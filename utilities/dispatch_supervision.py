@@ -31,6 +31,8 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 KIND = "supervision"
 REASONS = frozenset({"owner-input-undelivered", "no-progress", "attempt-stalled", "process-unverifiable", "join-deadline", "supervisor-exited", "join-observer-failed", "terminal-evidence-conflict", "workflow-completion-pending", "closure-blocked", "watch-deadline", "receiver-unavailable", "answer-awaiting-parent", "parent-session-ended"})
+# Notices that only say "still waiting / cannot classify": confirmed execution is not a reason to ask anyone.
+CONFIRMED_WAIT_REASONS = frozenset({"join-deadline", "process-unverifiable"})
 # Another session answered a BLOCKED owner; only the route's parent launches the continuation.
 ANSWER_AWAITING_PARENT = "answer-awaiting-parent"
 
@@ -348,6 +350,64 @@ def _runtime_tool_active(event):
             or (harness == "opencode" and state in {"pending", "running"}))
 
 
+def _owned_child_executing(jobs, attempt_id, metadata, now) -> bool:
+    """True when an owner's direct child is open/running with confirmed execution."""
+    if metadata.get("worker_type") != "owner":
+        return False
+    try:
+        rows = _owned_rows(jobs, attempt_id)
+    except (OSError, ValueError, SupervisionError):
+        return False
+    for child, row in rows.items():
+        if child == attempt_id or row[0] not in {"open", "running"}:
+            continue
+        if (row[1].get("worker_type") != "owner"
+                and _execution_confirmed(jobs, child, row[0], row[1], now=now)):
+            return True
+    return False
+
+
+def _execution_confirmed(jobs, aid, status, metadata, *, now=None, decision=None) -> bool:
+    """대기(확인된 실행): the existing observers show the attempt running or draining.
+
+    An open/running row is confirmed when the stall observation (live exact runtime
+    command plus progress inside the existing window) reads ``active``. A terminal row
+    whose exact process is still live is a normal end draining. Anything else -- no
+    process, no progress past the window, unobservable state -- is not confirmed here
+    and keeps its existing classification.
+    """
+    try:
+        if status in {"open", "running"}:
+            observation = update_attempt_stall_observation(
+                jobs, aid, persist=False, row=(status, metadata), now=now)
+            return bool(observation) and observation.get("state") == "active"
+        if decision is not None and decision.action == "wait":
+            return decision.reason == "registry-terminal-process-live"
+    except (OSError, ValueError, SupervisionError):
+        return False
+    return False
+
+
+def confirmed_execution_attempts(jobs, attempts) -> set[str]:
+    """Attempts of this batch that are confirmed executing (read-only, existing observers)."""
+    try:
+        rows = _rows(Path(jobs), set(attempts))
+    except (OSError, ValueError, SupervisionError):
+        return set()
+    confirmed = set()
+    for aid in attempts:
+        if aid not in rows:
+            continue
+        status, meta = rows[aid]
+        try:
+            _proof, decision = _settlement_decision(status, meta)
+        except (OSError, ValueError, SupervisionError):
+            continue
+        if _execution_confirmed(Path(jobs), aid, status, meta, decision=decision):
+            confirmed.add(aid)
+    return confirmed
+
+
 def update_attempt_stall_observation(jobs, attempt_id, *, now=None,
                                      progress_window_seconds=300.0,
                                      max_quiet_windows=2, persist=True, worktree=None,
@@ -456,6 +516,11 @@ def update_attempt_stall_observation(jobs, attempt_id, *, now=None,
               and any(len(identity) >= 3 and str(identity[2]).startswith("unclassified:")
                       for identity in execution.identities)):
             observation_state, reason = "active", "native-tool-process-live"
+        elif execution.state == "unknown" and _owned_child_executing(jobs, attempt_id, metadata, now):
+            # A supervised owner parks its own runtime while its worker runs; the carrier
+            # that remains cannot be classified. The worker's confirmed execution is the
+            # owner's progress (an absent owner is a different branch and still stalls).
+            observation_state, reason = "active", "owned-child-executing"
         elif execution.state == "unknown":
             observation_state, reason = "unknown", execution.reason or "execution-unverifiable"
         elif tool_active:
@@ -825,6 +890,9 @@ def _pending(rows: dict, attempts: list[str], jobs: Path, reason=None, *, notice
         from dispatch_notice_state import route_obligation_closed
         route_closed = reason == "supervisor-exited" and route_obligation_closed(meta, jobs)
         _proof, decision = _settlement_decision(status, meta)
+        if (reason in CONFIRMED_WAIT_REASONS and decision.action in {"wait", "recover"}
+                and _execution_confirmed(jobs, aid, status, meta, decision=decision)):
+            continue  # 대기(확인된 실행): the existing controller keeps observing; nobody is asked.
         if decision.action in {"wait", "recover", "reconcile", "inspect-conflict"}:
             return True
         # A supervisor-exited notice may be only a lagging route-settlement
@@ -1051,6 +1119,14 @@ def notice_is_current(record: dict, *, notice_context=None) -> bool:
         return False
     if _cleanup_only_result(receipt) is not None:
         return False  # Retire the model wake; the cleanup controller still owns its observation.
+    # Send-time precedence (d8): one completion, one path. An attention whose
+    # every monitored attempt already has its exact completion record (open or
+    # acked) retires without a send; that completion record is the replacement.
+    # A single unresolved attempt keeps the attention current. Completion
+    # records themselves never consult this path, so they are never suppressed.
+    if _recorded_completion_result(receipt, require_ack=False,
+                                   notice_context=notice_context) is not None:
+        return False
     return _pending(rows, receipt["monitored_attempt_ids"], Path(receipt["job_registry"]),
                     receipt["reason"], notice_context=notice_context)
 
@@ -1559,6 +1635,15 @@ def _project_replacement_lineage(edges: list[dict], roots: set[str]) -> list[dic
     return projected
 
 
+def _batch_waiting_on_confirmed_execution(jobs: Path, attempts: set[str]) -> bool:
+    """A join timeout while every unsettled member is confirmed executing needs no notice."""
+    try:
+        rows = _rows(Path(jobs).resolve(), attempts)
+        return not _pending(rows, sorted(attempts), Path(jobs).resolve(), "join-deadline")
+    except (OSError, ValueError, SupervisionError):
+        return False
+
+
 def wait_for_batch(*, join: Callable[[set[str]], dict], attempts: set[str],
                    jobs: Path, parent_attempt_id: str = "", emit: Callable[[dict], None] | None = None,
                    on_timeout: Callable[[set[str]], None] | None = None,
@@ -1639,8 +1724,9 @@ def wait_for_batch(*, join: Callable[[set[str]], dict], attempts: set[str],
             return result
         notice_error = ""
         try:
-            materialize(jobs, attempts,
-                        reason="join-observer-failed" if observer_error else "join-deadline")
+            if observer_error or not _batch_waiting_on_confirmed_execution(jobs, attempts):
+                materialize(jobs, attempts,
+                            reason="join-observer-failed" if observer_error else "join-deadline")
         except (OSError, ValueError, pending_delivery.PendingDeliveryError) as exc:
             notice_error = str(exc)
         if on_timeout:

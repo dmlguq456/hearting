@@ -685,7 +685,9 @@ def expire_pending_for_dead_recipient(
             and expired.get("expiry_reason") == "recipient-session-gone" else "protected")
 
 
-def reconcile_pending_delivery(jobs: Path) -> dict[str, int]:
+def reconcile_pending_delivery(jobs: Path, *, max_rows: int | None = None,
+                               time_budget_s: float | None = None,
+                               start_after: str | None = None) -> dict[str, int]:
     """SD-111 P2 trigger 2 + the single declared expiry actor (§2-b-2/§2-c).
 
     Meant to run on the same bounded cadence as ``dispatch-registry.py
@@ -712,17 +714,52 @@ def reconcile_pending_delivery(jobs: Path) -> dict[str, int]:
     Never raises; each row/record is handled independently so one bad row or
     record cannot stop the sweep. Observers (fleet, sweep hooks) have no call
     path to this function -- only this reconcile driver does.
+
+    The obligation runner wraps this same sweep with ``max_rows`` and
+    ``time_budget_s`` so a periodic pass cannot block on a large backlog. Both
+    are optional and ``None`` keeps the manual ``dispatch-registry reconcile``
+    behavior byte-for-byte (every row and every open record). ``start_after``
+    resumes a record walk at the next relative path; when the walk reaches the
+    end the returned ``cursor`` is ``None``, otherwise it is the last processed
+    relative path.
+
+    A bounded registry pass that stops early never reaches the record loop: a
+    partial ``rows_by_attempt`` is not a valid authority view and must not
+    materialize or expire anything. Retention pruning still runs because it
+    reads the records alone.
     """
 
+    try:
+        row_limit = None if max_rows is None else max(0, int(max_rows))
+    except (TypeError, ValueError):
+        row_limit = None
+    try:
+        deadline = (None if time_budget_s is None
+                    else time.monotonic() + max(0.0, float(time_budget_s)))
+    except (TypeError, ValueError):
+        deadline = None
+    start_after = start_after if isinstance(start_after, str) and start_after else None
+
+    def out_of_budget():
+        return deadline is not None and time.monotonic() >= deadline
+
+    bounded = max_rows is not None or time_budget_s is not None
     root = jobs.resolve(strict=False).parent
     result = {"materialized": 0, "expired": 0, "skipped": 0,
               "pruned_records": 0, "pruned_locks": 0, "prune_skipped": 0}
+    counters = {"rows_read": 0, "records_read": 0, "budget_exhausted": 0}
+    registry_complete = True
     try:
         lines = registry_lines(jobs)
     except OSError:
         lines = []
     rows_by_attempt: dict[str, dict[str, str]] = {}
     for line in lines:
+        if out_of_budget():
+            counters["budget_exhausted"] = 1
+            registry_complete = False
+            break
+        counters["rows_read"] += 1
         fields = line.split("\t")
         if len(fields) != 6:
             continue
@@ -739,9 +776,25 @@ def reconcile_pending_delivery(jobs: Path) -> dict[str, int]:
                     and materialize_after_terminal_close(jobs, attempt_id) is not None:
                 result["materialized"] += 1
 
+    cursor = start_after
+    walk_finished = False
     pending_root = root / "pending-delivery"
-    if pending_root.is_dir():
-        for record_file in pending_root.glob("*/*.json"):
+    if not pending_root.is_dir():
+        walk_finished = True
+    elif registry_complete:
+        record_files = sorted(
+            pending_root.glob("*/*.json"),
+            key=lambda path: path.relative_to(pending_root).as_posix())
+        for record_file in record_files:
+            relative = record_file.relative_to(pending_root).as_posix()
+            if start_after is not None and relative <= start_after:
+                continue
+            if out_of_budget() or (row_limit is not None
+                                   and counters["records_read"] >= row_limit):
+                counters["budget_exhausted"] = 1
+                break
+            counters["records_read"] += 1
+            cursor = relative
             try:
                 record = json.loads(record_file.read_text(encoding="utf-8"))
             except (OSError, ValueError):
@@ -768,6 +821,8 @@ def reconcile_pending_delivery(jobs: Path) -> dict[str, int]:
                 result["expired"] += 1
             elif expiry == "skipped":
                 result["skipped"] += 1
+        else:
+            walk_finished = True
     # 3. **Retention prune** (SD-111 §(7) v67). Terminal (`acked`/`expired`)
     #    records past `TERMINAL_RETENTION_SECONDS` and orphan `.lock` files
     #    past `ORPHAN_LOCK_RETENTION_SECONDS` are unlinked under the same
@@ -780,6 +835,13 @@ def reconcile_pending_delivery(jobs: Path) -> dict[str, int]:
         result["prune_skipped"] = pruned["skipped"]
     except Exception:  # noqa: BLE001 -- the sweep never raises
         pass
+    if walk_finished:
+        cursor = None
+    if bounded:
+        result.update(counters)
+        result["cursor"] = cursor
+    elif start_after is not None:
+        result["cursor"] = cursor
     return result
 
 
@@ -4022,9 +4084,14 @@ def _join_snapshot(
             last_notice_attempt = now
             state["last_notice_attempt"] = last_notice_attempt
             try:
-                from dispatch_supervision import materialize
-                materialize(observation_jobs, notice_attempt_ids, reason="process-unverifiable")
-                notified_attempt_ids.update(notice_attempt_ids)
+                from dispatch_supervision import confirmed_execution_attempts, materialize
+                # 대기(확인된 실행): a member the existing observers show executing is not
+                # reported; it is re-read at the next pass and notified only if that changes.
+                notice_attempt_ids = notice_attempt_ids - confirmed_execution_attempts(
+                    observation_jobs, notice_attempt_ids)
+                if notice_attempt_ids:
+                    materialize(observation_jobs, notice_attempt_ids, reason="process-unverifiable")
+                    notified_attempt_ids.update(notice_attempt_ids)
             except (OSError, ValueError, pending_delivery.PendingDeliveryError) as exc:
                 observation_error = "supervision-notice-unpersisted:" + str(exc)
         if (not blocked_notice_published and observation_jobs is not None and blocked_attempt_ids

@@ -701,6 +701,65 @@ def obligations_root(root: str | Path | None = None) -> Path:
     return directory
 
 
+RUNNER_DUTY_DIRECTORY = "runner-duties"
+
+
+def runner_duty_state_path(root: str | Path, name: str) -> Path:
+    """One runner maintenance cursor/due record under the peer state root."""
+    return (Path(root).expanduser() / "peer-steward" / RUNNER_DUTY_DIRECTORY
+            / (_safe_id(name) + ".json"))
+
+
+def read_runner_duty_state(root: str | Path, name: str) -> dict:
+    """The recorded cursor/due state, or ``{}`` when absent or unreadable."""
+    try:
+        raw = runner_duty_state_path(root, name).read_text(encoding="utf-8")
+        value = json.loads(raw)
+    except (OSError, ValueError, UnicodeError, ObligationError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def write_runner_duty_state(root: str | Path, name: str, payload: dict) -> None:
+    """Atomically record one runner duty's cursor/due state."""
+    if not isinstance(payload, dict):
+        raise ObligationError("runner-duty-state-invalid")
+    path = runner_duty_state_path(root, name)
+    # A duty record may never resurrect a state root that its runner lost; the
+    # caller's next lock check owns stopping.
+    if not Path(root).expanduser().is_dir() or not path.parent.parent.is_dir():
+        raise ObligationError("runner-duty-state-root-missing")
+    path.parent.mkdir(mode=0o700, exist_ok=True)
+    data = (json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                       separators=(",", ":")) + "\n").encode("utf-8")
+    temporary = path.parent / f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                 | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(temporary)
+        raise
+
+
+def runner_duty_due(state: dict, due_seconds: float, *, now: float | None = None) -> bool:
+    """Whether a duty has not run within ``due_seconds`` (missing state is due)."""
+    last = state.get("last_pass_ns") if isinstance(state, dict) else None
+    if not isinstance(last, int) or isinstance(last, bool) or last <= 0:
+        return True
+    try:
+        due_ns = max(0.0, float(due_seconds)) * 1_000_000_000
+    except (TypeError, ValueError):
+        due_ns = 0.0
+    now_ns = int((time.time() if now is None else float(now)) * 1_000_000_000)
+    return now_ns - last >= due_ns
+
+
 def request_obligation_recovery(*, lifecycle_root: str | Path | None = None) -> bool:
     """Start the common recovery entry detached with its caller environment."""
     root = Path(lifecycle_root).expanduser().resolve(strict=False) if lifecycle_root is not None else _code_root()

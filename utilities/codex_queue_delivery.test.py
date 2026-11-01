@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import contextlib
 import hashlib
 import json
 import stat
@@ -562,6 +563,374 @@ class PeerQueuePolicy(unittest.TestCase):
                 QUEUE.send_at_least_once(SOCKET, thread_id=THREAD,
                     client_message_id=CLIENT_ID, message="peer", allow_restart=False, allow_add=False)
         rpc.assert_not_called()
+
+
+PEER_CLIENT = "delivery-peer-" + "a" * 32
+PEER_TEXT = "peer message"
+TURN = "turn-active-1"
+PEER_ITEM = {"id": "queued-peer-1", "clientUserMessageId": PEER_CLIENT,
+             "input": [{"type": "text", "text": PEER_TEXT}]}
+USER_ITEM = {"id": "queued-user-1", "input": [{"type": "text", "text": "mine"}]}
+
+
+class _FakeServer:
+    """Method-keyed fake app-server that records every RPC (method, params)."""
+
+    def __init__(self, *, queue=(), turn_status="completed", turn_id=TURN,
+                 responses=None, errors=None):
+        self.queue = list(queue)
+        self.turn_status = turn_status
+        self.turn_id = turn_id
+        self.responses = dict(responses or {})
+        self.errors = dict(errors or {})
+        self.calls = []
+
+    def methods(self):
+        return [method for method, _params in self.calls]
+
+    def params(self, method):
+        return [params for name, params in self.calls if name == method]
+
+    def __call__(self, _path, method, params, **_kw):
+        self.calls.append((method, params))
+        error = self.errors.get(method)
+        if error is not None:
+            error = error.pop(0) if isinstance(error, list) else error
+            if error is not None:
+                raise error
+        if method in self.responses:
+            value = self.responses[method]
+            return value(params) if callable(value) else value
+        if method == "thread/queue/list":
+            return {"data": list(self.queue)}
+        if method == "thread/turns/list":
+            if self.turn_status is None:
+                return {"data": []}
+            return {"data": [{"id": self.turn_id, "status": self.turn_status}]}
+        if method == "thread/queue/add":
+            item = {"id": "queued-peer-new", "input": params["input"],
+                    "clientUserMessageId": params["clientUserMessageId"]}
+            self.queue.append(item)
+            return {"queuedSubmission": {"id": "queued-peer-new"}}
+        if method == "thread/queue/delete":
+            self.queue = [i for i in self.queue if i["id"] != params["queuedSubmissionId"]]
+            return {"deleted": True}
+        if method == "thread/queue/start":
+            return {"turn": {"id": "turn-started"}}
+        if method == "turn/steer":
+            return {"turnId": params["expectedTurnId"]}
+        raise AssertionError("unexpected rpc " + method)
+
+
+class PeerSteerAndInterruptPolicyTest(unittest.TestCase):
+    def send(self, server, *, observation=None, **kw):
+        kw.setdefault("allow_restart", True)
+        kw.setdefault("owned_queue_only_restart", True)
+        kw.setdefault("observe_turn", True)
+        kw.setdefault("retry_ambiguous", False)
+        kw.setdefault("require_message_match", True)
+        patches = [mock.patch.object(QUEUE, "_rpc", server),
+                   mock.patch.object(QUEUE, "_known_consumed", return_value=None)]
+        if observation is not None:
+            patches.append(mock.patch.object(QUEUE, "_observe_peer_message",
+                                             return_value=observation))
+        with contextlib.ExitStack() as stack:
+            for patch in patches:
+                stack.enter_context(patch)
+            return QUEUE.send_at_least_once(SOCKET, thread_id=THREAD,
+                client_message_id=PEER_CLIENT, message=PEER_TEXT, **kw)
+
+    # d1: interrupted thread
+    def test_interrupted_empty_queue_starts_exact_added_item(self):
+        server = _FakeServer(turn_status="interrupted")
+        result = self.send(server)
+        self.assertEqual(server.methods(), ["thread/queue/list", "thread/turns/list",
+            "thread/queue/add", "thread/queue/list", "thread/queue/list",
+            "thread/turns/list", "thread/queue/start"])
+        self.assertEqual(server.params("thread/queue/start"),
+                         [{"threadId": THREAD, "queuedSubmissionId": "queued-peer-new"}])
+        self.assertTrue(result["started_after_interrupt"])
+        self.assertIsNone(result["start_hold"])
+        self.assertEqual(result["latest_turn_status"], "interrupted")
+
+    def test_interrupted_user_queue_item_holds_without_any_write_on_it(self):
+        server = _FakeServer(turn_status="interrupted", queue=[USER_ITEM])
+        result = self.send(server)
+        self.assertNotIn("thread/queue/start", server.methods())
+        self.assertEqual(result["start_hold"], "user-queue")
+        self.assertFalse(result["started_after_interrupt"])
+        self.assertEqual(server.params("thread/queue/add")[0]["clientUserMessageId"], PEER_CLIENT)
+        self.assertNotIn("queued-user-1", repr(server.calls))
+
+    def test_interrupted_start_disabled_holds(self):
+        server = _FakeServer(turn_status="interrupted")
+        result = self.send(server, allow_restart=False)
+        self.assertNotIn("thread/queue/start", server.methods())
+        self.assertEqual(result["start_hold"], "start-disabled")
+
+    def test_interrupted_start_refusal_is_start_refused(self):
+        server = _FakeServer(turn_status="interrupted", errors={
+            "thread/queue/start": QUEUE.QueueDeliveryError(
+                "queue-rpc-refused:thread/queue/start:-32600:no", ambiguous=False)})
+        result = self.send(server)
+        self.assertEqual(result["status"], "queued")
+        self.assertEqual(result["start_hold"], "start-refused")
+        self.assertFalse(result["started_after_interrupt"])
+
+    def test_interrupted_start_ambiguous_is_raised(self):
+        server = _FakeServer(turn_status="interrupted", errors={
+            "thread/queue/start": QUEUE.QueueDeliveryError("lost", ambiguous=True)})
+        with self.assertRaises(QUEUE.QueueDeliveryError) as caught:
+            self.send(server)
+        self.assertTrue(caught.exception.ambiguous)
+
+    def test_add_without_item_id_holds_start_refused(self):
+        server = _FakeServer(turn_status="interrupted",
+                             responses={"thread/queue/add": {"queuedSubmission": {}}})
+        result = self.send(server)
+        self.assertEqual(result["start_hold"], "start-refused")
+        self.assertNotIn("thread/queue/start", server.methods())
+
+    def test_pending_item_gets_the_same_interrupted_gate(self):
+        server = _FakeServer(turn_status="interrupted", queue=[PEER_ITEM])
+        result = self.send(server)
+        self.assertTrue(result["already_pending"])
+        self.assertTrue(result["started_after_interrupt"])
+        self.assertEqual(server.params("thread/queue/start"),
+                         [{"threadId": THREAD, "queuedSubmissionId": "queued-peer-1"}])
+        held = _FakeServer(turn_status="interrupted", queue=[PEER_ITEM, USER_ITEM])
+        result = self.send(held)
+        self.assertEqual(result["start_hold"], "user-queue")
+        self.assertNotIn("thread/queue/start", held.methods())
+        disabled = _FakeServer(turn_status="interrupted", queue=[PEER_ITEM])
+        self.assertEqual(self.send(disabled, allow_restart=False)["start_hold"], "start-disabled")
+
+    def test_completed_turn_only_adds(self):
+        server = _FakeServer(turn_status="completed")
+        result = self.send(server, steer=True)
+        self.assertEqual(result["status"], "queued")
+        self.assertEqual(result["latest_turn_status"], "completed")
+        self.assertNotIn("turn/steer", server.methods())
+        self.assertNotIn("thread/queue/start", server.methods())
+
+    # d2: active turn
+    def test_in_progress_turn_is_steered_without_queue_add(self):
+        server = _FakeServer(turn_status="inProgress")
+        before = []
+        result = self.send(server, steer=True, before_steer=before.append)
+        self.assertEqual(result["status"], "steered")
+        self.assertEqual(result["steer_turn_id"], TURN)
+        self.assertEqual(server.params("turn/steer"), [{
+            "threadId": THREAD, "expectedTurnId": TURN,
+            "clientUserMessageId": PEER_CLIENT,
+            "input": [{"type": "text", "text": PEER_TEXT}]}])
+        self.assertNotIn("thread/queue/add", server.methods())
+        self.assertEqual(before, [TURN])
+
+    def test_non_steer_row_behind_active_turn_queues(self):
+        server = _FakeServer(turn_status="inProgress")
+        result = self.send(server, steer=False)
+        self.assertEqual(result["status"], "queued")
+        self.assertEqual(result["latest_turn_status"], "inProgress")
+        self.assertNotIn("turn/steer", server.methods())
+        self.assertIn("thread/queue/add", server.methods())
+
+    def test_steer_refusal_falls_back_to_queue_add(self):
+        refusal = QUEUE.QueueDeliveryError(
+            "queue-rpc-refused:turn/steer:-32600:expected turn mismatch", ambiguous=False)
+        server = _FakeServer(turn_status="inProgress", errors={"turn/steer": refusal})
+        result = self.send(server, steer=True)
+        self.assertEqual(result["status"], "queued")
+        self.assertIn("turn/steer", result["steer_refusal"])
+        self.assertEqual(server.methods().count("thread/queue/add"), 1)
+        self.assertEqual(server.methods().count("thread/turns/list"), 2)
+
+    def test_ambiguous_steer_is_raised_and_never_added(self):
+        server = _FakeServer(turn_status="inProgress", errors={
+            "turn/steer": QUEUE.QueueDeliveryError("lost", ambiguous=True)})
+        with self.assertRaises(QUEUE.QueueDeliveryError) as caught:
+            self.send(server, steer=True)
+        self.assertTrue(caught.exception.ambiguous)
+        self.assertNotIn("thread/queue/add", server.methods())
+
+    def test_steer_response_without_turn_id_is_ambiguous(self):
+        server = _FakeServer(turn_status="inProgress", responses={"turn/steer": {}})
+        with self.assertRaises(QUEUE.QueueDeliveryError) as caught:
+            self.send(server, steer=True)
+        self.assertEqual(caught.exception.reason, "queue-steer-response-invalid")
+        self.assertTrue(caught.exception.ambiguous)
+        self.assertNotIn("thread/queue/add", server.methods())
+
+    def test_steer_requires_exact_message_match(self):
+        server = _FakeServer(turn_status="inProgress")
+        with self.assertRaisesRegex(QUEUE.QueueDeliveryError, "queue-steer-requires-exact-message"):
+            self.send(server, steer=True, require_message_match=False)
+        self.assertEqual(server.calls, [])
+
+    def test_before_steer_failure_prevents_the_write(self):
+        server = _FakeServer(turn_status="inProgress")
+
+        def refuse(_turn):
+            raise QUEUE.QueueDeliveryError("peer-claim-changed-before-steer")
+        with self.assertRaisesRegex(QUEUE.QueueDeliveryError, "changed-before-steer"):
+            self.send(server, steer=True, before_steer=refuse)
+        self.assertNotIn("turn/steer", server.methods())
+
+    def test_turn_read_failure_before_a_write_is_not_ambiguous(self):
+        server = _FakeServer(turn_status="inProgress", errors={
+            "thread/turns/list": QUEUE.QueueDeliveryError("queue-websocket-timeout", ambiguous=True)})
+        with self.assertRaises(QUEUE.QueueDeliveryError) as caught:
+            self.send(server, steer=True)
+        self.assertFalse(caught.exception.ambiguous)
+        self.assertNotIn("thread/queue/add", server.methods())
+
+    # lost steer recovery
+    def lost(self, server, observation):
+        exact = {"id": TURN, "status": server.turn_status, "items": None}
+        server.responses["read-exact"] = exact
+        with mock.patch.object(QUEUE, "read_exact_turn",
+                               return_value=None if server.turn_status is None else exact):
+            return self.send(server, observation=observation, steer=True,
+                             allow_add=False, steer_turn_id=TURN)
+
+    def test_lost_steer_on_ended_turn_is_requeued_once(self):
+        server = _FakeServer(turn_status="completed")
+        result = self.lost(server, QUEUE._PeerObservation("not_observed"))
+        self.assertEqual(result["status"], "queued")
+        self.assertTrue(result["requeued_after_lost_steer"])
+        self.assertEqual(server.methods().count("thread/queue/add"), 1)
+        self.assertNotIn("turn/steer", server.methods())
+
+    def test_steer_on_running_turn_is_reported_without_writes(self):
+        server = _FakeServer(turn_status="inProgress")
+        result = self.lost(server, QUEUE._PeerObservation("not_observed"))
+        self.assertEqual(result["status"], "steered")
+        self.assertEqual(result["steer_turn_id"], TURN)
+        self.assertNotIn("thread/queue/add", server.methods())
+        self.assertNotIn("turn/steer", server.methods())
+
+    def test_unknown_history_after_steer_stays_ambiguous(self):
+        server = _FakeServer(turn_status="completed")
+        with self.assertRaises(QUEUE.QueueDeliveryError) as caught:
+            self.lost(server, QUEUE._PeerObservation("unknown", reason="native-projection-incomplete"))
+        self.assertTrue(caught.exception.ambiguous)
+        self.assertNotIn("thread/queue/add", server.methods())
+
+    def test_conflicting_history_after_steer_is_not_requeued(self):
+        server = _FakeServer(turn_status="completed")
+        with self.assertRaisesRegex(QUEUE.QueueDeliveryError, "queue-peer-history-conflict"):
+            self.lost(server, QUEUE._PeerObservation("conflict", reason="duplicate-client-id"))
+        self.assertNotIn("thread/queue/add", server.methods())
+
+    def test_missing_steer_turn_is_a_definite_error(self):
+        server = _FakeServer(turn_status=None)
+        with self.assertRaises(QUEUE.QueueDeliveryError) as caught:
+            self.lost(server, QUEUE._PeerObservation("not_observed"))
+        self.assertEqual(caught.exception.reason, "queue-peer-steer-turn-missing")
+        self.assertFalse(caught.exception.ambiguous)
+
+    def test_lost_steer_requeue_never_steers_again(self):
+        server = _FakeServer(turn_status="inProgress")
+        exact = {"id": "turn-old", "status": "interrupted", "items": None}
+        with mock.patch.object(QUEUE, "read_exact_turn", return_value=exact):
+            result = self.send(server, observation=QUEUE._PeerObservation("not_observed"),
+                               steer=True, allow_add=False, steer_turn_id="turn-old")
+        self.assertEqual(result["status"], "queued")
+        self.assertNotIn("turn/steer", server.methods())
+
+    # promotion of an already queued item
+    def test_pending_item_is_deleted_then_steered_in_order(self):
+        server = _FakeServer(turn_status="inProgress", queue=[PEER_ITEM])
+        events = []
+        result = self.send(server, steer=True, before_steer=lambda turn: events.append(("before", turn)))
+        methods = [m for m in server.methods() if m in {"thread/queue/delete", "turn/steer"}]
+        self.assertEqual(methods, ["thread/queue/delete", "turn/steer"])
+        self.assertEqual(server.params("thread/queue/delete"),
+                         [{"threadId": THREAD, "queuedSubmissionId": "queued-peer-1"}])
+        self.assertEqual(server.params("turn/steer")[0]["clientUserMessageId"], PEER_CLIENT)
+        self.assertEqual(events, [("before", TURN)])
+        self.assertEqual(result["status"], "steered")
+        self.assertTrue(result["promoted_from_queue"])
+        self.assertNotIn("thread/queue/add", server.methods())
+
+    def test_before_steer_runs_before_the_delete(self):
+        server = _FakeServer(turn_status="inProgress", queue=[PEER_ITEM])
+
+        def before(_turn):
+            self.assertNotIn("thread/queue/delete", server.methods())
+        self.send(server, steer=True, before_steer=before)
+
+    def test_delete_false_is_ambiguous_and_never_steers(self):
+        server = _FakeServer(turn_status="inProgress", queue=[PEER_ITEM],
+                             responses={"thread/queue/delete": {"deleted": False}})
+        with self.assertRaises(QUEUE.QueueDeliveryError) as caught:
+            self.send(server, steer=True)
+        self.assertTrue(caught.exception.ambiguous)
+        self.assertNotIn("turn/steer", server.methods())
+
+    def test_delete_error_with_item_still_queued_keeps_the_queue_item(self):
+        server = _FakeServer(turn_status="inProgress", queue=[PEER_ITEM], errors={
+            "thread/queue/delete": QUEUE.QueueDeliveryError("queue-rpc-refused:x", ambiguous=False)})
+        result = self.send(server, steer=True)
+        self.assertEqual(result["status"], "queued")
+        self.assertTrue(result["already_pending"])
+        self.assertIn("promote-delete-failed", result["steer_refusal"])
+        self.assertNotIn("turn/steer", server.methods())
+
+    def test_delete_error_with_item_gone_is_ambiguous(self):
+        listings = iter([[PEER_ITEM], []])
+        server = _FakeServer(turn_status="inProgress", errors={
+            "thread/queue/delete": QUEUE.QueueDeliveryError("lost", ambiguous=True)},
+            responses={"thread/queue/list": lambda _p: {"data": next(listings)}})
+        with self.assertRaises(QUEUE.QueueDeliveryError) as caught:
+            self.send(server, steer=True)
+        self.assertEqual(caught.exception.reason, "queue-peer-promote-delete-ambiguous")
+        self.assertTrue(caught.exception.ambiguous)
+        self.assertNotIn("turn/steer", server.methods())
+
+    def test_steer_refused_after_delete_requeues_exactly_once(self):
+        refusal = QUEUE.QueueDeliveryError("queue-rpc-refused:turn/steer:-32600:no", ambiguous=False)
+        server = _FakeServer(turn_status="inProgress", queue=[PEER_ITEM], errors={"turn/steer": refusal})
+        added = []
+        steered = []
+        result = self.send(server, steer=True, before_add=lambda: added.append("add"),
+                           before_steer=steered.append)
+        self.assertEqual(steered, [TURN])
+        self.assertEqual(server.methods().count("thread/queue/add"), 1)
+        self.assertEqual(server.params("thread/queue/add")[0]["clientUserMessageId"], PEER_CLIENT)
+        self.assertEqual(result["status"], "queued")
+        self.assertIn("turn/steer", result["steer_refusal"])
+        self.assertEqual(added, ["add"])
+
+    def test_ambiguous_steer_after_delete_does_not_add(self):
+        server = _FakeServer(turn_status="inProgress", queue=[PEER_ITEM], errors={
+            "turn/steer": QUEUE.QueueDeliveryError("lost", ambiguous=True)})
+        with self.assertRaises(QUEUE.QueueDeliveryError):
+            self.send(server, steer=True)
+        self.assertNotIn("thread/queue/add", server.methods())
+
+    # defaults keep the completion sequence
+    def test_default_arguments_never_read_the_turn_for_a_pending_item(self):
+        server = _FakeServer(turn_status="interrupted", queue=[PEER_ITEM])
+        with mock.patch.object(QUEUE, "_rpc", server), \
+             mock.patch.object(QUEUE, "_known_consumed", return_value=None):
+            result = QUEUE.send_at_least_once(SOCKET, thread_id=THREAD,
+                client_message_id=PEER_CLIENT, message=PEER_TEXT, allow_restart=False)
+        self.assertEqual(server.methods(), ["thread/queue/list"])
+        self.assertNotIn("latest_turn_status", result)
+
+    def test_turn_steer_oversized_response_is_ambiguous(self):
+        client = QUEUE._WebSocket.__new__(QUEUE._WebSocket)
+        client.timeout = 1.0
+        client.socket = mock.Mock()
+        client.socket.recv.return_value = b"\x81\x7f" + struct.pack("!Q", QUEUE.MAX_FRAME_BYTES + 1)
+        client.buffer = bytearray()
+        client.next_id = 1
+        client.request_sent = False
+        client._send_frame = mock.Mock()
+        with self.assertRaises(QUEUE.QueueDeliveryError) as caught:
+            QUEUE._WebSocket.request(client, "turn/steer", {"threadId": THREAD})
+        self.assertTrue(caught.exception.ambiguous)
 
 
 class NativePeerObservationTest(unittest.TestCase):

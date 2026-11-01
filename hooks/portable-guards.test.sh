@@ -43,6 +43,11 @@ fi
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
+# Codex prompt hooks derive a dispatch state root. HOME alone is not enough:
+# HARNESS_STATE_ROOT (and XDG_STATE_HOME) take precedence in
+# dispatch_contract.state_root(), so an inherited live value would write the
+# fixture's recipient inbox into the real user state.
+mkdir -p "$TMP/codex_hook_state"
 # Each Git display assertion consumes a completed private projection. Cold
 # snapshots are unknown; a timing race is not a meaningful risk assertion.
 GIT_DISPLAY_STATE_ROOT="$TMP/display-state"
@@ -1847,7 +1852,7 @@ else
   bad "adapter loop runtime logs should be ignored"
 fi
 if printf '{"prompt":"plain prompt","session_id":"promptlifecyclesid","cwd":"%s"}\n' "$TMP/flowproj" \
-  | MEM_STORE="$TMP/codex_hook_mem" HOME="$TMP/codex_hook_home" python3 "$TMP/codex_hook_home/.codex/hearting/adapters/codex/hooks/userprompt-lifecycle.py" >"$TMP/codex_prompt_hook_tracked.out" 2>"$TMP/codex_prompt_hook_tracked.err" \
+  | HARNESS_STATE_ROOT="$TMP/codex_hook_state" MEM_STORE="$TMP/codex_hook_mem" HOME="$TMP/codex_hook_home" python3 "$TMP/codex_hook_home/.codex/hearting/adapters/codex/hooks/userprompt-lifecycle.py" >"$TMP/codex_prompt_hook_tracked.out" 2>"$TMP/codex_prompt_hook_tracked.err" \
   && [ ! -s "$TMP/codex_prompt_hook_tracked.out" ] \
   && ! grep -q 'adapters/claude\|claude_setting\|statusline.sh' "$TMP/codex_prompt_hook_tracked.out" "$TMP/codex_prompt_hook_tracked.err"; then
   ok "codex native hook projection injects no workflow-mode banner (retired)"
@@ -1921,7 +1926,7 @@ else
 fi
 if (cd "$TMP/flowproj" && HOME="$TMP/codex_hook_home" MEM_STORE="$TMP/codex_hook_mem" python3 "$ROOT/tools/memory/mem.py" add durable thread "지난번 결정론 우선 설계가 핵심이라고 배웠다" >"$TMP/codex_nested_prompt_seed.out" 2>"$TMP/codex_nested_prompt_seed.err") \
   && printf '{"input":{"messages":[{"role":"user","content":[{"type":"text","text":"지난번 결정론 내용을 다시 확인"}]}]},"session_id":"nestedpromptsid","cwd":"%s"}\n' "$TMP/flowproj" \
-  | MEM_STORE="$TMP/codex_hook_mem" HOME="$TMP/codex_hook_home" python3 "$TMP/codex_hook_home/.codex/hearting/adapters/codex/hooks/userprompt-lifecycle.py" >"$TMP/codex_nested_prompt_hook.out" 2>"$TMP/codex_nested_prompt_hook.err" \
+  | HARNESS_STATE_ROOT="$TMP/codex_hook_state" MEM_STORE="$TMP/codex_hook_mem" HOME="$TMP/codex_hook_home" python3 "$TMP/codex_hook_home/.codex/hearting/adapters/codex/hooks/userprompt-lifecycle.py" >"$TMP/codex_nested_prompt_hook.out" 2>"$TMP/codex_nested_prompt_hook.err" \
   && ! grep -q '우선 설계가 핵심' "$TMP/codex_nested_prompt_hook.out"; then
   ok "codex native prompt hook does not classify nested message content for recall"
 else
@@ -1931,7 +1936,7 @@ if (cd "$TMP/flowproj" && HOME="$TMP/codex_hook_home" MEM_STORE="$TMP/codex_hook
   "This durable record keeps direct-body-marker outside prompt context" \
   --headline "Deterministic recall capsule" --alias "deterministic recall" >"$TMP/codex_direct_prompt_seed.out" 2>"$TMP/codex_direct_prompt_seed.err") \
   && printf '{"prompt":"deterministic recall","session_id":"directpromptsid","turn_id":"directturnid","cwd":"%s"}\n' "$TMP/flowproj" \
-  | MEM_STORE="$TMP/codex_hook_mem" MEM_RECALL_RECEIPTS="$MEM_RECALL_RECEIPTS" HOME="$TMP/codex_hook_home" python3 "$TMP/codex_hook_home/.codex/hearting/adapters/codex/hooks/userprompt-lifecycle.py" >"$TMP/codex_direct_prompt_hook.out" 2>"$TMP/codex_direct_prompt_hook.err" \
+  | HARNESS_STATE_ROOT="$TMP/codex_hook_state" MEM_STORE="$TMP/codex_hook_mem" MEM_RECALL_RECEIPTS="$MEM_RECALL_RECEIPTS" HOME="$TMP/codex_hook_home" python3 "$TMP/codex_hook_home/.codex/hearting/adapters/codex/hooks/userprompt-lifecycle.py" >"$TMP/codex_direct_prompt_hook.out" 2>"$TMP/codex_direct_prompt_hook.err" \
   && grep -q 'Deterministic recall capsule' "$TMP/codex_direct_prompt_hook.out" \
   && ! grep -q 'direct-body-marker' "$TMP/codex_direct_prompt_hook.out"; then
   ok "codex native prompt hook exposes bounded capsule candidates without record bodies"
@@ -2198,7 +2203,7 @@ else
   bad "codex native SessionEnd bridge must not detach worker lifecycle"
 fi
 codex_worker_prompt_out="$(printf '{"hook_event_name":"UserPromptSubmit","session_id":"codex-worker-prompt","cwd":"%s"}\n' "$TMP/flowproj" \
-  | AGENT_SESSION_ROLE=worker MEM_STORE="$TMP/store_prompt_worker" \
+  | AGENT_SESSION_ROLE=worker HARNESS_STATE_ROOT="$TMP/codex_hook_state" MEM_STORE="$TMP/store_prompt_worker" \
     python3 "$ROOT/adapters/codex/hooks/userprompt-lifecycle.py" 2>"$TMP/codex_worker_prompt.err")"
 if [ -z "$codex_worker_prompt_out" ] && [ ! -e "$TMP/store_prompt_worker" ]; then
   ok "codex native UserPromptSubmit bridge injects no main context for workers"
@@ -2233,7 +2238,7 @@ else
 fi
 D812_PROMPT_STORE="$TMP/d812-prompt-store"
 if printf '{"prompt":"hello","session_id":"d812-prompt","cwd":"%s"}\n' "$TMP/flowproj" \
-  | PATH="$D812_NOSPAWN_PATH" MEM_STORE="$D812_PROMPT_STORE" python3 "$ROOT/adapters/codex/hooks/userprompt-lifecycle.py" >/dev/null 2>"$TMP/d812_prompt.err" \
+  | PATH="$D812_NOSPAWN_PATH" HARNESS_STATE_ROOT="$TMP/codex_hook_state" MEM_STORE="$D812_PROMPT_STORE" python3 "$ROOT/adapters/codex/hooks/userprompt-lifecycle.py" >/dev/null 2>"$TMP/d812_prompt.err" \
   && [ -z "$(find "$TMP" -name '.codex-turn-state-*' 2>/dev/null)" ] \
   && [ -z "$(find "$TMP" -name '.opencode-distill-stamp-*' 2>/dev/null)" ]; then
   ok "codex main UserPromptSubmit writes zero turn-counter state (D-81.2)"

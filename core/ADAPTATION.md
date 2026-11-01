@@ -755,11 +755,14 @@ owner-settlement writes to the explicitly selected authoritative registry or,
 when it discovers configured roots, the canonical registry at index 0; discovery
 of a compatibility root never grants registry-write authority. Its independent
 sidecar-recovery pass still visits every configured discovery root. Activation
-invokes the existing `reconcile_pending_delivery` actor once for the canonical
-registry. That actor retains sole authority for pending materialization,
-known-dead expiry, and terminal retention pruning. Missing or inaccessible PID
-evidence stays unknown; no prompt callback, Fleet reader, or exact-attempt
-request runs an unrelated bulk mutation.
+only requests the existing obligation runner; the runner's periodic pass is what
+invokes `reconcile_pending_delivery` for the canonical registry, and no hook
+callback runs the global actor itself. That actor retains sole authority for
+pending materialization, known-dead expiry, and terminal retention pruning.
+Hooks read the runner-published recipient inbox and public run states instead of
+re-deriving global dispatch state. Missing or inaccessible PID evidence stays
+unknown; no prompt callback, Fleet reader, or exact-attempt request runs an
+unrelated bulk mutation.
 
 When a child already has a committed PASS, join and reap inspect only its exact
 terminal log before cleanup. A valid late FAIL/BLOCKED is recorded through the
@@ -886,7 +889,7 @@ group, process, and JSON views use the same authoritative current owner generati
 
 ### 8.19. Declared runtime requirements and lifecycle evidence under SD-97
 
-a node may declare only registry-known `runtime_requirements`. `loopback-listen` means localhost bind while outbound network remains denied; a runtime that exposes only a broad network boolean reports `loopback-only-unsupported` and uses the checked main/inline handoff rather than widening outbound access. Every registered row records the requested launch lifecycle plus bounded selector evidence (source, NSpid width, and PID-1 class) so an intermittent nested-sandbox lifetime failure is diagnosable without transcript inspection.
+a node may declare only registry-known `runtime_requirements`. `loopback-listen` means localhost bind and connect while outbound network and broad Unix sockets stay denied; sealed lab HTML verification and the `code-execute`/`code-test` stages use it without resealing — Codex adds only the localhost table to the stage's current approved profile, a runtime that cannot realize it refuses a declared or lab requirement as `loopback-only-unsupported` while a code stage proceeds with network off and records the unmet fact in its effective grant, and Claude and OpenCode are never recorded as enforcing it. Every registered row records the requested launch lifecycle plus bounded selector evidence (source, NSpid width, and PID-1 class) so an intermittent nested-sandbox lifetime failure is diagnosable without transcript inspection.
 
 ## 9. Native interaction and optional Herdr observation
 
@@ -905,8 +908,17 @@ remain separate duties. A transport timeout or ambiguous reply retains the
 same transfer reference and its existing owner.
 
 The peer-delivery support matrix is transport-specific: `Claude plain TUI:
-idle -> existing steward prompt delivery; busy -> callback`; Codex uses its
-exact native per-thread queue, and OpenCode uses its native plugin callback.
+idle -> existing steward prompt delivery; busy -> callback`; Codex steers
+ordinary peer input into the active turn with `turn/steer` (same
+`clientUserMessageId`, `expectedTurnId`) and otherwise uses its exact native
+per-thread queue, and OpenCode uses its native plugin callback.
+A non-ambiguous steer refusal falls back to the queue; an ambiguous result is
+never repeated, and a steer whose turn ended without the id in complete exact
+history is re-queued once. The sender's earlier Hearting items are first moved
+into the turn after `deleted:true` is confirmed. An interrupted thread is
+started only when the sender saw no form and an empty composer and the queue
+holds no non-Hearting item, and then only for the exact Hearting item;
+otherwise the receipt is `native-queue-held-interrupted:<reason>`.
 Claude's idle prompt path requires the exact native SID, pane, foreground PID
 birth and namespace, native `idle` state, ready registered-work state, no open
 form or question, and an empty visible composer. A dim prompt suggestion is

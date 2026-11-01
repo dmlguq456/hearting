@@ -585,7 +585,7 @@ def notice_is_current(record: dict, *, jobs: Path | None = None, notice_context=
         return current(record, notice_context=notice_context)
     if receipt.get("kind") == "notice":
         from session_notice import notice_is_current as current
-        return current(record)
+        return current(record, jobs=jobs, notice_context=notice_context)
     if receipt.get("kind") == "human-gate":
         import human_gate_receipt as gate
         try:

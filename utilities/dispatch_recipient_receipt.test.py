@@ -204,6 +204,29 @@ class RecipientReceiptTest(unittest.TestCase):
         self.assertTrue(second["received"])
         self.assertTrue(second["settled"])
 
+    def test_never_claimed_record_is_not_settled_by_a_quoted_marker_but_a_rewake_claim_is(self):
+        # A pending record no carrier ever claimed has no delivery grade, so a
+        # marker in a transcript cannot ack it. The hook-native rewake always
+        # claims before it emits (observed: attempts counts that claim and
+        # `claim_authority` persists), after which the exact system event settles.
+        marker = receipt.receipt_marker(self.record, self.storage)
+        native = {"type": "user", "sessionId": self.storage,
+                  "origin": {"kind": "task-notification", "producer": "session-task"},
+                  "promptSource": "system", "turnOrigin": "task_notification",
+                  "message": {"content": ("<task-notification><summary>Stop hook feedback"
+                                          "</summary>" + marker + "</task-notification>")}}
+        evidence = receipt.claude_feedback_evidence([native], self.storage)
+        refused = receipt.settle_native_receipt(
+            self.root, self.storage, "claude", self.storage, self.record, evidence,
+            acked_by="test")
+        self.assertEqual(refused["reason"], "delivery-was-never-claimed")
+        self.assertEqual(pending.read(self.root, self.storage, self.delivery_id)["state"], "pending")
+        self._mark_sent_ambiguous()
+        settled = receipt.settle_native_receipt(
+            self.root, self.storage, "claude", self.storage, self.record, evidence,
+            acked_by="test")
+        self.assertTrue(settled["settled"])
+
     def test_foreign_or_stale_identity_cannot_suppress_delivery(self):
         marker = receipt.receipt_marker(self.record, self.storage)
         body = "Hearting delivery context\n" + marker

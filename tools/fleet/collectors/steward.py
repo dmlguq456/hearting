@@ -304,6 +304,33 @@ def _owner_targets(winners, harness, session_id):
     return [entry for _rank, _parent, entry, _order in sorted(targets, key=lambda claim: claim[3])]
 
 
+def self_role_candidate(harness, session_id, *, aliases=(), markers=None, relations=None):
+    """Whether this exact session could carry the role at all.
+
+    The Stop hook draws one pane header: a session whose own marker or confirmed
+    relation holder names neither itself nor a proven alias cannot be a steward,
+    so the caller returns before enumerating every live agent. Evidence is the
+    same marker/relation data `role_targets`/`role_flag` use; this adds no new
+    authority rule.
+    """
+    harness = str(harness or "").lower()
+    if not session_id:
+        return False
+    identities = {(harness, sid) for sid in (session_id, *aliases) if sid}
+    if markers is None and relations is None:
+        return False
+    for identity in identities:
+        if markers is not None and markers.get(identity):
+            return True
+    for relation in relations or ():
+        if relation.get("released") is True:
+            continue
+        holder = relation.get("holder") or {}
+        if (str(holder.get("harness") or "").lower(), holder.get("sid")) in identities:
+            return True
+    return False
+
+
 def role_targets(harness, session_id, *, aliases=(), markers=None, cwd=None, sessions=None,
                  _winners=None, include_native=False, _relations=None):
     """One same-repository role lookup for Fleet and herdr, with proven prior ids.

@@ -1848,6 +1848,31 @@ function createCompletionCarrier(ctx) {
     const now = Date.now()
     const current = await command("recipients", sid)
     let cached = recipientCache.get(sid)
+    if (current && typeof current.generation === "string" && Array.isArray(current.delivery_ids)) {
+      // The helper names the exact owed delivery ids from the derived inbox.
+      // Follow only that list: no directory scan, no record re-read here.
+      const deliveryIds = current.delivery_ids.filter(value =>
+        typeof value === "string" && value.startsWith("delivery-") && !value.includes("/"))
+      if (!cached || cached.generation !== current.generation || now >= cached.expiresAt) {
+        cached = {
+          generation: current.generation,
+          digests: (Array.isArray(current.digests) ? current.digests : [])
+            .filter(value => /^[0-9a-f]{64}$/.test(value)),
+          deliveryIds,
+          expiresAt: now + CARRIER_RECIPIENT_CACHE_MS,
+          negativeUntil: 0,
+        }
+        recipientCache.set(sid, cached)
+      } else {
+        cached.deliveryIds = deliveryIds
+      }
+      if (cached.deliveryIds.length) {
+        cached.negativeUntil = 0
+        return true
+      }
+      cached.negativeUntil = now + CARRIER_NEGATIVE_CACHE_MS
+      return false
+    }
     if (current && typeof current.generation === "string" && Array.isArray(current.digests)) {
       if (!cached || cached.generation !== current.generation || now >= cached.expiresAt) {
         cached = {
@@ -1863,8 +1888,11 @@ function createCompletionCarrier(ctx) {
       return false
     }
     if (!cached || now < cached.negativeUntil) return false
-    for (const base of roots) {
-      for (const digest of cached.digests) {
+    // Rolling-upgrade fallback only: an older helper predates delivery_ids and
+    // still answers with digests. The installed helper always takes the branch
+    // above, so this bounded scan is never the normal carrier path.
+    for (const digest of cached.digests) {
+      for (const base of roots) {
         let names = []
         try { names = readdirSync(path.join(base, "pending-delivery", digest)) } catch { continue }
         for (const name of names) {

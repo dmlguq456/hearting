@@ -47,6 +47,13 @@ class RuntimeProjectionTest(unittest.TestCase):
         env = os.environ.copy()
         for name in self._WORKER_ENV:
             env.pop(name, None)
+        # A caller's live state roots take precedence over this fixture's HOME /
+        # XDG_STATE_HOME (state_root() reads HARNESS_STATE_ROOT and the inherited
+        # dispatch registry first), so clear them or a fake-session hook writes
+        # a real recipient inbox.
+        for name in ("HARNESS_STATE_ROOT", "AGENT_DISPATCH_JOBS",
+                     "AGENT_PEER_LEDGER_ROOT"):
+            env.pop(name, None)
         env.update({"AGENT_HOME": str(root / "agent"), "HOME": str(root / "home"),
                     "CLAUDE_CONFIG_DIR": str(root / "home" / ".claude"),
                     "HARNESS_CAPACITY_REFRESH_DISABLE": "1",

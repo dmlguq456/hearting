@@ -64,8 +64,11 @@ DEFAULT_JOBS = 4
 # Keep it in the full corpus and report, but run it only after the profile's
 # parallel batch has drained. A suite that rewrites repository files does it in
 # its own copy (tools/checkout-copy.sh), so none waits here for that reason.
+# hook_perf_budget measures wall-clock hook budgets; beside a parallel batch the
+# same code measured 3.4-3.6 s on CI against 2.15 s serially.
 SERIAL_SUITES = frozenset({
     "tools/install/projection-completeness.test.sh",
+    "utilities/hook_perf_budget.test.py",
 })
 
 PRUNE_DIRS = {".git", ".dispatch", "__pycache__", "node_modules",

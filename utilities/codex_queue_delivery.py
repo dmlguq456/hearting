@@ -272,7 +272,8 @@ class _WebSocket:
                         and time.monotonic() >= absolute_deadline):
                     raise QueueDeliveryError("queue-operation-deadline-exceeded",
                                              ambiguous=self.request_sent) from exc
-                if (not exc.ambiguous and method in {"thread/queue/add", "thread/queue/start"}
+                if (not exc.ambiguous and method in {"thread/queue/add", "thread/queue/start",
+                                                   "turn/steer"}
                         and exc.reason in {"queue-websocket-message-oversized",
                                            "queue-websocket-frame-invalid"}):
                     raise QueueDeliveryError(exc.reason, ambiguous=True) from exc
@@ -983,18 +984,163 @@ def _exact_peer_content(turn, client_message_id, message):
             and _peer_text_input(matches[0].get("content"), message))
 
 
+_PEER_RESULT_DEFAULTS = (
+    ("latest_turn_status", None), ("latest_turn_id", None), ("start_hold", None),
+    ("steer_turn_id", None), ("steer_refusal", None),
+    ("requeued_after_lost_steer", False), ("promoted_from_queue", False),
+)
+
+
+def _steer_active_turn(path: Path, *, thread_id: str, client_message_id: str,
+                       message: str, turn_id: str, timeout: float,
+                       session: DeliverySession | None = None) -> str:
+    """Inject one exact message into the active turn; the result must name a turn."""
+    result = _rpc(path, "turn/steer", {
+        "threadId": thread_id, "expectedTurnId": turn_id,
+        "clientUserMessageId": client_message_id,
+        "input": [{"type": "text", "text": message}],
+    }, timeout=timeout, **_session_kwargs(session))
+    accepted = result.get("turnId")
+    if not isinstance(accepted, str) or not accepted:
+        raise QueueDeliveryError("queue-steer-response-invalid", ambiguous=True)
+    return accepted
+
+
+def _peer_interrupted_start(
+    path: Path, *, thread_id: str, client_message_id: str, item_id: str,
+    allow_restart: bool, owned_queue_only_restart: bool, timeout: float,
+    session: DeliverySession | None = None,
+) -> tuple[bool, str | None]:
+    """Start the exact Hearting item only when the sender-side gate allowed it."""
+    if not allow_restart:
+        return False, "start-disabled"
+    if owned_queue_only_restart:
+        try:
+            queued = list_queue(path, thread_id, timeout=timeout, **_session_kwargs(session))
+        except QueueDeliveryError:
+            # A read cannot have changed anything; the item is already queued.
+            return False, "start-refused"
+        for item in queued:
+            owner = item.get("clientUserMessageId")
+            if not isinstance(owner, str) or not owner.startswith("delivery-"):
+                return False, "user-queue"
+    try:
+        started = _start_interrupted_owned_item(
+            path, thread_id=thread_id, client_message_id=client_message_id,
+            item_id=item_id, timeout=timeout, **_session_kwargs(session))
+    except QueueDeliveryError as exc:
+        if exc.ambiguous:
+            raise
+        return False, "start-refused"
+    return (True, None) if started else (False, "start-refused")
+
+
+def _peer_latest_turn(path, thread_id, *, timeout, session=None):
+    """Latest turn for a decision made before any write: a read failure is not ambiguous."""
+    try:
+        return _latest_turn(path, thread_id, timeout=timeout, **_session_kwargs(session))
+    except QueueDeliveryError as exc:
+        if exc.ambiguous:
+            raise QueueDeliveryError(exc.reason, ambiguous=False) from exc
+        raise
+
+
+def _turn_fields(turn):
+    status = turn.get("status") if isinstance(turn, dict) else None
+    turn_id = turn.get("id") if isinstance(turn, dict) else None
+    return (status if isinstance(status, str) else None,
+            turn_id if isinstance(turn_id, str) and turn_id else None)
+
+
+def _promote_pending_to_steer(
+    path: Path, *, thread_id: str, client_message_id: str, message: str,
+    item_id: str, turn_id: str, timeout: float,
+    session: DeliverySession | None = None, before_steer=None, before_add=None,
+    base: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Move one exact queued Hearting item into the active turn.
+
+    The queue item is deleted first (``deleted: true`` confirmed) so the same
+    client id never exists twice; a steer refused after that is queued again.
+    """
+    result = dict(base or {})
+    result.update(latest_turn_status="inProgress", latest_turn_id=turn_id)
+    if before_steer is not None:
+        before_steer(turn_id)
+    elif before_add is not None:
+        before_add()
+    try:
+        deleted = delete_queue_item(path, thread_id, item_id, timeout=timeout,
+                                    **_session_kwargs(session))
+    except QueueDeliveryError as exc:
+        try:
+            queued = list_queue(path, thread_id, timeout=timeout, **_session_kwargs(session))
+        except QueueDeliveryError as listing:
+            raise QueueDeliveryError("queue-peer-promote-delete-ambiguous",
+                                     ambiguous=True) from listing
+        pending, current_id = _pending_item(queued, client_message_id)
+        if not pending:
+            raise QueueDeliveryError("queue-peer-promote-delete-ambiguous",
+                                     ambiguous=True) from exc
+        result.update(status="queued", queued_submission_id=current_id,
+                      already_pending=True, started_after_interrupt=False,
+                      steer_refusal="promote-delete-failed:" + exc.reason)
+        return result
+    if deleted is not True:
+        raise QueueDeliveryError("queue-peer-promote-delete-unconfirmed", ambiguous=True)
+    try:
+        accepted = _steer_active_turn(
+            path, thread_id=thread_id, client_message_id=client_message_id,
+            message=message, turn_id=turn_id, timeout=timeout, session=session)
+    except QueueDeliveryError as exc:
+        if exc.ambiguous:
+            raise
+        if before_add is not None:
+            before_add()
+        added = _rpc(path, "thread/queue/add", {
+            "threadId": thread_id, "clientUserMessageId": client_message_id,
+            "input": [{"type": "text", "text": message}],
+        }, timeout=timeout, **_session_kwargs(session))
+        submission = added.get("queuedSubmission")
+        new_id = submission.get("id") if isinstance(submission, dict) else None
+        result.update(status="queued",
+                      queued_submission_id=new_id if isinstance(new_id, str) and new_id else None,
+                      already_pending=False, started_after_interrupt=False,
+                      steer_refusal=exc.reason)
+        return result
+    result.update(status="steered", queued_submission_id=None, already_pending=True,
+                  started_after_interrupt=False, steer_turn_id=accepted,
+                  promoted_from_queue=True)
+    return result
+
+
 def send_at_least_once(
     path: Path, *, thread_id: str, client_message_id: str, message: str,
     timeout: float = 5.0, allow_restart: bool = True,
     retry_ambiguous: bool = True, allow_add: bool = True,
     require_message_match: bool = False, before_add=None,
     session: DeliverySession | None = None,
+    # Peer-only extensions. All default off: completion callers keep their
+    # exact RPC sequence.
+    steer: bool = False, owned_queue_only_restart: bool = False,
+    observe_turn: bool = False, steer_turn_id: str | None = None,
+    before_steer=None,
 ) -> dict[str, Any]:
     """Inspect exact history and pending input before every at-least-once send."""
     if not thread_id or not client_message_id.startswith("delivery-"):
         raise QueueDeliveryError("queue-delivery-identity-invalid")
     if not isinstance(message, str) or not message.strip() or len(message.encode("utf-8")) > 16 * 1024:
         raise QueueDeliveryError("queue-message-invalid")
+    if steer and not require_message_match:
+        raise QueueDeliveryError("queue-steer-requires-exact-message")
+    peer_turn = steer or observe_turn
+
+    def done(result):
+        if peer_turn:
+            for key, value in _PEER_RESULT_DEFAULTS:
+                result.setdefault(key, value)
+        return result
+
     for retry in range(2):
         consumed = _known_consumed(path, thread_id, client_message_id, timeout=timeout,
                                    strict_history=require_message_match,
@@ -1003,9 +1149,9 @@ def send_at_least_once(
         if consumed is not None:
             if require_message_match and not _exact_peer_content(consumed, client_message_id, message):
                 raise QueueDeliveryError("queue-peer-history-mismatch", ambiguous=True)
-            return {"status": "consumed", "queued_submission_id": None,
-                    "already_pending": False, "started_after_interrupt": False,
-                    "turn_id": consumed.get("id"), "turn_status": consumed.get("status")}
+            return done({"status": "consumed", "queued_submission_id": None,
+                         "already_pending": False, "started_after_interrupt": False,
+                         "turn_id": consumed.get("id"), "turn_status": consumed.get("status")})
         queued = list_queue(path, thread_id, timeout=timeout, **_session_kwargs(session))
         pending, item_id = _pending_item(queued, client_message_id)
         if pending:
@@ -1014,11 +1160,34 @@ def send_at_least_once(
                            and item.get("clientUserMessageId") == client_message_id]
                 if len(matches) != 1 or not _peer_text_input(matches[0].get("input"), message):
                     raise QueueDeliveryError("queue-peer-pending-mismatch", ambiguous=True)
-            started = allow_restart and bool(item_id) and _start_interrupted_owned_item(
-                path, thread_id=thread_id, client_message_id=client_message_id,
-                item_id=item_id, timeout=timeout, **_session_kwargs(session))
-            return {"status": "queued", "queued_submission_id": item_id,
-                    "already_pending": True, "started_after_interrupt": started}
+            if not peer_turn:
+                started = allow_restart and bool(item_id) and _start_interrupted_owned_item(
+                    path, thread_id=thread_id, client_message_id=client_message_id,
+                    item_id=item_id, timeout=timeout, **_session_kwargs(session))
+                return {"status": "queued", "queued_submission_id": item_id,
+                        "already_pending": True, "started_after_interrupt": started}
+            latest_status, latest_id = _turn_fields(
+                _peer_latest_turn(path, thread_id, timeout=timeout, session=session))
+            base = {"latest_turn_status": latest_status, "latest_turn_id": latest_id}
+            if steer and latest_status == "inProgress" and latest_id and item_id:
+                return done(_promote_pending_to_steer(
+                    path, thread_id=thread_id, client_message_id=client_message_id,
+                    message=message, item_id=item_id, turn_id=latest_id, timeout=timeout,
+                    session=session, before_steer=before_steer, before_add=before_add,
+                    base=base))
+            started, hold = False, None
+            if latest_status == "interrupted":
+                if item_id:
+                    started, hold = _peer_interrupted_start(
+                        path, thread_id=thread_id, client_message_id=client_message_id,
+                        item_id=item_id, allow_restart=allow_restart,
+                        owned_queue_only_restart=owned_queue_only_restart,
+                        timeout=timeout, session=session)
+                else:
+                    hold = "start-refused"
+            return done(dict(base, status="queued", queued_submission_id=item_id,
+                             already_pending=True, started_after_interrupt=started,
+                             start_hold=hold))
         # Close the common consume-between-history-and-list race. Another
         # writer may still win after this read; accepted duplicates are benign.
         consumed = _known_consumed(path, thread_id, client_message_id, timeout=timeout,
@@ -1028,13 +1197,67 @@ def send_at_least_once(
         if consumed is not None:
             if require_message_match and not _exact_peer_content(consumed, client_message_id, message):
                 raise QueueDeliveryError("queue-peer-history-mismatch", ambiguous=True)
-            return {"status": "consumed", "queued_submission_id": None,
-                    "already_pending": False, "started_after_interrupt": False,
-                    "turn_id": consumed.get("id"), "turn_status": consumed.get("status")}
-        if not allow_add:
+            return done({"status": "consumed", "queued_submission_id": None,
+                         "already_pending": False, "started_after_interrupt": False,
+                         "turn_id": consumed.get("id"), "turn_status": consumed.get("status")})
+        lost = False
+        if steer_turn_id and not allow_add:
+            known = read_exact_turn(path, thread_id, steer_turn_id, timeout=timeout,
+                                    **_session_kwargs(session))
+            if known is None:
+                raise QueueDeliveryError("queue-peer-steer-turn-missing")
+            if known["status"] == "inProgress":
+                return done({"status": "steered", "queued_submission_id": None,
+                             "already_pending": True, "started_after_interrupt": False,
+                             "steer_turn_id": steer_turn_id,
+                             "latest_turn_status": "inProgress",
+                             "latest_turn_id": steer_turn_id})
+            observation = _observe_peer_message(path, thread_id, client_message_id,
+                                                timeout=timeout, expected_message=message)
+            if observation.status == "matched":
+                turn = observation.turn
+                if not _exact_peer_content(turn, client_message_id, message):
+                    raise QueueDeliveryError("queue-peer-history-mismatch", ambiguous=True)
+                return done({"status": "consumed", "queued_submission_id": None,
+                             "already_pending": False, "started_after_interrupt": False,
+                             "turn_id": turn.get("id"), "turn_status": turn.get("status")})
+            if observation.status == "conflict":
+                raise QueueDeliveryError("queue-peer-history-conflict")
+            if observation.status != "not_observed":
+                raise QueueDeliveryError("queue-peer-steer-unconfirmed", ambiguous=True)
+            lost = True
+        if not allow_add and not lost:
             raise QueueDeliveryError("queue-add-previously-unconfirmed", ambiguous=True)
-        interrupted = allow_restart and _latest_turn_status(
-            path, thread_id, timeout=timeout, **_session_kwargs(session)) == "interrupted"
+        extra = {}
+        if peer_turn:
+            latest_status, latest_id = _turn_fields(
+                _peer_latest_turn(path, thread_id, timeout=timeout, session=session))
+            if steer and not lost and latest_status == "inProgress" and latest_id:
+                if before_steer is not None:
+                    before_steer(latest_id)
+                elif before_add is not None:
+                    before_add()
+                try:
+                    accepted = _steer_active_turn(
+                        path, thread_id=thread_id, client_message_id=client_message_id,
+                        message=message, turn_id=latest_id, timeout=timeout, session=session)
+                except QueueDeliveryError as exc:
+                    if exc.ambiguous:
+                        raise
+                    extra["steer_refusal"] = exc.reason
+                    latest_status, latest_id = _turn_fields(
+                        _peer_latest_turn(path, thread_id, timeout=timeout, session=session))
+                else:
+                    return done({"status": "steered", "queued_submission_id": None,
+                                 "already_pending": False, "started_after_interrupt": False,
+                                 "steer_turn_id": accepted, "latest_turn_status": "inProgress",
+                                 "latest_turn_id": latest_id})
+            extra.update(latest_turn_status=latest_status, latest_turn_id=latest_id,
+                         requeued_after_lost_steer=lost)
+            interrupted = latest_status == "interrupted"
+        else:
+            interrupted = allow_restart and _latest_turn_status(
+                path, thread_id, timeout=timeout, **_session_kwargs(session)) == "interrupted"
         try:
             if before_add is not None:
                 before_add()
@@ -1052,12 +1275,21 @@ def send_at_least_once(
             item_id = None
         # Successful add is acceptance even when the server omits item identity.
         started = False
-        if interrupted and item_id:
+        if peer_turn:
+            if interrupted and item_id:
+                started, extra["start_hold"] = _peer_interrupted_start(
+                    path, thread_id=thread_id, client_message_id=client_message_id,
+                    item_id=item_id, allow_restart=allow_restart,
+                    owned_queue_only_restart=owned_queue_only_restart,
+                    timeout=timeout, session=session)
+            elif interrupted:
+                extra["start_hold"] = "start-refused"
+        elif interrupted and item_id:
             started = _start_interrupted_owned_item(
                 path, thread_id=thread_id, client_message_id=client_message_id,
                 item_id=item_id, timeout=timeout, **_session_kwargs(session))
-        return {"status": "queued", "queued_submission_id": item_id,
-                "already_pending": False, "started_after_interrupt": started}
+        return done(dict(extra, status="queued", queued_submission_id=item_id,
+                         already_pending=False, started_after_interrupt=started))
     raise QueueDeliveryError("queue-add-unconfirmed", ambiguous=True)
 
 

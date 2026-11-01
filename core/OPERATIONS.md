@@ -1135,7 +1135,7 @@ A legacy hash collision is diagnostic
    - **Owner route binding and duplicate launch receipt under SD-97:** `dispatch-owner --route-evidence` fills the owner-tuple flags a route-backed call omits (`route_defaults=` in the receipt; a cwd, capability, mode, or intensity that contradicts the route is refused typed), and verifies the route against cwd, capability, mode, intensity, hash, and owner harness; an owner is never fabricated as a route node. An exact duplicate claim starts zero children and reports `launch_state=existing-active|existing-dead|existing-unverified|existing-completed` (the open-row word comes from the shared process verdict, with one plain `note=` line for dead/unverified); a caller requiring a new start must branch on it.
    - **Post-launch owner-route lifecycle under SD-97:** a registered dispatch-depth-1 owner may start without route evidence and compile generation 0 after launch; the compiler attaches that immutable route to the exact owner attempt through a separate atomic lifecycle record and never rewrites the route or the launch-sealed tuple. The owner route advances only through verified generation `n -> n+1` edges adopted by a registered depth-2 child row; a childless candidate is inert.
    - **Fleet owner-lineage projection under SD-97:** Fleet projects the same verified current owner generation; two real successors or unverifiable lineage stay the typed `multiple-owner-routes` ambiguity, and timestamp ordering or "latest route" heuristics are forbidden. Display-parent resolution consumes the exact managed-session binding before classifying a missing visible thread as orphan; the collector owns that decision and rendering consumes it without changing completion delivery identity.
-   - **Declared runtime requirements and lifecycle evidence under SD-97:** a node may declare only registry-known `runtime_requirements`; `loopback-listen` means localhost bind with outbound denied. Sealed lab HTML verification derives that same requirement without resealing old routes. Review source stays read-only; canonical verdicts and required spec-read markers remain writable before optional sinks. Use the existing headless shell without broad Unix-socket access. Unsupported runtimes retain `loopback-only-unsupported` and the checked main/inline fallback.
+   - **Declared runtime requirements and lifecycle evidence under SD-97:** a node may declare only registry-known `runtime_requirements`; `loopback-listen` means localhost bind and connect with outbound network and broad Unix sockets denied. Sealed lab HTML verification and the `code-execute`/`code-test` stages derive that same scope without resealing old routes; Codex adds only the localhost table to the stage's current approved profile. Review source stays read-only; canonical verdicts and required spec-read markers remain writable before optional sinks. Use the existing headless shell without broad Unix-socket access. A runtime that cannot realize it refuses a declared or lab requirement as `loopback-only-unsupported`, while a code stage proceeds with network off and records the unmet fact in its effective grant; Claude and OpenCode are not recorded as enforcing it.
 3. **Merge and cleanup belong to main or the orchestrator:** merge only after an explicit user signal or while harvesting a background job that main dispatched. Do not self-merge the current turn's substantive branch; finish with the branch and a concise report while preserving main unless the user has already authorized integration. Review `git diff main...<branch>`, skip regressions or duplicated work, resolve conflicts by interpreting both intents rather than choosing a side automatically, stop when ambiguity would revert an established result, and verify the integrated build. “Merge everything” means merge all valid work selectively, not blindly accept every diff.
    - After merge, integrated verification, and a successful push of the
      integration ref, main automatically runs
@@ -1183,7 +1183,9 @@ section; those shapes are migration history only.
 SD-92 completion binds to the calling `CODEX_THREAD_ID`.
 The interactive launcher and gateway are retired. Native queue
 submission is at-least-once; pending/history checks suppress known duplicates.
-Interrupted-parent restart requires one exact pending Hearting item. Transport
+Interrupted-parent restart requires one exact pending Hearting item. Peer
+restart additionally requires a sender-verified empty composer with no form and
+no non-Hearting queue item; otherwise the receipt names the hold. Transport
 refusal preserves the delivery obligation independently of child completion.
 The native TUI owns subscriptions, questions, and approvals. Headless owners keep
 their separate supervisor. See ADAPTATION §7.1 for the carrier contract.
@@ -1191,6 +1193,8 @@ Across adapters, the result record remains under the registered parent's key,
 while the current `effective_parent` receives it. Result recovery may repeat
 after interruption; peer input is reserved as pending and becomes unverified
 only at the external write boundary, so an ambiguous write is not repeated.
+A Codex peer steer into an active turn follows the same boundary; only complete
+exact history without the client id after that turn ends re-queues it once.
 
 **SD-110 runtime-owned deterministic stage advance.** At an eligible-linear
 boundary — completion gate proven, exactly one non-terminal runnable

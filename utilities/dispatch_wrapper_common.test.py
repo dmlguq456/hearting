@@ -1434,5 +1434,80 @@ class SameRowTest(unittest.TestCase):
             self.assertIn("child_spawned=0", refused.exception.detail)
             self.assertEqual(check.call_count, 2)
 
+class LoopbackAdmissionTest(unittest.TestCase):
+    """U10: lab and declared loopback still refuse when unsupported, without a manual fallback hint."""
+
+    def route(self, tmp, **node):
+        base = {"id": "execute", "completion_gate": "code-execute", "commit_expected": True}
+        base.update(node)
+        path = Path(tmp) / "route.json"
+        path.write_text(json.dumps({"schema_version": 2, "capability": "autopilot-code",
+                                    "nodes": [base]}))
+        return path
+
+    def args(self, tmp, route):
+        return argparse.Namespace(
+            route_id="rt-fixture", route_hash="sha256:fixture", route_node="execute",
+            registry_digest="fixture", write_scope="source/**", route_file=str(route),
+            worktree=tmp, artifact_root=tmp, capability="autopilot-code", intensity="standard",
+            unit="dev/backend", action="start", model_role="fast implementer",
+            model_profile="balanced", attempt_id=None, jobs=str(Path(tmp) / "jobs.log"),
+            agent_home=Path(tmp))
+
+    def test_unsupported_declared_requirement_refuses_with_harness_not_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            route = self.route(tmp, runtime_requirements=["loopback-listen"])
+            out = io.StringIO()
+            with mock.patch("codex_permission_profile.local_verification_available",
+                            return_value=False), redirect_stdout(out):
+                code = C.validate_route_record(self.args(tmp, route), marker_gate=lambda *_: None,
+                                               runtime_harness="codex",
+                                               runtime_sandbox="workspace-write")
+            self.assertEqual(code, 69)
+            text = out.getvalue()
+            self.assertIn("reason=loopback-only-unsupported\n", text)
+            self.assertIn("child_spawned=0\n", text)
+            self.assertIn("harness=codex\n", text)
+            self.assertNotIn("fallback=", text)
+
+    def test_runtime_sandbox_reaches_the_support_decision(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            route = self.route(tmp, runtime_requirements=["loopback-listen"])
+            seen = []
+            real = C.validate_runtime_requirements
+            def capture(record, node, *, supported):
+                seen.append(supported)
+                return real(record, node, supported=supported)
+            result = subprocess.CompletedProcess([], 65, "", '{"status":"blocked","reason":"stop"}\n')
+            for sandbox, expected in (("workspace-write", {"loopback-listen"}),
+                                      ("danger-full-access", set()), (None, set())):
+                with self.subTest(sandbox=sandbox), redirect_stdout(io.StringIO()), \
+                     mock.patch("codex_permission_profile.local_verification_available",
+                                return_value=True), \
+                     mock.patch.object(C, "validate_runtime_requirements", side_effect=capture), \
+                     mock.patch.object(C, "validate_route_mode_axes"), \
+                     mock.patch.object(C.subprocess, "run", return_value=result):
+                    C.validate_route_record(self.args(tmp, route), marker_gate=lambda *_: None,
+                                            runtime_harness="codex", runtime_sandbox=sandbox)
+                self.assertEqual(seen.pop(), expected)
+
+    def test_approved_stage_is_not_a_new_hard_requirement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            route = self.route(tmp)
+            result = subprocess.CompletedProcess([], 65, "", '{"status":"blocked","reason":"stop"}\n')
+            out = io.StringIO()
+            for harness in ("codex", "claude", "opencode"):
+                with self.subTest(harness=harness), redirect_stdout(out), \
+                     mock.patch("codex_permission_profile.local_verification_available",
+                                return_value=False), \
+                     mock.patch.object(C, "validate_route_mode_axes"), \
+                     mock.patch.object(C.subprocess, "run", return_value=result):
+                    code = C.validate_route_record(self.args(tmp, route), marker_gate=lambda *_: None,
+                                                   runtime_harness=harness,
+                                                   runtime_sandbox="workspace-write")
+                self.assertEqual(code, 65)
+            self.assertNotIn("loopback-only-unsupported", out.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

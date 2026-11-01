@@ -346,6 +346,24 @@ def _sd111_sweep_marker(root: Path, sid: str) -> Path:
     return root / "session-sweep-markers" / f"{digest}.marker"
 
 
+def _sd111_inbox_delivery_ids(root: Path, sid: str) -> list[str] | None:
+    """The current derived inbox's own records, or ``None`` for a full first scan.
+
+    Only ids stored under this session's own key can be claimed by this
+    generation-proof sweep; a predecessor record stays with its carrier.
+    """
+    try:
+        import dispatch_recipient_inbox as inbox
+        dispatch_root = inbox.dispatch_inbox_root(jobs=root / "jobs.log")
+        payload = inbox.read_inbox(dispatch_root, "codex", sid)
+        if payload is None or not inbox.is_current(payload, dispatch_root):
+            return None
+        return [item["delivery_id"] for item in payload["delivery_ids"]
+                if item.get("storage_key") == sid]
+    except Exception:  # noqa: BLE001 - discovery only; the own-dir scan remains
+        return None
+
+
 def sd111_first_prompt_sweep(sid: str) -> None:
     """SD-111 P4 -- Codex carrier 2. There is no confirmed Codex
     SessionStart-equivalent surface (plan §P4), so this runs at the first
@@ -384,7 +402,9 @@ def sd111_first_prompt_sweep(sid: str) -> None:
             continue
         seen.add(root)
         try:
-            sweep(root, SD111_SWEEP_RECIPIENT_KIND, sid, SD111_SWEEP_SESSION_GENERATION)
+            delivery_ids = _sd111_inbox_delivery_ids(root, sid)
+            sweep(root, SD111_SWEEP_RECIPIENT_KIND, sid, SD111_SWEEP_SESSION_GENERATION,
+                  delivery_ids=delivery_ids)
         except Exception:
             continue
 

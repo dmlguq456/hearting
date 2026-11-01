@@ -13,6 +13,7 @@ from codex_permission_profile import (
     LOCAL_VERIFICATION_PROFILE_NAME,
     verification_profile_config,
     commit_profile_config,
+    code_stage_profile_config,
     config_arguments,
     owner_turn_profile_config,
     recordish_profile_config,
@@ -831,9 +832,19 @@ def configure_permission_profiles(args: argparse.Namespace, command: list[str]) 
                 "commit_no_network": OWNER_COMMIT_NO_NETWORK_PROFILE_NAME,
             }
             return
-    args.native_permission_profile = commit_profile_config(
+    from verification_runtime import bound_route_node
+    bound = bound_route_node(args)
+    primary_commit = bool(getattr(args, "primary_git_commit", False))
+    if bound is None:
+        args.local_network = "not-applicable"
+        args.native_permission_profile = commit_profile_config(
+            args.worktree, args.writable_root, args.sandbox, args.network_access,
+            primary_commit=primary_commit,
+        )
+        return
+    args.native_permission_profile, args.local_network = code_stage_profile_config(
         args.worktree, args.writable_root, args.sandbox, args.network_access,
-        primary_commit=bool(getattr(args, "primary_git_commit", False)),
+        primary_commit=primary_commit, route=bound["route"], node_id=bound["node_id"],
     )
 
 

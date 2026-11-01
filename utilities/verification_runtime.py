@@ -1,7 +1,10 @@
-"""Existing lab HTML verification contracts and their local execution intent.
+"""Local-only verification contracts and their local execution intent.
 
-Intent is derived from sealed node I/O, never a role-name permission exception.
-No route, user config or live artifact is rewritten here.
+Sealed lab HTML verification and the approved `code-execute`/`code-test` stages
+share one meaning: localhost bind and connect with outbound network denied.
+Intent is derived from sealed node I/O and completion gate, never a role-name
+permission exception or a new recipe field. No route, user config or live
+artifact is rewritten here.
 """
 from __future__ import annotations
 
@@ -24,6 +27,62 @@ def lab_browser_node(route: dict, node_id: str | None) -> dict | None:
     return node
 
 
+# Stages whose approved verification runs tests. Derived from the sealed node's
+# completion gate, so already-sealed routes qualify without resealing.
+_APPROVED_TEST_GATES = frozenset({"code-execute", "code-test"})
+
+
+def _node(route: dict, node_id: str | None) -> dict | None:
+    return next((n for n in route.get("nodes", ())
+                 if isinstance(n, dict) and n.get("id") == node_id), None)
+
+
+def approved_test_node(route: dict, node_id: str | None) -> dict | None:
+    """Sealed stage whose approved verification runs tests (no reseal, no new input)."""
+    node = _node(route, node_id)
+    if node is None or node.get("completion_gate") not in _APPROVED_TEST_GATES:
+        return None
+    return node
+
+
+def local_network_projection(route: dict | None, node_id: str | None,
+                             harness: str | None, *, sandbox: str | None = None) -> str | None:
+    """'native-profile' | 'verification-command' | 'unavailable' | None (not applicable).
+
+    The one place that decides whether a node's localhost-only scope can be
+    realized. For a Codex non-lab node, `sandbox` is the runtime sandbox the
+    launch will use; the localhost table is realizable only on a
+    workspace-write sandbox with named profiles and the checked proxy (the
+    `code_stage_profile_config` condition). An unknown sandbox is unavailable.
+    """
+    if not isinstance(route, dict):
+        return None
+    node = _node(route, node_id)
+    if node is None:
+        return None
+    lab = lab_browser_node(route, node_id) is not None
+    declared = "loopback-listen" in (node.get("runtime_requirements") or ())
+    approved = approved_test_node(route, node_id) is not None
+    if not (lab or declared or approved):
+        return None
+    if harness == "codex":
+        from codex_permission_profile import local_verification_available
+        if lab:
+            return "native-profile" if local_verification_available() else "unavailable"
+        return ("native-profile" if sandbox == "workspace-write"
+                and local_verification_available() else "unavailable")
+    if harness in {"claude", "opencode"}:
+        # Their checked verification commands use the shared sandbox runner;
+        # do not claim that a broad native network switch enforces this scope.
+        if lab:
+            from codex_permission_profile import local_verification_available
+            return "verification-command" if local_verification_available() else "unavailable"
+        # Outside a lab there is no enforcing path: a declared requirement is
+        # unsupported, and an approved test stage runs as it does today.
+        return "unavailable" if declared else None
+    return None
+
+
 def runtime_requirements(route: dict, node_id: str) -> set[str]:
     node = next((n for n in route.get("nodes", ())
                  if isinstance(n, dict) and n.get("id") == node_id), {})
@@ -33,7 +92,8 @@ def runtime_requirements(route: dict, node_id: str) -> set[str]:
     return requirements
 
 
-def bound_lab_context(args, environ=None) -> dict | None:
+def bound_route_node(args, environ=None) -> dict | None:
+    """The sealed route and node this attempt is bound to (any node kind)."""
     env = os.environ if environ is None else environ
     route_file = getattr(args, "route_file", None) or env.get("AGENT_ROUTE_FILE")
     node_id = getattr(args, "route_node", None) or env.get("AGENT_ROUTE_NODE")
@@ -43,7 +103,7 @@ def bound_lab_context(args, environ=None) -> dict | None:
         route = json.loads(Path(route_file).read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
         return None
-    if lab_browser_node(route, node_id) is None:
+    if not isinstance(route, dict):
         return None
     for key, env_key in (("route_id", "AGENT_ROUTE_ID"), ("route_hash", "AGENT_ROUTE_HASH")):
         expected = getattr(args, key, None) or env.get(env_key)
@@ -52,23 +112,27 @@ def bound_lab_context(args, environ=None) -> dict | None:
     worktree = getattr(args, "worktree", None) or env.get("AGENT_DISPATCH_WORKTREE")
     if worktree and Path(worktree).resolve() != Path(route.get("cwd", "")).resolve():
         return None
-    return {"route": route, "node_id": node_id,
-            "worktree": str(Path(worktree or route["cwd"]).resolve()),
-            "artifact_root": str(Path(route["artifact_root"]).resolve())}
+    try:
+        return {"route": route, "node_id": node_id,
+                "worktree": str(Path(worktree or route["cwd"]).resolve()),
+                "artifact_root": str(Path(route["artifact_root"]).resolve())}
+    except (KeyError, TypeError, OSError, ValueError):
+        return None
 
 
-def supported_requirements(route: dict, node_id: str, harness: str | None) -> set[str]:
-    if lab_browser_node(route, node_id) is None:
-        return set()
-    if harness == "codex":
-        from codex_permission_profile import local_verification_available
-        return {"loopback-listen"} if local_verification_available() else set()
-    if harness in {"claude", "opencode"}:
-        # Their checked verification commands use the shared sandbox runner;
-        # do not claim that a broad native network switch enforces this scope.
-        from codex_permission_profile import local_verification_available
-        return {"loopback-listen"} if local_verification_available() else set()
-    return set()
+def bound_lab_context(args, environ=None) -> dict | None:
+    bound = bound_route_node(args, environ)
+    if bound is None or lab_browser_node(bound["route"], bound["node_id"]) is None:
+        return None
+    return bound
+
+
+def supported_requirements(route: dict, node_id: str, harness: str | None, *,
+                           sandbox: str | None = None) -> set[str]:
+    """Requirements this runtime can realize for the node (see local_network_projection)."""
+    projection = local_network_projection(route, node_id, harness, sandbox=sandbox)
+    return ({"loopback-listen"} if projection in {"native-profile", "verification-command"}
+            else set())
 
 
 def review_scope(route, node_id, route_file, environ=None, parent_attempt_id=None):
@@ -219,11 +283,12 @@ def scratch_environment(environ=None):
     return env
 
 
-def effective_scope(args, supplied, harness, environ):
+def effective_scope(args, supplied, harness, environ, *, sandbox=None, network=False,
+                    read_roots=()):
     """Describe the concrete projection in the existing attempt grant record."""
     bound = bound_lab_context(args, environ)
     if bound is None:
-        return None
+        return _code_stage_scope(args, supplied, harness, environ, sandbox, network, read_roots)
     scope = review_scope(bound["route"], bound["node_id"], args.route_file, environ)
     prepare_review_directories(scope)
     return {"network": "loopback-only", "route_node": bound["node_id"],
@@ -231,6 +296,32 @@ def effective_scope(args, supplied, harness, environ):
             "projection": "native-profile" if harness == "codex" else "verification-command",
             "write_roots": scoped_write_roots(scope, supplied, environ),
             "read_roots": [bound["worktree"], bound["artifact_root"], *scope["read_only_roots"]]}
+
+
+def _code_stage_scope(args, supplied, harness, environ, sandbox, network, read_roots):
+    """Approved code stage on Codex: record the localhost-only projection, or the unmet fact."""
+    if harness != "codex":
+        return None
+    bound = bound_route_node(args, environ)
+    if bound is None or approved_test_node(bound["route"], bound["node_id"]) is None:
+        return None
+    from codex_permission_profile import code_stage_profile_config
+    status = getattr(args, "local_network", None)
+    if status is None:
+        _profile, status = code_stage_profile_config(
+            bound["worktree"], list(supplied), sandbox or getattr(args, "sandbox", None) or "",
+            bool(network), route=bound["route"], node_id=bound["node_id"])
+    if status == "unavailable":
+        args.local_network_unmet = ("loopback-unavailable-codex",)
+        return None
+    if status != "applied":
+        return None
+    return {"network": "loopback-only", "route_node": bound["node_id"],
+            "route_id": bound["route"].get("route_id"), "route_hash": bound["route"].get("route_hash"),
+            "projection": "native-profile",
+            "write_roots": sorted({str(Path(root).resolve()) for root in supplied}),
+            # Only what the stage was already granted to read; the profile adds no read root.
+            "read_roots": sorted({str(Path(root).resolve()) for root in read_roots})}
 
 
 def verification_command(command, environ=None):

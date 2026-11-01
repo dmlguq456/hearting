@@ -224,11 +224,31 @@ def session_title(harness: str, session_id: str) -> str:
     return current_session_subject(runtime_name, title)
 
 
-def is_steward(harness: str, session_id: str) -> bool:
+def _published_steward_relations():
+    """The runner-published role relations, or ``None`` when unavailable."""
+    try:
+        utilities = str(Path(__file__).resolve().parents[2] / "utilities")
+        if utilities not in sys.path:
+            sys.path.insert(0, utilities)
+        import dispatch_recipient_inbox as inbox
+        return inbox.read_steward_relations(inbox.dispatch_inbox_root())
+    except Exception:
+        return None
+
+
+def is_steward(harness: str, session_id: str, *, published_only: bool = False) -> bool:
     """True when this session's marker holds steward ROLE evidence.
 
     Uses Fleet's role lookup and its confirmed native-clear aliases, so a new
     conversation keeps the same role on both displays without copying a marker.
+    The Stop hook asks this for one pane header, so a session whose own evidence
+    names neither itself nor an alias returns before Fleet enumerates every live
+    agent; only a possible steward pays for the full role resolution.
+
+    ``published_only`` is the Stop header's display path: it reuses the
+    runner-published relation observation and falls back to one live read only
+    when that file is missing or unreadable. Authority paths and Fleet keep the
+    live read (the default).
     """
     if not session_id:
         return False
@@ -242,17 +262,24 @@ def is_steward(harness: str, session_id: str) -> bool:
         harness_key = str(harness or "").lower()
         aliases = _clear_gpu_session_aliases(harness, session_id,
                                              os.environ.get("HERDR_PANE_ID"), cwd)
+        relations = _published_steward_relations() if published_only else None
+        if relations is None:
+            relations = steward_collector.read_relations()
+        if not steward_collector.self_role_candidate(
+                harness, session_id, aliases=aliases, markers=markers,
+                relations=relations):
+            return False
         sessions = steward_collector._projection_sessions()
         live = {(str(getattr(row, "harness", "") or "").lower(),
                  getattr(row, "session_id", None)) for row in sessions}
         aliases = [sid for sid in aliases if (harness_key, sid) not in live]
         targets = steward_collector.role_targets(
             harness, session_id, aliases=aliases, markers=markers, cwd=cwd,
-            sessions=sessions, include_native=True)
+            sessions=sessions, include_native=True, _relations=relations)
         # The normal hook owns its cwd even before herdr has published a SID.
         return steward_collector.role_flag(harness, session_id, aliases=aliases,
                                            markers=markers, cwd=cwd, sessions=sessions,
-                                           _targets=targets)
+                                           _targets=targets, _relations=relations)
     except Exception:
         pass
     return False
@@ -317,7 +344,7 @@ def refresh_tag_metadata(agents) -> None:
 
 
 def compose(harness: str, session_id: str, *, tag=None, steward=None, title=None,
-            label=None) -> tuple:
+            label=None, display_relations: bool = False) -> tuple:
     """→ ``(display_agent, title)`` in the fixed order number → ⚑ → harness → summary.
 
     ``label`` lets a user formatter rename the middle harness word; the badge and the
@@ -328,7 +355,7 @@ def compose(harness: str, session_id: str, *, tag=None, steward=None, title=None
     if tag is None:
         tag = resolve_tag(harness, session_id)
     if steward is None:
-        steward = is_steward(harness, session_id)
+        steward = is_steward(harness, session_id, published_only=display_relations)
     if title is None:
         title = session_title(harness, session_id)
     middle = sanitize_title(label) or harness or "agent"
@@ -602,8 +629,15 @@ def _native_opencode_lifecycle(session_id):
 
 def project(harness: str, session_id: str, *, pane_id=None, worker=None,
             report_session=True, observation=None, session_seq=None,
-            session_start_source=None, resume_argv=None) -> bool:
-    """Report this session's pane metadata to herdr. Always returns True (fail-soft)."""
+            session_start_source=None, resume_argv=None, permission=None,
+            display_relations=False) -> bool:
+    """Report this session's pane metadata to herdr. Always returns True (fail-soft).
+
+    ``permission`` is the boolean a hook already obtained from `may_report` for
+    this exact attempt; passing it avoids a second identity walk. ``None`` keeps
+    the normal internal check. ``display_relations`` reuses the runner-published
+    role relation for this header instead of walking every ledger.
+    """
     harness = str(harness or "").lower()
     pane = pane_id or os.environ.get("HERDR_PANE_ID", "")
     if observation is not None:
@@ -624,7 +658,9 @@ def project(harness: str, session_id: str, *, pane_id=None, worker=None,
             _defer_until_proven(session_id, report_session, session_seq=session_seq,
                                 session_start_source=session_start_source)
         return True
-    if not may_report(harness, session_id, worker=worker, pane_id=pane):
+    allowed = (may_report(harness, session_id, worker=worker, pane_id=pane)
+               if permission is None else bool(permission))
+    if not allowed:
         if observation is not None:
             observation["reason"] = "guard-refused"
         if codex_main and runtime_identity()[0] == "codex":
@@ -685,6 +721,8 @@ def project(harness: str, session_id: str, *, pane_id=None, worker=None,
             harness, session_id, worker=worker, pane_id=pane)
     if not report_session:
         _assign_observed_tag(harness, session_id, pane)
+    if display_relations:
+        lifecycle["display_relations"] = True
     _report(harness, session_id, pane, report_session, **lifecycle)
     return True
 
@@ -713,10 +751,11 @@ def _send_projection(command, observation):
             observation[field] = "spawn-error"
 
 
-def _metadata_command(herdr, harness, session_id, pane):
+def _metadata_command(herdr, harness, session_id, pane, *, display_relations=False):
     title = session_title(harness, session_id)
     label, custom_title = _formatter_overrides(harness, session_id, title)
-    agent, shown_title = compose(harness, session_id, title=custom_title or title, label=label)
+    agent, shown_title = compose(harness, session_id, title=custom_title or title,
+                                 label=label, display_relations=display_relations)
     try:
         utilities = str(Path(__file__).resolve().parents[2] / "utilities")
         if utilities not in sys.path:
@@ -742,7 +781,7 @@ def _metadata_command(herdr, harness, session_id, pane):
 
 def _report(harness: str, session_id: str, pane: str, report_session: bool,
             observation=None, session_seq=None, session_start_source=None, resume_argv=None,
-            _proof=None) -> None:
+            _proof=None, display_relations: bool = False) -> None:
     herdr = shutil.which("herdr")
     if not herdr:
         if observation is not None:
@@ -778,7 +817,8 @@ def _report(harness: str, session_id: str, pane: str, report_session: bool,
                 observation["reason"] = "guard-refused-before-metadata"
             return
         _assign_observed_tag(harness, session_id, pane)
-    metadata = _metadata_command(herdr, harness, session_id, pane)
+    metadata = _metadata_command(herdr, harness, session_id, pane,
+                                 display_relations=display_relations)
     if not current():
         if observation is not None:
             observation["reason"] = "guard-refused-before-metadata"
