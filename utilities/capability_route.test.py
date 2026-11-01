@@ -3145,6 +3145,36 @@ class TestContinuation(unittest.TestCase):
                     [node["id"] for node in source["nodes"]
                      [next(i for i,row in enumerate(source["nodes"]) if row["id"]==review["id"]):]])
    R.verify_route(continuation)
+ def test_continuation_cuts_prefix_at_any_superseded_node(self):
+  # One rule (`completion_superseded`): a reusable-looking result older than a completion upstream
+  # of it is reopened at that node, whatever kind of node it is; its old marker stays history.
+  with tempfile.TemporaryDirectory() as tmp:
+   source=self._source(Path(tmp)/"artifacts")
+   self._complete_prefix(source,"report",Path(tmp)/"evidence")
+   whole=self._build(source,resume_from_node="report",requested_boundary="report")
+   self.assertEqual((whole["first_runnable_node"],whole["first_runnable_blocker"]),("report",None))
+   frame=next(node for node in source["nodes"] if node["id"]=="frame")
+   plan=next(node for node in source["nodes"] if node["id"]=="plan")
+   jobs=Path(source["launch_compatibility_tuple"]["jobs_path"]["path"])
+   plan_marker=R.completion_dir(source["route_id"],jobs=jobs)/"plan.json"
+   old=plan_marker.read_bytes()
+   # frame completes again after plan: plan is the result of the older frame.
+   self._complete_node(source,frame,Path(tmp)/"evidence-again","att-continuation-frame-again")
+   cut=self._build(source,resume_from_node="report",requested_boundary="report")
+   self.assertEqual((cut["first_runnable_node"],cut["first_runnable_blocker"]),("plan",None))
+   self.assertEqual([row["node_id"] for row in cut["reused_nodes"]],["frame","frame-alternative"])
+   self.assertEqual(plan_marker.read_bytes(),old)               # history is kept, not rewritten
+   # A result whose upstream did not complete again is still reused.
+   self.assertIn("frame-alternative",[row["node_id"] for row in cut["reused_nodes"]])
+   # Not the superseded case: an integrity break keeps its refusal, and so does a closure marker.
+   broken=json.loads(old)
+   plan_marker.write_text(json.dumps({**broken,"route_hash":"sha256:"+"0"*64}),encoding="utf-8")
+   refused=self._build(source,resume_from_node="report",requested_boundary="report")
+   self.assertIsNotNone(refused["first_runnable_blocker"])
+   plan_marker.write_text(json.dumps({**broken,"stage_authority":"owner-closure"}),encoding="utf-8")
+   closed=self._build(source,resume_from_node="report",requested_boundary="report")
+   self.assertIsNotNone(closed["first_runnable_blocker"])
+   self.assertNotEqual(closed["first_runnable_node"],"plan")
  def test_continuation_drops_a_binding_whose_entry_node_was_cut(self):
   with tempfile.TemporaryDirectory() as tmp:
    source=self._source(Path(tmp)/"artifacts")

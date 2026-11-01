@@ -1540,7 +1540,7 @@ class RealSubsessionAdvanceServices:
         return self._run(request, "start")
 
     def _run(self, request: SubsessionAdvanceRequest, action: str) -> dict:
-        if not request.parent_slug or os.environ.get("AGENT_DISPATCH_ATTEMPT_ID") != request.parent_attempt_id:
+        if not request.parent_slug or not self._caller_is_parent(request):
             return {
                 "returncode": None, "check": "failed", "attempt_id": "",
                 "registered": False, "started": False, "duplicate_attempt": False,
@@ -1594,6 +1594,13 @@ class RealSubsessionAdvanceServices:
             if row["metadata"].get("attempt_id") == request.successor_session.get("attempt_id"):
                 return row
         return {}
+
+    @staticmethod
+    def _caller_is_parent(request) -> bool:
+        """The caller is the registered parent attempt or its final launched replacement."""
+        import route_authority as RA
+        caller = os.environ.get("AGENT_DISPATCH_ATTEMPT_ID")
+        return bool(caller) and RA.parent_attempt_succeeded(getattr(request, "jobs", None), request.parent_attempt_id, caller)
 
     def _parent_slug(self, request):
         try:

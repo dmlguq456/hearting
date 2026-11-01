@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import importlib.util
+import contextlib
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 from concurrent.futures import ThreadPoolExecutor
 import threading
 import unittest
@@ -1310,6 +1312,87 @@ class SourceSubjectIntegrationTest(unittest.TestCase):
                                           self.agent_home, self.jobs)
         self.assertEqual(refused.exception.reason, "completion-review-source-stale")
 
+    def _gate_start(self, node, *, gates, readiness=False):
+        env = {**os.environ, "HEARTING_GATES": gates}
+        patches = [mock.patch.dict(os.environ, env, clear=True)]
+        if not readiness:
+            patches.append(mock.patch.object(DC, "completion_attempt_readiness",
+                                             side_effect=AssertionError("superseded PASS must not be consumed")))
+        with contextlib.ExitStack() as stack:
+            for patch in patches:
+                stack.enter_context(patch)
+            DC.completion_marker_gate(str(self.route_file), node, "start", self.agent_home, self.jobs)
+
+    def test_gates_off_stale_test_source_proceeds_without_reusing_pass(self):
+        # N21: a source-bound test PASS whose source moved is dropped from the observation, never consumed.
+        self.current_smoke_markers("A")
+        (self.repo / "engine.py").write_text("value = 'B'\n", encoding="utf-8")
+        smoke = ROUTE_WRITER.completion_dir(self.route["route_id"], jobs=self.jobs) / "smoke.json"
+        marker = json.loads(smoke.read_text(encoding="utf-8"))
+        currency = DC.gate_currency(self.route, self.get_node("smoke"), smoke, marker, observe=True)
+        self.assertEqual((currency.state, currency.reason), ("superseded", "completion-test-source-stale"))
+        self.assertTrue(DC.completion_superseded(currency))
+        self._gate_start("impl-review", gates="off")
+        with self.assertRaises(DC.DispatchContractError) as refused:
+            self._gate_start("impl-review", gates="on")
+        self.assertEqual(refused.exception.reason, "completion-test-source-stale")
+
+    def test_gates_off_unknown_review_subject_proceeds_without_reusing_pass(self):
+        # N28: a review PASS that records no subject cannot be read as current; the next node proceeds.
+        self.current_smoke_markers("A")
+        self.complete_review("att-review-unbound")
+        with mock.patch.object(DC, "gate_currency", return_value=DC.GateCurrency(
+                "superseded", "completion-review-subject-unknown")), \
+                mock.patch.object(DC, "completion_marker_is_current", return_value=False):
+            self._gate_start("test", gates="off")
+            with self.assertRaises(DC.DispatchContractError) as refused:
+                self._gate_start("test", gates="on")
+        self.assertEqual(refused.exception.reason, "completion-review-subject-unknown")
+
+    def test_gates_off_missing_review_input_proceeds_without_reusing_pass(self):
+        self.current_smoke_markers("A")
+        self.complete_review("att-review-input-missing")
+        with mock.patch.object(DC, "gate_currency", return_value=DC.GateCurrency(
+                "superseded", "completion-review-subject-input-missing")), \
+                mock.patch.object(DC, "completion_marker_is_current", return_value=False):
+            self._gate_start("test", gates="off")
+            with self.assertRaises(DC.DispatchContractError) as refused:
+                self._gate_start("test", gates="on")
+        self.assertEqual(refused.exception.reason, "completion-review-subject-input-missing")
+
+    def test_superseded_rule_never_admits_integrity_breaks(self):
+        for state in ("integrity-broken:history-conflict", "integrity-broken:identity-mismatch"):
+            currency = DC.GateCurrency(state, "completion-marker-unreadable")
+            self.assertFalse(DC.completion_superseded(currency))
+            self.assertFalse(DC.completion_superseded(currency, answered=True))
+        self.assertTrue(DC.completion_superseded(DC.GateCurrency("superseded", "x")))
+        self.assertFalse(DC.completion_superseded(DC.GateCurrency("current", "x")))
+        self.assertFalse(DC.completion_superseded(DC.GateCurrency("revised-unrecorded", "x")))
+        # Only a verdict an approved fix answered is reopened whatever evidence change it shows.
+        for state in ("current", "revised-unrecorded", "completion-evidence-unreadable"):
+            self.assertTrue(DC.completion_superseded(DC.GateCurrency(state, "x"), answered=True))
+        self.current_smoke_markers("A")
+        smoke = ROUTE_WRITER.completion_dir(self.route["route_id"], jobs=self.jobs) / "smoke.json"
+        broken = json.loads(smoke.read_text(encoding="utf-8"))
+        smoke.write_text(json.dumps({**broken, "route_hash": "sha256:" + "0" * 64}), encoding="utf-8")
+        for gates in ("off", "on"):
+            with self.assertRaises(DC.DispatchContractError) as refused:
+                self._gate_start("impl-review", gates=gates)
+            self.assertEqual(refused.exception.reason, "completion-marker-integrity-broken")
+
+    def test_upstream_revision_tombstone_is_superseded_and_gates_on_names_the_rerun(self):
+        self.current_smoke_markers("A")
+        self.revise_execute("att-execute-revision", "execute evidence revised")
+        smoke = ROUTE_WRITER.completion_dir(self.route["route_id"], jobs=self.jobs) / "smoke.json"
+        tombstone = json.loads(smoke.read_text(encoding="utf-8"))
+        self.assertEqual(tombstone["state"], "superseded-by-upstream-revision")
+        currency = DC.gate_currency(self.route, self.get_node("smoke"), smoke, tombstone, observe=True)
+        self.assertTrue(DC.completion_superseded(currency))
+        with self.assertRaises(DC.DispatchContractError) as refused:
+            self._gate_start("impl-review", gates="on", readiness=True)
+        self.assertEqual(refused.exception.reason, "completion-evidence-superseded")
+        self.assertIn("rerun dependency node", refused.exception.next_action)
+
     def test_registration_and_launch_fences_reject_source_races_without_spawning(self):
         admitted_digest = SUBJECT.observe(self.route, self.review_node,
                                           worktree=self.repo)["digest"]
@@ -1617,6 +1700,168 @@ class SourceSubjectIntegrationTest(unittest.TestCase):
             self.assertEqual(source_state["digest"], result["source_subject"]["digest"])
         self.assertEqual(DC.gate_currency(self.route, node, marker, result).state, "current")
         self.assertEqual(marker.stat().st_mtime_ns, before_mtime)
+
+
+class UpstreamOrderTest(unittest.TestCase):
+    """C1: a result older than a completion upstream of it is not current.
+
+    The shape of SR route rt-3a82704b6ee6824f: ``inspect`` completed (sequence 1), ``report`` completed
+    after it, then ``inspect`` was reopened and completed again (sequence 2) while ``report`` stayed.
+    """
+
+    git = SourceSubjectIntegrationTest.git
+    get_node = SourceSubjectIntegrationTest.get_node
+    _metadata = SourceSubjectIntegrationTest._metadata
+
+    def setUp(self):
+        # The shared fixture, then the audit route.
+        SourceSubjectIntegrationTest.setUp(self)
+        self.route["nodes"] = [
+            {"id": "inspect", "kind": "pipeline-stage", "unit": "research/fact-check",
+             "completion_gate": "audit-inspect", "dispatch_depth": 2, "write_scope": ["reviews/audit/**"],
+             "depends_on": []},
+            {"id": "report", "kind": "pipeline-stage", "unit": "editorial/report",
+             "completion_gate": "audit-report", "dispatch_depth": 2, "write_scope": ["reviews/audit-report.md"],
+             "outputs": ["reviews/audit-report.md"], "depends_on": ["inspect"]},
+            {"id": "ship", "kind": "pipeline-stage", "unit": "dev/backend",
+             "completion_gate": "audit-ship", "dispatch_depth": 2, "write_scope": ["dev_logs/**"],
+             "depends_on": ["report"]},
+        ]
+        self.route["route_hash"] = route_hash(self.route)
+        self.route["route_id"] = route_id_from_hash(self.route["route_hash"])
+        self.route_file.write_text(json.dumps(self.route, sort_keys=True), encoding="utf-8")
+
+    def complete(self, node_id, attempt_id, text, evidence=None):
+        node = self.get_node(node_id)
+        evidence = evidence or self.artifact_root / f"{attempt_id}.md"
+        evidence.parent.mkdir(parents=True, exist_ok=True)
+        evidence.write_text(text, encoding="utf-8")
+        return ROUTE_WRITER._publish_completion_locked(
+            self.route, node, node_id, evidence, jobs=self.jobs, attempt_id=attempt_id,
+            attempt_metadata=self._metadata(node, attempt_id, "stage"))
+
+    def path(self, node):
+        return ROUTE_WRITER.completion_dir(self.route["route_id"], jobs=self.jobs) / f"{node}.json"
+
+    def marker(self, node):
+        return json.loads(self.path(node).read_text(encoding="utf-8"))
+
+    def judge(self, node):
+        return DC.gate_currency(self.route, self.get_node(node), self.path(node), self.marker(node), observe=True)
+
+    def start(self, node, gates):
+        with mock.patch.dict(os.environ, {**os.environ, "HEARTING_GATES": gates}, clear=True), \
+                mock.patch.object(DC, "completion_attempt_readiness",
+                                  side_effect=AssertionError("a superseded result must not be consumed")):
+            DC.completion_marker_gate(str(self.route_file), node, "start", self.agent_home, self.jobs)
+
+    def test_a_result_older_than_its_upstream_completion_is_superseded_until_it_completes_again(self):
+        self.complete("inspect", "att-inspect-1", "inspect v1")
+        self.complete("report", "att-report-1", "report v1")
+        # Protection: an upstream that did not complete again leaves the downstream result current.
+        self.assertEqual((self.judge("inspect").state, self.judge("report").state), ("current", "current"))
+        self.assertEqual(DC.evidence_currency(self.route, self.get_node("report"), self.path("report")).state, "current")
+        # inspect is reopened and completes again (a new attempt, a new sequence).
+        again = self.complete("inspect", "att-inspect-2", "inspect v2")
+        self.assertEqual(again["sequence"], 2)
+        self.assertEqual(self.judge("inspect").state, "current")
+        for currency in (self.judge("report"), DC.evidence_currency(
+                self.route, self.get_node("report"), self.path("report"))):
+            self.assertEqual((currency.state, currency.reason), ("superseded", "completion-evidence-superseded"))
+            self.assertIn("inspect@2 completed again", currency.next_action)
+        self.assertTrue(DC.completion_superseded(self.judge("report")))
+        # Not a new refusal: gates off, the node after the stale result proceeds without consuming the old
+        # PASS; gates on, it names the rerun it owes (the existing refusal).
+        self.start("ship", "off")
+        with self.assertRaises(DC.DispatchContractError) as refused:
+            self.start("ship", "on")
+        self.assertEqual(refused.exception.reason, "completion-evidence-superseded")
+        # The reopened node's own new completion, after its upstream's, is current again.
+        self.complete("report", "att-report-2", "report v2")
+        self.assertEqual(self.judge("report").state, "current")
+
+    def test_a_reopened_node_writes_its_new_result_beside_the_old_one(self):
+        # C2: the report's sealed output is one exact file holding the old result. Run again, it writes
+        # the output's next revision path and completes with that path; the old file stays as it was.
+        report = self.artifact_root / "reviews" / "audit-report.md"
+        revision = lambda: DC.reopened_output_path(self.route, self.get_node("report"), self.jobs, self.artifact_root)
+        self.complete("inspect", "att-inspect-1", "inspect v1")
+        self.complete("report", "att-report-1", "report v1", evidence=report)
+        self.assertIsNone(revision())                       # a current result is not reopened
+        self.complete("inspect", "att-inspect-2", "inspect v2")
+        path = revision()
+        self.assertEqual(path, str(report.with_name("audit-report.r2.md")))
+        self.assertIsNone(DC.reopened_output_path(self.route, self.get_node("inspect"), self.jobs, self.artifact_root))
+        import artifact_context
+        # Inside the node's approved scope (guard and write oracle read the same rule); beside it only.
+        self.assertTrue(artifact_context.scope_matches("reviews/audit-report.r2.md", ["reviews/audit-report.md"]))
+        self.assertFalse(artifact_context.scope_matches("reviews/other.r2.md", ["reviews/audit-report.md"]))
+        self.assertFalse(artifact_context.scope_matches("audit-report.r2.md", ["reviews/audit-report.md"]))
+        self.complete("report", "att-report-2", "report v2", evidence=Path(path))
+        self.assertEqual(report.read_text(encoding="utf-8"), "report v1")          # not overwritten
+        marker = self.marker("report")
+        self.assertEqual((marker["evidence"]["path"], marker["sequence"]), (path, 2))
+        self.assertEqual(self.judge("report").state, "current")
+        self.assertIsNone(revision())                       # current again: nothing to move aside
+        # A continuation route (a new route id along the verified lineage) runs the node again: the sealed file
+        # holds the source route's result, and the revision number is one past the lineage's highest sequence.
+        child = {**self.route, "route_id": "rt-continuation0001", "route_hash": "sha256:" + "c" * 64,
+                 "continuation_contract_version": 1, "source_route_id": self.route["route_id"]}
+        import route_lineage
+        with mock.patch.object(route_lineage, "verified_route_lineage", return_value=[child, self.route]):
+            self.assertEqual(DC.reopened_output_path(child, self.get_node("report"), self.jobs, self.artifact_root),
+                             str(report.with_name("audit-report.r3.md")))
+        with mock.patch.object(route_lineage, "verified_route_lineage",
+                               side_effect=route_lineage.RouteLineageError("route-lineage-unverified")):
+            self.assertIsNone(DC.reopened_output_path(child, self.get_node("report"), self.jobs, self.artifact_root))
+        # Another reopening: the sealed file is still an earlier marker's evidence, so the next revision
+        # is named, and the node's assignment says so.
+        self.complete("inspect", "att-inspect-3", "inspect v3")
+        self.assertEqual(revision(), str(report.with_name("audit-report.r3.md")))
+        import worker_bootstrap
+        args = SimpleNamespace(route_node="report", jobs_path=self.jobs)
+        scope = SimpleNamespace(output_dir=str(self.artifact_root))
+        prompt = worker_bootstrap.reopened_output_prompt(args, self.route, scope)
+        self.assertIn(str(report.with_name("audit-report.r3.md")), prompt)
+        self.assertIn("do not overwrite the earlier file", prompt)
+        self.assertEqual(worker_bootstrap.reopened_output_prompt(
+            SimpleNamespace(route_node="inspect", jobs_path=self.jobs), self.route, scope), "")
+
+    def test_the_terminal_gate_does_not_accept_the_older_result(self):
+        router = ROUTE_WRITER
+        self.complete("inspect", "att-inspect-1", "inspect v1")
+        self.complete("report", "att-report-1", "report v1")
+        row = lambda: router._marker_identity_row(self.route, self.get_node("report"), "report", "audit-report",
+                                                  jobs=self.jobs)
+        self.assertTrue(row()["passed"])
+        self.complete("inspect", "att-inspect-2", "inspect v2")
+        stale = row()
+        self.assertEqual((stale["passed"], stale["reason"]), (False, "completion-evidence-superseded"))
+        self.complete("report", "att-report-2", "report v2")
+        self.assertTrue(row()["passed"])
+
+    def test_a_revision_a_tombstone_an_unreadable_upstream_or_a_bound_result_is_not_older(self):
+        self.complete("inspect", "att-inspect-1", "inspect v1")
+        self.complete("report", "att-report-1", "report v1")
+        report, mine, inspect_path = self.get_node("report"), self.marker("report"), self.path("inspect")
+        first = self.marker("inspect")
+        def judged(**changes):
+            inspect_path.write_text(json.dumps({**first, **changes}), encoding="utf-8")
+            return DC._upstream_completed_later(self.route, report, mine, self.path("report"))
+        later = {"completed_at": "2999-01-01T00:00:00Z", "sequence": 2}
+        self.assertEqual(judged(**later), ("inspect", 2))
+        self.assertIsNone(judged(**later, stage_authority="revision"))           # an upstream revision
+        self.assertIsNone(judged(**later, state="superseded-by-upstream-revision"))
+        self.assertIsNone(judged(completed_at="1999-01-01T00:00:00Z"))            # earlier than the result
+        inspect_path.write_text("{", encoding="utf-8")                           # unreadable: no judgement
+        self.assertIsNone(DC._upstream_completed_later(self.route, report, mine, self.path("report")))
+        inspect_path.write_text(json.dumps({**first, **later}), encoding="utf-8")
+        # A result judged by its source subject is judged by that subject, not by order.
+        self.assertIsNone(DC._upstream_completed_later(
+            self.route, report, {**mine, "source_subject": {"digest": "x"}}, self.path("report")))
+        # A marker whose own date cannot be read is not judged.
+        self.assertIsNone(DC._upstream_completed_later(
+            self.route, report, {k: v for k, v in mine.items() if k != "completed_at"}, self.path("report")))
 
 
 if __name__ == "__main__":

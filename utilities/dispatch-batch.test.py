@@ -1999,8 +1999,10 @@ class DispatchBatchTest(unittest.TestCase):
         self.assertEqual(popen.call_count, 1)
         self.assertEqual(len(created), 1)
         command = created[0].command
-        self.assertEqual(command[command.index("--prompt-text") + 1],
-                         BATCH.DEFAULT_PROMPT if original_prompt is None else original_prompt)
+        # The shared instruction is the owner's text, led by the one line naming this leg's node.
+        launched = command[command.index("--prompt-text") + 1]
+        self.assertTrue(launched.startswith(f"This leg is node `{command[command.index('--node') + 1]}`"))
+        self.assertTrue(launched.endswith("\n\n" + (BATCH.DEFAULT_PROMPT if original_prompt is None else original_prompt)))
         self.assertEqual(created[0].env["AGENT_DISPATCH_RETRY_BRIEF"],
                          retry_prompt if retry_prompt is not None else BATCH.DEFAULT_PROMPT)
         self.assertEqual(command[command.index("--parent-attempt-id") + 1], parent_attempt)
@@ -4384,6 +4386,25 @@ class DispatchBatchTest(unittest.TestCase):
         self.assertFalse(jobs.exists())
         return rc, output.getvalue(), error.getvalue(), log_dir
 
+    def test_parallel_legs_get_their_own_node_line_over_shared_instruction(self):
+        # #20: one owner instruction reaches every leg; each leg also learns which node it is.
+        seen = {}
+        def script(leg, command):
+            seen[leg["node"]] = command[command.index("--prompt-text") + 1]
+            return "pass"
+        self._run_diagnostic_wrapper_batch("codex", script)
+        nodes = sorted(seen)
+        self.assertEqual(len(nodes), 2)
+        shared = BATCH.DEFAULT_PROMPT
+        for node in nodes:
+            self.assertTrue(seen[node].startswith(f"This leg is node `{node}`"), seen[node])
+            self.assertTrue(seen[node].endswith(shared))
+        self.assertNotEqual(seen[nodes[0]], seen[nodes[1]])
+        # The line comes from the leg alone (a resume builds the same prompt); one leg has nothing to tell apart.
+        leg = {"node": "n", "parallel_group": "g", "parallel_leg_index": 0}
+        self.assertEqual(BATCH.leg_launch_prompt("p", leg, 2), BATCH.leg_launch_prompt("p", leg, 2))
+        self.assertEqual(BATCH.leg_launch_prompt("p", leg, 1), "p")
+
     def test_exit_one_wrapper_saves_bounded_traceback_for_each_harness(self):
         for harness in ("claude", "codex", "opencode"):
             with self.subTest(harness=harness):
@@ -5589,7 +5610,8 @@ class GroupLegReviewRoundCapTest(unittest.TestCase):
         )
         self.assertNotEqual(expected_block, "")
         self.assertIn("판정 없음", expected_block)
-        self.assertEqual(actual_prompt, BATCH.DEFAULT_PROMPT)
+        self.assertTrue(actual_prompt.startswith("This leg is node `impl-review`"))
+        self.assertTrue(actual_prompt.endswith("\n\n" + BATCH.DEFAULT_PROMPT))
         self.assertEqual(recovery_context["impl-review"], expected_block)
 
 

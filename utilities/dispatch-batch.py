@@ -2769,6 +2769,22 @@ def _run_slices(args: argparse.Namespace, route: dict[str, object]) -> int:
 
 
 
+def leg_launch_prompt(prompt_text, leg, leg_count):
+    """The shared batch instruction, led by the one line that says which leg reads it.
+
+    The owner writes one instruction for every leg of a parallel group. A node name inside it
+    that is not the leg's own names a sibling's work. The sealed batch input and the assignment
+    digest keep the owner's text; this line comes from the leg alone, so a resume or a reseal
+    builds the same prompt. A single-leg batch has nothing to tell apart.
+    """
+    if leg_count < 2:
+        return prompt_text
+    return (f"This leg is node `{leg['node']}` (parallel group `{leg.get('parallel_group')}`, "
+            f"leg {leg.get('parallel_leg_index')}). The shared batch instruction applies to this node; "
+            "a node name in it that is not yours names a sibling leg's work, not a reason to stop.\n\n"
+            + prompt_text)
+
+
 def node_launch_command(*, route_path, leg, parent, prompt_text, reviewed_evidence, jobs,
                         parent_attempt, log_dir, lifecycle, qa, automatic_retry_of=None):
     """The dispatch-node.py argv for one admitted leg.
@@ -3792,7 +3808,7 @@ def main(argv: list[str] | None = None) -> int:
                     launch_prompt = DEFAULT_PROMPT
             command = node_launch_command(
                 route_path=route_path, leg=leg, parent=args.parent,
-                prompt_text=launch_prompt,
+                prompt_text=leg_launch_prompt(launch_prompt, leg, len(legs)),
                 reviewed_evidence=(args.review_inputs[leg["node"]]["path"]
                                    if leg["node"] in args.review_inputs else None),
                 jobs=jobs, parent_attempt=parent_attempt, log_dir=args.log_dir,

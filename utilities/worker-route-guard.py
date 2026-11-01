@@ -15,7 +15,7 @@ SPEC = importlib.util.spec_from_file_location("capability_route", ROOT / "utilit
 ROUTE = importlib.util.module_from_spec(SPEC); SPEC.loader.exec_module(ROUTE)
 sys.path.insert(0, str(ROOT / "utilities"))
 from hearting_gates import gates_on, same_work_or_refuse
-from artifact_context import scope_values
+from artifact_context import scope_covers, scope_values
 
 
 class WorkerRouteError(ValueError):
@@ -51,7 +51,10 @@ def _git_state(cwd: Path) -> dict[str, str]:
 
 
 def _scopes(value: str | None) -> list[str]:
-    return scope_values(value)
+    """The observed scope values: ``;``, ``,`` or white space separate them."""
+    if not isinstance(value, str):
+        return scope_values(value)
+    return scope_values(value.replace(",", ";").replace(" ", ";"))
 
 
 # topologies.json write_scope vocabulary realized: these are the only scopes that
@@ -123,8 +126,14 @@ def validate_route_contract(route_path: str | Path, node_id: str, cwd: str | Pat
             if gates_on():
                 raise _fail(reason, f"expected={expected} observed={observed}", rid)
             same_work_or_refuse(reason, f"expected={expected} observed={observed}")
-    if write_scope is not None and _scopes(write_scope) != sorted(node["write_scope"]):
-        raise _fail("route-node-scope-mismatch", f"expected={sorted(node['write_scope'])} observed={_scopes(write_scope)}", rid)
+    if write_scope is not None:
+        # A narrower or differently written value of the sealed scope is the same approved work; a
+        # value outside what the node was sealed with is not. The node's own sealed values are what
+        # the next launch passes, and this check grants no write (the write oracle does).
+        outside = [value for value in _scopes(write_scope) if not scope_covers(value, node["write_scope"])]
+        if outside:
+            raise _fail("route-node-scope-mismatch",
+                        f"observed-outside-sealed-node={outside} sealed={sorted(node['write_scope'])}", rid)
     if enforce_model_binding:
         for reason, observed, expected in (
             ("route-node-model-role-mismatch", model_role or None, node.get("model_role")),

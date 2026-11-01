@@ -271,6 +271,58 @@ class Case1ParentSessionTest(unittest.TestCase):
         with mock.patch.object(RA,'owns',return_value=True):
             self.assertFalse(RA.replacement_parent_matches(stage,{**stage,'parent_sid':'successor'},None))
 
+    def test_replacement_parent_matches_reads_parent_attempt_lineage(self):
+        import dispatch_replacement
+        stage={**self.OWNER,'dispatch_depth':'2','parent_attempt_id':'att-owner'}
+        later={**stage,'parent_attempt_id':'att-owner-2'}
+        jobs=Path('/tmp/lineage-fixture-jobs')
+        def projection(effective, mapping=({'edge': 1},)):
+            return mock.patch.object(dispatch_replacement,'effective_attempts',
+                                     return_value=(set(effective), list(mapping)))
+        with projection({'att-owner-2'}):
+            self.assertTrue(RA.replacement_parent_matches(stage,later,jobs))
+            self.assertTrue(RA.parent_attempt_succeeded(jobs,'att-owner','att-owner-2'))
+        # An unrelated attempt, a different final successor, or a projection with no launched hop is not it.
+        with projection({'att-owner-3'}):
+            self.assertFalse(RA.replacement_parent_matches(stage,later,jobs))
+        with projection({'att-owner-2'}, mapping=()):
+            self.assertFalse(RA.replacement_parent_matches(stage,later,jobs))
+        with mock.patch.object(dispatch_replacement,'effective_attempts',
+                               side_effect=DC.DispatchContractError('replacement-lineage-unproven')):
+            self.assertFalse(RA.replacement_parent_matches(stage,later,jobs))
+        # Without the registry only the exact recorded parent qualifies; other session rules stay.
+        self.assertFalse(RA.replacement_parent_matches(stage,later,None))
+        with projection({'att-owner-2'}):
+            self.assertFalse(RA.replacement_parent_matches(stage,{**later,'parent_sid':'other'},jobs))
+            self.assertFalse(RA.parent_attempt_succeeded(jobs,'att-owner',''))
+            self.assertFalse(RA.parent_attempt_succeeded(jobs,'','att-owner-2'))
+
+    def test_pin_and_access_change_read_the_launched_owner(self):
+        import dispatch_replacement
+        route={'route_id':'rt-1'}
+        first={'attempt_id':'att-a','worker_type':'owner','route_id':'rt-1','parent_sid':'parent'}
+        claim={'attempt_id':'att-b','worker_type':'owner','route_id':'rt-1','parent_sid':'registered-later',
+               'replacement_original_attempt_id':'att-a'}
+        rows={'att-a':('done',first),'att-b':('open',claim),'att-x':('done',{'attempt_id':'att-x','worker_type':'stage','route_id':'rt-1'})}
+        jobs=Path('/tmp/lineage-fixture-jobs')
+        def owner(effective):
+            with mock.patch.object(dispatch_replacement,'effective_attempts',return_value=(set(effective),[])):
+                return RA.current_route_owner(route,jobs,rows)
+        self.assertIs(owner({'att-a'}),first)       # the replacement never launched: not the owner yet
+        self.assertIs(owner({'att-b'}),claim)       # launched: it answers now
+        with mock.patch.object(dispatch_replacement,'effective_attempts',side_effect=OSError('unreadable')):
+            self.assertIs(RA.current_route_owner(route,jobs,rows),claim)   # unreadable: the last owner row, as before
+        self.assertIsNone(RA.current_route_owner({'route_id':'rt-other'},jobs,rows))
+
+    def test_depth1_replacement_keeps_seat_lineage_owner_check(self):
+        # Depth 1 is the registered session and its recorded same-seat successor only: an attempt id
+        # in the environment, or any unrecorded session, does not become the parent.
+        with mock.patch.dict(os.environ,{'AGENT_DISPATCH_ATTEMPT_ID':'att-owner'}):
+            with self.assertRaises(DC.DispatchContractError) as refused:
+                RA.require_replacement_parent(None, {}, self.OWNER, current_session=lambda: "unrecorded-sid")
+            self.assertEqual(refused.exception.reason, "replacement-parent-identity-unproven")
+            RA.require_replacement_parent(None, {}, self.OWNER, current_session=lambda: "codex-sid")
+
     def test_the_runtime_parent_is_the_calling_session(self):
         env = {"CODEX_THREAD_ID": "codex-sid", "CODEX_DISPATCH_PARENT_CURRENT_FORCE": "1"}
         for honor_force, expected in ((True, "codex-sid"), (False, "synthetic")):

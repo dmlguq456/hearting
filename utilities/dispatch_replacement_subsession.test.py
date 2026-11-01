@@ -91,6 +91,34 @@ class ReplacementSubsessionTest(unittest.TestCase):
         with self.assertRaises(R.DC.DispatchContractError):
             SERIAL.ADVANCE.resume_index(self.jobs, self.manifest)
 
+    def test_projection_follows_replaced_parent_and_route_hash(self):
+        # The slot's own work binds the replacement. Who answers for the parent, the route file it runs
+        # from and the harness it was launched under follow the lineage claim admission binds, so a
+        # replacement differing only there projects.
+        original = self.manifest['sessions'][0]['attempt_id']
+        target, _record = replace_row(self.jobs, self.route, original)
+        sealed = self.jobs.read_text().splitlines()
+        meta = R.DC.parse_registry_metadata(sealed[-1].split('\t')[-1])
+
+        def project(key, value):
+            lines = list(sealed)
+            lines[-1] = (lines[-1].replace(f"{key}={meta[key]}", f"{key}={value}") if key in meta
+                         else lines[-1] + f",{key}={value}")
+            self.jobs.write_text('\n'.join(lines)+'\n')
+            rows = SERIAL.ADVANCE._registry_rows_for_chain(self.jobs, self.manifest['chain_id'])
+            return RS.project(self.jobs, self.manifest, rows)
+
+        for key, value in {'harness': 'opencode', 'parent': 'replacement-owner-label',
+                           'route_file': '/elsewhere/route.json'}.items():
+            with self.subTest(key=key):
+                _rows, mapping = project(key, value)
+                self.assertEqual(mapping[original], target)
+        # The slot's own work, inputs and purpose still bind it.
+        for key in ('phase_brief_sha256', 'fixed_files_sha256', 'subsession_index', 'route_node'):
+            with self.subTest(binding=key), self.assertRaises(R.DC.DispatchContractError) as refused:
+                project(key, 'other')
+            self.assertEqual(refused.exception.reason, 'replacement-subsession-scope-mismatch')
+
     def test_later_failed_slice_still_requires_its_own_launch_input(self):
         replace_row(self.jobs, self.route, self.manifest['sessions'][0]['attempt_id'])
         second = self.manifest['sessions'][1]['attempt_id']

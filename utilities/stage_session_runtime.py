@@ -29,7 +29,14 @@ _BRIEF_PATH_TOKEN = re.compile(
 
 
 def _artifact_fence(args, worktree: Path) -> tuple[list[str], list[str]] | None:
-    """Derive an artifact-only sub-session fence from its bound route and brief."""
+    """Derive a sub-session fence from its bound route and brief.
+
+    An artifact-only node's list is the brief's and the declared artifact outputs. A node that
+    also has source scope keeps its declared fixed files and adds the brief's artifact outputs
+    that fall in its artifact scope (a serial or gap-retry session); a parallel slice keeps its
+    declared list, so slices stay disjoint. Write authority is the node's `write_scope` and the
+    write oracle, not this list.
+    """
     route_file = getattr(args, "route_file", None)
     if not route_file:
         return None
@@ -40,9 +47,11 @@ def _artifact_fence(args, worktree: Path) -> tuple[list[str], list[str]] | None:
     if not isinstance(route, dict):
         return None
     import artifact_context
-    if any(artifact_context.classify_scope(value) != "artifact"
-           for value in (next((node.get("write_scope", []) for node in route.get("nodes", [])
-                               if node.get("id") == args.route_node), []))):
+    node_scope = next((node.get("write_scope", []) for node in route.get("nodes", [])
+                       if node.get("id") == args.route_node), [])
+    mixed = any(artifact_context.classify_scope(value) != "artifact" for value in node_scope)
+    if mixed and (getattr(args, "subsession_mode", None) == "parallel"
+                  or not any(artifact_context.classify_scope(value) == "artifact" for value in node_scope)):
         return None
     from worker_bootstrap import (
         _child_scope_environment, _linked_slice_source_worktree, resolve_node_scope,
@@ -57,12 +66,14 @@ def _artifact_fence(args, worktree: Path) -> tuple[list[str], list[str]] | None:
     )
     if not scope.output_dir or not scope.write_scope:
         return None
-    if any(artifact_context.classify_scope(value) != "artifact" for value in scope.write_scope):
+    artifact_values = [value for value in scope.write_scope
+                       if artifact_context.classify_scope(value) == "artifact"]
+    if not mixed and len(artifact_values) != len(scope.write_scope):
         return None
 
     output_dir = Path(scope.output_dir).resolve(strict=False)
     artifact_scopes = []
-    for value in scope.write_scope:
+    for value in artifact_values:
         path = Path(value)
         if path.is_absolute():
             try:
@@ -105,6 +116,8 @@ def _artifact_fence(args, worktree: Path) -> tuple[list[str], list[str]] | None:
               for match in _BRIEF_PATH_TOKEN.finditer(brief)]
     outputs = exact_outputs(tokens)
     declared_outputs = exact_outputs(args.fixed_file)
+    if mixed:
+        return sorted(set(args.fixed_file) | outputs), []
     effective = outputs | declared_outputs
     if not effective:
         effective = exact_outputs(scope.outputs)
