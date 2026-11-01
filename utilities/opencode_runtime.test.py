@@ -986,6 +986,66 @@ class OpenCodeTypedErrorTest(unittest.TestCase):
              "message": "OpenCode Go subscription required."})["reason"], "subscription-missing")
 
 
+class OpenCodeCatalogFitTest(unittest.TestCase):
+    """The shared fit rules: variant ladder and provider-less model completion."""
+
+    def test_variant_fits_to_the_highest_value_at_or_below_the_request(self):
+        fit = runtime.fit_variant
+        self.assertEqual(fit("max", ("minimal", "low", "medium", "high", "xhigh")),
+                         ("xhigh", "max"))
+        self.assertEqual(fit("xhigh", ("low", "high", "max")), ("high", "xhigh"))
+        self.assertEqual(fit("xhigh", ("low", "medium", "high")), ("high", "xhigh"))
+
+    def test_variant_without_a_value_below_takes_the_lowest_above(self):
+        self.assertEqual(runtime.fit_variant("minimal", ("high", "low-ish", "max")),
+                         ("high", "minimal"))
+        self.assertEqual(runtime.fit_variant("low", ("xhigh", "high")), ("high", "low"))
+
+    def test_variant_stays_as_requested_without_a_usable_observation(self):
+        fit = runtime.fit_variant
+        observed = ("low", "high")
+        self.assertEqual(fit("high", observed), ("high", None))
+        for requested in (None, "", "runtime-default"):
+            self.assertEqual(fit(requested, observed), (requested, None))
+        for observation in ((), None):
+            self.assertEqual(fit("xhigh", observation), ("xhigh", None))
+        for requested in ("none", "auto", "custom-tier"):
+            self.assertEqual(fit(requested, observed), (requested, None))
+        self.assertEqual(fit("xhigh", ("custom-a", "custom-b")), ("xhigh", None))
+
+    def test_variant_ladder_order_is_the_common_effort_order(self):
+        self.assertEqual(runtime.VARIANT_LADDER,
+                         ("minimal", "low", "medium", "high", "xhigh", "max"))
+
+    def test_single_catalog_match_completes_a_provider_less_id(self):
+        models = ("alpha/fixture-flash", "alpha/other")
+        never = lambda _model: self.fail("a single match needs no eligibility")
+        self.assertEqual(runtime.canonical_model_id("fixture-flash", models, never),
+                         "alpha/fixture-flash")
+        self.assertEqual(runtime.canonical_model_id("fixture-flash#high", models, never),
+                         "alpha/fixture-flash#high")
+
+    def test_several_matches_narrow_by_eligibility_to_exactly_one(self):
+        models = ("alpha/fixture-flash", "beta/fixture-flash", "alpha/other")
+        only_alpha = lambda model: model.startswith("alpha/")
+        self.assertEqual(runtime.canonical_model_id("fixture-flash", models, only_alpha),
+                         "alpha/fixture-flash")
+        self.assertEqual(runtime.canonical_model_id("fixture-flash", models, lambda _m: True),
+                         "fixture-flash")
+        self.assertEqual(runtime.canonical_model_id("fixture-flash", models, lambda _m: False),
+                         "fixture-flash")
+
+    def test_unmatched_full_or_unobserved_ids_are_unchanged(self):
+        yes = lambda _model: True
+        models = ("alpha/fixture-flash",)
+        self.assertEqual(runtime.canonical_model_id("missing", models, yes), "missing")
+        self.assertEqual(runtime.canonical_model_id("beta/fixture-flash", models, yes),
+                         "beta/fixture-flash")
+        for catalog in ((), None):
+            self.assertEqual(runtime.canonical_model_id("fixture-flash", catalog, yes),
+                             "fixture-flash")
+
+
 class OpenCodeVariantObservationTest(unittest.TestCase):
     """The catalog's per-model variant ids decide only confirmed unsupported rows."""
 
@@ -1220,7 +1280,7 @@ class OpenCodeAutomaticEligibilityTest(unittest.TestCase):
         # An eligible primary stays first.
         self.assertEqual(select("opencode-go/other")[0], "opencode-go/other")
 
-    def test_catalog_variant_rejection_excludes_only_the_confirmed_row(self):
+    def test_catalog_variant_mismatch_fits_the_row_and_keeps_it_eligible(self):
         self.fallbacks("opencode-go/fallback:max")
         catalog = {"state": "available", "variants": {
             "opencode-go/primary": ("low", "medium"),
@@ -1228,20 +1288,22 @@ class OpenCodeAutomaticEligibilityTest(unittest.TestCase):
         }}
         rows = runtime.automatic_candidates("opencode-go/primary", "xhigh",
                                             config_path=self.config, catalog=catalog)
-        self.assertEqual((rows[0]["automatic_eligible"], rows[0]["variant_reason"]),
-                         (False, "variant-unavailable"))
-        self.assertTrue(rows[1]["automatic_eligible"])
+        self.assertEqual((rows[0]["automatic_eligible"], rows[0]["variant"],
+                          rows[0]["variant_fit_from"], rows[0]["variant_reason"]),
+                         (True, "medium", "xhigh", "variant-fitted"))
+        self.assertNotIn("variant_fit_from", rows[1])
         self.assertNotIn("variant_reason", rows[1])
         model, variant, evidence = runtime.select_automatic_model(
             "opencode-go/primary", "xhigh", config_path=self.config, catalog=catalog)
-        self.assertEqual((model, variant), ("opencode-go/fallback", "max"))
-        self.assertEqual(evidence["fallback_from_reason"], "no-observation")
+        self.assertEqual((model, variant, evidence["variant_fit_from"]),
+                         ("opencode-go/primary", "medium", "xhigh"))
 
         # An unobserved candidate and a supported one keep their previous eligibility.
         unknown_catalog = {"state": "available", "variants": {}}
         rows = runtime.automatic_candidates("opencode-go/primary", "xhigh",
                                             config_path=self.config, catalog=unknown_catalog)
         self.assertTrue(rows[0]["automatic_eligible"])
+        self.assertEqual(rows[0]["variant"], "xhigh")
         self.assertNotIn("variant_reason", rows[0])
         supported = {"state": "available", "variants": {
             "opencode-go/primary": ("low", "high", "xhigh")}}

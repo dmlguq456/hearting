@@ -1080,5 +1080,32 @@ class DuplicateSidCollapseTest(unittest.TestCase):
                          ("Attempt title", "Attempt summary"))
 
 
+class CatalogFitAttemptRowTest(unittest.TestCase):
+    """A fitted launch shows its effective variant; the original request rides on the row."""
+
+    def test_fleet_effort_is_the_effective_variant_and_the_original_stays_on_the_row(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            jobs_log = os.path.join(tmp, "jobs.log")
+            worktree = os.path.join(tmp, "wt")
+            os.makedirs(worktree)
+            row = "\t".join([
+                "2026-07-05T01:00:01+00:00", "open", "repo", worktree, "fitted-opencode",
+                "capability=audit,mode=qa/test,qa=quick,intensity=quick,depth=1,"
+                "model=provider/test,variant=high,variant_fit_from=xhigh,"
+                "catalog_fit_observer=launch-snapshot"])
+            with open(jobs_log, "w") as handle:
+                handle.write(row + "\n")
+            self.assertEqual(
+                dispatch._parse_pipe_meta(row.split("\t")[5])["variant_fit_from"], "xhigh")
+            with mock.patch.object(dispatch, "_scan_processes", return_value=[]), \
+                 mock.patch.object(dispatch, "_live_claude_cwds", return_value={}), \
+                 mock.patch.object(dispatch, "_dispatch_liveness",
+                                   side_effect=lambda *a, **k: "working"):
+                jobs = dispatch.collect(jobs_path=jobs_log)
+        job = {j.slug: j for j in jobs}["fitted-opencode"]
+        self.assertEqual((job.harness, job.model, job.effort),
+                         ("opencode", "provider/test", "high"))
+
+
 if __name__ == "__main__":
     unittest.main()

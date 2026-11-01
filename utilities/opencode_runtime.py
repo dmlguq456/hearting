@@ -461,6 +461,57 @@ def variant_support(model, variant, observed):
     return "supported" if variant in observed else "unsupported"
 
 
+# One common effort order for every OpenCode model. A variant outside it
+# (``none``, ``auto``, a model-specific id) is never reordered or fitted.
+VARIANT_LADDER = ("minimal", "low", "medium", "high", "xhigh", "max")
+
+
+def fit_variant(requested, observed):
+    """Fit one requested variant to one model's observed variants.
+
+    Returns ``(effective, fit_from)``; ``fit_from`` is the original request when
+    the value moved and ``None`` otherwise. A supported request stays. An
+    unsupported ladder value moves to the highest observed ladder value at or
+    below it, else to the lowest above it. An omitted or ``runtime-default``
+    request, an empty or unknown observation, a request off the ladder, and an
+    observation with no ladder value all run as requested.
+
+    The result is an execution-only value: it is not written back to saved
+    settings, so it may sit outside the saved-setting allowance.
+    """
+    if requested in (None, "", "runtime-default") or not observed:
+        return requested, None
+    if requested in observed or requested not in VARIANT_LADDER:
+        return requested, None
+    rank = VARIANT_LADDER.index
+    rungs = sorted((value for value in observed if value in VARIANT_LADDER), key=rank)
+    if not rungs:
+        return requested, None
+    below = [value for value in rungs if rank(value) < rank(requested)]
+    return (below[-1] if below else rungs[0]), requested
+
+
+def canonical_model_id(requested, catalog_models, is_eligible):
+    """Complete a provider-less model id from the catalog, or return it unchanged.
+
+    A full ``provider/model`` id is never touched. A bare id takes the single
+    catalog model whose id after the provider matches it; when several match,
+    only those ``is_eligible(full_id)`` accepts count, and exactly one must
+    remain. Any other outcome (none, several, no observation) keeps the request.
+    A ``#variant`` suffix is preserved.
+    """
+    if not isinstance(requested, str) or not requested or not catalog_models:
+        return requested
+    base, sep, suffix = requested.partition("#")
+    if not base or "/" in base:
+        return requested
+    matches = [model for model in catalog_models
+               if isinstance(model, str) and model.partition("/")[2] == base]
+    if len(matches) > 1:
+        matches = [model for model in matches if is_eligible(model)]
+    return matches[0] + sep + suffix if len(matches) == 1 else requested
+
+
 @lru_cache(maxsize=32)
 def _runtime_version_for_environment(binary: str, environment: tuple):
     env = dict(environment)
@@ -1459,17 +1510,18 @@ def select_automatic_model(model: str, variant: str, *, config_path=None,
             if row["model"] != model:
                 evidence["fallback_from_reason"] = primary.get("reason")
             return row["model"], row["variant"], evidence
-    return model, variant, {key: value for key, value in primary.items()
-                            if key not in ("model", "variant")}
+    return model, primary["variant"], {key: value for key, value in primary.items()
+                                       if key not in ("model", "variant")}
 
 
 def automatic_candidates(model: str, variant: str, *, config_path=None,
                          environ=None, catalog=None) -> list[dict]:
     """Candidate evidence, in configured order, for automatic placement.
 
-    When ``catalog`` is a dict, a candidate whose exact variant the observation
-    reports as unsupported is excluded from automatic placement. An unobserved
-    candidate stays unchanged: only a confirmed rejection is filtered.
+    When ``catalog`` is a dict, a candidate whose variant the observation
+    reports as unsupported keeps its eligibility and runs the fitted variant;
+    the pre-fit request stays on the row as ``variant_fit_from``. An unobserved
+    candidate stays unchanged.
     """
     rows = []
     candidates = [(model, variant), *automatic_model_fallbacks(config_path)]
@@ -1484,11 +1536,12 @@ def automatic_candidates(model: str, variant: str, *, config_path=None,
         row = {**evidence, "model": candidate, "variant": effort}
         if evidence.get("model") not in (None, candidate.split("/", 1)[-1].split("#", 1)[0]):
             row["evidence_model"] = evidence["model"]
-        if (isinstance(variant_map, Mapping)
-                and variant_support(candidate, effort, variant_map.get(candidate))
-                == "unsupported"):
-            row["automatic_eligible"] = False
-            row["variant_reason"] = "variant-unavailable"
+        if isinstance(variant_map, Mapping):
+            fitted, fit_from = fit_variant(effort, variant_map.get(candidate))
+            if fit_from is not None:
+                row["variant"] = fitted
+                row["variant_fit_from"] = fit_from
+                row["variant_reason"] = "variant-fitted"
         rows.append(row)
     return rows
 
