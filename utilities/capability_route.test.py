@@ -2850,6 +2850,13 @@ class TestContinuation(unittest.TestCase):
     env={**os.environ,"AGENT_HOME":str(R.ROOT)},cwd=str(R.ROOT),timeout=30)
    self.assertEqual(implied.returncode,0,implied.stderr)
    self.assertTrue(R.canonical_route_path(artifact,json.loads(implied.stdout)["route_id"]).is_file())
+   # The source route may be named by the `rt-...` id the other commands print, like `--route`.
+   by_id=subprocess.run([sys.executable,str(P),"continuation","--source-route",source["route_id"],
+    "--resume-from-node","test","--requested-boundary","test","--reason","cli-route-id",
+    "--dispatch-evidence",str(checked)],capture_output=True,text=True,
+    env={**os.environ,"AGENT_HOME":str(R.ROOT),"AGENT_ARTIFACT_ROOT":str(artifact)},cwd=str(R.ROOT),timeout=30)
+   self.assertEqual(by_id.returncode,0,by_id.stderr)
+   self.assertTrue(R.canonical_route_path(artifact,json.loads(by_id.stdout)["route_id"]).is_file())
    tampered=json.loads(json.dumps(changed))
    tampered["nodes"][0]["unit"]="qa/ml-debug"
    tampered["new_nodes"][0]["realized_contract_hash"]=R._continuation_contract_hash(tampered["nodes"][0])

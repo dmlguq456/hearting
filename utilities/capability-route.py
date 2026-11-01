@@ -13077,7 +13077,7 @@ def main():
             )
         _emit_compiled_route(a,route,a.artifact_root)
     elif a.command=="continuation":
-        source_path=Path(a.source_route).resolve(strict=True)
+        source_path=resolve_route_argument(a.source_route).resolve(strict=True)
         source=verify_route(json.loads(source_path.read_text(encoding="utf-8")))
         # Keep the source path local to this invocation.  Do not attach it to
         # the verified route payload: continuation lineage hashes cover the
