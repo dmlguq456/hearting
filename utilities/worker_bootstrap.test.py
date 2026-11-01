@@ -1093,6 +1093,11 @@ class OwnerInlineMarkerPromptTest(OPA.OwnerRefineBase):
         self.assertNotIn("--jobs", command)
         # the rendered command, run as written, publishes the marker settlement asks for
         argv = [a.replace("<node>", "review").replace("<one line>", "review done") for a in shlex.split(command)]
+        self.assertIn("--node review", command)
+        if "--evidence" in argv:      # the block names the file the stage writes; write it, then publish
+            evidence = Path(argv[argv.index("--evidence") + 1])
+            evidence.parent.mkdir(parents=True, exist_ok=True)
+            evidence.write_text("review done\n", encoding="utf-8")
         env = {**os.environ, "AGENT_ARTIFACT_ROOT": str(self.root), "AGENT_DISPATCH_JOBS": str(self.jobs),
                "AGENT_DISPATCH_REGISTERED_WORKER": "1", "AGENT_DISPATCH_ATTEMPT_ID": self.owner}
         done = subprocess.run([sys.executable, *argv[1:]], text=True, capture_output=True, env=env, cwd=str(OPA.R.ROOT))
@@ -1125,8 +1130,161 @@ class OwnerInlineMarkerPromptTest(OPA.OwnerRefineBase):
         text = W.assignment_prompt(
             SimpleNamespace(worker_type="owner", route_file=str(path), jobs=str(self.jobs), attempt_id="att-code"),
             "Fix it", {})
-        self.assertIn("A declared stage (plan, execute, test)", text)
+        self.assertIn("Route steps (sealed route", text)
+        self.assertIn("Start now: `", text)
+        self.assertRegex(text, r"`[^`]*capability-route\.py complete --inline --node plan [^`]*`")
+        self.assertNotIn("A declared stage (", text)
         self.assertNotIn("Human gate", text)
+
+
+def steps_route(**extra) -> dict:
+    """A small sealed-shaped route: plan -> plan-check -> execute -> (owner-run) report."""
+    nodes = [
+        {"id": "plan", "kind": "pipeline-stage", "depends_on": [], "inputs": ["task"],
+         "outputs": ["plan.md", "checklist.md"], "dispatch_depth": 2},
+        {"id": "plan-check", "kind": "review-worker", "depends_on": ["plan"], "inputs": ["plan.md", "checklist.md"],
+         "outputs": ["_internal/plan_reviews/round_1.md"], "dispatch_depth": 2},
+        {"id": "execute", "kind": "pipeline-stage", "depends_on": ["plan-check"],
+         "inputs": ["plan.md", "checklist.md", "source-diff", "dev_logs/**"],
+         "outputs": ["source-diff", "dev_logs/**"], "dispatch_depth": 2},
+        {"id": "report", "kind": "capability-owner", "unit": "_kernel/owner", "terminal": True,
+         "depends_on": ["execute"], "outputs": ["final_report.md"], "dispatch_depth": 1},
+    ]
+    return {"route_id": "rt-steps", "route_hash": "sha256:" + "a" * 64, "artifact_root": "/unused",
+            "human_gates": [], "human_gate_bindings": [], "nodes": nodes, **extra}
+
+
+class OwnerRouteStepsPromptTest(unittest.TestCase):
+    """The owner is handed the exact first command, output locations and entry-gate state (no contract digging)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.output_dir = str(self.root / "artifacts")
+
+    def write(self, route) -> Path:
+        path = self.root / "route with space.json"
+        path.write_text(json.dumps(route), encoding="utf-8")
+        return path
+
+    def owner(self, path, **kw):
+        return SimpleNamespace(worker_type=kw.pop("worker_type", "owner"), route_file=None, route_node=None,
+                               owner_route_binding=SimpleNamespace(route_file=str(path)), **kw)
+
+    def steps(self, route=None, environ=None, **kw) -> str:
+        path = self.write(route or steps_route())
+        return W.owner_route_steps_prompt(self.owner(path, **kw),
+                                          {"AGENT_ARTIFACT_OUTPUT_DIR": self.output_dir} if environ is None else environ)
+
+    def test_start_now_is_the_exact_first_command_and_its_flags_exist(self):
+        text = self.steps()
+        command = re.search(r"Start now: `([^`]+)`", text).group(1)
+        argv = shlex.split(command)
+        self.assertEqual(argv[0], "python3")
+        self.assertEqual(Path(argv[1]).name, "stage-dispatch-fallback.py")
+        self.assertTrue(Path(argv[1]).is_file())
+        self.assertEqual(argv[2:], ["--route", str(self.root / "route with space.json"), "--node", "plan", "--start"])
+        self.assertEqual(command, W.route_start_command(self.root / "route with space.json", "plan"))
+        self.assertNotIn("--jobs", command)
+        self.assertNotIn("--prompt-file", command)
+        self.assertIn("Optional: add --prompt-file <path>", text)
+        help_text = subprocess.run([sys.executable, argv[1], "--help"], text=True, capture_output=True).stdout
+        for flag in ("--route", "--node", "--start"):
+            self.assertIn(flag, help_text)
+
+    def test_outputs_share_one_absolute_prefix_and_owner_nodes_have_no_command(self):
+        text = self.steps()
+        self.assertEqual(text.count(self.output_dir), text.count(f"Outputs under {self.output_dir}/:") + text.count(f"--evidence {self.output_dir}/plan.md"))
+        self.assertIn(f"Outputs under {self.output_dir}/:\n1. plan → plan.md, checklist.md\n", text)
+        self.assertIn("2. plan-check after plan → _internal/plan_reviews/round_1.md\n", text)
+        self.assertIn("3. execute after plan-check → source-diff, dev_logs/**\n", text)
+        self.assertIn("4. report after execute [you run it yourself] → final_report.md\n", text)
+        self.assertEqual(text.count("--node plan-check"), 0)
+        self.assertEqual(text.count("--start`"), 1)
+
+    def test_inline_completion_command_is_concrete_with_the_first_evidence_file(self):
+        text = self.steps()
+        inline = re.search(r"`([^`]*capability-route\.py complete[^`]*)`", text).group(1)
+        self.assertEqual(shlex.split(inline)[3:9], ["--inline", "--node", "plan", "--evidence", f"{self.output_dir}/plan.md", "--reason"])
+        self.assertNotIn("<node>", text)
+        self.assertIn("do not export or pass them", text)
+
+    def test_unbound_cycle_states_it_and_never_guesses_a_path(self):
+        text = self.steps(environ={})
+        self.assertIn("Outputs (cycle unbound; names are relative to the cycle output directory the runtime binds):", text)
+        self.assertNotIn("Outputs under", text)
+        inline = re.search(r"`([^`]*capability-route\.py complete[^`]*)`", text).group(1)
+        self.assertNotIn("--evidence", inline)
+        self.assertNotIn(self.output_dir, text)
+
+    def test_entry_gate_line_states_the_sealed_fact(self):
+        self.assertIn("Entry gate: none sealed on this route (no frame-review); no intent.md is expected", self.steps())
+        bound = steps_route(human_gate_bindings=[{"gate": "preview-disposition", "node": "report", "position": "entry"}])
+        self.assertIn("Entry gates sealed: preview-disposition@report(entry)", self.steps(bound))
+        self.assertNotIn("Entry gate: none", self.steps(bound))
+
+    def test_several_ready_nodes_are_listed_without_a_single_command(self):
+        route = steps_route()
+        route["nodes"][1]["depends_on"] = []
+        route["nodes"][2]["depends_on"] = ["plan", "plan-check"]
+        text = self.steps(route)
+        self.assertIn("Ready now: plan, plan-check\n", text)
+        self.assertNotIn("Start now:", text)
+
+    def test_parallel_group_members_are_marked(self):
+        route = steps_route()
+        route["nodes"][0]["parallel_group"] = "g1"
+        self.assertIn("1. plan (parallel group g1) → plan.md", self.steps(route))
+
+    def test_nothing_without_a_dispatchable_stage_a_route_or_an_owner(self):
+        self.assertEqual(self.steps(steps_route(nodes=[])), "")
+        owner_only = steps_route()
+        owner_only["nodes"] = owner_only["nodes"][-1:]
+        owner_only["nodes"][0]["depends_on"] = []
+        self.assertEqual(self.steps(owner_only), "")
+        self.assertEqual(self.steps(worker_type="stage"), "")
+        self.assertEqual(W.owner_route_steps_prompt(SimpleNamespace(worker_type="owner", route_file=None), {}), "")
+        missing = SimpleNamespace(worker_type="owner", route_file=str(self.root / "missing.json"))
+        self.assertEqual(W.owner_route_steps_prompt(missing, {}), "")
+
+    def test_the_assignment_carries_the_block_once_and_drops_the_template_marker(self):
+        path = self.write(steps_route())
+        args = self.owner(path)
+        text = W.assignment_prompt(args, "Fix it", {"AGENT_ARTIFACT_OUTPUT_DIR": self.output_dir})
+        self.assertEqual(text.count("Route steps (sealed route rt-steps"), 1)
+        self.assertEqual(text.count("complete --inline"), 1)
+        self.assertNotIn("A declared stage (", text)
+        self.assertIn("Assignment:\nFix it\n\n", text)
+
+    def test_contract_read_line_points_an_owner_at_the_block(self):
+        for harness in ("claude", "codex", "opencode"):
+            owner = W.contract_read_prompt(SimpleNamespace(worker_type="owner", assigned_contract="autopilot-code"), harness)
+            self.assertIn("Route steps carry the exact start commands", owner)
+            stage = W.contract_read_prompt(SimpleNamespace(worker_type="stage", assigned_contract="autopilot-code",
+                                                           completion_gate=None), harness)
+            self.assertNotIn("Route steps", stage)
+
+    def test_a_space_in_the_route_path_is_quoted(self):
+        command = W.route_start_command("/a b/route.json", "plan")
+        self.assertIn("'/a b/route.json'", command)
+        self.assertEqual(shlex.split(command)[3], "/a b/route.json")
+
+
+class NodeInputsPromptTest(unittest.TestCase):
+    def test_earlier_cycle_files_become_absolute_paths_and_semantic_inputs_are_skipped(self):
+        route = steps_route()
+        self.assertEqual(W.node_inputs_prompt(route, "plan-check", "/od"),
+                         "Inputs from this cycle: plan.md=/od/plan.md, checklist.md=/od/checklist.md\n")
+        self.assertEqual(W.node_inputs_prompt(route, "execute", "/od"),
+                         "Inputs from this cycle: plan.md=/od/plan.md, checklist.md=/od/checklist.md\n")
+        self.assertEqual(W.node_inputs_prompt(route, "plan", "/od"), "")
+
+    def test_no_output_dir_or_unknown_node_yields_nothing(self):
+        route = steps_route()
+        self.assertEqual(W.node_inputs_prompt(route, "plan-check", None), "")
+        self.assertEqual(W.node_inputs_prompt(route, "nope", "/od"), "")
+        self.assertEqual(W.node_inputs_prompt(route, None, "/od"), "")
 
 
 class ReportContractTest(unittest.TestCase):

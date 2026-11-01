@@ -537,6 +537,49 @@ class FallbackTest(unittest.TestCase):
      self.assertEqual(saved["candidate_outcomes"],rows)
      self.assertEqual(saved["candidate_outcomes_omitted"],0)
 
+ def test_inline_verdict_receipt_names_how_the_owner_finishes_the_stage_itself(self):
+  with self.dispatch_env(AGENT_DISPATCH_CURRENT_HARNESS="codex",
+                         AGENT_DISPATCH_CURRENT_TRANSPORT="headless",
+                         AGENT_DISPATCH_CURRENT_SANDBOX="workspace-write",
+                         AGENT_ARTIFACT_OUTPUT_DIR="/fixture/cycle/artifacts"):
+   path=self.route(same_status="supported")
+   rows=[self.tuple("codex","supported")]
+   hops=[{"ordinal":1,"fallback_hop":"same-harness-headless","candidates":rows},
+         {"ordinal":2,"fallback_hop":"inline","reason_enum":"runtime-unavailable"}]
+   def process_failure(_args,_command,**_policy):
+    return subprocess.run([sys.executable,"-c","import sys; print('check=failed'); print('reason=process-refusal'); sys.exit(75)"],
+                          text=True,capture_output=True,check=False)
+   out=io.StringIO()
+   with mock.patch.object(F,"ordered_fallback_hops",return_value=(hops,None)), \
+        mock.patch.object(F,"run_wrapper",side_effect=process_failure), \
+        contextlib.redirect_stdout(out):
+    code,_=self.run_inline(path)
+   self.assertEqual(code,79,out.getvalue())
+   lines=out.getvalue().splitlines()
+   self.assertEqual(sum(1 for l in lines if l.startswith("owner_next_command=")),1,out.getvalue())
+   self.assertEqual(lines.index(next(l for l in lines if l.startswith("owner_next_command=")))-lines.index(
+     next(l for l in lines if l.startswith("degradation_ledger="))),1)
+   for field in ("check=degraded","selected_hop=inline","route_reuse=required"):
+    self.assertIn(field,lines)
+
+ def test_inline_owner_next_line_is_exact_and_never_guessed(self):
+  route={"route_id":"rt-x","route_hash":"sha256:"+"a"*64,"artifact_root":"/unused",
+         "nodes":[{"id":"plan","outputs":["plan.md","checklist.md"]},{"id":"execute","outputs":["source-diff","dev_logs/**"]}]}
+  with mock.patch.dict(os.environ,{"AGENT_ARTIFACT_OUTPUT_DIR":"/od"}):
+   line=F.inline_owner_next_line(route,route["nodes"][0],"/route.json")
+   self.assertTrue(line.startswith("owner_next_command=python3 "),line)
+   command=line[len("owner_next_command="):].split("  # ")[0]
+   import worker_bootstrap as WB
+   self.assertEqual(command,WB.inline_complete_command("plan","/od/plan.md"))
+   self.assertIn("complete --inline --node plan --evidence /od/plan.md --reason",command)
+   self.assertIn("write its output to /od/plan.md first",line)
+   semantic=F.inline_owner_next_line(route,route["nodes"][1],"/route.json")
+   self.assertIn("--node execute --reason",semantic)
+   self.assertNotIn("--evidence",semantic)
+  with mock.patch.dict(os.environ,{},clear=True):
+   self.assertEqual(F.inline_owner_next_line(route,route["nodes"][0],"/route.json"),"")
+  self.assertEqual(F.inline_owner_next_line({},{},"/route.json"),"")
+
  def test_multiple_process_failures_then_parent_skip_preserve_last_real_cause(self):
   with self.dispatch_env(AGENT_DISPATCH_CURRENT_HARNESS="codex",
                          AGENT_DISPATCH_CURRENT_TRANSPORT="headless",

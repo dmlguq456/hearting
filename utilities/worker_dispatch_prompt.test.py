@@ -345,7 +345,8 @@ class WorkerDispatchPromptTest(unittest.TestCase):
                                           owner_route_binding=binding)
             no_binding_owner = SimpleNamespace(worker_type="owner", route_file=None, route_node=None,
                                                owner_route_binding=None)
-            expected = ("Assignment:\nTASK\n\n" + WB.completion_scope_prompt() + WB.owner_gate_prompt(bound_owner)
+            expected = ("Assignment:\nTASK\n\n" + WB.completion_scope_prompt() + WB.owner_route_steps_prompt(bound_owner, {})
+                        + WB.owner_gate_prompt(bound_owner)
                         + WB.owner_inline_marker_prompt(bound_owner) + WB.owner_close_prompt(bound_owner))
             self.assertEqual(WB.assignment_prompt(bound_owner, "TASK", {}), expected)
             self.assertEqual(WB.assignment_prompt(no_binding_owner, "TASK", {}),
@@ -354,6 +355,48 @@ class WorkerDispatchPromptTest(unittest.TestCase):
                                                  owner_route_binding=SimpleNamespace(route_file=str(route_path)))
             self.assertEqual(WB.assignment_prompt(stage_with_binding, "TASK", {}),
                              "Assignment:\nTASK\n\n" + WB.completion_scope_prompt())
+
+
+    def test_owner_adapters_render_one_route_steps_block_with_the_exact_first_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            route = {"route_id": "rt-steps-adapters", "route_hash": "sha256:" + "e" * 64,
+                     "artifact_root": str(root / "reports"), "human_gates": [], "human_gate_bindings": [],
+                     "nodes": [
+                         {"id": "plan", "kind": "pipeline-stage", "depends_on": [], "inputs": ["task"],
+                          "outputs": ["plan.md", "checklist.md"], "dispatch_depth": 2},
+                         {"id": "test", "kind": "pipeline-stage", "depends_on": ["plan"], "inputs": ["plan.md"],
+                          "outputs": ["test_logs/**"], "dispatch_depth": 2}]}
+            route_path = root / "steps-route.json"
+            route_path.write_text(json.dumps(route), encoding="utf-8")
+            od = root / "reports" / "cycle" / "artifacts"
+            blocks = {}
+            for harness, (wrapper, model, _suffix) in ADAPTERS.items():
+                with self.subTest(harness=harness):
+                    spec = importlib.util.spec_from_file_location("owner_steps_" + harness, wrapper)
+                    module = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(module)
+                    args = module.parser().parse_args([
+                        "--worktree", str(root), "--slug", "owner-steps", "--capability", "autopilot-code",
+                        "--capability-mode", "dev", "--intensity", "standard", "--dispatch-depth", "1",
+                        "--worker-type", "owner", "--unit", "_kernel/owner", "--prompt-text", "TASK",
+                        "--jobs", str(root / "missing-jobs.log"), *model])
+                    args.route_file = None
+                    args.route_node = None
+                    args.artifact_root = str(root / "reports")
+                    args.agent_home = module.resolve_agent_home()
+                    args.owner_route_binding = SimpleNamespace(
+                        route_file=str(route_path), route_id=route["route_id"], route_hash=route["route_hash"])
+                    render = module.prompt if harness == "opencode" else module.dispatch_prompt
+                    with mock.patch.dict(os.environ, {"AGENT_ARTIFACT_OUTPUT_DIR": str(od)}):
+                        prompt, _ = render(args)
+                    self.assertEqual(prompt.count("Route steps (sealed route rt-steps-adapters"), 1)
+                    self.assertEqual(prompt.count(f"--route {route_path} --node plan --start"), 1)
+                    self.assertIn(f"Outputs under {od}/:", prompt)
+                    self.assertIn("Entry gate: none sealed", prompt)
+                    self.assertIn("Route steps carry the exact start commands", prompt)
+                    blocks[harness] = prompt[prompt.index("Route steps (sealed route"):].split("\n\n")[0]
+            self.assertEqual(len(set(blocks.values())), 1)
 
 
 class FrameAssignmentPromptTest(unittest.TestCase):

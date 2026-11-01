@@ -353,6 +353,27 @@ class CandidateOutcomes(list):
         self[:] = rows
 
 
+def inline_owner_next_line(route: dict, node: dict, route_file) -> str:
+    """One receipt line telling the owner how to finish a stage it must now run itself; "" when unknown.
+
+    Text only: the cycle output directory comes from the owner's inherited environment or the route's
+    producer binding, and an unbound cycle yields no line rather than a guessed path.
+    """
+    try:
+        import worker_bootstrap as wb
+        env = os.environ
+        output_dir = (wb.artifact_cycle_environment(env)["AGENT_ARTIFACT_OUTPUT_DIR"]
+                      or wb.resolve_node_scope(route, None, env, route_file=route_file).output_dir)
+        if not output_dir:
+            return ""
+        evidence = wb.node_first_evidence(route, node["id"], output_dir)
+        return ("owner_next_command=" + wb.inline_complete_command(node["id"], evidence)
+                + "  # run this stage yourself" + (f", write its output to {evidence} first" if evidence else "")
+                + ", then run this command")
+    except Exception:  # an advisory line never changes the receipt's verdict or exit code
+        return ""
+
+
 def _print_candidate_outcomes(rows: CandidateOutcomes) -> None:
     rows.normalize()
     print("candidate_outcomes=" + json.dumps(rows, separators=(",", ":")))
@@ -2896,6 +2917,9 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
                 ),
             )
             print("degradation_ledger=" + (str(ledger) if ledger else "-"))
+            next_line = inline_owner_next_line(route, node, args.route)
+            if next_line:
+                print(next_line)
             return 79
     worker_pin = sealed_pin_harness(route, worker_type="stage") if pin_skipped else None
     if worker_pin:
