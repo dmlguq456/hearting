@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import dispatch_replacement as R
 
+# The slot's own work: what it does, where, and the immutable inputs it was given. Who answers for the
+# parent now (the attempt, its session, the label, the route file/hash it runs from, the harness) follows
+# the replacement lineage that claim admission binds (`route_authority.require_recovery_binding`).
 SCOPE_KEYS = (
-    'route_id', 'route_hash', 'route_node', 'route_file', 'parent_attempt_id',
-    'parent_sid', 'parent', 'harness', 'worker_type', 'dispatch_depth',
+    'route_id', 'route_node', 'worker_type', 'dispatch_depth',
     'session_chain_id', 'subsession_id', 'subsession_index', 'subsession_count',
     'subsession_mode', 'subsession_purpose', 'stage_authority', 'phase_brief',
     'phase_brief_sha256', 'fixed_files_sha256', 'narrow_verify_sha256',

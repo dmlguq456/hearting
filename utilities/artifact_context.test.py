@@ -198,6 +198,23 @@ class ArtifactContextTest(unittest.TestCase):
         self.assertEqual(C.scope_values("tests/**;source-scoped;;dev_logs/**"),
                          ["dev_logs/**", "source-scoped", "tests/**"])
 
+    def test_an_exact_output_scope_covers_its_revision_paths_and_a_scope_covers_narrower_ones(self):
+        # A node reopened after its result became historical writes the output's next revision beside it.
+        scope = ["reviews/audit-report.md"]
+        for covered in ("reviews/audit-report.md", "reviews/audit-report.r2.md", "reviews/audit-report.r17.md"):
+            self.assertTrue(C.scope_matches(covered, scope), covered)
+        for refused in ("reviews/audit-report.r0.md", "reviews/audit-report.rx.md", "reviews/audit-report.r2.txt",
+                        "reviews/other.r2.md", "audit-report.r2.md", "reviews/sub/audit-report.r2.md",
+                        "reviews/audit-report.r2.r3.md"):
+            self.assertFalse(C.scope_matches(refused, scope), refused)
+        self.assertEqual(C.revision_output("/c/reviews/audit-report.md", 3), "/c/reviews/audit-report.r3.md")
+        sealed = ["spec/**", "spec/<component>/**", "checklist.md"]
+        for value in ("spec/<component>/**", "spec/prd/**", "checklist.md", "checklist.r2.md", "spec/**"):
+            self.assertTrue(C.scope_covers(value, sealed), value)
+        for value in ("source/**", "reports/**", "checklist.txt", "", "dev_logs/**"):
+            self.assertFalse(C.scope_covers(value, sealed), value)
+        self.assertTrue(C.scope_covers("source/**", ["source/**", "spec/**"]))    # a source scope covers only itself
+
     def test_verified_route_lineage_overrides_stale_cycle_environment(self):
         context = self._context({"AGENT_ARTIFACT_CYCLE_ID": "cyc_stale",
                                  "AGENT_ARTIFACT_CAMPAIGN_ID": "camp_stale"})

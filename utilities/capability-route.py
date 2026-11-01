@@ -72,6 +72,7 @@ from dispatch_contract import (
     evidence_currency,
     note_evidence_change,
     gate_currency,
+    completion_superseded,
     original_review_self_claim,
     review_self_disposition_origin,
     review_self_disposition_subject,
@@ -872,22 +873,30 @@ def _source_evidence_snapshot(route, node_ids):
         raise ValueError(error)
     return rows,digest,turns
 
-def _continuation_fresh_review_boundary(route, node_id, error):
-    """Return a stale/unbound implementation review that must be rerun."""
+def _continuation_superseded_boundary(route, node_id, error):
+    """The node whose superseded PASS the continuation reruns instead of reusing.
+
+    A source- or input-bound PASS that is stale or unbound, or whose upstream completed
+    again, is not reusable evidence (`completion_superseded`, the one rule); the prefix is
+    cut at that node and its old marker stays history. A closure marker (an owner ruling
+    over a FAIL), an integrity break and an unreadable marker are not that case.
+    """
     prefix=f"continuation-source-node-unverified:{node_id}:"
     if not error.startswith(prefix):
-        return None
-    reason=error[len(prefix):]
-    if reason not in {
-        "completion-source-subject-unknown",
-        "completion-review-source-stale",
-    }:
         return None
     node=next((row for row in route.get("nodes",[]) if str(row.get("id"))==str(node_id)),None)
     if node is None:
         return None
-    from review_source_subject import is_implementation_review
-    return str(node_id) if is_implementation_review(route,node) else None
+    try:
+        jobs=_continuation_source_jobs(route)
+        path=completion_dir(route["route_id"],jobs=jobs)/f"{node_id}.json"
+        marker=json.loads(path.read_text(encoding="utf-8"))
+        if owner_closure_shape(marker) is not None:
+            return None
+        currency=gate_currency(route,node,path,marker,observe=True,jobs=jobs)
+    except (OSError,ValueError,DispatchContractError):
+        return None
+    return str(node_id) if completion_superseded(currency) else None
 
 def _terminal_owner_for_revised_ancestor(route, jobs):
     """The ended owner of the continuation being superseded, not a review verdict."""
@@ -1348,7 +1357,7 @@ def build_continuation_route(
             _source_evidence_prefix(source_route,reused_ids)
         )
         if reuse_error:
-            restart_node=_continuation_fresh_review_boundary(
+            restart_node=_continuation_superseded_boundary(
                 source_route,failed_node,reuse_error
             )
             if restart_node is not None:
@@ -3896,10 +3905,8 @@ def _change_pins(route, jobs, values):
     from work_start import _rows
     pins, warnings = _filter_top_pins(_parse_selection_pins(values))
     harness, session = RA.caller_identity()
-    owners = [meta for _status, meta in _rows(jobs).values()
-              if meta.get("worker_type") == "owner"
-              and route["route_id"] in {meta.get("owner_route_id"), meta.get("route_id")}]
-    if owners and not RA.owns(owners[-1], session, jobs):
+    owner = RA.current_route_owner(route, jobs, _rows(jobs))
+    if owner and not RA.owns(owner, session, jobs):
         raise ValueError("start-pin-parent-only: only this route's parent session moves its pins")
     targets = [target for target in RA.PIN_CHANGE_TARGETS if target in pins]
     probed = {target: _pin_change_probe(route, jobs, target, pins[target]["harness"], harness)
@@ -3934,10 +3941,8 @@ def _record_access_change(route, jobs):
     if given is None:
         return None
     harness, session = RA.caller_identity()
-    owners = [meta for _status, meta in _rows(jobs).values()
-              if meta.get("worker_type") == "owner"
-              and route["route_id"] in {meta.get("owner_route_id"), meta.get("route_id")}]
-    if owners and not RA.owns(owners[-1], session, jobs):
+    owner = RA.current_route_owner(route, jobs, _rows(jobs))
+    if owner and not RA.owns(owner, session, jobs):
         return {"changed": False, "reason": "access-change-parent-only"}
     try:
         context = AccessContext.build(worktree=str(route.get("cwd") or ""),

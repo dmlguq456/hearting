@@ -330,13 +330,13 @@ class ReplacementTest(unittest.TestCase):
             with self.assertRaises(D.DispatchContractError) as refused:
                 node_module.replacement_task(args,self.route,{'id':'frame'},self.jobs)
             self.assertEqual(refused.exception.reason,'replacement-launch-binding-mismatch')
-        # The same ledger is never authority to change a depth-2 owner's label or attempt.
+        # The same ledger is never authority to change a depth-2 owner's attempt; its label is a
+        # name, and the parent attempt binding follows the replacement lineage instead.
         self.meta.update(dispatch_depth='2',parent_attempt_id='att-owner');self.write(self.meta)
         source={**self.meta}
         with mock.patch.object(R,'validate_claim_source',return_value=([],source,{'task':'the raw task'})), \
                 mock.patch.object(node_module.ROUTE_AUTHORITY,'default_parent_session_id',return_value='parent'):
-            with self.assertRaises(D.DispatchContractError):
-                node_module.replacement_task(args,self.route,{'id':'frame'},self.jobs)
+            self.assertEqual(node_module.replacement_task(args,self.route,{'id':'frame'},self.jobs),'the raw task')
 
     def test_depth1_replacement_is_authorized_for_the_launching_session_or_its_same_seat_successor(self):
         import work_start
@@ -485,7 +485,9 @@ class ReplacementTest(unittest.TestCase):
         self.args.reviewed_evidence=str(evidence)
         self.meta.update(D.parse_registry_metadata(R.seal_launch_input(self.args,'codex','the raw task')))
         self.write(self.meta)
-        self.write(dict(self.meta,attempt_id='att-prior-crash'),'done',append=True)
+        crashed=dict(self.meta,attempt_id='att-prior-crash')
+        crashed[review_input.KEY]=review_input.seal_binding(self.jobs,crashed,candidate_input)
+        self.write(crashed,'done',append=True)
         (self.root/'review-input-revisions').mkdir()
         record=self.claim();aid=record['replacement_attempt_id']
         source=R._rows(self.jobs.read_text().splitlines())['att-source'][1]
@@ -498,10 +500,12 @@ class ReplacementTest(unittest.TestCase):
             source={'attempt_id':'att-source','binding_digest':source[review_input.KEY]})
         candidate.update(D.parse_registry_metadata(R.seal_launch_input(args,'codex','the raw task')))
         rows=[(['now','done'],meta) for _,meta in R._rows(self.jobs.read_text().splitlines()).values()]
-        route_module=SimpleNamespace(review_lineage_routes=lambda route,node:[route],
-            review_round_records=lambda *args,**kw:rows,
-            _dependency_revisions=lambda *args,**kw:[], REVIEW_ROUND_CAP=__import__('review_round_cap'))
-        with mock.patch.object(review_input,'_route_module',return_value=route_module):
+        route_module=review_input._dispatch_node_module().ROUTE
+        patches=[mock.patch.object(route_module,'review_lineage_routes',side_effect=lambda route,node:[route]),
+                 mock.patch.object(route_module,'review_round_records',side_effect=lambda *args,**kw:rows),
+                 mock.patch.object(route_module,'_dependency_revisions',side_effect=lambda *args,**kw:[])]
+        with contextlib.ExitStack() as stack:
+            for patch in patches: stack.enter_context(patch)
             with self.assertRaises(D.DispatchContractError) as failure:
                 review_input.validate_revision_admission(self.jobs,candidate,candidate_input)
             self.assertEqual(failure.exception.reason,'reviewed-evidence-revision-not-admitted')
@@ -600,7 +604,7 @@ class ReplacementTest(unittest.TestCase):
                     self.assertEqual(caught.exception.reason,'replacement-input-tuple-mismatch')
                     self.assertIn('child_spawned=0', caught.exception.detail)
         for changed_parent in ({'parent_sandbox':'read-only'}, {'parent_sandbox':'unknown'},
-                               {'parent_session_id':'different-session'}, {'parent_transport':'unknown'}):
+                               {'parent_transport':'unknown'}):
             with self.subTest(changed_parent=changed_parent):
                 changed=SimpleNamespace(**{**vars(host),**changed_parent})
                 with self.assertRaises(D.DispatchContractError) as caught:
@@ -618,6 +622,140 @@ class ReplacementTest(unittest.TestCase):
         with self.assertRaises(D.DispatchContractError) as caught:
             R.seal_launch_input(args,'codex','phase g2')
         self.assertEqual(caught.exception.reason,'replacement-record-conflict')
+
+    # -- U8b-1: a never-started attempt may be resealed for the same work inside the approval ----------
+    def _unlaunched_seal(self, aid='att-reseal', **changes):
+        """Seal an attempt's input under a verified route and register it unstarted."""
+        import execution_access as EA
+        self.bind_fixture_route()
+        verify=mock.patch.object(D._route_module(),'verify_route',side_effect=lambda route,*a,**k:dict(route))
+        verify.start();self.addCleanup(verify.stop)
+        work=self.root/'work';work.mkdir(exist_ok=True)
+        (self.root/'work2').mkdir(exist_ok=True)
+        args=SimpleNamespace(**vars(self.args));args.attempt_id=aid
+        args.route_id=self.route['route_id'];args.route_file=str(self.path)
+        args.replacement_input_argv=['--start','--attempt-id',aid,'--route-file',str(self.path),
+                                     '--model','model-one','--prompt-text','phase']
+        args.execution_access_grant=EA.ExecutionAccessGrant(
+            request_sha256='r'*64,writable_roots=(work,self.root/'work2'),read_roots=(),
+            additional_writable_roots=(work,self.root/'work2'),absorbed_writable_roots=(),
+            network='none',file_enforcement='none',network_enforcement='none',unmet=())
+        args.launch_lifecycle='detached';args.nested_headless_network=False
+        for key,value in changes.items():setattr(args,key,value)
+        first=R.seal_launch_input(args,'codex','phase')
+        self.write({**self.meta,'attempt_id':aid,'launch_claimed':'0','launch_outcome':'never-launched',
+                    **D.parse_registry_metadata(first)},'open',append=True)
+        return args
+
+    def _reseal(self, args, **changes):
+        second=SimpleNamespace(**{**vars(args),**changes})
+        return R.seal_launch_input(second,'codex','phase')
+
+    def test_unlaunched_reseal_accepts_selection_and_narrowed_grants(self):
+        import execution_access as EA
+        args=self._unlaunched_seal()
+        def saved():
+            return json.loads((R._directory(self.jobs)/'inputs'/'att-reseal.json').read_text())
+        # A selection option and the retry brief follow the current launch.
+        argv=['--start','--attempt-id','att-reseal','--route-file',str(self.path),'--model','model-two',
+              '--prompt-text','phase']
+        digest=self._reseal(args,replacement_input_argv=argv,replacement_retry_brief='continue from step 2')
+        self.assertEqual(saved()['retry_brief'],'continue from step 2')
+        self.assertIn('model-two',saved()['argv'])
+        self.assertEqual(',replacement_input_digest='+R._digest(saved()),digest)
+        # A grant narrowed to a sub-root of the sealed one is inside the approved addresses.
+        work=self.root/'work'
+        narrowed=EA.ExecutionAccessGrant(
+            request_sha256='r'*64,writable_roots=(work,),read_roots=(),additional_writable_roots=(work,),
+            absorbed_writable_roots=(),network='none',file_enforcement='none',
+            network_enforcement='none',unmet=())
+        self._reseal(args,execution_access_grant=narrowed)
+        self.assertEqual(saved()['applied_permissions']['execution_access']['writable_roots'],[str(work)])
+
+    def test_unlaunched_reseal_judges_opencode_narrowing_by_approved_addresses(self):
+        # The file rules of an OpenCode policy are the part the address check reads; a narrower
+        # edit root inside the approved worktree passes, a root outside it does not.
+        work=str(self.root/'work')
+        def sealed(aid, edit_root, other=None):
+            config={"permission":{"read":"allow","external_directory":{"*":"deny",work+"/**":"allow"},
+                                  "edit":{"*":"deny",edit_root+"/**":"allow"},**(other or {})}}
+            args=SimpleNamespace(**vars(self.args));args.attempt_id=aid;args.route_id=''
+            args.agent='build';args.opencode_config_content=json.dumps(config,separators=(',',':'))
+            args.replacement_input_argv=['--start','--attempt-id',aid,'--agent','build','--prompt-text','phase']
+            fragment=R.seal_launch_input(args,'opencode','phase')
+            return R.launch_input(self.jobs,aid,D.parse_registry_metadata(fragment))
+        within=R.route_authority._grants_within_approval
+        previous=sealed('att-oc-wide',work)
+        self.assertTrue(within(previous,sealed('att-oc-same',work),None))
+        self.assertTrue(within(previous,sealed('att-oc-narrow',work+'/sub'),None))
+        self.assertFalse(within(previous,sealed('att-oc-outside','/nonexistent-outside-root'),None))
+        # A non-file rule that changes is not an address difference.
+        self.assertFalse(within(previous,sealed('att-oc-bash',work,{"bash":"allow"}),None))
+
+    def test_subsession_successor_register_replay_reseals(self):
+        # E4-S3b: the supervisor registers the same sub-session successor again; the second argv
+        # differs only in the selection (model) the current launcher resolved.
+        base=['--start','--attempt-id','att-reseal','--route-file',str(self.path),'--session-chain-id','ssc-1',
+              '--subsession-id','ss-2','--subsession-index','2','--prompt-text','phase']
+        args=self._unlaunched_seal(replacement_input_argv=[*base,'--model','model-one'])
+        self._reseal(args,replacement_input_argv=[*base,'--model','model-two'])   # replay, selection only
+        self.assertIn('model-two',json.loads((R._directory(self.jobs)/'inputs'/'att-reseal.json').read_text())['argv'])
+        # A different sub-session is different work.
+        with self.assertRaises(D.DispatchContractError) as caught:
+            self._reseal(args,replacement_input_argv=[*base[:-3],'ss-3','--prompt-text','phase'])
+        self.assertEqual(caught.exception.reason,'replacement-record-conflict')
+
+    def test_reseal_never_touches_started_attempt(self):
+        args=self._unlaunched_seal()
+        original=self.jobs.read_bytes()
+        for change in ({'launch_started':'1'},{'launch_claimed':'1'},{'pid':'4242'}):
+            self.jobs.write_bytes(original)
+            row={**R._rows(self.jobs.read_text().splitlines())['att-reseal'][1],**change}
+            kept=[l for l in self.jobs.read_text().splitlines()
+                  if not D.row_has_attempt(l.split('\t')[5],'att-reseal')]
+            self.jobs.write_text('\n'.join(kept)+'\n');self.write(row,'open',append=True)
+            with self.subTest(change=change),self.assertRaises(D.DispatchContractError) as caught:
+                self._reseal(args,replacement_retry_brief='different')
+            self.assertEqual(caught.exception.reason,'replacement-record-conflict')
+        self.jobs.write_bytes(original)
+        self.write({**R._rows(self.jobs.read_text().splitlines())['att-reseal'][1]},'open',append=True)
+        with self.assertRaises(D.DispatchContractError) as caught:
+            self._reseal(args,replacement_retry_brief='different')   # two rows for the attempt
+        self.assertEqual(caught.exception.reason,'replacement-record-conflict')
+
+    def test_reseal_refuses_other_work_or_unapproved_grant(self):
+        import execution_access as EA
+        args=self._unlaunched_seal()
+        def refused(reasons=('replacement-record-conflict','replacement-input-tuple-mismatch'),**changes):
+            with self.assertRaises(D.DispatchContractError) as caught:
+                self._reseal(args,**changes)
+            self.assertIn(caught.exception.reason,reasons)
+        base=['--start','--attempt-id','att-reseal','--route-file',str(self.path),'--model','model-one',
+              '--prompt-text','phase']
+        # Other work: node, worktree, a work option.
+        refused(route_node='other')
+        refused(worktree=str(self.root/'elsewhere'))
+        refused(replacement_input_argv=[*base,'--unit','dev/other'])
+        # A write root outside the approved addresses.
+        outside=EA.ExecutionAccessGrant(
+            request_sha256='r'*64,writable_roots=(Path('/nonexistent-outside-root'),),read_roots=(),
+            additional_writable_roots=(Path('/nonexistent-outside-root'),),absorbed_writable_roots=(),
+            network='none',file_enforcement='none',network_enforcement='none',unmet=())
+        refused(execution_access_grant=outside)
+        # The sandbox a Codex input asks for, an unknown grant, network.
+        refused(replacement_runtime_sandbox='danger-full-access')
+        refused(replacement_runtime_sandbox='read-only')
+        refused(nested_headless_network=True)
+        refused(approval='never')
+        refused(resolved_permission_posture={'mode':'bypass','mode_flag':'bypassPermissions',
+                                             'allowed_tools':('Bash(rm:*)',),'inherited_default_mode':'default'})
+        refused(replacement_input_argv=[*base,'--sandbox','danger-full-access'])
+        # A sealed route that cannot be read is not observable: wait, do not guess.
+        self.path.unlink()
+        refused(replacement_retry_brief='x',execution_access_grant=EA.ExecutionAccessGrant(
+            request_sha256='r'*64,writable_roots=(self.root/'work',),read_roots=(),
+            additional_writable_roots=(self.root/'work',),absorbed_writable_roots=(),
+            network='none',file_enforcement='none',network_enforcement='none',unmet=()))
 
     def test_the_registry_and_the_replacement_tuple_read_the_same_definition(self):
         import route_authority
@@ -1889,6 +2027,107 @@ class ReplacementTest(unittest.TestCase):
         with self.assertRaises(D.DispatchContractError):
             self._sr_retry_admission(candidate)
 
+    # -- U1: a depth-2 child's parent attempt follows the owner's replacement lineage ---------------
+    def _authorized_as(self, caller, *, live=True, child='att-child'):
+        rows=R._rows(self.jobs.read_text().splitlines())
+        with mock.patch.dict(os.environ,{'AGENT_DISPATCH_ATTEMPT_ID':caller}), \
+                mock.patch.object(D,'_parent_liveness_evidence',return_value=(live,'fixture')):
+            R._authorized(self.jobs,rows,rows[child][1])
+
+    def test_depth2_replacement_parent_follows_launched_owner_lineage(self):
+        child, candidate, successor=self._sr_child_retry()
+        self._authorized_as(successor['attempt_id'])      # the recorded parent's final launched replacement
+        # The ended recorded parent is the lineage's start, not a live caller.
+        with self.assertRaises(D.DispatchContractError) as ended:
+            self._authorized_as('att-source')
+        self.assertEqual(ended.exception.reason,'replacement-parent-not-live')
+
+    def test_depth2_replacement_parent_refuses_intermediate_claim_only_or_dead_owner(self):
+        child, candidate, successor=self._sr_child_retry()
+        original=self.jobs.read_bytes()
+        def refused(caller, reason, **kwargs):
+            with self.subTest(caller=caller,reason=reason), self.assertRaises(D.DispatchContractError) as caught:
+                self._authorized_as(caller, **kwargs)
+            self.assertEqual(caught.exception.reason, reason)
+        refused('att-unrelated','replacement-parent-identity-unproven')
+        refused('','replacement-parent-identity-unproven')
+        # The launched owner's row ended: still the lineage, no longer live.
+        refused(successor['attempt_id'],'replacement-parent-not-live',live=False)
+        # An intermediate owner is not the parent once a later one launched.
+        dead=self._die(successor, note='dead-exact-pid', failure_class='contract')
+        final=self._successor(R.claim(self.jobs, dead['attempt_id']), dead, status='open', launch_started='1')
+        refused(successor['attempt_id'],'replacement-parent-identity-unproven')
+        self._authorized_as(final['attempt_id'])
+        # A claim-only reservation, or a registered row that never launched, is not the owner.
+        self.jobs.write_bytes(original)
+        reserved=self._die(successor, note='dead-exact-pid', failure_class='contract')
+        record=R.claim(self.jobs, reserved['attempt_id'])
+        refused(record['replacement_attempt_id'],'replacement-parent-identity-unproven')
+        pending=self._successor(record, reserved, status='open', launch_started='0', launch_claimed='0')
+        refused(pending['attempt_id'],'replacement-parent-identity-unproven')
+        # Unreadable lineage is "not proven", the existing refusal.
+        self.jobs.write_bytes(original)
+        with mock.patch.object(R,'effective_attempts',side_effect=D.DispatchContractError('replacement-lineage-unproven')):
+            refused(successor['attempt_id'],'replacement-parent-identity-unproven')
+
+    def test_recovery_binding_ignores_parent_slug_but_keeps_work_scope(self):
+        child, candidate, successor=self._sr_child_retry()
+        record=self.claim() if False else None
+        source={**child,'parent':'old-owner-label','parent_sid':'parent'}
+        later={**source,'attempt_id':'att-child-next','parent':'new-owner-label',
+               'parent_attempt_id':successor['attempt_id']}
+        route={'route_id':'rt-test','route_hash':'sha256:test'}
+        rec={'route_id':'rt-test','route_hash':'sha256:test'}
+        RA=R.route_authority
+        RA.require_recovery_binding(rec,source,later,self.jobs)
+        for key in RA.RECOVERY_SCOPE_KEYS:
+            with self.subTest(key=key),self.assertRaises(D.DispatchContractError) as caught:
+                RA.require_recovery_binding(rec,source,{**later,key:'other'},self.jobs)
+            self.assertEqual(caught.exception.reason,'replacement-launch-binding-mismatch')
+
+    def test_retry_across_verified_continuation_route_same_node_is_admitted(self):
+        child, candidate, successor=self._sr_child_retry()
+        import route_identity
+        ancestor={'route_id':'rt-test','route_hash':'sha256:test'}
+        # The successor route seals its source route, as a pin-handoff continuation does.
+        base={'artifact_root':str(self.root),'cwd':str(self.root),'capability':'autopilot-code',
+              'continuation_contract_version':1,'source_route_id':'rt-test','source_route_hash':'sha256:test',
+              'nodes':[]}
+        child_route=dict(base);child_route['route_hash']=route_identity.route_hash(child_route)
+        child_route['route_id']=route_identity.route_id_from_hash(child_route['route_hash'])
+        route_dir=self.root/'.runtime'/'routes';route_dir.mkdir(parents=True,exist_ok=True)
+        # The ancestor's file and hash must verify as well.
+        anc=dict(self.route,route_hash='x');anc['route_hash']=route_identity.route_hash(anc)
+        anc['route_id']=route_identity.route_id_from_hash(anc['route_hash'])
+        child_route['source_route_id']=anc['route_id'];child_route['source_route_hash']=anc['route_hash']
+        child_route['route_hash']=route_identity.route_hash(child_route)
+        child_route['route_id']=route_identity.route_id_from_hash(child_route['route_hash'])
+        (route_dir/(anc['route_id']+'.json')).write_text(json.dumps(anc))
+        child_file=route_dir/(child_route['route_id']+'.json');child_file.write_text(json.dumps(child_route))
+        source_row={**child,'route_id':anc['route_id'],'route_hash':anc['route_hash']}
+        cand={**candidate,'route_id':child_route['route_id'],'route_hash':child_route['route_hash'],
+              'route_file':str(child_file)}
+        rows=R._rows(self.jobs.read_text().splitlines())
+        # Bind both owners to their routes: the previous owner to the ancestor, the current to the child.
+        (route_dir/(anc['route_id']+'.json')).write_text(json.dumps(anc))
+        self._die(rows['att-source'][1],owner_route_id=anc['route_id'],owner_route_hash=anc['route_hash'],
+                  owner_route_file=str(route_dir/(anc['route_id']+'.json')))
+        self._die(successor,owner_route_id=child_route['route_id'],owner_route_hash=child_route['route_hash'],
+                  owner_route_file=str(child_file))
+        self._die(child,route_id=anc['route_id'],route_hash=anc['route_hash'])
+        # The continuation route's child retries its predecessor on the ancestor route, same node.
+        self._sr_retry_admission(cand)
+        for change in ({'route_node':'test'},{'route_id':'rt-foreign'},{'route_hash':'sha256:other'},
+                       {'route_file':str(self.root/'missing.json')},{'parent_attempt_id':'att-unrelated'}):
+            with self.subTest(change=change),self.assertRaises(D.DispatchContractError) as caught:
+                self._sr_retry_admission({**cand,**change})
+            self.assertEqual(caught.exception.reason,'retry-predecessor-binding-mismatch')
+        self.assertTrue(D._retry_route_related(source_row,cand))
+        self.assertFalse(D._retry_route_related(source_row,{**cand,'route_hash':'sha256:other'}))
+        self.assertFalse(D._retry_route_related(source_row,{**cand,'route_file':str(self.root/'missing.json')}))
+        self.assertFalse(D._retry_route_related({**source_row,'route_id':'rt-foreign'},cand))
+        self.assertFalse(D._retry_route_related({**source_row,'route_hash':'sha256:forged'},cand))
+
     def test_sr_child_retry_preserves_process_and_semantic_result_refusals(self):
         child, candidate, _=self._sr_child_retry()
         for state in ('live', 'unverifiable'):
@@ -2918,6 +3157,58 @@ class ReplacementTest(unittest.TestCase):
         before = {p: p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
         self._real_reuse()
         self._assert_sr_v2_review_is_next(record, before)
+
+    def test_answered_fail_and_stale_source_share_one_reopen_rule(self):
+        # The reopening of an answered FAIL and of a stale source-bound PASS is one rule
+        # (`completion_superseded`); the first is the same rule with the fix's answer added.
+        markers, _handoff = self._sr_failed_owner()
+        self._real_reuse()
+        lines = self.jobs.read_text().splitlines()
+        stale = D.GateCurrency('superseded', 'completion-review-source-stale')
+        with mock.patch.object(D, 'gate_currency', side_effect=lambda route, node, *a, **k: (
+                stale if node['id'] == 'report' else D.GateCurrency('current', 'completion-marker-verified'))), \
+                mock.patch.object(D, 'completion_superseded', wraps=D.completion_superseded) as rule:
+            snapshot = R._reuse_snapshot(self.jobs, self.route, lines)
+        self.assertEqual([row['node'] for row in snapshot['completed']], ['inspect'])
+        (reopened,) = snapshot['invalidated']
+        self.assertEqual((reopened['node'], reopened['currency'], reopened.get('reopened')),
+                         ('report', 'superseded', None))
+        self.assertGreaterEqual(rule.call_count, 2)
+        # Not reopened, not reused as current: an integrity break keeps its refusal.
+        with mock.patch.object(D, 'gate_currency', return_value=D.GateCurrency(
+                'integrity-broken:history-conflict', 'completion-marker-unreadable')):
+            with self.assertRaises(D.DispatchContractError):
+                R._reuse_snapshot(self.jobs, self.route, lines)
+        # An answered verdict is reopened whatever evidence change it shows, and carries the mark.
+        # Only the answered node shows the change: with gates on, the same change on an
+        # unanswered node is still refused, which is not what this case is about.
+        with mock.patch.object(R, '_answered_fail_verdicts', return_value={'inspect'}), \
+                mock.patch.object(D, 'gate_currency', side_effect=lambda route, node, *a, **k: D.GateCurrency(
+                    'revised-unrecorded', 'completion-evidence-revised-unrecorded')
+                    if node['id'] == 'inspect' else D.GateCurrency('current', 'completion-marker-verified')):
+            snapshot = R._reuse_snapshot(self.jobs, self.route, lines)
+        marks = {row['node']: row.get('reopened') for row in snapshot['invalidated']}
+        self.assertEqual(marks.get('inspect'), R.ANSWERED_FAIL_REOPEN)
+
+    def test_recovery_context_names_the_revision_path_of_a_reopened_stage_output(self):
+        markers, _handoff = self._sr_failed_owner()
+        route = self.route
+        invalidated = [{'node': 'inspect'}, {'node': 'report'}]
+        route['nodes'][1]['outputs'] = ['reviews/audit-report.md']
+        output = self.root / 'artifacts'
+        cycle = {'campaign_id': 'camp-test', 'cycle_id': 'cyc-test'}
+        import artifact_producer
+        with mock.patch.object(artifact_producer, 'route_cycle_for', return_value=cycle), \
+                mock.patch.object(artifact_producer, 'cycle_dir', return_value=output.parent), \
+                mock.patch.object(D, 'reopened_output_path', side_effect=lambda r, node, j, out: (
+                    str(Path(out) / 'reviews/audit-report.r2.md') if node['id'] == 'report' else None)) as named:
+            note = R._reopened_outputs_note(route, invalidated, self.jobs)
+        self.assertEqual(named.call_count, 2)
+        self.assertIn('report -> ' + str(output / 'reviews/audit-report.r2.md'), note)
+        self.assertNotIn('inspect ->', note)
+        # No cycle, or no path to name: nothing is added.
+        with mock.patch.object(artifact_producer, 'route_cycle_for', return_value=None):
+            self.assertEqual(R._reopened_outputs_note(route, invalidated, self.jobs), '')
 
     def test_sr_new_claim_pins_the_reopening_on_every_harness(self):
         for harness in ('claude', 'codex', 'opencode'):

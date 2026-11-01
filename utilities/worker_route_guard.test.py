@@ -81,7 +81,25 @@ class WorkerRouteGuardTest(unittest.TestCase):
    _,node,git=G.validate_route_contract(path,"execute",self.route_worktree,self.route_worktree,"autopilot-code","strong",";".join(next(x for x in route["nodes"] if x["id"]=="execute")["write_scope"]),route["route_id"],route["route_hash"],route["registry_digest"])
    self.assertEqual(node["id"],"execute")
    self.assertEqual(git["branch"],"guard-fixture")
-   self.assertRaisesRegex(G.WorkerRouteError,"expected=",G.validate_route_contract,path,"execute",self.route_worktree,self.route_worktree,"autopilot-code","strong","spec/**")
+   self.assertRaisesRegex(G.WorkerRouteError,"observed-outside-sealed-node",G.validate_route_contract,path,"execute",self.route_worktree,self.route_worktree,"autopilot-code","strong","reports/**")
+ def test_guard_accepts_subset_and_notation_of_sealed_scope(self):
+  # N05: the sealed scope names the generic and the component spec path; a re-check that passes one
+  # of them, or writes them with another separator, is the same approved work.
+  with tempfile.TemporaryDirectory() as td:
+   path=Path(td)/"route.json"; route=self.route()
+   node=next(x for x in route["nodes"] if x["id"]=="execute")
+   node["write_scope"]=["spec/**","spec/<component>/**","checklist.md","reviews/audit-report.md","dev_logs/**"]
+   self.reseal(route); path.write_text(json.dumps(route))
+   def check(scope):
+    return G.validate_route_contract(path,"execute",self.route_worktree,self.route_worktree,"autopilot-code","strong",scope)
+   for scope in (";".join(node["write_scope"]),",".join(node["write_scope"]),"spec/<component>/**","spec/<component>/**,spec/**",
+                 "spec/**; checklist.md","spec/prd/**","reviews/audit-report.md","reviews/audit-report.r2.md"):
+    with self.subTest(scope=scope): check(scope)
+   # Outside the sealed node, still refused; the detail names what was outside.
+   for scope in ("source/**","spec/**;source/**","reports/other.md","reviews/audit-report.r2.txt","reviews/other.r2.md","plans/**"):
+    with self.subTest(refused=scope), self.assertRaises(G.WorkerRouteError) as caught: check(scope)
+    self.assertEqual(caught.exception.reason,"route-node-scope-mismatch")
+    self.assertIn("observed-outside-sealed-node",str(caught.exception))
  def test_detached_spec_worktree_reports_safe_branch_recovery(self):
   with tempfile.TemporaryDirectory() as td:
    repo=Path(td)/"spec worktree"; repo.mkdir()

@@ -568,6 +568,20 @@ def node_scope_prompt(scope: "NodeScope") -> str:
     return " ".join(lines) + "\n"
 
 
+def reopened_output_prompt(args, route, scope: "NodeScope") -> str:
+    """Name the revision path of a reopened node's single output (`dispatch_contract.reopened_output_path`)."""
+    node = next((row for row in route.get("nodes", []) if row.get("id") == getattr(args, "route_node", None)), None)
+    if node is None or not scope.output_dir:
+        return ""
+    import dispatch_contract
+    path = dispatch_contract.reopened_output_path(route, node, getattr(args, "jobs_path", None), scope.output_dir)
+    if not path:
+        return ""
+    return (f"This node is run again and its output {Path(scope.output_dir) / node['outputs'][0]} still holds the earlier, "
+            f"historical result. Write this run's result to {path} instead, beside it, and pass that path to "
+            "`complete --evidence`; do not overwrite the earlier file.\n")
+
+
 def completion_scope_prompt() -> str:
     """Keep procedure defaults subordinate to the approved request and node scope."""
     return (
@@ -1055,7 +1069,8 @@ def assignment_prompt(args, task: str, environ) -> str:
                 f"{assignment_hint(route, getattr(args, 'route_node', None))}"
                 f"{plan_leg_prompt(route, getattr(args, 'route_node', None),
                                    getattr(args, 'report_file', None))}"
-                f"{node_scope_prompt(scope)}{node_inputs_prompt(route, getattr(args, 'route_node', None), scope.output_dir)}"
+                f"{node_scope_prompt(scope)}{reopened_output_prompt(args, route, scope)}"
+                f"{node_inputs_prompt(route, getattr(args, 'route_node', None), scope.output_dir)}"
                 f"{input_sources_prompt(route, getattr(args, 'route_node', None))}\n"
                 f"{automatic_consumer_prompt(route, getattr(args, 'route_node', None))}"
                 f"{steps}{owner_gate_prompt(args)}{'' if steps else owner_inline_marker_prompt(args)}{owner_close_prompt(args)}")

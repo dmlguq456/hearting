@@ -2769,6 +2769,22 @@ def _run_slices(args: argparse.Namespace, route: dict[str, object]) -> int:
 
 
 
+def leg_launch_brief(leg, leg_count, group):
+    """The one line that says which leg reads the shared batch instruction.
+
+    The owner writes one instruction for every leg of a parallel group. A node name inside it
+    that is not the leg's own names a sibling's work. The sealed batch input and the assignment
+    digest keep the owner's raw text byte for byte (the reservation, a resume and every adapter
+    hash the same bytes); this line rides the unhashed recovery-brief channel, built from the leg
+    alone so a resume or a reseal produces the same line. A single-leg batch has nothing to tell apart.
+    """
+    if leg_count < 2:
+        return ""
+    return (f"This leg is node `{leg['node']}` (parallel group `{group}`, "
+            f"leg {leg.get('parallel_leg_index')}). The shared batch instruction applies to this node; "
+            "a node name in it that is not yours names a sibling leg's work, not a reason to stop.")
+
+
 def node_launch_command(*, route_path, leg, parent, prompt_text, reviewed_evidence, jobs,
                         parent_attempt, log_dir, lifecycle, qa, automatic_retry_of=None):
     """The dispatch-node.py argv for one admitted leg.
@@ -3828,10 +3844,14 @@ def main(argv: list[str] | None = None) -> int:
                                        "source_subject_digest", None)
             if admitted_subject:
                 env["AGENT_REVIEW_SOURCE_SUBJECT_DIGEST"] = admitted_subject
+            # Message content only: the original raw task still supplies the exact
+            # reservation assignment digest in every adapter.
+            leg_brief = leg_launch_brief(leg, len(legs), args.parallel_group)
             if partial is not None:
-                # Message content only: the original raw task still supplies
-                # the exact reservation assignment digest in every adapter.
-                env["AGENT_DISPATCH_RETRY_BRIEF"] = args.prompt_text
+                env["AGENT_DISPATCH_RETRY_BRIEF"] = (
+                    leg_brief + "\n\n" + args.prompt_text if leg_brief else args.prompt_text)
+            elif leg_brief:
+                env["AGENT_DISPATCH_RETRY_BRIEF"] = leg_brief
             try:
                 proc = subprocess.Popen(
                     command,

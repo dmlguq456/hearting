@@ -249,7 +249,7 @@ class ArtifactContext:
         parts = PurePosixPath(relative).parts
         declarations = [value for value in self.outputs if not is_semantic_output(value)]
         if (not scope_matches(relative, self.write_scope)
-                or not any(_path_pattern_matches(parts, _scope_parts(value)) for value in declarations)):
+                or not any(_declared_path_matches(parts, _scope_parts(value)) for value in declarations)):
             return None
 
         root = self.artifact_root.resolve(strict=False)
@@ -311,7 +311,11 @@ def scope_values(value) -> list[str]:
 
 
 def scope_matches(relative: str, scopes) -> bool:
-    """Component-aware match for a route scope; `**` crosses components."""
+    """Component-aware match for a route scope; `**` crosses components.
+
+    A scope that names one exact file also covers that file's revision paths
+    (``revision_output``): the same output of the same node, written beside the earlier one.
+    """
     try:
         path = _safe_relative(relative)
     except ArtifactContextError:
@@ -320,9 +324,52 @@ def scope_matches(relative: str, scopes) -> bool:
     for scope in scopes or ():
         if not isinstance(scope, str) or not scope or classify_scope(scope) != "artifact":
             continue
-        if _path_pattern_matches(parts, _scope_parts(scope)):
+        if _declared_path_matches(parts, _scope_parts(scope)):
             return True
     return False
+
+
+def scope_covers(value: str, scopes) -> bool:
+    """Whether one declared scope value stays inside the given route scopes.
+
+    The same value, or an artifact scope narrower than a declared one (``spec/<c>/**`` under
+    ``spec/**``), or an exact output's revision path (``scope_matches`` reads the same rule).
+    A source scope is covered only by itself: it is the worktree's, not the artifact tree's.
+    """
+    if not isinstance(value, str) or not value:
+        return False
+    scopes = [scope for scope in scopes or () if isinstance(scope, str) and scope]
+    if value in scopes:
+        return True
+    if classify_scope(value) != "artifact":
+        return False
+    parts = tuple(PurePosixPath(value).parts)
+    return any(classify_scope(scope) == "artifact" and _declared_path_matches(parts, _scope_parts(scope))
+               for scope in scopes)
+
+
+_REVISION_NAME = re.compile(r"\.r[1-9][0-9]*(?=\.[^./]+$)")
+
+
+def revision_output(path: str | Path, sequence: int) -> str:
+    """The revision path of an exact output file: ``<stem>.r<N><suffix>`` beside it.
+
+    A node that is run again after its result became historical writes here, so the earlier
+    result is not overwritten. ``sequence`` is the node's next completion sequence.
+    """
+    value = Path(path)
+    return str(value.with_name(f"{value.stem}.r{int(sequence)}{value.suffix}"))
+
+
+def _declared_path_matches(parts: tuple[str, ...], pattern: tuple[str, ...]) -> bool:
+    """``_path_pattern_matches``, plus the revision paths of an exact one-file declaration."""
+    if _path_pattern_matches(parts, pattern):
+        return True
+    if (not parts or not pattern or pattern[-1] == "**" or len(parts) != len(pattern)
+            or any(re.search(r"[*?\[<]", part) for part in pattern)):
+        return False
+    base = _REVISION_NAME.sub("", parts[-1], count=1)
+    return base != parts[-1] and Path(base).suffix != "" and (*parts[:-1], base) == pattern
 
 
 def render_outputs(output_dir: str | Path | None, outputs) -> list[str]:

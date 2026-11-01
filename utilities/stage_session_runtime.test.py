@@ -376,6 +376,35 @@ class StageSessionStateDirTests(unittest.TestCase):
         self.assertEqual(args2.fixed_files_sha256, args.fixed_files_sha256)
         self.assertNotEqual(args2.phase_brief_sha256, args.phase_brief_sha256)
 
+    def test_mixed_node_serial_session_fence_includes_brief_artifact_outputs(self):
+        # #14: a node with source and artifact scope; the brief names the contract and spec outputs.
+        brief = "계약서 `spec/x-contract.md`와 `reviews/claim-verdict.json`을 쓴다. 범위 밖 reports/other.md.\n"
+        scope = ["source/**", "spec/**", "reviews/claim-verdict.json"]
+        args, route, cycle, output_dir = self._artifact_args(brief_text=brief, scope=scope)
+        self._bind_artifact(args, route, cycle, output_dir, action="start")
+        self.assertEqual(args.effective_fixed_files, sorted([
+            *args.fixed_file, str(output_dir / "spec/x-contract.md"), str(output_dir / "reviews/claim-verdict.json")]))
+        self.assertEqual(args.readonly_input_files, [])           # worktree files are not turned read-only
+        self.assertNotIn(str(output_dir / "reports/other.md"), args.effective_fixed_files)
+        # A gap-retry session reads the same node the same way.
+        args, route, cycle, output_dir = self._artifact_args(brief_text=brief, scope=scope)
+        args.subsession_purpose = "gap-retry"
+        self._bind_artifact(args, route, cycle, output_dir, action="start")
+        self.assertIn(str(output_dir / "spec/x-contract.md"), args.effective_fixed_files)
+
+    def test_parallel_slice_fence_stays_declared(self):
+        brief = "계약서 `spec/x-contract.md`를 쓴다. `../x.md`와 다른 cycle의 `campaigns/other/x.md`도 있다.\n"
+        scope = ["source/**", "spec/**"]
+        args, route, cycle, output_dir = self._artifact_args(brief_text=brief, scope=scope)
+        args.subsession_mode = "parallel"
+        self._bind_artifact(args, route, cycle, output_dir, action="start")
+        self.assertEqual(args.effective_fixed_files, args.fixed_file)    # slices stay disjoint (H3)
+        self.assertNotIn(str(output_dir / "spec/x-contract.md"), args.effective_fixed_files)
+        # Serial: only a path inside the node's artifact scope is added; an escape or another cycle is not.
+        args, route, cycle, output_dir = self._artifact_args(brief_text=brief, scope=scope)
+        self._bind_artifact(args, route, cycle, output_dir, action="start")
+        self.assertEqual(args.effective_fixed_files, sorted([*args.fixed_file, str(output_dir / "spec/x-contract.md")]))
+
     def test_artifact_fence_fallback_and_scope_boundaries(self):
         args, route, cycle, output_dir = self._artifact_args(brief_text="No path named here.\n",
                                                               outputs=["reviews/claim-verdict.json"])

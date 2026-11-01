@@ -8,7 +8,10 @@
   unfinished item to the owner without widening scope.
   For a bound artifact-only node, the effective list names its in-scope outputs
   from the phase brief; declared worktree files are read-only inputs, and brief
-  output paths are relative to the cycle output directory.
+  output paths are relative to the cycle output directory. For a bound node
+  that also has source scope, a serial or gap-retry session keeps its fixed
+  files and adds the brief's in-scope artifact outputs; a parallel slice keeps
+  its declared list.
   When the sealed QA plan requires `done_when` records, the exact primary
   report's `.items.json` sidecar follows that report through the same fence,
   ledger, and any continuation derived from it.

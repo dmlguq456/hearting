@@ -955,28 +955,82 @@ def owns(meta, session, jobs, *, read_context=None) -> bool:
     return seat_owns(meta, session, jobs, read_context=read_context)
 
 
+def parent_attempt_succeeded(jobs, recorded, actual) -> bool:
+    """True when ``actual`` is ``recorded`` or the final launched replacement of it.
+
+    The one answer for "is this the recorded parent attempt, as the replacement
+    lineage reads it". A claim-only or intermediate successor does not qualify
+    (``effective_attempts`` projects only launched hops), and an unreadable
+    lineage is "not proven", which stays the existing refusal.
+    """
+    if recorded == actual:
+        return True
+    if not jobs or not recorded or not actual:
+        return False
+    import dispatch_contract as DC
+    from dispatch_replacement import effective_attempts
+    try:
+        effective, mapping = effective_attempts(jobs, {recorded})
+    except (OSError, ValueError, DC.DispatchContractError):
+        return False
+    return bool(mapping) and effective == {actual}
+
+
+def current_route_owner(route, jobs, rows):
+    """The owner attempt that answers for ``route`` now, or None.
+
+    ``rows`` maps attempt id to ``(status, metadata)`` in registry order. Each
+    original owner attempt is projected to its final launched replacement
+    (``effective_attempts``); the last such row in registry order answers. A
+    claim-only or unlaunched replacement is not the owner yet. When the
+    lineage cannot be read the last owner row answers, as before.
+    """
+    route_ids = {route["route_id"]}
+    owners = [(aid, meta) for aid, (_status, meta) in rows.items()
+              if meta.get("worker_type") == "owner"
+              and route_ids & {meta.get("owner_route_id"), meta.get("route_id")}]
+    if not owners:
+        return None
+    originals = {aid for aid, meta in owners if not meta.get("replacement_original_attempt_id")}
+    if originals and jobs:
+        import dispatch_contract as DC
+        from dispatch_replacement import effective_attempts
+        try:
+            effective, _mapping = effective_attempts(jobs, originals)
+        except (OSError, ValueError, DC.DispatchContractError):
+            effective = None
+        if effective:
+            launched = [meta for aid, meta in owners if aid in effective]
+            if launched:
+                return launched[-1]
+    return owners[-1][1]
+
+
 def require_replacement_parent(jobs, rows, meta, *, current_session) -> None:
     """Only the attempt's parent may start its replacement.
 
-    Dispatch depth 2: the caller's own attempt is the registered, live parent
-    attempt. Otherwise: the registered parent session or its same-seat
-    successor. ``current_session`` is called only on that second path.
+    Dispatch depth 2: the caller's own attempt is the registered parent attempt
+    or its final launched replacement, and is live. Otherwise: the registered
+    parent session or its same-seat successor. ``current_session`` is called
+    only on that second path.
     """
     if meta.get('dispatch_depth') == '2':
         import dispatch_contract as DC
         parent = meta.get('parent_attempt_id')
-        if not parent or os.environ.get('AGENT_DISPATCH_ATTEMPT_ID') != parent or parent not in rows:
+        caller = os.environ.get('AGENT_DISPATCH_ATTEMPT_ID')
+        if (not parent or parent not in rows or not caller or caller not in rows
+                or not parent_attempt_succeeded(jobs, parent, caller)):
             raise DC.DispatchContractError('replacement-parent-identity-unproven')
-        fields, parent_meta = rows[parent]
-        if fields[1] not in {'open', 'running'} or not DC._parent_liveness_evidence(Path(jobs), parent_meta)[0]:
+        fields, caller_meta = rows[caller]
+        if fields[1] not in {'open', 'running'} or not DC._parent_liveness_evidence(Path(jobs), caller_meta)[0]:
             raise DC.DispatchContractError('replacement-parent-not-live')
     elif not meta.get('parent_sid') or not owns(meta, current_session(), jobs):
         raise _contract_error('replacement-parent-identity-unproven')
 
 
 def replacement_parent_matches(source, candidate, jobs, *, lineage=False) -> bool:
-    """Keep the parent attempt exact; a depth-1 session may be its recorded successor."""
-    if candidate.get('parent_attempt_id') != source.get('parent_attempt_id'):
+    """The parent attempt follows the replacement lineage; a depth-1 session may be its recorded successor."""
+    if not parent_attempt_succeeded(jobs, source.get('parent_attempt_id'), candidate.get('parent_attempt_id')):
         return False
     if candidate.get('parent_sid') == source.get('parent_sid'):
         return True
@@ -1601,7 +1655,6 @@ def require_recovery_binding(record, source, candidate, jobs):
     if (candidate.get(route_key) != record["route_id"]
             or candidate.get(hash_key) != record["route_hash"]
             or not replacement_parent_matches(source, candidate, jobs)
-            or (source.get("dispatch_depth") != "1" and candidate.get("parent") != source.get("parent"))
             or any(candidate.get(key) != source.get(key) for key in RECOVERY_SCOPE_KEYS)):
         raise _contract_error("replacement-launch-binding-mismatch", source.get("attempt_id", ""))
     if source.get("session_chain_id"):
@@ -2493,9 +2546,76 @@ def release_moved(sealed: dict, current: dict, *, managed_release) -> frozenset:
     return frozenset(moved)
 
 
+# The grant keys `require_recovery_grant_addresses` reads. A grant that differs only inside
+# these may still be within the approved addresses; any other key differing is other work.
+_ADDRESS_GRANT_KEYS = frozenset({
+    "execution_access", "nested_headless_network", "opencode_permission",
+    "opencode_selected_agent_permission", "claude"})
+_PATHED_CLAUDE_FILE_RULE = re.compile(r"(?:Read|Edit|Write)\([^)]+\)")
+
+
+def _resealed_route(previous):
+    """The route the sealed input was launched under, or None for a standalone input.
+
+    Raises ``DispatchContractError`` when the sealed route cannot be read or is not the
+    sealed route (not observable, so not within approval)."""
+    from dispatch_contract import DispatchContractError, _route_module
+    if not previous.get("route_id"):
+        return None
+    argv = previous.get("argv") or []
+    path = next((argv[index + 1] for index, token in enumerate(argv[:-1]) if token == "--route-file"), None)
+    try:
+        route = json.loads(Path(path).read_text(encoding="utf-8"))
+        _route_module().verify_route(route)
+    except (TypeError, OSError, ValueError, AttributeError):
+        raise DispatchContractError("replacement-input-tuple-mismatch", "route") from None
+    if route.get("route_id") != previous["route_id"]:
+        raise DispatchContractError("replacement-input-tuple-mismatch", "route")
+    return route
+
+
+def _grants_within_approval(previous, current, recovery) -> bool:
+    """Same grants, or a difference that stays inside the approved task addresses.
+
+    A difference qualifies only when every changed grant key is one the address check reads,
+    the rest of the grants are equal once the address-read parts are set aside, and
+    ``require_recovery_grant_addresses`` accepts the current grants against the sealed ones.
+    Anything unobservable is a refusal."""
+    old, new = _granted_permission_pair(previous, current)
+    if old == new:
+        return True
+    if {key for key in set(old) | set(new) if old.get(key) != new.get(key)} - _ADDRESS_GRANT_KEYS:
+        return False
+
+    def beyond_addresses(grants):
+        value = _without_recovery_access(grants)
+        value.pop("nested_headless_network", None)
+        claude = value.get("claude")
+        if isinstance(claude, dict) and isinstance(claude.get("allowed_tools"), list):
+            value["claude"] = {**claude, "allowed_tools": [
+                rule for rule in claude["allowed_tools"]
+                if not (isinstance(rule, str) and _PATHED_CLAUDE_FILE_RULE.fullmatch(rule))]}
+        return value
+
+    if beyond_addresses(old) != beyond_addresses(new):
+        return False
+    from dispatch_contract import DispatchContractError
+    try:
+        route = recovery[3] if recovery is not None else _resealed_route(previous)
+        access = recovery[0].get("execution_access") if recovery is not None else None
+        require_recovery_grant_addresses(current, previous, route=route, access=access)
+    except (DispatchContractError, OSError, ValueError, KeyError, TypeError):
+        return False
+    return True
+
+
 def same_sealed_work(previous, current, *, recovery=None) -> bool:
-    """Whether two sealed launch inputs describe the same work with the same granted permissions."""
-    old_grants, new_grants = _granted_permission_pair(previous, current)
+    """Whether two sealed launch inputs describe the same work, with grants inside the approval.
+
+    The work is the identity keys and the work options of ``argv``; selection options
+    (model, route file, ...) and the retry brief follow the current launch. The permissions
+    granted are equal, or differ only inside the approved task addresses
+    (``_grants_within_approval``). An owner recovery may also move the harness."""
     old_applied = previous.get("applied_permissions") or {}
     new_applied = current.get("applied_permissions") or {}
     selected_key = "opencode_selected_agent_permission"
@@ -2515,16 +2635,17 @@ def same_sealed_work(previous, current, *, recovery=None) -> bool:
                     current, previous, route=route, access=access)
             except DispatchContractError:
                 return False
-    exact = (all(previous.get(key) == current.get(key) for key in RESEAL_STABLE_KEYS
-                 if key != "argv")
-            and _same_reseal_argv(previous, current)
-            and old_grants == new_grants)
+    work = (all(previous.get(key) == current.get(key) for key in RESEAL_STABLE_KEYS
+                if key not in {"argv", "retry_brief"})
+            and _work_options(previous.get("argv", []), harness=previous.get("harness"))
+            == _work_options(current.get("argv", []), harness=current.get("harness")))
+    exact = work and _grants_within_approval(previous, current, recovery)
     if exact or recovery is None:
         return exact
     record, source, history, route = recovery
     if (source.get("worker_type") != "owner"
             or any(previous.get(key) != current.get(key) for key in RESEAL_STABLE_KEYS
-                   if key not in {"harness", "argv"})
+                   if key not in {"harness", "argv", "retry_brief"})
             or current.get("task") != recovery_task(record, source, history)):
         return False
     from dispatch_contract import DispatchContractError
@@ -2533,32 +2654,6 @@ def same_sealed_work(previous, current, *, recovery=None) -> bool:
     except DispatchContractError:
         return False
     return True
-
-
-def _same_reseal_argv(previous, current) -> bool:
-    """Ignore only OpenCode's agent label; its recorded policy is compared separately."""
-    old = previous.get("argv", [])
-    new = current.get("argv", [])
-    if previous.get("harness") != "opencode" or current.get("harness") != "opencode":
-        return old == new
-
-    def without_agent(argv):
-        result = []
-        index = 0
-        while index < len(argv):
-            token = argv[index]
-            if token.startswith("--agent="):
-                index += 1
-                continue
-            if (token == "--agent" and index + 1 < len(argv)
-                    and not argv[index + 1].startswith("--")):
-                index += 2
-                continue
-            result.append(token)
-            index += 1
-        return result
-
-    return without_agent(old) == without_agent(new)
 
 
 # ---------------------------------------------------------------------------

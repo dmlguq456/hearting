@@ -1094,5 +1094,43 @@ class StartWaitRetryTest(unittest.TestCase):
         self.assertEqual(result.refusal.reason, "subsession-advance-successor-start-failed:x")
 
 
+class ParentBindingLineageTest(unittest.TestCase):
+    """U1-T7: the supervisor's caller is the registered parent or its final launched replacement."""
+
+    def setUp(self):
+        self.sandbox = Sandbox()
+        self.addCleanup(self.sandbox.close)
+        self.manifest = make_manifest(2)
+        self.services = SA.RealSubsessionAdvanceServices(self.manifest)
+        self.request = SA.SubsessionAdvanceRequest(
+            **{**vars(make_request(self.sandbox, self.manifest, successor_index=2)), "parent_slug": "owner"})
+
+    def run_as(self, caller, *, final):
+        import dispatch_replacement
+        done = SimpleNamespace(returncode=0, stdout="check=ok\nregistered=1\nchild_spawned=0\n", stderr="")
+        with mock.patch.dict(os.environ, {"AGENT_DISPATCH_ATTEMPT_ID": caller}), \
+                mock.patch.object(dispatch_replacement, "effective_attempts",
+                                  return_value=({final}, [{"edge": 1}] if final != "att-owner-0001" else [])), \
+                mock.patch.object(self.services._chain, "dispatch_command", return_value=["true"]), \
+                mock.patch.object(self.services._chain, "run_checked", return_value=done) as run:
+            result = self.services._run(self.request, "register")
+        return result, run
+
+    def test_successor_register_accepts_launched_replacement_owner(self):
+        result, run = self.run_as("att-owner-0002", final="att-owner-0002")
+        self.assertEqual(result["verdict"], "register-ok")
+        # The launch still carries the registered parent identity.
+        self.assertEqual(run.call_args.kwargs["env"]["AGENT_DISPATCH_ATTEMPT_ID"], "att-owner-0001")
+        result, _ = self.run_as("att-owner-0001", final="att-owner-0001")
+        self.assertEqual(result["verdict"], "register-ok")
+
+    def test_successor_register_refuses_unrelated_or_intermediate_owner(self):
+        for caller, final in (("att-unrelated", "att-owner-0002"), ("att-owner-0002", "att-owner-0003"), ("", "att-owner-0002")):
+            with self.subTest(caller=caller, final=final):
+                result, run = self.run_as(caller, final=final)
+                self.assertEqual(result["reason"], "subsession-advance-parent-binding-invalid")
+                run.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

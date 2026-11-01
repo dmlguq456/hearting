@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import importlib.util
 import io
 import json
@@ -1999,10 +2000,14 @@ class DispatchBatchTest(unittest.TestCase):
         self.assertEqual(popen.call_count, 1)
         self.assertEqual(len(created), 1)
         command = created[0].command
-        self.assertEqual(command[command.index("--prompt-text") + 1],
-                         BATCH.DEFAULT_PROMPT if original_prompt is None else original_prompt)
-        self.assertEqual(created[0].env["AGENT_DISPATCH_RETRY_BRIEF"],
-                         retry_prompt if retry_prompt is not None else BATCH.DEFAULT_PROMPT)
+        # The shared instruction stays the owner's sealed text; the one line naming this leg's node
+        # leads the (unhashed) brief beside the current retry brief.
+        launched = command[command.index("--prompt-text") + 1]
+        node = command[command.index("--node") + 1]
+        self.assertEqual(launched, BATCH.DEFAULT_PROMPT if original_prompt is None else original_prompt)
+        brief = created[0].env["AGENT_DISPATCH_RETRY_BRIEF"]
+        self.assertTrue(brief.startswith(f"This leg is node `{node}`"), brief)
+        self.assertTrue(brief.endswith("\n\n" + (retry_prompt if retry_prompt is not None else BATCH.DEFAULT_PROMPT)))
         self.assertEqual(command[command.index("--parent-attempt-id") + 1], parent_attempt)
         self.assertEqual(
             command[command.index("--attempt-id") + 1],
@@ -4384,6 +4389,36 @@ class DispatchBatchTest(unittest.TestCase):
         self.assertFalse(jobs.exists())
         return rc, output.getvalue(), error.getvalue(), log_dir
 
+    def test_parallel_legs_get_their_own_node_line_beside_the_unchanged_shared_instruction(self):
+        # #20: one owner instruction reaches every leg; each leg also learns which node it is.
+        # The line rides the unhashed brief channel, so the raw assignment (and its reserved
+        # digest) is the owner's instruction byte for byte.
+        seen = {}
+        out_dir = Path(tempfile.mkdtemp(prefix="leg-seen-", dir=self.base))
+        def script(leg, command):
+            prompt = command[command.index("--prompt-text") + 1]
+            target = out_dir / f"{leg['node']}.json"
+            return ("import json, os\n"
+                    f"open({str(target)!r}, 'w').write(json.dumps({{'prompt': {prompt!r}, "
+                    "'brief': os.environ.get('AGENT_DISPATCH_RETRY_BRIEF', '')}))")
+        self._run_diagnostic_wrapper_batch("codex", script)
+        for path in out_dir.glob("*.json"):
+            seen[path.stem] = json.loads(path.read_text(encoding="utf-8"))
+        nodes = sorted(seen)
+        self.assertEqual(len(nodes), 2)
+        shared = BATCH.DEFAULT_PROMPT
+        sealed = "sha256:" + hashlib.sha256(shared.encode("utf-8")).hexdigest()
+        for node in nodes:
+            self.assertEqual(seen[node]["prompt"], shared)
+            self.assertEqual("sha256:" + hashlib.sha256(seen[node]["prompt"].encode("utf-8")).hexdigest(), sealed)
+            self.assertTrue(seen[node]["brief"].startswith(f"This leg is node `{node}`"), seen[node]["brief"])
+        self.assertNotEqual(seen[nodes[0]]["brief"], seen[nodes[1]]["brief"])
+        # The line comes from the leg alone (a resume builds the same line); one leg has nothing to tell apart.
+        leg = {"node": "n", "parallel_leg_index": 0}
+        self.assertEqual(BATCH.leg_launch_brief(leg, 2, "g"), BATCH.leg_launch_brief(leg, 2, "g"))
+        self.assertIn("parallel group `g`", BATCH.leg_launch_brief(leg, 2, "g"))
+        self.assertEqual(BATCH.leg_launch_brief(leg, 1, "g"), "")
+
     def test_exit_one_wrapper_saves_bounded_traceback_for_each_harness(self):
         for harness in ("claude", "codex", "opencode"):
             with self.subTest(harness=harness):
@@ -5590,7 +5625,11 @@ class GroupLegReviewRoundCapTest(unittest.TestCase):
         self.assertNotEqual(expected_block, "")
         self.assertIn("판정 없음", expected_block)
         self.assertEqual(actual_prompt, BATCH.DEFAULT_PROMPT)
-        self.assertEqual(recovery_context["impl-review"], expected_block)
+        self.assertTrue(recovery_context["impl-review"].startswith("This leg is node `impl-review`"))
+        self.assertEqual(recovery_context["impl-review"],
+                         BATCH.leg_launch_brief(
+                             {"node": "impl-review", "parallel_leg_index": 0}, 2, "impl-review")
+                         + expected_block)
 
 
 

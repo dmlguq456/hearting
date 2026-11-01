@@ -46,12 +46,17 @@ class ReviewInputTest(unittest.TestCase):
                      'unit': self.node['unit'], 'route_file': str(self.route_file)}
         # These unit fixtures isolate input fences; real route verification is
         # exercised by the public node/chain entrypoint suite.
-        import review_round_cap
-        round_module = SimpleNamespace(review_lineage_routes=lambda route,node:[route],
-            review_round_records=lambda *args,**kwargs:[],
-            _dependency_revisions=lambda *args,**kwargs:[], REVIEW_ROUND_CAP=review_round_cap)
-        patcher = mock.patch.object(R, '_route_module', return_value=round_module)
-        patcher.start(); self.addCleanup(patcher.stop)
+        # The registration fence and the preview both read dispatch-node's one
+        # `admit_round`; isolate only its route-lineage/row/revision sources.
+        self.node_module = R._dispatch_node_module()
+        self.rounds = []
+        self.revisions = []
+        route_module = self.node_module.ROUTE
+        for name, fake in (("review_lineage_routes", lambda route, node: [route]),
+                           ("review_round_records", lambda *args, **kwargs: list(self.rounds)),
+                           ("_dependency_revisions", lambda *args, **kwargs: list(self.revisions))):
+            patcher = mock.patch.object(route_module, name, side_effect=fake)
+            patcher.start(); self.addCleanup(patcher.stop)
 
     def seal(self, **kwargs):
         candidate = R.resolve_input(self.route, self.node, self.jobs, self.evidence)
@@ -73,7 +78,7 @@ class ReviewInputTest(unittest.TestCase):
     def assert_reason(self, reason, fn, *args, **kwargs):
         with self.assertRaises(DC.DispatchContractError) as error:
             fn(*args, **kwargs)
-        self.assertEqual(error.exception.reason, reason)
+        self.assertEqual(error.exception.reason, reason, str(error.exception))
 
     def test_producerless_requires_explicit_input_without_mutation(self):
         self.assert_reason('reviewed-evidence-required', R.resolve_input,
@@ -348,38 +353,125 @@ class ReviewInputTest(unittest.TestCase):
         # budget. The former input-revision closure permission remains for
         # that input family but cannot relabel a new content review.
         self.assertEqual(fresh.budget.round_kind, 'first')
-        # Between route admission and wrapper registration, B itself changes.
-        # The atomic fence must not accept the new bytes against B's old record.
-        corrected.write_text('unapproved bytes C')
-        current = R.resolve_input(self.route, self.node, self.jobs, corrected)
+        # The fence reads the same admission as the preview, so the former
+        # permission is still not borrowed by the exhausted original input.
         (self.root/'review-input-revisions').mkdir()
-        with mock.patch.object(R, '_route_module', return_value=module), \
-                mock.patch.object(module, 'review_lineage_routes', return_value=[self.route]), \
-                mock.patch.object(module, 'review_round_records', return_value=[(['now','done'],previous)]), \
-                mock.patch.object(module, '_review_input_revision_records', return_value=[revision]):
+        patches = (mock.patch.object(R, '_dispatch_node_module', return_value=node_module),
+                   mock.patch.object(node_module, 'prior_round_attempts', return_value=[(['now','done'], previous)]),
+                   mock.patch.object(node_module, '_auto_record_revisions', return_value=()),
+                   mock.patch.object(module, 'review_lineage_routes', return_value=[self.route]),
+                   mock.patch.object(module, 'preview_review_input_revision', return_value={'input_revision':revision}),
+                   mock.patch.object(module, '_review_input_revision_records', return_value=[revision]))
+        with contextlib.ExitStack() as stack:
+            for patch in patches:
+                stack.enter_context(patch)
             self.assert_reason('reviewed-evidence-revision-not-admitted', R.validate_revision_admission,
-                               self.jobs, dict(self.meta, attempt_id='att-new'), current)
+                               self.jobs, dict(self.meta, attempt_id='att-new'), original)
+            # Between route admission and wrapper registration, B itself changes.
+            # The launch fence must not accept the new bytes against B's old record.
+            new_meta = dict(self.meta, attempt_id='att-new')
+            new_meta[R.KEY] = R.seal_binding(self.jobs, new_meta, candidate)
+            corrected.write_text('unapproved bytes C')
+            self.assert_reason('reviewed-evidence-changed', R.validate_launch, self.jobs, new_meta)
 
     def test_parallel_review_cap_applies_without_any_input_revision_directory(self):
         import review_round_cap
         self.node['id']='plan-check-alternative';self.meta['route_node']=self.node['id']
         self.route_file.write_text(json.dumps(self.route))
         candidate=self.seal()
-        rounds=[]
-        module=SimpleNamespace(review_lineage_routes=lambda route,node:[route],
-            review_round_records=lambda *args,**kwargs:rounds,
-            _dependency_revisions=lambda *args,**kwargs:[],REVIEW_ROUND_CAP=review_round_cap)
+        rounds = self.rounds
         self.assertFalse((self.root/'review-input-revisions').exists())
-        with mock.patch.object(R,'_route_module',return_value=module):
-            for number in (1,2,3,4):
-                current=dict(self.meta,attempt_id=f'att-next-{number}')
-                if number<=2:
-                    R.validate_revision_admission(self.jobs,current,candidate)
+        for number in (1,2,3,4):
+            current=dict(self.meta,attempt_id=f'att-next-{number}')
+            if number<=2:
+                R.validate_revision_admission(self.jobs,current,candidate)
+            else:
+                self.assert_reason('reviewed-evidence-revision-not-admitted',
+                    R.validate_revision_admission,self.jobs,current,candidate)
+            prior = dict(self.meta, attempt_id=f'att-r{number}',
+                         worker_type='review', note='completed-review-blocking')
+            prior[R.KEY] = R.seal_binding(self.jobs, prior, candidate)
+            rounds.append((['now','done','', '', f'slug-{number}'], prior))
+
+    def _sealed_verdict_rows(self, candidate, count):
+        for number in range(1, count + 1):
+            prior = dict(self.meta, attempt_id=f'att-r{number}', worker_type='review',
+                         note='completed-review-blocking')
+            prior[R.KEY] = R.seal_binding(self.jobs, prior, candidate)
+            self.rounds.append((['now', 'done', '', '', f'slug-{number}'], prior))
+
+    def test_preview_and_fence_share_one_round_admission(self):
+        candidate = self.seal()
+        preview = SimpleNamespace(**dict(self.meta, action='dry-run', jobs_path=self.jobs, command_attempt_id=None,
+                                         reviewed_evidence=str(self.evidence), automatic_retry_of=None,
+                                         parent_attempt_id=None, attempt_id='att-next'))
+        for count, state in ((0, 'admit'), (1, 'admit'), (2, 'exhausted')):
+            self.rounds.clear(); self._sealed_verdict_rows(candidate, count)
+            seen = []
+            real = R._round_admission
+            def spy(*args, **kwargs):
+                seen.append(kwargs)
+                return real(*args, **kwargs)
+            with mock.patch.object(R, '_round_admission', side_effect=spy):
+                if state == 'admit':
+                    admitted = R.preview_request_admission(preview, self.jobs)
+                    R.validate_revision_admission(self.jobs, dict(self.meta, attempt_id='att-next'), candidate)
+                    self.assertEqual(admitted.budget.state, 'admit')
                 else:
                     self.assert_reason('reviewed-evidence-revision-not-admitted',
-                        R.validate_revision_admission,self.jobs,current,candidate)
-                rounds.append((['now','done'],{'attempt_id':f'att-r{number}',
-                    'worker_type':'review','note':'completed-review-blocking'}))
+                                       R.preview_request_admission, preview, self.jobs)
+                    self.assert_reason('reviewed-evidence-revision-not-admitted', R.validate_revision_admission,
+                                       self.jobs, dict(self.meta, attempt_id='att-next'), candidate)
+            self.assertEqual(len(seen), 2, (count, seen))             # one decision, two callers
+            self.assertEqual(seen[0], seen[1], (count, seen))           # over the same facts
+            self.assertEqual(seen[0]['reviewed_evidence'], str(self.evidence))
+
+    def test_round_admission_still_refuses_exhausted_without_revision(self):
+        candidate = self.seal()
+        self._sealed_verdict_rows(candidate, 2)
+        preview = SimpleNamespace(**dict(self.meta, action='dry-run', jobs_path=self.jobs, command_attempt_id=None,
+                                         reviewed_evidence=str(self.evidence), automatic_retry_of=None,
+                                         parent_attempt_id=None, attempt_id='att-next'))
+        for call in (lambda: R.preview_request_admission(preview, self.jobs),
+                     lambda: R.validate_revision_admission(self.jobs, dict(self.meta, attempt_id='att-next'), candidate)):
+            self.assert_reason('reviewed-evidence-revision-not-admitted', call)
+        # A sealed subject that no longer matches the observed one is unproven,
+        # not a verdict on this attempt; the same digest follows the admission.
+        admitted = SimpleNamespace(budget=SimpleNamespace(state='admit'), source_subject_digest='sha256:now')
+        sealed = {'subject_digest': 'sha256:sealed'}
+        import review_source_subject as subject
+        with mock.patch.object(R, '_round_admission', return_value=admitted), \
+                mock.patch.object(subject, 'read_binding', return_value=sealed):
+            self.assert_reason('reviewed-evidence-revision-unproven', R.validate_revision_admission,
+                               self.jobs, dict(self.meta, attempt_id='att-next'), candidate)
+            sealed['subject_digest'] = 'sha256:now'
+            R.validate_revision_admission(self.jobs, dict(self.meta, attempt_id='att-next'), candidate)
+            admitted.budget.state = 'exhausted'
+            self.assert_reason('reviewed-evidence-revision-not-admitted', R.validate_revision_admission,
+                               self.jobs, dict(self.meta, attempt_id='att-next'), candidate)
+
+    def test_unrecorded_planned_revision_cannot_start(self):
+        # The fence may count a planned (unrecorded) revision, but a real start
+        # records it first; an unrecorded one is still refused at the start gate.
+        agent_home = self.root / 'home'
+        marker_dir = agent_home / 'completion' / 'rt-planned'
+        marker_dir.mkdir(parents=True)
+        (marker_dir / 'plan.json').write_text('{}')
+        route = {'route_id': 'rt-planned', 'route_hash': 'sha256:planned', 'dispatch_contract_version': 3,
+                 'nodes': [{'id': 'plan', 'kind': 'stage'},
+                           {'id': 'plan-check', 'kind': 'review-worker', 'unit': 'qa/plan-review',
+                            'depends_on': ['plan']}]}
+        route_file = self.root / 'planned-route.json'
+        route_file.write_text(json.dumps(route))
+        unrecorded = SimpleNamespace(state='revised-unrecorded', reason='completion-evidence-revised-unrecorded',
+                                     next_action=None)
+        with mock.patch.object(DC, 'dispatch_state_roots', return_value=(agent_home,)), \
+                mock.patch.object(DC, '_launch_completion_input'), \
+                mock.patch.object(DC, 'completion_marker_is_current', return_value=False), \
+                mock.patch.object(DC, 'gate_currency', return_value=unrecorded):
+            self.assert_reason('completion-evidence-revised-unrecorded', DC.completion_marker_gate,
+                               str(route_file), 'plan-check', 'start', agent_home, self.jobs,
+                               planned_revision_nodes=frozenset({'plan'}))
 
     def test_three_wrapper_mains_seal_input_and_refuse_missing_or_drifted_input(self):
         # Exercise actual parser -> main -> append_job -> common claim wiring.

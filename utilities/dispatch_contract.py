@@ -7800,12 +7800,11 @@ def completion_marker_gate(
                     "completion-evidence-revised-unrecorded", dep,
                     next_action=currency.next_action,
                 )
-            if currency.state == "superseded":
-                if (not gates_on()
-                        and currency.reason.startswith(("completion-source", "completion-review-source"))):
+            if completion_superseded(currency):
+                if not gates_on():
                     # Gates-off execution may continue, but the old marker is
                     # omitted from the admitted observations so no consumer
-                    # can treat its source-bound PASS as current.
+                    # can treat its superseded PASS as current.
                     continue
                 superseded_by = marker.get("superseded_by") or {}
                 upstream = superseded_by.get("node") if isinstance(superseded_by, dict) else None
@@ -8711,6 +8710,149 @@ class GateCurrency(NamedTuple):
     evidence_digest: str | None = None
 
 
+# Currency states an approved fix's answered verdict may show when it is reopened: the
+# verdict is not reused, so an evidence or input change needs no revision first. Integrity and
+# resource-stage refusals keep their own handling.
+ANSWERED_CURRENCY_STATES = frozenset({"current", "superseded", "revised-unrecorded",
+                                      "completion-evidence-unreadable"})
+
+
+def completion_superseded(currency: GateCurrency, *, answered: bool = False) -> bool:
+    """Whether a completion is no longer the current result of its node (U8c, the one answer).
+
+    A source- or input-bound PASS that is stale or unbound, one whose upstream completed again
+    after it, and a marker an upstream revision tombstoned are all superseded. ``answered``
+    adds the verdict an approved fix answered, which is reopened whatever evidence change it
+    shows. An integrity break is never superseded: it keeps its refusal. Every consumer drops
+    such a marker from its observations and reopens the node; none reuses it as current.
+    """
+    if currency.state.startswith("integrity-broken:"):
+        return False
+    if currency.state == "superseded":
+        return True
+    return answered and currency.state in ANSWERED_CURRENCY_STATES
+
+
+def _completion_instant(marker: Mapping[str, object]):
+    # An unreadable, timezone-less or otherwise unorderable value cannot be placed against
+    # another completion, so it is no instant (never a reason to call a result older).
+    try:
+        instant = datetime.fromisoformat(str(marker["completed_at"]).replace("Z", "+00:00"))
+    except (KeyError, ValueError, TypeError):
+        return None
+    return instant if instant.tzinfo is not None and instant.utcoffset() is not None else None
+
+
+def _upstream_completed_later(route, node, marker, marker_path):
+    """The upstream node that completed again after this marker was written, or None.
+
+    A node's completion is the result of the nodes it depends on (directly or through others).
+    When one of them has a later completion (a new attempt's new sequence), this one is the
+    result of an older upstream, however unchanged its own evidence is. Not a new completion:
+    an upstream's first marker (a resource stage's owner settlement writes it after the
+    dependents that already consumed its accepted result), an upstream revision (its
+    dependents carry their own tombstone or restored marker), a tombstone, or a marker that
+    cannot be read or dated. Only markers beside this one are read.
+    A result bound to a source or input subject is judged by that subject (`marker_currency`),
+    not by when its upstream last ran.
+    """
+    if isinstance(marker.get("source_subject"), dict):
+        return None
+    mine = _completion_instant(marker)
+    if mine is None:
+        return None
+    by_id = {str(row.get("id")): row for row in route.get("nodes", []) if isinstance(row, dict)}
+    pending = [str(dep) for dep in node.get("depends_on", [])]
+    seen = set()
+    while pending:
+        upstream = pending.pop()
+        if upstream in seen or upstream not in by_id:
+            continue
+        seen.add(upstream)
+        pending.extend(str(dep) for dep in by_id[upstream].get("depends_on", []))
+        try:
+            later = json.loads((marker_path.parent / f"{upstream}.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if (not isinstance(later, dict) or later.get("node_id") != upstream
+                or type(later.get("sequence")) is not int or later["sequence"] < 2
+                or later.get("state") == "superseded-by-upstream-revision"
+                or later.get("stage_authority") == "revision"):
+            continue
+        completed = _completion_instant(later)
+        if completed is not None and completed > mine:
+            return upstream, later.get("sequence")
+    return None
+
+
+def _older_than_upstream(route, node, marker, marker_path):
+    """``superseded`` when an upstream node completed again after this marker, else None.
+
+    An older result of a node whose upstream has completed again is not current in any gate
+    mode: the node is reopened, not read as done.
+    """
+    newer = _upstream_completed_later(route, node, marker, marker_path)
+    if newer is None:
+        return None
+    action = route_state_next_action(
+        "completion-evidence-superseded", str(node.get("id")), None, node,
+    ) + f" (upstream {newer[0]}@{newer[1]} completed again)"
+    return GateCurrency("superseded", "completion-evidence-superseded", action)
+
+
+def reopened_output_path(route, node, jobs, output_dir) -> str | None:
+    """Where a reopened node writes its new result so it does not overwrite the old one (C2).
+
+    A node run again because its result became historical (`completion_superseded`), or run on a
+    continuation of a route that completed it, whose sealed output is one exact file that still holds
+    an earlier result of that node, gets the output's next revision path (`<stem>.r<N><suffix>`, N one
+    past the node's highest completion sequence along the route's verified lineage). The path is
+    derived from the node's own sealed output, so it is inside the approved scope (`artifact_context`),
+    and the earlier result stays readable. Any other node, or a current result, gets None.
+    """
+    outputs = [value for value in node.get("outputs") or () if isinstance(value, str)]
+    if (len(outputs) != 1 or not output_dir or re.search(r"[*?\[<]", outputs[0])
+            or not Path(outputs[0]).suffix):
+        return None
+    held = Path(output_dir) / outputs[0]
+    node_id = str(node["id"])
+    try:
+        if not held.is_file():
+            return None
+        module = _route_module()
+        own = module.completion_dir(route["route_id"], jobs=jobs)
+        try:
+            marker_path = own / f"{node_id}.json"
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            marker = None
+        if marker is not None and not completion_superseded(
+                gate_currency(route, node, marker_path, marker, observe=True, jobs=jobs)):
+            return None
+        try:
+            from route_lineage import RouteLineageError, verified_route_lineage
+            lineage = verified_route_lineage(route, observe=True)
+        except (RouteLineageError, OSError, ValueError, KeyError):
+            lineage = [route]
+        recorded, highest = set(), 0
+        for item in lineage:
+            directory = module.completion_dir(item["route_id"], jobs=jobs)
+            for path in directory.glob(f"{node_id}.*.json"):
+                middle = path.name[len(node_id) + 1:-5]
+                if not middle.isdigit():
+                    continue
+                highest = max(highest, int(middle))
+                evidence = json.loads(path.read_text(encoding="utf-8")).get("evidence") or {}
+                recorded.add(Path(str(evidence.get("path") or "")).resolve(strict=False))
+        if held.resolve(strict=False) not in recorded:
+            return None
+        sequence = max(module._next_marker_sequence(own, node_id), highest + 1)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, DispatchContractError):
+        return None
+    from artifact_context import revision_output
+    return revision_output(held, sequence)
+
+
 def _resource_stage_marker_current(route, node, marker, marker_path, jobs):
     """Bind supervised-owner marker use to the journaled owner admission.
 
@@ -9013,6 +9155,9 @@ def evidence_currency(
                 return GateCurrency(state, reason,
                                     route_state_next_action(reason, str(node.get("id")), None, node)
                                     if state == "superseded" else None)
+        older = _older_than_upstream(route, node, marker, marker_path)
+        if older is not None:
+            return older
     evidence_record = marker.get("evidence")
     from codex_dispatch_terminal import artifact_declared_verdict
     if (isinstance(evidence_record, dict) and not owner_closure_shape(marker)
@@ -9113,6 +9258,9 @@ def gate_currency(
                     route_state_next_action(reason, str(node.get("id")), None, node)
                     if state == "superseded" else None,
                     provenance.evidence_digest)
+        older = _older_than_upstream(route, node, marker, marker_path)
+        if older is not None:
+            return older._replace(evidence_digest=provenance.evidence_digest)
     if provenance.state in {"current", "revised-unrecorded"}:
         resource_currency = _resource_stage_marker_current(route, node, marker, marker_path, jobs)
         if resource_currency is not None:
@@ -10960,11 +11108,39 @@ def recover_unstarted_attempt(jobs: Path, attempt_id: str) -> bool:
         return True
 
 
+def _retry_route_related(source, candidate) -> bool:
+    """Same route, or the source's route is a verified lineage ancestor of the candidate's.
+
+    The relation answer only (``verified_route_lineage``); an unreadable or
+    unverified lineage is "not related", which stays the existing refusal.
+    """
+    if source.get("route_id") == candidate.get("route_id"):
+        return True
+    if not source.get("route_id"):
+        return False
+    route_file = candidate.get("route_file")
+    if not route_file or not all((source.get("route_hash"), candidate.get("route_id"), candidate.get("route_hash"))):
+        return False
+    from route_lineage import RouteLineageError, verified_route_lineage
+    try:
+        route = json.loads(Path(route_file).read_text(encoding="utf-8"))
+        if (route.get("route_id"), route.get("route_hash")) != (candidate.get("route_id"), candidate.get("route_hash")):
+            return False
+        lineage = verified_route_lineage(route, observe=True)
+    except (OSError, ValueError, RouteLineageError, AttributeError):
+        return False
+    return any((item.get("route_id"), item.get("route_hash")) == (source["route_id"], source["route_hash"])
+               for item in lineage[1:])
+
+
 def _retry_parent_matches(source, candidate, jobs, lines) -> bool:
     """An existing owner replacement may continue its predecessor's child.
 
-    Launch admission prepares these lineage and route observations outside
-    the registry lock, then pins their exact dependency rows at commit.
+    The parent follows the replacement lineage (``parent_attempt_succeeded``)
+    on one route; across a verified continuation route each parent owner is
+    bound to its own route. Launch admission prepares these lineage and route
+    observations outside the registry lock, then pins their exact dependency
+    rows at commit.
     """
     previous, current = source.get("parent_attempt_id"), candidate.get("parent_attempt_id")
     if previous == current:
@@ -10973,15 +11149,16 @@ def _retry_parent_matches(source, candidate, jobs, lines) -> bool:
         return False
     if any(row.get("dispatch_depth") != "2" for row in (source, candidate)):
         return False
-    route = (source.get("route_id"), source.get("route_hash"))
-    if (not all(route) or not source.get("route_node")
-            or route != (candidate.get("route_id"), candidate.get("route_hash"))):
+    routes = ((source.get("route_id"), source.get("route_hash")),
+              (candidate.get("route_id"), candidate.get("route_hash")))
+    if not all(routes[0]) or not all(routes[1]) or not source.get("route_node"):
         return False
-    from dispatch_replacement import _rows, effective_attempts
+    from dispatch_replacement import _rows
     from owner_route_binding import OwnerRouteBindingError, resolve_owner_route_lifecycle
+    from route_authority import parent_attempt_succeeded
     rows = _rows(lines)
     try:
-        for parent in (previous, current):
+        for parent, route in zip((previous, current), routes):
             owner = rows.get(parent, (None, {}))[1]
             if (owner.get("worker_type") != "owner" or owner.get("dispatch_depth") != "1"
                     or owner.get("registered_worker") != "1"):
@@ -10990,10 +11167,13 @@ def _retry_parent_matches(source, candidate, jobs, lines) -> bool:
                 jobs, owner_attempt_id=parent, registry_rows=list(rows.values()))
             if binding is None or (binding.route_id, binding.route_hash) != route:
                 return False
-        effective, lineage = effective_attempts(jobs, {previous})
     except (OSError, OwnerRouteBindingError):
         return False
-    return effective == {current} and bool(lineage)
+    # A pin-handoff owner is a new owner of the continuation route, not a
+    # replacement of the previous one; only one route keeps the lineage walk.
+    if routes[0][0] != routes[1][0]:
+        return True
+    return routes[0] == routes[1] and parent_attempt_succeeded(jobs, previous, current)
 
 
 def _retry_registration_census(lines, metadata):
@@ -11073,7 +11253,8 @@ def _automatic_retry_admission(lines: list[str], metadata: dict[str, str], *, jo
                 or metadata.get("replacement_family_id") != family):
             raise DispatchContractError("automatic-replacement-exhausted", prior)
         return
-    if (any(source.get(k) != metadata.get(k) for k in ("route_id", "route_node"))
+    if (source.get("route_node") != metadata.get("route_node")
+            or not _retry_route_related(source, metadata)
             or not _retry_parent_matches(source, metadata, jobs, lines)):
         raise DispatchContractError("retry-predecessor-binding-mismatch", prior)
     proof = attempt_process_quiescence(source, terminal_receipt=status in {"done", "killed", "cancelled"})

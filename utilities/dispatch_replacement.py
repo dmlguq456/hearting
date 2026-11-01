@@ -1810,10 +1810,6 @@ def _answered_fail_verdicts(route, markers, basis, reference):
 
 
 ANSWERED_FAIL_REOPEN = 'corrected-fail-verdict'
-# Evidence or input changes a reopened answered verdict may show: it is not reused, so they
-# need no revision first. Integrity and resource-stage refusals keep their own handling.
-ANSWERED_FAIL_CURRENCIES = frozenset({'current', 'superseded', 'revised-unrecorded',
-                                      'completion-evidence-unreadable'})
 
 
 def _reuse_snapshot(jobs, route, lines, *, proof=None, pinned=None):
@@ -1845,8 +1841,11 @@ def _reuse_snapshot(jobs, route, lines, *, proof=None, pinned=None):
         gates_off_edit = (currency.state == 'revised-unrecorded'
                           and currency.reason == 'completion-evidence-revised-unrecorded'
                           and not DC.gates_on())
-        reopened = str(node['id']) in answered and currency.state in ANSWERED_FAIL_CURRENCIES
-        if (currency.state not in {'current', 'superseded'} and not merge_unobservable
+        # One rule (`completion_superseded`): a result that is no longer current, or a verdict an
+        # approved fix answered, is not reused; its node is reopened.
+        superseded = DC.completion_superseded(currency)
+        reopened = str(node['id']) in answered and DC.completion_superseded(currency, answered=True)
+        if (currency.state != 'current' and not superseded and not merge_unobservable
                 and not gates_off_edit and not reopened):
             raise _completion_unproven(route, node, marker, currency)
         ready = DC.completion_attempt_readiness(route, node, marker, Path(jobs), registry_lines=lines)
@@ -1863,7 +1862,7 @@ def _reuse_snapshot(jobs, route, lines, *, proof=None, pinned=None):
         # Keep the predecessor digest with its own observation; the reuse
         # rows below are built in a second pass over every node.
         observations[str(node['id'])] = (node, path, marker, currency, restored_from)
-        if currency.state == 'superseded' or merge_unobservable or reopened:
+        if superseded or merge_unobservable or reopened:
             invalidated[str(node['id'])] = {
                 'node': node['id'], 'marker_digest': _digest(marker),
                 'attempt_id': marker.get('attempt_id', ''),
@@ -1914,6 +1913,22 @@ def _reuse_snapshot(jobs, route, lines, *, proof=None, pinned=None):
             'producer_id': cycle.get('producer_id', ''), 'gates': _gate_snapshot(jobs, route),
             'invalidated': [invalidated[key] for key in sorted(invalidated)],
             'pending': pending}
+
+
+def _reopened_outputs_note(route, invalidated, jobs):
+    """Name the revision path of each reopened stage whose one sealed output still holds its old result."""
+    reopened = {str(row['node']) for row in invalidated}
+    from artifact_producer import ProducerError, cycle_dir, route_cycle_for
+    try:
+        root = Path(route['artifact_root'])
+        cycle = route_cycle_for(root, route)
+        output = cycle_dir(root, cycle['campaign_id'], cycle['cycle_id']) / 'artifacts'
+        rows = [f"{node['id']} -> {path}" for node in route.get('nodes', []) if str(node['id']) in reopened
+                for path in [DC.reopened_output_path(route, node, jobs, output)] if path]
+    except (OSError, ValueError, KeyError, TypeError, ProducerError, DC.DispatchContractError):
+        return ''
+    return ('Write a reopened stage\'s new result to its revision path, beside the earlier file and not over it: '
+            + '; '.join(rows) + '.\n') if rows else ''
 
 
 def _gate_snapshot(jobs, route):
@@ -3086,7 +3101,7 @@ def recovery_instructions(args):
             source = _rows(jobs.read_text().splitlines())[prior][1]
             brief = launch_input(jobs, prior, source).get('retry_brief', brief)
     args.replacement_retry_brief = brief
-    retry_context = ('\n\n## Partial-group retry brief\n' + brief + '\n') if brief else ''
+    retry_context = ('\n\n## Batch leg / retry brief\n' + brief + '\n') if brief else ''
     stage_progress = ''
     if prior and getattr(args, 'worker_type', '') == 'stage':
         try:
@@ -3147,6 +3162,7 @@ def recovery_instructions(args):
             f'Reuse the existing cycle {record["reuse"]["cycle_id"]} and completion evidence for: {completed}.\n'
             + (f'Reopen these stages because their former result is historical: {invalidated}.\n'
                if invalidated else '')
+            + _reopened_outputs_note(route, current_reuse.get('invalidated', []), jobs)
             + f'Unfinished route stages: {pending}.\n'
             + rerun +
             'Keep existing human answers and gate releases; do not ask the same scope again. '

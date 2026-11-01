@@ -331,6 +331,17 @@ def _dispatch_node_module():
     return sys.modules[name]
 
 
+def _round_admission(route, node, jobs, *, attempt_id, owner_attempt_id, reviewed_evidence):
+    """The one round-admission decision preview and the registration fence share.
+
+    A thin call into dispatch-node's `admit_round` (the same census, subject and
+    revision derivation every launch surface reads), without recording anything.
+    """
+    return _dispatch_node_module().admit_round(
+        route, node, jobs, owner_attempt_id=owner_attempt_id, exclude_attempt=attempt_id,
+        reviewed_evidence=reviewed_evidence, record_auto_revisions=False)
+
+
 def preview_request_admission(args, jobs):
     """Recompute dry-run admission; caller-supplied preview flags are not proof."""
     if getattr(args, "action", None) != "dry-run" or not getattr(args, "route_file", None):
@@ -352,11 +363,10 @@ def preview_request_admission(args, jobs):
     if not module.REVIEW_ROUND_CAP.is_round_capped_node(node):
         return None
     try:
-        admission = module.admit_round(
-            route, node, jobs, owner_attempt_id=getattr(args, "parent_attempt_id", None),
-            exclude_attempt=getattr(args, "command_attempt_id", None) or getattr(args, "attempt_id", None),
-            reviewed_evidence=getattr(args, "reviewed_evidence", None), record_auto_revisions=False,
-        )
+        admission = _round_admission(
+            route, node, jobs, attempt_id=getattr(args, "command_attempt_id", None) or getattr(args, "attempt_id", None),
+            owner_attempt_id=getattr(args, "parent_attempt_id", None),
+            reviewed_evidence=getattr(args, "reviewed_evidence", None))
     except (ValueError, OSError) as exc:
         if isinstance(exc, DC.DispatchContractError):
             raise
@@ -439,26 +449,24 @@ def validate_revision_admission(jobs, metadata, binding):
         return
     if is_spec_review_node(node):
         return
-    module = _route_module()
-    from review_source_subject import annotate_rows, read_binding as read_subject
+    from review_source_subject import read_binding as read_subject
     try:
-        lines = Path(jobs).read_text().splitlines()
-        lineage = module.review_lineage_routes(route, node["id"])
-        route_ids = {generation["route_id"] for generation in lineage}
-        rows = [(fields[1], meta) for fields, meta in
-                module.review_round_records(lines, route_ids, node["id"], jobs=jobs)
-                if meta.get("attempt_id") != metadata["attempt_id"]]
+        admission = _round_admission(
+            route, node, jobs, attempt_id=metadata["attempt_id"],
+            owner_attempt_id=metadata.get("parent_attempt_id"),
+            reviewed_evidence=binding["path"] if binding else None)
         subject = read_subject(jobs, metadata, required=False)
-        if subject is not None:
-            rows = annotate_rows(jobs, rows, route=route, node=node,
-                                 family=subject.get("family", "source"))
-        revisions = module._dependency_revisions(route, node, jobs, reviewed_input=binding)
-        budget = module.REVIEW_ROUND_CAP.round_budget(route, node, rows, revisions=revisions,
-            source_subject_digest=subject["subject_digest"] if subject is not None else None)
-    except (ValueError, OSError) as exc:
+    except (ValueError, OSError, _dispatch_node_module().DispatchNodeError) as exc:
+        if isinstance(exc, DC.DispatchContractError):
+            raise
         raise DC.DispatchContractError("reviewed-evidence-revision-unproven", str(exc)) from exc
-    if budget.state != "admit":
-        raise DC.DispatchContractError("reviewed-evidence-revision-not-admitted", budget.state)
+    # The fence judges by the subject sealed at registration. A worktree that has
+    # moved since is an observation of later work, not a verdict on this attempt.
+    if subject is not None and admission.source_subject_digest != subject["subject_digest"]:
+        raise DC.DispatchContractError("reviewed-evidence-revision-unproven",
+                                       "sealed-review-subject-differs-from-current")
+    if admission.budget.state != "admit":
+        raise DC.DispatchContractError("reviewed-evidence-revision-not-admitted", admission.budget.state)
 
 
 def validate_launch(jobs, metadata):
