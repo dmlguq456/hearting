@@ -2820,6 +2820,122 @@ class ReplacementTest(unittest.TestCase):
         self.assertEqual(R._approved_fix_answers(record, self.jobs), ['att-test-2'])
         self.assertEqual(self.jobs.read_bytes(), before)
 
+    def test_a_reopened_owner_closed_fail_keeps_its_closure_check_answer(self):
+        record, _ = self._legacy_closed_review_claim(test_fails=2)
+        pin = record['reuse']['completed'][0]
+        self.assertEqual(R._approved_fix_answers(record, self.jobs), ['att-test-2', 'att-review-2'])
+        row = {**pin, 'currency': 'current', 'currency_reason': 'completion-marker-verified',
+               'depends_on_invalid': []}
+        reopened = {**record, 'reuse': {**record['reuse'], 'completed': [],
+                                        'invalidated': [{**row, 'reopened': R.ANSWERED_FAIL_REOPEN}]}}
+        self.assertEqual(R._approved_fix_answers(reopened, self.jobs), ['att-test-2', 'att-review-2'])
+        stale = {**record, 'reuse': {**record['reuse'], 'completed': [], 'invalidated': [row]}}
+        self.assertEqual(R._approved_fix_answers(stale, self.jobs), ['att-test-2'])
+
+    # -- SR H768 [e9]: inline audit verdicts answered by a fix ---------------------------------
+    def _sr_failed_owner(self):
+        """The owner ran inspect and report inline and handed the FAIL report off."""
+        self._failed_owner(test_fails=0)
+        self.route['nodes'] = [
+            {'id': 'inspect', 'kind': 'review-worker', 'unit': 'research/fact-check',
+             'inputs': ['target-artifact'], 'depends_on': [], 'completion_gate': 'audit-inspect'},
+            {'id': 'report', 'kind': 'pipeline-stage', 'unit': 'editorial/report',
+             'depends_on': ['inspect'], 'completion_gate': 'audit-report'}]
+        directory = D._route_module().completion_dir('rt-test', jobs=self.jobs)
+        directory.mkdir(parents=True, exist_ok=True)
+        reviews = self.root / 'artifacts' / 'reviews'
+        (reviews / 'audit').mkdir(parents=True, exist_ok=True)
+        markers = {}
+        for node, evidence, body in (('inspect', reviews / 'audit' / 'source-review-v1.json', '{"status": "FAIL"}\n'),
+                                     ('report', reviews / 'audit-report.md', '판정: FAIL\n')):
+            evidence.write_text(body, encoding='utf-8')
+            markers[node] = {'route_id': 'rt-test', 'route_hash': 'sha256:test', 'node_id': node,
+                             'attempt_id': f'att-source-{node}-inline', 'sequence': 1,
+                             'execution_surface': 'inline', 'registered_worker': False,
+                             'evidence': {'path': str(evidence), 'sha256': 'fixture'}}
+            (directory / f'{node}.json').write_text(json.dumps(markers[node]), encoding='utf-8')
+        self.assertTrue(self._answer(text='approved fix: review the v2 contracts independently',
+                                     request_id='input-fix')['retained'])
+        return markers, reviews / 'audit-report.md'
+
+    def _real_reuse(self):
+        """The shared reuse reader over this fixture's markers, read as settled current completions."""
+        import artifact_producer
+        self.reuse.stop()
+        stack = contextlib.ExitStack()
+        self.addCleanup(stack.close)
+        stack.enter_context(mock.patch.object(D, 'gate_currency', return_value=D.GateCurrency(
+            'current', 'completion-marker-verified')))
+        stack.enter_context(mock.patch.object(D, 'completion_attempt_readiness',
+                                              return_value=SimpleNamespace(state='ready')))
+        stack.enter_context(mock.patch.object(D, 'note_evidence_change'))
+        stack.enter_context(mock.patch.object(R, '_gate_snapshot', return_value=[]))
+        stack.enter_context(mock.patch.object(artifact_producer, 'route_cycle_for', return_value={
+            'cycle_id': 'cyc-test', 'producer_id': 'prod-test'}))
+        stack.enter_context(mock.patch.object(artifact_producer, 'cycle_route_admission',
+                                              return_value=SimpleNamespace(allow=True)))
+
+    def _sr_recovery_text(self, record):
+        return R.recovery_instructions(SimpleNamespace(automatic_retry_of='att-source', worker_type='owner',
+                                       jobs_path=self.jobs, attempt_id=record['replacement_attempt_id']))
+
+    def _assert_sr_v2_review_is_next(self, record, before):
+        R.validate_claim_source(self.jobs, self.jobs.read_text().splitlines(), record)  # no drift
+        text = self._sr_recovery_text(record)
+        for expected in ('ended FAIL and a person approved a fix',
+                         'completion evidence for: (none).',
+                         'Reopen these stages because their former result is historical: inspect, report.',
+                         'Unfinished route stages: inspect, report.',
+                         'The approved fix answers the FAIL result of inspect, report',
+                         'as a fresh check', 'review the v2 contracts independently'):
+            self.assertIn(expected, text)
+        self.assertNotIn('each get one more verdict round', text)
+        spec = importlib.util.spec_from_file_location('sr_answered_fail_dispatch_node',
+                                                      Path(__file__).with_name('dispatch-node.py'))
+        dispatch = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = dispatch
+        spec.loader.exec_module(dispatch)
+        with mock.patch.object(dispatch.ROUTE, 'review_lineage_routes', return_value=[self.route]):
+            budget = dispatch.admit_round(self.route, self.route['nodes'][0], self.jobs,
+                                          record_auto_revisions=False).budget
+        self.assertEqual((budget.state, budget.round_kind, budget.next_round), ('admit', 'first', 1))
+        self.assertEqual(R.answered_fix_revisions(self.jobs, 'rt-test'), [])
+        self.assertEqual({p: p.read_bytes() for p in self.root.rglob('*') if p.is_file()}, before)
+
+    def test_sr_old_claim_reopens_its_answered_inline_verdicts_for_a_first_round(self):
+        markers, handoff = self._sr_failed_owner()
+        # The installed claim: reuse pinned both inline completions and no failed check.
+        R._reuse_snapshot.return_value.update(invalidated=[], pending=[], completed=[
+            {'node': node, 'marker_digest': R._digest(marker), 'attempt_id': marker['attempt_id']}
+            for node, marker in markers.items()])
+        with mock.patch.object(R, '_blocked_handoff', return_value=str(handoff)):
+            result, commands = self._launch()
+        self.assertEqual((len(commands), result['reason']), (1, 'replacement-launch-pending'), result)
+        record = result['record']
+        self.assertEqual((record['proof']['source_result'], record['proof']['answers'],
+                          record['proof']['handoff']), ('FAIL', [], str(handoff)))
+        self.assertEqual([row['node'] for row in record['reuse']['completed']], ['inspect', 'report'])
+        before = {p: p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
+        self._real_reuse()
+        self._assert_sr_v2_review_is_next(record, before)
+
+    def test_sr_new_claim_pins_the_reopening_on_every_harness(self):
+        for harness in ('claude', 'codex', 'opencode'):
+            with self.subTest(harness=harness):
+                self.tearDown_case()
+                self.meta['harness'] = harness
+                _markers, handoff = self._sr_failed_owner()
+                self._real_reuse()
+                with mock.patch.object(R, '_blocked_handoff', return_value=str(handoff)):
+                    result, commands = self._launch()
+                self.assertEqual((len(commands), result['reason']), (1, 'replacement-launch-pending'), result)
+                record = result['record']
+                self.assertEqual(record['reuse']['completed'], [])
+                self.assertEqual([row['node'] for row in record['reuse']['invalidated']], ['inspect', 'report'])
+                self.assertEqual(record['reuse']['pending'], ['inspect', 'report'])
+                before = {p: p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
+                self._assert_sr_v2_review_is_next(record, before)
+
     def test_failed_owner_without_failed_checks_continues_once_per_answer(self):
         import dispatch_owner_input as I
         self._failed_owner(test_fails=0)
@@ -4276,6 +4392,251 @@ class ReplacementReuseCurrencyTest(unittest.TestCase):
         with self.assertRaises(D.DispatchContractError) as refused:
             self.snapshot(states)
         self.assertEqual(refused.exception.reason, "replacement-completion-unproven")
+
+
+class AnsweredFailVerdictReuseTest(unittest.TestCase):
+    """SR H768 [e9]: a fix answering an owner's FAIL reopens the verdict that FAIL came from.
+
+    The route is the audit shape: an owner-inline ``inspect`` review whose FAIL the
+    inline ``report`` wrote, and the owner handed that report off as its FAIL.
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.jobs = self.root / "jobs.log"
+        self.jobs.write_text("", encoding="utf-8")
+        self.completion = self.root / "completion" / "rt-answered"
+        self.completion.mkdir(parents=True)
+        self.evidence = self.root / "artifacts" / "reviews"
+        (self.evidence / "audit").mkdir(parents=True)
+        self.route = {
+            "route_id": "rt-answered", "route_hash": "sha256:answered",
+            "artifact_root": str(self.root), "cwd": str(self.root), "human_gate_bindings": [],
+            "nodes": [
+                {"id": "inspect", "kind": "review-worker", "depends_on": [],
+                 "unit": "research/fact-check", "inputs": ["target-artifact"],
+                 "completion_gate": "audit-inspect"},
+                {"id": "report", "kind": "pipeline-stage", "depends_on": ["inspect"],
+                 "unit": "editorial/report", "completion_gate": "audit-report"},
+            ],
+        }
+        self.markers = {}
+        self.mark("inspect", self.evidence / "audit" / "source-review-v1.json")
+        self.mark("report", self.evidence / "audit-report.md")
+        self.states = {}
+
+    def mark(self, node_id, evidence, *, attempt=None, sequence=1):
+        evidence = Path(evidence)
+        evidence.parent.mkdir(parents=True, exist_ok=True)
+        if not evidence.exists():
+            evidence.write_text(f"{node_id} v{sequence}: FAIL\n", encoding="utf-8")
+        marker = {"route_id": self.route["route_id"], "route_hash": self.route["route_hash"],
+                  "node_id": node_id, "attempt_id": attempt or f"att-owner-{node_id}-inline",
+                  "sequence": sequence, "execution_surface": "inline", "registered_worker": False,
+                  "evidence": {"path": str(evidence), "sha256": "fixture"}}
+        if node_id == "inspect":
+            marker.update(reviewer_kind="owner-inline", review_independence="degraded")
+        self.markers[node_id] = marker
+        (self.completion / f"{node_id}.json").write_text(json.dumps(marker), encoding="utf-8")
+        return marker
+
+    def fail_proof(self, **changes):
+        return {"death_kind": R.CORRECTED, "source_result": "FAIL", "note": "dead-worker-fail",
+                "answers": [], "fallback_nodes": [],
+                "corrections": [{"id": "input-fix", "digest": "0" * 64}],
+                "handoff": str(self.evidence / "audit-report.md"), **changes}
+
+    def snapshot(self, proof=None, pinned=None, *, readiness="ready"):
+        module = SimpleNamespace(completion_dir=lambda route_id, jobs=None: self.completion)
+
+        def currency(_route, node, _path, _marker, **_kwargs):
+            return D.GateCurrency(*self.states.get(node["id"], ("current", "completion-marker-verified")))
+
+        import artifact_producer
+        with mock.patch.object(D, "_route_module", return_value=module), \
+                mock.patch.object(D, "gate_currency", side_effect=currency), \
+                mock.patch.object(D, "completion_attempt_readiness",
+                                  return_value=SimpleNamespace(state=readiness)), \
+                mock.patch.object(D, "note_evidence_change") as noted, \
+                mock.patch.object(R, "_gate_snapshot", return_value=[]), \
+                mock.patch.object(artifact_producer, "route_cycle_for",
+                                  return_value={"cycle_id": "cyc-answered", "producer_id": "prod-answered"}), \
+                mock.patch.object(artifact_producer, "cycle_route_admission",
+                                  return_value=SimpleNamespace(allow=True)):
+            snapshot = R._reuse_snapshot(self.jobs, self.route, [], proof=proof, pinned=pinned)
+        self.noted = {call.args[1]["id"] for call in noted.call_args_list}
+        return snapshot
+
+    @staticmethod
+    def nodes(rows):
+        return [row["node"] for row in rows]
+
+    def test_d1_sr_shape_reuses_both_without_the_fix_and_reopens_both_with_it(self):
+        before = self.snapshot()  # the pre-fix reading: no proof reaches reuse
+        self.assertEqual(self.nodes(before["completed"]), ["inspect", "report"])
+        self.assertEqual((before["invalidated"], before["pending"]), ([], []))
+        after = self.snapshot(self.fail_proof())
+        self.assertEqual(after["completed"], [])
+        self.assertEqual(self.nodes(after["invalidated"]), ["inspect", "report"])
+        self.assertEqual(after["pending"], ["inspect", "report"])
+        for row in after["invalidated"]:
+            self.assertEqual(row["reopened"], R.ANSWERED_FAIL_REOPEN)
+            self.assertEqual(row["marker_digest"], R._digest(self.markers[row["node"]]))
+            self.assertEqual(row["attempt_id"], self.markers[row["node"]]["attempt_id"])
+        # A reopened verdict is not reusable evidence, so no evidence change is noted for it.
+        self.assertEqual(self.noted, set())
+
+    def test_d2_an_existing_claim_that_pinned_both_completed_validates_without_drift(self):
+        claim_reuse = self.snapshot()  # the SR claim: completed=[inspect, report], answers=[]
+        launch_reuse = self.snapshot(self.fail_proof(), claim_reuse)
+        self.assertEqual(self.nodes(launch_reuse["invalidated"]), ["inspect", "report"])
+        self.assertTrue(R._reuse_preserved(claim_reuse, launch_reuse))
+        # A claim written after the fix pins the reopening and replays it unchanged.
+        new_claim = self.snapshot(self.fail_proof())
+        self.assertEqual(self.snapshot(self.fail_proof(), new_claim), new_claim)
+        self.assertTrue(R._reuse_preserved(new_claim, self.snapshot(self.fail_proof(), new_claim)))
+
+    def test_reopened_verdict_admits_its_own_evidence_or_input_change(self):
+        claim_reuse = self.snapshot()
+        for state in (("revised-unrecorded", "completion-evidence-revised-unrecorded"),
+                      ("completion-evidence-unreadable", "review-source-subject-changed")):
+            with self.subTest(state=state[0]), mock.patch.dict(os.environ, {"HEARTING_GATES": "on"}):
+                self.states = {"inspect": state}
+                with self.assertRaises(D.DispatchContractError) as refused:
+                    self.snapshot()
+                self.assertEqual(refused.exception.reason, "replacement-completion-unproven")
+                reopened = self.snapshot(self.fail_proof(), claim_reuse)
+                rows = {row["node"]: row for row in reopened["invalidated"]}
+                self.assertEqual(rows["inspect"]["currency"], state[0])
+                self.assertEqual(rows["inspect"]["reopened"], R.ANSWERED_FAIL_REOPEN)
+                self.assertTrue(R._reuse_preserved(claim_reuse, reopened))
+                new_claim = self.snapshot(self.fail_proof())
+                self.assertTrue(R._reuse_preserved(new_claim, self.snapshot(self.fail_proof(), new_claim)))
+        self.states = {"inspect": ("integrity-broken:history-conflict", "completion-marker-history-conflict")}
+        with self.assertRaises(D.DispatchContractError) as broken:
+            self.snapshot(self.fail_proof(), claim_reuse)
+        self.assertEqual(broken.exception.reason, "replacement-completion-unproven")
+        self.states = {}
+        with self.assertRaises(D.DispatchContractError) as unsettled:
+            self.snapshot(self.fail_proof(), claim_reuse, readiness="unsettled")
+        self.assertEqual(unsettled.exception.reason, "replacement-completion-unsettled")
+
+    def test_d3_other_proofs_and_an_unmatched_handoff_keep_ordinary_reuse(self):
+        ordinary = self.snapshot()
+        proofs = {
+            "pass-or-silent": {"death_kind": "silent", "note": "dead-exact-pid"},
+            "capacity": {"death_kind": "capacity", "note": "dead-capacity"},
+            "unlaunched": {"death_kind": "unlaunched", "note": "dead-unlaunched"},
+            "transport": {"death_kind": "transport", "note": "dead-runtime-exit"},
+            "exited": self.fail_proof(source_result="EXITED"),
+            "contract": self.fail_proof(source_result="CONTRACT"),
+            "blocked": {k: v for k, v in self.fail_proof().items() if k != "source_result"},
+            "fail-handoff-elsewhere": self.fail_proof(handoff=str(self.root / "final_report.md")),
+            "fail-handoff-relative": self.fail_proof(handoff="artifacts/reviews/audit-report.md"),
+            "fail-without-handoff": {k: v for k, v in self.fail_proof().items() if k != "handoff"},
+        }
+        for name, proof in proofs.items():
+            with self.subTest(proof=name):
+                self.assertEqual(self.snapshot(proof), ordinary)
+                self.assertEqual(self.snapshot(proof, ordinary), ordinary)
+
+    def test_handoff_identity_is_the_real_path(self):
+        link = self.root / "handoff-link.md"
+        link.symlink_to(self.evidence / "audit-report.md")
+        reopened = self.snapshot(self.fail_proof(handoff=str(link)))
+        self.assertEqual(self.nodes(reopened["invalidated"]), ["inspect", "report"])
+
+    def test_preparation_siblings_and_far_checks_keep_reuse(self):
+        self.route["nodes"] = [
+            {"id": "plan", "kind": "pipeline-stage", "depends_on": []},
+            {"id": "plan-check", "kind": "review-worker", "depends_on": ["plan"]},
+            {"id": "execute", "kind": "pipeline-stage", "depends_on": ["plan-check"]},
+            {"id": "impl-review", "kind": "review-worker", "depends_on": ["execute"]},
+            {"id": "test", "kind": "pipeline-stage", "depends_on": ["impl-review"]},
+            {"id": "report", "kind": "pipeline-stage", "depends_on": ["test"]},
+            {"id": "docs", "kind": "pipeline-stage", "depends_on": ["plan"]},
+        ]
+        for node in self.route["nodes"]:
+            if node["id"] != "report":
+                self.mark(node["id"], self.evidence / f"{node['id']}.md")
+        # The report wrote the FAIL: it reopens with the check it consumed directly (test);
+        # the earlier review, its preparation and an unrelated sibling keep their reuse.
+        answered = self.snapshot(self.fail_proof())
+        self.assertEqual(self.nodes(answered["invalidated"]), ["report", "test"])
+        self.assertEqual(self.nodes(answered["completed"]),
+                         ["plan", "plan-check", "execute", "impl-review", "docs"])
+        # A report reading the check through an ordinary stage reopens alone.
+        self.route["nodes"][5] = {"id": "report", "kind": "pipeline-stage", "depends_on": ["summary"]}
+        self.route["nodes"].append({"id": "summary", "kind": "pipeline-stage", "depends_on": ["test"]})
+        self.mark("summary", self.evidence / "summary.md")
+        answered = self.snapshot(self.fail_proof())
+        self.assertEqual(self.nodes(answered["invalidated"]), ["report"])
+        self.assertEqual(self.nodes(answered["completed"]),
+                         ["plan", "plan-check", "execute", "impl-review", "test", "docs", "summary"])
+        # A FAIL the review itself wrote reopens that review and, through its closure, its consumers.
+        answered = self.snapshot(self.fail_proof(handoff=str(self.evidence / "impl-review.md")))
+        rows = {row["node"]: row for row in answered["invalidated"]}
+        self.assertEqual(sorted(rows), ["impl-review", "report", "summary", "test"])
+        self.assertEqual(rows["impl-review"]["reopened"], R.ANSWERED_FAIL_REOPEN)
+        self.assertNotIn("reopened", rows["test"])
+        self.assertEqual(rows["test"]["depends_on_invalid"], ["impl-review"])
+        self.assertEqual(self.nodes(answered["completed"]), ["plan", "plan-check", "execute", "docs"])
+
+    def test_a_resource_run_whose_evidence_is_the_handoff_is_not_reopened(self):
+        self.route["nodes"] = [
+            {"id": "smoke", "kind": "review-worker", "depends_on": []},
+            {"id": "full-run", "kind": "resource-runner", "depends_on": ["smoke"],
+             "continuation": {"kind": "supervised"}},
+        ]
+        self.completion.joinpath("inspect.json").unlink()
+        self.completion.joinpath("report.json").unlink()
+        self.mark("smoke", self.evidence / "smoke.md")
+        self.mark("full-run", self.evidence / "audit-report.md")
+        ordinary = self.snapshot()
+        self.assertEqual(self.snapshot(self.fail_proof()), ordinary)
+        self.assertEqual(self.nodes(ordinary["completed"]), ["smoke", "full-run"])
+
+    def test_a_completion_written_after_the_claim_is_never_reopened(self):
+        claim_reuse = self.snapshot()
+        # The replacement's own v2 inspect completes: a new marker the claim did not pin.
+        self.mark("inspect", self.evidence / "audit" / "source-review-v2.json",
+                  attempt="att-replacement-inspect", sequence=2)
+        later = self.snapshot(self.fail_proof(), claim_reuse)
+        self.assertEqual(self.nodes(later["completed"]), ["inspect"])
+        self.assertEqual(self.nodes(later["invalidated"]), ["report"])
+        # A v2 report written to the same sealed path is not the answered FAIL either.
+        self.mark("report", self.evidence / "audit-report.md", attempt="att-replacement-report", sequence=2)
+        self.assertEqual(self.nodes(self.snapshot(self.fail_proof(), claim_reuse)["completed"]),
+                         ["inspect", "report"])
+        # The ordinary rule still treats a pinned completion replaced before launch as drift.
+        self.assertFalse(R._reuse_preserved(claim_reuse, later))
+
+    def test_an_unlaunched_continuation_carries_the_reopening_by_digest(self):
+        claim_reuse = self.snapshot()
+        logical = {"root_route_id": "rt-answered", "node": "__owner__", "after_capacity": "att-owner"}
+        family = R._digest(logical)
+        carried = {"schema": R.SCHEMA, "family_id": family, "logical_node": logical,
+                   "original_attempt_id": "att-owner",
+                   "replacement_attempt_id": "att-" + __import__("hashlib").sha256(
+                       ("replacement:" + family).encode()).hexdigest()[:48],
+                   "ordinal": 1, "proof": self.fail_proof(), "reuse": claim_reuse}
+        path = R._record_path(self.jobs, family)
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps(carried), encoding="utf-8")
+        proof = {"death_kind": "unlaunched", "note": "dead-unlaunched",
+                 "carried_continuation": {"attempt_id": "att-owner", "family_id": family,
+                                          "claim_digest": R._digest(carried), "corrections": []}}
+        second = self.snapshot(proof)
+        self.assertEqual(self.nodes(second["invalidated"]), ["inspect", "report"])
+        self.assertTrue(R._reuse_preserved(second, self.snapshot(proof, second)))
+        forged = {**proof, "carried_continuation": {**proof["carried_continuation"],
+                                                    "claim_digest": "f" * 64}}
+        self.assertEqual(self.snapshot(forged), claim_reuse)
+        missing = {**proof, "carried_continuation": {**proof["carried_continuation"],
+                                                     "family_id": "e" * 64}}
+        self.assertEqual(self.snapshot(missing), claim_reuse)
 
 
 class FrameTopCapacityTest(unittest.TestCase):
