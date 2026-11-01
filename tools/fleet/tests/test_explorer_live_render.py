@@ -121,8 +121,9 @@ class CutRule(unittest.TestCase):
         for cols in (80, 100, 140, 168):
             with self.subTest(cols=cols):
                 rows = _frame(_vm(), "ROUTES", cols=cols).text_rows()
-                header = next(row[34:] for row in rows if "REPO" in row and "ROUTE" in row)
-                labels = ("REPO", "ID", "ROUTE", "KIND", "HARNESS",
+                header = next(row[34:] for row in rows if "ID" in row and "ROUTE" in row
+                              and "HARNESS" in row)
+                labels = ("ID", "ROUTE", "KIND", "HARNESS",
                           *(("PROGRESS",) if "PROGRESS" in header else ()), "AGE")
                 positions = [header.index(label) for label in labels]
                 self.assertEqual(positions, sorted(positions))
@@ -140,7 +141,7 @@ class CutRule(unittest.TestCase):
         self.assertEqual(line[kind:kind + 8], "lab(eval")
         self.assertLess(kind + 8, age)
         self.assertEqual(line[age:age + 7], "22h 32m")
-        # REPO now precedes ID; the 80-column pane shares the remaining cells.
+        # The repo rule sits above the rows; ID starts the column set.
         owner = str(route.get("harness"))
         self.assertIn(owner[:5], line)
 

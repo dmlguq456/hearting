@@ -267,9 +267,12 @@ class FramePhaseTests(BlinkAssertions):
                     expected[(y, 34 + strip + 2)] = "g_work_off"
                 continue
             if "└ " in pane:
-                x = line.find("running 3m", 34)
+                x = line.find("running", 34)
                 if x >= 0:
-                    expected.update({(y, col): "h_claude" for col in range(x, x + 10)})
+                    run = "running 3m"
+                    length = next((size for size in range(len(run), len("running") - 1, -1)
+                                   if line[x:x + size] == run[:size]), len("running"))
+                    expected.update({(y, col): "h_claude" for col in range(x, x + length)})
                 continue  # KIND is a steady stage label
             for name, dim in active.items():
                 for match in re.finditer(name, pane):

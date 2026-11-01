@@ -296,6 +296,21 @@ def _draw_cross_links(grid, edges, boxes, frames, right, clear_of):
                        (" " + when + " ", "dim")], min(right, sx1))
 
 
+def _draw_steward_columns(grid, edges, boxes, right):
+    """Grey dotted stalks between a steward card and the targets stacked below it.
+
+    The stalk stops at the last target's top border: that row belongs to the target.
+    """
+    for column in edges.get("steward_columns", ()):
+        tags = [str(tag) for tag in column]
+        for upper, lower in zip(tags, tags[1:]):
+            top, tail = boxes.get(upper), boxes.get(lower)
+            if not top or not tail or top[2] != tail[2]:
+                continue
+            for yy in range(top[3] + 1, tail[1]):
+                grid.put(top[0], yy, "┆", "dim", limit=right)
+
+
 def _draw_markers(grid, vm, edges, boxes, frames, right, clear_of):
     """A recent clear on a seat marks its card's bottom border; a steward's watch marks its frame."""
     session_by_tag = {str(item.get("tag")): item for item in vm.sessions}
@@ -307,10 +322,14 @@ def _draw_markers(grid, vm, edges, boxes, frames, right, clear_of):
             harness = str(session_by_tag.get(tag, {}).get("harness") or "claude")
             grid.put(box[0] + 1, box[3], text, "hb_" + harness,
                      limit=min(right, box[2] + 1))
+    by_repo = {}
     for marker in edges.get("watches", ()):
-        frame = frames.get(str(marker.get("repo")))
+        by_repo.setdefault(str(marker.get("repo")), []).append(str(marker.get("text") or ""))
+    for repo, texts in by_repo.items():
+        frame = frames.get(repo)
         if frame:
-            grid.put(frame[0] + 3, frame[3], " ⚑ " + str(marker.get("text") or "") + " ", "steward",
+            text = " · ".join(dict.fromkeys(text for text in texts if text))
+            grid.put(frame[0] + 3, frame[3], " ⚑ " + text + " ", "steward",
                      limit=min(right, frame[2] + 1))
 
 
@@ -517,6 +536,7 @@ def draw_peers(grid, vm, state, x=34, y=3):
         cursor_y += band_h + 1
 
     _draw_side_lanes(grid, edges, session_boxes, right)
+    _draw_steward_columns(grid, edges, session_boxes, right)
     _draw_cross_links(grid, edges, session_boxes, frame_boxes, right, clear_of)
     _draw_markers(grid, vm, edges, session_boxes, frame_boxes, right, clear_of)
 
