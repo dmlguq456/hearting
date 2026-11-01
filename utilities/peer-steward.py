@@ -7746,10 +7746,21 @@ def _native_continuation_message(*, thread_id, turn_id, source_turn_id,
 
 def _settle_claude_native_dispatch_receipt(root, storage_recipient, row,
                                           recipient_sid, record) -> bool:
-    """Reuse only the exact Claude transcript bound to the registered cwd."""
+    """Reuse only the exact Claude transcript bound to the registered cwd.
+
+    The record is addressed to its registered parent (`storage_recipient`). When
+    the effective recipient moved on (a `/clear` or resume gave a new SID) the
+    registered parent's own transcript is still the place its exact receipt
+    marker lives, so it is read too; a result the parent already took is not
+    delivered a second time to its successor.
+    """
     cwd = row.metadata.get("parent_cwd")
     if not isinstance(cwd, str) or not os.path.isabs(cwd):
         return False
+    sessions = [recipient_sid]
+    if (storage_recipient and storage_recipient != recipient_sid
+            and row.metadata.get("parent_harness") == "claude"):
+        sessions.append(storage_recipient)
     runtime_home = os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude")
     try:
         from claude_project_dir import resolve_session_transcript
@@ -7757,28 +7768,31 @@ def _settle_claude_native_dispatch_receipt(root, storage_recipient, row,
             claude_transcript_evidence, legacy_claude_receipt_bindings,
             settle_native_receipt,
         )
-        transcript, _reason = resolve_session_transcript(
-            recipient_sid, cwd, expected_cwd=cwd, runtime_home=runtime_home)
-        if transcript is None:
-            return False
-        evidence = claude_transcript_evidence(
-            transcript_path=transcript, session_id=recipient_sid, cwd=cwd,
-            expected_cwd=cwd, runtime_home=runtime_home)
-        if evidence is not None:
-            from dispatch_session_sweep import addressed_records
-            candidates, _count = addressed_records(
-                Path(root), record.get("recipient_kind", ""), recipient_sid)
-            legacy = legacy_claude_receipt_bindings(
-                root, record.get("recipient_kind", ""), recipient_sid,
-                candidates, evidence)
-            binding = legacy.get((storage_recipient, record.get("delivery_id")))
-            if binding is not None:
-                evidence = {**evidence,
-                            "bindings": [*(evidence.get("bindings") or []), binding]}
-        outcome = settle_native_receipt(
-            root, storage_recipient, "claude", recipient_sid, record, evidence,
-            acked_by=f"native-receipt:claude:{recipient_sid}")
-        return bool(outcome.get("received"))
+        for session_id in sessions:
+            transcript, _reason = resolve_session_transcript(
+                session_id, cwd, expected_cwd=cwd, runtime_home=runtime_home)
+            if transcript is None:
+                continue
+            evidence = claude_transcript_evidence(
+                transcript_path=transcript, session_id=session_id, cwd=cwd,
+                expected_cwd=cwd, runtime_home=runtime_home)
+            if evidence is not None:
+                from dispatch_session_sweep import addressed_records
+                candidates, _count = addressed_records(
+                    Path(root), record.get("recipient_kind", ""), session_id)
+                legacy = legacy_claude_receipt_bindings(
+                    root, record.get("recipient_kind", ""), session_id,
+                    candidates, evidence)
+                binding = legacy.get((storage_recipient, record.get("delivery_id")))
+                if binding is not None:
+                    evidence = {**evidence,
+                                "bindings": [*(evidence.get("bindings") or []), binding]}
+            outcome = settle_native_receipt(
+                root, storage_recipient, "claude", session_id, record, evidence,
+                acked_by=f"native-receipt:claude:{session_id}")
+            if outcome.get("received"):
+                return True
+        return False
     except (OSError, RuntimeError, TypeError, ValueError):
         return False
 

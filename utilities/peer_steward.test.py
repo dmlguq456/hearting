@@ -16249,6 +16249,148 @@ class NativeDispatchReceiptTest(unittest.TestCase):
             self.assertIn("required_action=advance-completed", sent_bodies[0])
 
 
+class RegisteredParentReceiptAfterSuccessorTest(unittest.TestCase):
+    """C7: the registered parent already took the result; its successor SID must not get it again."""
+
+    def setUp(self):
+        import dispatch_pending_delivery as pending
+        import dispatch_recipient_receipt as recipient_receipt
+        import claude_project_dir
+        self.pending, self.rr = pending, recipient_receipt
+        self.tmp = tempfile.TemporaryDirectory(prefix="peer-native-successor-")
+        base = Path(self.tmp.name)
+        self.root = base / "dispatch"
+        self.cwd = base / "repo"
+        self.cwd.mkdir()
+        self.runtime_home = base / "claude-home"
+        self.project = self.runtime_home / "projects" / claude_project_dir.encode_project_dir(str(self.cwd))
+        self.project.mkdir(parents=True)
+        self.old, self.new = "old-parent-session", "new-parent-session"
+        self.attempt = "att-owner-successor"
+        self.did = "delivery-" + "c" * 32
+        body = {"schema_version": 1, "kind": "supervision",
+                "owner_attempt_id": self.attempt, "reason": "waiting"}
+        pending.create(
+            self.root, recipient_kind="claude-parent-runtime", recipient_key=self.old,
+            delivery_id=self.did, session_generation="", session_generation_supported="0",
+            attempt_ids=[self.attempt], parent_attempt_id=self.attempt,
+            route_id="route-successor", route_node="execute", receipt=body,
+            receipt_digest=pending._canonical_receipt_digest(body),
+            row_revisions={self.attempt: "revision-1"})
+        # The hook-native rewake claims, emits and leaves the record sent-ambiguous.
+        pending.claim(self.root, self.old, self.did, claim_owner="claude-async-rewake:1:1",
+                      lease_seconds=0.001, require_generation_proof=False)
+        pending.mark_sent_ambiguous(self.root, self.old, self.did,
+                                    claim_owner="claude-async-rewake:1:1")
+        time.sleep(0.01)
+        self.record = pending.read(self.root, self.old, self.did)
+        self.marker = recipient_receipt.receipt_marker(self.record, self.old)
+        self.row = SimpleNamespace(metadata={"parent_cwd": str(self.cwd), "parent_harness": "claude"})
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _native(self, sid, text, **over):
+        event = {"type": "user", "sessionId": sid,
+                 "origin": {"kind": "task-notification", "producer": "session-task"},
+                 "promptSource": "system", "turnOrigin": "task_notification",
+                 "message": {"content": ("<task-notification><task-id>t</task-id>"
+                                         "<summary>Stop hook feedback</summary>" + text +
+                                         "</task-notification>")}}
+        event.update(over)
+        return event
+
+    def _write(self, sid, *events):
+        (self.project / f"{sid}.jsonl").write_text(
+            "".join(json.dumps(e) + "\n" for e in events), encoding="utf-8")
+
+    def _settle(self, row=None):
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.runtime_home)}):
+            return peer_steward._settle_claude_native_dispatch_receipt(
+                self.root, self.old, row or self.row, self.new, self.record)
+
+    def _state(self):
+        return self.pending.read(self.root, self.old, self.did)["state"]
+
+    def test_exact_system_event_in_registered_parent_transcript_settles_for_successor(self):
+        self._write(self.old, self._native(self.old, self.marker))
+        self._write(self.new, {"type": "user", "sessionId": self.new,
+                               "message": {"content": "fresh after /clear"}})
+        self.assertTrue(self._settle())
+        self.assertEqual(self._state(), "acked")
+
+    def test_only_exact_system_origin_evidence_settles(self):
+        other_digest = "f" * 64
+        wrong_delivery = "HEARTING_RECEIPT_V1 delivery-" + "d" * 32 + " " + self.marker.split()[-1]
+        wrong_digest = f"HEARTING_RECEIPT_V1 {self.did} {other_digest}"
+        cases = {
+            "no-marker": [self._native(self.old, "nothing to see")],
+            "other-delivery": [self._native(self.old, wrong_delivery)],
+            "other-digest": [self._native(self.old, wrong_digest)],
+            "model-authored": [{"type": "assistant", "sessionId": self.old,
+                                "message": {"content": self.marker}}],
+            "user-typed": [self._native(self.old, self.marker, promptSource="user")],
+            "foreign-session": [self._native("someone-else", self.marker)],
+        }
+        for name, events in cases.items():
+            with self.subTest(case=name):
+                self._write(self.old, *events)
+                self.assertFalse(self._settle())
+                self.assertEqual(self._state(), "sent-ambiguous")
+
+    def test_registered_parent_is_consulted_only_when_it_is_a_claude_parent(self):
+        self._write(self.old, self._native(self.old, self.marker))
+        other = SimpleNamespace(metadata={"parent_cwd": str(self.cwd), "parent_harness": "codex"})
+        self.assertFalse(self._settle(other))
+        self.assertEqual(self._state(), "sent-ambiguous")
+
+    def _run_courier(self, *events):
+        carrier = "claude-parent-runtime"
+        jobs = self.root / "jobs.log"
+        jobs.touch()
+        metadata = {"parent_sid": self.old, "parent_harness": "claude",
+                    "parent_completion_delivery": carrier, "delivery_intent": "1",
+                    "delivery_id": self.did,
+                    "delivery_receipt_digest": self.record["receipt_digest"],
+                    "delivery_row_revision": "revision-1",
+                    "route_id": "route-successor", "route_node": "execute",
+                    "parent_cwd": str(self.cwd)}
+        row = SimpleNamespace(status="done", attempt_id=self.attempt, metadata=metadata)
+        store = peer_steward.peer_obligations.ObligationStore(Path(self.tmp.name))
+        identity = {"jobs": str(jobs), "attempt_id": self.attempt, "session_id": self.old,
+                    "harness": "claude", "server": "default"}
+        duty = store.create("registered-batch-successor-" + "a" * 20,
+                            "registered-batch", identity, {"carrier": carrier})
+        agents = {"result": {"agents": [{"agent": "claude", "pane_id": "w1:p9",
+                  "agent_session": {"value": self.new}}]}}
+        self._write(self.old, *events)
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.runtime_home)}), \
+             mock.patch("dispatch_completion_join.current_attempt_row", return_value=row), \
+             mock.patch("dispatch_completion_join.materialize_after_terminal_close"), \
+             mock.patch("dispatch_seat_handover._effective", return_value=(self.new, "claude")), \
+             mock.patch.object(peer_steward.subprocess, "run", return_value=SimpleNamespace(
+                 stdout=json.dumps(agents), returncode=0)), \
+             mock.patch.object(peer_steward, "_resolve_target", return_value=("claude", self.new)), \
+             mock.patch.object(peer_steward, "_schedule_message_obligation"), \
+             mock.patch.object(peer_steward, "cmd_prompt", return_value=0) as send:
+            peer_steward._resume_registered_obligation(store.get(duty["id"]), store)
+        return send, self.pending.read(self.root, self.old, self.did)
+
+    def test_registered_courier_does_not_redeliver_to_successor_after_parent_took_it(self):
+        send, record = self._run_courier(self._native(self.old, self.marker))
+        send.assert_not_called()
+        self.assertEqual(record["state"], "acked")
+        self.assertEqual(record["attempts"], 1)  # no new claim by the courier
+
+    def test_registered_courier_still_delivers_to_live_successor_without_evidence(self):
+        stop = self.pending.PendingDeliveryError("pending-delivery-claim-refused", "test-stop")
+        with mock.patch.object(self.pending, "claim_ready_batch", side_effect=stop) as claim:
+            send, record = self._run_courier(self._native(self.old, "no receipt marker here"))
+        # Past the receipt check, the courier goes on to claim it for the live successor.
+        claim.assert_called_once()
+        self.assertNotEqual(record["state"], "acked")
+
+
 class WatchReceiptLockBudgetTest(_TmpRootMixin, unittest.TestCase):
     def setUp(self):
         super().setUp()
