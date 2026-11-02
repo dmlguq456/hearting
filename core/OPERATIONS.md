@@ -2648,7 +2648,9 @@ Window contract: every pane Hearting opens comes from
 (another session), `hearting run pane open <command>` (a command output pane),
 `interactive-main-recovery --start` and Fleet `--window`. Peer start and
 recovery pass the Herdr reference they already checked (a project start passes
-its workspace, and no pane is split there). `pane open` and Fleet use the caller's
+its workspace, and no pane is split there). Without the `herdr` command a peer
+start prints one `started=false reason=herdr-not-found` line, exits 4 and
+queues no retry notice; the work stays in the calling session. `pane open` and Fleet use the caller's
 Herdr pane when the shared live ownership proof holds, then the tmux server
 `$TMUX` names when it answers, else none: nothing opens and the result carries
 the command line to run by hand (exit 0). Registered workers get no surface, and

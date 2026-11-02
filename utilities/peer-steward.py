@@ -1934,7 +1934,9 @@ def cmd_start(args, *, retain_failure=True):
     result = output.getvalue()
     if result:
         print(result, end="")
-    if code != 0 and retain_failure:
+    # No herdr is not a failed attempt: a retry cannot succeed either, so no retained
+    # notice asks this session to repeat it. The one printed line is the whole answer.
+    if code != 0 and retain_failure and "reason=herdr-not-found" not in result:
         try:
             _retain_start_failure(requester, requested, vars(args), result)
         except (OSError, ValueError, KeyError, TypeError):
@@ -1973,7 +1975,9 @@ def _start_request(args):
 
 def _start_in_pane(args):
     if _herdr_missing():
-        return _unavailable("herdr-not-found")
+        print(f"started=false reason=herdr-not-found agent={args.kind} name={args.name} pane=- "
+              "detail=새 세션 창은 herdr가 있어야 열립니다. 이 일은 지금 세션에서 이어서 하세요")
+        return 4
     workspace = getattr(args, "project_workspace", None)
     if not args.pane and not args.beside and not workspace:
         print(f"started=false reason=pane-unknown agent={args.kind} name={args.name} "
