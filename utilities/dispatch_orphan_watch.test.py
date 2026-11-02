@@ -571,24 +571,45 @@ class WatchLifetimeTest(unittest.TestCase):
             self.assertEqual(self.watch.watch(self.args), 0)
         exited.assert_called_once_with(self.args)
 
-    def test_each_idle_wait_offers_the_watch_to_the_installed_release_first(self):
+    def test_a_live_owner_keeps_the_watch_on_its_release_through_every_wait(self):
         self.write("open")
         self.args.release_argv = ["--jobs", str(self.jobs), "--attempt-id", "att-life"]
-        events = []
-
-        def sleep(_seconds):
-            events.append("sleep")
-            if events.count("sleep") >= 5:
-                raise self.Stop()
         import peer_obligations
-        with mock.patch.object(self.watch, "process_start", return_value="1"), \
-             mock.patch.object(self.watch.time, "sleep", side_effect=sleep), \
-             mock.patch.object(peer_obligations, "follow_installed_release",
-                               side_effect=lambda script, argv: events.append((script, list(argv)))):
+        with mock.patch("parent_next_directive.release_moved", return_value=True), \
+             mock.patch.object(self.watch, "process_start", return_value="1"), \
+             mock.patch.object(self.watch.time, "sleep", side_effect=self.sleeper(5)), \
+             mock.patch.object(peer_obligations, "follow_installed_release") as follow:
             with self.assertRaises(self.Stop):
                 self.watch.watch(self.args)
-        offer = (self.watch.__file__, self.args.release_argv)
-        self.assertEqual(events, [offer, "sleep"] * 5)
+            self.write("killed")
+            with self.assertRaises(self.Stop):
+                self.watch.watch(self.args)
+        follow.assert_not_called()
+
+    def test_only_an_ended_attempt_moves_and_an_unmoved_install_reads_nothing(self):
+        self.args.release_argv = ["--jobs", str(self.jobs), "--attempt-id", "att-life"]
+        quiescent = SimpleNamespace(process_state="quiescent")
+        live = SimpleNamespace(process_state="live")
+        import peer_obligations
+        for moved, owner, observed, expected in (
+                (False, None, quiescent, False),
+                (True, "1", quiescent, False),
+                (True, None, live, False),
+                (True, None, quiescent, True),
+                (True, None, None, True)):
+            with self.subTest(moved=moved, owner=owner, observed=observed), \
+                 mock.patch("parent_next_directive.release_moved", return_value=moved), \
+                 mock.patch.object(self.watch, "process_start", return_value=owner), \
+                 mock.patch.object(self.watch, "observed_owner_lifecycle",
+                                   return_value=(observed, "", {})) as lifecycle, \
+                 mock.patch.object(peer_obligations, "follow_installed_release") as follow:
+                self.watch.follow_installed_release(self.args)
+            if expected:
+                follow.assert_called_once_with(self.watch.__file__, self.args.release_argv)
+            else:
+                follow.assert_not_called()
+            if not moved:
+                lifecycle.assert_not_called()
 
     def test_an_exited_owner_is_reconciled_without_moving_in_between(self):
         self.write("open")

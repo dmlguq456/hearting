@@ -627,14 +627,15 @@ def _exec_in_release(source_root: Path, target_root: Path, argv, *, keep_fds=())
 
 
 def _rebase_release_argument(value: str, source_root: Path, target_root: Path) -> str:
-    """Name the same place in the target release when an argument names the old one."""
-    if not value.startswith(os.sep):
-        return value
-    try:
-        relative = Path(os.path.abspath(value)).relative_to(source_root)
-    except ValueError:
-        return value
-    return str(target_root / relative)
+    """Name the target release when an argument names the old code root itself.
+
+    Only the root moves. A path beneath it can be state that stays where it is
+    (a release-local `.dispatch/jobs.log`, a resume record), so it is passed on
+    unchanged.
+    """
+    if value.startswith(os.sep) and os.path.abspath(value) == str(source_root):
+        return str(target_root)
+    return value
 
 
 def follow_installed_release(script: str | Path, arguments: Iterable[str], *, root=None) -> bool:
@@ -644,7 +645,9 @@ def follow_installed_release(script: str | Path, arguments: Iterable[str], *, ro
     loop calls this only where nothing is half done. When the installer's
     ``current`` pointer names another release of this same managed install,
     the process becomes the same script of that release with the same
-    arguments (paths into the old release tree name the new one). The PID,
+    arguments (one naming the old code root names the new one; state paths,
+    even beneath the old tree, stay). These arguments are therefore a contract
+    between releases: a later release accepts what an earlier one passed. The PID,
     start time, session and standard streams stay, so every record that names
     this helper stays true and the new code observes its inputs again.
 

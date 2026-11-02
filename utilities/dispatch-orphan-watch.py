@@ -130,19 +130,30 @@ def attempt_status(jobs: Path, attempt_id: str) -> str | None:
 
 
 def follow_installed_release(args) -> None:
-    """At an idle point, hand this watch to the installed release (same PID).
+    """Once its attempt runs nothing, hand this watch to the installed release (same PID).
 
-    A watch can outlive its owner by days while the owner's leftovers settle,
-    and nothing else would ever move it off the release that started it. It is
-    called only before a wait, where nothing is half done: the registry row and
-    the exact owner identity are the watch's only inputs, so the new code starts
-    this same watch again from them. Without its original arguments (a direct
-    call) or when nothing moved, the watch continues here.
+    A watch can outlive its attempt while a close or a recovery settles, and
+    nothing else would ever move it off the release that started it. While the
+    exact owner, or any process of its attempt, is still live, the attempt runs
+    its own release's code and the watch stays with it, so one release's code
+    settles the attempt (OPERATIONS §5.9a). It is called only before a wait,
+    where nothing is half done: the registry row and the exact owner identity
+    are the watch's only inputs, so the new code starts this same watch again
+    from them. Without its original arguments (a direct call) or when nothing
+    moved, the watch continues here.
     """
     argv = getattr(args, "release_argv", None)
     if argv is None:
         return
     try:
+        from parent_next_directive import release_moved
+        if not release_moved(Path(__file__).resolve().parents[1]):
+            return
+        if process_start(args.pid) == args.pid_start:
+            return
+        observed, _phase, _metadata = observed_owner_lifecycle(args)
+        if observed is not None and observed.process_state != "quiescent":
+            return
         import peer_obligations
         peer_obligations.follow_installed_release(__file__, argv)
     except Exception:  # noqa: BLE001 -- a failed move keeps watching with this code
@@ -395,7 +406,6 @@ def watch(args) -> int:
                 status in PARENT_EXTINCTION_TERMINAL_STATUSES
                 and process_start(args.pid) == args.pid_start
             ):
-                follow_installed_release(args)
                 time.sleep(args.interval)
                 continue
             recovered = recover_waiting_continuation(args)
@@ -409,11 +419,9 @@ def watch(args) -> int:
         if process_start(args.pid) != args.pid_start:
             observed, _phase, _metadata = observed_owner_lifecycle(args)
             if observed is not None and observed.process_state != "quiescent":
-                follow_installed_release(args)
                 time.sleep(args.interval)
                 continue
             break
-        follow_installed_release(args)
         time.sleep(args.interval)
     return reconcile_exact_exit(args)
 

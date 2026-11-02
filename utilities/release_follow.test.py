@@ -67,6 +67,7 @@ parent = os.getppid()
 command = Path(f"/proc/{parent}/cmdline").read_bytes().split(b"\0")
 with open(os.environ["FIXTURE_RESUME_MARKER"], "a") as handle:
     handle.write(json.dumps({"parent": parent, "parent_script": command[1].decode(),
+                             "parent_args": [part.decode() for part in command[2:] if part],
                              "start": __file__, "argv": sys.argv[1:]}) + "\n")
 print(json.dumps({"state": "running", "owner_attempt_id": "att-resumed"}))
 '''
@@ -288,15 +289,20 @@ class FollowDecisionTest(unittest.TestCase):
         self.assertFalse(parent_next_directive.release_moved(ROOT))
         self.assertFalse(parent_next_directive.release_moved(""))
 
-    def test_a_moved_release_execs_the_same_script_with_rebased_arguments(self):
+    def test_a_moved_release_execs_the_same_script_renaming_only_the_old_root(self):
         self.install.point(self.install.b)
+        # State may live beneath the old tree (a release-local .dispatch); it stays put.
+        local_jobs = str(self.install.a / ".dispatch/jobs.log")
+        local_record = str(self.install.a / ".dispatch/capacity-resume/rt-x.json")
         result, execve = self.follow(self.install.a, arguments=(
-            "--agent-home", str(self.install.a), "--jobs", "/elsewhere/jobs.log", "plain"))
+            "--agent-home", str(self.install.a) + "/", "--jobs", local_jobs, "--record",
+            local_record, "--other", "/elsewhere/jobs.log", "plain"))
         self.assertTrue(result)
         executable, argv, environment = execve.call_args.args
         self.assertEqual(executable, sys.executable)
         self.assertEqual(argv, [sys.executable, str(self.install.b / "utilities/fixture-helper.py"),
-                                "--agent-home", str(self.install.b), "--jobs", "/elsewhere/jobs.log",
+                                "--agent-home", str(self.install.b), "--jobs", local_jobs,
+                                "--record", local_record, "--other", "/elsewhere/jobs.log",
                                 "plain"])
         self.assertEqual(environment["AGENT_HOME"], str(self.install.b))
 
@@ -336,14 +342,18 @@ class FollowDecisionTest(unittest.TestCase):
 
 
 class RealHelpersFollowTest(HelperProcesses, unittest.TestCase):
-    """The watchers that outlive their work move with the install and finish it."""
+    """A capacity wait moves and finishes; an orphan watcher stays with its live attempt.
 
-    def test_capacity_wait_resumes_once_on_the_installed_release(self):
+    Both keep their state beneath the old release (`.dispatch`), as a
+    release-local registry does; that state stays where it is.
+    """
+
+    def test_capacity_wait_resumes_once_on_the_installed_release_with_its_own_record(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         install = FakeInstall(Path(temp.name))
         marker = install.base / "resumed.jsonl"
-        jobs = install.base / "dispatch" / "jobs.log"
+        jobs = install.a / ".dispatch" / "jobs.log"
         jobs.parent.mkdir()
         jobs.write_text("", encoding="utf-8")
         record = jobs.parent / "capacity-resume" / "rt-fixture-0.json"
@@ -368,19 +378,21 @@ class RealHelpersFollowTest(HelperProcesses, unittest.TestCase):
         self.assertEqual(resumed[0]["parent"], process.pid)
         self.assertEqual(resumed[0]["parent_script"],
                          str(install.b / "utilities/capacity_auto_resume.py"))
+        self.assertEqual(resumed[0]["parent_args"], ["run", "--record", str(record)])
+        self.assertFalse((install.b / ".dispatch").exists())
         self.assertTrue(start)
         settled = json.loads(record.read_text(encoding="utf-8"))
         self.assertEqual((settled["state"], settled["owner_attempt_id"]),
                          ("resumed", "att-resumed"))
 
-    def test_orphan_watch_moves_with_the_install_and_still_closes_its_owner(self):
+    def test_orphan_watch_stays_with_its_live_attempt_and_settles_it_on_one_release(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         install = FakeInstall(Path(temp.name), full_utilities=True)
         owner = self.start(["sleep", "120"], install.environment(install.a))
         owner_start = proc_start(owner.pid)
         namespace = Path("/proc/self/ns/pid").readlink()
-        jobs = install.base / "registry" / "jobs.log"
+        jobs = install.a / ".dispatch" / "jobs.log"
         jobs.parent.mkdir()
         jobs.write_text(
             "2026-07-19T00:00:00Z\topen\t/r\t/w\towner\t"
@@ -390,30 +402,29 @@ class RealHelpersFollowTest(HelperProcesses, unittest.TestCase):
             "parent_completion_delivery=claude-parent-runtime,"
             f"pid={owner.pid},pid_start={owner_start},pgid={owner.pid},"
             f"pid_observer_ns={namespace},pid_ns={namespace}\n", encoding="utf-8")
+        script = install.a / "utilities/dispatch-orphan-watch.py"
         watcher = self.start(
-            [sys.executable, str(install.a / "utilities/dispatch-orphan-watch.py"),
-             "--jobs", str(jobs), "--agent-home", str(install.a), "--attempt-id", "att-move",
-             "--pid", str(owner.pid), "--pid-start", owner_start, "--interval", "0.05"],
+            [sys.executable, str(script), "--jobs", str(jobs), "--agent-home", str(install.a),
+             "--attempt-id", "att-move", "--pid", str(owner.pid), "--pid-start", owner_start,
+             "--interval", "0.05"],
             install.environment(install.a))
         watcher_start = wait_until(lambda: proc_start(watcher.pid))
         time.sleep(0.5)
-        self.assertEqual(cmdline(watcher.pid)[1],
-                         str(install.a / "utilities/dispatch-orphan-watch.py"))
         install.point(install.b)
-        moved = wait_until(lambda: cmdline(watcher.pid)[1:2]
-                           == [str(install.b / "utilities/dispatch-orphan-watch.py")], timeout=20)
-        self.assertTrue(moved, cmdline(watcher.pid))
-        argv = cmdline(watcher.pid)
-        self.assertEqual(argv[argv.index("--agent-home") + 1], str(install.b))
+        # Twenty-odd idle waits with B installed: the live attempt keeps its watcher.
+        deadline = time.monotonic() + 1.5
+        while time.monotonic() < deadline:
+            self.assertEqual(cmdline(watcher.pid)[1], str(script))
+            time.sleep(0.05)
         self.assertEqual(proc_start(watcher.pid), watcher_start)
-        self.assertIn("\topen\t", jobs.read_text(encoding="utf-8"),
-                      "moving never closes the owner it watches")
+        self.assertIn("\topen\t", jobs.read_text(encoding="utf-8"))
         owner.kill()
         owner.wait(timeout=5)
         self.assertEqual(watcher.wait(timeout=30), 0)
         text = jobs.read_text(encoding="utf-8")
         self.assertIn("\tdone\t/r\t/w\towner\t", text)
         self.assertIn("note=dead-exact-pid", text)
+        self.assertFalse((install.b / ".dispatch").exists())
 
 
 if __name__ == "__main__":
