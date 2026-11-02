@@ -1147,6 +1147,18 @@ def _repo_results(snapshot, resolver, now):
     return found
 
 
+def stewards_first(rows):
+    """A stewarding session leads its repository; every other row keeps its order.
+
+    The monitor board has led each repo group with its steward since F-100c (user
+    2026-09-03, again 2026-10-06: "감독 세션을 fleet에서 가장 상단에"). The explorer
+    kept only first-seen order, so the rule is applied here once for every view.
+    """
+    rows = list(rows)
+    return ([row for row in rows if row.get("steward")]
+            + [row for row in rows if not row.get("steward")])
+
+
 def _repo_records(session_rows, routes, results=None, now=None):
     order = []
     for row in session_rows:
@@ -2861,7 +2873,7 @@ def build_view_model(snapshot, accepted_detail=None, cached_config=None, now=Non
     by_repo = {}
     for row in session_rows:
         by_repo.setdefault(row["repo_id"], []).append(row)
-    session_rows = [row for repo in repos for row in by_repo.get(repo["id"], ())]
+    session_rows = [row for repo in repos for row in stewards_first(by_repo.get(repo["id"], ()))]
     focus, _seats, detail_config, panes = _detail_parts(accepted_detail)
     for row in session_rows:                          # a pane id the herdr read found for this session
         if not row.get("pane"):
