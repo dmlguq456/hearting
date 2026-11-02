@@ -199,7 +199,8 @@ credentials, sessions, logs, databases, or shell startup files, and it cannot
 change the `PATH` of a shell that is already open: use the `~/.local/bin/...`
 paths until that directory is on your `PATH`.
 
-Read [Permissions](#permissions) before your first task.
+The installer prints a note about the default worker permissions. Read
+[Permissions](#permissions) before your first task.
 
 ### First task
 
@@ -212,7 +213,10 @@ change, what was run to check it, and anything left undone. For anything
 beyond a one-line fix, the plan, evidence, and report stay in the project's
 `.agent_reports/` folder.
 
-<!-- TODO(public-readiness stages 1 and 6): link QUICKSTART.md with the demo repository, expected patch, and measured time. -->
+The [Quickstart](QUICKSTART.md) walks this task end to end with measured times,
+and the [FAQ](FAQ.md) covers `PATH`, Python versions, and permissions.
+
+<!-- TODO(public-readiness stage 1): link a published demo repository with the expected patch. -->
 
 ### Update and status
 
@@ -271,7 +275,8 @@ headless:
   `workspace-write` sandbox without approval prompts; OpenCode workers start
   from your own OpenCode permission configuration.
 
-<!-- TODO(public-readiness stage 2): once the installer prints this default and the file path, say so here. -->
+The installer prints a one-line note with this default and the file path after
+a Claude Code install; it asks for no input.
 
 ## Artifacts and status
 
@@ -401,13 +406,14 @@ The `pre-push` hook runs the same projection check CI runs. Packaged
 activation refuses to build from a dirty tree, so run the install lifecycle
 suites from a clean checkout; `--mode linked` exists only for live debugging.
 
-<!-- TODO(public-readiness stage 6): add CONTRIBUTING.md and link it here. -->
+See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 
 ## Documentation
 
 | Purpose | Document |
 |---|---|
 | Maintenance principles | [AGENTS.md](AGENTS.md) |
+| First task, common questions, contributing | [QUICKSTART.md](QUICKSTART.md), [FAQ.md](FAQ.md), [CONTRIBUTING.md](CONTRIBUTING.md) |
 | How the parts fit together | [MANUAL.md](MANUAL.md) |
 | Installation and runtime projections | [INSTALL_LAYOUT.md](INSTALL_LAYOUT.md) |
 | Releases and versioning | [RELEASE_POLICY.md](RELEASE_POLICY.md) |

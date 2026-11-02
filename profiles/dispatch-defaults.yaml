@@ -117,7 +117,7 @@ allocation:
   # OpenCode is slow: every enabled harness is a worker candidate, but it takes a
   # smaller target share of default placements (`balanced` strategy). Explicit
   # selection, pins and hard eligibility ignore this.
-  # 2026-09-30 (user: "codex 팍팍 쓰고"): weights only lower a share (at most 1),
+  # 2026-09-30 (maintainer decision): weights only lower a share (at most 1),
   # so Claude takes half the default share and Codex gets about twice as many
   # default placements; workers lean further to Codex through depth affinity.
   harness_weights:

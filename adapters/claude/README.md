@@ -105,8 +105,9 @@ Route-bound registered work uses a second, independent execution-budget axis:
 | `mini` | `sonnet` / `low` | lifecycle and micro-semantic helpers only; substantive dispatch-depth-1/2 work is rejected |
 | `top` | `fable` / `max` | exception above deep: the main-session-only model, reachable only from a route that seals the explicit `top` profile on a dispatch-depth-1 owner (`model_source=profile-top`; the wrapper refuses `top` without that route); no cascade in or out, no `--model` override |
 
-These are the shipped defaults and equal the user's runtime mapping (2026-09-09
-사용자 결정: a runtime value changed by instruction becomes the shipped default).
+These are the shipped defaults and equal the maintainer's runtime mapping
+(2026-09-09 maintainer decision: a runtime value changed by instruction becomes
+the shipped default).
 The top model is reserved for the main session, so both deep-side profiles ride
 `opus` and separate by effort. The deep-tier capacity cascade is `opus -> sonnet`.
 
