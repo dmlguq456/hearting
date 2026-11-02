@@ -3115,6 +3115,9 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
         terminal_var_evidence = actual_resource_evidence(var_armed)
         self.assertTrue(terminal_var_evidence['terminal'])
         self.assertTrue(terminal_var_evidence['quiescent'])
+        # That observation settled the row; the real context re-reads it on every look.
+        pairs = [(armed, json.loads(Path(armed['resource_registry']).read_text())['runs'][armed['predecessor_id']])
+                 for armed in current]
 
         def restored_observation(armed):
             if armed['predecessor_id'] == 'var-run':
