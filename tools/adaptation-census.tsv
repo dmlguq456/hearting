@@ -351,6 +351,7 @@ tool-deferred	generate.py
 tool-deferred	generated-projections.test.sh
 tool-deferred	git-hooks
 tool-deferred	harness_manifest.py
+tool-deferred	i18n
 tool-deferred	improvement
 tool-deferred	install
 tool-deferred	installed-layout-triggers.tsv
