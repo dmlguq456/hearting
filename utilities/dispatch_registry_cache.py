@@ -9,7 +9,7 @@ authority under the existing lock before a state transition.
 from __future__ import annotations
 
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import atexit
 import codecs
 import contextlib
@@ -26,6 +26,12 @@ import time
 _RETRIES = 3
 _CHUNK_SIZE = 1024 * 1024
 _APPEND_OBSERVATION_GAP_SECONDS = 30.0
+# A read this long after the file's last change cannot share that change's
+# timestamp tick. Whole-second stamps (FAT 2 s, ext3/HFS+ 1 s) get the coarse
+# margin; stamps with sub-second digits come from a clock of one kernel tick
+# (at most 10 ms) or finer.
+_SETTLED_NS = 2_000_000_000
+_SETTLED_FINE_NS = 100_000_000
 _CACHE_MAX_PATHS = 128
 _CACHE_MAX_BYTES = 64 * 1024 * 1024
 _MAX_SEGMENTS = 256
@@ -501,15 +507,25 @@ class RegistryView:
                  "line_count", "record_count", "malformed_rows", "has_partial_tail",
                  "last_observed_at", "_has_duplicate_attempts", "_invalid_utf8_prefix",
                  "has_invalid_utf8", "_raw_digest", "_prefix_reuse_eligible",
-                 "_append_only_generation")
+                 "_append_only_generation", "_asserted_suffix", "_settled",
+                 "_parent_sessions")
 
     def __init__(self, path_identity: str, resolved_path: str, signature: tuple,
-                 raw: bytes, *, previous: "RegistryView | None" = None, fd: int = -1):
+                 raw: bytes, *, previous: "RegistryView | None" = None, fd: int = -1,
+                 asserted_suffix: bool = False, settled: bool = False):
         self.path_identity = path_identity
         self.resolved_path = resolved_path
         self.signature = signature
         self._fd = fd
         self._append_only_generation = previous is not None
+        # True while any part of this generation rests on a caller's append-only
+        # assertion instead of bytes whose prefix digest was compared here.
+        self._asserted_suffix = bool(
+            previous is not None and (asserted_suffix or previous._asserted_suffix))
+        # True once these bytes were read when the file's last change was already
+        # older than the timestamp granularity: any later write changes the stat.
+        self._settled = bool(settled and not self._asserted_suffix)
+        self._parent_sessions = None
         self.last_observed_at = time.monotonic()
         self._has_duplicate_attempts = None
         self._raw_digest = hashlib.sha256(raw)
@@ -768,6 +784,26 @@ class RegistryView:
         return {attempt: (status, record.handover_metadata())
                 for attempt, (status, record) in latest.items()}
 
+    PARENT_SESSION_KEYS = ("parent_sid", "parent_harness", "main_runtime_harness",
+                           "parent_completion_delivery")
+
+    def handover_parent_sessions(self) -> tuple[tuple[str | None, ...], ...]:
+        """Distinct ``PARENT_SESSION_KEYS`` values of each attempt's latest row.
+
+        Projected once per immutable generation, so a caller that scans every
+        parent session on each pass does not re-parse every historical row.
+        """
+        if self._parent_sessions is None:
+            latest = {}
+            for segment in self._segments:
+                latest.update(segment.handover_latest)
+            distinct = {}
+            for _status, record in latest.values():
+                metadata = dict(record._handover_pairs or _parse_handover(record.fields[5]))
+                distinct[tuple(metadata.get(key) for key in self.PARENT_SESSION_KEYS)] = None
+            self._parent_sessions = tuple(distinct)
+        return self._parent_sessions
+
     def handover_attempt(self, attempt_id: str):
         latest = None
         for segment in self._segments:
@@ -846,9 +882,15 @@ class RegistrySnapshot:
     resolved_path: str
     signature: tuple[int, int, int, int, int]
     view: RegistryView
-    lines: tuple[str, ...]
+    # The scope's pinned ``[view, lines]``; most consumers read only the view.
+    _pinned: list = field(repr=False, compare=False)
     complete: bool
     reason: str = ""
+
+    @property
+    def lines(self) -> tuple[str, ...]:
+        """The exact text lines of this generation, decoded on first use."""
+        return _pinned_lines(self._pinned)
 
     def matches_jobs(self, jobs) -> bool:
         path = Path(jobs)
@@ -958,6 +1000,52 @@ def _path_matches_fd(path: Path, resolved: str, signature: tuple, fd: int) -> bo
         return False
 
 
+def _settled_read(fd: int, started_ns: int) -> bool:
+    """Whether bytes read after ``started_ns`` predate every possible later write.
+
+    A write within one timestamp tick of the previous write can keep size, mtime
+    and ctime equal. Once a read starts at least the granularity margin after the
+    file's last change, a later write must carry a newer timestamp, so an equal
+    stat proves the bytes unchanged (the "racily clean" rule).
+    """
+    try:
+        info = os.fstat(fd)
+    except OSError:
+        return False
+    fine = info.st_mtime_ns % 1_000_000_000 and info.st_ctime_ns % 1_000_000_000
+    margin = min(_SETTLED_NS, _SETTLED_FINE_NS) if fine else _SETTLED_NS
+    return started_ns - max(info.st_mtime_ns, info.st_ctime_ns) >= margin
+
+
+def _current_cached(path: Path, identity: str, *, scoped: bool = False) -> "RegistryView | None":
+    """The cached generation when the path and its retained fd still name it.
+
+    One decision for every reader; the caller holds ``_LOCK``. Equal path and
+    descriptor metadata identify the bytes that were read, so nothing is re-read.
+    A scoped reader also needs bytes it can vouch for without a stat collision:
+    a generation read too soon after its last write, or extended by an asserted
+    append suffix, keeps its full read and digest comparison; so does a registry
+    whose text lines differ from the view's rows.
+    """
+    cached = _CACHE.get(identity)
+    if cached is None or cached._fd < 0:
+        return None
+    if scoped and (not cached._settled or cached._asserted_suffix
+                   or not cached._prefix_reuse_eligible or cached.has_invalid_utf8):
+        return None
+    try:
+        resolved = str(path.resolve(strict=True))
+    except (OSError, RuntimeError):
+        return None
+    if (cached.resolved_path != resolved
+            or not _path_matches_fd(path, resolved, cached.signature, cached._fd)):
+        return None
+    _METRICS["cache_hits"] += 1
+    _CACHE.move_to_end(identity)
+    cached.last_observed_at = time.monotonic()
+    return cached
+
+
 def _read_retained_suffix(path: Path, path_identity: str, cached: RegistryView):
     """Read appended bytes from the cache owner's continuously retained fd."""
     last_error = None
@@ -1053,19 +1141,25 @@ def _pinned_generation(scope: dict, jobs: Path) -> list:
 
 
 def _observe_generation(path: Path) -> list:
-    """Read one full stable generation into ``[view, lines]``.
+    """Observe one stable generation as ``[view, lines]``.
 
     ``lines`` is None when the view's own lines already equal
     ``read_text(errors="replace").splitlines()`` of the same bytes (LF-only
     registry, valid UTF-8 prefix); otherwise it is those plain text lines, which
     the LF-segmented view does not promise for other line separators.
-    The view is the cached one when that generation is already cached.
+    A cached generation that the path and its retained descriptor still name is
+    returned without reading; any other generation is read in full and its
+    prefix digest decides how much of the cached parse it may reuse.
     """
     identity = str(path.absolute())
     with _LOCK:
+        current = _current_cached(path, identity, scoped=True)
+        if current is not None:
+            return [current, None]
         fd = None
         try:
             path.resolve(strict=True)  # a missing path fails at once, as in registry_view
+            started_ns = time.time_ns()
             resolved, signature, raw, fd = _stable_read(path, identity)
         except OSError:
             if _drop(identity) is not None:
@@ -1075,6 +1169,7 @@ def _observe_generation(path: Path) -> list:
             if _drop(identity) is not None:
                 _METRICS["invalidations"] += 1
             raise OSError(f"could not resolve registry path: {identity}") from exc
+        settled = _settled_read(fd, started_ns)
         cached = _CACHE.get(identity)
         if (cached is not None and cached.resolved_path == resolved
                 and cached.signature == signature
@@ -1084,6 +1179,8 @@ def _observe_generation(path: Path) -> list:
             _METRICS["cache_hits"] += 1
             _CACHE.move_to_end(identity)
             cached.last_observed_at = time.monotonic()
+            cached._asserted_suffix = False  # the full digest now vouches for it
+            cached._settled = cached._settled or settled
             view = cached
         else:
             reusable = bool(
@@ -1100,13 +1197,15 @@ def _observe_generation(path: Path) -> list:
                 and not _utf8_status(cached._tail + raw[cached.signature[2]:])[0]
             )
             previous = cached if reusable else None
+            if previous is not None:
+                previous._asserted_suffix = False  # its prefix digest just matched
             suffix = raw[previous.signature[2]:] if previous is not None else raw
             _drop(identity, keep_parse=previous is not None)
             if previous is None:
                 cached = None
             _METRICS["invalidations"] += 1
             view = RegistryView(identity, resolved, signature, suffix,
-                                previous=previous, fd=fd)
+                                previous=previous, fd=fd, settled=settled)
             fd = suffix = None
             if previous is not None:
                 _METRICS["append_reuses"] += 1
@@ -1163,11 +1262,11 @@ def registry_snapshot(jobs: Path) -> RegistrySnapshot:
         with registry_read_scope():
             return registry_snapshot(path)
     entry = _pinned_generation(scope, path)
-    view, lines = entry[0], _pinned_lines(entry)
+    view = entry[0]
     reason = view.completeness_reason
     return RegistrySnapshot(
         path_identity=str(path.absolute()), resolved_path=view.resolved_path,
-        signature=tuple(view.signature), view=view, lines=tuple(lines),
+        signature=tuple(view.signature), view=view, _pinned=entry,
         complete=not reason, reason=reason,
     )
 
@@ -1204,15 +1303,11 @@ def _registry_view_fresh(jobs: Path, *, append_only: bool = False) -> RegistryVi
                 _METRICS["invalidations"] += 1
             raise OSError(f"could not resolve registry path: {identity}") from exc
 
-        cached = _CACHE.get(identity)
-        if (cached is not None and cached.resolved_path == resolved
-                and cached.signature == signature and cached._fd >= 0
-                and _path_matches_fd(path, resolved, signature, cached._fd)):
-            _METRICS["cache_hits"] += 1
-            _CACHE.move_to_end(identity)
-            cached.last_observed_at = time.monotonic()
-            return cached
+        current = _current_cached(path, identity)
+        if current is not None:
+            return current
 
+        cached = _CACHE.get(identity)
         can_append = bool(
             append_only and cached is not None and cached.resolved_path == resolved
             and cached._fd >= 0
@@ -1243,13 +1338,16 @@ def _registry_view_fresh(jobs: Path, *, append_only: bool = False) -> RegistryVi
                 _drop(identity)
                 cached = None
                 _METRICS["invalidations"] += 1
+        started_ns = time.time_ns()
         if previous is None:
             resolved, signature, raw, fd = _stable_read(path, identity)
         else:
             _drop(identity, keep_parse=True)
             cached = None
             _METRICS["invalidations"] += 1
-        view = RegistryView(identity, resolved, signature, raw, previous=previous, fd=fd)
+        view = RegistryView(identity, resolved, signature, raw, previous=previous, fd=fd,
+                            asserted_suffix=previous is not None,
+                            settled=previous is None and _settled_read(fd, started_ns))
         if previous is None:
             _METRICS["full_metadata_parses"] += 1
             _METRICS["metadata_rows_parsed"] += view.record_count

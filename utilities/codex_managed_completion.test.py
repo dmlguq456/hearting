@@ -142,6 +142,97 @@ class ControlServer:
         self.thread.join(timeout=2)
 
 
+def direct_latest_rows(jobs: Path, attempts: set[str]) -> dict:
+    """The whole-file parse the observer used before the shared registry view."""
+    latest = {}
+    for line in jobs.read_text(encoding="utf-8", errors="replace").splitlines():
+        fields = line.split("\t")
+        if len(fields) != 6:
+            continue
+        metadata = dict(part.split("=", 1) for part in fields[5].split(",") if "=" in part)
+        attempt_id = metadata.get("attempt_id", "")
+        if attempt_id in attempts:
+            latest[attempt_id] = (fields[1], metadata)
+    return latest
+
+
+class RegistryAttemptRowsTest(unittest.TestCase):
+    """The observer's launch-claim and open-attempt checks read the shared view."""
+
+    def setUp(self):
+        import dispatch_registry_cache
+        self.cache = dispatch_registry_cache
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.jobs = Path(self.temp.name) / "jobs.log"
+        self.module = load_completion_module()
+        self.cache.clear_cache()
+        self.cache.reset_metrics()
+        self.addCleanup(self.cache.clear_cache)
+
+    def test_latest_rows_match_the_direct_text_parse_for_edge_shapes(self):
+        attempts = {"att-a", "att-b", "att-c", "att-missing"}
+        shapes = {
+            "lf-partial-tail": (row("att-a", harness="codex", status="open") + "garbage\n"
+                                + row("att-a", harness="codex", status="done")
+                                + row("att-b", harness="claude", status="running")
+                                + row("att-c", harness="codex", status="open").rstrip("\n")
+                                ).encode("utf-8"),
+            "cr-and-form-feed": (row("att-a", harness="codex", status="open").replace("\n", "\r\n")
+                                 + row("att-b", harness="codex", status="open")
+                                 .replace("note=", "note=x\x0cy,")
+                                 + row("att-c", harness="codex", status="done")).encode("utf-8"),
+            "invalid-utf8": (row("att-a", harness="codex", status="open").encode("utf-8")
+                             + b"t\tdone\t/r\t/w\ts\tattempt_id=att-b,note=\xff\n"
+                             + row("att-c", harness="codex", status="killed").encode("utf-8")),
+            "empty": b"",
+        }
+        for name, data in shapes.items():
+            with self.subTest(name):
+                staged = self.jobs.with_name("jobs.staged")
+                staged.write_bytes(data)
+                os.replace(staged, self.jobs)
+                expected = direct_latest_rows(self.jobs, attempts)
+                actual = self.module._latest_attempt_rows(self.jobs, attempts)
+                self.assertEqual(actual, expected)
+                self.assertEqual(
+                    self.module._any_attempt_open(self.jobs, {"att-a", "att-c"}),
+                    any(expected.get(aid, ("open",))[0] in self.module.OPEN_STATES
+                        for aid in ("att-a", "att-c")))
+        self.assertTrue(self.module._any_attempt_open(self.jobs, {"att-missing"}))
+        self.jobs.unlink()
+        self.assertTrue(self.module._any_attempt_open(self.jobs, {"att-a"}))
+        with self.assertRaises(OSError):
+            self.module._latest_attempt_rows(self.jobs, {"att-a"})
+
+    def test_unchanged_registry_is_not_reread_and_late_writes_are_seen(self):
+        attempts = {"att-a", "att-b"}
+        first = row("att-a", harness="codex", status="open")
+        partial = row("att-b", harness="codex", status="open").rstrip("\n")
+        with mock.patch.object(self.cache, "_SETTLED_NS", 0):
+            self.jobs.write_text(first + partial, encoding="utf-8")
+            for _ in range(4):
+                latest = self.module._latest_attempt_rows(self.jobs, attempts)
+                self.assertEqual(latest, direct_latest_rows(self.jobs, attempts))
+                self.assertTrue(self.module._any_attempt_open(self.jobs, attempts))
+            self.assertEqual(self.cache.metrics_snapshot()["content_reads"], 1)
+            # A late writer completes the truncated row and closes att-a.
+            with self.jobs.open("a", encoding="utf-8") as stream:
+                stream.write(",late=1\n" + row("att-a", harness="codex", status="done"))
+            latest = self.module._latest_attempt_rows(self.jobs, attempts)
+            self.assertEqual(latest, direct_latest_rows(self.jobs, attempts))
+            self.assertEqual(latest["att-a"][0], "done")
+            self.assertEqual(latest["att-b"][1]["late"], "1")
+            # Rotation: the old file moves away and a new registry takes its path.
+            os.rename(self.jobs, self.jobs.with_name("jobs.log.1"))
+            self.jobs.write_text(row("att-b", harness="codex", status="done"), encoding="utf-8")
+            self.assertEqual(self.module._latest_attempt_rows(self.jobs, attempts),
+                             direct_latest_rows(self.jobs, attempts))
+            self.assertFalse(self.module._any_attempt_open(self.jobs, {"att-b"}))
+            self.assertTrue(self.module._any_attempt_open(self.jobs, {"att-a"}))
+        self.assertEqual(self.cache.metrics_snapshot()["content_reads"], 3)
+
+
 class ParentLifetimeStopTest(unittest.TestCase):
     def setUp(self):
         self.module = load_completion_module()
