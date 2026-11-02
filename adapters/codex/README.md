@@ -59,6 +59,95 @@ project Claude Skill, Agent, command, hook, or statusline files into Codex.
 | Selected tool projection | `adapters/codex/tools/` |
 | Selected utility projection | `adapters/codex/utilities/` |
 
+## Session Command Reference
+
+The always-loaded `adapters/codex/AGENTS.md` keeps purpose, judgment, where
+to look, and the instruction to follow the next action the runtime prints.
+The command detail it used to carry lives here; command output stays
+authoritative for current support.
+
+| Need | Command |
+|---|---|
+| lifecycle | `preflight.sh prompt-signal` |
+| workflow/context | `preflight.sh status`, `preflight.sh briefing`, `preflight.sh worklog` |
+| memory | `preflight.sh memory`, `preflight.sh recall-gate`, `preflight.sh recall` |
+| token/UI | `preflight.sh token-budget`, `preflight.sh ui-info`, `preflight.sh tui-config` |
+| delegation/QA | `preflight.sh subagent-info --check`, `preflight.sh qa-policy <level> [code|research|doc|general]` |
+| readiness/loops | `preflight.sh doctor [--runtime]`, `preflight.sh loop-info <oncall|note|study|drill|runtime-watch>` |
+| roles | `preflight.sh role <portable-role|role-profile|pipeline-stage>` |
+| spec-read evidence | `preflight.sh read <prd.md>` |
+| dispatch control | `preflight.sh dispatch-wait --attempt-id <id> --max 300..600` (operator recovery only), `preflight.sh liveness`, `preflight.sh harvest`, `preflight.sh dispatch-reconcile` |
+| dispatch readiness | `preflight.sh dispatch-readiness --worktree <path> --jobs <jobs.log> --owner-harness <h>... --child-harness <h>... --output <evidence.json>` |
+| install | `install-runtime-projection.sh [--install-plugin] [--skills-mode native|plugin|both]`, `check-runtime-projection.sh`, `preflight.sh runtime-projection --require-hook-trust` |
+
+Native Skills/plugin, agents, modes, and hooks project through
+`codex_setting/codex-plugin-marketplace`, `codex_setting/codex-agents`,
+`codex_setting/codex-modes`, and `codex_setting/codex-hooks`; never project
+Claude settings, commands, hooks, or allowedTools.
+
+Keep Codex `/statusline` responsible for model, context, token, limit, and session footer fields. `preflight.sh status` is an on-demand harness snapshot, including git dirty/worktree/dead-branch risks. Runtime config remains user-owned; strict projection checks read authoritative App Server `hooks/list` current-hash trust and never rewrite user trust state.
+The recommended footer fragment is `codex_setting/codex-config/tui-statusline.toml`; apply it only through explicit `preflight.sh tui-config`.
+
+**Tool checks.** Before claiming support, run the relevant check:
+`preflight.sh visual-harness <file.html>`,
+`preflight.sh browser-fetch --check <url>`,
+`preflight.sh data-script --check <script.py>`,
+`preflight.sh figure-gen --check <script.py>`,
+`figure-gen --verify-report <manifest.json> <report.md>`,
+`preflight.sh pdf-extract --check <file.pdf>`,
+`preflight.sh web-image-search --check <query>`,
+`preflight.sh verification-runner --timeout <seconds> -- <command>`,
+`preflight.sh claim-verify --check <claim>`,
+`preflight.sh permissions`, and `preflight.sh mcp [--check]`. Exit 69 means
+the local tool contract is unavailable; use the reported fallback or mark the
+adapter row unverified/unsupported.
+
+**Completion delivery.** Interactive completion uses Codex's native queue, addressed to the caller's
+`CODEX_THREAD_ID`. The interactive launcher and managed gateway are retired.
+The exact-batch sidecar checks consumed and pending messages before sending;
+ambiguous sends may repeat. Only an exact Hearting item may restart an interrupted
+parent. The TUI owns questions and approvals; headless owners keep their separate
+supervisor. Default mode asks via waiting `request_user_input` (`default_mode_request_user_input`); it submits empty at 120 s (countdown from 60 s; typing cancels). Empty is no decision: restate at turn end (Fleet keeps `answer needed`); `_async`: fallback.
+Arbitrary detached shell output still does not auto-resume. For non-dispatch
+long-running work, obey `preflight.sh loop-info runtime-watch` and its explicit automatic-follow-up-impossible fallback
+instead of ending with a detached completion promise. The native queue never
+substitutes for a continuation. The session uses one canonical
+`AGENT_DISPATCH_JOBS`; treat it as immutable at every dispatch depth and never
+rebuild a registry path from the packaged, versioned `$AGENT_HOME`.
+
+**Dispatch.** Harness selection reads the user-owned `dispatch-defaults.yaml` over
+`profiles/dispatch-defaults.yaml`; `core/ADAPTATION.md` owns the cascade.
+Capacity never crosses a quality band unless the relief threshold is met, and
+OpenCode is not a default deep peer.
+Check `preflight.sh headless [--check] [--require-hook-trust] <worktree>`.
+`preflight.sh dispatch --dry-run|--register|--start [--require-hook-trust]`
+runs the raw wrapper; the route commands reach it with the sealed tuple.
+A direct interactive launch selects completion by the parent runtime: a Codex
+parent uses its native queue and a Claude parent uses Claude resume. Native
+queue delivery does not force Stop/PreToolUse trust. Keep the parent
+conversational; a wait is never an in-model `sleep`/liveness loop.
+`--allow-unmanaged-parent-poll` stays operator-only. Legacy stamped Stop state
+permits only one exact terminal `--status all --attempt-id` harvest. Dispatch
+contract v3 atomically claims one stable attempt row before spawn and starts
+no child for a duplicate claim. A standard+ Codex dispatch-depth-1 owner
+receives workspace-write network access for this purpose; dispatch-depth-2
+workers do not. The retired broker exposes only legacy `status`/`stop`.
+`standard+` uses a dispatch-depth-1 capability owner and, when separable,
+dispatch-depth-2 `code-plan -> code-execute -> code-test -> code-report` stage
+workers; `direct` is inline and `quick` is one registered-headless
+dispatch-depth-1 one-shot conductor. For `autopilot-code`, `capability-info` and `route` print the portable pipeline contract (`code-plan>code-execute>code-test>code-report` for `standard+`).
+Use native subagents only after `preflight.sh subagent-info --check`. After
+integration, verification, and push, use `preflight.sh worktree-cleanup
+--check` before `--apply`; SessionEnd/Stop never cleans worktrees.
+
+**Token budget.** `preflight.sh token-budget` exposes exact-session telemetry. The normal, unknown, repeated-band, and validated-native states inject zero bytes; a verified
+tight/critical transition may emit one directive of at most 240 UTF-8 bytes.
+Pressure changes optional response prose only—never intensity, dispatch/depth,
+model role, required input, tools/tests, safety, validation, or guards.
+`token-budget-experiment.py` is production-disabled; static bytes and counters
+are not token, billing, savings, cost, or ROI estimates. Native budget config is
+read-only unless the user explicitly opts into a separately validated feature.
+
 ## Runtime Mapping
 
 | Core Concept | Codex Implementation |

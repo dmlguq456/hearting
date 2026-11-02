@@ -7,215 +7,157 @@ twice (`core/ADAPTATION.md §6.1`). The semantic hierarchy is
 `core/capabilities/roles -> {Claude, Codex, OpenCode}`; adapters are siblings.
 Edit portable sources first.
 
-## Source Order
+The harness root is the active `AGENT_HOME` (shared `utilities/agent-home.sh`
+fallback), including an explicitly activated checkout; never guess another
+checkout from cwd or earlier tasks. `preflight.sh` is not on PATH: it means
+`AGENT_HOME="$AGENT_HOME" bash "$AGENT_HOME/adapters/opencode/bin/preflight.sh"`.
 
-Resolve all paths below against active `AGENT_HOME` (shared `utilities/agent-home.sh`
-fallback), including explicitly activated source checkouts; never guess another
-checkout from cwd or previous tasks. Read `core/CORE.md` first; load remaining documents only when the task
-touches the named domain.
+<!-- BEGIN generated from core/fragments/bootstrap-body.md by tools/sync-bootstrap-dispatch.py; edit the source -->
+## Purpose
 
-1. `core/CORE.md`
-2. `core/WORKFLOW.md` for routing and tracked work
-3. `core/CONVENTIONS.md` for intensity, QA, roles, artifacts, and Skill rules
-4. `core/OPERATIONS.md` for git, worktrees, locks, and dispatch
-5. `core/MEMORY.md`
-6. `capabilities/README.md`, `roles/README.md`, and `roles/MODES.md`
+Hearting keeps work consistent with the user's intent, whichever agent runs
+it. You do not need to memorize its procedures: one command starts tracked
+work, the runtime prints your next action, and its hooks wake you when work
+you started reports back. Paths are relative to the harness root named above.
+Read a document only when the task needs it.
 
-For runtime-surface or parity changes, verify current official documentation,
-then inspect local projection and fallback. Never infer support from another
-adapter.
+## Judgment
 
-## Runtime Mapping
+- Look for what already exists before relying on your own knowledge:
+  the repository's research, analysis, and briefing artifacts, its code,
+  memory, and earlier outputs. An answer from memory alone says so and flags
+  its risky specifics; this holds for explanations too.
+- Stay inside the user's intent and the existing flow. Ask only for genuinely
+  non-obvious or destructive choices, and use structured input only when the
+  choice changes the goal, architecture, UX, large scope, or an external
+  system. Continue low-risk reversible work autonomously, with its implied
+  validation, records, commit, and push. If structured input is unavailable,
+  ask one concise ordinary question; a helper never owns user input or
+  approvals.
+- Do not build your own waiting: no sleep or poll loops, background watchers,
+  or self-scheduled wake-ups for work the runtime tracks.
+- Native subagents and registered headless worker dispatch are separate
+  surfaces; a restriction on one never silently extends to the other. Preserve
+  model role, intensity, dispatch depth, tests, safety, and validation on
+  fallback.
+- Use portable model roles, never vendor model names, in shared artifacts.
+  Runtime-owned credentials, sessions, logs, caches, databases, and config
+  stay out of repositories.
+- For harness changes, edit the portable sources (`core/`, `capabilities/`,
+  `roles/`) first and expose changes before committing; commit and push the
+  validated change in the same turn (`core/OPERATIONS.md §5.11`).
 
-- `AGENT_HOME` is the installed harness root. Resolve the canonical artifact root with `utilities/artifact-root.sh`; linked worktrees write the primary checkout's `.agent_reports/`, and legacy `.claude_reports/` is only a fallback.
-- `preflight.sh` is a shorthand, not a PATH command: it resolves to `<AGENT_HOME>/adapters/opencode/bin/preflight.sh` and no shim is installed at the harness root. Run it by that absolute path — for example `AGENT_HOME="$AGENT_HOME" bash "$AGENT_HOME/adapters/opencode/bin/preflight.sh" capability-info <capability>` — and read every `preflight.sh <command>` below as that path. Export `AGENT_HOME` to the installed root for release behavior, or to a checkout/worktree to use that tree as the active runtime.
-- Portable model roles stay vendor-neutral in shared artifacts; never use vendor model names as portable semantics.
-<!-- BEGIN generated from core/fragments/bootstrap-compute-hosts.md by tools/sync-bootstrap-dispatch.py; edit the source -->
-- Reach compute hosts through `compute-hosts` and its inventory (`~/.config/hearting/compute-hosts.yaml`). `run` receipts include measured GPU headroom; `probe` remains available for host comparison.
-<!-- END generated from core/fragments/bootstrap-compute-hosts.md -->
-- Capabilities come from `capabilities/`. OpenCode-native generated Skills, commands, agents, and plugins live under `adapters/opencode/` and project through `opencode_setting/opencode-skills`, `opencode_setting/opencode-commands`, `opencode_setting/opencode-agents`, and `opencode_setting/opencode-plugins`.
-- Validate native discovery with `OPENCODE_DISABLE_CLAUDE_CODE_SKILLS=1`; Claude compatibility autoload must not mask missing OpenCode output.
-- Run `preflight.sh capability-info <capability>` and `preflight.sh mode-info <family/mode>`; obey named `tool_contract`, `tool_contract_check`, `runtime_surface`, and `fallback`.
-- Read the governing core contract before adapter changes. Spec reads may be
-  recorded with `preflight.sh read <prd.md>` for workflow evidence.
-- Use explicit guards when the OpenCode plugin is unavailable or untrusted. Never port Claude allowedTools, settings MCP, command, agent, or hook formats.
+## Starting work
 
-Detailed lifecycle and edge-case contracts live in
-`adapters/opencode/README.md` and `ADAPTATION.md`.
+Route by `core/WORKFLOW.md §0.2`: the capability that owns the artifacts is
+the primary. The main session decides only whether the work is direct
+(§0.2.1): use `--shape direct` for one atomic, reversible inline change;
+otherwise omit `--shape` and let the frame decide. Start with `hearting run
+capability-route compose`:
 
-## Command Surface
+```
+hearting run capability-route compose --start --prompt-file <task> [--shape direct]
+```
 
-| Need | Command |
+`hearting run <utility>` uses `AGENT_HOME` when set, else the installed
+release. Other flags are hints; a refusal names what to add, such as
+`--campaign-key`. For a user's material request that is not yet approved,
+present the §0.4 five-field card before starting (진행 / 수정 / 중단); a
+request from a peer session needs only the `[경로]` line compose prints plus
+one clause of scope, unless the work is destructive or external-facing.
+Dispatch depth 3 is forbidden.
+
+## Following the runtime
+
+Do the next action the command or its hook prints:
+
+- `parent_next=end-turn`: end the turn with no wait, poll, or recap; the
+  runtime wakes you.
+- `parent_next=bounded-wait`: run `parent_next_command` once.
+- `required_action`, `next_step`, `resume_command`, `correction_command`: do
+  exactly what they name.
+- No directive in view: read the printed `receipt_file`. A missing directive
+  is not `end-turn`, so keep launch output unfiltered.
+
+To message another session, run `hearting run peer-steward prompt
+<name-or-pane> --body-file <file>`; reply text sends nothing.
+
+## Finishing work (Tracked-Workflow Continuation)
+
+Process exit is not workflow completion (`core/WORKFLOW.md §0.6`): a workflow
+is done only when every terminal node holds its completion gate. Keep
+unfinished work here or in its registered continuation. A receipt, queue
+entry, or ACK is not execution. When a result arrives, review it and do the
+approved follow-through. Close material work with the first-report content
+required by §0.5; its card is optional. Lead with the result or the decision
+needed; keep PIDs, logs, digests, and paths in the evidence.
+
+## Memory and context
+
+A main prompt may carry memory candidates (headline and ID): ignore unrelated
+ones and read a relevant record in full before using it, and retrieve a
+pending obligation in full before applying it. Run the `session-tidy` Skill
+when context is filling or before compact, before handing work to another
+session, and when a large task ends. Context pressure never lowers intensity,
+dispatch depth, model role, tests, safety, or validation.
+
+## Where to look
+
+| Need | Read |
 |---|---|
-| lifecycle/workflow | `preflight.sh prompt-signal`, `preflight.sh briefing`, `preflight.sh worklog` |
-| memory | `preflight.sh memory`, `preflight.sh recall-gate`, `preflight.sh recall` |
-| readiness/loops | `preflight.sh status`, `preflight.sh doctor`, `preflight.sh loop-info <oncall|note|study|drill|runtime-watch>` |
-| QA | `preflight.sh qa-policy <level> [code|research|doc|general]` |
-| runtime | `preflight.sh permissions`, `preflight.sh mcp [--check]` |
+| Layers, harness root, artifact root | `core/CORE.md` |
+| Routing §0.2, entry card §0.4, report §0.5, completion §0.6 | `core/WORKFLOW.md` |
+| Intensity, QA, model roles, artifacts, Skills | `core/CONVENTIONS.md` |
+| Git, worktrees, dispatch, receipts §5.10a, frame questions §5.10b, continuation §5.12, other sessions §5.14 | `core/OPERATIONS.md` |
+| Memory | `core/MEMORY.md` |
+| Capabilities, roles, modes | `capabilities/README.md`, `roles/README.md`, `roles/MODES.md` |
+| Route health | `hearting run workflow-supervisor status --route <id> --json` |
+| Compute hosts | `compute-hosts` and `~/.config/hearting/compute-hosts.yaml`; `run` receipts include GPU headroom |
+| This runtime's commands and edge cases | the adapter `README.md` and `ADAPTATION.md` named below |
 
-Main lifecycle does not run for workers. Runtime-owned credentials, sessions,
-logs, caches, databases, and config stay outside this repo.
-
-## Tool Contracts
-
-Before claiming support, run:
-
-- `preflight.sh visual-harness <file.html>`
-- `preflight.sh browser-fetch --check <url>`
-- `preflight.sh data-script --check <script.py>`
-- `preflight.sh figure-gen --check <script.py>`
-- `figure-gen --verify-report <manifest.json> <report.md>`
-- `preflight.sh pdf-extract --check <file.pdf>`
-- `preflight.sh web-image-search --check <query>`
-- `preflight.sh verification-runner --timeout <seconds> -- <command>`
-- `preflight.sh claim-verify --check <claim>`
-
-Exit 69 means unavailable; use the reported fallback or keep the adapter row
-partial. OpenCode native UI/config owns model and context fields.
-
-## Dispatch
-
-<!-- BEGIN generated from core/fragments/bootstrap-dispatch.md by tools/sync-bootstrap-dispatch.py; edit the source -->
-```
-hearting run capability-route compose --start --prompt-file <task> \
-  [--shape direct]
-```
-
-Shape-free flags are hints. Honor decided routes (§0.2.1); person-named stages use
-`--shape staged --graph <stage,…>`.
-
-`hearting` is on PATH; `hearting run <utility>` uses set `AGENT_HOME` (dev
-checkout), else installed release. Slug: task. Stream: session's latest
-artifact-root stream, else folder's sole active one; otherwise `--campaign-key`
-(folder/close spelling joins; refusal lists keys) or `--unassigned`. Runtime:
-cycle/frames/owner, per-leg live-usage selection among sealed harnesses,
-exact-attempt reuse, success/idle route/cycle closure.
-
-Receipt: `parent_next=end-turn` ends without wait/poll/recap (runtime carrier owns
-it); `parent_next=bounded-wait` runs `parent_next_command` once. Start saves
-`receipt_file`; read if hooks omit `parent_next`. Missing directive is not
-`end-turn`; never filter stdout.
-Wake/correction: `resume_command`; BLOCKED owner:
-`correction_command --message-file <file>`. At `needs-question`, compare both
-briefs; follow `next_step`: `resume_command --interview <file>` registers the
-question; person answers once in native question surface;
-`resume_command --answers <file>` records intent, releases gate, starts owner.
-
-Owner stage: `python3 "$AGENT_HOME/utilities/stage-dispatch-fallback.py" --node
-<node> --start`; route/slug/parent/harness inherit owner route/environment.
-Start each sealed parallel group as one batch. Dispatch depth 3 is forbidden.
-
-Use this session's route; interactive `hearting run peer-steward start` only for
-long work needing human answers/recovery. Output: `hearting run pane open <command>`.
-
-Supervise/check periodically: own route/owner/resource reuses runtime receipts,
-observations/hooks; if coverage is unclear, read `hearting run workflow-supervisor
-status --route <id-or-file> --json` and report observations. Peer role: `hearting
-run peer-steward steward on` (watch/start grants also apply). ⚑ is role, not health.
-Use existing role checks/hooks; no added harness-scheduled re-invocation,
-Monitor/polling or manual role pane titles.
-
-Send: `hearting run peer-steward prompt <name-or-pane> --body-file <file>`;
-reply text sends nothing.
-<!-- END generated from core/fragments/bootstrap-dispatch.md -->
-
-Route by `core/WORKFLOW.md §0.2`: semantic precedence names the capability
-that owns the artifacts. The main session decides only whether the work is
-direct (§0.2.1): use `--shape direct` for one atomic, reversible inline change;
-otherwise omit `--shape` and let the frame decide.
-
-Use `hearting run capability-route compose`; without `--shape`, capability,
-mode, graph, and profile flags are routing hints only. Follow frame- or
-person-decided shapes under §0.2.1; person-named stages use
-`--shape staged --graph <stage,…>`. Flags, spec-read gate, and probes default
-from the checkout. Use the preset recipe (`preflight.sh route --capability …`)
-only when the request names the entry's full loop or a promotion signal or
-spec-backed flow requires it. Apply §0.3. Direct routes carry the §0.4 card
-through `question` on user-authored turns; received peer envelopes use one
-`[경로]` line plus a scope clause, unless destructive or external-facing;
-otherwise present the §0.4 five-field card before material work unless already
-approved, and close material work with the first-report content required by
-§0.5; its card is optional. Load full capability detail only in the acting
-owner or worker.
-
-Check `preflight.sh headless [--check] <worktree>`. `preflight.sh dispatch
---dry-run|--register|--start` runs the raw wrapper; the route commands above
-reach it with the sealed tuple. Monitor
-`preflight.sh liveness [jobs.log]`; harvest via `preflight.sh harvest`. For an
-attempt you launched, its receipt outranks that general monitoring.
-OpenCode is eligible for the registered standard+ dispatch-depth-2 path —
-exact parent binding, foreground lifecycle, and supervisor parity are implemented.
-Dispatch contract v3 atomically claims one stable
-attempt row before spawn and starts no child for a duplicate claim. Broker v1/v2
-routes are read-only migration inputs; the retired broker exposes only legacy
-`status`/`stop`.
-
-While this session is idle, the hearting plugin hands it the completion records
-owed to it as its next turn (`opencode-turn`, `core/ADAPTATION.md` §7.4), and
-a launch receipt then says `end-turn`; a server without that carrier gets
-`bounded-wait`. Nested leg receipts remain evidence and add no child waits.
-
-`standard+` uses a dispatch-depth-1 capability owner and separable dispatch-depth-2
-`code-plan -> code-execute -> code-test -> code-report` workers. `direct` is
-inline; `quick` is one registered-headless dispatch-depth-1 one-shot conductor; dispatch depth 3 is forbidden. Record
-inline exceptions in plan metrics. After merge, integrated verification, and
-push, use `preflight.sh worktree-cleanup --check` before `--apply`. A
-`session.idle` or other session-end event never owns destructive worktree
-cleanup; it may expose diagnostics only.
-
-Keep native agent delegation distinct from registered headless work; a
-restriction on one surface never silently extends to the other. Before
-delegating to a native subagent, verify it against its declared
-`opencode_setting/opencode-agents` file and the runtime's current agent list —
-never assume a Codex or Claude agent surface exists here. The
-main/orchestrator chooses portable roles and concrete model settings per job,
-and preserves model role, intensity, depth, tests, safety, and validation on
-fallback.
-
-## Tracked-Workflow Continuation
-
-Process exit is not workflow completion (`core/WORKFLOW.md §0.6`): a workflow is
-complete only when every declared terminal node holds its completion gate. Every
-non-terminal stage declares `inline-next`, `supervised`, `human-gate`, or
-`monitor`; a detached resource run must be `supervised` and can never be
-terminal. Route compile and launch refuse a graph that breaks this.
-
-<!-- BEGIN generated from core/fragments/bootstrap-continuation.md by tools/sync-bootstrap-dispatch.py; edit the source -->
-Keep unfinished work here or in its registered continuation; state checked fallback if unsupported. Lead with condition/result, decision/blocker; keep PID/start, exit/log, digests and paths in evidence.
-On completion, review exact results and do approved follow-through here or in its continuation. Receipt/queue/ACK is not execution; report chronology. Reply once with immediate result or short receipt for delayed/sustained work. Informational notices need no reply. Accept typed handoff only by its supplied command; refs/cards and same-seat clear need none.
-<!-- END generated from core/fragments/bootstrap-continuation.md -->
-
-OpenCode's registered standard+
-dispatch-depth-2 continuations use the shared external supervisor rather than a
-runtime bridge. `OPERATIONS §5.12` owns the mechanics.
-
-## Memory and Context
-
-Main prompts receive capsule headline/IDs; read relevant records fully.
-Fallback: `preflight.sh recall-gate <cwd> ...`. Workers skip it.
-Call `session-tidy` when context is filling or before compact, before handing
-work to another session, and when a large task ends; a new session receives the
-seat's card once.
-
-OpenCode token self-regulation remains explicitly deferred: Phase 2 automatic accounting and the isolated experiment CLI are not projected; it does not copy
-Codex token-budget hooks or mutate runtime config. Ordinary lifecycle context
-should be silent. Static bytes, lines, and directive counters are footprint
-measures, not token or billing savings. Context pressure never lowers intensity,
-dispatch/depth, model role, required input, tools/tests, safety, or validation.
-
-Do not run drill automatically.
+Resolve the artifact root with `utilities/artifact-root.sh`; linked worktrees
+write the primary checkout's `.agent_reports/`, and legacy `.claude_reports/`
+is only a fallback. For runtime-surface or parity changes, check current
+official documentation, then the local realization and its fallback; never
+infer support from another adapter.
 
 ## Response Policy
 
 Portable behavior contract = `roles/response-policy.md`.
 
-- **Audience-language first** — user artifacts default to the user's current communication language unless a stronger audience/repository contract applies. Code and commits keep the repo's language.
-- Keep responses concise, match promises with same-turn action, verify before asserting, and follow current conventions; expose a convention change before committing it.
-- **Local evidence before recall** — answer a domain question from the repository's research/analysis/briefing artifacts first; model memory is the fallback, a memory-only answer says so and flags its risky specifics, and the §0.4 card exemption never waives this evidence check.
-- **Answer first, bounded** — lead with the answer; unrequested explanation stays within about five lines or five short bullets unless the user asked for depth or the turn closes material work. Offer the rest rather than delivering it unbidden.
-- **Plain address** — write for a tired reader: ordinary words over harness jargon, conclusion before its qualifications, no clause-stacked sentences or unexpanded internal terms. Other sessions use Fleet tag and pane (SID if needed), role in parentheses; without a tag, herdr name and pane, rather than internal abbreviations.
-- Ask only for genuinely non-obvious or destructive choices. Continue reversible in-flow work and its implied validation, records, commit, and push. Use structured input only for choices that materially change the goal, architecture, UX, large scope, destructive work, or an external-system outcome. Continue low-risk reversible work autonomously. If structured input is unavailable, ask one concise ordinary question; a helper never owns user input or approvals.
-- Under `core/OPERATIONS.md §5.11`, commit and push validated `<agent-home>` instruction, rule, hook, preflight, or status-surface changes in the same turn without a separate user signal.
+- **Audience-language first** — user artifacts use the user's current
+  communication language unless a stronger audience or repository contract
+  applies. Code, comments, commits, and PR text follow the repository's
+  language, even when a runtime language setting names another.
+- **Answer first, bounded** — lead with the answer; keep unrequested
+  explanation to about five lines unless the user asked for depth or the turn
+  closes material work.
+- **Plain address** — ordinary words over harness jargon, conclusion first,
+  no unexpanded internal terms. Name other sessions by Fleet tag and pane (SID
+  if needed), role in parentheses.
+- Keep responses concise, verify before asserting, follow existing
+  conventions, and match promises with same-turn action.
+<!-- END generated from core/fragments/bootstrap-body.md -->
+
+## OpenCode Notes
+
+- Before using a capability or mode, run
+  `preflight.sh capability-info <capability>` or
+  `preflight.sh mode-info <family/mode>` and obey its contract:
+  named `tool_contract`, `tool_contract_check`, `runtime_surface`, and `fallback`.
+  Before claiming a tool works, run its check; exit 69 means unavailable, so
+  use the reported fallback or keep the adapter row partial.
+- Ask structured questions, including the §0.4 card, with `question`.
+- While this session is idle, the hearting plugin hands it the completion
+  records owed to it as its next turn, so a launch receipt says `end-turn`; a
+  server without that carrier gets `bounded-wait`.
+- Before delegating to a native subagent, check it against its
+  `opencode_setting/opencode-agents` file and the runtime's current agent list.
+- If the memory prompt hook is unavailable, record `recall` or `skip` with
+  `preflight.sh recall-gate <cwd> ...`.
+- Command surface, tool checks, native projections, and edge cases:
+  `adapters/opencode/README.md` (Session Command Reference) and
+  `adapters/opencode/ADAPTATION.md`.
 
 ## Compatibility Boundary
 
