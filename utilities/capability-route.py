@@ -12494,6 +12494,17 @@ def _legacy_inline_finish(a, route, route_file, api, entry_error=None, *, _admis
     import artifact_producer
     import inline_finish
     _admission = _admission or inline_finish.admit(route, allow_legacy=True)
+    if route.get("capability") == "autopilot-refine" and route.get("entry_scope_contract_version") == 1:
+        # The preview is checked in the cycle this route's lineage owns, never
+        # in whichever cycle the caller's summary file happens to name.
+        try:
+            record = artifact_producer.route_cycle_for(Path(route["artifact_root"]), route)
+        except artifact_producer.ProducerError:
+            record = None
+        if record is not None:
+            output = artifact_producer.cycle_dir(
+                Path(route["artifact_root"]), record["campaign_id"], record["cycle_id"], record) / "artifacts"
+            _require_entry_scope_review_preview(route, {"id": "one-shot"}, output)
     node = route["nodes"][0]
     node_id = node["id"]
     choice = ROUTE_AUTHORITY.decide_continuation(route, action="finish-outcome",
@@ -12660,7 +12671,8 @@ def main():
                             "change is recorded beside it and applies from that target's next launch")
     finish=sub.add_parser("finish",help="finish one current-session direct route and seal its exact producer cycle")
     finish.add_argument("--route",help="route file or route id (rt-...); defaults to this session's latest route here")
-    finish.add_argument("--evidence",required=True,type=Path)
+    finish.add_argument("--evidence",required=True,metavar="FILE|URL",
+                        help="a file anywhere or an http(s) URL; finish records it inside the route's cycle")
     finish.add_argument("--summary-file",required=True,type=Path)
     finish.add_argument("--commit",help="full result commit; defaults to current HEAD on first claim")
     correction=sub.add_parser("correct", help="deliver a correction to one existing owner; without a message file, inspect its receipts")
@@ -13204,13 +13216,6 @@ def main():
         a.route=Path(_close_route_argument(a))
         raw=json.loads(a.route.read_text(encoding="utf-8"))
         route=verify_route(raw, raw.get("cwd"))
-        if (route.get("capability") == "autopilot-refine"
-                and route.get("entry_scope_contract_version") == 1):
-            import artifact_producer
-            output = artifact_producer.require_cycle_output(
-                Path(route["artifact_root"]), Path(a.summary_file), route_id=route["route_id"])
-            if output is not None:
-                _require_entry_scope_review_preview(route, {"id": "one-shot"}, output)
         import inline_finish
         admission = inline_finish.admit(route, allow_legacy=True)
         if admission[0].state == "modern":

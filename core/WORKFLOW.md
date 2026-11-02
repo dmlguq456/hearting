@@ -438,8 +438,9 @@ other allowed releases preserve their source in the journal and intent. A
 registered worker cannot use this field to bypass its existing release
 restrictions.
 Runtime settlement closes the route and cycle before owner success is delivered.
-Direct start also prepares the inline cycle and returns its `artifact_env`;
-use that output path without a separate producer `begin`. Replaying start on a
+Direct start also prepares the inline cycle and returns its `artifact_env` for
+work products written during the task; `finish` does not need it.
+Replaying start on a
 proven closed route returns its outcome without launching or reopening work.
 The model does not assemble launch tuples or artifact variables, harvest, or
 finalize ordinary work. Recovery commands name the exact
@@ -875,8 +876,15 @@ and close refusals without sweeping routes, reconciling the root, healing the
 index, or flushing history.
 
 A session finishes its own `direct` inline route to record real evidence.
-Supply a readable, nonempty artifact from the route's exact open cycle and the
-final summary; the command records terminal proof, closes the route, finalizes
+Supply a readable, nonempty regular file anywhere, or an http(s) URL, and the
+final summary; finish records that evidence inside the route's own cycle (a
+file byte for byte, a URL as a one-line record) under a runtime name, and that
+copy is what the terminal proof, manifest and producer binding name. If the
+route has no cycle yet because its start was interrupted, finish prepares it
+exactly as direct start does; no `AGENT_ARTIFACT_*` value is needed. Symbolic
+links, directories and empty files are refused, and a claimed finish keeps
+its copy as recorded: changed bytes are `finish-evidence-drift`, and the same
+bytes resume. The command records terminal proof, closes the route, finalizes
 that cycle and returns a receipt only after rechecking all three. A partial
 transaction remains `finish-pending` and is resumed with the same intent.
 The synthetic `source-scoped` authority does not make unrelated tracked edits
@@ -888,7 +896,7 @@ index, while its evidence, route/session identity, commit lineage and replay
 checks remain in force.
 
 ```text
-python3 utilities/capability-route.py finish [--route <route.json|rt-id>] --evidence <cycle-local-file> --summary-file <file> [--commit <full-sha>]
+python3 utilities/capability-route.py finish [--route <route.json|rt-id>] --evidence <file|http(s)-url> --summary-file <file> [--commit <full-sha>]
 ```
 
 Without `--route` it finishes this session's latest route under the cwd's
