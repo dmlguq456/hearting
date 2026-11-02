@@ -850,6 +850,11 @@ def wait(args, path, control, delivered, emit, *, sleep=time.sleep):
             if key in resource["delivered"]:
                 continue
             evidence = sup.resource_evidence(armed)
+            if evidence.get("resource_sha256") not in (None, RESUME.row_digest(row)):
+                # Looking settled (rewrote) the row after it was read, here or in another
+                # observer. The receipt binds the row as it now is, read on the next look;
+                # a receipt bound to the earlier row would fail its own delivery check.
+                continue
             settled = evidence.get("terminal") is True and evidence.get("quiescent") is True
             attention = not settled and resource_needs_attention(row, evidence)
             if not settled and not attention:

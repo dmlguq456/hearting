@@ -1722,6 +1722,49 @@ class DispatchCompletionJoinTest(unittest.TestCase):
                         self.assertNotIn("The payload completed successfully.", prompt)
                         self.assertIn("no user prohibition", prompt)
 
+    def test_resource_receipt_binds_the_row_its_observation_settled(self):
+        # rt-a87cfd349fd0aada: the row was read while still running, the terminal
+        # observation settled it, and a receipt bound to the earlier row failed
+        # its own delivery check, ending the parked owner's supervisor.
+        import dispatch_resource_wait as RESOURCE
+        from types import SimpleNamespace
+
+        args = SimpleNamespace(parent_attempt_id="att-parent", route_id="rt-resource",
+                               route_hash="sha256:route", jobs=str(self.jobs))
+        control = SimpleNamespace(thread_id="same-native", pending=lambda: False)
+        path = self.root / "settled-during-look.json"
+        running = {"run_id": "host-run", "pid": 123, "starttime": "100", "command": ["approved"],
+                   "route": "/exact", "node": "host-run", "jobs": str(self.jobs),
+                   "owner_wait": {"parent_attempt_id": "att-parent"}, "status": "running",
+                   "sentinel": "/exit"}
+        settled = dict(running, status="succeeded", exit_code=0, ended_at=1.0,
+                       workflow_state="STAGE_SUCCEEDED", failure_class=None,
+                       liveness_reason="process-absent")
+        registry = {"row": running}
+        armed = {"node": "host-run", "successors": ["test"]}
+
+        def observe(_armed):
+            registry["row"] = settled  # the observation persists the terminal row
+            return {"terminal": True, "quiescent": True, "succeeded": True, "liveness": "exited",
+                    "exit_code": 0, "resource_sha256": RESOURCE.RESUME.row_digest(settled)}
+
+        sup = SimpleNamespace(poll_once=lambda *_: None, read_resource_watches=lambda *_: [armed],
+                              resource_evidence=observe,
+                              artifact_evidence=lambda _: {"checked": True, "missing": []},
+                              runner=lambda: SimpleNamespace(read_sentinel=lambda _: 0))
+        ledger = SimpleNamespace(state=lambda: {"nodes": {"host-run": {"state": "RUNNING"}}})
+        sleeps = []
+        JOIN.write_supervisor_state(path, "att-parent", set(), phase="running-turn")
+        with mock.patch.object(RESOURCE, "context",
+                               side_effect=lambda *_: (sup, {}, ledger, [(armed, dict(registry["row"]))])), \
+                mock.patch.object(RESOURCE, "resource_execution_succeeded", return_value=True):
+            prompt = RESOURCE.wait(args, path, control, set(), lambda _: None, sleep=sleeps.append)
+        receipt = JOIN.read_supervisor_phase_state(path, "att-parent").resource["outbox"]["receipt"]
+        self.assertEqual(receipt["resource_sha256"], RESOURCE.RESUME.row_digest(settled))
+        self.assertEqual((receipt["state"], receipt["exit_code"]), ("succeeded", 0))
+        self.assertIn("The payload completed successfully.", prompt)
+        self.assertEqual(len(sleeps), 1)  # one more look, not an ended supervisor
+
     def test_resource_correction_and_attention_never_become_model_child_success(self):
         import dispatch_resource_wait as RESOURCE
         from types import SimpleNamespace
