@@ -503,8 +503,8 @@ while the canonical registry first records the stable attempt as registered-only
 the shared launch fence publishes complete process identity with the claim and
 records payload start before exec. This does not establish standard+
 dispatch-depth-2 parity.
-The retired broker exposes diagnostic `status`/`stop` only; v1/v2 broker routes
-remain inspectable but cannot register or start new workers. Registered
+The launch broker is retired and removed; v1/v2 broker routes remain
+inspectable but cannot register or start new workers. Registered
 standard+ dispatch-depth-2 requests remain explicitly unsupported as described above.
 
 ## Worklog Boundary

@@ -480,8 +480,8 @@ verify through the runtime path above.
 Claude conductors launch checked same- or cross-harness dispatch-depth-2 headless
 adapters directly. The immutable v3 route binds the checked tuple and stable
 attempt identity; register/start are atomically claimed in the canonical
-registry. The retired broker retains diagnostic `status`/`stop` only, and
-historical v1/v2 broker routes are read-only.
+registry. The launch broker is retired and removed; historical v1/v2 broker
+routes are read-only.
 
 ## Stage-session capacity contract (2026-08-06)
 

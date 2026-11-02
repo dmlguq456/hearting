@@ -305,7 +305,6 @@ utilities/dispatch_allocation.test.py	0.08
 utilities/dispatch_allocation_receipt.test.py	0.55
 utilities/dispatch_attempt_policy.test.py	0.09
 utilities/dispatch_attempt_ready.test.py	0.89
-utilities/dispatch_broker.test.py	1.79
 utilities/dispatch_budget_record.test.py	1.33
 utilities/dispatch_capacity_evidence.test.py	1.37
 utilities/dispatch_codex_nocommit_fixture.test.py	4.77
