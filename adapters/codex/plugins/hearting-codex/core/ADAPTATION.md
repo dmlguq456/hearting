@@ -351,10 +351,17 @@ decision rather than an accidental leak.
 ### 6.1. Active Context Budget
 
 Progressive disclosure applies to runtime bootstraps and discovery metadata,
-not only Skill bodies. The bootstrap is a router: source order, hard invariants,
-and runtime entrypoints stay resident; detailed lifecycle explanations,
-examples, and edge cases live in adapter README/ADAPTATION documents or command
-help loaded on demand.
+not only Skill bodies. The bootstrap is a router: purpose, judgment criteria,
+where to look, and the runtime entrypoint stay resident, and the agent follows
+the next action the runtime prints (`parent_next`, `required_action`,
+`next_step`). Procedure detail — receipts, resume and correction commands,
+peer messaging, command surfaces, tool checks, examples, and edge cases —
+lives in core sections, adapter README/ADAPTATION documents, or command help
+loaded on demand, and no bootstrap asks for a core document to be read before
+the task needs it. The shared body is one portable source,
+`core/fragments/bootstrap-body.md`, projected byte for byte into each adapter
+bootstrap by `tools/sync-bootstrap-dispatch.py`; an adapter adds only its
+harness-root resolution and runtime notes around it.
 
 - Each always-loaded adapter bootstrap is at most `16,384` UTF-8 bytes.
 - Each active Skill metadata discovery surface is at most `7,000` characters,

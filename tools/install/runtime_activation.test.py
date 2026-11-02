@@ -1655,6 +1655,72 @@ class RuntimeActivationOwnershipTest(unittest.TestCase):
                 self.assertEqual(target.read_bytes(), original)
 
 
+class CodexOverrideActivationTest(unittest.TestCase):
+    """A user AGENTS.override.md hides AGENTS.md from Codex, so it carries the bootstrap block."""
+
+    ORIGINAL = "# 외부 소통은 읽기 전용\n- 메일은 읽기만 한다.".encode()
+
+    def _seed(self, root: Path) -> Path:
+        home = activation.paths.runtime_home("codex")
+        home.mkdir(parents=True, exist_ok=True)
+        override = home / "AGENTS.override.md"
+        override.write_bytes(self.ORIGINAL)
+        override.chmod(0o600)
+        return override
+
+    def test_activate_refresh_deactivate_round_trip_keeps_user_bytes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = Path(__file__).resolve().parents[2]
+            with fixture_env.patched_environment(root / "fixture", source):
+                override = self._seed(root)
+                report = activation.activate("codex", "linked", str(source))
+                data = override.read_bytes()
+                self.assertTrue(data.startswith(self.ORIGINAL))
+                self.assertIn((source / "adapters/codex/AGENTS.md").read_bytes(), data)
+                self.assertTrue(any("AGENTS.override.md" in line for line in report["report_lines"]))
+                self.assertTrue((override.parent / "AGENTS.md").is_symlink())
+
+                activation.refresh("codex")
+                self.assertEqual(override.read_bytes(), data)
+
+                result = activation.deactivate("codex")
+                self.assertIn(str(override), result["restored_configs"])
+                self.assertEqual(override.read_bytes(), self.ORIGINAL)
+                self.assertEqual(override.stat().st_mode & 0o777, 0o600)
+
+    def test_failed_activation_restores_the_override(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = Path(__file__).resolve().parents[2]
+            with fixture_env.patched_environment(root / "fixture", source):
+                override = self._seed(root)
+                original_prepare = activation._prepare_runtime_config
+
+                def project_then_fail(*args, **kwargs):
+                    original_prepare(*args, **kwargs)
+                    self.assertNotEqual(override.read_bytes(), self.ORIGINAL)
+                    raise activation.ActivationError("injected after override block")
+
+                activation._prepare_runtime_config = project_then_fail
+                try:
+                    with self.assertRaisesRegex(activation.ActivationError, "injected"):
+                        activation.activate("codex", "linked", str(source))
+                finally:
+                    activation._prepare_runtime_config = original_prepare
+                self.assertEqual(override.read_bytes(), self.ORIGINAL)
+
+    def test_without_an_override_activation_creates_none(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = Path(__file__).resolve().parents[2]
+            with fixture_env.patched_environment(root / "fixture", source):
+                activation.activate("codex", "linked", str(source))
+                home = activation.paths.runtime_home("codex")
+                self.assertTrue((home / "AGENTS.md").is_symlink())
+                self.assertFalse((home / "AGENTS.override.md").exists())
+
+
 class NativeContextLifecycleTest(unittest.TestCase):
     """Activate, refresh, then deactivate: what activation added leaves, what the user had stays."""
 

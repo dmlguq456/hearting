@@ -1,49 +1,79 @@
-# Lab 실행 저장소와 명시적 데이터 접근
+# Lab Run Storage and Explicit Data Access
 
-`part_catalog` row에 compute 실행 필요를 선언한 origin stage가 있는 route의 owner를 시작하거나
-재개하면 초기화된 compute-hosts inventory의 정확한 `run_root`가 기존
-`execution_access_v1` 요청에 포함된다. 이 요구는 `capabilities/topologies.json`의
-`part_catalog`에서 origin stage의 row 한 곳에 선언되며 sealed node의 stage identity로 조회한다. borrowed
-stage도 같은 선언을 사용한다. Inventory는
-`COMPUTE_HOSTS_CONFIG`, 또는 `${XDG_CONFIG_HOME:-~/.config}/hearting/compute-hosts.yaml`에서
-기존 loader로 읽는다. GPU 작업과 compute-hosts resource 실행의 로그·PID 저장소를
-owner의 정상 접근 범위 안에 두기 위한 기본값이다. compute stage가 없는 일반
-code owner와 frame에는 이 기본값을 추가하지 않는다. Resource child는 실제 부모
-grant 안에서만 접근한다.
+When an owner starts or resumes a route whose `part_catalog` row declares an
+origin stage that needs compute execution, the exact `run_root` of the
+initialized compute-hosts inventory is added to the existing
+`execution_access_v1` request. The requirement is declared in one place, on the
+origin stage's row in the `part_catalog` of `capabilities/topologies.json`, and
+is looked up by the sealed node's stage identity. A borrowed stage uses the same
+declaration. The inventory is read with the existing loader from
+`COMPUTE_HOSTS_CONFIG`, or from
+`${XDG_CONFIG_HOME:-~/.config}/hearting/compute-hosts.yaml`. This default keeps
+the log and PID storage of GPU work and compute-hosts resource runs inside the
+owner's normal access range. It is not added to ordinary code owners or frames
+that have no compute stage. A resource child only gets access inside its actual
+parent's grant.
 
-GPU 실행 범위가 있는 lab owner는 inventory 폴더를 읽기 전용으로 받고, 별도 명시 요청이
-없으면 compute-hosts SSH 네트워크 필요도 같은 요청에 포함된다. OpenCode 작업자 홈은
-XDG 경로를 격리하기 전에 기존 `COMPUTE_HOSTS_CONFIG` 입력에 사용자 inventory의 정확한
-경로를 유지한다. 파일을 복사하거나 사용자 설정을 바꾸지 않는다. 기존 준비 파일이 있는
-route도 정상 start·correction에서 기존 도출 root를 유지한 채 이 실행 기본값을 준비한다.
-비실행 child에는 이 자동 요청을 더하지 않으며 child의 실제 요청은 부모 grant를 넘을 수 없다.
-Claude·OpenCode의 `network_allowed`는 논리적 허용이며 OS 네트워크 격리 보장이 아니다.
+A lab owner with a GPU execution scope receives the inventory folder read-only.
+Unless a separate explicit request says otherwise, the compute-hosts SSH network
+need is added to the same request. The OpenCode worker home keeps the exact path
+of the user's inventory in the existing `COMPUTE_HOSTS_CONFIG` input before the
+XDG paths are isolated. No file is copied and no user setting is changed. A route
+that already has a prepared file also gets this execution default prepared on a
+normal start or correction, keeping the roots it already derived. Non-execution
+children get no such automatic request, and a child's actual request cannot
+exceed its parent's grant. For Claude and OpenCode, `network_allowed` is a
+logical permission, not a guarantee of OS network isolation.
 
-Inventory가 없거나 주석 템플릿 상태라면 경로를 추측하지 않는다. 잘못된 inventory,
-홈 전체 같은 넓은 root, symlink로 넓은 root에 도달하는 요청은 기존 검증에서 거부한다.
-준비 과정은 inventory를 읽고 요청 파일만 만들며 실제 `run_root`를 만들거나 작업을
-시작하지 않는다.
+If the inventory is missing or still the commented template, no path is guessed.
+A malformed inventory, a root as broad as the whole home folder, and a request
+that reaches a broad root through a symlink are all refused by the existing
+validation. Preparation only reads the inventory and writes the request file; it
+does not create the actual `run_root` or start any work.
 
-## 외부 데이터 경로 지정
+## Naming external data paths
 
-수동 요청 파일이 없으면 start·resume이 봉인된 작업문에서 요청을 만든다
-(`execution_access.derive_task_access`).
+When there is no manual request file, start and resume build the request from the
+sealed task text (`execution_access.derive_task_access`).
 
-- 읽기 루트: 작업문에 나온 절대경로 중 실제로 있는 폴더. 파일이면 그 폴더다. 작업문에서 지정한 JSON 목록의 `roots`에 있는 `artifact_root_path` 또는 절대경로 문자열도 읽기 입력이다. 설치된 앱의 `ops/` 입력 목록과 하팅 코드·문서도 읽을 수 있다. 읽기는 최대 256개, 쓰기는 기존 최대 16개다. 입력 목록은 64 KiB, 도출한 요청과 binding은 4 MiB까지 안전하게 읽고 저장한다. 소스 폴더의 링크가 설치 소스 영역 밖으로 빠지면 자동 허용하지 않는다. 이미 쓰기를 승인한 개발 체크아웃에는 읽기 전용 제한을 덧씌우지 않는다.
-- 쓰기 루트: 시작 카드의 `범위:`(`Scope:`) 칸에서 쓰기 표현(쓰기·저장·수정·생성·write·save 등)이 있고
-  읽기·제외 표현은 없는 구절의 기존 폴더만, owner에만 준다. 경로 뒤 괄호나 쉼표 뒤의 경로 없는 구절
-  (`(제외)`, `(읽기 전용)`, `, 읽기만`)은 바로 앞 경로에 붙는다. 쓰기 표현이 없거나 읽기·쓰기가 섞인
-  경로는 읽기, 제외 표현(제외·금지·않·off-limits 등)이 처음 나온 경로부터는 읽기에서도 뺀다. 해석이 애매하면
-  권한이 작은 쪽으로 정한다. 작업문의 다른 곳에 나온 경로는 쓰기 루트가 되지 않는다.
-- 빼는 것: credentials·키·`~/.ssh` 같은 홈의 숨김 폴더·사용자/런타임 설정·시스템 영역, 없는 경로,
-  너무 넓은 경로, worktree·artifact root처럼 이미 쓸 수 있는 곳.
-- 근거: 루트마다 요청의 `justification`에 출처(범위 칸/작업문, 몇째 줄, 그렇게 정한 표현, 그 구절)가 남는다.
-  준비된 `binding.json`의 `derivation`에는 받은 루트와 뺀 경로·이유가 남는다.
-- 같은 route 노드는 처음 준비한 결과를 resume에서도 그대로 쓴다. 이전 설치본이 빠뜨린 읽기 입력은 정상 start에서 한 번 보완한다. 과거 요청과 읽기·쓰기 판정을 먼저 보존한 뒤 남은 읽기 용량만 채우며 이후에는 보완한 목록을 재사용한다. 도출한 루트가 검증을 통과하지 못하면
-  그 루트들만 빼고 시작하며, 도출 때문에 시작이 거절되지는 않는다.
+- Read roots: every existing folder among the absolute paths in the task text
+  (for a file, its folder). An `artifact_root_path` or absolute path string in
+  the `roots` of a JSON list that the task text names is also a read input. The
+  installed app's `ops/` input list and the Hearting code and documents can be
+  read as well. Reads are capped at 256 roots and writes at the existing 16. The
+  input list is read safely up to 64 KiB, and the derived request and binding up
+  to 4 MiB. A link in a source folder that escapes the installed source area is
+  not granted automatically. A development checkout that already has write
+  approval does not get a read-only restriction layered on top.
+- Write roots: only the existing folders in a clause of the start card's
+  `범위:` (`Scope:`) field that contains a write expression (write, save, modify,
+  create, 쓰기, 저장, 수정, 생성 and similar) and no read or exclusion
+  expression, and only for the owner. A path-less clause after a path, in
+  parentheses or after a comma (`(excluded)`, `(read-only)`, `, read only`),
+  attaches to the path just before it. A path with no write expression, or one
+  that mixes read and write, is a read root. From the first path that carries an
+  exclusion expression (excluded, forbidden, not, off-limits and similar) onward,
+  paths are left out of reading as well. A doubtful reading falls toward less
+  access. A path that appears elsewhere in the task text never becomes a write
+  root.
+- Left out: credentials, keys, hidden folders in the home such as `~/.ssh`, user
+  and runtime settings, system areas, paths that do not exist, paths that are too
+  broad, and places that are already writable such as the worktree and the
+  artifact root.
+- Evidence: each root records its source in the request's `justification` (the
+  scope field or task text, which line, the expression that decided it, and that
+  clause). The `derivation` in the prepared `binding.json` records the roots
+  received and the paths left out, with the reason.
+- A node of the same route reuses its first prepared result on resume. Read
+  inputs that an earlier installed release missed are added once on a normal
+  start: past requests and their read/write decisions are preserved first, only
+  the remaining read capacity is filled, and the supplemented list is reused
+  afterwards. If a derived root fails validation, only those roots are dropped and
+  the start proceeds; derivation never causes a start to be refused.
 
-수동 요청 파일은 계속 받으며, 있으면 도출보다 우선한다. 다음 경로는 예시이며
-실제 승인된 경로로 바꿔야 한다.
+A manual request file is still accepted, and when present it takes precedence over
+derivation. The path below is an example and must be replaced with the actual
+approved path.
 
 ```json
 {
@@ -53,121 +83,150 @@ Inventory가 없거나 주석 템플릿 상태라면 경로를 추측하지 않�
   "network": {"required": false, "reason": "", "hosts": []},
   "enforcement_required": "os-sandbox",
   "justification": {
-    "/data/project/train-valid": "사용자가 승인한 데이터 처리 및 결과 저장 경로"
+    "/data/project/train-valid": "User-approved data processing and result storage path"
   }
 }
 ```
 
-파일을 저장한 뒤 기존 start 또는 resume 명령을 실행하는 세션에 전달한다.
+After saving the file, pass it to the session that runs the existing start or
+resume command.
 
 ```sh
 export AGENT_DISPATCH_EXECUTION_ACCESS_FILE=/absolute/path/lab-access.json
-# 기존 preflight.sh compose --start ... 또는 그 receipt의 resume_command 실행
+# run the existing preflight.sh compose --start ... or the receipt's resume_command
 ```
 
-Lab 준비는 `load_request`로 이 파일을 검증하고 inventory의 `run_root`만 더한 사본을
-기존 dispatch state의 route별 `execution-access` 폴더에 저장한다. 원본 파일은 수정하지
-않는다. 시작·재개에 같은 입력을 유지하면 같은 준비 파일을 재사용한다.
+Lab preparation validates this file with `load_request`, adds only the inventory's
+`run_root`, and stores the copy in the route's `execution-access` folder under the
+existing dispatch state. The original file is not modified. Keeping the same input
+across start and resume reuses the same prepared file.
 
-열린 route에서 부모가 요청을 바꾸려면 새 파일을 같은 환경 변수로 주고 그 route의
-`start`(또는 `correct`)를 실행한다. route의 현 부모일 때만 route 옆 변경 기록에 `access`
-1행이 남고(누가 줬는지와 출처 포함, 첫 도출 요청은 `derived` 행), 다음 owner·교체 owner와
-그 자식은 가장 최근 행의 요청으로 시작한다. lab owner는 그 요청에 `run_root`를 더한 별도
-준비 파일을 쓴다. 다른 세션의 요청은 기록되지 않는다. 명시적 JSON은 preview ROOTS 입력보다
-우선한다. 낮은 수준의 직접 dispatch에서도 기존 `--execution-access-file <JSON>`을
-쓸 수 있다. 이 직접 경로에서는 필요한 모든 root를 해당 JSON에 명시한다.
+To change the request on an open route, the parent supplies a new file through the
+same environment variable and runs that route's `start` (or `correct`). Only when
+it is the route's current parent, one `access` row (with who supplied it and the
+source; a first derived request is a `derived` row) is added to the route's
+change record beside the route. The next owner, a replacement owner and their
+children then start with the request in the latest row. A lab owner uses a
+separate prepared file made from that request plus `run_root`. Another session's
+request is not recorded. An explicit JSON takes precedence over the preview ROOTS
+input. Low-level direct dispatch can still use the existing
+`--execution-access-file <JSON>`; on that direct path, every needed root must be
+named explicitly in that JSON.
 
-Owner 전달과 child 전달은 기존 환경 변수·CLI·effective-grant 경로를 사용한다.
-Child 요청이 부모의 실제 파일 또는 네트워크 범위를 넘으면 모델을 시작하기 전에
-거부된다. 별도의 승인 절차나 전역 permission 설정은 필요하지 않다.
+Owner and child handoff use the existing environment variable, CLI and
+effective-grant paths. A child request that exceeds the parent's actual file or
+network scope is refused before any model starts. No separate approval step or
+global permission setting is needed.
 
-## 적용 수준과 현재 한계
+## Enforcement levels and current limits
 
-### GPU compute 부품의 실행 sandbox
+### Execution sandbox for GPU compute parts
 
-카탈로그 부품이 `execution_needs: compute-hosts`를 선언하면 Codex owner와 그
-compute 부품에 기존 `danger-full-access`를 선택한다. 이 범위에는 lab의 smoke,
-full-run, run-verify뿐 아니라 eval/resume과 code route가 빌려 쓴 compute 부품,
-extra stage, parallel leg도 포함된다. 카탈로그 선언이 compute 판단의 기준이다.
-기존 명시 `resource_class=gpu`와 resource-runner의 `gpu` promotion signal도
-호환 선택으로 유지하며 작업 설명의 자연어는 해석하지 않는다. 일반 code, frame,
-계획·metrics·report 같은 비-compute child는 기본값을 유지한다.
+When a catalog part declares `execution_needs: compute-hosts`, the Codex owner and
+that compute part use the existing `danger-full-access`. This covers not only
+the lab's smoke, full-run and run-verify but also eval/resume and the compute
+parts, extra stages and parallel legs that a code route borrows. The catalog
+declaration is the basis for the compute decision. An existing explicit
+`resource_class=gpu` and the resource-runner's `gpu` promotion signal are kept as
+compatible selectors, and the natural language of a task description is not
+interpreted. Ordinary code, frames, and non-compute children such as planning,
+metrics and report keep the default.
 
-새 route의 한 선택은 prospective readiness, sealed `codex_execution_sandbox`,
-실제 exec/App Server 실행, GPU lease admission에 함께 쓰인다. 이미 봉인된 route는
-seal의 GPU 범위와 sandbox를 유지한다. seal이 없는 역사 route는 기존 owner sandbox
-선택을 유지하며, checked Codex parent tuple만으로 sandbox를 바꾸거나 compute 접근과
-GPU lease를 소급해서 만들지 않는다. 같은
-cycle의 lab 또는 code suffix owner는 완료 prefix의 seal을 이어받으며 그 아래
-비-compute child는 기본값을 유지한다. Caller의 기존 `--sandbox`,
-`CODEX_DISPATCH_SANDBOX`, `CODEX_DISPATCH_SANDBOX_FORCE` precedence는 보존하고
-사용자 전역 설정은 수정하지 않는다.
+A new route makes one selection that is shared by prospective readiness, the
+sealed `codex_execution_sandbox`, the actual exec/App Server run, and GPU lease
+admission. A route that is already sealed keeps the GPU scope and sandbox of its
+seal. A historical route with no seal keeps its existing owner sandbox selection;
+the checked Codex parent tuple alone does not change the sandbox or retroactively
+create compute access or a GPU lease. A lab or code suffix owner of the same
+cycle inherits the seal of the completed prefix, and the non-compute children
+below it keep the default. The caller's existing `--sandbox`,
+`CODEX_DISPATCH_SANDBOX` and `CODEX_DISPATCH_SANDBOX_FORCE` precedence is
+preserved, and the user's global settings are not modified.
 
-Codex 0.160.0의 Linux sandbox에서 NVIDIA 장치가 숨겨지는 것을 실제 조회로
-확인했다. `/dev` read로 해결되지 않았고 장치 write profile은 bwrap panic으로
-종료됐다. 같은 설치의 full access에서는 `nvidia-smi -L` 조회가 성공했다.
-이는 학습 성공이나 다른 외부 sandbox의 장치 지원을 보증하지 않는다.
+On the Linux sandbox of Codex 0.160.0, NVIDIA devices were confirmed by direct
+query to be hidden. Reading `/dev` did not fix it, and a device write profile
+ended in a bwrap panic. In full access on the same installation, the
+`nvidia-smi -L` query succeeded. This does not guarantee that training works or
+that any other external sandbox supports the devices.
 
-이 선택에는 filesystem/network OS enforcement가 **없다**. 이 범위에서
-`enforcement_required=any`인 요청만 논리적 root/child≤parent 경계로 수용하고
-grade `none`, `file-enforcement-none`, `network-enforcement-none`을 기록한다.
-Network 요청은 부모의 논리적 허용 범위 안에서 `granted-unenforced`로 남는다.
-`os-sandbox` 필수 요청, read-only에서 쓰기 요청, 부모 밖 요청은 기존대로 거부한다.
-Strict OS enforcement가 필요하면 기존 workspace 실행이나 compute-hosts resource
-경로를 이용한다. Compose/explain/start와 launch receipt에는 실제 선택·적용 수준이
-표시되며, 외부 sandbox와 관리된 runtime 제약은 계속 적용된다.
+This selection has **no** filesystem or network OS enforcement. In this scope,
+only requests with `enforcement_required=any` are accepted, as a logical
+root/child-at-most-parent boundary, and recorded with the grade `none`,
+`file-enforcement-none` and `network-enforcement-none`. A network request stays
+`granted-unenforced` within the parent's logical allowance. A request that
+requires `os-sandbox`, a write request under read-only, and a request outside the
+parent are refused as before. If strict OS enforcement is needed, use the
+existing workspace execution or the compute-hosts resource path. Compose, explain,
+start and the launch receipt show the actual selection and the level applied, and
+external sandboxes and managed runtime constraints continue to apply.
 
-### GPU 없는 host payload 부품
+### Host payload parts without a GPU
 
-GPU 없이 오래 걸리는 측정·benchmark·browser test·메모리 상한 명령은
-`autopilot-lab:host-run`을 빌려(`execute,autopilot-lab:host-run,test,report`) 등록된
-detached·supervised resource로 실행한다. 카탈로그 선언은
-`execution_needs: host-process`이며 compute 부품이 아니므로 GPU scope·lease·
-compute-hosts 저장소 접근과 smoke attestation·시작 승인을 요구하지 않는다.
+Long measurements, benchmarks, browser tests and memory-capped commands that need
+no GPU borrow `autopilot-lab:host-run`
+(`execute,autopilot-lab:host-run,test,report`) and run as a registered, detached,
+supervised resource. The catalog declaration is `execution_needs: host-process`;
+it is not a compute part, so it does not require GPU scope, a lease, access to
+compute-hosts storage, a smoke attestation or a start approval.
 
-Codex owner와 모델 child는 계속 `workspace-write`다. 이 노드가 봉인된 route에서 host
-부품으로 확인될 때만 controller가 만든 payload 명령이 owner profile 밖(`-P
-:danger-full-access`)에서 실행되어, payload 안의 `systemd-run --user --scope -p
-MemoryMax=… -p MemorySwapMax=0 <명령>`이 사용자 systemd manager에 닿는다. 메모리
-상한은 이 payload 명령이 소유하며 Hearting은 별도 옵션이나 증명 파일을 만들지 않는다.
-이 payload에는 filesystem/network OS enforcement가 **없다**. Caller의 `--sandbox`,
-`CODEX_DISPATCH_SANDBOX`, `CODEX_DISPATCH_SANDBOX_FORCE`가 있으면 그 선택이 그대로
-적용되고, 이미 전달된 `enforcement_required=os-sandbox` 요청은 payload 시작 전에
-`execution-access-enforcement-unavailable`로 거부한다. `any`이거나 요청이 없으면 새 입력을
-요구하지 않는다. 이미 봉인된 이전 route에는 소급 적용되지 않는다. Claude·OpenCode는 같은
-부품을 쓰며 sandbox 분기는 추가되지 않는다.
+The Codex owner and model children stay `workspace-write`. Only when this node is
+confirmed as a host part in a sealed route does the payload command made by the
+controller run outside the owner profile (`-P :danger-full-access`), so that
+`systemd-run --user --scope -p MemoryMax=… -p MemorySwapMax=0 <command>` inside
+the payload can reach the user systemd manager. The memory cap is owned by that
+payload command; Hearting adds no separate option or proof file. This payload has
+**no** filesystem or network OS enforcement. If the caller supplied `--sandbox`,
+`CODEX_DISPATCH_SANDBOX` or `CODEX_DISPATCH_SANDBOX_FORCE`, that choice applies
+unchanged, and a request that already carries `enforcement_required=os-sandbox` is
+refused before the payload starts with
+`execution-access-enforcement-unavailable`. With `any`, or with no request, no new
+input is required. Earlier routes that were already sealed are not changed
+retroactively. Claude and OpenCode use the same part, and no sandbox branch is
+added.
 
-공식 문서도 full access가 파일·네트워크 경계를 제거한다고 설명한다.
+The official documentation also explains that full access removes the file and
+network boundaries:
 [Codex sandbox](https://learn.chatgpt.com/docs/sandboxing),
 [Codex permissions](https://learn.chatgpt.com/docs/permissions),
 [Codex App Server](https://learn.chatgpt.com/docs/app-server)
 
-Codex의 `workspace-write`에서는 writable root를 OS sandbox에 적용한다. 로컬
-`codex-cli 0.160.0`의 exec는 `--add-dir`, Hearting App Server runner는
-`--writable-root`로 같은 검증 결과를 전달한다. 일반 code 실행의 기존 기본 경로와
-request가 없는 builder argv는 유지한다. 공식 Codex 설정도 파일 경로별 permission과
-workspace 확장을 지원한다. [Codex permissions 설정](https://learn.chatgpt.com/docs/config-file/config-reference)
+Under Codex `workspace-write`, writable roots are applied to the OS sandbox. The
+local `codex-cli 0.160.0` exec passes the same validated result with `--add-dir`,
+and the Hearting App Server runner with `--writable-root`. The existing default
+path of ordinary code runs and the builder argv without a request are unchanged.
+The official Codex configuration also supports per-path file permissions and
+workspace extension.
+[Codex permissions configuration](https://learn.chatgpt.com/docs/config-file/config-reference)
 
-`read_roots`는 세 하네스 모두 읽기 전용으로 투영한다(어댑터 선언표 `access`). Codex sandbox는
-어디든 읽고 writable root에만 쓰며, Claude는 루트마다 `--add-dir`와 Edit 거부 규칙,
-OpenCode는 `external_directory` 읽기 전용이다. 실제 보장 수준은 grant의 `read_enforcement`에 남는다.
+`read_roots` are projected read-only on all three harnesses (the adapter
+declaration table, `access`). The Codex sandbox reads everywhere and writes only
+to writable roots; Claude uses `--add-dir` and an Edit deny rule for each root;
+OpenCode uses read-only `external_directory`. The actual guarantee level is
+recorded in the grant's `read_enforcement`.
 
-SSH 등 네트워크가 필요하면 기존 `network.required=true`와 `reason`을 명시하고 기존
-owner 네트워크 정책을 따른다. `network.hosts`는 현재 호스트별 격리를 보장하지 않는다.
-`any`에서는 미적용 상태를 보고하고, 호스트 제한과 `os-sandbox`를 함께 요구하면 거부한다.
-Codex 공식 문서 역시 호스트별 네트워크 규칙을 적용하려면 proxy enforcement가 필요하다고
-설명한다. [Codex 네트워크 설정](https://learn.chatgpt.com/docs/config-file/config-reference)
+If a network such as SSH is needed, state the existing `network.required=true` and
+a `reason`, and follow the existing owner network policy. `network.hosts` does not
+currently guarantee per-host isolation. With `any`, the unenforced state is
+reported; requiring both a host restriction and `os-sandbox` is refused. The
+Codex documentation likewise says that per-host network rules need proxy
+enforcement.
+[Codex network configuration](https://learn.chatgpt.com/docs/config-file/config-reference)
 
-Claude·OpenCode에서는 같은 요청을 기존 tool-permission 수준으로 적용하며 OS sandbox와
-동등하다고 보고하지 않는다. Claude의 additional directory 권한과 sandbox는 별도
-설정이다. [Claude permissions](https://code.claude.com/docs/en/permissions)
+On Claude and OpenCode the same request is applied at the existing
+tool-permission level and is not reported as equivalent to an OS sandbox. Claude's
+additional-directory permissions and its sandbox are separate settings.
+[Claude permissions](https://code.claude.com/docs/en/permissions)
 
-## Continuation의 checked evidence 갱신
+## Refreshing checked evidence for a continuation
 
-이미 실행 중인 부모의 sandbox가 원 tuple과 다르면 기존 continuation 명령에
-선택적으로 `--dispatch-evidence /absolute/path/checked-evidence.json`을 전달할 수 있다.
-Compile/compose와 같은 exact-worktree·parent identity 검증으로 evidence를 확인하고,
-새 continuation의 tuple과 해당 fallback 선택에만 반영한다. 원 route와 완료 증거,
-단위·승인 범위·cycle lineage는 보존한다. Override가 없으면 원 evidence를 그대로 쓴다.
-이 입력은 sandbox를 바꾸거나 자동 probe·권한 승격을 수행하지 않는다. 새 정상 GPU
-compose/start는 실행 선택과 probe/tuple을 함께 준비하므로 이 복구 입력이 필요 없다.
+When the sandbox of an already running parent differs from the original tuple, the
+existing continuation command can optionally take
+`--dispatch-evidence /absolute/path/checked-evidence.json`. The evidence is
+verified with the same exact-worktree and parent-identity checks as compile and
+compose, and is reflected only in the new continuation's tuple and its fallback
+selection. The original route and completion evidence, the unit, the approval
+scope and the cycle lineage are preserved. Without the override, the original
+evidence is used unchanged. This input does not change the sandbox and performs
+no automatic probe or privilege escalation. A new normal GPU compose/start
+prepares the execution selection together with its probe and tuple, so this
+recovery input is not needed there.

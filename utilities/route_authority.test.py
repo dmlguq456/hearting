@@ -687,32 +687,32 @@ class WorkerPinChangeTest(unittest.TestCase):
         import model_profile
         before = model_profile.route_selection_pin(self.route_file, worker_type="stage", adapter="codex")
         self.assertEqual(before, {"status": "harness-only"})
-        result, readiness = self.start_pin(["worker=codex:gpt-6.1-sol@high"], caller=("claude", "claude-sid"),
+        result, readiness = self.start_pin(["worker=codex:codex-model-deep@high"], caller=("claude", "claude-sid"),
                                            owner_parent="claude-sid")
         self.assertTrue(result["changed"])
-        self.assertEqual(result["worker"], {"harness": "codex", "model": "gpt-6.1-sol", "effort": "high"})
+        self.assertEqual(result["worker"], {"harness": "codex", "model": "codex-model-deep", "effort": "high"})
         self.assertEqual((readiness.call_args.args[2], readiness.call_args.args[3]), ("claude", ["codex"]))
         rows = RA.pin_changes(self.route)
         self.assertEqual([row["target"] for row in rows], ["owner", "worker"])
         self.assertEqual(rows[-1]["previous"], {"harness": "codex", "model": None, "effort": None})
         self.assertEqual(model_profile.route_selection_pin(self.route_file, worker_type="stage", adapter="codex"),
-                         {"status": "applied", "model": "gpt-6.1-sol", "effort": "high"})
+                         {"status": "applied", "model": "codex-model-deep", "effort": "high"})
         self.assertEqual(model_profile.route_selection_pin(self.route_file, worker_type="review", adapter="codex"),
-                         {"status": "applied", "model": "gpt-6.1-sol", "effort": "high"})
+                         {"status": "applied", "model": "codex-model-deep", "effort": "high"})
         self.assertEqual(RA.sealed_pin_harness(self.route, worker_type="owner"), "claude")   # owner unchanged
         self.assertEqual(self.route, json.loads(self.route_file.read_text()))               # sealed route unchanged
-        again, _ = self.start_pin(["worker=codex:gpt-6.1-sol@high"], caller=("claude", "claude-sid"),
+        again, _ = self.start_pin(["worker=codex:codex-model-deep@high"], caller=("claude", "claude-sid"),
                                   owner_parent="claude-sid")
         self.assertFalse(again["changed"])
 
     def test_composing_the_work_again_carries_the_pins_in_force(self):
         import shlex
         import work_start
-        self.start_pin(["worker=codex:gpt-6.1-sol@high"], caller=("claude", "claude-sid"), owner_parent="claude-sid")
+        self.start_pin(["worker=codex:codex-model-deep@high"], caller=("claude", "claude-sid"), owner_parent="claude-sid")
         argv = shlex.split(work_start._compose_again({**self.route, "capability": "autopilot-code", "slug": "s"}))
         pins = [argv[i + 1] for i, word in enumerate(argv) if word == "--pin"]
         self.assertIn("owner=claude", pins)
-        self.assertIn("worker=codex:gpt-6.1-sol@high", pins)
+        self.assertIn("worker=codex:codex-model-deep@high", pins)
 
     def test_a_frame_pin_is_probed_from_this_session(self):
         result, readiness = self.start_pin(["frame=claude"], caller=("claude", "claude-sid"),

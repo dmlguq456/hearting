@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Create and verify content-bound smoke attestations before expensive lab runs."""
-import argparse, hashlib, json, os, re, subprocess, sys
+import argparse, datetime, hashlib, json, os, re, subprocess, sys
 from pathlib import Path
 
 UTILITIES = Path(__file__).resolve().parents[1] / "utilities"
@@ -15,6 +15,74 @@ def digest(path):
     for item in sorted(x for x in path.rglob("*") if x.is_file()):
         rows.append((str(item.relative_to(path)),hashlib.sha256(item.read_bytes()).hexdigest()))
     return hashlib.sha256(json.dumps(rows,separators=(",",":")).encode()).hexdigest()
+
+def _data_root(environ):
+    """The installer's release data root, resolved from the passed mapping only.
+
+    `tools/install/distribution.py` resolves the same three sources in the same
+    order; a parity fixture keeps this writer and that reader in sync."""
+    raw = environ.get("HARNESS_DATA_ROOT")
+    if raw:
+        return Path(raw).expanduser()
+    xdg = environ.get("XDG_DATA_HOME")
+    if xdg:
+        return Path(xdg).expanduser() / "hearting"
+    home = environ.get("HOME")
+    if not home:
+        raise ValueError("none of HARNESS_DATA_ROOT, XDG_DATA_HOME, HOME are set")
+    return Path(home).expanduser() / ".local" / "share" / "hearting"
+
+
+def _attestation_refs_path(environ):
+    """`<stable state root>/attestation-refs.jsonl`, the installer's read path."""
+    import dispatch_contract
+    return dispatch_contract.stable_state_root(environ) / "attestation-refs.jsonl"
+
+
+def _release_input_paths(inputs, environ):
+    """Resolved input paths that live inside this data root's `releases/` tree."""
+    releases = Path(os.path.realpath(_data_root(environ) / "releases"))
+    found = set()
+    for row in inputs:
+        raw = row.get("path") if isinstance(row, dict) else None
+        if not isinstance(raw, str):
+            continue
+        try:
+            candidate = Path(os.path.realpath(raw))
+            if os.path.commonpath((str(releases), str(candidate))) == str(releases):
+                found.add(str(candidate))
+        except (OSError, ValueError):
+            continue
+    return sorted(found)
+
+
+def _record_release_input_refs(output, inputs, environ):
+    """Append one release-input reference line for the installer's cleanup pass.
+
+    This is a retention side channel, not part of the attestation result: a
+    write failure only warns on stderr and leaves the attest exit code alone.
+    """
+    try:
+        paths = _release_input_paths(inputs, environ)
+        if not paths:
+            return
+        path = _attestation_refs_path(environ)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        line = json.dumps({
+            "schema_version": 1,
+            "attestation": str(Path(os.path.realpath(output))),
+            "inputs": paths,
+            "recorded_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        }, sort_keys=True, separators=(",", ":")) + "\n"
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            os.write(fd, line.encode("utf-8"))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except Exception as exc:
+        print(f"smoke-attestation: attested-input reference not recorded: {exc}", file=sys.stderr)
+
 
 def _verify_config_manifest(path):
     tool = Path(__file__).with_name("lab-config-provenance.py")
@@ -178,6 +246,7 @@ def main(argv=None):
     data.update(exit_code=result.returncode,status="passed" if result.returncode==0 else "failed")
     data["attestation_hash"]="sha256:"+hashlib.sha256(json.dumps(data,sort_keys=True,separators=(",",":")).encode()).hexdigest()
     Path(x.output).parent.mkdir(parents=True,exist_ok=True); Path(x.output).write_text(json.dumps(data,indent=2)+"\n")
+    _record_release_input_refs(x.output, data["inputs"], os.environ)
     raise SystemExit(result.returncode)
 if __name__=="__main__":
  try: main()

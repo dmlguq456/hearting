@@ -82,6 +82,35 @@ class JourneyTests(unittest.TestCase):
         self.assertEqual(later, ["codex", "exec", "resume", "--json", "t-1", "Proceed"])
         self.assertNotIn("--sandbox", first + later)
 
+    def test_approval_prompts_are_off_only_inside_the_sandbox(self):
+        cwd = Path("/tmp/w/repos/x")
+        for harness, flag in (("claude", "--dangerously-skip-permissions"),
+                              ("codex", "--dangerously-bypass-approvals-and-sandbox"), ("opencode", "--auto")):
+            self.assertNotIn(flag, fj.turn_argv(harness, harness, cwd, None, "t", "v2"))
+            for sid in (None, "s-1"):
+                self.assertIn(flag, fj.turn_argv(harness, harness, cwd, sid, "t", "v2", True))
+
+    def test_opencode_starts_on_the_last_used_model(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "opencode"; state.mkdir()
+            (state / "model.json").write_text('{"recent":[{"providerID":"p","modelID":"m"}]}')
+            previous = os.environ.get("XDG_STATE_HOME"); os.environ["XDG_STATE_HOME"] = tmp
+            try:
+                self.assertEqual(fj.opencode_last_model(), "p/m")
+                (state / "model.json").write_text("{}")
+                self.assertIsNone(fj.opencode_last_model())
+            finally:
+                if previous is None: os.environ.pop("XDG_STATE_HOME", None)
+                else: os.environ["XDG_STATE_HOME"] = previous
+        argv = fj.turn_argv("opencode", "opencode", Path("/tmp/x"), None, "t", "v2", True, "p/m")
+        self.assertEqual(argv[argv.index("--model") + 1], "p/m")
+
+    def test_credential_identity_ignores_export_order(self):
+        a = json.dumps([{"id": "a", "integrationID": "x", "active": True, "value": {"k": 1}},
+                        {"id": "b", "integrationID": "y", "active": False, "value": {"k": 2}}]).encode()
+        b = json.dumps(list(reversed(json.loads(a)))).encode()
+        self.assertEqual(fj._credential_identity(a), fj._credential_identity(b))
+
     def test_unexpected_question_stops_without_answer(self):
         old = fj.run
         old_sandbox = fj.sandbox
@@ -673,6 +702,120 @@ else: raise SystemExit(5)
                 timer.cancel(); signal.signal(signal.SIGUSR1, previous)
             child_pid = int(pidfile.read_text())
             with self.assertRaises(ProcessLookupError): os.kill(child_pid, 0)
+
+    CLAUDE = b'{"claudeAiOauth":{"accessToken":"fake-access","refreshToken":"fake-refresh","expiresAt":1}}'
+
+    def _seed_env(self, tmp):
+        base = Path(tmp)
+        real = base / "claude-config"; real.mkdir(mode=0o755)
+        (real / ".credentials.json").write_bytes(self.CLAUDE)
+        root = base / "auth"; root.mkdir(mode=0o700)
+        previous = os.environ.get("CLAUDE_CONFIG_DIR")
+        os.environ["CLAUDE_CONFIG_DIR"] = str(real)
+        self.addCleanup(lambda: os.environ.pop("CLAUDE_CONFIG_DIR", None) if previous is None
+                        else os.environ.__setitem__("CLAUDE_CONFIG_DIR", previous))
+        return real, root
+
+    def test_existing_login_seeds_private_store_with_marker_and_is_removed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            real, root = self._seed_env(tmp)
+            entry = fj.seed_from_existing_login(root, "claude", None, "/bin/true")
+            store = fj.auth_file(root, "claude")
+            self.assertEqual(store.read_bytes(), self.CLAUDE)
+            self.assertEqual(store.stat().st_mode & 0o777, 0o600)
+            self.assertTrue(fj.seed_marker(store).is_file())
+            # A dedicated measurement login (no marker) always wins and is never overwritten.
+            fj.release_seed({"failures": []}, entry, store)
+            self.assertFalse(store.exists()); self.assertFalse(fj.seed_marker(store).exists())
+            fj.atomic_auth_write(store, b'{"dedicated":true}')
+            self.assertIsNone(fj.seed_from_existing_login(root, "claude", None, "/bin/true"))
+            self.assertEqual(store.read_bytes(), b'{"dedicated":true}')
+            # Nothing to copy means no seed.
+            store.unlink(); (real / ".credentials.json").unlink()
+            self.assertIsNone(fj.seed_from_existing_login(root, "claude", None, "/bin/true"))
+
+    def test_refreshed_login_goes_back_only_while_original_is_still_the_seed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            real, root = self._seed_env(tmp)
+            original = real / ".credentials.json"
+            os.chmod(original, 0o640); os.chmod(real, 0o755)
+            refreshed = self.CLAUDE.replace(b"fake-access", b"newer-access")
+            # Unchanged original: refreshed copy returns, mode and directory permissions stay.
+            entry = fj.seed_from_existing_login(root, "claude", None, "/bin/true")
+            store = fj.auth_file(root, "claude"); store.write_bytes(refreshed)
+            record = {"failures": []}
+            fj.release_seed(record, entry, store)
+            self.assertEqual(original.read_bytes(), refreshed)
+            self.assertEqual(original.stat().st_mode & 0o777, 0o640)
+            self.assertEqual(real.stat().st_mode & 0o777, 0o755)
+            self.assertEqual(record["failures"], []); self.assertFalse(store.exists())
+            # The user signed in elsewhere meanwhile: never overwrite, say so, still delete the copy.
+            entry = fj.seed_from_existing_login(root, "claude", None, "/bin/true")
+            store.write_bytes(refreshed.replace(b"newer", b"older"))
+            original.write_bytes(self.CLAUDE.replace(b"fake-access", b"other-account"))
+            record = {"failures": []}
+            fj.release_seed(record, entry, store)
+            self.assertIn(b"other-account", original.read_bytes())
+            self.assertEqual(record["failures"], [{"harness": "claude", "reason": "login-writeback-failed"}])
+            self.assertFalse(store.exists()); self.assertFalse(fj.seed_marker(store).exists())
+
+    def test_leftover_seed_from_a_killed_run_is_dropped_before_the_next_seed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            real, root = self._seed_env(tmp)
+            store = fj.auth_file(root, "claude")
+            fj.atomic_auth_write(fj.seed_marker(store), b"seeded\n")
+            fj.atomic_auth_write(store, b'{"claudeAiOauth":{"accessToken":"stale"}}')
+            entry = fj.seed_from_existing_login(root, "claude", None, "/bin/true")
+            self.assertEqual(store.read_bytes(), self.CLAUDE)  # fresh seed, not the stale copy
+            fj.release_seed({"failures": []}, entry, store)
+            # If the original is gone, the stale copy is removed and nothing replaces it.
+            fj.atomic_auth_write(fj.seed_marker(store), b"seeded\n")
+            fj.atomic_auth_write(store, b'{"x":1}')
+            (real / ".credentials.json").unlink()
+            self.assertIsNone(fj.seed_from_existing_login(root, "claude", None, "/bin/true"))
+            self.assertFalse(store.exists())
+
+    def test_v2_seed_leaves_out_oauth_entries_that_could_refresh(self):
+        def row(i, kind, expires=1):
+            return {"id": i, "integrationID": "p" + i, "label": "l", "active": True,
+                    "value": {"type": kind, "key": "fake-key", "access": "fake-a", "refresh": "fake-r",
+                              "expires": expires, "methodID": "m", "metadata": {}}}
+        later = int((fj.time.time() + 86400) * 1000)
+        exported = json.dumps([row("a", "key"), row("b", "oauth", 1), row("c", "oauth", later)]).encode()
+        previous = fj.private_auth_command
+        fj.private_auth_command = lambda *a, **k: {"ok": True, "stdout": exported}
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp) / "auth"; root.mkdir(mode=0o700)
+                store = fj.auth_file(root, "opencode", "v2")
+                entry = fj.seed_from_existing_login(root, "opencode", "v2", "/bin/true")
+                self.assertEqual([r["id"] for r in json.loads(entry[2])], ["a", "c"])
+                # Unchanged export: silent. A changed one cannot be handed back: say so, still delete.
+                record = {"failures": []}
+                fj.release_seed(record, entry, store)
+                self.assertEqual(record["failures"], []); self.assertFalse(store.exists())
+                entry = fj.seed_from_existing_login(root, "opencode", "v2", "/bin/true")
+                changed = json.loads(entry[2]); changed[1]["value"]["access"] = "rotated"
+                store.write_bytes(json.dumps(changed).encode())
+                fj.release_seed(record, entry, store)
+                self.assertEqual(record["failures"], [{"harness": "opencode", "reason": "login-writeback-failed"}])
+                self.assertFalse(store.exists())
+        finally:
+            fj.private_auth_command = previous
+
+    def test_kept_world_loses_the_users_credentials(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            world = Path(tmp)
+            files = [world / "home/.claude/.credentials.json", world / "home/.codex/auth.json",
+                     world / "home/.local/share/opencode/auth.json", world / "home/.local/share/opencode/opencode.db",
+                     world / "home/.local/share/opencode/opencode.db-wal",
+                     world / "home/.local/state/x/codex-1/auth.json", world / "home/notes.txt"]
+            for f in files:
+                f.parent.mkdir(parents=True, exist_ok=True); f.write_text("x")
+            fj.scrub_world_credentials(world, set())  # nothing seeded: leave a user's own measurement login alone
+            self.assertTrue(all(f.exists() for f in files))
+            fj.scrub_world_credentials(world, {"claude", "opencode"})
+            self.assertEqual([f.exists() for f in files], [False] * 6 + [True])
 
     def test_invalid_auth_json_is_not_persisted(self):
         with tempfile.TemporaryDirectory() as tmp:

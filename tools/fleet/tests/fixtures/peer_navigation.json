@@ -1,6 +1,6 @@
 {
   "fixture_schema": "peer-navigation-v1",
-  "cwd": "/home/Uihyeop/hearting-wt/fleet-peer-inline-navigation-1013",
+  "cwd": "/home/example/hearting-wt/fleet-peer-inline-navigation-1013",
   "rows": [
     {
       "harness": "codex", "session_id": "peer-nav-codex-a", "session_tag": "a1",
