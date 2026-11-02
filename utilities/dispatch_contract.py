@@ -36,7 +36,7 @@ from types import MappingProxyType
 _CODE_ROOT_FD = os.open(Path(__file__).resolve().parents[1],
                         os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
 
-from hearting_gates import gates_on, same_work_or_refuse
+from hearting_gates import note_same_work_drift
 from session_identity import session_label
 from route_identity import registered_node_identity
 from governor_identity import close_witness, create_witness
@@ -1796,13 +1796,13 @@ def validate_review_output_binding(
         or metadata.get("worktree", expected_worktree) != expected_worktree
         or str(Path(fields[2]).resolve(strict=False)) != expected_worktree
     ):
-        same_work_or_refuse("review-binding-worktree-mismatch", attempt_id)
+        note_same_work_drift("review-binding-worktree-mismatch", attempt_id)
     if metadata.get("artifact_root") != expected_root:
-        same_work_or_refuse("review-binding-artifact-root-mismatch", attempt_id)
+        note_same_work_drift("review-binding-artifact-root-mismatch", attempt_id)
     if metadata.get("review_cycle_id") != cycle_id:
-        same_work_or_refuse("review-binding-cycle-mismatch", cycle_id)
+        note_same_work_drift("review-binding-cycle-mismatch", cycle_id)
     if metadata.get("review_producer_id") != producer_id:
-        same_work_or_refuse("review-binding-producer-mismatch", producer_id)
+        note_same_work_drift("review-binding-producer-mismatch", producer_id)
     try:
         locator = target.relative_to(Path(expected_root)).as_posix()
     except ValueError as exc:
@@ -1824,7 +1824,7 @@ def validate_review_output_binding(
     binding["digest"] = review_output_binding_digest(binding)
     mirrored = metadata.get("review_output_digest")
     if mirrored != binding["digest"]:
-        same_work_or_refuse("review-binding-digest-mismatch", attempt_id)
+        note_same_work_drift("review-binding-digest-mismatch", attempt_id)
     binding["_registry_metadata"] = metadata
     binding["_registry_status"] = fields[1]
     return binding
@@ -7790,18 +7790,10 @@ def completion_marker_gate(
                     next_action=currency.next_action,
                 )
             if completion_superseded(currency):
-                if not gates_on():
-                    # Gates-off execution may continue, but the old marker is
-                    # omitted from the admitted observations so no consumer
-                    # can treat its superseded PASS as current.
-                    continue
-                superseded_by = marker.get("superseded_by") or {}
-                upstream = superseded_by.get("node") if isinstance(superseded_by, dict) else None
-                sequence = superseded_by.get("sequence") if isinstance(superseded_by, dict) else None
-                cause = f"{dep}:superseded-by={upstream}@{sequence}" if upstream and sequence else dep
-                raise DispatchContractError(
-                    currency.reason, cause, next_action=currency.next_action,
-                )
+                # Execution may continue, but the old marker is omitted from the
+                # admitted observations so no consumer can treat its superseded
+                # PASS as current.
+                continue
             if currency.state.startswith("integrity-broken:") or currency.state == "completion-evidence-unreadable":
                 raise DispatchContractError(
                     "completion-marker-integrity-broken",
@@ -8101,18 +8093,18 @@ def _marker_schema_identity_ok(
         "completion_gate": node.get("completion_gate"),
     }
     if any(marker.get(key) != value for key, value in expected.items()):
-        if observe or gates_on() or any(key not in marker for key in expected):
+        if observe or any(key not in marker for key in expected):
             return False, None
-        same_work_or_refuse("completion-marker-identity-mismatch", node_id)
+        note_same_work_drift("completion-marker-identity-mismatch", node_id)
     history_path = marker_path.parent / f"{node_id}.{sequence}.json"
     try:
         history = json.loads(history_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return False, None
     if history != marker:
-        if observe or gates_on() or not isinstance(history, dict):
+        if observe or not isinstance(history, dict):
             return False, None
-        same_work_or_refuse("completion-marker-history-changed", node_id)
+        note_same_work_drift("completion-marker-history-changed", node_id)
     return True, history_path
 
 
@@ -8972,7 +8964,7 @@ def record_evidence_change(
 ) -> None:
     """Record one evidence edit after its completion marker; never refuse it.
 
-    Gates off (the default), an artifact stays editable after its stage
+    An artifact stays editable after its stage
     completed (user decision 2026-10-01): the edit is kept as one history line
     -- when, by whom, why, and the digest it replaced -- instead of a refusal.
     The same change is written once however often it is read, and a failed
@@ -9035,14 +9027,11 @@ def note_evidence_change(
     marker_path: Path,
     marker: Mapping[str, object] | None = None,
 ) -> None:
-    """Keep a gates-off evidence edit as history at an operation that proceeds on the marker.
+    """Keep an evidence edit as history at an operation that proceeds on the marker.
 
     Called by continuation, a stage start, `complete` and a replacement owner's
     claim -- never by a read (dry-run, status, Fleet), which stays write-free.
-    With gates on the edit is still `revised-unrecorded` and this records nothing.
     """
-    if gates_on():
-        return
     try:
         marker = marker if marker is not None else json.loads(marker_path.read_text(encoding="utf-8"))
         currency = evidence_currency(route, dict(node), marker_path, dict(marker))
@@ -9130,9 +9119,9 @@ def evidence_currency(
         )
         if detail != node.get("id"):
             action += f" (upstream revision {detail})"
-        if observe or gates_on():
+        if observe:
             return GateCurrency("superseded", "completion-evidence-superseded", action)
-        same_work_or_refuse("completion-evidence-superseded", str(detail))
+        note_same_work_drift("completion-evidence-superseded", str(detail))
     if check_source:
         from review_source_subject import marker_currency as source_marker_currency
         source_currency = source_marker_currency(
@@ -9175,7 +9164,7 @@ def evidence_currency(
         try:
             marker_stat = marker_path.lstat()
             recorded_sha = evidence_record.get("sha256")
-            if (not observe and not gates_on() and stat.S_ISREG(marker_stat.st_mode)
+            if (not observe and stat.S_ISREG(marker_stat.st_mode)
                     and isinstance(recorded_sha, str)
                     and re.fullmatch(r"[0-9a-f]{64}", recorded_sha)):
                 return GateCurrency("current", "completion-evidence-recorded-missing",
@@ -9191,7 +9180,7 @@ def evidence_currency(
         return GateCurrency("completion-evidence-unreadable", "completion-evidence-unreadable")
     if digest != evidence_record.get("sha256"):
         node_id = str(node.get("id"))
-        if not observe and not gates_on():
+        if not observe:
             # Gates off an edit is not a refusal (nor a warning line). This read
             # stays a read: the operations that proceed on the marker keep the
             # edit as history (`note_evidence_change`).
@@ -9595,9 +9584,9 @@ def completion_attempt_readiness(
         # depth, just as registered complete does.
         if row_hash != str(route.get("route_hash") or ""):
             if metadata.get("attempt_id") == attempt_id:
-                if observe or gates_on():
+                if observe:
                     return AttemptReadiness("unverifiable", "attempt-route-hash-mismatch", attempt_id)
-                same_work_or_refuse("attempt-route-hash-mismatch", attempt_id)
+                note_same_work_drift("attempt-route-hash-mismatch", attempt_id)
             else:
                 continue
         if metadata.get("attempt_id") == attempt_id:

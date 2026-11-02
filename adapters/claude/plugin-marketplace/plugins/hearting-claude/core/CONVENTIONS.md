@@ -370,7 +370,7 @@ remain unchanged. Bind every displayed judgment to the exact selected report
 artifact revision and input digests through existing lineage and currency
 readers. A status query reads existing completion and obligation state without
 creating a verification round, route, proof, input, publication, or durable
-display record. Execution compatibility with gates off does not attest evidence
+display record. Execution compatibility does not attest evidence
 integrity: read observations retain tombstones, hash/history conflicts, and
 unverified lineage independently of execution permission. A terminal review
 FAIL needs its exact readable attempt and input binding, not a PASS completion

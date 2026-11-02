@@ -1,20 +1,16 @@
-"""Opt-in same-work identity gates shared by dispatch consumers."""
+"""Same-work identity drift diagnostics shared by dispatch consumers.
 
-import os
+Dispatch proceeds on current inputs when a sealed identity differs from the
+live one inside the approved work. The one signal is a single stderr line per
+distinct diagnostic.
+"""
+
 import sys
 
 _REPORTED = set()
 
 
-def gates_on():
-    return os.environ.get("HEARTING_GATES", "off") == "on"
-
-
-def same_work_or_refuse(reason, detail=""):
-    if gates_on():
-        # Late import keeps dispatch_contract free to use this helper itself.
-        from dispatch_contract import DispatchContractError
-        raise DispatchContractError(reason, detail)
+def note_same_work_drift(reason, detail=""):
     message = " ".join(f"hearting: gate-off {reason} {detail}".splitlines())
     # Long-lived readers (Fleet ticks every 2 s) meet the same stale row again and
     # again; one line per distinct diagnostic is the whole signal.

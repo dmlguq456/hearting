@@ -1832,8 +1832,8 @@ class FallbackTest(unittest.TestCase):
   self.assertEqual(len(augmented),1,augmented)
   self.assertEqual(augmented[0].read_text(encoding="utf-8"),"BASE PROMPT TEXT\n"+expected_block)
 
- def _producer_revision_entry(self,surface,*,gates_enabled):
-  with self.dispatch_env(HEARTING_GATES="on" if gates_enabled else "off"):
+ def _producer_revision_entry(self,surface):
+  with self.dispatch_env():
    path=self.route(same_status="supported",intensity="standard")
    route=json.loads(path.read_text())
    self.seed_parent()
@@ -1886,17 +1886,10 @@ class FallbackTest(unittest.TestCase):
     return result
    def resolve_bound_input(*args,**kwargs):
     current_marker=json.loads(marker_path.read_text())
-    if gates_enabled:
-     self.assertEqual(current_marker["sequence"],2)
-     self.assertEqual(current_marker["stage_authority"],"revision")
-     self.assertEqual(current_marker["evidence"]["path"],str(evidence.resolve()))
-     self.assertEqual(current_marker["evidence"]["sha256"],
-                      hashlib.sha256(evidence.read_bytes()).hexdigest())
-    else:
-     self.assertEqual(current_marker["sequence"],1)
-     self.assertNotIn("revision",current_marker)
-     self.assertNotEqual(current_marker["evidence"]["sha256"],
-                         hashlib.sha256(evidence.read_bytes()).hexdigest())
+    self.assertEqual(current_marker["sequence"],1)
+    self.assertNotIn("revision",current_marker)
+    self.assertNotEqual(current_marker["evidence"]["sha256"],
+                        hashlib.sha256(evidence.read_bytes()).hexdigest())
     result=real_resolve_input(*args,**kwargs)
     start_events.append(("review-input",result["path"]))
     return result
@@ -1913,50 +1906,29 @@ class FallbackTest(unittest.TestCase):
    reviewed_inputs=[event[1] for event in start_events if event[0]=="review-input"]
    self.assertTrue(reviewed_inputs)
    self.assertEqual(reviewed_inputs,[str(evidence.resolve())]*len(reviewed_inputs))
-   if gates_enabled:
-    event_kinds=[event[0] for event in start_events]
-    self.assertEqual(event_kinds.count("producer-revision"),1)
-    self.assertEqual(event_kinds.count("review-input"),len(reviewed_inputs))
-    self.assertLess(event_kinds.index("producer-revision"),event_kinds.index("review-input"))
-    self.assertEqual(R.gate_currency(route,plan,marker_path,observe=True).state,"current")
-    marker=json.loads(marker_path.read_text())
-    self.assertEqual(marker["sequence"],2)
-    self.assertEqual(marker["revision"]["recorded_by"],"runtime-auto")
-    self.assertEqual(marker["evidence"]["path"],str(evidence.resolve()))
-    self.assertEqual(marker["revision"]["evidence_sha256"],marker["evidence"]["sha256"])
-   else:
-    # Gates-off operations keep a live evidence edit as history; they do not
-    # synthesize a revision marker. The real completion gate's history writer
-    # is covered by dispatch_completion_marker.test.py.
-    self.assertEqual(R.gate_currency(route,plan,marker_path).state,"current")
-    self.assertEqual(R.gate_currency(route,plan,marker_path,observe=True).state,"revised-unrecorded")
-    marker=json.loads(marker_path.read_text())
-    self.assertEqual(marker["sequence"],1)
-    self.assertNotIn("revision",marker)
-    self.assertEqual([event[0] for event in start_events],
-                     ["review-input"]*len(reviewed_inputs))
-    self.assertNotEqual(marker["evidence"]["sha256"],
-                        hashlib.sha256(evidence.read_bytes()).hexdigest())
+   # Operations keep a live evidence edit as history; they do not
+   # synthesize a revision marker. The real completion gate's history writer
+   # is covered by dispatch_completion_marker.test.py.
+   self.assertEqual(R.gate_currency(route,plan,marker_path).state,"current")
+   self.assertEqual(R.gate_currency(route,plan,marker_path,observe=True).state,"revised-unrecorded")
+   marker=json.loads(marker_path.read_text())
+   self.assertEqual(marker["sequence"],1)
+   self.assertNotIn("revision",marker)
+   self.assertEqual([event[0] for event in start_events],
+                    ["review-input"]*len(reviewed_inputs))
+   self.assertNotEqual(marker["evidence"]["sha256"],
+                       hashlib.sha256(evidence.read_bytes()).hexdigest())
    link_path=marker_path.parent/"plan.att-fixture-plan.attempt.json"
    original_link=link_path.read_bytes();link=json.loads(original_link)
    for wrong in (marker_path.parent/"other-node.json",self.art/"plan.json"):
     link["completion_marker"]=str(wrong);link_path.write_text(json.dumps(link))
     self.assertNotEqual(R.gate_currency(route,plan,marker_path,observe=True).state,"current")
    link_path.write_bytes(original_link)
-   if gates_enabled:
-    self.assertEqual(R.gate_currency(route,plan,marker_path,observe=True).state,"current")
-   else:
-    self.assertEqual(R.gate_currency(route,plan,marker_path).state,"current")
-   if gates_enabled:
-    self.assertEqual(json.loads(marker_path.read_text())["revision"]["recorded_by"],"runtime-auto")
- def test_sd161_chain_gate_enabled_revises_before_review_input(self):
-  self._producer_revision_entry("chain",gates_enabled=True)
- def test_sd161_chain_gate_disabled_keeps_evidence_history(self):
-  self._producer_revision_entry("chain",gates_enabled=False)
- def test_sd161_node_gate_enabled_revises_before_review_input(self):
-  self._producer_revision_entry("node",gates_enabled=True)
- def test_sd161_node_gate_disabled_keeps_evidence_history(self):
-  self._producer_revision_entry("node",gates_enabled=False)
+   self.assertEqual(R.gate_currency(route,plan,marker_path).state,"current")
+ def test_sd161_chain_keeps_evidence_history(self):
+  self._producer_revision_entry("chain")
+ def test_sd161_node_keeps_evidence_history(self):
+  self._producer_revision_entry("node")
 
  def test_cross_harness_direct_precedes_inline(self):
   result=self.run_chain(self.route()); self.assertEqual(result.returncode,0,result.stdout+result.stderr)
@@ -2075,25 +2047,23 @@ class FallbackTest(unittest.TestCase):
   self.assertEqual(command[command.index("--intensity")+1],route["effective_intensity"])
  def test_explicit_parent_mismatch_uses_the_session_name_with_one_notice(self):
   # 5th Codex run: a mismatched --parent printed `gate-off parent-identity-mismatch`
-  # (gates off) or refused with exit 73 (gates on). Either way the session's own
+  # or refused with exit 73. Either way the session's own
   # name is the parent: it is used, with one plain notice, before any identity
   # is derived -- the attempt id is the one the session's own name produces.
   notice=("notice: --parent wrong-owner is not this session's name; "
           "using owner (from AGENT_DISPATCH_SELF_SLUG).")
   path=self.route(same_status="supported"); route=json.loads(path.read_text())
   node=next(n for n in route["nodes"] if n["id"]=="plan")
-  for gates in ("on","off"):
-   with self.subTest(gates=gates):
-    result=self.run_chain(path,"--parent","wrong-owner",HEARTING_GATES=gates)
-    self.assertEqual(result.returncode,0,result.stdout+result.stderr)
-    self.assertEqual(result.stderr.splitlines().count(notice),1,result.stderr)
-    self.assertNotIn("gate-off",result.stderr)
-    self.assertNotIn("parent-identity-mismatch",result.stdout+result.stderr)
-    verdict=self.cli_verdict(result.stdout)
-    expected=F.attempt_identity(
-     SimpleNamespace(slug="fallback-plan",parent="owner",parent_attempt_id="att-fallback-parent"),
-     route,node,{"child_harness":verdict["child_harness"]},int(verdict["fallback_ordinal"]))
-    self.assertEqual(verdict["attempt_id"],expected)
+  result=self.run_chain(path,"--parent","wrong-owner")
+  self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+  self.assertEqual(result.stderr.splitlines().count(notice),1,result.stderr)
+  self.assertNotIn("gate-off",result.stderr)
+  self.assertNotIn("parent-identity-mismatch",result.stdout+result.stderr)
+  verdict=self.cli_verdict(result.stdout)
+  expected=F.attempt_identity(
+   SimpleNamespace(slug="fallback-plan",parent="owner",parent_attempt_id="att-fallback-parent"),
+   route,node,{"child_harness":verdict["child_harness"]},int(verdict["fallback_ordinal"]))
+  self.assertEqual(verdict["attempt_id"],expected)
  def test_parent_without_a_session_name_keeps_the_missing_identity_refusal(self):
   path=self.route(same_status="supported")
   self.seed_predecessor_markers(path,"plan"); self.seed_parent()

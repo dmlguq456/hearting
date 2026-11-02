@@ -690,9 +690,8 @@ class PlanSlicesTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             route_path, worktree, slices_path, output = self._fixture(td)
             linked = self._linked(td, worktree)
-            with mock.patch.dict(os.environ, {"HEARTING_GATES": "off"}):
-                receipt = CHAIN.plan_slices(route_path=route_path, node_id="execute", worktree=linked,
-                                            slices_path=slices_path, output_path=output)
+            receipt = CHAIN.plan_slices(route_path=route_path, node_id="execute", worktree=linked,
+                                        slices_path=slices_path, output_path=output)
             self.assertEqual(receipt["planned"], "ok")
             self.assertEqual(json.loads(output.read_text())["worktree"], str(linked.resolve()))
 
@@ -703,14 +702,9 @@ class PlanSlicesTest(unittest.TestCase):
             cwd = os.getcwd()
             try:
                 os.chdir(linked)
-                with mock.patch.dict(os.environ, {"HEARTING_GATES": "off"}):
-                    CHAIN.plan_slices(route_path=route_path, node_id="execute",
-                                      slices_path=slices_path, output_path=output)
+                CHAIN.plan_slices(route_path=route_path, node_id="execute",
+                                  slices_path=slices_path, output_path=output)
                 self.assertEqual(json.loads(output.read_text())["worktree"], str(linked.resolve()))
-                with mock.patch.dict(os.environ, {"HEARTING_GATES": "on"}):
-                    CHAIN.plan_slices(route_path=route_path, node_id="execute",
-                                      slices_path=slices_path, output_path=output)
-                self.assertEqual(json.loads(output.read_text())["worktree"], str(worktree.resolve()))
             finally:
                 os.chdir(cwd)
 
@@ -720,28 +714,10 @@ class PlanSlicesTest(unittest.TestCase):
             route_path, worktree, slices_path, output = self._fixture(td)
             foreign = Path(td) / "foreign"
             subprocess.run(["git", "init", "-q", str(foreign)], check=True)
-            with mock.patch.dict(os.environ, {"HEARTING_GATES": "off"}), \
-                    self.assertRaisesRegex(CHAIN.StageSessionError, "plan-slices-worktree-mismatch"):
+            with self.assertRaisesRegex(CHAIN.StageSessionError, "plan-slices-worktree-mismatch"):
                 CHAIN.plan_slices(route_path=route_path, node_id="execute", worktree=foreign,
                                   slices_path=slices_path, output_path=output)
             self.assertFalse(output.exists())
-
-    def test_linked_worktree_is_refused_when_gates_are_on(self):
-        with tempfile.TemporaryDirectory() as td:
-            route_path, worktree, slices_path, output = self._fixture(td)
-            linked = self._linked(td, worktree)
-            with mock.patch.dict(os.environ, {"HEARTING_GATES": "on"}), \
-                    self.assertRaisesRegex(CHAIN.StageSessionError, "plan-slices-worktree-mismatch"):
-                CHAIN.plan_slices(route_path=route_path, node_id="execute", worktree=linked,
-                                  slices_path=slices_path, output_path=output)
-            # and the common loader refuses a manifest naming the linked worktree
-            with mock.patch.dict(os.environ, {"HEARTING_GATES": "off"}):
-                CHAIN.plan_slices(route_path=route_path, node_id="execute", worktree=linked,
-                                  slices_path=slices_path, output_path=output)
-            route = json.loads(route_path.read_text()) | {"_route_file": str(route_path)}
-            with mock.patch.dict(os.environ, {"HEARTING_GATES": "on"}), \
-                    self.assertRaisesRegex(CHAIN.StageSessionError, "manifest-worktree-mismatch"):
-                CHAIN.load_manifest(output, route=route, node=route["nodes"][0])
 
 
 class RuntimeJoinsCensusTest(unittest.TestCase):

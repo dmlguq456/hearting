@@ -320,18 +320,6 @@ class OwnerPreviewApprovalTest(OwnerRefineBase):
                 finally:
                     fixture.doCleanups()
 
-    def test_a_preview_changed_after_it_was_shown_does_not_authorize_the_apply(self):
-        self.build("claude")
-        self.assertEqual(self.start()["state"], "waiting-human-gate")
-        self.preview.write_text("a different preview")        # not the bytes the person was asked about
-        with mock.patch.dict(os.environ, {"HEARTING_GATES": "on"}):   # the opt-in same-work identity check
-            self.assertEqual(self.release("proceed").returncode, 0)
-            self.assertNotEqual(self.settle().result, "completed")
-            receipt = self.start()
-        self.assertNotEqual(receipt["state"], "completed", receipt)
-        self.assertNotIn("next_leg", receipt)
-        self.assertNotEqual(self.workflow_state(), "COMPLETE")
-
     def test_an_owner_that_raised_and_was_released_settles_as_before(self):
         self.build("claude", close=False)
         self.raise_gate()
@@ -342,34 +330,30 @@ class OwnerPreviewApprovalTest(OwnerRefineBase):
 
     def test_a_preview_removed_after_its_release_does_not_hold_the_closure(self):
         # The preview is a file of its own, not the review marker's evidence: removing that one is a different refusal.
-        for label, released, gates in (("off", True, None), ("off-unreleased", False, None), ("on", True, "on")):
-            with self.subTest(gates=label):
+        for label, released in (("released", True), ("unreleased", False)):
+            with self.subTest(case=label):
                 fixture = OwnerPreviewApprovalTest(
                     "test_a_preview_removed_after_its_release_does_not_hold_the_closure")
                 fixture.setUp()
                 try:
-                    env = {"HEARTING_GATES": gates} if gates else {}
-                    with mock.patch.dict(os.environ, env):
-                        if not gates:
-                            os.environ.pop("HEARTING_GATES", None)
-                        fixture.build("claude", close=False)
-                        preview = fixture.write_output(fixture.cycle, rel="documents/diff-preview.md",
-                                                       data=b"--- a/README\n+++ b/README\n")
-                        fixture.raise_gate(preview)
-                        if released:
-                            self.assertEqual(fixture.release("proceed").returncode, 0)
-                        preview.unlink()
-                        fixture.close_owner()
-                        settled = fixture.settle()
-                        if label == "off":
-                            self.assertEqual(settled.result, "completed", settled)
-                            receipt = fixture.start()
-                            self.assertEqual(receipt["state"], "completed", receipt)
-                            self.assertEqual(fixture.workflow_state(), "COMPLETE")
-                        else:
-                            # Only a person's `proceed` authorizes the close; the gate-off record never stands in for it.
-                            self.assertNotEqual(settled.result, "completed", settled)
-                            self.assertNotEqual(fixture.workflow_state(), "COMPLETE")
+                    fixture.build("claude", close=False)
+                    preview = fixture.write_output(fixture.cycle, rel="documents/diff-preview.md",
+                                                   data=b"--- a/README\n+++ b/README\n")
+                    fixture.raise_gate(preview)
+                    if released:
+                        self.assertEqual(fixture.release("proceed").returncode, 0)
+                    preview.unlink()
+                    fixture.close_owner()
+                    settled = fixture.settle()
+                    if label == "released":
+                        self.assertEqual(settled.result, "completed", settled)
+                        receipt = fixture.start()
+                        self.assertEqual(receipt["state"], "completed", receipt)
+                        self.assertEqual(fixture.workflow_state(), "COMPLETE")
+                    else:
+                        # Only a person's `proceed` authorizes the close; the gate-off record never stands in for it.
+                        self.assertNotEqual(settled.result, "completed", settled)
+                        self.assertNotEqual(fixture.workflow_state(), "COMPLETE")
                 finally:
                     fixture.doCleanups()
 

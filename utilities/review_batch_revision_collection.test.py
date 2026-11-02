@@ -14,11 +14,10 @@ SUITES = (
 )
 EXPECTED = Counter({
     "test_two_pass_revision_inline_next_generation_and_cap_replay": 1,
-    "test_revision_generation_and_replay_with_gates_on": 1,
     "test_foreign_registry_cannot_override_the_sealed_jobs": 1,
     "test_logical_budget_and_physical_generation_selection": 1,
     "test_one_started_one_missing_admitted_resume": 1,
-    "test_both_zero_admitted_resume_with_gates_on": 1,
+    "test_both_zero_admitted_resume": 1,
     "test_closure_capped_peer_pending_sibling": 1,
     "test_live_peer_preserved_and_unknown_unsettled_refused": 1,
     "test_death_partial_replacement_then_revision_and_cap_replay": 1,

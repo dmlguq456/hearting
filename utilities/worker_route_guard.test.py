@@ -13,14 +13,6 @@ def dispatch(worktree):
  return {"tuples":[{"parent_harness":"codex","parent_transport":"headless","parent_sandbox":"workspace-write","child_harness":"codex","launch_authority":"conductor","status":"supported","probe_source":"fixture","probe_time":"2026-07-16T00:00:00Z","failure_class":"","checked_worktree":str(Path(worktree).resolve()),"failure_scope":"none","codex_command":"ok","retry_on_isolated_worktree":0}],"native_subagent":[]}
 
 class WorkerRouteGuardTest(unittest.TestCase):
- def setUp(self):
-  # This suite asserts the repository's guarded launch behavior. Keep the
-  # existing gate setting inside the fixture so cleared owner environments do
-  # not silently switch these expectations to the compatibility path.
-  self.gates_env=mock.patch.dict(os.environ,{"HEARTING_GATES":"on"})
-  self.gates_env.start()
-  self.addCleanup(self.gates_env.stop)
-
  def route(self):
   # A guarded worker needs a branch, but the source running this suite may be
   # an exact-SHA (detached) CI checkout. Own that worktree precondition instead
@@ -37,44 +29,6 @@ class WorkerRouteGuardTest(unittest.TestCase):
   route["route_id"]="rt-"+route["route_hash"].split(":",1)[1][:16]
   return route
 
- def test_launch_tuple_absent_and_incompatible_fail_closed(self):
-  for case in ("absent","incompatible"):
-   with self.subTest(case=case), tempfile.TemporaryDirectory() as td:
-    route=self.route()
-    if case=="absent":
-     route.pop("launch_compatibility_tuple")
-     expected="launch-compatibility-tuple-required"
-    else:
-     route["launch_compatibility_tuple"]["runtime_root"]["binding_digest"]="sha256:"+"0"*64
-     expected="launch-runtime-root-mismatch"
-    self.reseal(route); path=Path(td)/"route.json"; path.write_text(json.dumps(route))
-    # Plain material/spec callers remain compatible with legacy route records.
-    if case=="absent":
-     # This no-phase read is only the legacy material/spec compatibility
-     # check; launch refusal below must exercise the actual start boundary.
-     _,node,_=G.validate_route_contract(path,"execute",self.route_worktree,self.route_worktree)
-     self.assertEqual(node["id"],"execute")
-    with self.assertRaises(G.WorkerRouteError) as ctx:
-     # Keep incompatible and absent tuple cases on the same real launch path.
-     G.validate_route_contract(path,"execute",self.route_worktree,self.route_worktree,launch_phase="start")
-    self.assertEqual(ctx.exception.reason,expected)
-    if case=="incompatible":
-     detail=json.loads(str(ctx.exception))
-     self.assertIn(route["launch_compatibility_tuple"]["runtime_root"]["path"],detail["recovery"])
-     self.assertIn("AGENT_HOME=",detail["recovery"])
-     self.assertIn("runtime projection",detail["recovery"])
- def test_malformed_runtime_root_preserves_typed_refusal(self):
-  for runtime in (7,[],None,{"path":7},{"path":[]},{"path":"relative/root"}):
-   with self.subTest(runtime=runtime), tempfile.TemporaryDirectory() as td:
-    route=self.route(); route["launch_compatibility_tuple"]["runtime_root"]=runtime
-    self.reseal(route); path=Path(td)/"route.json"; path.write_text(json.dumps(route))
-    with self.assertRaises(G.WorkerRouteError) as caught:
-     G.validate_route_contract(path,"execute",self.route_worktree,self.route_worktree,launch_phase="start")
-    self.assertEqual(caught.exception.reason,"launch-runtime-root-mismatch")
-    detail=json.loads(str(caught.exception))
-    self.assertIn("runtime_root",detail["mismatches"])
-    self.assertIn("hearting/current",detail["recovery"])
-    self.assertIn("AGENT_HOME=",detail["recovery"])
  def test_valid_and_scope_bound(self):
   with tempfile.TemporaryDirectory() as td:
    path=Path(td)/"route.json"; route=self.route(); path.write_text(json.dumps(route))
@@ -113,13 +67,6 @@ class WorkerRouteGuardTest(unittest.TestCase):
    self.assertIn("spec",str(caught.exception))
    git("switch","-c","spec-recovered")
    self.assertEqual(G._git_state(repo)["branch"],"spec-recovered")
- def test_hash_and_reselection_rejected(self):
-  with tempfile.TemporaryDirectory() as td:
-   path=Path(td)/"route.json"; route=self.route(); route["cwd"]="/tmp"; path.write_text(json.dumps(route))
-   self.assertRaisesRegex(G.WorkerRouteError,"stale or modified",G.validate_route_contract,path,"execute",self.route_worktree,self.route_worktree)
-  with tempfile.TemporaryDirectory() as td:
-   path=Path(td)/"route.json"; route=self.route(); path.write_text(json.dumps(route))
-   self.assertRaisesRegex(G.WorkerRouteError,"expected=autopilot-code",G.validate_route_contract,path,"execute",self.route_worktree,self.route_worktree,"code-execute")
  def test_source_commit_descendant_head_passes_regardless_of_node_or_evidence(self):
   # SD-156: a first-parent descendant HEAD passes for any node, with no
   # registry row required -- the guard asks one lineage question
@@ -174,16 +121,6 @@ class WorkerRouteGuardTest(unittest.TestCase):
    self.assertEqual(node["id"],"test")
    _,node,_=G.validate_route_contract(path,"report",repo,repo)
    self.assertEqual(node["id"],"report")
-
- def test_post_execute_diverged_head_rejected(self):
-  # SD-65 (b): a rewritten (amended) root commit produces a HEAD unrelated to
-  # route["source_commit"] -- not an ancestor at all -- and stays fail-closed
-  # even for a post-execute node.
-  with tempfile.TemporaryDirectory() as td:
-   repo,route,path=self._lineage_repo(td)
-   subprocess.run(["git","-C",str(repo),"commit","--amend","-qm","a-rewritten"],check=True)
-   with self.assertRaisesRegex(G.WorkerRouteError,"expected=.* observed=") as ctx: G.validate_route_contract(path,"test",repo,repo)
-   self.assertEqual(ctx.exception.reason,"route-source-commit-mismatch")
 
  def test_pre_mutation_node_on_descendant_head_passes(self):
   # SD-65's exact-match requirement for pre-mutation nodes is retired by
@@ -259,15 +196,6 @@ class WorkerRouteGuardTest(unittest.TestCase):
     _,validated,_=G.validate_route_contract(path,node["id"],repo,repo)
     self.assertEqual(validated["id"],node["id"])
 
- def test_c_continuation_on_diverged_head_refused_typed(self):
-  # A rewritten HEAD is off the history the source route bound: no node of such a
-  # continuation could dispatch, so it is refused before any route file exists.
-  with tempfile.TemporaryDirectory() as td:
-   repo,source,_=self._lineage_repo(td)
-   subprocess.run(["git","-C",str(repo),"commit","--amend","-qm","a-rewritten"],check=True)
-   with self.assertRaisesRegex(ValueError,"continuation-source-commit-diverged"):
-    self._continuation(source,repo)
-
  def _write_registry_row(self,jobs_path,route_id,node_id,attempt_id,status="done"):
   pipe=f"route_id={route_id},route_node={node_id},attempt_id={attempt_id}"
   line="\t".join(["2026-07-19T00:00:00Z",status,"repo","worktree","slug",pipe])
@@ -306,18 +234,6 @@ class WorkerRouteGuardTest(unittest.TestCase):
    with self._bound_jobs(str(jobs)):
     _,node,_=G.validate_route_contract(path,"execute",repo,repo,current_attempt="att-current")
    self.assertEqual(node["id"],"execute")
-
- def test_mutation_retry_diverged_head_rejected(self):
-  # A3a: a qualifying registry row cannot authorize an amended/unrelated HEAD.
-  with tempfile.TemporaryDirectory() as td:
-   repo,route,path=self._lineage_repo(td)
-   subprocess.run(["git","-C",str(repo),"commit","--amend","-qm","a-rewritten"],check=True)
-   jobs=Path(td)/"jobs.log"; jobs.write_text("")
-   self._write_registry_row(jobs,route["route_id"],"execute","att-prior")
-   with self._bound_jobs(str(jobs)):
-    with self.assertRaisesRegex(G.WorkerRouteError,"expected=.* observed=") as ctx:
-     G.validate_route_contract(path,"execute",repo,repo,current_attempt="att-current")
-   self.assertEqual(ctx.exception.reason,"route-source-commit-mismatch")
 
  def test_mutation_retry_passes_regardless_of_registry_availability(self):
   # A3b, retired by SD-156: the registry is no longer consulted for this gate

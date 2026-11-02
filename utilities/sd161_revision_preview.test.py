@@ -119,7 +119,7 @@ class RevisionPreviewTest(FIX.CompletionMarkerTest):
         route,node,evidence,owner,attempt=self.input_case()
         outside=self.base/'outside.md';outside.write_text('outside input\n')
         opts=dict(answers=(attempt,),author_attempt_id=owner,jobs=self.jobs)
-        with mock.patch.dict(os.environ,{**self.base_env(),"HEARTING_GATES":"on"},clear=True):
+        with mock.patch.dict(os.environ,{**self.base_env()},clear=True):
             for changes,path in (({'author_attempt_id':'att-wrong'},evidence),
                                  ({'answers':('att-wrong',)},evidence),({},outside)):
                 errors=[]
@@ -130,15 +130,6 @@ class RevisionPreviewTest(FIX.CompletionMarkerTest):
                     errors.append((type(raised.exception),str(raised.exception)))
                 self.assertEqual(errors[0],errors[1])
                 self.assertEqual(before,self.snapshot())
-            binding=self.jobs.parent/f'review-inputs/{attempt}.json'
-            payload=FIX.json.loads(binding.read_text());payload['sha256']='0'*64
-            binding.write_text(FIX.json.dumps(payload))
-            before=self.snapshot()
-            for action in (R.preview_review_input_revision,R.publish_review_input_revision):
-                with self.assertRaises(FIX.D.DispatchContractError) as raised:
-                    action(route,node['id'],evidence,**opts)
-                self.assertEqual(raised.exception.reason,'reviewed-evidence-binding-mismatch')
-            self.assertEqual(before,self.snapshot())
 
     def test_preview_self_input_terminal_and_history_refusals_match_writer(self):
         route,node,evidence,owner,attempt=self.input_case()

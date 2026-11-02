@@ -1013,7 +1013,6 @@ class RuntimeObservationCpuFixture(unittest.TestCase):
                 "XDG_STATE_HOME": str(home / ".local" / "state"),
                 "XDG_CACHE_HOME": str(home / ".cache"),
                 "HARNESS_DATA_ROOT": str(data_root),
-                "HEARTING_GATES": "on",
                 "AGENT_HOME": str(source),
                 "AGENT_DISPATCH_JOBS": str(jobs_path),
                 "AGENT_PEER_LEDGER_ROOT": str(state_root),

@@ -32,7 +32,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
-from hearting_gates import gates_on, same_work_or_refuse
+from hearting_gates import note_same_work_drift
 from dispatch_contract import resolve_agent_home, resolve_dispatch_state_root  # noqa: E402
 
 LEDGER_SCHEMA_VERSION = 1
@@ -693,17 +693,13 @@ def require_gate_artifact_current(resolution: dict) -> None:
     if not digest or not path.is_absolute():
         raise WorkflowStateError("inline-gate-preview-changed-or-unbound")
     if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
-        if gates_on():
-            raise WorkflowStateError("inline-gate-preview-changed-or-unbound")
-        same_work_or_refuse("inline-gate-preview-changed-or-unbound", str(path))
+        note_same_work_drift("inline-gate-preview-changed-or-unbound", str(path))
 
 
 def require_inline_gate_release(route: dict, node: dict, *, jobs=None) -> None:
     from route_identity import route_hash
     if route.get("route_hash") != route_hash(route):
-        if gates_on():
-            raise WorkflowStateError("inline-gate-route-identity-mismatch")
-        same_work_or_refuse("inline-gate-route-identity-mismatch")
+        note_same_work_drift("inline-gate-route-identity-mismatch")
     ledger = WorkflowLedger(route["route_id"], route["route_hash"], jobs=jobs)
     for gate in node.get("inline_human_gates", []):
         binding = {"gate": gate, "node": node["id"], "position": "terminal"}

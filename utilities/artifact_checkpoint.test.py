@@ -341,9 +341,6 @@ class InterimManifestTest(CheckpointTestBase):
         self.assertTrue(F.R.terminal_gate_observation(self.route_obj)[node["id"]]["passed"])
         mapped = P.resolve_placed_output(evidence)
         self.assertEqual(mapped.read_bytes(), b"completed report")
-        mapped.write_bytes(b"changed after completion")
-        with mock.patch.dict(os.environ, {"HEARTING_GATES": "on"}):
-            self.assertFalse(F.R.terminal_gate_observation(self.route_obj)[node["id"]]["passed"])
 
     def test_reviewed_plan_evidence_follows_recorded_move(self):
         # plan-check launch read the plan marker's original path and was refused with

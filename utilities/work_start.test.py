@@ -2949,9 +2949,6 @@ class GroupContextStartTest(GF.fixture.ProducerTestBase):
         with mock.patch.dict(os.environ, self.env):
             route, _ = self.compose()
         route["work_request"]["workflow_group_context"]["group_id"] = "wgrp_" + "f" * 32
-        with mock.patch.dict(os.environ, {"HEARTING_GATES": "on"}):
-            with self.assertRaisesRegex(ValueError, "modified route hash"):
-                GF.fixture.R.verify_route(route, W.ROOT)
         for context in (None, {}, {**self.context, "guess": True},
                         {**self.context, "group_id": "title-derived"},
                         {**self.context, "campaign_id": "../campaign"}):
