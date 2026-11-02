@@ -1916,7 +1916,7 @@ def _retain_start_failure(requester, requested, actual, result):
     _schedule_message_obligation(row, "")
 
 
-def cmd_start(args):
+def cmd_start(args, *, retain_failure=True):
     import io
     requester = _current_session_identity()
     requested = {key: getattr(args, key, None) for key in
@@ -1933,7 +1933,7 @@ def cmd_start(args):
     result = output.getvalue()
     if result:
         print(result, end="")
-    if code != 0:
+    if code != 0 and retain_failure:
         try:
             _retain_start_failure(requester, requested, vars(args), result)
         except (OSError, ValueError, KeyError, TypeError):
@@ -10643,8 +10643,13 @@ def _submit_pending_native(pending, target, sid, pane, state, *, harness, no_tra
 
 
 def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_binding=None,
-               handoff=None, resolved_recipient=None):
+               handoff=None, resolved_recipient=None, sender=None):
     """Seal a peer message and route it through the recipient's native carrier.
+
+    ``sender`` is the observed predecessor identity for a supervisor-issued
+    handoff: it supplies the sealed sender and the pane binding instead of
+    ``_current_session_identity``/``verified_pane``. It is internal to the
+    typed handoff path and is never a CLI flag.
 
     Codex steers ordinary input into an active turn (`turn/steer`) and
     otherwise uses its exact thread queue; an interrupted thread is started
@@ -10666,16 +10671,23 @@ def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_bind
         return 1
 
     body = body.rstrip("\n")
+    if producer_binding is not None and sender is not None:
+        raise ValueError("producer-binding-with-sender")
     if producer_binding is not None:
         if args.no_trailer:
             print("prompted=false reason=runtime-completion-requires-receipt-envelope")
             return 5
         from_sid, from_harness, from_name = None, "runtime", "Hearting runtime"
         from_identity = (None, "runtime", "")
+    elif sender is not None:
+        from_sid, from_harness = sender.get("session_id"), sender.get("harness")
+        from_identity = (from_sid, from_harness, _project_of(sender.get("cwd") or os.getcwd()))
+        from_name = _from_name(from_harness, from_sid)
     else:
         from_sid, from_harness = _current_session_identity()
         from_identity = (from_sid, from_harness, _project_of(os.getcwd()))
         from_name = _from_name(from_harness, from_sid)
+    relay_pane = (sender or {}).get("pane") or ""
     if _herdr_missing():
         resolved, resolve_error, candidate_panes = None, "herdr-not-found", []
     elif resolved_recipient is None:
@@ -10735,19 +10747,24 @@ def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_bind
             and len(body.encode("utf-8")) > peer_message._BODY_REFERENCE_THRESHOLD):
         reference_evidence = _peer_reference_access_evidence(
             resolved_target, t_harness, t_sid, target_pane)
-    sender = {"harness": from_harness, "session_id": from_sid, "name": from_name}
-    if from_sid and from_harness in {"claude", "codex", "opencode"}:
+    sender_row = {"harness": from_harness, "session_id": from_sid, "name": from_name}
+    if sender is not None:
+        # The supervisor's shell pane is not the sender; the observed predecessor
+        # pane is what the typed context and the retire endpoint require.
+        if relay_pane:
+            sender_row["pane_id"] = relay_pane
+    elif from_sid and from_harness in {"claude", "codex", "opencode"}:
         try:
             from pane_ownership import verified_pane
             sender_pane = verified_pane(os.environ.get("HERDR_PANE_ID", ""),
                                         from_harness, from_sid, server=_HERDR_SESSION)
             if sender_pane:
-                sender["pane_id"] = sender_pane
+                sender_row["pane_id"] = sender_pane
         except Exception:
             pass
     try:
         text, transfer_ref = peer_message.prepare_peer_message(
-            body, sender,
+            body, sender_row,
             recipient, defer=True, refs=args.ref, receipt=input_reason or "native-pending",
             with_trailer=not args.no_trailer, reference_evidence=reference_evidence,
             first_input_process=first_input_process, producer_binding=producer_binding, handoff=handoff,

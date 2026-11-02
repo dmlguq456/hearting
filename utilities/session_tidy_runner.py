@@ -55,6 +55,7 @@ import dataclasses
 import datetime
 import fcntl
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -104,6 +105,8 @@ RELATED_MAX = 20
 KEEP_FINISHED_DAYS = 14
 KEEP_RUN_DAYS = 60
 MAX_ITEMS_PER_RUN = 10
+SUPERVISED_START_WAIT = 30.0
+SUPERVISED_START_POLL = 0.5
 
 # The worker runs on the caller's own harness where that harness's checked wrapper
 # accepts a route-free support tuple under a modeless capability; OpenCode's does not
@@ -1425,17 +1428,39 @@ def accept_handoff(ref, caller, *, steward=None):
 
 def handoff(seat: "st.Seat", target: str, *, caller=None) -> tuple[str, int]:
     """(one report line, exit code); the verdict is peer-steward's own typed answer."""
+    line, code, _lineage = _handoff_send(seat, target, caller=caller)
+    return line, code
+
+
+def _handoff_send(seat: "st.Seat", target: str, *, caller=None, sender=None,
+                  relayed_by=None, steward=None) -> tuple[str, int, str]:
+    """Deliver one typed handoff and report whether the ledger row exists yet.
+
+    ``sender`` is the observed predecessor identity for a supervisor-issued
+    handoff; it must agree with ``caller`` when both are given. ``steward`` lets
+    the caller reuse one peer-steward module instance (and its endpoint state)
+    for resolution, start, and this send. The third value is ``recorded``,
+    ``at-accept`` (sid-less successor) or ``none``.
+    """
     injected = injected_executable("HEARTING_TIDY_PEER_STEWARD")
-    steward = None
+    if injected and sender is not None:
+        return "prompted=false reason=handoff-relay-unsupported", 5, "none"
     successor_candidate = None
+    lineage = "none"
     if not injected:
-        steward = _handoff_steward()
+        steward = steward or _handoff_steward()
         successor_candidate, error, _panes = steward._resolve_prompt_target(target)
         if successor_candidate is None:
-            return f"prompted=false reason={error or 'target-identity-unverified'}", 5
-        sender_sid, sender_harness = (caller[2], caller[1]) if caller else steward._current_session_identity()
+            return f"prompted=false reason={error or 'target-identity-unverified'}", 5, "none"
+        if sender is not None:
+            sender_sid, sender_harness = sender.get("session_id"), sender.get("harness")
+            if (caller is not None and (caller[2], caller[1]) != (sender_sid, sender_harness)) \
+                    or (sender.get("pane") and seat.pane and sender["pane"] != seat.pane):
+                return "prompted=false reason=handoff-predecessor-mismatch", 5, "none"
+        else:
+            sender_sid, sender_harness = (caller[2], caller[1]) if caller else steward._current_session_identity()
         if not sender_sid or sender_harness not in st.HARNESSES:
-            return "prompted=false reason=handoff-predecessor-mismatch", 5
+            return "prompted=false reason=handoff-predecessor-mismatch", 5, "none"
         import dispatch_seat_handover as handover
         try:
             relation = handover.record_retire_handover(
@@ -1446,12 +1471,13 @@ def handoff(seat: "st.Seat", target: str, *, caller=None) -> tuple[str, int]:
                     st.session_seat(st.seat_for_project(successor_candidate["harness"], ""),
                         successor_candidate["harness"], successor_candidate["session_id"]))
         except handover.RegistryUnreadable:
-            return "prompted=unverified reason=handoff-registry-unreadable", 5
+            return "prompted=unverified reason=handoff-registry-unreadable", 5, "none"
         if relation is None and successor_candidate.get("session_id"):
-            return "prompted=false reason=handoff-source-not-holder", 5
+            return "prompted=false reason=handoff-source-not-holder", 5, "none"
+        lineage = "recorded" if relation is not None else "at-accept"
     card = st.read_latest_card(seat)
     if not card or not st.sanitize_body(card.get("body", "")):
-        return "prompted=false reason=no-card", 1
+        return "prompted=false reason=no-card", 1, lineage
     path = st.state_root() / "handoff" / f"{new_id()}.md"
     st.atomic_write(path, (card["body"].rstrip() + "\n").encode("utf-8"))
     prepared_refs = []
@@ -1486,6 +1512,10 @@ def handoff(seat: "st.Seat", target: str, *, caller=None) -> tuple[str, int]:
                 "successor": steward._retire_request_identity(successor, successor_foreground),
                 "requester": {"harness": successor["harness"], "session_id": successor["session_id"],
                     "pane": successor["pane"], "server": (steward._HERDR_SESSION or "default")}}
+            if relayed_by is not None:
+                context["relayed_by"] = {
+                    "harness": relayed_by[1] or "unknown",
+                    "session_id": relayed_by[0] or None}
             def prepared(ref):
                 peer = steward.peer_message
                 with peer.pending_lock(ref):
@@ -1498,14 +1528,19 @@ def handoff(seat: "st.Seat", target: str, *, caller=None) -> tuple[str, int]:
             args = argparse.Namespace(target=target, body_file=str(path), body_stdin=False,
                 text=None, no_verify=False, no_trailer=False, wait_idle_ms=0,
                 verify_timeout_ms=5000, ref=[])
+            prompt_kwargs = dict(
+                expected_recipient=(successor["harness"], successor["session_id"]),
+                on_prepared=prepared, handoff=context,
+                resolved_recipient=successor_candidate)
+            if sender is not None:
+                prompt_kwargs["sender"] = {"harness": sender_harness, "session_id": sender_sid,
+                                           "pane": seat.pane or ""}
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
-                code = steward.cmd_prompt(args, expected_recipient=(successor["harness"], successor["session_id"]),
-                                          on_prepared=prepared, handoff=context,
-                                          resolved_recipient=successor_candidate)
+                code = steward.cmd_prompt(args, **prompt_kwargs)
             done = subprocess.CompletedProcess([], code, output.getvalue(), "")
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
-        return f"prompted=failed reason=peer-steward-unavailable detail={type(exc).__name__}", 1
+        return f"prompted=failed reason=peer-steward-unavailable detail={type(exc).__name__}", 1, lineage
     finally:
         with contextlib.suppress(OSError):
             os.unlink(path)
@@ -1526,7 +1561,191 @@ def handoff(seat: "st.Seat", target: str, *, caller=None) -> tuple[str, int]:
                 break
     if (done.returncode == 0 and outcome == "prompted=true") or retained:
         st.mark_card_handed_off(seat)
-    return f"{verdict} exit={done.returncode}", done.returncode
+    return f"{verdict} exit={done.returncode}", done.returncode, lineage
+
+
+def _supervised_line(*, started="false", pane="-", session_id="-", source="-",
+                     source_state="-", card="none", transcript="none",
+                     lineage="none", verdict):
+    """The one result line of a supervisor-issued transfer (D8)."""
+    return (f"started={started} pane={pane} session_id={session_id} source={source} "
+            f"source_state={source_state} card={card} transcript={transcript} "
+            f"lineage={lineage} {verdict}")
+
+
+def _start_receipt_fields(text):
+    return {key: value for key, value in
+            re.findall(r"(?:^|\s)(started|pane|session_id)=([^\s]+)", text or "")}
+
+
+def _handoff_source_cwd(steward, seat, harness, sid):
+    """The source session's working directory: its ledger row, then the live pane, then None."""
+    row = st.session_summary(seat).get((harness, sid)) or {}
+    cwd = row.get("cwd")
+    if isinstance(cwd, str) and cwd and os.path.isdir(cwd):
+        return cwd
+    try:
+        cwd = steward._payload_cwd(steward._run_herdr_get(seat.pane))
+    except (OSError, TypeError, ValueError):
+        cwd = None
+    return cwd if isinstance(cwd, str) and cwd and os.path.isdir(cwd) else None
+
+
+def _supervised_card_plan(seat, harness, sid, *, state):
+    """Read-only card/transcript decision before any start (D5/D6).
+
+    Returns ``(body_to_seal, card_status, transcript_status, prompt_seq)``.
+    ``body_to_seal`` is None when the existing card goes out unchanged.
+    """
+    summary = st.session_summary(seat).get((harness, sid)) or {}
+    hint = summary.get("transcript") if isinstance(summary.get("transcript"), str) else ""
+    transcript = st._lineage_transcript(harness, sid, hint)
+    attached = (isinstance(transcript, dict) and transcript.get("status") == "available"
+                and bool(transcript.get("path")))
+    card = st.read_latest_card(seat)
+    card_ok = bool(card and st.sanitize_body(card.get("body", "")))
+    frontier = st.read_prompt_seq(seat)
+    card_seq = card.get("prompt_seq") if card_ok else None
+    card_seq = card_seq if type(card_seq) is int and card_seq >= 0 else None
+    working_line = ""
+    if state == "working":
+        working_line = (f"앞 세션 작업 중: {harness} {sid[:8]}는 아직 하던 일을 진행 중입니다. "
+                        "옛 창은 그 일이 끝난 뒤 닫힙니다.")
+    previous_line = st.previous_transcript_line(harness, sid, transcript) if attached else ""
+    if not card_ok:
+        if not attached:
+            return None, "none", "none", frontier
+        body = "\n".join(part for part in (working_line, previous_line) if part)
+        return body, "composed", "attached", frontier
+    stale = card_seq is not None and card_seq < frontier
+    if stale and attached:
+        body = "\n".join(part for part in (working_line, previous_line, card["body"]) if part)
+        return body, "composed", "attached", frontier
+    if working_line:
+        # A working source always changes the body, so it needs its own sealed generation.
+        body = "\n".join(part for part in (working_line, card["body"]) if part)
+        return body, "composed", "none", card_seq if card_seq is not None else frontier
+    if stale:
+        return None, "kept-stale", "none", card_seq
+    return None, "current", "none", card_seq if card_seq is not None else frontier
+
+
+def supervised_handoff(source: str, *, kind=None, target=None, name=None) -> tuple[str, int]:
+    """One supervisor-issued transfer: name the source and its successor harness.
+
+    Steps are: resolve the source, judge card/transcript state read-only, start
+    the successor beside it (``--kind``), re-resolve that successor, seal a card
+    generation only when the body changed, then run the existing typed handoff.
+    A start failure writes no card generation, lineage row, pending message or
+    retry notice, and this function never retries on its own.
+    """
+    steward = _handoff_steward()
+    relayed_by = steward._current_session_identity()
+    candidate, error, _panes = steward._resolve_prompt_target(source)
+    if candidate is None:
+        return _supervised_line(
+            verdict=f"prompted=false reason={error or 'target-identity-unverified'}"), 5
+    observed, _observed_error = steward._prompt_current_candidate(
+        candidate["pane"], expected_harness=candidate["harness"],
+        expected_sid=candidate["session_id"], require_process_session=True,
+        target_observation=(candidate["state"], candidate.get("_identity")))
+    if observed is None:
+        return _supervised_line(
+            source=f"{candidate['harness']}:{str(candidate.get('session_id') or '')[:8]}",
+            source_state=candidate.get("state") or "-",
+            verdict="prompted=false reason=handoff-predecessor-mismatch"), 5
+    p_harness, p_sid, p_pane = observed["harness"], observed["session_id"], observed["pane"]
+    p_seat = st.session_seat(
+        st._pane_seat_of(p_pane, endpoint=st._endpoint_scope(os.environ)), p_harness, p_sid)
+    source_label = f"{p_harness}:{p_sid[:8]}"
+    state, _state_source = steward._effective_retire_state(observed["state"], observed["_identity"])
+    cwd = _handoff_source_cwd(steward, p_seat, p_harness, p_sid)
+    try:
+        body, card_status, transcript_status, prompt_seq = _supervised_card_plan(
+            p_seat, p_harness, p_sid, state=state)
+    except (OSError, ValueError, TypeError):
+        return _supervised_line(source=source_label, source_state=state,
+                                verdict="prompted=false reason=handoff-card-unreadable"), 5
+    if card_status == "none":
+        return _supervised_line(source=source_label, source_state=state,
+                                verdict="prompted=false reason=no-card"), 1
+
+    started = "existing"
+    successor = None
+    start_sid = None
+    if kind is not None:
+        start_args = argparse.Namespace(
+            name=name or f"{kind}-{p_sid[:8]}", kind=kind, pane=None, beside=p_pane,
+            cwd=cwd, permission_mode=None)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = steward.cmd_start(start_args, retain_failure=False)
+        receipt = output.getvalue()
+        fields = _start_receipt_fields(receipt)
+        start_pane = fields.get("pane") or "-"
+        start_sid = fields.get("session_id")
+        start_sid = None if start_sid in (None, "-") else start_sid
+        if code != 0:
+            lines = [ln.strip() for ln in receipt.splitlines() if ln.strip()]
+            failure = next((ln for ln in lines if ln.startswith("started=")), "")
+            for line in lines:
+                if line != failure:
+                    print(line)
+            return (failure or "started=false reason=start-unknown"), 1
+        started = "true"
+        for line in receipt.splitlines():
+            if line.strip() and not line.strip().startswith("started="):
+                print(line.strip())
+        deadline = time.monotonic() + SUPERVISED_START_WAIT
+        while True:
+            successor, resolve_error, _ = steward._resolve_prompt_target(start_pane)
+            if successor is not None:
+                if (successor["harness"] != kind
+                        or (start_sid and successor.get("session_id") not in (None, start_sid))):
+                    successor, resolve_error = None, "target-identity-changed"
+                else:
+                    break
+            if resolve_error not in ("target-observation-unavailable", "target-identity-unverified"):
+                break
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(SUPERVISED_START_POLL)
+        if successor is None:
+            return _supervised_line(
+                started=started, pane=start_pane, session_id=start_sid or "-",
+                source=source_label, source_state=state, card=card_status,
+                transcript=transcript_status,
+                verdict=f"prompted=false reason={resolve_error or 'target-observation-unavailable'}"), 5
+    else:
+        successor, error, _ = steward._resolve_prompt_target(target)
+        if successor is None:
+            return _supervised_line(
+                source=source_label, source_state=state, card=card_status,
+                transcript=transcript_status,
+                verdict=f"prompted=false reason={error or 'target-identity-unverified'}"), 5
+
+    if card_status == "composed":
+        try:
+            st.write_session_card(p_seat, p_harness, p_sid, body, cwd=cwd or "",
+                                  prompt_seq=prompt_seq)
+        except (OSError, ValueError):
+            return _supervised_line(
+                started=started, pane=successor["pane"],
+                session_id=successor.get("session_id") or start_sid or "-",
+                source=source_label, source_state=state, card=card_status,
+                transcript=transcript_status,
+                verdict="prompted=false reason=handoff-card-write-failed"), 1
+
+    line, code, lineage = _handoff_send(
+        p_seat, successor["pane"], caller=(p_seat, p_harness, p_sid),
+        sender={"harness": p_harness, "session_id": p_sid, "pane": p_pane},
+        relayed_by=relayed_by, steward=steward)
+    verdict = line if " exit=" in line else f"{line} exit={code}"
+    return _supervised_line(
+        started=started, pane=successor["pane"],
+        session_id=successor.get("session_id") or start_sid or "-",
+        source=source_label, source_state=state, card=card_status,
+        transcript=transcript_status, lineage=lineage, verdict=verdict), code
 
 
 def main(argv=None) -> int:

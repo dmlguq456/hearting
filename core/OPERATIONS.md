@@ -2694,9 +2694,11 @@ Resumed retirement determines self-target from its recorded requester's session
 and pane identity. A cancelled request is terminal history:
 a new explicit request for the same lifetime accepts a fresh duty while retaining
 the cancelled record; repeated active or completed requests share that fresh duty.
-The current holder's explicit handoff records every eligible logical job and a
-seat-successor relation in the common ledger, independently of card delivery,
-receiver acceptance and physical retirement. A missing card or pane does not
+The current holder's explicit handoff — its own command, or a supervisor or user
+command that names it with `--from` and whose sealed sender is that observed
+holder — records every eligible logical job and a seat-successor relation in the
+common ledger, independently of card delivery, receiver acceptance and physical
+retirement. A missing card or pane does not
 remove that relation. Explicit receiver acceptance records reading separately. The successor may then
 `start` and `correct` them, and their stored completion records reach it. The
 registered parent, worker, receipt, claim, and ACK identities stay anchored to
@@ -3194,7 +3196,9 @@ complete-source path. Receiver guidance is advisory. The receiver reads the
 complete source and referenced documents before using that supplied command;
 ordinary messages and cards have no accept command or successor authority.
 Logical transfer records the current holder's explicit request independently
-of content delivery. Acceptance revalidates the exact native receiver, replays
+of content delivery — the holder's own command, or a supervisor's `--from`
+command whose sealed sender is the observed holder and whose executor is
+informational only. Acceptance revalidates the exact native receiver, replays
 the same logical record and schedules the retained reply. Physical retirement
 has its own original lifetime and preserved-context checks; native acceptance
 may report `retire=deferred` without a reservation ID. Queueing, delivery and ACK

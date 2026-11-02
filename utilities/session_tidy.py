@@ -2783,6 +2783,26 @@ def _ago(seconds: float) -> str:
     return f"{seconds // 86400}일 전"
 
 
+def previous_transcript_line(harness: str, sid: str, location) -> str:
+    """The one "이전 대화" line shared by card injection and a supervisor handoff.
+
+    The 320-byte rule is the existing rendering: a longer path becomes
+    ``경로 생략`` instead of an unbounded absolute path. ``location`` is the
+    transcript dict produced by ``_lineage_transcript``.
+    """
+    if not isinstance(location, dict):
+        location = {}
+    status = str(location.get("status") or "missing")
+    path = str(location.get("path") or "")
+    if status == "available" and path:
+        if len(path.encode("utf-8")) > 320:
+            path = "경로 생략"
+        detail = path
+    else:
+        detail = "읽기 불가" if status == "unreadable" else "없음"
+    return f"이전 대화: {harness} {sid[:8]} · 원문 {detail}"
+
+
 def build_card_injection(card: dict, card_path: Path, now: float, cap: int,
                          previous_transcript: Optional[dict] = None) -> str:
     """Card text within ``cap`` UTF-8 bytes; guidance is part of the fixed header."""
@@ -2794,18 +2814,10 @@ def build_card_injection(card: dict, card_path: Path, now: float, cap: int,
     footer = f"카드 전문: {card_path}"
     previous_line = ""
     if isinstance(previous_transcript, dict):
-        prior_harness = str(previous_transcript.get("harness") or "")
-        prior_sid = str(previous_transcript.get("sid") or "")
-        location = previous_transcript.get("transcript") or {}
-        status = str(location.get("status") or "missing") if isinstance(location, dict) else "missing"
-        path = str(location.get("path") or "") if isinstance(location, dict) else ""
-        if status == "available" and path:
-            if len(path.encode("utf-8")) > 320:
-                path = "경로 생략"
-            detail = path
-        else:
-            detail = "읽기 불가" if status == "unreadable" else "없음"
-        previous_line = f"이전 대화: {prior_harness} {prior_sid[:8]} · 원문 {detail}"
+        previous_line = previous_transcript_line(
+            str(previous_transcript.get("harness") or ""),
+            str(previous_transcript.get("sid") or ""),
+            previous_transcript.get("transcript"))
     cut_note = "…(이하 생략)"
     body = card.get("body", "")
     fixed = (len(header.encode("utf-8")) + len(footer.encode("utf-8")) + 2
@@ -3613,6 +3625,23 @@ def resolve_caller(harness, sid, cwd: str, *, project: bool = True) -> Optional[
     return seat, harness or detected or "unknown", sid or f"unknown-{secrets.token_hex(4)}"
 
 
+def write_session_card(seat: Seat, harness: str, sid: str, body: str, *, cwd: str = "",
+                       prompt_seq: Optional[int] = None) -> dict:
+    """Seal one card generation through the existing ledger event and card writer.
+
+    Callers hold no lock here: the helper takes the same shared seat lock, records
+    the ``card`` event, then writes the card. ``prompt_seq`` defaults to the
+    current frontier exactly as the caller-card path does.
+    """
+    with session_state_lock(seat):
+        prepare_native_session_state(seat)
+        previous = read_latest_card(seat)
+        generation = int(previous.get("generation", 0) or 0) + 1 if previous else 1
+        record_event(seat, harness, sid, "card", cwd=cwd, card_generation=generation)
+        return write_card(seat, harness, sid, body, cwd=cwd,
+                          prompt_seq=read_prompt_seq(seat) if prompt_seq is None else prompt_seq)
+
+
 def _write_caller_card(args, cwd: str) -> tuple[Optional[tuple[Seat, str, str]], str]:
     """Write the calling session's card; (caller, printed line), caller None when nothing was written."""
     if args.text is not None:
@@ -3627,12 +3656,7 @@ def _write_caller_card(args, cwd: str) -> tuple[Optional[tuple[Seat, str, str]],
     if caller is None:
         return None, "card=none reason=no-seat"
     seat, harness, sid = caller
-    with session_state_lock(seat):
-        prepare_native_session_state(seat)
-        previous = read_latest_card(seat)
-        generation = int(previous.get("generation", 0) or 0) + 1 if previous else 1
-        record_event(seat, harness, sid, "card", cwd=cwd, card_generation=generation)
-        write_card(seat, harness, sid, body, cwd=cwd, prompt_seq=read_prompt_seq(seat))
+    write_session_card(seat, harness, sid, body, cwd=cwd)
     return caller, f"card={card_text_path(seat)} seat={seat.key}"
 
 
@@ -3811,6 +3835,27 @@ def cmd_handoff(args) -> int:
     if is_worker():
         print("prompted=false reason=worker")
         return 1
+    source = getattr(args, "source", None)
+    if source is not None:
+        if args.harness or args.session_id:
+            raise StateError("handoff-source-with-caller")
+        if args.transfer_ref:
+            raise StateError("handoff-source-with-transfer-ref")
+        if args.kind is not None and args.target is not None:
+            raise StateError("handoff-kind-with-target")
+        if args.target == "accept":
+            raise StateError("handoff-source-with-accept")
+        if args.kind is None and args.target is None:
+            raise StateError("handoff-target-required")
+        import session_tidy_runner as runner
+        line, code = runner.supervised_handoff(
+            source, kind=args.kind, target=args.target, name=args.name)
+        print(line)
+        return code
+    if args.kind is not None:
+        raise StateError("handoff-kind-requires-source")
+    if args.target is None:
+        raise StateError("handoff-target-required")
     caller = resolve_caller(args.harness, args.session_id, args.cwd or os.getcwd())
     if caller is None:
         print("prompted=false reason=no-seat")
@@ -3987,8 +4032,13 @@ def build_parser() -> argparse.ArgumentParser:
     tidy.add_argument("--handoff", metavar="TARGET", help="then deliver the card to this peer (인계)")
     tidy.set_defaults(func=cmd_tidy)
     handoff = sub.add_parser("handoff", help="deliver this seat's card to a peer session")
-    handoff.add_argument("target")
+    handoff.add_argument("target", nargs="?")
     handoff.add_argument("transfer_ref", nargs="?")
+    handoff.add_argument("--from", dest="source", metavar="SESSION",
+                         help="observed live session to transfer from (supervisor form)")
+    handoff.add_argument("--kind", choices=HARNESSES,
+                         help="start a successor of this harness beside --from")
+    handoff.add_argument("--name", help="successor name for --kind (default <kind>-<sid8>)")
     handoff.add_argument("--harness", choices=HARNESSES)
     handoff.add_argument("--session-id")
     handoff.add_argument("--cwd")

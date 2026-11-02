@@ -1547,6 +1547,40 @@ print(json.dumps(info)); sys.exit(0)
 
 
 
+class SupervisedPromptContractTest(_TmpRootMixin, unittest.TestCase):
+    """The supervisor sender is internal: no CLI flag, keyword-only, mutually exclusive."""
+
+    def test_prompt_cli_exposes_no_sender_or_source_flag(self):
+        args = peer_steward.build_parser().parse_args(["prompt", "w1:p2", "body"])
+        self.assertFalse(hasattr(args, "sender"))
+        self.assertFalse(hasattr(args, "source"))
+        for flag in ("--sender", "--from", "--from-session"):
+            with self.subTest(flag=flag), self.assertRaises(SystemExit):
+                peer_steward.build_parser().parse_args(
+                    ["prompt", "w1:p2", "body", flag, "x"])
+
+    def test_sender_is_keyword_only_and_conflicts_with_a_producer_binding(self):
+        import inspect
+        parameter = inspect.signature(peer_steward.cmd_prompt).parameters["sender"]
+        self.assertIs(parameter.kind, inspect.Parameter.KEYWORD_ONLY)
+        args = peer_steward.build_parser().parse_args(["prompt", "w1:p2", "body"])
+        with self.assertRaisesRegex(ValueError, "producer-binding-with-sender"):
+            peer_steward.cmd_prompt(args, producer_binding={}, sender={
+                "harness": "claude", "session_id": "predecessor", "pane": "w1:p1"})
+
+    def test_retain_failure_is_off_only_when_the_supervised_path_asks(self):
+        args = peer_steward.build_parser().parse_args(
+            ["start", "grid", "--kind", "codex", "--beside", "w1:p0"])
+        with mock.patch.object(peer_steward, "_start_request", return_value=1), \
+             mock.patch.object(peer_steward, "_retain_start_failure") as retain:
+            self.assertEqual(peer_steward.cmd_start(args, retain_failure=False), 1)
+        retain.assert_not_called()
+        with mock.patch.object(peer_steward, "_start_request", return_value=1), \
+             mock.patch.object(peer_steward, "_retain_start_failure") as retain:
+            self.assertEqual(peer_steward.cmd_start(args), 1)
+        retain.assert_called_once()
+
+
 class SharedDaemonCodexStartTest(_TmpRootMixin, unittest.TestCase):
     """Exercise the real steward start path with Codex's shared defaults."""
 
