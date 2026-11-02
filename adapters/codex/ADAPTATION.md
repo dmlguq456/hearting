@@ -27,7 +27,9 @@ main; durable detail is artifact-only and the terminal handoff is three lines.
 All new headless types, including session-tidy support, use the shared profile
 projector's role home. Hearting's global main `AGENTS.md` is replaced with the
 small attach template. This is controlled global input, distinct from native
-project instructions, which remain. User credentials/config/hooks stay linked;
+project instructions, which remain. Codex reads one global file, so when the
+user keeps an `AGENTS.override.md` the worker home gets a read-only copy of the
+user's own text followed by the attach template instead of the main bootstrap. User credentials/config/hooks stay linked;
 launch overrides disable apps, MCP servers, custom agents, native collaboration
 and enabled plugins, and disable discovered system skills by documented path.
 The assigned contract remains in the prompt. Native or managed input outside

@@ -1722,6 +1722,104 @@ class DispatchCompletionJoinTest(unittest.TestCase):
                         self.assertNotIn("The payload completed successfully.", prompt)
                         self.assertIn("no user prohibition", prompt)
 
+    def test_resource_receipt_binds_the_row_its_observation_settled(self):
+        # rt-a87cfd349fd0aada: the row was read while still running, the terminal
+        # observation settled it, and a receipt bound to the earlier row failed
+        # its own delivery check, ending the parked owner's supervisor.
+        import dispatch_resource_wait as RESOURCE
+        from types import SimpleNamespace
+
+        args = SimpleNamespace(parent_attempt_id="att-parent", route_id="rt-resource",
+                               route_hash="sha256:route", jobs=str(self.jobs))
+        control = SimpleNamespace(thread_id="same-native", pending=lambda: False)
+        path = self.root / "settled-during-look.json"
+        running = {"run_id": "host-run", "pid": 123, "starttime": "100", "command": ["approved"],
+                   "route": "/exact", "node": "host-run", "jobs": str(self.jobs),
+                   "owner_wait": {"parent_attempt_id": "att-parent"}, "status": "running",
+                   "sentinel": "/exit"}
+        settled = dict(running, status="succeeded", exit_code=0, ended_at=1.0,
+                       workflow_state="STAGE_SUCCEEDED", failure_class=None,
+                       liveness_reason="process-absent")
+        registry = {"row": running}
+        armed = {"node": "host-run", "successors": ["test"]}
+
+        def observe(_armed):
+            registry["row"] = settled  # the observation persists the terminal row
+            return {"terminal": True, "quiescent": True, "succeeded": True, "liveness": "exited",
+                    "exit_code": 0, "resource_sha256": RESOURCE.RESUME.row_digest(settled)}
+
+        sup = SimpleNamespace(poll_once=lambda *_: None, read_resource_watches=lambda *_: [armed],
+                              resource_evidence=observe,
+                              artifact_evidence=lambda _: {"checked": True, "missing": []},
+                              runner=lambda: SimpleNamespace(read_sentinel=lambda _: 0))
+        ledger = SimpleNamespace(state=lambda: {"nodes": {"host-run": {"state": "RUNNING"}}})
+        sleeps = []
+        JOIN.write_supervisor_state(path, "att-parent", set(), phase="running-turn")
+        with mock.patch.object(RESOURCE, "context",
+                               side_effect=lambda *_: (sup, {}, ledger, [(armed, dict(registry["row"]))])), \
+                mock.patch.object(RESOURCE, "resource_execution_succeeded", return_value=True):
+            prompt = RESOURCE.wait(args, path, control, set(), lambda _: None, sleep=sleeps.append)
+        receipt = JOIN.read_supervisor_phase_state(path, "att-parent").resource["outbox"]["receipt"]
+        self.assertEqual(receipt["resource_sha256"], RESOURCE.RESUME.row_digest(settled))
+        self.assertEqual((receipt["state"], receipt["exit_code"]), ("succeeded", 0))
+        self.assertIn("The payload completed successfully.", prompt)
+        self.assertEqual(len(sleeps), 1)  # one more look, not an ended supervisor
+
+    def test_unacknowledged_attention_receipt_survives_its_row_settling(self):
+        # An attention receipt describes a row that is not settled yet. The row settles before
+        # the owner acknowledges it; reading it at a turn start or after a supervisor restart
+        # must not end the supervisor on its own receipt.
+        import dispatch_resource_wait as RESOURCE
+        from types import SimpleNamespace
+
+        args = SimpleNamespace(parent_attempt_id="att-parent", route_id="rt-resource",
+                               route_hash="sha256:route", jobs=str(self.jobs))
+        control = SimpleNamespace(thread_id="same-native", pending=lambda: False)
+        path = self.root / "attention-then-settled.json"
+        running = {"run_id": "host-run", "pid": 123, "starttime": "100", "command": ["approved"],
+                   "route": "/exact", "node": "host-run", "jobs": str(self.jobs),
+                   "owner_wait": {"parent_attempt_id": "att-parent"}, "status": "running",
+                   "sentinel": "/exit"}
+        settled = dict(running, status="succeeded", exit_code=0, ended_at=1.0,
+                       workflow_state="STAGE_SUCCEEDED", failure_class=None,
+                       liveness_reason="process-absent")
+        registry = {"row": running}
+        observation = {"evidence": {"terminal": False, "reason": "fixture-reaping", "liveness": "reaping"}}
+        armed = {"node": "host-run", "successors": ["test"]}
+        sup = SimpleNamespace(poll_once=lambda *_: None, read_resource_watches=lambda *_: [armed],
+                              resource_evidence=lambda _: dict(observation["evidence"]),
+                              artifact_evidence=lambda _: {"checked": True, "missing": []},
+                              runner=lambda: SimpleNamespace(read_sentinel=lambda _: 0))
+        ledger = SimpleNamespace(state=lambda: {"nodes": {"host-run": {"state": "RUNNING"}}})
+        JOIN.write_supervisor_state(path, "att-parent", set(), phase="running-turn")
+        fail_sleep = lambda _: self.fail("a ready receipt must not wait")
+        with mock.patch.object(RESOURCE, "context",
+                               side_effect=lambda *_: (sup, {}, ledger, [(armed, dict(registry["row"]))])), \
+                mock.patch.object(RESOURCE, "resource_execution_succeeded", return_value=True):
+            prompt = RESOURCE.wait(args, path, control, set(), lambda _: None, sleep=fail_sleep)
+            attention = JOIN.read_supervisor_phase_state(path, "att-parent").resource["outbox"]
+            self.assertEqual(attention["receipt"]["reason"], RESOURCE.NONTERMINAL_RESOURCE_REASON)
+            registry["row"] = settled
+            observation["evidence"] = {"terminal": True, "quiescent": True, "succeeded": True,
+                                       "liveness": "exited", "exit_code": 0,
+                                       "resource_sha256": RESOURCE.RESUME.row_digest(settled)}
+            # A turn start still delivers the attention receipt it is about to acknowledge.
+            self.assertEqual(RESOURCE.pending_prompt(path, "att-parent", args, control), prompt)
+            # A restarted supervisor takes it back and describes the settled row instead.
+            prompt = RESOURCE.wait(args, path, control, set(), lambda _: None, sleep=fail_sleep)
+        box = JOIN.read_supervisor_phase_state(path, "att-parent").resource["outbox"]
+        self.assertNotEqual(box["receipt_id"], attention["receipt_id"])
+        self.assertEqual((box["receipt"]["state"], box["receipt"]["exit_code"]), ("succeeded", 0))
+        self.assertEqual(box["receipt"]["resource_sha256"], RESOURCE.RESUME.row_digest(settled))
+        self.assertIn("The payload completed successfully.", prompt)
+        self.assertEqual(JOIN.read_supervisor_phase_state(path, "att-parent").resource["delivered"], [])
+        # A receipt whose owner identity changed is still refused.
+        control.thread_id = "foreign-native"
+        with self.assertRaisesRegex(JOIN.JoinContractError, "resource-outbox-binding-changed"):
+            with mock.patch.object(RESOURCE, "context",
+                                   side_effect=lambda *_: (sup, {}, ledger, [(armed, dict(registry["row"]))])):
+                RESOURCE.pending_prompt(path, "att-parent", args, control)
+
     def test_resource_correction_and_attention_never_become_model_child_success(self):
         import dispatch_resource_wait as RESOURCE
         from types import SimpleNamespace
@@ -5805,6 +5903,39 @@ class NextReadyReceiptTest(unittest.TestCase):
             self.assertIn(flag, help_text)
         self.assertTrue(text.startswith(self.old_text().split(self.BASE)[0] + self.BASE))
         self.assertTrue(text.endswith("This receipt creates no new approval step."))
+
+    def test_a_finished_stage_with_no_verification_after_it_hands_the_owner_its_checks(self):
+        # RV-1029: with no qa/test stage after it, a producing stage's handed-over checks reach the owner
+        # in the same completion receipt; with one after it, the verification stage receives them.
+        output = Path(self.tmp.name) / "cycle" / "artifacts"
+        (output / "dev_logs").mkdir(parents=True)
+        (output / "dev_logs" / "step_01.md").write_text(
+            "handed-over: `pytest -k socket` (reason: loopback bind EPERM)\n", encoding="utf-8")
+        from route_identity import route_hash, route_id_from_hash
+
+        def reseal():
+            for key in ("route_hash", "route_id"):
+                self.route.pop(key, None)
+            self.route["route_hash"] = route_hash(self.route)
+            self.route["route_id"] = route_id_from_hash(self.route["route_hash"])
+            self.path.write_text(json.dumps(self.route))
+            self.marker_dir = self.SA.ROUTE.completion_dir(self.route["route_id"], jobs=self.jobs)
+            self.finish_plan()
+
+        self.route["nodes"][0].update({"unit": "dev/backend", "outputs": ["source-diff", "dev_logs/**"]})
+        reseal()
+        with mock.patch.dict(os.environ, {"AGENT_ARTIFACT_OUTPUT_DIR": str(output)}):
+            text = self.render()
+            self.assertIn("\nHanded over to you by plan (no verification stage follows it): run each under the "
+                          "verification runner before you settle the leg; one your environment cannot run "
+                          "either stays unverified in your final report, not PASS.\n"
+                          "- `pytest -k socket` (reason: loopback bind EPERM) [dev_logs/step_01.md]\n", text)
+            self.assertLess(text.index("Next ready:"), text.index("Handed over to you"))
+            self.route["nodes"][1]["unit"] = "qa/test"
+            reseal()
+            text = self.render()
+            self.assertIn("Next ready:", text)
+            self.assertNotIn("Handed over to you", text)
 
     def test_an_owner_run_terminal_node_is_named_without_a_command(self):
         self.finish_plan()

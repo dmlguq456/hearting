@@ -6,9 +6,13 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import shutil
 import sqlite3
+import subprocess
 import sys
+import tempfile
 import unittest
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
@@ -17,6 +21,8 @@ sys.path.insert(0, str(ROOT / "utilities"))
 
 import tidy_isolation  # noqa: E402
 from tidy_isolation import IsolationError, isolated_env, scrub  # noqa: E402
+import session_tidy as st  # noqa: E402
+import session_tidy_clear as clear  # noqa: E402
 import tidy_transcripts  # noqa: E402
 
 FIXTURES = HERE / "fixtures"
@@ -128,6 +134,84 @@ class IsolationHelperTest(unittest.TestCase):
         root = other.root
         other.cleanup()
         self.assertFalse(root.exists())
+
+
+class StateConfinementTest(unittest.TestCase):
+    """A live IsolatedEnv confines this process's own session-tidy state access."""
+
+    def setUp(self):
+        self.iso = isolated_env()
+        self.addCleanup(self.iso.cleanup)
+
+    def _outside_root(self) -> Path:
+        outside = Path(tempfile.mkdtemp(dir=tidy_isolation.ISOLATION_BASE))
+        self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
+        return outside
+
+    def test_a_bare_state_write_outside_the_root_fails_fast(self):
+        outside = self._outside_root()
+        request = {"schema": "fixture", "seat": {"key": "a" * 32}}
+        with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(outside)}):
+            with self.assertRaises(st.StateError):
+                clear._write_reservation(request)
+        self.assertFalse((outside / "hearting" / "session-tidy").exists())
+
+    def test_a_bare_call_with_the_process_home_state_fails_fast(self):
+        outside = self._outside_root()
+        saved = dict(os.environ)
+        os.environ.pop("XDG_STATE_HOME", None)
+        os.environ["HOME"] = str(outside)
+        try:
+            with self.assertRaises(st.StateError):
+                clear._write_reservation({"schema": "fixture", "seat": {"key": "b" * 32}})
+        finally:
+            os.environ.clear()
+            os.environ.update(saved)
+        self.assertFalse((outside / ".local" / "state" / "hearting").exists())
+
+    def test_a_child_pointed_outside_the_root_refuses_and_writes_nothing(self):
+        outside = self._outside_root()
+        env = self.iso.env()
+        env["XDG_STATE_HOME"] = str(outside)   # deliberately outside the process root
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "utilities" / "session_tidy.py"),
+             "status", "--json"],
+            cwd=str(self.iso.root), env=env, text=True, capture_output=True, timeout=60,
+        )
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("outside the test confinement", result.stderr)
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_production_state_root_is_unchanged_without_confinement(self):
+        saved = os.environ.pop("HEARTING_STATE_CONFINEMENT")
+        try:
+            base = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state")
+            self.assertEqual(st.state_root(), Path(base) / "hearting" / "session-tidy")
+        finally:
+            os.environ["HEARTING_STATE_CONFINEMENT"] = saved
+
+
+class StateConfinementLifetimeTest(unittest.TestCase):
+    """Confinement follows creation and cleanup order, not a single test root."""
+
+    def test_confinement_follows_the_isolated_env_lifetime(self):
+        before = os.environ.get("HEARTING_STATE_CONFINEMENT")
+        first = isolated_env()
+        try:
+            self.assertEqual(os.environ["HEARTING_STATE_CONFINEMENT"], str(first.root))
+            second = isolated_env()
+            try:
+                self.assertEqual(os.environ["HEARTING_STATE_CONFINEMENT"], str(second.root))
+            finally:
+                second.cleanup()
+            self.assertEqual(os.environ["HEARTING_STATE_CONFINEMENT"], str(first.root))
+            with first.patched_environ():
+                clear._write_reservation({"schema": "fixture", "seat": {"key": "c" * 32}})
+                written = first.xdg_state / "hearting" / "session-tidy" / "clear" / f"{'c' * 32}.json"
+                self.assertTrue(written.is_file())
+        finally:
+            first.cleanup()
+        self.assertEqual(os.environ.get("HEARTING_STATE_CONFINEMENT"), before)
 
 
 class FixtureFormatTest(unittest.TestCase):

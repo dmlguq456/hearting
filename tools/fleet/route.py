@@ -1348,6 +1348,28 @@ def _ev_elapsed(ev, now):
         return ev.get("elapsed_min")
 
 
+def route_liveness(nodes, route_jobs, route_id=None):
+    """``"unknown"`` when a route still looks in flight but nothing of it runs, else None.
+
+    In flight means a node is ``active``, ``reconciling`` or ``recovering``. The verdict
+    needs every such node to be ``reconciling`` -- the shared observer proved its
+    attempt's process gone from this PID namespace while the registry row stayed open --
+    and every route job settled: done, dead, or that exact reconcile shape. A live, idle,
+    blocked, unobservable or merely quiet (heuristic ``stale``) job keeps the existing
+    per-node/owner reading (None). This is the data verdict the operator view shows as
+    "응답 없음" instead of working; it never closes the route."""
+    own = [job for job in route_jobs
+           if route_id is None or getattr(job, "route_id", route_id) in (route_id, None)]
+    if any(getattr(job, "liveness", None) not in ("done", "dead")
+           and not _is_reconciling_attempt(job) for job in own):
+        return None
+    in_flight = [node for node in nodes
+                 if node.get("state") in ("active", "reconciling", "recovering")]
+    if in_flight and all(node.get("state") == "reconciling" for node in in_flight):
+        return "unknown"
+    return None
+
+
 def _heuristic_view(route_id, route_jobs):
     """Represent explicit-invalid evidence without fabricating a fixed pipeline."""
     return {"route_id": route_id, "route_hash": None, "source": "unknown",
@@ -1427,7 +1449,8 @@ def _record_view(record, route_id, route_jobs, ev_by_node, now, gate_marks_for_r
             "unit_catalog_digest": record.get("unit_catalog_digest"),
             "composed": bool(record.get("composed")),
             "effective_intensity": record.get("effective_intensity"),
-            "progress": {"done": done, "total": len(nodes)}, "nodes": nodes, "key": route_id}
+            "progress": {"done": done, "total": len(nodes)}, "nodes": nodes, "key": route_id,
+            "liveness": route_liveness(nodes, route_jobs, route_id)}
     if history is not None and history.get("lineage", {}).get("status") != "none":
         result["lineage"] = history["lineage"]
     return result

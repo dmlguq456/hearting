@@ -651,7 +651,28 @@ def _write(path, parent, delivered, resource, phase):
         JOIN._write_supervisor_state_unlocked(path, parent, delivered, phase=phase, resource=resource)
 
 
-def pending_prompt(path, parent, args=None, control=None):
+def _drop_unacknowledged(path, parent, receipt_id):
+    """Take back a receipt nobody acknowledged yet; its execution is described again from its row."""
+    with JOIN._supervisor_state_lock(path):
+        state = JOIN.read_supervisor_phase_state(path, parent)
+        resource = dict(state.resource or {}) if state else {}
+        box = resource.get("outbox")
+        if not box or box["receipt_id"] != receipt_id:
+            return
+        resource["outbox"] = None
+        JOIN._write_supervisor_state_unlocked(path, parent, set(state.delivered_attempt_ids),
+            phase=state.phase, outbox=state.outbox, resource=resource)
+
+
+def pending_prompt(path, parent, args=None, control=None, *, recompose=False):
+    """The unacknowledged resource receipt as a prompt, checked against its exact execution.
+
+    The receipt's parent, session, route and jobs must still be this owner's, and its
+    execution (resource_key) must still be held. When only that execution's row changed
+    since the receipt was written (a late settle), `wait` (recompose=True) takes the
+    receipt back and describes the row as it now is; other callers still deliver an
+    attention receipt, which reports an unsettled observation and binds the execution only.
+    """
     state = JOIN.read_supervisor_phase_state(path, parent)
     box = (state.resource or {}).get("outbox") if state else None
     if not box:
@@ -683,9 +704,14 @@ def pending_prompt(path, parent, args=None, control=None):
                         and resource_execution_finished(prior)):
                     row = prior
                     break
-        if (any(receipt.get(k) != v for k, v in expected.items()) or row is None
-                or RESUME.row_digest(row) != receipt.get("resource_sha256")):
+        if any(receipt.get(k) != v for k, v in expected.items()) or row is None:
             raise JOIN.JoinContractError("resource-outbox-binding-changed")
+        if RESUME.row_digest(row) != receipt.get("resource_sha256"):
+            if recompose:
+                _drop_unacknowledged(path, parent, box["receipt_id"])
+                return None
+            if receipt.get("reason") != NONTERMINAL_RESOURCE_REASON:
+                raise JOIN.JoinContractError("resource-outbox-binding-changed")
     from resource_run_registry import resource_never_started
     # The bound receipt keeps outcome guidance identical on a returning turn
     # even when that turn has no row context. It grants no execution authority.
@@ -742,7 +768,8 @@ def wait(args, path, control, delivered, emit, *, sleep=time.sleep):
                     return None, True
                 sleep(1)
 
-    pending, interrupted = look(lambda: pending_prompt(path, args.parent_attempt_id, args, control))
+    pending, interrupted = look(lambda: pending_prompt(path, args.parent_attempt_id, args, control,
+                                                       recompose=True))
     if interrupted:
         return correction
     if pending:
@@ -850,6 +877,11 @@ def wait(args, path, control, delivered, emit, *, sleep=time.sleep):
             if key in resource["delivered"]:
                 continue
             evidence = sup.resource_evidence(armed)
+            if evidence.get("resource_sha256") not in (None, RESUME.row_digest(row)):
+                # Looking settled (rewrote) the row after it was read, here or in another
+                # observer. The receipt binds the row as it now is, read on the next look;
+                # a receipt bound to the earlier row would fail its own delivery check.
+                continue
             settled = evidence.get("terminal") is True and evidence.get("quiescent") is True
             attention = not settled and resource_needs_attention(row, evidence)
             if not settled and not attention:

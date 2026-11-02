@@ -351,10 +351,17 @@ decision rather than an accidental leak.
 ### 6.1. Active Context Budget
 
 Progressive disclosure applies to runtime bootstraps and discovery metadata,
-not only Skill bodies. The bootstrap is a router: source order, hard invariants,
-and runtime entrypoints stay resident; detailed lifecycle explanations,
-examples, and edge cases live in adapter README/ADAPTATION documents or command
-help loaded on demand.
+not only Skill bodies. The bootstrap is a router: purpose, judgment criteria,
+where to look, and the runtime entrypoint stay resident, and the agent follows
+the next action the runtime prints (`parent_next`, `required_action`,
+`next_step`). Procedure detail — receipts, resume and correction commands,
+peer messaging, command surfaces, tool checks, examples, and edge cases —
+lives in core sections, adapter README/ADAPTATION documents, or command help
+loaded on demand, and no bootstrap asks for a core document to be read before
+the task needs it. The shared body is one portable source,
+`core/fragments/bootstrap-body.md`, projected byte for byte into each adapter
+bootstrap by `tools/sync-bootstrap-dispatch.py`; an adapter adds only its
+harness-root resolution and runtime notes around it.
 
 - Each always-loaded adapter bootstrap is at most `16,384` UTF-8 bytes.
 - Each active Skill metadata discovery surface is at most `7,000` characters,
@@ -907,24 +914,31 @@ receiver's consumption evidence records `received`; completion and acceptance
 remain separate duties. A transport timeout or ambiguous reply retains the
 same transfer reference and its existing owner.
 
-The peer-delivery support matrix is transport-specific: `Claude plain TUI:
-idle -> existing steward prompt delivery; busy -> callback`; Codex steers
+Peer delivery follows one rule, and only its native transport differs: the
+sender uses the native path it can address, otherwise the guarded PTY input,
+otherwise the row waits under one `message-<ref>` carrier. Codex steers
 ordinary peer input into the active turn with `turn/steer` (same
 `clientUserMessageId`, `expectedTurnId`) and otherwise uses its exact native
-per-thread queue, and OpenCode uses its native plugin callback.
+per-thread queue. Claude and OpenCode with the exact session ID share the same
+guarded PTY input; OpenCode's native plugin callback may also take its own
+pending row, and the existing `rpc_claim` lets exactly one side send.
 A non-ambiguous steer refusal falls back to the queue; an ambiguous result is
 never repeated, and a steer whose turn ended without the id in complete exact
 history is re-queued once. The sender's earlier Hearting items are first moved
 into the turn after `deleted:true` is confirmed. An interrupted thread is
-started only when the sender saw no form and an empty composer and the queue
-holds no non-Hearting item, and then only for the exact Hearting item;
-otherwise the receipt is `native-queue-held-interrupted:<reason>`.
-Claude's idle prompt path requires the exact native SID, pane, foreground PID
-birth and namespace, native `idle` state, ready registered-work state, no open
-form or question, and an empty visible composer. A dim prompt suggestion is
-empty. Busy, blocked, unknown, form-open, nonempty-draft, or unreadable targets
-stay on the existing callback path and receive no PTY input. Prompt submission
-is only `queued`; the exact receiver ref remains the only peer-delivery receipt.
+started only when the same sender-side gate saw no form and an empty composer
+and the queue holds no non-Hearting item, and then only for the exact Hearting
+item; the retry recomputes that gate, otherwise the receipt is
+`native-queue-held-interrupted:<reason>`.
+The guarded PTY input (Claude, and OpenCode with the exact session ID) requires
+the exact native SID, pane, foreground PID birth and namespace, native `idle`
+state, ready registered-work state, no open form or question, and an empty
+visible composer. A dim prompt suggestion is empty. Busy, blocked, unknown,
+form-open, nonempty-draft, or unreadable targets remain `pending` under the one
+`message-<ref>` carrier and receive no PTY input; a write that provably never
+started returns to `pending`, while an ambiguous write is never retyped. Prompt
+submission is only `queued`; the exact receiver ref remains the only
+peer-delivery receipt.
 
 For Claude's peer-message context path, SD-113 §13.34.1 recognizes successful
 synchronous `additionalContext` injection from the native

@@ -101,6 +101,73 @@ full masking.
 | Selected tool projection | `adapters/opencode/tools/` |
 | Selected utility projection | `adapters/opencode/utilities/` |
 
+## Session Command Reference
+
+The always-loaded `adapters/opencode/AGENTS.md` keeps purpose, judgment, where
+to look, and the instruction to follow the next action the runtime prints.
+The command detail it used to carry lives here. `preflight.sh` below means
+`AGENT_HOME="$AGENT_HOME" bash "$AGENT_HOME/adapters/opencode/bin/preflight.sh"`;
+no shim is installed at the harness root. Export `AGENT_HOME` to the installed
+root for release behavior, or to a checkout/worktree to use that tree as the
+active runtime.
+
+| Need | Command |
+|---|---|
+| lifecycle/workflow | `preflight.sh prompt-signal`, `preflight.sh briefing`, `preflight.sh worklog` |
+| memory | `preflight.sh memory`, `preflight.sh recall-gate`, `preflight.sh recall` |
+| readiness/loops | `preflight.sh status`, `preflight.sh doctor`, `preflight.sh loop-info <oncall|note|study|drill|runtime-watch>` |
+| QA | `preflight.sh qa-policy <level> [code|research|doc|general]` |
+| runtime | `preflight.sh permissions`, `preflight.sh mcp [--check]` |
+| spec-read evidence | `preflight.sh read <prd.md>` |
+
+Native Skills, commands, agents, and plugins project through
+`opencode_setting/opencode-skills`, `opencode_setting/opencode-commands`,
+`opencode_setting/opencode-agents`, and `opencode_setting/opencode-plugins`.
+Validate native discovery with `OPENCODE_DISABLE_CLAUDE_CODE_SKILLS=1`; Claude
+compatibility autoload must not mask missing OpenCode output. Use explicit
+guards when the OpenCode plugin is unavailable or untrusted, and never port
+Claude allowedTools, settings MCP, command, agent, or hook formats. Main
+lifecycle does not run for workers.
+
+**Tool checks.** Before claiming support, run:
+`preflight.sh visual-harness <file.html>`,
+`preflight.sh browser-fetch --check <url>`,
+`preflight.sh data-script --check <script.py>`,
+`preflight.sh figure-gen --check <script.py>`,
+`figure-gen --verify-report <manifest.json> <report.md>`,
+`preflight.sh pdf-extract --check <file.pdf>`,
+`preflight.sh web-image-search --check <query>`,
+`preflight.sh verification-runner --timeout <seconds> -- <command>`, and
+`preflight.sh claim-verify --check <claim>`. Exit 69 means unavailable; use the
+reported fallback or keep the adapter row partial. OpenCode native UI/config
+owns model and context fields.
+
+**Dispatch.** Check `preflight.sh headless [--check] <worktree>`.
+`preflight.sh dispatch --dry-run|--register|--start` runs the raw wrapper; the
+route commands reach it with the sealed tuple. Monitor `preflight.sh liveness
+[jobs.log]` and harvest via `preflight.sh harvest`; for an attempt you
+launched, its receipt outranks that general monitoring. OpenCode is eligible
+for the registered standard+ dispatch-depth-2 path — exact parent binding,
+foreground lifecycle, and supervisor parity are implemented. Dispatch contract
+v3 atomically claims one stable attempt row before spawn and starts no child
+for a duplicate claim. Broker v1/v2 routes are read-only migration inputs; the
+retired broker exposes only legacy `status`/`stop`. The completion carrier is
+`opencode-turn` (`core/ADAPTATION.md` §7.4); nested leg receipts remain
+evidence and add no child waits. Registered standard+ dispatch-depth-2
+continuations use the shared external supervisor rather than a runtime bridge.
+`standard+` uses a dispatch-depth-1 capability owner and separable
+dispatch-depth-2 `code-plan -> code-execute -> code-test -> code-report`
+workers; `direct` is inline and `quick` is one registered-headless
+dispatch-depth-1 one-shot conductor. After merge, integrated verification, and
+push, use `preflight.sh worktree-cleanup --check` before `--apply`; a
+`session.idle` or other session-end event never owns destructive worktree
+cleanup. The main/orchestrator chooses portable roles and concrete model
+settings per job.
+
+**Token budget.** OpenCode token self-regulation remains explicitly deferred:
+Phase 2 automatic accounting and the isolated experiment CLI are not
+projected; it does not copy Codex token-budget hooks or mutate runtime config.
+
 ## Runtime Mapping
 
 | Core Concept | OpenCode Implementation |
@@ -110,7 +177,7 @@ full masking.
 | stage-session capacity | `dispatch-headless.py` projects the same phase brief, fixed-file fence, ledger, and `stage_authority=0` metadata as Claude/Codex. OpenCode's native-agent surface is not yet route-owned dispatch-depth-2 evidence, so the checked registered/inline fallback remains authoritative and no native parity is claimed. |
 | role profile | Use `roles/README.md` for meaning; use `adapters/opencode/agents/<role>/<role>.md` as OpenCode-native role guidance, and use Claude agent files only as compatibility references |
 | role mode | Run `adapters/opencode/bin/preflight.sh mode-info <family/mode>` before using a `roles/units/` fragment; portable modes can be used directly, tool-contract modes require equivalent tools, unsupported modes report `fallback=reference-only` when no OpenCode-native runtime surface exists |
-| adapter bootstrap | `adapters/opencode/AGENTS.md` reaches a session as the auto-loaded `AGENTS.md` in the global config home, and must not also be listed in `instructions[]` (`core/ADAPTATION.md §6.1`); then load `core/CORE.md` plus task-relevant shared docs; do not treat `CLAUDE.md` as portable bootstrap |
+| adapter bootstrap | `adapters/opencode/AGENTS.md` reaches a session as the auto-loaded `AGENTS.md` in the global config home, and must not also be listed in `instructions[]` (`core/ADAPTATION.md §6.1`); read `core/CORE.md` and other shared docs when the task needs them; do not treat `CLAUDE.md` as portable bootstrap |
 | agent home | Set `AGENT_HOME` to the installed harness directory |
 | permission model | Run `adapters/opencode/bin/preflight.sh permissions`; V1 uses `permission` and V2 uses ordered `permissions` plus plugin hooks; neither consumes Claude `allowedTools` |
 | MCP config | Run `adapters/opencode/bin/preflight.sh mcp [--check]`; use OpenCode native `opencode mcp`/config surfaces, not Claude `settings.json` MCP payloads |

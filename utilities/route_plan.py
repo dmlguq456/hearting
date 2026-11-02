@@ -58,6 +58,9 @@ MAX_APPROVALS = 4
 MAX_TEXT = 300
 MAX_YAML_EVENTS = 600
 SHAPES = ("direct", "solo", "staged")
+# A leg's optional work size and the shape that fits it. The frame judges the size from its
+# evidence before the shape; an omitted shape follows the size, a different one is kept and shown.
+SIZE_SHAPE = {"one-change": "direct", "one-pass": "solo", "multi-stage": "staged"}
 SHAPE_INTENSITY = {"direct": "direct", "solo": "quick", "staged": "standard", "framed": "standard"}
 INTENSITIES = frozenset(("direct", "quick", "standard", "strong", "thorough", "adversarial"))
 APPROVAL_KEYS = ("full-run", "deploy", "handback", "preview")
@@ -341,7 +344,7 @@ def _text(value, *, name, required=False):
     return value.strip()
 
 
-_LEG_FIELDS = frozenset({"capability", "mode", "shape", "graph", "intensity", "cwd", "why",
+_LEG_FIELDS = frozenset({"capability", "mode", "shape", "size", "graph", "intensity", "cwd", "why",
                          "done_when", "verify", "hands_over", "parallel", "extra_stages"})
 MAX_DONE_WHEN = 5
 MAX_PLAN_NOTES = 8
@@ -429,11 +432,19 @@ def _normal_leg(raw, index, notes=None):
         raise ProposalError(f"schema-invalid:legs[{index}]")
     if set(raw) - _LEG_FIELDS and notes is not None:
         notes.append(f"ignored:legs[{index}]:" + ",".join(sorted(map(str, set(raw) - _LEG_FIELDS))))
-    capability, shape = raw.get("capability"), raw.get("shape")
+    capability, shape, size = raw.get("capability"), raw.get("shape"), raw.get("size")
     if not isinstance(capability, str) or not _CAPABILITY.fullmatch(capability):
         raise ProposalError(f"schema-invalid:legs[{index}].capability")
+    if size is not None and (not isinstance(size, str) or size not in SIZE_SHAPE):
+        if notes is not None:
+            notes.append(f"ignored:legs[{index}].size")
+        size = None
+    if shape is None and size is not None:
+        shape = SIZE_SHAPE[size]
     if shape not in SHAPES:
         raise ProposalError(f"schema-invalid:legs[{index}].shape")
+    if size is not None and SIZE_SHAPE[size] != shape and notes is not None:
+        notes.append(f"kept:legs[{index}].shape:{shape}-for-size-{size}")
     mode, intensity = raw.get("mode"), raw.get("intensity")
     if mode is not None and (not isinstance(mode, str) or not _MODE.fullmatch(mode)):
         raise ProposalError(f"schema-invalid:legs[{index}].mode")
@@ -462,6 +473,7 @@ def _normal_leg(raw, index, notes=None):
                 raise ProposalError(f"leg-invalid:{index}:frame-stage-not-allowed")
     return {"capability": capability, "mode": mode, "shape": shape, "graph": list(graph) if graph else None,
             "intensity": intensity, "why": _text(raw.get("why"), name=f"legs[{index}].why"),
+            **({"size": size} if size is not None else {}),
             **({"cwd": _text(raw["cwd"], name=f"legs[{index}].cwd", required=True)} if "cwd" in raw else {}),
             **_plan_fields(raw, index, notes)}
 

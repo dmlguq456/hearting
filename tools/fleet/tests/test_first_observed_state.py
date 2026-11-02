@@ -91,7 +91,7 @@ class BasicObservationTest(unittest.TestCase):
             command=['python', 'train.py'], elapsed_min=2)
         projection.attach_projections([parent, target], [owner], resources=[child], fast_first=True)
         render.set_compute_hosts({'configured': True, 'collected_at': time.time(), 'hosts': [
-            {'host': 'moving4', 'reachable': True, 'self': True, 'gpus': [{'index': 1, 'name': 'RTX',
+            {'host': 'mgpu-a1', 'reachable': True, 'self': True, 'gpus': [{'index': 1, 'name': 'RTX',
                 'processes': [{'pid': 43, 'proc_start': '101', 'pgid': 43, 'command': 'python train.py',
                                'used_memory_mib': 1024}]}]}]})
         with mock.patch.object(route, 'load', side_effect=AssertionError('render route read')), \
@@ -99,7 +99,7 @@ class BasicObservationTest(unittest.TestCase):
             rows = render._build_lines([parent, target], [owner], 'both', False, 0,
                                        term_width=168, resources=[child])
         screen = '\n'.join(render._plain(row) for row in rows)
-        for required in ('⚑', '┆', '╭', 'owner', 'train train.py', 'moving4:1', 'GPU moving4:1'):
+        for required in ('⚑', '┆', '╭', 'owner', 'train train.py', 'mgpu-a1:1', 'GPU mgpu-a1:1'):
             self.assertIn(required, screen)
 
     def test_basic_process_view_shows_route_bound_depth_two_worker_now(self):

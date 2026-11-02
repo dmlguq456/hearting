@@ -3,7 +3,7 @@ set -eu
 
 root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 cli=$root/utilities/cairn-artifact-read.sh
-cairn=${CAIRN_W3A_ROOT:-/home/nas/user/Uihyeop/personal/cairn}
+cairn=${CAIRN_W3A_ROOT:-/home/example/cairn}
 tsx=$cairn/node_modules/.bin/tsx
 [ -x "$tsx" ] || { echo "missing Cairn W3a tsx runtime: $tsx" >&2; exit 1; }
 git -C "$cairn" merge-base --is-ancestor 1fa0d99e4b714b5ce305f78c8f7c7773255e8f87 HEAD

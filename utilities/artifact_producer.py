@@ -53,6 +53,7 @@ import shutil
 import stat
 import sys
 import time
+import unicodedata
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, NamedTuple, Optional, Sequence, Set, Tuple
 
@@ -228,9 +229,23 @@ MEDIA_TYPES = {
 PRIMARY_CANDIDATES = (
     "final_report.md", "report.md", "report.html", "prd.md", "plan.md", "handoff.md", "verdict.json",
 )
+# A project status document (one page: a `**한 줄**:` line, `## 결정 필요`, `## 다음`).
+# Directly under a cycle's `artifacts/` it is that cycle's automatic primary, so Cairn
+# pins it as the project's status row and Fleet's project line reads the same file.
+STATUS_DOCUMENT_NAMES = ("현황.md", "STATUS.md")
+# What a person opens the artifact store for: reports, summaries, the canonical PRD and
+# the status document. Their manifest rows carry `audience: "user"`; other rows carry no
+# audience, and a reader keeps its own rule for them. Names compare NFC, case-folded.
+USER_DOCUMENT_NAMES = frozenset({
+    "final_report.md", "final_report.html", "report.md", "report.html", "summary.md",
+    "audit-report.md", "현황.md", "status.md",
+})
 # CORE §3 top-level `C-INT` names that are not a cycle bucket: support material is
 # kept in the manifest but is not auto-nominated as a cycle's primary artifact.
 SUPPORT_SEGMENTS = frozenset({"_internal", "shards"})
+# Folders whose files are work records or copies, never the reader's document itself,
+# whatever their name: work logs, verification evidence, snapshots and support material.
+RECORD_SEGMENTS = frozenset({"dev_logs", "test_logs", "evidence", "versions"}) | SUPPORT_SEGMENTS
 _KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 
 
@@ -746,6 +761,29 @@ def _fallback_blocks(fallback: Optional[Mapping[str, Any]]) -> bool:
         and fallback["override"]["status"] != "accepted"
 
 
+def _admitted_cycle_rows(root: Path, cycle_id: str) -> Tuple[Mapping[str, Any], Mapping[str, Any]]:
+    """One cycle's admitted `manifests` and `cycles` index rows.
+
+    The small head projection of the current index generation answers first;
+    a missing or stale head falls back to the full index (`load_index` keeps
+    the parsed generation for the rest of this process), and an index that
+    does not parse as one keeps the raw read this function always had.
+    """
+    head = artifact_admission.load_index_head(root)
+    if head is not None:
+        return head.manifests.get(cycle_id) or {}, head.cycles.get(cycle_id) or {}
+    path = artifact_admission._index_path(root)
+    if path.is_file() and not path.is_symlink():
+        try:
+            index = artifact_admission.load_index(root)
+            return index.manifests.get(cycle_id) or {}, index.cycles.get(cycle_id) or {}
+        except Exception:  # noqa: BLE001 -- the raw read below decides as before
+            pass
+    raw = _read_json(path) or {}
+    return ((raw.get("manifests") or {}).get(cycle_id) or {},
+            (raw.get("cycles") or {}).get(cycle_id) or {})
+
+
 def read_cycle_record(root: Path, cycle_id: str) -> Optional[Dict[str, Any]]:
     if not artifact_identity.is_well_formed(cycle_id, "cycle"):
         return None
@@ -754,9 +792,7 @@ def read_cycle_record(root: Path, cycle_id: str) -> Optional[Dict[str, Any]]:
         return record
     # A producer record is a cache. Read the already admitted revision if the
     # cache was removed; this recovers a past result, never a new PASS.
-    index = _read_json(artifact_admission._index_path(root)) or {}
-    row = (index.get("manifests") or {}).get(cycle_id) or {}
-    cycle_row = (index.get("cycles") or {}).get(cycle_id) or {}
+    row, cycle_row = _admitted_cycle_rows(root, cycle_id)
     digest = row.get("manifest_digest")
     document = artifact_lifecycle.find_manifest_snapshot(root, cycle_id, manifest_digest=digest) if digest else None
     if document is None:
@@ -871,6 +907,47 @@ def _artifact_index_observation(root: Path, *, cycle_id: str | None = None,
     pass_observations = _ARTIFACT_INDEX_PASS.get()
 
     def load():
+        head = artifact_admission.load_index_head(root)
+        if head is not None:
+            def head_rows(source):
+                return tuple(sorted((name, tuple(sorted(value.items())))
+                                    for name, value in source.items()
+                                    if isinstance(name, str) and isinstance(value, dict)))
+            manifest_rows = head_rows(head.manifests)
+            cycle_rows = head_rows(head.cycles)
+            cycle_ids = tuple(head.cycles)
+            projected, route_cycles = set(), set()
+            routes_valid = True
+            for bucket in head.routes.values():
+                if not isinstance(bucket, dict):
+                    routes_valid = False
+                    break
+                for route_id, item in bucket.items():
+                    if (not isinstance(route_id, str) or not isinstance(item, dict)
+                            or not isinstance(item.get("cycle_id"), str)):
+                        routes_valid = False
+                        break
+                    referenced_cycle = item["cycle_id"]
+                    projected.add(referenced_cycle)
+                    route_cycles.add((route_id, referenced_cycle))
+                if not routes_valid:
+                    break
+            if not routes_valid:
+                projected.clear()
+                route_cycles.clear()
+            weight = 256
+            for collection in (manifest_rows, cycle_rows):
+                for name, fields in collection:
+                    weight += len(name) + 48
+                    weight += sum(len(field) + len(str(value)) + 24 for field, value in fields)
+            weight += sum(len(cycle_id) + 48 for cycle_id in projected)
+            weight += sum(len(route) + len(cycle) + 64 for route, cycle in route_cycles)
+            weight += sum(len(str(value)) + 16 for value in cycle_ids)
+            return _ArtifactIndexObservation(
+                head.artifact_root_id, manifest_rows, cycle_rows, cycle_ids,
+                tuple(sorted(projected)), (), routes_valid, "", weight,
+                tuple(sorted(route_cycles)),
+            )
         payload = json.loads(stable_read_bytes(path).decode("utf-8"))
         schema_error = ""
         parsed = None
@@ -2193,6 +2270,7 @@ def _env_for(root: Path, record: Mapping[str, Any], route: Optional[Mapping[str,
 # slow disk keeps it. Past it nothing has started and the caller is told to run
 # start again later.
 OWNER_LAUNCH_ADMISSION_WAIT_SECONDS = 120.0
+_RECONCILE_FINISHED = frozenset({"unchanged", "reconciled", "inactive"})
 
 
 def _begin_waiting_for_admission(root: Path, **kwargs: Any) -> Dict[str, Any]:
@@ -2204,9 +2282,15 @@ def _begin_waiting_for_admission(root: Path, **kwargs: Any) -> Dict[str, Any]:
     again later.
     """
     deadline = time.monotonic() + OWNER_LAUNCH_ADMISSION_WAIT_SECONDS
+    looked = kwargs.get("node_id") is not None  # a node begin never looks for hand changes
     while True:
+        if not looked:
+            # §45 D-126 before the cycle begins. A look that finished is not repeated while
+            # asking again only waits for the lock; one that could not finish (skipped, e.g.
+            # its own lock wait ran out) is taken again before the next try.
+            looked = reconcile_root(root).get("status") in _RECONCILE_FINISHED
         try:
-            return begin(root, **kwargs)
+            return begin(root, _reconcile=False, **kwargs)
         except artifact_admission.AdmissionBusy:
             if time.monotonic() >= deadline:
                 raise ProducerError(
@@ -2927,7 +3011,8 @@ def _begin_cycle_record(
             }
         if campaign is not None:
             artifact_locator.prepare_index_update(root, [campaign["campaign_id"]])
-        index = artifact_admission.load_index(root)
+        head = artifact_admission.load_index_head(root)
+        index = artifact_admission.load_index(root) if head is None else None
         if campaign is None and campaign_key is None:
             campaign = find_campaign_by_key(root, UNASSIGNED_KEY)
         campaign_created = False
@@ -2936,7 +3021,8 @@ def _begin_cycle_record(
         started_on = _rfc3339(now)
         if campaign is None:
             new_campaign_id = alloc.allocate("campaign")
-            while new_campaign_id in index.stable_ids:
+            while (head.has_prefixed_stable_id(new_campaign_id) if head is not None
+                   else new_campaign_id in index.stable_ids):
                 new_campaign_id = alloc.allocate("campaign")
             # The campaign is named from the proposed stream key; the route
             # slug names only this cycle (CONVENTIONS "Campaign or cycle").
@@ -2990,7 +3076,9 @@ def _begin_cycle_record(
             if changed:
                 _write_campaign(root, campaign, exclusive=False)
         new_cycle_id = alloc.allocate("cycle")
-        while new_cycle_id in index.stable_ids or cycle_record_path(root, new_cycle_id).exists():
+        while ((head.has_prefixed_stable_id(new_cycle_id) if head is not None
+                else new_cycle_id in index.stable_ids)
+               or cycle_record_path(root, new_cycle_id).exists()):
             new_cycle_id = alloc.allocate("cycle")
         producer_id = alloc.allocate("producer")
         campaign_path = campaign_dir(root, campaign["campaign_id"], campaign)
@@ -3085,8 +3173,8 @@ def _observe_after_begin(root: Path, result: Mapping[str, Any]) -> None:
         pass
 
 
-def begin(root: Path, **kwargs: Any) -> Dict[str, Any]:
-    if kwargs.get("node_id") is None:
+def begin(root: Path, *, _reconcile: bool = True, **kwargs: Any) -> Dict[str, Any]:
+    if _reconcile and kwargs.get("node_id") is None:
         reconcile_root(root)  # §45 D-126: what was moved or removed by hand is found before a cycle is begun
     result = _begin_cycle_record(root, **kwargs)
     if kwargs.get("node_id") is None and result.get("layout") == "cycle":
@@ -3571,6 +3659,47 @@ def _is_support_locator(rel: str) -> bool:
     return any(part in SUPPORT_SEGMENTS for part in rel.split("/")[1:])
 
 
+def _document_name(name: str) -> str:
+    return unicodedata.normalize("NFC", name).casefold()
+
+
+_STATUS_RANK = {_document_name(name): rank for rank, name in enumerate(STATUS_DOCUMENT_NAMES)}
+
+
+def _is_record_locator(rel: str) -> bool:
+    """A file inside a work-record or copy folder (`dev_logs/`, `evidence/`, `_internal/`, ...)."""
+    return any(part in RECORD_SEGMENTS for part in rel.split("/")[1:-1])
+
+
+def _status_rank(rel: str) -> Optional[int]:
+    """The status document's place in `STATUS_DOCUMENT_NAMES`, only directly under `artifacts/`."""
+    root, _, name = rel.partition("/")
+    return _STATUS_RANK.get(_document_name(name)) if root == "artifacts" and "/" not in name else None
+
+
+def artifact_audience(rel: str) -> Optional[str]:
+    """`user` for a reader-facing document of the cycle output, None for everything else.
+
+    A report, summary or status document by name, or a PRD at the top of the cycle or of
+    a spec component, outside any work-record or copy folder."""
+    if _payload_root(rel) != "artifacts" or _is_record_locator(rel):
+        return None
+    parts = rel.split("/")[1:]
+    name = _document_name(parts[-1])
+    if name in USER_DOCUMENT_NAMES or (
+            name == "prd.md" and (len(parts) <= 2 or (len(parts) == 3 and parts[0] == "spec"))):
+        return artifact_manifest.USER_AUDIENCE
+    return None
+
+
+def _with_audience(row: Dict[str, Any], rel: str) -> Dict[str, Any]:
+    """Add the optional `audience` to a non-support artifact row; other rows stay unchanged."""
+    audience = artifact_audience(rel) if row.get("role") != "support" else None
+    if audience is not None:
+        row["audience"] = audience
+    return row
+
+
 def _output_placements(root: Path, record: Mapping[str, Any]) -> List[Dict[str, str]]:
     path = producer_dir(root) / "bucket-placements" / f"{record['cycle_id']}.json"
     rows = (_read_json(path) or {}).get("moves", [])
@@ -3794,6 +3923,13 @@ def _choose_primary(rows: Sequence[Tuple[str, bytes]], primary: Optional[str],
     official = official_spec_primary(route or {}, durable)
     if official is not None:
         return official
+    status = sorted((_status_rank(rel), rel) for rel in durable if _status_rank(rel) is not None)
+    if status:
+        return status[0][1]
+    # A copy under a work-record folder (`dev_logs/.../final_report.md`) never outranks the
+    # same name outside one; the order is otherwise unchanged.
+    durable = ([rel for rel in durable if not _is_record_locator(rel)]
+               + [rel for rel in durable if _is_record_locator(rel)])
     for wanted in PRIMARY_CANDIDATES:
         for rel in durable:
             if rel.endswith("/" + wanted) or rel == "artifacts/" + wanted:
@@ -3959,13 +4095,13 @@ def build_manifest(
         inner = _payload_inner(rel)
         root_support = _is_cycle_root_support(rel)
         bundle = (bundle_metadata or {}).get(rel)
-        artifacts.append({
+        artifacts.append(_with_audience({
             "artifact_id": art_id, "cycle_id": record["cycle_id"],
             "role": "support" if rel in support_rels or root_support else ("primary" if rel == primary_rel else "output"),
             "type": bundle.get("type") if bundle else ("file" if root_support else _bucket_type(inner)),
             "capability": record["capability"],
             "title": bundle.get("title", inner) if bundle else (rel if root_support else inner),
-        })
+        }, rel))
         revisions.append({
             "artifact_revision_id": arev_id, "artifact_id": art_id, "revision_sequence": 1,
             "content_digest": digest, "byte_size": byte_size,
@@ -6349,10 +6485,16 @@ def _verify_sealed_cycle_locked(root: Path, record: Mapping[str, Any],
         row = index_projection.manifest_row(record["cycle_id"])
         cycle_index_row = index_projection.cycle_row(record["cycle_id"])
     else:
-        index = artifact_admission.load_index(root)
-        index_root_id = index.artifact_root_id
-        row = index.manifests.get(record["cycle_id"]) if hasattr(index, "manifests") else None
-        cycle_index_row = index.cycles.get(record["cycle_id"]) if hasattr(index, "cycles") else None
+        head = artifact_admission.load_index_head(root)
+        if head is not None:
+            index_root_id = head.artifact_root_id
+            row = head.manifests.get(record["cycle_id"])
+            cycle_index_row = head.cycles.get(record["cycle_id"])
+        else:
+            index = artifact_admission.load_index(root)
+            index_root_id = index.artifact_root_id
+            row = index.manifests.get(record["cycle_id"]) if hasattr(index, "manifests") else None
+            cycle_index_row = index.cycles.get(record["cycle_id"]) if hasattr(index, "cycles") else None
     if not isinstance(row, dict) or row.get("manifest_digest") != digest:
         raise ProducerError("already-sealed-mismatch", "index")
     if expected_binding is not None:
@@ -6622,10 +6764,11 @@ def _refreshed_document(root: Path, record: Mapping[str, Any], document: Mapping
         artifact_id = allocator.allocate("artifact")
         inner = _payload_inner(rel)
         root_support = _is_cycle_root_support(rel)
-        artifacts.append({"artifact_id": artifact_id, "cycle_id": record["cycle_id"],
-                          "role": "support" if root_support else "output",
-                          "type": "file" if root_support else _bucket_type(inner),
-                          "capability": record["capability"], "title": rel if root_support else inner})
+        artifacts.append(_with_audience({"artifact_id": artifact_id, "cycle_id": record["cycle_id"],
+                                         "role": "support" if root_support else "output",
+                                         "type": "file" if root_support else _bucket_type(inner),
+                                         "capability": record["capability"],
+                                         "title": rel if root_support else inner}, rel))
         revisions.append({
             "artifact_revision_id": allocator.allocate("artifact_revision"), "artifact_id": artifact_id,
             "revision_sequence": 1, "content_digest": digest, "byte_size": size, "media_type": _media_type(rel),
@@ -7568,9 +7711,16 @@ def _refresh_cycle_locked(root: Path, record: Mapping[str, Any], *, now: Optiona
         raise ProducerError("already-sealed-mismatch", str(manifest_path)) from exc
     digest = artifact_manifest.manifest_digest(document)
     # The index row is read once, here, and answers for the whole refresh: a manifest the
-    # index does not carry is not something to publish a next document over.
-    index = artifact_admission.load_index(root)
-    row = index.manifests.get(cycle_id)
+    # index does not carry is not something to publish a next document over. The small
+    # head projection answers exactly this row when the generation is current; only an
+    # actual publish below needs the full mutable document.
+    head = artifact_admission.load_index_head(root)
+    index = None
+    if head is not None:
+        row = head.manifests.get(cycle_id)
+    else:
+        index = artifact_admission.load_index(root)
+        row = index.manifests.get(cycle_id)
     if not isinstance(row, dict) or row.get("manifest_digest") != digest:
         previous = artifact_lifecycle.find_manifest_snapshot(
             root, cycle_id, manifest_digest=record.get("manifest_digest"))
@@ -7643,6 +7793,8 @@ def _refresh_cycle_locked(root: Path, record: Mapping[str, Any], *, now: Optiona
     new_digest = artifact_manifest.manifest_digest(refreshed)
     new_raw = artifact_manifest.canonical_bytes(refreshed)
     identity = artifact_lifecycle.read_root_identity(root)
+    if index is None:
+        index = artifact_admission.load_index(root)
     index_report = artifact_index.check(
         index, refreshed, idempotency_key=cycle_id, manifest_digest=new_digest,
         repository_id=identity.repository_id if identity else None,
@@ -10977,20 +11129,30 @@ def _read_manifest_raw(directory: Path) -> Optional[Tuple[bytes, Dict[str, Any]]
 
 
 def _observe_control_changes(root: Path, cycle_id: str, *, now: Optional[float] = None,
-                             directory: Optional[Path] = None, locator_cache: bool = False) -> None:
+                             directory: Optional[Path] = None, locator_cache: bool = False,
+                             record: Any = _UNSET, stored: Any = _UNSET) -> bool:
     """Log ordinary record edits/deletions through the existing recorder.
 
     No payload is restored. Bookkeeping can be read from its admitted revision
     and written again by an ordinary operation. Observation is best effort and
     never changes a completion decision or fails the caller.
+
+    A caller that has just read the cycle passes `record` (what
+    `read_cycle_record` answers) and `stored` (the record file as parsed, None
+    when absent) so the same files are not read again; a change found from
+    them is confirmed against a fresh read under the lock, as before.
+
+    True means there was nothing to log or update (the files say what the
+    record expects); False means a change was found, written or left for later.
     """
     try:
-        record = read_cycle_record(root, cycle_id)
+        if record is _UNSET:
+            record = read_cycle_record(root, cycle_id)
         if record is None or record.get("deleted_at") or not _closed_record(record):
-            return
+            return True
         directory = directory or _record_cycle_manifest_path(root, record).parent
         if not directory.is_dir() or directory.is_symlink():
-            return
+            return True
         binding = artifact_locator.cycle_binding_bytes(record["campaign_id"], cycle_id,
                                                        started_on=record.get("started_on"))
         journal = _read_json(journal_path(root, cycle_id)) or {}
@@ -11012,7 +11174,7 @@ def _observe_control_changes(root: Path, cycle_id: str, *, now: Optional[float] 
             if path.parent == root / "campaigns":
                 after = _digest(path.read_bytes()) if path.is_file() and not path.is_symlink() else None
             elif path == cycle_record_path(root, cycle_id):
-                parsed = _read_json(path)
+                parsed = _read_json(path) if stored is _UNSET else stored
                 after = _record_content_digest(parsed) if parsed is not None else None
             elif path.is_symlink() or not path.is_file():
                 after = None
@@ -11038,14 +11200,14 @@ def _observe_control_changes(root: Path, cycle_id: str, *, now: Optional[float] 
                           "event_id": _history_id("hevt", cycle_id, rel, stamp),
                           "now": time.time() if now is None else float(now)})
         if not lines and not updates:
-            return
+            return True
         fd = artifact_admission.try_acquire_lock(root)
         if fd is None:
-            return
+            return False
         try:
             current = read_cycle_record(root, cycle_id)
             if current != record:
-                return
+                return False
             prior.update(updates)
             pending = _merge_pending(record.get("history_pending") or [], lines)
             _write_cycle_record(root, _with_pending(dict(record, control_observations=prior,
@@ -11053,8 +11215,103 @@ def _observe_control_changes(root: Path, cycle_id: str, *, now: Optional[float] 
             _flush_cycle_pending_locked(root, cycle_id)
         finally:
             artifact_admission._release_lock(root, fd)
+        return False
     except Exception:  # noqa: BLE001 -- a history observation cannot block ordinary work
-        pass
+        return False
+
+
+# A closed cycle whose observed files are, to the `lstat`, exactly as a quiet observation left them
+# says the same thing again; `reconcile_root` keeps those identities in one derived file so a later
+# pass need not read the record, manifest and binding of every finished cycle once more. Any change of
+# identity (content, inode, size, mtime or ctime) means the cycle is read and observed as before; a
+# missing, unreadable or foreign memo means every cycle is. Identities younger than the settle margin
+# (measured from before the look) are never kept: a write within one timestamp tick of the look could
+# otherwise go unseen. On NFS an edit made on another host may show its new identity only after the
+# client's attribute cache expires (about a minute by default); until then that cycle is skipped, then
+# observed. Bump the memo `schema` whenever what `_observe_control_changes` reads or expects changes.
+CONTROL_MEMO_NAME = "control-observation-memo.json"
+_CONTROL_MEMO_SETTLE_NS = 2_000_000_000
+
+
+def _control_file_key(path: Path) -> Optional[List[int]]:
+    try:
+        seen = os.lstat(str(path))
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    return [seen.st_dev, seen.st_ino, seen.st_size, seen.st_mtime_ns, seen.st_ctime_ns, seen.st_mode]
+
+
+def _control_keys(root: Path, cycle_id: str, directory: Path) -> Optional[List[Optional[List[int]]]]:
+    """The `lstat` identities of what `_observe_control_changes` reads for one cycle (None if unreadable)."""
+    try:
+        return [_control_file_key(path) for path in (
+            cycle_record_path(root, cycle_id), journal_path(root, cycle_id),
+            directory / "manifest.json", directory / artifact_locator.CYCLE_BINDING)]
+    except (OSError, ProducerError):
+        return None
+
+
+def _control_keys_settled(keys: Sequence[Optional[List[int]]], now_ns: int) -> bool:
+    return all(key is None or (now_ns - key[3] > _CONTROL_MEMO_SETTLE_NS
+                               and now_ns - key[4] > _CONTROL_MEMO_SETTLE_NS) for key in keys)
+
+
+def _read_control_memo(root: Path) -> Dict[str, Any]:
+    document = _read_json(producer_dir(root) / CONTROL_MEMO_NAME)
+    cycles = document.get("cycles") if document and document.get("schema") == 1 else None
+    return cycles if isinstance(cycles, dict) else {}
+
+
+def _write_control_memo(root: Path, cycles: Mapping[str, Any]) -> None:
+    try:
+        data = json.dumps({"schema": 1, "cycles": cycles}, sort_keys=True, separators=(",", ":")).encode()
+        _write_atomic(producer_dir(root) / CONTROL_MEMO_NAME, data, 0o600)
+    except OSError:
+        pass  # a derived accelerator: the next pass reads every cycle instead
+
+
+def _observe_root_controls(root: Path, scan: _LayoutScan, *, now: Optional[float]) -> None:
+    """Observe every cycle the scan found, reading each record once and skipping quiet unchanged ones.
+
+    The earliest cycle also watches the campaign locator cache, so it is always observed."""
+    memo = _read_control_memo(root)
+    look_ns = time.time_ns()  # identities are judged against the moment before they were read
+    keys = {cid: _control_keys(root, cid, folder) for cid, folder in scan.cycles.items()}
+    quiet = {cid: memo[cid] for cid, folder in scan.cycles.items()
+             if keys[cid] is not None and isinstance(memo.get(cid), dict)
+             and memo[cid].get("dir") == _cycle_rel(root, folder) and memo[cid].get("keys") == keys[cid]}
+    stored: Dict[str, Any] = {}
+    records: Dict[str, Any] = {}
+
+    def load(cid: str) -> None:
+        stored[cid] = _read_json(cycle_record_path(root, cid))
+        records[cid] = stored[cid] if stored[cid] is not None else read_cycle_record(root, cid)
+
+    for cid in scan.cycles:
+        if cid not in quiet:
+            load(cid)
+
+    def started(cid: str) -> str:
+        source = quiet[cid] if cid in quiet else (records[cid] or {})
+        return source.get("started_on") or ""
+
+    remembered: Dict[str, Any] = {}
+    for position, cycle_id in enumerate(sorted(scan.cycles, key=lambda cid: (started(cid), cid))):
+        if cycle_id in quiet and position != 0:
+            remembered[cycle_id] = quiet[cycle_id]
+            continue
+        if cycle_id not in stored:
+            load(cycle_id)
+        folder = scan.cycles[cycle_id]
+        calm = _observe_control_changes(root, cycle_id, now=now, directory=folder,
+                                        locator_cache=position == 0, record=records[cycle_id],
+                                        stored=stored[cycle_id])
+        if (calm and stored[cycle_id] is not None and keys[cycle_id] is not None
+                and _control_keys_settled(keys[cycle_id], look_ns)):
+            remembered[cycle_id] = {"dir": _cycle_rel(root, folder), "keys": keys[cycle_id],
+                                    "started_on": stored[cycle_id].get("started_on")}
+    if remembered != memo:
+        _write_control_memo(root, remembered)
 
 
 def _preserve_current_manifest(root: Path, record: Mapping[str, Any], directory: Path) -> None:
@@ -11973,9 +12230,7 @@ def reconcile_root(root: Path, *, now: Optional[float] = None) -> Dict[str, Any]
                         published[cycle_id] = where
                         published[record["campaign_id"]] = str(Path(where).parent)
             scan = _scan_layout(root)
-            ordered = sorted(scan.cycles, key=lambda cid: ((read_cycle_record(root, cid) or {}).get("started_on") or "", cid))
-            for position, cycle_id in enumerate(ordered):
-                _observe_control_changes(root, cycle_id, now=now, directory=scan.cycles[cycle_id], locator_cache=position == 0)
+            _observe_root_controls(root, scan, now=now)
             if scan.mapping(root) == published:
                 return {"status": "unchanged"}
             changes = _hand_changes(root, scan, published)
