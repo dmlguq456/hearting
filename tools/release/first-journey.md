@@ -14,7 +14,10 @@ python3 tools/release/first-journey.py login --harness codex
 python3 tools/release/first-journey.py login --harness opencode
 python3 tools/release/first-journey.py run --source published --output /tmp/journey
 python3 tools/release/first-journey.py run --source published --model-free --output /tmp/journey-check
+python3 tools/release/first-journey.py run --source checkout --profile claude-only --output /tmp/journey-claude
 ```
+
+`--profile` (repeatable) runs only the named profile; without it both run.
 
 Without a dedicated measurement login, `run` uses the login you already have
 for each harness (`~/.claude/.credentials.json`, `~/.codex/auth.json`, or
@@ -94,3 +97,7 @@ passes the original focused test and the product left a route record
 
 Inside the sandbox the world keeps its host path, while the real HOME and
 `/home/nas` are empty tmpfs mounts; the report's isolation checks show this.
+PATH holds the installed launchers, the selected CLIs and the standard shell
+tools (`grep`, `sed`, `ls`, ...), never herdr; the fresh world has no Cairn
+setting, compute-host inventory or memory remote. A completed run therefore
+also shows that the basic task needs none of these optional pieces.

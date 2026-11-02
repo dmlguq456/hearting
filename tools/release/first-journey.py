@@ -35,6 +35,15 @@ if str(UTILITIES) not in sys.path:
     sys.path.insert(0, str(UTILITIES))
 from opencode_runtime import is_v2 as opencode_is_v2, parse_version as parse_opencode_version
 DEFAULT_PROMPT = "Fix the typo in greet's output, run the existing focused test, and show the diff."
+# The standard tools every user shell has, so hooks and the agent's own shell commands
+# behave as they do for a user. Optional host tools such as herdr stay off PATH, and the
+# fresh world has no NAS mount, Cairn setting, compute-host inventory or memory remote,
+# so a completed run also shows the basic task does not need them.
+WORLD_COMMANDS = ("python3", "bash", "sh", "git", "curl", "tar", "gzip", "mktemp",
+                  "mkdir", "chmod", "cp", "mv", "rm", "cat", "uname", "dirname", "readlink",
+                  "basename", "grep", "sed", "awk", "head", "tail", "ls", "find", "wc", "sort",
+                  "uniq", "tr", "cut", "env", "date", "diff", "touch", "ln", "stat", "sleep",
+                  "tee", "xargs", "id", "ps", "realpath", "printf", "test", "true", "false")
 _ACTIVE_AUTH: dict | None = None
 
 
@@ -892,11 +901,9 @@ def journey_profile(profile: str, args: argparse.Namespace, repo: Path) -> dict:
     record["isolation"]["world"] = str(world)
     try:
         for part in ("home", "tmp", "bin", "logs", "repos"): (world / part).mkdir(mode=0o700)
-        commands = ["python3", "bash", "sh", "git", "curl", "tar", "gzip", "mktemp",
-                    "mkdir", "chmod", "cp", "mv", "rm", "cat", "uname", "dirname", "readlink"]
         sysbin = world / "sysbin"
         sysbin.mkdir()
-        for name in commands:
+        for name in WORLD_COMMANDS:
             found = shutil.which(name)
             if found:
                 resolved = Path(found).resolve()
@@ -1014,7 +1021,7 @@ def journey_profile(profile: str, args: argparse.Namespace, repo: Path) -> dict:
                 checks = {"real_home_empty": probe_values.get("real_home_empty") is True,
                           "nas_empty": probe_values.get("nas_empty") is True,
                           "home_write_not_host_visible": not (Path.home()/world.name).exists(), "nas_write_not_host_visible": not (Path("/home/nas")/world.name).exists(),
-                          "forbidden_env_absent": not any(k.startswith(("HERDR_", "AGENT_", "CLAUDE_CODE_")) for k in env),
+                          "forbidden_env_absent": not any(k.startswith(("HERDR_", "AGENT_", "CLAUDE_CODE_", "CAIRN_")) for k in env),
                           "herdr_absent_from_path": probe_values.get("herdr_absent_from_path") is True}
                 record["isolation"]["checks"] = [{"check": k, "passed": v} for k,v in checks.items()]
                 record["isolation"]["probe_exit"] = probe["exit"]
@@ -1295,6 +1302,7 @@ def main() -> int:
     runp.add_argument("--tag", default="latest"); runp.add_argument("--ref", default="HEAD"); runp.add_argument("--auth-root", default=f"/tmp/hearting-measure-auth-{os.getuid()}")
     runp.add_argument("--local-root", default="/tmp"); runp.add_argument("--prompt", default=DEFAULT_PROMPT); runp.add_argument("--model-free", action="store_true")
     runp.add_argument("--keep-world", choices=("always", "failure", "never"), default="failure"); runp.add_argument("--step-timeout", type=int, default=300); runp.add_argument("--task-timeout", type=int, default=600)
+    runp.add_argument("--profile", action="append", choices=tuple(PROFILES), help="run only this profile (repeatable; default: every profile)")
     args = parser.parse_args()
     if args.command == "login":
         try:
@@ -1373,7 +1381,7 @@ def main() -> int:
     signal.signal(signal.SIGINT, auth_signal)
     signal.signal(signal.SIGTERM, auth_signal)
     try:
-        for profile in ("claude-only", "all"):
+        for profile in dict.fromkeys(args.profile or ("claude-only", "all")):
             record = journey_profile(profile, args, repo)
             write_report(record, output / profile)
             if record["failures"]: overall = 1
