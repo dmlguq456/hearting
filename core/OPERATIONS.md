@@ -2224,7 +2224,7 @@ model. This bridge exists only while the direct SSH connection is live; it does
 not replace the detached-process claim below.
 
 An optional host `path_namespace` block mapping declares `target: source`
-absolute paths, for example `/home/nas: /home/nas_IIP`. For configured runs,
+absolute paths, for example `/mnt/shared: /mnt/shared_alt`. For configured runs,
 Hearting verifies the source mount and run-root identity, then exposes those
 paths only inside the run-directory creation child and detached payload's
 user and mount namespaces; the shared tmux server, probes, claims, and stop
@@ -3055,7 +3055,7 @@ The B explorer compose (a work ledger and output view with navigation) is still 
 the approved public command `fleet` opens it, and `fleet2` remains a compatibility alias.
 This command choice does not mark the Explorer's visual or interaction acceptance complete.
 For a live local resource, bounded reads of its exact process and descendants
-show GPU selection separately from use: `moving4:1 지정 · GPU 사용 전`.
+show GPU selection separately from use: `mgpu-a1:1 지정 · GPU 사용 전`.
 Observed GPU use takes precedence; selection alone creates no GPU usage
 row or memory total. The same NOW path serves every harness. Existing process
 state supplies `입출력 대기`. Observation uses targeted procfs reads within its
