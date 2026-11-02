@@ -3042,13 +3042,17 @@ class FallbackTest(unittest.TestCase):
   self.assertEqual(moved["affinity_source"],"repeat-environment-failure")
   self.assertEqual(both["affinity_source"],"handed-over-checks")
 
- def _repeat_launch(self,escalation,wrapper):
+ def _repeat_launch(self,escalation,wrapper,patches=()):
   out=io.StringIO()
   with self.dispatch_env():
    path=self.route(same_status="supported")
    route=json.loads(path.read_text())
+   plan=next(n for n in route["nodes"] if n["id"]=="plan")
+   escalation=escalation(plan["model_profile"]) if callable(escalation) else escalation
    with mock.patch("model_profile.repeat_escalation",return_value=escalation) as decide, \
-        mock.patch.object(F,"run_wrapper",side_effect=wrapper), contextlib.redirect_stdout(out):
+        mock.patch.object(F,"run_wrapper",side_effect=wrapper), contextlib.ExitStack() as stack, \
+        contextlib.redirect_stdout(out):
+    for patch in patches:stack.enter_context(patch)
     code,_=self.run_inline(path)
   decide.assert_called_once()
   self.assertEqual(decide.call_args.args[1],"plan")
@@ -3059,16 +3063,40 @@ class FallbackTest(unittest.TestCase):
   def wrapper(args,command,**_policy):
    commands.append(command)
    return SimpleNamespace(returncode=130,stdout="worker_failure=interrupted\n",stderr="")
-  escalation={"kind":"profile","from":"balanced","to":"balanced-deep","streak":2,"class":"other",
-              "attempts":["att-a","att-b"]}
-  _code,out,_route=self._repeat_launch(escalation,wrapper)
+  def escalation(sealed):
+   up="deep" if sealed!="deep" else "light"
+   return {"kind":"profile","from":sealed,"to":up,"launch_profile":up,"streak":2,"class":"other",
+           "attempts":["att-a","att-b"]}
+  import dispatch_capacity_evidence as CE
+  usage=mock.patch.object(F,"_usage_states",wraps=F._usage_states)
+  limits=mock.patch.object(CE,"active_limits",wraps=CE.active_limits)
+  with usage as usage_states,limits as active:
+   _code,out,route=self._repeat_launch(escalation,wrapper)
+  sealed=next(n for n in route["nodes"] if n["id"]=="plan")["model_profile"]
+  up="deep" if sealed!="deep" else "light"
   self.assertTrue(commands)
-  self.assertEqual(commands[0][commands[0].index("--model-profile")+1],"balanced-deep")
+  self.assertEqual(commands[0][commands[0].index("--model-profile")+1],up)
   self.assertIn("repeat_failure_streak=2\nrepeat_failure_class=other\n"
-                "repeat_escalation=profile:balanced->balanced-deep\n",out)
+                f"repeat_escalation=profile:{sealed}->{up}\n",out)
+  # The usage gates judge the profile the launch runs at, not the seal.
+  self.assertTrue(usage_states.call_args_list)
+  self.assertTrue(all(call.args[1]==up for call in usage_states.call_args_list))
+  profiles=[call.kwargs.get("profile") for call in active.call_args_list if "profile" in call.kwargs]
+  self.assertTrue(profiles and all(profile==up for profile in profiles),profiles)
+
+ def test_an_owner_inline_repeat_under_a_worker_pin_keeps_the_chain(self):
+  hops=[{"ordinal":1,"fallback_hop":"same-harness-headless","candidates":[{"child_harness":"codex"}]},
+        {"ordinal":2,"fallback_hop":"inline","reason_enum":"runtime-unavailable"}]
+  self.assertEqual(F.owner_inline_hops(hops),[{**hops[1],"reason_enum":"repeat-failure"}])
+  pinned=[hops[0],{**hops[1],"_worker_pin_skip":"codex"}]
+  out=io.StringIO()
+  with contextlib.redirect_stdout(out):
+   self.assertEqual(F.owner_inline_hops(pinned),pinned)
+  self.assertEqual(out.getvalue(),"repeat_escalation_owner_inline=unavailable-chain-kept\n")
 
  def test_a_repeat_past_the_last_profile_takes_the_existing_inline_hop(self):
-  escalation={"kind":"owner-inline","streak":4,"class":"other","attempts":["a","b","c","d"]}
+  escalation=lambda sealed:{"kind":"owner-inline","from":sealed,"launch_profile":sealed,"streak":4,
+                            "class":"scope","attempts":["a","b","c","d"]}
   code,out,route=self._repeat_launch(escalation,AssertionError("no worker for an owner-inline repeat"))
   plan=next(n for n in route["nodes"] if n["id"]=="plan")
   if not any(hop.get("fallback_hop")=="inline" for hop in plan["fallback_hops"]):

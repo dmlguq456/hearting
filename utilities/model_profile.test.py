@@ -783,16 +783,21 @@ class RepeatEscalationTest(unittest.TestCase):
     def test_each_repeat_moves_one_profile_up_and_then_to_the_owner(self):
         self.assertIsNone(self.decide("execute", 0))
         self.assertIsNone(self.decide("execute", 1))
-        self.assertEqual({k: v for k, v in self.decide("execute", 2).items() if k in {"kind", "from", "to"}},
-                         {"kind": "profile", "from": "balanced", "to": "balanced-deep"})
+        self.assertEqual({k: v for k, v in self.decide("execute", 2).items()
+                          if k in {"kind", "from", "to", "launch_profile"}},
+                         {"kind": "profile", "from": "balanced", "to": "balanced-deep",
+                          "launch_profile": "balanced-deep"})
         self.assertEqual(self.decide("execute", 3)["to"], "deep")
-        self.assertEqual(self.decide("execute", 4)["kind"], "owner-inline")
+        past = self.decide("execute", 4)
+        # A surface that cannot hand the stage over still runs at the top of the ladder.
+        self.assertEqual((past["kind"], past["launch_profile"]), ("owner-inline", "deep"))
         self.assertEqual(self.decide("execute", 2, "judge")["to"], "balanced-deep")
 
     def test_an_environment_repeat_moves_the_place_not_the_model(self):
         self.assertEqual(self.decide("execute", 2, "environment")["kind"], "place")
         self.assertEqual(self.decide("execute", 2, "host-resource")["kind"], "place")
         self.assertEqual(self.decide("execute", 3, "environment")["kind"], "owner-inline")
+        self.assertEqual(self.decide("execute", 3, "environment")["launch_profile"], "balanced")
 
     def test_a_scope_or_input_repeat_goes_to_the_owner(self):
         for cls in ("scope", "input"):
@@ -802,6 +807,11 @@ class RepeatEscalationTest(unittest.TestCase):
         self.assertIsNone(self.decide("impl-review", 3))
         self.assertIsNone(self.decide("plan", 3))
         self.assertIsNone(PROFILE.repeat_escalation(self.ROUTE, "missing", "/tmp/jobs.log"))
+        framed = {"route_id": "rt-x", "nodes": [{"id": "frame", "kind": "map-worker", "unit": "plan/frame",
+                                                 "worker_type": "frame", "model_profile": "balanced"}]}
+        repeat = {"streak": 2, "class": "input", "signature": ("own", "input", ()), "attempts": ["a", "b"]}
+        with mock.patch("worker_bootstrap.repeat_failure", return_value=repeat):
+            self.assertIsNone(PROFILE.repeat_escalation(framed, "frame", "/tmp/jobs.log"))
         grouped = {"route_id": "rt-x", "nodes": [{**self.ROUTE["nodes"][0], "parallel_group": "execute"}]}
         repeat = {"streak": 3, "class": "other", "signature": ("FAIL", "other", ()), "attempts": ["a", "b", "c"]}
         with mock.patch("worker_bootstrap.repeat_failure", return_value=repeat):
@@ -814,6 +824,11 @@ class RepeatEscalationTest(unittest.TestCase):
                 self.ROUTE, "execute", "/tmp/jobs.log", sealed="balanced", profile=profile)
             self.assertTrue(verified("balanced-deep"))
             self.assertFalse(verified("deep"))
+            self.assertFalse(verified("balanced"))
+        past = {"streak": 4, "class": "other", "signature": ("own", "other", ()), "attempts": list("abcd")}
+        with mock.patch("worker_bootstrap.repeat_failure", return_value=past):
+            self.assertTrue(PROFILE.escalated_profile_verified(
+                self.ROUTE, "execute", "/tmp/jobs.log", sealed="balanced", profile="deep"))
         with mock.patch("worker_bootstrap.repeat_failure", side_effect=OSError("unreadable")):
             self.assertFalse(PROFILE.escalated_profile_verified(
                 self.ROUTE, "execute", "/tmp/jobs.log", sealed="balanced", profile="balanced-deep"))

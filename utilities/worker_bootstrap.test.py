@@ -1477,15 +1477,20 @@ class RepeatFailureTest(unittest.TestCase):
     setUp = PriorRoundContextTest.setUp
     row = PriorRoundContextTest.row
 
-    def blocked(self, attempt, blocker):
+    def blocked(self, attempt, blocker, unmet=None, **extra):
         log = self.root / f"{attempt}.log"
         self.blockers[str(log)] = {"verdict": "BLOCKED", "blocker": blocker}
-        self.row("execute", attempt, "dead-worker-blocked", "blocked", log_file=str(log))
+        if unmet is not None:
+            self.unmet[attempt] = frozenset(unmet)
+        self.row("execute", attempt, "dead-worker-blocked", "blocked", log_file=str(log), **extra)
 
     def census(self):
         self.blockers = getattr(self, "blockers", {})
+        self.unmet = getattr(self, "unmet", {})
         with mock.patch("codex_dispatch_terminal.inspect_terminal_log",
-                        side_effect=lambda path: self.blockers.get(str(path))):
+                        side_effect=lambda path: self.blockers.get(str(path))), \
+                mock.patch("route_authority._blocked_round_items",
+                           side_effect=lambda route, meta: self.unmet.get(meta.get("attempt_id"))):
             return W.repeat_failure(self.route, "execute", self.jobs)
 
     def test_blocker_lines_fall_into_the_fixed_classes(self):
@@ -1520,10 +1525,34 @@ class RepeatFailureTest(unittest.TestCase):
                          (2, "environment", ["att-execute-1", "att-execute-2"]))
         self.blocked("att-execute-3", "the plan contradicts itself")
         self.assertEqual((self.census()["streak"], self.census()["class"]), (1, "other"))
-        # A pass of the stage itself and a transport death are not rounds.
-        self.row("execute", "att-execute-4", "completed-marker", "pass")
-        self.row("execute", "att-execute-5", "dead-timeout", "runtime")
-        self.blocked("att-execute-6", "the plan still contradicts itself")
+        # A transport death is not a round; a pass of the stage itself ends its own run.
+        self.row("execute", "att-execute-4", "dead-timeout", "runtime")
+        self.blocked("att-execute-5", "the plan still contradicts itself")
+        self.assertEqual(self.census()["streak"], 2)
+        self.row("execute", "att-execute-6", "completed-marker", "pass")
+        self.assertIsNone(self.census())
+        self.blocked("att-execute-7", "the plan contradicts itself again")
+        self.assertEqual(self.census()["streak"], 1)
+
+    def test_unmet_items_follow_the_blocked_progress_rule(self):
+        self.blockers, self.unmet = {}, {}
+        self.blocked("att-execute-1", "remains unfinished", unmet={"d1"})
+        self.blocked("att-execute-2", "remains unfinished", unmet={"d1", "d2"})
+        self.assertEqual(self.census()["streak"], 2)        # worse is the same failure
+        self.blocked("att-execute-3", "remains unfinished", unmet={"d1"})
+        self.assertEqual(self.census()["streak"], 1)        # a strict subset is progress
+        self.blocked("att-execute-4", "remains unfinished", unmet={"d1"})
+        self.assertEqual(self.census()["streak"], 2)
+
+    def test_one_sub_session_chain_is_one_round(self):
+        self.blockers = {}
+        for attempt in ("att-slice-a", "att-slice-b"):
+            self.blocked(attempt, "needs a file outside its fixed_files", session_chain_id="chain-1",
+                         subsession_id=attempt, subsession_mode="parallel")
+        repeat = self.census()
+        self.assertEqual((repeat["streak"], repeat["class"], repeat["attempts"]), (1, "scope", ["att-slice-b"]))
+        self.blocked("att-gap", "needs a file outside its fixed_files", session_chain_id="chain-2",
+                     subsession_id="att-gap", subsession_mode="serial")
         self.assertEqual(self.census()["streak"], 2)
 
     def test_blocking_verdicts_of_a_judging_stage_repeat_and_its_pass_ends_the_run(self):
@@ -1536,6 +1565,19 @@ class RepeatFailureTest(unittest.TestCase):
         self.assertEqual((repeat["streak"], repeat["class"], repeat["signature"]),
                          (2, "judge", ("judge", "impl-review")))
         self.row("impl-review", "att-review-3", "completed-marker", "pass")
+        self.assertIsNone(self.census())
+
+    def test_a_test_after_the_review_repeats_and_a_disposed_review_ends_the_run(self):
+        self.blockers = {}
+        self.row("impl-review", "att-review-1", "completed-marker", "pass")
+        self.row("test", "att-test-1", "dead-worker-fail", "fail")
+        self.row("execute", "att-execute-1", "completed-marker", "pass")
+        self.row("test", "att-test-2", "dead-worker-fail", "fail")
+        repeat = self.census()
+        self.assertEqual((repeat["streak"], repeat["signature"]), (2, ("judge", "test")))
+        self.row("impl-review", "att-review-2", "completed-review-blocking", "fail")
+        self.row("impl-review", "att-review-3", "completed-marker", "fail",
+                 review_gate_closure="owner-closure", review_independence="owner-overridden")
         self.assertIsNone(self.census())
 
 

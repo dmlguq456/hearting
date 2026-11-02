@@ -2871,6 +2871,13 @@ def retry_predecessor(prior_rows, *, jobs=None, task=None):
     return ""
 
 
+def unmet_progress(previous, current) -> bool:
+    """Whether a BLOCKED round progressed: its unmet `done_when` items are a strict subset of the
+    previous round's. Unknown items on either side are no progress. `blocked_progress` and the
+    repeat-failure count (`worker_bootstrap.repeat_failure`) read this one rule."""
+    return previous is not None and current is not None and current < previous
+
+
 def _blocked_round_items(route, metadata):
     """The unmet `done_when` ids a BLOCKED round left, from the items file beside its artifact;
     None when that round's items cannot be judged (no plan items, no readable file, or a file
@@ -2916,7 +2923,7 @@ def blocked_progress(route, rows, *, worker_type="test") -> int:
     streak, previous = 0, None
     for metadata in tail:
         current = _blocked_round_items(route, metadata) if route.get("route_plan") is not None else None
-        streak = 1 if previous is not None and current is not None and current < previous else streak + 1
+        streak = 1 if unmet_progress(previous, current) else streak + 1
         previous = current
     return streak
 

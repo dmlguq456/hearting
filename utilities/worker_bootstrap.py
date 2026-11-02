@@ -1322,7 +1322,8 @@ _BLOCKER_CLASSES = (
         r"|not (?:in|within) (?:the )?scope", re.I)),
     ("input", re.compile(
         r"missing (?:input|artifact|plan|brief|handoff)|handoff (?:was |is )?(?:missing|absent)"
-        r"|predecessor|upstream (?:stage|output|marker)", re.I)),
+        r"|(?:predecessor|upstream) (?:stage|output|marker|artifact)s? (?:is |are )?"
+        r"(?:missing|absent|not (?:ready|published))", re.I)),
     ("test-failure", re.compile(r"\btests? (?:fail|failed|failing)\b|assertion|\bFAILED\b|regression", re.I)),
 )
 PLACE_CLASSES = frozenset({"environment", "host-resource"})
@@ -1336,58 +1337,99 @@ def blocker_class(text) -> str:
     return next((name for name, pattern in _BLOCKER_CLASSES if pattern.search(text)), "other")
 
 
+def _own_round_signature(route, meta, result) -> dict:
+    """One failed round of a producing stage: its blocker class and unmet leg items."""
+    unmet = None
+    if result == "BLOCKED":
+        try:
+            import route_authority
+            unmet = route_authority._blocked_round_items(route, meta)
+        except Exception:  # unjudgeable items leave the class to sign the round
+            unmet = None
+    return {"kind": "own", "cls": blocker_class(attempt_outcome(route, meta).get("blocker", "")),
+            "unmet": unmet, "attempt": meta.get("attempt_id", "")}
+
+
 def repeat_failure(route, node_id, jobs, rows=None) -> dict | None:
     """How many of a producing stage's latest settled rounds failed the same way.
 
-    A round is one of this node's own settled attempts (full stage or sub-session) that ended FAIL
-    or BLOCKED, signed (verdict, blocker class, unmet leg items), or one blocking verdict of a
-    round-capped stage that judges it, signed by that stage. A judging PASS ends the run; a pass of
-    the node itself, a transport death and a verdict-less judge are not rounds. Returns
-    ``{"streak", "signature", "class", "attempts"}`` for the newest run, None without one."""
+    A round is one settled attempt of the stage that ended FAIL or BLOCKED -- a sub-session chain
+    (serial sessions or parallel slices sharing ``session_chain_id``) is one round, signed by its
+    latest failed session -- or one open blocking verdict of a stage that judges it
+    (``judging_stages``, ``open_blocking_verdict``). Two rounds are the same failure when both
+    come from the same judging stage, or both are the stage's own with the same blocker class and
+    no progress on the unmet leg items (``route_authority.unmet_progress``, the rule
+    ``blocked_progress`` reads). A judging PASS or a review the owner disposed ends the run, the
+    stage's own pass ends a run of its own failures, and a transport death or a verdict-less judge
+    is not a round. Returns ``{"streak", "signature", "class", "attempts"}``, None without a run."""
     import review_round_cap as ROUND
-    from dispatch_attempt_policy import OPEN_STATES, readable_result
+    import route_authority
+    from dispatch_attempt_policy import OPEN_STATES, readable_result, verdict_pass
     rows = _lineage_rows(route, jobs) if rows is None else rows
-    judges = {n["id"]: n.get("worker_type") or ("review" if n.get("kind") == "review-worker" else "test")
-              for n in _route_nodes(route)
-              if node_id in (n.get("depends_on") or ()) and ROUND.is_round_capped_node(n)}
     events = []
-    candidates = [(status, meta, node_id) for status, meta in rows.get(node_id, ())]
-    candidates += [(status, meta, judge) for judge in judges for status, meta in rows.get(judge, ())]
-    candidates.sort(key=lambda row: row[1].get("_registry_line", -1))
-    for status, meta, owner in candidates:
+    chains: dict[str, list] = {}
+    for status, meta in rows.get(node_id, ()):
+        line = meta.get("_registry_line", -1)
+        if meta.get("session_chain_id"):
+            chains.setdefault(meta["session_chain_id"], []).append((line, status, meta))
+            continue
         if status in OPEN_STATES:
             continue
-        if owner == node_id:
-            result = readable_result(meta)
-            if result not in {"FAIL", "BLOCKED"}:
+        result = readable_result(meta)
+        if result in {"FAIL", "BLOCKED"}:
+            events.append((line, _own_round_signature(route, meta, result)))
+        elif status == "done" and verdict_pass(meta):
+            events.append((line, {"kind": "pass"}))
+    for sessions in chains.values():
+        if any(status in OPEN_STATES for _line, status, _meta in sessions):
+            continue  # a chain still running is not a settled round
+        sessions.sort(key=lambda item: item[0])
+        failed = [(line, meta, readable_result(meta)) for line, _status, meta in sessions
+                  if readable_result(meta) in {"FAIL", "BLOCKED"}]
+        last_line = sessions[-1][0]
+        if failed:
+            _line, meta, result = failed[-1]
+            events.append((last_line, _own_round_signature(route, meta, result)))
+        elif any(status == "done" and verdict_pass(meta) for _l, status, meta in sessions):
+            events.append((last_line, {"kind": "pass"}))
+    for judge in judging_stages(route, node_id):
+        worker = judge.get("worker_type") or ("review" if judge.get("kind") == "review-worker" else "test")
+        for status, meta in rows.get(judge["id"], ()):
+            if ROUND.classify_round_row(status, meta, worker_type=meta.get("worker_type") or worker) != "verdict":
                 continue
-            blocker = attempt_outcome(route, meta).get("blocker", "")
-            unmet = None
-            if result == "BLOCKED":
-                try:
-                    import route_authority
-                    unmet = route_authority._blocked_round_items(route, meta)
-                except Exception:  # unjudgeable items leave the class to sign the round
-                    unmet = None
-            cls = blocker_class(blocker)
-            events.append(((result, cls, tuple(sorted(unmet or ()))), cls, meta.get("attempt_id", "")))
-        else:
-            kind = ROUND.classify_round_row(status, meta, worker_type=meta.get("worker_type") or judges[owner])
-            if kind != "verdict":
-                continue
-            if not ROUND.last_verdict_blocking([(status, meta)], judges[owner]):
-                events.append((None, None, meta.get("attempt_id", "")))
-                continue
-            events.append((("judge", owner), "judge", meta.get("attempt_id", "")))
-    if not events or events[-1][0] is None:
-        return None
-    signature, cls = events[-1][0], events[-1][1]
-    attempts = []
-    for event_signature, _cls, attempt in reversed(events):
-        if event_signature != signature:
+            open_list = ROUND.open_blocking_verdict([(status, meta)], worker) is not None
+            events.append((meta.get("_registry_line", -1),
+                           {"kind": "judge", "judge": judge["id"], "attempt": meta.get("attempt_id", "")}
+                           if open_list else {"kind": "break"}))
+    events.sort(key=lambda item: item[0])
+
+    def same(earlier, later):
+        if earlier["kind"] != later["kind"]:
+            return False
+        if earlier["kind"] == "judge":
+            return earlier["judge"] == later["judge"]
+        return (earlier["cls"] == later["cls"]
+                and not route_authority.unmet_progress(earlier["unmet"], later["unmet"]))
+
+    run: list[dict] = []
+    for _line, event in reversed(events):
+        if event["kind"] == "break":
             break
-        attempts.append(attempt)
-    return {"streak": len(attempts), "signature": signature, "class": cls, "attempts": attempts[::-1]}
+        if event["kind"] == "pass":
+            if not run or run[0]["kind"] == "own":
+                break
+            continue  # the stage passing its own checks is no news to a judge that keeps failing it
+        if run and not same(event, run[-1]):
+            break
+        run.append(event)
+    if not run:
+        return None
+    latest = run[0]
+    signature = (("judge", latest["judge"]) if latest["kind"] == "judge"
+                 else ("own", latest["cls"], tuple(sorted(latest["unmet"] or ()))))
+    return {"streak": len(run), "signature": signature,
+            "class": "judge" if latest["kind"] == "judge" else latest["cls"],
+            "attempts": [event["attempt"] for event in reversed(run)]}
 
 
 def plan_leg_prompt(route, node_id=None, primary_report=None) -> str:

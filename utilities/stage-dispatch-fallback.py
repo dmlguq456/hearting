@@ -387,7 +387,23 @@ def repeat_escalation_for(route: dict, node: dict, jobs) -> dict | None:
         print("repeat_escalation=" + (
             f"profile:{escalation['from']}->{escalation['to']}" if escalation["kind"] == "profile"
             else "place:unsandboxed" if escalation["kind"] == "place" else "owner-inline"))
+        if escalation["kind"] != "profile" and escalation["launch_profile"] != escalation["from"]:
+            print(f"repeat_escalation_profile={escalation['from']}->{escalation['launch_profile']}")
     return escalation
+
+
+def owner_inline_hops(hops: list[dict]) -> list[dict]:
+    """The sealed chain's own inline hop for an owner-inline repeat, or the chain unchanged.
+
+    When a worker pin keeps that hop off the owner's harness (``_worker_pin_skip``) the owner
+    cannot take the stage here; the chain stays as it is (at the escalated profile) instead of
+    ending in a pin refusal the pin did not cause."""
+    inline = [dict(hop, reason_enum="repeat-failure") for hop in hops
+              if hop.get("fallback_hop") == "inline" and not hop.get("_worker_pin_skip")]
+    if inline:
+        return inline
+    print("repeat_escalation_owner_inline=unavailable-chain-kept")
+    return hops
 
 
 def unsandboxed_harness(harness) -> bool:
@@ -2456,7 +2472,10 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
     # The same failure settling twice on a producing stage changes what runs
     # next: a stronger profile, a harness without an OS sandbox, or the owner.
     escalation = repeat_escalation_for(route, node, args.jobs)
-    args.profile_override = escalation["to"] if escalation and escalation["kind"] == "profile" else None
+    args.profile_override = (escalation["launch_profile"] if escalation
+                             and escalation["launch_profile"] != node.get("model_profile") else None)
+    # Usage gates and allocation read the profile this launch actually runs at.
+    launch_node = {**node, "model_profile": args.profile_override} if args.profile_override else node
 
     prior_failures = registry_failures(args.jobs, route["route_id"], node["id"])
     prior_rows = registry_rows(args.jobs, route["route_id"], node["id"])
@@ -2474,16 +2493,13 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
     candidate_outcomes = CandidateOutcomes()
     try:
         fallback_hops, allocation_context = ordered_fallback_hops(
-            route, node, args.jobs, parent_identity=parent_identity, recheck=args.action != "dry-run",
+            route, launch_node, args.jobs, parent_identity=parent_identity, recheck=args.action != "dry-run",
             handed_over=handed_over_count(route, node, args.route),
             **({"prefer_unsandboxed": "repeat-environment-failure"}
                if escalation and escalation["kind"] == "place" else {}),
         )
         if escalation and escalation["kind"] == "owner-inline":
-            # The existing last hop of the sealed chain: the owner runs the stage itself.
-            inline_hops = [dict(hop, reason_enum="repeat-failure") for hop in fallback_hops
-                           if hop.get("fallback_hop") == "inline"]
-            fallback_hops = inline_hops or fallback_hops
+            fallback_hops = owner_inline_hops(fallback_hops)
     except DISPATCH_NODE.DispatchNodeError as exc:
         return fail(exc.reason, 65, child_spawned="0", **exc.fields)
     if allocation_context is not None:
@@ -2547,7 +2563,7 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
                 # Re-read after an early failure too: a whole-account quota
                 # cannot be cured by changing models later in this same chain.
                 from dispatch_capacity_evidence import active_limits, model_hold
-                quota = active_limits(args.jobs, profile=node.get("model_profile"),
+                quota = active_limits(args.jobs, profile=launch_node.get("model_profile"),
                                       recheck=row.get("child_harness") == "claude"
                                       and getattr(args, "action", "start") != "dry-run").get(row.get("child_harness"))
                 if quota:
@@ -2556,7 +2572,7 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
                       and row.get("child_harness") != sealed_pin_harness(route, worker_type="stage")):
                     # Provider/model eligibility also binds a route without an
                     # allocation policy, whose chain is the compiled order.
-                    hold = model_hold(row.get("child_harness"), node.get("model_profile"))
+                    hold = model_hold(row.get("child_harness"), launch_node.get("model_profile"))
                     if hold:
                         row = {**row, "_allocation_skip": f"usage-{hold}"}
                 if row.get("_allocation_skip"):

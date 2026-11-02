@@ -350,25 +350,32 @@ def repeat_escalation(route, node_id, jobs) -> dict | None:
     import worker_bootstrap as WB
     node = next((n for n in (route or {}).get("nodes") or ()
                  if isinstance(n, dict) and n.get("id") == node_id), None)
-    # A parallel or replica leg keeps the profile its batch reservation sealed.
+    # A parallel or replica leg keeps the profile its batch reservation sealed; a frame leg keeps
+    # its own frame rule.
     if (node is None or WB.judges_leg(node) or ROUND.is_round_capped_node(node) or not jobs
-            or node.get("parallel_group") or node.get("replica_group")):
+            or node.get("parallel_group") or node.get("replica_group")
+            or node.get("worker_type") == "frame" or str(node.get("unit") or "").startswith("plan/frame")):
         return None
     repeat = WB.repeat_failure(route, node_id, jobs)
     if not repeat or repeat["streak"] < 2:
         return None
-    facts = {key: repeat[key] for key in ("streak", "class", "attempts")}
-    if repeat["class"] in WB.PLACE_CLASSES:
-        return {"kind": "place" if repeat["streak"] == 2 else "owner-inline", **facts}
-    if repeat["class"] in WB.OWNER_CLASSES:
-        return {"kind": "owner-inline", **facts}
     sealed = node.get("model_profile")
+    # `launch_profile` is what a worker launch of this stage runs at; it differs from the seal
+    # only by climbing the ladder, so a surface that cannot hand the stage to the owner (a
+    # sub-session, a pinned chain) still runs at the top of the ladder.
+    facts = {"from": sealed, "launch_profile": sealed,
+             **{key: repeat[key] for key in ("streak", "class", "attempts")}}
+    if repeat["class"] in WB.PLACE_CLASSES:
+        return {**facts, "kind": "place" if repeat["streak"] == 2 else "owner-inline"}
+    if repeat["class"] in WB.OWNER_CLASSES:
+        return {**facts, "kind": "owner-inline"}
     if sealed not in ESCALATION_ORDER:
         return None
     index = ESCALATION_ORDER.index(sealed) + repeat["streak"] - 1
     if index < len(ESCALATION_ORDER):
-        return {"kind": "profile", "from": sealed, "to": ESCALATION_ORDER[index], **facts}
-    return {"kind": "owner-inline", **facts}
+        return {**facts, "kind": "profile", "to": ESCALATION_ORDER[index],
+                "launch_profile": ESCALATION_ORDER[index]}
+    return {**facts, "kind": "owner-inline", "launch_profile": ESCALATION_ORDER[-1]}
 
 
 def escalated_profile_verified(route, node_id, jobs, *, sealed, profile) -> bool:
@@ -377,8 +384,8 @@ def escalated_profile_verified(route, node_id, jobs, *, sealed, profile) -> bool
         escalation = repeat_escalation(route, node_id, jobs)
     except Exception:  # an unreadable record grants no escalation; the sealed profile stays the check
         return False
-    return bool(escalation and escalation["kind"] == "profile"
-                and escalation["from"] == sealed and escalation["to"] == profile)
+    return bool(escalation and escalation["from"] == sealed and sealed != profile
+                and escalation["launch_profile"] == profile)
 
 
 def resolve_profile(adapter: str, config_path: str | Path, profile: str) -> dict[str, str]:
