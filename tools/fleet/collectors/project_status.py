@@ -1,10 +1,12 @@
-"""A project's status document (``STATUS.md`` / ``현황.md``) for Fleet's per-project line.
+"""A project's status document (``현황.md`` / ``STATUS.md``) for Fleet's per-project line.
 
 Read-only and best-effort. The location and shape are the convention in
-``core/ARTIFACT_META.md`` ("The project status document"): the file sits directly in a
-cycle's ``artifacts/`` under the project's artifact root, and the most recently changed
-one is the project's current status. Cairn pins the same file at the top of the project.
-Files written before the convention under a legacy ``research/<dir>/`` folder are read too.
+``core/ARTIFACT_META.md`` ("The project status document"): ``현황.md`` (else ``STATUS.md``)
+directly in a cycle's ``artifacts/``, which the producer makes that cycle's primary, so
+Cairn's status row reads the same file. Names match NFC-normalized and case-folded, as
+the producer and Cairn match them. The most recently changed one is the project's current
+status. A file at the cycle root is never sealed and is not read; the legacy flat folder
+``research/<dir>/`` is read too.
 
 Cost: the artifact root comes from file reads only (no git process), and one scan per
 root runs at most every ``INTERVAL`` seconds, over campaigns changed in the last
@@ -14,8 +16,9 @@ cached. Nothing here writes, gates, or asks anything.
 import os
 import re
 import time
+import unicodedata
 
-STATUS_NAMES = ("STATUS.md", "현황.md")
+STATUS_NAMES = ("현황.md", "status.md")    # preference order, NFC and case-folded
 RECENT_DAYS = 14
 INTERVAL = 60.0           # seconds between scans of one artifact root
 SCAN_BUDGET = 3.0         # seconds one scan may spend before it stops (the rest waits a pass)
@@ -25,12 +28,12 @@ _IMMUTABLE = ("/.harness/bundles/", "/hearting/releases/")
 _ROOTS = {}               # cwd -> (resolved_at, root or None)
 _SCANS = {}               # root -> (scanned_at, record or None)
 _CYCLES = {}              # campaign dir -> (dir mtime, cycle dirs)
-_ARTIFACTS = {}           # cycle dir -> (artifacts mtime, status paths)
+_LISTED = {}              # folder -> (folder mtime, its status document path or None)
 _DOCS = {}                # path -> (mtime, size, parsed)
 
 
 def clear_cache():
-    for cache in (_ROOTS, _SCANS, _CYCLES, _ARTIFACTS, _DOCS):
+    for cache in (_ROOTS, _SCANS, _CYCLES, _LISTED, _DOCS):
         cache.clear()
 
 
@@ -142,27 +145,41 @@ def _subdirs(path):
         return []
 
 
-def _status_files(folder):
-    found = []
-    for name in STATUS_NAMES:
-        path = os.path.join(folder, name)
-        if os.path.isfile(path):
-            found.append(path)
-    return found
+def _status_file(folder):
+    """The status document directly in ``folder``: ``현황.md`` before ``STATUS.md``, any case or
+    Unicode form. One listing per change of the folder (a new or renamed file changes its mtime)."""
+    stamp = _mtime(folder)
+    if stamp is None:
+        return None
+    known = _LISTED.get(folder)
+    if known is None or known[0] != stamp:
+        names = {}
+        try:
+            with os.scandir(folder) as entries:
+                for entry in entries:
+                    key = unicodedata.normalize("NFC", entry.name).casefold()
+                    if key in STATUS_NAMES and entry.is_file():
+                        names.setdefault(key, entry.path)
+        except OSError:
+            names = {}
+        known = (stamp, next((names[key] for key in STATUS_NAMES if key in names), None))
+        _LISTED[folder] = known
+    return known[1]
 
 
 def find_documents(root, now=None, budget=SCAN_BUDGET):
     """Status documents under ``root`` the convention names, plus the legacy research copies.
 
     Campaigns changed in the last ``RECENT_DAYS`` days are read newest first, one stat per
-    cycle; past ``budget`` seconds the rest waits for the next scan.
+    cycle's ``artifacts/`` (listed again only when it changed); past ``budget`` seconds the
+    rest waits for the next scan.
     """
     now = time.time() if now is None else now
     since = now - RECENT_DAYS * 86400
     started = time.monotonic()
     found = []
     for folder in _subdirs(os.path.join(root, "research")):
-        found.extend(_status_files(folder))
+        found.append(_status_file(folder))
     campaigns = []
     for campaign in _subdirs(os.path.join(root, "campaigns")):
         mtime = _mtime(campaign)
@@ -175,17 +192,9 @@ def find_documents(root, now=None, budget=SCAN_BUDGET):
             _CYCLES[campaign] = cached
         for cycle in cached[1]:
             if time.monotonic() - started > budget:
-                return found
-            artifacts = os.path.join(cycle, "artifacts")
-            stamp = _mtime(artifacts)
-            if stamp is None:
-                continue
-            known = _ARTIFACTS.get(cycle)
-            if known is None or known[0] != stamp:
-                known = (stamp, _status_files(artifacts))
-                _ARTIFACTS[cycle] = known
-            found.extend(known[1])
-    return found
+                return [path for path in found if path]
+            found.append(_status_file(os.path.join(cycle, "artifacts")))
+    return [path for path in found if path]
 
 
 # -- reading one document ---------------------------------------------------------------------

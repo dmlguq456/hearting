@@ -129,7 +129,7 @@ cap is reached, the writer replaces a proposed new code by `ETC`. The writer lim
 label to 40 and a note to 120 characters (stricter than the contract, which only needs
 strings). Without a project file the default display name is the project folder name.
 
-### `STATUS.md` / `현황.md` — the project status document
+### `현황.md` / `STATUS.md` — the project status document
 
 One short page a person reads first to see where a project stands. Fleet puts its one
 line on the project's OVERVIEW rule and its parts at the top of the project page; Cairn
@@ -137,13 +137,18 @@ pins it at the top of the project. Writing one is optional and nothing waits on 
 without one, Fleet builds the line from the routes, questions and results it already
 shows.
 
-- **Where.** Directly in a cycle's `artifacts/`, as that cycle's primary artifact:
-  `campaigns/<campaign-locator>/<cycle-locator>/artifacts/STATUS.md` (or `현황.md`). A
-  campaign keeps one and edits it in place (a finalized cycle still takes writes,
-  D-123). The most recently modified one in the artifact root is the project's current
-  status. Copies under `_internal/` or `versions/`, or deeper inside `artifacts/`, are
-  not read. A file written before this convention at `research/<folder>/STATUS.md` is
-  still read.
+- **Where.** `campaigns/<campaign-locator>/<cycle-locator>/artifacts/현황.md` (or
+  `STATUS.md`), directly under the cycle's `artifacts/`. When `finalize` picks the
+  primary itself, this file is the cycle's primary (`현황.md` first, then `STATUS.md`,
+  after the official spec PRD; an explicit `--primary` still wins), and its row carries
+  `audience: "user"`, so Cairn's status row and Fleet's project line read the same file
+  (`core/CORE.md` §3, primary selection). Names match NFC-normalized and case-folded. A
+  file at the cycle root (`campaigns/<campaign>/<cycle>/현황.md`) makes the seal fail
+  with `file-outside-artifacts` and is not read; copies under `_internal/` or
+  `versions/`, or deeper inside `artifacts/`, are not read either. A campaign keeps one
+  and edits it in place (a finalized cycle still takes writes, D-123). The most recently
+  modified one in the artifact root is the project's current status. Fleet also keeps
+  reading the legacy flat folder, `research/<folder>/현황.md`.
 - **Shape.** Markdown in the reader's language. Only the parts below are read; other
   sections are free.
 

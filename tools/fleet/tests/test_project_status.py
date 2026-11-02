@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -167,6 +168,27 @@ class FindTest(unittest.TestCase):
         _touch(self.root / "research" / "2026-10-01_old" / "STATUS.md", STATUS_EN, self.now)
         self.assertEqual(project_status.newest(str(self.root), self.now)["relative"],
                          "research/2026-10-01_old/STATUS.md")
+
+    def test_names_match_the_producer_rule_and_hangul_name_comes_first(self):
+        campaign = self.root / "campaigns" / "2026-11-02_v4"
+        both = campaign / "2026-11-02_both" / "artifacts"
+        _touch(both / "STATUS.md", STATUS_EN, self.now)
+        _touch(both / "현황.md", STATUS_KO, self.now - 600)              # the cycle's primary, though older
+        found = project_status.find_documents(str(self.root), self.now)
+        self.assertEqual([Path(path).name for path in found], ["현황.md"])
+        project_status.clear_cache()
+        lower = campaign / "2026-11-02_lower" / "artifacts" / "status.md"
+        decomposed = campaign / "2026-11-02_nfd" / "artifacts" / unicodedata.normalize("NFD", "현황.md")
+        at_root = campaign / "2026-11-02_root" / "현황.md"                   # never sealed: not read
+        for path in (lower, decomposed, at_root):
+            _touch(path, STATUS_EN, self.now)
+        found = sorted(os.path.relpath(path, self.root) for path in project_status.find_documents(
+            str(self.root), self.now))
+        self.assertEqual(found, sorted([
+            "campaigns/2026-11-02_v4/2026-11-02_both/artifacts/현황.md",
+            "campaigns/2026-11-02_v4/2026-11-02_lower/artifacts/status.md",
+            os.path.join("campaigns/2026-11-02_v4/2026-11-02_nfd/artifacts",
+                         unicodedata.normalize("NFD", "현황.md"))]))
 
     def test_collect_scans_one_root_once_per_interval(self):
         doc = self.root / "research" / "2026-11-02_x" / "STATUS.md"
