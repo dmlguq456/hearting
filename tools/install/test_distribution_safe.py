@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import ExitStack
+import contextlib
 import hashlib
 import io
 import json
@@ -960,7 +961,8 @@ class ReleasePycachePruneTest(unittest.TestCase):
         cache.mkdir(parents=True)
         (cache / "old.pyc").write_bytes(b"orphan")
 
-        def prove_use(_release, _stable, route_snapshot, _registry_snapshot=None):
+        def prove_use(_release, _stable, route_snapshot, _registry_snapshot=None,
+                      _attestation_snapshot=None):
             if route_snapshot[1]:
                 return True, route_snapshot[1]
             return True, "open-attempt:att-live"
@@ -1026,6 +1028,140 @@ class ReleasePycachePruneTest(unittest.TestCase):
             distribution._cleanup_releases(set())
         self.assertTrue(old.is_dir())
         self.assertTrue((cache / "old.pyc").is_file())
+
+
+class AttestedInputRetentionTest(unittest.TestCase):
+    """A release named by a live smoke-attestation reference is not pruned."""
+
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.share = self.root / "share" / "hearting"
+        self.releases = self.share / "releases"
+        self.releases.mkdir(parents=True)
+        self.state = self.root / "state"
+        self.attestations = self.root / "attestations"
+        self.attestations.mkdir()
+        (self.root / "home").mkdir()
+        self.refs = self.state / "dispatch" / "attestation-refs.jsonl"
+        environment = {
+            "HARNESS_DATA_ROOT": str(self.share),
+            "HARNESS_STATE_ROOT": str(self.state),
+            "HOME": str(self.root / "home"),
+        }
+        self.environment = mock.patch.dict(os.environ, environment)
+        self.environment.start()
+        self.addCleanup(self.environment.stop)
+
+    def _release(self, name: str, timestamp: int) -> Path:
+        release = self.releases / name
+        (release / "tools").mkdir(parents=True)
+        (release / "tools" / "probe.py").write_text("VALUE = 42\n", encoding="utf-8")
+        os.utime(release, (timestamp, timestamp))
+        return release
+
+    def _attestation(self, name: str = "att.json") -> Path:
+        path = self.attestations / name
+        path.write_text('{"schema_version": 1}\n', encoding="utf-8")
+        return path
+
+    def _record(self, attestation: Path, inputs, **overrides) -> None:
+        row = {
+            "schema_version": 1,
+            "attestation": str(attestation.resolve()),
+            "inputs": [str(Path(item).resolve()) for item in inputs],
+            "recorded_at": "2026-11-02T00:00:00+00:00",
+        }
+        row.update(overrides)
+        self.refs.parent.mkdir(parents=True, exist_ok=True)
+        with self.refs.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row, sort_keys=True) + "\n")
+
+    def _patch_cleanup(self, stack: ExitStack) -> None:
+        for name, value in {
+            "_stable_registry_snapshot": [],
+            "_open_route_launch_homes": ([], ""),
+            "_release_held_by_live_process": (False, ""),
+            "_release_projection_referenced": False,
+            "_succeed_dispatch_state": True,
+            "_migration_deletion_precondition": (True, ""),
+            "_retention_containment_precondition": (True, ""),
+        }.items():
+            stack.enter_context(mock.patch.object(distribution, name, return_value=value))
+
+    def _cleanup(self) -> str:
+        stderr = io.StringIO()
+        with ExitStack() as stack, contextlib.redirect_stderr(stderr):
+            self._patch_cleanup(stack)
+            distribution._cleanup_releases(set())
+        return stderr.getvalue()
+
+    def test_cleanup_keeps_a_release_bound_by_an_existing_attestation(self) -> None:
+        old = self._release("v-old", 1)
+        middle = self._release("v-middle", 2)
+        newest = self._release("v-newest", 3)
+        attestation = self._attestation()
+        self._record(attestation, [old / "tools" / "probe.py"])
+
+        stderr = self._cleanup()
+
+        self.assertTrue(old.is_dir())
+        self.assertTrue(middle.is_dir() and newest.is_dir())
+        self.assertIn(f"attested-input:{attestation.resolve()}", stderr)
+        self.assertIn("still bound as an input by a smoke attestation", stderr)
+
+    def test_reference_whose_attestation_is_gone_is_ignored(self) -> None:
+        old = self._release("v-old", 1)
+        self._release("v-middle", 2)
+        self._release("v-newest", 3)
+        attestation = self._attestation()
+        self._record(attestation, [old / "tools" / "probe.py"])
+        attestation.unlink()
+
+        stderr = self._cleanup()
+
+        self.assertFalse(old.exists())
+        self.assertNotIn("attested-input:", stderr)
+
+    def test_unreadable_reference_registry_keeps_every_candidate(self) -> None:
+        releases = [self._release(f"v-{index}", index) for index in range(1, 4)]
+        self.refs.parent.mkdir(parents=True, exist_ok=True)
+        self.refs.mkdir()
+
+        stderr = self._cleanup()
+
+        self.assertTrue(all(release.is_dir() for release in releases))
+        self.assertIn("attestation-refs-unreadable:", stderr)
+
+    def test_torn_reference_line_is_skipped_but_valid_lines_still_protect(self) -> None:
+        old = self._release("v-old", 1)
+        self._release("v-middle", 2)
+        self._release("v-newest", 3)
+        attestation = self._attestation()
+        self._record(attestation, [old / "tools" / "probe.py"])
+        with self.refs.open("a", encoding="utf-8") as handle:
+            handle.write('{"schema_version": 1, "attestation": "')
+            handle.write(json.dumps({"schema_version": 2, "attestation": "/x", "inputs": ["/x"]}) + "\n")
+            handle.write(json.dumps({"schema_version": 1, "attestation": "/x", "inputs": "bad"}) + "\n")
+
+        stderr = self._cleanup()
+
+        self.assertTrue(old.is_dir())
+        self.assertIn(f"attested-input:{attestation.resolve()}", stderr)
+
+    def test_release_in_use_direct_surface_is_unchanged_without_attestation_snapshot(self) -> None:
+        old = self._release("v-old", 1)
+        attestation = self._attestation()
+        self._record(attestation, [old / "tools" / "probe.py"])
+
+        self.assertEqual(distribution._release_in_use(old, [], ([], ""), []), (False, ""))
+        retained, why = distribution._release_in_use(
+            old, [], ([], ""), [],
+            [(str(attestation.resolve()), str((old / "tools" / "probe.py").resolve()))],
+        )
+        self.assertTrue(retained)
+        self.assertEqual(why, f"attested-input:{attestation.resolve()}")
 
 
 class ManagedRuntimeAdoptionTest(unittest.TestCase):
