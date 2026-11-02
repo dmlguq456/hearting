@@ -170,13 +170,34 @@ class RepoGroupingTest(_TmpStoreCase):
         result = memcol.collect(now=now)
         self.assertEqual(set(result["by_repo"].keys()), {"myrepo"})
 
-    def test_yesterday_events_excluded_from_by_repo(self):
-        now = datetime.datetime(2026, 7, 16, 12, 0, 0)
+    def test_yesterday_events_stay_in_by_repo_but_not_in_today(self):
+        # 2026-11-02 사용자 결정: by_repo shows each project's latest journal rows, not
+        # only today's. The `today` aggregate keeps its midnight boundary.
+        now = datetime.datetime(2026, 7, 16, 0, 1, 0)
         _write_lines(self.journal, [
-            _event("2026-07-15T09:00:00", "add", cwd="/home/demo/agent_setting"),
+            _event("2026-07-15T23:59:00", "add", cwd="/home/demo/agent_setting"),
         ])
         result = memcol.collect(now=now)
-        self.assertEqual(result["by_repo"], {})
+        self.assertEqual(len(result["by_repo"]["agent_setting"]), 1)
+        self.assertEqual(result["by_repo"]["agent_setting"][0]["ts"], "2026-07-15T23:59:00")
+        self.assertEqual(result["today"]["added"], 0)
+
+    def test_by_repo_keeps_only_the_latest_k_per_repo(self):
+        now = datetime.datetime(2026, 7, 31, 12, 0, 0)
+        days = range(10, 10 + memcol.RECENT_LIMIT + 3)
+        _write_lines(self.journal, [
+            _event("2026-07-%02dT09:00:00" % day, "add", cwd="/home/demo/agent_setting")
+            for day in days
+        ] + [
+            _event("2026-07-01T09:00:00", "add", cwd="/home/demo/other-repo"),
+        ])
+        result = memcol.collect(now=now)
+        rows = result["by_repo"]["agent_setting"]
+        self.assertEqual(len(rows), memcol.RECENT_LIMIT)
+        stamps = [row["ts"] for row in rows]
+        self.assertEqual(stamps, sorted(stamps, reverse=True))
+        self.assertEqual(stamps[0], "2026-07-%02dT09:00:00" % (10 + memcol.RECENT_LIMIT + 2))
+        self.assertEqual(len(result["by_repo"]["other-repo"]), 1)
 
 
 class DurableOverTest(_TmpStoreCase):

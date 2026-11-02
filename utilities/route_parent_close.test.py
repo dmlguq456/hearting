@@ -2349,7 +2349,7 @@ class ParentCloseTest(unittest.TestCase):
                 raise AssertionError("namespace self host must not read run_root")
 
         self_config = {"run_root": UnreadableRunRoot(), "hosts": {
-            "local": {"ssh_host": "local", "path_namespace": {"/home/nas": "/home/nas"}}}}
+            "local": {"ssh_host": "local", "path_namespace": {"/mnt/shared": "/mnt/shared"}}}}
         compute.load_config = lambda: self_config
         with mock.patch.object(CLOSE, "_compute", return_value=compute):
             self.assertEqual(CLOSE.linked_resources(self.route, self.path, self.jobs,

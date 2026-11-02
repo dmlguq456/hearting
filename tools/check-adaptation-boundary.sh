@@ -1016,7 +1016,7 @@ check_codex_bin_wrappers() {
   if ! grep -Fq 'native Skills, native Agents, and native Modes' adapters/codex/README.md \
     || ! grep -Fq 'native Skills, native Agents, and native Modes' adapters/codex/ADAPTATION.md \
     || ! grep -Fq 'headless --check <worktree>' adapters/codex/README.md \
-    || ! grep -Fq 'headless [--check] [--require-hook-trust]' adapters/codex/AGENTS.md \
+    || ! grep -Fq 'headless [--check] [--require-hook-trust]' adapters/codex/README.md \
     || ! grep -Fq 'Use `dispatch --dry-run|--register|--start`' adapters/codex/ADAPTATION.md \
     || ! grep -Fq 'native Codex records `codex-native-queue`' adapters/codex/README.md \
     || ! grep -Fq 'actual parent runtime, not the child' adapters/codex/ADAPTATION.md \
@@ -1062,7 +1062,7 @@ check_codex_bin_wrappers() {
     || ! grep -Fq 'portable_model_role=deep editor' /tmp/codex-role-report.out \
     || ! grep -Fq 'role <portable-role|role-profile|pipeline-stage>' adapters/codex/bin/preflight.sh \
     || ! grep -Fq 'role <portable-role|role-profile|pipeline-stage>' adapters/codex/README.md \
-    || ! grep -Fq 'role <portable-role|role-profile|pipeline-stage>' adapters/codex/AGENTS.md; then
+    || ! grep -Fq 'role <portable-role|role-profile|pipeline-stage>' adapters/codex/README.md; then
     fail_msg "adapters/codex/bin/role-map.sh must map pipeline-stage aliases to portable roles with unit-catalog guidance (no retired team profiles)"
   fi
   if adapters/codex/bin/role-map.sh 'plan team' >/tmp/codex-role-retired.out 2>/tmp/codex-role-retired.err; then
@@ -1084,15 +1084,15 @@ check_codex_bin_wrappers() {
   done
 
   for p in 'preflight.sh prompt-signal' 'preflight.sh token-budget' 'preflight.sh memory' 'preflight.sh recall' 'preflight.sh briefing' 'preflight.sh worklog' 'preflight.sh ui-info' 'preflight.sh tui-config' 'preflight.sh subagent-info' 'preflight.sh loop-info' 'preflight.sh qa-policy'; do
-    if ! grep -Fq "$p" adapters/codex/AGENTS.md; then
-      fail_msg "adapters/codex/AGENTS.md must document manual Codex lifecycle wrapper $p"
+    if ! grep -Fq "$p" adapters/codex/README.md; then
+      fail_msg "adapters/codex/README.md must document manual Codex lifecycle wrapper $p"
     fi
   done
 
-  if ! grep -Fq 'Keep Codex `/statusline` responsible for model, context, token, limit, and session footer fields.' adapters/codex/AGENTS.md \
+  if ! grep -Fq 'Keep Codex `/statusline` responsible for model, context, token, limit, and session footer fields.' adapters/codex/README.md \
     || ! grep -Fq 'This does not replace Codex `/statusline` for model/context/token/session fields' adapters/codex/README.md \
     || ! grep -Fq 'Codex has its own `/statusline` configuration for the TUI footer.' adapters/codex/ADAPTATION.md \
-    || ! grep -Fq 'preflight.sh ui-info' adapters/codex/AGENTS.md \
+    || ! grep -Fq 'preflight.sh ui-info' adapters/codex/README.md \
     || ! grep -Fq 'preflight.sh ui-info' adapters/codex/README.md \
     || ! grep -Fq 'preflight.sh ui-info' adapters/codex/ADAPTATION.md \
     || ! grep -Fq 'statusline_custom_dynamic_fields=unsupported' adapters/codex/bin/preflight.sh \
@@ -1110,22 +1110,22 @@ check_codex_bin_wrappers() {
     || ! grep -Fq 'codex status distinguishes tracked dirty, untracked files, and sibling worktrees' hooks/portable-guards.test.sh \
     || ! grep -Fq 'tracked-dirty vs untracked counts' adapters/codex/README.md \
     || ! grep -Fq 'tracked-dirty vs untracked counts' adapters/codex/ADAPTATION.md \
-    || ! grep -Fq 'git dirty/worktree/dead-branch risks' adapters/codex/AGENTS.md \
+    || ! grep -Fq 'git dirty/worktree/dead-branch risks' adapters/codex/README.md \
     || ! grep -Fq 'git dirty/worktree/dead-branch risk fields' adapters/codex/README.md \
     || ! grep -Fq 'git dirty/worktree/dead-branch risk fields' adapters/codex/ADAPTATION.md \
-    || ! grep -Fq 'preflight.sh subagent-info --check' adapters/codex/AGENTS.md \
+    || ! grep -Fq 'preflight.sh subagent-info --check' adapters/codex/README.md \
     || ! grep -Fq 'preflight.sh subagent-info --check' adapters/codex/README.md \
     || ! grep -Fq 'preflight.sh subagent-info --check' adapters/codex/ADAPTATION.md \
     || ! grep -Fq 'do not duplicate Codex-native footer' adapters/codex/ADAPTATION.md; then
     fail_msg "Codex docs must keep /statusline native and reserve preflight.sh status for harness-specific signals"
   fi
 
-  if ! grep -Fq 'codex_setting/codex-modes' adapters/codex/AGENTS.md; then
-    fail_msg "adapters/codex/AGENTS.md must document the Codex native mode projection"
+  if ! grep -Fq 'codex_setting/codex-modes' adapters/codex/README.md; then
+    fail_msg "adapters/codex/README.md must document the Codex native mode projection"
   fi
 
-  if ! grep -Fq 'codex_setting/codex-hooks' adapters/codex/AGENTS.md; then
-    fail_msg "adapters/codex/AGENTS.md must document the Codex native hook projection"
+  if ! grep -Fq 'codex_setting/codex-hooks' adapters/codex/README.md; then
+    fail_msg "adapters/codex/README.md must document the Codex native hook projection"
   fi
 
 
@@ -1206,14 +1206,14 @@ check_codex_bin_wrappers() {
     || ! grep -Fq 'token-budget)' adapters/codex/bin/preflight.sh \
     || ! grep -Fq 'Token pressure is orthogonal to intensity' core/CONVENTIONS.md \
     || ! grep -Fq '**Token-pressure non-interference:**' core/OPERATIONS.md \
-    || ! grep -Fq 'normal, unknown, repeated-band, and validated-native states' adapters/codex/AGENTS.md \
+    || ! grep -Fq 'normal, unknown, repeated-band, and validated-native states' adapters/codex/README.md \
     || ! grep -Fq 'runtime-owned `$CODEX_HOME/config.toml`' adapters/codex/README.md \
     || ! grep -Fq 'AGENT_TOKEN_BUDGET_NATIVE_VALIDATED=1' adapters/codex/ADAPTATION.md \
     || grep -Fq 'import fcntl' utilities/token-budget.py \
     || ! grep -Fq 'class TransitionLock' utilities/token-budget.py \
     || ! grep -Fq 'class DirectoryLock' tools/fleet/token_accounting.py \
     || ! grep -Fq 'eligible_for_user_review' tools/fleet/token_experiment.py \
-    || ! grep -Fq 'Phase 2 automatic accounting' adapters/opencode/AGENTS.md; then
+    || ! grep -Fq 'Phase 2 automatic accounting' adapters/opencode/README.md; then
     fail_msg "token-budget projection must preserve portable orthogonality, bounded accounting, isolated evaluation, and native-config boundaries"
   fi
   for p in utilities/token-budget.py adapters/codex/hooks/userprompt-lifecycle.py adapters/codex/bin/preflight.sh adapters/codex/hooks/hooks.json; do
@@ -1297,7 +1297,7 @@ check_codex_bin_wrappers() {
     || ! grep -Fq 'dispatch_contract="preflight.sh dispatch --capability autopilot-code --capability-mode <mode> [--worker-mode <family/mode>] --qa <level> --intensity <level> --dispatch-depth 1|2 [--parent <slug>]"' adapters/codex/bin/capability-map.sh; then
     fail_msg "Codex autopilot-code capability-info must expose the portable pipeline/artifact/role/dispatch contracts"
   fi
-  if ! grep -Fq 'capability-info` and `route` print the portable pipeline contract (`code-plan>code-execute>code-test>code-report` for `standard+`)' adapters/codex/AGENTS.md \
+  if ! grep -Fq 'capability-info` and `route` print the portable pipeline contract (`code-plan>code-execute>code-test>code-report` for `standard+`)' adapters/codex/README.md \
     || ! grep -Fq 'autopilot-code pipeline' adapters/codex/README.md \
     || ! grep -Fq 'stage_graph_contract=core/CONVENTIONS.md#pipeline-intensity-stage-graph-and-assurance' adapters/codex/README.md \
     || ! grep -Fq 'plan_policy=direct=no-plan;quick=registered-headless-dispatch-depth-1-one-shot-micro-plan+plan-check-lite;standard+=durable-plan' adapters/codex/README.md \
@@ -1307,7 +1307,7 @@ check_codex_bin_wrappers() {
   if ! grep -Fq 'qa-policy <quick|light|standard|thorough|adversarial> [code|research|doc|general]' adapters/codex/bin/preflight.sh \
     || ! grep -Fq 'runtime_surface=codex-qa-policy' adapters/codex/bin/preflight.sh \
     || ! grep -Fq 'independent_delegation_policy=claim-only-if-separate-codex-agent-headless-or-external-pass-ran' adapters/codex/bin/preflight.sh \
-    || ! grep -Fq 'preflight.sh qa-policy <level> [code|research|doc|general]' adapters/codex/AGENTS.md \
+    || ! grep -Fq 'preflight.sh qa-policy <level> [code|research|doc|general]' adapters/codex/README.md \
     || ! grep -Fq 'QA policy mapping' adapters/codex/README.md; then
     fail_msg "Codex adapter must expose QA level policy mapping as a runtime preflight contract"
   fi
@@ -1319,32 +1319,32 @@ check_codex_bin_wrappers() {
     fail_msg "Codex runtime-facing visual harness output must use legacy/adapter-specific wording, not Claude implementation names"
   fi
 
-  if ! grep -Fq 'preflight.sh visual-harness' adapters/codex/AGENTS.md; then
-    fail_msg "adapters/codex/AGENTS.md must document the Codex visual harness tool-contract"
+  if ! grep -Fq 'preflight.sh visual-harness' adapters/codex/README.md; then
+    fail_msg "adapters/codex/README.md must document the Codex visual harness tool-contract"
   fi
-  if ! grep -Fq 'preflight.sh browser-fetch --check <url>' adapters/codex/AGENTS.md; then
-    fail_msg "adapters/codex/AGENTS.md must document the Codex material browser-fetch tool-contract"
+  if ! grep -Fq 'preflight.sh browser-fetch --check <url>' adapters/codex/README.md; then
+    fail_msg "adapters/codex/README.md must document the Codex material browser-fetch tool-contract"
   fi
-  if ! grep -Fq 'preflight.sh data-script --check <script.py>' adapters/codex/AGENTS.md; then
-    fail_msg "adapters/codex/AGENTS.md must document the Codex material data-script tool-contract"
+  if ! grep -Fq 'preflight.sh data-script --check <script.py>' adapters/codex/README.md; then
+    fail_msg "adapters/codex/README.md must document the Codex material data-script tool-contract"
   fi
-  if ! grep -Fq 'preflight.sh figure-gen --check <script.py>' adapters/codex/AGENTS.md; then
-    fail_msg "adapters/codex/AGENTS.md must document the Codex material figure-gen tool-contract"
+  if ! grep -Fq 'preflight.sh figure-gen --check <script.py>' adapters/codex/README.md; then
+    fail_msg "adapters/codex/README.md must document the Codex material figure-gen tool-contract"
   fi
-  if ! grep -Fq 'figure-gen --verify-report <manifest.json> <report.md>' adapters/codex/AGENTS.md; then
-    fail_msg "adapters/codex/AGENTS.md must document fail-closed report figure QA"
+  if ! grep -Fq 'figure-gen --verify-report <manifest.json> <report.md>' adapters/codex/README.md; then
+    fail_msg "adapters/codex/README.md must document fail-closed report figure QA"
   fi
-  if ! grep -Fq 'preflight.sh pdf-extract --check <file.pdf>' adapters/codex/AGENTS.md; then
-    fail_msg "adapters/codex/AGENTS.md must document the Codex material PDF extract tool-contract"
+  if ! grep -Fq 'preflight.sh pdf-extract --check <file.pdf>' adapters/codex/README.md; then
+    fail_msg "adapters/codex/README.md must document the Codex material PDF extract tool-contract"
   fi
-  if ! grep -Fq 'preflight.sh web-image-search --check <query>' adapters/codex/AGENTS.md; then
-    fail_msg "adapters/codex/AGENTS.md must document the Codex material web image search tool-contract"
+  if ! grep -Fq 'preflight.sh web-image-search --check <query>' adapters/codex/README.md; then
+    fail_msg "adapters/codex/README.md must document the Codex material web image search tool-contract"
   fi
-  if ! grep -Fq 'preflight.sh verification-runner --timeout <seconds> -- <command>' adapters/codex/AGENTS.md; then
-    fail_msg "adapters/codex/AGENTS.md must document the Codex QA verification-runner tool-contract"
+  if ! grep -Fq 'preflight.sh verification-runner --timeout <seconds> -- <command>' adapters/codex/README.md; then
+    fail_msg "adapters/codex/README.md must document the Codex QA verification-runner tool-contract"
   fi
-  if ! grep -Fq 'preflight.sh claim-verify --check <claim>' adapters/codex/AGENTS.md; then
-    fail_msg "adapters/codex/AGENTS.md must document the Codex research claim-verify tool-contract"
+  if ! grep -Fq 'preflight.sh claim-verify --check <claim>' adapters/codex/README.md; then
+    fail_msg "adapters/codex/README.md must document the Codex research claim-verify tool-contract"
   fi
   if ! grep -Fq 'tool_contract_check' adapters/codex/README.md \
     || ! grep -Fq 'fallback=reference-only' adapters/codex/README.md \
@@ -1376,11 +1376,11 @@ check_codex_bin_wrappers() {
   fi
   if ! grep -Fq 'loop-info <oncall|note|study|drill|runtime-watch>' adapters/codex/README.md \
     || ! grep -Fq 'preflight.sh loop-info <loop>' adapters/codex/ADAPTATION.md \
-    || ! grep -Fq 'Arbitrary detached shell output' adapters/codex/AGENTS.md \
-    || ! grep -Fq 'The interactive launcher and managed gateway are retired.' adapters/codex/AGENTS.md \
-    || ! grep -Fq 'Interactive completion uses Codex' adapters/codex/AGENTS.md \
-    || ! grep -Fq '`CODEX_THREAD_ID`' adapters/codex/AGENTS.md \
-    || ! grep -Fq 'ambiguous sends may repeat.' adapters/codex/AGENTS.md; then
+    || ! grep -Fq 'Arbitrary detached shell output' adapters/codex/README.md \
+    || ! grep -Fq 'The interactive launcher and managed gateway are retired.' adapters/codex/README.md \
+    || ! grep -Fq 'Interactive completion uses Codex' adapters/codex/README.md \
+    || ! grep -Fq '`CODEX_THREAD_ID`' adapters/codex/README.md \
+    || ! grep -Fq 'ambiguous sends may repeat.' adapters/codex/README.md; then
     fail_msg "Codex docs must document loop-info support/fallback contracts"
   fi
 
@@ -2291,7 +2291,7 @@ check_opencode_bin_wrappers() {
   if ! grep -Fq 'preflight.sh qa-policy <quick|light|standard|thorough|adversarial> [code|research|doc|general]' adapters/opencode/bin/preflight.sh \
     || ! grep -Fq 'runtime_surface=opencode-qa-policy' adapters/opencode/bin/preflight.sh \
     || ! grep -Fq 'stage_graph_selector=explicit-graph-or-intensity-default' adapters/opencode/bin/preflight.sh \
-    || ! grep -Fq 'preflight.sh qa-policy <level> [code|research|doc|general]' adapters/opencode/AGENTS.md \
+    || ! grep -Fq 'preflight.sh qa-policy <level> [code|research|doc|general]' adapters/opencode/README.md \
     || ! grep -Fq 'QA policy mapping' adapters/opencode/README.md \
     || ! grep -Fq 'QA policy mapping' adapters/opencode/ADAPTATION.md; then
     fail_msg "OpenCode adapter must expose QA level policy mapping as a runtime preflight contract"
@@ -2322,19 +2322,19 @@ check_opencode_bin_wrappers() {
   done
 
   for p in 'preflight.sh memory' 'preflight.sh recall' 'preflight.sh briefing' 'preflight.sh worklog'; do
-    if ! grep -Fq "$p" adapters/opencode/AGENTS.md; then
-      fail_msg "adapters/opencode/AGENTS.md must document manual OpenCode lifecycle wrapper $p"
+    if ! grep -Fq "$p" adapters/opencode/README.md; then
+      fail_msg "adapters/opencode/README.md must document manual OpenCode lifecycle wrapper $p"
     fi
   done
 
-  if ! grep -Fq 'opencode_setting/opencode-plugins' adapters/opencode/AGENTS.md; then
-    fail_msg "adapters/opencode/AGENTS.md must document the OpenCode native plugin projection"
+  if ! grep -Fq 'opencode_setting/opencode-plugins' adapters/opencode/README.md; then
+    fail_msg "adapters/opencode/README.md must document the OpenCode native plugin projection"
   fi
 
-  if ! grep -Fq 'opencode_setting/opencode-agents' adapters/opencode/AGENTS.md \
-    || ! grep -Fq 'opencode_setting/opencode-commands' adapters/opencode/AGENTS.md \
-    || ! grep -Fq 'opencode_setting/opencode-skills' adapters/opencode/AGENTS.md; then
-    fail_msg "adapters/opencode/AGENTS.md must document OpenCode native surface projections"
+  if ! grep -Fq 'opencode_setting/opencode-agents' adapters/opencode/README.md \
+    || ! grep -Fq 'opencode_setting/opencode-commands' adapters/opencode/README.md \
+    || ! grep -Fq 'opencode_setting/opencode-skills' adapters/opencode/README.md; then
+    fail_msg "adapters/opencode/README.md must document OpenCode native surface projections"
   fi
 
   if ! grep -Fq 'named `tool_contract`, `tool_contract_check`, `runtime_surface`, and `fallback`' adapters/opencode/AGENTS.md; then
@@ -2382,32 +2382,32 @@ check_opencode_bin_wrappers() {
     fail_msg "OpenCode runtime-facing visual harness output must use legacy/adapter-specific wording, not Claude implementation names"
   fi
 
-  if ! grep -Fq 'preflight.sh visual-harness' adapters/opencode/AGENTS.md; then
-    fail_msg "adapters/opencode/AGENTS.md must document the OpenCode visual harness tool-contract"
+  if ! grep -Fq 'preflight.sh visual-harness' adapters/opencode/README.md; then
+    fail_msg "adapters/opencode/README.md must document the OpenCode visual harness tool-contract"
   fi
-  if ! grep -Fq 'preflight.sh browser-fetch --check <url>' adapters/opencode/AGENTS.md; then
-    fail_msg "adapters/opencode/AGENTS.md must document the OpenCode material browser-fetch tool-contract"
+  if ! grep -Fq 'preflight.sh browser-fetch --check <url>' adapters/opencode/README.md; then
+    fail_msg "adapters/opencode/README.md must document the OpenCode material browser-fetch tool-contract"
   fi
-  if ! grep -Fq 'preflight.sh data-script --check <script.py>' adapters/opencode/AGENTS.md; then
-    fail_msg "adapters/opencode/AGENTS.md must document the OpenCode material data-script tool-contract"
+  if ! grep -Fq 'preflight.sh data-script --check <script.py>' adapters/opencode/README.md; then
+    fail_msg "adapters/opencode/README.md must document the OpenCode material data-script tool-contract"
   fi
-  if ! grep -Fq 'preflight.sh figure-gen --check <script.py>' adapters/opencode/AGENTS.md; then
-    fail_msg "adapters/opencode/AGENTS.md must document the OpenCode material figure-gen tool-contract"
+  if ! grep -Fq 'preflight.sh figure-gen --check <script.py>' adapters/opencode/README.md; then
+    fail_msg "adapters/opencode/README.md must document the OpenCode material figure-gen tool-contract"
   fi
-  if ! grep -Fq 'figure-gen --verify-report <manifest.json> <report.md>' adapters/opencode/AGENTS.md; then
-    fail_msg "adapters/opencode/AGENTS.md must document fail-closed report figure QA"
+  if ! grep -Fq 'figure-gen --verify-report <manifest.json> <report.md>' adapters/opencode/README.md; then
+    fail_msg "adapters/opencode/README.md must document fail-closed report figure QA"
   fi
-  if ! grep -Fq 'preflight.sh pdf-extract --check <file.pdf>' adapters/opencode/AGENTS.md; then
-    fail_msg "adapters/opencode/AGENTS.md must document the OpenCode material PDF extract tool-contract"
+  if ! grep -Fq 'preflight.sh pdf-extract --check <file.pdf>' adapters/opencode/README.md; then
+    fail_msg "adapters/opencode/README.md must document the OpenCode material PDF extract tool-contract"
   fi
-  if ! grep -Fq 'preflight.sh web-image-search --check <query>' adapters/opencode/AGENTS.md; then
-    fail_msg "adapters/opencode/AGENTS.md must document the OpenCode material web image search tool-contract"
+  if ! grep -Fq 'preflight.sh web-image-search --check <query>' adapters/opencode/README.md; then
+    fail_msg "adapters/opencode/README.md must document the OpenCode material web image search tool-contract"
   fi
-  if ! grep -Fq 'preflight.sh verification-runner --timeout <seconds> -- <command>' adapters/opencode/AGENTS.md; then
-    fail_msg "adapters/opencode/AGENTS.md must document the OpenCode QA verification-runner tool-contract"
+  if ! grep -Fq 'preflight.sh verification-runner --timeout <seconds> -- <command>' adapters/opencode/README.md; then
+    fail_msg "adapters/opencode/README.md must document the OpenCode QA verification-runner tool-contract"
   fi
-  if ! grep -Fq 'preflight.sh claim-verify --check <claim>' adapters/opencode/AGENTS.md; then
-    fail_msg "adapters/opencode/AGENTS.md must document the OpenCode research claim-verify tool-contract"
+  if ! grep -Fq 'preflight.sh claim-verify --check <claim>' adapters/opencode/README.md; then
+    fail_msg "adapters/opencode/README.md must document the OpenCode research claim-verify tool-contract"
   fi
   if ! grep -Fq 'tool_contract_check' adapters/opencode/README.md \
     || ! grep -Fq 'fallback=reference-only' adapters/opencode/README.md \
@@ -3390,7 +3390,7 @@ check_adaptation_inventory_native_surfaces() {
   fi
   if ! grep -Fq 'install-runtime-projection.sh' adapters/codex/README.md \
     || ! grep -Fq 'check-runtime-projection.sh' adapters/codex/README.md \
-    || ! grep -Fq 'install-runtime-projection.sh' adapters/codex/AGENTS.md \
+    || ! grep -Fq 'install-runtime-projection.sh' adapters/codex/README.md \
     || ! grep -Fq 'preflight.sh doctor --runtime' adapters/codex/bin/preflight.sh \
     || ! grep -Fq 'preflight.sh doctor [--runtime|--runtime-strict]' adapters/codex/bin/preflight.sh \
     || ! grep -Fq 'runtime-projection [--require-hook-trust]' adapters/codex/bin/preflight.sh \
@@ -3423,11 +3423,11 @@ check_adaptation_inventory_native_surfaces() {
     || ! grep -Fq 'check=hook-trust:review-needed' adapters/codex/README.md \
     || ! grep -Fq 'authoritative App Server `hooks/list`' adapters/codex/README.md \
     || ! grep -Fq 'authoritative App Server `hooks/list`' adapters/codex/ADAPTATION.md \
-    || ! grep -Fq 'does not force Stop/PreToolUse trust' adapters/codex/AGENTS.md \
+    || ! grep -Fq 'does not force Stop/PreToolUse trust' adapters/codex/README.md \
     || ! grep -Fq 'doctor --runtime-strict' adapters/codex/README.md \
-    || ! grep -Fq 'runtime-projection --require-hook-trust' adapters/codex/AGENTS.md \
+    || ! grep -Fq 'runtime-projection --require-hook-trust' adapters/codex/README.md \
     || ! grep -Fq 'check=hook-trust:review-needed' adapters/codex/ADAPTATION.md; then
-    fail_msg "adapters/codex/README.md and adapters/codex/AGENTS.md must document the Codex runtime projection installer/checker"
+    fail_msg "adapters/codex/README.md must document the Codex runtime projection installer/checker"
   fi
   if ! grep -Fq 'permissionrequest-lifecycle.py' adapters/codex/bin/preflight.sh \
     || ! grep -Fq 'check-runtime-projection.sh' adapters/codex/bin/preflight.sh \
@@ -3439,9 +3439,9 @@ check_adaptation_inventory_native_surfaces() {
     || ! grep -Fq 'status_line = ["thread-title", "git-branch", "context-used", "model-with-reasoning", "five-hour-limit", "weekly-limit", "thread-id"]' adapters/codex/config/tui-statusline.toml \
     || ! grep -Fq 'status_line_use_colors = true' adapters/codex/config/tui-statusline.toml \
     || ! grep -Fq 'codex_setting/codex-config/tui-statusline.toml' adapters/codex/README.md \
-    || ! grep -Fq 'codex_setting/codex-config/tui-statusline.toml' adapters/codex/AGENTS.md \
+    || ! grep -Fq 'codex_setting/codex-config/tui-statusline.toml' adapters/codex/README.md \
     || ! grep -Fq 'preflight.sh tui-config' adapters/codex/README.md \
-    || ! grep -Fq 'preflight.sh tui-config' adapters/codex/AGENTS.md \
+    || ! grep -Fq 'preflight.sh tui-config' adapters/codex/README.md \
     || ! grep -Fq 'preflight.sh tui-config' core/ADAPTATION_INVENTORY.md \
     || ! grep -Fq 'statusline_fragment=codex_setting/codex-config/tui-statusline.toml' adapters/codex/bin/preflight.sh \
     || ! grep -Fq 'managed_keys=status_line,status_line_use_colors' adapters/codex/bin/apply-tui-config.sh \

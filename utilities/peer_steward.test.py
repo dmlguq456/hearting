@@ -932,7 +932,7 @@ class StartTest(_TmpRootMixin, unittest.TestCase):
 
     def test_shell_prompt_glyphs_and_past_prompt_are_distinct(self):
         screens = [
-            (" Uihyeop@moving4  /home/nas/user/Uihyeop/NN_Zoo/BC_ResNet  ↱ main ± ", True),
+            (" user@mgpu-a1  /home/example/NN_Zoo/BC_ResNet  ↱ main ± ", True),
             ("host ~/project $ ", True), ("#\n\n", True), ("% ", True), ("❯ ", True),
             ("host $\nrunning command\n", False),
             ("host \nDownloading 42%\n", False),
@@ -1387,6 +1387,21 @@ class StartTest(_TmpRootMixin, unittest.TestCase):
         with mock.patch.object(peer_steward.shutil, "which", return_value=None):
             rc = self._start()
         self.assertEqual(rc, 4)
+
+    def test_herdr_missing_start_says_so_once_and_queues_no_retry(self):
+        # No herdr is permanent for this session: a retained start notice would only ask
+        # the caller to repeat a start that cannot succeed.
+        import contextlib
+        import io
+        output = io.StringIO()
+        with mock.patch.object(peer_steward.shutil, "which", return_value=None), \
+             mock.patch.object(peer_steward, "_retain_start_failure") as retain, \
+             contextlib.redirect_stdout(output):
+            self.assertEqual(peer_steward.main(["start", "helper", "--kind", "claude"]), 4)
+        retain.assert_not_called()
+        lines = output.getvalue().splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].startswith("started=false reason=herdr-not-found agent=claude name=helper pane=- "))
 
     def test_started_false_when_herdr_start_fails(self):
         with mock.patch("builtins.print") as print_mock, \
@@ -19777,6 +19792,23 @@ class ReceiverStateRetentionCycleTest(_TmpRootMixin, unittest.TestCase):
                                      "queued")
                     self.assertIsNone(self._duty(ref),
                                       "a queued submission is closed by its exact receipt")
+
+    def test_a_held_message_says_the_runtime_delivers_it_and_nothing_is_resent(self):
+        """The prompt line stays as it was; one stderr line says the carrier owns the rest."""
+        with self._world("claude", "sid-child", screen=CLAUDE_FORM):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                rc, line, ref = self._prompt("claude", "sid-child")
+            self.assertEqual(rc, 3, line)
+            self.assertTrue(line.startswith("prompted=queued "), line)
+            self.assertIsNotNone(self._duty(ref))
+            self.assertIn(f"next: nothing to resend - the runtime delivers ref={ref} to child", err.getvalue())
+        with self._world("claude", None, screen=CLAUDE_EMPTY):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                rc, line, ref = self._prompt("claude", None, pane=False, text="[steer] no endpoint")
+            self.assertIsNone(self._duty(ref))
+            self.assertNotIn("next:", err.getvalue(), "no carrier, no claim that one delivers it")
 
     def test_unverified_endpoint_creates_no_carrier(self):
         with self._world("claude", None, screen=CLAUDE_EMPTY):

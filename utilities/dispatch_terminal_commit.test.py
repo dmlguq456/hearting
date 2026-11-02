@@ -1656,9 +1656,13 @@ class OwnerCompletionStateTest(_TerminalCommitFixture):
         metadata = [self._metadata(attempt_id=attempt) for attempt in ("att-a", "att-b")]
         selections = [registry.registry_view(self.jobs).select_rows(
             attempt_id=item["attempt_id"]) for item in metadata]
+        # Each standalone classification observes its own generation. Inside the
+        # timestamp-racy window after the write that observation reads the bytes.
         with mock.patch.object(T, "_historical_request", return_value=request), \
              mock.patch.object(T, "_completion_request", return_value=request), \
              mock.patch.object(T, "_commit_state_path", return_value=self.root / "missing-commit.json"), \
+             mock.patch.object(registry, "_SETTLED_NS", 10**18), \
+             mock.patch.object(registry, "_SETTLED_FINE_NS", 10**18), \
              mock.patch.object(T, "_route_module") as route_module:
             route_module.return_value.terminal_gate_observation.return_value = {
                 "execute": {"passed": True}}

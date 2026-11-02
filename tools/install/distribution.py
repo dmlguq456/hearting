@@ -1821,6 +1821,53 @@ def stable_state_root(environ: dict[str, str]) -> Path:
     return base / "dispatch"
 
 
+def _attestation_refs_path(environ: dict[str, str]) -> Path:
+    """Standalone stdlib-only mirror of the smoke-attestation writer's path.
+
+    `tools/smoke-attestation.py` records release-tree inputs at this exact
+    leaf; the installer cannot import `utilities/` (see
+    `stable_state_root()`), so the writer and this reader are bound by a
+    parity fixture instead of a shared import (same handling as
+    `_commit_forced_prune_gap_record`)."""
+
+    return stable_state_root(environ) / "attestation-refs.jsonl"
+
+
+def _attestation_refs_snapshot(environ: dict[str, str]) -> list[tuple[str, str]]:
+    """Read `(attestation, input)` pairs from the attested-input reference file.
+
+    A missing file is an empty snapshot. An unreadable file is uncertain
+    evidence: the caller keeps every candidate rather than guessing. A single
+    torn, non-object, wrong-schema, or mistyped line is skipped -- it cannot
+    name a release input by itself -- while the remaining lines still count."""
+
+    path = _attestation_refs_path(environ)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return []
+    except (OSError, UnicodeDecodeError) as exc:
+        raise DistributionError(f"attestation-refs-unreadable:{path}") from exc
+    snapshot: list[tuple[str, str]] = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(row, dict) or row.get("schema_version") != 1:
+            continue
+        attestation = row.get("attestation")
+        inputs = row.get("inputs")
+        if not isinstance(attestation, str) or not os.path.isabs(attestation):
+            continue
+        if not isinstance(inputs, list) or not all(isinstance(item, str) for item in inputs):
+            continue
+        snapshot.extend((attestation, item) for item in inputs)
+    return snapshot
+
+
 def _ensure_new_directory_mode(path: Path, mode: int) -> None:
     """Force `mode` only when `path` doesn't exist yet -- an existing
     symlink, non-directory, or a different mode is a typed refusal, never a
@@ -3874,6 +3921,7 @@ def _release_in_use(
     stable_snapshot: list[dict],
     route_snapshot: tuple[list[tuple[str, str]], str] | None = None,
     registry_snapshot: list[dict] | None = None,
+    attestation_snapshot: list[tuple[str, str]] | None = None,
 ) -> tuple[bool, str]:
     """Return (in_use, reason). Undecidable evidence returns (True, ...).
 
@@ -3895,6 +3943,13 @@ def _release_in_use(
     working unchanged. Production pruning takes a fresh route snapshot after
     acquiring the writer boundary; the earlier snapshot in `_cleanup_releases`
     is used only by the bounded orphan-cache pass.
+
+    `attestation_snapshot` is `_attestation_refs_snapshot()`'s pre-parsed
+    `(attestation, input)` pairs: a release named by an input whose attestation
+    file still exists is bound for as long as that file exists. A reference
+    whose attestation is gone is ignored (the person chose not to revive old
+    seals); any other stat failure keeps the release. `None` keeps the direct
+    call surface unchanged.
     """
 
     try:
@@ -3966,6 +4021,21 @@ def _release_in_use(
             return True, f"route-launch-home-unresolvable:{route_id}"
         if common == candidate_real:
             return True, f"open-route:{route_id}"
+    for attestation, entry in attestation_snapshot or ():
+        try:
+            entry_real = os.path.realpath(entry)
+            common = os.path.commonpath((candidate_real, entry_real))
+        except (OSError, ValueError):
+            continue
+        if common != candidate_real:
+            continue
+        try:
+            os.stat(attestation)
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        except OSError:
+            return True, f"attested-input-unresolvable:{attestation}"
+        return True, f"attested-input:{attestation}"
     return False, ""
 
 
@@ -4130,6 +4200,9 @@ def _release_keep_message(candidate: Path, why: str) -> str:
         return (f"harness release: {candidate} is still named by an unresolved route reference "
                 f"({why}); current evidence does not establish that execution or continuation no "
                 "longer needs it, so it is kept")
+    if kind == "attested-input":
+        return (f"harness release: {candidate} is still bound as an input by a smoke attestation "
+                f"({why}); keeping it while that attestation exists")
     return (f"harness release: {candidate} cannot be proved unused ({why}); keeping it instead of "
             "deleting it")
 
@@ -4141,6 +4214,7 @@ def _prune_release_under_writer_boundary(
     stable_snapshot: list[dict] | None = None,
     route_snapshot: tuple[list[tuple[str, str]], str] | None = None,
     registry_snapshot: list[dict] | None = None,
+    attestation_snapshot: list[tuple[str, str]] | None = None,
     discovery_inputs: dict | None = None,
 ) -> tuple[bool, str]:
     """Carry, refresh deletion evidence, verify, and remove under admission locks.
@@ -4158,7 +4232,8 @@ def _prune_release_under_writer_boundary(
             legacy_paths = _installed_legacy_registry_paths(None)
             route_inventory: dict = {}
             stable_jobs = stable_state_root(environ) / "jobs.log"
-            watch_paths = [*legacy_paths, stable_jobs]
+            refs_path = _attestation_refs_path(environ)
+            watch_paths = [*legacy_paths, stable_jobs, refs_path]
             if environ.get("AGENT_DISPATCH_JOBS"):
                 watch_paths.append(Path(environ["AGENT_DISPATCH_JOBS"]))
             fresh_routes = _open_route_launch_homes(
@@ -4166,10 +4241,11 @@ def _prune_release_under_writer_boundary(
             )
             route_inventory["registries"].add(stable_jobs)
             discovery_inputs = _snapshot_discovery_inputs(
-                route_inventory, [*legacy_paths, stable_jobs]
+                route_inventory, [*legacy_paths, stable_jobs, refs_path]
             )
             fresh_stable = _stable_registry_snapshot(environ)
             fresh_registries = _release_registry_snapshot(legacy_paths)
+            fresh_attestations = _attestation_refs_snapshot(environ)
             if (_discovery_inputs_changed(discovery_inputs)
                     or route_inventory.get("unstable")):
                 return False, "route-discovery-inputs-changed"
@@ -4186,6 +4262,7 @@ def _prune_release_under_writer_boundary(
                     stable_snapshot=fresh_stable,
                     route_snapshot=fresh_routes,
                     registry_snapshot=fresh_registries,
+                    attestation_snapshot=fresh_attestations,
                     discovery_inputs=discovery_inputs,
                 )
         except (OSError, DistributionError) as exc:
@@ -4193,7 +4270,8 @@ def _prune_release_under_writer_boundary(
 
     try:
         in_use, why = _release_in_use(
-            candidate, stable_snapshot or [], route_snapshot, registry_snapshot
+            candidate, stable_snapshot or [], route_snapshot, registry_snapshot,
+            attestation_snapshot,
         )
         if in_use:
             return False, why
@@ -4322,6 +4400,7 @@ def _cleanup_orphan_release_pycache(
     route_snapshot: tuple[list[tuple[str, str]], str],
     skip_names: set[str] | None = None,
     registry_snapshot: list[dict] | None = None,
+    attestation_snapshot: list[tuple[str, str]] | None = None,
     discovery_inputs: dict | None = None,
 ) -> None:
     """Retry release-specific cache cleanup without scanning outside its exact prefix."""
@@ -4362,7 +4441,8 @@ def _cleanup_orphan_release_pycache(
         if Path(os.path.abspath(release)) in {Path(os.path.abspath(item)) for item in keep}:
             continue
         in_use, why = _release_in_use(
-            release, stable_snapshot, route_snapshot, registry_snapshot
+            release, stable_snapshot, route_snapshot, registry_snapshot,
+            attestation_snapshot,
         )
         if in_use:
             print(
@@ -4420,6 +4500,7 @@ def _cleanup_releases(keep: set[Path], *, force_prune_unproven: bool = False) ->
     legacy_registry_paths = _installed_legacy_registry_paths(None)
     try:
         stable_jobs = stable_state_root(environ) / "jobs.log"
+        refs_path = _attestation_refs_path(environ)
     except DistributionError as exc:
         for candidate in candidates:
             if candidate not in keep:
@@ -4427,14 +4508,14 @@ def _cleanup_releases(keep: set[Path], *, force_prune_unproven: bool = False) ->
                     candidate, f"dispatch-writer-boundary-unavailable:{exc}"
                 ), file=sys.stderr)
         return
-    admission_registry_paths = [*legacy_registry_paths, stable_jobs]
+    admission_registry_paths = [*legacy_registry_paths, stable_jobs, refs_path]
     ambient_jobs = environ.get("AGENT_DISPATCH_JOBS")
     if ambient_jobs:
         admission_registry_paths.append(Path(ambient_jobs))
 
     def discover() -> dict:
         inventory: dict = {}
-        watch_paths = [*legacy_registry_paths, stable_jobs]
+        watch_paths = [*legacy_registry_paths, stable_jobs, refs_path]
         if ambient_jobs:
             watch_paths.append(Path(ambient_jobs))
         route_snapshot = _open_route_launch_homes(
@@ -4459,6 +4540,10 @@ def _cleanup_releases(keep: set[Path], *, force_prune_unproven: bool = False) ->
             registry_snapshot = _release_registry_snapshot(legacy_registry_paths)
         except OSError as exc:
             return {"error": f"dispatch-writer-boundary-unavailable:{exc}"}
+        try:
+            attestation_snapshot = _attestation_refs_snapshot(environ)
+        except (OSError, DistributionError) as exc:
+            return {"error": str(exc)}
         admission_after = {
             Path(path): _path_fingerprint(Path(path))
             for path in admission_registry_paths
@@ -4489,6 +4574,7 @@ def _cleanup_releases(keep: set[Path], *, force_prune_unproven: bool = False) ->
             "route_snapshot": route_snapshot,
             "stable_snapshot": stable_snapshot,
             "registry_snapshot": registry_snapshot,
+            "attestation_snapshot": attestation_snapshot,
             "unstable": bool(inventory.get("unstable") or inputs.get("unstable")
                               or _discovery_inputs_changed(inputs)),
         }
@@ -4615,6 +4701,7 @@ def _cleanup_releases(keep: set[Path], *, force_prune_unproven: bool = False) ->
                             stable_snapshot=evidence["stable_snapshot"],
                             route_snapshot=evidence["route_snapshot"],
                             registry_snapshot=evidence["registry_snapshot"],
+                            attestation_snapshot=evidence["attestation_snapshot"],
                             discovery_inputs=evidence["inputs"],
                         )
             except (OSError, DistributionError) as exc:
@@ -4671,7 +4758,8 @@ def _cleanup_releases(keep: set[Path], *, force_prune_unproven: bool = False) ->
 
     _cleanup_orphan_release_pycache(
         releases, keep, evidence["stable_snapshot"], evidence["route_snapshot"],
-        cache_failures, evidence["registry_snapshot"], evidence["inputs"],
+        cache_failures, evidence["registry_snapshot"],
+        evidence["attestation_snapshot"], evidence["inputs"],
     )
 
 
