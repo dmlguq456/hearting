@@ -160,7 +160,6 @@ utility-deferred	dispatch-orphan-watch.py
 utility-deferred	dispatch-owner.py
 utility-deferred	dispatch-progress.py
 utility-deferred	dispatch-reap-watch.py
-utility-deferred	dispatch-recovery.py
 utility-deferred	dispatch-registry.py
 utility-deferred	dispatch-route.test.sh
 utility-deferred	dispatch-state-root.sh

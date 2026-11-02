@@ -3618,10 +3618,6 @@ class D1LegacyConsumersTest(C1ChangesBase):
         # The default it described lives in the producer: changed material input makes a child cycle.
         self.assertTrue(hasattr(P, "cycle_route_admission"))
 
-    def test_d1_batch_digest_guard_stays(self):
-        recovery = Path(__file__).with_name("dispatch-recovery.py").read_text(encoding="utf-8")
-        self.assertIn('raise RecoveryError("recovery-source-manifest-digest-mismatch")', recovery)
-
 
 class Gap2LocksTest(C1ChangesBase):
     """§45 D-124/D-125 after the impl review: nothing is walked or hashed under the admission lock,
