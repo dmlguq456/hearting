@@ -27,6 +27,15 @@ assert SPEC.loader is not None
 SPEC.loader.exec_module(GOVERNOR)
 
 
+def _wait_until_settled(path: Path, timeout: float = 1.0) -> None:
+    """Wait only as long as the cache's own 100ms settle rule needs."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if time.time_ns() - path.stat().st_mtime_ns > 120_000_000:
+            return
+        time.sleep(0.01)
+
+
 class BacklogPerformanceTest(unittest.TestCase):
     def test_admission_finalize_verify_and_retry_consume_large_indexes_once(self):
         fixture_path = ROOT / "utilities" / "artifact_producer.test.py"
@@ -119,12 +128,19 @@ class BacklogPerformanceTest(unittest.TestCase):
                         self.assertEqual(sealed["status"], "sealed")
                         seal_metrics = dict(metrics)
                         record = PRODUCER.read_cycle_record(fixture.root, result["cycle_id"])
+                        binding = {"cycle_id": result["cycle_id"],
+                                   "producer_id": record["producer_id"]}
+                        # Inside the settle window the seed is not trusted: verify must fall
+                        # back to one full parse and still answer the same.
+                        immediate = PRODUCER.verify_finalized_cycle(
+                            fixture.root, cycle_id=result["cycle_id"], expected_binding=binding)
+                        immediate_metrics = {k: metrics[k] - seal_metrics[k] for k in metrics}
+                        self.assertTrue(immediate["verified"] if "verified" in immediate else immediate)
+                        _wait_until_settled(ADMISSION._index_path(fixture.root))
+                        before_verify = dict(metrics)
                         verified = PRODUCER.verify_finalized_cycle(
-                            fixture.root, cycle_id=result["cycle_id"],
-                            expected_binding={"cycle_id": result["cycle_id"],
-                                              "producer_id": record["producer_id"]},
-                        )
-                        verify_metrics = {k: metrics[k] - seal_metrics[k] for k in metrics}
+                            fixture.root, cycle_id=result["cycle_id"], expected_binding=binding)
+                        verify_metrics = {k: metrics[k] - before_verify[k] for k in metrics}
                         self.assertTrue(verified["verified"] if "verified" in verified else verified)
                         before_retry = dict(metrics)
                         retried = PRODUCER.finalize(fixture.root, cycle_id=result["cycle_id"])
@@ -133,11 +149,23 @@ class BacklogPerformanceTest(unittest.TestCase):
                     self.assertLessEqual(seal_metrics["loads"], 1, seal_metrics)
                     self.assertLessEqual(seal_metrics["parses"], 1, seal_metrics)
                     self.assertLessEqual(seal_metrics["writes"], 1, seal_metrics)
+                    # Scale-dependent: at the largest fixture the seal's own write can
+                    # outlive the settle window. Either answer is the same; the
+                    # deterministic fallback rule is pinned in
+                    # artifact_admission.test.TestIndexGenerationCache.
+                    self.assertIn(immediate_metrics["parses"], {0, 1}, immediate_metrics)
+                    self.assertEqual(verify_metrics["parses"], 0, verify_metrics)
+                    # After the settle window verify answers from the index head summary.
+                    self.assertEqual(verify_metrics["loads"], 0, verify_metrics)
+                    self.assertLessEqual(immediate_metrics["loads"], 1, immediate_metrics)
+                    self.assertEqual(retry_metrics["loads"], 0, retry_metrics)
+                    self.assertEqual(retry_metrics["parses"], 0, retry_metrics)
                     self.assertEqual(retry_metrics["writes"], 0, retry_metrics)
                     print("M2_METRIC", json.dumps({
                         "stable_rows": stable_count, "event_stream_rows": event_count,
                         "index_bytes_before": input_bytes, "seal": seal_metrics,
-                        "verify": verify_metrics, "retry": retry_metrics,
+                        "immediate_verify": immediate_metrics, "verify": verify_metrics,
+                        "retry": retry_metrics,
                     }, sort_keys=True))
                 finally:
                     fixture.doCleanups()
@@ -160,6 +188,31 @@ class BacklogPerformanceTest(unittest.TestCase):
                 os.utime(jobs, ns=(frozen_mtime, frozen_mtime))
                 changed_key = CAPACITY._stat_key(jobs)
                 self.assertNotEqual(original_key, changed_key)
+                after = CAPACITY._snapshot(jobs, 1790985600)
+            self.assertEqual(after["legacy"][0]["r"], "2099-01-02T00:00:00Z")
+
+    def test_capacity_snapshot_rechecks_same_size_rewrite_with_a_lineage_chain(self):
+        import dispatch_contract as CONTRACT
+        with tempfile.TemporaryDirectory(dir="/tmp") as temp_dir:
+            jobs = Path(temp_dir) / "jobs.log"
+            first_line = "2026-10-03T00:00:00Z\tdone\ta\tb\tc\tharness=codex,note=dead-usage-limit,reset=2099-01-01T00:00:00Z"
+            second_line = "2026-10-03T00:00:00Z\tdone\ta\tb\tc\tharness=codex,note=dead-usage-limit,reset=2099-01-02T00:00:00Z"
+            self.assertEqual(len(first_line), len(second_line))
+            jobs.write_text(first_line + "\n", encoding="utf-8")
+            frozen_mtime = jobs.stat().st_mtime_ns
+            with mock.patch.object(CAPACITY, "_settled", return_value=True):
+                before = CAPACITY._snapshot(jobs, 1790985600)
+                CAPACITY._persist(before)
+                # A supported writer replaces the registry and records the lineage fact.
+                CONTRACT._atomic_registry_replace(jobs, [first_line, "2026-10-03T00:00:00Z\tdone\ta\tb\tc\tnote=pass"])
+                self.assertTrue(Path(f"{jobs}.lineage.json").exists())
+                base = CAPACITY._load_cache(jobs, 1790985600)[2]
+                self.assertIsNotNone(base)
+                # Same-size, same-mtime in-place rewrite after the chain: ctime and the
+                # tail anchor must keep the changed answer visible.
+                os.utime(jobs, ns=(frozen_mtime, frozen_mtime))
+                jobs.write_text(second_line + "\n", encoding="utf-8")
+                os.utime(jobs, ns=(frozen_mtime, frozen_mtime))
                 after = CAPACITY._snapshot(jobs, 1790985600)
             self.assertEqual(after["legacy"][0]["r"], "2099-01-02T00:00:00Z")
 

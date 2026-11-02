@@ -871,6 +871,47 @@ def _artifact_index_observation(root: Path, *, cycle_id: str | None = None,
     pass_observations = _ARTIFACT_INDEX_PASS.get()
 
     def load():
+        head = artifact_admission.load_index_head(root)
+        if head is not None:
+            def head_rows(source):
+                return tuple(sorted((name, tuple(sorted(value.items())))
+                                    for name, value in source.items()
+                                    if isinstance(name, str) and isinstance(value, dict)))
+            manifest_rows = head_rows(head.manifests)
+            cycle_rows = head_rows(head.cycles)
+            cycle_ids = tuple(head.cycles)
+            projected, route_cycles = set(), set()
+            routes_valid = True
+            for bucket in head.routes.values():
+                if not isinstance(bucket, dict):
+                    routes_valid = False
+                    break
+                for route_id, item in bucket.items():
+                    if (not isinstance(route_id, str) or not isinstance(item, dict)
+                            or not isinstance(item.get("cycle_id"), str)):
+                        routes_valid = False
+                        break
+                    referenced_cycle = item["cycle_id"]
+                    projected.add(referenced_cycle)
+                    route_cycles.add((route_id, referenced_cycle))
+                if not routes_valid:
+                    break
+            if not routes_valid:
+                projected.clear()
+                route_cycles.clear()
+            weight = 256
+            for collection in (manifest_rows, cycle_rows):
+                for name, fields in collection:
+                    weight += len(name) + 48
+                    weight += sum(len(field) + len(str(value)) + 24 for field, value in fields)
+            weight += sum(len(cycle_id) + 48 for cycle_id in projected)
+            weight += sum(len(route) + len(cycle) + 64 for route, cycle in route_cycles)
+            weight += sum(len(str(value)) + 16 for value in cycle_ids)
+            return _ArtifactIndexObservation(
+                head.artifact_root_id, manifest_rows, cycle_rows, cycle_ids,
+                tuple(sorted(projected)), (), routes_valid, "", weight,
+                tuple(sorted(route_cycles)),
+            )
         payload = json.loads(stable_read_bytes(path).decode("utf-8"))
         schema_error = ""
         parsed = None
@@ -2927,7 +2968,8 @@ def _begin_cycle_record(
             }
         if campaign is not None:
             artifact_locator.prepare_index_update(root, [campaign["campaign_id"]])
-        index = artifact_admission.load_index(root)
+        head = artifact_admission.load_index_head(root)
+        index = artifact_admission.load_index(root) if head is None else None
         if campaign is None and campaign_key is None:
             campaign = find_campaign_by_key(root, UNASSIGNED_KEY)
         campaign_created = False
@@ -2936,7 +2978,8 @@ def _begin_cycle_record(
         started_on = _rfc3339(now)
         if campaign is None:
             new_campaign_id = alloc.allocate("campaign")
-            while new_campaign_id in index.stable_ids:
+            while (head.has_prefixed_stable_id(new_campaign_id) if head is not None
+                   else new_campaign_id in index.stable_ids):
                 new_campaign_id = alloc.allocate("campaign")
             # The campaign is named from the proposed stream key; the route
             # slug names only this cycle (CONVENTIONS "Campaign or cycle").
@@ -2990,7 +3033,9 @@ def _begin_cycle_record(
             if changed:
                 _write_campaign(root, campaign, exclusive=False)
         new_cycle_id = alloc.allocate("cycle")
-        while new_cycle_id in index.stable_ids or cycle_record_path(root, new_cycle_id).exists():
+        while ((head.has_prefixed_stable_id(new_cycle_id) if head is not None
+                else new_cycle_id in index.stable_ids)
+               or cycle_record_path(root, new_cycle_id).exists()):
             new_cycle_id = alloc.allocate("cycle")
         producer_id = alloc.allocate("producer")
         campaign_path = campaign_dir(root, campaign["campaign_id"], campaign)
@@ -6349,10 +6394,16 @@ def _verify_sealed_cycle_locked(root: Path, record: Mapping[str, Any],
         row = index_projection.manifest_row(record["cycle_id"])
         cycle_index_row = index_projection.cycle_row(record["cycle_id"])
     else:
-        index = artifact_admission.load_index(root)
-        index_root_id = index.artifact_root_id
-        row = index.manifests.get(record["cycle_id"]) if hasattr(index, "manifests") else None
-        cycle_index_row = index.cycles.get(record["cycle_id"]) if hasattr(index, "cycles") else None
+        head = artifact_admission.load_index_head(root)
+        if head is not None:
+            index_root_id = head.artifact_root_id
+            row = head.manifests.get(record["cycle_id"])
+            cycle_index_row = head.cycles.get(record["cycle_id"])
+        else:
+            index = artifact_admission.load_index(root)
+            index_root_id = index.artifact_root_id
+            row = index.manifests.get(record["cycle_id"]) if hasattr(index, "manifests") else None
+            cycle_index_row = index.cycles.get(record["cycle_id"]) if hasattr(index, "cycles") else None
     if not isinstance(row, dict) or row.get("manifest_digest") != digest:
         raise ProducerError("already-sealed-mismatch", "index")
     if expected_binding is not None:
@@ -7568,9 +7619,16 @@ def _refresh_cycle_locked(root: Path, record: Mapping[str, Any], *, now: Optiona
         raise ProducerError("already-sealed-mismatch", str(manifest_path)) from exc
     digest = artifact_manifest.manifest_digest(document)
     # The index row is read once, here, and answers for the whole refresh: a manifest the
-    # index does not carry is not something to publish a next document over.
-    index = artifact_admission.load_index(root)
-    row = index.manifests.get(cycle_id)
+    # index does not carry is not something to publish a next document over. The small
+    # head projection answers exactly this row when the generation is current; only an
+    # actual publish below needs the full mutable document.
+    head = artifact_admission.load_index_head(root)
+    index = None
+    if head is not None:
+        row = head.manifests.get(cycle_id)
+    else:
+        index = artifact_admission.load_index(root)
+        row = index.manifests.get(cycle_id)
     if not isinstance(row, dict) or row.get("manifest_digest") != digest:
         previous = artifact_lifecycle.find_manifest_snapshot(
             root, cycle_id, manifest_digest=record.get("manifest_digest"))
@@ -7643,6 +7701,8 @@ def _refresh_cycle_locked(root: Path, record: Mapping[str, Any], *, now: Optiona
     new_digest = artifact_manifest.manifest_digest(refreshed)
     new_raw = artifact_manifest.canonical_bytes(refreshed)
     identity = artifact_lifecycle.read_root_identity(root)
+    if index is None:
+        index = artifact_admission.load_index(root)
     index_report = artifact_index.check(
         index, refreshed, idempotency_key=cycle_id, manifest_digest=new_digest,
         repository_id=identity.repository_id if identity else None,

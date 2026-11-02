@@ -360,6 +360,7 @@ tool-deferred	lab-config-provenance.py
 tool-deferred	lab_config_provenance.test.py
 tool-deferred	ledger_invariant.test.py
 tool-deferred	measure_hook_before_after.py
+tool-deferred	measure_state_file_before_after.py
 tool-deferred	migration-manifest.py
 tool-deferred	migration_manifest.test.py
 tool-deferred	native-skill-discovery.test.py
