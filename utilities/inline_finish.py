@@ -1,7 +1,7 @@
 """Retryable direct inline route finish transaction."""
 from __future__ import annotations
-import fcntl, hashlib, json, os, stat, subprocess, sys, tempfile, time
-import fnmatch
+import errno, fcntl, hashlib, json, os, re, stat, subprocess, sys, tempfile, time
+import fnmatch, urllib.parse
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 import artifact_producer, artifact_lifecycle, dispatch_terminal_commit
@@ -67,9 +67,8 @@ def _unscoped_tracked_dirt(cwd: str, scope: Sequence[str]) -> list[str]:
     return paths
 
 
-def _atomic(path: Path, value: Mapping[str, Any]) -> None:
+def _atomic_bytes(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    data = json.dumps(value, sort_keys=True, indent=2).encode() + b"\n"
     fd, tmp = tempfile.mkstemp(prefix=".finish-", dir=path.parent)
     try:
         with os.fdopen(fd, "wb") as stream:
@@ -81,6 +80,10 @@ def _atomic(path: Path, value: Mapping[str, Any]) -> None:
     finally:
         try: os.unlink(tmp)
         except FileNotFoundError: pass
+
+
+def _atomic(path: Path, value: Mapping[str, Any]) -> None:
+    _atomic_bytes(path, json.dumps(value, sort_keys=True, indent=2).encode() + b"\n")
 
 def _read(path: Path):
     if not path.exists() and not path.is_symlink():
@@ -155,6 +158,152 @@ def admit(route, *, allow_legacy=False):
     return choice, jobs, inherited
 
 
+def _evidence_url(raw: str) -> bool:
+    """An http(s) locator, not a filesystem spelling that happens to contain `://`."""
+    if not raw or any(char.isspace() or ord(char) < 0x20 or ord(char) == 0x7f for char in raw):
+        return False
+    try:
+        parts = urllib.parse.urlsplit(raw)
+    except ValueError:
+        return False
+    return parts.scheme in {"http", "https"} and bool(parts.netloc)
+
+
+def _evidence_locator(kind: str, identity: str, original: Path | None) -> Path:
+    """A locator-safe runtime name for one imported evidence identity."""
+    suffix = ".url" if kind == "url" else ""
+    if kind != "url" and original is not None:
+        candidate = original.suffix
+        if (re.fullmatch(r"\.[A-Za-z0-9]{1,10}", candidate)
+                and candidate not in {".tmp", ".part", ".swp", ".pyc"}):
+            suffix = candidate
+    return Path("finish-evidence") / (_digest((kind + "\0" + identity).encode())[:16] + suffix)
+
+
+def _read_evidence_file(path: Path) -> bytes:
+    """Read another cycle's regular file through a non-following descriptor."""
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as exc:
+        raise InlineFinishError("finish-evidence-not-regular" if exc.errno == errno.ELOOP
+                                else "finish-evidence-outside-cycle-or-unreadable") from exc
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise InlineFinishError("finish-evidence-not-regular")
+        chunks = []
+        while True:
+            chunk = os.read(fd, 1 << 20)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        data = b"".join(chunks)
+    except OSError as exc:
+        raise InlineFinishError("finish-evidence-outside-cycle-or-unreadable") from exc
+    finally:
+        os.close(fd)
+    if not data:
+        raise InlineFinishError("finish-evidence-empty")
+    return data
+
+
+def _cycle_evidence(raw: str, output: Path, root: Path, record: Mapping[str, Any], *,
+                    finished: bool, state_path: Path, lock_path: Path,
+                    recorded_path: Path | None = None) -> Path:
+    """One `--evidence` value as the cycle-local path the transaction records.
+
+    This cycle's regular file is used as it is, another regular file is copied
+    byte for byte, and an http(s) URL becomes one deterministic line; both
+    imports land under a runtime locator name inside this cycle.  A finished
+    finish replays what it recorded and never imports again.
+    """
+    url = _evidence_url(raw)
+    evidence = None if url else Path(raw).absolute()
+    rel = inside_rel = resolved = None
+    if evidence is not None:
+        try:
+            rel = evidence.relative_to(output).as_posix()
+        except ValueError:
+            rel = None
+        if rel is not None:
+            placed = artifact_producer._placed_locator(
+                rel, artifact_producer._output_placements(root, record))
+            if placed != rel:
+                evidence = output.parent / placed
+                rel = placed[len("artifacts/"):] if placed.startswith("artifacts/") else placed
+        regular = False
+        try:
+            regular = not evidence.is_symlink() and stat.S_ISREG(evidence.lstat().st_mode)
+        except OSError:
+            regular = False
+        if regular:
+            try:
+                resolved = evidence.resolve(strict=True)
+            except OSError:
+                resolved = None
+        if resolved is not None:
+            try:
+                inside_rel = resolved.relative_to(output.resolve(strict=True)).as_posix()
+            except ValueError:
+                inside_rel = None
+    if finished:
+        recorded_rel = ((_read(state_path) or {}).get("intent") or {}).get("evidence_path")
+        recorded = output / recorded_rel if isinstance(recorded_rel, str) and recorded_rel else None
+        if url:
+            candidate = _evidence_locator("url", raw, None).as_posix()
+        elif inside_rel is not None:
+            candidate = inside_rel
+        elif resolved is not None:
+            candidate = _evidence_locator("file", str(resolved), evidence).as_posix()
+        elif rel is not None and rel != ".." and not rel.startswith("../"):
+            candidate = rel
+        else:
+            candidate = None
+        if candidate is None or (recorded is not None and candidate == recorded_rel):
+            return recorded_path or recorded or evidence or Path(raw).absolute()
+        return output / candidate
+    if url:
+        data = (raw + "\n").encode("utf-8")
+        locator = _evidence_locator("url", raw, None)
+    elif inside_rel is not None:
+        return evidence
+    elif resolved is not None:
+        data = _read_evidence_file(evidence)
+        locator = _evidence_locator("file", str(resolved), evidence)
+    else:
+        # Missing, symbolic, or not a regular file: the existing checks below
+        # name the refusal exactly as they did before this import existed.
+        return evidence
+    copy = output / locator
+    copy_rel = locator.as_posix()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+b") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            state = _read(state_path)
+            if state is None:
+                _atomic_bytes(copy, data)
+                return copy
+            if copy.is_symlink():
+                raise InlineFinishError("finish-intent-unsafe")
+            if not copy.exists():
+                intent = state.get("intent") or {}
+                if intent.get("evidence_path") != copy_rel:
+                    raise InlineFinishError("finish-intent-conflict")
+                if intent.get("evidence_sha256") != _digest(data):
+                    raise InlineFinishError("finish-evidence-drift")
+                _atomic_bytes(copy, data)
+                return copy
+            try:
+                held = copy.read_bytes()
+            except OSError as exc:
+                raise InlineFinishError("finish-evidence-drift") from exc
+            if held != data:
+                raise InlineFinishError("finish-evidence-drift")
+            return copy
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
 def finish(args, route: Mapping[str, Any], route_file: Path, api, *, _admission=None) -> dict[str, Any]:
     root = Path(route["artifact_root"]).resolve(strict=True)
     route_file = Path(route_file)
@@ -208,6 +357,19 @@ def finish(args, route: Mapping[str, Any], route_file: Path, api, *, _admission=
     record = artifact_producer.route_cycle_for(root, route)
     if record is None and prior_state:
         record = artifact_producer.read_cycle_record(root, prior_state.get("intent", {}).get("cycle_id", ""))
+    if record is None and not prior_state and historical_false is None:
+        # A direct start that never reached its cycle leaves the route without
+        # one.  Finish prepares the same cycle with the same call direct start
+        # uses, and never when a prior finish or a legacy root already owns the
+        # decision (those two keep their existing paths).
+        try:
+            inactive_legacy = artifact_producer.classify_root(root)["state"] == "inactive-with-legacy"
+            if not inactive_legacy:
+                artifact_producer.prepare_route_artifact_env(
+                    route_file, start=True, jobs=jobs, require_cycle=False)
+                record = artifact_producer.route_cycle_for(root, route)
+        except artifact_producer.ProducerError as exc:
+            raise InlineFinishError("finish-route-cycle-" + exc.code) from exc
     if not record:
         raise InlineFinishError("finish-route-cycle-missing")
     admitted = artifact_producer.cycle_route_admission(root, record, route, finalize=True)
@@ -230,16 +392,21 @@ def finish(args, route: Mapping[str, Any], route_file: Path, api, *, _admission=
         error.retry_when = choice.retry_when
         raise error
     output = artifact_producer.cycle_dir(root, record["campaign_id"], record["cycle_id"], record) / "artifacts"
-    evidence = Path(args.evidence).absolute()
-    # Nothing moves payloads now; a path an earlier release moved is translated
-    # through the move record it left.
-    try:
-        evidence_rel = evidence.relative_to(output).as_posix()
-        placed = artifact_producer._placed_locator(evidence_rel, artifact_producer._output_placements(root, record))
-        if placed != evidence_rel:
-            evidence = output.parent / placed
-    except ValueError:
-        pass
+    # A scoped refine preview belongs to the cycle this finish seals, never to
+    # wherever the caller happened to put its summary file.
+    api._require_entry_scope_review_preview(route, {"id": "one-shot"}, output)
+    recorded_path = None
+    if finished:
+        try:
+            recorded_path = (json.loads(
+                (api.completion_dir(route["route_id"]) / (node["id"] + ".json")).read_text(encoding="utf-8")
+            ).get("evidence") or {}).get("path")
+        except (OSError, ValueError, UnicodeError):
+            recorded_path = None
+        recorded_path = Path(recorded_path) if isinstance(recorded_path, str) and recorded_path else None
+    evidence = _cycle_evidence(
+        str(args.evidence), output, root, record, finished=finished,
+        state_path=state_path, lock_path=lock_path, recorded_path=recorded_path)
     recorded_intent = (prior_state.get("intent") or {}) if finished else {}
     try:
         if evidence.is_symlink() or not stat.S_ISREG(evidence.lstat().st_mode):
