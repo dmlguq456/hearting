@@ -14,6 +14,13 @@ import unittest
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
+# Producer VmRSS after two refreshes of the 32.8 MB jobs.log fixture (MiB):
+# system 3.12.3 196.7, uv 3.12.14 195.4, uv 3.14.7 199.7 (201.0 under
+# run-tests), GitHub ubuntu-26.04 system 3.14 203.2-203.9. Same algorithm;
+# the rise is interpreter/build drift. The guard exists to catch one extra
+# registry copy (~32 MiB, see ceed8caf2), so the budget keeps >= 8 MiB over
+# the highest observation and stays below the lowest observation + 32 MiB.
+PRODUCER_RSS_BUDGET_MIB = 216
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "utilities"))
 sys.path.insert(0, str(ROOT / "tools"))
@@ -414,7 +421,8 @@ class HumanWaitPerformanceTests(unittest.TestCase):
             self.assertLessEqual(max(unchanged), 1.0)
             self.assertLessEqual(append, 1.0)
             self.assertLessEqual(max(deltas_all), 0.2)
-            self.assertLessEqual(rss_kb / 1024, 200)
+            self.assertLessEqual(rss_kb / 1024, PRODUCER_RSS_BUDGET_MIB,
+                                 f"producer VmRSS {rss_kb / 1024:.2f} MiB")
 
 
 if __name__ == "__main__":
