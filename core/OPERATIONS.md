@@ -478,8 +478,8 @@ of every post-exit reaper and in a `reconcile --apply` that is not scoped to one
 most every five minutes (every minute while the last pass left due homes behind),
 examines at most 128 homes (a fair cursor) and stops once 16 are due, and removes at
 most 16 destructively touched homes, including partial leftovers of an interrupted removal.
-The same pass first prunes pending-delivery records, before it judges any home, so the
-index those judgments read stays under its record cap: terminal
+The same pass first prunes pending-delivery records, before it judges any home, so
+those judgments read fewer records: terminal
 (`acked`/`expired`/`rejected`) records unchanged for seven days are removed oldest
 first after a `stat` pre-filter, at most 512 records and three seconds per pass; open
 records, recent terminal records and tombstones stay untouched. The prune uses
@@ -494,12 +494,15 @@ from the best completion estimate: the terminal row timestamp or, when later, th
 regular log file mtime. Only when that timestamp cannot be parsed does the clock
 start at the first pass that proves every protection below. Uncertain prepared
 evidence defers without restarting an established clock, while freshly observed
-renewed protection restarts it. Delivery discovery shares the existing pass's
-budget and resumes a bounded candidate cohort from its saved directory position;
-an unfinished read remains deferred until observation completes. The saved
+renewed protection restarts it. Delivery discovery reads at most 4,096 records per
+pass (tombstones, locks and other entries cost only pass time) and resumes a bounded
+candidate cohort from its saved directory position; an unfinished read remains
+deferred (`delivery-read-deferred`), not unknown, until observation completes.
+An unreadable, malformed or misplaced record is unknown, with its cause (such as
+`record-unreadable`) counted under `unknown_causes`. The saved
 position carries one filesystem-clock mark taken before the first group was read;
 the final candidate admission looks once for records published after that mark
-and rereads only those, so the number of recipient groups is never a limit.
+and rereads only those, so the number of recipient groups does not limit it.
 Only a complete, fresh candidate observation permits retirement. Open or
 unattributable evidence stays protected; terminal activity extends only the
 related attempt, parent, child, successor or verified legacy HOME binding.

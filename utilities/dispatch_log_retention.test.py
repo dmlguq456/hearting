@@ -612,7 +612,7 @@ class DispatchLogRetentionTest(unittest.TestCase):
                                                      home._stamp(PD.record_directory(case.root, recipient))])
                             result = R.sweep(case.jobs, now_ns=case.now + i * 301 * 10**9)
                             passes.append(result)
-                            self.assertLessEqual(result["delivery_entries"], 4096)
+                            self.assertLessEqual(result["delivery_reads"], home.DELIVERY_READ_BUDGET)
                             self.assertTrue(all(p.exists() for p in paths["open"]))
                             if not any(p.exists() for p in paths["free"]):
                                 break
@@ -827,7 +827,7 @@ class DispatchLogRetentionTest(unittest.TestCase):
                     for i in range(5):
                         result = R.sweep(case.jobs, now_ns=case.now + i * 301 * 10**9, force=True)
                         passes.append(result)
-                        self.assertLessEqual(result["delivery_entries"], 4096, result)
+                        self.assertLessEqual(result["delivery_reads"], home.R.DELIVERY_READ_BUDGET, result)
                         self.assertTrue(all(p.exists() for p in paths["open"]))
                         if not paths["free"][0].exists():
                             break

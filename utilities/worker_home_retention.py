@@ -63,10 +63,12 @@ MAX_STATE_BYTES = 1024 * 1024
 MAX_MANIFEST_BYTES = 64 * 1024
 MAX_EVIDENCE_BYTES = 1024 * 1024
 MAX_DELIVERY_BYTES = 256 * 1024
-# Delivery entries one pass visits (a resumable observation budget: over it the
-# candidate is deferred, not unknown), and (separately) directory entries listed
-# there: tombstones, locks and sidecars are entries but not records.
-MAX_DELIVERY_RECORDS = 4096
+# Delivery records one pass reads. It is a per-pass budget, not a store limit:
+# past it the candidate is deferred and the next pass resumes from the saved
+# position. Tombstones, locks and other directory entries are never read, so
+# they cost only time (the pass deadline), not this budget.
+DELIVERY_READ_BUDGET = 4096
+# Entries one late-change directory listing may hold before it is unknown.
 MAX_DIRECTORY_ENTRIES = 131072
 MAX_DEPENDENCY_STAMPS = 32768
 MAX_HOME_REFERENCE_ENTRIES = 4096
@@ -1074,8 +1076,9 @@ class _DeliveryObservation:
             "position": {"root_cookie": 0, "group": "", "cookie": 0,
                          "root_generation": _generation(_stamp(ctx.root / "pending-delivery")),
                          "generation": "", "inventory": 0},
+            # "unknown" holds the first cause that left the read incomplete.
             "results": {s["id"]: {"token": self.tokens[s["id"]], "open": False,
-                                    "unknown": False, "activity": 0, "matches": []}
+                                    "unknown": "", "activity": 0, "matches": []}
                         for s in subjects}}
         try:
             pos = self.data["position"]
@@ -1093,7 +1096,8 @@ class _DeliveryObservation:
                     or (pos["group"] and SHA256_RE.fullmatch(pos["group"]) is None)
                     or any(not isinstance(row, dict) or set(row) != {
                         "token", "open", "unknown", "activity", "matches"}
-                        or type(row["open"]) is not bool or type(row["unknown"]) is not bool
+                        or type(row["open"]) is not bool or type(row["unknown"]) is not str
+                        or len(row["unknown"]) > 64
                         or type(row["activity"]) is not int or row["activity"] < 0
                         or not isinstance(row["matches"], list)
                         or len(row["matches"]) > MAX_INTENT_CHILDREN
@@ -1143,19 +1147,28 @@ class _DeliveryObservation:
         from worker_runtime_home import _builder
         return _builder.worker_home_key(source, harness, worker_type, identity) == key
 
-    def _unknown(self):
+    def _unknown(self, cause):
+        # The first cause is kept; it is reported, never used as evidence.
         for result in self.data["results"].values():
-            result["unknown"] = True
+            result["unknown"] = result["unknown"] or cause
 
     def _record(self, path, dir_fd=None, *, flag=False):
-        from dispatch_pending_delivery import record_references, OPEN_STATES
+        """Fold one record into the cohort; `_Unreadable(<cause>)` if it cannot be."""
+        from dispatch_pending_delivery import record_references, OPEN_STATES, PendingDeliveryError
         self.reads += 1
-        found = (_read_json(str(path), MAX_DELIVERY_BYTES) if dir_fd is None
-                 else _read_json(path.name, MAX_DELIVERY_BYTES, dir_fd=dir_fd))
+        try:
+            found = (_read_json(str(path), MAX_DELIVERY_BYTES) if dir_fd is None
+                     else _read_json(path.name, MAX_DELIVERY_BYTES, dir_fd=dir_fd))
+        except _Unreadable as exc:
+            raise _Unreadable("record-unreadable") from exc
         if found is None:
             return
         value, mtime = found
-        named = record_references(value, group=path.parent.name, delivery_id=path.name[:-5])
+        try:
+            named = record_references(value, group=path.parent.name, delivery_id=path.name[:-5])
+        except (PendingDeliveryError, TypeError, ValueError) as exc:
+            raise _Unreadable("record-path-mismatch" if getattr(exc, "detail", "") == "record-path-mismatch"
+                              else "record-invalid") from exc
         for subject in self.subjects:
             matches = {a for a in named if self._match(subject, a)}
             if not matches:
@@ -1165,7 +1178,7 @@ class _DeliveryObservation:
             result["matches"] = sorted(set(result["matches"]) | (matches - set(subject["related"])))
             if len(result["matches"]) > MAX_INTENT_CHILDREN:
                 result["matches"] = result["matches"][:MAX_INTENT_CHILDREN]
-                result["unknown"] = True
+                result["unknown"] = result["unknown"] or "match-limit"
             if value["state"] in OPEN_STATES:
                 result["open"] = True
             else:
@@ -1210,7 +1223,7 @@ class _DeliveryObservation:
             return None
 
         try:
-            outcome = _scan_published(base, mark - MARK_SLACK_NS, deadline, MAX_DELIVERY_RECORDS,
+            outcome = _scan_published(base, mark - MARK_SLACK_NS, deadline, DELIVERY_READ_BUDGET,
                                       self.ctx.discovery_stamps, visit)
         except (_Unreadable, PendingDeliveryError, OSError, ValueError, TypeError):
             return "unknown"
@@ -1247,8 +1260,10 @@ class _DeliveryObservation:
             # The traversal starts over, so every group is read after this reading.
             self.data["mark"] = time.time_ns()
         self.ctx.discovery_stamps[base] = _stamp(base)
+        kind = "groups"
         try:
-            while self.visits < MAX_DELIVERY_RECORDS and time.monotonic() < self.deadline:
+            # Only record reads spend the budget; every other entry costs time.
+            while time.monotonic() < self.deadline:
                 if pos.get("delivery_done"):
                     if pos["inventory"] >= len(self.inventories):
                         self.data["complete"] = True
@@ -1263,7 +1278,7 @@ class _DeliveryObservation:
                     pos["cookie"] = 0
                 pos["generation"] = generation
                 entries, eof, observed = _directory_page(
-                    directory, pos["cookie"], MAX_DELIVERY_RECORDS - self.visits, self.deadline)
+                    directory, pos["cookie"], DELIVERY_READ_BUDGET, self.deadline)
                 if observed != before:
                     break
                 if kind == "delivery":
@@ -1274,12 +1289,17 @@ class _DeliveryObservation:
                 for name, cookie, dtype in entries:
                     if time.monotonic() >= self.deadline:
                         return
+                    if (kind == "delivery" and name.endswith(".json")
+                            and self.reads >= DELIVERY_READ_BUDGET):
+                        # The budget is spent: the next pass reads this record first.
+                        self._bound_state()
+                        return
                     self.visits += 1
                     if name not in (".", ".."):
                         path = directory / name
                         if kind == "groups":
                             if not SHA256_RE.fullmatch(name) or dtype not in (0, 4):
-                                self._unknown()
+                                self._unknown("group-untrusted")
                             else:
                                 pos.update(root_cookie=cookie, group=name, cookie=0, generation="")
                                 break
@@ -1300,7 +1320,7 @@ class _DeliveryObservation:
                                 if (not ATTEMPT_RE.fullmatch(identity) or info.st_uid != os.geteuid()
                                         or (not stat.S_ISDIR(info.st_mode) if kind == "provider"
                                             else not stat.S_ISREG(info.st_mode))):
-                                    self._unknown()
+                                    self._unknown("ledger-entry-untrusted")
                                 else:
                                     for subject in self.subjects:
                                         if self._match(subject, identity):
@@ -1327,33 +1347,37 @@ class _DeliveryObservation:
         except (OSError, _Unreadable, ValueError, TypeError, PendingDeliveryError) as exc:
             if str(exc) in ("directory-changed", "directory-cookie-unsupported", "directory-cookie-unavailable"):
                 return
-            self._unknown()
+            text = str(exc) if isinstance(exc, _Unreadable) else ""
+            place = {"groups": "store", "delivery": "group"}.get(kind, "ledger")
+            self._unknown(text if text.startswith("record-")
+                          else place + ("-untrusted" if text == "directory-owner" else "-unreadable"))
             self.data["complete"] = True
 
     def result(self, subject_id):
         self.advance()
         result = self.data["results"].get(subject_id)
         if result is None:
-            return "deferred", False, 0
+            return "deferred", False, 0, ""
         if result["unknown"]:
-            return "unknown", result["open"], result["activity"]
+            return "unknown", result["open"], result["activity"], result["unknown"]
         if not result["token"] or result["token"] != self.tokens.get(subject_id):
-            return "deferred", result["open"], result["activity"]
+            return "deferred", result["open"], result["activity"], ""
         if result["open"]:
-            return "complete", True, result["activity"]
+            return "complete", True, result["activity"], ""
         if not self.data["complete"]:
-            return "deferred", False, result["activity"]
-        return "complete", False, result["activity"]
+            return "deferred", False, result["activity"], ""
+        return "complete", False, result["activity"], ""
 
 
 def _delivery_index(root: Path, *, observation):
+    """(attempts in open records, first unknown cause or "") after this pass's read."""
     observation.advance()
     refs = set()
-    unknown = False
+    unknown = ""
     for result in observation.data["results"].values():
         if result["open"]:
             refs.update(result["matches"])
-        unknown |= result["unknown"]
+        unknown = unknown or result["unknown"]
     return refs, unknown
 
 
@@ -1590,7 +1614,7 @@ class _Context:
     def delivery_index(self):
         if self.delivery is None:
             if self.observation is None:
-                return set(), False
+                return set(), ""
             self.delivery, self.delivery_unknown_global = _delivery_index(
                 self.root, observation=self.observation)
         return self.delivery, self.delivery_unknown_global
@@ -1603,7 +1627,7 @@ class _Context:
             self.configure_delivery({}, [subject], time.monotonic() + EXAMINE_BUDGET_SECONDS)
         self.delivery_index()
         if self.observation is None:
-            return "deferred", False, 0
+            return "deferred", False, 0, ""
         result = self.observation.result(subject_id)
         # A verdict read now already includes whatever a refresh recorded.
         self.observation.fresh_related.discard(subject_id)
@@ -1622,7 +1646,7 @@ class _Context:
             self.delivery_index()
             for result in self.observation.data["results"].values():
                 attempts.update(result["matches"])
-                self.legacy_scan_unknown |= result["unknown"]
+                self.legacy_scan_unknown |= bool(result["unknown"])
         for attempt in attempts:
             key = _builder.worker_home_key(source, harness, worker_type, attempt)
             table.setdefault(key, set()).add(attempt)
@@ -2144,9 +2168,9 @@ def _late_candidate_group_change(baseline, related, binding, known, deadline, *,
             return "unknown"
         return None
 
-    # The look holds the reference admission: its stats keep the former cap.
-    return _scan_published(baseline.base, mark - MARK_SLACK_NS, deadline, MAX_DELIVERY_RECORDS,
-                           known, visit, stat_limit=MAX_DELIVERY_RECORDS)
+    # The look holds the reference admission, so its stats are capped as well.
+    return _scan_published(baseline.base, mark - MARK_SLACK_NS, deadline, DELIVERY_READ_BUDGET,
+                           known, visit, stat_limit=DELIVERY_READ_BUDGET)
 
 
 def _admission_scan(ctx, deadline):
@@ -2254,7 +2278,7 @@ def _bind(ctx: _Context, key: str, home_fd: int):
     elif identity is not None:
         attempt = identity
     else:
-        status, _open, _activity = ctx.delivery_observation(None, _HomeBinding(
+        status, _open, _activity, _cause = ctx.delivery_observation(None, _HomeBinding(
             key, None, None, source, harness, worker_type, schema))
         matches = ctx.legacy_matches(source, harness, worker_type).get(key, set())
         if ctx.legacy_scan_unknown:
@@ -2380,9 +2404,9 @@ def _orphan_protection(ctx: _Context, binding: _HomeBinding):
             if state == "unknown":
                 return _Verdict("unknown", "delivery-unknown", detail="intent-state-unreadable")
             activity = max(activity, mtime)
-    status, is_open, delivery_activity = ctx.delivery_observation(attempt, binding)
+    status, is_open, delivery_activity, cause = ctx.delivery_observation(attempt, binding)
     if status == "unknown":
-        return _Verdict("unknown", "delivery-index-unknown", detail="delivery-evidence-unreadable")
+        return _Verdict("unknown", "delivery-index-unknown", detail=cause)
     if status == "deferred":
         return _Verdict("deferred", "delivery-read-deferred")
     if is_open:

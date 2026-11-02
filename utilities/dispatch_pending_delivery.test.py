@@ -2134,13 +2134,23 @@ class G03ReferencesTest(IsolatedRootMixin, unittest.TestCase):
                               row_revisions={}, attempt_ids=ids, parent_attempt_id=parent)
                 notice.pop("claim_authority")  # legacy lazy upgrade uses returned envelope
                 self.assertEqual(PD.record_references(notice), frozenset())
-        for overrides in ({"attempt_ids": ["bad"]}, {"parent_attempt_id": "broken"},
+        for overrides in ({"attempt_ids": ["bad"]}, {"parent_attempt_id": ""},
                           {"attempt_ids": "att-wrong-shape"}, {"extra": "not-schema"}):
             with self.assertRaises(PD.PendingDeliveryError):
                 PD.record_references(dict(record, **overrides))
-        for location in ({"group": "b" * 64}, {"delivery_id": "delivery-" + "b" * 32}):
-            with self.assertRaises(PD.PendingDeliveryError):
+        # One decision with record_attempt_identities: a parent that is not an
+        # attempt id names no worker HOME, like the depth-1 "-" parent.
+        broken = dict(record, parent_attempt_id="broken")
+        self.assertEqual(PD.record_references(broken), frozenset(PD.record_attempt_identities(broken)))
+        self.assertEqual(PD.record_references(broken), frozenset(record["attempt_ids"]))
+        for location in ({"group": "b" * 64}, {"group": "not-a-digest"},
+                         {"delivery_id": "delivery-" + "b" * 32}, {"delivery_id": "elsewhere"}):
+            with self.assertRaises(PD.PendingDeliveryError) as raised:
                 PD.record_references(record, **location)
+            self.assertEqual(raised.exception.detail, "record-path-mismatch")
+        self.assertEqual(PD.record_references(record, group=record["recipient_digest"],
+                                              delivery_id=record["delivery_id"]),
+                         frozenset(PD.record_attempt_identities(record)))
 
     def test_g03_writer_tokens_change_on_ack_prune_not_read_or_noop(self):
         kwargs, record = self.create()

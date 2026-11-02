@@ -327,38 +327,6 @@ def _validate_record(value: object) -> dict:
     return value
 
 
-def record_references(value: object, *, group: str | None = None,
-                      delivery_id: str | None = None) -> frozenset[str]:
-    """Validate the complete relationship before extracting actual HOME refs.
-
-    Keep this stricter than the permissive mutex extractor: a malformed identity
-    is unknown evidence, not an empty reference set. Use the validator's returned
-    envelope so legacy lazy upgrades follow the same admission semantics.
-    """
-    value = _validate_record(value)
-    ids, parent = value.get("attempt_ids"), value.get("parent_attempt_id")
-    notice = re.compile(r"notice-[0-9a-f]{32}")
-    if (not re.fullmatch(r"[0-9a-f]{64}", str(value.get("recipient_digest", "")))
-            or (delivery_id is not None and not re.fullmatch(
-                r"delivery-(?:[0-9a-f]{32}|[0-9a-f]{64})", delivery_id))
-            or (group is not None and value["recipient_digest"] != group)
-            or (delivery_id is not None and value["delivery_id"] != delivery_id)
-            or not isinstance(ids, list)
-            or any(not isinstance(item, str) or not (
-                attempt_reference.ATTEMPT_RE.fullmatch(item) or notice.fullmatch(item))
-                   for item in ids)
-            or not isinstance(parent, str)
-            or (parent not in ("", "-") and not (
-                attempt_reference.ATTEMPT_RE.fullmatch(parent) or notice.fullmatch(parent)))):
-        raise PendingDeliveryError("delivery-persistence-refused", "record-references-invalid")
-    ordinary_notice = (isinstance(value.get("receipt"), dict)
-                       and value["receipt"].get("kind") == "notice"
-                       and value.get("route_node") == "notice" and value.get("row_revisions") == {})
-    if not parent and not ordinary_notice:
-        raise PendingDeliveryError("delivery-persistence-refused", "record-parent-invalid")
-    return attempt_reference.record_attempts(value)
-
-
 _REFERENCE_TOKEN_PREFIX = b"delivery-change-v1:"
 _REFERENCE_TOKEN_BYTES = len(_REFERENCE_TOKEN_PREFIX) + 32 + 1
 
@@ -448,6 +416,26 @@ def record_attempt_identities(value: object) -> tuple[str, ...]:
         if attempt_reference.ATTEMPT_RE.fullmatch(item) and item not in named:
             named.append(item)
     return tuple(named)
+
+
+_DELIVERY_ID_RE = re.compile(r"delivery-(?:[0-9a-f]{32}|[0-9a-f]{64})")
+
+
+def record_references(value: object, *, group: str | None = None,
+                      delivery_id: str | None = None) -> frozenset[str]:
+    """`record_attempt_identities`, checked against the path the record was read from.
+
+    `group` and `delivery_id` are the record's directory and file stem when it
+    was read from disk; a record outside its own path raises
+    `PendingDeliveryError` with detail `record-path-mismatch`.
+    """
+    named = record_attempt_identities(value)
+    if ((group is not None and (not _SHA256_RE.fullmatch(group)
+                                or value.get("recipient_digest") != group))
+            or (delivery_id is not None and (not _DELIVERY_ID_RE.fullmatch(delivery_id)
+                                             or value.get("delivery_id") != delivery_id))):
+        raise PendingDeliveryError("delivery-persistence-refused", "record-path-mismatch")
+    return frozenset(named)
 
 
 @contextmanager

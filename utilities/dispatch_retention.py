@@ -330,9 +330,9 @@ def terminal_protection(ctx, attempt, *, probe_processes, delivery_state,
     if lease == "unknown":
         return Protection("unknown", "lease-unknown")
 
-    status, is_open, delivery_activity = delivery_observation(attempt)
+    status, is_open, delivery_activity, cause = delivery_observation(attempt)
     if status == "unknown":
-        return Protection("unknown", "delivery-index-unknown")
+        return Protection("unknown", "delivery-index-unknown", detail=cause)
     if status == "deferred":
         return Protection("deferred", "delivery-read-deferred")
     if is_open:
