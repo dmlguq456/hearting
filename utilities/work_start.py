@@ -1229,20 +1229,28 @@ def _automatic_direction(route, rows, output):
     return interview, answers
 
 
-def _automatic_direction_notice(route, jobs) -> str:
-    """The one-line notice for a frame review the runtime released itself; "" for any other release.
+AUTOMATIC_NOTICE_NAME = "notice.txt"
 
-    Read from the recorded release, so a repeated start returns the same notice."""
+
+def _automatic_direction_notice_text(interview, answers) -> str:
+    """The one-line notice for a frame review the runtime released itself; "" for any other release."""
     import frame_interview as FI
-    try:
-        interview, answers = _recorded_interview(route, jobs)
-        if not isinstance(answers, dict) or answers.get("basis") != FI.AUTOMATIC_BASIS:
-            return ""
-        option = str(interview["questions"][0]["options"][0].get("means") or "")
-    except (OSError, ValueError, KeyError, IndexError, TypeError, AttributeError):
+    if not isinstance(answers, dict) or answers.get("basis") != FI.AUTOMATIC_BASIS:
         return ""
+    try:
+        option = str(interview["questions"][0]["options"][0].get("means") or "")
+    except (KeyError, IndexError, TypeError, AttributeError):
+        option = ""
     return ("[방향 통지] 두 갈래 검토가 같은 방향을 내고 물을 것을 남기지 않아 묻지 않고 시작했습니다"
             + (f": {option}" if option else "") + ". 고칠 점이 있으면 다음 말로 알려 주세요.")
+
+
+def _automatic_direction_notice(output) -> str:
+    """The notice the decision recorded, read on the first start and every repeat without the interview."""
+    try:
+        return (Path(output) / AUTOMATIC_DIRECTION_DIR / AUTOMATIC_NOTICE_NAME).read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError):
+        return ""
 
 
 DIRECTION_NOTICE_STEP = ("Show direction_notice to the person in one line, as written, in this reply; "
@@ -1387,6 +1395,9 @@ def _decide(route, jobs, root, record, output, briefs, intent):
                                  intent=intent, proposals=rows)
 
     interview, answers = _recorded_interview(route, jobs)
+    notice = _automatic_direction_notice_text(interview, answers)
+    if notice:  # decided once; the first leg's receipt and every repeat read it without re-reading the interview
+        _store_bytes_once(output / AUTOMATIC_DIRECTION_DIR / AUTOMATIC_NOTICE_NAME, (notice + "\n").encode())
     if not isinstance(interview, dict) or not isinstance(answers, dict) or "route_proposals" not in interview:
         return ended(RP.NO_PROPOSAL_READ)
     rows = _proposal_rows(route, jobs, root, record, output)
@@ -1673,7 +1684,7 @@ def _framed_settle(route, path, jobs, result, *, closed=None, wait=False, run=su
             receipt = dict(_first_leg_state(root, decision_record, jobs, receipt))
         receipt["route_decision"] = {"record_file": str(record_path), "selected": decision["selected"],
                                      "frame_route_id": route["route_id"]}
-        notice = _automatic_direction_notice(route, jobs)
+        notice = _automatic_direction_notice(output)
         if notice:  # the first leg's own receipt carries it, on the first start and on every repeat
             receipt["direction_notice"] = notice
             receipt["next_step"] = DIRECTION_NOTICE_STEP + str(receipt.get("next_step") or "")
