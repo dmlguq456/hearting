@@ -557,6 +557,7 @@ fields and this order. In Korean, the canonical card is:
 
 원문: "<compose가 붙인 사람 말 발췌>"
 의도: <무엇을 어떤 결과로 만들지>
+범위: <포함 범위 — 결과를 쓸 폴더는 경로로>
 안 할 것: <중요한 제외 대상 또는 없음>
 완료: <산출물과 검증 기준>
 경로: <primary entry capability> · <mode/intensity> — <선택 이유>
@@ -570,8 +571,9 @@ In English, the same fields in the same order are:
 ```text
 [Intent confirmation]
 
-Original: "<the excerpt of the person's words compose sealed>"
+Original: "<the excerpt of the person's words compose kept>"
 Intent: <what to produce, and the expected result>
+Scope: <what is included — name the folder the result is written to as a path>
 Not doing: <the important exclusions, or none>
 Done: <deliverables and verification criteria>
 Route: <primary entry capability> · <mode/intensity> — <why this route>
@@ -584,9 +586,12 @@ The card follows the user's communication language; the shared UI-text
 selection (`tools/i18n/ui_text.py`) governs only text the tools print, such as
 the `[경로]` notice, whose marker prints as `[Route]` in English.
 
-`원문` (Original) appears only when compose sealed an excerpt; `경로` (Route) is
-information, not a second question. When the runtime exposes a native
-structured-question surface (Claude `AskUserQuestion`, Codex
+`원문` (Original) appears only when compose kept an excerpt; `경로` (Route) is
+information, not a second question. `범위` (Scope) stays the approved scope that
+execution access reads for an owner's write roots (`OPERATIONS` execution
+access). `compose --explain` prints the same `[의도]` lines without writing
+anything, so the card can come before `compose --start`. When the runtime
+exposes a native structured-question surface (Claude `AskUserQuestion`, Codex
 `request_user_input`, OpenCode `question`), deliver this confirmation through
 it: the card's fields form the question body; the optional start-approval line
 is scope metadata, and the options are exactly 진행 (recommended) / 수정 / 중단

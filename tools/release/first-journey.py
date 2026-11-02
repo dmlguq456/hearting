@@ -608,7 +608,8 @@ def published_installer(world: Path, tag: str, timeout: int) -> tuple[Path, str,
 
 
 # §0.4 confirmation card: its labelled fields in order, then the option line. The intent card
-# (의도/안 할 것/완료/경로) replaced the five-field card; agents on an older release still print that one.
+# (의도/범위/안 할 것/완료/경로; 범위 is not required here) replaced the five-field card; agents on an
+# older release still print that one.
 CARD_SHAPES = (
     ((("의도",), ("안 할 것",), ("완료",), ("경로",)), ("진행", "중단")),
     ((("intent",), ("not doing",), ("done", "completion", "complete"), ("route", "path")), ("proceed", "stop")),
