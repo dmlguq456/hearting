@@ -16,6 +16,17 @@ python3 tools/release/first-journey.py run --source published --output /tmp/jour
 python3 tools/release/first-journey.py run --source published --model-free --output /tmp/journey-check
 ```
 
+Without a dedicated measurement login, `run` uses the login you already have
+for each harness (`~/.claude/.credentials.json`, `~/.codex/auth.json`, or
+`opencode auth export --standalone`; the harness's own `CLAUDE_CONFIG_DIR`,
+`CODEX_HOME`, and `XDG_DATA_HOME` are honored). The credential is copied only
+into the private auth root (mode 0600), never printed or exported, and removed
+when `run` ends. If a task refreshed a file-based login, the refreshed copy is
+written back to the original file so it keeps working; an OpenCode V2 refresh
+is not written back. Account percentages are shared with every other session
+using that login, so judge cost from the session token counts. `login` stays
+available for a separate measurement account and takes precedence when present.
+
 Login is performed in an isolated environment and retains only the selected
 harness credential under `/tmp/hearting-measure-auth-UID`. OpenCode V1 keeps
 using `opencode/auth.json`. OpenCode V2 stores the bounded
@@ -40,6 +51,13 @@ longer needed.
 required; if it is unavailable, the run reports `isolation-unavailable` and
 does not fall back to a weaker model run. macOS supports only environment and
 HOME separation, so its report marks filesystem protection and d3 unproven.
+
+On Linux the bwrap world is the safety boundary, so the harness's own approval
+prompts (which a headless run cannot answer) are switched off there
+(`--dangerously-skip-permissions`, `--dangerously-bypass-approvals-and-sandbox`,
+`--auto`); other platforms keep them on. OpenCode starts on the model the user
+used last (`state/opencode/model.json`), because its own default can point at a
+stale login.
 
 Published runs resolve `latest` to a release tag, download that tag's
 `install.sh` and checksum, and verify the bytes with SHA-256 before staging the

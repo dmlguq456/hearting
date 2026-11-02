@@ -82,6 +82,35 @@ class JourneyTests(unittest.TestCase):
         self.assertEqual(later, ["codex", "exec", "resume", "--json", "t-1", "Proceed"])
         self.assertNotIn("--sandbox", first + later)
 
+    def test_approval_prompts_are_off_only_inside_the_sandbox(self):
+        cwd = Path("/tmp/w/repos/x")
+        for harness, flag in (("claude", "--dangerously-skip-permissions"),
+                              ("codex", "--dangerously-bypass-approvals-and-sandbox"), ("opencode", "--auto")):
+            self.assertNotIn(flag, fj.turn_argv(harness, harness, cwd, None, "t", "v2"))
+            for sid in (None, "s-1"):
+                self.assertIn(flag, fj.turn_argv(harness, harness, cwd, sid, "t", "v2", True))
+
+    def test_opencode_starts_on_the_last_used_model(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "opencode"; state.mkdir()
+            (state / "model.json").write_text('{"recent":[{"providerID":"p","modelID":"m"}]}')
+            previous = os.environ.get("XDG_STATE_HOME"); os.environ["XDG_STATE_HOME"] = tmp
+            try:
+                self.assertEqual(fj.opencode_last_model(), "p/m")
+                (state / "model.json").write_text("{}")
+                self.assertIsNone(fj.opencode_last_model())
+            finally:
+                if previous is None: os.environ.pop("XDG_STATE_HOME", None)
+                else: os.environ["XDG_STATE_HOME"] = previous
+        argv = fj.turn_argv("opencode", "opencode", Path("/tmp/x"), None, "t", "v2", True, "p/m")
+        self.assertEqual(argv[argv.index("--model") + 1], "p/m")
+
+    def test_credential_identity_ignores_export_order(self):
+        a = json.dumps([{"id": "a", "integrationID": "x", "active": True, "value": {"k": 1}},
+                        {"id": "b", "integrationID": "y", "active": False, "value": {"k": 2}}]).encode()
+        b = json.dumps(list(reversed(json.loads(a)))).encode()
+        self.assertEqual(fj._credential_identity(a), fj._credential_identity(b))
+
     def test_unexpected_question_stops_without_answer(self):
         old = fj.run
         old_sandbox = fj.sandbox
@@ -673,6 +702,36 @@ else: raise SystemExit(5)
                 timer.cancel(); signal.signal(signal.SIGUSR1, previous)
             child_pid = int(pidfile.read_text())
             with self.assertRaises(ProcessLookupError): os.kill(child_pid, 0)
+
+    def test_existing_login_seeds_private_store_and_is_removed_after_run(self):
+        claude = b'{"claudeAiOauth":{"accessToken":"fake-access","refreshToken":"fake-refresh","expiresAt":1}}'
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            real = base / "claude-config"; real.mkdir()
+            (real / ".credentials.json").write_bytes(claude)
+            root = base / "auth"; root.mkdir()
+            previous = os.environ.get("CLAUDE_CONFIG_DIR")
+            os.environ["CLAUDE_CONFIG_DIR"] = str(real)
+            try:
+                self.assertTrue(fj.seed_from_existing_login(root, "claude", None, "/bin/true"))
+                store = fj.auth_file(root, "claude")
+                self.assertEqual(store.read_bytes(), claude)
+                self.assertEqual(store.stat().st_mode & 0o777, 0o600)
+                # A dedicated measurement login always wins; nothing is overwritten.
+                self.assertFalse(fj.seed_from_existing_login(root, "claude", None, "/bin/true"))
+                # A refreshed copy is handed back to the original login, then the seed goes away.
+                refreshed = claude.replace(b"fake-access", b"newer-access")
+                store.write_bytes(refreshed)
+                fj.release_seeded_logins()
+                self.assertFalse(store.exists())
+                self.assertEqual((real / ".credentials.json").read_bytes(), refreshed)
+                # No existing login means no seed (the caller reports measurement-login-missing).
+                (real / ".credentials.json").unlink()
+                self.assertFalse(fj.seed_from_existing_login(root, "claude", None, "/bin/true"))
+            finally:
+                fj._SEEDED.clear()
+                if previous is None: os.environ.pop("CLAUDE_CONFIG_DIR", None)
+                else: os.environ["CLAUDE_CONFIG_DIR"] = previous
 
     def test_invalid_auth_json_is_not_persisted(self):
         with tempfile.TemporaryDirectory() as tmp:
