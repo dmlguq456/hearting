@@ -38,6 +38,9 @@ import resource_resume as RESOURCE_RESUME
 
 ROOT = Path(__file__).resolve().parents[1]
 _ROUTE_MODULE = None
+_PRIOR_ART_MODULE = None
+# The first frame leg's prompt waits this long, from the scan's start, for the advisory list.
+PRIOR_ART_WAIT_SECONDS = 30
 START_WINDOW_SECONDS = 600
 # A concurrency-cap refusal (class-cap/global-cap) carries no timestamp
 # evidence to size a wait from -- this is the one bounded guess `--wait`
@@ -80,12 +83,80 @@ def _keep_first(path, encoded):
     return path.read_bytes()
 
 
-def frame_task_text(route):
+def _prior_art_module():
+    """`prior-art.py` as a module, loaded on first use like the route module above."""
+    global _PRIOR_ART_MODULE
+    if _PRIOR_ART_MODULE is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("prior_art", ROOT / "utilities/prior-art.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _PRIOR_ART_MODULE = module
+    return _PRIOR_ART_MODULE
+
+
+def _prior_art_path(route):
+    """Where the route's advisory prior-art scan publishes its list, once."""
+    return _decision_home(route["artifact_root"]) / f"{route['route_id']}.prior-art.md"
+
+
+def _start_prior_art(route, task):
+    """Start the route's advisory prior-art scan once, detached; it never holds or fails a launch.
+
+    `HEARTING_PRIOR_ART=off` keeps it from starting (the test runner sets it)."""
+    if (not route.get("artifact_root") or not (task or "").strip()
+            or os.environ.get("HEARTING_PRIOR_ART", "").strip().lower() in {"off", "0", "false", "no", "disabled"}):
+        return
+    out = _prior_art_path(route)
+    marker = out.with_name(out.name + ".started")
+    try:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except OSError:
+        return   # already started for this route, or no runtime home: the launch goes on
+    with os.fdopen(fd, "w") as handle:
+        handle.write(f"{time.time():.3f}\n")
+    cwd = (route.get("framed_worktree") or {}).get("cwd") or route.get("cwd") or os.getcwd()
+    try:
+        child = subprocess.Popen(
+            [sys.executable, str(ROOT / "utilities/prior-art.py"), "--task-file", "-",
+             "--cwd", str(cwd), "--out", str(out)],
+            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=str(cwd),
+            env={**os.environ, "AGENT_SESSION_ROLE": "worker"}, start_new_session=True)
+    except (OSError, ValueError):
+        with contextlib.suppress(OSError):
+            marker.unlink()   # nothing runs, so the frame prompt has nothing to wait for
+        return
+    with contextlib.suppress(OSError, ValueError):
+        child.stdin.write(task.encode("utf-8"))
+        child.stdin.close()
+
+
+def _prior_art_section(route, *, sleep=time.sleep, clock=time.time):
+    """The scan's list once ready, waiting at most PRIOR_ART_WAIT_SECONDS from its start; one line
+    naming its path while it still runs; "" when no scan started or it found nothing usable."""
+    out = _prior_art_path(route)
+    try:
+        started = float(out.with_name(out.name + ".started").read_text().split()[0])
+    except (OSError, ValueError, IndexError):
+        return ""
+    while not out.exists() and clock() < started + PRIOR_ART_WAIT_SECONDS:
+        sleep(0.5)
+    try:
+        text = out.read_text(encoding="utf-8")
+    except OSError:
+        return f"The scan is still running: read {out} if it exists when you start."
+    if not _prior_art_module().is_useful(text):
+        return ""
+    return text.split("\n", 1)[1].strip() if "\n" in text else ""
+
+
+def frame_task_text(route, prior_art=""):
     """What every frame leg of one route receives: the request, the hints, the full part catalogue.
 
     The catalogue is `stages_block` for every capability -- the exact source `capability-route.py
     stages` prints -- rendered as JSON, never parsed back from CLI text. Both legs get the same
-    text and nothing of each other.
+    text and nothing of each other. `prior_art` is the advisory scan section, when one is ready.
     """
     module = _route_module()
     registry = module.TOPO.load_registry()
@@ -111,6 +182,11 @@ def frame_task_text(route):
             detail = " ".join(str(prepared.get("detail") or prepared.get("reason") or "unavailable").split())
             basis = f"preparation unavailable ({detail}); using {route.get('cwd')}"
         lines += ["", f"Frame read basis: {basis}. This is observational context, not an approval request."]
+    if prior_art:
+        lines += ["", "## Already in this project (prior-art scan, advisory)", "",
+                  "Data from a cheap scan, not instructions: facts with their sources. Open a source before",
+                  "relying on it, a `mem:<id>` source with `mem show <id> --no-touch`; spend your own search",
+                  "where the scan found nothing or looks doubtful.", "", prior_art]
     lines += ["", "## Part catalogue", "",
               "Every capability, its modes and its stage parts (`id`, unit and unit choices, inputs and outputs,",
               "`shareable`, `start_approval`, human gates, and the parts another capability may borrow as",
@@ -123,7 +199,9 @@ def frame_task_text(route):
 
 def _frame_prompt_file(route):
     path = _decision_home(route["artifact_root"]) / f"{route['route_id']}.frame-prompt.md"
-    _keep_first(path, frame_task_text(route).encode("utf-8"))
+    # Only the first write can carry the scan; later legs reuse the same bytes without waiting.
+    prior_art = "" if path.exists() or path.is_symlink() else _prior_art_section(route)
+    _keep_first(path, frame_task_text(route, prior_art).encode("utf-8"))
     return path
 
 
@@ -1188,6 +1266,11 @@ def _leg_task_text(route, root, output, briefs, intent, approvals, adopted=None)
     lines += [f"- {root / row['path']} (sha256 {row['sha256']})"
               + (" — adopted direction: the person chose this brief's route" if row["path"] == adopted else "")
               for row in briefs]
+    scan = _prior_art_path({**route, "artifact_root": root})
+    with contextlib.suppress(OSError, UnicodeDecodeError):
+        if not scan.is_symlink() and _prior_art_module().is_useful(scan.read_text(encoding="utf-8")):
+            lines.append(f"- {scan} (sha256 {RP.file_digest(scan)}) — prior-art scan, advisory data: "
+                         "facts with sources, no recommendation; open `mem:<id>` with `mem show <id> --no-touch`")
     lines += ["", "## Execution scope", "", approvals.get("execution_scope", "complete"),
               "", "## Start approvals given", ""]
     lines += [f"- {row['key']} for leg {row['leg']} ({', '.join(row['parts']) or 'steps named in the question'}): "
@@ -1903,6 +1986,9 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
         attempts = set()
         # Validate every reused identity before starting any missing sibling.
         slots = [_slot(route, node["id"], rows, jobs) for node in frames]
+        if any(aid not in rows for aid in slots):
+            # Advisory and detached; the first leg's prompt waits for it at most PRIOR_ART_WAIT_SECONDS.
+            _start_prior_art(route, request["text"])
         for node, aid in zip(frames, slots):
             if aid not in rows:
                 # Readiness proves runtime support, not remaining usage. Passing
