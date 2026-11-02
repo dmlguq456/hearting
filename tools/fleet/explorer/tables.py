@@ -324,7 +324,6 @@ def _draw_overview_tail(grid, vm, state, x, use, right, y, route_rows, repos, he
     repo_order = {repo.get("id", repo.get("name", "")): index for index, repo in enumerate(repos)}
     route_rows.sort(key=lambda route: repo_order.get(route.get("repo"), len(repo_order)))
     repo_width = _route_line_repo_width(x + IND + 1, x + use, route_rows)
-    previous_repo = None
     for route in route_rows:
         if getattr(state, "scope", "-") == "-":
             grid.add_hit(y, x + IND + 1, right,
@@ -334,9 +333,7 @@ def _draw_overview_tail(grid, vm, state, x, use, right, y, route_rows, repos, he
         repo_name = repo_label(route.get("repo"))
         _draw_overview_route(grid, x, use, y, route,
                              steward=bool(scoped_page and (source or {}).get("steward")),
-                             repo_w=repo_width,
-                             show_repo=bool(repo_name) and repo_name != previous_repo)
-        previous_repo = repo_name
+                             repo_w=repo_width, show_repo=bool(repo_name))
         y += 1
     y += 1
     grid.put(x, y, "── ", "line")
@@ -363,9 +360,14 @@ def _draw_overview_routes_rule(grid, vm, state, x, use, right, y, route_rows):
     stopped = sum(1 for route in route_rows if route.get("state") == "dead")
     grid.put(x, y, "── ", "line")
     label_x = grid.put(x + 3, y, "ROUTES", "head")
-    meta = f"  {open_routes} open" + (f" · {stopped} stopped leg{'s' if stopped != 1 else ''}"
-                                      if stopped else "")
-    meta_end = grid.put(label_x, y, meta, "dim", limit=right)
+    # Open routes pulse on the shared working beat (the same g_work/g_work_off pair as the
+    # working dot); with none open the count stays a steady dim note.
+    lit = bool(getattr(grid, "beat", 1))
+    count_key = ("g_work" if lit else "g_work_off") if open_routes else "dim"
+    count_x = grid.put(label_x, y, "  ", "dim", limit=right)
+    count_end = grid.put(count_x, y, f"{open_routes} open", count_key, limit=right)
+    meta = (f" · {stopped} stopped leg{'s' if stopped != 1 else ''}" if stopped else "")
+    meta_end = grid.put(count_end, y, meta, "dim", limit=right) if meta else count_end
     grid.put(meta_end, y, " ", "branch_s")
     for cell_x in range(meta_end + 1, right):
         grid.put(cell_x, y, "─", "line")
