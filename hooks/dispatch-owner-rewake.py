@@ -1008,6 +1008,17 @@ def _owner_status(launch: Launch) -> str:
         return ""
 
 
+def _sealed_summary(row, attempt_id: str) -> str:
+    """The runtime's completion summary for this owner (shared with Codex/OpenCode delivery)."""
+    if row is None:
+        return ""
+    try:
+        import work_intent
+    except ImportError:
+        return ""
+    return work_intent.sealed_summary(row.metadata, attempt_id)
+
+
 def classified_receipt(
     launch: Launch, state: str, reason: str, root: Path
 ) -> tuple[str, str]:
@@ -1090,6 +1101,10 @@ def classified_receipt(
                 parked = None
         if state == "success":
             instruction = "No harvest command is required; the registered owner completed."
+            summary = _sealed_summary(row, launch.attempt_id)
+            if summary:
+                instruction += ("\nFirst close: show this runtime summary to the person as written, "
+                                "then add only what the request asked for beyond it.\n" + summary)
         elif parked and parked["status"] == "blocked":
             gate = parked["gate"]
             required_action = HUMAN_GATE_PREFIX + gate

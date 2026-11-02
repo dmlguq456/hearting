@@ -1016,6 +1016,7 @@ def completion_followup_text(receipt: dict, *, jobs: str, surface: str) -> str:
     # route or synthesize a new workflow from generic harvest instructions.
     work_commands = {}
     completed_work = set()
+    summaries = []
     parked_notes = []
     if jobs:
         from route_identity import route_hash
@@ -1031,6 +1032,10 @@ def completion_followup_text(receipt: dict, *, jobs: str, surface: str) -> str:
                 if meta["worker_type"] == "owner" and child["required_action"] == "advance-completed":
                     if meta.get("workflow_completion") == "runtime-v1":
                         completed_work.add(child["attempt_id"])
+                        import work_intent
+                        summary = work_intent.sealed_summary(meta, child["attempt_id"])
+                        if summary and summary not in summaries:
+                            summaries.append(summary)
                     continue  # Already sealed; successful work has no extra command obligation.
                 path = Path(meta.get("owner_route_file") or meta.get("route_file") or "")
                 route = json.loads(path.read_text())
@@ -1057,10 +1062,14 @@ def completion_followup_text(receipt: dict, *, jobs: str, surface: str) -> str:
     if completed_work and all(child["attempt_id"] in completed_work for child in receipt["children"]):
         notes = [f"The approved route plan names a next leg (index {child['next_leg']['index']}): "
                  f"{child['next_leg']['compose_command']}" for child in receipt["children"] if child.get("next_leg")]
+        close = ("First close: show the runtime summary below to the person as written, then add only "
+                 "what the request asked for beyond it." if summaries else
+                 "First close: changes/why, before/after, checks run/reused/skipped/unrun, "
+                 "commit/PR/deployment/serving, limits.")
         return ("Original request/format apply. Review result; do approved follow-through or existing "
-                "continuation. First close: changes/why, before/after, checks run/reused/skipped/unrun, "
-                "commit/PR/deployment/serving, limits. No harvest/restart/manual finalize. "
+                "continuation. " + close + " No harvest/restart/manual finalize. "
                 "Receipt/ACK isn't execution; handled exact repeats need no ACK."
+                + "".join("\n" + summary for summary in summaries)
                 + ("".join("\n" + note for note in notes)
                    + ("\nIf this next leg is already approved, execute it in this turn or its existing registered continuation. "
                       "Nothing starts it from receipt alone; obtain approval only for work outside the existing scope." if notes else "")))

@@ -360,3 +360,124 @@ def prompt_block(route) -> str:
         lines.append(f"- Done when: {value['done']}")
     lines.append("Stay within this intent; the assignment below says which part is yours.")
     return "\n".join(lines) + "\n\n"
+
+
+# ---------------------------------------------------------------------------
+# The end: one mechanical completion summary, sealed with the owner envelope
+# ---------------------------------------------------------------------------
+
+SUMMARY_NAME = "completion-summary.md"
+SUMMARY_HEAD = "[완료 요약]"
+MAX_FIELD_CHARS = 320
+MAX_SUMMARY_CHARS = 1600
+_SECTION = re.compile(r"^#{2,3}\s+(?P<title>.+?)\s*$")
+_NUMBER = re.compile(r"^(?P<num>\d+(?:\.\d+)?)[.)]?\s")
+# (field, numbered sections of the code report template, words of an unnumbered heading)
+_SECTION_FIELDS = (
+    ("remaining", ("5", "6"), ("미검증", "실패", "건너", "남은", "후속", "한계", "unverified", "failed",
+                               "skipped", "follow", "remaining", "limit")),
+    ("verified", ("4",), ("검증", "qa", "verification", "test")),
+    ("changed", ("1",), ("변경", "개요", "바뀐", "고친", "사용자용", "change", "overview", "summary")),
+)
+_PR_URL = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+/pull/\d+")
+_CARRIER_MARKERS = ("HEARTING_RECEIPT_V1", "AGENT_HARNESS_COMPLETION_V1")
+
+
+def _section_field(title: str) -> str | None:
+    number = _NUMBER.match(title)
+    lowered = title.lower()
+    for field, numbers, words in _SECTION_FIELDS:
+        if number and number["num"] in numbers:
+            return field
+        if not number and any(word in lowered for word in words):
+            return field
+    return None
+
+
+def report_sections(text: str) -> dict[str, list[str]]:
+    """The report's own lines under its overview, verification and remaining-work headings."""
+    sections: dict[str, list[str]] = {}
+    current = None
+    for raw in (text or "").splitlines():
+        match = _SECTION.match(raw)
+        if match:
+            current = _section_field(match["title"].strip())
+            continue
+        line = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+", "", raw).strip()
+        if (current and line and not re.fullmatch(r"[|:\-\s]+", line)
+                and not any(marker in line for marker in _CARRIER_MARKERS)):
+            sections.setdefault(current, []).append(line.strip("|").strip())
+    return sections
+
+
+def _joined(lines, cap=MAX_FIELD_CHARS) -> str:
+    return _line(" · ".join(item for item in lines if item), cap)
+
+
+def _review_degraded(route_file) -> list[str]:
+    if not route_file:
+        return []
+    path = Path(route_file)
+    try:
+        outcome = json.loads(path.with_name(path.stem + ".outcome.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return []
+    nodes = outcome.get("review_independence_degraded") if isinstance(outcome, dict) else None
+    return [str(node) for node in nodes] if isinstance(nodes, list) else []
+
+
+def completion_summary(route, primary, *, route_file=None) -> str:
+    """The runtime's close text for one completed owner: intent, result, changes, checks, the rest.
+
+    Every value comes from the sealed route, the route outcome and the primary
+    report itself; a report whose headings cannot be matched is named, not
+    summarised, so nothing is invented and nothing unverified reads as verified.
+    """
+    request = route.get("work_request") if isinstance(route.get("work_request"), dict) else {}
+    intent = route_intent(route) or {}
+    head = f"{SUMMARY_HEAD} {route.get('capability') or '-'} · route {route.get('route_id') or '-'}"
+    lines = [head]
+    goal = intent.get("intent") or ""
+    if not goal and request.get("text"):
+        goal = draft(request["text"]).get("intent") or ""
+    if goal:
+        original = f" (원문 \"{_line(intent['original'], 100)}\")" if intent.get("original") else ""
+        lines.append(f"의도: {_line(goal, 200)}{original}")
+    lines.append("결과: 완료 — 런타임이 route·사이클 종결을 확인함")
+    try:
+        text = Path(primary).read_text(encoding="utf-8") if primary else ""
+    except (OSError, UnicodeError):
+        text = ""
+    sections = report_sections(text)
+    degraded = _review_degraded(route_file)
+    if sections:
+        if sections.get("changed"):
+            lines.append("바뀐 것: " + _joined(sections["changed"]))
+        checks = _joined(sections.get("verified") or []) or "보고서에 검증 절이 없음"
+        lines.append("검증: " + checks)
+        lines.append("미검증·남은 것: " + (_joined(sections.get("remaining") or [])
+                                         or "보고서에 따로 적힌 것 없음"))
+    else:
+        lines.append("검증·남은 것: 보고서 형식이 달라 기계 요약 안 함 — 보고서 본문을 그대로 볼 것")
+    if degraded:
+        lines.append("독립 리뷰 없이 닫힌 노드: " + ", ".join(degraded))
+    prs = list(dict.fromkeys(_PR_URL.findall(text)))[:3]
+    artifact = f"산출물: {primary}" if primary else "산출물: 없음"
+    lines.append(artifact + (" · PR " + " ".join(prs) if prs else ""))
+    rendered = "\n".join(line for line in lines if line.strip())
+    return rendered[:MAX_SUMMARY_CHARS].rstrip() + "\n"
+
+
+def sealed_summary(metadata, attempt_id: str) -> str:
+    """The summary the runtime sealed for this owner attempt; empty when there is none."""
+    try:
+        route_file = metadata.get("owner_route_file") or metadata.get("route_file")
+        route = json.loads(Path(route_file).read_text(encoding="utf-8"))
+        from dispatch_terminal_commit import terminal_slot
+        path = terminal_slot(Path(route["artifact_root"]), route["route_id"], attempt_id) / SUMMARY_NAME
+        text = path.read_text(encoding="utf-8").strip()
+    except Exception:  # noqa: BLE001 -- a missing summary leaves the existing delivery text as it was
+        return ""
+    if not text.startswith(SUMMARY_HEAD) or "\n\n" in text or any(m in text for m in _CARRIER_MARKERS):
+        return ""
+    return text

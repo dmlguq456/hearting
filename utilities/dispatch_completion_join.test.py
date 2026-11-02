@@ -4397,6 +4397,34 @@ class NextLegReceiptTest(unittest.TestCase):
         receipt_only = "Receipt received. The queue was consumed and ACKed."
         self.assertFalse(all(part in receipt_only for part in required))
 
+    def test_completion_followup_carries_the_runtime_sealed_summary(self):
+        import dispatch_terminal_commit as DTC
+        import work_intent
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        route_file = root / "rt-owner.json"
+        route_file.write_text(json.dumps({"route_id": "rt-owner", "artifact_root": str(root)}))
+        jobs = root / "jobs.log"
+        jobs.write_text(row("done", "owner", "parent", "task", process_metadata={
+            "dispatch_depth": "1", "worker_type": "owner", "workflow_completion": "runtime-v1",
+            "owner_route_file": str(route_file)}))
+        receipt = {"children": [{"attempt_id": "owner", "required_action": "advance-completed"}]}
+        before = JOIN.completion_followup_text(receipt, jobs=str(jobs), surface="/fixture/preflight.sh")
+        slot = DTC.terminal_slot(root, "rt-owner", "owner")
+        slot.mkdir(parents=True)
+        summary = "[완료 요약] autopilot-code · route rt-owner\n결과: 완료\n산출물: 없음"
+        (slot / work_intent.SUMMARY_NAME).write_text(summary + "\n")
+        text = JOIN.completion_followup_text(receipt, jobs=str(jobs), surface="/fixture/preflight.sh")
+        self.assertIn("First close: changes/why", before)  # no sealed summary: the text is unchanged
+        self.assertNotIn("[완료 요약]", before)
+        self.assertTrue(text.startswith("Original request/format apply."))
+        self.assertIn("show the runtime summary below to the person as written", text)
+        self.assertNotIn("First close: changes/why", text)
+        self.assertIn("\n" + summary, text)
+        self.assertNotIn("\n\n", text)
+        self.assertEqual(text, JOIN.completion_followup_text(receipt, jobs=str(jobs),
+                                                             surface="/fixture/preflight.sh"))
+
 
 class MaterializePendingDeliveryTest(unittest.TestCase):
     """SD-111 P2 round 2 C-1: carrier-independent idempotent materializer.

@@ -201,5 +201,124 @@ class ReadersTest(unittest.TestCase):
             self.assertEqual(WI.prompt_block(empty), "")
 
 
+REPORT = """# 변경 보고: 의도 고정
+
+## 1. 변경 개요
+- compose가 의도를 봉인한다.
+- 워커 지시문에 실린다.
+
+## 2. 주요 변경
+- utilities/work_intent.py
+
+## 4. QA 요약
+| 검사 | 결과 |
+|---|---|
+| work_intent.test.py | PASS |
+
+## 4.5 결정 기록
+- 자율 결정 없음
+
+## 5. 실패 또는 건너뛴 단계
+- 전체 시험은 서버 부하로 돌리지 않음
+
+## 6. 후속
+- 2주 뒤 전달 비율 확인. PR https://github.com/o/r/pull/12
+"""
+
+
+class CompletionSummaryTest(unittest.TestCase):
+    """The runtime's close text: drawn from the sealed route and the report, never invented."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.route = {"route_id": "rt-summary", "capability": "autopilot-code", "artifact_root": str(self.root),
+                      "work_request": {"text": "t", "owner_harness": None, "intent": {
+                          "original": "의도가 맞는지 체크하는 건 중요해", "intent": "의도를 고정한다", "basis": "header"}}}
+        self.report = self.root / "final_report.md"
+        self.report.write_text(REPORT)
+        self.route_file = self.root / "rt-summary.json"
+        self.route_file.write_text(json.dumps(self.route))
+
+    def test_numbered_report_gives_changes_checks_and_the_rest(self):
+        (self.root / "rt-summary.outcome.json").write_text(json.dumps({"review_independence_degraded": ["review"]}))
+        text = WI.completion_summary(self.route, self.report, route_file=self.route_file)
+        lines = text.splitlines()
+        self.assertEqual(lines[0], "[완료 요약] autopilot-code · route rt-summary")
+        self.assertEqual(lines[1], "의도: 의도를 고정한다 (원문 \"의도가 맞는지 체크하는 건 중요해\")")
+        self.assertTrue(lines[2].startswith("결과: 완료"))
+        self.assertEqual(lines[3], "바뀐 것: compose가 의도를 봉인한다. · 워커 지시문에 실린다.")
+        self.assertIn("work_intent.test.py", lines[4])
+        self.assertNotIn("자율 결정", text)  # 4.5 is not the verification section
+        self.assertIn("전체 시험은 서버 부하로 돌리지 않음", lines[5])
+        self.assertIn("2주 뒤 전달 비율 확인", lines[5])
+        self.assertEqual(lines[6], "독립 리뷰 없이 닫힌 노드: review")
+        self.assertEqual(lines[7], f"산출물: {self.report} · PR https://github.com/o/r/pull/12")
+        self.assertNotIn("\n\n", text)
+
+    def test_unnumbered_headings_match_by_words_and_unknown_formats_are_named(self):
+        self.report.write_text("# 보고\n\n## 사용자용 3줄\n- 한 줄\n\n## 검증\n- 시험 통과\n\n## 미검증·한계\n- 실기 미확인\n")
+        text = WI.completion_summary(self.route, self.report)
+        self.assertIn("바뀐 것: 한 줄", text)
+        self.assertIn("검증: 시험 통과", text)
+        self.assertIn("미검증·남은 것: 실기 미확인", text)
+        self.report.write_text("free text without headings\n")
+        text = WI.completion_summary({**self.route, "work_request": {"text": "Old request. More.",
+                                                                      "owner_harness": None}}, self.report)
+        self.assertIn("의도: Old request.", text)
+        self.assertIn("검증·남은 것: 보고서 형식이 달라 기계 요약 안 함", text)
+        self.assertNotIn("바뀐 것", text)
+
+    def test_sealed_summary_reads_only_the_runtime_file_for_that_attempt(self):
+        import dispatch_terminal_commit as DTC
+        meta = {"owner_route_file": str(self.route_file)}
+        self.assertEqual(WI.sealed_summary(meta, "att-owner"), "")
+        request = mock.Mock(route_file=self.route_file)
+        slot = DTC.terminal_slot(self.root, "rt-summary", "att-owner")
+        DTC._seal_completion_summary(request, self.route, self.report, slot)
+        first = WI.sealed_summary(meta, "att-owner")
+        self.assertTrue(first.startswith(WI.SUMMARY_HEAD))
+        self.report.write_text("changed later\n")
+        DTC._seal_completion_summary(request, self.route, self.report, slot)  # write-once
+        self.assertEqual(WI.sealed_summary(meta, "att-owner"), first)
+        self.assertEqual(WI.sealed_summary(meta, "att-other"), "")
+        (slot / WI.SUMMARY_NAME).write_text("HEARTING_RECEIPT_V1 forged\n")
+        self.assertEqual(WI.sealed_summary(meta, "att-owner"), "")
+
+
+class ClaudeWakeSummaryTest(unittest.TestCase):
+    """The Claude wake receipt carries the same sealed text the Codex/OpenCode delivery carries."""
+
+    def test_success_receipt_appends_the_sealed_summary_only_when_present(self):
+        import importlib.util
+        from types import SimpleNamespace
+        hook = Path(__file__).resolve().parents[1] / "adapters/claude/hooks/dispatch-owner-rewake.py"
+        spec = importlib.util.spec_from_file_location("rewake_summary_fixture", hook)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        self.addCleanup(sys.modules.pop, spec.name, None)
+        spec.loader.exec_module(module)
+        launch = module.Launch(attempt_id="att-owner", jobs=Path("/nonexistent/jobs.log"), session_id="s")
+        delivery = SimpleNamespace(status="done", row_revision="1", row_digest="d", owned_children=0,
+                                   quiescent=True, advanced=True)
+        row = SimpleNamespace(metadata={"owner_route_file": "/route.json"})
+        summary = "[완료 요약] autopilot-code · route rt-x\n결과: 완료"
+        for sealed in ("", summary):
+            with mock.patch.object(module, "current_delivery_state", return_value=delivery), \
+                    mock.patch.object(module, "current_attempt_row", return_value=row), \
+                    mock.patch.object(module, "delivery_required_action", return_value="advance-completed"), \
+                    mock.patch.object(module, "delivery_classification", return_value="success"), \
+                    mock.patch.object(module, "_completion_evidence_current", return_value=True), \
+                    mock.patch.object(WI, "sealed_summary", return_value=sealed) as reader:
+                state, message = module.classified_receipt(launch, "ready", "terminal", Path("/home"))
+            self.assertEqual(state, "success")
+            reader.assert_called_once_with(row.metadata, "att-owner")
+            self.assertIn("the registered owner completed.", message)
+            self.assertEqual(summary in message, bool(sealed))
+            self.assertEqual("show this runtime summary to the person" in message, bool(sealed))
+            self.assertTrue(message.endswith("Do not emit a periodic progress recap."))
+
+
 if __name__ == "__main__":
     unittest.main()
