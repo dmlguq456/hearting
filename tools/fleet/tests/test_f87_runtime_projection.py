@@ -944,6 +944,67 @@ class ProjectionObservationTest(unittest.TestCase):
                                     session_seq=100, session_start_source="startup"), True)
             report.assert_not_called()
 
+    def test_recorded_start_lifecycle_converts_ledger_microseconds_per_harness(self):
+        from tools.fleet import herdr_projection as hp
+        sys.path.insert(0, str(ROOT / "utilities"))
+        import session_tidy
+        recorded = {"session_start_source": "clear", "session_seq": 1793262080500000}
+        for harness, expected in (("codex", 1793262080500000000), ("claude", 1793262080500000000),
+                                  ("opencode", 1793262080500000)):
+            with self.subTest(harness=harness), \
+                 unittest.mock.patch.object(session_tidy, "session_start_context",
+                                            return_value=dict(recorded)) as read:
+                lifecycle = hp._recorded_start_lifecycle(harness, "sid", "w:p", socket_path="/s.sock")
+                self.assertEqual(lifecycle, {"session_seq": expected, "session_start_source": "clear"})
+                read.assert_called_once_with(
+                    harness, "sid", "w:p",
+                    endpoint=session_tidy._endpoint_scope({"HERDR_SOCKET_PATH": "/s.sock"}))
+        with unittest.mock.patch.object(session_tidy, "session_start_context",
+                                        return_value=dict(recorded)) as read:
+            hp._recorded_start_lifecycle("codex", "sid", "w:p")
+            read.assert_called_once_with("codex", "sid", "w:p", endpoint=None)
+        # a recorded source with no recorded seq stays without one: no seq is ever made here
+        for context, expected in (({}, {}),
+                                  ({"session_start_source": "clear"}, {"session_start_source": "clear"})):
+            with self.subTest(context=context), \
+                 unittest.mock.patch.object(session_tidy, "session_start_context", return_value=context), \
+                 unittest.mock.patch.object(hp.time, "time_ns", side_effect=AssertionError("no new seq")):
+                self.assertEqual(hp._recorded_start_lifecycle("codex", "sid", "w:p", socket_path=""),
+                                 expected)
+
+    def test_direct_codex_projection_sends_recorded_start_in_nanoseconds_and_keeps_explicit_seq(self):
+        from tools.fleet import herdr_projection as hp
+        sys.path.insert(0, str(ROOT / "utilities"))
+        import session_tidy
+        from fleet import process_identity
+        recorded = {"session_start_source": "clear", "session_seq": 1793262080500000}
+        common = (unittest.mock.patch.object(hp.shutil, "which", return_value="/fixture/herdr"),
+                  unittest.mock.patch.object(hp, "may_report", return_value=True),
+                  unittest.mock.patch.object(process_identity, "current_launch_context", return_value=None))
+        with common[0], common[1], common[2], \
+                unittest.mock.patch.object(session_tidy, "session_start_context",
+                                           return_value=dict(recorded)), \
+                unittest.mock.patch.object(hp, "_report") as report:
+            hp.project("codex", "sid", pane_id="w:p", worker=False)
+        self.assertEqual(report.call_args.kwargs["session_seq"], 1793262080500000000)
+        self.assertEqual(report.call_args.kwargs["session_start_source"], "clear")
+
+        with common[0], common[1], common[2], \
+                unittest.mock.patch.object(session_tidy, "session_start_context") as read, \
+                unittest.mock.patch.object(hp, "_report") as report:
+            hp.project("codex", "sid", pane_id="w:p", worker=False,
+                       session_seq=1793262080600000000, session_start_source="clear")
+        read.assert_not_called()
+        self.assertEqual(report.call_args.kwargs["session_seq"], 1793262080600000000)
+
+        with common[0], common[1], common[2], \
+                unittest.mock.patch.object(session_tidy, "session_start_context",
+                                           return_value=dict(recorded)), \
+                unittest.mock.patch.object(hp, "_native_opencode_lifecycle", return_value={}), \
+                unittest.mock.patch.object(hp, "_report") as report:
+            hp.project("opencode", "ses_A", pane_id="w:p", worker=False)
+        self.assertEqual(report.call_args.kwargs["session_seq"], 1793262080500000)
+
     def test_normal_opencode_cli_transports_lifecycle_without_changing_other_harnesses(self):
         from contextlib import redirect_stdout
         from io import StringIO
