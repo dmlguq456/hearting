@@ -300,9 +300,32 @@ def _window_closed(harness: str, session_id: str) -> bool:
     return _session_liveness(harness, session_id, _agents(), _end_observation()) != "live"
 
 
+_ACTIVITY_EVENTS = frozenset({"start", "prompt", "real-prompt", "summary"})
+
+
+def _row_ts(row) -> float:
+    try:
+        return float(row.get("ts") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _evidence_ts(relation: dict) -> float:
+    """Latest role-evidence time of a relation (``YYYY-mm-ddTHH:MM:SSZ``), 0 if none."""
+    latest = 0.0
+    for target in relation.get("targets") or ():
+        try:
+            value = datetime.strptime(str(target.get("ts")), "%Y-%m-%dT%H:%M:%SZ")
+        except (TypeError, ValueError):
+            continue
+        latest = max(latest, value.replace(tzinfo=timezone.utc).timestamp())
+    return latest
+
+
 def _seat_cleared(harness: str, session_id: str) -> bool:
     """True only when every seat this holder's role sits in recorded the holder's own
-    confirmed same-harness ``/clear`` and the session is not ``live``.
+    confirmed same-harness ``/clear``, nothing shows the holder after that clear, and the
+    session is not ``live``.
 
     This is the confirmed same-seat ``/clear`` the session-tidy start hook releases on,
     read again by a later pass from the same shared lineage: the seat's own ledger holds
@@ -310,11 +333,26 @@ def _seat_cleared(harness: str, session_id: str) -> bool:
     chain end. Without this pass a clear that the hook missed (one taken before that
     release existed, or while the lineage was momentarily unresolved) keeps the
     predecessor's role, duty and watches for good, because the successor keeps the pane
-    occupied. An ambiguous lineage, a role re-granted in another seat or a live session
-    is left as it is."""
-    keys = _holder_seat_keys(harness, session_id)
-    if not keys:
+    occupied.
+
+    A clear edge is history, not proof that the session stayed gone, and a resume makes
+    no edge. So the pass concludes nothing when, after the last clear edge by row time
+    (never ledger order, which compaction regroups), the session has a ``start``,
+    ``prompt``, ``real-prompt`` or ``summary`` row in any of its ledgers or newer role
+    evidence; nor while this seat's tidy snapshot from the holder still waits for its
+    successor's first prompt (the hook's handover can still carry the role). An
+    ambiguous lineage, a clear on another seat or a live session is left as it is."""
+    try:
+        held = [relation for relation in _relations()
+                if relation.get("released") is not True
+                and ((relation.get("holder") or {}).get("harness"),
+                     (relation.get("holder") or {}).get("sid")) == (harness, session_id)]
+    except Exception:  # noqa: BLE001
         return False
+    if not held or not all(relation.get("seat_key") for relation in held):
+        return False
+    keys = {str(relation["seat_key"]) for relation in held}
+    vertex = (harness, session_id)
     try:
         import dispatch_seat_handover as handover
         import session_tidy as tidy
@@ -322,10 +360,28 @@ def _seat_cleared(harness: str, session_id: str) -> bool:
         end, state = handover._chain_end(graph, harness, session_id)
         if state != "successor" or end == session_id:
             return False
+        edges = [(key, row) for key, rows in graph.ledger_rows.items() for row in rows
+                 if (tidy.tidy_lineage_edge(row) or ())[:2] == vertex]
+        if not keys <= {key for key, _row in edges}:
+            return False
+        cleared_at = max(_row_ts(row) for _key, row in edges)
+
+        def active_after(who, events):
+            return any((row.get("harness"), row.get("sid")) == who
+                       and row.get("event") in events and _row_ts(row) > cleared_at
+                       for key in graph.ledger_keys.get(who, ())
+                       for row in graph.ledger_rows.get(key, ()))
+
+        if active_after(vertex, _ACTIVITY_EVENTS):
+            return False
+        if any(_evidence_ts(relation) > cleared_at for relation in held):
+            return False
+        successors = {tidy.tidy_lineage_edge(row)[2] for _key, row in edges}
         for key in keys:
-            rows = graph.ledger_rows.get(key) or ()
-            if not any((tidy.tidy_lineage_edge(row) or ())[:2] == (harness, session_id)
-                       for row in rows):
+            origin = (handover.read_snapshot(key) or {}).get("from") or {}
+            if ((origin.get("harness"), origin.get("sid")) == vertex
+                    and not any(active_after((harness, successor), {"prompt", "real-prompt"})
+                                for successor in successors)):
                 return False
     except Exception:  # noqa: BLE001 - unreadable lineage concludes nothing
         return False
@@ -335,7 +391,8 @@ def _seat_cleared(harness: str, session_id: str) -> bool:
 def _release_if_window_closed(duty, store, harness: str, session_id: str, now: float) -> bool:
     """Release a role whose session closed through an ordinary path the hook did not see:
     its seat pane vanished (``window-closed``) or its seat moved on by a confirmed
-    ``/clear`` (``cleared``). The release itself is the one ``release_closed_session``."""
+    ``/clear`` (``cleared``). The release itself is the one ``release_closed_session``;
+    while it cannot resolve the role, the duty stays for the next pass."""
     try:
         if _window_closed(harness, session_id):
             reason = "window-closed"
@@ -347,7 +404,9 @@ def _release_if_window_closed(duty, store, harness: str, session_id: str, now: f
         peer_message = module() if module else None
         if peer_message is None:
             return False
-        peer_message.release_closed_session(harness, session_id, reason=reason)
+        summary = peer_message.release_closed_session(harness, session_id, reason=reason)
+        if isinstance(summary, dict) and summary.get("roles") == "unresolved":
+            return False
         latest = store.get(duty["id"])
         if _active(latest):
             _retire(latest, store, reason, now=now)

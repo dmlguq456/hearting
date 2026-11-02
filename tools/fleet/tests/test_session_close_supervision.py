@@ -31,6 +31,7 @@ for _path in (_UTILITIES_DIR, _TOOLS_DIR):
         sys.path.insert(0, _path)
 
 import claude_process_identity                                          # noqa: E402
+import dispatch_seat_handover as handover                               # noqa: E402
 import herdr_observation                                                # noqa: E402
 import peer_obligations                                                 # noqa: E402
 import session_tidy as tidy                                             # noqa: E402
@@ -119,16 +120,16 @@ class CloseSupervisionBase(unittest.TestCase):
         self.rows.append(SimpleNamespace(harness=harness, session_id=session, cwd=str(self.repo),
                                          session_aliases=(), _gpu_session_aliases=()))
 
-    def holder(self, harness, session, label=None, *, repository=True, generation=None):
+    def holder(self, harness, session, label=None, *, repository=True, generation=None, ts=NOW):
         """A role this session holds: its marker (with the seat and repository)."""
         seat_key = _digest(label or session)
         self.seat_of[(harness, session)] = seat_key
         path = Path(os.environ["AGENT_PEER_LEDGER_ROOT"]) / "peer-steward" / harness / f"{session}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         marker = {"schema_version": 2, "harness": harness, "session_id": session, "since": NOW,
-                  "generation": generation or f"gen-{session}", "seat_key": seat_key, "updated": NOW,
+                  "generation": generation or f"gen-{session}", "seat_key": seat_key, "updated": ts,
                   "targets": {"-": {"harness": "unknown", "session_id": None, "name": "-",
-                                    "kind": "explicit", "ts": NOW, "source": "explicit"}}}
+                                    "kind": "explicit", "ts": ts, "source": "explicit"}}}
         if repository:
             marker["repository"] = self.key
         path.write_text(json.dumps(marker), encoding="utf-8")
@@ -606,6 +607,99 @@ class ClearedSeatTest(CloseSupervisionBase):
         self.succession(stale, sid("f0f0f0f0"), seat_label="fork-seat")
         self.runner_pass("claude", stale)
         self.assertTrue(self.holds_role("claude", stale))
+
+    # --- RV-1043: a clear edge is history; later activity or a pending handover wins
+
+    def activity(self, session, event, at, seat_label=None, **extra):
+        seat = tidy.Seat("pane", _digest(seat_label or self.SEAT))
+        tidy._append_ledger_entry(seat, {"ts": at, "harness": "claude", "sid": session,
+                                         "event": event, **extra})
+
+    def test_a_predecessor_resumed_in_its_seat_keeps_its_role(self):
+        # Written before the clear edges, so file order says "earlier"; its time is later.
+        self.activity(self.CHAIN[0], "start", time.time() + 60, source="resume")
+        stale, _current = self.build()
+        self.assertEqual(self.liveness("claude", stale), "unknown")
+        duty = self.runner_pass("claude", stale)
+        self.assertNotEqual(duty["state"], "complete")
+        self.assertTrue(self.holds_role("claude", stale))
+
+    def test_activity_older_than_the_clear_still_releases(self):
+        stale, _current = self.build()
+        # Appended after the edges (file order "later"), but older in time.
+        self.activity(stale, "prompt", time.time() - 3600)
+        duty = self.runner_pass("claude", stale)
+        self.assertEqual(duty["observation"]["reason"], "cleared")
+        self.assertFalse(self.holds_role("claude", stale))
+
+    def test_a_predecessor_resumed_elsewhere_and_unseen_by_the_census_keeps_its_role(self):
+        stale, _current = self.build()
+        self.claude_process(4200, native=stale)
+        os.unlink(self.proc / "self" / "ns" / "pid")      # the runner sits in another PID namespace
+        os.symlink("pid:[4026599999]", self.proc / "self" / "ns" / "pid")
+        self.activity(stale, "start", time.time() + 60, seat_label="wB:pR1", source="resume")
+        self.assertEqual(self.liveness("claude", stale), "unknown")
+        self.runner_pass("claude", stale)
+        self.assertTrue(self.holds_role("claude", stale))
+
+    def test_a_role_granted_again_after_the_clear_is_kept(self):
+        stale, _current = self.build()
+        again = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 60))
+        self.holder("claude", stale, label=self.SEAT, generation="gen-again", ts=again)
+        self.runner_pass("claude", stale)
+        self.assertTrue(self.holds_role("claude", stale))
+
+    def pending_handover(self):
+        """The predecessor's tidy snapshot, its clear edge and the successor's start; the
+        start hook's handover of the role has not committed (it retries at a prompt)."""
+        stale, current = self.CHAIN[0], self.CHAIN[1]
+        self.holder("claude", stale, label=self.SEAT)
+        seat = tidy.Seat("pane", _digest(self.SEAT))
+        with tidy.seat_lock(seat.key):
+            handover.write_snapshot_locked(seat, "claude", stale, now=time.time())
+        self.succession(stale, current, seat_label=self.SEAT)
+        self.activity(current, "start", time.time(), source="clear")
+        self.unresolved_daemon()
+        self.claude_process(4100, native=current)
+        self.requester_row("claude", current)
+        return seat, stale, current
+
+    def test_a_pending_handover_is_left_to_carry_the_role(self):
+        seat, stale, current = self.pending_handover()
+        duty = self.runner_pass("claude", stale)
+        self.assertNotEqual(duty["state"], "complete")
+        with mock.patch.object(handover, "_confirmed_clear", return_value=True), \
+                tidy.seat_lock(seat.key):
+            row = handover._record_locked(seat, "claude", current, "prompt", "", time.time())
+        self.assertEqual(len(((row or {}).get("steward") or {}).get("roles") or ()), 1)
+        self.assertTrue(self.holds_role("claude", current))
+
+    def test_after_the_successor_prompted_an_untaken_role_is_released(self):
+        _seat, stale, current = self.pending_handover()
+        self.activity(current, "prompt", time.time() + 1)
+        duty = self.runner_pass("claude", stale)
+        self.assertEqual(duty["observation"]["reason"], "cleared")
+        self.assertFalse(self.holds_role("claude", stale))
+
+    def test_a_release_read_before_the_hook_handover_leaves_the_successors_role(self):
+        seat, stale, current = self.pending_handover()
+        before = handover.resolved_steward_relations(include_released=True)
+        with tidy.seat_lock(seat.key):
+            row = handover._record_locked(seat, "claude", current, "start", "clear", time.time())
+        self.assertTrue(row)
+        self.assertTrue(self.holds_role("claude", current))
+        real = handover.resolved_steward_relations
+
+        def read_before_the_handover(*args, **kwargs):
+            if not args and kwargs == {"include_released": True}:
+                return [dict(relation) for relation in before]
+            return real(*args, **kwargs)
+
+        with mock.patch.object(handover, "resolved_steward_relations",
+                               side_effect=read_before_the_handover):
+            summary = self.pm.release_closed_session("claude", stale, reason="cleared")
+        self.assertEqual(summary["roles"], 0)
+        self.assertTrue(self.holds_role("claude", current))
 
 
 if __name__ == "__main__":
