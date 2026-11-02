@@ -115,6 +115,31 @@ class HerdrSessionTargeting(unittest.TestCase):
         self.assertNotEqual(left.key, right.key)
         self.assertNotEqual(left.endpoint, right.endpoint)
 
+    def test_codex_candidate_follows_replaced_sid_and_still_refuses_old_mismatch(self):
+        module = self.load("fourth")
+        old, new, pane = ("01a1827d-0000-7000-8000-000000000001",
+                          "01a186b9-0000-7000-8000-000000000002", "w1:p3")
+        info = {"pane_id": pane, "foreground_processes": [{"pid": 4242}]}
+
+        def candidate(herdr_sid, **expected):
+            ident = {"harness": "codex", "pane": pane, "session_id": herdr_sid, "name": None}
+            with unittest.mock.patch.object(module, "_prompt_process_session",
+                                            return_value=(new, None)):
+                return module._prompt_current_candidate(
+                    pane, expected_harness="codex", target_observation=("idle", ident),
+                    pane_info=info, **expected)
+
+        # after the Herdr report follows the /clear, the proven process SID is the candidate
+        found, error = candidate(new)
+        self.assertIsNone(error)
+        self.assertEqual(found["session_id"], new)
+        found, error = candidate(new, expected_sid=new)
+        self.assertIsNone(error)
+        self.assertEqual(found["session_id"], new)
+        # a Herdr SID that is still the old one, or an expectation of it, is refused
+        self.assertEqual(candidate(old), (None, "target-identity-changed"))
+        self.assertEqual(candidate(new, expected_sid=old), (None, "target-identity-changed"))
+
     def test_opencode_clear_requires_the_current_native_selection(self):
         module = self.load("fourth")
         req = {"seat": {"pane": "w1:p3"}, "harness": "opencode", "sid": "booked-sid"}
