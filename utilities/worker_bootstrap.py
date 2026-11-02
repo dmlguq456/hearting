@@ -1115,6 +1115,8 @@ def handed_over_prompt(route, node_id, output_dir) -> str:
 
 
 _PRIOR_ROUND_LIMITS = {"paths": 20, "commits": 20, "chars": 300}
+# One parse per unchanged registry file: a chain continuation asks once per session.
+_LINEAGE_CACHE: dict = {}
 
 
 def _lineage_rows(route, jobs) -> dict[str, list[tuple[str, dict]]]:
@@ -1128,7 +1130,13 @@ def _lineage_rows(route, jobs) -> dict[str, list[tuple[str, dict]]]:
         pass
     rows: dict[str, list[tuple[str, dict]]] = {}
     try:
-        lines = Path(jobs).read_text(encoding="utf-8", errors="replace").splitlines()
+        path = Path(jobs).resolve()
+        info = path.stat()
+        key = (str(path), info.st_ino, info.st_mtime_ns, info.st_ctime_ns, info.st_size,
+               frozenset(map(str, identities)))
+        if key in _LINEAGE_CACHE:
+            return _LINEAGE_CACHE[key]
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     except (OSError, TypeError):
         return rows
     for line in lines:
@@ -1140,7 +1148,26 @@ def _lineage_rows(route, jobs) -> dict[str, list[tuple[str, dict]]]:
                 or terminal_attempt_never_started(fields[1], meta)):
             continue
         rows.setdefault(meta["route_node"], []).append((fields[1], meta))
+    _LINEAGE_CACHE.clear()
+    _LINEAGE_CACHE[key] = rows
     return rows
+
+
+def judging_stages(route, node_id) -> list[dict]:
+    """The round-capped stages that judge this node's work, in route order: its dependents and
+    theirs through judging stages only, up to the next stage that produces work (so execute is
+    judged by impl-review and the test after it, not by the report that follows)."""
+    import review_round_cap as ROUND
+    nodes = _route_nodes(route)
+    found, pending = set(), [node_id]
+    while pending:
+        current = pending.pop(0)
+        for node in nodes:
+            if (current in (node.get("depends_on") or ()) and node["id"] not in found
+                    and node["id"] != node_id and ROUND.is_round_capped_node(node)):
+                found.add(node["id"])
+                pending.append(node["id"])
+    return [node for node in nodes if node["id"] in found]
 
 
 def _decoded(encoded) -> str:
@@ -1213,20 +1240,17 @@ def attempt_changes(route, meta) -> list[str]:
 
 
 def judge_findings(route, node_id, rows=None, jobs=None) -> list[str]:
-    """``<judge> <attempt>: <artifact>`` for each round-capped stage that depends on this node and
-    whose latest verdict is blocking: the findings this node's next round closes."""
+    """``<judge> <attempt>: <artifact>`` for each stage that judges this node (``judging_stages``)
+    whose latest verdict still holds an open 🔴 list (``open_blocking_verdict``: not one the owner
+    already disposed): the findings this node's next round closes."""
     import review_round_cap as ROUND
     rows = _lineage_rows(route, jobs) if rows is None else rows
     found = []
-    for judge in _route_nodes(route):
-        if node_id not in (judge.get("depends_on") or ()) or not ROUND.is_round_capped_node(judge):
-            continue
+    for judge in judging_stages(route, node_id):
         worker = judge.get("worker_type") or ("review" if judge.get("kind") == "review-worker" else "test")
-        verdicts = [(status, meta) for status, meta in rows.get(judge["id"], ())
-                    if ROUND.classify_round_row(status, meta, worker_type=meta.get("worker_type") or worker) == "verdict"]
-        if not verdicts or not ROUND.last_verdict_blocking(verdicts[-1:], worker):
+        meta = ROUND.open_blocking_verdict(rows.get(judge["id"], ()), worker)
+        if meta is None:
             continue
-        meta = verdicts[-1][1]
         outcome = attempt_outcome(route, meta)
         text = f"{judge['id']} {meta.get('attempt_id', 'unknown')} ({meta.get('note', 'blocking')})"
         if outcome.get("artifact"):

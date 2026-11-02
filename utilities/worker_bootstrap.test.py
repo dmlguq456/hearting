@@ -1448,6 +1448,19 @@ class PriorRoundContextTest(unittest.TestCase):
                       "loopback bind EPERM in sandbox", context)
         self.assertNotIn("Findings to close", context)
 
+    def test_a_test_after_the_review_is_followed_and_a_disposed_review_is_not_reopened(self):
+        self.row("execute", "att-execute-1", "completed-marker", "pass", launch_head=self.launch_head)
+        self.row("impl-review", "att-review-1", "completed-marker", "pass")
+        self.row("test", "att-test-1", "dead-worker-fail", "fail")
+        self.assertEqual([n["id"] for n in W.judging_stages(self.route, "execute")], ["impl-review", "test"])
+        self.assertEqual([n["id"] for n in W.judging_stages(self.route, "plan")], ["plan-check"])
+        context = W.prior_round_context(self.route, "execute", self.jobs)
+        self.assertIn("Findings to close: test att-test-1 (dead-worker-fail)", context)
+        # The owner closed a review in place: its findings were ruled on, not reopened.
+        self.row("impl-review", "att-review-2", "completed-marker", "fail",
+                 review_gate_closure="owner-closure", review_independence="owner-overridden")
+        self.assertNotIn("impl-review", " ".join(W.judge_findings(self.route, "execute", jobs=self.jobs)))
+
     def test_unreadable_records_render_only_what_is_known(self):
         self.row("execute", "att-execute-1", "dead-worker-fail", "fail", launch_head="not-a-commit")
         context = W.prior_round_context(self.route, "execute", self.jobs)
