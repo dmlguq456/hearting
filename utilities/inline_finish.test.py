@@ -105,6 +105,58 @@ class PendingForCycleTest(unittest.TestCase):
                     inline_finish.pending_for_cycle(self.root, "cyc-current")
 
 
+class ResultLocationLineTest(unittest.TestCase):
+    """finish ends with one line naming where the change is when it is not the person's folder."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="result-location-")
+        base = Path(self.temp.name)
+        self.repo = base / "repo"
+        self.wt = base / "repo-wt" / "greet"
+        self.env = {**os.environ, "GIT_CEILING_DIRECTORIES": str(base)}
+        self.git(base, "init", "-q", str(self.repo))
+        self.git(self.repo, "config", "user.email", "test@example.com")
+        self.git(self.repo, "config", "user.name", "Result Location Test")
+        (self.repo / "greet.py").write_text("print('Helo')\n", encoding="utf-8")
+        self.git(self.repo, "add", "greet.py")
+        self.git(self.repo, "commit", "-qm", "base")
+        self.git(self.repo, "worktree", "add", "-q", "-b", "greet", str(self.wt))
+        self.repo = Path(os.path.realpath(self.repo))
+        self.wt = Path(os.path.realpath(self.wt))
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def git(self, cwd, *args):
+        subprocess.run(["git", "-C", str(cwd), *args], check=True, env=self.env,
+                       capture_output=True, text=True)
+
+    def line(self, cwd):
+        with unittest.mock.patch.dict(os.environ, {"GIT_CEILING_DIRECTORIES": self.env["GIT_CEILING_DIRECTORIES"]}):
+            return CAP._result_location_line(str(cwd))
+
+    def test_primary_checkout_and_untouched_worktree_say_nothing(self):
+        self.assertEqual(self.line(self.repo), "")
+        self.assertEqual(self.line(self.wt), "")
+        self.assertEqual(self.line(self.repo.parent / "missing"), "")
+
+    def test_uncommitted_change_in_a_worktree_names_both_folders_and_the_merge(self):
+        (self.wt / "greet.py").write_text("print('Hello')\n", encoding="utf-8")
+        line = self.line(self.wt)
+        self.assertTrue(line.startswith(f"result: the change is in {self.wt} (branch greet, not committed yet)"), line)
+        self.assertIn(f"not in {self.repo}", line)
+        self.assertTrue(line.endswith(f"git -C {self.repo} merge greet"), line)
+
+    def test_committed_change_in_a_worktree_names_its_branch(self):
+        (self.wt / "greet.py").write_text("print('Hello')\n", encoding="utf-8")
+        self.git(self.wt, "commit", "-qam", "fix greeting")
+        line = self.line(self.wt)
+        self.assertTrue(line.startswith(f"result: the change is on branch greet in {self.wt}"), line)
+        self.assertNotIn("not committed", line)
+        self.git(self.repo, "merge", "-q", "greet")
+        self.assertEqual(self.line(self.wt), "")
+
+
 class PublicInlineFinishTest(unittest.TestCase):
     CAPABILITY = "autopilot-code"
     CAPABILITY_MODE = "dev"
@@ -633,6 +685,8 @@ class PublicInlineFinishTest(unittest.TestCase):
         self.assertEqual(first.returncode, 0, first.stderr)
         receipt = json.loads(first.stdout)
         self.assertEqual(receipt["schema"], "finish_receipt_v1")
+        # The route ran in the person's own folder, so no result-location line.
+        self.assertNotIn("result:", first.stderr)
         self.assertFalse(receipt["replay"])
         record = artifact_producer.read_cycle_record(self.root, self.cycle["cycle_id"])
         self.assertEqual(record["state"], "sealed")

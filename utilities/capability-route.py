@@ -11475,6 +11475,34 @@ def _primary_worktree(cwd, common):
     return None
 
 
+def _result_location_line(cwd):
+    """One plain closing line naming where a route's source change is when that is not the
+    person's own folder, or "".
+
+    A source start from a primary checkout runs in a prepared `<repo>-wt/<slug>` worktree and
+    leaves the primary untouched, so a person who reads only the agent's last message looks
+    for the change in the folder they started from. Read-only: "" in the primary itself, when
+    a clean worktree's commit is already in the primary, or on any git failure."""
+    top = _git(cwd, "rev-parse", "--show-toplevel") if cwd and os.path.isdir(cwd) else None
+    common = _git_common_dir(top) if top else None
+    primary = _primary_worktree(top, common) if common else None
+    if not primary or os.path.realpath(primary) == os.path.realpath(top):
+        return ""
+    branch = _git(top, "symbolic-ref", "-q", "--short", "HEAD")
+    pending = bool(_git(top, "status", "--porcelain"))
+    primary_head = _git(primary, "rev-parse", "HEAD")
+    if not pending and primary_head and _worktree_git(
+            top, "merge-base", "--is-ancestor", "HEAD", primary_head).returncode == 0:
+        return ""
+    if not branch:
+        return f"result: the change is in {top}, not in {primary}"
+    merge = shlex.join(["git", "-C", primary, "merge", branch])
+    if pending:
+        return (f"result: the change is in {top} (branch {branch}, not committed yet), not in "
+                f"{primary}; to bring it there, commit it in {top}, then run: {merge}")
+    return f"result: the change is on branch {branch} in {top}, not in {primary}; to bring it there, run: {merge}"
+
+
 def _preparation_record_path(artifact_root, key):
     return Path(artifact_root).resolve() / ".runtime" / "worktree-preparation" / f"{key}.json"
 
@@ -13230,7 +13258,13 @@ def main():
                 receipt=_legacy_inline_finish(a,route,a.route,sys.modules[__name__], _admission=admission)
         else:
             receipt=_legacy_inline_finish(a,route,a.route,sys.modules[__name__], _admission=admission)
-        print(json.dumps(receipt,sort_keys=True))
+        print(json.dumps(receipt,sort_keys=True),flush=True)
+        # Last, on stderr: stdout keeps exactly the one receipt its readers parse. A non-Git
+        # (unversioned) route runs no git probe at all.
+        location=("" if route.get("source_commit")=="unversioned"
+                  else _result_location_line(route.get("cwd")))
+        if location:
+            print(location,file=sys.stderr)
     else:
         if a.command=="close":
             a.route=_close_route_argument(a)
