@@ -475,7 +475,8 @@ continuation, delivery/replacement, summary/provider, lease, process or recent-v
 obligation can read it. Route and attempt outcomes retain their semantic state;
 an unreadable or conflicting route binding remains unknown. The pass runs at the end
 of every post-exit reaper and in a `reconcile --apply` that is not scoped to one exact attempt. It is due at
-most every five minutes, examines at most 128 homes (a fair cursor), and removes at
+most every five minutes (every minute while the last pass left due homes behind),
+examines at most 128 homes (a fair cursor) and stops once 16 are due, and removes at
 most 16 destructively touched homes, including partial leftovers of an interrupted removal.
 The same pass first prunes pending-delivery records, before it judges any home, so the
 index those judgments read stays under its record cap: terminal
@@ -575,7 +576,8 @@ then retire the oldest eligible logs as needed to approach 2 GiB. Protected
 and unknown bytes take precedence, so totals above 2 GiB are expected when
 needed. The bounded pass reuses one evidence snapshot, rechecks identity
 immediately before unlink, and resumes on the next normal cadence after
-interruption. It runs beside the existing post-exit reaper and selector-free
+interruption; examining and removing have separate time budgets, and the next
+pass may start after one minute while removable files remain. It runs beside the existing post-exit reaper and selector-free
 `reconcile --apply`; exact-attempt transactions remain scoped to their attempt.
 The append-only session-sweep and pending-delivery observation logs rotate at
 complete record boundaries under their writer lock, retaining a bounded set of
