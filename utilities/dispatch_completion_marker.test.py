@@ -1746,6 +1746,111 @@ class CompletionMarkerTest(unittest.TestCase):
         canonical = self.stable_dispatch / "completion" / route["route_id"] / "plan.json"
         self.assertTrue(canonical.is_file(), "marker must be preserved even when the row close fails")
 
+    def test_inline_completion_with_jobs_and_no_row_is_unregistered_complete(self):
+        route = self.compile_route()
+        route_path = self.write_route(route)
+        evidence = self.base / "plan.md"
+        evidence.write_text("plan body\n", encoding="utf-8")
+        axes = {"dispatch_depth": 2, "transport": "interactive", "execution_surface": "inline",
+                "registered_worker": "0", "fallback_hop": "inline"}
+        result = self.complete(route_path, "plan", evidence, jobs=self.jobs,
+                               attempt_id="att-inline-plan-jobs", attempt_axes=axes)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        canonical = self.stable_dispatch / "completion" / route["route_id"] / "plan.json"
+        self.assertTrue(canonical.is_file())
+        rows = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+        self.assertEqual(rows[-1], {"attempt_id": "att-inline-plan-jobs", "status": "unregistered-complete"})
+        self.assertNotIn("att-inline-plan-jobs", self.jobs.read_text(encoding="utf-8"))
+
+    def test_inline_completion_with_unwritable_jobs_is_unregistered_complete(self):
+        route = self.compile_route()
+        route_path = self.write_route(route)
+        evidence = self.base / "plan.md"
+        evidence.write_text("plan body\n", encoding="utf-8")
+        unwritable_dir = self.base / "readonly-inline"
+        unwritable_dir.mkdir(mode=0o500)
+        try:
+            result = self.complete(
+                route_path, "plan", evidence, jobs=unwritable_dir / "jobs.log",
+                attempt_id="att-inline-unwritable",
+                attempt_axes={"dispatch_depth": 2, "transport": "interactive",
+                              "execution_surface": "inline", "registered_worker": "0",
+                              "fallback_hop": "inline"},
+            )
+        finally:
+            unwritable_dir.chmod(0o700)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        canonical = self.stable_dispatch / "completion" / route["route_id"] / "plan.json"
+        self.assertTrue(canonical.is_file())
+        rows = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+        self.assertEqual(rows[-1], {"attempt_id": "att-inline-unwritable", "status": "unregistered-complete"})
+
+    def test_inline_completion_with_jobs_keeps_parent_cancellation(self):
+        spec = importlib.util.spec_from_file_location(
+            "inline_cancel_route", ROOT / "utilities/capability-route.py")
+        router = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(router)
+        route = self.compile_route()
+        self.write_route(route)
+        node = next(item for item in route["nodes"] if item["id"] == "plan")
+        evidence = self.base / "plan.md"
+        evidence.write_text("plan body\n", encoding="utf-8")
+        import route_parent_close
+        prior_jobs = os.environ.pop("AGENT_DISPATCH_JOBS", None)  # keep marker/lock resolution fixture-owned
+        try:
+            with self.stable_root_env(), mock.patch.object(route_parent_close, "intent",
+                                                           return_value={"requested": True}):
+                with self.assertRaises(ValueError) as ctx:
+                    router.complete_node(
+                        route, node, "plan", evidence, jobs=self.jobs,
+                        attempt_id="att-inline-cancel",
+                        explicit_attempt_metadata={"dispatch_depth": 2, "transport": "interactive",
+                                                   "execution_surface": "inline",
+                                                   "registered_worker": "0",
+                                                   "fallback_hop": "inline"},
+                    )
+        finally:
+            if prior_jobs is not None:
+                os.environ["AGENT_DISPATCH_JOBS"] = prior_jobs
+        self.assertEqual(str(ctx.exception), "cancelled-by-parent")
+        canonical = self.stable_dispatch / "completion" / route["route_id"] / "plan.json"
+        self.assertFalse(canonical.exists())
+
+    def test_inline_completion_with_unreadable_parent_close_stays_fail_closed(self):
+        spec = importlib.util.spec_from_file_location(
+            "inline_unreadable_route", ROOT / "utilities/capability-route.py")
+        router = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(router)
+        route = self.compile_route()
+        self.write_route(route)
+        node = next(item for item in route["nodes"] if item["id"] == "plan")
+        evidence = self.base / "plan.md"
+        evidence.write_text("plan body\n", encoding="utf-8")
+        unwritable_dir = self.base / "readonly-unreadable"
+        unwritable_dir.mkdir(mode=0o500)
+        import route_parent_close
+        prior_jobs = os.environ.pop("AGENT_DISPATCH_JOBS", None)  # keep marker resolution fixture-owned
+        try:
+            with self.stable_root_env(), mock.patch.object(route_parent_close, "intent",
+                                                           side_effect=OSError("unreadable ledger")):
+                with self.assertRaises(ValueError) as ctx:
+                    router.complete_node(
+                        route, node, "plan", evidence, jobs=unwritable_dir / "jobs.log",
+                        attempt_id="att-inline-unreadable",
+                        explicit_attempt_metadata={"attempt_schema_version": 2,
+                                                   "dispatch_depth": 2, "transport": "interactive",
+                                                   "execution_surface": "inline",
+                                                   "registered_worker": "0",
+                                                   "fallback_hop": "inline"},
+                    )
+        finally:
+            unwritable_dir.chmod(0o700)
+            if prior_jobs is not None:
+                os.environ["AGENT_DISPATCH_JOBS"] = prior_jobs
+        self.assertIn("row-close-failed", str(ctx.exception))
+        canonical = self.stable_dispatch / "completion" / route["route_id"] / "plan.json"
+        self.assertTrue(canonical.is_file(), "an unreadable ledger must not be read as 'no cancellation'")
+
     def test_complete_unwritable_jobs_marker_preserved_then_reconcile_repairs(self):
         route = self.compile_route()
         route_path = self.write_route(route)

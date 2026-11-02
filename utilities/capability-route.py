@@ -10544,6 +10544,20 @@ def _bound_env_attempt(route, node, jobs):
         return None
     return None
 
+def _unregistered_attempt(metadata):
+    """Whether explicit attempt metadata declares an attempt the registry never owned.
+
+    Mirrors `dispatch_contract._registered_worker` for the declared spellings; an
+    absent or invalid value stays "registered" so the fail-closed row paths keep it.
+    """
+    if not metadata:
+        return False
+    value = metadata.get("registered_worker")
+    if isinstance(value, bool):
+        return not value
+    return str(value).lower() in {"0", "false"}
+
+
 def _complete_node_locked(
     route,
     node,
@@ -10584,6 +10598,31 @@ def _complete_node_locked(
         try:
             ensure_global_registry_writable(jobs_path)
         except DispatchContractError as exc:
+            if explicit_attempt_metadata is not None and _unregistered_attempt(explicit_attempt_metadata):
+                import route_parent_close
+                try:
+                    cancellation = route_parent_close.intent(route, jobs_path)
+                except OSError:
+                    # The cancellation ledger could not be read: keep the fail-closed row
+                    # error instead of inferring "no cancellation" from a failed read.
+                    _publish_completion_locked(
+                        route,node,node_id,evidence,
+                        attempt_id=attempt_id,
+                        attempt_metadata=explicit_attempt_metadata,
+                        review_claim=review_claim,
+                        jobs=jobs_path,
+                    )
+                    raise ValueError(f"row-close-failed:{exc.reason}") from exc
+                if cancellation:
+                    raise ValueError("cancelled-by-parent")
+                marker=_publish_completion_locked(
+                    route,node,node_id,evidence,
+                    attempt_id=attempt_id,
+                    attempt_metadata=explicit_attempt_metadata,
+                    review_claim=review_claim,
+                    jobs=jobs_path,
+                )
+                return marker, {"attempt_id": attempt_id, "status": "unregistered-complete"}
             if explicit_attempt_metadata is not None:
                 _publish_completion_locked(
                     route,node,node_id,evidence,
@@ -10613,13 +10652,15 @@ def _complete_node_locked(
                     break
             if row_fields is None or row_metadata is None:
                 if explicit_attempt_metadata is not None:
-                    _publish_completion_locked(
+                    marker=_publish_completion_locked(
                         route,node,node_id,evidence,
                         attempt_id=attempt_id,
                         attempt_metadata=explicit_attempt_metadata,
                         review_claim=review_claim,
                         jobs=jobs_path,
                     )
+                    if _unregistered_attempt(explicit_attempt_metadata):
+                        return marker, {"attempt_id": attempt_id, "status": "unregistered-complete"}
                 raise ValueError(
                     f"attempt-row-absent:{attempt_id}; exact fallback attempt metadata required"
                 )
