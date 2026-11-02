@@ -2521,7 +2521,14 @@ prints `changes=none`, and the steward leaves a line or two of status and starts
 work. When the role has no targets, every target is finished or the sessions are ready
 to tidy, one short request recommends closing ended sessions and releasing the flag
 through the ordinary `steward off` path; while that state is unchanged the next due
-point produces no model turn. The runner does not release a role itself. Release, a
+point produces no model turn. A session that closed through an ordinary path lets go of
+what it held at that moment: a retire that finished (`normal-exit`, `target-already-gone`),
+a confirmed same-seat `/clear` (for what the successor did not take over), and a window
+a steward-check pass saw gone. The last one needs the seat's pane, taken from a watch arm
+of that holder, to be absent from a complete pane census while no evidence says the
+session still lives; unknown liveness alone never releases, and a pane now holding another
+session never counts as absence. What a confirmed same-seat successor took over carries
+on. Any other end leaves the role where it is. Release, a
 holder change (a confirmed handover moves the schedule to the successor) or a proven
 session end completes the duty and retires its undelivered notice through the existing
 `keep_claim`/`reject_claimed` path, so nothing stays addressed to a former holder or is
@@ -2539,10 +2546,15 @@ target sits in another repository is communication (F-100c-2) and is neither cou
 limited. A grant whose own session row is not yet visible is admitted without a
 repository and counts once its row appears; the process cwd is not used to guess it. A session counts once
 however many generations it holds. A same-session re-grant, restart, resume or a
-confirmed successor takes no further slot; a session whose end Hearting proved leaves
-its slot while its mark remains and reclaims the role when it revives (a resulting
-overshoot is only displayed); an unknown session keeps counting. Proof of end follows
-each harness's declared session-ownership proof: no live Claude process in any config home claims the session (native registry, exact statusline tap or launch arguments, a nested PID namespace by its own pid) while the session exists in the native history or transcripts, or its registry process has exited,
+confirmed successor takes no further slot; a session that closed through the paths above
+also lets go of its mark, while any other session whose end Hearting proved leaves its
+slot with its mark remaining and reclaims the role when it revives (a resulting
+overshoot is only displayed); an unknown session keeps counting. A watch whose
+supervisor ended or whose target was replaced ends with its receipt before it is re-armed,
+without the herdr socket: the supervisor's end comes from the same session proof or from
+its seat pane missing in a complete CLI pane census, the target's from that census or the
+confirmed lineage. Proof of end follows
+each harness's declared session-ownership proof: no live Claude process in any config home claims the session (native registry, exact statusline tap or launch arguments, a nested PID namespace by its own pid) while the session exists in the native history or transcripts, or its registry process has exited, or the only live claim on it is an old tap or launch argument of a process whose own native session is its confirmed same-harness tidy successor (complete census not needed),
 no live Codex process holds the session's stored rollout open, and no live OpenCode
 client shows the session while no running OpenCode runtime can be running it; an
 incomplete observation (another PID namespace, an unreadable process or connection

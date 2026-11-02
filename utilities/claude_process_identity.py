@@ -545,6 +545,18 @@ def is_local_path(path: str | os.PathLike, *, mounts_path: str | os.PathLike = "
     return not _remote_mount(Path(path), mount_file)
 
 
+class ClaimedSessions(set):
+    """Census holders that remember which process made each claim.
+
+    ``process_claims`` holds one ``(native_sid | None, claimed_sids)`` pair per
+    counted process, so a caller can tell a session that only one live process's
+    stale claim names from one that process currently runs. Set equality and
+    membership are unchanged; a plain ``set`` simply carries no process claims.
+    """
+
+    process_claims: tuple = ()
+
+
 def claude_session_census(*, proc_root: str | os.PathLike = "/proc",
                           budget_seconds: float = 1.0):
     """Return ``(complete, live_sids, reasons)`` from a bounded host census.
@@ -557,7 +569,8 @@ def claude_session_census(*, proc_root: str | os.PathLike = "/proc",
     root = Path(proc_root)
     started = time.monotonic()
     reasons = set()
-    holders = set()
+    holders = ClaimedSessions()
+    process_claims = []
     try:
         host_namespace = os.readlink(root / "self" / "ns" / "pid")
         if host_namespace != _INITIAL_PID_NAMESPACE:
@@ -634,6 +647,8 @@ def claude_session_census(*, proc_root: str | os.PathLike = "/proc",
         native_sid, valid = _native_session_claim(Path(home_value), claim_pid, start)
         if not valid:
             reasons.add("native-session-claim-unusable")
+            if argv_sids:
+                process_claims.append((None, frozenset(argv_sids)))
             continue
         home_key = str(home)
         if home_key not in tap_indexes:
@@ -651,11 +666,15 @@ def claude_session_census(*, proc_root: str | os.PathLike = "/proc",
                 tap_indexes[home_key] = None
         if tap_indexes[home_key] is None:
             reasons.add("statusline-tap-index-incomplete")
+            if argv_sids:
+                process_claims.append((None, frozenset(argv_sids)))
             continue
         taps = tap_sids_by_pid(home, claim_pid, start, index=tap_indexes[home_key])
         claims = {native_sid} if native_sid else set()
         claims.update(taps)
         holders.update(claims)
+        if argv_sids or claims:
+            process_claims.append((native_sid or None, frozenset(argv_sids | claims)))
         if not claims:
             if not argv_sids and invocation_kind(argv) == "command":
                 continue
@@ -683,6 +702,7 @@ def claude_session_census(*, proc_root: str | os.PathLike = "/proc",
             reasons.add("closing-inventory-unavailable")
     if time.monotonic() - started > budget_seconds:
         reasons.add("census-budget-exhausted")
+    holders.process_claims = tuple(process_claims)
     return not reasons, holders, reasons
 
 
