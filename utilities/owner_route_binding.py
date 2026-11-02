@@ -1210,12 +1210,8 @@ def _derive_depth1_node_binding(route_file: str | Path, *, worktree: str | Path,
         if (route.get("capability"), route.get("capability_mode"),
                 route.get("effective_intensity")) != (capability, capability_mode, intensity):
             raise OwnerRouteBindingError("frame-route-tuple-mismatch")
-        if route.get("effective_intensity") == "quick":
-            candidates, field = route.get("registered_headless_candidates") or [], "harness"
-        else:
-            candidates = (route.get("dispatch_evidence") or {}).get("tuples") or []
-            field = "child_harness"
-        if harness not in {r.get(field) for r in candidates if r.get("status") == "supported"}:
+        from route_authority import depth1_supported_harnesses
+        if harness not in depth1_supported_harnesses(route, worker_type="frame"):
             if gates_on():
                 raise OwnerRouteBindingError("frame-route-harness-mismatch")
             same_work_or_refuse("frame-route-harness-mismatch")
@@ -1246,20 +1242,9 @@ def _derive_depth1_node_binding(route_file: str | Path, *, worktree: str | Path,
 
 
 def _supported_owner_harnesses(route: dict) -> set[str]:
-    """Read owner readiness for quick/single-owner routes, parent tuples otherwise,
-    including those probed for an owner pin the route's parent changed later."""
-    from route_authority import route_in_force
-    route = route_in_force(route)
-    if route.get("effective_intensity") == "quick" or route.get("registered_headless_candidates") is not None:
-        rows, field = route.get("registered_headless_candidates") or [], "harness"
-    else:
-        rows = (route.get("dispatch_evidence") or {}).get("tuples") or []
-        field = "parent_harness"
-    return {
-        str(row.get(field))
-        for row in rows
-        if isinstance(row, dict) and row.get("status") == "supported"
-    }
+    """Owner readiness: the shared depth-1 judgment (`route_authority`)."""
+    from route_authority import depth1_supported_harnesses
+    return depth1_supported_harnesses(route, worker_type="owner")
 
 
 def validate_owner_route_binding(

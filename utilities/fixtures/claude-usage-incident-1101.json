@@ -1,0 +1,16 @@
+{
+ "_note": "2026-11-01: harness-capacity scored Claude from per-session statusline taps while Fleet's credential-bound account cache said the weekly window was 1% used. Times are seconds relative to the reading's `now`. `api_document` is what the Claude usage endpoint returned (usage_api._quota turns it into the cache payload, used percentages 0-100).",
+ "now": 1000000.0,
+ "taps": [
+  {"file": "s1.json", "age": 40, "rate_limits": {"seven_day": {"used_percentage": 96, "resets_in": 7200}}},
+  {"file": "s2.json", "age": 30, "rate_limits": {"seven_day": {"used_percentage": 1, "resets_in": 7200}}},
+  {"file": "s3.json", "age": 20, "rate_limits": {"seven_day": {"used_percentage": 2, "resets_in": 7200}}},
+  {"file": "s4.json", "age": 10, "rate_limits": {"seven_day": {"used_percentage": 3, "resets_in": 7200}}},
+  {"file": "s5.json", "age": 5, "rate_limits": {"seven_day": {"used_percentage": 4, "resets_in": 7200}}},
+  {"file": "other-account.json", "age": 8, "rate_limits": {"seven_day": {"used_percentage": 98, "resets_in": 90000}}}
+ ],
+ "taps_score": 2.0,
+ "api_document": {"limits": [{"kind": "weekly_all", "percent": 1, "resets_in": 90000}]},
+ "cache_age": 109,
+ "cache_score": 99.0
+}

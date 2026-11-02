@@ -51,7 +51,7 @@ _GOVERNOR_WITNESS_HANDLES: dict[tuple[str, str], object] = {}
 
 # Sub-session standing is a route authority judgment; the name stays for its readers.
 from route_authority import linked_worktree_slice as is_linked_worktree_slice  # noqa: E402
-from route_authority import route_in_force  # noqa: E402
+from route_authority import depth1_supported_harnesses, route_in_force  # noqa: E402
 
 
 def _governor_witness_key(root: Path, token: str) -> tuple[str, str]:
@@ -6436,14 +6436,7 @@ def headless_attempt_policy(
             raise DispatchContractError("frame-route-surface-invalid", effective_hop)
         # Standard+ HAS checked dispatch evidence (quick does not), so the
         # requested harness is checked against it rather than taken on trust.
-        supported = [
-            row
-            for row in ((route.get("dispatch_evidence") or {}).get("tuples") or [])
-            if isinstance(row, dict)
-            and row.get("status") == "supported"
-            and row.get("child_harness") == harness
-        ]
-        if not supported:
+        if harness not in depth1_supported_harnesses(route, worker_type="frame"):
             raise DispatchContractError("frame-harness-unsupported", str(harness))
         policy.update(fallback_hop=effective_hop)
         return policy
@@ -7540,14 +7533,7 @@ def frame_harness_admission(route: dict, jobs: Path, lines: list[str],
     if (any(not isinstance(value, str) or not value.strip() for value in perspectives)
             or len({value.strip() for value in perspectives}) != len(frames)):
         raise DispatchContractError("frame-perspective-duplicate", str(perspectives))
-    if route.get("effective_intensity") == "quick":
-        candidates, field = route.get("registered_headless_candidates") or [], "harness"
-    else:
-        candidates = (route.get("dispatch_evidence") or {}).get("tuples") or []
-        field = "child_harness"
-    supported = {r.get(field) for r in candidates
-                 if isinstance(r, dict) and r.get("status") == "supported"}
-    supported &= {"codex", "claude", "opencode"}
+    supported = depth1_supported_harnesses(route, worker_type="frame")
     if len(harnesses) != len(frames) or not supported or not set(harnesses).issubset(supported):
         raise DispatchContractError("frame-harness-unsupported", str(harnesses))
     return []

@@ -6974,16 +6974,51 @@ class FrameLegRegistrationTest(_AttemptPolicyFixture):
 
  def test_the_requested_harness_must_be_in_the_routes_checked_evidence(self):
   """Standard+ HAS checked dispatch evidence, so the harness is verified
-  against it rather than taken on trust."""
+  against it rather than taken on trust. A frame leg may run on the harness its
+  owner may run on (a supported tuple's parent) or on one its own launch was
+  checked for (a supported tuple's child): `route_authority.depth1_supported_harnesses`."""
   route=self.route(self.frame_node(),harnesses=("codex",))
-  exception=self.refusal(route,harness="claude")
-  self.assertEqual((exception.reason,exception.detail),("frame-harness-unsupported","claude"))
-  # an `unsupported` row is not a supported row
+  # claude is the parent of the only supported tuple: eligible
+  self.assertEqual(self.policy(route,harness="claude")["fallback_hop"],"same-harness-headless")
+  # opencode appears nowhere in the supported rows
+  exception=self.refusal(route,harness="opencode")
+  self.assertEqual((exception.reason,exception.detail),("frame-harness-unsupported","opencode"))
+  # an `unsupported` row is not a supported row, for parent or child
   degraded=self.route(self.frame_node())
-  for row in degraded["dispatch_evidence"]["tuples"]:
-   if row["child_harness"]=="claude": row["status"]="unsupported"
-  self.assertEqual(self.refusal(degraded,harness="claude").reason,"frame-harness-unsupported")
+  degraded["dispatch_evidence"]["tuples"].append(
+   {"parent_harness":"opencode","parent_transport":"headless","parent_sandbox":"workspace-write",
+    "child_harness":"opencode","launch_authority":"conductor","status":"unsupported"})
+  self.assertEqual(self.refusal(degraded,harness="opencode").reason,"frame-harness-unsupported")
   self.assertEqual(self.policy(degraded,harness="codex")["fallback_hop"],"same-harness-headless")
+
+ def test_incident_rt_ad3fb_frame_pin_harness_is_registered_through_parent_rows(self):
+  """rt-ad3fb: every child_harness=opencode tuple was unsupported; the
+  parent_harness=opencode rows (child claude/codex) were supported."""
+  fixture=json.loads((Path(__file__).resolve().parent/"fixtures"/"frame-assignment-incidents-1101.json").read_text())
+  rt=fixture["rt_ad3fb"]
+  route={"schema_version":2,"route_id":rt["route_id"],"effective_intensity":"standard",
+   "dispatch_evidence":rt["dispatch_evidence"],
+   "nodes":[{"id":"frame","dispatch_depth":1,"worker_type":"frame","unit":"plan/frame",
+             "perspective":"primary-frame"},
+            {"id":"frame-alternative","dispatch_depth":1,"worker_type":"frame","unit":"plan/frame",
+             "perspective":"alternative-frame"},
+            {"id":"plan","dispatch_depth":2,"fallback_hops":[
+             {"ordinal":1,"fallback_hop":"same-harness-headless","candidates":[]}]}]}
+  self.assertEqual({r["status"] for r in rt["dispatch_evidence"]["tuples"] if r["child_harness"]=="opencode"},
+                   {"unsupported"})
+  for node in ("frame","frame-alternative"):
+   with self.subTest(node=node):
+    policy=self.policy(route,route_node=node,harness="opencode",parent_harness="claude",
+                       fallback_hop="cross-harness-headless",fallback_ordinal=2)
+    self.assertEqual(policy["fallback_hop"],"cross-harness-headless")
+  # the pair admission the selector runs for the second leg
+  with tempfile.TemporaryDirectory() as td:
+   jobs=Path(td)/"jobs.log"; jobs.write_text("")
+   self.assertEqual(D.frame_harness_admission(route,jobs,[],["opencode","opencode"],["top","top"]),[])
+   self.assertEqual(D.frame_harness_admission(route,jobs,[],["codex","opencode"],["top","top"]),[])
+   with self.assertRaises(D.DispatchContractError) as caught:
+    D.frame_harness_admission(route,jobs,[],["opencode","gemini"],["top","top"])
+   self.assertEqual(caught.exception.reason,"frame-harness-unsupported")
 
  def test_launch_authority_and_depth_zero_are_not_the_same_axis(self):
   """A frame leg is launched under `launch_authority: "depth-0"`, which is a
