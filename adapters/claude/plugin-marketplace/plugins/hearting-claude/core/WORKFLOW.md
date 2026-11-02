@@ -649,6 +649,17 @@ records, commits, dispatch, and handoffs proceed without further confirmation.
 Reconfirm only a material change to the primary capability, scope, completion
 criterion, destructive risk, or touched external system.
 
+**Sealed intent.** `compose` seals the intent once into the route's
+`work_request.intent`: the prompt file's optional leading lines `의도:` /
+`Intent:`, `안 할 것:` / `Not doing:` (up to three, `;`-separated) and `완료:` /
+`Done:`, plus an excerpt of the person's own prompt that the runtime reads from
+the session record when the current prompt boundary carries no peer or runtime
+transfer origin. Without an intent line the request's first sentence is a
+marked draft; an unreadable record leaves the excerpt out. Nothing is required
+or refused. The `[경로]` notice shows it as `[의도]` lines, every later leg
+inherits it, and a route without a frame-review release hands it to its owner
+and every worker. Questions and gates are unchanged.
+
 Material source work has an additional deterministic participation invariant:
 before a source Edit/Write-family mutation or a commit containing source
 changes, the acting session must hold a current, cwd-bound route record emitted

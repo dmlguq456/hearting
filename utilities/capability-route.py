@@ -4549,7 +4549,11 @@ def compile_first_leg(leg, *, frame_route, frame_cycle_id, context, binding, wor
     kwargs["cwd"] = RP.leg_cwd(leg, frame_route["cwd"], base_cwd=context["cwd"])
     owner = ((kwargs["selection_pins"] or {}).get("owner") or {}).get("harness") or context.get("owner")
     if work_request is not None:
+        import work_intent
         work_request = {**work_request, "owner_harness": owner or work_request.get("owner_harness")}
+        intent = work_intent.inherited(frame_route.get("work_request"), work_request.get("text") or "")
+        if intent:  # every leg carries the intent sealed at the person's start
+            work_request["intent"] = intent
     selection = compose_route(**kwargs, work_request=work_request, route_plan=binding,
                               parent_harness=owner or "claude", selection_only=True)
     diagnosis = _compose_git_diagnosis(kwargs["cwd"])
@@ -5083,6 +5087,9 @@ def compose_card(route, plan=None, plan_source=None, *, owner_harness=None, rout
         + _compose_campaign_line(campaign_selection if campaign_selection is not None
                                  else compose_campaign_selection(route), t)
     )
+    import work_intent
+    for line in work_intent.card_lines(route):
+        card += "\n" + line
     observed = compose_observations(route, t)
     if include_decisions:
         card += "\n" + "\n".join(compose_decision_lines(route, non_git_decision, t))

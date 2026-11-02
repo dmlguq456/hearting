@@ -554,6 +554,29 @@ class ReleasedTaskPromptTest(unittest.TestCase):
         self.assertEqual(WB.released_task_prompt(self.args(jobs=fresh_jobs)), "")
         self.assertFalse(fresh_jobs.parent.exists())
 
+    def test_without_a_release_owner_and_stage_receive_the_intent_sealed_at_start(self):
+        self.write_journal(self.raised)
+        route_file = self.root / "route.json"
+        intent = {"original": "의도 확인은 중요해", "intent": "Seal the intent once.",
+                  "not_doing": ["new gates"], "basis": "header"}
+        route_file.write_text(json.dumps({"route_id": self.route_id, "work_request": {
+            "text": "t", "owner_harness": None, "intent": intent}}))
+        binding = SimpleNamespace(route_id=self.route_id, route_file=str(route_file))
+        fresh_jobs = self.root / "fresh-preview" / "jobs.log"
+        for args in (self.args(route_file=str(route_file)),
+                     self.args(worker_type="owner", route_id=None, owner_route_binding=binding),
+                     self.args(route_file=str(route_file), jobs=fresh_jobs)):
+            with self.subTest(worker_type=args.worker_type):
+                context = WB.released_task_prompt(args)
+                self.assertTrue(context.startswith("Sealed intent"))
+                self.assertIn("\"의도 확인은 중요해\"", context)
+                self.assertIn("- Not doing: new gates", context)
+        self.assertEqual(WB.released_task_prompt(self.args(route_file=str(route_file), route_id="rt-other")), "")
+        self.assertEqual(WB.released_task_prompt(self.args(worker_type="frame", route_file=str(route_file))), "")
+        self.write_journal(self.raised, self.released)
+        self.assertIn("Released task context (frame-review)",
+                      WB.released_task_prompt(self.args(route_file=str(route_file))))
+
     def test_missing_or_foreign_input_returns_the_exact_recovery_path(self):
         self.interview.unlink()
         with self.assertRaisesRegex(ValueError, "Restore the recorded interview"):
