@@ -127,11 +127,7 @@ class RegistryLinesCacheTest(unittest.TestCase):
         new = old.replace(b"open", b"done")
         self.jobs.write_bytes(old)
         signature = lambda s: (s.st_dev, 616161, s.st_size, 17, 19)
-        # A real stat collision needs the rewrite in the first write's timestamp
-        # tick; keep every observation inside that racy window.
-        with mock.patch.object(CACHE, "_stat_signature", side_effect=signature), \
-                mock.patch.object(CACHE, "_SETTLED_NS", 10**18), \
-                mock.patch.object(CACHE, "_SETTLED_FINE_NS", 10**18):
+        with mock.patch.object(CACHE, "_stat_signature", side_effect=signature):
             with CACHE.registry_read_scope():
                 first = CACHE.current_registry_view(self.jobs)
                 old_lines = CACHE.registry_text_lines(self.jobs)
@@ -573,6 +569,22 @@ class RegistryLinesCacheTest(unittest.TestCase):
             self.assertIs(CACHE.registry_view(self.jobs), view)
             self.assertEqual(CACHE.metrics_snapshot()["cache_hits"], 1)
 
+    def test_largest_registry_is_not_pushed_out_by_smaller_paths(self):
+        self.jobs.write_text("L\topen\t/repo\t/wt\towner\tnote=" + "x" * 60 + "\n",
+                             encoding="utf-8")
+        with mock.patch.object(CACHE, "_CACHE_MAX_BYTES", 30):  # one 19-byte path beside it
+            main = CACHE.registry_view(self.jobs)
+            for number in range(3):
+                path = Path(self.tmp.name) / f"small-{number}.log"
+                path.write_text(f"s\topen\t/r\t/w\to\tf={number}\n", encoding="utf-8")
+                CACHE.registry_view(path)  # the large view stays least recently used
+            metrics = CACHE.metrics_snapshot()
+            self.assertEqual(metrics["cache_entries"], 2)
+            self.assertEqual(metrics["cache_evictions"], 2)
+            self.assertIs(CACHE.registry_view(self.jobs), main)
+            self.assertGreaterEqual(main._fd, 0)
+        self.assertEqual(CACHE.metrics_snapshot()["content_reads"], 4)
+
     def test_cached_raw_content_is_included_in_budget_and_released_on_clear(self):
         content = b"a\tb\tc\td\te\tf=1\n"
         self.jobs.write_bytes(content)
@@ -958,6 +970,39 @@ class RegistryLinesCacheTest(unittest.TestCase):
             self._scoped()
         self.assertEqual(CACHE.metrics_snapshot()["content_reads"], 3)
         self.assertEqual(CACHE.metrics_snapshot()["full_metadata_parses"], 1)
+
+    def test_lf_only_stat_collision_inside_the_racy_window_is_still_read(self):
+        old = b"t\topen\t/repo\t/wt\tone\tattempt_id=one\n"
+        new = old.replace(b"open", b"done")
+        self.jobs.write_bytes(old)
+        signature = lambda s: (s.st_dev, 515151, s.st_size, 23, 29)
+        # Rewritten in place within the first write's timestamp tick, so even
+        # the real stat could stay equal; the generation is not settled yet.
+        with mock.patch.object(CACHE, "_stat_signature", side_effect=signature), \
+                mock.patch.object(CACHE, "_SETTLED_NS", 10**18), \
+                mock.patch.object(CACHE, "_SETTLED_FINE_NS", 10**18):
+            first, _lines = self._scoped()
+            self.jobs.write_bytes(new)
+            second, lines = self._scoped()
+        self.assertFalse(first._settled)
+        self.assertIsNot(second, first)
+        self.assertEqual(second.records[0].status, "done")
+        self.assertEqual(lines, (new[:-1].decode(),))
+        self.assertEqual(CACHE.metrics_snapshot()["content_reads"], 2)
+
+    def test_whole_second_timestamps_need_the_coarse_settle_margin(self):
+        second = 1_800_000_000 * 10**9
+        coarse = mock.Mock(st_mtime_ns=second, st_ctime_ns=second)
+        fine = mock.Mock(st_mtime_ns=second + 1, st_ctime_ns=second + 1)
+        with mock.patch.object(CACHE.os, "fstat", return_value=coarse):
+            self.assertFalse(CACHE._settled_read(0, second + CACHE._SETTLED_FINE_NS))
+            self.assertFalse(CACHE._settled_read(0, second + CACHE._SETTLED_NS - 1))
+            self.assertTrue(CACHE._settled_read(0, second + CACHE._SETTLED_NS))
+        with mock.patch.object(CACHE.os, "fstat", return_value=fine):
+            self.assertFalse(CACHE._settled_read(0, second + CACHE._SETTLED_FINE_NS))
+            self.assertTrue(CACHE._settled_read(0, second + 1 + CACHE._SETTLED_FINE_NS))
+        with mock.patch.object(CACHE.os, "fstat", side_effect=OSError("closed")):
+            self.assertFalse(CACHE._settled_read(0, second * 2))
 
     def test_settled_scoped_reuse_sees_late_appends_and_completed_partial_rows(self):
         first = "t\topen\t/repo\t/wt\tone\tattempt_id=one\n"

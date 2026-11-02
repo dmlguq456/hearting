@@ -195,9 +195,10 @@ replacement moves the cache to the new file generation. Append reuse is
 limited to the registry writer's append protocol and reads only the suffix
 through the retained descriptor. A scoped reader skips the read only while
 the path and descriptor still name a generation whose bytes were read after
-its last change outlived the file timestamp granularity, so no later write can
-keep its stat; otherwise it reads the current bytes and compares their digest
-with the cached generation before reusing its indexes. Registry writers may
+its last change outlived the file timestamp granularity; when the file's
+timestamps come from this host's clock, no later write can keep its stat.
+Otherwise it reads the current bytes and compares their digest with the
+cached generation before reusing its indexes. Registry writers may
 append rows or atomically replace the file; arbitrary in-place truncation or
 rewrite is unsupported. A partial byte tail remains data, not a row, until its
 newline arrives. The projection must name

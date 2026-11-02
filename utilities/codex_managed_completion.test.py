@@ -232,6 +232,47 @@ class RegistryAttemptRowsTest(unittest.TestCase):
             self.assertTrue(self.module._any_attempt_open(self.jobs, {"att-a"}))
         self.assertEqual(self.cache.metrics_snapshot()["content_reads"], 3)
 
+    def _launch_args(self, timeout: float):
+        return SimpleNamespace(parent_session_id=SESSION, launch_ready_timeout=timeout,
+                               interval=0.05, queue_socket=None, jobs=self.jobs)
+
+    def test_launch_claim_wait_reads_again_through_concurrent_appends(self):
+        self.jobs.write_text(session_row("att-claimed", harness="codex"), encoding="utf-8")
+        real_read = os.read
+        # One stable read gives up after three changed attempts; a fourth makes
+        # the second stable read retry once before it succeeds.
+        appends = [4]
+
+        def append_during_read(fd, size):
+            first_chunk = os.lseek(fd, 0, os.SEEK_CUR) == 0
+            data = real_read(fd, size)
+            if (data and first_chunk and appends[0]
+                    and os.readlink(f"/proc/self/fd/{fd}") == str(self.jobs)):
+                appends[0] -= 1
+                with self.jobs.open("a", encoding="utf-8") as stream:
+                    stream.write(row(f"att-other-{appends[0]}", harness="codex"))
+            return data
+
+        with mock.patch.object(self.cache.os, "read", side_effect=append_during_read):
+            self.module.wait_for_session_launch_claims(self._launch_args(5.0), {"att-claimed"})
+        self.assertEqual(appends[0], 0)
+        self.assertEqual(self.cache.metrics_snapshot()["content_reads"], 5)
+
+    def test_launch_claim_wait_fails_at_once_only_for_a_missing_registry(self):
+        started = time.monotonic()
+        with self.assertRaises(self.module.CompletionError) as caught:
+            self.module.wait_for_session_launch_claims(self._launch_args(30.0), {"att-claimed"})
+        self.assertEqual(str(caught.exception), "registry-launch-read-failed")
+        self.assertLess(time.monotonic() - started, 5.0)
+
+        self.jobs.write_text(session_row("att-claimed", harness="codex"), encoding="utf-8")
+        unstable = OSError(None, "could not read a stable registry generation")
+        with mock.patch.object(self.cache, "_stable_read", side_effect=unstable) as reads:
+            with self.assertRaises(self.module.CompletionError) as caught:
+                self.module.wait_for_session_launch_claims(self._launch_args(0.3), {"att-claimed"})
+        self.assertEqual(str(caught.exception), "launch-claim-timeout")
+        self.assertGreater(reads.call_count, 1)
+
 
 class ParentLifetimeStopTest(unittest.TestCase):
     def setUp(self):

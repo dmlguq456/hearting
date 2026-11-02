@@ -711,11 +711,21 @@ def wait_for_session_launch_claims(
     if not args.parent_session_id:
         return
     deadline = time.monotonic() + max(0.0, args.launch_ready_timeout)
+    unstable_delay = 0.02
     while True:
         try:
             latest = _latest_attempt_rows(args.jobs, attempts)
         except OSError as exc:
-            raise CompletionError("registry-launch-read-failed") from exc
+            if exc.errno is not None:  # missing or unreadable registry
+                raise CompletionError("registry-launch-read-failed") from exc
+            # A write landed during each stable-read attempt. That is a busy
+            # registry, not a failed launch: observe again until the deadline.
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise CompletionError("launch-claim-timeout") from exc
+            time.sleep(min(unstable_delay, remaining))
+            unstable_delay = min(unstable_delay * 2, max(args.interval, 0.05))
+            continue
         if set(latest) != attempts:
             raise CompletionError("expected-attempt-missing")
         pending = False

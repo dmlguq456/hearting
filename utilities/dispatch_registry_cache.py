@@ -1377,14 +1377,22 @@ def _drop(identity: str, *, keep_parse: bool = False) -> "RegistryView | None":
 def _remember(identity: str, view: RegistryView) -> None:
     """Cache one generation within the existing bounds; the caller holds ``_LOCK``.
 
-    The byte bound limits the sum over paths. The generation just remembered is
-    never evicted for its own size, so one large registry still gets reused.
+    The byte bound limits the paths beside the largest cached registry, so one
+    large registry (the live jobs.log) is neither evicted for its own size nor
+    pushed out by a second, smaller path. The oldest other path leaves first;
+    the generation just remembered is never evicted for its own size.
     """
     global _CACHE_BYTES
     _CACHE[identity] = view
     _CACHE_BYTES += view.signature[2]
-    while len(_CACHE) > 1 and (len(_CACHE) > _CACHE_MAX_PATHS or _CACHE_BYTES > _CACHE_MAX_BYTES):
-        _evicted_identity, evicted = _CACHE.popitem(last=False)
+    while len(_CACHE) > 1:
+        largest = max(_CACHE, key=lambda key: _CACHE[key].signature[2])
+        if (len(_CACHE) <= _CACHE_MAX_PATHS
+                and _CACHE_BYTES - _CACHE[largest].signature[2] <= _CACHE_MAX_BYTES):
+            break
+        victim = next((key for key in _CACHE if key not in (largest, identity)),
+                      next(key for key in _CACHE if key != identity))
+        evicted = _CACHE.pop(victim)
         _CACHE_BYTES -= evicted.signature[2]
         _close_view_fd(evicted)
         _METRICS["cache_evictions"] += 1
