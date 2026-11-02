@@ -19745,6 +19745,23 @@ class ReceiverStateRetentionCycleTest(_TmpRootMixin, unittest.TestCase):
                     self.assertIsNone(self._duty(ref),
                                       "a queued submission is closed by its exact receipt")
 
+    def test_a_held_message_says_the_runtime_delivers_it_and_nothing_is_resent(self):
+        """The prompt line stays as it was; one stderr line says the carrier owns the rest."""
+        with self._world("claude", "sid-child", screen=CLAUDE_FORM):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                rc, line, ref = self._prompt("claude", "sid-child")
+            self.assertEqual(rc, 3, line)
+            self.assertTrue(line.startswith("prompted=queued "), line)
+            self.assertIsNotNone(self._duty(ref))
+            self.assertIn(f"next: nothing to resend - the runtime delivers ref={ref} to child", err.getvalue())
+        with self._world("claude", None, screen=CLAUDE_EMPTY):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                rc, line, ref = self._prompt("claude", None, pane=False, text="[steer] no endpoint")
+            self.assertIsNone(self._duty(ref))
+            self.assertNotIn("next:", err.getvalue(), "no carrier, no claim that one delivers it")
+
     def test_unverified_endpoint_creates_no_carrier(self):
         with self._world("claude", None, screen=CLAUDE_EMPTY):
             rc, line, ref = self._prompt("claude", None, pane=False)
