@@ -272,6 +272,73 @@ class DispatchLogRetentionTest(unittest.TestCase):
         self.assertEqual((first["examined"], second["examined"]), (64, 64))
         self.assertEqual(set(seen), set(attempts))
 
+    def test_examination_stops_once_the_removal_budget_is_full(self):
+        count = R.REMOVE_LIMIT + 4
+        paths = []
+        for index in range(count):
+            path = self.log(f"expired-{index:03d}.jsonl")
+            self.add_row(f"att-expired-{index:03d}", path, ended=self.now - 30 * DAY)
+            paths.append(path)
+
+        first = self.sweep()
+        self.assertEqual((first["removed"], first["examined"]), (R.REMOVE_LIMIT, R.REMOVE_LIMIT))
+        second = self.sweep()
+        self.assertEqual(second["removed"], 4)
+        self.assertFalse(any(path.exists() for path in paths))
+
+    def test_files_still_inside_retention_do_not_end_examination_early(self):
+        recent = []
+        for index in range(R.REMOVE_LIMIT + 2):
+            path = self.log(f"a-recent-{index:03d}.jsonl")
+            self.add_row(f"att-a-recent-{index:03d}", path, ended=self.now - DAY)
+            recent.append(path)
+        old = self.log("z-expired.jsonl")
+        self.add_row("att-z-expired", old, ended=self.now - 30 * DAY)
+
+        result = self.sweep()
+
+        self.assertEqual(result["removed"], 1)
+        self.assertFalse(old.exists())
+        self.assertTrue(all(path.exists() for path in recent))
+
+    def test_a_slow_examination_does_not_use_up_the_removal_time(self):
+        paths = []
+        for index in range(3):
+            path = self.log(f"slow-{index}.jsonl")
+            self.add_row(f"att-slow-{index}", path, ended=self.now - 30 * DAY)
+            paths.append(path)
+        clock = [0.0]
+        actual = R._log_protection
+
+        def slow(ctx, attempt, *, probe_processes):
+            clock[0] += R.MAX_PASS_SECONDS + 1
+            return actual(ctx, attempt, probe_processes=probe_processes)
+
+        with mock.patch.object(R.time, "monotonic", side_effect=lambda: clock[0]), \
+                mock.patch.object(R, "_log_protection", side_effect=slow):
+            result = self.sweep()
+
+        # Examination stops after its own budget; the one file it reached is
+        # still removed, and the cursor resumes after it.
+        self.assertEqual((result["examined"], result["removed"]), (1, 1))
+        state = json.loads((self.root / R.STATE_NAME).read_text(encoding="utf-8"))
+        self.assertEqual(len(state["cursor"]) > 0, True)
+        self.assertEqual(sum(path.exists() for path in paths), 2)
+
+    def test_next_pass_starts_sooner_only_while_removable_logs_are_left_behind(self):
+        for index in range(R.REMOVE_LIMIT + 1):
+            path = self.log(f"more-{index:03d}.jsonl")
+            self.add_row(f"att-more-{index:03d}", path, ended=self.now - 30 * DAY)
+        first = R.sweep(self.jobs, now_ns=self.now)
+        self.assertEqual((first["removed"], first["more"]), (R.REMOVE_LIMIT, 1))
+        gap = R.BACKLOG_DUE_SECONDS * 1_000_000_000
+        self.assertEqual(R.sweep(self.jobs, now_ns=self.now + gap - 1_000_000_000),
+                         {"skipped": "not-due"})
+        second = R.sweep(self.jobs, now_ns=self.now + gap)
+        self.assertEqual((second["removed"], second["more"]), (1, 0))
+        self.assertEqual(R.sweep(self.jobs, now_ns=self.now + 2 * gap),
+                         {"skipped": "not-due"})
+
     def test_inode_replacement_between_scan_and_unlink_is_preserved(self):
         path = self.log("swap.jsonl")
         info = os.stat(path, follow_symlinks=False)
