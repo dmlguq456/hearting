@@ -1114,33 +1114,60 @@ def mark_prompt_source(seat: Seat, harness: str, sid: str, sequence: int, source
     atomic_write_json(path, current)
 
 
-def _record_tidy_clear_succession_locked(seat: Seat, harness: str, sid: str, now: float) -> None:
-    """Record the confirmed session edge from a matching tidy-clear reservation only."""
+def _record_tidy_clear_succession_locked(seat: Seat, harness: str, sid: str, now: float) -> bool:
+    """Record the confirmed session edge from a matching tidy-clear reservation only.
+
+    Returns whether this call appended the edge."""
     seat = session_seat(seat, harness, sid)
     if seat.kind not in ("pane", "native"):
-        return
+        return False
     try:
         import session_tidy_clear
         booking = session_tidy_clear.read_reservation(seat.key)
     except Exception:
-        return
+        return False
     if not isinstance(booking, dict) or booking.get("harness") != harness:
-        return
+        return False
     old = booking.get("sid")
     observed = booking.get("observed")
     observed_sid = observed.get("sid") if isinstance(observed, dict) else None
     if (not isinstance(old, str) or not old or old == sid
             or not (observed_sid == sid or booking.get("new_session") == sid)):
-        return
+        return False
     if isinstance(observed, dict) and observed.get("harness") not in (None, harness):
-        return
+        return False
     if any(row.get("event") == "succession" and row.get("harness") == harness
            and row.get("sid") == sid and row.get("from") == old
            for row in _read_ledger_lines(seat)):
-        return
+        return False
     _append_ledger_entry(seat, {"ts": now, "harness": harness, "sid": sid,
                                 "event": "succession", "from": old, "source": "tidy-clear"})
     bump_dispatch_edge_generation()
+    return True
+
+
+def _confirmed_clear_predecessor(seat: Seat, harness: str, sid: str) -> Optional[dict]:
+    """The one predecessor this ``/clear`` or first message provably replaced, else None.
+
+    The seat ledger must name exactly one predecessor, a matching tidy-clear
+    reservation (when one exists) must agree with it, and the same-harness session
+    lineage must end at ``sid``. Read-only: callable while the hook holds its locks."""
+    predecessor = confirmed_predecessor_identity(seat, harness, sid)
+    if not predecessor:
+        return None
+    logical = session_seat(seat, harness, sid)
+    try:
+        import session_tidy_clear
+        booking = session_tidy_clear.read_reservation(logical.key)
+    except Exception:
+        booking = None
+    if (isinstance(booking, dict) and booking.get("harness") == harness
+            and booking.get("sid") not in (None, predecessor["sid"])):
+        return None
+    import dispatch_seat_handover as handover
+    if handover.chain_end(harness, predecessor["sid"]) != (sid, "successor"):
+        return None
+    return predecessor
 
 
 def prompt_state(seat: Seat) -> Optional[dict]:
@@ -2878,13 +2905,30 @@ def build_human_history_notice(seat: Seat, harness: str, sid: str, *, env=None) 
             f"{str(previous.get('sid', ''))[:8]} · {availability}")
 
 
-def run_hook(harness: str, event: str, sid: str, *, source: str = "", transcript: str = "",
-             cwd: str = "", reread: bool = False, env=None, now: Optional[float] = None,
-             emit: Optional[Callable[[str], None]] = None, phase: Optional[str] = None,
-             compact_summary: str = "", compact_context: Optional[dict] = None,
-             prompt_text: str = "", emit_human: Optional[Callable[[str], None]] = None,
-             human_only: bool = False,
-             deferred: Optional[list] = None) -> str:
+def run_hook(*args, **kwargs) -> str:
+    """Record the session and print its card / notices (see ``_run_hook``).
+
+    A confirmed ``/clear`` also lets go of what its predecessor still held. That runs
+    here, after every hook lock is released: the release takes its own seat lock, and
+    taking it under the hook's would deadlock."""
+    closed: list = []
+    try:
+        return _run_hook(*args, _closed=closed, **kwargs)
+    finally:
+        if closed:
+            with contextlib.suppress(BaseException):
+                import dispatch_seat_handover as handover
+                handover._peer_message().release_closed_session(
+                    closed[0]["harness"], closed[0]["sid"], reason="cleared")
+
+
+def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcript: str = "",
+              cwd: str = "", reread: bool = False, env=None, now: Optional[float] = None,
+              emit: Optional[Callable[[str], None]] = None, phase: Optional[str] = None,
+              compact_summary: str = "", compact_context: Optional[dict] = None,
+              prompt_text: str = "", emit_human: Optional[Callable[[str], None]] = None,
+              human_only: bool = False,
+              deferred: Optional[list] = None, _closed: Optional[list] = None) -> str:
     """Record the session, and print the card / notices it is due exactly once.
 
     Returns the text that was emitted ("" for none). The receipt is written only
@@ -3062,10 +3106,11 @@ def run_hook(harness: str, event: str, sid: str, *, source: str = "", transcript
             with contextlib.suppress(BaseException):    # a hook never fails for the clear note
                 import session_tidy_clear
                 session_tidy_clear.note_start_locked(seat, harness, sid, now)
+        appended = False
         if ((event == "start" and source == "clear")
                 or (harness == "opencode" and event == "prompt")):
             with contextlib.suppress(BaseException):
-                _record_tidy_clear_succession_locked(seat, harness, sid, now)
+                appended = _record_tidy_clear_succession_locked(seat, harness, sid, now)
         # The one place a same-seat handover (A -> B) is recorded: B's confirmed start/first prompt.
         handed = None
         handover = None
@@ -3077,6 +3122,13 @@ def run_hook(harness: str, event: str, sid: str, *, source: str = "", transcript
                     # Keep the shared writer's confirmed edge in this exact native ledger
                     # as well as its physical seat ledger for current seat-scoped readers.
                     _append_ledger_entry(physical_seat(seat), handed)
+        if (_closed is not None and seat.kind in ("pane", "native")
+                and ((event == "start" and source == "clear")
+                     or (harness == "opencode" and event == "prompt" and (handed or appended)))):
+            with contextlib.suppress(BaseException):    # a hook never fails for a release
+                predecessor = _confirmed_clear_predecessor(seat, harness, sid)
+                if predecessor:
+                    _closed.append(predecessor)
         epoch = int(row.get("epoch", 0) or 0)
         parts: list[str] = []
         lineage = []

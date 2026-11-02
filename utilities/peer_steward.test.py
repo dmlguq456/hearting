@@ -2534,7 +2534,13 @@ class WatchArmTest(_WatchMixin, unittest.TestCase):
 
         self.addCleanup(cleanup_reattached_processes)
         with mock.patch.dict(os.environ, env):
-            with mock.patch.object(peer_steward.subprocess, "Popen", side_effect=tracked_popen):
+            # The pre-spawn closed-watch check reads herdr (agent list, pane census); this
+            # test counts only the observer process, so those reads are held to "no evidence".
+            with mock.patch.object(peer_steward.subprocess, "Popen", side_effect=tracked_popen), \
+                    mock.patch.object(peer_steward.herdr_observation, "pane_census",
+                                      return_value=None), \
+                    mock.patch.object(peer_steward._steward_check_module(), "_agents",
+                                      return_value=[]):
                 self.assertTrue(peer_steward._spawn_watch_observer(watch_id, original_arm))
         reattached_arm = json.loads(arm_path.read_text())
         reattached_watcher = reattached_arm["watcher"]
@@ -3696,6 +3702,189 @@ class WatchTerminalReconcileTest(unittest.TestCase):
                 argument_variants=[])
             spawn.assert_called_once_with(watch_id, arm, service_current=binding,
                                           recipient_census=mock.ANY)
+
+
+class ClosedWatchBeforeRearmTest(unittest.TestCase):
+    """A watch whose supervisor closed or whose target was replaced ends without a socket."""
+
+    WATCH = "closed-before-rearm"
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.arm = {"schema_version": 1, "watch_id": self.WATCH, "target": "peer", "server": "named",
+                    "armed_ts": "then", "until": ["idle"], "refs": [], "watcher": {},
+                    "agent": {"harness": "codex", "session_id": "sid-target", "pane": "w1:p9"},
+                    "steward": {"harness": "codex", "session_id": "sid-steward"},
+                    "steward_server": "named",
+                    "steward_seat": {"kind": "pane", "key": "seat-k", "pane": "w1:p1"},
+                    "rearm_count": 31}
+        self.paths = peer_steward._watch_paths(self.WATCH, self.root)
+        self.paths.arm.write_text(json.dumps(self.arm), encoding="utf-8")
+        self.rows = {"w1:p9": ("codex", "sid-target"), "w1:p1": ("codex", "sid-steward")}
+        self.liveness = {}
+        self.chain = {}
+        self.holder = {"harness": "codex", "sid": "sid-steward"}
+        self.present = False
+        self.socket = None
+        check = peer_steward._steward_check_module()
+        import dispatch_seat_handover as handover
+        for target, name, replacement in (
+                (peer_steward, "_watch_root", lambda: self.root),
+                (peer_steward.herdr_observation, "socket_path_for_endpoint",
+                 lambda *a, **k: self.socket),
+                (peer_steward.herdr_observation, "pane_census", lambda **k: self.census()),
+                (peer_steward, "_watcher_present", lambda arm: self.present),
+                (peer_steward, "_herdr_missing", lambda: False),
+                (peer_steward, "_wake_watch_observer", lambda arm: True),
+                (check, "_agents", lambda: []),
+                (check, "_end_observation", lambda: None),
+                (check, "_session_liveness",
+                 lambda harness, sid, agents=None, observation=None:
+                     self.liveness.get((harness, sid), "unknown")),
+                (handover, "resolve_watch",
+                 lambda watch_id, **k: {"holder": dict(self.holder)} if self.holder else None),
+                (handover, "_chain_end",
+                 lambda graph, harness, sid: self.chain.get((harness, sid), (sid, "self"))),
+                (handover, "lineage_graph", lambda *a, **k: object())):
+            patcher = mock.patch.object(target, name, side_effect=replacement)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        spawn = mock.patch.object(peer_steward, "_spawn_watch_observer")
+        self.spawn = spawn.start()
+        self.addCleanup(spawn.stop)
+
+    def census(self):
+        return peer_steward.herdr_observation.PaneCensus(
+            "named", tuple({"pane_id": pane, "agent": harness, "agent_session": {"value": sid}}
+                           for pane, (harness, sid) in self.rows.items()), 1.0, True)
+
+    def run_pass(self):
+        peer_steward._ensure_watch_observers(entries=[(self.WATCH, self.arm)])
+        return (json.loads(self.paths.receipt.read_text()) if self.paths.receipt.exists() else None)
+
+    def test_supervisor_pane_absent_ends_the_watch_and_never_rearms(self):
+        del self.rows["w1:p1"]
+        receipt = self.run_pass()
+        self.assertEqual((receipt["state"], receipt["reason"]), ("steward-exited", "steward-exited"))
+        self.spawn.assert_not_called()
+        self.assertEqual(json.loads(self.paths.arm.read_text())["rearm_count"], 31)
+
+    def test_supervisor_pane_now_holding_another_session_is_not_an_exit(self):
+        self.rows["w1:p1"] = ("codex", "someone-else")
+        self.assertIsNone(self.run_pass())
+        self.spawn.assert_called_once()
+
+    def test_target_pane_session_replaced(self):
+        self.rows["w1:p9"] = ("claude", "sid-new")
+        self.assertEqual(self.run_pass()["reason"], "session-replaced")
+        self.spawn.assert_not_called()
+
+    def test_target_with_a_confirmed_lineage_successor_is_replaced(self):
+        self.chain[("codex", "sid-target")] = ("sid-target-2", "successor")
+        self.assertEqual(self.run_pass()["reason"], "session-replaced")
+        self.spawn.assert_not_called()
+
+    def test_supervisor_session_ended_by_liveness(self):
+        self.liveness[("codex", "sid-steward")] = "ended"
+        self.assertEqual(self.run_pass()["reason"], "steward-exited")
+        self.spawn.assert_not_called()
+
+    def test_a_live_successor_holder_keeps_the_watch_even_when_the_original_ended(self):
+        self.holder = {"harness": "codex", "sid": "sid-successor"}
+        self.liveness[("codex", "sid-steward")] = "ended"
+        self.liveness[("codex", "sid-successor")] = "live"
+        self.assertIsNone(self.run_pass())
+        self.spawn.assert_called_once()
+
+    def test_an_unresolved_holder_is_not_judged(self):
+        self.holder = None
+        del self.rows["w1:p1"]
+        self.assertIsNone(self.run_pass())
+        self.spawn.assert_called_once()
+
+    def test_control_unchanged_panes_and_unknown_liveness_spawn_as_before(self):
+        self.assertIsNone(self.run_pass())
+        self.spawn.assert_called_once()
+        self.assertFalse(self.paths.receipt.exists())
+
+    def test_an_incomplete_or_missing_census_is_not_evidence(self):
+        with mock.patch.object(peer_steward.herdr_observation, "pane_census", return_value=None):
+            self.assertIsNone(self.run_pass())
+        self.spawn.assert_called_once()
+
+    def test_a_live_socketless_observer_is_asked_to_settle_a_closed_watch(self):
+        self.present = True
+        del self.rows["w1:p1"]
+        fd = os.open(self.paths.lock, os.O_CREAT | os.O_RDWR, 0o600)
+        self.addCleanup(os.close, fd)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        with mock.patch.object(peer_steward, "_wake_watch_observer", return_value=True) as wake:
+            self.assertIsNone(self.run_pass())
+        wake.assert_called_once()
+        observation = json.loads(self.paths.observation.read_text())
+        self.assertEqual((observation["state"], observation["reason"]),
+                         ("terminal_pending", "steward-exited"))
+        self.spawn.assert_not_called()
+
+
+class RetireReleasesClosedSessionTest(unittest.TestCase):
+    """A retired session lets go of its roles and supervision watches, once the pane is closed."""
+
+    IDENT = {"harness": "claude", "session_id": "sid-retired", "name": "old", "pane": "w1:p9",
+             "server": "default"}
+
+    def setUp(self):
+        for name, value in (("_request_watch_terminal", 0), ("_retire_followup_successor_pane", None)):
+            patcher = mock.patch.object(peer_steward, name, return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def ready(self, **kwargs):
+        return peer_steward._retire_followup_ready({"id": "d"}, dict(self.IDENT), "completed-retire",
+                                                   None, **kwargs)
+
+    def test_follow_up_releases_the_retired_sessions_roles_and_records_the_summary(self):
+        summary = {"roles": 1, "marker": "removed", "watches": 2, "skipped": 0}
+        with mock.patch.object(peer_steward.peer_message, "release_closed_session",
+                               return_value=summary) as release:
+            record = {}
+            self.assertTrue(self.ready(summary=record))
+        release.assert_called_once_with("claude", "sid-retired", reason="retired",
+                                        settle_watch=peer_steward.settle_steward_exited_watch)
+        self.assertEqual(json.loads(record["steward_release"]), summary)
+
+    def test_a_transient_failure_keeps_the_follow_up_pending_for_retry(self):
+        with mock.patch.object(peer_steward.peer_message, "release_closed_session",
+                               side_effect=OSError("busy")):
+            self.assertFalse(self.ready())
+
+    def test_any_other_failure_never_blocks_the_follow_up(self):
+        with mock.patch.object(peer_steward.peer_message, "release_closed_session",
+                               side_effect=RuntimeError("steward-release-relation-unresolved")):
+            record = {}
+            self.assertTrue(self.ready(summary=record))
+        self.assertEqual(json.loads(record["steward_release"]), {"error": "RuntimeError"})
+
+    def test_an_identity_without_a_session_releases_nothing(self):
+        with mock.patch.object(peer_steward.peer_message, "release_closed_session") as release:
+            self.assertTrue(peer_steward._retire_followup_ready(
+                {"id": "d"}, {**self.IDENT, "session_id": "-"}, "completed-retire", None))
+        release.assert_not_called()
+
+    def test_settle_steward_exited_watch_writes_the_receipt_once(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        arm = {"schema_version": 1, "watch_id": "exited-1", "target": "peer", "server": "default",
+               "armed_ts": "then", "refs": [], "steward": {"harness": "claude", "session_id": "sid-retired"},
+               "agent": {"harness": "codex", "session_id": "sid-t", "pane": "w1:p2"}}
+        paths = peer_steward._watch_paths("exited-1", root)
+        paths.arm.write_text(json.dumps(arm), encoding="utf-8")
+        with mock.patch.object(peer_steward, "_watch_root", return_value=root):
+            self.assertTrue(peer_steward.settle_steward_exited_watch("exited-1"))
+            self.assertTrue(peer_steward.settle_steward_exited_watch("exited-1"))
+            self.assertFalse(peer_steward.settle_steward_exited_watch("no-such-watch"))
+        self.assertEqual(json.loads(paths.receipt.read_text())["reason"], "steward-exited")
 
 
 class JoinTest(_WatchMixin, unittest.TestCase):

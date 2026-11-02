@@ -3150,6 +3150,78 @@ class MemoryLayerTest(TidyCase):
         self.assertEqual(lineage[0]["predecessor"], {"harness": "claude", "sid": "sid-old"})
         self.assertIn("이전 대화 열기", notice)
 
+    def _clear_release_probe(self, seat_key):
+        """Record each ``release_closed_session`` call and whether the seat lock was free."""
+        import dispatch_seat_handover as handover
+        calls = []
+
+        def release(harness, sid, *, reason, settle_watch=None):
+            with st.seat_lock(seat_key, wait=1.0):
+                calls.append((harness, sid, reason))
+            return {}
+
+        real = handover._peer_message()
+
+        class Proxy:
+            release_closed_session = staticmethod(release)
+
+            def __getattr__(self, name):
+                return getattr(real, name)
+
+        patcher = mock.patch.object(handover, "_peer_message", return_value=Proxy())
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return calls
+
+    def _booked_clear(self):
+        seat = st.resolve_seat("claude", str(self.cwd))
+        st.record_event(seat, "claude", "sid-old", "start", source="startup",
+                        cwd=str(self.cwd), now=100)
+        clear._write_reservation({"schema": 1, "nonce": "clear-nonce", "status": "reserved",
+                                  "created": 150, "seat": seat.as_dict(), "harness": "claude",
+                                  "sid": "sid-old"})
+        return seat
+
+    def test_confirmed_clear_releases_what_the_predecessor_held_after_the_locks_drop(self):
+        with self.library():
+            seat = self._booked_clear()
+            calls = self._clear_release_probe(seat.key)
+            st.run_hook("claude", "start", "sid-new", source="clear", cwd=str(self.cwd), now=200)
+        self.assertEqual(calls, [("claude", "sid-old", "cleared")])
+
+    def test_a_refused_role_adoption_still_releases_the_predecessor(self):
+        import dispatch_seat_handover as handover
+        with self.library():
+            seat = self._booked_clear()
+            calls = self._clear_release_probe(seat.key)
+            with mock.patch.object(handover, "record_locked",
+                                   side_effect=ValueError("notice-lineage-unresolved")):
+                st.run_hook("claude", "start", "sid-new", source="clear", cwd=str(self.cwd), now=200)
+        self.assertEqual(calls, [("claude", "sid-old", "cleared")])
+
+    def test_a_plain_clear_without_a_reservation_releases_nothing(self):
+        with self.library():
+            seat = st.resolve_seat("claude", str(self.cwd))
+            st.record_event(seat, "claude", "sid-old", "start", source="startup",
+                            cwd=str(self.cwd), now=100)
+            calls = self._clear_release_probe(seat.key)
+            st.run_hook("claude", "start", "sid-new", source="clear", cwd=str(self.cwd), now=200)
+        self.assertEqual(calls, [])
+
+    def test_a_start_that_is_not_a_clear_releases_nothing(self):
+        with self.library():
+            seat = self._booked_clear()
+            calls = self._clear_release_probe(seat.key)
+            st.run_hook("claude", "start", "sid-new", source="resume", cwd=str(self.cwd), now=200)
+        self.assertEqual(calls, [])
+
+    def test_a_failing_release_never_fails_the_hook(self):
+        import dispatch_seat_handover as handover
+        with self.library():
+            self._booked_clear()
+            with mock.patch.object(handover, "_peer_message", side_effect=RuntimeError("gone")):
+                st.run_hook("claude", "start", "sid-new", source="clear", cwd=str(self.cwd), now=200)
+
     def test_history_notice_loads_managed_key_with_only_utilities_on_subprocess_path(self):
         import subprocess
         import sys
