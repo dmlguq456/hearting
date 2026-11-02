@@ -1290,7 +1290,10 @@ def resolve_parent_extinction(
     return ParentExtinctionEvidence("unproven", "parent-extinction-unproven:" + process.reason, parent_id)
 
 
-@functools.lru_cache(maxsize=8192)
+_REGISTRY_METADATA_CACHE_SIZE = 32768
+
+
+@functools.lru_cache(maxsize=_REGISTRY_METADATA_CACHE_SIZE)
 def _registry_metadata_items(pipe: str) -> tuple[tuple[str, str], ...]:
     return tuple(dict(part.split("=", 1) for part in pipe.split(",") if "=" in part).items())
 
@@ -9672,24 +9675,110 @@ def launched_attempt_identity(fields: list[str]) -> tuple[object, ...]:
             metadata.get("launch_lifecycle", ""))
 
 def _atomic_registry_replace(jobs: Path, lines: list[str]) -> None:
-    """Replace the registry after fsync without exposing a truncated file."""
+    """Replace the registry after fsync without exposing a truncated file.
+
+    The write path is byte-for-byte what it was (same temp file, fsync, rename,
+    directory fsync).  A derived ``jobs.log.lineage.json`` sidecar additionally
+    records the line-aligned prefix this replacement preserved, so a reader can
+    rescan only the changed suffix.  Recording never changes the result: an
+    unreadable/racing parent, a missing temp fd, or a broken sidecar simply
+    leaves no entry and the next reader does the full read it always did.
+    """
+    from dispatch_registry_cache import (common_prefix_line_aligned, record_lineage,
+                                         registry_key)
+    data = ("\n".join(lines) + "\n").encode("utf-8")
+    parent_key = child_key = anchor = None
+    prefix = 0
+    try:
+        with jobs.open("rb") as existing:
+            before = os.fstat(existing.fileno())
+            if before.st_size:
+                import mmap
+                try:
+                    with mmap.mmap(existing.fileno(), 0, access=mmap.ACCESS_READ) as view:
+                        prefix = common_prefix_line_aligned(view, data)
+                except (OSError, ValueError):
+                    prefix = 0
+            after = os.fstat(existing.fileno())
+            if before.st_size == after.st_size and registry_key(before) == registry_key(after):
+                parent_key = registry_key(after)
+                anchor = hashlib.sha256(data[max(0, prefix - 4096):prefix]).hexdigest()
+            else:
+                prefix = 0
+    except OSError:
+        parent_key = None
     fd, tmp_name = tempfile.mkstemp(prefix=f".{jobs.name}.claim-", dir=str(jobs.parent))
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as registry:
-            registry.write("\n".join(lines) + "\n")
-            registry.flush()
-            os.fsync(registry.fileno())
+        view = memoryview(data)
+        while view:
+            # os.write may write only part of the buffer; never rename a short image.
+            view = view[os.write(fd, view):]
+        os.fsync(fd)
         os.replace(tmp_name, jobs)
+        # fstat after the rename: rename updates ctime, so a pre-rename key
+        # would never match the path key a later reader observes.
+        try:
+            child_key = registry_key(fd)
+        finally:
+            os.close(fd)
+            fd = -1
         dir_fd = os.open(str(jobs.parent), os.O_RDONLY)
         try:
             os.fsync(dir_fd)
         finally:
             os.close(dir_fd)
     finally:
+        if fd >= 0:
+            os.close(fd)
         try:
             os.unlink(tmp_name)
         except FileNotFoundError:
             pass
+    if parent_key is not None and child_key is not None and anchor is not None:
+        try:
+            record_lineage(jobs, parent_key, child_key, prefix, anchor)
+        except Exception:  # noqa: BLE001 - the derived record never changes the write
+            pass
+
+
+def _append_registry_rows(jobs: Path, rows: list[str]) -> None:
+    """Append complete rows under the existing writer protocol and record lineage."""
+    from dispatch_registry_cache import record_lineage, registry_key
+    if not rows:
+        return
+    parent_key = child_key = anchor = None
+    prefix = 0
+    try:
+        with jobs.open("rb") as existing:
+            fd = existing.fileno()
+            before = os.fstat(fd)
+            if before.st_size and os.pread(fd, 1, before.st_size - 1) == b"\n":
+                prefix = before.st_size
+                start = max(0, prefix - 4096)
+                anchor = hashlib.sha256(os.pread(fd, prefix - start, start)).hexdigest()
+                parent_key = registry_key(os.fstat(fd))
+    except OSError:
+        parent_key = None
+    with jobs.open("a", encoding="utf-8") as registry:
+        # The fact is recorded only about the file this handle appends to: it must be
+        # the same unchanged version the anchor was read from, and the child key comes
+        # from the same descriptor, so a concurrent replace can never borrow the fact.
+        try:
+            if parent_key is not None and registry_key(os.fstat(registry.fileno())) != parent_key:
+                parent_key = None
+        except OSError:
+            parent_key = None
+        for row in rows:
+            registry.write(row + "\n")
+        registry.flush()
+        os.fsync(registry.fileno())
+        try:
+            child_key = registry_key(os.fstat(registry.fileno()))
+        except OSError:
+            child_key = None
+    if parent_key is not None and child_key is not None and anchor is not None:
+        record_lineage(jobs, parent_key, child_key, prefix, anchor)
+
 
 
 _FOREGROUND_SIGNED_INTEGER = re.compile(r"(?:0|-?[1-9][0-9]*)\Z")
@@ -11521,10 +11610,7 @@ def _commit_attempt_row(
             _retry_registration_census(lines, row_metadata)
         pin_preparation()
         row_fields[5] += f",launch_claimed={1 if launch else 0}"
-        with jobs.open("a", encoding="utf-8") as registry:
-            registry.write("\t".join(row_fields) + "\n")
-            registry.flush()
-            os.fsync(registry.fileno())
+        _append_registry_rows(jobs, ["\t".join(row_fields)])
         return True
 
 
@@ -12584,10 +12670,6 @@ def reconcile_local_registry(global_jobs: Path, local_jobs: Path) -> tuple[int, 
             identities.add(identity)
             reconciled += 1
         if additions:
-            with global_jobs.open("a", encoding="utf-8") as registry:
-                for line in additions:
-                    registry.write(line + "\n")
-                registry.flush()
-                os.fsync(registry.fileno())
+            _append_registry_rows(global_jobs, additions)
         fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
     return reconciled, malformed

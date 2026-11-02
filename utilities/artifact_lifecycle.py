@@ -254,9 +254,10 @@ def evaluate_route_admission(
             "reject",
             (_violation("route-composite-duplicate-runtime", detail=str(target)),),
         )
-    if index is None and identity is not None:
-        index = artifact_admission.load_index(root)
-    if identity is not None and index is not None:
+    if identity is not None:
+        if index is None:
+            head = artifact_admission.load_index_head(root)
+            index = artifact_admission.load_index(root) if head is None else head
         indexed = getattr(index, "routes", {}).get(identity.artifact_root_id, {}).get(route_id)
         if indexed is not None:
             return Decision("reject", (_violation("route-composite-duplicate-index"),))
@@ -1024,7 +1025,8 @@ def finalize_direct_quick(artifact_root: Path, request: DirectQuickRequest) -> D
         # Otherwise the sidecar can only belong to a prior failed attempt, and
         # admitting a new manifest would permanently bind that stale outcome.
         try:
-            index = artifact_admission.load_index(artifact_root)
+            head = artifact_admission.load_index_head(artifact_root)
+            index = artifact_admission.load_index(artifact_root) if head is None else head
             exact_noop = artifact_index.idempotent_match(
                 index,
                 document,

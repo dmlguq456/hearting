@@ -16,6 +16,7 @@ import contextlib
 import contextvars
 import functools
 import hashlib
+import json
 import os
 from pathlib import Path
 import threading
@@ -54,6 +55,157 @@ _METRICS = {
 
 def _stat_signature(info: os.stat_result) -> tuple[int, int, int, int, int]:
     return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+# ---------------------------------------------------------------------------
+# registry change lineage
+#
+# Every supported writer replaces the registry through one atomic rename or
+# appends complete rows.  A small sidecar beside `jobs.log` records the byte
+# prefix each write preserved, so a later reader can rescan only the suffix.
+# The sidecar is a derived accelerator: a missing, stale or malformed chain
+# silently falls back to the full read that existed before it.
+# ---------------------------------------------------------------------------
+
+LINEAGE_SCHEMA = 1
+_LINEAGE_MAX_ENTRIES = 64
+_LINEAGE_ANCHOR_BYTES = 4096
+
+
+def lineage_path(jobs) -> Path:
+    return Path(str(Path(os.path.abspath(jobs))) + ".lineage.json")
+
+
+def registry_key(source) -> list[int]:
+    """One file version identity: the same six fields the capacity cache keys on."""
+    info = source if isinstance(source, os.stat_result) else os.fstat(source)
+    return [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns,
+            info.st_mode, info.st_ctime_ns]
+
+
+def _key_tuple(value) -> tuple[int, ...] | None:
+    if (isinstance(value, list) and len(value) == 6
+            and all(isinstance(item, int) and not isinstance(item, bool) for item in value)):
+        return tuple(value)
+    return None
+
+
+def _read_lineage(jobs) -> dict | None:
+    try:
+        data = json.loads(lineage_path(jobs).read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeError):
+        return None
+    if (not isinstance(data, dict) or data.get("schema") != LINEAGE_SCHEMA
+            or data.get("jobs") != os.path.abspath(jobs)
+            or not isinstance(data.get("entries"), list)):
+        return None
+    entries = []
+    for entry in data["entries"]:
+        if (not isinstance(entry, dict) or _key_tuple(entry.get("p")) is None
+                or _key_tuple(entry.get("c")) is None
+                or not isinstance(entry.get("n"), int) or isinstance(entry.get("n"), bool)
+                or entry["n"] < 0 or not isinstance(entry.get("a"), str)):
+            return None
+        entries.append({"p": entry["p"], "c": entry["c"], "n": entry["n"], "a": entry["a"]})
+    return {"schema": LINEAGE_SCHEMA, "jobs": os.path.abspath(jobs), "entries": entries}
+
+
+def record_lineage(jobs, parent_key, child_key, prefix: int, anchor_sha256: str) -> None:
+    """Append one change fact; every failure leaves the previous file untouched."""
+    temp = None
+    try:
+        parent, child = _key_tuple(parent_key), _key_tuple(child_key)
+        if parent is None or child is None or not isinstance(prefix, int) or prefix < 0:
+            return
+        if not isinstance(anchor_sha256, str):
+            return
+        entries = (_read_lineage(jobs) or {"entries": []})["entries"]
+        entries.append({"p": list(parent), "c": list(child), "n": prefix,
+                        "a": anchor_sha256})
+        payload = {"schema": LINEAGE_SCHEMA, "jobs": os.path.abspath(jobs),
+                   "entries": entries[-_LINEAGE_MAX_ENTRIES:]}
+        target = lineage_path(jobs)
+        temp = target.with_name(target.name + ".tmp")
+        data = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        fd = os.open(str(temp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, data)
+        finally:
+            os.close(fd)
+        os.replace(str(temp), str(target))
+    except Exception:  # noqa: BLE001 - a derived sidecar never changes the write result
+        try:
+            if temp is not None:
+                temp.unlink()
+        except OSError:
+            pass
+
+
+def resolve_lineage(jobs, from_key, to_key) -> tuple[int, str] | None:
+    """The smallest prefix on a recorded chain from ``from_key`` to ``to_key``.
+
+    Returns ``(prefix, anchor_sha256)``; the anchor proves the parent bytes at
+    that prefix still match the current file.  None means "read the whole file".
+    """
+    try:
+        start, target = _key_tuple(from_key), _key_tuple(to_key)
+        if start is None or target is None:
+            return None
+        data = _read_lineage(jobs)
+        if data is None:
+            return None
+        successors = {}
+        for entry in data["entries"]:
+            successors.setdefault(_key_tuple(entry["p"]), []).append(entry)
+        best = None
+        stack = [(start, [])]
+        seen = set()
+        while stack:
+            key, path = stack.pop()
+            if key == target:
+                if path:
+                    lowest = min(path, key=lambda entry: entry["n"])
+                    if best is None or lowest["n"] < best["n"]:
+                        best = lowest
+                continue
+            if key in seen:
+                continue
+            seen.add(key)
+            for entry in successors.get(key, ()):
+                stack.append((_key_tuple(entry["c"]), path + [entry]))
+        if best is None:
+            return None
+        return best["n"], best["a"]
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def common_prefix_line_aligned(old, new: bytes) -> int:
+    """Length of the shared prefix of two registry images, cut at a line start.
+
+    Compares 1MiB slices (an mmap or bytes slice copies only that window), so a
+    replacement never duplicates the whole registry image in memory.
+    """
+    limit = min(len(old), len(new))
+    chunk = 1024 * 1024
+    position = 0
+    while position < limit:
+        width = min(chunk, limit - position)
+        left = old[position:position + width]
+        right = new[position:position + width]
+        if left != right:
+            low, high = 0, width
+            while low < high:
+                middle = (low + high) // 2
+                if left[:middle + 1] == right[:middle + 1]:
+                    low = middle + 1
+                else:
+                    high = middle
+            position += low
+            break
+        position += width
+    return new.rfind(b"\n", 0, position) + 1
+
 
 
 def _utf8_status(data: bytes) -> tuple[bool, bool]:

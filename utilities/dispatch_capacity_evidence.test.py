@@ -524,7 +524,8 @@ class EvidenceCacheTests(unittest.TestCase):
         self.assertLess(cache.stat().st_size, 20_000)
         text = cache.read_text()
         data = json.loads(text)
-        self.assertEqual(set(data), {"schema", "jobs", "key", "horizon", "native", "legacy"})
+        self.assertEqual(set(data), {"schema", "jobs", "key", "horizon", "native", "legacy",
+                                     "size", "tail", "head", "offsets"})
         # the evidence is the two log rows `native_quota` reads, not the jobs row or the log tail
         for leaked in ("/repo", "launch_outcome", "governed-process-group-drained"):
             self.assertNotIn(leaked, text)
@@ -629,22 +630,29 @@ class EvidenceCacheTests(unittest.TestCase):
     def test_warm_call_reads_neither_jobs_log_nor_any_log_tail(self):
         self.settle()
         first = Q._usage(self.jobs, now=self.now + 10, env=self.env)
-        real = Path.read_text
+        real_text, real_bytes = Path.read_text, Path.read_bytes
 
         def only_the_cache(path, *args, **kwargs):
             self.assertNotEqual(path, self.jobs, "jobs.log re-read")
-            return real(path, *args, **kwargs)
+            return real_text(path, *args, **kwargs)
+
+        def only_the_cache_bytes(path, *args, **kwargs):
+            self.assertNotEqual(path, self.jobs, "jobs.log re-read")
+            return real_bytes(path, *args, **kwargs)
 
         with mock.patch.object(Path, "read_text", autospec=True, side_effect=only_the_cache), \
+                mock.patch.object(Path, "read_bytes", autospec=True, side_effect=only_the_cache_bytes), \
+                mock.patch.object(os, "pread", wraps=os.pread) as pread, \
                 self.native_reads() as reads:
             second = Q._usage(self.jobs, now=self.now + 10, env=self.env)
             Q.observations(self.jobs, now=self.now + 10, env=self.env)
         self.assertEqual(first, second)
         reads.assert_not_called()
+        pread.assert_not_called()
 
     def test_one_call_reads_jobs_log_once(self):
         self.settle()
-        with mock.patch.object(Path, "read_text", autospec=True, side_effect=Path.read_text) as reads:
+        with mock.patch.object(Path, "read_bytes", autospec=True, side_effect=Path.read_bytes) as reads:
             Q._usage(self.jobs, now=self.now + 10, env=self.env)
         self.assertEqual([c.args[0] for c in reads.call_args_list if c.args[0] == self.jobs], [self.jobs])
 
@@ -775,18 +783,18 @@ class EvidenceCacheTests(unittest.TestCase):
 
     def test_a_change_during_the_read_is_answered_directly_and_not_cached(self):
         self.settle()
-        real = Path.read_text
+        real = Path.read_bytes
         state = {"raced": False}
 
         def racing(path, *args, **kwargs):
-            text = real(path, *args, **kwargs)
+            data = real(path, *args, **kwargs)
             if path == self.jobs and not state["raced"]:
                 state["raced"] = True
                 with self.jobs.open("a") as handle:
                     handle.write("\n")
-            return text
+            return data
 
-        with mock.patch.object(Path, "read_text", autospec=True, side_effect=racing):
+        with mock.patch.object(Path, "read_bytes", autospec=True, side_effect=racing):
             first = Q.observations(self.jobs, now=self.now + 10, env=self.env)
         self.assertEqual(len(first), 1)
         self.assertFalse(self.cache_file().exists())
@@ -1453,6 +1461,166 @@ class SharedGaugeHoldTests(unittest.TestCase):
             self.assertEqual(states["codex"], "ok")
             self.assertIsNone(Q.harness_hold(self.jobs, "codex", now=self.now))
             self.assertNotIn("codex", Q.active_limits(self.jobs, now=self.now))
+
+
+class IncrementalSnapshotTest(unittest.TestCase):
+    """The suffix rescan must reproduce the whole-file answer byte for byte."""
+
+    NOW = 1792000000
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(dir="/tmp")
+        self.addCleanup(self.tmp.cleanup)
+        self.jobs = Path(self.tmp.name) / "jobs.log"
+
+    def _row(self, stamp="2026-10-03T00:00:00Z", note="pass", harness="codex", pad="p"):
+        return (f"{stamp}\tdone\t/repo\t/work\tjob\tattempt_id=att-x,harness={harness},"
+                f"note={note},failure_class=pass,pad={pad}")
+
+    def _write(self, text):
+        self.jobs.write_bytes(text.encode("utf-8"))
+
+    def _direct(self):
+        with mock.patch.object(Q, "_DISK_CACHE", False):
+            return Q._snapshot(self.jobs, self.NOW)
+
+    def _cached(self):
+        with mock.patch.object(Q, "_DISK_CACHE", True):
+            return Q._snapshot(self.jobs, self.NOW)
+
+    def test_segments_match_text_splitlines_for_every_line_separator(self):
+        data = (b"a\tb\r\nc\rd\x0be\x0cf\x1cg\x1dh\x1ei"
+                + "\u0085j\u2028k\u2029l".encode("utf-8")
+                + b"\n\nbad\nlast\rtail\x0cend")
+        expected = data.decode("utf-8").splitlines()
+        self.assertEqual([line for _offset, line in Q._segments(bytes(data))], expected)
+        with self.assertRaises(UnicodeDecodeError):
+            list(Q._segments(b"ok\nbad=\xff\n"))
+
+    def test_record_offsets_are_actual_segment_starts(self):
+        data = "one\n\nthree\r\nfour\x0bfive\nsix".encode("utf-8")
+        offsets = [(offset, line) for offset, line in Q._segments(data)]
+        self.assertEqual([line for _offset, line in offsets],
+                         data.decode("utf-8").splitlines())
+        for offset, line in offsets:
+            if line:
+                self.assertIn(line, data[offset:].decode("utf-8").splitlines())
+
+    def test_candidate_offsets_survive_a_full_snapshot_and_a_persisted_hit(self):
+        native = ("2026-10-10T00:00:00Z\tdone\t/repo\t/work\tjob\tattempt_id=att-a,"
+                  "harness=claude,note=dead-usage-limit,failure_class=capacity,"
+                  "model=claude-opus-4-6,log_file=/x/job.att-a.claude.jsonl")
+        self._write("pad\n" + native + "\n")
+        with mock.patch.object(Q, "_settled", return_value=True):
+            snapshot = self._cached()
+        self.assertEqual(len(snapshot["native"]), 1)
+        self.assertEqual(snapshot["native"][0]["x"], len("pad\n"))
+        Q._persist(snapshot)
+        payload = json.loads(Path(f"{self.jobs}.capacity-cache.json").read_text())
+        self.assertEqual(set(payload) & {"size", "tail", "head", "offsets"},
+                         {"size", "tail", "head", "offsets"})
+        self.assertTrue(payload["offsets"])
+        self.assertEqual(payload["native"][0]["x"], len("pad\n"))
+        with mock.patch.object(Q, "_settled", return_value=True):
+            hit = self._cached()
+        self.assertEqual(hit["native"], snapshot["native"])
+
+    def test_incomplete_tail_base_is_refused_and_the_answer_still_matches(self):
+        self._write("a\nb")
+        with mock.patch.object(Q, "_settled", return_value=True):
+            base = self._cached()
+            Q._persist(base)
+            self.assertTrue(Path(f"{self.jobs}.capacity-cache.json").exists())
+            with self.jobs.open("a", encoding="utf-8") as handle:
+                handle.write("c\nd\n")
+            # base ended mid-line: growth from that point is not a line boundary
+            self.assertIsNone(Q._incremental_snapshot(
+                self.jobs, self.NOW, Q._load_cache(self.jobs, self.NOW)[2], {}))
+            self.assertEqual(self._cached()["native"], self._direct()["native"])
+
+    def test_legacy_growth_with_a_changed_head_is_refused(self):
+        first = ("2026-10-03T00:00:00Z\tdone\ta\tb\tc\tharness=codex,"
+                 "note=dead-usage-limit,reset=2099-01-01T00:00:00Z")
+        changed = first.replace("2099-01-01", "2099-01-02")
+        self.assertEqual(len(first), len(changed))
+        filler = [self._row(pad="f" * 200) for _ in range(40)]
+        self._write("\n".join([first, *filler]) + "\n")
+        self.assertGreater(self.jobs.stat().st_size, 8192)
+        with mock.patch.object(Q, "_settled", return_value=True):
+            Q._persist(self._cached())
+            # No lineage sidecar: an old-release writer changes the first row in
+            # place (same length, so the base tail window is untouched) and grows
+            # the same inode.  The base head digest must refuse the suffix rescan.
+            with self.jobs.open("r+b") as handle:
+                handle.write(changed.encode("utf-8"))
+            with self.jobs.open("a", encoding="utf-8") as handle:
+                handle.write(self._row(pad="g") + "\n")
+            self.assertFalse(Path(f"{self.jobs}.lineage.json").exists())
+            base = Q._load_cache(self.jobs, self.NOW)[2]
+            self.assertIsNotNone(base)
+            self.assertIsNone(Q._incremental_snapshot(self.jobs, self.NOW, base, {}))
+            cached = self._cached()
+        self.assertEqual(cached["legacy"], self._direct()["legacy"])
+        self.assertEqual(cached["legacy"][0]["r"], "2099-01-02T00:00:00Z")
+
+    def test_legacy_growth_with_an_intact_head_still_rescans_only_the_suffix(self):
+        filler = [self._row(pad="f" * 200) for _ in range(40)]
+        self._write("\n".join(filler) + "\n")
+        size = self.jobs.stat().st_size
+        with mock.patch.object(Q, "_settled", return_value=True):
+            Q._persist(self._cached())
+            with self.jobs.open("a", encoding="utf-8") as handle:
+                handle.write(self._row(pad="g") + "\n")
+            incremental = Q._incremental_snapshot(
+                self.jobs, self.NOW, Q._load_cache(self.jobs, self.NOW)[2], {})
+        self.assertIsNotNone(incremental)
+        self.assertEqual(incremental["legacy"], self._direct()["legacy"])
+        self.assertEqual(incremental["size"], self.jobs.stat().st_size)
+        self.assertGreater(self.jobs.stat().st_size, size)
+
+    def test_random_write_sequence_matches_the_direct_answer(self):
+        import random
+        rng = random.Random(1102)
+        rows = [self._row(pad="p" * 40) for _ in range(6)]
+        rows[2] = ("2026-10-03T00:00:00Z\tdone\t/repo\t/work\tjob\tattempt_id=att-c,"
+                   "harness=claude,note=dead-usage-limit,failure_class=capacity,"
+                   "log_file=/x/job.att-c.claude.jsonl,model=claude-opus-4-6,pad=" + "q" * 40)
+        self._write("\n".join(rows) + "\n")
+        for key in Q._METRICS:
+            Q._METRICS[key] = 0
+        with mock.patch.object(Q, "_settled", return_value=True):
+            for step in range(14):
+                choice = rng.choice(("append", "close", "comment", "replace", "same-size"))
+                lines = self.jobs.read_text(encoding="utf-8").splitlines()
+                if choice == "append":
+                    lines.append(self._row(pad="a" * 40))
+                    self.jobs.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                elif choice == "close":
+                    index = rng.randrange(len(lines))
+                    fields = lines[index].split("\t")
+                    fields[1] = "done"
+                    lines[index] = "\t".join(fields)
+                    self.jobs.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                elif choice == "comment":
+                    text = self.jobs.read_text(encoding="utf-8").replace("note=pass", "note=pass-old", 1)
+                    self.jobs.write_text(text, encoding="utf-8")
+                elif choice == "replace":
+                    import dispatch_contract as DC
+                    DC._atomic_registry_replace(self.jobs, lines)
+                else:
+                    stat = self.jobs.stat()
+                    text = self.jobs.read_text(encoding="utf-8")
+                    if "q" in text:
+                        text = text.replace("q" * 40, "r" * 40, 1)
+                        self.jobs.write_text(text, encoding="utf-8")
+                        os.utime(self.jobs, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+                cached = self._cached()
+                Q._persist(cached)
+                direct = self._direct()
+                with self.subTest(step=step, choice=choice):
+                    self.assertEqual(cached["native"], direct["native"])
+                    self.assertEqual(cached["legacy"], direct["legacy"])
+            self.assertGreater(Q._METRICS["incremental_reads"], 0, Q._METRICS)
 
 
 if __name__ == "__main__":

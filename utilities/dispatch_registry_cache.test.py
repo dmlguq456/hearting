@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gc
+import json
 import os
 from pathlib import Path
 import sys
@@ -1011,6 +1012,66 @@ class LightRegistryViewTest(unittest.TestCase):
             self.assertEqual(view.line_count, len(expected), raw)
             self.assertEqual(view.lines, expected, raw)
             self.assertEqual(view.has_partial_tail, bool(raw) and not raw.endswith(b"\n"))
+
+
+class RegistryLineageTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.jobs = Path(self.tmp.name) / "jobs.log"
+        self.jobs.write_bytes(b"a\nb\n")
+
+    def _key(self, size=None, ino=None, mtime=None):
+        info = self.jobs.stat()
+        return [info.st_dev, info.st_ino if ino is None else ino,
+                info.st_size if size is None else size,
+                info.st_mtime_ns if mtime is None else mtime,
+                info.st_mode, info.st_ctime_ns]
+
+    def test_chain_resolves_to_the_smallest_prefix_and_its_anchor(self):
+        first, second, third = self._key(ino=1), self._key(ino=2), self._key(ino=3)
+        CACHE.record_lineage(self.jobs, first, second, 2, "a" * 64)
+        CACHE.record_lineage(self.jobs, second, third, 4, "b" * 64)
+        self.assertEqual(CACHE.resolve_lineage(self.jobs, first, third), (2, "a" * 64))
+        self.assertEqual(CACHE.resolve_lineage(self.jobs, second, third), (4, "b" * 64))
+
+    def test_complete_chain_shorter_than_a_later_entry_wins(self):
+        first, second, third = self._key(ino=1), self._key(ino=2), self._key(ino=3)
+        CACHE.record_lineage(self.jobs, first, third, 8, "c" * 64)
+        CACHE.record_lineage(self.jobs, first, second, 1, "a" * 64)
+        CACHE.record_lineage(self.jobs, second, third, 3, "b" * 64)
+        self.assertEqual(CACHE.resolve_lineage(self.jobs, first, third), (1, "a" * 64))
+
+    def test_broken_or_missing_chain_falls_back(self):
+        first, second, third = self._key(ino=1), self._key(ino=2), self._key(ino=3)
+        CACHE.record_lineage(self.jobs, first, second, 2, "a" * 64)
+        self.assertIsNone(CACHE.resolve_lineage(self.jobs, first, third))
+        self.assertIsNone(CACHE.resolve_lineage(self.jobs, third, first))
+        Path(CACHE.lineage_path(self.jobs)).write_text("{not json")
+        self.assertIsNone(CACHE.resolve_lineage(self.jobs, first, second))
+
+    def test_only_the_last_sixty_four_entries_are_kept(self):
+        keys = [self._key(ino=i, size=i) for i in range(1, 72)]
+        for parent, child in zip(keys, keys[1:]):
+            CACHE.record_lineage(self.jobs, parent, child, 1, "a" * 64)
+        data = json.loads(Path(CACHE.lineage_path(self.jobs)).read_text())
+        self.assertEqual(len(data["entries"]), 64)
+        self.assertIsNone(CACHE.resolve_lineage(self.jobs, keys[0], keys[-1]))
+        self.assertEqual(CACHE.resolve_lineage(self.jobs, keys[-2], keys[-1])[0], 1)
+
+    def test_malformed_entries_are_ignored_not_repaired(self):
+        path = Path(CACHE.lineage_path(self.jobs))
+        path.write_text(json.dumps({"schema": 1, "jobs": str(self.jobs.resolve()),
+                                    "entries": [{"p": [1, 2], "c": [3, 4], "n": 1, "a": "x"}]}))
+        self.assertIsNone(CACHE.resolve_lineage(self.jobs, [1, 2, 0, 0, 0, 0], [3, 4, 0, 0, 0, 0]))
+
+    def test_common_prefix_is_line_aligned(self):
+        self.assertEqual(CACHE.common_prefix_line_aligned(b"", b"a\n"), 0)
+        self.assertEqual(CACHE.common_prefix_line_aligned(b"a\nb\n", b"a\nb\n"), 4)
+        self.assertEqual(CACHE.common_prefix_line_aligned(b"a\nb\n", b"a\nc\n"), 2)
+        self.assertEqual(CACHE.common_prefix_line_aligned(b"a\nlong-line\n", b"a\nlong-other\n"), 2)
+        self.assertEqual(CACHE.common_prefix_line_aligned(b"a\nb", b"a\nb\nc\n"), 2)
+        self.assertEqual(CACHE.common_prefix_line_aligned(b"x" * 3000000, b"x" * 2000000), 0)
 
 
 if __name__ == "__main__":

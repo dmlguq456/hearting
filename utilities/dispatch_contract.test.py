@@ -7863,4 +7863,101 @@ class ResourceStageMarkerSuccessorTest(unittest.TestCase):
             self.holder(False), self.binding()).state, "resource-stage-not-current")
 
 
-if __name__=="__main__": unittest.main()
+class RegistryLineageWriterTest(unittest.TestCase):
+    def setUp(self):
+        import dispatch_registry_cache
+        self.cache = dispatch_registry_cache
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.jobs = Path(self.tmp.name) / "jobs.log"
+
+    def test_atomic_replace_records_the_line_aligned_prefix_and_child_key(self):
+        self.jobs.write_text("a\tx\nb\ty\n", encoding="utf-8")
+        parent = self.cache.registry_key(self.jobs.stat())
+        D._atomic_registry_replace(self.jobs, ["a\tx", "b\tz"])
+        child = self.cache.registry_key(self.jobs.stat())
+        resolved = self.cache.resolve_lineage(self.jobs, parent, child)
+        self.assertIsNotNone(resolved)
+        prefix, anchor = resolved
+        self.assertEqual(prefix, len("a\tx\n"))
+        self.assertEqual(anchor, hashlib.sha256(b"a\tx\n").hexdigest())
+
+    def test_atomic_replace_matching_prefix_uses_the_full_parent_tail(self):
+        self.jobs.write_text("a\nb\n", encoding="utf-8")
+        parent = self.cache.registry_key(self.jobs.stat())
+        D._atomic_registry_replace(self.jobs, ["a", "b", "c"])
+        child = self.cache.registry_key(self.jobs.stat())
+        self.assertEqual(self.cache.resolve_lineage(self.jobs, parent, child)[0], 4)
+
+    def test_parent_changing_during_the_replace_records_nothing(self):
+        self.jobs.write_text("a\nb\n", encoding="utf-8")
+        real = self.cache.common_prefix_line_aligned
+
+        def racing(old, new):
+            result = real(old, new)
+            with self.jobs.open("a", encoding="utf-8") as handle:
+                handle.write("changed\n")
+            return result
+
+        with mock.patch.object(self.cache, "common_prefix_line_aligned", side_effect=racing):
+            D._atomic_registry_replace(self.jobs, ["a", "b"])
+        self.assertFalse(self.cache.lineage_path(self.jobs).exists())
+
+    def test_append_helper_records_the_previous_end_and_keeps_the_bytes(self):
+        self.jobs.write_text("a\tx\nb\ty\n", encoding="utf-8")
+        parent = self.cache.registry_key(self.jobs.stat())
+        D._append_registry_rows(self.jobs, ["c\tz", "d\tw"])
+        self.assertEqual(self.jobs.read_text(encoding="utf-8"), "a\tx\nb\ty\nc\tz\nd\tw\n")
+        child = self.cache.registry_key(self.jobs.stat())
+        prefix, anchor = self.cache.resolve_lineage(self.jobs, parent, child)
+        self.assertEqual(prefix, len("a\tx\nb\ty\n"))
+        self.assertEqual(anchor, hashlib.sha256(b"a\tx\nb\ty\n").hexdigest())
+
+    def test_an_append_without_a_trailing_newline_records_nothing(self):
+        self.jobs.write_text("a\tx\nb\ty", encoding="utf-8")
+        D._append_registry_rows(self.jobs, ["c\tz"])
+        self.assertFalse(self.cache.lineage_path(self.jobs).exists())
+
+    def test_atomic_replace_finishes_a_short_os_write_before_the_rename(self):
+        self.jobs.write_text("a\n", encoding="utf-8")
+        rows = [f"row-{index}\t" + "x" * 50 for index in range(200)]
+        real_write = os.write
+        calls = []
+
+        def short_write(fd, data):
+            calls.append(len(data))
+            return real_write(fd, bytes(data[:97]))
+
+        with mock.patch.object(D.os, "write", side_effect=short_write):
+            D._atomic_registry_replace(self.jobs, rows)
+        self.assertGreater(len(calls), 1)
+        self.assertEqual(self.jobs.read_text(encoding="utf-8"), "\n".join(rows) + "\n")
+
+    def test_append_after_a_concurrent_replace_records_no_borrowed_fact(self):
+        self.jobs.write_text("a\tx\nb\ty\n", encoding="utf-8")
+        real_pread = os.pread
+        replaced = []
+
+        def pread_then_replace(fd, length, offset):
+            data = real_pread(fd, length, offset)
+            if length > 1 and not replaced:
+                replacement = self.jobs.with_name("jobs.log.other")
+                replacement.write_text("z\tq\nb\ty\n", encoding="utf-8")
+                os.replace(replacement, self.jobs)
+                replaced.append(True)
+            return data
+
+        with mock.patch.object(D.os, "pread", side_effect=pread_then_replace):
+            D._append_registry_rows(self.jobs, ["c\tz"])
+        self.assertEqual(replaced, [True])
+        self.assertEqual(self.jobs.read_text(encoding="utf-8"), "z\tq\nb\ty\nc\tz\n")
+        self.assertFalse(self.cache.lineage_path(self.jobs).exists())
+
+    def test_sidecar_failure_never_changes_the_replacement(self):
+        self.jobs.write_text("a\n", encoding="utf-8")
+        with mock.patch.object(self.cache, "record_lineage", side_effect=OSError("read-only")):
+            D._atomic_registry_replace(self.jobs, ["b"])
+        self.assertEqual(self.jobs.read_text(encoding="utf-8"), "b\n")
+
+
+if __name__ == "__main__": unittest.main()
