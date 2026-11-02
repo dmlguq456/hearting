@@ -978,11 +978,32 @@ def _next_ready_start_lines(receipt: dict, jobs: str) -> list[str]:
                         lines.append("Next ready: " + worker_bootstrap.route_start_command(route_file, node["id"]))
                     else:
                         lines.append(f"Next ready: run {node['id']} yourself (per your Route steps).")
+                lines += _owner_handed_over_lines(route, route_file, meta.get("route_node"))
             except Exception:  # advisory text only: any unreadable route/row keeps the receipt unchanged
                 continue
     except ImportError:
         return []
     return list(dict.fromkeys(lines))
+
+
+def _owner_handed_over_lines(route: dict, route_file: Path, node_id) -> list[str]:
+    """The checks a finished producing stage handed over when no `qa/test` stage follows it: the owner
+    runs them, and one its environment cannot run either stays unverified. [] when none or unreadable."""
+    try:
+        import worker_bootstrap
+        node = next((n for n in route.get("nodes") or [] if n.get("id") == node_id), None)
+        if not node or node.get("unit") == worker_bootstrap.VERIFICATION_UNIT:
+            return []
+        found = worker_bootstrap.owner_handed_over(
+            route, node_id, worker_bootstrap.cycle_output_dir(route, route_file))
+    except Exception:  # advisory text only
+        return []
+    if not found.rows:
+        return []
+    return ([f"Handed over to you by {node_id} (no verification stage follows it): run each under the "
+             "verification runner before you settle the leg; one your environment cannot run either stays "
+             "unverified in your final report, not PASS."]
+            + worker_bootstrap.handed_over_lines(found, "- "))
 
 
 def completion_followup_text(receipt: dict, *, jobs: str, surface: str) -> str:

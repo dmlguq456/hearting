@@ -480,6 +480,39 @@ class ObligationStoreTest(unittest.TestCase):
             store.create("after-removal", "message", {}, {})
         self.assertFalse(state_root.exists())
 
+    def test_runner_duty_state_refuses_a_replaced_state_root(self):
+        state_root = self.root / "duty-state"
+        state_root.mkdir()
+        store = obligations.ObligationStore(state_root)
+        self.assertTrue(store.ensure_directory())
+        identity = obligations.state_root_identity(state_root)
+        self.assertIsNotNone(identity)
+        obligations.write_runner_duty_state(
+            state_root, "probe", {"last_pass_ns": 1},
+            expected_root_identity=identity)
+        self.assertTrue((state_root / "peer-steward" / "runner-duties"
+                         / "probe.json").is_file())
+
+        moved = state_root.with_name("duty-state-held")
+        state_root.rename(moved)
+        state_root.mkdir(mode=0o700)
+        (state_root / "peer-steward").mkdir(mode=0o700)
+        with self.assertRaises(obligations.ObligationError):
+            obligations.write_runner_duty_state(
+                state_root, "replacement", {}, expected_root_identity=identity)
+        self.assertEqual(list((state_root / "peer-steward").iterdir()), [])
+
+    def test_recovery_request_carries_the_observed_state_root_identity(self):
+        observed = self.root / "peer-ledger"
+        observed.mkdir()
+        with mock.patch.object(obligations, "peer_state_root", return_value=observed), \
+                mock.patch.object(obligations.subprocess, "Popen") as popen:
+            self.assertTrue(obligations.request_obligation_recovery())
+        env = popen.call_args.kwargs["env"]
+        info = os.stat(observed)
+        self.assertEqual(env[obligations.STATE_ROOT_IDENTITY_ENV],
+                         f"{info.st_dev}:{info.st_ino}")
+
     def test_lifecycle_initializer_creates_one_root_beneath_an_existing_parent(self):
         parent = self.root / "existing-parent"
         parent.mkdir()

@@ -123,6 +123,45 @@ class InstallFollowTest(unittest.TestCase):
         with mock.patch.object(install_follow.os, "execve", side_effect=OSError("fixture")):
             self.assertFalse(self.follower.restart(self.new, [], {"offset": 12}))
         self.assertIsNone(install_follow.read_handoff({}))
+        self.assertEqual(self.follower._declined[0], "새 릴리스 실행 실패 (OSError)")
+
+    def test_restart_waits_while_the_screen_cannot_take_output(self):
+        self.activate(self.new)
+        hold = ["화면 출력이 막혀 있음"]
+        self.follower.hold = lambda: hold[0]
+        with mock.patch.object(install_follow.os, "execve") as execute:
+            self.assertFalse(self.follower.restart(self.new, [], {}))
+            execute.assert_not_called()
+            hold[0] = None
+            self.follower.restart(self.new, [], {})
+            execute.assert_called_once()
+        self.follower.hold = mock.Mock(side_effect=RuntimeError("fixture"))
+        with mock.patch.object(install_follow.os, "execve") as execute:
+            self.follower.restart(self.new, [], {})
+            execute.assert_called_once()
+
+    def test_waiting_note_names_the_release_and_the_last_reason(self):
+        self.assertIsNone(self.follower.waiting_note())
+        self.activate(self.new)
+        self.assertEqual(self.follower.target(), self.new)
+        seen = self.follower._pending[1]
+        self.assertEqual(self.follower.target(), self.new)
+        self.assertEqual(self.follower._pending[1], seen, "the first sighting is kept")
+        later = seen + install_follow.WAIT_NOTE_AFTER
+        self.assertIsNone(self.follower.waiting_note(now=later - 1))
+        self.assertEqual(self.follower.waiting_note(now=later),
+                         "v3.25.19로 넘어가기 대기: 확인 창·입력이 끝나면 넘어감")
+        self.follower.hold = lambda: "화면 출력이 막혀 있음"
+        self.assertFalse(self.follower.restart(self.new, [], {}))
+        declined = self.follower._declined[1]
+        self.follower._pending = (self.new, declined - install_follow.WAIT_NOTE_AFTER)
+        self.assertEqual(self.follower.waiting_note(now=declined + 1),
+                         "v3.25.19로 넘어가기 대기: 화면 출력이 막혀 있음")
+        self.assertEqual(self.follower.waiting_note(now=declined + 11),
+                         "v3.25.19로 넘어가기 대기: 확인 창·입력이 끝나면 넘어감")
+        self.activate(self.old)
+        self.assertIsNone(self.follower.target())
+        self.assertIsNone(self.follower.waiting_note(now=later + 60))
 
     def test_viewer_handoff_roundtrip_includes_tuple_fold_keys_and_order(self):
         names = ("_OFFSET", "_PROCESS_VIEW", "_SHOW_ALL", "_ROUTE_FOLD", "_REPO_FOLD",

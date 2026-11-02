@@ -7,8 +7,8 @@ the live record's keys are drawn from the fixture's keys, its value types are th
 and an unknown value is ``None``. Additive route fields have the explicit
 optional contract below, so old render fixtures remain valid inputs.
 """
-import time
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 from tools.fleet.explorer.live import build_view_model
@@ -174,7 +174,7 @@ class SectionShapes(unittest.TestCase):
             {"ts": "2026-10-23T12:00:00", "action": "decision-record", "type": "decision",
              "snippet": "[결정] 이대로 시작할까요?"},
             {"ts": "2026-10-23T11:00:00", "action": "add", "type": "decision", "snippet": "not an answer"}]}})
-        live = build_view_model(snapshot, now=time.time()).to_mapping()
+        live = build_view_model(snapshot, now=datetime(2026, 10, 23, 12, 30).timestamp()).to_mapping()
         self.assertEqual(live["answered"], [["demo-app", [["12:00", "이대로 시작할까요?"]]]])
         problems = []
         conform(live["answered"], [self.fixture["answered"]], "answered", problems)

@@ -285,6 +285,47 @@ class BuildViewsTest(unittest.TestCase):
         public_node = next(n for n in public["nodes"] if n["id"] == "eval-sep")
         self.assertEqual(public_node["state"], "reconciling")
 
+    def _reconciling_job(self, node="eval-sep"):
+        job = DispatchJob(
+            key=node, slug="lab-" + node, route_id=self.route_id, route_node=node,
+            attempt_id="att-" + node, liveness="stale", elapsed_min=3,
+            note="reconcile-needed",
+        )
+        job.state_evidence = {"attempt": {
+            "state": "stale", "source": "shared-observer",
+            "rule": "terminal-observed/reconcile-needed",
+            "attempt_id": job.attempt_id, "route_id": self.route_id, "route_node": node,
+            "observed_liveness": {"state": "reconcile-needed", "reason": "process-exited",
+                                  "process_state": "quiescent"},
+        }}
+        return job
+
+    def test_route_whose_only_in_flight_work_has_no_process_is_unknown_not_working(self):
+        # rt-454aff269a3d2452 (2026-11-02): a frame leg's process was proven gone, its
+        # registry row stayed open, and the route read "working 8d" with nothing running.
+        views = route.build_views([self._reconciling_job()], {}, {self.route_id: self.record},
+                                  self.now)
+        self.assertEqual(views[0]["liveness"], "unknown")
+        node = next(n for n in views[0]["nodes"] if n["id"] == "eval-sep")
+        self.assertEqual(node["state"], "reconciling")
+
+    def test_any_live_or_unobservable_route_job_keeps_route_liveness_unset(self):
+        # A quiet ("stale" by transcript age) job is not proof that its process ended.
+        for liveness in ("working", "idle", "blocked", "unknown", "stale", None):
+            other = DispatchJob(key="eval-asr", slug="lab-eval-asr", route_id=self.route_id,
+                                route_node="eval-asr", liveness=liveness, elapsed_min=1)
+            views = route.build_views([self._reconciling_job(), other], {},
+                                      {self.route_id: self.record}, self.now)
+            self.assertIsNone(views[0]["liveness"], liveness)
+        unrelated = DispatchJob(key="x", slug="x", route_id="rt-other", route_node="eval-asr",
+                                liveness="working", elapsed_min=1)
+        self.assertEqual(route.route_liveness(
+            [{"id": "eval-sep", "state": "reconciling"}], [self._reconciling_job(), unrelated],
+            self.route_id), "unknown")
+        self.assertIsNone(route.route_liveness([{"id": "a", "state": "pending"}], [], None))
+        self.assertIsNone(route.route_liveness(
+            [{"id": "a", "state": "reconciling"}, {"id": "b", "state": "recovering"}], [], None))
+
     def test_reconcile_note_without_exact_evidence_remains_failed(self):
         job = DispatchJob(
             key="eval-sep", slug="lab-eval-sep", route_id=self.route_id,

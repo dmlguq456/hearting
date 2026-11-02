@@ -56,6 +56,7 @@ if __package__ in (None, ""):
     from fleet.collectors import procscan
     from fleet import installinfo
     from fleet import install_follow
+    from fleet import screen_guard
     from fleet.refresh import as_snapshot
 else:
     from .collectors import collect_all
@@ -63,6 +64,7 @@ else:
     from .collectors import procscan
     from . import installinfo
     from . import install_follow
+    from . import screen_guard
     from .refresh import as_snapshot
 
 
@@ -275,6 +277,19 @@ def _discard_empty(path):
         pass
 
 
+def _run_live(render, collector, hfilter, section, interval, *, follower=None, guard=None):
+    """The live view on a guarded screen: a terminal that stops reading pauses the
+    picture, not collection or install follow, and a new release waits for output."""
+    follower = install_follow.InstallFollower() if follower is None else follower
+    guard = screen_guard.ScreenGuard() if guard is None else guard
+    follower.hold = guard.hold_reason
+    if guard.note is None:
+        guard.note = follower.waiting_note
+    collector.install_follower = follower
+    with guard.around(render):
+        return render.run_live(collector, hfilter, section, interval)
+
+
 def main(argv=None):
     argv = list(argv if argv is not None else sys.argv[1:])
     args = parse_args(argv)
@@ -460,11 +475,10 @@ def main(argv=None):
     # F-83: SSH/GPU polling has its own slower pump in render. Never put it in
     # the 2-second process snapshot producer or on the curses thread.
     live_collector.compute_hosts_refresh = compute_hosts.collect
-    live_collector.install_follower = install_follow.InstallFollower()
     live_collector.restart_argv = argv
 
     try:
-        return render.run_live(live_collector, hfilter, args.section, args.interval)
+        return _run_live(render, live_collector, hfilter, args.section, args.interval)
     finally:
         render.set_explorer_mode(False)
 

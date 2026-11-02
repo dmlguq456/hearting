@@ -770,7 +770,7 @@ Session and prompt bridges retain `hookSpecificOutput.additionalContext` for opt
 - **Runtime support:** the existing Stop hook receives the exact thread id and reads only the latest `last_token_usage.input_tokens` from that thread's rollout. If the Stop payload omits a transcript path, the bounded rollout finder must resolve the exact thread.
 - **Adapter realization:** the shared idle observer records a durable due time and requests a card from the same verified main pane once. It does not fabricate a remote-V2 compact summary. The card/enqueue receipt is required before clear, and the successor receives status-only guidance.
 
-- **Cache evidence:** the local config names `gpt-6.1-sol` but leaves `model_provider` unset and provides no request-level cache settings. The provider/cache lifetime is therefore unknown; no OpenAI API retention claim is applied to the Codex account path.
+- **Cache evidence:** the local config names the configured deep model (`CFG_TIER_DEEP_MODEL`) but leaves `model_provider` unset and provides no request-level cache settings. The provider/cache lifetime is therefore unknown; no OpenAI API retention claim is applied to the Codex account path.
 
 ## Parent authority and peer transport
 

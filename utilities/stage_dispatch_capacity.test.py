@@ -8,6 +8,13 @@ S=importlib.util.spec_from_file_location("fallback",ROOT/"utilities/stage-dispat
 F=importlib.util.module_from_spec(S);S.loader.exec_module(F)
 import sys;sys.path.insert(0,str(ROOT/"utilities"))
 from model_config import parse_config
+import re
+
+def concrete(model):
+ # Alias vs full id: the same split model_config.restricted_model uses. A bare
+ # alphanumeric alias takes the adapter's versioned id shape; a hyphen id is
+ # already concrete and is used as-is.
+ return f"claude-{model}-5" if re.fullmatch(r"[a-z0-9]+",model) else model
 import os
 os.environ.setdefault("HEARTING_CAPACITY_PROBE_CLI", os.devnull)  # never ask a real Claude login
 
@@ -163,7 +170,7 @@ class CapacityTest(unittest.TestCase):
   for i,(model,paired) in enumerate(claude):
    nxt=claude[i+1] if i+1<len(claude) else None
    self.assertEqual(F.capacity_cascade_next("claude",model),nxt)
-   self.assertEqual(F.capacity_cascade_next("claude",f"claude-{model}-5"),nxt)  # concrete id form
+   self.assertEqual(F.capacity_cascade_next("claude",concrete(model)),nxt)  # concrete id form
    # every declared cascade member is proved by declaration with its own paired effort
    self.assertTrue(F.allowed_capacity_settings("claude",model,paired))
    self.assertFalse(F.allowed_capacity_settings("claude",model,"not-a-real-effort"))
@@ -172,7 +179,7 @@ class CapacityTest(unittest.TestCase):
   # restriction changes both eligibility and the next-candidate walk.
   conf=self.shipped_conf("claude")
   declared=[tuple(e.split(":",1)) for e in conf["CFG_TIER_DEEP_FAILOVER_CASCADE"].split()]
-  blocked=declared[0][0];blocked_alias=f"claude-{blocked}-5"
+  blocked=declared[0][0];blocked_alias=concrete(blocked)
   conf={**conf,"CFG_MAIN_SESSION_ONLY_MODELS":blocked};self.pin_conf(conf)
   claude=F.capacity_cascade("claude");models=[m for m,_ in claude]
   self.assertNotIn(blocked,models);self.assertEqual(claude,[entry for entry in declared if entry[0]!=blocked])
@@ -215,7 +222,7 @@ class CapacityTest(unittest.TestCase):
   conf=self.shipped_conf("claude");self.pin_conf(conf)
   cascade=F.capacity_cascade("claude")
   self.assertEqual(cascade[0][0],conf["CFG_TIER_DEEP_MODEL"])
-  self.capacity_retry_from(f"claude-{cascade[0][0]}-5",cascade[1])
+  self.capacity_retry_from(concrete(cascade[0][0]),cascade[1])
  def test_legacy_main_only_fable_retry_launches_first_eligible_candidate(self):
   # migration-only: a row recorded under a main-only policy resumes at the first
   # eligible cascade member without admitting fable into the cascade.

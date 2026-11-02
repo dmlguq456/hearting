@@ -10143,8 +10143,9 @@ def _build_unbounded_lines(sessions, jobs, section, narrow, malformed, layout="w
             lines.extend(gpu_rows + resource_rows)
         lines.extend(_gpu_work_strip(emission["gpu"], term_width))
 
-        # F-19 repo rows (사용자 확정 2026-07-16): this card's own today-mem events, below a
-        # subtle in-band divider — entirely silent when the repo has none (healthy-silent,
+        # F-19 repo rows (사용자 결정 2026-11-02, replacing the 2026-07-16 today-only rule):
+        # this card's own recent mem events (latest K per repo, dated), below a subtle
+        # in-band divider — entirely silent when the repo has none (healthy-silent,
         # §4.7 F-19 convention). Rides the same body-tint loop below, unmodified.
         repo_events = (memory or {}).get("by_repo", {}).get(name) if memory else None
         if repo_events:
