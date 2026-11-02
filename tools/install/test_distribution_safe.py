@@ -1117,6 +1117,7 @@ class AttestedInputRetentionTest(unittest.TestCase):
         self._release("v-newest", 3)
         attestation = self._attestation()
         self._record(attestation, [old / "tools" / "probe.py"])
+        # destructive-ok: reason=remove the smoke attestation so its index row goes stale; boundary=one attestation file below this test's temporary state root
         attestation.unlink()
 
         stderr = self._cleanup()
