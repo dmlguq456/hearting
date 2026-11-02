@@ -2526,8 +2526,8 @@ what it held at that moment: a retire that finished (`normal-exit`, `target-alre
 a confirmed same-seat `/clear` (for what the successor did not take over), and a window
 a steward-check pass saw gone. The last one needs the seat's pane, taken from a watch arm
 of that holder, to be absent from a complete pane census while no evidence says the
-session still lives; unknown liveness alone never releases, and a pane now holding another
-session never counts as absence. What a confirmed same-seat successor took over carries
+session still lives; unknown liveness alone releases nothing, and a pane now holding another
+session does not count as absence. What a confirmed same-seat successor took over carries
 on. Any other end leaves the role where it is. Release, a
 holder change (a confirmed handover moves the schedule to the successor) or a proven
 session end completes the duty and retires its undelivered notice through the existing
