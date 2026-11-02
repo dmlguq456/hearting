@@ -45,7 +45,7 @@ class PlacementTest(unittest.TestCase):
 
     def observe(self):
         with mock.patch.object(placement, "MAX_SECONDS", 1), \
-             mock.patch.object(placement.socket, "gethostname", return_value="moving4.iip.lab"):
+             mock.patch.object(placement.socket, "gethostname", return_value="gpu-a01.example.test"):
             return placement.observe(self.run, self.proc)
 
     def test_tf_children_selection_and_io_wait_are_display_only(self):
@@ -109,9 +109,9 @@ class PlacementNowTest(unittest.TestCase):
     def setUp(self):
         self.child = model.ResourceJob(run_id="tf-resume", node="resume-run", liveness="working",
             pid=100, starttime="10", process_group=100, command=["python", "resume_run.py"],
-            local_placement={"hostname": "moving4.iip.lab", "requested_devices": ["1"],
+            local_placement={"hostname": "gpu-a01.example.test", "requested_devices": ["1"],
                 "io_wait": True, "processes": [{"pid": 102, "starttime": "102"}]})
-        self.snapshot = {"configured": True, "hosts": [{"host": "moving4", "self": True, "reachable": True,
+        self.snapshot = {"configured": True, "hosts": [{"host": "gpu-a01", "self": True, "reachable": True,
             "gpus": [{"index": 1, "uuid": "GPU-12345678-abcd", "processes": [
                 {"pid": 777, "proc_start": "777", "pgid": 777,
                  "used_memory_mib": 8192, "command": "unrelated.py"}]}]}]}
@@ -124,14 +124,14 @@ class PlacementNowTest(unittest.TestCase):
 
     def test_selection_before_use_is_shared_and_never_creates_gpu_memory(self):
         for harness in ("claude", "codex", "opencode"):
-            self.assertIn('moving4:1 selected · GPU not in use · I/O wait', self.now(harness))
+            self.assertIn('gpu-a01:1 selected · GPU not in use · I/O wait', self.now(harness))
         self.assertEqual(render._resource_gpu_resources(self.child, self.snapshot), [])
 
     def test_observed_child_with_new_group_wins_and_reused_pid_does_not(self):
         process = self.snapshot["hosts"][0]["gpus"][0]["processes"][0]
         process.update(pid=102, proc_start="102", pgid=102)
         for harness in ("claude", "codex", "opencode"):
-            self.assertIn("moving4:1", self.now(harness))
+            self.assertIn("gpu-a01:1", self.now(harness))
             self.assertNotIn("selected", self.now(harness))
             self.assertNotIn('GPU not in use', self.now(harness))
         process["proc_start"] = "reused"
@@ -139,7 +139,7 @@ class PlacementNowTest(unittest.TestCase):
 
     def test_uuid_selection_and_no_sample_do_not_guess(self):
         self.child.local_placement["requested_devices"] = ["GPU-12345678"]
-        self.assertIn('moving4:1 selected', self.now("codex"))
+        self.assertIn('gpu-a01:1 selected', self.now("codex"))
         self.child.local_placement = None
         self.assertIn('host/GPU unknown', self.now("codex"))
 
@@ -148,7 +148,7 @@ class PlacementNowTest(unittest.TestCase):
         for field in ("detail", "process_detail", "gpu_error", "process_error"):
             with self.subTest(field=field):
                 host[field] = "unavailable"
-                self.assertIn('moving4:1 selected · GPU use unknown', self.now("opencode"))
+                self.assertIn('gpu-a01:1 selected · GPU use unknown', self.now("opencode"))
                 host.pop(field)
         self.child.local_placement["complete"] = False
         self.assertIn('GPU use unknown', self.now("opencode"))
@@ -174,7 +174,7 @@ class PlacementNowTest(unittest.TestCase):
         for start in (None, "reused"):
             process["proc_start"] = start
             for harness in ("claude", "codex", "opencode"):
-                self.assertIn('moving4:1 selected · GPU use unknown', self.now(harness))
+                self.assertIn('gpu-a01:1 selected · GPU use unknown', self.now(harness))
             self.assertEqual(render._resource_gpu_resources(self.child, self.snapshot), [])
 
 

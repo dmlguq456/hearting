@@ -351,7 +351,7 @@ class ResourceProgressProductionTest(unittest.TestCase):
                 "production": {
                     "schema": "tf-rehancer.cnn-production/v1", "host": "cnn",
                     "capacity": capacity, "gpu_index": gpu,
-                    "directory": "/home/nas/user/Uihyeop/NN_Zoo/TF-Rehancer_artifacts"
+                    "directory": "/home/example/NN_Zoo/TF-Rehancer_artifacts"
                                  "/cnn_canonical_20261006/recovery-a1/%s/runs/%s"
                                  % (capacity.lower(), run),
                     "config_sha256": "9" * 64, "state": "training-updates",
@@ -517,11 +517,11 @@ class RemoteCandidatesTest(unittest.TestCase):
 
     def test_same_pid_on_other_hosts_stays_host_qualified(self):
         first = self.arm("T", pid=42, start=11)
-        second = self.arm("B", pid=42, start=11, host="moving4",
+        second = self.arm("B", pid=42, start=11, host="gpu-a01",
                           run="b_baseline_20261006", gpu=1)
         found = self.collect_remote({"arms": [first, second]})
         self.assertEqual([(item["host"], item["pid"]) for item in found],
-                         [("cnn", 42), ("moving4", 42)])
+                         [("cnn", 42), ("gpu-a01", 42)])
 
 
 class DeclaredResourceProgressTest(unittest.TestCase):

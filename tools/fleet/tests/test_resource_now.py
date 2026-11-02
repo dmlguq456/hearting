@@ -30,7 +30,7 @@ class ResourceNowTest(unittest.TestCase):
             for harness in ("claude", "codex", "opencode"):
                 with self.subTest(node=row["node"], harness=harness):
                     owner, child = self.owner(row, harness)
-                    snapshot = {"hosts": [{"host": "moving4", "self": True, "reachable": True,
+                    snapshot = {"hosts": [{"host": "gpu-a01", "self": True, "reachable": True,
                         "gpus": ([] if row["gpu"] is None else [{"index": 0, "name": "RTX 6000",
                             "processes": [{"pid": child.pid, "proc_start": child.starttime,
                                 "pgid": child.process_group, "command": "python train.py"}]}])}]}
@@ -41,8 +41,8 @@ class ResourceNowTest(unittest.TestCase):
                     expected_name = {"full-run": "full run", "resume-run": "resume run",
                                      "eval-run": "eval run"}[child.node]
                     self.assertIn(expected_name, now)
-                    location = ("moving4:0" if row["gpu"] == 0 else
-                                "moving4:CPU" if row["node"] == "eval-run" else
+                    location = ("gpu-a01:0" if row["gpu"] == 0 else
+                                "gpu-a01:CPU" if row["node"] == "eval-run" else
                                 'host/GPU unknown')
                     self.assertIn(location, now)
                     self.assertIn('log ', now)
@@ -96,7 +96,7 @@ class ResourceNowTest(unittest.TestCase):
     def test_now_and_resource_row_share_verified_host_without_gpu_snapshot(self):
         for harness in ("claude", "codex", "opencode"):
             owner, child = self.owner(self.rows[0], harness)
-            child.local_placement = {"hostname": "moving4.iip.lab", "processes": [
+            child.local_placement = {"hostname": "gpu-a01.example.test", "processes": [
                 {"pid": child.pid, "starttime": child.starttime}]}
             child.log_path, child.log_updated_at = "/logs/empty.log", None
             child.log_size = 0
@@ -104,7 +104,7 @@ class ResourceNowTest(unittest.TestCase):
                 now = render._resource_now_text(owner)
                 row = render._plain(render._resource_child_rows(owner, term_width=180)[0])
             for text in (now, row):
-                self.assertIn("moving4.iip.lab", text)
+                self.assertIn("gpu-a01.example.test", text)
                 self.assertNotIn('host/GPU unknown', text)
             self.assertIn('no output', now)
             self.assertNotIn('log ', now)

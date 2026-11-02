@@ -956,8 +956,8 @@ def _r14_narrow_host_identity(record, band):
     if not candidate.startswith(host_prefix):
         return False
     if width == 80 and (not record.get("reference_edge", [False])[0] or
-                        reference[-1] not in _SPINNER_GLYPHS or hosts[0] != ("⌂", "moving4") or
-                        "moving4" in reference):
+                        reference[-1] not in _SPINNER_GLYPHS or hosts[0] != ("⌂", "gpu-a01") or
+                        "gpu-a01" in reference):
         return False
     reference_spinner = [index for index, char in enumerate(reference) if char in _SPINNER_GLYPHS]
     candidate_spinner = [index for index, char in enumerate(candidate) if char in _SPINNER_GLYPHS]
@@ -1076,7 +1076,7 @@ def _unknown_compute_track(record, band):
     unknown_cells = frozenset({"UTIL", "COMPUTE block VRAM percent", "VRAM gauge", "VRAM used/total"})
     limitations = {(item.get("gpu"), frozenset(item.get("unknown_cells") or ()))
                    for item in record.get("reference_copy_limitations", ())
-                   if item.get("reference_file") == "mock13.py" and item.get("host") == "moving4"}
+                   if item.get("reference_file") == "mock13.py" and item.get("host") == "gpu-a01"}
     trace = record.get("reference_overflow_mask") or {}
     if not (record["state"] == "COMPUTE" and record["width"] in R14_UNKNOWN_GPU_TRACK_LAST_COLUMN
             and band["pane"] == "right" and len(band["rows"]) == 1 and band["rows"][0] in (5, 6)
@@ -1246,10 +1246,10 @@ RULES = [
      "the pinned R14 MODELS row has an exact visible suffix at its pane edge; Fleet2 keeps the unchanged prefix and the recorded blank suffix",
      _r14_models_safe_edge_clip),
     ("unknown-gpu-track", "copy-limitation", None,
-     "moving4 GPU 0/1 UTIL and VRAM values are None: the reference copy can show · but cannot draw fleet2's empty 10-cell unknown track; no zero is synthesized",
+     "gpu-a01 GPU 0/1 UTIL and VRAM values are None: the reference copy can show · but cannot draw fleet2's empty 10-cell unknown track; no zero is synthesized",
      _unknown_compute_track),
     ("hosts-fold-100", "fleet2-defect", CHROME,
-     "100 columns: when the host list does not fit before the census the reference folds it to `⌂ moving4 +4 · 5/5`; "
+     "100 columns: when the host list does not fit before the census the reference folds it to `⌂ gpu-a01 +4 · 5/5`; "
      "fleet2 clips the list mid-name (chrome.py draw_chrome host loop)",
      lambda r, b: r["width"] == 100 and b["pane"] == "frame" and _has(r"\+4 · 5/5", b["reference"][0])),
     ("more-below-marker", "fleet2-defect", "tools/fleet/explorer/frame.py",

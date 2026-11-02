@@ -1124,33 +1124,33 @@ class ComputeHostsTest(unittest.TestCase):
                                             "hostname": here}), [])
 
     def test_self_discovery_accepts_short_name_and_name_lists(self):
-        # moving4's system hostname changed from `workstation` to
-        # `moving4.iip.lab`: an inventory that declares only the short name,
+        # gpu-a01's system hostname changed from `workstation` to
+        # `gpu-a01.example.test`: an inventory that declares only the short name,
         # or keeps several names, must still recognize the local machine.
         module = load_module()
         with mock.patch.object(module.socket, "gethostname",
-                               return_value="moving4.iip.lab"):
+                               return_value="gpu-a01.example.test"):
             self.assertTrue(module.is_self({"ssh_host": "203.0.113.9",
-                                            "hostname": "moving4"}))
-            self.assertTrue(module.is_self({"ssh_host": "203.0.113.9",
-                                            "hostname": ["workstation",
-                                                         "moving4.iip.lab"]}))
+                                            "hostname": "gpu-a01"}))
             self.assertTrue(module.is_self({"ssh_host": "203.0.113.9",
                                             "hostname": ["workstation",
-                                                         "moving4"]}))
+                                                         "gpu-a01.example.test"]}))
             self.assertTrue(module.is_self({"ssh_host": "203.0.113.9",
-                                            "hostname": "MOVING4"}))
+                                            "hostname": ["workstation",
+                                                         "gpu-a01"]}))
+            self.assertTrue(module.is_self({"ssh_host": "203.0.113.9",
+                                            "hostname": "GPU-A01"}))
             self.assertFalse(module.is_self({"ssh_host": "203.0.113.9",
                                              "hostname": ["workstation",
                                                           "cnn"]}))
             self.assertFalse(module.is_self({"ssh_host": "203.0.113.9",
-                                             "hostname": "moving40"}))
+                                             "hostname": "gpu-a010"}))
             self.assertFalse(module.is_self({"ssh_host": "203.0.113.9",
                                              "hostname": [None, 7]}))
         with mock.patch.object(module.socket, "gethostname",
-                               return_value="moving4"):
+                               return_value="gpu-a01"):
             self.assertTrue(module.is_self({"ssh_host": "203.0.113.9",
-                                            "hostname": "moving4.iip.lab"}))
+                                            "hostname": "gpu-a01.example.test"}))
 
     def test_static_listing_marks_short_and_listed_names_as_self(self):
         import socket
@@ -1190,8 +1190,8 @@ class ComputeHostsTest(unittest.TestCase):
         module = load_module()
         import socket
         self.assertEqual(
-            module._decode_proc_net_endpoint("63DDEFA3:840C", socket.AF_INET),
-            ("163.239.221.99", 33804),
+            module._decode_proc_net_endpoint("630200C0:840C", socket.AF_INET),
+            ("192.0.2.99", 33804),
         )
         self.assertEqual(
             module._decode_proc_net_endpoint(
@@ -1205,11 +1205,11 @@ class ComputeHostsTest(unittest.TestCase):
         )
         self.assertEqual(
             module._decode_proc_net_endpoint(
-                "0000000000000000FFFF0000370DEFA3:0016", socket.AF_INET6),
-            ("163.239.13.55", 22),
+                "0000000000000000FFFF0000370200C0:0016", socket.AF_INET6),
+            ("192.0.2.55", 22),
         )
-        self.assertEqual(module._normalize_ip("::ffff:163.239.13.55"),
-                         "163.239.13.55")
+        self.assertEqual(module._normalize_ip("::ffff:192.0.2.55"),
+                         "192.0.2.55")
         self.assertIsNone(module._decode_proc_net_endpoint("bad", socket.AF_INET))
 
         proc_root = self.root / "proc-net"
@@ -2083,8 +2083,8 @@ class ComputeHostsTest(unittest.TestCase):
     def test_unconfirmed_launches_are_unknown_without_repairing_history(self):
         module = load_module()
         config = {"run_root": self.run_root}
-        run_ids = ("xavier-20261024-193701-ami-tf-a1-historical-parity",
-                   "xavier-20261024-191238-ami-leg2-e1-recovery",
+        run_ids = ("gpu-b1-20261024-193701-ami-tf-a1-historical-parity",
+                   "gpu-b1-20261024-191238-ami-leg2-e1-recovery",
                    "just-created")
         for run_id in run_ids:
             run_dir = self.run_root / run_id
@@ -2175,7 +2175,7 @@ class LauncherProvenanceTest(unittest.TestCase):
     """The launcher forwards runtime-known provenance into detached payloads.
 
     Regression cover for the 2026-10-06 BC_ResNet eval loss
-    (`moving4-20261006-102542`): the payload's guard read exactly
+    (`gpu-a01-20261006-102542`): the payload's guard read exactly
     `AGENT_HOME` and `AGENT_DISPATCH_ATTEMPT_ID` with strict lookups and died
     with `KeyError` before the first inference, while the launch receipt
     (`env=null`, no `AGENT_*`) shows the launcher forwarded neither. The
@@ -3158,7 +3158,7 @@ class PathNamespaceInventoryTest(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.path = Path(self.tmp.name) / "inventory.yaml"
 
-    def load_text(self, path_namespace, run_root="/home/nas/runs"):
+    def load_text(self, path_namespace, run_root="/mnt/shared/runs"):
         self.path.write_text(
             "schema_version: 1\nrun_root: " + run_root + "\nhosts:\n"
             "  mpwav:\n    ssh_host: mpwav\n    path_namespace:\n"
@@ -3168,20 +3168,20 @@ class PathNamespaceInventoryTest(unittest.TestCase):
     def test_accepts_block_mapping_and_multiple_disjoint_targets_without_readiness_checks(self):
         with mock.patch.object(self.module.os.path, "exists",
                                side_effect=AssertionError("inventory validation must not probe mounts")):
-            config = self.load_text("      /home/nas: /home/nas_IIP\n"
+            config = self.load_text("      /mnt/shared: /mnt/shared_alt\n"
                                     "      /datasets: /mnt/datasets\n")
         self.assertEqual(config["hosts"]["mpwav"]["path_namespace"],
-                         {"/home/nas": "/home/nas_IIP", "/datasets": "/mnt/datasets"})
+                         {"/mnt/shared": "/mnt/shared_alt", "/datasets": "/mnt/datasets"})
 
     def test_rejects_invalid_mapping_shapes_and_path_relationships(self):
         invalid = [
-            ("      /home/nas: {}\n", "paths must be absolute"),
-            ("      /home/nas: relative\n", "paths must be absolute"),
-            ("      /home/nas: /mnt/data/../x\n", "paths must be absolute"),
-            ("      /home/nas: /mnt/data/\n", "paths must be absolute"),
-            ("      /home/nas: /home/nas\n", "source and target must differ"),
-            ("      /home/nas: /mnt/x\n      /home/nas/nested: /mnt/y\n", "targets overlap"),
-            ("      /home/nas: /mnt/x\n      /data: /home/nas/sub\n", "source overlaps target"),
+            ("      /mnt/shared: {}\n", "paths must be absolute"),
+            ("      /mnt/shared: relative\n", "paths must be absolute"),
+            ("      /mnt/shared: /mnt/data/../x\n", "paths must be absolute"),
+            ("      /mnt/shared: /mnt/data/\n", "paths must be absolute"),
+            ("      /mnt/shared: /mnt/shared\n", "source and target must differ"),
+            ("      /mnt/shared: /mnt/x\n      /mnt/shared/nested: /mnt/y\n", "targets overlap"),
+            ("      /mnt/shared: /mnt/x\n      /data: /mnt/shared/sub\n", "source overlaps target"),
         ]
         for mapping, reason in invalid:
             with self.subTest(mapping=mapping), self.assertRaisesRegex(
@@ -3191,8 +3191,8 @@ class PathNamespaceInventoryTest(unittest.TestCase):
             self.load_text("      /data: /mnt/data\n")
 
     def test_rejects_empty_inline_and_quoted_target_mappings(self):
-        for suffix in ("      /home/nas: {}\n", "      /home/nas: []\n",
-                       "      \"/home/nas\": /mnt/nas\n"):
+        for suffix in ("      /mnt/shared: {}\n", "      /mnt/shared: []\n",
+                       "      \"/mnt/shared\": /mnt/nas\n"):
             with self.subTest(suffix=suffix), self.assertRaises(self.module.ConfigError):
                 self.load_text(suffix)
 
@@ -3229,7 +3229,7 @@ class PathNamespaceInventoryTest(unittest.TestCase):
 
     def test_configured_self_launcher_refuses_all_run_root_commands_before_access(self):
         target = {"ssh_host": "remote.example"}
-        self_host = {"ssh_host": "local", "path_namespace": {"/home/nas": "/mnt/lab"}}
+        self_host = {"ssh_host": "local", "path_namespace": {"/mnt/shared": "/mnt/lab"}}
         config = {"run_root": Path(self.tmp.name) / "must-not-touch",
                   "hosts": {"self": self_host, "other": target}}
         module = self.module
@@ -3253,7 +3253,7 @@ class PathNamespaceInventoryTest(unittest.TestCase):
     def test_configured_self_probe_and_list_skip_claim_root(self):
         config = {"run_root": Path(self.tmp.name) / "must-not-touch",
                   "hosts": {"self": {"ssh_host": "local",
-                                      "path_namespace": {"/home/nas": "/mnt/lab"}}}}
+                                      "path_namespace": {"/mnt/shared": "/mnt/lab"}}}}
         module = self.module
         row = {"host": "self", "reachable": True, "gpus": [], "load": "0",
                "cpu_utilization_pct": 0, "gpu_status": None}
@@ -3268,7 +3268,7 @@ class PathNamespaceInventoryTest(unittest.TestCase):
     def test_configured_host_non_run_remote_scripts_match_unconfigured(self):
         module = self.module
         plain = {"ssh_host": "fixture.example"}
-        mapped = {**plain, "path_namespace": {"/home/nas": "/home/nas_IIP"}}
+        mapped = {**plain, "path_namespace": {"/mnt/shared": "/mnt/shared_alt"}}
         captured = []
         def capture(_host, script, **_kwargs):
             captured.append(script)

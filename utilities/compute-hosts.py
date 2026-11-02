@@ -238,9 +238,9 @@ def is_self(host):
     entry is local has to be discovered rather than written down: marking one
     host `local` would make the file machine-specific and turn moving the
     session host into an edit on every server. A declared `hostname` is matched
-    against this machine's own, since an inventory label (`moving4`) and the
+    against this machine's own, since an inventory label (`gpu-a01`) and the
     system hostname (`workstation`) need not agree. The declaration may also be
-    a short name (`moving4` for `moving4.iip.lab`) or a list of names, of which
+    a short name (`gpu-a01` for `gpu-a01.example.test`) or a list of names, of which
     any one matching is enough.
     """
     if host.get("ssh_host") == LOCAL:

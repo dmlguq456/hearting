@@ -932,7 +932,7 @@ class StartTest(_TmpRootMixin, unittest.TestCase):
 
     def test_shell_prompt_glyphs_and_past_prompt_are_distinct(self):
         screens = [
-            (" Uihyeop@moving4  /home/nas/user/Uihyeop/NN_Zoo/BC_ResNet  ↱ main ± ", True),
+            (" user@gpu-a01  /home/example/NN_Zoo/BC_ResNet  ↱ main ± ", True),
             ("host ~/project $ ", True), ("#\n\n", True), ("% ", True), ("❯ ", True),
             ("host $\nrunning command\n", False),
             ("host \nDownloading 42%\n", False),

@@ -181,7 +181,7 @@ class ComputeHostRenderTest(unittest.TestCase):
         self.snapshot = {
             "configured": True,
             "hosts": [
-                {"host": "moving4", "self": True, "reachable": True,
+                {"host": "gpu-a01", "self": True, "reachable": True,
                  "cpu_utilization_pct": 37, "cpu_count": 32, "load": "3.2 3.0 2.8",
                  "cpu_thread_utilization_pct": [0, 70, 0, 30] + [0] * 28,
                  "memory_used_mib": 16384, "memory_total_mib": 65536,
@@ -215,7 +215,7 @@ class ComputeHostRenderTest(unittest.TestCase):
                      "memory_used_mib": 512, "memory_total_mib": 40960,
                      "processes": []},
                 ]},
-                {"host": "xavier", "self": False, "reachable": False,
+                {"host": "gpu-b1", "self": False, "reachable": False,
                  "detail": "timed out", "gpus": []},
                 {"host": "cpu", "self": False, "reachable": True,
                  "cpu_utilization_pct": None, "cpu_count": 64, "gpus": []},
@@ -234,8 +234,8 @@ class ComputeHostRenderTest(unittest.TestCase):
                 rows = render._compute_host_rows(width)
                 self.assertTrue(all(render._dw(render._plain(row)) <= width for row in rows))
                 text = "\n".join(render._plain(row) for row in rows)
-                for value in ("compute resources  3/4", "⌂ moving4", "CPU", "0:", "1:",
-                              "UTIL", "VRAM", "32/48GB", "1/48GB", "xavier", "down",
+                for value in ("compute resources  3/4", "⌂ gpu-a01", "CPU", "0:", "1:",
+                              "UTIL", "VRAM", "32/48GB", "1/48GB", "gpu-b1", "down",
                               "cpu", "no gpu"):
                     self.assertIn(value, text)
                 if width >= 100:
@@ -263,7 +263,7 @@ class ComputeHostRenderTest(unittest.TestCase):
             self.assertNotIn(owner, wide)
         self.assertNotIn("LOAD", wide)
         base_row = next(row for row in render._compute_host_rows(168)
-                        if "⌂ moving4" in render._plain(row))
+                        if "⌂ gpu-a01" in render._plain(row))
         self.assertIn(("⌂", "base_host"), base_row)
         self.assertIn(("CPU ", "resource_active"), base_row)
         self.assertIn(("2/32 thr", "lvl_g"), base_row)
@@ -425,7 +425,7 @@ class ComputeHostRenderTest(unittest.TestCase):
         aligned = {
             "configured": True,
             "hosts": [{
-                "host": "moving4", "self": True, "reachable": True,
+                "host": "gpu-a01", "self": True, "reachable": True,
                 "cpu_utilization_pct": 10, "cpu_count": 32,
                 "gpus": [
                     {"index": 0, "name": "NVIDIA RTX 6000 Ada Generation",

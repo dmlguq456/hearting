@@ -75,7 +75,7 @@ class WorkTitlesTest(unittest.TestCase):
         self.assertEqual(result['name'], 'fleet freshness p2')
 
     def test_resource_and_gpu_use_same_title(self):
-        child = model.ResourceJob(run_id='moving4-20261008-203517-css-AMI8var-v3',
+        child = model.ResourceJob(run_id='gpu-a01-20261008-203517-css-AMI8var-v3',
                                   node='train', liveness='working')
         child.display_title = '환경별 모델 비교'
         rows = render._resource_child_rows(self.job(), children=[child])
@@ -98,7 +98,7 @@ class WorkTitlesTest(unittest.TestCase):
     def test_gpu_does_not_repeat_same_command_as_title(self):
         child = model.ResourceJob(run_id='run', node='train', liveness='working',
                                   display_title='train.py', elapsed_min=3)
-        gpu = dict(host='moving4', index=1, processes=[dict(pid=42, proc_start='100', command='python train.py')])
+        gpu = dict(host='gpu-a01', index=1, processes=[dict(pid=42, proc_start='100', command='python train.py')])
         with mock.patch.object(render, '_gpu_commands_folded', return_value=False):
             rows = render._gpu_resource_strip([gpu], term_width=160, resource_children=[child])
         self.assertEqual(render._plain(rows[0]).count('train.py'), 1)
@@ -110,7 +110,7 @@ class WorkTitlesTest(unittest.TestCase):
             liveness='working', elapsed_min=elapsed,
             progress=dict(completed=completed, total=10, unit='epoch', age_s=age))
             for node, elapsed, completed, age in (('train', 3, 2, 120), ('eval', 10, 4, 180))]
-        gpu = dict(host='moving4', index=1, processes=[])
+        gpu = dict(host='gpu-a01', index=1, processes=[])
         rows = render._gpu_resource_strip([gpu], term_width=240, resource_children=children)
         text = render._plain(rows[0])
         self.assertEqual(text.count(title), 1)
