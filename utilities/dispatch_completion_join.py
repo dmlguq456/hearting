@@ -1064,10 +1064,10 @@ def completion_followup_text(receipt: dict, *, jobs: str, surface: str) -> str:
                  f"{child['next_leg']['compose_command']}" for child in receipt["children"] if child.get("next_leg")]
         return ("Original request/format apply. Review result; do approved follow-through or existing "
                 "continuation. First close: "
-                + ("show the runtime summary below to the person as written, then add only what the "
-                   "request asked for beyond it." if summaries else
-                   "changes/why, before/after, checks run/reused/skipped/unrun, "
-                   "commit/PR/deployment/serving, limits.")
+                + ("show the runtime summary below to the person first, as written; then add what it "
+                   "does not show of " if summaries else "")
+                + "changes/why, before/after, checks run/reused/skipped/unrun, "
+                "commit/PR/deployment/serving, limits."
                 + " No harvest/restart/manual finalize. "
                 "Receipt/ACK isn't execution; handled exact repeats need no ACK."
                 + "".join("\n" + summary for summary in summaries)

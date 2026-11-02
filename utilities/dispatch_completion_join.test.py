@@ -4418,8 +4418,9 @@ class NextLegReceiptTest(unittest.TestCase):
         self.assertIn("First close: changes/why", before)  # no sealed summary: the text is unchanged
         self.assertNotIn("[완료 요약]", before)
         self.assertTrue(text.startswith("Original request/format apply."))
-        self.assertIn("show the runtime summary below to the person as written", text)
-        self.assertNotIn("First close: changes/why", text)
+        self.assertIn("show the runtime summary below to the person first, as written", text)
+        self.assertIn("then add what it does not show of changes/why, before/after, checks run/reused/skipped/unrun, "
+                      "commit/PR/deployment/serving, limits.", text)   # a one-line summary never shrinks the close
         self.assertIn("\n" + summary, text)
         self.assertNotIn("\n\n", text)
         self.assertEqual(text, JOIN.completion_followup_text(receipt, jobs=str(jobs),

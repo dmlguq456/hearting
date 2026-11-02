@@ -372,36 +372,47 @@ MAX_FIELD_CHARS = 320
 MAX_SUMMARY_CHARS = 1600
 _SECTION = re.compile(r"^#{2,3}\s+(?P<title>.+?)\s*$")
 _NUMBER = re.compile(r"^(?P<num>\d+(?:\.\d+)?)[.)]?\s")
-# (field, numbered sections of the code report template, words of an unnumbered heading)
+# (field, sections of the code-report template by number, words of any other heading). The numbers
+# hold only for a code report (`code-report` writes `## 1. Change Overview` … `## 6. Follow-Ups`);
+# other documents number their own sections, so their headings are read by words only.
 _SECTION_FIELDS = (
-    ("remaining", ("5", "6"), ("미검증", "실패", "건너", "남은", "후속", "한계", "unverified", "failed",
-                               "skipped", "follow", "remaining", "limit")),
-    ("verified", ("4",), ("검증", "qa", "verification", "test")),
-    ("changed", ("1",), ("변경", "개요", "바뀐", "고친", "사용자용", "change", "overview", "summary")),
+    ("remaining", ("5", "6"), ("미검증", "실패", "건너뛴", "건너뜀", "남은", "후속", "한계", "unverified", "failed",
+                               "skipped", "follow-up", "follow up", "follow-ups", "remaining", "limitation", "limits",
+                               "open risk")),
+    ("verified", ("4",), ("검증", "시험", "qa", "verification", "tests", "testing")),
+    ("changed", ("1",), ("변경 개요", "변경 사항", "변경 내용", "바뀐 것", "고친 것", "고친 행동", "사용자용",
+                         "change overview", "changes", "what changed")),
 )
 _PR_URL = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+/pull/\d+")
 _CARRIER_MARKERS = ("HEARTING_RECEIPT_V1", "AGENT_HARNESS_COMPLETION_V1")
 
 
-def _section_field(title: str) -> str | None:
+def _has_word(title: str, word: str) -> bool:
+    if word.isascii():
+        return re.search(r"(?<![a-z0-9])" + re.escape(word) + r"(?![a-z0-9])", title) is not None
+    return word in title
+
+
+def _section_field(title: str, *, numbered: bool) -> str | None:
     number = _NUMBER.match(title)
-    lowered = title.lower()
-    for field, numbers, words in _SECTION_FIELDS:
-        if number and number["num"] in numbers:
-            return field
-        if not number and any(word in lowered for word in words):
-            return field
-    return None
+    if number and numbered:
+        return next((field for field, numbers, _words in _SECTION_FIELDS if number["num"] in numbers), None)
+    lowered = (title[number.end():] if number else title).lower()
+    return next((field for field, _numbers, words in _SECTION_FIELDS
+                 if any(_has_word(lowered, word) for word in words)), None)
 
 
-def report_sections(text: str) -> dict[str, list[str]]:
-    """The report's own lines under its overview, verification and remaining-work headings."""
+def report_sections(text: str, *, numbered: bool = False) -> dict[str, list[str]]:
+    """The report's own lines under its overview, verification and remaining-work headings.
+
+    `numbered` reads `1`/`4`/`5`/`6` as the code-report template's sections; any other heading
+    is matched by its words."""
     sections: dict[str, list[str]] = {}
     current = None
     for raw in (text or "").splitlines():
         match = _SECTION.match(raw)
         if match:
-            current = _section_field(match["title"].strip())
+            current = _section_field(match["title"].strip(), numbered=numbered)
             continue
         line = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+", "", raw).strip()
         if (current and line and not re.fullmatch(r"[|:\-\s]+", line)
@@ -426,6 +437,21 @@ def _review_degraded(route_file) -> list[str]:
     return [str(node) for node in nodes] if isinstance(nodes, list) else []
 
 
+def _result_line(route) -> str:
+    """Completed; for one leg of an approved plan, say that a later leg remains."""
+    plan = route.get("route_plan")
+    if isinstance(plan, dict):
+        try:
+            record = json.loads((Path(route["artifact_root"]) / plan["decision"]).read_text(encoding="utf-8"))
+            legs = len(record["decision"]["proposal"]["legs"])
+            index = int(plan["index"])
+        except (OSError, ValueError, KeyError, TypeError):
+            legs = index = None
+        if legs is not None and index + 1 < legs:
+            return f"이 leg({index + 1}/{legs}) 완료 — 다음 leg가 남음"
+    return "완료 — 런타임이 route·사이클 종결을 확인함"
+
+
 def completion_summary(route, primary, *, route_file=None) -> str:
     """The runtime's close text for one completed owner: intent, result, changes, checks, the rest.
 
@@ -443,12 +469,13 @@ def completion_summary(route, primary, *, route_file=None) -> str:
     if goal:
         original = f" (원문 \"{_line(intent['original'], 100)}\")" if intent.get("original") else ""
         lines.append(f"의도: {_line(goal, 200)}{original}")
-    lines.append("결과: 완료 — 런타임이 route·사이클 종결을 확인함")
+    lines.append("결과: " + _result_line(route))
     try:
         text = Path(primary).read_text(encoding="utf-8") if primary else ""
     except (OSError, UnicodeError):
         text = ""
-    sections = report_sections(text)
+    code_report = route.get("capability") == "autopilot-code" or Path(str(primary or "")).name == "final_report.md"
+    sections = report_sections(text, numbered=code_report)
     degraded = _review_degraded(route_file)
     if sections:
         if sections.get("changed"):
