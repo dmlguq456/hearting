@@ -108,6 +108,21 @@ class AllocationReceiptTest(unittest.TestCase):
         row = json.loads(Path(plain["path"]).read_text(encoding="utf-8").splitlines()[0])
         self.assertIsNone(row["harness_weights"])
 
+    def test_an_observed_affinity_names_its_source_and_a_sealed_one_adds_nothing(self):
+        observed = self.receipt.record_allocation_receipt(
+            route_id="rt-handover", route_node="test", writer="stage-dispatch-fallback.py",
+            child_harness="claude", allocation=self._policy("balanced"), affinity="claude",
+            affinity_source="handed-over-checks", jobs=self.jobs,
+        )
+        row = json.loads(Path(observed["path"]).read_text(encoding="utf-8").splitlines()[0])
+        self.assertEqual((row["affinity"], row["affinity_source"]), ("claude", "handed-over-checks"))
+        sealed = self.receipt.record_allocation_receipt(
+            route_id="rt-sealed", route_node="test", writer="stage-dispatch-fallback.py",
+            child_harness="codex", allocation=self._policy("balanced"), affinity="codex", jobs=self.jobs,
+        )
+        row = json.loads(Path(sealed["path"]).read_text(encoding="utf-8").splitlines()[0])
+        self.assertNotIn("affinity_source", row)
+
     def test_unknown_writer_or_harness_is_refused_without_raising(self):
         self.assertIsNone(self.receipt.record_allocation_receipt(
             route_id="rt-x", route_node="n", writer="someone-else.py",

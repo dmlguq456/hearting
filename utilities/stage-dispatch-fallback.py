@@ -353,6 +353,37 @@ class CandidateOutcomes(list):
         self[:] = rows
 
 
+def _cycle_output_dir(route: dict, route_file) -> str | None:
+    """The owner's cycle output directory: its inherited environment, else the route's producer binding."""
+    import worker_bootstrap as wb
+    env = os.environ
+    return (wb.artifact_cycle_environment(env)["AGENT_ARTIFACT_OUTPUT_DIR"]
+            or wb.resolve_node_scope(route, None, env, route_file=route_file).output_dir)
+
+
+def handed_over_count(route: dict, node: dict, route_file) -> int:
+    """Checks earlier stages of this cycle handed over to this verification node; 0 when none or unknown.
+
+    An observation that only orders harnesses (``ordered_fallback_hops``); it never refuses a start.
+    """
+    try:
+        import worker_bootstrap as wb
+        if node.get("unit") != wb.VERIFICATION_UNIT:
+            return 0
+        return len(wb.handed_over_checks(route, node["id"], _cycle_output_dir(route, route_file)))
+    except Exception:  # an unreadable observation leaves the order as it was
+        return 0
+
+
+def unsandboxed_harness(harness) -> bool:
+    """Whether the adapter declares no OS sandbox, so a handed-over host check can run there."""
+    try:
+        import harness_capabilities
+        return harness_capabilities.access(harness)["enforcement"] != "os-sandbox"
+    except Exception:
+        return False
+
+
 def inline_owner_next_line(route: dict, node: dict, route_file) -> str:
     """One receipt line telling the owner how to finish a stage it must now run itself; "" when unknown.
 
@@ -361,9 +392,7 @@ def inline_owner_next_line(route: dict, node: dict, route_file) -> str:
     """
     try:
         import worker_bootstrap as wb
-        env = os.environ
-        output_dir = (wb.artifact_cycle_environment(env)["AGENT_ARTIFACT_OUTPUT_DIR"]
-                      or wb.resolve_node_scope(route, None, env, route_file=route_file).output_dir)
+        output_dir = _cycle_output_dir(route, route_file)
         if not output_dir:
             return ""
         evidence = wb.node_first_evidence(route, node["id"], output_dir)
@@ -581,11 +610,16 @@ def apply_worker_pin(route: dict, hops: list[dict], parent_identity: dict | None
 
 
 def ordered_fallback_hops(
-    route: dict, node: dict, jobs: Path, *, parent_identity: dict | None = None, recheck: bool = False
+    route: dict, node: dict, jobs: Path, *, parent_identity: dict | None = None, recheck: bool = False,
+    handed_over: int = 0,
 ) -> tuple[list[dict], dict | None]:
     """Rank the checked direct-headless band from the sealed allocation policy.
 
     `recheck` (a launch, not a dry run) lets the usage gate probe a held Claude login.
+    `handed_over` counts checks earlier stages could not run in their environment
+    (``handed_over_count``). When it is positive and neither a pin nor an unsandboxed
+    sealed affinity decides the head, the best-ranked harness without an OS sandbox
+    takes the affinity slot under the same rules a sealed affinity follows.
 
     Both paths end in ``apply_worker_pin``: a pinned step is never moved to
     another tool.
@@ -706,10 +740,16 @@ def ordered_fallback_hops(
             declared_order=allocation.get("harness_order") or ALLOCATION_HARNESSES,
         )
     affinity = node.get("harness_affinity")
+    affinity_source = None
     # A sealed `--pin worker=<harness>` leads the order (CONVENTIONS §2.1) while that harness is ranked,
     # i.e. outside a usage limit and the node's policy. The soft usage gate does not move it; a limited
     # pin is in `limited` and goes to the tail below, as before.
     pinned_head = worker_pin in ranked
+    if handed_over and not pinned_head and not (affinity in ranked and unsandboxed_harness(affinity)):
+        # Observed, like usage: handed-over checks need a harness that can run them.
+        open_harnesses = [harness for harness in ranked if unsandboxed_harness(harness)]
+        if open_harnesses:
+            affinity, affinity_source = open_harnesses[0], "handed-over-checks"
     if pinned_head:
         ranked = [worker_pin] + [harness for harness in ranked if harness != worker_pin]
     elif affinity in ranked:
@@ -754,7 +794,8 @@ def ordered_fallback_hops(
         if quality_peer is not None and owner_family:
             head = ranked[0] if ranked else None
             if head is not None and head not in quality_peer:
-                affinity_pinned_head = pinned_head or (affinity in ranked and affinity == head)
+                affinity_pinned_head = pinned_head or (affinity in ranked and affinity == head
+                                                       and affinity_source is None)
                 if affinity_pinned_head:
                     sole_gate = "degraded"
                 else:
@@ -792,6 +833,7 @@ def ordered_fallback_hops(
         "eligible": list(eligible),
         "limited": list(limited),
         "affinity": affinity,
+        "affinity_source": affinity_source,
         "owner_family": owner_family,
         "quality_peer_set": quality_peer,
     }
@@ -866,7 +908,8 @@ def _persist_allocation_receipt(args, route, node, context, row, *, attempt_id=N
         counts=context.get("counts"), states=context.get("states"),
         quality_band=context.get("quality_band"), relief_promoted=context.get("relief_promoted"),
         parent_cross=context.get("parent_cross"), sole_gate=context.get("sole_gate"),
-        affinity=context.get("affinity"), owner_family=context.get("owner_family"),
+        affinity=context.get("affinity"), affinity_source=context.get("affinity_source"),
+        owner_family=context.get("owner_family"),
         jobs=getattr(args, "jobs", None),
     )
 
@@ -889,6 +932,9 @@ def emit_allocation(context: dict | None) -> None:
         print(f"quality_band={context.get('quality_band') or 'none'}")
         print(f"relief_promoted={int(bool(context.get('relief_promoted')))}")
     print(f"allocation_preferred={context.get('preferred') or '-'}")
+    if context.get("affinity_source"):
+        print(f"allocation_affinity={context['affinity']}")
+        print(f"allocation_affinity_source={context['affinity_source']}")
     inert = inert_allocation_keys(context.get("allocation"))
     print("allocation_inert_keys=" + (",".join(sorted(inert)) or "-"))
     print(f"parent_cross={context.get('parent_cross') or 'not-applicable'}")
@@ -2376,7 +2422,8 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
     candidate_outcomes = CandidateOutcomes()
     try:
         fallback_hops, allocation_context = ordered_fallback_hops(
-            route, node, args.jobs, parent_identity=parent_identity, recheck=args.action != "dry-run"
+            route, node, args.jobs, parent_identity=parent_identity, recheck=args.action != "dry-run",
+            handed_over=handed_over_count(route, node, args.route),
         )
     except DISPATCH_NODE.DispatchNodeError as exc:
         return fail(exc.reason, 65, child_spawned="0", **exc.fields)

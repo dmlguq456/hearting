@@ -44,6 +44,7 @@ Use the checklist as the sole orchestration tracker. Keep plan files immutable d
 - Implement each step within this node's sealed `dev/*` unit with concrete file and change instructions.
 - Record each step in the declared `dev_logs/` location, such as `step_01_model_py.md`.
 - Run the focused checks named by the plan for each step. The selected sibling review node owns implementation review.
+- Your verdict covers your steps and the checks your environment can run; the leg's wider verification belongs to `code-test` and the owner. A check this environment cannot run (sandbox, network, host or hardware limits) does not fail its step: write `handed-over: <exact command> (reason: ...)` in the step log, finish the step, and leave the check to `code-test`.
 - After a successful step, mark it `[x]`.
 - Continue until every processable step has a terminal checklist mark.
 
@@ -68,7 +69,7 @@ reviewers or passes from file count.
 ## Handoff
 
 Record each implementation step in the declared dev log with the changed files,
-commands and outcomes, deviations, unfinished items, and relevant risks. The
+commands and outcomes, deviations, unfinished items, `handed-over:` checks, and relevant risks. The
 selected sibling review node owns implementation review; do not dispatch it or
 require an additional pass from this procedure. Keep correction and recovery
 within the compiled route and preserve unrelated work.

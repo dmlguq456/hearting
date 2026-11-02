@@ -582,8 +582,16 @@ def reopened_output_prompt(args, route, scope: "NodeScope") -> str:
             "`complete --evidence`; do not overwrite the earlier file.\n")
 
 
+HANDED_OVER_LINE = "handed-over: `<exact command>` (reason: <why it cannot run here>)"
+
+
 def completion_scope_prompt() -> str:
-    """Keep procedure defaults subordinate to the approved request and node scope."""
+    """Keep procedure defaults subordinate to the approved request and node scope.
+
+    One completion rule for every worker: verification a later stage or the owner
+    judges is not a producing stage's unfinished duty, and a check the worker's own
+    environment cannot run is handed over in its artifact instead of blocking it.
+    """
     return (
         "Completion precedence:\n"
         "Complete feasible remaining duties in the recorded request within the "
@@ -591,9 +599,13 @@ def completion_scope_prompt() -> str:
         "reports, and role or intensity defaults do not replace requested "
         "investigation, deliverables, or verification. Stop at an approved report "
         "endpoint; a bounded stage completes only its assigned portion and leaves "
-        "deferred stages to their owners. If assigned work remains unfinished or "
-        "blocked, report it with the existing outcome semantics instead of "
-        "presenting the whole request as complete.\n\n"
+        "deferred stages, including verification that a later stage or the owner "
+        "judges, to their owners. A check your environment cannot run (sandbox, "
+        "network, host or hardware limits) goes in your artifact as the line "
+        f"{HANDED_OVER_LINE}; it is not an unfinished duty of a stage that "
+        "produces the work, and the verification stage or owner runs it. If assigned "
+        "work remains unfinished or blocked, report it with the existing outcome "
+        "semantics instead of presenting the whole request as complete.\n\n"
     )
 
 
@@ -891,10 +903,149 @@ def qa_primary_items_sidecar(route, node_id, primary_report):
     return str(sidecar)
 
 
+VERIFICATION_UNIT = "qa/test"
+_HANDED_OVER_RE = re.compile(r"(?im)^[ \t]*(?:[-*][ \t]+)?handed-over:[ \t]*(\S.*?)[ \t]*$")
+_HANDED_OVER_SUFFIXES = frozenset({".md", ".txt", ".log"})
+_HANDED_OVER_LIMITS = {"items": 20, "chars": 300, "files": 200, "bytes": 1 << 20}
+
+
+def _route_nodes(route) -> list[dict]:
+    return [n for n in (route or {}).get("nodes") or [] if isinstance(n, dict) and n.get("id")]
+
+
+def judges_leg(node) -> bool:
+    """Whether a node's own verdict judges the leg: the owner (no node), a review or
+    verification stage, or an owner-executed node. Every other stage produces work
+    that those judge."""
+    if not isinstance(node, dict) or not node:
+        return True
+    return (node.get("kind") in {"review-worker", "capability-owner"}
+            or str(node.get("unit") or "").startswith("qa/"))
+
+
+def _related_nodes(route, node_id, *, later: bool) -> list[dict]:
+    """The nodes after (`later`) or before this one in the sealed graph, in route order."""
+    nodes = _route_nodes(route)
+    by_id = {n["id"]: n for n in nodes}
+    reached, pending = set(), [node_id]
+    while pending:
+        current = pending.pop()
+        if later:
+            step = [n["id"] for n in nodes if current in (n.get("depends_on") or ())]
+        else:
+            step = [d for d in (by_id.get(current) or {}).get("depends_on") or () if d in by_id]
+        for nid in step:
+            if nid not in reached and nid != node_id:
+                reached.add(nid)
+                pending.append(nid)
+    return [n for n in nodes if n["id"] in reached]
+
+
+def verification_receivers(route, node_id) -> list[str]:
+    """The later stages that run checks a producing stage hands over; empty means the owner."""
+    return [n["id"] for n in _related_nodes(route, node_id, later=True)
+            if n.get("unit") == VERIFICATION_UNIT]
+
+
+def _named(ids, fallback="the owner") -> str:
+    ids = list(ids)
+    if not ids:
+        return fallback
+    return ", ".join(ids[:4]) + (f" (+{len(ids) - 4} more)" if len(ids) > 4 else "")
+
+
+def handed_over_checks(route, node_id, output_dir) -> list[tuple[str, str]]:
+    """`handed-over:` lines earlier stages of this cycle wrote in their declared artifact
+    outputs and write scopes (a sub-session report lives in the latter).
+
+    Read for a verification stage (`qa/test` unit) only: these are the checks a
+    producing stage's environment could not run. Returns ``[(text, relative path)]``,
+    bounded; a missing or unreadable file contributes nothing. Read-only.
+    """
+    nodes = {n["id"]: n for n in _route_nodes(route)}
+    node = nodes.get(node_id)
+    if not output_dir or not node or node.get("unit") != VERIFICATION_UNIT:
+        return []
+    import artifact_context
+    base = Path(output_dir)
+    try:
+        base_real = base.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return []
+    patterns = list(dict.fromkeys(
+        value for n in _related_nodes(route, node_id, later=False)
+        for value in (*(n.get("outputs") or ()), *(n.get("write_scope") or ()))
+        if isinstance(value, str) and value and not artifact_context.is_semantic_output(value)
+        and artifact_context.classify_scope(value) == "artifact"))
+    found: list[tuple[str, str]] = []
+    seen_items: set[str] = set()
+    seen_files: set[str] = set()
+    for pattern in patterns:
+        prefix = []
+        for part in Path(pattern).parts:
+            if any(c in part for c in "*?[<"):
+                break
+            prefix.append(part)
+        if not prefix or ".." in prefix:
+            continue
+        root = base.joinpath(*prefix)
+        if root.is_symlink():
+            continue
+        if root.is_file():
+            files = [root]
+        elif root.is_dir():
+            files = []
+            for directory, dirnames, filenames in os.walk(root, followlinks=False):
+                dirnames.sort()
+                files.extend(Path(directory) / name for name in sorted(filenames))
+                if len(files) >= _HANDED_OVER_LIMITS["files"]:
+                    break
+        else:
+            continue
+        for path in files:
+            relative = path.relative_to(base).as_posix()
+            if (relative in seen_files or len(seen_files) >= _HANDED_OVER_LIMITS["files"]
+                    or path.suffix not in _HANDED_OVER_SUFFIXES or path.is_symlink()
+                    or not artifact_context.scope_matches(relative, [pattern])):
+                continue
+            seen_files.add(relative)
+            try:
+                if base_real not in path.resolve(strict=True).parents:
+                    continue
+                if path.stat().st_size > _HANDED_OVER_LIMITS["bytes"]:
+                    continue
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except (OSError, RuntimeError):
+                continue
+            for match in _HANDED_OVER_RE.finditer(text):
+                item = match.group(1)[:_HANDED_OVER_LIMITS["chars"]]
+                if item not in seen_items:
+                    seen_items.add(item)
+                    found.append((item, relative))
+                if len(found) >= _HANDED_OVER_LIMITS["items"]:
+                    return found
+    return found
+
+
+def handed_over_prompt(route, node_id, output_dir) -> str:
+    """Give a verification stage the checks earlier stages handed over to it."""
+    rows = handed_over_checks(route, node_id, output_dir)
+    if not rows:
+        return ""
+    return ("Checks earlier stages handed over (their environment could not run them); run each as "
+            "part of your verification. One your environment cannot run either leaves your verdict "
+            "BLOCKED: repeat its handed-over line in your report so the owner runs it.\n"
+            + "\n".join(f"- {text} [{relative}]" for text, relative in rows) + "\n")
+
+
 def plan_leg_prompt(route, node_id=None, primary_report=None) -> str:
     """The approved plan for this leg, read from the sealed decision: what finishes it, what
     verification looks at, what it hands over, and the direction the person chose. Empty for a
-    route made from no plan. A verification stage is also told where to record each item."""
+    route made from no plan. A verification stage is also told where to record each item.
+
+    The owner and the stages that judge the leg base their verdict on it. A stage that
+    produces the leg's work receives the same plan as context: its own verdict covers its
+    assignment and the checks it can run, and the later stages or the owner judge the leg."""
     import route_plan as RP
     plan = RP.leg_plan(route)
     leg = (plan or {}).get("leg") or {}
@@ -924,6 +1075,13 @@ def plan_leg_prompt(route, node_id=None, primary_report=None) -> str:
     if not lines:
         return ""
     node = next((n for n in route.get("nodes") or [] if n.get("id") == node_id), {}) if node_id else {}
+    if not judges_leg(node):
+        judges = [n["id"] for n in _related_nodes(route, node_id, later=True) if judges_leg(n)]
+        return ("Plan for this leg, as context (approved in the frame interview). The leg's verdict "
+                f"belongs to {_named(judges, '')}{' and ' if judges else ''}the owner; base your verdict "
+                "on your assignment and the checks your environment can run. A listed check it cannot "
+                f"run is handed over to {_named(verification_receivers(route, node_id))}, "
+                "not left unfinished:\n" + "\n".join(lines) + "\n\n")
     sidecar = qa_primary_items_sidecar(route, node_id, primary_report)
     if sidecar:
         lines.append(
@@ -1071,6 +1229,7 @@ def assignment_prompt(args, task: str, environ) -> str:
                                    getattr(args, 'report_file', None))}"
                 f"{node_scope_prompt(scope)}{reopened_output_prompt(args, route, scope)}"
                 f"{node_inputs_prompt(route, getattr(args, 'route_node', None), scope.output_dir)}"
+                f"{handed_over_prompt(route, getattr(args, 'route_node', None), scope.output_dir)}"
                 f"{input_sources_prompt(route, getattr(args, 'route_node', None))}\n"
                 f"{automatic_consumer_prompt(route, getattr(args, 'route_node', None))}"
                 f"{steps}{owner_gate_prompt(args)}{'' if steps else owner_inline_marker_prompt(args)}{owner_close_prompt(args)}")

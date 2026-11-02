@@ -2954,6 +2954,56 @@ class FallbackTest(unittest.TestCase):
   if pin:
    route["selection_pins"]={"contract_version":1,target:{"harness":pin,"model":None,"effort":None}}
   return route
+ def test_handed_over_checks_lead_with_a_harness_that_has_no_os_sandbox(self):
+  # D1 seam 5: a verification stage whose earlier stages handed over checks their sandbox
+  # refused starts on the best-ranked harness without an OS sandbox, through the existing
+  # affinity rules. A pin or an unsandboxed sealed affinity still decides; nothing else moves.
+  node={**self._pinned_balanced_node(),"harness_affinity":"codex","unit":"qa/test"}
+  route=self._pinned_balanced_route(pin=None)
+  self.assertFalse(F.unsandboxed_harness("codex"))
+  self.assertTrue(F.unsandboxed_harness("claude") and F.unsandboxed_harness("opencode"))
+  self.assertFalse(F.unsandboxed_harness("no-such-harness"))
+  with mock.patch.object(F,"_usage_states",return_value={
+      "claude":"ok","codex":"ok","opencode":"ok"}), \
+      mock.patch.object(F.CAPACITY,"capacity_scores",return_value={
+       "claude":60,"codex":90,"opencode":70}):
+   _hops,plain=F.ordered_fallback_hops(route,node,self.jobs)
+   hops,observed=F.ordered_fallback_hops(route,node,self.jobs,handed_over=2)
+   _hops,pinned=F.ordered_fallback_hops(self._pinned_balanced_route(pin="codex"),node,self.jobs,
+                                        handed_over=2)
+   _hops,open_affinity=F.ordered_fallback_hops(route,{**node,"harness_affinity":"opencode"},self.jobs,
+                                               handed_over=2)
+  self.assertEqual((plain["rank"][0],plain["affinity"],plain["affinity_source"]),("codex","codex",None))
+  head=observed["rank"][0]
+  self.assertTrue(F.unsandboxed_harness(head),observed["rank"])
+  self.assertEqual(hops[0]["candidates"][0]["child_harness"],head)
+  self.assertEqual((observed["affinity"],observed["affinity_source"]),(head,"handed-over-checks"))
+  self.assertEqual(sorted(observed["rank"]),["claude","codex","opencode"])
+  self.assertEqual((pinned["rank"][0],pinned["affinity_source"]),("codex",None))
+  self.assertEqual((open_affinity["rank"][0],open_affinity["affinity_source"]),("opencode",None))
+  out=io.StringIO()
+  with contextlib.redirect_stdout(out):
+   F.emit_allocation(observed)
+   F.emit_allocation(plain)
+  self.assertEqual(out.getvalue().count("allocation_affinity_source=handed-over-checks"),1)
+  self.assertIn(f"allocation_affinity={head}\nallocation_affinity_source=handed-over-checks\n",out.getvalue())
+ def test_handed_over_count_reads_the_cycle_for_the_verification_node_only(self):
+  output=Path(self.tmp.name)/"cycle"/"artifacts"
+  (output/"dev_logs").mkdir(parents=True)
+  route={"route_id":"rt-handover","nodes":[
+   {"id":"execute","kind":"pipeline-stage","unit":"dev/backend","depends_on":[],
+    "outputs":["source-diff","dev_logs/**"]},
+   {"id":"test","kind":"pipeline-stage","unit":"qa/test","depends_on":["execute"],
+    "outputs":["test_logs/**"]}]}
+  execute,test=route["nodes"]
+  with mock.patch.dict(os.environ,{"AGENT_ARTIFACT_OUTPUT_DIR":str(output)}):
+   self.assertEqual(F.handed_over_count(route,test,None),0)
+   (output/"dev_logs"/"step_01.md").write_text(
+    "handed-over: `pytest -k socket` (reason: loopback bind EPERM)\n",encoding="utf-8")
+   self.assertEqual(F.handed_over_count(route,test,None),1)
+   self.assertEqual(F.handed_over_count(route,execute,None),0)
+   with mock.patch.object(F,"_cycle_output_dir",side_effect=ValueError("cycle-unbound")):
+    self.assertEqual(F.handed_over_count(route,test,None),0)
  def test_a_sealed_worker_pin_stays_first_even_when_the_usage_gate_would_drop_it(self):
   # The same node and scores as the affinity test above, but the route seals `--pin worker=claude`:
   # claude is gated (5% headroom, not a limit) and still the first hop; the others keep their order.
@@ -3701,7 +3751,7 @@ class FallbackTest(unittest.TestCase):
   # The stage's compiled hop order, without the usage/capacity ranking. `recheck_seen`
   # records whether each ranking was a launch decision (--start) or not (--dry-run).
   self.recheck_seen=getattr(self,"recheck_seen",[])
-  def order(route,node,jobs,parent_identity=None,recheck=False):
+  def order(route,node,jobs,parent_identity=None,recheck=False,handed_over=0):
    self.recheck_seen.append(recheck)
    return F.apply_worker_pin(route,list(node["fallback_hops"]),parent_identity),None
   return mock.patch.object(F,"ordered_fallback_hops",side_effect=order)

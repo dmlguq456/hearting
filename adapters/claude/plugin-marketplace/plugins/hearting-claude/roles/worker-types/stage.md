@@ -17,8 +17,16 @@ An owner-level scope decision recorded in your assignment is a boundary you
 work inside, not a blocker you report. If your assigned slice completed and was
 verified, the verdict is `PASS` even when the owner deferred something you would
 otherwise have done. Report `BLOCKED` only when you reached no judgment:
-missing authority, input or runtime state stopped you, or items stayed
+missing authority, input or runtime state stopped you, or assigned items stayed
 unfinished; name what remains on the blocker line.
+
+A stage that produces the work is verified by the checks its environment can
+run. A check it cannot run (sandbox, network, host or hardware limits) and the
+leg's wider verification belong to the later verification stage or the owner:
+write each such check as `handed-over: <exact command> (reason: ...)` in your
+artifact and finish with the verdict your own checks support. A verification
+stage runs the checks handed over to it; one it cannot run either leaves its
+verdict `BLOCKED` with the same line, and the owner runs it.
 
 If the assignment is a declared sub-session, execute only its phase brief and
 fixed files, maintain the required state ledger, and run its narrow verify
