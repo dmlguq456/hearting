@@ -37,6 +37,10 @@ class HumanWaitStateTests(unittest.TestCase):
         demand = mock.patch.object(state, "_request_producer")
         demand.start()
         self.addCleanup(demand.stop)
+        rollouts = mock.patch.object(observation, "_codex_rollout_waits",
+                                     return_value={"complete": True, "pending": {}})
+        rollouts.start()
+        self.addCleanup(rollouts.stop)
         self.addCleanup(self.tmp.cleanup)
 
     def test_only_explicit_first_line_markers_open_private_signal(self):
@@ -302,6 +306,93 @@ class HumanWaitStateTests(unittest.TestCase):
         self.assertNotIn("--sound", lines[0])
         self.assertIn("--sound request", lines[-1])
         self.assertTrue(all("사용자 답을 기다림" in line for line in lines))
+
+    def test_one_fold_rule_gates_notifications_for_every_source(self):
+        now = 100_000.0
+        items = [
+            {"id": "S2:gate", "source": "S2", "since": now - 2 * 3600, "stale": False},
+            {"id": "S1:native", "source": "S1", "since": now - 2 * 3600, "stale": False},
+            {"id": "S3:aged", "source": "S3", "since": now - 72 * 3600, "stale": False},
+            {"id": "S4:aged", "source": "S4", "since": now - 72 * 3600, "stale": False},
+            {"id": "S3:ownerless", "source": "S3", "since": now - 2 * 3600, "stale": False,
+             "owner_state": "none"},
+        ]
+        sent = []
+        with mock.patch.object(state, "_notify_item",
+                               side_effect=lambda item, **kw: sent.append(item["id"]) or True):
+            state._notify_result({"observed_at": now, "items": items})
+        self.assertEqual(set(sent), {"S2:gate", "S1:native"})
+        self.assertIsNone(state.wait_fold(now - 72 * 3600 + 1, now))
+        self.assertEqual(state.wait_fold(now - 72 * 3600, now), "older")
+        self.assertEqual(state.wait_fold(now - 30 * 86400, now), "older")
+        self.assertEqual(state.wait_fold(now, now, owner_state="none"), "ownerless")
+        self.assertIsNone(state.wait_fold(now, now, owner_state="unknown"))
+        self.assertIsNone(state.wait_fold("not-a-time", now))
+        self.assertIsNone(state._notification_delay(items[2:], now, enabled=True))
+        self.assertEqual(state._notification_delay(items[:1], now, enabled=True), 4 * 3600)
+
+    def test_publish_carries_owner_facts_and_one_count_to_every_projection(self):
+        from tools.fleet.refresh import fleet_answer_wait_view
+        now = 1_000_000.0
+        result = {"observed_at": now, "complete": True, "health": [], "items": [
+            {"id": "S3:live", "source": "S3", "kind": "decision", "since": now - 60,
+             "stale": False, "fold": None, "route_id": "rt-1", "attempt_id": "att-1",
+             "owner": {"harness": "claude", "session_id": "sid-new"},
+             "owner_state": "successor", "attribution": "lineage", "cwd": "/work/repo",
+             "registered_owner": {"harness": "claude", "session_id": "sid-old"},
+             "question": "PRIVATE-BLOCKER"},
+            {"id": "S2:gone", "source": "S2", "kind": "decision", "since": now - 60,
+             "stale": True, "fold": "ownerless", "route_id": "rt-2", "gate_id": "frame-review",
+             "owner": {"harness": "codex", "session_id": "sid-gone"},
+             "owner_state": "none", "attribution": "lineage"},
+            {"id": "S4:aged", "source": "S4", "kind": "decision", "since": now - 80 * 3600,
+             "stale": True, "fold": "older", "owner_state": "unknown", "attribution": "exact",
+             "owner": {"harness": "codex", "session_id": "sid-4"}},
+        ]}
+        self.assertTrue(state.publish_cache(result))
+        private = state._read_cache(now=now)
+        self.assertEqual((private["total"], private["older"], private["ownerless"]), (1, 2, 1))
+        rows = {row["id"]: row for row in private["items"]}
+        self.assertEqual(rows["S3:live"]["registered_owner"],
+                         {"harness": "claude", "session_id": "sid-old"})
+        self.assertEqual((rows["S3:live"]["owner_state"], rows["S3:live"]["cwd"]),
+                         ("successor", "/work/repo"))
+        self.assertEqual((rows["S2:gone"]["owner_state"], rows["S2:gone"]["fold"]),
+                         ("none", "ownerless"))
+        self.assertEqual(private["by_session"], {"claude\0sid-new": ["S3:live"]})
+        fleet = state.cached_fleet_view(now=now, request=False)
+        self.assertEqual((fleet["total"], fleet["older"], fleet["ownerless"]), (1, 2, 1))
+        by_id = {row["id"]: row for row in fleet["items"]}
+        self.assertEqual((by_id["S3:live"]["registered_session_id"], by_id["S3:live"]["stale"]),
+                         ("sid-old", "current"))
+        self.assertEqual((by_id["S2:gone"]["fold"], by_id["S2:gone"]["stale"]),
+                         ("ownerless", "older"))
+        view = fleet_answer_wait_view(fleet)
+        self.assertEqual(view["ownerless"], 1)
+        self.assertEqual(state.wait_counts(view["items"]),
+                         {"total": view["total"], "older": view["older"], "ownerless": 1})
+        self.assertEqual({row["id"]: row.get("owner_state") for row in view["items"]},
+                         {"S3:live": "successor", "S2:gone": "none", "S4:aged": "unknown"})
+        self.assertNotIn("PRIVATE-BLOCKER", state._fleet_cache_path().read_text(encoding="utf-8"))
+        self.assertNotIn("PRIVATE-BLOCKER", state._cache_path().read_text(encoding="utf-8"))
+
+    def test_frame_interview_detail_names_each_recommended_choice(self):
+        import frame_interview as FI
+        interview = {"understanding": "Restated task", "questions": [
+            {"id": "scope", "question": "Which scope?", "recommended": 1,
+             "options": [{"label": "Small", "means": "Only the gate"}, {"label": "Both"}]},
+            {"id": "speed", "question": "Fast?", "recommended": 7,
+             "options": [{"label": "Yes"}, {"label": "No"}]}]}
+        binding = {"route": {"route_id": "rt-x", "nodes": [],
+                             "human_gate_bindings": [{"gate": "frame-review", "node": "owner"}]},
+                   "resolution": {}}
+        with mock.patch.object(state, "_workflow_gate_interview", return_value=(interview, None)):
+            detail, error = state._workflow_gate_detail(binding, {"gate_id": "frame-review"})
+        self.assertIsNone(error)
+        questions = detail["detail"]["questions"]
+        self.assertEqual([question["id"] for question in questions],
+                         [FI.UNDERSTANDING_SLOT, "scope", "speed"])
+        self.assertEqual([question.get("recommended") for question in questions], [0, 1, None])
 
     def test_absent_herdr_does_not_leave_a_dedupe_marker(self):
         with mock.patch("human_wait_state.shutil.which", return_value=None):
@@ -2122,6 +2213,94 @@ class WorkflowSelectedResponseTest(unittest.TestCase):
                          state._cache_path().read_text(encoding="utf-8"))
         self.assertNotIn("select the next step",
                          state._fleet_cache_path().read_text(encoding="utf-8"))
+
+    def _questions_cli(self, *argv):
+        import contextlib
+        import io
+        import questions
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = questions.main(list(argv))
+        return code, out.getvalue(), err.getvalue()
+
+    def test_questions_cli_lists_then_releases_s2_gate_through_the_existing_release(self):
+        selected, ledger = self._bound_human_gate_wait()
+        item_id = selected["selected_id"]
+        code, text, _err = self._questions_cli()
+        self.assertEqual(code, 0)
+        self.assertIn("questions: 1 current · 0 older", text)
+        self.assertIn(item_id + "  human gate", text)
+        self.assertIn("1) proceed", text)
+        self.assertIn("answer: hearting run questions answer " + item_id, text)
+        code, listed, _err = self._questions_cli("list", "--json")
+        board = json.loads(listed)
+        self.assertEqual(board["counts"], {"total": 1, "older": 0, "ownerless": 0})
+        self.assertEqual(board["items"][0]["questions"][0]["id"], "gate-decision")
+        self.assertTrue(board["items"][0]["answerable"])
+
+        code, _out, err = self._questions_cli("answer", item_id, "--choice", "9")
+        self.assertEqual(code, 1)
+        self.assertIn("outside 1..3", err)
+        # A prefix could name a re-raised gate the person never saw: only the full id.
+        code, _out, err = self._questions_cli("answer", item_id.rsplit(":", 1)[0], "--choice", "1")
+        self.assertEqual(code, 2)
+        self.assertIn("exactly this id", err)
+        self.assertEqual(ledger.claims(), {})
+        code, out, err = self._questions_cli("answer", item_id, "--choice", "1", "--json")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["state"], "applied")
+        self.assertTrue(ledger.claims())
+        releases = [row for row in ledger.journal()
+                    if row.get("workflow_state") == "RUNNING"
+                    and (row.get("evidence") or {}).get("selected_request_id")]
+        self.assertEqual(len(releases), 1)
+        self.assertEqual(self._observe()["total"], 0)
+
+    def test_questions_cli_sends_s3_correction_through_owner_input(self):
+        import dispatch_owner_input
+        item = self._blocked_owner_wait()
+        code, text, _err = self._questions_cli("list")
+        self.assertIn(item["id"] + "  blocked owner", text)
+        code, out, err = self._questions_cli("answer", item["id"], "--text",
+                                             "keep the approved route and retry", "--json")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["state"], "received")
+        retained = dispatch_owner_input.retained(self.jobs, "att-workflow-owner")
+        self.assertEqual(retained[0]["text"], "keep the approved route and retry")
+
+    def test_questions_cli_reports_a_reply_claimed_first_elsewhere_as_not_its_own(self):
+        import dispatch_owner_input
+        item = self._blocked_owner_wait()
+        original = state._claim_selected_action
+
+        def fleet_claims_first(current, action_id, response):
+            original(current, "fleet-first", {"answers": {"owner-correction": ["fleet reply"]}})
+            return original(current, action_id, response)
+
+        with mock.patch.object(state, "_claim_selected_action", side_effect=fleet_claims_first):
+            code, out, _err = self._questions_cli("answer", item["id"], "--text", "cli reply",
+                                                  "--json")
+        self.assertEqual(code, 1)
+        reported = json.loads(out)
+        self.assertEqual(reported["state"], "answered-elsewhere")
+        self.assertIn("another caller", reported["reason"])
+        self.assertEqual(dispatch_owner_input.inspect(self.jobs, "att-workflow-owner")["requests"],
+                         [])
+
+    def test_questions_cli_leaves_a_marker_without_reply_surface_untouched(self):
+        import human_gate_observation
+        self.assertTrue(state.open_signal("codex", "marker-session", "marker-seat",
+                                           "[답변 필요] select the next step", sequence=7))
+        self.assertTrue(state.publish_cache(
+            human_gate_observation.read_answer_waits(jobs_paths=(self.jobs,))))
+        code, text, _err = self._questions_cli()
+        self.assertIn("select the next step", text)
+        self.assertIn("answer in that session", text)
+        item_id = next(row["id"] for row in state._read_cache()["items"] if row["source"] == "S4")
+        code, _out, err = self._questions_cli("answer", item_id, "--text", "next")
+        self.assertEqual(code, 2)
+        self.assertIn("cannot be answered here", err)
+        self.assertTrue(state.signal_is_current({"id": item_id, "seat_key": "marker-seat"}))
 
 
 class S3EffectiveParentTest(unittest.TestCase):
