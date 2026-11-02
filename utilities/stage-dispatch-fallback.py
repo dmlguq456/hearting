@@ -13,7 +13,6 @@ from pathlib import Path
 import re
 import subprocess
 import sys
-import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -2417,15 +2416,20 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
             current_manifest=(getattr(node_round_admission, "source_subject_manifest", ())
                               if node_round_admission.source_subject_digest else None),
         )
-        if round_block and args.prompt_file:
-            base_prompt = Path(args.prompt_file).read_text(encoding="utf-8")
-            with tempfile.NamedTemporaryFile(
-                mode="w", delete=False, suffix=".md",
-                prefix=f"round-protocol-{node['id']}-", dir=str(args.jobs.parent), encoding="utf-8",
-            ) as handle:
-                handle.write(base_prompt + round_block)
-                augmented_prompt_path = handle.name
-            args.prompt_file = Path(augmented_prompt_path)
+    else:
+        # A producing stage has no round budget, but its next round still
+        # needs the findings that judged it and what its last attempt did.
+        from worker_bootstrap import prior_round_context
+        try:
+            round_block = prior_round_context(route, node["id"], args.jobs)
+        except Exception:  # context is a help, never a reason to withhold a launch
+            round_block = ""
+    if round_block:
+        # One carrier with or without an owner prompt file: every adapter
+        # renders it after the assignment and seals it in the attempt's
+        # launch input, so a replacement replays the same text.
+        os.environ["AGENT_DISPATCH_RETRY_BRIEF"] = (
+            os.environ.get("AGENT_DISPATCH_RETRY_BRIEF", "") + round_block)
 
     prior_failures = registry_failures(args.jobs, route["route_id"], node["id"])
     prior_rows = registry_rows(args.jobs, route["route_id"], node["id"])

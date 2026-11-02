@@ -1051,6 +1051,46 @@ class ReviewRoundCapTest(unittest.TestCase):
             )
         return code, printed
 
+    def test_producing_stage_launch_carries_its_previous_round_context(self):
+        import worker_bootstrap
+        node = make_node(depth=1, dispatch_fallback=[])
+        route = seal_route_hash(make_route(node, tuples=[]))
+        context = "\n\n## Previous round (runtime record)\n- Findings to close: fixture\n"
+        seen, carried = [], []
+        real_run = subprocess.run
+
+        def fake_run(cmd, **kwargs):
+            if cmd and str(cmd[0]) == "git":
+                return real_run(cmd, **kwargs)
+            if any("dispatch-headless.py" in str(part) for part in cmd):
+                carried.append(N.os.environ.get("AGENT_DISPATCH_RETRY_BRIEF"))
+            return mock.Mock(returncode=0)
+
+        def previous(route_arg, node_id, jobs):
+            seen.append(node_id)
+            return context
+
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / ".dispatch" / "jobs.log"
+            jobs.parent.mkdir()
+            jobs.write_text("")
+            route_path = Path(td) / "route.json"
+            route_path.write_text(json.dumps(route))
+            argv = ["dispatch-node.py", "--route", str(route_path), "--node", "execute",
+                    "--adapter", "claude", "--slug", "slug-execute", "--action", "dry-run",
+                    "--prompt-text", "Close the review findings."]
+            with mock.patch.object(sys, "argv", argv), \
+                 mock.patch.dict(N.os.environ, {"AGENT_DISPATCH_JOBS": str(jobs)}, clear=True), \
+                 mock.patch.object(N.subprocess, "run", side_effect=fake_run), \
+                 mock.patch.object(worker_bootstrap, "prior_round_context", side_effect=previous), \
+                 mock.patch("builtins.print"):
+                try:
+                    N.main()
+                except SystemExit:
+                    pass
+        self.assertEqual(seen, ["execute"])
+        self.assertEqual(carried, [context])
+
     def test_direct_and_quick_reject_the_second_round(self):
         for intensity in ("direct", "quick"):
             code, printed = self._run("plan-check", 1, effective_intensity=intensity)

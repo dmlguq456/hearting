@@ -1027,6 +1027,11 @@ the worker's recovery context, along with later-round guidance, without changing
 that assignment or its digest.
 The existing sealed launch input also retains this recovery guidance so an
 automatic replacement replays the same instructions and semantic round.
+Every launch surface uses that one recovery context, with or without an owner
+request file: a capped node's `Round protocol` block, and for an uncapped
+producing stage the runtime record of its previous round (blocking findings of
+the stages that judge it, its last attempt's blocker and report, unmet leg
+items, and the commits and paths changed since that attempt began).
 An owner continuing an uncapped stage with a different nonempty request after
 the prior execution has settled opens new work under the same stage and gate;
 it does not inherit a transport retry link. Compare the existing sealed request,
