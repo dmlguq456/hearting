@@ -1637,6 +1637,12 @@ class CiLikeProfileFixture(unittest.TestCase):
             self.assertEqual(env["HEARTING_CAMPAIGN_TITLE_AUTO"], "off")
             self.assertEqual(env["HEARTING_PRIOR_ART"], "off")
 
+    def test_isolated_env_pins_the_korean_regression_screens(self):
+        # UI text defaults to English; the suites' stored screens are Korean.
+        for env in (self.mod.build_isolated_env(self.root / "iso"),
+                    self.mod.build_ci_like_env(self.root / "ci", self.root)):
+            self.assertEqual(env["FLEET_NOW_LANG"], "Korean")
+
     def test_ci_like_reuses_the_isolated_trust_entry(self):
         env = self.mod.build_ci_like_env(self.root / "ci", self.root)
         self.assertEqual(Path(env["GIT_CONFIG_GLOBAL"]).read_text(encoding="utf-8"),
