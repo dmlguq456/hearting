@@ -1388,6 +1388,21 @@ class StartTest(_TmpRootMixin, unittest.TestCase):
             rc = self._start()
         self.assertEqual(rc, 4)
 
+    def test_herdr_missing_start_says_so_once_and_queues_no_retry(self):
+        # No herdr is permanent for this session: a retained start notice would only ask
+        # the caller to repeat a start that cannot succeed.
+        import contextlib
+        import io
+        output = io.StringIO()
+        with mock.patch.object(peer_steward.shutil, "which", return_value=None), \
+             mock.patch.object(peer_steward, "_retain_start_failure") as retain, \
+             contextlib.redirect_stdout(output):
+            self.assertEqual(peer_steward.main(["start", "helper", "--kind", "claude"]), 4)
+        retain.assert_not_called()
+        lines = output.getvalue().splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].startswith("started=false reason=herdr-not-found agent=claude name=helper pane=- "))
+
     def test_started_false_when_herdr_start_fails(self):
         with mock.patch("builtins.print") as print_mock, \
              mock.patch.object(peer_steward.shutil, "which", return_value="/usr/bin/herdr"), \
