@@ -184,6 +184,12 @@ def _stat_key(path):
     return [st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_mode, st.st_ctime_ns]
 
 
+def _fd_key(fd):
+    """`_stat_key` of the file an open descriptor refers to (immune to a later rename)."""
+    st = os.fstat(fd)
+    return [st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_mode, st.st_ctime_ns]
+
+
 def _settled(stat):
     """False for a file modified within the last 100ms.
 
@@ -197,16 +203,48 @@ def _cache_path(jobs):
     return Path(f"{os.path.abspath(jobs)}.capacity-cache.json")
 
 
-def _build_snapshot(lines, now, previous=None):
+_METRICS = {
+    "full_reads": 0,
+    "incremental_reads": 0,
+    "bytes_read": 0,
+    "rows_scanned": 0,
+}
+
+
+def _segments(data: bytes, base_offset: int = 0):
+    """Yield ``(byte offset, line)`` with the exact semantics of ``text.splitlines()``.
+
+    Splitting the bytes only at ``b"\n"`` keeps every two-character line break
+    (``\r\n``) inside one segment; every other ``str.splitlines`` separator is a
+    single character, so decoding each segment and splitting it yields the same
+    lines as decoding the whole file once.  UTF-8 multi-byte sequences never
+    contain 0x0A, so a byte split never cuts a character.
+    """
+    start = 0
+    length = len(data)
+    while start < length:
+        newline = data.find(b"\n", start)
+        stop = length if newline < 0 else newline + 1
+        text = data[start:stop].decode("utf-8")
+        for line in text.splitlines():
+            yield base_offset + start, line
+        start = stop
+
+
+def _build_snapshot(lines, now, previous=None, base_offset=None):
     """The time- and environment-independent candidates of a registry.
 
     Only what the readers cannot cheaply rederive is kept: which rows can carry native
     quota evidence or a legacy limit marker. Expiry, the 8-day cutoff, scope matching,
     model selection and reset conversion stay per-call decisions. Native rows older than
     eight days at `now` can never matter again, so they are not kept.
+
+    ``base_offset`` is not None for a byte image: every candidate then carries
+    ``x``, the byte offset of the line segment it came from.
     """
     native, legacy = [], []
-    for line in lines:
+    rows = _segments(lines, base_offset) if base_offset is not None else ((None, line) for line in lines)
+    for offset, line in rows:
         fields = line.split("\t")
         if len(fields) != 6:
             continue
@@ -223,6 +261,8 @@ def _build_snapshot(lines, now, previous=None):
             if observed is not None and now - observed <= 8 * 86400:
                 record = {"o": observed, "a": attempt, "l": log, "m": meta.get("model"),
                           "s": meta.get("quota_scope"), "k": meta.get("quota_scope_kind"), "d": digest(line)}
+                if offset is not None:
+                    record["x"] = offset
                 earlier = (previous or {}).get(record["d"])
                 if earlier:  # same row: its extracted evidence stays valid while the log's stat does
                     record.update(e=earlier["e"], ls=earlier["ls"])
@@ -230,9 +270,12 @@ def _build_snapshot(lines, now, previous=None):
         harness = meta.get("harness") or meta.get("owner_harness")
         if harness in HARNESSES and (note in _LEGACY_QUOTA_NOTES
                                      or (note == "dead-capacity" and meta.get("failure_class") != "pass")):
-            legacy.append({"t": fields[0], "h": harness, "a": meta.get("attempt_id"),
-                           "s": meta.get("quota_scope"), "k": meta.get("quota_scope_kind"),
-                           "n": note, "r": meta.get("reset", "-"), "l": meta.get("log_file")})
+            item = {"t": fields[0], "h": harness, "a": meta.get("attempt_id"),
+                    "s": meta.get("quota_scope"), "k": meta.get("quota_scope_kind"),
+                    "n": note, "r": meta.get("reset", "-"), "l": meta.get("log_file")}
+            if offset is not None:
+                item["x"] = offset
+            legacy.append(item)
     return {"native": native, "legacy": legacy}
 
 
@@ -243,6 +286,10 @@ def _is_stat(value):
 
 def _is_str(value, *, nullable=False):
     return isinstance(value, str) or (nullable and value is None)
+
+
+def _is_digest(value):
+    return isinstance(value, str) and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
 
 
 def _valid_cache(data):
@@ -279,21 +326,54 @@ def _valid_cache(data):
     return True
 
 
+def _offset_records(records):
+    return all(isinstance(rec, dict) and isinstance(rec.get("x"), int)
+               and not isinstance(rec.get("x"), bool) and rec["x"] >= 0 for rec in records)
+
+
+def _incremental_base(path, key, data, now):
+    """The validated prefix snapshot a suffix rescan may start from, or None.
+
+    Optional fields are additive: an old cache (no ``offsets``/``x``) or a cache
+    whose optional fields are malformed is still a valid answer cache.  It only
+    disables the incremental path, never the pre-existing checks above.
+    """
+    if data.get("jobs") != os.path.abspath(path) or data.get("horizon") > now:
+        return None
+    if data.get("offsets") is not True:
+        return None
+    size = data.get("size")
+    if (not isinstance(size, int) or isinstance(size, bool) or size < 0
+            or not _is_stat(data.get("key")) or data["key"][2] != size):
+        return None
+    if not _is_digest(data.get("tail")) or not _is_digest(data.get("head")):
+        return None
+    if not _offset_records(data["native"]) or not _offset_records(data["legacy"]):
+        return None
+    return {"key": data["key"], "size": size, "tail": data["tail"], "head": data["head"],
+            "native": data["native"], "legacy": data["legacy"]}
+
+
 def _load_cache(path, now):
-    """`(snapshot | None, earlier native records by row digest)` from the cache file."""
+    """``(snapshot | None, earlier native records by digest, incremental base | None)``."""
     key = _stat_key(path)
     if key is None:
-        return None, {}
+        return None, {}, None
     data = json.loads(_cache_path(path).read_text())
     if not _valid_cache(data):
-        return None, {}
+        return None, {}, None
     earlier = {rec["d"]: rec for rec in data["native"] if "e" in rec}
+    base = _incremental_base(path, key, data, now)
     # A cache built at a later `now` dropped rows this reader may still need.
     if data["jobs"] != os.path.abspath(path) or data["key"] != key or data["horizon"] > now \
             or _stat_key(path) != key:
-        return None, earlier
-    return {"native": data["native"], "legacy": data["legacy"], "path": path, "key": key,
-            "horizon": data["horizon"], "cacheable": True, "dirty": False}, earlier
+        return None, earlier, base
+    snapshot = {"native": data["native"], "legacy": data["legacy"], "path": path, "key": key,
+                "horizon": data["horizon"], "cacheable": True, "dirty": False}
+    for field in ("size", "tail", "head", "offsets"):
+        if field in data:
+            snapshot[field] = data[field]
+    return snapshot, earlier, base
 
 
 def _fresh_snapshot(jobs, now, earlier):
@@ -308,12 +388,95 @@ def _fresh_snapshot(jobs, now, earlier):
     path = Path(jobs)
     key = _stat_key(path)
     try:
-        text = path.read_text()
+        data = path.read_bytes()
     except (OSError, UnicodeError):
         return None
     stable = key is not None and _stat_key(path) == key
-    return {**_build_snapshot(text.splitlines(), now, earlier), "path": path, "key": key,
-            "horizon": now, "cacheable": _DISK_CACHE and stable and _settled(key), "dirty": True}
+    try:
+        built = _build_snapshot(data, now, earlier, base_offset=0)
+    except UnicodeError:
+        return None
+    _METRICS["full_reads"] += 1
+    _METRICS["bytes_read"] += len(data)
+    _METRICS["rows_scanned"] += len(built["native"]) + len(built["legacy"])
+    return {**built, "path": path, "key": key, "horizon": now,
+            "cacheable": _DISK_CACHE and stable and _settled(key), "dirty": True,
+            "size": len(data), "tail": hashlib.sha256(data[-4096:]).hexdigest(),
+            "head": hashlib.sha256(data[:4096]).hexdigest(), "offsets": True}
+
+
+def _incremental_snapshot(jobs, now, base, earlier):
+    """Rebuild the candidates from a recorded lineage chain instead of the whole file."""
+    if not base or not isinstance(base.get("tail"), str):
+        return None
+    path = Path(jobs)
+    key = _stat_key(path)
+    if key is None or not _settled(key):
+        return None
+    size = key[2]
+    start = None
+    anchor = None
+    from dispatch_registry_cache import resolve_lineage
+    resolved = resolve_lineage(path, base["key"], key)
+    if resolved is not None:
+        start = min(resolved[0], base["size"])
+        anchor = resolved[1]
+    else:
+        # Legacy append-only growth: the same inode grew and the old tail is intact.
+        if (base["key"][:2] == key[:2] and size > base["size"]
+                and key[3] >= base["key"][3]):
+            start = base["size"]
+            anchor = base["tail"]
+    if start is None or not 0 <= start <= size:
+        return None
+    if start > 0 and not anchor:
+        return None
+    fd = None
+    try:
+        fd = os.open(str(path), os.O_RDONLY)
+        if _fd_key(fd) != key or _stat_key(path) != key:
+            return None
+        if start > 0:
+            verify_start = max(0, start - 4096)
+            chunk = os.pread(fd, start - verify_start, verify_start)
+            if len(chunk) != start - verify_start or chunk[-1:] != b"\n":
+                return None
+            if hashlib.sha256(chunk).hexdigest() != anchor:
+                return None
+        suffix = os.pread(fd, size - start, start)
+        if len(suffix) != size - start:
+            return None
+        head_chunk = os.pread(fd, min(4096, size), 0)
+        tail_chunk = os.pread(fd, min(4096, size), max(0, size - 4096))
+        if len(head_chunk) != min(4096, size) or len(tail_chunk) != min(4096, size):
+            return None
+        if resolved is None and isinstance(base.get("head"), str):
+            # Legacy growth has no lineage fact: the base's leading bytes must also be intact.
+            if hashlib.sha256(head_chunk[:min(4096, base["size"])]).hexdigest() != base["head"]:
+                return None
+        if _fd_key(fd) != key or _stat_key(path) != key:
+            return None
+    except OSError:
+        return None
+    finally:
+        if fd is not None:
+            os.close(fd)
+    try:
+        built = _build_snapshot(suffix, now, earlier, base_offset=start)
+    except UnicodeError:
+        return None
+    cutoff = 8 * 86400
+    native = [rec for rec in base["native"] if rec.get("x", 0) < start and now - rec["o"] <= cutoff]
+    legacy = [rec for rec in base["legacy"] if rec.get("x", 0) < start]
+    native.extend(built["native"])
+    legacy.extend(built["legacy"])
+    _METRICS["incremental_reads"] += 1
+    _METRICS["bytes_read"] += len(suffix) + len(head_chunk) + len(tail_chunk)
+    _METRICS["rows_scanned"] += len(built["native"]) + len(built["legacy"])
+    return {"native": native, "legacy": legacy, "path": path, "key": key, "horizon": now,
+            "cacheable": _DISK_CACHE and _settled(key), "dirty": True,
+            "size": size, "tail": hashlib.sha256(tail_chunk).hexdigest(),
+            "head": hashlib.sha256(head_chunk).hexdigest(), "offsets": True}
 
 
 def _snapshot(jobs, now, lines=None):
@@ -326,11 +489,15 @@ def _snapshot(jobs, now, lines=None):
         return {**_build_snapshot(lines, now), "cacheable": False, "dirty": False}
     path = Path(jobs)
     earlier = {}
+    base = None
     if _DISK_CACHE:
         try:
-            snapshot, earlier = _load_cache(path, now)
+            snapshot, earlier, base = _load_cache(path, now)
             if snapshot is not None:
                 return snapshot
+            incremental = _incremental_snapshot(path, now, base, earlier)
+            if incremental is not None:
+                return incremental
         except Exception:  # noqa: BLE001 - a broken cache must never change the answer
             earlier = {}
     return _fresh_snapshot(path, now, earlier)
@@ -349,7 +516,7 @@ def _snapshot_guard(jobs, now, lines=None):
         return
     pre_earlier = {}
     try:
-        cached, pre_earlier = _load_cache(path, now)
+        cached, pre_earlier, _pre_base = _load_cache(path, now)
     except Exception:  # noqa: BLE001 - broken cache remains a direct-read fallback
         cached, pre_earlier = None, {}
     if cached is not None:
@@ -387,15 +554,21 @@ def _snapshot_guard(jobs, now, lines=None):
         return
     try:
         post_earlier = {}
+        post_base = None
         try:
-            cached, post_earlier = _load_cache(path, now)
+            cached, post_earlier, post_base = _load_cache(path, now)
         except Exception:  # noqa: BLE001
-            cached, post_earlier = None, {}
+            cached, post_earlier, post_base = None, {}, None
         # Another cold process may have published while this one waited.
         if cached is not None:
             yield cached
         else:
-            yield _fresh_snapshot(path, now, {**pre_earlier, **post_earlier})
+            merged = {**pre_earlier, **post_earlier}
+            incremental = _incremental_snapshot(path, now, post_base, merged)
+            if incremental is not None:
+                yield incremental
+            else:
+                yield _fresh_snapshot(path, now, merged)
     finally:
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
@@ -416,6 +589,9 @@ def _persist(snapshot):
         target = _cache_path(path)
         payload = {"schema": CACHE_SCHEMA, "jobs": os.path.abspath(path), "key": snapshot["key"],
                    "horizon": snapshot["horizon"], "native": snapshot["native"], "legacy": snapshot["legacy"]}
+        for field in ("size", "tail", "head", "offsets"):
+            if field in snapshot:
+                payload[field] = snapshot[field]
         fd, tmp = tempfile.mkstemp(prefix=target.name + ".", suffix=".tmp", dir=target.parent)
         with os.fdopen(fd, "w") as handle:
             json.dump(payload, handle, separators=(",", ":"))

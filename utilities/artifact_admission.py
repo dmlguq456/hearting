@@ -103,17 +103,33 @@ def _new_token() -> str:
     return "{0}-{1}".format(os.getpid(), uuid.uuid4().hex)
 
 
-def _atomic_write_bytes(path: Path, data: bytes) -> None:
+def _atomic_write_bytes(path: Path, data: bytes) -> Optional[List[int]]:
+    """Atomically replace ``path`` and return the new file's identity key.
+
+    The return value is ``[dev, ino, size, mtime_ns, mode, ctime_ns]`` taken
+    from the still-open temp fd after ``os.replace`` (rename changes ctime), so
+    a caller can seed a generation cache with the exact identity a later reader
+    will stat.  Existing callers may ignore it.
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_name(".{0}.{1}.tmp".format(path.name, _new_token()))
     fd = os.open(str(temp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    key = None
     try:
         with os.fdopen(fd, "wb") as fh:
             fh.write(data)
             fh.flush()
             os.fsync(fh.fileno())
-        os.replace(str(temp), str(path))
+            os.replace(str(temp), str(path))
+            # fstat the written file itself: a path stat could observe another
+            # writer's later replacement and pair this content with its key.
+            try:
+                info = os.fstat(fh.fileno())
+                key = [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns,
+                       info.st_mode, info.st_ctime_ns]
+            except OSError:
+                key = None
     finally:
         if temp.exists():
             try:
@@ -121,6 +137,7 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
             except OSError:
                 pass
     _fsync_dir(path.parent)
+    return key
 
 
 def _fsync_dir(path: Path) -> None:
@@ -209,6 +226,17 @@ def holds_lock(root: Path) -> bool:
     return str(Path(root).resolve()) in _held_roots()
 
 
+def current_hold_token() -> int:
+    """Identity of this thread's current continuous lock-holding interval.
+
+    The counter grows once per new acquisition, so two loads inside one
+    acquisition share a token while a release/re-acquire or another thread gets
+    a different one.  Only the seed exception of the index generation cache
+    uses it; cache hits outside that interval still require a settled file.
+    """
+    return getattr(_HELD_ROOTS_STATE, "hold_token", 0)
+
+
 def try_acquire_lock(root: Path) -> Optional[int]:
     """Non-blocking producer-admission acquire; ``None`` on any contention (never raises).
 
@@ -284,6 +312,8 @@ def _acquire_lock(root: Path, timeout: float, now: Optional[float] = None) -> in
                     else:
                         dispatch_lock_order.enter("producer-admission")
                     _held_roots().add(canonical_root)
+                    _HELD_ROOTS_STATE.hold_token = getattr(
+                        _HELD_ROOTS_STATE, "hold_token", 0) + 1
                     result_fd, fd = fd, -1  # ownership transferred to caller
                     return result_fd
         finally:
@@ -798,18 +828,241 @@ def _index_path(root: Path) -> Path:
     return _admission_dir(root) / "index.json"
 
 
+def _index_head_path(root: Path) -> Path:
+    return _admission_dir(root) / "index.json.head.json"
+
+
+# ---------------------------------------------------------------------------
+# index generation cache and head sidecar
+#
+# `index.json` is a derived document: every writer replaces it atomically, so
+# one exact stat identity denotes one generation.  Two derived layers avoid
+# re-parsing it: a one-generation in-process cache (seedable only while the
+# writer holds this root's admission lock) and `index.json.head.json`, a small
+# cross-process projection of the same generation.  Both are accelerators: a
+# missing, stale, malformed or unsettled key simply falls back to the full
+# `_read_json` + `_parse_owned` path that existed before them.
+# ---------------------------------------------------------------------------
+
+_INDEX_SETTLE_NS = 100_000_000
+_INDEX_CACHE_LOCK = threading.RLock()
+_INDEX_GENERATION: Optional[Dict[str, Any]] = None
+_HEAD_WRITES: Dict[str, tuple] = {}
+
+
+@dataclass(frozen=True)
+class IndexHead:
+    """A validated index generation projection for absence/existence questions.
+
+    Deliberately not an ``IndexDocument``: consumers can only ask about the
+    sections they were moved to, never accidentally treat it as the full index.
+    """
+
+    key: Tuple[int, ...]
+    artifact_root_id: str
+    schema_version: int
+    manifests: Mapping[str, Mapping[str, Any]]
+    cycles: Mapping[str, Mapping[str, Any]]
+    routes: Mapping[str, Mapping[str, Mapping[str, Any]]]
+    prefixed_stable_ids: Mapping[str, frozenset]
+
+    def has_prefixed_stable_id(self, value: Any) -> bool:
+        if not isinstance(value, str):
+            return False
+        for prefix, identifiers in self.prefixed_stable_ids.items():
+            if value.startswith(prefix):
+                return value in identifiers
+        return False
+
+
+def _file_key(path: Path) -> Optional[List[int]]:
+    try:
+        info = os.stat(str(path))
+    except (OSError, ValueError):
+        return None
+    return [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns,
+            info.st_mode, info.st_ctime_ns]
+
+
+def _key_settled(key: Optional[List[int]]) -> bool:
+    return key is None or time.time_ns() - key[3] > _INDEX_SETTLE_NS
+
+
+def _copy_index_document(document: artifact_index.IndexDocument) -> artifact_index.IndexDocument:
+    """Shallow-copy every section so a caller's section edits never reach a cache."""
+    return artifact_index.IndexDocument(
+        schema_version=document.schema_version,
+        artifact_root_id=document.artifact_root_id,
+        stable_ids=dict(document.stable_ids),
+        routes={name: dict(bucket) for name, bucket in document.routes.items()},
+        event_ids=dict(document.event_ids),
+        streams=dict(document.streams),
+        manifests=dict(document.manifests),
+        cycles=dict(document.cycles),
+    )
+
+
+def _generation_hit_allowed(root: Path, cached: Mapping[str, Any]) -> bool:
+    if _key_settled(cached.get("key")):
+        return True
+    # The only exception: the continuous lock-holding interval that seeded it.
+    return (cached.get("hold_token") == current_hold_token()
+            and cached.get("thread") == threading.get_ident()
+            and holds_lock(root))
+
+
 def load_index(root: Path) -> artifact_index.IndexDocument:
+    global _INDEX_GENERATION
     root = Path(root)
     path = _index_path(root)
+    resolved = os.path.realpath(str(path))
+    key = _file_key(path)
+    if key is not None:
+        with _INDEX_CACHE_LOCK:
+            cached = _INDEX_GENERATION
+        if (cached is not None and cached.get("path") == resolved
+                and cached.get("key") == key and _generation_hit_allowed(root, cached)):
+            return _copy_index_document(cached["document"])
     payload = _read_json(path)
     if payload is None:
         identity = ensure_root_identity(root)
         return artifact_index.empty(identity.artifact_root_id)
-    return artifact_index._parse_owned(payload)
+    document = artifact_index._parse_owned(payload)
+    key_after = _file_key(path)
+    if key is not None and key_after == key:
+        # A reader that validated this generation may leave the small head
+        # projection for the next process; a later index write invalidates it
+        # by key, so this needs no lock.
+        _write_index_head(root, document, key)
+    if key is not None and key_after == key and _key_settled(key):
+        with _INDEX_CACHE_LOCK:
+            _INDEX_GENERATION = {"path": resolved, "key": key,
+                                 "document": _copy_index_document(document)}
+    return document
+
+
+def clear_index_cache() -> None:
+    """Test/administrative helper: drop the one-generation process cache."""
+    global _INDEX_GENERATION
+    with _INDEX_CACHE_LOCK:
+        _INDEX_GENERATION = None
+
+
+def _head_payload(root: Path, index: artifact_index.IndexDocument, key: List[int]) -> Dict[str, Any]:
+    prefixes = (artifact_identity.prefix_for("campaign"), artifact_identity.prefix_for("cycle"))
+    pinned = {prefix: [] for prefix in prefixes}
+    for stable_id in index.stable_ids:
+        if not isinstance(stable_id, str):
+            continue
+        for prefix in prefixes:
+            if stable_id.startswith(prefix):
+                pinned[prefix].append(stable_id)
+                break
+    return {"schema": 1, "key": list(key), "artifact_root_id": index.artifact_root_id,
+            "schema_version": index.schema_version,
+            "manifests": dict(index.manifests), "cycles": dict(index.cycles),
+            "routes": {name: dict(bucket) for name, bucket in index.routes.items()},
+            "prefixed_stable_ids": {prefix: sorted(ids) for prefix, ids in pinned.items()}}
+
+
+def _write_index_head(root: Path, index: artifact_index.IndexDocument, key: List[int]) -> None:
+    try:
+        head_path = _index_head_path(root)
+        payload = _head_payload(root, index, key)
+        written = _atomic_write_bytes(head_path, artifact_manifest.canonical_bytes(payload))
+        if written is not None:
+            with _INDEX_CACHE_LOCK:
+                _HEAD_WRITES[os.path.realpath(str(head_path))] = (
+                    tuple(written), current_hold_token(), threading.get_ident())
+                if len(_HEAD_WRITES) > 16:
+                    _HEAD_WRITES.pop(next(iter(_HEAD_WRITES)))
+    except Exception:  # noqa: BLE001 - the head is a derived accelerator
+        pass
+
+
+def _parse_index_head(payload: Any) -> Optional[IndexHead]:
+    if not isinstance(payload, dict) or payload.get("schema") != 1:
+        return None
+    key = payload.get("key")
+    if (not isinstance(key, list) or len(key) != 6
+            or not all(isinstance(item, int) and not isinstance(item, bool) for item in key)):
+        return None
+    root_id = payload.get("artifact_root_id")
+    schema_version = payload.get("schema_version")
+    if (not isinstance(root_id, str) or not root_id or not isinstance(schema_version, int)
+            or isinstance(schema_version, bool)):
+        return None
+    sections = {}
+    for name, shapes in (("manifests", artifact_index._ROW_SHAPES["manifests"]),
+                         ("cycles", artifact_index._ROW_SHAPES["cycles"])):
+        rows = payload.get(name)
+        if not isinstance(rows, dict):
+            return None
+        for row_key, row in rows.items():
+            artifact_index._check_row_shape(name, row_key, row, shapes)
+        sections[name] = rows
+    routes = payload.get("routes")
+    if not isinstance(routes, dict):
+        return None
+    copied_routes = {}
+    for root_key, bucket in routes.items():
+        if not isinstance(root_key, str) or not isinstance(bucket, dict):
+            return None
+        copied = {}
+        for route_key, row in bucket.items():
+            artifact_index._check_row_shape("routes", route_key, row, artifact_index._ROUTE_ROW_SHAPE)
+            copied[route_key] = row
+        copied_routes[root_key] = copied
+    pinned = payload.get("prefixed_stable_ids")
+    if not isinstance(pinned, dict):
+        return None
+    prefixed = {}
+    for prefix in (artifact_identity.prefix_for("campaign"), artifact_identity.prefix_for("cycle")):
+        values = pinned.get(prefix)
+        if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
+            return None
+        prefixed[prefix] = frozenset(values)
+    return IndexHead(key=tuple(key), artifact_root_id=root_id, schema_version=schema_version,
+                     manifests=sections["manifests"], cycles=sections["cycles"],
+                     routes=copied_routes, prefixed_stable_ids=prefixed)
+
+
+def load_index_head(root: Path) -> Optional[IndexHead]:
+    """The current generation's head projection, or None to use the full index."""
+    root = Path(root)
+    index_path = _index_path(root)
+    head_path = _index_head_path(root)
+    key = _file_key(index_path)
+    if key is None:
+        return None
+    try:
+        payload = json.loads(head_path.read_bytes().decode("utf-8"))
+        head = _parse_index_head(payload)
+    except (OSError, ValueError, UnicodeError, TypeError, KeyError, AttributeError):
+        return None
+    if head is None or list(head.key) != key or _file_key(index_path) != key:
+        return None
+    if not _key_settled(key):
+        with _INDEX_CACHE_LOCK:
+            written = _HEAD_WRITES.get(os.path.realpath(str(head_path)))
+        if not (written == (tuple(key), current_hold_token(), threading.get_ident())
+                and holds_lock(root)):
+            return None
+    return head
 
 
 def _write_index(root: Path, index: artifact_index.IndexDocument) -> None:
-    _atomic_write_bytes(_index_path(root), artifact_index.canonical_bytes(index))
+    global _INDEX_GENERATION
+    key = _atomic_write_bytes(_index_path(root), artifact_index.canonical_bytes(index))
+    if key is None:
+        return
+    _write_index_head(root, index, key)
+    if holds_lock(root):
+        with _INDEX_CACHE_LOCK:
+            _INDEX_GENERATION = {"path": os.path.realpath(str(_index_path(root))),
+                                 "key": key, "document": _copy_index_document(index),
+                                 "hold_token": current_hold_token(),
+                                 "thread": threading.get_ident()}
 
 
 def _known_idempotency_keys(root: Path) -> Tuple[Dict[str, str], Dict[str, str]]:
@@ -1025,15 +1278,29 @@ def rebuild_index(root: Path) -> artifact_index.IndexDocument:
 
 def verify_index(root: Path) -> artifact_manifest.ValidationReport:
     root = Path(root)
-    current_payload = _read_json(_index_path(root))
-    current_bytes = (
-        artifact_manifest.canonical_bytes(current_payload) if current_payload is not None else None
-    )
+    index_path = _index_path(root)
     rebuilt, _fallback_keys = _compute_rebuilt_index(root)
     rebuilt_bytes = artifact_index.canonical_bytes(rebuilt)
-    if current_bytes is not None and current_bytes != rebuilt_bytes:
-        v = Violation("index-drift", "$", "current index.json bytes differ from rebuild")
-        return artifact_manifest.ValidationReport(ok=False, violations=(v,))
+    try:
+        current_size = index_path.stat().st_size
+    except OSError:
+        current_size = None
+    current_raw = None
+    if current_size is not None and current_size == len(rebuilt_bytes):
+        try:
+            current_raw = index_path.read_bytes()
+        except OSError:
+            current_raw = None
+    if current_raw is not None and current_raw == rebuilt_bytes:
+        pass  # the common canonical case: no second parse + re-serialization
+    else:
+        current_payload = _read_json(index_path)
+        current_bytes = (
+            artifact_manifest.canonical_bytes(current_payload) if current_payload is not None else None
+        )
+        if current_bytes is not None and current_bytes != rebuilt_bytes:
+            v = Violation("index-drift", "$", "current index.json bytes differ from rebuild")
+            return artifact_manifest.ValidationReport(ok=False, violations=(v,))
     stable_row_count = len(rebuilt.stable_ids) + len(rebuilt.event_ids)
     if stable_row_count >= _INDEX_ROW_WARN_COUNT or len(rebuilt_bytes) >= _INDEX_BYTE_WARN_SIZE:
         # Advisory only (W7E): the index still verifies; the size asks for a sharding review.
