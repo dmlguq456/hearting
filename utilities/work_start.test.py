@@ -2058,6 +2058,31 @@ class FrameInterviewStepTest(WF.WorkflowFixture):
         self.assertEqual(self.calls, ["gate", "release"])
         self.assertEqual(Path(asked["interview_file"]).parent, Path(released["interview_file"]).parent)
 
+    def test_only_the_runtime_records_an_automatic_agreement(self):
+        import frame_interview as FI
+        question, _ = self.routed()
+        asked = self.step(interview=self.question_file)
+        answer = self.base / "answers.json"
+        response = {**asked["supervisor_answers_template"], "understanding_confirmed": True,
+                    "basis": FI.AUTOMATIC_BASIS}
+        for item in question["questions"]:
+            response["answers"][item["id"]]["choice"] = item["recommended"]
+        answer.write_text(json.dumps(response))
+        with self.assertRaisesRegex(ValueError, "only the runtime records an automatic agreement"):
+            self.step(answers=answer)                        # a hand-written label is refused
+        with self.assertRaisesRegex(ValueError, "only the runtime records an automatic agreement"):
+            self.step(answers=answer, automatic=False)
+        answer.write_text(json.dumps({**response, "actor_kind": "user"}))
+        with self.assertRaisesRegex(ValueError, "only the runtime records an automatic agreement"):
+            self.step(answers=answer, automatic=True)        # the runtime speaks only on-behalf
+        self.assertEqual(self.resolution()["status"], "blocked")
+        answer.write_text(json.dumps(response))
+        released = self.step(answers=answer, automatic=True)
+        self.assertEqual(released["state"], "released")
+        self.assertEqual(self.resolution()["actor_kind"], "supervisor")
+        self.assertEqual(self.resolution()["answers"]["basis"], FI.AUTOMATIC_BASIS)
+        self.assertEqual(self.calls, ["gate", "release"])
+
     def test_registered_caller_cannot_claim_a_user_before_immutable_save(self):
         answer = self.answers()
         with mock.patch.dict(os.environ, {"AGENT_DISPATCH_REGISTERED_WORKER": "1"}):

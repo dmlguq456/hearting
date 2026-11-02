@@ -344,7 +344,7 @@ def record_native_answer(route, jobs, asked):
 
 
 def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
-                         decision="proceed", runtime_root=ROOT, run=subprocess.run):
+                         decision="proceed", runtime_root=ROOT, run=subprocess.run, automatic=False):
     """Own raise -> actual answers -> intent -> release through existing commands.
 
     The caller supplies semantic questions/real answers. WorkflowLedger remains
@@ -458,6 +458,10 @@ def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
         # question. A refused machine reply must leave room for the real reply.
         registered_worker = os.environ.get("AGENT_DISPATCH_REGISTERED_WORKER") == "1"
         actor_kind = FI.answer_actor_kind(response, registered_worker=registered_worker)
+        if (response.get("basis") == FI.AUTOMATIC_BASIS) != bool(automatic) or (
+                automatic and actor_kind != "supervisor"):
+            raise ValueError("gate-release-authority-refused: only the runtime records an automatic agreement, "
+                             "and only when both frames agree with nothing left to choose")
         binding = next((row for row in route.get("human_gate_bindings", [])
                         if row.get("gate") == "frame-review"), {})
         authority = (resolution.get("release_authority") or
@@ -1173,6 +1177,71 @@ def _interview_questions(rows):
     approvals = sorted({pair for row in valid for pair in _start_approval_keys(row)})
     return [choice] + [blank(FI.approval_question_id(leg, key), "yes-no", [{**option, "approves": True}, dict(option)])
                       for leg, key in approvals]
+
+
+AUTOMATIC_DIRECTION_DIR = "shards/frame/automatic"
+
+
+def _automatic_direction(route, rows, output):
+    """`(interview, answers)` the runtime records itself when there is nothing to choose, else None.
+
+    Only when both frame legs returned valid, equal proposals, no start approval is in scope,
+    neither brief lists a question only the user can answer, and the caller is not a registered
+    worker. The answer is the depth-0 session's existing on-behalf (`supervisor`) authority with
+    basis `automatic-agreement`; every other case asks the person exactly as before (WORKFLOW §0.4)."""
+    import frame_interview as FI
+    if os.environ.get("AGENT_DISPATCH_REGISTERED_WORKER") == "1":
+        return None
+    if len(rows) != 2 or not RP.proposals_equal(rows) or any(_start_approval_keys(row) for row in rows):
+        return None
+    texts = []
+    for row in rows:
+        try:
+            texts.append((Path(output) / "shards" / row["node"] / "direction-brief.md").read_text(encoding="utf-8"))
+        except (OSError, UnicodeError):
+            return None
+    if any(FI.user_questions_left(text) for text in texts):
+        return None
+    brief = FI.brief_draft(texts[0])
+    request = route.get("work_request") or {}
+    understanding = (((request.get("intent") or {}).get("intent") or "")[:FI.MAX_UNDERSTANDING_CHARS]
+                     or FI.understanding_draft(request.get("text") or ""))
+    summary = " ".join(str(rows[0]["proposal"].get("summary") or "").split())
+    if len(summary) > FI.MAX_OPTION_MEANS_CHARS:
+        summary = summary[:FI.MAX_OPTION_MEANS_CHARS - 1].rstrip() + "…"
+    question = {"id": FI.ROUTE_QUESTION_ID, "topic": "진행 방향", "kind": "yes-no",
+                "question": "두 갈래 검토가 같은 진행 방향을 냈습니다. 이대로 시작할까요?",
+                "options": [{"label": "진행", "means": summary or "두 갈래가 함께 낸 방향대로 시작합니다",
+                             FI.PROPOSAL_MARK: rows[0]["node"]},
+                            {"label": "보류", "means": "시작하지 않고 방향을 다시 봅니다"}],
+                "recommended": 0, "why": "두 갈래가 같은 결론이고 사람이 고를 질문을 남기지 않았습니다"}
+    interview = {"schema": FI.SCHEMA, "route_id": route["route_id"], "round": 1,
+                 "understanding": understanding, "brief": brief, "questions": [question]}
+    if FI.validate({**interview, "summary": "-"}, intensity=route["effective_intensity"]):
+        return None
+    answers = {"schema": FI.ANSWERS_SCHEMA, "route_id": route["route_id"], "round": 1,
+               "actor_kind": "supervisor", "basis": FI.AUTOMATIC_BASIS,
+               "understanding_confirmed": True, "correction": "",
+               "answers": {FI.ROUTE_QUESTION_ID: {
+                   "choice": 0, "note": "자동: 두 갈래가 같은 방향을 내고 물을 것을 남기지 않음"}}}
+    return interview, answers
+
+
+def _automatic_frame_release(route, path, jobs, output, interview, answers):
+    """Record the runtime's own interview and answer, release through the existing commands, and say so."""
+    directory = Path(output) / AUTOMATIC_DIRECTION_DIR
+    directory.mkdir(parents=True, exist_ok=True)
+    interview_path, answers_path = directory / "interview.json", directory / "answers.json"
+    _store_once(interview_path, interview)
+    _store_once(answers_path, answers)
+    step = frame_interview_step(route, path, jobs, interview=interview_path, answers=answers_path, automatic=True)
+    option = interview["questions"][0]["options"][0]["means"]
+    return {**step, "automatic_direction": True,
+            "direction_notice": f"[방향 통지] 두 갈래 검토가 같은 방향을 내고 물을 것을 남기지 않아 묻지 않고 "
+                                f"시작합니다: {option}. 고칠 점이 있으면 다음 말로 알려 주세요.",
+            "next_step": "Show direction_notice to the person in one line; nothing waits for an answer. "
+                         "A correction in the person's next message goes through the route's existing "
+                         "correction path."}
 
 
 def _marked_route_proposals(route, jobs, interview):
@@ -2096,6 +2165,10 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
             if RP.is_framed_route(route) and step["state"] == "needs-interview":
                 root, record, output = _framed_cycle(route)
                 rows = _proposal_rows(route, jobs, root, record, output)
+                automatic = _automatic_direction(route, rows, output)
+                if automatic is not None:
+                    step = _automatic_frame_release(route, path, jobs, output, *automatic)
+            if RP.is_framed_route(route) and step["state"] == "needs-interview":
                 template = {**(step.get("interview_template") or {}), "questions": _interview_questions(rows)}
                 step = {**step, "interview_template": template,
                         "route_proposal_review": _proposal_review(route, path, jobs, rows),
@@ -2109,6 +2182,8 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
             result.update(frame_interview=step, gate="frame-review", task=request["text"])
             if step["state"] != "released":
                 return {**result, **step}
+            if step.get("direction_notice"):
+                result.update(direction_notice=step["direction_notice"], automatic_direction=True)
             owner_frame_launch_gate(SimpleNamespace(route_file=str(path)), "start", ROOT, jobs)
     if RP.is_framed_route(route):
         return _framed_settle(route, path, jobs, result, wait=wait, run=run, sleep=sleep, clock=clock)
