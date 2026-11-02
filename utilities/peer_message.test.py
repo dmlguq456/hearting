@@ -4106,6 +4106,497 @@ class HandoffAcceptanceTest(_TmpRootMixin, unittest.TestCase):
                     self.assertIn(verdict, line)
 
 
+class SupervisedHandoffTest(_TmpRootMixin, unittest.TestCase):
+    """A supervisor names the source; the sealed sender stays that observed source."""
+
+    def setUp(self):
+        super().setUp()
+        import session_tidy as tidy
+        import session_tidy_runner as runner
+        import dispatch_seat_handover as handover
+        self.tidy, self.runner, self.handover = tidy, runner, handover
+        self.steward = runner._handoff_steward()
+        self.steward.peer_message = peer_message
+        self.p_seat = tidy.session_seat(tidy._pane_seat_of("w1:p1"), "claude", "predecessor")
+        tidy.record_event(self.p_seat, "claude", "predecessor", "start", source="startup",
+                          cwd=str(self.tmp_root), transcript=str(self.tmp_root / "source.jsonl"))
+        self.identities = {
+            "w1:p1": {"harness": "claude", "session_id": "predecessor", "name": "old",
+                      "pane": "w1:p1", "server": "default",
+                      "foreground": {"pid": 11, "start": "101"}},
+            "w1:p2": {"harness": "codex", "session_id": "successor", "name": "new",
+                      "pane": "w1:p2", "server": "default",
+                      "foreground": {"pid": 22, "start": "202"}},
+        }
+        self.states = {"w1:p1": "idle", "w1:p2": "idle"}
+        self.successor_sid = "successor"
+        self.successor_pane = "w1:p2"
+        self.start_failure = False
+        self.start_calls = []
+        self.start_retained = []
+        self.bodies = []
+        self.store = self.steward.peer_obligations.ObligationStore(self.tmp_root / "obligations")
+
+        def current_candidate(pane, *, expected_harness=None, expected_sid=None,
+                              expected_name=None, require_process_session=False,
+                              target_observation=None, pane_info=None, native_address=None,
+                              **_kwargs):
+            ident = self.identities.get(pane)
+            if ident is None:
+                return None, "target-not-found"
+            ident = dict(ident)
+            if pane == self.successor_pane and self.successor_sid is None:
+                ident["session_id"] = None
+            session_id = peer_message.usable_session_id(ident.get("session_id"))
+            if expected_harness and ident.get("harness") != expected_harness:
+                return None, "target-identity-changed"
+            if expected_sid and session_id != expected_sid:
+                return None, "target-identity-changed"
+            if require_process_session and not session_id:
+                return None, "target-identity-unverified"
+            info = {"pane_id": pane,
+                    "foreground_processes": [{"pid": ident["foreground"]["pid"]}]}
+            return {"state": self.states.get(pane, "idle"), "harness": ident["harness"],
+                    "session_id": session_id, "pane": pane, "name": ident.get("name"),
+                    "_identity": dict(ident, session_id=session_id), "_pane_info": info,
+                    "_native_session_id": (session_id if require_process_session
+                                           else (session_id or None))}, None
+
+        def retire_target(pane):
+            ident = self.identities.get(pane)
+            if ident is None:
+                return ("agent-not-found",
+                        {"harness": "-", "session_id": "-", "name": pane, "pane": "-"}, 2, None)
+            return (self.states.get(pane, "idle"),
+                    {key: value for key, value in ident.items() if key != "foreground"}, 0, None)
+
+        def start_request(args):
+            self.start_calls.append({"kind": args.kind, "beside": args.beside,
+                                     "cwd": args.cwd, "name": args.name})
+            if self.start_failure:
+                print("started=false reason=herdr-start-error agent=codex name=x pane=-")
+                return 1
+            args.pane = self.successor_pane
+            self.steward._mark_seat_successor(
+                args.pane, args.beside, args.kind, self.successor_sid or "")
+            print(f"started=true agent={args.kind} name={args.name} pane={args.pane} "
+                  f"permission_mode=bypass session_id={self.successor_sid or '-'} managed=-")
+            return 0
+
+        patches = [
+            mock.patch.object(runner, "_handoff_steward", return_value=self.steward),
+            mock.patch.object(self.steward, "_retire_target", side_effect=retire_target),
+            mock.patch.object(self.steward, "_prompt_current_candidate",
+                              side_effect=current_candidate),
+            mock.patch.object(self.steward, "_retire_foreground",
+                              side_effect=lambda pane, *a, **kw:
+                              dict(self.identities[pane]["foreground"])),
+            mock.patch.object(self.steward, "_retire_pane_info", return_value=None),
+            mock.patch.object(self.steward, "_pid_identity_ok", return_value=True),
+            mock.patch.object(self.steward, "_native_opencode_turn", return_value=None),
+            mock.patch.object(self.steward, "_herdr_missing", return_value=False),
+            mock.patch.object(self.steward, "_current_session_identity",
+                              return_value=("supervisor", "claude")),
+            mock.patch.object(self.steward, "_start_request", side_effect=start_request),
+            mock.patch.object(self.steward, "_retain_start_failure",
+                              side_effect=lambda *a, **kw: self.start_retained.append(True)),
+            mock.patch.object(self.steward.peer_obligations, "ObligationStore",
+                              return_value=self.store),
+            mock.patch.object(self.steward.peer_obligations, "ensure_normal_runner"),
+            mock.patch.object(self.steward, "_HERDR_SESSION", None),
+        ]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def _run(self, argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = self.tidy.main(argv)
+        return code, [line for line in out.getvalue().splitlines() if line.strip()], err.getvalue()
+
+    def _write_source_card(self, body, prompt_seq, *, harness="claude", sid="predecessor",
+                           pane="w1:p1"):
+        seat = self.tidy.session_seat(self.tidy._pane_seat_of(pane), harness, sid)
+        return self.tidy.write_card(seat, harness, sid, body, cwd=str(self.tmp_root),
+                                    prompt_seq=prompt_seq)
+
+    def _advance(self, count, *, harness="claude", sid="predecessor", pane="w1:p1"):
+        seat = self.tidy.session_seat(self.tidy._pane_seat_of(pane), harness, sid)
+        for _ in range(count):
+            self.tidy.bump_prompt_seq(seat, harness, sid, self.tidy.now_epoch())
+
+    def _register_job(self, *, parent_sid="predecessor", parent_harness="claude",
+                      attempt="att-supervised"):
+        meta = {"attempt_id": attempt, "dispatch_depth": "1", "worker_type": "owner",
+                "parent_sid": parent_sid, "parent_harness": parent_harness,
+                "route_id": "rt-" + attempt, "route_hash": "sha256:" + attempt,
+                "route_node": "owner"}
+        self.jobs_path.write_text(
+            "now\trunning\t0\tjob\tlog\t"
+            + ",".join(f"{key}={value}" for key, value in meta.items()) + "\n")
+        return meta
+
+    def _pending_handoffs(self):
+        rows = []
+        for path in peer_message._pending_dir().glob("*.json"):
+            try:
+                row = peer_message._read_pending(path.stem)
+            except (OSError, ValueError):
+                continue
+            if row and row.get("handoff"):
+                rows.append(row)
+        return rows
+
+    def _pending_count(self):
+        return len(list(peer_message._pending_dir().glob("*.json")))
+
+    def _lineage_rows(self, pane):
+        return [row for row in self.tidy._read_ledger_lines(self.tidy._pane_seat_of(pane))
+                if row.get("event") == "handover" and row.get("source") == "retire"]
+
+    def _card_generations(self):
+        folder = self.tidy.state_root() / "cards"
+        if not folder.is_dir():
+            return {}
+        return {path.name: json.loads(path.read_text(encoding="utf-8"))["generation"]
+                for path in folder.glob("*.json")}
+
+    def _fake_prompt(self, args, *, expected_recipient=None, on_prepared=None, handoff=None,
+                     resolved_recipient=None, sender=None):
+        body = Path(args.body_file).read_text(encoding="utf-8")
+        self.bodies.append(body)
+        harness, sid = expected_recipient
+        recipient = {"harness": harness, "session_id": sid,
+                     "name": (resolved_recipient or {}).get("name")}
+        proof = None
+        if sid is None:
+            pane = resolved_recipient["pane"]
+            foreground = self.identities[pane]["foreground"]
+            recipient["pane_id"] = pane
+            proof = {"schema": "peer-first-input-process-v1", "harness": harness,
+                     "pane_id": pane, "pid": foreground["pid"],
+                     "start": foreground["start"],
+                     "pid_namespace": "pid:[4026531836]"}
+        from_identity = sender or {"harness": "claude", "session_id": "supervisor"}
+        _text, ref = peer_message.prepare_peer_message(
+            body, {"harness": from_identity["harness"],
+                   "session_id": from_identity["session_id"]},
+            recipient, defer=True, handoff=handoff, first_input_process=proof,
+            original_target=args.target, server="default")
+        if on_prepared:
+            on_prepared(ref)
+        print("prompted=true")
+        return 0
+
+    def test_supervisor_command_records_the_typed_cutover_and_reserves_retire(self):
+        meta = self._register_job()
+        self._write_source_card("진행 중: 카드 본문", prompt_seq=0)
+        with mock.patch.object(peer_message, "deliver_pending_codex",
+                               return_value={"status": "received"}), \
+             mock.patch.object(self.steward, "_codex_interrupt_start_gate", return_value=False), \
+             mock.patch.object(self.steward, "_record", wraps=self.steward._record) as recorded:
+            code, lines, stderr = self._run(["handoff", "--from", "w1:p1", "--kind", "codex"])
+        self.assertEqual(code, 0, (lines, stderr))
+        line = lines[-1]
+        self.assertTrue(line.startswith("started=true pane=w1:p2 session_id=successor"), line)
+        self.assertIn("source=claude:predeces", line)
+        self.assertIn("source_state=idle", line)
+        self.assertIn("card=current", line)
+        self.assertIn("transcript=none", line)
+        self.assertIn("lineage=recorded", line)
+        self.assertIn("prompted=true", line)
+
+        rows = self._pending_handoffs()
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual((row["from"]["harness"], row["from"]["session_id"],
+                          row["from"].get("pane_id")), ("claude", "predecessor", "w1:p1"))
+        # The sealed sender is the predecessor, so the peer ledger row names the
+        # source session's project, not the supervisor shell's working directory.
+        self.assertNotEqual(os.path.basename(os.getcwd()), os.path.basename(str(self.tmp_root)))
+        sent = [call.kwargs for call in recorded.call_args_list
+                if call.kwargs.get("transfer_ref") == row["ref"]]
+        self.assertEqual(len(sent), 1, recorded.call_args_list)
+        self.assertEqual(sent[0]["from_identity"],
+                         ("predecessor", "claude", os.path.basename(str(self.tmp_root))))
+        context = row["handoff"]
+        self.assertEqual(context["target"], "w1:p1")
+        self.assertEqual(context["predecessor"]["pane"], "w1:p1")
+        self.assertEqual(context["relayed_by"],
+                         {"harness": "claude", "session_id": "supervisor"})
+
+        ledger = self._lineage_rows("w1:p2")
+        self.assertEqual(len(ledger), 1)
+        self.assertEqual(ledger[0]["from"], {"harness": "claude", "sid": "predecessor"})
+        self.assertEqual((ledger[0]["harness"], ledger[0]["sid"]), ("codex", "successor"))
+        resolution = self.handover.resolve_recipient(
+            "seat-successor", session="predecessor", harness="claude")
+        self.assertEqual((resolution.session_id, resolution.harness, resolution.state),
+                         ("successor", "codex", "confirmed"))
+        self.assertEqual(self.handover.effective_parent(meta, self.jobs_path), "successor")
+
+        accepted, code = self.runner.accept_handoff(
+            row["ref"], (self.tidy._pane_seat_of("w1:p2"), "codex", "successor"))
+        self.assertEqual(code, 0, accepted)
+        self.assertIn("retire=reserved", accepted)
+        acceptance = peer_message._read_pending(row["ref"])["acceptance"]
+        duty = self.store.get(acceptance["retire_id"])
+        self.assertEqual(duty["intent"]["identity"]["pane"], "w1:p1")
+        self.assertEqual(duty["intent"]["requester"]["session_id"], "successor")
+
+    def test_existing_target_form_skips_a_new_start(self):
+        self._register_job()
+        self._write_source_card("진행 중: 카드", prompt_seq=0)
+        with mock.patch.object(self.tidy, "_lineage_transcript",
+                               return_value={"path": None, "status": "missing"}), \
+             mock.patch.object(self.steward, "cmd_prompt", side_effect=self._fake_prompt):
+            code, lines, stderr = self._run(["handoff", "--from", "w1:p1", "w1:p2"])
+        self.assertEqual(code, 0, (lines, stderr))
+        self.assertEqual(self.start_calls, [])
+        self.assertTrue(lines[-1].startswith("started=existing pane=w1:p2"), lines[-1])
+        self.assertIn("lineage=recorded", lines[-1])
+        row = self._pending_handoffs()[0]
+        self.assertEqual((row["from"]["harness"], row["from"]["session_id"]),
+                         ("claude", "predecessor"))
+        self.assertEqual(row["handoff"]["target"], "w1:p1")
+
+    def test_missing_card_with_a_transcript_seals_the_previous_conversation_line(self):
+        self._register_job()
+        self._advance(2)
+        transcript = {"path": "/short/source.jsonl", "status": "available"}
+        with mock.patch.object(self.tidy, "_lineage_transcript", return_value=transcript), \
+             mock.patch.object(self.steward, "cmd_prompt", side_effect=self._fake_prompt):
+            code, lines, stderr = self._run(["handoff", "--from", "w1:p1", "--kind", "codex"])
+        self.assertEqual(code, 0, (lines, stderr))
+        self.assertIn("card=composed", lines[-1])
+        self.assertIn("transcript=attached", lines[-1])
+        self.assertIn("lineage=recorded", lines[-1])
+        self.assertEqual(self.bodies[0].splitlines()[0],
+                         "이전 대화: claude predeces · 원문 /short/source.jsonl")
+        row = self._pending_handoffs()[0]
+        self.assertEqual(row["handoff"]["prompt_seq"], 2)
+        accepted, code = self.runner.accept_handoff(
+            row["ref"], (self.tidy._pane_seat_of("w1:p2"), "codex", "successor"))
+        self.assertEqual(code, 0, accepted)
+        self.assertIn("retire=reserved", accepted)
+
+    def test_stale_card_with_a_transcript_keeps_the_old_body_and_seals_at_the_frontier(self):
+        self._register_job()
+        card = self._write_source_card("진행 중: 오래된 카드", prompt_seq=0)
+        self._advance(2)
+        transcript = {"path": "/short/source.jsonl", "status": "available"}
+        with mock.patch.object(self.tidy, "_lineage_transcript", return_value=transcript), \
+             mock.patch.object(self.steward, "cmd_prompt", side_effect=self._fake_prompt):
+            code, lines, stderr = self._run(["handoff", "--from", "w1:p1", "--kind", "codex"])
+        self.assertEqual(code, 0, (lines, stderr))
+        self.assertIn("card=composed transcript=attached", lines[-1])
+        body = self.bodies[0]
+        self.assertEqual(body.splitlines()[0],
+                         "이전 대화: claude predeces · 원문 /short/source.jsonl")
+        self.assertIn("진행 중: 오래된 카드", body)
+        row = self._pending_handoffs()[0]
+        self.assertEqual(row["handoff"]["prompt_seq"], 2)
+        self.assertGreater(self.tidy.read_latest_card(self.p_seat)["generation"], card["generation"])
+        accepted, code = self.runner.accept_handoff(
+            row["ref"], (self.tidy._pane_seat_of("w1:p2"), "codex", "successor"))
+        self.assertEqual(code, 0, accepted)
+        self.assertIn("retire=reserved", accepted)
+
+    def test_stale_card_without_a_transcript_defers_retire_at_acceptance(self):
+        self._register_job()
+        self._write_source_card("진행 중: 오래된 카드", prompt_seq=0)
+        self._advance(2)
+        with mock.patch.object(self.tidy, "_lineage_transcript",
+                               return_value={"path": None, "status": "missing"}), \
+             mock.patch.object(self.steward, "cmd_prompt", side_effect=self._fake_prompt):
+            code, lines, stderr = self._run(["handoff", "--from", "w1:p1", "--kind", "codex"])
+        self.assertEqual(code, 0, (lines, stderr))
+        self.assertIn("card=kept-stale", lines[-1])
+        self.assertIn("transcript=none", lines[-1])
+        self.assertEqual(self.bodies[0], "진행 중: 오래된 카드\n")
+        row = self._pending_handoffs()[0]
+        self.assertEqual(row["handoff"]["prompt_seq"], 0)
+        accepted, code = self.runner.accept_handoff(
+            row["ref"], (self.tidy._pane_seat_of("w1:p2"), "codex", "successor"))
+        self.assertEqual(code, 0, accepted)
+        self.assertIn("retire=deferred", accepted)
+        self.assertIn("handoff-context-new-input", accepted)
+        self.assertFalse(peer_message._read_pending(row["ref"])["acceptance"]["settled"])
+
+    def test_no_card_and_no_transcript_starts_nothing(self):
+        self._register_job()
+        before_cards = self._card_generations()
+        before_lineage = len(self._lineage_rows("w1:p2"))
+        before_pending = self._pending_count()
+        before_duties = self.store.list()
+        with mock.patch.object(self.tidy, "_lineage_transcript",
+                               return_value={"path": None, "status": "missing"}), \
+             mock.patch.object(self.steward, "cmd_prompt", side_effect=self._fake_prompt):
+            code, lines, stderr = self._run(["handoff", "--from", "w1:p1", "--kind", "codex"])
+        self.assertEqual(code, 1, (lines, stderr))
+        self.assertIn("prompted=false reason=no-card", lines[-1])
+        self.assertEqual(self.start_calls, [])
+        self.assertEqual(self.bodies, [])
+        self.assertEqual(self._card_generations(), before_cards)
+        self.assertEqual(len(self._lineage_rows("w1:p2")), before_lineage)
+        self.assertEqual(self._pending_count(), before_pending)
+        self.assertEqual(self.store.list(), before_duties)
+
+    def test_start_failure_keeps_every_generation_lineage_pending_and_obligation(self):
+        self._register_job()
+        card = self._write_source_card("진행 중: 카드", prompt_seq=0)
+        self.start_failure = True
+        before_lineage = len(self._lineage_rows("w1:p2"))
+        before_pending = self._pending_count()
+        before_duties = self.store.list()
+        with mock.patch.object(self.tidy, "_lineage_transcript",
+                               return_value={"path": None, "status": "missing"}), \
+             mock.patch.object(self.steward, "cmd_prompt", side_effect=self._fake_prompt):
+            code, lines, stderr = self._run(["handoff", "--from", "w1:p1", "--kind", "codex"])
+        self.assertEqual(code, 1, (lines, stderr))
+        self.assertIn("started=false", lines[-1])
+        self.assertIn("herdr-start-error", lines[-1])
+        self.assertEqual(self.start_retained, [])
+        self.assertEqual(self.bodies, [])
+        self.assertEqual(self.tidy.read_latest_card(self.p_seat)["generation"], card["generation"])
+        self.assertEqual(len(self._lineage_rows("w1:p2")), before_lineage)
+        self.assertEqual(self._pending_count(), before_pending)
+        self.assertEqual(self.store.list(), before_duties)
+
+    def test_working_source_is_handed_over_immediately_with_the_working_line(self):
+        self._register_job()
+        self.states["w1:p1"] = "working"
+        self._write_source_card("진행 중: 카드", prompt_seq=0)
+        with mock.patch.object(self.tidy, "_lineage_transcript",
+                               return_value={"path": None, "status": "missing"}), \
+             mock.patch.object(self.steward, "cmd_prompt", side_effect=self._fake_prompt):
+            code, lines, stderr = self._run(["handoff", "--from", "w1:p1", "--kind", "codex"])
+        self.assertEqual(code, 0, (lines, stderr))
+        self.assertIn("source_state=working", lines[-1])
+        self.assertIn("card=composed", lines[-1])
+        self.assertEqual(
+            self.bodies[0].splitlines()[0],
+            "앞 세션 작업 중: claude predeces는 아직 하던 일을 진행 중입니다. "
+            "옛 창은 그 일이 끝난 뒤 닫힙니다.")
+        row = self._pending_handoffs()[0]
+        accepted, code = self.runner.accept_handoff(
+            row["ref"], (self.tidy._pane_seat_of("w1:p2"), "codex", "successor"))
+        self.assertEqual(code, 0, accepted)
+        self.assertIn("retire=reserved", accepted)
+
+    def test_sidless_successor_reports_at_accept_and_records_one_row_on_acceptance(self):
+        self._register_job()
+        self._write_source_card("진행 중: 카드", prompt_seq=0)
+        self.successor_sid = None
+        with mock.patch.object(self.tidy, "_lineage_transcript",
+                               return_value={"path": None, "status": "missing"}), \
+             mock.patch.object(self.steward, "cmd_prompt", side_effect=self._fake_prompt):
+            code, lines, stderr = self._run(["handoff", "--from", "w1:p1", "--kind", "codex"])
+        self.assertEqual(code, 0, (lines, stderr))
+        self.assertIn("session_id=-", lines[-1])
+        self.assertIn("lineage=at-accept", lines[-1])
+        self.assertEqual(self._lineage_rows("w1:p2"), [])
+        row = self._pending_handoffs()[0]
+        proof = row["first_input_process"]
+        with mock.patch.object(peer_message, "_first_input_process_is_current", return_value=True):
+            bound = peer_message.bind_pending_recipient(
+                row["ref"], {"harness": "codex", "session_id": "first-session",
+                             "pane_id": "w1:p2"}, process_proof=proof)
+        self.assertIsNotNone(bound)
+        self.identities["w1:p2"]["session_id"] = "first-session"
+        self.successor_sid = "first-session"
+        accepted, code = self.runner.accept_handoff(
+            row["ref"], (self.tidy._pane_seat_of("w1:p2"), "codex", "first-session"))
+        self.assertEqual(code, 0, accepted)
+        self.assertEqual(len(self._lineage_rows("w1:p2")), 1)
+
+    def test_other_harness_pairs_record_the_same_source_retire_row(self):
+        cases = (("codex", "claude", "w2:p1", "w2:p2", "cx-old", "cl-new"),
+                 ("opencode", "codex", "w3:p1", "w3:p2", "oc-old", "cx-new"))
+        for index, (p_harness, s_harness, p_pane, s_pane, p_sid, s_sid) in enumerate(cases):
+            with self.subTest(predecessor=p_harness, successor=s_harness):
+                self.identities[p_pane] = {"harness": p_harness, "session_id": p_sid,
+                                           "name": "old", "pane": p_pane, "server": "default",
+                                           "foreground": {"pid": 31 + index, "start": str(301 + index)}}
+                self.identities[s_pane] = {"harness": s_harness, "session_id": s_sid,
+                                           "name": "new", "pane": s_pane, "server": "default",
+                                           "foreground": {"pid": 41 + index, "start": str(401 + index)}}
+                self.states[p_pane] = self.states[s_pane] = "idle"
+                p_seat = self.tidy.session_seat(
+                    self.tidy._pane_seat_of(p_pane), p_harness, p_sid)
+                self.tidy.record_event(p_seat, p_harness, p_sid, "start", source="startup",
+                                       cwd=str(self.tmp_root))
+                self._write_source_card("진행 중: 카드", prompt_seq=0,
+                                        harness=p_harness, sid=p_sid, pane=p_pane)
+                self._register_job(parent_sid=p_sid, parent_harness=p_harness,
+                                   attempt=f"att-pair-{index}")
+                self.successor_pane, self.successor_sid = s_pane, s_sid
+                with mock.patch.object(self.tidy, "_lineage_transcript",
+                                       return_value={"path": None, "status": "missing"}), \
+                     mock.patch.object(self.steward, "cmd_prompt",
+                                       side_effect=self._fake_prompt):
+                    code, lines, stderr = self._run(
+                        ["handoff", "--from", p_pane, "--kind", s_harness])
+                self.assertEqual(code, 0, (lines, stderr))
+                self.assertIn(f"source={p_harness}:{p_sid[:8]}", lines[-1])
+                self.assertIn("lineage=recorded", lines[-1])
+                ledger = self._lineage_rows(s_pane)
+                self.assertEqual(len(ledger), 1)
+                self.assertEqual(ledger[0]["from"], {"harness": p_harness, "sid": p_sid})
+                self.assertEqual((ledger[0]["harness"], ledger[0]["sid"]), (s_harness, s_sid))
+
+    def test_closed_source_reports_target_not_found_and_writes_nothing(self):
+        self.identities.pop("w1:p1")
+        before_pending = len(self._pending_handoffs())
+        with mock.patch.object(self.steward, "cmd_prompt", side_effect=self._fake_prompt):
+            code, lines, stderr = self._run(["handoff", "--from", "w1:p1", "--kind", "codex"])
+        self.assertEqual(code, 5, (lines, stderr))
+        self.assertIn("prompted=false reason=target-not-found", lines[-1])
+        self.assertEqual(self.start_calls, [])
+        self.assertEqual(self.bodies, [])
+        self.assertEqual(self._lineage_rows("w1:p2"), [])
+        self.assertEqual(len(self._pending_handoffs()), before_pending)
+
+    def test_already_handed_off_source_keeps_the_existing_not_holder_result(self):
+        self._register_job()
+        card = self._write_source_card("진행 중: 카드", prompt_seq=0)
+        prior = self.handover.record_retire_handover(
+            "predecessor", "claude", "other", "codex", jobs=self.jobs_path,
+            successor_seat=self.tidy._pane_seat_of("w1:p9"))
+        self.assertIsNotNone(prior)
+        with mock.patch.object(self.tidy, "_lineage_transcript",
+                               return_value={"path": None, "status": "missing"}), \
+             mock.patch.object(self.steward, "cmd_prompt", side_effect=self._fake_prompt):
+            code, lines, stderr = self._run(["handoff", "--from", "w1:p1", "--kind", "codex"])
+        self.assertEqual(code, 5, (lines, stderr))
+        self.assertTrue(lines[-1].startswith("started=true pane=w1:p2"), lines[-1])
+        self.assertIn("prompted=false reason=handoff-source-not-holder exit=5", lines[-1])
+        self.assertIn("lineage=none", lines[-1])
+        self.assertEqual(self._pending_handoffs(), [])
+        self.assertEqual(self._pending_count(), 0)
+        self.assertEqual(self.bodies, [])
+        self.assertEqual(self.tidy.read_latest_card(self.p_seat)["generation"],
+                         card["generation"])
+        self.assertEqual(self._lineage_rows("w1:p2"), [])
+        self.assertEqual(len(self._lineage_rows("w1:p9")), 1)
+
+    def test_sidless_human_supervisor_records_only_an_informational_relay(self):
+        self.steward._current_session_identity.return_value = ("", "unknown")
+        self._register_job()
+        self._write_source_card("진행 중: 카드", prompt_seq=0)
+        with mock.patch.object(self.tidy, "_lineage_transcript",
+                               return_value={"path": None, "status": "missing"}), \
+             mock.patch.object(self.steward, "cmd_prompt", side_effect=self._fake_prompt):
+            code, lines, stderr = self._run(["handoff", "--from", "w1:p1", "--kind", "codex"])
+        self.assertEqual(code, 0, (lines, stderr))
+        row = self._pending_handoffs()[0]
+        self.assertEqual(row["handoff"]["relayed_by"],
+                         {"harness": "unknown", "session_id": None})
+        self.assertEqual((row["from"]["harness"], row["from"]["session_id"]),
+                         ("claude", "predecessor"))
+
+
 class PendingLockLifetimeTest(_TmpRootMixin, unittest.TestCase):
     def lock_path(self, key):
         return peer_message._pending_dir() / (".lock-" + key)
