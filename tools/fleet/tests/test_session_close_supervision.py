@@ -537,5 +537,76 @@ class Watch915dTest(CloseSupervisionBase):
         popen.assert_called_once()
 
 
+class ClearedSeatTest(CloseSupervisionBase):
+    """hearting 11-02: ``steward=limited repo=hearting holders=claude:8d7111b4,
+    hearting-supervisor-claude limit=2``.
+
+    8d7111b4 /cleared on 10-31 in its own pane, before the start hook released on a
+    confirmed /clear. No live process names it any more and the census is incomplete,
+    so its liveness stays unknown, and its successor two clears later is the supervisor
+    in that same pane: one seat held two slots. The steward-check pass reads the same
+    confirmed same-seat /clear and lets the predecessor's role go."""
+
+    CHAIN = [sid(label) for label in ("8d7111b4", "c0696404", "adb5fe90")]
+    SEAT = "wB:pA6"
+    NEWCOMER = sid("b6b6b6b6")
+
+    def build(self, *, edge_seat=None):
+        stale, current = self.CHAIN[0], self.CHAIN[-1]
+        self.holder("claude", stale, label=self.SEAT)
+        self.holder("claude", current, label=self.SEAT, generation="gen-current")
+        self.succession(*self.CHAIN, seat_label=edge_seat or self.SEAT)
+        self.claude_process(4100, native=current)
+        self.unresolved_daemon()
+        self.requester_row("claude", current)
+        self.requester_row("claude", self.NEWCOMER)
+        return stale, current
+
+    def runner_pass(self, harness, session):
+        store = peer_obligations.ObligationStore(self.base / "obligations")
+        duty = store.create(SC.duty_id(harness, session), SC.DUTY_KIND,
+                            {"harness": harness, "session_id": session}, {"carrier": "x", "schema": 1})
+        duty = store.update(duty["id"], state="pending", observation=SC._new_observation(1000.0))
+        SC.advance(duty, store, now=1001.0)
+        return store.get(duty["id"])
+
+    def test_the_cleared_predecessor_leaves_its_slot_after_one_pass(self):
+        stale, current = self.build()
+        self.assertEqual(self.liveness("claude", stale), "unknown")
+        self.assertEqual(self.holder_state(self.supervision(), "claude", stale), ("unknown", True))
+        self.assertEqual(self.grant("claude", self.NEWCOMER)["status"], "limited")
+
+        duty = self.runner_pass("claude", stale)
+
+        self.assertEqual((duty["state"], duty["observation"]["reason"]), ("complete", "cleared"))
+        self.assertFalse(self.holds_role("claude", stale))
+        self.assertTrue(self.holds_role("claude", current))
+        self.assertIsNone(self.holder_state(self.supervision(), "claude", stale))
+        self.assertEqual(self.grant("claude", self.NEWCOMER)["status"], "granted")
+
+    def test_the_successor_in_the_same_seat_keeps_its_role(self):
+        _stale, current = self.build()
+        duty = self.runner_pass("claude", current)
+        self.assertNotEqual(duty["state"], "complete")
+        self.assertTrue(self.holds_role("claude", current))
+
+    def test_a_clear_recorded_on_another_seat_releases_nothing(self):
+        stale, _current = self.build(edge_seat="wB:pZZ")
+        self.runner_pass("claude", stale)
+        self.assertTrue(self.holds_role("claude", stale))
+
+    def test_a_predecessor_live_elsewhere_keeps_its_role(self):
+        stale, _current = self.build()
+        self.claude_process(4200, native=stale)
+        self.runner_pass("claude", stale)
+        self.assertTrue(self.holds_role("claude", stale))
+
+    def test_an_ambiguous_lineage_releases_nothing(self):
+        stale, _current = self.build()
+        self.succession(stale, sid("f0f0f0f0"), seat_label="fork-seat")
+        self.runner_pass("claude", stale)
+        self.assertTrue(self.holds_role("claude", stale))
+
+
 if __name__ == "__main__":
     unittest.main()

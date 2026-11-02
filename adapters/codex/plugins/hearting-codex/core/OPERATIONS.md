@@ -2546,8 +2546,11 @@ a confirmed same-seat `/clear` (for what the successor did not take over), and a
 a steward-check pass saw gone. The last one needs the seat's pane, taken from a watch arm
 of that holder, to be absent from a complete pane census while no evidence says the
 session still lives; unknown liveness alone releases nothing, and a pane now holding another
-session does not count as absence. What a confirmed same-seat successor took over carries
-on. Any other end leaves the role where it is. Release, a
+session does not count as absence. A steward-check pass also applies a confirmed
+same-seat `/clear` the start hook missed: the role's own seat ledger holds the holder's
+clear edge, the shared lineage resolves the holder to another chain end, and the holder
+is not live; an ambiguous lineage concludes nothing. What a confirmed same-seat
+successor took over carries on. Any other end leaves the role where it is. Release, a
 holder change (a confirmed handover moves the schedule to the successor) or a proven
 session end completes the duty and retires its undelivered notice through the existing
 `keep_claim`/`reject_claimed` path, so nothing stays addressed to a former holder or is

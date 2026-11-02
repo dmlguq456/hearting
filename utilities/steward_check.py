@@ -300,18 +300,57 @@ def _window_closed(harness: str, session_id: str) -> bool:
     return _session_liveness(harness, session_id, _agents(), _end_observation()) != "live"
 
 
-def _release_if_window_closed(duty, store, harness: str, session_id: str, now: float) -> bool:
+def _seat_cleared(harness: str, session_id: str) -> bool:
+    """True only when every seat this holder's role sits in recorded the holder's own
+    confirmed same-harness ``/clear`` and the session is not ``live``.
+
+    This is the confirmed same-seat ``/clear`` the session-tidy start hook releases on,
+    read again by a later pass from the same shared lineage: the seat's own ledger holds
+    the edge out of this session and the lineage resolves the session to a different
+    chain end. Without this pass a clear that the hook missed (one taken before that
+    release existed, or while the lineage was momentarily unresolved) keeps the
+    predecessor's role, duty and watches for good, because the successor keeps the pane
+    occupied. An ambiguous lineage, a role re-granted in another seat or a live session
+    is left as it is."""
+    keys = _holder_seat_keys(harness, session_id)
+    if not keys:
+        return False
     try:
-        if not _window_closed(harness, session_id):
+        import dispatch_seat_handover as handover
+        import session_tidy as tidy
+        graph = handover.lineage_graph()
+        end, state = handover._chain_end(graph, harness, session_id)
+        if state != "successor" or end == session_id:
+            return False
+        for key in keys:
+            rows = graph.ledger_rows.get(key) or ()
+            if not any((tidy.tidy_lineage_edge(row) or ())[:2] == (harness, session_id)
+                       for row in rows):
+                return False
+    except Exception:  # noqa: BLE001 - unreadable lineage concludes nothing
+        return False
+    return _session_liveness(harness, session_id, _agents(), _end_observation()) != "live"
+
+
+def _release_if_window_closed(duty, store, harness: str, session_id: str, now: float) -> bool:
+    """Release a role whose session closed through an ordinary path the hook did not see:
+    its seat pane vanished (``window-closed``) or its seat moved on by a confirmed
+    ``/clear`` (``cleared``). The release itself is the one ``release_closed_session``."""
+    try:
+        if _window_closed(harness, session_id):
+            reason = "window-closed"
+        elif _seat_cleared(harness, session_id):
+            reason = "cleared"
+        else:
             return False
         module = getattr(_collector(), "_peer_message_module", None)
         peer_message = module() if module else None
         if peer_message is None:
             return False
-        peer_message.release_closed_session(harness, session_id, reason="window-closed")
+        peer_message.release_closed_session(harness, session_id, reason=reason)
         latest = store.get(duty["id"])
         if _active(latest):
-            _retire(latest, store, "window-closed", now=now)
+            _retire(latest, store, reason, now=now)
         return True
     except Exception:  # noqa: BLE001 - the next pass decides again
         return False
