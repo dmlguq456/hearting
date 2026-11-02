@@ -896,10 +896,11 @@ def decide_continuation(route=None, *, action, jobs=None, owner_attempt_id=None,
         # follows the node lineage: a correction always changes the reviewed
         # content, so a review whose lineage ends in a blocking verdict checks
         # that 🔴 list and the delta instead of auditing the new subject from
-        # scratch. Attempt history alone (crash, capacity death, invalid
+        # scratch. A list the owner already disposed (owner-closure) is not
+        # open, and attempt history alone (crash, capacity death, invalid
         # envelope) never establishes a prior judgment.
         lineage_closure = bool(source_aware and not verdicts and node.get("kind") == "review-worker"
-                               and _ROUND.last_verdict_blocking(rows, worker_type))
+                               and _ROUND.open_blocking_verdict(rows, worker_type) is not None)
         round_kind = "closure-check" if closure or lineage_closure else "correction" if verdicts else "first"
         budget = _ROUND.RoundBudget(len(verdicts), counted, budget_kinds_for_streak.count("verdict-less"), cap, state,
             len(rows) + 1, len(rows) + 1 if rows else 0,

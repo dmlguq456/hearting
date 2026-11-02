@@ -217,6 +217,17 @@ class RoundBudgetTest(unittest.TestCase):
         self.assertEqual((third.state, third.verdict_rounds, third.round_kind),
                          ("admit", 0, "closure-check"))
 
+        # A list the owner already disposed by owner-closure is not open: the
+        # corrected subject gets an independent first review again.
+        disposed_a = row("done", "completed-marker", failure_class="fail", extra={
+            "attempt_id": "att-review-A-closed", "review_subject_digest": "subject-A",
+            "review_gate_closure": "owner-closure", "review_independence": "owner-overridden"})
+        self.assertTrue(CAP.last_verdict_blocking([blocked_a, disposed_a], "review"))
+        self.assertIsNone(CAP.open_blocking_verdict([blocked_a, disposed_a], "review"))
+        self.assertEqual(AUTH.decide_continuation(route(cap=2), action="round", node=node,
+            rows=[blocked_a, disposed_a], facts=corrected).budget.round_kind, "first")
+        self.assertEqual(CAP.open_blocking_verdict([blocked_a, crashed], "review"), blocked_a[1])
+
         passed_a = row("done", "completed-marker", extra={
             "attempt_id": "att-review-A-pass", "review_subject_digest": "subject-A"})
         after_pass = AUTH.decide_continuation(route(cap=2), action="round", node=node,
@@ -569,6 +580,25 @@ class RoundProtocolParityTest(unittest.TestCase):
                 else:
                     self.assertIn("full execution of the original assigned task and scope", block)
                     self.assertNotIn("independent first review", block)
+
+    def test_closure_materials_skip_a_disposed_list_and_name_an_unrecorded_delta(self):
+        dispatch_node_spec = importlib.util.spec_from_file_location(
+            "review_round_cap_closure_materials", ROOT / "utilities/dispatch-node.py")
+        dispatch_node = importlib.util.module_from_spec(dispatch_node_spec)
+        dispatch_node_spec.loader.exec_module(dispatch_node)
+        cols = ["2026-11-02T00:00:00Z", "done", "/repo", "/wt", "slug-r1"]
+        blocked = {"note": "completed-review-blocking", "attempt_id": "att-review-1", "worker_type": "review"}
+        closed = {"note": "completed-marker", "failure_class": "fail", "attempt_id": "att-review-2",
+                  "worker_type": "review", "review_gate_closure": "owner-closure",
+                  "review_independence": "owner-overridden"}
+        with tempfile.TemporaryDirectory() as tmp:
+            jobs = Path(tmp) / "jobs.log"
+            jobs.write_text("", encoding="utf-8")
+            self.assertEqual(dispatch_node.closure_materials(
+                [(cols, blocked), (cols, closed)], "review", jobs=jobs, current_manifest=()), "")
+            unrecorded = dispatch_node.closure_materials([(cols, blocked)], "review", jobs=jobs,
+                                                         current_manifest=())
+        self.assertIn("Delta since that review: not recorded for that attempt", unrecorded)
 
     def test_first_round_renders_no_block(self):
         dispatch_node_spec = importlib.util.spec_from_file_location(

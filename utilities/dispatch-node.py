@@ -578,19 +578,14 @@ def _decoded_artifact(encoded):
 def closure_materials(rows, worker_type, *, jobs=None, current_manifest=None):
  """Exact inputs a closure check reads, from records the runtime already keeps.
 
- The latest verdict of the lineage, when it is a blocking review, names its
+ The lineage's open blocking verdict (`open_blocking_verdict`: not one the
+ owner already disposed) names its
  review artifact (`review_artifact_b64`) and its sealed source binding; the
  binding manifest against the admitted subject's manifest is the delta. Only
  paths are rendered, never file bodies; an unreadable record renders nothing.
  """
- prior = None
- for cols, meta in reversed(rows):
-  status = cols[1] if isinstance(cols, (list, tuple)) else cols
-  if REVIEW_ROUND_CAP.classify_round_row(
-    status, meta, worker_type=meta.get("worker_type") or worker_type) == "verdict":
-   if REVIEW_ROUND_CAP.last_verdict_blocking([(status, meta)], worker_type):
-    prior = meta
-   break
+ prior = REVIEW_ROUND_CAP.open_blocking_verdict(
+  [(cols[1] if isinstance(cols, (list, tuple)) else cols, meta) for cols, meta in rows], worker_type)
  if prior is None:
   return ""
  lines = []
@@ -617,6 +612,9 @@ def closure_materials(rows, worker_type, *, jobs=None, current_manifest=None):
     lines.append(f"- Delta since that review{since}: {shown}" + (f" (+{more} more)" if more > 0 else ""))
    else:
     lines.append(f"- Delta since that review{since}: no reviewed path changed")
+  else:
+   lines.append("- Delta since that review: not recorded for that attempt; read it with "
+                "`git log`/`git diff` from the review's time before judging the delta")
  return "".join(line + "\n" for line in lines)
 
 
