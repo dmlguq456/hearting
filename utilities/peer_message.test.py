@@ -719,6 +719,73 @@ class F100cSenderAndStewardTest(unittest.TestCase):
             harness="claude", session_id="sid-a")), 0)
         self.assertEqual(peer_message.read_steward_markers(), {})
 
+    def _closed_session_fixture(self, relations_by_call, watches=()):
+        import dispatch_seat_handover as handover
+        released = []
+
+        def fake_release(seat, harness, sid, generation, relation=None):
+            released.append((harness, sid, generation))
+            return True
+
+        calls = iter(relations_by_call)
+        patches = [
+            mock.patch.object(handover, "resolved_steward_relations",
+                              side_effect=lambda *a, **k: next(calls)),
+            mock.patch.object(handover, "record_steward_release", side_effect=fake_release),
+            mock.patch.object(handover, "resolved_watch_references", return_value=list(watches)),
+            mock.patch.object(peer_message, "_steward_check")]
+        mocks = [patch.start() for patch in patches]
+        for patch in patches:
+            self.addCleanup(patch.stop)
+        return released, mocks[3]
+
+    @staticmethod
+    def _role(holder, origin="sid-a", released=False):
+        return {"generation": "g1", "seat_key": "k1", "released": released,
+                "origin": {"harness": "claude", "sid": origin},
+                "holder": {"harness": "claude", "sid": holder}}
+
+    def test_release_closed_session_releases_the_roles_the_session_holds(self):
+        ts = "2026-11-02T00:00:00Z"
+        self.assertTrue(peer_message.mark_steward("claude", "sid-a", {"harness": "unknown", "name": "-"},
+                                                  "explicit", ts, source="explicit"))
+        root = str(peer_message.peer_state_root())
+        released, check = self._closed_session_fixture(
+            [[self._role("sid-a")], []],
+            watches=[{"watch_id": "w1", "storage_root": root},
+                     {"watch_id": "w2", "storage_root": "/elsewhere"}])
+        settle = mock.Mock(return_value=True)
+        summary = peer_message.release_closed_session("claude", "sid-a", reason="retired",
+                                                      settle_watch=settle)
+        self.assertEqual(released, [("claude", "sid-a", "g1")])
+        self.assertEqual(summary, {"roles": 1, "marker": "removed", "watches": 1, "skipped": 1})
+        self.assertFalse(peer_message.steward_marker_path("claude", "sid-a").exists())
+        settle.assert_called_once_with("w1")
+        check.assert_called_once_with("settle_session", "claude", "sid-a", reason="retired")
+
+    def test_release_closed_session_leaves_a_role_already_handed_to_a_successor(self):
+        ts = "2026-11-02T00:00:00Z"
+        self.assertTrue(peer_message.mark_steward("claude", "sid-a", {"harness": "unknown", "name": "-"},
+                                                  "explicit", ts, source="explicit"))
+        released, check = self._closed_session_fixture(
+            [[self._role("sid-new")], [self._role("sid-new")]])
+        summary = peer_message.release_closed_session("claude", "sid-a", reason="retired",
+                                                      settle_watch=mock.Mock())
+        self.assertEqual(released, [])
+        self.assertEqual((summary["roles"], summary["marker"]), (0, "kept"))
+        self.assertTrue(peer_message.steward_marker_path("claude", "sid-a").exists())
+        check.assert_not_called()
+
+    def test_release_closed_session_reports_unresolved_roles_and_keeps_going(self):
+        import dispatch_seat_handover as handover
+        released, _check = self._closed_session_fixture([[self._role("sid-a")]])
+        with mock.patch.object(handover, "record_steward_release", return_value=False):
+            watch = mock.Mock(return_value=True)
+            summary = peer_message.release_closed_session("claude", "sid-a", reason="retired",
+                                                          settle_watch=watch)
+        self.assertEqual(summary["roles"], "unresolved")
+        self.assertEqual(released, [])
+
     def test_schema_version_2_only_when_every_entry_carries_a_source(self):
         path = self._write_marker("claude", "sid-a", {
             "h": {"harness": "claude", "session_id": "h", "name": "h", "kind": "handoff", "ts": "1"}})

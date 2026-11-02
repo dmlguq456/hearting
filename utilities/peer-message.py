@@ -4513,55 +4513,74 @@ def _record_validated_receiver_notice(trailer, recipient, project, summary, refs
     return _record(args, exact_receiver_evidence=proof)
 
 
+def _release_role_relations(harness, session_id, *, seat=None, holder_only=False):
+    """Revoke the role generations ``session_id`` is bound to; return ``(selected, fresh)``.
+
+    ``selected`` counts the relations chosen for release (already-released ones are
+    idempotent), ``fresh`` counts those this call actually revoked. ``holder_only``
+    narrows the choice to relations this session currently holds, so a role that was
+    already handed to a successor (origin is this session, holder is not) stays.
+    A relation without a seat key is skipped. Failures raise ``RuntimeError``.
+    """
+    import dispatch_seat_handover as handover
+    import session_tidy as tidy
+
+    path = steward_marker_path(harness, session_id)
+    relations = handover.resolved_steward_relations(include_released=True)
+    marker = tidy.read_json(path)
+    if isinstance(marker, dict) and is_steward_marker(marker):
+        key = marker.get("seat_key") or getattr(seat, "key", None)
+        if key:
+            # Preserve the original own-marker path if unrelated global
+            # discovery is unavailable; interpretation stays in the common reader.
+            scoped = handover.resolved_steward_relations(seat_key=str(key), include_released=True)
+            if not any((row.get("origin") or {}) == {"harness": harness, "sid": session_id}
+                       and row.get("generation") == handover.steward_marker_generation(marker)
+                       for row in scoped):
+                raise RuntimeError("steward-release-relation-unresolved")
+            known = {handover._role_identity(row) for row in relations}
+            relations += [row for row in scoped if handover._role_identity(row) not in known]
+    relations_by_seat = {}
+    for relation in relations:
+        origin = relation.get("origin") or {}
+        holder = relation.get("holder") or {}
+        held = holder.get("harness") == harness and holder.get("sid") == session_id
+        originated = origin.get("harness") == harness and origin.get("sid") == session_id
+        if held or (originated and not holder_only):
+            key = relation.get("seat_key") or getattr(seat, "key", None)
+            if key and relation.get("generation"):
+                bound = dict(relation, seat_key=str(key))
+                relations_by_seat.setdefault(str(key), []).append(bound)
+
+    fresh = 0
+    for key, selected in sorted(relations_by_seat.items()):
+        with tidy.seat_lock(key):
+            ledger_seat = tidy.Seat("pane", key)
+            for relation in selected:
+                if not handover.record_steward_release(
+                        ledger_seat, harness, session_id,
+                        relation["generation"], relation=relation):
+                    raise RuntimeError("steward-release-relation-unresolved")
+                if not relation.get("released"):
+                    fresh += 1
+    return sum(len(rows) for rows in relations_by_seat.values()), fresh
+
+
 def cmd_release(args):
     """Release this session's role generations before removing its marker projection."""
     path = steward_marker_path(args.harness, args.session_id)
     try:
         import dispatch_seat_handover as handover
-        import session_tidy as tidy
 
         seat = handover.pane_seat(os.environ, args.harness, args.session_id)
-
-        relations = handover.resolved_steward_relations(include_released=True)
-        marker = tidy.read_json(path)
-        if isinstance(marker, dict) and is_steward_marker(marker):
-            key = marker.get("seat_key") or getattr(seat, "key", None)
-            if key:
-                # Preserve the original own-marker path if unrelated global
-                # discovery is unavailable; interpretation stays in the common reader.
-                scoped = handover.resolved_steward_relations(seat_key=str(key), include_released=True)
-                if not any((row.get("origin") or {}) == {"harness": args.harness, "sid": args.session_id}
-                           and row.get("generation") == handover.steward_marker_generation(marker)
-                           for row in scoped):
-                    raise RuntimeError("steward-release-relation-unresolved")
-                known = {handover._role_identity(row) for row in relations}
-                relations += [row for row in scoped if handover._role_identity(row) not in known]
-        relations_by_seat = {}
-        for relation in relations:
-            origin = relation.get("origin") or {}
-            holder = relation.get("holder") or {}
-            if ((origin.get("harness") == args.harness and origin.get("sid") == args.session_id)
-                    or (holder.get("harness") == args.harness and holder.get("sid") == args.session_id)):
-                key = relation.get("seat_key") or getattr(seat, "key", None)
-                if key and relation.get("generation"):
-                    bound = dict(relation, seat_key=str(key))
-                    relations_by_seat.setdefault(str(key), []).append(bound)
-
-        for key, relations in sorted(relations_by_seat.items()):
-            with tidy.seat_lock(key):
-                ledger_seat = tidy.Seat("pane", key)
-                for relation in relations:
-                    if not handover.record_steward_release(
-                            ledger_seat, args.harness, args.session_id,
-                            relation["generation"], relation=relation):
-                        raise RuntimeError("steward-release-relation-unresolved")
+        selected, _fresh = _release_role_relations(args.harness, args.session_id, seat=seat)
 
         try:
             # destructive-ok: reason=caller-requested release after exact generation tombstone; boundary=<dispatch-state-root>/peer-steward/<harness>/<sid>.json
             path.unlink()
             result = "released"
         except FileNotFoundError:
-            result = "released" if relations_by_seat else "not-marked"
+            result = "released" if selected else "not-marked"
         if result == "released":
             _steward_check("settle_session", args.harness, args.session_id,
                            reason="role-released")
@@ -4572,6 +4591,56 @@ def cmd_release(args):
         print(f"peer-message release failed: {exc}", file=sys.stderr)
         return 1
     return 0
+
+
+def release_closed_session(harness, session_id, *, reason, settle_watch=None):
+    """Let go of everything a closed session still held: the roles it is the holder of,
+    its marker when no role of it remains, its steward-check duty, and the watches it
+    supervised. One routine for retire, a confirmed ``/clear`` and a confirmed lost window.
+
+    Only relations this session *holds* are revoked; a role already handed to a
+    confirmed successor stays with that successor. A relation failure is reported as
+    ``roles="unresolved"`` and the rest still runs. ``OSError`` propagates so the
+    caller can retry the whole (idempotent) routine."""
+    import dispatch_seat_handover as handover
+
+    summary = {"roles": 0, "marker": "absent", "watches": 0, "skipped": 0}
+    try:
+        selected, fresh = _release_role_relations(harness, session_id, holder_only=True)
+        summary["roles"] = selected
+    except RuntimeError:
+        selected, fresh = 0, 0
+        summary["roles"] = "unresolved"
+    path = steward_marker_path(harness, session_id)
+    if path.exists():
+        remaining = [
+            row for row in handover.resolved_steward_relations(include_released=False)
+            if any((row.get(field) or {}) == {"harness": harness, "sid": session_id}
+                   for field in ("origin", "holder"))]
+        if remaining or summary["roles"] == "unresolved":
+            summary["marker"] = "kept"
+        else:
+            try:
+                # destructive-ok: reason=closed session released every role it held; boundary=<dispatch-state-root>/peer-steward/<harness>/<sid>.json
+                path.unlink()
+                summary["marker"] = "removed"
+            except FileNotFoundError:
+                summary["marker"] = "absent"
+    if selected:
+        _steward_check("settle_session", harness, session_id, reason=reason)
+    state_root = str(peer_state_root())
+    for watch in handover.resolved_watch_references(harness=harness, sid=session_id):
+        if str(watch.get("storage_root")) != state_root:
+            summary["skipped"] += 1
+            continue
+        if settle_watch is None:
+            # Loaded only when a watch is there to settle; most closed sessions supervise none.
+            settle_watch = _peer_steward_module().settle_steward_exited_watch
+        if settle_watch(watch["watch_id"]):
+            summary["watches"] += 1
+        else:
+            summary["skipped"] += 1
+    return summary
 
 
 def cmd_prune_steward_markers(args):

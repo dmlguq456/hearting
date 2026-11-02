@@ -533,6 +533,93 @@ class RecipientLifetimeTest(unittest.TestCase):
                 self.assertEqual(census.state("claude", "nested-sid"), "alive")
                 self.assertEqual(census.state("claude", "gone-sid"), "ended")
 
+    def _lineage_process(self, root, number, *, native, taps=(), argv=("claude",), home=None):
+        proc, home = self._fake_runtime(root, number, argv=argv, home=home)
+        if native:
+            (home / "sessions" / f"{number}.json").write_text(json.dumps({
+                "pid": number, "procStart": str(number), "sessionId": native}))
+        if taps:
+            (home / ".statusline").mkdir(exist_ok=True)
+            for sid in taps:
+                (home / ".statusline" / f"{sid}.json").write_text(json.dumps({
+                    "pid": number, "proc_start": str(number), "session_id": sid}))
+        return home
+
+    def _incomplete_with_daemon(self, root):
+        # An unresolved Claude-shaped process keeps the whole census incomplete.
+        self._fake_runtime(root, 999, argv=("claude", "--permission-mode", "bypassPermissions"))
+
+    @staticmethod
+    def _chain(mapping):
+        return lambda harness, sid: (mapping[sid], "successor") if sid in mapping else (sid, "self")
+
+    def test_same_process_stale_claim_with_confirmed_successor_is_ended_even_if_incomplete(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "proc"
+            self._fake_proc_root(root)
+            self._lineage_process(root, 123, native="sid-new", taps=("sid-old",),
+                                  argv=("claude", "--resume", "sid-old"))
+            self._incomplete_with_daemon(root)
+            complete, holders, _reasons = claude_session_census(proc_root=root)
+            self.assertFalse(complete)
+            self.assertEqual(holders, {"sid-old", "sid-new"})
+            with self._real_census_at(root):
+                census = RecipientCensus(lineage=self._chain({"sid-old": "sid-new"}))
+                self.assertEqual(census.state("claude", "sid-old"), "ended")
+                self.assertEqual(census.state("claude", "sid-new"), "alive")
+                # ii: without the lineage the stale claim stays a live holder.
+                census = RecipientCensus(lineage=self._chain({}))
+                self.assertEqual(census.state("claude", "sid-old"), "alive")
+
+    def test_stale_claim_that_is_not_the_native_sessions_predecessor_stays_alive(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "proc"
+            self._fake_proc_root(root)
+            # iii: native registration lags: native is the old session, the tap is the new one.
+            self._lineage_process(root, 123, native="sid-old", taps=("sid-new",))
+            with self._real_census_at(root):
+                census = RecipientCensus(lineage=self._chain({"sid-old": "sid-new"}))
+                self.assertEqual(census.state("claude", "sid-new"), "alive")
+                self.assertEqual(census.state("claude", "sid-old"), "alive")
+
+    def test_stale_claim_must_resolve_to_every_naming_process_native(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "proc"
+            self._fake_proc_root(root)
+            # iv-1: the lineage ends at a session other than the process's native.
+            self._lineage_process(root, 123, native="sid-new", taps=("sid-old",))
+            with self._real_census_at(root):
+                census = RecipientCensus(lineage=self._chain({"sid-old": "sid-other"}))
+                self.assertEqual(census.state("claude", "sid-old"), "alive")
+                unresolved = RecipientCensus(lineage=lambda _h, sid: (sid, "unresolved"))
+                self.assertEqual(unresolved.state("claude", "sid-old"), "alive")
+                broken = RecipientCensus(lineage=lambda *_a: (_ for _ in ()).throw(OSError("x")))
+                self.assertEqual(broken.state("claude", "sid-old"), "alive")
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "proc"
+            self._fake_proc_root(root)
+            # iv-2: a second process names the same SID without a native session.
+            self._lineage_process(root, 123, native="sid-new", taps=("sid-old",))
+            self._lineage_process(root, 124, native=None, argv=("claude", "--resume", "sid-old"))
+            with self._real_census_at(root):
+                census = RecipientCensus(lineage=self._chain({"sid-old": "sid-new"}))
+                self.assertEqual(census.state("claude", "sid-old"), "alive")
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "proc"
+            self._fake_proc_root(root)
+            # iv-3: two processes carry the SID in a tap; only one native matches the lineage end.
+            self._lineage_process(root, 123, native="sid-new", taps=("sid-old",))
+            self._lineage_process(root, 124, native="sid-m", taps=("sid-old",))
+            with self._real_census_at(root):
+                census = RecipientCensus(lineage=self._chain({"sid-old": "sid-new"}))
+                self.assertEqual(census.state("claude", "sid-old"), "alive")
+
+    def test_plain_set_holders_never_use_lineage(self):
+        with mock.patch.object(claude_process_identity, "claude_session_census",
+                               return_value=(False, {"sid-old"}, {"x"})):
+            census = RecipientCensus(lineage=self._chain({"sid-old": "sid-new"}))
+            self.assertEqual(census.state("claude", "sid-old"), "alive")
+
 
 if __name__ == "__main__":
     unittest.main()

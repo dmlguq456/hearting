@@ -2434,8 +2434,28 @@ def _retire_followup_successor_pane(duty):
     return _caller_pane()
 
 
+def _release_retired_session(identity, summary=None):
+    """Let go of the roles and supervision watches a retired session still held.
+
+    Returns False only when a transient failure should be retried by the existing
+    follow-up; any other outcome is recorded in ``summary`` and never blocks it."""
+    harness, sid = identity.get("harness"), identity.get("session_id")
+    if not all(isinstance(value, str) and value and value != "-" for value in (harness, sid)):
+        return True
+    try:
+        result = peer_message.release_closed_session(
+            harness, sid, reason="retired", settle_watch=settle_steward_exited_watch)
+    except OSError:
+        return False
+    except Exception as exc:  # noqa: BLE001 - best effort; the retire itself already ended
+        result = {"error": type(exc).__name__}
+    if summary is not None:
+        summary["steward_release"] = json.dumps(result, sort_keys=True, separators=(",", ":"))
+    return True
+
+
 def _retire_followup_ready(duty, identity, reason, handover, *,
-                           defer_if_missing=False):
+                           defer_if_missing=False, summary=None):
     unresolved = (handover == "error" or (isinstance(handover, str)
                   and handover.startswith("skipped:")))
     if handover is None and defer_if_missing:
@@ -2455,16 +2475,20 @@ def _retire_followup_ready(duty, identity, reason, handover, *,
             unresolved = True
     except Exception:
         unresolved = True
+    if not _release_retired_session(identity, summary):
+        unresolved = True
     return not unresolved
 
 
 def _mark_completed_retire_followup(store, duty, identity, reason, handover, *,
                                     defer_if_missing=False):
+    release = {}
     complete = _retire_followup_ready(
-        duty, identity, reason, handover, defer_if_missing=defer_if_missing)
+        duty, identity, reason, handover, defer_if_missing=defer_if_missing,
+        summary=release)
     observation = dict(duty.get("observation") or {})
     observation.update(terminal_followup="complete" if complete else "pending",
-                       terminal_followup_result=str(handover or "none"))
+                       terminal_followup_result=str(handover or "none"), **release)
     try:
         return store.update(duty["id"], observation=observation)
     except (OSError, ValueError, RuntimeError):
@@ -3481,6 +3505,168 @@ def _settle_ended_seatless_recipient(watch_id, arm, root=None, *, census=None,
         return True
     return _settle_terminal_watch_if_unobserved(
         watch_id, current, root, reason_override="steward-exited")
+
+
+def settle_steward_exited_watch(watch_id, *, reason="steward-exited"):
+    """End one exact watch whose supervisor session is closed (idempotent).
+
+    The same ``terminal_pending`` request a retire uses: a live observer is woken to
+    settle it, otherwise the receipt is written here. ``True`` once the watch has
+    (or is being given) its receipt; ``False`` when the arm is not readable."""
+    paths = _watch_paths(watch_id)
+    if paths.receipt.exists():
+        return True
+    arm = _read_json(paths.arm)
+    if not isinstance(arm, dict) or arm.get("watch_id") != watch_id:
+        return False
+    expected = dict(arm.get("agent") or {})
+    _write_json_atomic(paths.observation, {
+        "schema_version": _WATCH_SCHEMA, "watch_id": watch_id,
+        "state": "terminal_pending", "reason": reason,
+        "server": arm.get("server") or "default",
+        "agent": {key: expected.get(key, "-") for key in ("harness", "session_id", "pane")},
+    })
+    return _settle_terminal_watch_if_unobserved(watch_id, arm, reason_override=reason)
+
+
+class _WatchCloseEvidence:
+    """One pass's evidence for deciding that a watch's supervisor or target is gone.
+
+    Every item is read at most once per pass and only when a watch needs it: the
+    recipient census (seat-less Claude), the session lineage, the live agents and
+    process observation, and one CLI ``herdr pane list`` per endpoint."""
+
+    def __init__(self, recipient_census=None):
+        if recipient_census is None:
+            from recipient_lifetime import RecipientCensus
+            recipient_census = RecipientCensus()
+        self.recipient_census = recipient_census
+        self._graph = None
+        self._chain = {}
+        self._panes = {}
+        self._agents = self._observation = self._UNSET
+        self._liveness = {}
+
+    _UNSET = object()
+
+    def pane_census(self, server):
+        if server not in self._panes:
+            try:
+                self._panes[server] = herdr_observation.pane_census(session=server)
+            except Exception:
+                self._panes[server] = None
+        return self._panes[server]
+
+    def chain_end(self, harness, sid):
+        key = (harness, sid)
+        if key not in self._chain:
+            try:
+                import dispatch_seat_handover as handover
+                if self._graph is None:
+                    self._graph = handover.lineage_graph()
+                self._chain[key] = handover._chain_end(self._graph, harness, sid)
+            except Exception:
+                self._chain[key] = (sid, "unresolved")
+        return self._chain[key]
+
+    def liveness(self, harness, sid):
+        key = (harness, sid)
+        if key not in self._liveness:
+            try:
+                check = _steward_check_module()
+                if self._agents is self._UNSET:
+                    self._agents = check._agents()
+                    self._observation = check._end_observation()
+                self._liveness[key] = check._session_liveness(
+                    harness, sid, self._agents, self._observation)
+            except Exception:
+                self._liveness[key] = "unknown"
+        return self._liveness[key]
+
+
+def _watch_close_reason(watch_id, arm, evidence):
+    """Why this watch can no longer be served, or None when that is not established.
+
+    The target is gone when it left its pane or its session was replaced (a complete
+    pane census, or a confirmed same-seat lineage). The supervisor is gone when its
+    session ended, or, with no live socket, when its seat's pane is absent from a
+    complete census. A pane that now holds some other session never ends the watch."""
+    expected = dict(arm.get("agent") or {})
+    server = arm.get("server") or "default"
+    has_socket = bool(herdr_observation.socket_path_for_endpoint(server))
+    if not has_socket:
+        census = evidence.pane_census(server)
+        if census is not None:
+            view = SimpleNamespace(endpoint=census.endpoint, complete=census.complete,
+                                   panes=list(census.panes), terminal={})
+            reason = _watch_terminal_from_view(view, expected, server)
+            if reason in {"pane-absent", "session-replaced"}:
+                return reason
+    target_harness, target_sid = expected.get("harness"), expected.get("session_id")
+    if (isinstance(target_harness, str) and isinstance(target_sid, str)
+            and target_harness not in {"", "-"} and target_sid not in {"", "-"}):
+        end, disposition = evidence.chain_end(target_harness, target_sid)
+        if disposition == "successor" and end != target_sid:
+            return "session-replaced"
+
+    steward = arm.get("steward") or {}
+    seat = arm.get("steward_seat") or {}
+    holder = (steward.get("harness"), steward.get("session_id"))
+    if seat.get("key"):
+        import dispatch_seat_handover as handover
+        relation = handover.resolve_watch(watch_id, seat_key=seat["key"])
+        current = (relation or {}).get("holder") or {}
+        holder = (current.get("harness"), current.get("sid")) if relation else (None, None)
+    if not all(isinstance(value, str) and value for value in holder):
+        return None
+    if evidence.liveness(*holder) == "ended":
+        return "steward-exited"
+    if (holder == (steward.get("harness"), steward.get("session_id")) and not has_socket
+            and seat.get("kind") == "pane" and seat.get("pane")
+            and (arm.get("steward_server") or "default") == server
+            and herdr_observation.confirms_absence(
+                evidence.pane_census(server), seat["pane"], endpoint=server)):
+        return "steward-exited"
+    return None
+
+
+def _settle_closed_watch(watch_id, arm, root=None, *, evidence=None, lock_held=False):
+    """End a watch whose supervisor closed or whose target was replaced, before it is
+    re-armed. Never needs the herdr socket; unknown evidence leaves the watch alone."""
+    if not isinstance(evidence, _WatchCloseEvidence):
+        evidence = _WatchCloseEvidence(evidence)
+    if _settle_ended_seatless_recipient(
+            watch_id, arm, root, census=evidence.recipient_census, lock_held=lock_held):
+        return True
+    paths = _watch_paths(watch_id, root)
+    if paths.receipt.exists():
+        return True
+    if not isinstance(arm, dict) or arm.get("watch_id") != watch_id:
+        return False
+    try:
+        reason = _watch_close_reason(watch_id, arm, evidence)
+    except Exception:
+        reason = None
+    if reason is None:
+        return False
+    current = _read_json(paths.arm)
+    if (not isinstance(current, dict) or current.get("watch_id") != watch_id
+            or current.get("agent") != arm.get("agent")
+            or current.get("steward") != arm.get("steward")
+            or (current.get("server") or "default") != (arm.get("server") or "default")):
+        return False
+    expected = dict(current.get("agent") or {})
+    _write_json_atomic(paths.observation, {
+        "schema_version": _WATCH_SCHEMA, "watch_id": watch_id,
+        "state": "terminal_pending", "reason": reason,
+        "server": current.get("server") or "default",
+        "agent": {key: expected.get(key, "-") for key in ("harness", "session_id", "pane")},
+    })
+    if lock_held:
+        _write_terminal_watch_receipt(watch_id, current, reason)
+        return True
+    return _settle_terminal_watch_if_unobserved(
+        watch_id, current, root, reason_override=reason)
 
 
 def _request_watch_terminal(identity, reason):
@@ -5528,11 +5714,9 @@ def _spawn_watch_observer(watch_id, arm, *, service_current=None,
                 (arm.get("steward") or {}).get("session_id")):
         return False
     arm = current_arm
-    if recipient_census is None:
-        from recipient_lifetime import RecipientCensus
-        recipient_census = RecipientCensus()
-    if _settle_ended_seatless_recipient(
-            watch_id, arm, census=recipient_census):
+    if not isinstance(recipient_census, _WatchCloseEvidence):
+        recipient_census = _WatchCloseEvidence(recipient_census)
+    if _settle_closed_watch(watch_id, arm, evidence=recipient_census):
         return True
     if _watcher_present(arm):
         return True
@@ -5571,8 +5755,8 @@ def _spawn_watch_observer(watch_id, arm, *, service_current=None,
                 or (current_arm.get("steward") or {}).get("session_id") !=
                     (arm.get("steward") or {}).get("session_id")):
             return False
-        if _settle_ended_seatless_recipient(
-                watch_id, current_arm, census=recipient_census, lock_held=True):
+        if _settle_closed_watch(
+                watch_id, current_arm, evidence=recipient_census, lock_held=True):
             return True
         arm = current_arm
         os.set_inheritable(lock_fd, True)
@@ -5647,8 +5831,7 @@ def _watch_observer_takeover_argvs(watch_id, arm):
 def _ensure_watch_observers(*, service_current=None, entries=None):
     root = _watch_root()
     transports = {}
-    from recipient_lifetime import RecipientCensus
-    recipient_census = RecipientCensus()
+    recipient_census = _WatchCloseEvidence()
     try:
         for watch_id, _snapshot_arm in (_watch_entries(root) if entries is None else entries):
             paths = _watch_paths(watch_id, root)
@@ -5661,8 +5844,7 @@ def _ensure_watch_observers(*, service_current=None, entries=None):
                 continue
             if paths.receipt.exists():
                 continue
-            if _settle_ended_seatless_recipient(
-                    watch_id, arm, root, census=recipient_census):
+            if _settle_closed_watch(watch_id, arm, root, evidence=recipient_census):
                 continue
             if _settle_terminal_watch_if_unobserved(watch_id, arm, root):
                 continue

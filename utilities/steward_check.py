@@ -217,6 +217,106 @@ def _session_liveness(harness: str, session_id: str, agents=None, observation=No
     return result if result in {"live", "ended", "unknown"} else "unknown"
 
 
+def _holder_seat_keys(harness: str, session_id: str):
+    """Seat keys of the unreleased roles this session holds, or None when unknown."""
+    try:
+        relations = _relations()
+    except Exception:  # noqa: BLE001
+        return None
+    keys = set()
+    for relation in relations:
+        holder = relation.get("holder") or {}
+        if (relation.get("released") is not True
+                and (holder.get("harness"), holder.get("sid")) == (harness, session_id)):
+            if not relation.get("seat_key"):
+                return None
+            keys.add(str(relation["seat_key"]))
+    return keys
+
+
+def _seat_panes(harness: str, session_id: str, seat_keys):
+    """``{seat_key: {(pane, server)}}`` from this holder's watch arms, or None.
+
+    A watch arm names the pane its supervisor sat in, and the arm file outlives its
+    receipt. A seat with no such arm has no pane evidence, so nothing is concluded."""
+    import json
+    module = getattr(_collector(), "_peer_message_module", None)
+    root = Path(module().peer_state_root()) / "peer-watches" if module else None
+    if root is None or not root.is_dir():
+        return None
+    found = {key: set() for key in seat_keys}
+    for path in sorted(root.glob("*.json")):
+        if path.name.startswith(".") or path.name.endswith(
+                (".receipt.json", ".ack.json", ".observation.json")):
+            continue
+        try:
+            arm = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        steward = arm.get("steward") if isinstance(arm, dict) else None
+        seat = arm.get("steward_seat") if isinstance(arm, dict) else None
+        if (not isinstance(steward, dict) or not isinstance(seat, dict)
+                or (steward.get("harness"), steward.get("session_id")) != (harness, session_id)
+                or seat.get("key") not in found or seat.get("kind") != "pane"
+                or not seat.get("pane") or not arm.get("steward_server")):
+            continue
+        found[seat["key"]].add((str(seat["pane"]), str(arm["steward_server"])))
+    return found if all(found.values()) else None
+
+
+def _pane_census(server: str):
+    try:
+        import herdr_observation
+        return herdr_observation.pane_census(session=server)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _window_closed(harness: str, session_id: str) -> bool:
+    """True only when every seat this holder's role sits in was seen empty in a complete
+    pane census and the session's liveness is not ``live``.
+
+    The ground for release is therefore "unknown (or ended) liveness plus the absence of
+    the same seat's pane", not liveness alone: a holder that is merely unobserved while
+    its pane still exists, or whose pane now shows another session, is left as it is.
+    A holder that moved to a different pane without a herdr row or process evidence is
+    the residual case; it is handled like any session whose proof of life is missing."""
+    keys = _holder_seat_keys(harness, session_id)
+    if not keys:
+        return False
+    panes = _seat_panes(harness, session_id, keys)
+    if panes is None:
+        return False
+    try:
+        import herdr_observation
+    except Exception:  # noqa: BLE001
+        return False
+    censuses = {}
+    for pane, server in sorted({item for values in panes.values() for item in values}):
+        if server not in censuses:
+            censuses[server] = _pane_census(server)
+        if not herdr_observation.confirms_absence(censuses[server], pane, endpoint=server):
+            return False
+    return _session_liveness(harness, session_id, _agents(), _end_observation()) != "live"
+
+
+def _release_if_window_closed(duty, store, harness: str, session_id: str, now: float) -> bool:
+    try:
+        if not _window_closed(harness, session_id):
+            return False
+        module = getattr(_collector(), "_peer_message_module", None)
+        peer_message = module() if module else None
+        if peer_message is None:
+            return False
+        peer_message.release_closed_session(harness, session_id, reason="window-closed")
+        latest = store.get(duty["id"])
+        if _active(latest):
+            _retire(latest, store, "window-closed", now=now)
+        return True
+    except Exception:  # noqa: BLE001 - the next pass decides again
+        return False
+
+
 def _human_wait_open(harness: str, session_id: str, now: float) -> bool:
     try:
         import human_wait_state
@@ -464,6 +564,10 @@ def advance(duty: dict, store, *, now: float | None = None) -> None:
     if phase == "retired":
         store.update(duty["id"], state="complete", cleanup="complete")
         return
+    if not _throttled(duty["id"], "window", now):
+        # A polling cadence for `herdr pane list`, not a time condition on the verdict.
+        if _release_if_window_closed(duty, store, harness, session_id, now):
+            return
     if phase == "notified":
         _advance_notified(duty, store, observation, harness, session_id, now)
         return

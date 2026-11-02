@@ -205,15 +205,49 @@ def _has_native_existence_evidence(
 
 
 class RecipientCensus:
-    """Memoize one bounded evidence probe for each recipient during one pass."""
+    """Memoize one bounded evidence probe for each recipient during one pass.
 
-    __slots__ = ("_probe", "_results", "_host_result", "_history_sids")
+    A Claude session that a live process still names only through an old claim
+    (a stale statusline tap or launch argument) is ENDED when that same process's
+    native session is the confirmed same-harness tidy successor of the claim. The
+    positive evidence is the live process holding the successor, so it does not
+    need the census to be complete.
+    """
 
-    def __init__(self, probe: Callable[[str, str], str] | None = None):
+    __slots__ = ("_probe", "_results", "_host_result", "_history_sids", "_lineage", "_graph")
+
+    def __init__(self, probe: Callable[[str, str], str] | None = None, *,
+                 lineage: Callable[[str, str], tuple[str, str]] | None = None):
         self._probe = probe
         self._results: dict[tuple[str, str], str] = {}
         self._host_result = None
         self._history_sids: dict[str, set[str] | None] = {}
+        self._lineage = lineage
+        self._graph = None
+
+    def _chain_end(self, harness: str, session_id: str) -> tuple[str, str]:
+        if self._lineage is not None:
+            return self._lineage(harness, session_id)
+        try:
+            import dispatch_seat_handover as handover
+            if self._graph is None:
+                self._graph = handover.lineage_graph()
+            return handover._chain_end(self._graph, harness, session_id)
+        except Exception:
+            return session_id, "unresolved"
+
+    def _superseded(self, session_id: str, holders) -> bool:
+        claims = getattr(holders, "process_claims", ())
+        if not claims or any(native == session_id for native, _sids in claims):
+            return False
+        named_by = [native for native, sids in claims if session_id in sids]
+        if not named_by:
+            return False
+        try:
+            return all(native and self._chain_end("claude", session_id) == (native, "successor")
+                       for native in named_by)
+        except Exception:
+            return False
 
     def state(self, harness: str, session_id: str) -> str:
         key = (harness, session_id)
@@ -227,7 +261,9 @@ class RecipientCensus:
                     except Exception:
                         self._host_result = (False, set(), {"census-failed"})
                 complete, holders, _reasons = self._host_result
-                if session_id in holders:
+                if session_id in holders and self._superseded(session_id, holders):
+                    result = ENDED
+                elif session_id in holders:
                     result = ALIVE
                 elif complete and _has_native_existence_evidence(
                         session_id, self._history_sids):

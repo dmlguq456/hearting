@@ -2197,6 +2197,11 @@ def run_helper(seat_key: str, nonce: str, *, wait: Optional[Callable[[str, int],
                 _finish(seat_key, nonce, "cleared", observed=str(seen["sid"]))
                 return _continue(seat_key, nonce, continuer, sleep=sleep)
             sleep(1.0)
+        # A start recorded during the last wait is still inside the window.
+        seen = (read_reservation(seat_key) or {}).get("observed") or {}
+        if seen.get("sid"):
+            _finish(seat_key, nonce, "cleared", observed=str(seen["sid"]))
+            return _continue(seat_key, nonce, continuer, sleep=sleep)
         return "unverified" if _finish(seat_key, nonce, "unverified", reason) else "superseded"
     final = "skipped" if outcome == "skipped" else "failed"
     return final if _finish(seat_key, nonce, final, reason) else "superseded"
