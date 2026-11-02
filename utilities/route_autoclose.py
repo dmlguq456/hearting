@@ -77,7 +77,7 @@ WALK_LIMIT = 2000
 # older than this are not re-probed on every sweep.
 _RECENT_TERMINAL_SECONDS = 3600
 _TERMINAL = {"done", "killed", "cancelled"}
-_RESOURCE_OPEN = {"open", "running", "pending", "working"}   # artifact-quiescence RESOURCE_OPEN
+_RESOURCE_OPEN = {"open", "running", "pending", "working"}
 
 
 class Unreadable(Exception):

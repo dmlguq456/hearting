@@ -233,7 +233,6 @@ tools/smoke_attestation.test.py	6.44
 tools/stage_advance_census.test.py	0.56
 utilities/artifact-knowledge-feed.test.py	1.77
 utilities/artifact-pointer-startup-boundary.test.sh	2.83
-utilities/artifact-quiescence.test.py	5.56
 utilities/artifact-read-fallback-e2e.test.sh	2.07
 utilities/artifact-relocation-live.test.py	7.10
 utilities/artifact-relocation.test.py	64.44

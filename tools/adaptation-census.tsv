@@ -9,7 +9,6 @@
 # *.test.py/*.test.sh utilities defer automatically. The short projected lists stay in the
 # script beside the checks that verify each projected link.
 list	name
-shared-utility-deferred	artifact-quiescence.py
 shared-utility-deferred	artifact_campaign.py
 shared-utility-deferred	artifact_cycle_titles.py
 shared-utility-deferred	artifact_locator_amendment.py
