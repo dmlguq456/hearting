@@ -35,6 +35,7 @@ from __future__ import annotations
 from contextlib import contextmanager, nullcontext, suppress
 from dataclasses import dataclass
 import datetime
+import errno
 import fcntl
 import hashlib
 import json
@@ -94,9 +95,10 @@ EXPIRY_REASONS = frozenset({
 })
 EXPIRY_ACTOR = "dispatch-reconcile"
 # SD-111 §13.33.1-(7) v67: terminal records are kept for a retention window and
-# then pruned by the selector-less dispatch reconcile path and the post-exit
-# reaper's retention tail (the same prune; it is safe under concurrent runs);
-# open-state records are never pruned whatever their age. Ages are file mtimes:
+# then pruned by one bounded prune (``prune_bounded``) that the HOME retention
+# pass (post-exit reaper tail, selector-less reconcile) and the reconcile actor
+# share; the operator CLI ``prune --apply`` stays the unbounded manual path.
+# Open-state records are never pruned whatever their age. Ages are file mtimes:
 # the terminal transition is the record's last write. A pruned record leaves a
 # binding-bearing tombstone (`<record>.json.pruned`, never deleted) so the
 # materialize backstop cannot resurrect it from the append-only jobs.log row
@@ -104,6 +106,12 @@ EXPIRY_ACTOR = "dispatch-reconcile"
 TERMINAL_STATES = frozenset({"acked", "expired", "rejected"})
 TERMINAL_RETENTION_SECONDS = 7 * 86400
 ORPHAN_LOCK_RETENTION_SECONDS = 24 * 3600
+# Per-pass budget of the bounded prune. 6,133 live-shaped records - the 4,096
+# delivery-index cap = 2,037 excess, ceil(2037/512) = 4 passes to get under the
+# cap and ceil(2933/512) = 6 passes to clear every record past retention.
+PRUNE_RECORD_LIMIT = 512
+PRUNE_LOCK_LIMIT = 512
+PRUNE_TIME_BUDGET_SECONDS = 3.0
 TOMBSTONE_SUFFIX = ".pruned"
 PRUNE_TOMBSTONE_SCHEMA = "delivery-prune-v1"
 _LOCK_REOPEN_LIMIT = 16
@@ -452,6 +460,56 @@ def _record_reference_lock(path: Path, *, candidate: dict | None = None):
             break
     raise PendingDeliveryError("delivery-persistence-refused",
                                "attempt-reference-set-changed")
+
+
+@contextmanager
+def _record_removal_lock(path: Path, hint_refs, *, blocking: bool):
+    """Removal-only admission for terminal-record retention.
+
+    Order: attempt references (``hint_refs`` - the immutable references of the
+    record as the caller already read it) -> record CAS lock -> re-read. Yields
+    ``("busy", None)`` when a nonblocking reference admission is not obtained,
+    ``("changed", current)`` when the record now names a reference outside
+    ``hint_refs`` (nothing may be removed under a lock set that does not cover
+    it), else ``("ok", current)`` where ``current`` is ``None`` if the record
+    is gone. There is no reopen loop: a deferred record is simply retried by
+    the next pass.
+
+    Unlike ``_record_reference_lock`` this never calls
+    ``home_reference_relevant`` / ``home_view_admission``, so a removal reads
+    neither the jobs.log tail nor any HOME manifest. Why that is safe:
+
+    * Removing a terminal record cannot create a HOME reference. HOME
+      references are only born from a create admission (the writer path keeps
+      the full ``_record_reference_lock``), and a terminal record's
+      ``attempt_ids`` / ``parent_attempt_id`` are ``IMMUTABLE_FIELDS``.
+    * The tombstone is written (fsynced, replaced into place) *before* the
+      record is unlinked, so ``worker_home_retention._delivery_state`` always
+      sees the record or a binding-bearing tombstone for the attempt - never a
+      window with neither. A tombstone reads as ``resolved`` with the
+      tombstone's own mtime, which only restarts the HOME idle clock (the
+      conservative direction).
+    * HOME final detach never takes a record lock; it takes the candidate
+      references nonblocking and defers on any group stamp change, so it
+      linearizes against this removal through the reference lock and the
+      pending-delivery group listing rather than through ``view.lock``.
+    * The retention ``lock`` (a file lock the HOME pass holds while pruning)
+      is never waited on by anyone, so no cycle exists. This path takes
+      reference (rank 3) then record (rank 4), ascending, and never
+      ``view.lock`` or ``jobs.log.lock``.
+    """
+    root = Path(path).parents[2]
+    refs = attempt_reference.referenced_attempts(hint_refs)
+    with attempt_reference.admission(root, refs, blocking=blocking) as admitted:
+        if not admitted:
+            yield "busy", None
+            return
+        with _record_lock(path):
+            current = _read_unlocked(path)
+            if not attempt_reference.record_attempts(current).issubset(refs):
+                yield "changed", current
+                return
+            yield "ok", current
 
 
 def _courier_retry_identity_digest(record: dict) -> str:
@@ -1799,6 +1857,54 @@ def _write_prune_tombstone(record_file: Path, value: dict) -> None:
             pass
 
 
+def _reference_lock_candidates(
+    root: Path, now: float, lock_retention_seconds: float,
+) -> tuple[list[dict], int, int]:
+    """Attempt-reference lock files older than the lock retention.
+
+    Returns ``(candidates, kept_recent, unreadable)``; candidates are
+    ``{"path", "age_seconds", "mtime"}`` in name order. The directory and each
+    file must be ours (uid) and regular, and the name a sha256 digest."""
+
+    reference_root = Path(root) / attempt_reference.LOCK_DIRECTORY
+    candidates: list[dict] = []
+    kept_recent = 0
+    unreadable = 0
+    try:
+        reference_dir_stat = reference_root.stat(follow_symlinks=False)
+    except FileNotFoundError:
+        return candidates, kept_recent, unreadable
+    except OSError:
+        return candidates, kept_recent, unreadable + 1
+    if (not stat.S_ISDIR(reference_dir_stat.st_mode)
+            or reference_dir_stat.st_uid != os.geteuid()):
+        return candidates, kept_recent, unreadable + 1
+    try:
+        reference_locks = sorted(reference_root.iterdir())
+    except OSError:
+        return candidates, kept_recent, unreadable + 1
+    for lock_file in reference_locks:
+        digest = lock_file.name[:-len(attempt_reference.LOCK_SUFFIX)] \
+            if lock_file.name.endswith(attempt_reference.LOCK_SUFFIX) else ""
+        try:
+            stat_value = lock_file.stat(follow_symlinks=False)
+        except OSError:
+            unreadable += 1
+            continue
+        if (not _SHA256_RE.fullmatch(digest) or not stat.S_ISREG(stat_value.st_mode)
+                or stat_value.st_uid != os.geteuid()):
+            unreadable += 1
+            continue
+        age = now - stat_value.st_mtime
+        if age < lock_retention_seconds:
+            kept_recent += 1
+            continue
+        candidates.append({
+            "path": str(lock_file), "age_seconds": int(age), "mtime": stat_value.st_mtime,
+        })
+    return candidates, kept_recent, unreadable
+
+
 def prune_plan(
     root: Path,
     *,
@@ -1864,44 +1970,276 @@ def prune_plan(
                 plan["kept_locks_recent"] += 1
                 continue
             plan["orphan_locks"].append({"path": str(lock_file), "age_seconds": int(age)})
-    try:
-        reference_dir_stat = reference_root.stat(follow_symlinks=False)
-    except FileNotFoundError:
-        reference_locks = []
-    except OSError:
-        reference_locks = []
-        plan["unreadable_reference_locks"] += 1
-    else:
-        if (not stat.S_ISDIR(reference_dir_stat.st_mode)
-                or reference_dir_stat.st_uid != os.geteuid()):
-            reference_locks = []
-            plan["unreadable_reference_locks"] += 1
-        else:
-            try:
-                reference_locks = sorted(reference_root.iterdir())
-            except OSError:
-                reference_locks = []
-                plan["unreadable_reference_locks"] += 1
-    for lock_file in reference_locks:
-        digest = lock_file.name[:-len(attempt_reference.LOCK_SUFFIX)] \
-            if lock_file.name.endswith(attempt_reference.LOCK_SUFFIX) else ""
-        try:
-            stat_value = lock_file.stat(follow_symlinks=False)
-        except OSError:
-            plan["unreadable_reference_locks"] += 1
-            continue
-        if (not _SHA256_RE.fullmatch(digest) or not stat.S_ISREG(stat_value.st_mode)
-                or stat_value.st_uid != os.geteuid()):
-            plan["unreadable_reference_locks"] += 1
-            continue
-        age = now - stat_value.st_mtime
-        if age < lock_retention_seconds:
-            plan["kept_reference_locks_recent"] += 1
-            continue
-        plan["reference_locks"].append({
-            "path": str(lock_file), "age_seconds": int(age), "mtime": stat_value.st_mtime,
-        })
+    candidates, recent, unreadable = _reference_lock_candidates(
+        root, now, lock_retention_seconds)
+    plan["reference_locks"] = candidates
+    plan["kept_reference_locks_recent"] += recent
+    plan["unreadable_reference_locks"] += unreadable
     return plan
+
+
+def _prune_record(path: Path, planned_mtime: float, hint_refs, *, blocking: bool) -> str:
+    """Remove one terminal record under the removal-only admission.
+
+    Returns ``pruned`` | ``gone`` | ``changed`` | ``busy`` | ``unreadable``.
+    Tombstone first, then ``.json``, courier retry/timeline sidecars and the
+    record lock. A record that is open, rewritten since ``planned_mtime``, or
+    fails validation is kept (a record that does not validate is never
+    deleted). Never raises."""
+
+    path = Path(path)
+    lock_path = path.with_name(path.name[:-5] + _RECORD_LOCK_SUFFIX)
+    try:
+        if hint_refs is None:
+            try:
+                hint_refs = attempt_reference.record_attempts(_read_unlocked(path))
+            except PendingDeliveryError:
+                return "unreadable"
+        with _record_removal_lock(path, hint_refs, blocking=blocking) as (status, value):
+            if status == "busy":
+                return "busy"
+            if status == "changed":
+                return "changed"
+            if value is None:
+                # Gone since the plan (a concurrent prune): the lock this
+                # process just created must not become a new orphan
+                # (review round 1, minor 2).
+                for stale in (courier_retry_path(path), courier_timeline_path(path), lock_path):
+                    try:
+                        stale.unlink()
+                    except FileNotFoundError:
+                        pass
+                return "gone"
+            if value["state"] not in TERMINAL_STATES or path.stat().st_mtime != planned_mtime:
+                return "changed"
+            _write_prune_tombstone(path, value)
+            path.unlink()
+            for stale in (courier_retry_path(path), courier_timeline_path(path), lock_path):
+                try:
+                    stale.unlink()
+                except FileNotFoundError:
+                    pass
+            return "pruned"
+    except (PendingDeliveryError, attempt_reference.AttemptReferenceError, OSError):
+        return "unreadable"
+
+
+def _prune_orphan_lock(lock_path: Path) -> str:
+    """Unlink one orphan record lock under its own flock.
+
+    Returns ``pruned`` | ``skipped`` | ``missing``. The lock is unlinked only
+    while this process holds it and only if its record is still absent
+    (holders waiting on the old inode reopen, see ``_record_lock``). The open
+    carries no ``O_CREAT`` so a vanished lock is never recreated. The flock is
+    blocking, but the caller holds no other dispatch lock at this point."""
+
+    lock_path = Path(lock_path)
+    record_file = lock_path.with_name(lock_path.name[: -len(".lock")])
+    try:
+        fd = os.open(str(lock_path), os.O_RDWR)
+    except FileNotFoundError:
+        return "missing"
+    except OSError:
+        return "skipped"
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        with dispatch_lock_order.acquired("delivery-record"):
+            try:
+                if record_file.exists():
+                    return "skipped"
+                try:
+                    lock_path.unlink()
+                    return "pruned"
+                except FileNotFoundError:
+                    return "missing"
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+    except OSError:
+        return "skipped"
+    finally:
+        os.close(fd)
+
+
+def prune_bounded(
+    root: Path,
+    *,
+    now: float | None = None,
+    max_records: int | None = None,
+    max_locks: int | None = None,
+    time_budget_s: float | None = None,
+    retention_seconds: float = TERMINAL_RETENTION_SECONDS,
+    lock_retention_seconds: float = ORPHAN_LOCK_RETENTION_SECONDS,
+) -> dict:
+    """Bounded retention prune shared by the HOME retention pass and the
+    reconcile actor (SD-111 §(7)). Never raises.
+
+    Cost model for N records: one ``scandir`` per recipient group plus one
+    ``stat`` per ``.json`` (the age pre-filter) - bodies are read only for the
+    aged candidates actually considered, oldest mtime first, and every removal
+    uses the removal-only admission (``_record_removal_lock``: references
+    nonblocking, then the record lock), so a removal reads neither the
+    jobs.log tail nor any HOME manifest and never waits for ``view.lock``.
+    Open-state records, recent terminal records and tombstones are never
+    touched. A pass stops at ``max_records`` lock attempts or ``time_budget_s``;
+    ``deferred`` aged records wait for the next pass. The one in-flight
+    removal is not preempted (same contract as the retention passes).
+
+    Safety of removal-only admission, in short (details on
+    ``_record_removal_lock``): deleting a terminal record creates no HOME
+    reference; the tombstone is durable before the unlink; HOME detach takes no
+    record lock and defers on group stamp changes; the CLI ``prune --apply``
+    shares the same removal body and simply passes ``blocking=True`` (it also
+    omits the HOME ``view.lock``)."""
+
+    # Budgets default to the module constants, read at call time.
+    max_records = PRUNE_RECORD_LIMIT if max_records is None else max_records
+    max_locks = PRUNE_LOCK_LIMIT if max_locks is None else max_locks
+    time_budget_s = PRUNE_TIME_BUDGET_SECONDS if time_budget_s is None else time_budget_s
+    started = time.monotonic()
+    deadline = started + max(0.0, time_budget_s)
+    now = time.time() if now is None else now
+    root = Path(root)
+    pending_root = root / "pending-delivery"
+    result = {
+        "pruned_records": 0, "pruned_locks": 0, "pruned_reference_locks": 0,
+        "skipped": 0, "records_seen": 0, "aged_seen": 0, "body_reads": 0,
+        "kept_open_aged": 0, "busy": 0, "changed": 0, "unreadable": 0,
+        "unreadable_groups": 0, "deferred": 0, "records_remaining": 0,
+        "budget_exhausted": 0, "elapsed_ms": 0,
+    }
+
+    def finish() -> dict:
+        result["records_remaining"] = result["records_seen"] - result["pruned_records"]
+        result["elapsed_ms"] = int((time.monotonic() - started) * 1000)
+        return result
+
+    def out_of_budget() -> bool:
+        return time.monotonic() >= deadline
+
+    aged: list[tuple[float, str]] = []
+    lock_names: list[tuple[Path, set[str]]] = []  # (group dir, lock names)
+    json_names: dict[str, set[str]] = {}
+    try:
+        try:
+            groups = list(os.scandir(pending_root))
+        except FileNotFoundError:
+            groups = []
+        for group in sorted(groups, key=lambda entry: entry.name):
+            try:
+                if not group.is_dir(follow_symlinks=False):
+                    result["unreadable_groups"] += 1
+                    continue
+                entries = list(os.scandir(group.path))
+            except OSError:
+                result["unreadable_groups"] += 1
+                continue
+            names: set[str] = set()
+            locks: set[str] = set()
+            for entry in entries:
+                name = entry.name
+                if name.endswith(".json"):
+                    names.add(name)
+                    result["records_seen"] += 1
+                    try:
+                        entry_stat = entry.stat(follow_symlinks=False)
+                    except OSError:
+                        result["unreadable"] += 1
+                        continue
+                    if (stat.S_ISREG(entry_stat.st_mode)
+                            and now - entry_stat.st_mtime >= retention_seconds):
+                        aged.append((entry_stat.st_mtime, entry.path))
+                elif name.endswith(_RECORD_LOCK_SUFFIX):
+                    locks.add(name)
+            json_names[group.path] = names
+            lock_names.append((Path(group.path), locks))
+    except OSError as exc:
+        result["error"] = errno.errorcode.get(exc.errno or 0, type(exc).__name__)
+        return finish()
+
+    aged.sort()
+    result["aged_seen"] = len(aged)
+    attempted = 0
+    index = 0
+    while index < len(aged):
+        if attempted >= max_records or out_of_budget():
+            result["budget_exhausted"] = 1
+            result["deferred"] = len(aged) - index
+            break
+        mtime, name = aged[index]
+        index += 1
+        path = Path(name)
+        result["body_reads"] += 1
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            result["skipped"] += 1
+            continue
+        except (OSError, ValueError):
+            result["unreadable"] += 1
+            result["skipped"] += 1
+            continue
+        state = raw.get("state") if isinstance(raw, dict) else None
+        if state not in TERMINAL_STATES:
+            result["kept_open_aged"] += 1
+            continue
+        attempted += 1
+        outcome = _prune_record(path, mtime, attempt_reference.record_attempts(raw),
+                                blocking=False)
+        if outcome == "pruned":
+            result["pruned_records"] += 1
+            continue
+        result["skipped"] += 1
+        if outcome in {"busy", "changed", "unreadable"}:
+            result[outcome] += 1
+
+    # Orphan record locks (no sibling record), oldest first.
+    orphans: list[tuple[float, Path]] = []
+    for group_dir, locks in lock_names:
+        names = json_names.get(str(group_dir), set())
+        for lock_name in locks:
+            if lock_name[: -len(".lock")] in names:
+                continue
+            lock_path = group_dir / lock_name
+            try:
+                lock_mtime = lock_path.stat().st_mtime
+            except OSError:
+                continue
+            if now - lock_mtime >= lock_retention_seconds:
+                orphans.append((lock_mtime, lock_path))
+    orphans.sort()
+    spent = 0
+    for _mtime, lock_path in orphans:
+        if spent >= max_locks or out_of_budget():
+            result["budget_exhausted"] = 1
+            break
+        spent += 1
+        outcome = _prune_orphan_lock(lock_path)
+        if outcome == "pruned":
+            result["pruned_locks"] += 1
+        elif outcome == "skipped":
+            result["skipped"] += 1
+
+    # Attempt-reference locks, oldest first, within the remaining lock budget.
+    try:
+        candidates, _recent, _bad = _reference_lock_candidates(root, now, lock_retention_seconds)
+    except OSError:
+        candidates = []
+    candidates.sort(key=lambda item: (item["mtime"], item["path"]))
+    cutoff_ns = int((now - lock_retention_seconds) * 1e9)
+    for item in candidates:
+        if spent >= max_locks or out_of_budget():
+            result["budget_exhausted"] = 1
+            break
+        spent += 1
+        try:
+            outcome = attempt_reference.prune_stale_lock(Path(item["path"]), cutoff_ns=cutoff_ns)
+        except (OSError, attempt_reference.AttemptReferenceError):
+            outcome = "unavailable"
+        if outcome == "removed":
+            result["pruned_reference_locks"] += 1
+        elif outcome != "missing":
+            result["skipped"] += 1
+    return finish()
 
 
 def prune(
@@ -1912,11 +2250,12 @@ def prune(
     retention_seconds: float = TERMINAL_RETENTION_SECONDS,
     lock_retention_seconds: float = ORPHAN_LOCK_RETENTION_SECONDS,
 ) -> dict:
-    """Retention prune (SD-111 §(7) v67), run by the selector-less dispatch
-    reconcile path and the post-exit reaper's retention tail.
+    """Unbounded operator retention prune (SD-111 §(7) v67); the scheduled
+    carriers use ``prune_bounded``.
 
     ``apply=False`` returns the plan only. With ``apply=True`` each planned
-    record is re-read under its reference and record locks and unlinked only if it is still
+    record is re-read under its reference (blocking) and record locks - the
+    removal-only admission, see ``_record_removal_lock`` - and unlinked only if it is still
     terminal and unchanged since the plan: tombstone first, then ``.json``,
     then its ``.lock``. A planned orphan lock is unlinked only while this
     process holds it and only if its record is still absent (holders waiting
@@ -1945,80 +2284,17 @@ def prune(
     if not apply:
         return result
     for item in plan["records"]:
-        path = Path(item["path"])
-        lock_path = path.with_name(path.name[:-5] + _RECORD_LOCK_SUFFIX)
-        try:
-            with _record_reference_lock(path):
-                value = _read_unlocked(path)
-                if value is None:
-                    # Gone since the plan (a concurrent prune): the lock this
-                    # process just created must not become a new orphan
-                    # (review round 1, minor 2).
-                    try:
-                        courier_retry_path(path).unlink()
-                    except FileNotFoundError:
-                        pass
-                    try:
-                        courier_timeline_path(path).unlink()
-                    except FileNotFoundError:
-                        pass
-                    try:
-                        lock_path.unlink()
-                    except FileNotFoundError:
-                        pass
-                    result["skipped"] += 1
-                    continue
-                if (
-                    value["state"] not in TERMINAL_STATES
-                    or path.stat().st_mtime != item["mtime"]
-                ):
-                    result["skipped"] += 1
-                    continue
-                _write_prune_tombstone(path, value)
-                path.unlink()
-                try:
-                    courier_retry_path(path).unlink()
-                except FileNotFoundError:
-                    pass
-                try:
-                    courier_timeline_path(path).unlink()
-                except FileNotFoundError:
-                    pass
-                try:
-                    lock_path.unlink()
-                except FileNotFoundError:
-                    pass
+        outcome = _prune_record(Path(item["path"]), item["mtime"], None, blocking=True)
+        if outcome == "pruned":
             result["pruned_records"] += 1
-        except (PendingDeliveryError, OSError):
+        else:
             result["skipped"] += 1
     for item in plan["orphan_locks"]:
-        lock_path = Path(item["path"])
-        record_file = lock_path.with_name(lock_path.name[: -len(".lock")])
-        try:
-            fd = os.open(str(lock_path), os.O_RDWR)  # no O_CREAT: a vanished lock is not recreated
-        except FileNotFoundError:
-            continue
-        except OSError:
+        outcome = _prune_orphan_lock(Path(item["path"]))
+        if outcome == "pruned":
+            result["pruned_locks"] += 1
+        elif outcome == "skipped":
             result["skipped"] += 1
-            continue
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
-            with dispatch_lock_order.acquired("delivery-record"):
-                try:
-                    if record_file.exists():
-                        result["skipped"] += 1
-                        continue
-                    try:
-                        lock_path.unlink()
-                        result["pruned_locks"] += 1
-                    except FileNotFoundError:
-                        pass
-                finally:
-                    fcntl.flock(fd, fcntl.LOCK_UN)
-        except OSError:
-            result["skipped"] += 1
-        finally:
-            os.close(fd)
     cutoff_ns = int(((time.time() if now is None else now) - lock_retention_seconds) * 1e9)
     for item in plan["reference_locks"]:
         outcome = attempt_reference.prune_stale_lock(Path(item["path"]), cutoff_ns=cutoff_ns)

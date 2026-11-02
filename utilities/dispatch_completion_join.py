@@ -700,7 +700,9 @@ def reconcile_pending_delivery(jobs: Path, *, max_rows: int | None = None,
        between the terminal commit and trigger 1's in-process call) is
        materialized here, idempotently converging with any other trigger.
     3. **Retention prune** (v67): terminal records past retention and orphan
-       lock files are unlinked by this same actor -- see ``pending_delivery.prune``.
+       lock files are unlinked by the bounded prune the HOME retention pass
+       also runs -- see ``pending_delivery.prune_bounded`` (its own per-call
+       record/time budget, independent of the registry walk).
        A pruned record leaves a tombstone that sweep 1 honours, so the
        append-only row never re-materializes a delivered receipt (B1).
     2. **Expiry.** Any open-state (``pending``/``claimed``/``sent-ambiguous``)
@@ -823,13 +825,16 @@ def reconcile_pending_delivery(jobs: Path, *, max_rows: int | None = None,
                 result["skipped"] += 1
         else:
             walk_finished = True
-    # 3. **Retention prune** (SD-111 §(7) v67). Terminal (`acked`/`expired`)
-    #    records past `TERMINAL_RETENTION_SECONDS` and orphan `.lock` files
-    #    past `ORPHAN_LOCK_RETENTION_SECONDS` are unlinked under the same
-    #    single actor; open-state records are never touched (see
-    #    `pending_delivery.prune`). Observers still delete nothing.
+    # 3. **Retention prune** (SD-111 §(7) v67). Terminal (`acked`/`expired`/
+    #    `rejected`) records past `TERMINAL_RETENTION_SECONDS` and orphan
+    #    `.lock` files past `ORPHAN_LOCK_RETENTION_SECONDS` are unlinked by
+    #    the bounded prune the HOME retention pass also runs
+    #    (`pending_delivery.prune_bounded`: removal-only admission, oldest
+    #    first, at most `PRUNE_RECORD_LIMIT` records / `PRUNE_TIME_BUDGET_SECONDS`
+    #    per call, its own budget independent of the registry walk);
+    #    open-state records are never touched. Observers still delete nothing.
     try:
-        pruned = pending_delivery.prune(root, apply=True)
+        pruned = pending_delivery.prune_bounded(root)
         result["pruned_records"] = pruned["pruned_records"]
         result["pruned_locks"] = pruned["pruned_locks"]
         result["prune_skipped"] = pruned["skipped"]

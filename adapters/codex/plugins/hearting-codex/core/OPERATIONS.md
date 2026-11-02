@@ -474,10 +474,21 @@ route alone is not a HOME consumer: the home remains only while an existing
 continuation, delivery/replacement, summary/provider, lease, process or recent-view
 obligation can read it. Route and attempt outcomes retain their semantic state;
 an unreadable or conflicting route binding remains unknown. The pass runs at the end
-of every post-exit reaper and in a `reconcile --apply` that is not scoped to one exact attempt; when the
-reaper's pass runs it also carries the delivery store's seven-day terminal prune, at the same cadence. It is due at
+of every post-exit reaper and in a `reconcile --apply` that is not scoped to one exact attempt. It is due at
 most every five minutes, examines at most 128 homes (a fair cursor), and removes at
-most 16 destructively touched homes, including partial leftovers of an interrupted removal. The idle clock starts
+most 16 destructively touched homes, including partial leftovers of an interrupted removal.
+The same pass first prunes pending-delivery records, before it judges any home, so the
+index those judgments read stays under its record cap: terminal
+(`acked`/`expired`/`rejected`) records unchanged for seven days are removed oldest
+first after a `stat` pre-filter, at most 512 records and three seconds per pass; open
+records, recent terminal records and tombstones stay untouched. The prune uses
+removal-only admission (attempt references nonblocking, then the record lock), so it
+reads neither the `jobs.log` tail nor any home manifest and does not wait for the HOME
+view lock; a record's tombstone is written before the record is unlinked. The
+reconcile actor (the obligation runner's reconcile duty and a selector-less
+`reconcile --apply`) runs the same bounded prune; only the operator command
+`dispatch_pending_delivery.py prune --apply` is unbounded. The pass records the
+result as `delivery_prune` in `homes/worker-retention/state.json`. The idle clock starts
 from the best completion estimate: the terminal row timestamp or, when later, the
 regular log file mtime. Only when that timestamp cannot be parsed does the clock
 start at the first pass that proves every protection below. Uncertain prepared
