@@ -1551,6 +1551,41 @@ class FinalizeTest(ProducerTestBase):
         self.assertEqual(again["status"], "already-sealed")
         self.assertEqual(P.status(self.root)["cycle_counts"], {"sealed": 1})
 
+    def test_reader_documents_carry_user_audience_and_status_document_is_primary(self):
+        # W4 2026-11-02: Cairn shows `audience: "user"` rows by default, folds the rest as
+        # work records, and pins a cycle whose primary is a status document as the
+        # project's status row. Nothing extra is asked of the agent.
+        self.activate()
+        route, route_file, result = self.begin()
+        self.write_output(result, "현황.md", "# 현황\n\n**한 줄**: 진행 중\n".encode())
+        self.write_output(result, "final_report.md", b"report\n")
+        self.write_output(result, "plan.md")
+        self.write_output(result, "dev_logs/before-merge/final_report.md", b"older report\n")
+        self.write_output(result, "evidence/summary.md", b"evidence\n")
+        self.write_output(result, "_internal/report.md", b"support\n")
+        self.close(route, route_file)
+        sealed = P.finalize(self.root, cycle_id=result["cycle_id"])
+        self.assertEqual(sealed["status"], "sealed", sealed)
+        manifest_path = Path(result["cycle_dir"]) / "manifest.json"
+        document = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertTrue(m.validate(document).ok, m.validate(document).violations)
+        rows = {row["title"]: row for row in document["artifacts"]}
+        self.assertEqual(rows["현황.md"]["role"], "primary")
+        self.assertEqual({title: row.get("audience") for title, row in rows.items()}, {
+            "현황.md": "user", "final_report.md": "user", "plan.md": None,
+            "dev_logs/before-merge/final_report.md": None, "evidence/summary.md": None,
+            "_internal/report.md": None,
+        })
+        # A report that appears after the seal is marked the same way.
+        self.write_output(result, "summary.md", b"summary\n")
+        refreshed = P.refresh_cycle(self.root, result["cycle_id"], trigger="explicit")
+        self.assertEqual(refreshed["status"], "emitted", refreshed)
+        current = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertTrue(m.validate(current).ok, m.validate(current).violations)
+        audience = {row["title"]: row.get("audience") for row in current["artifacts"]}
+        self.assertEqual((audience["summary.md"], audience["현황.md"], audience["plan.md"]),
+                         ("user", "user", None))
+
     def test_general_sealed_replay_keeps_the_past_result_when_an_index_row_is_removed(self):
         self.activate()
         route, route_file, result = self.begin()
@@ -7773,6 +7808,43 @@ class PrimarySupportExclusionTest(unittest.TestCase):
         rows = [("artifacts/_internal/dispatch/retrieval_prompt.md", b""),
                 ("artifacts/shards/retrieval/_internal/raw.txt", b"")]
         self.assertEqual(P._choose_primary(rows, None), "artifacts/_internal/dispatch/retrieval_prompt.md")
+
+    def test_status_document_directly_under_artifacts_is_the_automatic_primary(self):
+        # The same file Cairn pins as the project's status row and Fleet's project line reads.
+        rows = [("artifacts/STATUS.md", b""), ("artifacts/final_report.md", b""),
+                ("artifacts/plans/현황.md", b"")]
+        self.assertEqual(P._choose_primary(rows, None), "artifacts/STATUS.md")
+        rows.append(("artifacts/현황.md", b""))
+        self.assertEqual(P._choose_primary(rows, None), "artifacts/현황.md")
+        self.assertEqual(P._choose_primary(rows, "final_report.md"), "artifacts/final_report.md")
+        nested = [("artifacts/plans/현황.md", b""), ("artifacts/final_report.md", b"")]
+        self.assertEqual(P._choose_primary(nested, None), "artifacts/final_report.md")
+
+    def test_work_record_copy_never_outranks_the_same_name_elsewhere(self):
+        rows = [("artifacts/dev_logs/before-merge/final_report.md", b""),
+                ("artifacts/evidence/report.md", b""), ("artifacts/final_report.md", b"")]
+        self.assertEqual(P._choose_primary(rows, None), "artifacts/final_report.md")
+        self.assertEqual(P._choose_primary(rows[:2], None),
+                         "artifacts/dev_logs/before-merge/final_report.md")
+
+    def test_user_audience_marks_reader_documents_outside_record_folders(self):
+        user = P.artifact_manifest.USER_AUDIENCE
+        cases = {
+            "artifacts/final_report.md": user, "artifacts/plans/cycle/final_report.md": user,
+            "artifacts/report/REPORT.md": user, "artifacts/documents/report.html": user,
+            "artifacts/research/summary.md": user, "artifacts/reviews/audit/audit-report.md": user,
+            "artifacts/현황.md": user, "artifacts/research/STATUS.md": user,
+            "artifacts/prd.md": user, "artifacts/spec/prd.md": user, "artifacts/spec/a/prd.md": user,
+            "artifacts/plans/a/b/prd.md": None, "artifacts/spec/_internal/versions/v1/prd.md": None,
+            "artifacts/plan.md": None, "artifacts/README.md": None, "artifacts/notes.md": None,
+            "artifacts/dev_logs/x/final_report.md": None, "artifacts/test_logs/summary.md": None,
+            "artifacts/evidence/REPORT.md": None, "artifacts/shards/a/report.md": None,
+            "artifacts/_internal/report.md": None, "_internal/reviews/report.md": None,
+        }
+        self.assertEqual({rel: P.artifact_audience(rel) for rel in cases}, cases)
+        decomposed = "artifacts/" + __import__("unicodedata").normalize("NFD", "현황.md")
+        self.assertEqual(P.artifact_audience(decomposed), user)
+        self.assertEqual(P._status_rank(decomposed), 0)
 
     def test_explicit_primary_inside_support_still_wins(self):
         rows = [("artifacts/_internal/notes.md", b""), ("artifacts/plans/report.md", b"")]
