@@ -354,11 +354,8 @@ class CandidateOutcomes(list):
 
 
 def _cycle_output_dir(route: dict, route_file) -> str | None:
-    """The owner's cycle output directory: its inherited environment, else the route's producer binding."""
     import worker_bootstrap as wb
-    env = os.environ
-    return (wb.artifact_cycle_environment(env)["AGENT_ARTIFACT_OUTPUT_DIR"]
-            or wb.resolve_node_scope(route, None, env, route_file=route_file).output_dir)
+    return wb.cycle_output_dir(route, route_file)
 
 
 def handed_over_count(route: dict, node: dict, route_file) -> int:
@@ -385,7 +382,11 @@ def unsandboxed_harness(harness) -> bool:
 
 
 def inline_owner_next_line(route: dict, node: dict, route_file) -> str:
-    """One receipt line telling the owner how to finish a stage it must now run itself; "" when unknown.
+    """Receipt lines telling the owner how to finish a stage it must now run itself; "" when unknown.
+
+    The first line is the completion command. A verification stage the owner now runs also carries
+    the exact checks earlier stages handed over (``owner_handed_over=`` lines): the owner runs them
+    under the verification runner, and one it cannot run either stays unverified.
 
     Text only: the cycle output directory comes from the owner's inherited environment or the route's
     producer binding, and an unbound cycle yields no line rather than a guessed path.
@@ -396,9 +397,14 @@ def inline_owner_next_line(route: dict, node: dict, route_file) -> str:
         if not output_dir:
             return ""
         evidence = wb.node_first_evidence(route, node["id"], output_dir)
-        return ("owner_next_command=" + wb.inline_complete_command(node["id"], evidence)
-                + "  # run this stage yourself" + (f", write its output to {evidence} first" if evidence else "")
-                + ", then run this command")
+        lines = ["owner_next_command=" + wb.inline_complete_command(node["id"], evidence)
+                 + "  # run this stage yourself" + (f", write its output to {evidence} first" if evidence else "")
+                 + ", then run this command"]
+        try:
+            lines += wb.handed_over_lines(wb.owner_handed_over(route, node["id"], output_dir), "owner_handed_over=")
+        except Exception:  # the command line stands even when the handed-over read fails
+            pass
+        return "\n".join(lines)
     except Exception:  # an advisory line never changes the receipt's verdict or exit code
         return ""
 
@@ -739,17 +745,25 @@ def ordered_fallback_hops(
             counts,
             declared_order=allocation.get("harness_order") or ALLOCATION_HARNESSES,
         )
-    affinity = node.get("harness_affinity")
-    affinity_source = None
+    sealed_affinity = affinity = node.get("harness_affinity")
+    # SD-100's quality-peer sole-gate protection binds a review node launched under a known owner.
+    owner_family = (parent_identity or {}).get("parent_harness")
+    peer_node = node.get("kind") == "review-worker" or node.get("parent_cross_preference") is True
+    quality_peer = quality_peer_families(_policy_by_profile(route, node)) if peer_node else None
+    peers_bind = quality_peer is not None and bool(owner_family)
     # A sealed `--pin worker=<harness>` leads the order (CONVENTIONS §2.1) while that harness is ranked,
     # i.e. outside a usage limit and the node's policy. The soft usage gate does not move it; a limited
     # pin is in `limited` and goes to the tail below, as before.
     pinned_head = worker_pin in ranked
-    if handed_over and not pinned_head and not (affinity in ranked and unsandboxed_harness(affinity)):
-        # Observed, like usage: handed-over checks need a harness that can run them.
-        open_harnesses = [harness for harness in ranked if unsandboxed_harness(harness)]
+    # Order of precedence: pin, quality-peer protection, then handed-over checks (an observation,
+    # like usage) choosing a harness without an OS sandbox, then the sealed affinity.
+    handed_over_affinity = None
+    if handed_over and not pinned_head and not (affinity in ranked and unsandboxed_harness(affinity)
+                                                and (not peers_bind or affinity in quality_peer)):
+        open_harnesses = [harness for harness in ranked if unsandboxed_harness(harness)
+                          and (not peers_bind or harness in quality_peer)]
         if open_harnesses:
-            affinity, affinity_source = open_harnesses[0], "handed-over-checks"
+            handed_over_affinity = affinity = open_harnesses[0]
     if pinned_head:
         ranked = [worker_pin] + [harness for harness in ranked if harness != worker_pin]
     elif affinity in ranked:
@@ -786,16 +800,12 @@ def ordered_fallback_hops(
     parent_cross = "not-applicable"
     parent_cross_cause = "-"
     sole_gate = "not-applicable"
-    quality_peer = None
-    owner_family = (parent_identity or {}).get("parent_harness")
-    if node.get("kind") == "review-worker" or node.get("parent_cross_preference") is True:
-        quality_peer = quality_peer_families(_policy_by_profile(route, node))
+    if peer_node:
         sole_gate = "ok"
-        if quality_peer is not None and owner_family:
+        if peers_bind:
             head = ranked[0] if ranked else None
             if head is not None and head not in quality_peer:
-                affinity_pinned_head = pinned_head or (affinity in ranked and affinity == head
-                                                       and affinity_source is None)
+                affinity_pinned_head = pinned_head or (affinity in ranked and affinity == head)
                 if affinity_pinned_head:
                     sole_gate = "degraded"
                 else:
@@ -804,6 +814,9 @@ def ordered_fallback_hops(
                         ranked = qp_eligible + [h for h in ranked if h not in qp_eligible]
                     else:
                         sole_gate = "degraded"
+    # The reason is recorded only when the observation actually decided the head.
+    affinity_source = ("handed-over-checks" if handed_over_affinity and ranked
+                       and ranked[0] == handed_over_affinity else None)
     ranked += limited
     ordered = []
     for harness in ranked:
@@ -832,7 +845,9 @@ def ordered_fallback_hops(
         "quality_peer_families": sorted(quality_peer) if quality_peer is not None else None,
         "eligible": list(eligible),
         "limited": list(limited),
-        "affinity": affinity,
+        "affinity": sealed_affinity,
+        "handed_over": handed_over,
+        "handed_over_affinity": handed_over_affinity,
         "affinity_source": affinity_source,
         "owner_family": owner_family,
         "quality_peer_set": quality_peer,
@@ -851,6 +866,9 @@ def _recompute_verdicts_for_child(context, child_harness):
     if context is None:
         return context
     updated = dict(context)
+    # The handed-over reason names the launched child only when it is the harness it chose.
+    if context.get("affinity_source") and child_harness != context.get("handed_over_affinity"):
+        updated["affinity_source"] = None
     # Never carry an obsolete same-family degradation into a fallback receipt.
     updated["parent_cross"] = "not-applicable"
     updated["parent_cross_cause"] = "-"
@@ -908,8 +926,8 @@ def _persist_allocation_receipt(args, route, node, context, row, *, attempt_id=N
         counts=context.get("counts"), states=context.get("states"),
         quality_band=context.get("quality_band"), relief_promoted=context.get("relief_promoted"),
         parent_cross=context.get("parent_cross"), sole_gate=context.get("sole_gate"),
-        affinity=context.get("affinity"), affinity_source=context.get("affinity_source"),
-        owner_family=context.get("owner_family"),
+        affinity=context.get("affinity"), handed_over_affinity=context.get("handed_over_affinity"),
+        affinity_source=context.get("affinity_source"), owner_family=context.get("owner_family"),
         jobs=getattr(args, "jobs", None),
     )
 
@@ -932,9 +950,9 @@ def emit_allocation(context: dict | None) -> None:
         print(f"quality_band={context.get('quality_band') or 'none'}")
         print(f"relief_promoted={int(bool(context.get('relief_promoted')))}")
     print(f"allocation_preferred={context.get('preferred') or '-'}")
-    if context.get("affinity_source"):
-        print(f"allocation_affinity={context['affinity']}")
-        print(f"allocation_affinity_source={context['affinity_source']}")
+    if context.get("handed_over_affinity"):
+        print(f"allocation_handed_over_affinity={context['handed_over_affinity']}")
+        print(f"allocation_affinity_source={context.get('affinity_source') or '-'}")
     inert = inert_allocation_keys(context.get("allocation"))
     print("allocation_inert_keys=" + (",".join(sorted(inert)) or "-"))
     print(f"parent_cross={context.get('parent_cross') or 'not-applicable'}")

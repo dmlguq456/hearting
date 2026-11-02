@@ -8,7 +8,7 @@
 
 ## Slice Mode
 
-If the assignment is a sub-session (phase brief, fixed files, `stage_authority=0`), complete all processable in-scope items, edit only the fixed worktree files, write the report to the artifact path assigned by the phase brief or dispatch prompt, and run the narrow verify command as a required check plus any additional checks named in the brief. The report is separate from source `fixed_files`. A slice makes no git writes (no add, commit, checkout, restore, stash, reset), reads git state with `GIT_OPTIONAL_LOCKS=0`, and leaves `checklist.md` and the dev log to the owner. If a needed source file is outside the list, finish independent in-scope work and report the exact path, change, and unfinished item without widening the fence.
+If the assignment is a sub-session (phase brief, fixed files, `stage_authority=0`), complete all processable in-scope items, edit only the fixed worktree files, write the report to the artifact path assigned by the phase brief or dispatch prompt, and run the narrow verify command as a required check plus any additional checks named in the brief; a check this environment cannot run is a `handed-over:` line in the report, not an unfinished item. The report is separate from source `fixed_files`. A slice makes no git writes (no add, commit, checkout, restore, stash, reset), reads git state with `GIT_OPTIONAL_LOCKS=0`, and leaves `checklist.md` and the dev log to the owner. If a needed source file is outside the list, finish independent in-scope work and report the exact path, change, and unfinished item without widening the fence.
 
 ## Source state and commit ownership
 
@@ -44,7 +44,7 @@ Use the checklist as the sole orchestration tracker. Keep plan files immutable d
 - Implement each step within this node's sealed `dev/*` unit with concrete file and change instructions.
 - Record each step in the declared `dev_logs/` location, such as `step_01_model_py.md`.
 - Run the focused checks named by the plan for each step. The selected sibling review node owns implementation review.
-- Your verdict covers your steps and the checks your environment can run; the leg's wider verification belongs to `code-test` and the owner. A check this environment cannot run (sandbox, network, host or hardware limits) does not fail its step: write `handed-over: <exact command> (reason: ...)` in the step log, finish the step, and leave the check to `code-test`.
+- Your verdict covers your steps and the checks your environment can run; the leg's wider verification belongs to `code-test` and the owner. A focused check that ran and failed is a step failure, not a handed-over check. A check this environment cannot run (sandbox, network, host or hardware limits) does not fail its step: write `handed-over: <command> (reason: ...)` in the step log, finish the step, and leave the check to `code-test` (the owner when no test stage follows).
 - After a successful step, mark it `[x]`.
 - Continue until every processable step has a terminal checklist mark.
 

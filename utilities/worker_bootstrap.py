@@ -588,9 +588,9 @@ HANDED_OVER_LINE = "handed-over: `<exact command>` (reason: <why it cannot run h
 def completion_scope_prompt() -> str:
     """Keep procedure defaults subordinate to the approved request and node scope.
 
-    One completion rule for every worker: verification a later stage or the owner
-    judges is not a producing stage's unfinished duty, and a check the worker's own
-    environment cannot run is handed over in its artifact instead of blocking it.
+    One completion rule for every worker: a producing stage runs the checks its own
+    environment can run (a failed one is a FAIL), and a check that environment cannot
+    run is handed over in its artifact instead of blocking it.
     """
     return (
         "Completion precedence:\n"
@@ -599,8 +599,9 @@ def completion_scope_prompt() -> str:
         "reports, and role or intensity defaults do not replace requested "
         "investigation, deliverables, or verification. Stop at an approved report "
         "endpoint; a bounded stage completes only its assigned portion and leaves "
-        "deferred stages, including verification that a later stage or the owner "
-        "judges, to their owners. A check your environment cannot run (sandbox, "
+        "deferred stages to their owners. A stage that produces the work runs the "
+        "checks its environment can run, and one that ran and failed is a FAIL, not a "
+        "handed-over check. A check your environment cannot run (sandbox, "
         "network, host or hardware limits) goes in your artifact as the line "
         f"{HANDED_OVER_LINE}; it is not an unfinished duty of a stage that "
         "produces the work, and the verification stage or owner runs it. If assigned "
@@ -904,9 +905,21 @@ def qa_primary_items_sidecar(route, node_id, primary_report):
 
 
 VERIFICATION_UNIT = "qa/test"
-_HANDED_OVER_RE = re.compile(r"(?im)^[ \t]*(?:[-*][ \t]+)?handed-over:[ \t]*(\S.*?)[ \t]*$")
+# One `handed-over:` line, also as a numbered, bulleted, checkbox, quoted, bold or first-cell table item.
+_HANDED_OVER_RE = re.compile(
+    r"(?im)^[ \t]*(?:[>|][ \t]*)*(?:(?:[-*+]|\d+[.)])[ \t]+)?(?:\[[ xX]\][ \t]+)?"
+    r"(?:\*\*|__)?handed-over(?:\*\*|__)?:(?:\*\*|__)?[ \t]*(\S.*?)[ \t|]*$")
+_HANDED_OVER_TEMPLATE = ("<exact command>", "<command>", "<why it cannot run here>", "(reason: ...)")
+_HANDED_OVER_COMMAND_RE = re.compile(r"`([^`]+)`")
 _HANDED_OVER_SUFFIXES = frozenset({".md", ".txt", ".log"})
 _HANDED_OVER_LIMITS = {"items": 20, "chars": 300, "files": 200, "bytes": 1 << 20}
+
+
+class HandedOver(NamedTuple):
+    """Handed-over lines read for one receiver: listed rows, unlisted count, files read."""
+    rows: list
+    omitted: int
+    files: list
 
 
 def _route_nodes(route) -> list[dict]:
@@ -954,32 +967,28 @@ def _named(ids, fallback="the owner") -> str:
     return ", ".join(ids[:4]) + (f" (+{len(ids) - 4} more)" if len(ids) > 4 else "")
 
 
-def handed_over_checks(route, node_id, output_dir) -> list[tuple[str, str]]:
-    """`handed-over:` lines earlier stages of this cycle wrote in their declared artifact
-    outputs and write scopes (a sub-session report lives in the latter).
+def _scan_handed_over(scanned, output_dir) -> HandedOver:
+    """`handed-over:` lines the `scanned` nodes wrote in their declared artifact outputs and
+    write scopes (a sub-session report lives in the latter), under this cycle's output directory.
 
-    Read for a verification stage (`qa/test` unit) only: these are the checks a
-    producing stage's environment could not run. Returns ``[(text, relative path)]``,
-    bounded; a missing or unreadable file contributes nothing. Read-only.
-    """
-    nodes = {n["id"]: n for n in _route_nodes(route)}
-    node = nodes.get(node_id)
-    if not output_dir or not node or node.get("unit") != VERIFICATION_UNIT:
-        return []
+    Bounded and read-only: a missing or unreadable file contributes nothing, a line that copies the
+    instruction template is not a check, and one command is listed once."""
     import artifact_context
+    empty = HandedOver([], 0, [])
+    if not output_dir or not scanned:
+        return empty
     base = Path(output_dir)
     try:
         base_real = base.resolve(strict=True)
     except (OSError, RuntimeError):
-        return []
+        return empty
     patterns = list(dict.fromkeys(
-        value for n in _related_nodes(route, node_id, later=False)
+        value for n in scanned
         for value in (*(n.get("outputs") or ()), *(n.get("write_scope") or ()))
         if isinstance(value, str) and value and not artifact_context.is_semantic_output(value)
         and artifact_context.classify_scope(value) == "artifact"))
-    found: list[tuple[str, str]] = []
-    seen_items: set[str] = set()
-    seen_files: set[str] = set()
+    rows: list[tuple[str, str]] = []
+    omitted, seen_items, seen_files, files_with_items = 0, set(), set(), []
     for pattern in patterns:
         prefix = []
         for part in Path(pattern).parts:
@@ -1019,23 +1028,73 @@ def handed_over_checks(route, node_id, output_dir) -> list[tuple[str, str]]:
                 continue
             for match in _HANDED_OVER_RE.finditer(text):
                 item = match.group(1)[:_HANDED_OVER_LIMITS["chars"]]
-                if item not in seen_items:
-                    seen_items.add(item)
-                    found.append((item, relative))
-                if len(found) >= _HANDED_OVER_LIMITS["items"]:
-                    return found
-    return found
+                if any(token in item for token in _HANDED_OVER_TEMPLATE):
+                    continue
+                command = _HANDED_OVER_COMMAND_RE.search(item)
+                key = command.group(1).strip() if command else item
+                if key in seen_items:
+                    continue
+                seen_items.add(key)
+                if relative not in files_with_items:
+                    files_with_items.append(relative)
+                if len(rows) < _HANDED_OVER_LIMITS["items"]:
+                    rows.append((item, relative))
+                else:
+                    omitted += 1
+    return HandedOver(rows, omitted, files_with_items)
+
+
+def handed_over_scan(route, node_id, output_dir) -> HandedOver:
+    """The checks handed over to this node, as a receiver reads them.
+
+    A `qa/test` stage receives what every earlier node handed over. The owner receives what a
+    producing node hands over when no `qa/test` stage follows it; that is read for the producing
+    node itself (``owner_handed_over``)."""
+    node = {n["id"]: n for n in _route_nodes(route)}.get(node_id)
+    if not node or node.get("unit") != VERIFICATION_UNIT:
+        return HandedOver([], 0, [])
+    return _scan_handed_over(_related_nodes(route, node_id, later=False), output_dir)
+
+
+def handed_over_checks(route, node_id, output_dir) -> list[tuple[str, str]]:
+    """``[(text, relative path)]`` handed over to a `qa/test` stage (``handed_over_scan``)."""
+    return handed_over_scan(route, node_id, output_dir).rows
+
+
+def owner_handed_over(route, node_id, output_dir) -> HandedOver:
+    """The checks the owner itself runs because of this node: everything handed over to a `qa/test`
+    stage the owner now runs itself (``inline``), or what a producing node with no later `qa/test`
+    stage handed over."""
+    node = {n["id"]: n for n in _route_nodes(route)}.get(node_id)
+    if not node or judges_leg(node) or verification_receivers(route, node_id):
+        return handed_over_scan(route, node_id, output_dir)
+    return _scan_handed_over([node], output_dir)
+
+
+def cycle_output_dir(route, route_file, environ=None) -> str | None:
+    """The owner's cycle output directory: its inherited environment, else the route's producer binding."""
+    env = os.environ if environ is None else environ
+    return (artifact_cycle_environment(env)["AGENT_ARTIFACT_OUTPUT_DIR"]
+            or resolve_node_scope(route, None, env, route_file=route_file).output_dir)
+
+
+def handed_over_lines(found: HandedOver, prefix: str) -> list[str]:
+    """One line per listed check, then one line naming how many more and where."""
+    lines = [f"{prefix}{text} [{relative}]" for text, relative in found.rows]
+    if found.omitted:
+        lines.append(f"{prefix}+{found.omitted} more not listed; see {', '.join(found.files)}")
+    return lines
 
 
 def handed_over_prompt(route, node_id, output_dir) -> str:
     """Give a verification stage the checks earlier stages handed over to it."""
-    rows = handed_over_checks(route, node_id, output_dir)
-    if not rows:
+    found = handed_over_scan(route, node_id, output_dir)
+    if not found.rows:
         return ""
     return ("Checks earlier stages handed over (their environment could not run them); run each as "
             "part of your verification. One your environment cannot run either leaves your verdict "
             "BLOCKED: repeat its handed-over line in your report so the owner runs it.\n"
-            + "\n".join(f"- {text} [{relative}]" for text, relative in rows) + "\n")
+            + "\n".join(handed_over_lines(found, "- ")) + "\n")
 
 
 def plan_leg_prompt(route, node_id=None, primary_report=None) -> str:

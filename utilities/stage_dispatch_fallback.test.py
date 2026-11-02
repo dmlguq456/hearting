@@ -579,6 +579,23 @@ class FallbackTest(unittest.TestCase):
   with mock.patch.dict(os.environ,{},clear=True):
    self.assertEqual(F.inline_owner_next_line(route,route["nodes"][0],"/route.json"),"")
   self.assertEqual(F.inline_owner_next_line({},{},"/route.json"),"")
+ def test_an_inline_verification_stage_hands_the_owner_its_exact_checks(self):
+  output=Path(self.tmp.name)/"cycle"/"artifacts"
+  (output/"dev_logs").mkdir(parents=True)
+  (output/"dev_logs"/"step_01.md").write_text(
+   "handed-over: `pytest -k socket` (reason: loopback bind EPERM)\n",encoding="utf-8")
+  route={"route_id":"rt-handover","nodes":[
+   {"id":"execute","kind":"pipeline-stage","unit":"dev/backend","depends_on":[],
+    "outputs":["source-diff","dev_logs/**"]},
+   {"id":"test","kind":"pipeline-stage","unit":"qa/test","depends_on":["execute"],
+    "outputs":["test_logs/test_report.md"]}]}
+  with mock.patch.dict(os.environ,{"AGENT_ARTIFACT_OUTPUT_DIR":str(output)}):
+   lines=F.inline_owner_next_line(route,route["nodes"][1],"/route.json").splitlines()
+   self.assertTrue(lines[0].startswith("owner_next_command=python3 "),lines)
+   self.assertEqual(lines[1:],["owner_handed_over=`pytest -k socket` (reason: loopback bind EPERM) "
+                               "[dev_logs/step_01.md]"])
+   # the producing stage itself, with a test stage after it, hands the owner nothing
+   self.assertEqual(len(F.inline_owner_next_line(route,route["nodes"][0],"/route.json").splitlines()),1)
 
  def test_multiple_process_failures_then_parent_skip_preserve_last_real_cause(self):
   with self.dispatch_env(AGENT_DISPATCH_CURRENT_HARNESS="codex",
@@ -2974,19 +2991,63 @@ class FallbackTest(unittest.TestCase):
    _hops,open_affinity=F.ordered_fallback_hops(route,{**node,"harness_affinity":"opencode"},self.jobs,
                                                handed_over=2)
   self.assertEqual((plain["rank"][0],plain["affinity"],plain["affinity_source"]),("codex","codex",None))
+  self.assertIsNone(plain["handed_over_affinity"])
   head=observed["rank"][0]
   self.assertTrue(F.unsandboxed_harness(head),observed["rank"])
   self.assertEqual(hops[0]["candidates"][0]["child_harness"],head)
-  self.assertEqual((observed["affinity"],observed["affinity_source"]),(head,"handed-over-checks"))
+  # the sealed affinity stays recorded; the observation and its reason are separate fields
+  self.assertEqual((observed["affinity"],observed["handed_over_affinity"],observed["affinity_source"]),
+                   ("codex",head,"handed-over-checks"))
   self.assertEqual(sorted(observed["rank"]),["claude","codex","opencode"])
-  self.assertEqual((pinned["rank"][0],pinned["affinity_source"]),("codex",None))
+  self.assertEqual((pinned["rank"][0],pinned["handed_over_affinity"],pinned["affinity_source"]),("codex",None,None))
   self.assertEqual((open_affinity["rank"][0],open_affinity["affinity_source"]),("opencode",None))
   out=io.StringIO()
   with contextlib.redirect_stdout(out):
    F.emit_allocation(observed)
    F.emit_allocation(plain)
+   F.emit_allocation(F._recompute_verdicts_for_child(observed,"codex"))
   self.assertEqual(out.getvalue().count("allocation_affinity_source=handed-over-checks"),1)
-  self.assertIn(f"allocation_affinity={head}\nallocation_affinity_source=handed-over-checks\n",out.getvalue())
+  self.assertIn(f"allocation_handed_over_affinity={head}\nallocation_affinity_source=handed-over-checks\n",
+                out.getvalue())
+  # a fallback launch on another harness does not carry the handed-over reason
+  self.assertIn(f"allocation_handed_over_affinity={head}\nallocation_affinity_source=-\n",out.getvalue())
+ def test_handed_over_checks_on_a_quality_peer_review_pick_an_unsandboxed_peer(self):
+  # RV-1029: a review-worker qa/test node (lab independent-verify, ship post-deploy-verify) under a
+  # claude owner with quality peers {claude, codex}. The quality-peer protection binds first, and
+  # handed-over checks choose the unsandboxed peer; the receipt names the harness that leads.
+  pi={f:("claude" if f=="parent_harness" else "v") for f in F.DISPATCH_NODE.CURRENT_PARENT_ENV}
+  row=lambda h:{"child_harness":h,"status":"supported",**pi}
+  node={"kind":"review-worker","unit":"qa/test","harness_affinity":"codex","model_profile":"balanced",
+        "harness_policy":{"primary":["codex","claude","opencode"],"relief":[],"last_resort":[],
+                          "promote_relief_below":0},
+        "fallback_hops":[
+         {"ordinal":1,"fallback_hop":"same-harness-headless","candidates":[row("claude")]},
+         {"ordinal":2,"fallback_hop":"cross-harness-headless","candidates":[row("codex"),row("opencode")]},
+         {"ordinal":3,"fallback_hop":"native-subagent","candidates":[]},
+         {"ordinal":4,"fallback_hop":"inline","candidates":[]}]}
+  route={"dispatch_allocation":{"strategy":"balanced","window":30,"usage_gate_used_percent":90,
+                                 "harness_order":["claude","codex","opencode"]},
+         "owner_harness_policy":{"primary":["codex","claude"]},
+         "nodes":[{"id":"x","model_profile":"balanced-deep","harness_policy":{"primary":["codex","claude"]}}]}
+  for scores in ({"claude":60,"codex":90,"opencode":70},{"claude":30,"codex":90,"opencode":95}):
+   with self.subTest(scores=scores), \
+        mock.patch.object(F,"_usage_states",return_value={"claude":"ok","codex":"ok","opencode":"ok"}), \
+        mock.patch.object(F.CAPACITY,"capacity_scores",return_value=scores):
+    hops,plain=F.ordered_fallback_hops(route,node,self.jobs,parent_identity=pi)
+    self.assertEqual(plain["rank"][0],"codex")
+    hops,ctx=F.ordered_fallback_hops(route,node,self.jobs,parent_identity=pi,handed_over=2)
+    self.assertEqual(ctx["quality_peer_families"],["claude","codex"])
+    self.assertEqual(hops[0]["candidates"][0]["child_harness"],"claude")
+    self.assertEqual((ctx["rank"][0],ctx["handed_over_affinity"],ctx["affinity_source"],ctx["sole_gate"]),
+                     ("claude","claude","handed-over-checks","ok"))
+    self.assertEqual(ctx["affinity"],"codex")
+  # no unsandboxed quality peer: the protection keeps a peer at the head and no reason is claimed
+  with mock.patch.object(F,"_usage_states",return_value={"claude":"ok","codex":"ok","opencode":"ok"}), \
+       mock.patch.object(F.CAPACITY,"capacity_scores",return_value={"claude":60,"codex":90,"opencode":70}), \
+       mock.patch.object(F,"quality_peer_families",return_value={"codex"}):
+   hops,ctx=F.ordered_fallback_hops(route,node,self.jobs,parent_identity=pi,handed_over=2)
+  self.assertEqual((ctx["rank"][0],ctx["handed_over_affinity"],ctx["affinity_source"],ctx["sole_gate"]),
+                   ("codex",None,None,"ok"))
  def test_handed_over_count_reads_the_cycle_for_the_verification_node_only(self):
   output=Path(self.tmp.name)/"cycle"/"artifacts"
   (output/"dev_logs").mkdir(parents=True)

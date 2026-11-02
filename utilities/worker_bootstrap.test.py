@@ -1358,7 +1358,8 @@ class LegPlanRoleTest(unittest.TestCase):
 
     def test_completion_precedence_hands_an_unrunnable_check_over_instead_of_blocking(self):
         text = W.completion_scope_prompt()
-        self.assertIn("including verification that a later stage or the owner judges", text)
+        self.assertIn("runs the checks its environment can run, and one that ran and failed is a FAIL, "
+                      "not a handed-over check", text)
         self.assertIn("handed-over: `<exact command>` (reason: <why it cannot run here>)", text)
         self.assertIn("it is not an unfinished duty of a stage that produces the work", text)
         self.assertIn("the verification stage or owner runs it", text)
@@ -1369,7 +1370,12 @@ class LegPlanRoleTest(unittest.TestCase):
         self.assertIn("A producing stage's handed-over check is not\none of its unfinished items.",
                       W.worker_terminal_contract(ROOT))
         self.assertIn("is not part\n  of a producing stage's portion", stage)
+        self.assertIn("a check that ran and failed is a `FAIL`, not a handed-over check", stage)
         self.assertIn("A verification\nstage runs the checks handed over to it", stage)
+        self.assertIn("one your environment cannot run is handed over the same way, not left unfinished", stage)
+        owner = W.render_worker_bootstrap(ROOT, "owner")
+        self.assertIn("One your own environment cannot run either stays\nunverified", owner)
+        self.assertIn("do not report it as PASS", owner)
 
 
 class HandedOverChecksTest(unittest.TestCase):
@@ -1421,13 +1427,49 @@ class HandedOverChecksTest(unittest.TestCase):
     def test_reading_is_bounded_and_deduplicated(self):
         lines = "".join(f"handed-over: `check {index}` (reason: sandbox)\n" for index in range(30))
         self.write("dev_logs/step_00.md", "handed-over: `" + "x" * 400 + "`\n")
-        self.write("dev_logs/step_01.md", "handed-over: `check 0` (reason: sandbox)\n" + lines)
-        rows = W.handed_over_checks(code_leg_route(), "test", str(self.output))
+        # the same command with another reason (a later correction round) is one check
+        self.write("dev_logs/step_01.md", "handed-over: `check 0` (reason: sandbox)\n" + lines
+                   + "handed-over: `check 0` (reason: still no loopback)\n")
+        found = W.handed_over_scan(code_leg_route(), "test", str(self.output))
+        rows = found.rows
         self.assertEqual(len(rows), 20)
         self.assertEqual(len({text for text, _ in rows}), 20)
         self.assertEqual(len(rows[0][0]), 300)
         self.assertEqual([text for text, _ in rows[1:3]],
                          ["`check 0` (reason: sandbox)", "`check 1` (reason: sandbox)"])
+        self.assertEqual((found.omitted, found.files), (11, ["dev_logs/step_00.md", "dev_logs/step_01.md"]))
+        prompt = W.handed_over_prompt(code_leg_route(), "test", str(self.output))
+        self.assertIn("- +11 more not listed; see dev_logs/step_00.md, dev_logs/step_01.md\n", prompt)
+
+    def test_common_markdown_forms_count_and_a_copied_template_does_not(self):
+        self.write("dev_logs/step_01.md", "\n".join([
+            "1. handed-over: `make one` (reason: a)",
+            "2) handed-over: `make two` (reason: b)",
+            "**handed-over:** `make three` (reason: c)",
+            "- **handed-over**: `make four` (reason: d)",
+            "- [ ] handed-over: `make five` (reason: e)",
+            "> handed-over: `make six` (reason: f)",
+            "| handed-over: `make seven` (reason: g) |",
+            "handed-over: `<exact command>` (reason: <why it cannot run here>)",
+            "- handed-over: <command> (reason: ...)",
+            "This step handed-over nothing: not at the start of a line.",
+        ]) + "\n")
+        texts = [text for text, _ in W.handed_over_checks(code_leg_route(), "test", str(self.output))]
+        self.assertEqual(texts, [f"`make {word}` (reason: {letter})" for word, letter in
+                                 zip(("one", "two", "three", "four", "five", "six", "seven"), "abcdefg")])
+
+    def test_the_owner_receives_what_no_later_verification_stage_takes(self):
+        self.write("dev_logs/step_01.md", "handed-over: `pytest -k socket` (reason: loopback bind EPERM)\n")
+        with_test, without_test = code_leg_route(), code_leg_route(with_test=False)
+        self.assertEqual(W.owner_handed_over(with_test, "execute", str(self.output)).rows, [])
+        self.assertEqual(W.owner_handed_over(without_test, "execute", str(self.output)).rows,
+                         [("`pytest -k socket` (reason: loopback bind EPERM)", "dev_logs/step_01.md")])
+        # a verification stage the owner now runs itself hands it everything it received
+        self.assertEqual(W.owner_handed_over(with_test, "test", str(self.output)).rows,
+                         W.handed_over_checks(with_test, "test", str(self.output)))
+        for node_id in ("impl-review", "report", "missing"):
+            with self.subTest(node=node_id):
+                self.assertEqual(W.owner_handed_over(without_test, node_id, str(self.output)).rows, [])
 
     def test_the_verification_stage_assignment_carries_what_execute_handed_over(self):
         route = code_leg_route(artifact_root=str(self.root / "artifact_root"))

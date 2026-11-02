@@ -67,6 +67,8 @@ not a retry; after a gate failure, dispatch only the last handoff's unfinished g
 sub-session that finds an out-of-list file stops; you decide whether to add a slice.
 
 A `handed-over:` line in a stage's artifact names a check its environment could not run; it
-is not that stage's gap. A later `qa/test` stage receives it with its assignment. Before you
-settle the leg, run yourself, under the verification runner above, each one that has no such
-stage after it or that the verification stage could not run either.
+is not that stage's gap. A later `qa/test` stage receives it with its assignment. When no such
+stage follows, or a verification stage you now run yourself received it, the stage's
+completion or inline receipt lists it for you. Before you settle the leg, run each listed check
+under the verification runner above. One your own environment cannot run either stays
+unverified: name it with its command in your final report and do not report it as PASS.

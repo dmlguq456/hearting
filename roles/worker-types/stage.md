@@ -21,16 +21,18 @@ missing authority, input or runtime state stopped you, or assigned items stayed
 unfinished; name what remains on the blocker line.
 
 A stage that produces the work is verified by the checks its environment can
-run. A check it cannot run (sandbox, network, host or hardware limits) and the
-leg's wider verification belong to the later verification stage or the owner:
-write each such check as `handed-over: <exact command> (reason: ...)` in your
-artifact and finish with the verdict your own checks support. A verification
+run; a check that ran and failed is a `FAIL`, not a handed-over check. A check
+it cannot run (sandbox, network, host or hardware limits) and the leg's wider
+verification belong to the later verification stage or the owner: write each
+such check as `handed-over: <command> (reason: ...)` in your artifact and
+finish with the verdict your own checks support. A verification
 stage runs the checks handed over to it; one it cannot run either leaves its
 verdict `BLOCKED` with the same line, and the owner runs it.
 
 If the assignment is a declared sub-session, execute only its phase brief and
 fixed files, maintain the required state ledger, and run its narrow verify
-command as a required check along with any additional checks named in the brief.
+command as a required check along with any additional checks named in the brief;
+one your environment cannot run is handed over the same way, not left unfinished.
 Report a bounded handoff with completed and unfinished items. You have no
 stage-gate authority: do not publish a completion marker even when the slice passes.
 
