@@ -41,10 +41,10 @@ class TodayParityPlumbingTests(unittest.TestCase):
             self.assertEqual(_validated_header_identity(capture), {
                 "version": "v3.50.3-20-gad247e2b6", "install_method": "managed/stable"})
             source.write_text(json.dumps({"compute_hosts": {"hosts": [
-                {"host": "gpu-a01", "self": True}, {"host": "cnn", "self": False}]}}),
+                {"host": "mgpu-a1", "self": True}, {"host": "cnn", "self": False}]}}),
                 encoding="utf-8")
             self.assertEqual(_validated_header_hosts(capture), [
-                {"mark": "⌂", "name": "gpu-a01"}, {"mark": "◇", "name": "cnn"}])
+                {"mark": "⌂", "name": "mgpu-a1"}, {"mark": "◇", "name": "cnn"}])
             source.write_text("{}", encoding="utf-8")
             self.assertEqual(_validated_header_identity(capture), {
                 "version": "unknown", "install_method": "unmanaged"})
@@ -118,7 +118,7 @@ def _rows_record(width, state, rows, *, start=0, hits=None, profile=None, fleet_
 
 
 def _r14_narrow_header_record(working=0, idle=0, blocked=0, version="v3.50.3-20-gad247e2b6", clock="02:38"):
-    host = "⌂ gpu-a01 +4"
+    host = "⌂ mgpu-a1 +4"
     reference_census = (f" {working} working  ● {idle} idle  ● {blocked} answer needed   hearting "
                         f"{version}  {clock}")
     reference = reference_census.ljust(79) + "⠏"
@@ -130,8 +130,8 @@ def _r14_narrow_header_record(working=0, idle=0, blocked=0, version="v3.50.3-20-
     record = _rows_record(80, "OVERVIEW", {0: (reference, candidate)}, profile=R14_REFERENCE_PROFILE)
     record["validated_header_identity"] = {"version": version, "install_method": "unmanaged"}
     record["validated_header_hosts"] = [
-        {"mark": "⌂", "name": "gpu-a01"}, {"mark": "◇", "name": "cnn"},
-        {"mark": "◇", "name": "gpu-b1"}, {"mark": "◇", "name": "gpu-c1"},
+        {"mark": "⌂", "name": "mgpu-a1"}, {"mark": "◇", "name": "cnn"},
+        {"mark": "◇", "name": "xgpu-b"}, {"mark": "◇", "name": "lgpu-c"},
         {"mark": "◇", "name": "mpwav"},
     ]
     record["reference_edge"][0] = True
@@ -145,7 +145,7 @@ def _r14_narrow_header_record(working=0, idle=0, blocked=0, version="v3.50.3-20-
 
     candidate_cells = record["fleet2_cells"]
     style_text(candidate_cells, 0, "⌂ ", "g_work")
-    style_text(candidate_cells, 2, "gpu-a01", "g_work")
+    style_text(candidate_cells, 2, "mgpu-a1", "g_work")
     style_text(candidate_cells, 9, " +4", "dim")
     position = 80 - len(census)
     for column in range(len(host), position):
@@ -170,10 +170,10 @@ def _r14_narrow_header_record(working=0, idle=0, blocked=0, version="v3.50.3-20-
 def _r14_wide_header_record(working=0, idle=0, blocked=0, version="v3.50.3-20-gad247e2b6",
                             clock="02:38", method="unmanaged"):
     width = 168
-    hosts = [{"mark": "⌂", "name": "gpu-a01"}, {"mark": "◇", "name": "cnn"},
-             {"mark": "◇", "name": "gpu-b1"}, {"mark": "◇", "name": "gpu-c1"},
+    hosts = [{"mark": "⌂", "name": "mgpu-a1"}, {"mark": "◇", "name": "cnn"},
+             {"mark": "◇", "name": "xgpu-b"}, {"mark": "◇", "name": "lgpu-c"},
              {"mark": "◇", "name": "mpwav"}]
-    host = " hosts ⌂ gpu-a01  ◇ cnn  ◇ gpu-b1  ◇ gpu-c1  ◇ mpwav 5/5"
+    host = " hosts ⌂ mgpu-a1  ◇ cnn  ◇ xgpu-b  ◇ lgpu-c  ◇ mpwav 5/5"
     old_census = (f"⠏ {working} working  ● {idle} idle  ● {blocked} answer needed   hearting "
                   f"{version}  {clock}")
     new_census = (f"⠏ {working} working  ● {idle} idle  ● {blocked} answer needed   hearting "
@@ -186,10 +186,10 @@ def _r14_wide_header_record(working=0, idle=0, blocked=0, version="v3.50.3-20-ga
     record["validated_header_hosts"] = hosts
     record["reference_overflow_mask"]["version"] = REFERENCE_MASK_VERSION
 
-    host_parts = [(" hosts ", "dim"), ("⌂ ", "g_work"), ("gpu-a01", "g_work"), ("  ", "branch_s"),
+    host_parts = [(" hosts ", "dim"), ("⌂ ", "g_work"), ("mgpu-a1", "g_work"), ("  ", "branch_s"),
                   ("◇ ", "dim"), ("cnn", "loc_repo"), ("  ", "branch_s"),
-                  ("◇ ", "dim"), ("gpu-b1", "loc_repo"), ("  ", "branch_s"),
-                  ("◇ ", "dim"), ("gpu-c1", "loc_repo"), ("  ", "branch_s"),
+                  ("◇ ", "dim"), ("xgpu-b", "loc_repo"), ("  ", "branch_s"),
+                  ("◇ ", "dim"), ("lgpu-c", "loc_repo"), ("  ", "branch_s"),
                   ("◇ ", "dim"), ("mpwav", "loc_repo"), (" 5/5", "dim")]
     base_census = [(f"⠏ {working}", "g_spin"), (" working", "dim"),
                    (f"  ● {idle}", "g_work_off"), (" idle", "dim"),
@@ -647,7 +647,7 @@ class ClassificationTests(unittest.TestCase):
                 (row.index("unmanaged"), ("l", "version_method", None)),
                 (row.index("hearting"), ("x", "hearting_name", None)),
                 (row.index("⠏"), ("⠙", "g_spin", None)),
-                (row.index("gpu-a01"), ("X", "g_work", None)),
+                (row.index("mgpu-a1"), ("X", "g_work", None)),
                 (row.index("02:38") + 4, ("9", "dim", None)),
                 (row.index("gad247"), ("g", "dim", None)),
         ):
@@ -712,8 +712,8 @@ class ClassificationTests(unittest.TestCase):
         self.assertEqual((entry["class"], entry["rule"]), ("intended", "right-edge-safe-clip"))
 
     def test_unknown_compute_track_is_a_narrow_reference_copy_limit(self):
-        ref0 = "  gpu-a01   ● 0  RTX 6000 Ada     ·    ·            ·"
-        live0 = "  gpu-a01   ● 0  RTX 6000 Ada    ·     ··········   ·"
+        ref0 = "  mgpu-a1   ● 0  RTX 6000 Ada     ·    ·            ·"
+        live0 = "  mgpu-a1   ● 0  RTX 6000 Ada    ·     ··········   ·"
         ref1 = "            ● 1  RTX 6000 Ada     ·    ·            ·"
         live1 = "            ● 1  RTX 6000 Ada    ·     ··········   ·"
         record = self._unknown_compute_record(140, ref0, live0, ref1, live1)
@@ -723,11 +723,11 @@ class ClassificationTests(unittest.TestCase):
         self.assertEqual((entry["class"], entry["rule"]), ("copy-limitation", "unknown-gpu-track"))
 
     def test_unknown_compute_track_does_not_hide_interior_glyph_or_style_changes(self):
-        ref0 = "  gpu-a01   ● 0  RTX 6000 Ada     ·    ·            ·"
-        live0 = "  gpu-a01   ● 0  RTX 6000 Ada    ·     ··········   ·"
+        ref0 = "  mgpu-a1   ● 0  RTX 6000 Ada     ·    ·            ·"
+        live0 = "  mgpu-a1   ● 0  RTX 6000 Ada    ·     ··········   ·"
         ref1 = "            ● 1  RTX 6000 Ada     ·    ·            ·"
         live1 = "            ● 1  RTX 6000 Ada    ·     ··········   ·"
-        wrong_glyph = self._unknown_compute_record(140, ref0, live0.replace("gpu-a01", "gpu-a0X"), ref1, live1)
+        wrong_glyph = self._unknown_compute_record(140, ref0, live0.replace("mgpu-a1", "mgpu-aX"), ref1, live1)
         wrong_style = self._unknown_compute_record(140, ref0, live0, ref1, live1,
                                                    fleet_style_overrides={(5, 35): "blocked"})
         for record in (wrong_glyph, wrong_style):
@@ -739,7 +739,7 @@ class ClassificationTests(unittest.TestCase):
                                                  6: (" " * 33 + ref1, " " * 33 + live1)},
                               fleet_style_overrides=fleet_style_overrides)
         record["reference_copy_limitations"] = [
-            {"reference_file": "mock13.py", "host": "gpu-a01", "gpu": gpu,
+            {"reference_file": "mock13.py", "host": "mgpu-a1", "gpu": gpu,
              "unknown_cells": ["UTIL", "COMPUTE block VRAM percent", "VRAM gauge", "VRAM used/total"]}
             for gpu in (0, 1)]
         record["reference_profile"] = "mock-r14-v87"
@@ -903,14 +903,14 @@ class InjectionPieces(unittest.TestCase):
         renderer = SimpleNamespace(ROOT_FN={"COMPUTE": compute_renderer},
                                    mock12=SimpleNamespace(compute_block=compute_block),
                                    mock6=SimpleNamespace(COMPUTE_BLOCK=compute_block))
-        compute = [["gpu-a01", True, [1, 2], [1, 2], [0, 1],
+        compute = [["mgpu-a1", True, [1, 2], [1, 2], [0, 1],
                     [[0, "idle", "GPU", "gpu_test", None, None, None, []]]]]
         with mock.patch.dict(globals(), {"gauge": lambda track, percent: (track, percent),
                                          "pct_key": lambda _percent: "known"}):
             limitations = _adapt_unknown_compute_cells(renderer, compute)
             # Keep the captured values as None; only the isolated renderer's cell formatting adapts.
             self.assertEqual(compute[0][5][0][4:7], [None, None, None])
-            self.assertEqual(limitations, [{"reference_file": "mock13.py", "host": "gpu-a01", "gpu": 0,
+            self.assertEqual(limitations, [{"reference_file": "mock13.py", "host": "mgpu-a1", "gpu": 0,
                                             "unknown_cells": ["UTIL", "COMPUTE block VRAM percent",
                                                               "VRAM gauge", "VRAM used/total"]}])
 
@@ -932,7 +932,7 @@ class InjectionPieces(unittest.TestCase):
             self.assertEqual(known_block.cells, {(18, 8): "●", (20, 8): " 50%"})
 
     def test_reference_copy_limitations_are_reported_without_exempting_differences(self):
-        limitation = {"reference_file": "mock13.py", "host": "gpu-a01", "gpu": 0,
+        limitation = {"reference_file": "mock13.py", "host": "mgpu-a1", "gpu": 0,
                       "unknown_cells": ["VRAM gauge", "VRAM used/total"]}
         records = [_record(cells=[(10, 50, "x", "dim", "y", "dim")]) for _ in range(2)]
         for record in records:

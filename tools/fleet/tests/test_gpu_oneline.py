@@ -33,7 +33,7 @@ class GPUOneLineTest(unittest.TestCase):
                     "reservations": [{"owner": {**o, "label": "saved [%s]" % o["id"]},
                                       "started_at": 1728000000, "task": "detailed task"}
                                      for o in owners]}
-        self.host = {"host": "gpu-a01", "reachable": True, "cpu_count": 64,
+        self.host = {"host": "mgpu-a1", "reachable": True, "cpu_count": 64,
                      "gpus": [self.gpu]}
         render.set_compute_hosts({"configured": True, "hosts": [self.host]})
 

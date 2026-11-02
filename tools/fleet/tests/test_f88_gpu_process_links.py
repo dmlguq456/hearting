@@ -284,7 +284,7 @@ class GpuProcessAndResourceRenderTest(unittest.TestCase):
                       title="old Claude", liveness="working")
         claimed = {"kind": "session", "harness": "codex", "id": "sid-exact",
                    "source": "persistent-claim+ancestry"}
-        snapshot = {"configured": True, "hosts": [{"host": "gpu-a01", "gpus": [
+        snapshot = {"configured": True, "hosts": [{"host": "mgpu-a1", "gpus": [
             {"index": 0, "name": "NVIDIA A100", "processes": [
                 {"pid": 3697573, "proc_start": 90,
                  "command": "python run.py --engine_mode train --config _m6_lx3nx4.yaml",
@@ -310,8 +310,8 @@ class GpuProcessAndResourceRenderTest(unittest.TestCase):
             joined = "\n".join(text)
             self.assertGreaterEqual(len(text), 1)
             self.assertLessEqual(len(text), 2)
-            self.assertEqual(joined.count("GPU gpu-a01:0"), 1)
-            self.assertEqual(joined.count("GPU gpu-a01:1"), 1)
+            self.assertEqual(joined.count("GPU mgpu-a1:0"), 1)
+            self.assertEqual(joined.count("GPU mgpu-a1:1"), 1)
             if width >= 100:
                 self.assertIn("(M6 train)", joined)
                 self.assertIn("(M3_9 train)", joined)
@@ -330,17 +330,17 @@ class GpuProcessAndResourceRenderTest(unittest.TestCase):
             render._build_process_lines([codex, old], [], {}, 0, None, 120, "wide"),
         ):
             text = [render._plain(line) for line in lines if line]
-            gpu_rows = [line for line in text if "GPU gpu-a01:" in line]
-            self.assertEqual("\n".join(gpu_rows).count("GPU gpu-a01:0 (M6 train)"), 1)
-            self.assertEqual("\n".join(gpu_rows).count("GPU gpu-a01:1 (M3_9 train)"), 1)
+            gpu_rows = [line for line in text if "GPU mgpu-a1:" in line]
+            self.assertEqual("\n".join(gpu_rows).count("GPU mgpu-a1:0 (M6 train)"), 1)
+            self.assertEqual("\n".join(gpu_rows).count("GPU mgpu-a1:1 (M3_9 train)"), 1)
             self.assertFalse(any(" RUN " in line for line in text))
             self.assertLess(next(i for i, line in enumerate(text) if "Codex [92]" in line),
-                            next(i for i, line in enumerate(text) if "GPU gpu-a01:" in line))
+                            next(i for i, line in enumerate(text) if "GPU mgpu-a1:" in line))
         render._COMPUTE_HOSTS_SET_AT -= 3 * render._COMPUTE_HOST_INTERVAL + 1
         self.assertEqual(render._gpu_session_resources(), {})
         stale_lines = render._build_lines([codex], [], "both", False, 0,
                                           layout="wide", term_width=120)
-        self.assertFalse(any("GPU gpu-a01:" in render._plain(line)
+        self.assertFalse(any("GPU mgpu-a1:" in render._plain(line)
                              for line in stale_lines if line))
 
     def test_confirmed_clear_keeps_gpu_under_the_current_same_pane_session(self):
@@ -388,7 +388,7 @@ class GpuProcessAndResourceRenderTest(unittest.TestCase):
                     claimed = {"kind": "session", "harness": harness, "id": "sid-old",
                                "source": "persistent-claim+ancestry"}
                     snapshot = {"configured": True, "hosts": [{
-                        "host": "gpu-a01", "self": True, "reachable": True, "gpus": [{
+                        "host": "mgpu-a1", "self": True, "reachable": True, "gpus": [{
                             "index": 1, "name": "NVIDIA A100", "processes": [{
                                 "pid": 300, "proc_start": 42, "pgid": 300,
                                 "command": "python run.py --engine_mode train --config _m6.yaml",

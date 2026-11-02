@@ -517,11 +517,11 @@ class RemoteCandidatesTest(unittest.TestCase):
 
     def test_same_pid_on_other_hosts_stays_host_qualified(self):
         first = self.arm("T", pid=42, start=11)
-        second = self.arm("B", pid=42, start=11, host="gpu-a01",
+        second = self.arm("B", pid=42, start=11, host="mgpu-a1",
                           run="b_baseline_20261006", gpu=1)
         found = self.collect_remote({"arms": [first, second]})
         self.assertEqual([(item["host"], item["pid"]) for item in found],
-                         [("cnn", 42), ("gpu-a01", 42)])
+                         [("cnn", 42), ("mgpu-a1", 42)])
 
 
 class DeclaredResourceProgressTest(unittest.TestCase):

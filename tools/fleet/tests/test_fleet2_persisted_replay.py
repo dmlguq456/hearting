@@ -40,7 +40,7 @@ def display_vm(**session_overrides):
         "identity": "internal-generation-id", "hearting": {
             "version": "v3.50.3-20-gad247e2b6", "install_method": "managed/stable"},
         "clock": 1700000000,
-        "hosts": [{"mark": "⌂", "name": "gpu-a01", "key": "base_host"}],
+        "hosts": [{"mark": "⌂", "name": "mgpu-a1", "key": "base_host"}],
         "usage": [{"harness": "codex", "text": "5h 72%", "key": "usage_codex",
                     "windows": [["5h", 72, 28]]}],
         "repos": [{"id": "repo-a", "name": "hearting", "done": 2, "age": "4m"}],
@@ -48,7 +48,7 @@ def display_vm(**session_overrides):
         "routes": [{"id": "route-a", "repo": "hearting", "session_tag": "c7",
                     "title": "safe route", "state": "active", "worker_stage": "execute",
                     "worktree": "/private/path", "activity": "RAW_ACTIVITY_SENTINEL"}],
-        "compute": [["gpu-a01", True, [12.0, 16], None, None, []]],
+        "compute": [["mgpu-a1", True, [12.0, 16], None, None, []]],
         "nodes": {"route-a": [{"lines": ["RAW_NODE_SENTINEL"]}]},
         "attempts": {"lines": ["RAW_ATTEMPT_SENTINEL"]},
         "questions": [{"title": "RAW_QUESTION_SENTINEL"}],

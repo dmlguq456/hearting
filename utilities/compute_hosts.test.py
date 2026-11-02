@@ -1124,33 +1124,33 @@ class ComputeHostsTest(unittest.TestCase):
                                             "hostname": here}), [])
 
     def test_self_discovery_accepts_short_name_and_name_lists(self):
-        # gpu-a01's system hostname changed from `workstation` to
-        # `gpu-a01.example.test`: an inventory that declares only the short name,
+        # mgpu-a1's system hostname changed from `workstation` to
+        # `mgpu-a1.example.test`: an inventory that declares only the short name,
         # or keeps several names, must still recognize the local machine.
         module = load_module()
         with mock.patch.object(module.socket, "gethostname",
-                               return_value="gpu-a01.example.test"):
+                               return_value="mgpu-a1.example.test"):
             self.assertTrue(module.is_self({"ssh_host": "203.0.113.9",
-                                            "hostname": "gpu-a01"}))
-            self.assertTrue(module.is_self({"ssh_host": "203.0.113.9",
-                                            "hostname": ["workstation",
-                                                         "gpu-a01.example.test"]}))
+                                            "hostname": "mgpu-a1"}))
             self.assertTrue(module.is_self({"ssh_host": "203.0.113.9",
                                             "hostname": ["workstation",
-                                                         "gpu-a01"]}))
+                                                         "mgpu-a1.example.test"]}))
             self.assertTrue(module.is_self({"ssh_host": "203.0.113.9",
-                                            "hostname": "GPU-A01"}))
+                                            "hostname": ["workstation",
+                                                         "mgpu-a1"]}))
+            self.assertTrue(module.is_self({"ssh_host": "203.0.113.9",
+                                            "hostname": "MGPU-A1"}))
             self.assertFalse(module.is_self({"ssh_host": "203.0.113.9",
                                              "hostname": ["workstation",
                                                           "cnn"]}))
             self.assertFalse(module.is_self({"ssh_host": "203.0.113.9",
-                                             "hostname": "gpu-a010"}))
+                                             "hostname": "mgpu-a10"}))
             self.assertFalse(module.is_self({"ssh_host": "203.0.113.9",
                                              "hostname": [None, 7]}))
         with mock.patch.object(module.socket, "gethostname",
-                               return_value="gpu-a01"):
+                               return_value="mgpu-a1"):
             self.assertTrue(module.is_self({"ssh_host": "203.0.113.9",
-                                            "hostname": "gpu-a01.example.test"}))
+                                            "hostname": "mgpu-a1.example.test"}))
 
     def test_static_listing_marks_short_and_listed_names_as_self(self):
         import socket
@@ -2083,8 +2083,8 @@ class ComputeHostsTest(unittest.TestCase):
     def test_unconfirmed_launches_are_unknown_without_repairing_history(self):
         module = load_module()
         config = {"run_root": self.run_root}
-        run_ids = ("gpu-b1-20261024-193701-ami-tf-a1-historical-parity",
-                   "gpu-b1-20261024-191238-ami-leg2-e1-recovery",
+        run_ids = ("xgpu-b-20261024-193701-ami-tf-a1-historical-parity",
+                   "xgpu-b-20261024-191238-ami-leg2-e1-recovery",
                    "just-created")
         for run_id in run_ids:
             run_dir = self.run_root / run_id
@@ -2175,7 +2175,7 @@ class LauncherProvenanceTest(unittest.TestCase):
     """The launcher forwards runtime-known provenance into detached payloads.
 
     Regression cover for the 2026-10-06 BC_ResNet eval loss
-    (`gpu-a01-20261006-102542`): the payload's guard read exactly
+    (`mgpu-a1-20261006-102542`): the payload's guard read exactly
     `AGENT_HOME` and `AGENT_DISPATCH_ATTEMPT_ID` with strict lookups and died
     with `KeyError` before the first inference, while the launch receipt
     (`env=null`, no `AGENT_*`) shows the launcher forwarded neither. The
