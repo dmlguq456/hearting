@@ -273,7 +273,9 @@ atomic, reversible direct source change, use
 the isolated worktree first. If the source change was already made in place,
 `compose --shape direct` records its route without preparing a worktree.
 Otherwise use `compose --start --prompt-file <task>` with no `--shape`; the
-frame chooses the capability, stages, and solo or staged shape.
+frame chooses the capability, stages, and solo or staged shape, judging each
+leg's optional `size` (`one-change`, `one-pass`, `multi-stage`) first; an
+omitted shape follows it.
 
 | Main decision | Command | Result |
 |---|---|---|

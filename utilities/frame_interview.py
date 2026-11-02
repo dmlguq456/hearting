@@ -940,8 +940,9 @@ def _route_lines(interview: dict, answers: dict, scope: dict) -> list[str]:
     lines.append(f"Execution scope: {proposal.get('execution_scope', 'complete')}")
     for index, leg in enumerate(proposal.get("legs") or []):
         graph = ",".join(leg.get("graph") or []) or "whole recipe"
+        size = f" (size {leg['size']})" if leg.get("size") else ""
         lines.append(f"- Leg {index}: {leg.get('capability')} / {leg.get('mode') or 'default mode'} / "
-                     f"{leg.get('shape')} / {graph}" + ("  (starts now)" if index == 0 else "  (next step, decided separately)"))
+                     f"{leg.get('shape')}{size} / {graph}" + ("  (starts now)" if index == 0 else "  (next step, decided separately)"))
     given = approvals_given(interview, answers, proposal)
     if given:
         lines += ["", "Start approvals:"]
