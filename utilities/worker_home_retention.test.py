@@ -1102,6 +1102,79 @@ class Deliveries(Fixture):
         self.assertEqual(self.unknown(result, "delivery-index-unknown"), 1)
         self.assertTrue(home.is_dir())
 
+    def producer_notice(self, harness, session_id, key):
+        record = NOTICE.notify(harness, session_id, key=key, subject="Status",
+                               text="Read this", jobs=self.jobs)
+        self.assertIsNotNone(record)
+        self.assertEqual(record["parent_attempt_id"], "")
+        self.assertEqual(record["attempt_ids"], [])
+        return record
+
+    def test_ordinary_session_notice_from_producer_does_not_block_retention(self):
+        for harness in ("claude", "codex"):
+            with self.subTest(harness=harness):
+                home = self.add("att-ordinary-" + harness, harness=harness)
+                self.producer_notice(harness, "sess-ordinary-" + harness, "ordinary-" + harness)
+                self.assertEqual(self.sweep(0)["eligible"], 1)
+                result = self.sweep(8 / 7)
+                self.assertEqual(result["removed"], 1)
+                self.assertFalse(home.exists())
+
+    def test_ordinary_notice_with_corrupt_record_still_keeps_home(self):
+        home = self.add("att-ordinary-corrupt")
+        self.producer_notice("claude", "sess-corrupt", "ordinary-corrupt")
+        folder = self.root / "pending-delivery" / ("d" * 64)
+        folder.mkdir(parents=True)
+        corrupt = folder / ("delivery-" + "d" * 32 + ".json")
+        corrupt.write_text("{")
+        stamp = self.now / 1e9
+        os.utime(corrupt, (stamp, stamp))
+        self.sweep(0)
+        result = self.sweep(8 / 7)
+        self.assertEqual(self.unknown(result, "delivery-index-unknown"), 1)
+        self.assertEqual(result["unknown_causes"]["delivery-index-unknown"],
+                         {"record-unreadable": 1})
+        self.assertTrue(home.is_dir())
+
+    def test_ordinary_notice_over_record_limit_still_keeps_home(self):
+        home = self.add("att-ordinary-limit")
+        self.producer_notice("claude", "sess-limit", "ordinary-limit-a")
+        self.producer_notice("claude", "sess-limit", "ordinary-limit-b")
+        with mock.patch.object(R, "MAX_DELIVERY_RECORDS", 1):
+            self.sweep(0)
+            result = self.sweep(8 / 7)
+        self.assertEqual(self.unknown(result, "delivery-index-unknown"), 1)
+        self.assertEqual(result["unknown_causes"]["delivery-index-unknown"],
+                         {"record-limit": 1})
+        self.assertTrue(home.is_dir())
+
+    def test_delivery_relation_and_index_share_record_identities(self):
+        ordinary = self.producer_notice("claude", "sess-share", "share-ordinary")
+        legacy = self.legacy_notice("sess-share", "share-legacy")
+        opened = self.publish_delivery("delivery-" + "5" * 32, "sess-share", ["att-share"], "-")
+        paths = {name: self.root / "pending-delivery" / record["recipient_digest"]
+                 / (record["delivery_id"] + ".json")
+                 for name, record in (("ordinary", ordinary), ("legacy", legacy), ("open", opened))}
+        refs, cause = R._delivery_index(self.root)
+        self.assertEqual((refs, cause), ({"att-share"}, ""))
+        for name, expected in (("ordinary", "unrelated"), ("legacy", "unrelated"),
+                               ("open", "related")):
+            self.assertEqual(R._delivery_record_relation(paths[name], {"att-share"}), expected, name)
+        for name in ("ordinary", "legacy"):
+            self.assertEqual(R._delivery_record_relation(paths[name], {"att-other"}), "unrelated")
+
+    def test_tombstones_do_not_count_against_the_record_limit(self):
+        home = self.add("att-tombstones")
+        group = self.root / "pending-delivery" / ("a" * 64)
+        group.mkdir(parents=True)
+        for index in range(R.MAX_HOME_REFERENCE_ENTRIES + 1):
+            (group / f"delivery-{index:032x}.json.pruned").touch()
+        self.assertGreater(R.MAX_DIRECTORY_ENTRIES, R.MAX_DELIVERY_RECORDS)
+        self.assertEqual(self.sweep(0)["eligible"], 1)
+        result = self.sweep(8 / 7)
+        self.assertEqual(result["removed"], 1)
+        self.assertFalse(home.exists())
+
 
 class Recovery(Fixture):
     def reserve(self, attempt, family="f" * 64, claim=None):

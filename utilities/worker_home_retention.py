@@ -44,6 +44,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 import dispatch_attempt_reference as attempt_reference
+from dispatch_pending_delivery import LEGACY_NOTICE_ID_RE
 
 IDLE_SECONDS = 3600
 DUE_SECONDS = 300
@@ -58,8 +59,12 @@ MAX_STATE_BYTES = 1024 * 1024
 MAX_MANIFEST_BYTES = 64 * 1024
 MAX_EVIDENCE_BYTES = 1024 * 1024
 MAX_DELIVERY_BYTES = 256 * 1024
-MAX_DELIVERY_RECORDS = 4096
-MAX_DEPENDENCY_STAMPS = MAX_DELIVERY_RECORDS * 8
+# Records read from the delivery store, and (separately) directory entries listed
+# there: tombstones, locks and sidecars are entries but not records.
+MAX_DELIVERY_RECORDS = 32768
+MAX_DIRECTORY_ENTRIES = 131072
+MAX_DEPENDENCY_STAMPS = 32768
+MAX_HOME_REFERENCE_ENTRIES = 4096
 MAX_HOME_SCAN_PIDS = 8192
 MAX_HOME_SCAN_FDS = 2048
 MAX_TREE_DEPTH = 128
@@ -67,7 +72,7 @@ REGISTRY_LOCK_WAIT_SECONDS = 0.100
 
 KEY_RE = re.compile(r"[0-9a-f]{32}")
 ATTEMPT_RE = attempt_reference.ATTEMPT_RE
-NOTICE_RE = re.compile(r"notice-[0-9a-f]{32}")
+NOTICE_RE = LEGACY_NOTICE_ID_RE
 ATTEMPT_ID_RE = re.compile(r"(?:^|,)attempt_id=([^,]+)")
 LEAF_RE = re.compile(r"([0-9a-f]{32})\.([0-9]{1,20})(?:\.([0-9]{1,5}))?")
 DELIVERY_ID_RE = re.compile(r"delivery-(?:[0-9a-f]{32}|[0-9a-f]{64})")
@@ -799,7 +804,7 @@ def home_reference_relevant(root, attempt_ids) -> bool | None:
         with os.scandir(workers_fd) as listing:
             entries = []
             for entry in listing:
-                if len(entries) >= MAX_DELIVERY_RECORDS:
+                if len(entries) >= MAX_HOME_REFERENCE_ENTRIES:
                     return None
                 if KEY_RE.fullmatch(entry.name) and entry.is_dir(follow_symlinks=False):
                     entries.append(entry.name)
@@ -951,12 +956,17 @@ def _worker_home_read_matches(layout: _Layout, home: int, requested: Path, trans
 
 def _delivery_index(root: Path, *, observer=None, activity=None, records=None,
                     groups_seen=None):
-    """(attempt ids in open records, unknown evidence).
+    """(attempt ids in open records, unknown cause).
+
+    The cause is "" when the store was read completely, else a short bucket
+    (store-unreadable, group-untrusted, group-unreadable, record-limit,
+    record-unreadable, record-invalid, record-path-mismatch).
 
     `activity`, when given, receives the newest mtime of resolved records per
     attempt they name.
     """
-    from dispatch_pending_delivery import OPEN_STATES, PendingDeliveryError, _validate_record
+    from dispatch_pending_delivery import (OPEN_STATES, PendingDeliveryError,
+                                           record_attempt_identities)
     refs: set[str] = set()
     seen = 0
     base = root / "pending-delivery"
@@ -965,13 +975,13 @@ def _delivery_index(root: Path, *, observer=None, activity=None, records=None,
     try:
         groups = list(os.scandir(base))
     except FileNotFoundError:
-        return refs, False
+        return refs, ""
     except OSError:
-        return refs, True
+        return refs, "store-unreadable"
     for group in groups:
         try:
             if group.is_symlink() or not group.is_dir(follow_symlinks=False):
-                return refs, True
+                return refs, "group-untrusted"
             if groups_seen is not None:
                 groups_seen.add(group.name)
             if observer is not None:
@@ -980,7 +990,7 @@ def _delivery_index(root: Path, *, observer=None, activity=None, records=None,
                 observer("group", Path(group.path))
             entries = list(os.scandir(group.path))
         except OSError:
-            return refs, True
+            return refs, "group-unreadable"
         for entry in entries:
             if not entry.name.endswith(".json"):
                 continue
@@ -988,31 +998,23 @@ def _delivery_index(root: Path, *, observer=None, activity=None, records=None,
                 observer("file", Path(entry.path))
             seen += 1
             if seen > MAX_DELIVERY_RECORDS:
-                return refs, True
+                return refs, "record-limit"
             try:
                 found = _read_json(entry.path, MAX_DELIVERY_BYTES)
             except _Unreadable:
-                return refs, True
+                return refs, "record-unreadable"
             if found is None:
                 continue
             value, mtime = found
             try:
-                _validate_record(value)
+                named = list(record_attempt_identities(value))
             except (PendingDeliveryError, TypeError, ValueError):
-                return refs, True
+                return refs, "record-invalid"
             if (not SHA256_RE.fullmatch(group.name)
                     or not DELIVERY_ID_RE.fullmatch(entry.name[:-5])
                     or value.get("recipient_digest") != group.name
                     or value.get("delivery_id") != entry.name[:-5]):
-                return refs, True
-            ids = value.get("attempt_ids")
-            parent = value.get("parent_attempt_id")
-            if (not isinstance(ids, list) or not all(
-                    isinstance(item, str) and (ATTEMPT_RE.fullmatch(item) or NOTICE_RE.fullmatch(item))
-                    for item in ids)
-                    or not isinstance(parent, str) or not parent):
-                return refs, True
-            named = [item for item in (*ids, parent) if ATTEMPT_RE.fullmatch(item)]
+                return refs, "record-path-mismatch"
             if records is not None:
                 digest = hashlib.sha256(json.dumps(
                     value, sort_keys=True, separators=(",", ":")
@@ -1025,7 +1027,7 @@ def _delivery_index(root: Path, *, observer=None, activity=None, records=None,
             elif activity is not None:
                 for item in named:
                     activity[item] = max(activity.get(item, 0), mtime)
-    return refs, False
+    return refs, ""
 
 
 def _replacement_state(root: Path, snapshot: _Snapshot, attempt: str):
@@ -1178,7 +1180,7 @@ class _Context:
         self.group_stamps = {}
         self.delivery_activity: dict[str, int] = {}
         self.delivery_records: dict[str, dict[str, tuple]] = {}
-        self.delivery_unknown_global = False
+        self.delivery_unknown_global = ""
         self.delivery_groups: set[str] = set()
         self.candidate_delivery_baseline: _CandidateDeliveryBaseline | None = None
         self.candidate_binding: _HomeBinding | None = None
@@ -1220,7 +1222,7 @@ class _Context:
             # registry row. They retain the exact attempt id needed to verify a
             # legacy key in the same forward direction used by the builder.
             _refs, delivery_unknown = self.delivery_index()
-            self.legacy_scan_unknown |= delivery_unknown
+            self.legacy_scan_unknown |= bool(delivery_unknown)
             attempts = set(self.snapshot.rows) | set(self.delivery_records)
             directories = [
                 (self.root / "automatic-replacements" / "by-source", "attempt-record"),
@@ -1504,7 +1506,7 @@ def _delivery_record_relation(path: Path, related: set[str] | frozenset[str],
                               binding: _HomeBinding | None = None, *,
                               dir_fd: int | None = None) -> str:
     """related | unrelated | unknown for a changed delivery record."""
-    from dispatch_pending_delivery import PendingDeliveryError, _validate_record
+    from dispatch_pending_delivery import PendingDeliveryError, record_attempt_identities
     for attempt in range(2):
         try:
             read_path = path.name if dir_fd is not None else str(path)
@@ -1512,23 +1514,14 @@ def _delivery_record_relation(path: Path, related: set[str] | frozenset[str],
             if found is None:
                 return "unrelated"
             value = found[0]
-            _validate_record(value)
+            identities = record_attempt_identities(value)
             if (value.get("delivery_id") != path.name[:-5]
                     or value.get("recipient_digest") != path.parent.name):
                 return "unknown"
-            ids = value.get("attempt_ids")
-            parent = value.get("parent_attempt_id")
-            if (not isinstance(ids, list) or not isinstance(parent, str)
-                    or not all(isinstance(item, str)
-                               and (ATTEMPT_RE.fullmatch(item) or NOTICE_RE.fullmatch(item))
-                               for item in ids)):
-                return "unknown"
-            identities = (item for item in (*ids, parent) if ATTEMPT_RE.fullmatch(item))
             if related.intersection(identities):
                 return "related"
             if binding is not None and any(
-                    _attempt_maps_to_binding(item, binding)
-                    for item in (*ids, parent) if ATTEMPT_RE.fullmatch(item)):
+                    _attempt_maps_to_binding(item, binding) for item in identities):
                 return "related"
             return "unrelated"
         except (_Unreadable, PendingDeliveryError, TypeError, ValueError):
@@ -1542,7 +1535,7 @@ def _bounded_directory_entries(path: Path, deadline: float) -> list | None:
     try:
         with os.scandir(path) as listing:
             for entry in listing:
-                if (len(entries) >= MAX_DELIVERY_RECORDS
+                if (len(entries) >= MAX_DIRECTORY_ENTRIES
                         or time.monotonic() >= deadline):
                     return None
                 entries.append(entry)
@@ -1556,7 +1549,7 @@ def _bounded_directory_entries_fd(dir_fd: int, deadline: float) -> list | None:
     try:
         with os.scandir(dir_fd) as listing:
             for entry in listing:
-                if (len(entries) >= MAX_DELIVERY_RECORDS
+                if (len(entries) >= MAX_DIRECTORY_ENTRIES
                         or time.monotonic() >= deadline):
                     return None
                 entries.append(entry)
@@ -2062,7 +2055,8 @@ def _orphan_protection(ctx: _Context, binding: _HomeBinding):
             activity = max(activity, mtime)
     refs, index_unknown = ctx.delivery_index()
     if index_unknown:
-        return _Verdict("unknown", "delivery-index-unknown", detail="delivery-scan-incomplete")
+        return _Verdict("unknown", "delivery-index-unknown",
+                        detail=index_unknown if isinstance(index_unknown, str) else "delivery-scan-incomplete")
     if attempt is not None and attempt in refs:
         return _Verdict("keep", "delivery-open")
     if attempt is not None:
