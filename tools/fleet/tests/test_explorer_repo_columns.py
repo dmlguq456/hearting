@@ -1,4 +1,4 @@
-"""Repository grouping is drawn once on the group rule; route summaries keep repo before the badge."""
+"""Repository grouping is drawn once on the group rule; OVERVIEW route summaries name the repo on every row."""
 import unittest
 from dataclasses import replace
 
@@ -117,7 +117,7 @@ class RepoColumnTests(unittest.TestCase):
 
 
 class RouteSummaryRepoRule(unittest.TestCase):
-    def test_shared_width_keeps_badges_aligned_and_repeats_only_on_repo_change(self):
+    def test_shared_width_keeps_badges_aligned_and_names_the_repo_on_every_row(self):
         vm = model(routes=[
             {"id": "one", "repo": LONG, "session_tag": "a1", "state": "working", "harness": "codex",
              "title": "first work", "capability": "code", "age": "3m"},
@@ -137,9 +137,11 @@ class RouteSummaryRepoRule(unittest.TestCase):
                 self.assertEqual(len(rows), 3, rows)
                 long_rows = [row for _y, row in rows if LONG[:12] in row]
                 cjk_rows = [row for _y, row in rows if CJK[:4] in row]
-                self.assertEqual(len(long_rows), 1)
+                # Every OVERVIEW ROUTES row names its own repo, not only the first of a run.
+                self.assertEqual(len(long_rows), 2)
                 self.assertEqual(len(cjk_rows), 1)
-                first_two = [y for y, pane in rows if LONG[:12] in pane or "[b2]" in pane][:2]
+                self.assertTrue(all(LONG[:12] in row for _y, row in rows if "[b2]" in row))
+                first_two = [y for y, pane in rows if LONG[:12] in pane][:2]
                 self.assertEqual(_cell_column(frame, first_two[0], "["),
                                  _cell_column(frame, first_two[1], "["))
 
@@ -161,6 +163,39 @@ class RouteSummaryRepoRule(unittest.TestCase):
         self.assertEqual(len(badge_columns), 1)
         for row in text:
             self.assertEqual(sum(cell_width(cell) for cell in row), 140)
+
+
+class RouteSummaryCountBlink(unittest.TestCase):
+    def _count_cells(self, vm, beat):
+        frame = draw(vm, NavState(view="OVERVIEW"), 140, 60, beat=beat)
+        for y, row in enumerate(frame.cells):
+            text = "".join(cell[0] for cell in row)
+            if "── ROUTES" in text:
+                start = text.index("ROUTES") + len("ROUTES  ")
+                end = text.index(" open", start) + len(" open")
+                return text[start:end], {cell[1] for cell in row[start:end]}
+        self.fail("no OVERVIEW ROUTES rule")
+
+    def test_open_count_pulses_on_the_working_beat(self):
+        vm = model()
+        text_on, keys_on = self._count_cells(vm, 1)
+        text_off, keys_off = self._count_cells(vm, 0)
+        self.assertEqual(text_on, "2 open")
+        self.assertEqual(text_on, text_off)
+        self.assertEqual(keys_on, {"g_work"})
+        self.assertEqual(keys_off, {"g_work_off"})
+
+    def test_zero_open_routes_stay_steady(self):
+        vm = model(routes=[
+            {"id": "done-" + tag, "repo": LONG, "session_tag": tag, "state": "done",
+             "harness": "codex", "title": "finished", "capability": "code", "age": "9m"}
+            for tag in ("a1", "b2")])
+        text_on, keys_on = self._count_cells(vm, 1)
+        text_off, keys_off = self._count_cells(vm, 0)
+        self.assertEqual(text_on, "0 open")
+        self.assertEqual(keys_on, keys_off)
+        self.assertNotIn("g_work", keys_on)
+        self.assertNotIn("g_work_off", keys_on)
 
 
 if __name__ == "__main__":

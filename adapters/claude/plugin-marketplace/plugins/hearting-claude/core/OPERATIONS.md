@@ -2706,9 +2706,11 @@ Resumed retirement determines self-target from its recorded requester's session
 and pane identity. A cancelled request is terminal history:
 a new explicit request for the same lifetime accepts a fresh duty while retaining
 the cancelled record; repeated active or completed requests share that fresh duty.
-The current holder's explicit handoff records every eligible logical job and a
-seat-successor relation in the common ledger, independently of card delivery,
-receiver acceptance and physical retirement. A missing card or pane does not
+The current holder's explicit handoff — its own command, or a supervisor or user
+command that names it with `--from` and whose sealed sender is that observed
+holder — records every eligible logical job and a seat-successor relation in the
+common ledger, independently of card delivery, receiver acceptance and physical
+retirement. A missing card or pane does not
 remove that relation. Explicit receiver acceptance records reading separately. The successor may then
 `start` and `correct` them, and their stored completion records reach it. The
 registered parent, worker, receipt, claim, and ACK identities stay anchored to
@@ -2925,7 +2927,7 @@ acceptance and actual receipt are separate facts:
 |---|---|---|---|
 | Claude | `peer-steward.py prompt` stores/reuses a ref bound to sender, recipient session and body digest; existing hook context carries the sealed message. | The exact receiving callback acknowledges the bound ref. Context output alone is not receipt. | An already armed exact owner/watch `asyncRewake` hook wakes on exit 2. Ordinary notices use the existing guarded PTY courier only after exact SID/PID/start/namespace, idle state and an empty composer are proven. Draft, question, approval, busy or unknown stays pending for the next supported opportunity or native callback. |
 | Codex | The freshly proven exact thread/client queue accepts one sealed ref and returns its `client_message_id`; a legitimate TUI process restart may continue the same exact thread. | The exact message in the bound thread history confirms consumption. | Uses the existing queue and hook path; no transcript inference. |
-| OpenCode | The plugin saves one `noReply` user message through its current client at the exact selected root SID. Its native ID marks it queued. | Only an error-free completed assistant message whose `parentID` is that ID in the same SID marks it received. | On a verified idle root, `promptAsync` continues the persisted message by ID. Busy, question, permission, child, ambiguous history or SID change cannot consume it. |
+| OpenCode | The exact selected root SID uses the same guarded PTY input as Claude. The plugin's idle callback may also take its own pending row through the current client; the existing `rpc_claim` lets exactly one side send. | Only an error-free completed assistant message whose `parentID` is that ID in the same SID marks it received. | On a verified idle root the runner repeats the Claude guard; `promptAsync` continues the plugin-persisted message by ID. Busy, question, permission, child, ambiguous history or SID change cannot consume it. |
 
 Queue acceptance never means delivery or consumption. A pending retry of the same
 sender/recipient/body reuses its ref; a changed body or recipient session gets a
@@ -3094,17 +3096,30 @@ leaving an extra anonymous target.
 
 **Peer submission is reference-based, never inferred from transport status.**
 `peer-steward.py prompt` seals a private transfer ref for the exact sender, recipient
-session and body digest. Its support matrix is `Claude plain TUI: idle -> existing
-steward prompt delivery; busy -> callback`. The Claude idle path checks exact SID,
-pane, foreground PID birth and namespace, native idle state, registered-work
-readiness, an empty visible composer, and no open form or question before sending
-through the existing steward prompt helper. A dim prompt suggestion counts as an
-empty composer. Busy, blocked, unknown, form-open, nonempty-draft, or unreadable
-targets remain on the callback path and receive no PTY input. Codex uses the exact
-thread queue and `client_message_id`; OpenCode saves a `noReply` message through the
-current plugin client, then resumes only that persisted ID on an idle, verified root
-session. A queued ref is not a receipt; only exact bound native history or the
-receiver callback can mark it received.
+session and body digest. One rule decides every harness: the sender uses the native
+path it can address, otherwise the guarded PTY input, otherwise the row waits under
+one carrier.
+
+- Native paths: Codex uses its exact thread queue and `client_message_id`, and an
+  interrupted thread is started only when the same sender-side screen gate sees no
+  form, no draft and an empty composer.
+- Guarded PTY input: Claude and OpenCode with the exact session ID use the same guard
+  (exact SID, pane, foreground PID birth and namespace, native idle state,
+  registered-work readiness, an empty visible composer, and no open form or
+  question). A dim prompt suggestion counts as an empty composer.
+- Blocked: busy, blocked, unknown, form-open, nonempty draft, unreadable screen,
+  unproven identity, or a submission that provably did not start keeps the row
+  `pending` under exactly one scheduled `message-<ref>` obligation. That runner
+  repeats the same guard and the same Codex start gate on every pass, so the message
+  is delivered once when the block clears.
+- A normal submission leaves the row `queued` with no new carrier: the exact
+  receiver's receipt closes it. A queued ref is not a receipt; only exact bound
+  native history or the receiver callback marks it received. An ambiguous or
+  timed-out write is not typed again.
+- A row whose endpoint was not proven (`receipt=peer-endpoint-unverified`) is
+  outside this class: no carrier can deliver it, so it keeps none and remains the
+  sender's one-hour notice target. After one hour the sender is notified for any
+  still-pending row.
 
 A lost native response is reconciled from exact persisted history before continuing
 the same ref. Duplicate or ambiguous matches are left pending without resubmitting
@@ -3206,7 +3221,9 @@ complete-source path. Receiver guidance is advisory. The receiver reads the
 complete source and referenced documents before using that supplied command;
 ordinary messages and cards have no accept command or successor authority.
 Logical transfer records the current holder's explicit request independently
-of content delivery. Acceptance revalidates the exact native receiver, replays
+of content delivery — the holder's own command, or a supervisor's `--from`
+command whose sealed sender is the observed holder and whose executor is
+informational only. Acceptance revalidates the exact native receiver, replays
 the same logical record and schedules the retained reply. Physical retirement
 has its own original lifetime and preserved-context checks; native acceptance
 may report `retire=deferred` without a reservation ID. Queueing, delivery and ACK

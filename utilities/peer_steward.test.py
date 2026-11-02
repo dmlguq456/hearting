@@ -1547,6 +1547,40 @@ print(json.dumps(info)); sys.exit(0)
 
 
 
+class SupervisedPromptContractTest(_TmpRootMixin, unittest.TestCase):
+    """The supervisor sender is internal: no CLI flag, keyword-only, mutually exclusive."""
+
+    def test_prompt_cli_exposes_no_sender_or_source_flag(self):
+        args = peer_steward.build_parser().parse_args(["prompt", "w1:p2", "body"])
+        self.assertFalse(hasattr(args, "sender"))
+        self.assertFalse(hasattr(args, "source"))
+        for flag in ("--sender", "--from", "--from-session"):
+            with self.subTest(flag=flag), self.assertRaises(SystemExit):
+                peer_steward.build_parser().parse_args(
+                    ["prompt", "w1:p2", "body", flag, "x"])
+
+    def test_sender_is_keyword_only_and_conflicts_with_a_producer_binding(self):
+        import inspect
+        parameter = inspect.signature(peer_steward.cmd_prompt).parameters["sender"]
+        self.assertIs(parameter.kind, inspect.Parameter.KEYWORD_ONLY)
+        args = peer_steward.build_parser().parse_args(["prompt", "w1:p2", "body"])
+        with self.assertRaisesRegex(ValueError, "producer-binding-with-sender"):
+            peer_steward.cmd_prompt(args, producer_binding={}, sender={
+                "harness": "claude", "session_id": "predecessor", "pane": "w1:p1"})
+
+    def test_retain_failure_is_off_only_when_the_supervised_path_asks(self):
+        args = peer_steward.build_parser().parse_args(
+            ["start", "grid", "--kind", "codex", "--beside", "w1:p0"])
+        with mock.patch.object(peer_steward, "_start_request", return_value=1), \
+             mock.patch.object(peer_steward, "_retain_start_failure") as retain:
+            self.assertEqual(peer_steward.cmd_start(args, retain_failure=False), 1)
+        retain.assert_not_called()
+        with mock.patch.object(peer_steward, "_start_request", return_value=1), \
+             mock.patch.object(peer_steward, "_retain_start_failure") as retain:
+            self.assertEqual(peer_steward.cmd_start(args), 1)
+        retain.assert_called_once()
+
+
 class SharedDaemonCodexStartTest(_TmpRootMixin, unittest.TestCase):
     """Exercise the real steward start path with Codex's shared defaults."""
 
@@ -4622,6 +4656,10 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
         sid = (agent.get("agent_session") or {}).get("value")
         if sid:
             self._native_sid_by_pid[os.getpid()] = sid
+            # The pane's own foreground pid carries the same native session; the
+            # OpenCode send path now proves it exactly like Claude's.
+            self._native_sid_by_pid.setdefault(
+                self._pane_pid.get(agent.get("pane_id"), 40000), sid)
             self._native_sid_by_harness[agent.get("agent")] = sid
 
         def run(argv, **kwargs):
@@ -6063,7 +6101,9 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
         prepare.assert_called_once()
         send.assert_not_called()
 
-    def test_opencode_prompt_keeps_its_native_callback_path(self):
+    def test_opencode_sid_prompt_uses_the_same_guarded_native_input_as_claude(self):
+        """An exact-SID OpenCode row takes Claude's guarded path; without process
+        proof it still sends no input and keeps the row pending (rc 3)."""
         os.environ["CLAUDE_CODE_SESSION_ID"] = "sid-steward"
         os.environ["HERDR_PANE_ID"] = "w:sender"
         harness = "opencode"
@@ -6112,7 +6152,7 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
                       "session_id": "sid-child"}
         snapshots = iter(foregrounds or [foreground, foreground])
         sent = []
-        def deliver(target, text, *, wait, timeout_ms):
+        def deliver(target, text, *, wait, timeout_ms, start_aware=False):
             sent.append((target, text, wait, timeout_ms))
             if consume:
                 self.assertEqual(peer_steward.peer_message.receive_peer_message(
@@ -6873,7 +6913,7 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
                             "argv": [kind], "shell_pid": os.getpid(),
                             "shell_start": peer_steward._proc_start_ticks(os.getpid())}
 
-                def submit(pane, text, *, wait, timeout_ms):
+                def submit(pane, text, *, wait, timeout_ms, start_aware=False):
                     self.assertEqual(pane, "w1:pX")
                     self.assertFalse(wait)
                     received = peer_steward.peer_message.receive_peer_message(
@@ -6899,7 +6939,10 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
                      mock.patch.object(peer_steward, "_prompt_foreground_proof",
                                        return_value=proof), \
                      mock.patch.object(peer_steward, "_read_screen",
-                                       return_value=peer_steward._screen_lines(CLAUDE_EMPTY)), \
+                                       side_effect=lambda _target: peer_steward._screen_lines(
+                                           CLAUDE_EMPTY if harness == "claude"
+                                           else OPENCODE_FORM if harness == "opencode"
+                                           else CODEX_EMPTY)), \
                      mock.patch.object(peer_steward.herdr_observation, "read_native_status",
                                        return_value={"status": "idle"}) as native_status, \
                      mock.patch("fleet.session_handle.resolve_recipient_tag",
@@ -6956,12 +6999,14 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
                 if harness == "claude":
                     self.assertEqual(send.call_count, 4)
                 else:
+                    # OpenCode now proves the same identity and screen at send time;
+                    # this fixture's open form still holds the row with no input.
                     send.assert_not_called()
                 if harness == "codex":
                     self.assertEqual(codex_queue.call_count, 3)
                     self.assertIn("selected", self._codex_server_observations)
                 if harness == "opencode":
-                    self.assertEqual(native_status.call_count, 3)
+                    self.assertEqual(native_status.call_count, 6)
                     self.assertTrue(all(call.args[0] == "selected"
                                         for call in native_status.call_args_list))
                 if harness == "claude":
@@ -7238,7 +7283,7 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
                                return_value={"status": "queued"}) as queue:
             self.assertEqual(peer_steward._flush_pending_for_target(
                 "child", "codex", "thread", "idle"), (0, []))
-        queue.assert_called_once_with(codex_ref, timeout=0.25)
+        queue.assert_called_once_with(codex_ref, timeout=0.25, start_interrupted=False)
 
     def test_claude_prompt_guard_accepts_a_finished_turn_but_not_work_or_questions(self):
         ident = {"harness": "claude", "session_id": "sid-1", "pane": "w1:p1"}
@@ -7267,7 +7312,7 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
         for obsolete in ("_prompt_box", "_verify_after_send", "_transcript_arrival",
                          "_prompt_input_reason", "no_verify", "state-flip"):
             self.assertNotIn(obsolete, prompt)
-        self.assertIn("elif t_harness == \"claude\"", prompt)
+        self.assertIn("elif t_harness in {\"claude\", \"opencode\"}", prompt)
         self.assertIn("_submit_pending_native", prompt)
         self.assertIn("_native_idle_prompt_guard", source[source.index("def _submit_pending_native"):start])
         self.assertNotIn("--no-verify", peer_steward.build_parser().format_help())
@@ -7324,7 +7369,7 @@ class RetainedRunNoticeCarrierTest(_TmpRootMixin, unittest.TestCase):
         resolved = {"pane": self.pane, "harness": harness, "session_id": target_sid,
                     "name": "fixture-owner", "state": target_state, "_identity": target_ident}
         sends = []
-        def native_receive(_pane, body, *, wait, timeout_ms):
+        def native_receive(_pane, body, *, wait, timeout_ms, start_aware=False):
             self.assertFalse(wait)
             sends.append(body)
             if fail_ack:
@@ -7390,7 +7435,7 @@ class RetainedRunNoticeCarrierTest(_TmpRootMixin, unittest.TestCase):
 
     def _resume_claude_message_duty(self, duty, store):
         ready = SimpleNamespace(state="ready", reason="")
-        def receive(_pane, body, *, wait, timeout_ms):
+        def receive(_pane, body, *, wait, timeout_ms, start_aware=False):
             self.assertFalse(wait)
             self.assertEqual(peer_steward.peer_message.receive_peer_message(
                 body, {"harness": "claude", "session_id": self.sid}), 0)
@@ -8734,7 +8779,7 @@ class SidlessObligationProcessBindingTest(_TmpRootMixin, unittest.TestCase):
         sidless = {"harness": "codex", "session_id": "-", "pane": "w1:pX"}
         delivered = []
 
-        def deliver(ref_, *, timeout=1.0):
+        def deliver(ref_, *, timeout=1.0, start_interrupted=False):
             row = peer_steward.peer_message._read_pending(ref_)
             delivered.append(peer_steward.peer_message.pending_delivery_recipient(row)["session_id"])
             return {"status": "queued"}
@@ -9688,6 +9733,10 @@ CODEX_POPUP = "recap line\n\x1b[1m›\x1b[0m \n  /clear   start a new chat\n  /c
 OPENCODE_EMPTY = "     ▣  Build · Model · 46m\n\n  ┃\n  ┃\n  ┃\n  ┃  Build auto · Model OpenCode Go\n  ╹▀▀▀▀▀\n   /path/to/project\n"
 OPENCODE_WIDE_EMPTY = "     \u25a3  Build \u00b7 Model\n\n  \u2503" + " " * 60 + "\n  \u2503" + " " * 60 + "\n  \u2503" + " " * 120 + "/path/to/project:\n  \u2503  Build \u00b7 Model OpenCode Go" + " " * 80 + "main\n  \u2579\u2580\u2580\u2580\u2580\u2580\n"
 OPENCODE_DRAFT = "     ▣  Build · Model\n\n  ┃  hello there\n  ┃\n  ┃  Build auto · Model OpenCode Go\n  ╹▀▀▀▀▀\n"
+# The token-based form classifier owns the shape; this is the OpenCode question/
+# permission surface in the same keymap footer OpenCode prints.
+OPENCODE_FORM = "Permission required\n ❯ 1. Allow once\n   2. Always allow\n Esc to cancel · Enter to select\n"
+CODEX_FORM = "Permission required\n ❯ 1. Allow once\n   2. Always allow\n Esc to cancel · Enter to select\n"
 OPENCODE_HOME_BLANK = "\n" * 12 + "  /path/to/project:main\n\n"     # 1.18.34: nothing but the cwd line
 OPENCODE_HOME = "\n\n  ┃  Ask anything... \"Fix broken tests\"\n  ┃\n  ┃  Build auto · Model OpenCode Go\n  ╹▀▀▀▀▀\n"
 NO_BOX = "just some output\nwith no prompt box at all\n"
@@ -19199,7 +19248,7 @@ class OpenCodeSidRunnerInputTest(_TmpRootMixin, unittest.TestCase):
         agent = ((lambda *_a, **_k: (next(states), self.PANE)) if states
                  else (lambda *_a, **_k: (state, self.PANE)))
         self.sent = []
-        def deliver(target, text, *, wait, timeout_ms):
+        def deliver(target, text, *, wait, timeout_ms, start_aware=False):
             self.sent.append((target, text))
             return 0, {}
         with mock.patch.object(peer_steward, "_retire_target",
@@ -19317,6 +19366,521 @@ class OpenCodeSidRunnerInputTest(_TmpRootMixin, unittest.TestCase):
         release.assert_called_once()
         self.assertEqual(pm._read_pending(ref)["state"], "pending")
         self.assertEqual(store.get("message-" + ref)["state"], "pending")
+
+
+class _PromptProcess:
+    """Just enough of `subprocess.Popen` for `_herdr_prompt`'s split error contract."""
+
+    def __init__(self, *, rc=0, payload=None, communicate_error=None, timeout=False):
+        self.returncode = rc
+        self.args = []
+        self.stdout = json.dumps(payload if payload is not None else {})
+        self.stderr = ""
+        self._communicate_error = communicate_error
+        self._timeout = timeout
+        self.killed = False
+
+    def communicate(self, _input=None, timeout=None):
+        if self._timeout:
+            raise subprocess.TimeoutExpired("herdr", timeout)
+        if self._communicate_error is not None:
+            raise self._communicate_error
+        return self.stdout, self.stderr
+
+    def kill(self):
+        self.killed = True
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+
+_REAL_HERDR_PROMPT = peer_steward._herdr_prompt
+
+
+class ReceiverStateRetentionCycleTest(_TmpRootMixin, unittest.TestCase):
+    """Backlog bundle B (d1): a message stopped by the receiver's own state keeps one
+    carrier (`pending` + `message-<ref>`) and is delivered exactly once after the
+    block clears; an external write that provably never started returns to pending,
+    while an ambiguous write is never retyped."""
+
+    PANE = "w1:pX"
+
+    def setUp(self):
+        super().setUp()
+        for key in ("AGENT_DISPATCH_CALLER_HARNESS", "AGENT_DISPATCH_CURRENT_HARNESS",
+                    "CLAUDE_SESSION_ID", "CODEX_SESSION_ID", "OPENCODE_SESSION_ID"):
+            os.environ.pop(key, None)
+        herdr = mock.patch.object(peer_steward.shutil, "which", return_value="/usr/bin/herdr")
+        herdr.start()
+        self.addCleanup(herdr.stop)
+        import pane_ownership
+        verified = mock.patch.object(pane_ownership, "verified_pane",
+                                     side_effect=lambda pane, *a, **kw: pane or "")
+        verified.start()
+        self.addCleanup(verified.stop)
+
+    # --- fixture world -----------------------------------------------------------
+    def _prepare_row(self, harness, sid, *, pane=True, text="[steer] keep this message",
+                     schedule=False):
+        pm = peer_steward.peer_message
+        sender = {"harness": "claude", "session_id": "sid-sender", "name": None}
+        recipient = {"harness": harness, "session_id": sid, "name": "child"}
+        if pane:
+            recipient["pane_id"] = self.PANE
+        text, ref = pm.prepare_peer_message(text, sender, recipient, defer=True)
+        row = pm._read_pending(ref)
+        if schedule:
+            with mock.patch.object(peer_steward.peer_obligations, "ensure_normal_runner",
+                                   return_value=False):
+                peer_steward._schedule_message_obligation(
+                    row, "child", self.PANE if pane else None)
+        return ref, row
+
+    def _identity(self, harness, sid):
+        return {"harness": harness, "session_id": sid, "name": "child", "pane": self.PANE}
+
+    def _process_proof(self, harness, sid):
+        return {"pid": os.getpid(), "start": "fixture-start",
+                "pid_namespace": os.readlink("/proc/self/ns/pid"), "session_id": sid}
+
+    @contextlib.contextmanager
+    def _world(self, harness, sid, *, screen=None, send=None, exact=True,
+               real_identity=False, pane_info=None):
+        self.screen = {"value": screen}
+        self.sent = []
+        ident = self._identity(harness, sid)
+        candidate = {"_identity": ident, "state": "idle", "session_id": sid,
+                     "_native_session_id": sid}
+        foreground = self._process_proof(harness, sid)
+        info = pane_info if pane_info is not None else {
+            "pane_id": self.PANE, "shell_pid": 1,
+            "foreground_process_group_id": os.getpgrp(),
+            "foreground_processes": [{"pid": os.getpid(), "argv": [harness]}]}
+
+        def deliver(target, text, *, wait, timeout_ms, start_aware=False):
+            self.sent.append((target, text))
+            return send(target, text) if send is not None else (0, {})
+
+        def screen_lines(_target):
+            value = self.screen["value"]
+            return None if value is None else peer_steward._screen_lines(value)
+
+        stack = contextlib.ExitStack()
+        with stack:
+            stack.enter_context(mock.patch.object(
+                peer_steward, "_retire_target", return_value=("idle", ident, 0, None)))
+            stack.enter_context(mock.patch.object(
+                peer_steward, "_retire_pane_info", return_value=info))
+            stack.enter_context(mock.patch.object(
+                peer_steward, "_agent_state", return_value=("idle", self.PANE)))
+            stack.enter_context(mock.patch.object(
+                peer_steward, "_pane_readiness",
+                return_value=SimpleNamespace(state="ready", reason="")))
+            stack.enter_context(mock.patch.object(
+                peer_steward, "_read_screen", side_effect=screen_lines))
+            stack.enter_context(mock.patch.object(
+                peer_steward, "_herdr_prompt", side_effect=deliver))
+            stack.enter_context(mock.patch.object(
+                peer_steward, "_current_session_identity",
+                return_value=("sid-steward", "claude")))
+            stack.enter_context(mock.patch.object(peer_steward, "_from_name", return_value="steward"))
+            stack.enter_context(mock.patch.object(peer_steward, "_project_of", return_value="/fixture"))
+            stack.enter_context(mock.patch.object(
+                peer_steward.peer_obligations, "ensure_normal_runner", return_value=False))
+            if not real_identity:
+                stack.enter_context(mock.patch.object(
+                    peer_steward, "_prompt_current_candidate",
+                    return_value=((candidate, None) if exact
+                                  else (None, "target-identity-unverified"))))
+                stack.enter_context(mock.patch.object(
+                    peer_steward, "_prompt_exact_candidate", return_value=(candidate, None)))
+                stack.enter_context(mock.patch.object(
+                    peer_steward, "_prompt_foreground_proof", return_value=foreground))
+            yield
+
+    def _prompt(self, harness, sid, *, text="[steer] keep this message", pane=True):
+        args = peer_steward.build_parser().parse_args(["prompt", "child", text])
+        resolved = {"harness": harness, "session_id": sid, "name": "child",
+                    "pane": self.PANE if pane else None, "state": "idle"}
+        with mock.patch("builtins.print") as printed:
+            rc = peer_steward.cmd_prompt(args, resolved_recipient=resolved)
+        ref = self._all_records()[-1]["transfer_ref"]
+        return rc, printed.call_args[0][0], ref
+
+    def _pass(self):
+        store = peer_steward.peer_obligations.ObligationStore()
+        peer_steward._reconcile_obligations(store, store.list(), retry_state={})
+        return store
+
+    def _duty(self, ref):
+        store = peer_steward.peer_obligations.ObligationStore()
+        return store.get("message-" + ref)
+
+    def _receive(self, ref, harness, sid):
+        pm = peer_steward.peer_message
+        row = pm._read_pending(ref)
+        rc = pm.receive_peer_message(row["text"], {"harness": harness, "session_id": sid})
+        self.assertEqual(rc, 0)
+
+    # --- 5.1 Claude form cycle ---------------------------------------------------
+    def test_claude_form_open_holds_one_carrier_then_delivers_once(self):
+        pm = peer_steward.peer_message
+        with self._world("claude", "sid-child", screen=CLAUDE_FORM):
+            rc, line, ref = self._prompt("claude", "sid-child")
+            self.assertEqual(rc, 3, line)
+            self.assertIn("reason=form-open", line)
+            self.assertEqual(self.sent, [])
+            self.assertEqual(pm._read_pending(ref)["state"], "pending")
+            duty = self._duty(ref)
+            self.assertIsNotNone(duty, "a verified endpoint keeps exactly one carrier")
+            self.assertEqual(duty["state"], "pending")
+            store = self._pass()              # still form-open
+            self.assertEqual(self.sent, [])
+            self.assertEqual(store.get("message-" + ref)["state"], "pending")
+            self.assertEqual(store.get("message-" + ref)["observation"]["reason"], "form-open")
+            self.screen["value"] = CLAUDE_EMPTY
+            store = self._pass()              # form closed
+            self.assertEqual(len(self.sent), 1)
+            self.assertEqual(self.sent[0][1], pm._read_pending(ref)["text"])
+            after = pm._read_pending(ref)
+            self.assertEqual((after["state"], after.get("rpc_claim")), ("queued", None))
+            self._receive(ref, "claude", "sid-child")
+            store = self._pass()
+            self.assertEqual(store.get("message-" + ref)["state"], "complete")
+            self._pass()
+            self._pass()
+            self.assertEqual(len(self.sent), 1, "a received row is never retyped")
+
+    # --- 5.2 OpenCode form cycle -------------------------------------------------
+    def test_opencode_form_open_holds_one_carrier_then_delivers_once(self):
+        pm = peer_steward.peer_message
+        with self._world("opencode", "sid-opencode", screen=OPENCODE_FORM):
+            rc, line, ref = self._prompt("opencode", "sid-opencode")
+            self.assertEqual(rc, 3, line)
+            self.assertIn("reason=form-open", line)
+            self.assertEqual(self.sent, [])
+            self.assertEqual(pm._read_pending(ref)["state"], "pending")
+            self.assertIsNotNone(self._duty(ref))
+            store = self._pass()
+            self.assertEqual(self.sent, [])
+            self.assertEqual(store.get("message-" + ref)["observation"]["reason"], "form-open")
+            self.screen["value"] = OPENCODE_EMPTY
+            store = self._pass()
+            self.assertEqual(len(self.sent), 1)
+            self.assertEqual(self.sent[0][1], pm._read_pending(ref)["text"])
+            after = pm._read_pending(ref)
+            self.assertEqual((after["state"], after.get("rpc_claim")), ("queued", None))
+            self._receive(ref, "opencode", "sid-opencode")
+            store = self._pass()
+            self.assertEqual(store.get("message-" + ref)["state"], "complete")
+            self._pass()
+            self._pass()
+            self.assertEqual(len(self.sent), 1)
+
+    # --- 5.3 Codex interrupted conversation + question form ----------------------
+    class _AppServer:
+        """Method-keyed fake Codex app-server; records every RPC."""
+
+        def __init__(self, *, turn_status="interrupted", queue=(), turn_id="turn-live"):
+            self.turn_status, self.turn_id = turn_status, turn_id
+            self.queue = [dict(item) for item in queue]
+            self.calls, self.errors = [], {}
+
+        def methods(self):
+            return [method for method, _params in self.calls]
+
+        def params(self, method):
+            return [params for name, params in self.calls if name == method]
+
+        def __call__(self, _path, method, params, **_kw):
+            self.calls.append((method, dict(params)))
+            error = self.errors.get(method)
+            if error is not None:
+                raise error
+            if method == "thread/queue/list":
+                return {"data": [dict(item) for item in self.queue]}
+            if method == "thread/turns/list":
+                if self.turn_status is None:
+                    return {"data": []}
+                return {"data": [{"id": self.turn_id, "status": self.turn_status, "items": []}]}
+            if method == "thread/queue/add":
+                item = {"id": "queued-%d" % (len(self.queue) + 1), "input": params["input"],
+                        "clientUserMessageId": params["clientUserMessageId"]}
+                self.queue.append(item)
+                return {"queuedSubmission": {"id": item["id"]}}
+            if method == "thread/queue/delete":
+                self.queue = [i for i in self.queue if i["id"] != params["queuedSubmissionId"]]
+                return {"deleted": True}
+            if method == "thread/queue/start":
+                return {"turn": {"id": "turn-started"}}
+            if method == "turn/steer":
+                return {"turnId": params["expectedTurnId"]}
+            raise AssertionError("unexpected rpc " + method)
+
+    @contextlib.contextmanager
+    def _codex_world(self, harness, sid, *, screen=None):
+        import codex_queue_delivery
+        import pane_ownership
+        self.screen = {"value": screen}
+        self.sent = []
+        ident = self._identity(harness, sid)
+        candidate = {"_identity": ident, "state": "idle", "session_id": sid,
+                     "_native_session_id": sid}
+        server = self.server
+        self._codex_calls = []
+
+        def observe(*_args, **_kwargs):
+            return codex_queue_delivery._PeerObservation("not_observed")
+
+        with mock.patch.object(peer_steward, "_retire_target",
+                               return_value=("idle", ident, 0, None)), \
+             mock.patch.object(peer_steward, "_retire_pane_info",
+                               return_value={"pane_id": self.PANE, "shell_pid": 1,
+                                             "foreground_process_group_id": os.getpgrp(),
+                                             "foreground_processes": [
+                                                 {"pid": os.getpid(), "argv": [harness]}]}), \
+             mock.patch.object(peer_steward, "_prompt_foreground",
+                               side_effect=lambda _pane, name, *, strict=True, info=None:
+                               {"pid": os.getpid(), "start": "birth", "argv": [name]}), \
+             mock.patch.object(peer_steward, "_prompt_current_candidate",
+                               return_value=(candidate, None)), \
+             mock.patch.object(peer_steward, "_prompt_exact_candidate",
+                               return_value=(candidate, None)), \
+             mock.patch.object(peer_steward, "_agent_state",
+                               return_value=("idle", self.PANE)), \
+             mock.patch.object(peer_steward, "_pane_readiness",
+                               return_value=SimpleNamespace(state="ready", reason="")), \
+             mock.patch.object(peer_steward, "_herdr_prompt",
+                               side_effect=AssertionError("Codex must never receive PTY input")), \
+             mock.patch.object(peer_steward, "_current_session_identity",
+                               return_value=("sid-steward", "claude")), \
+             mock.patch.object(peer_steward, "_from_name", return_value="steward"), \
+             mock.patch.object(peer_steward, "_project_of", return_value="/fixture"), \
+             mock.patch.object(peer_steward, "_read_screen",
+                               side_effect=lambda _target: (
+                                   None if self.screen["value"] is None
+                                   else peer_steward._screen_lines(self.screen["value"]))), \
+             mock.patch.object(peer_steward.peer_obligations, "bound_work_for_pane",
+                               return_value=((), "observed")), \
+             mock.patch.object(peer_steward.peer_obligations, "ensure_normal_runner",
+                               return_value=False), \
+             mock.patch.object(pane_ownership, "current_codex_thread",
+                               side_effect=lambda *_a, **_k: sid), \
+             mock.patch("codex_queue_dispatch.resolve_queue_socket",
+                        return_value="fixture-socket"), \
+             mock.patch.object(codex_queue_delivery, "_rpc", server), \
+             mock.patch.object(codex_queue_delivery, "_observe_peer_message", side_effect=observe):
+            yield
+
+    def test_codex_interrupted_form_holds_then_runner_starts_once(self):
+        self.server = self._AppServer(turn_status="interrupted")
+        with self._codex_world("codex", "codex-thread", screen=CODEX_FORM):
+            rc, line, ref = self._prompt("codex", "codex-thread")
+            self.assertEqual(rc, 3, line)
+            self.assertIn("reason=native-queue-held-interrupted:form", line)
+            self.assertEqual(self.server.params("thread/queue/start"), [])
+            self.assertEqual(len(self.server.params("thread/queue/add")), 1)
+            store = self._pass()              # the form is still open
+            self.assertEqual(self.server.params("thread/queue/start"), [])
+            self.assertEqual(len(self.server.params("thread/queue/add")), 1)
+            self.assertEqual(store.get("message-" + ref)["state"], "pending")
+            self.screen["value"] = CODEX_EMPTY
+            store = self._pass()              # form closed, composer empty
+            self.assertEqual(len(self.server.params("thread/queue/start")), 1)
+            self.assertEqual(len(self.server.params("thread/queue/add")), 1)
+            self.assertEqual(peer_steward.peer_message._read_pending(ref)["receipt"],
+                             "native-queue-started")
+            self._pass()
+            self._pass()
+            self.assertEqual(len(self.server.params("thread/queue/start")), 1)
+            self.assertEqual(len(self.server.params("thread/queue/add")), 1)
+
+    # --- 5.4 carrier rule ---------------------------------------------------------
+    def test_verified_endpoint_holds_get_exactly_one_carrier(self):
+        for harness, sid, screen in (("claude", "sid-child", CLAUDE_FORM),
+                                     ("opencode", "sid-opencode", OPENCODE_FORM)):
+            with self.subTest(harness=harness):
+                with self._world(harness, sid, screen=screen):
+                    _rc, _line, ref = self._prompt(
+                        harness, sid, text="[steer] carrier " + harness)
+                    store = peer_steward.peer_obligations.ObligationStore()
+                    duties = [d for d in store.list() if (d.get("intent") or {}).get("ref") == ref]
+                    self.assertEqual(len(duties), 1)
+                    self.assertEqual(duties[0]["id"], "message-" + ref)
+                    self.assertEqual(duties[0]["state"], "pending")
+
+    def test_sidless_first_input_hold_gets_one_carrier(self):
+        harness, proof = "claude", None
+        proof = {"schema": "peer-first-input-process-v1", "harness": harness,
+                 "pane_id": self.PANE, "pid": os.getpid(), "start": "123",
+                 "pid_namespace": os.readlink("/proc/self/ns/pid")}
+        with self._world(harness, None, screen=CLAUDE_FORM), \
+             mock.patch.object(peer_steward, "_first_input_foreground_proof",
+                               return_value=proof):
+            _rc, _line, ref = self._prompt(harness, None)
+            store = peer_steward.peer_obligations.ObligationStore()
+            duties = [d for d in store.list() if (d.get("intent") or {}).get("ref") == ref]
+            self.assertEqual(len(duties), 1)
+            self.assertEqual(peer_steward.peer_message._read_pending(ref)["state"], "pending")
+
+    def test_normal_queued_submission_creates_no_new_carrier(self):
+        for harness, sid in (("claude", "sid-child"), ("opencode", "sid-opencode")):
+            with self.subTest(harness=harness):
+                with self._world(harness, sid, screen=CLAUDE_EMPTY if harness == "claude"
+                                 else OPENCODE_EMPTY):
+                    _rc, _line, ref = self._prompt(
+                        harness, sid, text="[steer] queued " + harness)
+                    self.assertEqual(len(self.sent), 1)
+                    self.assertEqual(peer_steward.peer_message._read_pending(ref)["state"],
+                                     "queued")
+                    self.assertIsNone(self._duty(ref),
+                                      "a queued submission is closed by its exact receipt")
+
+    def test_unverified_endpoint_creates_no_carrier(self):
+        with self._world("claude", None, screen=CLAUDE_EMPTY):
+            rc, line, ref = self._prompt("claude", None, pane=False)
+            self.assertEqual(rc, 5, line)
+            row = peer_steward.peer_message._read_pending(ref)
+            self.assertEqual((row["state"], row["receipt"]),
+                             ("unverified", "peer-endpoint-unverified"))
+            self.assertIsNone(self._duty(ref))
+
+    # --- 5.5 provably unstarted write --------------------------------------------
+    def test_unstarted_popen_returns_the_row_to_pending_and_retries_once(self):
+        pm = peer_steward.peer_message
+        with self._world("claude", "sid-child", screen=CLAUDE_EMPTY) as world:
+            with mock.patch.object(peer_steward, "_herdr_prompt",
+                                   wraps=_REAL_HERDR_PROMPT), \
+                 mock.patch.object(peer_steward.subprocess, "Popen",
+                                   side_effect=FileNotFoundError(
+                                       errno.ENOENT, "herdr not found")):
+                rc, line, ref = self._prompt("claude", "sid-child")
+            self.assertEqual(rc, 3, line)
+            # The printed line names the held outcome, not a submission that
+            # never happened: queued + the start-failure reason, row pending.
+            self.assertIn("prompted=queued", line)
+            self.assertIn("reason=herdr-not-started", line)
+            row = pm._read_pending(ref)
+            self.assertEqual((row["state"], row.get("rpc_claim")), ("pending", None))
+            self.assertIsNotNone(self._duty(ref))
+            with mock.patch.object(peer_steward, "_herdr_prompt",
+                                   wraps=_REAL_HERDR_PROMPT), \
+                 mock.patch.object(peer_steward.subprocess, "Popen",
+                                   return_value=_PromptProcess(rc=0, payload={"result": {}})) as popen:
+                store = self._pass()
+            self.assertEqual(popen.call_count, 1)
+            self.assertEqual(pm._read_pending(ref)["state"], "queued")
+            self._receive(ref, "claude", "sid-child")
+            store = self._pass()
+            self.assertEqual(store.get("message-" + ref)["state"], "complete")
+
+    def test_ambiguous_or_failed_write_is_never_retyped(self):
+        pm = peer_steward.peer_message
+        cases = (
+            ("communicate-oserror", dict(communicate_error=OSError("pipe read failed"))),
+            ("timeout", dict(timeout=True)),
+            ("nonzero", dict(rc=1, payload={"error": {"code": "agent_prompt_stalled"}})),
+        )
+        for name, kwargs in cases:
+            with self.subTest(case=name):
+                with self._world("claude", "sid-child", screen=CLAUDE_EMPTY):
+                    with mock.patch.object(peer_steward, "_herdr_prompt",
+                                           wraps=_REAL_HERDR_PROMPT), \
+                         mock.patch.object(peer_steward.subprocess, "Popen",
+                                           return_value=_PromptProcess(**kwargs)):
+                        _rc, _line, ref = self._prompt(
+                            "claude", "sid-child", text="[steer] ambiguous " + name)
+                    self.assertEqual(pm._read_pending(ref)["state"], "unverified")
+                    before = pm._pending_path(ref).read_bytes()
+                    store = self._pass()
+                    self.assertEqual(self.sent, [])
+                    self.assertEqual(pm._pending_path(ref).read_bytes(), before)
+                    self.assertEqual(store.get("message-" + ref)["state"], "unknown")
+                    pm._pending_path(ref).unlink()
+                    store = peer_steward.peer_obligations.ObligationStore()
+                    store.update("message-" + ref, state="complete", result="received",
+                                 delivery="acknowledged", cleanup="complete",
+                                 observation={"ref": ref, "reason": "exact-peer-ref"})
+
+    # --- 5.6 Phase 4 counter-tests (real process identity) -----------------------
+    @contextlib.contextmanager
+    def _real_record(self, harness, sid):
+        child = subprocess.Popen([harness, "-c", "import time; time.sleep(120)"],
+                                 executable=sys.executable)
+        self.addCleanup(child.wait)
+        self.addCleanup(child.kill)
+        start = peer_steward._proc_start_ticks(child.pid)
+        self.assertIsNotNone(start)
+        state_home = Path(os.environ["XDG_STATE_HOME"]) / "hearting" / "tui-identity"
+        state_home.mkdir(parents=True, exist_ok=True)
+        path = state_home / f"{child.pid}-{start}.json"
+        info = {"pane_id": self.PANE, "shell_pid": 1,
+                "foreground_process_group_id": os.getpgid(child.pid),
+                "foreground_processes": [{"pid": child.pid, "argv": [harness]}]}
+        self._record_pid, self._record_start, self._record_path = child.pid, start, path
+
+        def write(session_id):
+            path.write_text(json.dumps({
+                "schema": "hearting-tui-selection-v1", "sessionID": session_id,
+                "pid": child.pid, "start": str(start),
+                "writtenAt": "2026-11-02T00:00:00.000Z"}))
+
+        try:
+            yield write, info
+        finally:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+    def test_real_identity_record_delivers_once_and_guards_changes(self):
+        pm = peer_steward.peer_message
+        harness, sid = "opencode", "ses_fixture0000"
+        with self._real_record(harness, sid) as (write, info):
+            write(sid)
+            ref, row = self._prepare_row(harness, sid, schedule=True,
+                                         text="[steer] identity match")
+            with self._world(harness, sid, screen=OPENCODE_EMPTY, real_identity=True,
+                             pane_info=info):
+                store = self._pass()
+            self.assertEqual(len(self.sent), 1, "a matching record supplies the exact SID")
+            self.assertEqual(pm._read_pending(ref)["state"], "queued")
+            self._receive(ref, harness, sid)
+            store = self._pass()
+            self.assertEqual(store.get("message-" + ref)["state"], "complete")
+
+        with self._real_record(harness, sid) as (write, info):
+            write("ses_fixture9999")          # same pane, /new selected another session
+            ref, _row = self._prepare_row(harness, sid, schedule=True,
+                                          text="[steer] identity changed")
+            with self._world(harness, sid, screen=OPENCODE_EMPTY, real_identity=True,
+                             pane_info=info):
+                store = self._pass()
+            self.assertEqual(self.sent, [])
+            self.assertEqual(pm._read_pending(ref)["state"], "pending")
+            duty = store.get("message-" + ref)
+            self.assertIn(duty["observation"]["reason"],
+                          {"target-identity-changed", "target-identity-unverified"})
+
+        with self._real_record(harness, sid) as (write, info):
+            ref, _row = self._prepare_row(harness, sid, schedule=True,
+                                          text="[steer] identity absent")   # no record at all
+            with self._world(harness, sid, screen=OPENCODE_EMPTY, real_identity=True,
+                             pane_info=info):
+                store = self._pass()
+            self.assertEqual(self.sent, [])
+            self.assertEqual(pm._read_pending(ref)["state"], "pending")
+            self.assertEqual(store.get("message-" + ref)["observation"]["reason"],
+                             "target-identity-unverified")
 
 
 if __name__ == "__main__":

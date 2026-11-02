@@ -3890,6 +3890,80 @@ class ClearBookingTest(TidyCase):
             self.assertEqual(clear.validate_request(path), (None, "new-input"))
 
 
+class HandoffEntryTest(TidyCase):
+    def run_cli(self, argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = st.main(argv)
+        return code, out.getvalue().strip(), err.getvalue().strip()
+
+    def test_supervisor_argument_combinations_are_refused_with_one_reason(self):
+        cases = (
+            (["handoff", "--from", "w1:p1", "--harness", "claude"], "handoff-source-with-caller"),
+            (["handoff", "--from", "w1:p1", "--session-id", "old"], "handoff-source-with-caller"),
+            (["handoff", "--kind", "codex"], "handoff-kind-requires-source"),
+            (["handoff", "peer", "--from", "w1:p1", "--kind", "codex"], "handoff-kind-with-target"),
+            (["handoff"], "handoff-target-required"),
+            (["handoff", "--from", "w1:p1"], "handoff-target-required"),
+            (["handoff", "accept", "ref", "--from", "w1:p1"], "handoff-source-with-transfer-ref"),
+            (["handoff", "accept", "--from", "w1:p1"], "handoff-source-with-accept"),
+        )
+        for argv, reason in cases:
+            with self.subTest(argv=argv):
+                code, out, err = self.run_cli(argv)
+                self.assertEqual(code, 1)
+                self.assertIn(reason, err)
+                self.assertEqual(out, "")
+
+    def test_existing_handoff_forms_keep_their_arguments(self):
+        parser = st.build_parser()
+        args = parser.parse_args(["handoff", "peer-x"])
+        self.assertEqual((args.target, args.transfer_ref, args.source, args.kind),
+                         ("peer-x", None, None, None))
+        args = parser.parse_args(["handoff", "accept", "ref-1"])
+        self.assertEqual((args.target, args.transfer_ref), ("accept", "ref-1"))
+
+    def test_previous_transcript_line_is_the_shared_rendering(self):
+        previous = {"harness": "claude", "sid": "a" * 36,
+                    "transcript": {"path": "/short/x.jsonl", "status": "available"}}
+        card = {"author": {"harness": "claude", "sid": "b" * 36},
+                "authored_at_epoch": 10, "body": "본문"}
+        text = st.build_card_injection(card, Path("/card.json"), 10, 2000,
+                                       previous_transcript=previous)
+        self.assertIn(st.previous_transcript_line("claude", "a" * 36,
+                                                 previous["transcript"]), text)
+        self.assertEqual(
+            st.previous_transcript_line("claude", "a" * 36,
+                                        {"path": "/" + "가" * 200, "status": "available"}),
+            "이전 대화: claude aaaaaaaa · 원문 경로 생략")
+        self.assertEqual(
+            st.previous_transcript_line("claude", "a" * 36,
+                                        {"path": "", "status": "unreadable"}),
+            "이전 대화: claude aaaaaaaa · 원문 읽기 불가")
+        self.assertEqual(st.previous_transcript_line("claude", "a" * 36, None),
+                         "이전 대화: claude aaaaaaaa · 원문 없음")
+        missing = st.build_card_injection(
+            card, Path("/card.json"), 10, 2000,
+            previous_transcript={"harness": "claude", "sid": "a" * 36})
+        self.assertIn("이전 대화: claude aaaaaaaa · 원문 없음", missing)
+
+    def test_write_session_card_uses_the_caller_card_sequence(self):
+        with self.library():
+            seat = st.resolve_seat("claude", str(self.cwd), sid="sid-w")
+            caller = st.session_seat(seat, "claude", "sid-w")
+            first = st.write_session_card(caller, "claude", "sid-w", "카드 하나",
+                                          cwd=str(self.cwd), prompt_seq=3)
+            second = st.write_session_card(caller, "claude", "sid-w", "카드 둘",
+                                           cwd=str(self.cwd), prompt_seq=4)
+            latest = st.read_latest_card(caller)
+            events = [row.get("card_generation") for row in st._read_ledger_lines(caller)
+                      if row.get("event") == "card"]
+        self.assertEqual((first["generation"], second["generation"]), (1, 2))
+        self.assertEqual((latest["generation"], latest["prompt_seq"], latest["body"]),
+                         (2, 4, "카드 둘"))
+        self.assertEqual(events, [1, 2])
+
+
 class TidyOneCallTest(TidyCase):
     """``tidy`` = ``card`` then, only for a written card, ``enqueue`` (+ ``handoff``) in one call."""
 

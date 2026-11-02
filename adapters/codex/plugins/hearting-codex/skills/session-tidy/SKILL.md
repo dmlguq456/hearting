@@ -66,6 +66,17 @@ Modes are `정리` (default), `정리만` (keep this window), and `인계 <받�
 handoff keep their existing one-call behavior. Reply with the command's `say=`
 line; report its `prompted=` line for handoff and do not retry an uncertain send.
 
+A supervisor or user may run the same transfer for a session it names:
+`python3 $AGENT_HOME/utilities/session_tidy.py handoff --from <세션> --kind <하네스>`.
+It names only the source session and the successor harness; the runtime starts
+the successor beside the source, delivers the current card (or, when the card is
+older or missing, the source conversation's transcript location), and records
+the same logical handover. Acceptance and retirement stay the existing ones. A
+working source is handed over immediately; its window closes after the work
+finishes. A start failure leaves no card generation, lineage row, pending
+message, or retry notice. Only live windows are eligible, and the supervisor
+role is not moved. Report the command's one result line.
+
 A nonce-bounded idle or compact card request is answered with the card itself
 between the request's marker lines, with no tool call. The turn-end observer
 stores that reply and queues the tidy. For a peer successor at this seat, use
