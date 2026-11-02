@@ -26,11 +26,9 @@
 > 명령, 경로, 설정 키와 식별자는 영문 원문을 기준으로 합니다.
 
 <p align="center">
-  <img src="docs/fleet.svg" alt="Fleet 그룹 화면: Claude Code 메인 세션, 그 세션이 분사한 owner, 그 아래 Claude Code와 Codex에서 도는 단계 작업자 셋(실행 중, 완료, 입력 대기). 각 행에 모델, 문맥 게이지, 경과 시간이 보인다." width="100%">
+  <img src="docs/fleet.svg" alt="Fleet Explorer의 OVERVIEW: Claude Code, Codex, OpenCode의 세션 여덟 개를 네 프로젝트로 묶어 모델, 문맥 게이지, 지금 하는 일을 보여 준다. 답을 기다리는 세션 하나, 단계 줄이 보이는 열린 요청 둘, 왼쪽 아래에 호스트별 CPU와 GPU 사용량." width="100%">
 </p>
-<p align="center"><sub>Fleet의 그룹 화면(<code>fleet-monitor</code>): 메인 세션, 그 세션이 분사한 owner, owner가 두 하네스에 띄운 단계 작업자. 합성 데이터로 그렸습니다.</sub></p>
-
-<!-- TODO(v4.0, Fleet F1): Fleet 단일 화면이 확정되면 이 그림을 Explorer OVERVIEW 캡처로 바꾼다. -->
+<p align="center"><sub>Fleet Explorer의 OVERVIEW: 세 하네스의 세션을 프로젝트별로 묶고, 답을 기다리는 세션 하나, 진행 중인 요청 둘, 호스트별 GPU 사용량을 보여 줍니다. 합성 데모 데이터로 그렸습니다(<a href="docs/fleet/overview.png">PNG</a>).</sub></p>
 
 ## 왜 하팅인가
 
@@ -106,6 +104,11 @@ Claude Code, Codex, OpenCode 세션과 하팅이 그 세션들에서 분사한 �
 
 ### 한눈에 보이는 것
 
+<p align="center">
+  <img src="docs/fleet/walkthrough.gif" alt="Fleet 네 단계 둘러보기: 모든 세션의 OVERVIEW, 열린 요청 목록 ROUTES, 한 세션의 페이지, 한 요청의 단계 그림과 owner 원문 출력." width="100%">
+</p>
+<p align="center"><sub>OVERVIEW → ROUTES → 세션 페이지 → 요청의 원문 출력. 데모 데이터.</sub></p>
+
 맨 위 줄에는 하네스별 사용량 한도 게이지와, 도는 세션·쉬는 세션·답을 기다리는
 세션이 몇 개인지 나옵니다. 그 아래는 질문 하나에 화면 하나입니다.
 
@@ -120,14 +123,29 @@ Claude Code, Codex, OpenCode 세션과 하팅이 그 세션들에서 분사한 �
 | **MEMORY** | 오늘 공용 메모리에 저장된 것, 프로젝트별. |
 | **MODELS · SYSTEM** | 각 예산이 어떤 실제 모델로 연결되는지, 설치된 하팅 릴리스. |
 
+### 핵심 화면
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/fleet/routes.png" alt="ROUTES: 열린 요청 둘. execute 단계의 코드 요청과 eval-asr 작업자가 도는 실험 요청, 작업자의 모델과 경과 시간."><br><sub><b>ROUTES</b> — 요청마다 단계 줄과 그 단계를 도는 작업자.</sub></td>
+    <td width="50%"><img src="docs/fleet/questions.png" alt="QUESTIONS: 7분째 기다리는 결정 하나와 답하는 법, 접힌 오래된 대기 하나, 오늘 답한 질문 셋."><br><sub><b>QUESTIONS</b> — 무엇이 답을 기다리는지, 어떻게 답하는지, 오늘 무엇에 답했는지.</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/fleet/session.png" alt="세션 페이지: Claude Code 세션 하나의 상태, 문맥 게이지, 지금 하는 일, 그 세션의 요청, 조정하는 OpenCode 세션, 쓰고 있는 GPU."><br><sub><b>세션 페이지</b> — 한 세션의 상태, 문맥, 지금 하는 일, 요청, 연결된 세션, GPU.</sub></td>
+    <td width="50%"><img src="docs/fleet/resources.png" alt="RESOURCES: 호스트 둘의 GPU별 사용률과 메모리, 각 GPU 프로세스를 돌리는 세션과 명령, CPU와 메모리 사용량."><br><sub><b>RESOURCES</b> — 호스트별 GPU 사용량과 각 프로세스 뒤의 세션과 명령.</sub></td>
+  </tr>
+</table>
+
 세션이나 요청을 고르면 그 페이지가 열리고, 거기서 원문 출력(도구 호출과 결과를
 순서대로)까지 볼 수 있습니다. 하네스를 직접 열지 않아도 됩니다.
 
-<!-- v4.0용 핵심 화면 캡처 목록(README 설계 문서 참고):
-     F1 OVERVIEW(머리 그림) · F2 ROUTES · F3 QUESTIONS · F4 세션 페이지 ·
-     F5 RESOURCES · F6 원문 출력 · F7 짧은 이동 장면(15초 이하) · F8 좁은 폭.
-     tools/fleet/tests/explorer_capture.py로 화면 없이 렌더하고, 가린 영어 view-model fixture를 쓰며,
-     데모 데이터임을 표기한다. -->
+<p align="center">
+  <img src="docs/fleet/output.png" alt="요청 페이지: setup 완료, eval-asr 실행 중, eval-sep과 report 대기인 단계 그림, 그 아래 편집과 셸 명령과 그 결과가 보이는 owner 원문 출력." width="100%">
+</p>
+<p align="center"><sub>실험 요청의 페이지: setup 완료, 평가 하나 실행 중, 다음 단계 대기, 그 아래 owner의 원문 출력. 데모 데이터.</sub></p>
+
+좁은 터미널에서도 배치가 유지됩니다.
+[100열 OVERVIEW](docs/fleet/narrow.png)를 보세요.
 
 ### 화면을 믿을 수 있는 이유
 
@@ -147,7 +165,7 @@ Claude Code, Codex, OpenCode 세션과 하팅이 그 세션들에서 분사한 �
 fleet              # Explorer 전체 화면(curses 필요)
 fleet --once       # 단순 스냅숏 한 번
 fleet --json       # 같은 상태를 JSON으로(스크립트용)
-fleet-monitor      # 이 문서 맨 위 그림의 그룹·프로세스 화면
+fleet-monitor      # 이전 그룹·프로세스 화면
 ```
 
 `--once`와 `--json`은 `curses`가 필요 없어서 Windows의 Git Bash에서도 됩니다.
