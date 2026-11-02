@@ -877,6 +877,152 @@ class ClaudeAccountAggregationTests(unittest.TestCase):
         self.assertIsInstance(score, float)
 
 
+class ClaudeAccountCacheTest(unittest.TestCase):
+    """2026-11-01: Claude was scored from per-session statusline taps (one account's 96% and
+    another reset window's 98% -> headroom 2) while Fleet's credential-bound account cache said
+    the weekly window was 1% used. The cache is read first; the taps stay the fallback."""
+
+    FIXTURE = json.loads((Path(__file__).with_name("fixtures") / "claude-usage-incident-1101.json")
+                         .read_text(encoding="utf-8"))
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.home = Path(self.tmp.name) / "claude-home"
+        self.state = Path(self.tmp.name) / "fleet-state"
+        (self.home / ".statusline").mkdir(parents=True)
+        self.state.mkdir()
+        self.now = self.FIXTURE["now"]
+        patch = mock.patch.dict(os.environ, {
+            "CLAUDE_CONFIG_DIR": str(self.home), "FLEET_USAGE_STATE_DIR": str(self.state),
+            "HARNESS_CAPACITY_SCORES": "codex:12,opencode:34", "AGENT_DISPATCH_JOBS": ""})
+        patch.start()
+        self.addCleanup(patch.stop)
+        scope = mock.patch("dispatch_capacity_evidence._scope_candidates", return_value={})
+        scope.start()
+        self.addCleanup(scope.stop)
+        C._fleet_collectors()
+        from fleet.collectors import usage_api, usage_cache
+        self.api, self.cache = usage_api, usage_cache
+
+    def credential(self, token="token-a"):
+        (self.home / ".credentials.json").write_text(
+            json.dumps({"claudeAiOauth": {"accessToken": token}}), encoding="utf-8")
+
+    def taps(self):
+        for row in self.FIXTURE["taps"]:
+            path = self.home / ".statusline" / row["file"]
+            limits = {key: {"used_percentage": value["used_percentage"],
+                            "resets_at": self.now + value["resets_in"]}
+                      for key, value in row["rate_limits"].items()}
+            path.write_text(json.dumps({"rate_limits": limits}), encoding="utf-8")
+            os.utime(path, (self.now - row["age"], self.now - row["age"]))
+
+    def payload(self, **override):
+        document = json.loads(json.dumps(self.FIXTURE["api_document"]))
+        for limit in document["limits"]:
+            limit["resets_at"] = self.now + limit.pop("resets_in")
+        payload = self.api._quota(document)
+        payload.update(override)
+        return payload
+
+    def write_cache(self, payload=None, *, age=None, token="token-a"):
+        """Fleet's own writer and file format, bound to the credential's generation."""
+        self.credential(token)
+        fetched = self.now - (self.FIXTURE["cache_age"] if age is None else age)
+        self.cache._write("claude", payload if payload is not None else self.payload(),
+                          fetched, fetched, credential_generation=self.api._credential().generation)
+
+    def report(self):
+        return C.capacity_report(now=self.now)
+
+    def test_the_fixture_is_the_real_cache_format_and_scale(self):
+        payload = self.payload()
+        self.assertEqual(payload["rl_7d"], 1)           # used percent, 0-100, not a 0-1 fraction
+        self.assertEqual(set(payload), {"rl_5h", "rl_7d", "rl_ms", "rs_5h", "rs_7d"})
+        self.write_cache(payload)
+        snapshot = self.cache.read("claude", now=self.now, stale_max=3600)
+        self.assertEqual(snapshot["payload"], payload)  # round trip through Fleet's reader
+
+    def test_a_fresh_account_cache_beats_the_taps_and_reads_99(self):
+        self.taps()
+        self.assertEqual(C._claude_capacity_reading(self.now, 3600)[0], self.FIXTURE["taps_score"])
+        self.write_cache()
+        report = self.report()
+        self.assertEqual(report["scores"]["claude"], self.FIXTURE["cache_score"])
+        self.assertEqual(report["sources"]["claude"], f"cache:{self.FIXTURE['cache_age']}s")
+        self.assertNotIn("claude", report["freshness"])        # tap file ages describe taps only
+        # the cache source leaves the gate-release answer where the taps left it: unknown
+        self.assertIsNone(C.gate_release_epoch("claude", report["sources"]["claude"], now=self.now))
+
+    def test_without_a_cache_file_the_taps_answer_as_before(self):
+        self.taps()
+        self.credential()
+        report = self.report()
+        self.assertEqual(report["scores"]["claude"], self.FIXTURE["taps_score"])
+        self.assertEqual(report["sources"]["claude"], "taps")
+        self.assertEqual(report["freshness"]["claude"]["observation_time"], "unknown")
+        self.assertIsNone(C.gate_release_epoch("claude", report["sources"]["claude"], now=self.now))
+
+    def test_a_stale_cache_falls_back_to_the_taps(self):
+        self.taps()
+        self.write_cache(age=3601)
+        report = self.report()
+        self.assertEqual((report["scores"]["claude"], report["sources"]["claude"]),
+                         (self.FIXTURE["taps_score"], "taps"))
+        self.write_cache(age=3600)
+        self.assertEqual(self.report()["sources"]["claude"], "cache:3600s")
+
+    def test_a_cache_of_another_credential_is_not_this_accounts_reading(self):
+        self.taps()
+        self.write_cache(token="token-a")
+        self.credential("token-b")                              # the home now holds another login
+        report = self.report()
+        self.assertEqual((report["scores"]["claude"], report["sources"]["claude"]),
+                         (self.FIXTURE["taps_score"], "taps"))
+
+    def test_no_credential_means_no_cache_reading(self):
+        self.taps()
+        self.write_cache()
+        (self.home / ".credentials.json").unlink()
+        report = self.report()
+        self.assertEqual(report["sources"]["claude"], "taps")
+
+    def test_nothing_readable_is_unknown_not_invented(self):
+        report = self.report()
+        self.assertIsNone(report["scores"]["claude"])
+        self.assertEqual(report["sources"]["claude"], "unknown:no-fresh-taps")
+
+    def test_the_tightest_window_of_the_cache_decides(self):
+        self.write_cache(self.payload(rl_5h=40, rl_7d=1, rl_ms=[["opus", 70]]))
+        self.assertEqual(self.report()["scores"]["claude"], 30.0)
+        self.write_cache(self.payload(rl_5h=None, rl_7d=None, rl_ms=[]))
+        self.assertIsNone(self.report()["scores"]["claude"])    # a payload without any window reads nothing
+
+    def test_an_error_payload_or_garbage_percentages_are_not_a_reading(self):
+        self.taps()
+        for payload in ({"error": "http-401", "rl_7d": 1}, {"rl_7d": True}, {"rl_7d": 140}, {"rl_7d": -3}):
+            with self.subTest(payload=payload):
+                self.write_cache(payload)
+                self.assertEqual(self.report()["sources"]["claude"], "taps")
+
+    def test_a_manual_score_still_wins_and_an_active_limit_still_zeroes_claude(self):
+        self.write_cache()
+        with mock.patch.dict(os.environ, {"HARNESS_CAPACITY_SCORES": "claude:12,codex:12,opencode:34"}):
+            report = self.report()
+        self.assertEqual((report["scores"]["claude"], report["sources"]["claude"]), (12.0, "manual"))
+        with tempfile.TemporaryDirectory() as td, \
+             mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(Path(td) / "jobs.log")}), \
+             mock.patch("dispatch_capacity_evidence.active_limits", return_value=["claude"]):
+            limited = self.report()
+        self.assertEqual((limited["scores"]["claude"], limited["sources"]["claude"]), (0.0, "active-limit"))
+
+    def test_the_hard_limit_reader_is_untouched_by_the_cache(self):
+        self.write_cache(self.payload(rl_7d=100))
+        self.assertEqual(self.report()["scores"]["claude"], 0.0)  # a full window is no headroom...
+        self.assertIsNone(C.gauge_limit_epoch("claude", now=self.now))  # ...but never a hard-limit claim
+
+
 class CodexGaugeReaderTests(unittest.TestCase):
     """The codex gauge must not starve on idle: live probe first, rollout second.
 

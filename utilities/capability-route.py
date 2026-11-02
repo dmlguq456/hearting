@@ -5049,9 +5049,7 @@ def compose_decision_lines(route, non_git_decision=None):
             count = len(RP.frame_legs(route))
             size_word = "한" if count == 1 else "두"
             size += f"; frame {size_word} 갈래(이전 규칙으로 만든 경로)"
-        tuples = ((route.get("dispatch_evidence") or {}).get("tuples") or [])
-        supported = {row.get("child_harness") for row in tuples
-                     if row.get("status") == "supported" and row.get("child_harness")}
+        supported = ROUTE_AUTHORITY.depth1_supported_harnesses(route, worker_type="frame")
         pin = (((route.get("selection_pins") or {}).get("frame") or {}).get("harness"))
         if len(supported) == 1:
             size += f" · 같은 하네스(쓸 수 있는 하네스가 {next(iter(supported))} 하나)"
@@ -5237,7 +5235,7 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
             registered_headless_evidence
         )
         # Quick's supported harness inventory is carried entirely by this candidate
-        # list -- `owner_route_binding._supported_owner_harnesses` reads it, and
+        # list -- `route_authority.depth1_supported_harnesses` reads it, and
         # `dispatch-owner.py` refuses an `--adapter` outside it. How many
         # harnesses it supports decides the pair's diversity, sealed on both
         # frame nodes by `_quick_frame_diversity` (shared with `verify_route`).

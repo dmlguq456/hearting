@@ -1233,6 +1233,30 @@ def sealed_pin_harness(route, *, worker_type: str | None) -> str | None:
     return (pin.get("harness") or None) if isinstance(pin, dict) else None
 
 
+def depth1_supported_harnesses(route, *, worker_type: str | None) -> set[str]:
+    """Harnesses the sealed route's evidence admits for a dispatch-depth-1 launch.
+
+    owner: parent tuples; frame: parent plus child tuples (a frame launches no
+    children, so it needs no owner-only nesting check). Quick and single-owner
+    routes read their registered-headless candidates for both. Recorded pin changes
+    (`route_in_force`) and their probed tuples count."""
+    if not isinstance(route, dict):
+        return set()
+    route = route_in_force(route)
+    if route.get("effective_intensity") == "quick" or route.get("registered_headless_candidates") is not None:
+        rows, fields = route.get("registered_headless_candidates") or [], ("harness",)
+    else:
+        rows = (route.get("dispatch_evidence") or {}).get("tuples") or []
+        fields = ("parent_harness", "child_harness") if worker_type == "frame" else ("parent_harness",)
+    return {
+        str(row.get(field))
+        for row in rows
+        if isinstance(row, dict) and row.get("status") == "supported"
+        for field in fields
+        if row.get(field) in PIN_HARNESSES
+    }
+
+
 # A sealed route never changes; its parent may later move one of its pins
 # (`capability-route.py start --route <file> --pin owner|frame|worker=<harness>[:<model>[@<effort>]]`).
 # Each change is one append-only row beside the route: the new pin, the pin it replaced, who

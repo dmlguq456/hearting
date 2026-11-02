@@ -5039,7 +5039,7 @@ class FrameTopCapacityTest(unittest.TestCase):
     def test_a_top_the_person_chose_is_never_lowered(self):
         for label,changes in {
             'pin with effort':{'selection_pins':{'contract_version':1,'frame':{'harness':'claude','model':None,'effort':'max'}}},
-            'pin with model':{'selection_pins':{'contract_version':1,'owner':{'harness':'claude','model':'opus','effort':None}}},
+            'pin with model':{'selection_pins':{'contract_version':1,'frame':{'harness':'claude','model':'opus','effort':None}}},
             'explicit node profile':{'explicit_profiles':{'frame':'top'}},
         }.items():
             with self.subTest(label):
@@ -5050,6 +5050,9 @@ class FrameTopCapacityTest(unittest.TestCase):
         self.set_route(selection_pins={'contract_version':1,'frame':{'harness':'claude','model':None,'effort':None}},
                        explicit_profiles={'__owner__':'deep'})
         self.assertEqual(self.kind(),R.FRAME_CAPACITY)  # a harness-only pin and an owner profile choose no frame profile
+        # An owner pin selects only the owner: even one naming a model chooses no frame model.
+        self.set_route(selection_pins={'contract_version':1,'owner':{'harness':'claude','model':'opus','effort':'max'}})
+        self.assertEqual(self.kind(),R.FRAME_CAPACITY)
         self.set_route();self.node['model_profile']='deep'
         self.set_route();self.assertIsNone(self.kind())
 
@@ -5504,6 +5507,15 @@ class ClosedNativeFrameCapacityRecoveryTest(unittest.TestCase):
             "pin": {"harness": "claude"}, "tuples": [],
         }) + "\n", encoding="utf-8")
         self.assertIs(RA._frame_peer_recovery_harness(candidate, history, self.route), False)
+        # An owner pin selects only the owner: moving it to another harness leaves the frame
+        # peer reusable (d4: a replacement reads the pin of its own target).
+        pin_path.write_text(json.dumps({
+            "schema": 1, "route_id": self.route["route_id"],
+            "route_hash": self.route["route_hash"], "target": "owner",
+            "pin": {"harness": "opencode"}, "tuples": [],
+        }) + "\n", encoding="utf-8")
+        self.assertEqual(RA.selection_pin_rows(self.route).get("owner"), {"harness": "opencode"})
+        self.assertIs(RA._frame_peer_recovery_harness(candidate, history, self.route), True)
         pin_path.unlink()
 
         def helper_with_peer_variant(name, **changes):

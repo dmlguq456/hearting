@@ -1,0 +1,389 @@
+{
+ "_note": "Incident data for the depth-1 frame assignment: the evidence, pins, allocation and frame nodes of two sealed routes, copied by hand (never the route files). rt_ad3fb (2026-10-31): `--pin frame=opencode` was dropped because only child_harness tuples were read. rt_c987 (2026-11-01): the second frame leg was forced onto a credit-only codex. Tests set cwd/worktree and scores at run time.",
+ "captured_at": "2026-11-02",
+ "rt_ad3fb": {
+  "route_id": "rt-ad3fb12a490623af",
+  "capability": "route-frame",
+  "capability_mode": "default",
+  "effective_intensity": "standard",
+  "owner_model_profile": "deep",
+  "selection": {
+   "shape": "framed"
+  },
+  "selection_pins": {
+   "contract_version": 1,
+   "owner": {
+    "harness": "opencode",
+    "model": null,
+    "effort": null
+   },
+   "frame": {
+    "harness": "opencode",
+    "model": null,
+    "effort": null
+   },
+   "worker": {
+    "harness": "opencode",
+    "model": null,
+    "effort": null
+   }
+  },
+  "dispatch_allocation": {
+   "strategy": "balanced",
+   "window": 30,
+   "usage_gate_used_percent": 85,
+   "harness_order": [
+    "claude",
+    "codex",
+    "opencode"
+   ],
+   "depth_affinity": {
+    "worker": "codex"
+   },
+   "depth_affinity_weight": 0.85,
+   "usage_headroom_exponent": 2,
+   "harness_weights": {
+    "opencode": 0.4
+   }
+  },
+  "owner_harness_policy": {
+   "primary": [
+    "codex",
+    "claude"
+   ],
+   "relief": [
+    "opencode"
+   ],
+   "last_resort": [],
+   "promote_relief_below": 25
+  },
+  "dispatch_evidence": {
+   "tuples": [
+    {
+     "parent_harness": "claude",
+     "parent_transport": "headless",
+     "parent_sandbox": "adapter-default",
+     "child_harness": "claude",
+     "launch_authority": "conductor",
+     "status": "supported",
+     "failure_scope": "none",
+     "failure_class": ""
+    },
+    {
+     "parent_harness": "claude",
+     "parent_transport": "headless",
+     "parent_sandbox": "adapter-default",
+     "child_harness": "codex",
+     "launch_authority": "conductor",
+     "status": "supported",
+     "failure_scope": "none",
+     "failure_class": ""
+    },
+    {
+     "parent_harness": "claude",
+     "parent_transport": "headless",
+     "parent_sandbox": "adapter-default",
+     "child_harness": "opencode",
+     "launch_authority": "conductor",
+     "status": "unsupported",
+     "failure_scope": "runtime-global",
+     "failure_class": "opencode-guard-projection-invalid"
+    },
+    {
+     "parent_harness": "codex",
+     "parent_transport": "headless",
+     "parent_sandbox": "workspace-write",
+     "child_harness": "claude",
+     "launch_authority": "conductor",
+     "status": "supported",
+     "failure_scope": "none",
+     "failure_class": ""
+    },
+    {
+     "parent_harness": "codex",
+     "parent_transport": "headless",
+     "parent_sandbox": "workspace-write",
+     "child_harness": "codex",
+     "launch_authority": "conductor",
+     "status": "supported",
+     "failure_scope": "none",
+     "failure_class": ""
+    },
+    {
+     "parent_harness": "codex",
+     "parent_transport": "headless",
+     "parent_sandbox": "workspace-write",
+     "child_harness": "opencode",
+     "launch_authority": "conductor",
+     "status": "unsupported",
+     "failure_scope": "runtime-global",
+     "failure_class": "opencode-guard-projection-invalid"
+    },
+    {
+     "parent_harness": "opencode",
+     "parent_transport": "headless",
+     "parent_sandbox": "adapter-default",
+     "child_harness": "claude",
+     "launch_authority": "conductor",
+     "status": "supported",
+     "failure_scope": "none",
+     "failure_class": ""
+    },
+    {
+     "parent_harness": "opencode",
+     "parent_transport": "headless",
+     "parent_sandbox": "adapter-default",
+     "child_harness": "codex",
+     "launch_authority": "conductor",
+     "status": "supported",
+     "failure_scope": "none",
+     "failure_class": ""
+    },
+    {
+     "parent_harness": "opencode",
+     "parent_transport": "headless",
+     "parent_sandbox": "adapter-default",
+     "child_harness": "opencode",
+     "launch_authority": "conductor",
+     "status": "unsupported",
+     "failure_scope": "runtime-global",
+     "failure_class": "opencode-guard-projection-invalid"
+    }
+   ]
+  },
+  "frame_nodes": [
+   {
+    "id": "frame",
+    "unit": "plan/frame",
+    "worker_type": "frame",
+    "dispatch_depth": 1,
+    "model_profile": "top",
+    "role": "deep maker",
+    "perspective": "primary-frame",
+    "harness_policy": {
+     "primary": [
+      "codex",
+      "claude"
+     ],
+     "relief": [
+      "opencode"
+     ],
+     "last_resort": [],
+     "promote_relief_below": 25
+    }
+   },
+   {
+    "id": "frame-alternative",
+    "unit": "plan/frame",
+    "worker_type": "frame",
+    "dispatch_depth": 1,
+    "model_profile": "top",
+    "role": "deep maker",
+    "perspective": "alternative-frame",
+    "harness_policy": {
+     "primary": [
+      "codex",
+      "claude"
+     ],
+     "relief": [
+      "opencode"
+     ],
+     "last_resort": [],
+     "promote_relief_below": 25
+    }
+   }
+  ]
+ },
+ "rt_c987": {
+  "route_id": "rt-c987d2888a1e28d6",
+  "capability": "route-frame",
+  "capability_mode": "default",
+  "effective_intensity": "standard",
+  "owner_model_profile": "deep",
+  "selection": {
+   "shape": "framed"
+  },
+  "selection_pins": null,
+  "dispatch_allocation": {
+   "strategy": "balanced",
+   "window": 30,
+   "usage_gate_used_percent": 85,
+   "harness_order": [
+    "claude",
+    "codex",
+    "opencode"
+   ],
+   "depth_affinity": {
+    "worker": "codex"
+   },
+   "depth_affinity_weight": 0.85,
+   "usage_headroom_exponent": 2,
+   "harness_weights": {
+    "opencode": 0.4
+   }
+  },
+  "owner_harness_policy": {
+   "primary": [
+    "codex",
+    "claude"
+   ],
+   "relief": [
+    "opencode"
+   ],
+   "last_resort": [],
+   "promote_relief_below": 25
+  },
+  "dispatch_evidence": {
+   "tuples": [
+    {
+     "parent_harness": "claude",
+     "parent_transport": "headless",
+     "parent_sandbox": "adapter-default",
+     "child_harness": "claude",
+     "launch_authority": "conductor",
+     "status": "supported",
+     "failure_scope": "none",
+     "failure_class": ""
+    },
+    {
+     "parent_harness": "claude",
+     "parent_transport": "headless",
+     "parent_sandbox": "adapter-default",
+     "child_harness": "codex",
+     "launch_authority": "conductor",
+     "status": "supported",
+     "failure_scope": "none",
+     "failure_class": ""
+    },
+    {
+     "parent_harness": "claude",
+     "parent_transport": "headless",
+     "parent_sandbox": "adapter-default",
+     "child_harness": "opencode",
+     "launch_authority": "conductor",
+     "status": "unsupported",
+     "failure_scope": "runtime-global",
+     "failure_class": "opencode-guard-projection-invalid"
+    },
+    {
+     "parent_harness": "codex",
+     "parent_transport": "headless",
+     "parent_sandbox": "workspace-write",
+     "child_harness": "claude",
+     "launch_authority": "conductor",
+     "status": "supported",
+     "failure_scope": "none",
+     "failure_class": ""
+    },
+    {
+     "parent_harness": "codex",
+     "parent_transport": "headless",
+     "parent_sandbox": "workspace-write",
+     "child_harness": "codex",
+     "launch_authority": "conductor",
+     "status": "supported",
+     "failure_scope": "none",
+     "failure_class": ""
+    },
+    {
+     "parent_harness": "codex",
+     "parent_transport": "headless",
+     "parent_sandbox": "workspace-write",
+     "child_harness": "opencode",
+     "launch_authority": "conductor",
+     "status": "unsupported",
+     "failure_scope": "runtime-global",
+     "failure_class": "opencode-guard-projection-invalid"
+    },
+    {
+     "parent_harness": "opencode",
+     "parent_transport": "headless",
+     "parent_sandbox": "adapter-default",
+     "child_harness": "claude",
+     "launch_authority": "conductor",
+     "status": "supported",
+     "failure_scope": "none",
+     "failure_class": ""
+    },
+    {
+     "parent_harness": "opencode",
+     "parent_transport": "headless",
+     "parent_sandbox": "adapter-default",
+     "child_harness": "codex",
+     "launch_authority": "conductor",
+     "status": "supported",
+     "failure_scope": "none",
+     "failure_class": ""
+    },
+    {
+     "parent_harness": "opencode",
+     "parent_transport": "headless",
+     "parent_sandbox": "adapter-default",
+     "child_harness": "opencode",
+     "launch_authority": "conductor",
+     "status": "unsupported",
+     "failure_scope": "runtime-global",
+     "failure_class": "opencode-guard-projection-invalid"
+    }
+   ]
+  },
+  "frame_nodes": [
+   {
+    "id": "frame",
+    "unit": "plan/frame",
+    "worker_type": "frame",
+    "dispatch_depth": 1,
+    "model_profile": "top",
+    "role": "deep maker",
+    "perspective": "primary-frame",
+    "harness_policy": {
+     "primary": [
+      "codex",
+      "claude"
+     ],
+     "relief": [
+      "opencode"
+     ],
+     "last_resort": [],
+     "promote_relief_below": 25
+    }
+   },
+   {
+    "id": "frame-alternative",
+    "unit": "plan/frame",
+    "worker_type": "frame",
+    "dispatch_depth": 1,
+    "model_profile": "top",
+    "role": "deep maker",
+    "perspective": "alternative-frame",
+    "harness_policy": {
+     "primary": [
+      "codex",
+      "claude"
+     ],
+     "relief": [
+      "opencode"
+     ],
+     "last_resort": [],
+     "promote_relief_below": 25
+    }
+   }
+  ],
+  "incident_state": {
+   "states": {
+    "claude": "ok",
+    "codex": "ok",
+    "opencode": "ok"
+   },
+   "scores": {
+    "claude": 94,
+    "codex": 0,
+    "opencode": 80
+   },
+   "first_leg": {
+    "harness": "claude",
+    "model_profile": "top"
+   }
+  }
+ }
+}
