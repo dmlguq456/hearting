@@ -9256,7 +9256,9 @@ def _discover_session_notice_duties(store, *, read_context=None):
         # Missing jobs is valid for route-free notices; partial input is not.
         view = read_context.registry_view(jobs)
         observed = (view is None or not view.completeness_reason) and observed
-        for status, meta in (view.handover_latest().values() if view is not None else ()):
+        # The latest row's parent keys, projected once per registry generation.
+        for values in (view.handover_parent_sessions() if view is not None else ()):
+            meta = dict(zip(view.PARENT_SESSION_KEYS, values))
             sid = str(meta.get("parent_sid") or "")
             harness = _registered_parent_harness(meta)
             if sid and harness:
