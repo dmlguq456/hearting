@@ -365,9 +365,9 @@ def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
         understanding, brief = "", {field: "" for field in FI.BRIEF_FIELDS}
         try:
             # A draft from the request and the anchor frame's brief; the owner rewrites it for the person.
-            request = route.get("work_request") or {}
-            understanding = (((request.get("intent") or {}).get("intent") or "")[:FI.MAX_UNDERSTANDING_CHARS]
-                             or FI.understanding_draft(request.get("text") or ""))
+            import work_intent
+            understanding = (work_intent.draft((route.get("work_request") or {}).get("text") or "")
+                             .get("intent") or "")[:FI.MAX_UNDERSTANDING_CHARS]
             output = prepare_route_artifact_env(Path(path), start=False, jobs=Path(jobs)).get("AGENT_ARTIFACT_OUTPUT_DIR")
             if output:
                 brief = FI.brief_draft((Path(output) / "shards/frame/direction-brief.md").read_text(encoding="utf-8"))
@@ -540,7 +540,7 @@ def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
 
 def validate_request(value):
     if (not isinstance(value, dict) or not {"text", "owner_harness"} <= set(value)
-            or set(value) - {"text", "owner_harness", "workflow_group_context", "routing_hints", "intent"}):
+            or set(value) - {"text", "owner_harness", "workflow_group_context", "routing_hints"}):
         raise ValueError("work-request-invalid")
     if not isinstance(value["text"], str) or not value["text"].strip():
         raise ValueError("work-request-empty")
@@ -563,9 +563,6 @@ def validate_request(value):
                 or not isinstance(context.get("group_id"), str)
                 or not GROUP_ID.fullmatch(context["group_id"])):
             raise ValueError("work-request-group-context-invalid")
-    if "intent" in value:
-        import work_intent
-        work_intent.validate(value["intent"])
     return value
 
 
@@ -607,17 +604,8 @@ def group_context_matches_campaign(route, context):
 
 
 def capture_request_context(value, route):
-    """Seal only the already explicit same-campaign context for later start.
-
-    The person's intent is sealed once here (WORKFLOW §0.4); a value already
-    present (an inherited leg) is kept, never re-read from the session.
-    """
+    """Seal only the already explicit same-campaign context for later start."""
     request = dict(validate_request(value))
-    if "intent" not in request:
-        import work_intent
-        intent = work_intent.capture(request["text"], route.get("cwd"))
-        if intent:
-            request["intent"] = intent
     if "workflow_group_context" not in request:
         campaign = os.environ.get("AGENT_ARTIFACT_CAMPAIGN_ID")
         group = os.environ.get("AGENT_ARTIFACT_WORKFLOW_GROUP_ID")

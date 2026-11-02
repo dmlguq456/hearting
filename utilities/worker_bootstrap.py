@@ -611,7 +611,7 @@ def completion_scope_prompt() -> str:
 
 
 def sealed_intent_prompt(args) -> str:
-    """The intent `work_request.intent` sealed at compose, for routes without a frame release."""
+    """The route's start intent (prompt-file lines and the person's words), for routes without a frame release."""
     binding = getattr(args, "owner_route_binding", None)
     route_file = getattr(args, "route_file", None) or getattr(binding, "route_file", None)
     if not route_file:
