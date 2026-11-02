@@ -1192,6 +1192,16 @@ def open_rollout_sessions(pids=None):
     ``complete`` is True only when every such process's fd table was fully read and the
     caller sits in the initial PID namespace; otherwise an absent sid proves nothing.
     ``pids`` restricts the walk (tests pass fixture pids)."""
+    walked = _open_rollout_paths(pids)
+    if walked is None:
+        return None
+    complete, paths = walked
+    return {"complete": complete, "open": frozenset(sid for sid in map(_sid, paths) if sid)}
+
+
+def _open_rollout_paths(pids=None):
+    """``(complete, realpaths)`` of the rollouts live same-UID Codex processes hold open,
+    or None when the process table cannot be listed (see ``open_rollout_sessions``)."""
     from . import procscan
     if pids is None:
         try:
@@ -1217,8 +1227,41 @@ def open_rollout_sessions(pids=None):
             complete = False
             continue
         complete = complete and not partial
-        held.update(sid for sid in map(_sid, paths) if sid)
-    return {"complete": complete, "open": frozenset(held)}
+        held.update(paths)
+    return complete, held
+
+
+def open_rollout_questions(pids=None, homes=None):
+    """``{sid: waiting_since}`` for live Codex threads whose rollout holds an unanswered
+    ``request_user_input``, or None when the process table cannot be listed.
+
+    The same rollout judgment as a Fleet session row (``_tail_pending_request_user_input``),
+    so a thread launched without the interaction hook still has its question observed.
+    Only rollouts under this environment's Codex home(s) count; a sid with two distinct
+    rollout files is ambiguous and skipped."""
+    walked = _open_rollout_paths(pids)
+    if walked is None:
+        return None
+    roots = []
+    for home in (homes if homes is not None else [_home()]):
+        try:
+            roots.append(os.path.join(os.path.realpath(os.path.expanduser(os.fspath(home))),
+                                      "sessions") + os.sep)
+        except (TypeError, ValueError):
+            continue
+    by_sid = {}
+    for path in walked[1]:
+        sid = _sid(path)
+        if sid and any(path.startswith(root) for root in roots):
+            by_sid.setdefault(sid, set()).add(path)
+    pending = {}
+    for sid, paths in by_sid.items():
+        if len(paths) != 1:
+            continue
+        wait = _tail_pending_request_user_input(next(iter(paths)))
+        if wait and isinstance(wait.get("waiting_since"), (int, float)):
+            pending[sid] = float(wait["waiting_since"])
+    return pending
 
 
 def _control_socket(environ):

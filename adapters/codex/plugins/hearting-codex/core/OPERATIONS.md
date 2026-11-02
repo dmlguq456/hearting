@@ -2794,7 +2794,10 @@ a bare registry status word is never evidence alone.
 
 **S5** gate relay — a steward may summarize a user gate for its own user and carry the
 response back, but never grants the approval itself; the session that received the
-user's response directly owns the release record.
+user's response directly owns the release record. `hearting run questions` lists the
+waits Fleet's QUESTIONS view shows, with each question, choices and recommended answer;
+the steward asks its user through its native question surface, then sends the chosen
+answer with `hearting run questions answer <id>`, the same release path Fleet uses.
 
 **S6** ledger — every message sent or received is a typed record in the `peer-messages/`
 ledger under the dispatch state root. The full body is never stored, only a bounded

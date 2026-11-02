@@ -39,6 +39,40 @@ _SELECTED_STATES = frozenset(("open", "submitted", "received", "applied",
                               "cancelled", "expired", "unknown"))
 _SELECTED_ENTRY_KEYS = frozenset(("identity", "selected_id", "draft", "state", "action_id",
                                   "response", "result", "updated_at"))
+# The one age rule for every answer-wait source (S1-S4): a wait this old folds out of
+# the current count. Age never removes a wait; only evidence does (answered, route
+# closed, replaced by a later attempt, native request ended). User decision
+# 2026-10-26: elapsed time never answers or closes an unanswered question.
+OLDER_AFTER = 72 * 3600
+OWNER_STATES = ("live", "successor", "none", "unknown")
+
+
+def wait_fold(since, now, *, owner_state=None):
+    """Why a wait is not current: ``"ownerless"``, ``"older"``, or ``None`` (current).
+
+    ``ownerless`` needs a proven owner exit with no lineage successor; an unobserved
+    owner stays ``unknown`` and current. An unreadable timestamp is not old."""
+    if owner_state == "none":
+        return "ownerless"
+    try:
+        age = float(now) - float(since)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return "older" if math.isfinite(age) and age >= OLDER_AFTER else None
+
+
+def wait_counts(items):
+    """The single count every surface shows: current, folded (older), and ownerless."""
+    current = folded = ownerless = 0
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if item.get("stale") in (True, "older"):
+            folded += 1
+            ownerless += item.get("fold") == "ownerless"
+        else:
+            current += 1
+    return {"total": current, "older": folded, "ownerless": ownerless}
 
 
 def state_root() -> Path:
@@ -314,9 +348,29 @@ def read_signals(*, now: float | None = None) -> list[dict]:
         value = _read(path)
         if value is None or not isinstance(value.get("since"), (int, float)):
             continue
-        value["stale"] = instant - float(value["since"]) >= 7 * 86400
+        value["stale"] = wait_fold(value["since"], instant) is not None
         out.append(value)
     return sorted(out, key=lambda item: (item.get("since", 0), item["id"]))
+
+
+def _owner_projection(item: dict) -> dict:
+    """Body-free owner facts a surface needs to place a wait: who answers it now, whether
+    that session is observed live, why it is folded, and its route's directory."""
+    row = {}
+    state = item.get("owner_state")
+    if state in OWNER_STATES:
+        row["owner_state"] = state
+    if item.get("fold") in ("older", "ownerless"):
+        row["fold"] = item["fold"]
+    registered = item.get("registered_owner")
+    if (isinstance(registered, dict) and registered.get("harness") in {"claude", "codex", "opencode"}
+            and _safe_native_ref(registered.get("session_id"))):
+        row["registered_owner"] = {"harness": registered["harness"],
+                                   "session_id": registered["session_id"]}
+    cwd = item.get("cwd")
+    if isinstance(cwd, str) and cwd.startswith("/") and len(cwd) <= 4096 and "\n" not in cwd:
+        row["cwd"] = cwd
+    return row
 
 
 def publish_cache(result: dict) -> bool:
@@ -336,6 +390,7 @@ def publish_cache(result: dict) -> bool:
         if isinstance(route_hash, str) and _SAFE_ROUTE_HASH.fullmatch(route_hash):
             row["route_hash"] = route_hash
         row["owner"] = {"harness": harness, "session_id": sid}
+        row.update(_owner_projection(item))
         if item.get("source") == "S1":
             for key in ("request_id", "turn_id", "item_id"):
                 ref = (_safe_request_id(item.get(key)) if key == "request_id"
@@ -346,12 +401,13 @@ def publish_cache(result: dict) -> bool:
         if harness and sid and not item.get("stale"):
             key = str(harness) + "\0" + str(sid)
             by_session.setdefault(key, []).append(str(item.get("id") or ""))
-    stale_total = sum(bool(item.get("stale")) for item in items)
-    current_total = sum(not bool(item.get("stale")) for item in items)
+    counts = wait_counts(items)
+    current_total, stale_total = counts["total"], counts["older"]
     observed_at = float(result.get("observed_at") or time.time())
     value = {"schema_version": 3, "observed_at": observed_at,
              "complete": bool(result.get("complete")), "total": current_total,
-             "older": stale_total, "stale_total": stale_total, "items": items, "by_session": by_session,
+             "older": stale_total, "stale_total": stale_total, "ownerless": counts["ownerless"],
+             "items": items, "by_session": by_session,
              "unattributed": [item.get("id") for item in items
                               if item.get("attribution") == "unattributed" and not item.get("stale")],
              "health": [{"source": row.get("source"), "state": row.get("state")}
@@ -379,6 +435,13 @@ def publish_cache(result: dict) -> bool:
                 "since": item.get("since"),
                 "stale": "older" if item.get("stale") else "current",
             }
+            for key in ("owner_state", "fold", "cwd"):
+                if item.get(key) is not None:
+                    fleet_item[key] = item[key]
+            registered = item.get("registered_owner")
+            if isinstance(registered, dict):
+                fleet_item["registered_harness"] = registered.get("harness")
+                fleet_item["registered_session_id"] = registered.get("session_id")
             if item.get("source") == "S1":
                 for key in ("request_id", "turn_id", "item_id"):
                     ref = (_safe_request_id(item.get(key)) if key == "request_id"
@@ -388,7 +451,7 @@ def publish_cache(result: dict) -> bool:
             fleet_items.append(fleet_item)
         fleet_value = {"schema_version": 1, "observed_at": observed_at,
                        "complete": bool(result.get("complete")), "total": current_total,
-                       "older": stale_total, "items": fleet_items,
+                       "older": stale_total, "ownerless": counts["ownerless"], "items": fleet_items,
                        "unattributed": [item["id"] for item in fleet_items
                                         if not item["session_id"] or not item["harness"]],
                        "health": [{"source": row.get("source"), "state": row.get("state")}
@@ -425,11 +488,9 @@ def publish_cache(result: dict) -> bool:
                                            if any(ref not in removed for ref in refs)}
                     fleet_value["items"] = [row for row in fleet_value["items"]
                                             if row["id"] not in removed]
-                    current_total = sum(not row.get("stale") for row in value["items"])
-                    older_total = len(value["items"]) - current_total
+                    counts = wait_counts(value["items"])
                     for projection in (value, fleet_value):
-                        projection["total"] = current_total
-                        projection["older"] = older_total
+                        projection.update(counts)
                         projection["unattributed"] = [ref for ref in projection["unattributed"]
                                                        if ref not in removed]
                     value["stale_total"] = value["older"]
@@ -2132,19 +2193,26 @@ def _workflow_gate_detail(binding, item):
                   "question": interview["understanding"],
                   "choices": [{"value": "I understand the restatement",
                                "label": "I understand the restatement"}],
-                  "is_other": True}]
+                  "recommended": 0, "is_other": True}]
     for question in interview.get("questions", ()):
         if not isinstance(question, dict):
             continue
         options = question.get("options") if isinstance(question.get("options"), list) else []
-        questions.append({"id": question["id"], "question": question["question"],
-                          "choices": [{"value": option["label"], "label": option["label"],
-                                       **({"means": option["means"]} if isinstance(option.get("means"), str)
-                                          else {})}
-                                      for option in options if isinstance(option, dict)
-                                      and isinstance(option.get("label"), str)],
-                          # The existing frame answer validator accepts off-menu notes.
-                          "is_other": True})
+        choices = [{"value": option["label"], "label": option["label"],
+                    **({"means": option["means"]} if isinstance(option.get("means"), str)
+                       else {})}
+                   for option in options if isinstance(option, dict)
+                   and isinstance(option.get("label"), str)]
+        entry = {"id": question["id"], "question": question["question"], "choices": choices,
+                 # The existing frame answer validator accepts off-menu notes.
+                 "is_other": True}
+        # Every sealed interview question names its recommended option; relaying
+        # surfaces show it, the person still chooses.
+        recommended = question.get("recommended")
+        if (type(recommended) is int and 0 <= recommended < len(choices)
+                and len(choices) == len(options)):
+            entry["recommended"] = recommended
+        questions.append(entry)
     detail = {"gate": gate, "target": target, "response_mode": "frame-interview",
               "decision": "proceed", "questions": questions}
     return {"detail": detail, "choices": [], "interview": interview}, None
@@ -3540,10 +3608,10 @@ def _notify_item(item: dict, *, boundary: str, sound: bool = False) -> bool:
 def _notify_result(result: dict) -> None:
     now = float(result.get("observed_at") or time.time())
     for item in result.get("items", ()):
+        # Only current waits notify; the shared fold rule is the same for S1-S4.
         if (not isinstance(item, dict) or item.get("stale")
-                or now - float(item.get("since") or now) >= 72 * 3600
-                   and item.get("source") in {"S2", "S3"}
-                or now - float(item.get("since") or now) >= 7 * 86400):
+                or wait_fold(item.get("since") or now, now,
+                             owner_state=item.get("owner_state")) is not None):
             continue
         _notify_item(item, boundary="registered")
         age = now - float(item.get("since") or now)
@@ -3566,9 +3634,8 @@ def _notification_delay(items, now, *, enabled):
             since = float(item["since"])
         except (KeyError, TypeError, ValueError, OverflowError):
             continue
-        maximum = 72 * 3600 if item.get("source") in {"S2", "S3"} else 7 * 86400
-        age = now - since
-        if age < 0 or age >= maximum:
+        if now - since < 0 or wait_fold(since, now,
+                                        owner_state=item.get("owner_state")) is not None:
             continue
         for boundary in (3600, 6 * 3600):
             remaining = since + boundary - now
