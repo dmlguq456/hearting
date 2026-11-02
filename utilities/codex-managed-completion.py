@@ -681,6 +681,27 @@ def canonical(value: Any) -> str:
     )
 
 
+def _latest_attempt_rows(
+    jobs: Path, attempts: set[str]
+) -> dict[str, tuple[str, dict[str, str]]]:
+    """Latest ``(status, metadata)`` per monitored attempt, partial tail included.
+
+    The shared registry view answers from its attempt index and is not re-read
+    while the file is unchanged. Raises OSError when the registry is unreadable.
+    """
+    import dispatch_registry_cache
+
+    with dispatch_registry_cache.registry_read_scope():
+        view = dispatch_registry_cache.current_registry_view(Path(jobs))
+    latest: dict[str, tuple[str, dict[str, str]]] = {}
+    for attempt_id in attempts:
+        if not attempt_id:
+            continue  # an empty id names no attempt; select_rows would return all rows
+        for fields, metadata in view.select_rows(attempt_id=attempt_id):
+            latest[attempt_id] = (fields[1], metadata)
+    return latest
+
+
 def wait_for_session_launch_claims(
     args: argparse.Namespace,
     attempts: set[str],
@@ -690,26 +711,21 @@ def wait_for_session_launch_claims(
     if not args.parent_session_id:
         return
     deadline = time.monotonic() + max(0.0, args.launch_ready_timeout)
+    unstable_delay = 0.02
     while True:
         try:
-            lines = args.jobs.read_text(
-                encoding="utf-8", errors="replace"
-            ).splitlines()
+            latest = _latest_attempt_rows(args.jobs, attempts)
         except OSError as exc:
-            raise CompletionError("registry-launch-read-failed") from exc
-        latest: dict[str, tuple[str, dict[str, str]]] = {}
-        for line in lines:
-            fields = line.split("\t")
-            if len(fields) != 6:
-                continue
-            metadata = dict(
-                part.split("=", 1)
-                for part in fields[5].split(",")
-                if "=" in part
-            )
-            attempt_id = metadata.get("attempt_id", "")
-            if attempt_id in attempts:
-                latest[attempt_id] = (fields[1], metadata)
+            if exc.errno is not None:  # missing or unreadable registry
+                raise CompletionError("registry-launch-read-failed") from exc
+            # A write landed during each stable-read attempt. That is a busy
+            # registry, not a failed launch: observe again until the deadline.
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise CompletionError("launch-claim-timeout") from exc
+            time.sleep(min(unstable_delay, remaining))
+            unstable_delay = min(unstable_delay * 2, max(args.interval, 0.05))
+            continue
         if set(latest) != attempts:
             raise CompletionError("expected-attempt-missing")
         pending = False
@@ -1790,19 +1806,11 @@ def _any_attempt_open(jobs: Path, attempts: set[str]) -> bool:
     a reason to stop watching on missing evidence, LOOP §4).
     """
     try:
-        lines = jobs.read_text(encoding="utf-8", errors="replace").splitlines()
+        latest = _latest_attempt_rows(jobs, attempts)
     except OSError:
         return True
-    latest: dict[str, str] = {}
-    for line in lines:
-        fields = line.split("\t")
-        if len(fields) != 6:
-            continue
-        metadata = dict(part.split("=", 1) for part in fields[5].split(",") if "=" in part)
-        attempt_id = metadata.get("attempt_id", "")
-        if attempt_id in attempts:
-            latest[attempt_id] = fields[1]
-    return any(latest.get(attempt_id, "open") in OPEN_STATES for attempt_id in attempts)
+    return any((latest[attempt_id][0] if attempt_id in latest else "open") in OPEN_STATES
+               for attempt_id in attempts)
 
 
 def _receiver_unavailable_reason(args: argparse.Namespace, attempts: set[str]) -> str:
