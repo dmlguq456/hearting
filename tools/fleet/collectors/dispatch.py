@@ -2326,12 +2326,20 @@ def _parse_codex_attempt_tail(path):
 
 
 def _codex_attempt_rollout(job, thread_id):
-    """Resolve a raw ``codex exec --json`` attempt to one exact projected rollout."""
+    """Resolve a raw ``codex exec --json`` attempt to one exact projected rollout.
+
+    A registered worker runs with its own CODEX_HOME, recorded as ``runtime_home``, and
+    its rollout exists only there; that home is searched first. Callers read it only
+    after ``_native_home_admitted`` has admitted the home for this read.
+    """
     try:
         from . import codex as codex_collector
     except Exception:
         return None
     homes = []
+    runtime_home = (getattr(job, "_registry_metadata", None) or {}).get("runtime_home")
+    if isinstance(runtime_home, str) and os.path.isabs(runtime_home):
+        homes.append(runtime_home)
     cwd = getattr(job, "cwd", None)
     if isinstance(cwd, str) and cwd:
         dispatch_dir = os.path.join(os.path.realpath(cwd), ".dispatch")

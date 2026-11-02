@@ -87,8 +87,9 @@ def probe_herdr() -> dict:
             "id": "host.herdr",
             "status": "warning",
             "detail": (
-                "herdr CLI not found; steward wait falls back to Claude "
-                "native notify_when_idle / explicit poll-fallback"
+                "herdr CLI not found (optional): peer windows (peer-steward start/watch), "
+                "pane titles, question notifications and automatic /clear are off; "
+                "core work is unaffected"
             ),
         }
     try:

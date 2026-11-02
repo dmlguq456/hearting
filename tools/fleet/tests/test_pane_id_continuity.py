@@ -404,7 +404,7 @@ class PaneContinuityTest(unittest.TestCase):
 
 
 # Fixture data only: the socket herdr reported on the host where e8 (w18:p7) lost its history.
-FIXTURE_SOCKET = "/home/Uihyeop/.config/herdr/herdr.sock"
+FIXTURE_SOCKET = "/home/example/.config/herdr/herdr.sock"
 E8_KEY = "cd408b2b164213cb18a8"         # (FIXTURE_SOCKET, w18:p7): the seat e8's own hooks wrote
 E8_LEGACY_KEY = "d0be643a697d29c02ff6"  # endpoint-free w18:p7: what a viewer outside herdr used to read
 E8_SIDS = ("7dcee068-0000-4000-8000-000000000001", "bbf14dfc-0000-4000-8000-000000000002",

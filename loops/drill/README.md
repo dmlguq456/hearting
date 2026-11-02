@@ -26,6 +26,8 @@ Do not run the full suite after every change. Select the changed instruction axi
 For Fleet grouping, each case uses `/tmp/drill-<case>-*/repo` as one group root. When `AGENT_DISPATCH_JOBS` is set, runner, owner, and stage/child registration, monitoring, and harvesting all use that registry. The runner row does not implicitly inherit `parent_sid` or `parent_cwd` from the `hearting/main` session that started it. The capability owner inside the case is depth 1; stage or review workers opened by that owner are depth 2.
 
 - Run after committing instruction changes under `<agent-home>`, not every night.
+  A person or a scheduled loop starts a drill; an agent does not start one on
+  its own.
 - Use the user's default model so the drill matches normal usage; do not pin a model.
 - Results are written to `results/<timestamp>.md` and the stdout table, with one saved transcript per case.
 

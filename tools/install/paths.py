@@ -133,8 +133,8 @@ def primary_checkout(root=None):
                 if not primary.is_dir():
                     return root
                 # Git reports the primary using whatever path the caller reached it by, so
-                # the same checkout can be named `/home/<u>/nas_<u>/…` from one worktree and
-                # `/home/nas/user/<u>/…` from another. Normalize like `artifact-root.sh`'s
+                # the same checkout can be named `/home/<u>/shared_<u>/…` from one worktree and
+                # `/mnt/shared/<u>/…` from another. Normalize like `artifact-root.sh`'s
                 # `pwd -P`, or the launcher target would depend on where install ran.
                 try:
                     return primary.resolve(strict=True)

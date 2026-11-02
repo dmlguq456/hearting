@@ -30,7 +30,7 @@ class ReadingTest(unittest.TestCase):
         self.addCleanup(model.reset_parent_edge_tracker)
 
     def test_r2_folded_gpu_keeps_config_name(self):
-        resource = dict(host="moving4", index=0, model="RTX A6000", processes=[
+        resource = dict(host="mgpu-a1", index=0, model="RTX A6000", processes=[
             dict(pid=101, proc_start=11, command="python run.py --config AMI_8ch_varying_0_3spk_v3.yaml")])
         with mock.patch.object(render, "_ROUTE_FOLD", {}):
             text = "\n".join(render._plain(x) for x in render._gpu_resource_strip([resource], 80))
@@ -79,12 +79,12 @@ class ReadingTest(unittest.TestCase):
 
     def test_r2_gpu_owner_adds_person_not_repeated_execution_id(self):
         from fleet.collectors import compute_hosts
-        for kind, identifier in (("run", "moving4-20261008-203517-css-AMI8var-v3"),
+        for kind, identifier in (("run", "mgpu-a1-20261008-203517-css-AMI8var-v3"),
                                  ("job", "training-owner")):
             label = kind + ":" + identifier
             process = dict(pid=101, proc_start=11, command="python run.py --config AMI_8ch_varying_0_3spk_v3.yaml",
                            cwd="/work/project", owner=dict(kind=kind, id=identifier, label=label))
-            snapshot = dict(configured=True, hosts=[dict(host="moving4", reachable=True,
+            snapshot = dict(configured=True, hosts=[dict(host="mgpu-a1", reachable=True,
                             gpus=[dict(index=0, processes=[process])])])
             entry = compute_hosts.unregistered_gpu(snapshot)[0]
             for show_all in (False, True):
@@ -255,7 +255,7 @@ class ReadingTest(unittest.TestCase):
         self.assertLessEqual(render._dw(pulse), 59)
 
     def test_r8_unknown_gpu_symbol_has_meaning_when_inline_note_drops(self):
-        resource = dict(host="moving4", index=0, model="RTX 6000 Ada Gen.",
+        resource = dict(host="mgpu-a1", index=0, model="RTX 6000 Ada Gen.",
                         access_only=True, telemetry_unknown=True, processes=[dict(
                             pid=101, proc_start=11,
                             command="python train.py --config AMI_8ch_varying_0_3spk_v3.yaml --engine_mode train")])

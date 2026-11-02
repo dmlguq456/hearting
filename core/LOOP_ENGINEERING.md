@@ -12,8 +12,10 @@ structure or a change is sound.
 
 ## 0. Three standing goals
 
-The user set these as Hearting's core goals (2026-10-06). Sections 1–6
-describe how to reach them; judge any structure or change against these first.
+The user set these as Hearting's core goals (2026-10-06). They serve the
+purpose stated at the top of the repository's AGENTS.md ("Why Hearting exists").
+Sections 1–6 describe how to reach them; judge any structure or change against
+these first.
 
 1. **Light dispatch surface.** An agent that dispatches work states only the
    goal, inputs, scope, and completion condition. Whatever the runtime already

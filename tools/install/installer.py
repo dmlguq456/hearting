@@ -1414,6 +1414,9 @@ def cmd_runtime(args):
                 exit_code = EXIT_VERIFY_FAIL
             for report in reports:
                 report["surface_skew"] = skew
+            if shutil.which("herdr") is None:
+                # Optional, never a failure: one line names what is off without herdr.
+                lines.append("optional: " + host_probes.probe_herdr()["detail"])
         if args.runtime_command in {"activate", "refresh"} and "codex" in targets:
             try:
                 launcher_result = codex_launcher.uninstall(
