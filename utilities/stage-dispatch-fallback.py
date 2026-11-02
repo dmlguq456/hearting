@@ -371,6 +371,25 @@ def handed_over_count(route: dict, node: dict, route_file) -> int:
         return 0
 
 
+def repeat_escalation_for(route: dict, node: dict, jobs) -> dict | None:
+    """The shared repeat-failure decision for this launch, printed once; None when nothing changes.
+
+    An observation like usage: it chooses a profile, an order or the existing inline hop and never
+    refuses a start. An unreadable record changes nothing."""
+    try:
+        from model_profile import repeat_escalation
+        escalation = repeat_escalation(route, node["id"], jobs)
+    except Exception:
+        return None
+    if escalation:
+        print(f"repeat_failure_streak={escalation['streak']}")
+        print(f"repeat_failure_class={escalation['class']}")
+        print("repeat_escalation=" + (
+            f"profile:{escalation['from']}->{escalation['to']}" if escalation["kind"] == "profile"
+            else "place:unsandboxed" if escalation["kind"] == "place" else "owner-inline"))
+    return escalation
+
+
 def unsandboxed_harness(harness) -> bool:
     """Whether the adapter declares no OS sandbox, so a handed-over host check can run there."""
     try:
@@ -616,7 +635,7 @@ def apply_worker_pin(route: dict, hops: list[dict], parent_identity: dict | None
 
 def ordered_fallback_hops(
     route: dict, node: dict, jobs: Path, *, parent_identity: dict | None = None, recheck: bool = False,
-    handed_over: int = 0,
+    handed_over: int = 0, prefer_unsandboxed: str | None = None,
 ) -> tuple[list[dict], dict | None]:
     """Rank the checked direct-headless band from the sealed allocation policy.
 
@@ -757,8 +776,10 @@ def ordered_fallback_hops(
     # Order of precedence: pin, quality-peer protection, then handed-over checks (an observation,
     # like usage) choosing a harness without an OS sandbox, then the sealed affinity.
     handed_over_affinity = None
-    if handed_over and not pinned_head and not (affinity in ranked and unsandboxed_harness(affinity)
-                                                and (not peers_bind or affinity in quality_peer)):
+    # A repeated environment failure of a producing stage asks for the same placement.
+    unsandboxed_reason = "handed-over-checks" if handed_over else prefer_unsandboxed
+    if unsandboxed_reason and not pinned_head and not (affinity in ranked and unsandboxed_harness(affinity)
+                                                       and (not peers_bind or affinity in quality_peer)):
         open_harnesses = [harness for harness in ranked if unsandboxed_harness(harness)
                           and (not peers_bind or harness in quality_peer)]
         if open_harnesses:
@@ -814,7 +835,7 @@ def ordered_fallback_hops(
                     else:
                         sole_gate = "degraded"
     # The reason is recorded only when the observation actually decided the head.
-    affinity_source = ("handed-over-checks" if handed_over_affinity and ranked
+    affinity_source = (unsandboxed_reason if handed_over_affinity and ranked
                        and ranked[0] == handed_over_affinity else None)
     ranked += limited
     ordered = []
@@ -1707,7 +1728,7 @@ def wrapper_command(
     if lifecycle == FOREGROUND_SCOPED:
         command += ["--foreground-timeout", str(args.foreground_timeout)]
     command += ["--model-role", _unit_role(node.get("unit")) or node.get("role", "fast implementer")]
-    command += ["--model-profile", node["model_profile"]]
+    command += ["--model-profile", getattr(args, "profile_override", None) or node["model_profile"]]
     if capacity_settings:
         model, paired = capacity_settings
         command += ["--model", model]
@@ -2432,6 +2453,10 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
         # parent passed (a batch leg's) stays first; the same block is not
         # appended twice.
         os.environ["AGENT_DISPATCH_RETRY_BRIEF"] = carried + round_block
+    # The same failure settling twice on a producing stage changes what runs
+    # next: a stronger profile, a harness without an OS sandbox, or the owner.
+    escalation = repeat_escalation_for(route, node, args.jobs)
+    args.profile_override = escalation["to"] if escalation and escalation["kind"] == "profile" else None
 
     prior_failures = registry_failures(args.jobs, route["route_id"], node["id"])
     prior_rows = registry_rows(args.jobs, route["route_id"], node["id"])
@@ -2451,7 +2476,14 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
         fallback_hops, allocation_context = ordered_fallback_hops(
             route, node, args.jobs, parent_identity=parent_identity, recheck=args.action != "dry-run",
             handed_over=handed_over_count(route, node, args.route),
+            **({"prefer_unsandboxed": "repeat-environment-failure"}
+               if escalation and escalation["kind"] == "place" else {}),
         )
+        if escalation and escalation["kind"] == "owner-inline":
+            # The existing last hop of the sealed chain: the owner runs the stage itself.
+            inline_hops = [dict(hop, reason_enum="repeat-failure") for hop in fallback_hops
+                           if hop.get("fallback_hop") == "inline"]
+            fallback_hops = inline_hops or fallback_hops
     except DISPATCH_NODE.DispatchNodeError as exc:
         return fail(exc.reason, 65, child_spawned="0", **exc.fields)
     if allocation_context is not None:

@@ -1164,7 +1164,18 @@ def main():
  if a.attempt_id: argv += ["--attempt-id",a.attempt_id]
  argv += ["--model-role",node.get("role","fast implementer")]
  if node.get("model_profile"):
-  argv += ["--model-profile",node["model_profile"]]
+  # A producing stage that failed the same way twice runs one profile up
+  # (model_profile.repeat_escalation); the route guard re-derives the same.
+  escalated=None
+  if not a.subsession_id and original_task is None and not REVIEW_ROUND_CAP.is_round_capped_node(node):
+   try:
+    from model_profile import repeat_escalation
+    escalation=repeat_escalation(route,node["id"],registry.path)
+    escalated=escalation["to"] if escalation and escalation["kind"]=="profile" else None
+   except Exception:
+    escalated=None
+  if escalated: print(f"repeat_escalation=profile:{node['model_profile']}->{escalated}")
+  argv += ["--model-profile",escalated or node["model_profile"]]
  if a.pair_model_profile:
   argv += ["--pair-model-profile",a.pair_model_profile]
  argv += strip_leading_separator(a.adapter_args)

@@ -1139,7 +1139,7 @@ def _lineage_rows(route, jobs) -> dict[str, list[tuple[str, dict]]]:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     except (OSError, TypeError):
         return rows
-    for line in lines:
+    for index, line in enumerate(lines):
         fields = line.split("\t")
         if len(fields) != 6:
             continue
@@ -1147,7 +1147,7 @@ def _lineage_rows(route, jobs) -> dict[str, list[tuple[str, dict]]]:
         if ((meta.get("route_id") or meta.get("route")) not in identities or not meta.get("route_node")
                 or terminal_attempt_never_started(fields[1], meta)):
             continue
-        rows.setdefault(meta["route_node"], []).append((fields[1], meta))
+        rows.setdefault(meta["route_node"], []).append((fields[1], {**meta, "_registry_line": index}))
     _LINEAGE_CACHE.clear()
     _LINEAGE_CACHE[key] = rows
     return rows
@@ -1302,6 +1302,92 @@ def prior_round_context(route, node_id, jobs) -> str:
     return ("\n\n## Previous round (runtime record)\n" + "\n".join(lines) + "\n"
             "- Read the findings and your previous report first; close every 🔴 they list together, "
             "building on the changes already made rather than starting over.\n")
+
+
+# A blocker line's class, from fixed patterns read in order. The class decides what changes
+# when a failure repeats: an environment or host limit moves the work, a scope or input gap goes
+# to the owner, any other one moves it to a stronger profile. Unmatched text is "other", whose
+# only cost is a stronger model.
+_BLOCKER_CLASSES = (
+    ("environment", re.compile(
+        r"EPERM|EACCES|permission denied|operation not permitted|sandbox|socket|AF_UNIX|loopback"
+        r"|\bbind\b|network|tmux|/proc\b|index\.lock|chromium|browser|playwright|소켓|샌드박스"
+        r"|\bnode(?:js)?\b[^.;]{0,30}(?:not found|missing|unavailable|absent)|command not found"
+        r"|not installed", re.I)),
+    ("host-resource", re.compile(
+        r"out of memory|\bOOM\b|no space left|disk (?:full|quota)|\bGPU\b|CUDA|memory cap|cgroup|no-swap",
+        re.I)),
+    ("scope", re.compile(
+        r"out-of-scope|outside (?:the |its |my )?(?:fixed[- ]file |write[_ -]?)?scope|fixed[_ -]files?"
+        r"|not (?:in|within) (?:the )?scope", re.I)),
+    ("input", re.compile(
+        r"missing (?:input|artifact|plan|brief|handoff)|handoff (?:was |is )?(?:missing|absent)"
+        r"|predecessor|upstream (?:stage|output|marker)", re.I)),
+    ("test-failure", re.compile(r"\btests? (?:fail|failed|failing)\b|assertion|\bFAILED\b|regression", re.I)),
+)
+PLACE_CLASSES = frozenset({"environment", "host-resource"})
+# A scope or missing-input repeat needs the owner's decision, not a stronger model.
+OWNER_CLASSES = frozenset({"scope", "input"})
+
+
+def blocker_class(text) -> str:
+    """The fixed class of one blocker line; "other" when no pattern matches."""
+    text = str(text or "")
+    return next((name for name, pattern in _BLOCKER_CLASSES if pattern.search(text)), "other")
+
+
+def repeat_failure(route, node_id, jobs, rows=None) -> dict | None:
+    """How many of a producing stage's latest settled rounds failed the same way.
+
+    A round is one of this node's own settled attempts (full stage or sub-session) that ended FAIL
+    or BLOCKED, signed (verdict, blocker class, unmet leg items), or one blocking verdict of a
+    round-capped stage that judges it, signed by that stage. A judging PASS ends the run; a pass of
+    the node itself, a transport death and a verdict-less judge are not rounds. Returns
+    ``{"streak", "signature", "class", "attempts"}`` for the newest run, None without one."""
+    import review_round_cap as ROUND
+    from dispatch_attempt_policy import OPEN_STATES, readable_result
+    rows = _lineage_rows(route, jobs) if rows is None else rows
+    judges = {n["id"]: n.get("worker_type") or ("review" if n.get("kind") == "review-worker" else "test")
+              for n in _route_nodes(route)
+              if node_id in (n.get("depends_on") or ()) and ROUND.is_round_capped_node(n)}
+    events = []
+    candidates = [(status, meta, node_id) for status, meta in rows.get(node_id, ())]
+    candidates += [(status, meta, judge) for judge in judges for status, meta in rows.get(judge, ())]
+    candidates.sort(key=lambda row: row[1].get("_registry_line", -1))
+    for status, meta, owner in candidates:
+        if status in OPEN_STATES:
+            continue
+        if owner == node_id:
+            result = readable_result(meta)
+            if result not in {"FAIL", "BLOCKED"}:
+                continue
+            blocker = attempt_outcome(route, meta).get("blocker", "")
+            unmet = None
+            if result == "BLOCKED":
+                try:
+                    import route_authority
+                    unmet = route_authority._blocked_round_items(route, meta)
+                except Exception:  # unjudgeable items leave the class to sign the round
+                    unmet = None
+            cls = blocker_class(blocker)
+            events.append(((result, cls, tuple(sorted(unmet or ()))), cls, meta.get("attempt_id", "")))
+        else:
+            kind = ROUND.classify_round_row(status, meta, worker_type=meta.get("worker_type") or judges[owner])
+            if kind != "verdict":
+                continue
+            if not ROUND.last_verdict_blocking([(status, meta)], judges[owner]):
+                events.append((None, None, meta.get("attempt_id", "")))
+                continue
+            events.append((("judge", owner), "judge", meta.get("attempt_id", "")))
+    if not events or events[-1][0] is None:
+        return None
+    signature, cls = events[-1][0], events[-1][1]
+    attempts = []
+    for event_signature, _cls, attempt in reversed(events):
+        if event_signature != signature:
+            break
+        attempts.append(attempt)
+    return {"streak": len(attempts), "signature": signature, "class": cls, "attempts": attempts[::-1]}
 
 
 def plan_leg_prompt(route, node_id=None, primary_report=None) -> str:

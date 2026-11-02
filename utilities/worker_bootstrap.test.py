@@ -1470,6 +1470,75 @@ class PriorRoundContextTest(unittest.TestCase):
         self.assertEqual(W.prior_round_context(self.route, "missing-node", self.jobs), "")
 
 
+class RepeatFailureTest(unittest.TestCase):
+    """The same failure settling twice on a producing stage is one shared, registry-derived fact
+    (D1 seam 3); judging stages are signed by their own blocking verdicts."""
+
+    setUp = PriorRoundContextTest.setUp
+    row = PriorRoundContextTest.row
+
+    def blocked(self, attempt, blocker):
+        log = self.root / f"{attempt}.log"
+        self.blockers[str(log)] = {"verdict": "BLOCKED", "blocker": blocker}
+        self.row("execute", attempt, "dead-worker-blocked", "blocked", log_file=str(log))
+
+    def census(self):
+        self.blockers = getattr(self, "blockers", {})
+        with mock.patch("codex_dispatch_terminal.inspect_terminal_log",
+                        side_effect=lambda path: self.blockers.get(str(path))):
+            return W.repeat_failure(self.route, "execute", self.jobs)
+
+    def test_blocker_lines_fall_into_the_fixed_classes(self):
+        cases = {
+            "connect: socket EPERM inside the sandbox": "environment",
+            "Chromium is not installed here": "environment",
+            "nodejs not found on PATH": "environment",
+            "CUDA out of memory on the shared GPU": "host-resource",
+            "the fix needs a file outside the write scope": "scope",
+            "Owner must update the out-of-scope tests/test_x.py fixture": "scope",
+            "prerequisites are outside the fixed-file scope": "scope",
+            "Required incoming chain handoff was missing": "input",
+            "check needs Node, absent from the runner's fixed PATH": "environment",
+            "tsx 시험 5개는 소켓 경로가 너무 길어(EINVAL) 종료": "environment",
+            "4 GiB/no-swap cgroup proof is unavailable": "host-resource",
+            "3 tests failed in test_engine.py": "test-failure",
+            "the plan contradicts itself": "other",
+            "": "other",
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(W.blocker_class(text), expected)
+
+    def test_the_same_signature_counts_and_another_one_starts_over(self):
+        self.blockers = {}
+        self.assertIsNone(self.census())
+        self.blocked("att-execute-1", "loopback bind EPERM")
+        self.assertEqual(self.census()["streak"], 1)
+        self.blocked("att-execute-2", "socket: operation not permitted")
+        repeat = self.census()
+        self.assertEqual((repeat["streak"], repeat["class"], repeat["attempts"]),
+                         (2, "environment", ["att-execute-1", "att-execute-2"]))
+        self.blocked("att-execute-3", "the plan contradicts itself")
+        self.assertEqual((self.census()["streak"], self.census()["class"]), (1, "other"))
+        # A pass of the stage itself and a transport death are not rounds.
+        self.row("execute", "att-execute-4", "completed-marker", "pass")
+        self.row("execute", "att-execute-5", "dead-timeout", "runtime")
+        self.blocked("att-execute-6", "the plan still contradicts itself")
+        self.assertEqual(self.census()["streak"], 2)
+
+    def test_blocking_verdicts_of_a_judging_stage_repeat_and_its_pass_ends_the_run(self):
+        self.blockers = {}
+        self.row("execute", "att-execute-1", "completed-marker", "pass")
+        self.row("impl-review", "att-review-1", "completed-review-blocking", "fail")
+        self.row("execute", "att-execute-2", "completed-marker", "pass")
+        self.row("impl-review", "att-review-2", "completed-review-blocking", "fail")
+        repeat = self.census()
+        self.assertEqual((repeat["streak"], repeat["class"], repeat["signature"]),
+                         (2, "judge", ("judge", "impl-review")))
+        self.row("impl-review", "att-review-3", "completed-marker", "pass")
+        self.assertIsNone(self.census())
+
+
 class HandedOverChecksTest(unittest.TestCase):
     """execute records what its environment cannot run; the later qa/test stage receives it (D1 seam 5)."""
 

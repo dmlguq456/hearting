@@ -764,6 +764,83 @@ class LowerLaunchSelectionReceiptTest(unittest.TestCase):
         self.assertEqual(receipt["model_source"], "profile+diversity")
 
 
+class RepeatEscalationTest(unittest.TestCase):
+    """D1 seam 3: the same failure settling twice moves a producing stage one profile up per repeat,
+    an environment repeat to a harness without an OS sandbox, and past either to the owner."""
+
+    ROUTE = {"route_id": "rt-x", "nodes": [
+        {"id": "execute", "kind": "pipeline-stage", "unit": "dev/backend", "model_profile": "balanced"},
+        {"id": "impl-review", "kind": "review-worker", "unit": "qa/code-review", "model_profile": "light",
+         "depends_on": ["execute"]},
+        {"id": "plan", "kind": "pipeline-stage", "unit": "plan/plan-author", "model_profile": "top"}]}
+
+    def decide(self, node_id, streak, cls="other"):
+        repeat = {"streak": streak, "class": cls, "signature": ("FAIL", cls, ()),
+                  "attempts": [f"att-{n}" for n in range(streak)]}
+        with mock.patch("worker_bootstrap.repeat_failure", return_value=repeat if streak else None):
+            return PROFILE.repeat_escalation(self.ROUTE, node_id, "/tmp/jobs.log")
+
+    def test_each_repeat_moves_one_profile_up_and_then_to_the_owner(self):
+        self.assertIsNone(self.decide("execute", 0))
+        self.assertIsNone(self.decide("execute", 1))
+        self.assertEqual({k: v for k, v in self.decide("execute", 2).items() if k in {"kind", "from", "to"}},
+                         {"kind": "profile", "from": "balanced", "to": "balanced-deep"})
+        self.assertEqual(self.decide("execute", 3)["to"], "deep")
+        self.assertEqual(self.decide("execute", 4)["kind"], "owner-inline")
+        self.assertEqual(self.decide("execute", 2, "judge")["to"], "balanced-deep")
+
+    def test_an_environment_repeat_moves_the_place_not_the_model(self):
+        self.assertEqual(self.decide("execute", 2, "environment")["kind"], "place")
+        self.assertEqual(self.decide("execute", 2, "host-resource")["kind"], "place")
+        self.assertEqual(self.decide("execute", 3, "environment")["kind"], "owner-inline")
+
+    def test_a_scope_or_input_repeat_goes_to_the_owner(self):
+        for cls in ("scope", "input"):
+            self.assertEqual(self.decide("execute", 2, cls)["kind"], "owner-inline")
+
+    def test_judging_stages_and_profiles_outside_the_order_do_not_move(self):
+        self.assertIsNone(self.decide("impl-review", 3))
+        self.assertIsNone(self.decide("plan", 3))
+        self.assertIsNone(PROFILE.repeat_escalation(self.ROUTE, "missing", "/tmp/jobs.log"))
+        grouped = {"route_id": "rt-x", "nodes": [{**self.ROUTE["nodes"][0], "parallel_group": "execute"}]}
+        repeat = {"streak": 3, "class": "other", "signature": ("FAIL", "other", ()), "attempts": ["a", "b", "c"]}
+        with mock.patch("worker_bootstrap.repeat_failure", return_value=repeat):
+            self.assertIsNone(PROFILE.repeat_escalation(grouped, "execute", "/tmp/jobs.log"))
+
+    def test_only_the_derived_target_is_verified(self):
+        repeat = {"streak": 2, "class": "other", "signature": ("FAIL", "other", ()), "attempts": ["a", "b"]}
+        with mock.patch("worker_bootstrap.repeat_failure", return_value=repeat):
+            verified = lambda profile: PROFILE.escalated_profile_verified(
+                self.ROUTE, "execute", "/tmp/jobs.log", sealed="balanced", profile=profile)
+            self.assertTrue(verified("balanced-deep"))
+            self.assertFalse(verified("deep"))
+        with mock.patch("worker_bootstrap.repeat_failure", side_effect=OSError("unreadable")):
+            self.assertFalse(PROFILE.escalated_profile_verified(
+                self.ROUTE, "execute", "/tmp/jobs.log", sealed="balanced", profile="balanced-deep"))
+
+    def test_the_selection_receipt_admits_the_escalated_launch_and_names_its_seal(self):
+        selection = PROFILE.resolve_profile_demand(None, explicit_profile="balanced")
+        route = {"route_id": "rt-x", "route_hash": "sha256:x", "profile_selection_contract_version": 1,
+                 "nodes": [{"id": "execute", "kind": "pipeline-stage", "unit": "dev/backend",
+                            "model_profile": "balanced", "profile_demand": None,
+                            "profile_selection": selection}]}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "route.json"
+            path.write_text(json.dumps(route))
+            args = argparse.Namespace(route_file=str(path), route_node="execute", jobs=str(Path(tmp) / "jobs.log"),
+                                      resolved_model_settings={"profile": "balanced-deep"})
+            repeat = {"streak": 2, "class": "test-failure", "signature": ("FAIL", "test-failure", ()),
+                      "attempts": ["a", "b"]}
+            with mock.patch("worker_bootstrap.repeat_failure", return_value=repeat):
+                receipt = PROFILE.selection_receipt(args)
+            self.assertEqual(receipt["profile_escalated_from"], "balanced")
+            self.assertEqual(receipt["profile_selection_digest"], PROFILE._digest(selection))
+            with mock.patch("worker_bootstrap.repeat_failure", return_value=None), \
+                    self.assertRaises(PROFILE.ModelProfileError) as refused:
+                PROFILE.selection_receipt(argparse.Namespace(**{**vars(args), "profile_escalated_from": None}))
+            self.assertEqual(refused.exception.reason, "profile-selection-mismatch")
+
+
 class FrameTierLadder(unittest.TestCase):
     def test_the_ladder_maps_every_owner_profile_to_its_frame_pair(self):
         expected = {

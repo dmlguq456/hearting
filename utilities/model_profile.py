@@ -331,6 +331,56 @@ def pair_model_rotation(
     return None
 
 
+# A producing stage that keeps failing the same way moves one profile up per repeat, in the same
+# order `pair_model_rotation` walks down, and past `deep` the owner takes the stage over.
+ESCALATION_ORDER = ("light", "balanced", "balanced-deep", "deep")
+
+
+def repeat_escalation(route, node_id, jobs) -> dict | None:
+    """What the next start of a producing stage changes after the same failure settled twice.
+
+    Re-derived from the registry by every reader (launcher, route guard, selection receipt), so a
+    caller's claim is never the evidence. ``{"kind": "profile", "from", "to"}`` runs it one profile
+    up per repeat; ``{"kind": "place"}`` puts an environment or host-limit repeat on a harness without
+    an OS sandbox first; ``{"kind": "owner-inline"}`` hands the stage to the owner through the
+    existing inline hop for a scope or input repeat, and when no profile or place is left. Every result also carries ``streak``,
+    ``class`` and ``attempts``. None for a first failure, a judging stage or an unknown profile:
+    nothing changes and nothing is refused."""
+    import review_round_cap as ROUND
+    import worker_bootstrap as WB
+    node = next((n for n in (route or {}).get("nodes") or ()
+                 if isinstance(n, dict) and n.get("id") == node_id), None)
+    # A parallel or replica leg keeps the profile its batch reservation sealed.
+    if (node is None or WB.judges_leg(node) or ROUND.is_round_capped_node(node) or not jobs
+            or node.get("parallel_group") or node.get("replica_group")):
+        return None
+    repeat = WB.repeat_failure(route, node_id, jobs)
+    if not repeat or repeat["streak"] < 2:
+        return None
+    facts = {key: repeat[key] for key in ("streak", "class", "attempts")}
+    if repeat["class"] in WB.PLACE_CLASSES:
+        return {"kind": "place" if repeat["streak"] == 2 else "owner-inline", **facts}
+    if repeat["class"] in WB.OWNER_CLASSES:
+        return {"kind": "owner-inline", **facts}
+    sealed = node.get("model_profile")
+    if sealed not in ESCALATION_ORDER:
+        return None
+    index = ESCALATION_ORDER.index(sealed) + repeat["streak"] - 1
+    if index < len(ESCALATION_ORDER):
+        return {"kind": "profile", "from": sealed, "to": ESCALATION_ORDER[index], **facts}
+    return {"kind": "owner-inline", **facts}
+
+
+def escalated_profile_verified(route, node_id, jobs, *, sealed, profile) -> bool:
+    """Whether ``profile`` is the one a verified repeat escalation runs this node at instead of ``sealed``."""
+    try:
+        escalation = repeat_escalation(route, node_id, jobs)
+    except Exception:  # an unreadable record grants no escalation; the sealed profile stays the check
+        return False
+    return bool(escalation and escalation["kind"] == "profile"
+                and escalation["from"] == sealed and escalation["to"] == profile)
+
+
 def resolve_profile(adapter: str, config_path: str | Path, profile: str) -> dict[str, str]:
     return resolve_profile_values(adapter, load_config(config_path), profile)
 
@@ -587,6 +637,10 @@ def _lower_launch_verified(args, route, node_id, selection, profile):
     if (isinstance(pair, Mapping) and pair.get("status") == "rotated"
             and pair.get("sealed_profile") == sealed and pair.get("profile") == profile):
         return True
+    if (node_id and sealed is not None and sealed != profile and getattr(args, "jobs", None)
+            and escalated_profile_verified(route, node_id, args.jobs, sealed=sealed, profile=profile)):
+        args.profile_escalated_from = sealed
+        return True
     if (not node_id or sealed is None or sealed == profile
             or not getattr(args, "automatic_retry_of", None) or not getattr(args, "attempt_id", None)
             or not getattr(args, "jobs", None)):
@@ -630,6 +684,8 @@ def selection_receipt(args):
                "profile_demand_digest": selection["demand_digest"] or "-",
                "profile_selection_digest": _digest(selection),
                "profile_judgment_floor": selection["judgment_floor"]}
+    if getattr(args, "profile_escalated_from", None):
+        receipt["profile_escalated_from"] = args.profile_escalated_from
     pair = getattr(args, "pair_model_context", None)
     if isinstance(pair, Mapping) and pair.get("status") not in {None, "none"}:
         receipt["model_diversity"] = str(pair.get("status"))
