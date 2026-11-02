@@ -3094,15 +3094,15 @@ one carrier.
   registered-work readiness, an empty visible composer, and no open form or
   question). A dim prompt suggestion counts as an empty composer.
 - Blocked: busy, blocked, unknown, form-open, nonempty draft, unreadable screen,
-  unproven identity, or a submission that provably never started keeps the row
+  unproven identity, or a submission that provably did not start keeps the row
   `pending` under exactly one scheduled `message-<ref>` obligation. That runner
   repeats the same guard and the same Codex start gate on every pass, so the message
   is delivered once when the block clears.
 - A normal submission leaves the row `queued` with no new carrier: the exact
   receiver's receipt closes it. A queued ref is not a receipt; only exact bound
   native history or the receiver callback marks it received. An ambiguous or
-  timed-out write is never retyped.
-- A row whose endpoint was never proven (`receipt=peer-endpoint-unverified`) is
+  timed-out write is not typed again.
+- A row whose endpoint was not proven (`receipt=peer-endpoint-unverified`) is
   outside this class: no carrier can deliver it, so it keeps none and remains the
   sender's one-hour notice target. After one hour the sender is notified for any
   still-pending row.
