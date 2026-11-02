@@ -2255,6 +2255,7 @@ def _env_for(root: Path, record: Mapping[str, Any], route: Optional[Mapping[str,
 # slow disk keeps it. Past it nothing has started and the caller is told to run
 # start again later.
 OWNER_LAUNCH_ADMISSION_WAIT_SECONDS = 120.0
+_RECONCILE_FINISHED = frozenset({"unchanged", "reconciled", "inactive"})
 
 
 def _begin_waiting_for_admission(root: Path, **kwargs: Any) -> Dict[str, Any]:
@@ -2266,13 +2267,16 @@ def _begin_waiting_for_admission(root: Path, **kwargs: Any) -> Dict[str, Any]:
     again later.
     """
     deadline = time.monotonic() + OWNER_LAUNCH_ADMISSION_WAIT_SECONDS
-    reconcile = True
+    looked = kwargs.get("node_id") is not None  # a node begin never looks for hand changes
     while True:
+        if not looked:
+            # §45 D-126 before the cycle begins. A look that finished is not repeated while
+            # asking again only waits for the lock; one that could not finish (skipped, e.g.
+            # its own lock wait ran out) is taken again before the next try.
+            looked = reconcile_root(root).get("status") in _RECONCILE_FINISHED
         try:
-            return begin(root, _reconcile=reconcile, **kwargs)
+            return begin(root, _reconcile=False, **kwargs)
         except artifact_admission.AdmissionBusy:
-            # The folders were looked at moments ago; asking again only waits for the lock.
-            reconcile = False
             if time.monotonic() >= deadline:
                 raise ProducerError(
                     "admission-busy",
@@ -11157,7 +11161,10 @@ def _observe_control_changes(root: Path, cycle_id: str, *, now: Optional[float] 
 # pass need not read the record, manifest and binding of every finished cycle once more. Any change of
 # identity (content, inode, size, mtime or ctime) means the cycle is read and observed as before; a
 # missing, unreadable or foreign memo means every cycle is. Identities younger than the settle margin
-# are never kept (a write within one timestamp tick of the look could otherwise go unseen).
+# (measured from before the look) are never kept: a write within one timestamp tick of the look could
+# otherwise go unseen. On NFS an edit made on another host may show its new identity only after the
+# client's attribute cache expires (about a minute by default); until then that cycle is skipped, then
+# observed. Bump the memo `schema` whenever what `_observe_control_changes` reads or expects changes.
 CONTROL_MEMO_NAME = "control-observation-memo.json"
 _CONTROL_MEMO_SETTLE_NS = 2_000_000_000
 
@@ -11204,6 +11211,7 @@ def _observe_root_controls(root: Path, scan: _LayoutScan, *, now: Optional[float
 
     The earliest cycle also watches the campaign locator cache, so it is always observed."""
     memo = _read_control_memo(root)
+    look_ns = time.time_ns()  # identities are judged against the moment before they were read
     keys = {cid: _control_keys(root, cid, folder) for cid, folder in scan.cycles.items()}
     quiet = {cid: memo[cid] for cid, folder in scan.cycles.items()
              if keys[cid] is not None and isinstance(memo.get(cid), dict)
@@ -11223,7 +11231,6 @@ def _observe_root_controls(root: Path, scan: _LayoutScan, *, now: Optional[float
         source = quiet[cid] if cid in quiet else (records[cid] or {})
         return source.get("started_on") or ""
 
-    now_ns = time.time_ns()
     remembered: Dict[str, Any] = {}
     for position, cycle_id in enumerate(sorted(scan.cycles, key=lambda cid: (started(cid), cid))):
         if cycle_id in quiet and position != 0:
@@ -11236,7 +11243,7 @@ def _observe_root_controls(root: Path, scan: _LayoutScan, *, now: Optional[float
                                         locator_cache=position == 0, record=records[cycle_id],
                                         stored=stored[cycle_id])
         if (calm and stored[cycle_id] is not None and keys[cycle_id] is not None
-                and _control_keys_settled(keys[cycle_id], now_ns)):
+                and _control_keys_settled(keys[cycle_id], look_ns)):
             remembered[cycle_id] = {"dir": _cycle_rel(root, folder), "keys": keys[cycle_id],
                                     "started_on": stored[cycle_id].get("started_on")}
     if remembered != memo:

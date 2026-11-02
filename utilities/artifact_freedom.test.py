@@ -217,6 +217,36 @@ class ArtifactFreedomTest(FX.ProducerTestBase):
         P.deliver_pending_history(self.root)
         self.assertEqual(len(self.control_events(later, "manifest.json")), 1)
 
+    def test_begin_retry_looks_again_when_the_hand_change_look_was_skipped(self):
+        # The look's own lock wait can run out (skipped); the cycle must not begin before it finished.
+        first = self.finished()
+        old = Path(first["cycle_dir"])
+        old.rename(old.with_name("renamed-by-hand"))
+        route, route_file = self.route(slug="after-hand-move", campaign_key="freedom")
+        real_acquire, calls = P.artifact_admission._acquire_lock, []
+
+        def acquire(*args, **kwargs):
+            calls.append(1)
+            if len(calls) <= 2:  # the look's lock, then the begin's lock
+                raise P.artifact_admission.AdmissionBusy("busy")
+            return real_acquire(*args, **kwargs)
+
+        statuses, real_reconcile = [], P.reconcile_root
+
+        def reconcile(root, **kwargs):
+            result = real_reconcile(root, **kwargs)
+            statuses.append(result["status"])
+            return result
+
+        with mock.patch.object(P.artifact_admission, "_acquire_lock", acquire), \
+                mock.patch.object(P, "reconcile_root", reconcile):
+            begun = P._begin_waiting_for_admission(self.root, route_file=route_file,
+                                                   capability="autopilot-code", intensity="direct")
+        self.assertEqual(begun["status"], "begun")
+        self.assertEqual(statuses, ["skipped", "reconciled"])
+        self.assertEqual(P.read_cycle_record(self.root, first["cycle_id"])["locator"], "renamed-by-hand")
+        self.assertEqual(P.reconcile_root(self.root)["status"], "unchanged")
+
     def test_deleted_generated_manifest_and_binding_are_logged_without_restoring_payload(self):
         first = self.finished()
         folder = Path(first["cycle_dir"])
