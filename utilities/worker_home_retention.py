@@ -2162,7 +2162,6 @@ def _mount_id(fd: int) -> str | None:
     return None
 
 
-# destructive-ok: reason=empty one detached expired worker home by descriptor; boundary=one validated leaf directly under homes/worker-retention/retiring
 _FREED: contextvars.ContextVar = contextvars.ContextVar("retention_freed_bytes", default=None)
 
 
@@ -2173,6 +2172,7 @@ def _note_freed(info: os.stat_result) -> None:
         box[0] += info.st_blocks * 512
 
 
+# destructive-ok: reason=empty one detached expired worker home by descriptor; boundary=one validated leaf directly under homes/worker-retention/retiring
 def _empty_directory(dir_fd: int, device: int, deadline: float, depth: int = 0) -> bool:
     """Remove every entry below `dir_fd`; links are unlinked, never followed.
 
