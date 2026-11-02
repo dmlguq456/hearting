@@ -350,10 +350,16 @@ such as Cairn use: `C-DUR` is a durable work product meant to be shown, `C-INT`
 is support material that is kept but not listed. When `finalize` picks a
 primary artifact itself, it skips any path through a top-level `C-INT` name
 that is not a cycle bucket (`_internal/`, `shards/`) while the cycle holds
-another file, then takes the first `PRIMARY_CANDIDATES` name (including nested
-`report.html`), then a Markdown or HTML document, then the first remaining file;
-an explicit `--primary` is kept as given. Exact cycle-root `_internal/**`
-rows have support role and no authority as an automatic or explicit primary or
+another file, then takes a project status document (`현황.md`, then `STATUS.md`)
+directly under `artifacts/`, so Cairn's status row and Fleet's project line read
+the same file, then the first `PRIMARY_CANDIDATES` name (including nested
+`report.html`; a copy under `dev_logs/`, `test_logs/` or `evidence/` comes after
+the same name elsewhere), then a Markdown or HTML document, then the first
+remaining file; an explicit `--primary` is kept as given. A non-support row for a
+report, summary, status document or top or component PRD (`USER_DOCUMENT_NAMES`)
+outside work-record and copy folders carries the optional `audience: "user"`;
+other rows carry none, and readers keep their own rule for them.
+Exact cycle-root `_internal/**` rows have support role and no authority as an automatic or explicit primary or
 terminal evidence. Without another primary candidate, the outcome has no required
 primary role.
 When the registered owner supplies a valid primary in its exact PASS handoff,

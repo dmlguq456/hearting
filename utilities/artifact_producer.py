@@ -53,6 +53,7 @@ import shutil
 import stat
 import sys
 import time
+import unicodedata
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, NamedTuple, Optional, Sequence, Set, Tuple
 
@@ -228,9 +229,23 @@ MEDIA_TYPES = {
 PRIMARY_CANDIDATES = (
     "final_report.md", "report.md", "report.html", "prd.md", "plan.md", "handoff.md", "verdict.json",
 )
+# A project status document (one page: a `**한 줄**:` line, `## 결정 필요`, `## 다음`).
+# Directly under a cycle's `artifacts/` it is that cycle's automatic primary, so Cairn
+# pins it as the project's status row and Fleet's project line reads the same file.
+STATUS_DOCUMENT_NAMES = ("현황.md", "STATUS.md")
+# What a person opens the artifact store for: reports, summaries, the canonical PRD and
+# the status document. Their manifest rows carry `audience: "user"`; other rows carry no
+# audience, and a reader keeps its own rule for them. Names compare NFC, case-folded.
+USER_DOCUMENT_NAMES = frozenset({
+    "final_report.md", "final_report.html", "report.md", "report.html", "summary.md",
+    "audit-report.md", "현황.md", "status.md",
+})
 # CORE §3 top-level `C-INT` names that are not a cycle bucket: support material is
 # kept in the manifest but is not auto-nominated as a cycle's primary artifact.
 SUPPORT_SEGMENTS = frozenset({"_internal", "shards"})
+# Folders whose files are work records or copies, never the reader's document itself,
+# whatever their name: work logs, verification evidence, snapshots and support material.
+RECORD_SEGMENTS = frozenset({"dev_logs", "test_logs", "evidence", "versions"}) | SUPPORT_SEGMENTS
 _KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 
 
@@ -3616,6 +3631,47 @@ def _is_support_locator(rel: str) -> bool:
     return any(part in SUPPORT_SEGMENTS for part in rel.split("/")[1:])
 
 
+def _document_name(name: str) -> str:
+    return unicodedata.normalize("NFC", name).casefold()
+
+
+_STATUS_RANK = {_document_name(name): rank for rank, name in enumerate(STATUS_DOCUMENT_NAMES)}
+
+
+def _is_record_locator(rel: str) -> bool:
+    """A file inside a work-record or copy folder (`dev_logs/`, `evidence/`, `_internal/`, ...)."""
+    return any(part in RECORD_SEGMENTS for part in rel.split("/")[1:-1])
+
+
+def _status_rank(rel: str) -> Optional[int]:
+    """The status document's place in `STATUS_DOCUMENT_NAMES`, only directly under `artifacts/`."""
+    root, _, name = rel.partition("/")
+    return _STATUS_RANK.get(_document_name(name)) if root == "artifacts" and "/" not in name else None
+
+
+def artifact_audience(rel: str) -> Optional[str]:
+    """`user` for a reader-facing document of the cycle output, None for everything else.
+
+    A report, summary or status document by name, or a PRD at the top of the cycle or of
+    a spec component, outside any work-record or copy folder."""
+    if _payload_root(rel) != "artifacts" or _is_record_locator(rel):
+        return None
+    parts = rel.split("/")[1:]
+    name = _document_name(parts[-1])
+    if name in USER_DOCUMENT_NAMES or (
+            name == "prd.md" and (len(parts) <= 2 or (len(parts) == 3 and parts[0] == "spec"))):
+        return artifact_manifest.USER_AUDIENCE
+    return None
+
+
+def _with_audience(row: Dict[str, Any], rel: str) -> Dict[str, Any]:
+    """Add the optional `audience` to a non-support artifact row; other rows stay unchanged."""
+    audience = artifact_audience(rel) if row.get("role") != "support" else None
+    if audience is not None:
+        row["audience"] = audience
+    return row
+
+
 def _output_placements(root: Path, record: Mapping[str, Any]) -> List[Dict[str, str]]:
     path = producer_dir(root) / "bucket-placements" / f"{record['cycle_id']}.json"
     rows = (_read_json(path) or {}).get("moves", [])
@@ -3839,6 +3895,13 @@ def _choose_primary(rows: Sequence[Tuple[str, bytes]], primary: Optional[str],
     official = official_spec_primary(route or {}, durable)
     if official is not None:
         return official
+    status = sorted((_status_rank(rel), rel) for rel in durable if _status_rank(rel) is not None)
+    if status:
+        return status[0][1]
+    # A copy under a work-record folder (`dev_logs/.../final_report.md`) never outranks the
+    # same name outside one; the order is otherwise unchanged.
+    durable = ([rel for rel in durable if not _is_record_locator(rel)]
+               + [rel for rel in durable if _is_record_locator(rel)])
     for wanted in PRIMARY_CANDIDATES:
         for rel in durable:
             if rel.endswith("/" + wanted) or rel == "artifacts/" + wanted:
@@ -4004,13 +4067,13 @@ def build_manifest(
         inner = _payload_inner(rel)
         root_support = _is_cycle_root_support(rel)
         bundle = (bundle_metadata or {}).get(rel)
-        artifacts.append({
+        artifacts.append(_with_audience({
             "artifact_id": art_id, "cycle_id": record["cycle_id"],
             "role": "support" if rel in support_rels or root_support else ("primary" if rel == primary_rel else "output"),
             "type": bundle.get("type") if bundle else ("file" if root_support else _bucket_type(inner)),
             "capability": record["capability"],
             "title": bundle.get("title", inner) if bundle else (rel if root_support else inner),
-        })
+        }, rel))
         revisions.append({
             "artifact_revision_id": arev_id, "artifact_id": art_id, "revision_sequence": 1,
             "content_digest": digest, "byte_size": byte_size,
@@ -6673,10 +6736,11 @@ def _refreshed_document(root: Path, record: Mapping[str, Any], document: Mapping
         artifact_id = allocator.allocate("artifact")
         inner = _payload_inner(rel)
         root_support = _is_cycle_root_support(rel)
-        artifacts.append({"artifact_id": artifact_id, "cycle_id": record["cycle_id"],
-                          "role": "support" if root_support else "output",
-                          "type": "file" if root_support else _bucket_type(inner),
-                          "capability": record["capability"], "title": rel if root_support else inner})
+        artifacts.append(_with_audience({"artifact_id": artifact_id, "cycle_id": record["cycle_id"],
+                                         "role": "support" if root_support else "output",
+                                         "type": "file" if root_support else _bucket_type(inner),
+                                         "capability": record["capability"],
+                                         "title": rel if root_support else inner}, rel))
         revisions.append({
             "artifact_revision_id": allocator.allocate("artifact_revision"), "artifact_id": artifact_id,
             "revision_sequence": 1, "content_digest": digest, "byte_size": size, "media_type": _media_type(rel),
