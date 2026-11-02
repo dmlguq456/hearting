@@ -31,6 +31,9 @@ from dispatch_attempt_policy import (
 
 SCHEMA_VERSION = 1
 RUNNER_LOCK_NAME = "runner-current.lock"
+# The producer that spawns `__ensure-obligations` observed this state root; the
+# detached writer must not recreate it if it disappeared before the child ran.
+STATE_ROOT_IDENTITY_ENV = "AGENT_PEER_STATE_ROOT_IDENTITY"
 _RUNNER_CONTROL_SCHEMA = 1
 _SAFE_ID = re.compile(r"[A-Za-z0-9._-]{1,160}\Z")
 _MAX_RECORD_BYTES = 128 * 1024
@@ -691,6 +694,27 @@ def peer_state_root() -> Path:
     return Path(module.peer_state_root()).resolve()
 
 
+def state_root_identity(path: str | Path) -> tuple[int, int] | None:
+    """``(device, inode)`` of an existing directory, or ``None`` when absent."""
+    try:
+        info = os.stat(Path(path).expanduser(), follow_symlinks=False)
+    except OSError:
+        return None
+    return (info.st_dev, info.st_ino) if stat.S_ISDIR(info.st_mode) else None
+
+
+def state_root_identity_from_environ(environ=None) -> tuple[int, int] | None:
+    """Read the identity a producer observed, tolerating absent/foreign values."""
+    value = (os.environ if environ is None else environ).get(STATE_ROOT_IDENTITY_ENV)
+    if not isinstance(value, str):
+        return None
+    try:
+        device, inode = value.split(":", 1)
+        return (int(device), int(inode))
+    except (TypeError, ValueError):
+        return None
+
+
 def obligations_root(root: str | Path | None = None) -> Path:
     base = Path(root).expanduser().resolve() if root is not None else peer_state_root()
     if base.is_symlink():
@@ -720,15 +744,25 @@ def read_runner_duty_state(root: str | Path, name: str) -> dict:
     return value if isinstance(value, dict) else {}
 
 
-def write_runner_duty_state(root: str | Path, name: str, payload: dict) -> None:
+def write_runner_duty_state(root: str | Path, name: str, payload: dict, *,
+                            expected_root_identity=None) -> None:
     """Atomically record one runner duty's cursor/due state."""
     if not isinstance(payload, dict):
         raise ObligationError("runner-duty-state-invalid")
     path = runner_duty_state_path(root, name)
     # A duty record may never resurrect a state root that its runner lost; the
-    # caller's next lock check owns stopping.
+    # caller's next lock check owns stopping. A recorded identity also refuses
+    # a root that was removed and recreated at the same path.
     if not Path(root).expanduser().is_dir() or not path.parent.parent.is_dir():
         raise ObligationError("runner-duty-state-root-missing")
+    if expected_root_identity is not None:
+        actual = state_root_identity(root)
+        try:
+            expected = (int(expected_root_identity[0]), int(expected_root_identity[1]))
+        except (TypeError, ValueError, IndexError):
+            raise ObligationError("runner-duty-state-identity-invalid") from None
+        if actual != expected:
+            raise ObligationError("runner-duty-state-root-replaced")
     path.parent.mkdir(mode=0o700, exist_ok=True)
     data = (json.dumps(payload, ensure_ascii=False, sort_keys=True,
                        separators=(",", ":")) + "\n").encode("utf-8")
@@ -761,17 +795,32 @@ def runner_duty_due(state: dict, due_seconds: float, *, now: float | None = None
 
 
 def request_obligation_recovery(*, lifecycle_root: str | Path | None = None) -> bool:
-    """Start the common recovery entry detached with its caller environment."""
+    """Start the common recovery entry detached with its caller environment.
+
+    The caller records the state root it observed. A child that starts after
+    that root disappeared therefore stops instead of creating it again (the
+    fixture-lifetime rule); a fresh install with no root yet passes no identity
+    and keeps the explicit lifecycle creation path.
+    """
     root = Path(lifecycle_root).expanduser().resolve(strict=False) if lifecycle_root is not None else _code_root()
     script = root / "utilities" / "peer-steward.py"
     command = [sys.executable, str(script), "__ensure-obligations"]
     if lifecycle_root is not None:
         command.extend(["--lifecycle-root", str(root)])
+    child_env = os.environ.copy()
+    try:
+        identity = state_root_identity(peer_state_root())
+    except (ObligationError, OSError):
+        identity = None
+    if identity is None:
+        child_env.pop(STATE_ROOT_IDENTITY_ENV, None)
+    else:
+        child_env[STATE_ROOT_IDENTITY_ENV] = f"{identity[0]}:{identity[1]}"
     try:
         subprocess.Popen(
             command,
             cwd=str(root),
-            env=os.environ.copy(),
+            env=child_env,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -2300,8 +2349,31 @@ class ObligationStore:
             return {str(self.root / (duty_id + ".json")): record
                     for duty_id, record in active_records.items()}
 
+    def _read_active_without_index(self, root_fd):
+        """Read active records without creating the index a reader never owns.
+
+        A reader must not materialize ``obligations/active`` (or the state root
+        above it) after a fixture removed the root while the process was still
+        alive. Without an index the bounded record scan is authoritative; the
+        next writer creates the index as part of its own mutation.
+        """
+        output = {}
+        with os.scandir(root_fd) as entries:
+            for entry in entries:
+                if not entry.name.endswith(".json"):
+                    continue
+                try:
+                    record = self._read_list_record(self.root / entry.name)
+                except ObligationError:
+                    continue
+                if record is not None and self._active_record(record):
+                    output[str(self.root / entry.name)] = record
+        return output
+
     def _discover_active(self, root_fd, *, fast_active_only=False):
-        active_fd = self._active_directory_fd(root_fd, create=True)
+        active_fd = self._active_directory_fd(root_fd, create=False)
+        if active_fd is None:
+            return self._read_active_without_index(root_fd)
         try:
             _ids, pending = self._active_names(active_fd)
             if pending or fast_active_only:

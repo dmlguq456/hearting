@@ -2889,17 +2889,13 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
 
     @contextlib.contextmanager
     def subfixture(self):
-        import tempfile
-        with tempfile.TemporaryDirectory(dir=self.base) as directory, mock.patch.object(self, 'base', Path(directory)):
+        with self.nested_base():
             yield
 
     @contextlib.contextmanager
     def retained_subfixture(self):
         """Retire owner leases before removing their fixture directory."""
-        import tempfile
-        directory = tempfile.TemporaryDirectory(dir=self.base)
-        self.addCleanup(directory.cleanup)
-        with mock.patch.object(self, 'base', Path(directory.name)):
+        with self.nested_base(retain=True):
             yield
 
     def test_existing_missing_output_failure_can_follow_but_other_failure_cannot(self):
