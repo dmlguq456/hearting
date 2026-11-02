@@ -15,6 +15,7 @@ import threading
 import time
 import types
 import unittest
+from unittest import mock
 
 TOOLS = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(TOOLS))
@@ -58,6 +59,14 @@ def frame(guard, text="hello"):
     guard.refresh()
 
 
+def first_frame(guard, screen):
+    """The first frame is always written in full; later ones get the budget."""
+    gate, screen.gate = screen.gate, None
+    frame(guard, "first")
+    screen.gate = gate
+    return list(screen.calls)
+
+
 class ScreenGuardTest(unittest.TestCase):
     def guard(self, screen, **kwargs):
         kwargs.setdefault("budget", 0.05)
@@ -79,6 +88,7 @@ class ScreenGuardTest(unittest.TestCase):
         screen.gate = threading.Event()
         guard = self.guard(screen, writable=lambda: True, repaint_after=0.0)
         guard.timeout(30)
+        first_frame(guard, screen)
         started = time.monotonic()
         frame(guard)
         self.assertLess(time.monotonic() - started, 1.0)
@@ -131,8 +141,9 @@ class ScreenGuardTest(unittest.TestCase):
     def test_late_write_failure_surfaces_on_the_loop_thread(self):
         screen = FakeScreen()
         screen.gate = threading.Event()
-        screen.refresh_error = RuntimeError("fixture write failure")
         guard = self.guard(screen, writable=lambda: True)
+        first_frame(guard, screen)
+        screen.refresh_error = RuntimeError("fixture write failure")
         frame(guard)
         screen.gate.set()
         guard._done.wait(5)
@@ -177,6 +188,7 @@ class ScreenGuardTest(unittest.TestCase):
         screen = FakeScreen()
         screen.gate = threading.Event()
         guard = screen_guard.ScreenGuard(budget=0.05, writable=lambda: True).attach(screen, fd=-1)
+        first_frame(guard, screen)
         frame(guard)
         closed = threading.Event()
         threading.Thread(target=lambda: (guard.close(), closed.set()), daemon=True).start()
@@ -184,10 +196,95 @@ class ScreenGuardTest(unittest.TestCase):
         screen.gate.set()
         self.assertTrue(closed.wait(5))
 
+    def test_ctrl_c_does_not_let_curses_restore_the_terminal_under_a_write(self):
+        screen = FakeScreen()
+        screen.gate = threading.Event()
+        guard = screen_guard.ScreenGuard(budget=0.05, writable=lambda: True).attach(screen, fd=-1)
+        first_frame(guard, screen)
+        frame(guard)
+        wait = guard._done.wait
+        interrupts = [2]
+
+        def interrupted(timeout=None):
+            if interrupts[0]:
+                interrupts[0] -= 1
+                raise KeyboardInterrupt
+            return wait(timeout)
+
+        threading.Timer(0.2, screen.gate.set).start()
+        with mock.patch.object(guard._done, "wait", side_effect=interrupted):
+            guard.close()                  # returns only once the write is finished
+        self.assertTrue(guard._done.is_set())
+        self.assertEqual(interrupts, [0])
+
+    def test_first_frame_is_written_in_full(self):
+        """Render's raw mouse-mode write follows the first paint; it must not split it."""
+        screen = FakeScreen()
+        screen.gate = threading.Event()
+        guard = self.guard(screen, writable=lambda: True)
+        threading.Timer(0.3, screen.gate.set).start()
+        started = time.monotonic()
+        frame(guard)
+        self.assertGreaterEqual(time.monotonic() - started, 0.25)
+        self.assertIsNone(guard.hold_reason())
+
+    def test_a_slow_repaint_does_not_chain_another_repaint(self):
+        clock = [0.0]
+        screen = FakeScreen()
+        writable = [True]
+        guard = self.guard(screen, writable=lambda: writable[0], repaint_after=5.0,
+                           clock=lambda: clock[0])
+        first_frame(guard, screen)
+        writable[0] = False
+        frame(guard)                       # a detached terminal
+        clock[0] += 10
+        writable[0] = True
+        screen.gate = threading.Event()
+        frame(guard)                       # the repaint itself is slow (a few KB/s link)
+        self.assertEqual(screen.names().count("clearok"), 1)
+        clock[0] += 10
+        screen.gate.set()
+        guard._done.wait(5)
+        screen.gate = None
+        frame(guard)
+        self.assertEqual(screen.names().count("clearok"), 1, "one repaint per stall")
+        writable[0] = False
+        frame(guard)
+        clock[0] += 10
+        writable[0] = True
+        frame(guard)                       # a new stall still earns its repaint
+        self.assertEqual(screen.names().count("clearok"), 2)
+
+    def test_skipped_frame_leaves_the_click_map_on_the_frame_on_screen(self):
+        writable = [True]
+        screen = FakeScreen()
+        guard = self.guard(screen, writable=lambda: writable[0])
+
+        def draw(stdscr, label):
+            render._CLICK_ROWS = {}         # render resets its maps, then paints
+            stdscr.erase()
+            render._EXPLORER_FRAME = label
+            render._CLICK_ROWS = {0: [label]}
+            stdscr.refresh()
+
+        render = types.SimpleNamespace(_loop=lambda *a: None, _draw=draw,
+                                       _EXPLORER_FRAME=None, _CLICK_ROWS={})
+        with guard.around(render):
+            render._draw(guard, "seen")
+            self.assertFalse(guard.frame_skipped)
+            writable[0] = False
+            render._draw(guard, "never shown")
+            self.assertTrue(guard.frame_skipped)
+            self.assertEqual((render._EXPLORER_FRAME, render._CLICK_ROWS), ("seen", {0: ["seen"]}))
+            writable[0] = True
+            render._draw(guard, "shown again")
+            self.assertEqual(render._EXPLORER_FRAME, "shown again")
+        self.assertIs(render._draw, draw)
+
     def test_around_hands_render_loop_the_guard_only_while_it_runs(self):
         seen = []
         original = lambda stdscr, *args: seen.append((stdscr, args)) or 7  # noqa: E731
-        render = types.SimpleNamespace(_loop=original)
+        render = types.SimpleNamespace(_loop=original, _draw=lambda *args: None)
         guard = screen_guard.ScreenGuard()
         screen = FakeScreen()
         with guard.around(render):
@@ -207,7 +304,8 @@ class ScreenGuardTest(unittest.TestCase):
             observed["follower"] = collector.install_follower
             return 0
 
-        render = types.SimpleNamespace(_loop=lambda *_args: None, run_live=run_live)
+        render = types.SimpleNamespace(_loop=lambda *_args: None, _draw=lambda *_args: None,
+                                       run_live=run_live)
         original = render._loop
         follower = install_follow.InstallFollower(Path(tempfile.gettempdir()), env={})
         guard = screen_guard.ScreenGuard()
@@ -219,6 +317,76 @@ class ScreenGuardTest(unittest.TestCase):
         self.assertEqual(follower.hold, guard.hold_reason)
         self.assertEqual(guard.note, follower.waiting_note)
         self.assertIs(render._loop, original)
+
+
+class ExplorerClickBasisTest(unittest.TestCase):
+    """The explorer resolves a click against ``_EXPLORER_FRAME`` (render.py
+    ``_explorer_click_current``). During a stall it must stay the frame on screen."""
+
+    def setUp(self):
+        from fleet import render
+        self.render = render
+        names = screen_guard.CLICK_BASIS + (
+            "_EXPLORER_ENABLED", "_EXPLORER_PUBLISHED_MODEL", "_EXPLORER_MODEL", "_EXPLORER_STATE",
+            "_EXPLORER_SIZE", "_EXPLORER_SHOWN", "_EXPLORER_REPLAY_ACTIVE", "_EXPLORER_RESULT",
+            "_EXPLORER_ORDER")
+        saved = {name: getattr(render, name) for name in names if hasattr(render, name)}
+        self.addCleanup(lambda: [setattr(render, k, v) for k, v in saved.items()])
+        render.set_explorer_mode(True)
+        render._EXPLORER_PUBLISHED_MODEL = render._EXPLORER_MODEL = None
+        render._EXPLORER_REPLAY_ACTIVE = False
+
+    def paint(self, screen):
+        from fleet.refresh import LiveSnapshot
+        self.render._draw(screen, [], [], "both", 0, loading=True, snapshot=LiveSnapshot())
+
+    def click_frame(self, size):
+        import curses
+        seen = []
+
+        def reduce(state, _event, frame):
+            seen.append(frame)
+            return state, ()
+
+        with mock.patch("fleet.explorer.state.reduce", side_effect=reduce):
+            self.render._explorer_handle(curses.KEY_MOUSE, (3, 2, curses.BUTTON1_PRESSED),
+                                         size, None)
+        return seen[0] if seen else None
+
+    def test_stalled_paint_keeps_clicks_on_the_frame_on_screen(self):
+        render = self.render
+        screen = FakeScreen(rows=24, cols=80)
+        writable = [True]
+        guard = screen_guard.ScreenGuard(budget=0.05, writable=lambda: writable[0])
+        guard.attach(screen, fd=-1)
+        self.addCleanup(guard.close)
+        with guard.around(render):
+            self.paint(guard)
+            shown = render._EXPLORER_FRAME
+            self.assertIsNotNone(shown)
+            writable[0] = False             # the terminal stops reading; the loop keeps composing
+            self.paint(guard)
+            self.paint(guard)
+            self.assertIs(render._EXPLORER_FRAME, shown)
+            self.assertIs(self.click_frame((24, 80)), shown)
+            writable[0] = True
+            self.paint(guard)
+            self.assertIsNot(render._EXPLORER_FRAME, shown)
+
+    def test_without_the_restore_a_stalled_paint_replaces_the_click_frame(self):
+        """Control: the same stalled paint straight through render moves the click basis."""
+        render = self.render
+        screen = FakeScreen(rows=24, cols=80)
+        writable = [True]
+        guard = screen_guard.ScreenGuard(budget=0.05, writable=lambda: writable[0])
+        guard.attach(screen, fd=-1)
+        self.addCleanup(guard.close)
+        self.paint(guard)
+        shown = render._EXPLORER_FRAME
+        writable[0] = False
+        self.paint(guard)
+        self.assertTrue(guard.frame_skipped)
+        self.assertIsNot(render._EXPLORER_FRAME, shown)
 
 
 # -- real terminals ---------------------------------------------------------------------------

@@ -14,7 +14,9 @@ no collection, no install follow, until someone read the terminal again.
 * when output comes back after a stall of ``REPAINT_AFTER`` or more, the next frame
   repaints the whole screen;
 * ``hold_reason`` lets install follow wait instead of exec'ing a new release into a
-  terminal that cannot take its first frame.
+  terminal that cannot take its first frame;
+* a frame that never reached the terminal does not become the click map: render's
+  painted-frame globals stay on the last frame the person could see.
 
 Only ``window.refresh()`` gets this protection: CPython releases the GIL around it, while
 ``curses.doupdate()`` holds the GIL for as long as it blocks. The explorer draws through
@@ -41,6 +43,14 @@ WRITE_BUDGET = 0.25      # a pty write with room returns in microseconds
 REPAINT_AFTER = 5.0      # a stall this long means the terminal went away; repaint everything
 RECOVERED_NOTE_SEC = 60.0
 STALLED = "화면 출력이 막혀 있음"
+# render globals that describe the painted frame: what a click or a navigation key is
+# resolved against (``_explorer_click_current``, ``reduce(..., _EXPLORER_FRAME)``, the
+# group screen's row maps). ``_draw`` resets and refills them on every pass.
+CLICK_BASIS = ("_EXPLORER_FRAME", "_CLICK_ROWS", "_CLICK_SPANS", "_PROMPT_HITS",
+               "_HIT_VALID", "_HIT_SIZE", "_HIT_SNAPSHOT_ID",
+               "_TOGGLE_ROWS", "_TOGGLE_SPANS", "_FOLD_ROWS", "_FOLD_SPANS",
+               "_REPO_FOLD_ROWS", "_REPO_FOLD_SPANS",
+               "_CURRENT_BODY_H", "_CURRENT_BODY_TOP", "_CURRENT_BODY_COUNT")
 
 
 def _cells(text):
@@ -65,6 +75,7 @@ class ScreenGuard:
                  writable=None, clock=time.monotonic):
         self.note = note                    # optional callable -> short status text or None
         self.skipped = 0                    # frames not written (diagnostics and tests)
+        self.frame_skipped = False          # the latest frame did not go to the terminal
         self._budget = float(budget)
         self._repaint_after = float(repaint_after)
         self._probe = writable
@@ -80,6 +91,8 @@ class ScreenGuard:
         self._stalled_since = None
         self._recovered = None              # (when, seconds) of the last long stall
         self._repaint = False
+        self._repaint_pending = False       # the write in progress is itself a full repaint
+        self._written = 0
         self._skip = False
         self._delay_ms = -1
         self._rows = self._cols = 0
@@ -103,9 +116,10 @@ class ScreenGuard:
         """Give ``render._loop`` this guard as its screen while the live view runs.
 
         ``render.run_live`` owns terminal setup and calls ``curses.wrapper(_loop, ...)``;
-        wrapping ``_loop`` keeps that setup in one place.
+        wrapping ``_loop`` keeps that setup in one place. ``render._draw`` is wrapped too:
+        when the guard skips a frame, render's click map goes back to the frame on screen.
         """
-        loop = render._loop
+        loop, draw = render._loop, render._draw
 
         @functools.wraps(loop)
         def guarded(stdscr, *args, **kwargs):
@@ -115,19 +129,37 @@ class ScreenGuard:
             finally:
                 self.close()
 
-        render._loop = guarded
+        @functools.wraps(draw)
+        def painted(*args, **kwargs):
+            shown = {name: getattr(render, name) for name in CLICK_BASIS if hasattr(render, name)}
+            self.frame_skipped = False
+            try:
+                return draw(*args, **kwargs)
+            finally:
+                if self.frame_skipped:
+                    for name, value in shown.items():
+                        setattr(render, name, value)
+
+        render._loop, render._draw = guarded, painted
         try:
             yield self
         finally:
-            render._loop = loop
+            render._loop, render._draw = loop, draw
 
     def close(self):
-        """Let a pending write finish before curses restores the terminal, then stop the writer."""
-        try:
-            self._done.wait()
-        finally:
-            self._closing = True
-            self._request.set()
+        """Let a pending write finish before curses restores the terminal, then stop the writer.
+
+        Ctrl-C does not cut this wait short: ``endwin`` racing the writer's ``refresh``
+        would be two threads inside curses. A hangup or SIGTERM still ends the process.
+        """
+        while True:
+            try:
+                self._done.wait()
+                break
+            except KeyboardInterrupt:
+                continue
+        self._closing = True
+        self._request.set()
 
     def hold_reason(self):
         """Why a new release should not take this terminal now, or None."""
@@ -167,7 +199,9 @@ class ScreenGuard:
         if self._stalled_since is not None:
             lasted = self._clock() - self._stalled_since
             self._stalled_since = None
-            if lasted >= self._repaint_after:
+            # A slow repaint does not earn another one: on a link that needs longer than
+            # ``REPAINT_AFTER`` for one full screen, repaints would otherwise never end.
+            if lasted >= self._repaint_after and not self._repaint_pending:
                 self._repaint = True
                 self._recovered = (self._clock(), lasted)
         return True
@@ -192,7 +226,10 @@ class ScreenGuard:
             self._worker.start()
         self._done.clear()
         self._request.set()
-        if self._done.wait(self._budget):
+        self._written += 1
+        # The first frame is written in full, as before: render turns mouse reporting on
+        # with a raw write right after it, and those bytes must not land inside the frame.
+        if self._done.wait(None if self._written == 1 else self._budget):
             error, self._error = self._error, None
             if error is not None:
                 raise error
@@ -203,6 +240,7 @@ class ScreenGuard:
 
     def erase(self):
         self._skip = not self._ready()
+        self.frame_skipped = self._skip
         if self._skip:
             self.skipped += 1
             return None
@@ -227,19 +265,23 @@ class ScreenGuard:
 
     def noutrefresh(self):
         if self._skip or not self._done.is_set():
+            self.frame_skipped = True
             return None
         self._draw_note()
         return self._screen.noutrefresh()
 
     def refresh(self):
         if self._skip or not self._done.is_set():
+            self.frame_skipped = True
             return None
         self._draw_note()
         if not self._takes_bytes():
             # Settle the frame into curses' own buffer so the next getch has nothing to flush.
             self._stalled()
             self.skipped += 1
+            self.frame_skipped = True
             return self._screen.noutrefresh()
+        self._repaint_pending = self._repaint
         if self._repaint:
             self._repaint = False
             self._screen.clearok(True)
