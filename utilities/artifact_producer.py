@@ -761,6 +761,29 @@ def _fallback_blocks(fallback: Optional[Mapping[str, Any]]) -> bool:
         and fallback["override"]["status"] != "accepted"
 
 
+def _admitted_cycle_rows(root: Path, cycle_id: str) -> Tuple[Mapping[str, Any], Mapping[str, Any]]:
+    """One cycle's admitted `manifests` and `cycles` index rows.
+
+    The small head projection of the current index generation answers first;
+    a missing or stale head falls back to the full index (`load_index` keeps
+    the parsed generation for the rest of this process), and an index that
+    does not parse as one keeps the raw read this function always had.
+    """
+    head = artifact_admission.load_index_head(root)
+    if head is not None:
+        return head.manifests.get(cycle_id) or {}, head.cycles.get(cycle_id) or {}
+    path = artifact_admission._index_path(root)
+    if path.is_file() and not path.is_symlink():
+        try:
+            index = artifact_admission.load_index(root)
+            return index.manifests.get(cycle_id) or {}, index.cycles.get(cycle_id) or {}
+        except Exception:  # noqa: BLE001 -- the raw read below decides as before
+            pass
+    raw = _read_json(path) or {}
+    return ((raw.get("manifests") or {}).get(cycle_id) or {},
+            (raw.get("cycles") or {}).get(cycle_id) or {})
+
+
 def read_cycle_record(root: Path, cycle_id: str) -> Optional[Dict[str, Any]]:
     if not artifact_identity.is_well_formed(cycle_id, "cycle"):
         return None
@@ -769,9 +792,7 @@ def read_cycle_record(root: Path, cycle_id: str) -> Optional[Dict[str, Any]]:
         return record
     # A producer record is a cache. Read the already admitted revision if the
     # cache was removed; this recovers a past result, never a new PASS.
-    index = _read_json(artifact_admission._index_path(root)) or {}
-    row = (index.get("manifests") or {}).get(cycle_id) or {}
-    cycle_row = (index.get("cycles") or {}).get(cycle_id) or {}
+    row, cycle_row = _admitted_cycle_rows(root, cycle_id)
     digest = row.get("manifest_digest")
     document = artifact_lifecycle.find_manifest_snapshot(root, cycle_id, manifest_digest=digest) if digest else None
     if document is None:
@@ -2249,6 +2270,7 @@ def _env_for(root: Path, record: Mapping[str, Any], route: Optional[Mapping[str,
 # slow disk keeps it. Past it nothing has started and the caller is told to run
 # start again later.
 OWNER_LAUNCH_ADMISSION_WAIT_SECONDS = 120.0
+_RECONCILE_FINISHED = frozenset({"unchanged", "reconciled", "inactive"})
 
 
 def _begin_waiting_for_admission(root: Path, **kwargs: Any) -> Dict[str, Any]:
@@ -2260,9 +2282,15 @@ def _begin_waiting_for_admission(root: Path, **kwargs: Any) -> Dict[str, Any]:
     again later.
     """
     deadline = time.monotonic() + OWNER_LAUNCH_ADMISSION_WAIT_SECONDS
+    looked = kwargs.get("node_id") is not None  # a node begin never looks for hand changes
     while True:
+        if not looked:
+            # §45 D-126 before the cycle begins. A look that finished is not repeated while
+            # asking again only waits for the lock; one that could not finish (skipped, e.g.
+            # its own lock wait ran out) is taken again before the next try.
+            looked = reconcile_root(root).get("status") in _RECONCILE_FINISHED
         try:
-            return begin(root, **kwargs)
+            return begin(root, _reconcile=False, **kwargs)
         except artifact_admission.AdmissionBusy:
             if time.monotonic() >= deadline:
                 raise ProducerError(
@@ -3145,8 +3173,8 @@ def _observe_after_begin(root: Path, result: Mapping[str, Any]) -> None:
         pass
 
 
-def begin(root: Path, **kwargs: Any) -> Dict[str, Any]:
-    if kwargs.get("node_id") is None:
+def begin(root: Path, *, _reconcile: bool = True, **kwargs: Any) -> Dict[str, Any]:
+    if _reconcile and kwargs.get("node_id") is None:
         reconcile_root(root)  # §45 D-126: what was moved or removed by hand is found before a cycle is begun
     result = _begin_cycle_record(root, **kwargs)
     if kwargs.get("node_id") is None and result.get("layout") == "cycle":
@@ -11101,20 +11129,30 @@ def _read_manifest_raw(directory: Path) -> Optional[Tuple[bytes, Dict[str, Any]]
 
 
 def _observe_control_changes(root: Path, cycle_id: str, *, now: Optional[float] = None,
-                             directory: Optional[Path] = None, locator_cache: bool = False) -> None:
+                             directory: Optional[Path] = None, locator_cache: bool = False,
+                             record: Any = _UNSET, stored: Any = _UNSET) -> bool:
     """Log ordinary record edits/deletions through the existing recorder.
 
     No payload is restored. Bookkeeping can be read from its admitted revision
     and written again by an ordinary operation. Observation is best effort and
     never changes a completion decision or fails the caller.
+
+    A caller that has just read the cycle passes `record` (what
+    `read_cycle_record` answers) and `stored` (the record file as parsed, None
+    when absent) so the same files are not read again; a change found from
+    them is confirmed against a fresh read under the lock, as before.
+
+    True means there was nothing to log or update (the files say what the
+    record expects); False means a change was found, written or left for later.
     """
     try:
-        record = read_cycle_record(root, cycle_id)
+        if record is _UNSET:
+            record = read_cycle_record(root, cycle_id)
         if record is None or record.get("deleted_at") or not _closed_record(record):
-            return
+            return True
         directory = directory or _record_cycle_manifest_path(root, record).parent
         if not directory.is_dir() or directory.is_symlink():
-            return
+            return True
         binding = artifact_locator.cycle_binding_bytes(record["campaign_id"], cycle_id,
                                                        started_on=record.get("started_on"))
         journal = _read_json(journal_path(root, cycle_id)) or {}
@@ -11136,7 +11174,7 @@ def _observe_control_changes(root: Path, cycle_id: str, *, now: Optional[float] 
             if path.parent == root / "campaigns":
                 after = _digest(path.read_bytes()) if path.is_file() and not path.is_symlink() else None
             elif path == cycle_record_path(root, cycle_id):
-                parsed = _read_json(path)
+                parsed = _read_json(path) if stored is _UNSET else stored
                 after = _record_content_digest(parsed) if parsed is not None else None
             elif path.is_symlink() or not path.is_file():
                 after = None
@@ -11162,14 +11200,14 @@ def _observe_control_changes(root: Path, cycle_id: str, *, now: Optional[float] 
                           "event_id": _history_id("hevt", cycle_id, rel, stamp),
                           "now": time.time() if now is None else float(now)})
         if not lines and not updates:
-            return
+            return True
         fd = artifact_admission.try_acquire_lock(root)
         if fd is None:
-            return
+            return False
         try:
             current = read_cycle_record(root, cycle_id)
             if current != record:
-                return
+                return False
             prior.update(updates)
             pending = _merge_pending(record.get("history_pending") or [], lines)
             _write_cycle_record(root, _with_pending(dict(record, control_observations=prior,
@@ -11177,8 +11215,103 @@ def _observe_control_changes(root: Path, cycle_id: str, *, now: Optional[float] 
             _flush_cycle_pending_locked(root, cycle_id)
         finally:
             artifact_admission._release_lock(root, fd)
+        return False
     except Exception:  # noqa: BLE001 -- a history observation cannot block ordinary work
-        pass
+        return False
+
+
+# A closed cycle whose observed files are, to the `lstat`, exactly as a quiet observation left them
+# says the same thing again; `reconcile_root` keeps those identities in one derived file so a later
+# pass need not read the record, manifest and binding of every finished cycle once more. Any change of
+# identity (content, inode, size, mtime or ctime) means the cycle is read and observed as before; a
+# missing, unreadable or foreign memo means every cycle is. Identities younger than the settle margin
+# (measured from before the look) are never kept: a write within one timestamp tick of the look could
+# otherwise go unseen. On NFS an edit made on another host may show its new identity only after the
+# client's attribute cache expires (about a minute by default); until then that cycle is skipped, then
+# observed. Bump the memo `schema` whenever what `_observe_control_changes` reads or expects changes.
+CONTROL_MEMO_NAME = "control-observation-memo.json"
+_CONTROL_MEMO_SETTLE_NS = 2_000_000_000
+
+
+def _control_file_key(path: Path) -> Optional[List[int]]:
+    try:
+        seen = os.lstat(str(path))
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    return [seen.st_dev, seen.st_ino, seen.st_size, seen.st_mtime_ns, seen.st_ctime_ns, seen.st_mode]
+
+
+def _control_keys(root: Path, cycle_id: str, directory: Path) -> Optional[List[Optional[List[int]]]]:
+    """The `lstat` identities of what `_observe_control_changes` reads for one cycle (None if unreadable)."""
+    try:
+        return [_control_file_key(path) for path in (
+            cycle_record_path(root, cycle_id), journal_path(root, cycle_id),
+            directory / "manifest.json", directory / artifact_locator.CYCLE_BINDING)]
+    except (OSError, ProducerError):
+        return None
+
+
+def _control_keys_settled(keys: Sequence[Optional[List[int]]], now_ns: int) -> bool:
+    return all(key is None or (now_ns - key[3] > _CONTROL_MEMO_SETTLE_NS
+                               and now_ns - key[4] > _CONTROL_MEMO_SETTLE_NS) for key in keys)
+
+
+def _read_control_memo(root: Path) -> Dict[str, Any]:
+    document = _read_json(producer_dir(root) / CONTROL_MEMO_NAME)
+    cycles = document.get("cycles") if document and document.get("schema") == 1 else None
+    return cycles if isinstance(cycles, dict) else {}
+
+
+def _write_control_memo(root: Path, cycles: Mapping[str, Any]) -> None:
+    try:
+        data = json.dumps({"schema": 1, "cycles": cycles}, sort_keys=True, separators=(",", ":")).encode()
+        _write_atomic(producer_dir(root) / CONTROL_MEMO_NAME, data, 0o600)
+    except OSError:
+        pass  # a derived accelerator: the next pass reads every cycle instead
+
+
+def _observe_root_controls(root: Path, scan: _LayoutScan, *, now: Optional[float]) -> None:
+    """Observe every cycle the scan found, reading each record once and skipping quiet unchanged ones.
+
+    The earliest cycle also watches the campaign locator cache, so it is always observed."""
+    memo = _read_control_memo(root)
+    look_ns = time.time_ns()  # identities are judged against the moment before they were read
+    keys = {cid: _control_keys(root, cid, folder) for cid, folder in scan.cycles.items()}
+    quiet = {cid: memo[cid] for cid, folder in scan.cycles.items()
+             if keys[cid] is not None and isinstance(memo.get(cid), dict)
+             and memo[cid].get("dir") == _cycle_rel(root, folder) and memo[cid].get("keys") == keys[cid]}
+    stored: Dict[str, Any] = {}
+    records: Dict[str, Any] = {}
+
+    def load(cid: str) -> None:
+        stored[cid] = _read_json(cycle_record_path(root, cid))
+        records[cid] = stored[cid] if stored[cid] is not None else read_cycle_record(root, cid)
+
+    for cid in scan.cycles:
+        if cid not in quiet:
+            load(cid)
+
+    def started(cid: str) -> str:
+        source = quiet[cid] if cid in quiet else (records[cid] or {})
+        return source.get("started_on") or ""
+
+    remembered: Dict[str, Any] = {}
+    for position, cycle_id in enumerate(sorted(scan.cycles, key=lambda cid: (started(cid), cid))):
+        if cycle_id in quiet and position != 0:
+            remembered[cycle_id] = quiet[cycle_id]
+            continue
+        if cycle_id not in stored:
+            load(cycle_id)
+        folder = scan.cycles[cycle_id]
+        calm = _observe_control_changes(root, cycle_id, now=now, directory=folder,
+                                        locator_cache=position == 0, record=records[cycle_id],
+                                        stored=stored[cycle_id])
+        if (calm and stored[cycle_id] is not None and keys[cycle_id] is not None
+                and _control_keys_settled(keys[cycle_id], look_ns)):
+            remembered[cycle_id] = {"dir": _cycle_rel(root, folder), "keys": keys[cycle_id],
+                                    "started_on": stored[cycle_id].get("started_on")}
+    if remembered != memo:
+        _write_control_memo(root, remembered)
 
 
 def _preserve_current_manifest(root: Path, record: Mapping[str, Any], directory: Path) -> None:
@@ -12097,9 +12230,7 @@ def reconcile_root(root: Path, *, now: Optional[float] = None) -> Dict[str, Any]
                         published[cycle_id] = where
                         published[record["campaign_id"]] = str(Path(where).parent)
             scan = _scan_layout(root)
-            ordered = sorted(scan.cycles, key=lambda cid: ((read_cycle_record(root, cid) or {}).get("started_on") or "", cid))
-            for position, cycle_id in enumerate(ordered):
-                _observe_control_changes(root, cycle_id, now=now, directory=scan.cycles[cycle_id], locator_cache=position == 0)
+            _observe_root_controls(root, scan, now=now)
             if scan.mapping(root) == published:
                 return {"status": "unchanged"}
             changes = _hand_changes(root, scan, published)
