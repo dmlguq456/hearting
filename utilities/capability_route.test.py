@@ -8415,7 +8415,8 @@ class ComposeRouteTest(TestRoute):
  def test_work_request_is_sealed_and_cannot_be_replaced_at_resume(self):
   request={"text":"Run the accepted commands, including exit 7.","owner_harness":"opencode"}
   route=self.compose(work_request=request,profile="light")
-  self.assertEqual(route["work_request"],request)
+  self.assertEqual(route["work_request"],{**request,"intent":{
+      "intent":"Run the accepted commands, including exit 7.","basis":"first-sentence"}})
   R.verify_route(route,R.ROOT)
   changed=self.compose(work_request={**request,"text":"Only run the passing command."},profile="light")
   self.assertNotEqual(route["route_id"],changed["route_id"])
@@ -8697,7 +8698,7 @@ class ComposeRouteTest(TestRoute):
      expected=graph.split(",")
      if intensity=="strong": expected.insert(expected.index("publish"),"independent-verify-alternative")
      self.assertEqual([n["id"] for n in route["nodes"]],expected)
-     self.assertEqual(route["work_request"],request)
+     self.assertEqual({k:v for k,v in route["work_request"].items() if k!="intent"},request)
      nodes={n["id"]:n for n in route["nodes"]}
      self.assertEqual(nodes["report"]["unit"],"editorial/report")
      self.assertTrue(nodes["sync"]["terminal"])
