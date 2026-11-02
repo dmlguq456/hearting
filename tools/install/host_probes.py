@@ -5,7 +5,7 @@ Standalone and Python-stdlib-only, matching ``distribution.py`` — these probes
 may run before a harness root exists. Every probe returns ``status in
 {"ok", "warning"}`` and never raises; a probe result is advisory only and
 must never influence ``install``'s exit code (``verify`` checks the PyYAML
-probe, which framed routes need).
+probe, which framed routes need; ``runtime doctor`` prints it as one line).
 """
 import importlib.util
 import shlex
@@ -123,10 +123,11 @@ def probe_pyyaml() -> dict:
         "id": "host.pyyaml",
         "status": "warning",
         "detail": (
-            f"PyYAML is not importable by {python}; a framed route reads its frame "
-            "proposals with it and stops before any frame leg runs without it. Install it "
-            f"for that Python (e.g. `{python} -m pip install --user pyyaml`) or use a "
-            "non-framed shape (direct, solo or staged)"
+            f"PyYAML is not importable by {python}: work that starts with the planning "
+            "step (a framed route, the default when no shape is given) reads its plan "
+            "proposal with it and stops before planning without it. Install it for that "
+            f"Python (e.g. `{python} -m pip install --user pyyaml`, or the OS package such "
+            "as python3-yaml); a non-framed shape (direct, solo or staged) runs without it"
         ),
     }
 
