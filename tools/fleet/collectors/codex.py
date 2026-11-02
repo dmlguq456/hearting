@@ -1232,8 +1232,10 @@ def _open_rollout_paths(pids=None):
 
 
 def open_rollout_questions(pids=None, homes=None):
-    """``{sid: waiting_since}`` for live Codex threads whose rollout holds an unanswered
-    ``request_user_input``, or None when the process table cannot be listed.
+    """``{"complete": bool, "pending": {sid: waiting_since}}`` for live Codex threads whose
+    rollout holds an unanswered ``request_user_input``, or None when the process table
+    cannot be listed. ``complete`` is ``open_rollout_sessions``'s: when False, an absent
+    sid proves nothing.
 
     The same rollout judgment as a Fleet session row (``_tail_pending_request_user_input``),
     so a thread launched without the interaction hook still has its question observed.
@@ -1261,7 +1263,7 @@ def open_rollout_questions(pids=None, homes=None):
         wait = _tail_pending_request_user_input(next(iter(paths)))
         if wait and isinstance(wait.get("waiting_since"), (int, float)):
             pending[sid] = float(wait["waiting_since"])
-    return pending
+    return {"complete": bool(walked[0]), "pending": pending}
 
 
 def _control_socket(environ):

@@ -434,9 +434,9 @@ def pending_human_waits(route, *, jobs, outcome=None):
 def _session_liveness_probe():
     """One pass's owner observation: ``live`` / ``ended`` / ``unknown`` per session.
 
-    Reuses Fleet's shared session-end proof (``collectors.steward.session_liveness``):
-    only a complete process observation from this PID namespace says ``ended``; an
-    unreadable table or a hiding namespace stays ``unknown`` (LOOP §4)."""
+    Reuses Fleet's shared session-end proof (``collectors.steward.session_liveness``),
+    and only from the initial PID namespace, where an absent process is really absent;
+    elsewhere, and for an unreadable table, the owner stays ``unknown`` (LOOP §4)."""
     seen = {}
     state = {}
 
@@ -447,9 +447,15 @@ def _session_liveness_probe():
                 project_root = str(Path(__file__).resolve().parents[1])
                 if project_root not in sys.path:
                     sys.path.insert(0, project_root)
-                from tools.fleet.collectors import steward
+                from tools.fleet.collectors import procscan, steward
                 if "observation" not in state:
+                    # Its registry fallback probes a recorded pid with a signal;
+                    # from another PID namespace an absent pid proves nothing.
+                    state["host"] = procscan.initial_pid_namespace()
                     state["observation"] = steward.end_observation()
+                if not state["host"]:
+                    seen[key] = "unknown"
+                    return seen[key]
                 seen[key] = steward.session_liveness(harness, session_id, agents=(),
                                                      observation=state["observation"])
             except Exception:
@@ -487,7 +493,7 @@ def _registered_owner(meta, harness, session_id):
 
 
 def _codex_rollout_waits():
-    """``{sid: waiting_since}`` from live Codex rollouts, or None when unobservable.
+    """``{"complete", "pending": {sid: waiting_since}}`` from live Codex rollouts, or None.
 
     A Codex thread started without the interaction hook leaves its unanswered
     ``request_user_input`` only in its rollout; Fleet's own rollout cursor reads it."""
@@ -605,10 +611,14 @@ def read_answer_waits(*, jobs_paths, sessions=(), now=None, owner_liveness=None)
     # S1 also keeps a Codex question that exists only in its live rollout (no hook
     # sidecar). The sidecar for the same session wins; the id has the sidecar shape.
     try:
-        rollout_waits = _codex_rollout_waits()
-        if rollout_waits is None:
+        observed = _codex_rollout_waits()
+        if observed is None:
             health.append({"source": "S1", "state": "unknown", "reason": "codex-rollouts-unreadable"})
         else:
+            if not observed["complete"]:
+                health.append({"source": "S1", "state": "unknown",
+                               "reason": "codex-rollouts-partial"})
+            rollout_waits = observed["pending"]
             with_sidecar = {(item.get("owner") or {}).get("session_id") for item in items
                             if item.get("source") == "S1"
                             and (item.get("owner") or {}).get("harness") == "codex"}
@@ -716,6 +726,7 @@ def read_answer_waits(*, jobs_paths, sessions=(), now=None, owner_liveness=None)
                                         blocker = " ".join(str(raw).split())[:160]
                             except Exception:
                                 pass
+                        lineage_read = True
                         try:
                             if effective_parent is None:
                                 raise ImportError("lineage reader unavailable")
@@ -724,6 +735,9 @@ def read_answer_waits(*, jobs_paths, sessions=(), now=None, owner_liveness=None)
                             parent_harness = effective_parent_harness(lineage_meta, path,
                                                                       read_context=read_context)
                         except Exception:
+                            # A failed lineage read cannot prove the owner has no
+                            # successor: keep the registered parent, owner unknown.
+                            lineage_read = False
                             parent, parent_harness = meta.get("parent_sid"), meta.get("parent_harness")
                         add({"id": "S3:" + str(attempt), "source": "S3",
                              "kind": "decision", "question": blocker, "choices": [],
@@ -735,6 +749,7 @@ def read_answer_waits(*, jobs_paths, sessions=(), now=None, owner_liveness=None)
                                        "seat_key": None},
                              "registered_owner": _registered_owner(meta, parent_harness, parent),
                              "cwd": route_record.get("cwd"),
+                             **({} if lineage_read else {"owner_state": "unknown"}),
                              "attribution": "lineage" if parent and parent_harness else "unattributed"})
                     except (OSError, ValueError, TypeError, KeyError, ImportError) as exc:
                         health.append({"source": "S3", "attempt_id": attempt,
@@ -769,13 +784,14 @@ def read_answer_waits(*, jobs_paths, sessions=(), now=None, owner_liveness=None)
                                 meta = row.completion_metadata()
                             parent_sid = meta.get("parent_sid")
                             parent_harness = meta.get("parent_harness")
-                            if effective_parent is not None:
+                            lineage_read = effective_parent is not None
+                            if lineage_read:
                                 try:
                                     parent_sid = effective_parent(meta, path, read_context=read_context)
                                     parent_harness = effective_parent_harness(meta, path,
                                                                               read_context=read_context)
                                 except Exception:
-                                    pass
+                                    lineage_read = False
                             since = float(wait["waiting_since"])
                             if instant - since < 0:
                                 continue
@@ -792,6 +808,7 @@ def read_answer_waits(*, jobs_paths, sessions=(), now=None, owner_liveness=None)
                                            "session_id": parent_sid or None},
                                  "registered_owner": _registered_owner(meta, parent_harness, parent_sid),
                                  "cwd": route_record.get("cwd"),
+                                 **({} if lineage_read else {"owner_state": "unknown"}),
                                  "attribution": "lineage" if parent_sid and parent_harness else "unattributed"})
                     except (OSError, ValueError, TypeError, KeyError, ImportError) as exc:
                         health.append({"source": "S2", "route_id": route_id,

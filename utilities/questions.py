@@ -20,6 +20,7 @@ import json
 import os
 import sys
 import time
+import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -85,7 +86,8 @@ def questions_of(envelope):
                         "choices": choices,
                         "recommended": recommended if type(recommended) is int
                         and 0 <= recommended < len(choices) else None,
-                        "free_text": bool(question.get("is_other", not choices))})
+                        "free_text": bool(question.get("is_other", not choices)),
+                        "secret": bool(question.get("is_secret"))})
         return out
     question_id = envelope.get("question_id") if isinstance(envelope, dict) else None
     if question_id is None:
@@ -169,9 +171,16 @@ def render(board, rows, folded):
                 mark = "  (recommended)" if question["recommended"] == number - 1 else ""
                 lines.append("      %d) %s%s" % (number, _choice_label(choice), mark))
         if row.get("answerable"):
-            many = len(row.get("questions") or ()) > 1
-            how = ("--decision approve|reject|defer" if row.get("answer_kind") == "decision"
-                   else "--choice N per question" if many else "--choice N | --text-file FILE")
+            listed = row.get("questions") or ()
+            if row.get("answer_kind") == "decision":
+                how = "--decision approve|reject|defer"
+            elif len(listed) > 1:
+                how = "--choice N per question"
+            elif listed and listed[0]["choices"] and not listed[0].get("secret"):
+                how = "--choice N | --text-file FILE"
+            else:
+                # A file keeps free text (and any secret) out of the process list.
+                how = "--text-file FILE"
             lines.append("  answer: hearting run questions answer %s %s" % (row["id"], how))
         elif row.get("reason"):
             lines.append("  answer in that session: %s" % row["reason"])
@@ -206,20 +215,19 @@ def _list(args):
 
 
 def _find(board, wanted):
-    items = [item for item in board.get("items") or () if isinstance(item, dict)]
-    exact = [item for item in items if item.get("id") == wanted]
+    """The wait with exactly this id. A prefix could name a newer wait (a re-raised gate
+    keeps its route prefix) that the person never saw, so only the full id answers."""
+    exact = [item for item in board.get("items") or ()
+             if isinstance(item, dict) and item.get("id") == wanted]
     if exact:
         return exact[0], None
-    matches = [item for item in items if str(item.get("id") or "").startswith(wanted)]
-    if len(matches) == 1:
-        return matches[0], None
-    return None, ("no open question has this id" if not matches
-                  else "id prefix matches %d questions; give more of the id" % len(matches))
+    return None, "no open question has exactly this id; copy the full id from the list"
 
 
 def _answer_values(value):
-    values = value if isinstance(value, list) else [value]
-    return [item if isinstance(item, str) else json.dumps(item) for item in values]
+    # Typed values (OpenCode booleans and numbers) pass unchanged; the shared
+    # response check validates them against the native request.
+    return list(value) if isinstance(value, list) else [value]
 
 
 def build_response(envelope, *, choices=(), text=None, decision=None, answers=None):
@@ -294,17 +302,30 @@ def _answer(args):
     listed = questions_of(envelope)
     if len(listed) == 1:
         ref.setdefault("question_id", listed[0]["id"])
-    result = HWS.submit_selected_response(ref, response)
-    state = result.get("state") if isinstance(result, dict) else "unknown"
-    outcome = result.get("result") if isinstance(result, dict) else None
-    reason = outcome.get("reason") if isinstance(outcome, dict) else None
-    reason = reason or (result.get("reason") if isinstance(result, dict) else None)
-    if args.json:
-        print(json.dumps({"id": item["id"], "state": state, "reason": reason},
-                         ensure_ascii=False))
+    # This command's own action id: a reply claimed first by Fleet or another
+    # caller comes back with that caller's action and state, never as ours.
+    action_id = uuid.uuid4().hex
+    result = HWS.submit_selected_response(ref, response, action_id=action_id)
+    result = result if isinstance(result, dict) else {}
+    state = result.get("state") or "unknown"
+    outcome = result.get("result") if isinstance(result.get("result"), dict) else {}
+    reason = outcome.get("reason") or result.get("reason")
+    if response.get("decision") == "defer" and outcome.get("status") == "no-response-sent":
+        verdict, code = "deferred", 0              # the person chose to wait; nothing sent
+    elif result.get("action_id") == action_id and state in _DELIVERED:
+        verdict, code = state, 0
+    elif result.get("action_id") not in (None, action_id) or (
+            state in _DELIVERED and result.get("action_id") != action_id):
+        verdict, code = "answered-elsewhere", 1
+        reason = "already answered by another caller (%s)" % state
     else:
-        print("questions: %s %s%s" % (item["id"], state, " (%s)" % reason if reason else ""))
-    return 0 if state in _DELIVERED else 1
+        verdict, code = state, 1
+    if args.json:
+        print(json.dumps({"id": item["id"], "state": verdict, "request_state": state,
+                          "reason": reason}, ensure_ascii=False))
+    else:
+        print("questions: %s %s%s" % (item["id"], verdict, " (%s)" % reason if reason else ""))
+    return code
 
 
 def main(argv=None):
@@ -318,11 +339,12 @@ def main(argv=None):
         target.add_argument("--json", action="store_true", default=default)
         target.add_argument("--all", action="store_true", default=default,
                             help="show question detail for older and ownerless waits too")
-    answer.add_argument("id", help="question id from the list (a unique prefix is enough)")
+    answer.add_argument("id", help="the full question id from the list")
     picked = answer.add_mutually_exclusive_group(required=True)
     picked.add_argument("--choice", type=int, action="append",
                         help="1-based choice number; repeat once per question in list order")
-    picked.add_argument("--text", help="free-text answer for a single question")
+    picked.add_argument("--text", help="free-text answer for a single question "
+                        "(use --text-file for anything private)")
     picked.add_argument("--text-file", help="file holding the free-text answer")
     picked.add_argument("--decision", choices=("approve", "reject", "defer"))
     picked.add_argument("--answers-file", help="JSON object: question id -> answer(s)")

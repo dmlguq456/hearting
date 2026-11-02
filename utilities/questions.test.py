@@ -49,6 +49,10 @@ class BuildResponseTest(unittest.TestCase):
         self.assertEqual(questions.build_response(self.INTERVIEW, answers={
             "_understanding": "I understand", "scope": ["Small"]})[0],
             {"answers": {"_understanding": ["I understand"], "scope": ["Small"]}})
+        opencode = {"kind": "question", "detail": {"questions": [
+            {"id": "enabled", "question": "Enable?", "field_type": "boolean", "choices": []}]}}
+        self.assertEqual(questions.build_response(opencode, answers={"enabled": True})[0],
+                         {"answers": {"enabled": [True]}})
         approval = {"kind": "approval"}
         self.assertEqual(questions.build_response(approval, decision="reject")[0],
                          {"decision": "reject"})
@@ -97,19 +101,49 @@ class BoardTest(unittest.TestCase):
         self.assertIn("owner ended, no successor", out)
         read.assert_called_once_with({"id": "S1:codex:sid-a:1", "harness": "codex",
                                       "session_id": "sid-a"})
-        with mock.patch.object(state, "submit_selected_response") as submit:
-            code, _out, err = _run("answer", "S1:codex:sid-", "--choice", "1")
-        self.assertEqual(code, 2)
-        self.assertIn("matches 2 questions", err)
-        submit.assert_not_called()
         with mock.patch.object(state, "read_selected_request", return_value=envelope), \
-             mock.patch.object(state, "submit_selected_response",
-                               return_value={"state": "applied"}) as submit:
-            code, out, _err = _run("answer", "S1:codex:sid-a", "--choice", "2")
+             mock.patch.object(state, "submit_selected_response") as submit:
+            for prefix in ("S1:codex:sid-", "S1:codex:sid-a"):
+                code, _out, err = _run("answer", prefix, "--choice", "1")
+                self.assertEqual(code, 2)
+                self.assertIn("exactly this id", err)
+        submit.assert_not_called()
+
+        def own(ref, response, *, action_id):
+            return {"state": "applied", "action_id": action_id}
+        with mock.patch.object(state, "read_selected_request", return_value=envelope), \
+             mock.patch.object(state, "submit_selected_response", side_effect=own) as submit:
+            code, out, _err = _run("answer", "S1:codex:sid-a:1", "--choice", "2")
         self.assertEqual(code, 0)
+        self.assertIn("applied", out)
         ref, response = submit.call_args.args
         self.assertEqual((ref["id"], ref["question_id"], response),
                          ("S1:codex:sid-a:1", "q", {"answers": {"q": ["B"]}}))
+        self.assertRegex(submit.call_args.kwargs["action_id"], r"^[0-9a-f]{32}$")
+        # Another caller (Fleet) claimed first: its state is not this command's success.
+        for other in ({"state": "submitted", "action_id": "fleet-action"},
+                      {"state": "applied"}):
+            with mock.patch.object(state, "read_selected_request", return_value=envelope), \
+                 mock.patch.object(state, "submit_selected_response", return_value=other):
+                code, out, _err = _run("answer", "S1:codex:sid-a:1", "--choice", "2")
+            self.assertEqual(code, 1)
+            self.assertIn("answered-elsewhere", out)
+
+    def test_defer_is_reported_as_deferred_and_sends_nothing(self):
+        import time
+        now = time.time()
+        self.assertTrue(state.publish_cache({"observed_at": now, "complete": True, "items": [
+            {"id": "S1:codex:sid-a:1", "source": "S1", "kind": "approval", "since": now - 30,
+             "stale": False, "owner": {"harness": "codex", "session_id": "sid-a"},
+             "attribution": "exact"}]}))
+        envelope = {"state": "open", "kind": "approval", "support": {"supported": True}}
+        deferred = {"state": "open", "result": {"decision": "defer",
+                                                "status": "no-response-sent"}}
+        with mock.patch.object(state, "read_selected_request", return_value=envelope), \
+             mock.patch.object(state, "submit_selected_response", return_value=deferred):
+            code, out, _err = _run("answer", "S1:codex:sid-a:1", "--decision", "defer")
+        self.assertEqual(code, 0)
+        self.assertIn("deferred", out)
 
 
 if __name__ == "__main__":

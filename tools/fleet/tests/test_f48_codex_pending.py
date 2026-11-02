@@ -362,18 +362,22 @@ class OpenRolloutQuestionsTest(unittest.TestCase):
         with mock.patch.object(codex, "_open_rollout_paths",
                                return_value=(True, {pending, answered, foreign})):
             found = codex.open_rollout_questions(homes=[self.home])
-        self.assertEqual(set(found), {self.SID})
-        self.assertIsInstance(found[self.SID], float)
+        self.assertTrue(found["complete"])
+        self.assertEqual(set(found["pending"]), {self.SID})
+        self.assertIsInstance(found["pending"][self.SID], float)
 
     def test_ambiguous_session_and_unlistable_process_table_prove_nothing(self):
         first = self.rollout(self.SID)
         second = self.rollout(self.SID, root=os.path.join(self.home, "sessions", "2026", "11", "01"))
         with mock.patch.object(codex, "_open_rollout_paths", return_value=(True, {first, second})):
-            self.assertEqual(codex.open_rollout_questions(homes=[self.home]), {})
+            self.assertEqual(codex.open_rollout_questions(homes=[self.home]),
+                             {"complete": True, "pending": {}})
         with mock.patch.object(codex, "_open_rollout_paths", return_value=None):
             self.assertIsNone(codex.open_rollout_questions(homes=[self.home]))
+        # A partial walk keeps what it saw but says so; the board marks it unknown.
         with mock.patch.object(codex, "_open_rollout_paths", return_value=(False, {first})):
-            self.assertEqual(set(codex.open_rollout_questions(homes=[self.home])), {self.SID})
+            partial = codex.open_rollout_questions(homes=[self.home])
+        self.assertEqual((partial["complete"], set(partial["pending"])), (False, {self.SID}))
 
     def test_open_rollout_sessions_keeps_its_contract(self):
         path = self.rollout(self.SID)

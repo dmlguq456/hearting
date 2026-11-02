@@ -37,6 +37,10 @@ class HumanWaitStateTests(unittest.TestCase):
         demand = mock.patch.object(state, "_request_producer")
         demand.start()
         self.addCleanup(demand.stop)
+        rollouts = mock.patch.object(observation, "_codex_rollout_waits",
+                                     return_value={"complete": True, "pending": {}})
+        rollouts.start()
+        self.addCleanup(rollouts.stop)
         self.addCleanup(self.tmp.cleanup)
 
     def test_only_explicit_first_line_markers_open_private_signal(self):
@@ -2237,8 +2241,14 @@ class WorkflowSelectedResponseTest(unittest.TestCase):
         code, _out, err = self._questions_cli("answer", item_id, "--choice", "9")
         self.assertEqual(code, 1)
         self.assertIn("outside 1..3", err)
-        code, _out, err = self._questions_cli("answer", "S2:", "--choice", "1")
+        # A prefix could name a re-raised gate the person never saw: only the full id.
+        code, _out, err = self._questions_cli("answer", item_id.rsplit(":", 1)[0], "--choice", "1")
+        self.assertEqual(code, 2)
+        self.assertIn("exactly this id", err)
+        self.assertEqual(ledger.claims(), {})
+        code, out, err = self._questions_cli("answer", item_id, "--choice", "1", "--json")
         self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["state"], "applied")
         self.assertTrue(ledger.claims())
         releases = [row for row in ledger.journal()
                     if row.get("workflow_state") == "RUNNING"
@@ -2258,6 +2268,25 @@ class WorkflowSelectedResponseTest(unittest.TestCase):
         retained = dispatch_owner_input.retained(self.jobs, "att-workflow-owner")
         self.assertEqual(retained[0]["text"], "keep the approved route and retry")
 
+    def test_questions_cli_reports_a_reply_claimed_first_elsewhere_as_not_its_own(self):
+        import dispatch_owner_input
+        item = self._blocked_owner_wait()
+        original = state._claim_selected_action
+
+        def fleet_claims_first(current, action_id, response):
+            original(current, "fleet-first", {"answers": {"owner-correction": ["fleet reply"]}})
+            return original(current, action_id, response)
+
+        with mock.patch.object(state, "_claim_selected_action", side_effect=fleet_claims_first):
+            code, out, _err = self._questions_cli("answer", item["id"], "--text", "cli reply",
+                                                  "--json")
+        self.assertEqual(code, 1)
+        reported = json.loads(out)
+        self.assertEqual(reported["state"], "answered-elsewhere")
+        self.assertIn("another caller", reported["reason"])
+        self.assertEqual(dispatch_owner_input.inspect(self.jobs, "att-workflow-owner")["requests"],
+                         [])
+
     def test_questions_cli_leaves_a_marker_without_reply_surface_untouched(self):
         import human_gate_observation
         self.assertTrue(state.open_signal("codex", "marker-session", "marker-seat",
@@ -2267,10 +2296,10 @@ class WorkflowSelectedResponseTest(unittest.TestCase):
         code, text, _err = self._questions_cli()
         self.assertIn("select the next step", text)
         self.assertIn("answer in that session", text)
-        code, _out, err = self._questions_cli("answer", "S4", "--text", "next")
+        item_id = next(row["id"] for row in state._read_cache()["items"] if row["source"] == "S4")
+        code, _out, err = self._questions_cli("answer", item_id, "--text", "next")
         self.assertEqual(code, 2)
         self.assertIn("cannot be answered here", err)
-        item_id = next(row["id"] for row in state._read_cache()["items"] if row["source"] == "S4")
         self.assertTrue(state.signal_is_current({"id": item_id, "seat_key": "marker-seat"}))
 
 

@@ -1755,7 +1755,11 @@ def _workflow_current_item(item_id, source):
             result = human_gate_observation.read_answer_waits(jobs_paths=(path,))
         except Exception:
             return None, "workflow-wait-source-unknown"
-        if result.get("complete") is not True:
+        # Only the registry/route sources bind an S2/S3 answer; an unobserved native
+        # S1/S4 source elsewhere on the board does not make this wait uncertain.
+        if any(isinstance(row, dict) and row.get("state") == "unknown"
+               and row.get("source") not in ("S1", "S4")
+               for row in result.get("health", ())):
             return None, "workflow-wait-source-incomplete"
         matches.extend((path, item) for item in result.get("items", ())
                        if isinstance(item, dict) and item.get("id") == item_id
