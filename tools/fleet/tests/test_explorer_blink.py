@@ -250,10 +250,20 @@ class SupervisorPhaseTests(BlinkAssertions):
                              {} if ended else {(6, 31): DIM_KEYS[1], (6, 32): DIM_KEYS[2]})
 
 
+def route_count_spans(frame):
+    """The OVERVIEW ROUTES rule's ``N open`` pulses on the working pair while N > 0."""
+    spans = {}
+    for y, line in enumerate(frame.text_rows()):
+        match = re.search(r"── ROUTES  ([0-9]+ open)", line)
+        if match and int(match.group(1).split()[0]) > 0:
+            spans.update({(y, col): "g_work_off" for col in range(*match.span(1))})
+    return spans
+
+
 class FramePhaseTests(BlinkAssertions):
     def expected_spans(self, frame, state):
         """Declare spans from fixed semantic labels, never from the observed off diff."""
-        expected = {}
+        expected = route_count_spans(frame)
         active = {"execute": "h_claude", "review": "g_work_off"}
         for y, line in enumerate(frame.text_rows()):
             for x, glyph in enumerate(line):
@@ -386,6 +396,7 @@ class FramePhaseTests(BlinkAssertions):
                         expected = {(yy, xx): "tag_steward_dim"
                                     for yy, line in enumerate(on.text_rows())
                                     for xx, glyph in enumerate(line[:32]) if glyph == "⚑"}
+                        expected.update(route_count_spans(on))
                         if status == "active":
                             expected.update({(y, col): DIM_KEYS[0] for col in range(x, x + 7)})
                             self.assertEqual(on.cells[y][x][1], "hb_opencode")

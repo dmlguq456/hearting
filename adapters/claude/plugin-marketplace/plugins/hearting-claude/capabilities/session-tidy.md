@@ -104,6 +104,17 @@ Modes are `정리` (default), `정리만` (keep this window), and `인계 <받�
 handoff keep their existing one-call behavior. Reply with the command's `say=`
 line; report its `prompted=` line for handoff and do not retry an uncertain send.
 
+A supervisor or user may run the same transfer for a session it names:
+`python3 $AGENT_HOME/utilities/session_tidy.py handoff --from <세션> --kind <하네스>`.
+It names only the source session and the successor harness; the runtime starts
+the successor beside the source, delivers the current card (or, when the card is
+older or missing, the source conversation's transcript location), and records
+the same logical handover. Acceptance and retirement stay the existing ones. A
+working source is handed over immediately; its window closes after the work
+finishes. A start failure leaves no card generation, lineage row, pending
+message, or retry notice. Only live windows are eligible, and the supervisor
+role is not moved. Report the command's one result line.
+
 A nonce-bounded idle or compact card request is answered with the card itself
 between the request's marker lines, with no tool call. The turn-end observer
 stores that reply and queues the tidy. For a peer successor at this seat, use
@@ -229,7 +240,7 @@ Only a valid current typed cross-seat handoff receives the existing explicit
 read-and-accept command. It is not user approval and does not change registered
 completion identity; mere delivery never accepts the handoff.
 
-Logical handoff records the explicitly requested transfer by the current holder, independently of card delivery, explicit receiver acceptance and physical retirement. A missing card or pane does not discard that relation. Never send empty context or infer acceptance from delivery. Retire waits for preserved context and an exact physical lifetime; native acceptance may succeed with `retire=deferred`. `--harness` selects the source caller; the shared target resolver determines the receiver harness.
+Logical handoff records the explicitly requested transfer by the current holder — run by that session itself or by a supervisor or user that names it with `--from` — independently of card delivery, explicit receiver acceptance and physical retirement. A missing card or pane does not discard that relation. Never send empty context or infer acceptance from delivery. Retire waits for preserved context and an exact physical lifetime; native acceptance may succeed with `retire=deferred`. `--from` selects an observed live session as the source; the sealed sender is that observed session, and the actual executor is recorded only as informational `relayed_by`. `--harness` selects the source caller; the shared target resolver determines the receiver harness.
 
 Current recipient interpretation uses the shared qualified ledger graph, including
 logical-session and physical-seat rows. Exact job bindings take precedence; only
