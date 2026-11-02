@@ -604,6 +604,70 @@ class OwnerPinChangeTest(unittest.TestCase):
         self.assertIs(RA.route_in_force(self.route), self.route)
 
 
+class Depth1SupportedHarnessesTest(unittest.TestCase):
+    """The one depth-1 judgment: the owner reads its parent evidence, a frame leg the harness its
+    owner may use plus the one its own launch was checked for."""
+
+    def route(self, tuples, **extra):
+        return {"route_id": "rt-depth1", "route_hash": "sha256:depth1", "effective_intensity": "standard",
+                "dispatch_evidence": {"tuples": tuples}, **extra}
+
+    def test_owner_reads_parent_rows_and_frame_reads_parent_and_child_rows(self):
+        route = self.route([_tuple("claude", "codex"), _tuple("codex", "codex"),
+                            _tuple("opencode", "claude"), _tuple("claude", "opencode", status="unsupported")])
+        self.assertEqual(RA.depth1_supported_harnesses(route, worker_type="owner"),
+                         {"claude", "codex", "opencode"})
+        self.assertEqual(RA.depth1_supported_harnesses(route, worker_type="frame"),
+                         {"claude", "codex", "opencode"})
+        child_only = self.route([_tuple("claude", "codex"), _tuple("claude", "opencode", status="unsupported")])
+        self.assertEqual(RA.depth1_supported_harnesses(child_only, worker_type="owner"), {"claude"})
+        self.assertEqual(RA.depth1_supported_harnesses(child_only, worker_type="frame"), {"claude", "codex"})
+
+    def test_the_incident_rt_ad3fb_evidence_admits_opencode_for_the_pinned_frame(self):
+        fixture = json.loads((Path(__file__).resolve().parent / "fixtures"
+                              / "frame-assignment-incidents-1101.json").read_text(encoding="utf-8"))
+        route = self.route(fixture["rt_ad3fb"]["dispatch_evidence"]["tuples"])
+        self.assertTrue(all(row["status"] == "unsupported" for row in route["dispatch_evidence"]["tuples"]
+                            if row["child_harness"] == "opencode"))
+        for worker_type in ("owner", "frame"):
+            self.assertEqual(RA.depth1_supported_harnesses(route, worker_type=worker_type),
+                             {"claude", "codex", "opencode"})
+
+    def test_quick_and_single_owner_routes_read_their_registered_headless_candidates(self):
+        candidates = [{"harness": "codex", "status": "supported"}, {"harness": "claude", "status": "unsupported"}]
+        quick = {"effective_intensity": "quick", "registered_headless_candidates": candidates,
+                 "dispatch_evidence": None}
+        single = {"effective_intensity": "standard", "registered_headless_candidates": candidates,
+                  "dispatch_evidence": {"tuples": [_tuple("claude", "claude")]}}
+        for route in (quick, single):
+            for worker_type in ("owner", "frame"):
+                self.assertEqual(RA.depth1_supported_harnesses(route, worker_type=worker_type), {"codex"})
+
+    def test_nothing_supported_or_not_a_route_is_the_empty_set(self):
+        self.assertEqual(RA.depth1_supported_harnesses(self.route([]), worker_type="frame"), set())
+        self.assertEqual(RA.depth1_supported_harnesses(
+            self.route([_tuple("claude", "codex", status="unsupported")]), worker_type="frame"), set())
+        self.assertEqual(RA.depth1_supported_harnesses({}, worker_type="owner"), set())
+        self.assertEqual(RA.depth1_supported_harnesses(None, worker_type="owner"), set())
+        # only the three wrapper harnesses are ever a result
+        self.assertEqual(RA.depth1_supported_harnesses(
+            self.route([_tuple("claude", "gemini")]), worker_type="frame"), {"claude"})
+
+    def test_a_recorded_pin_change_brings_its_probed_tuples(self):
+        with tempfile.TemporaryDirectory() as td:
+            route = self.route([_tuple("codex", "codex")], artifact_root=td, cwd="/w",
+                               selection_pins={"contract_version": 1,
+                                               "owner": {"harness": "codex", "model": None, "effort": None}})
+            self.assertEqual(RA.depth1_supported_harnesses(route, worker_type="owner"), {"codex"})
+            RA.record_pin_change(route, target="owner",
+                                 pin={"harness": "claude", "model": None, "effort": None},
+                                 by={"harness": "codex", "session_id": "sid"}, source="unattributed",
+                                 tuples=[_tuple("claude", "claude", sandbox="bypass")], candidates=[])
+            self.assertEqual(RA.depth1_supported_harnesses(route, worker_type="owner"), {"claude", "codex"})
+            self.assertEqual(RA.depth1_supported_harnesses(route, worker_type="frame"), {"claude", "codex"})
+            self.assertEqual(route["dispatch_evidence"]["tuples"], [_tuple("codex", "codex")])  # sealed dict untouched
+
+
 class WorkerPinChangeTest(unittest.TestCase):
     """The BC route rt-96bab699 after its owner moved to Claude: the parent now moves the worker
     pin to a stronger Codex model for the remaining checks; the owner pin and the sealed route stay."""

@@ -15,7 +15,8 @@ from owner_route_binding import OwnerRouteBindingError, validate_owner_route_bin
 from dispatch_mode_contract import DispatchModeContractError, resolve_qa
 from dispatch_contract import (DispatchContractError, frame_harness_admission,
                                parse_registry_metadata, record_frame_launch_degradation)
-from route_authority import harness_admitted, pinned_launch_harness, route_in_force, sealed_pin_harness
+from route_authority import (depth1_supported_harnesses, harness_admitted, pinned_launch_harness,
+                             route_in_force, sealed_pin_harness)
 from dispatch_lifecycle import (
     FOREGROUND_NOTICE,
     FOREGROUND_SCOPED,
@@ -230,14 +231,8 @@ def _sealed_owner_context(path, *, worker_type="owner", route_node=None):
     intensity = route.get("effective_intensity")
     if intensity == "direct":
         raise OwnerError("route-evidence-direct-route-has-no-owner")
-    if intensity == "quick" or route.get("registered_headless_candidates") is not None:
-        # Quick and single-owner recipes have no depth-2 tuples. Their
-        # registered-headless candidates name the probed owner harnesses;
-        # the launch binding rechecks this same selection.
-        rows, field = route.get("registered_headless_candidates") or [], "harness"
-    else:
+    if not (intensity == "quick" or route.get("registered_headless_candidates") is not None):
         rows = (route.get("dispatch_evidence") or {}).get("tuples") or []
-        field = "child_harness" if worker_type == "frame" else "parent_harness"
         if any(
             isinstance(row, dict)
             and row.get("status") == "unsupported"
@@ -246,11 +241,9 @@ def _sealed_owner_context(path, *, worker_type="owner", route_node=None):
             for row in rows
         ):
             raise OwnerError("route-evidence-exact-worktree-reprobe-required")
-    harnesses = {
-        row.get(field)
-        for row in rows
-        if isinstance(row, dict) and row.get("status") == "supported"
-    }
+    # The one depth-1 judgment (`route_authority.depth1_supported_harnesses`): an owner
+    # reads its parent evidence, a frame leg the owner-admitted plus its own launch evidence.
+    harnesses = set(depth1_supported_harnesses(route, worker_type=worker_type))
     harnesses &= _defaults.DISPATCHABLE_HARNESSES
     if not harnesses:
         raise OwnerError("route-evidence-no-supported-owner-harness")
@@ -312,27 +305,22 @@ def _first_frame_attempt(route, jobs):
     return matches[-1], lines
 
 
-def _prefer_other_frame_harness(first_harness, selected, explicit, config_version,
-                                policy, states, counts, allocation, capacity,
-                                configured, ranked, automatically_available):
-    """Re-run the existing capacity selector with the first frame family excluded."""
-    if explicit or config_version not in {3, 4} or not first_harness:
-        return selected, None, False
-    filtered = dict(states)
-    filtered[first_harness] = "limited(frame-sibling-already-placed)"
-    other, band, _ranks, promoted = _capacity.select(
-        policy, filtered, counts, allocation["harness_order"], capacity,
-        strategy=allocation["strategy"],
-        usage_gate_used_percent=allocation.get("usage_gate_used_percent", 90),
-        preferred=_capacity.preferred_for_depth(allocation, 1),
-        affinity_weight=allocation.get("depth_affinity_weight", 0.5),
-        headroom_exponent=allocation.get("usage_headroom_exponent", 1),
-        harness_weights=allocation.get("harness_weights"),
-        preference_order=allocation.get("owner_order"),
-    )
-    if other:
-        return other, band, promoted
-    return selected, None, False
+def _frame_alternative_tiebreak(first_harness, selected, band, ranks, scores, *,
+                                strategy, usage_gate_used_percent):
+    """Prefer another harness for the second frame leg only among candidates the
+    first selection already ranked eligible in the same quality band and, under
+    `balanced`, above the usage gate. Otherwise keep the owner-rule choice (the same
+    harness, then rotated to another model by `pair_model_rotation`)."""
+    if not first_harness or selected != first_harness or not band or not isinstance(ranks, dict):
+        return selected
+    for name in ranks.get(band) or []:
+        if name == first_harness:
+            continue
+        if strategy == "balanced" and _capacity.is_gated(
+                scores, name, usage_gate_used_percent=usage_gate_used_percent):
+            continue
+        return name
+    return selected
 
 
 def export_owner_route_env(child_env, binding):
@@ -954,10 +942,11 @@ def main(argv):
         reason = "none"
         quality_band = None
         relief_promoted = False
+        ranks = None
         if explicit and _eligible(states[explicit]):
             selected, source, quality_band = explicit, ("route-pin" if pin_chosen else "explicit"), "explicit"
         if selected is None and config_version in {3, 4}:
-            selected, quality_band, _ranks, relief_promoted = _capacity.select(
+            selected, quality_band, ranks, relief_promoted = _capacity.select(
                 policy, states, counts, allocation["harness_order"], capacity,
                 strategy=allocation["strategy"],
                 usage_gate_used_percent=allocation.get("usage_gate_used_percent", 90),
@@ -966,7 +955,7 @@ def main(argv):
                 headroom_exponent=allocation.get("usage_headroom_exponent", 1),
                 harness_weights=allocation.get("harness_weights"),
                 preference_order=(allocation.get("owner_order")
-                                  if values["--worker-type"] == "owner" else None),
+                                  if values["--worker-type"] in {"owner", "frame"} else None),
             )
             if selected:
                 source = "configured-" + allocation["strategy"]
@@ -1039,13 +1028,14 @@ def main(argv):
                 return 75
             first_harness = first["harness"]
             if not explicit:
-                alternate, alternate_band, alternate_promoted = _prefer_other_frame_harness(
-                    first_harness, selected, explicit, config_version, policy, states,
-                    counts, allocation, capacity, configured, ranked, automatically_available)
-                if alternate != selected:
-                    selected, quality_band = alternate, alternate_band
-                    source = "configured-" + allocation["strategy"]
-                    relief_promoted = alternate_promoted
+                if config_version in {3, 4}:
+                    alternate = _frame_alternative_tiebreak(
+                        first_harness, selected, quality_band, ranks, capacity,
+                        strategy=allocation["strategy"],
+                        usage_gate_used_percent=allocation.get("usage_gate_used_percent", 90))
+                    if alternate != selected:
+                        selected = alternate
+                        source = "configured-" + allocation["strategy"]
                 if selected == first_harness:
                     alternatives = [h for h in configured if h != first_harness]
                     if alternatives:
@@ -1054,6 +1044,12 @@ def main(argv):
                             "excluded_harnesses": alternatives,
                             "states": {h: states.get(h, "unknown") for h in alternatives},
                             "capacity": {h: capacity.get(h) for h in alternatives},
+                            "quality_band": quality_band,
+                            **({"gated": {h: _capacity.is_gated(
+                                    capacity, h,
+                                    usage_gate_used_percent=allocation.get("usage_gate_used_percent", 90))
+                                    for h in alternatives}}
+                               if allocation["strategy"] == "balanced" else {}),
                         }, sort_keys=True)
                     else:
                         reason = "frame-single-available-harness"

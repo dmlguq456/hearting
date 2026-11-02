@@ -56,7 +56,7 @@ implicitly inside plan authoring and it bends early, everything downstream
 executes the wrong direction precisely — the result is hotfix/patch cascades
 and cost blowups. Framing therefore runs as its own stage, launched directly by
 the depth-0 session after route binding and producer begin, before any owner
-launch (`core/WORKFLOW.md` frame procedure). Cross-harness placement is primary,
+launch (`core/WORKFLOW.md` frame procedure). Cross-harness placement is a usage-gated tie-break,
 while asymmetric model profiles and perspectives widen the search before
 anything commits.
 

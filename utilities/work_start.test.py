@@ -1449,11 +1449,33 @@ class WorkStartTest(unittest.TestCase):
             "frame": {"harness": "opencode", "model": "provider/model", "effort": "max"}}
         for row in self.route["dispatch_evidence"]["tuples"]:
             row.update(parent_harness="codex", launch_authority="conductor")
-        self.start()
-        self.assertEqual(self.adapters(), ["opencode", "opencode"])
+        result = self.start()
+        # A frame pin is applied by the selector (sealed-pin path, `route-pin`), not forwarded as
+        # `--adapter`: both legs start with no request, bound to this route's evidence, and the
+        # pin is not reported as unavailable. The pin's effect is proved in dispatch_owner.test.py
+        # (`FrameAssignmentIncidentTest`).
+        self.assertEqual(self.adapters(), [None, None])
+        self.assertTrue(all(c[c.index("--route-evidence") + 1] == str(self.path) for c in self.calls))
+        self.assertNotIn("frame_explicit_harness", result)
         self.ready = True; self.released = True
         self.start()
-        self.assertEqual(self.adapters()[2], "codex")
+        # the owner pin still selects only the owner
+        self.assertEqual(self.adapters(), [None, None, "codex"])
+
+    def test_a_frame_pin_the_parent_evidence_alone_admits_is_not_reported_unavailable(self):
+        # rt-ad3fb: every child_harness=opencode tuple is unsupported, the parent_harness=opencode
+        # rows (child claude/codex) are supported. The pinned frame leg is still eligible.
+        self.route["selection_pins"] = {"contract_version": 1,
+            "frame": {"harness": "opencode", "model": None, "effort": None}}
+        self.route["dispatch_evidence"]["tuples"] = [
+            {"parent_harness": "opencode", "child_harness": "claude", "status": "supported",
+             "launch_authority": "conductor"},
+            {"parent_harness": "claude", "child_harness": "opencode", "status": "unsupported",
+             "launch_authority": "conductor"}]
+        result = self.start()
+        self.assertEqual(self.adapters(), [None, None])
+        self.assertNotIn("frame_explicit_harness", result)
+        self.assertNotEqual(result.get("reason"), "frame-harness-unavailable")
 
     def test_start_repairs_missing_pinned_conductor_evidence_once_before_owner_launch(self):
         import route_authority as RA

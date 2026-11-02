@@ -219,6 +219,38 @@ def _cached_score(harness: str, now: float, stale_after: int) -> tuple[float | N
     return score, f"cache:{age}s"
 
 
+def _claude_cache_score(now: float, stale_after: int) -> tuple[float | None, str | None]:
+    """Fleet's credential-bound account reading (`usage_cache.read("claude")`), if younger
+    than `stale_after`; None when absent, stale, or bound to another credential.
+
+    The cache is the account's own usage (one entry per credential generation), unlike the
+    statusline taps, which are per-session files that can describe a different account or an
+    older window. Reading never probes: Fleet and the statusline refresh write it. The payload
+    holds the account's 5h/7d windows and per-model weekly windows as 0-100 used percentages;
+    the tightest window decides, as for codex and opencode.
+    """
+    cache = _usage_cache()
+    if cache is None:
+        return None, None
+    try:
+        snapshot = cache.read("claude", now=now, stale_max=stale_after)
+    except Exception:
+        return None, None
+    payload = snapshot.get("payload")
+    if not isinstance(payload, dict) or payload.get("error"):
+        return None, None
+    used = [payload.get("rl_5h"), payload.get("rl_7d")]
+    used += [row[1] for row in (payload.get("rl_ms") or [])
+             if isinstance(row, (list, tuple)) and len(row) >= 2]
+    score = _headroom(value for value in used
+                      if not isinstance(value, bool) and isinstance(value, (int, float))
+                      and math.isfinite(value) and 0 <= value <= 100)
+    if score is None:
+        return None, None
+    age = int(max(0.0, now - float(snapshot.get("observed_at") or now)))
+    return score, f"cache:{age}s"
+
+
 def _codex_probe(now: float, stale_after: int) -> tuple[float | None, str]:
     """(headroom, source). Order: live probe → shared cache (≤ stale_after) →
     own rollout samples (≤ stale_after) → unknown with the live probe's reason.
@@ -335,7 +367,8 @@ def capacity_report(*, stale_after: int = 3600, now: float | None = None) -> dic
     """Headroom percentages plus where each one came from.
 
     ``scores``: unknown is ``None`` and never invented. ``sources``: ``manual``,
-    ``live``, ``cache:<age>s;live=<reason>``, ``rollout;live=<reason>``,
+    ``live``, ``cache:<age>s`` (Claude: Fleet's credential-bound account cache, tried
+    before the taps), ``cache:<age>s;live=<reason>``, ``rollout;live=<reason>``,
     ``taps``, ``active-limit`` or ``unknown:<reason>`` — the receipt prints it so
     an unknown gauge says why (timeout, http-503, no-auth) instead of nothing.
     ``freshness`` optionally describes admitted Claude tap file mtimes; an mtime
@@ -355,10 +388,16 @@ def capacity_report(*, stale_after: int = 3600, now: float | None = None) -> dic
     if "claude" in manual:
         scores["claude"], sources["claude"] = manual["claude"], "manual"
     else:
-        claude, claude_freshness = _claude_capacity_reading(now, stale_after)
-        scores["claude"], sources["claude"] = claude, ("taps" if claude is not None else "unknown:no-fresh-taps")
-        if claude is not None and claude_freshness is not None:
-            freshness["claude"] = claude_freshness
+        # The account's own cached reading first; the per-session taps only when it is
+        # absent, stale, or bound to another credential.
+        claude, claude_source = _claude_cache_score(now, stale_after)
+        if claude is not None:
+            scores["claude"], sources["claude"] = claude, claude_source
+        else:
+            claude, claude_freshness = _claude_capacity_reading(now, stale_after)
+            scores["claude"], sources["claude"] = claude, ("taps" if claude is not None else "unknown:no-fresh-taps")
+            if claude is not None and claude_freshness is not None:
+                freshness["claude"] = claude_freshness
     if "opencode" in manual:
         scores["opencode"], sources["opencode"] = manual["opencode"], "manual"
     else:
@@ -383,8 +422,8 @@ def refresh_gauges(now: float | None = None) -> dict[str, dict]:
     """Probe every networked gauge once and leave the result in the shared
     cache: a hit is written through by the probe itself, a miss bumps
     `attempted_at` so stale-driven refreshers (the Claude statusline tick, Fleet)
-    back off instead of retrying every tick. Local-only readers (claude taps)
-    are reported, not probed."""
+    back off instead of retrying every tick. Claude is read from Fleet's cache,
+    then the local taps; it is reported, never probed."""
     report = capacity_report(now=now)
     cache = _usage_cache()
     if cache is not None:

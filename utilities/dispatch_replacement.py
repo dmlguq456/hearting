@@ -390,7 +390,7 @@ def _frame_rule_top(jobs, meta):
     if (route.get('explicit_profiles') or {}).get(meta['route_node']):
         return False
     pins = route_authority.route_in_force(route).get('selection_pins') or {}
-    pin = pins.get('frame') or pins.get('owner') or {}
+    pin = pins.get(route_authority.pin_target('frame')) or {}
     return not (pin.get('model') or pin.get('effort'))
 
 
@@ -476,17 +476,12 @@ def _same_role_successful_frame_peer_harness(jobs, meta, *, lines=None):
             return None
         in_force = route_authority.route_in_force(route)
         pins = route_authority.selection_pin_rows(in_force)
-        pin = pins.get('frame') or pins.get('owner') or {}
+        pin = pins.get(route_authority.pin_target('frame')) or {}
         # A concrete model/effort is an exact user choice. A harness-only pin
         # may use the peer only when it names that peer's harness.
         if pin.get('model') or pin.get('effort'):
             return None
-        candidates = (route.get('registered_headless_candidates') or []
-                      if route.get('effective_intensity') == 'quick'
-                      else (route.get('dispatch_evidence') or {}).get('tuples') or [])
-        candidate_key = 'harness' if route.get('effective_intensity') == 'quick' else 'child_harness'
-        supported = {row.get(candidate_key) for row in candidates
-                     if isinstance(row, dict) and row.get('status') == 'supported'}
+        supported = route_authority.depth1_supported_harnesses(route, worker_type='frame')
         current_lines = Path(jobs).read_text().splitlines() if lines is None else lines
         rows = _rows(current_lines)
         source_row = rows.get(meta['attempt_id'])
