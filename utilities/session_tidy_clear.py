@@ -259,6 +259,15 @@ def reconcile_pending(seat: "st.Seat", *, lock_wait: float = 0.2) -> bool:
     return ok
 
 
+def _clear_lineage_reason(harness: str, sid: str) -> str:
+    """A new automatic clear belongs only to the current source session."""
+    from dispatch_seat_handover import chain_end
+    _end, state = chain_end(harness, sid)
+    if state == "self":
+        return ""
+    return "session-handed-over" if state == "successor" else "lineage-unresolved"
+
+
 def observe_idle_event(harness: str, sid: str, cwd: str, *, event_id: str, provider: str = "",
                        model: str = "", tokens: int, now: Optional[float] = None,
                        lock_wait: Optional[float] = None) -> str:
@@ -278,6 +287,9 @@ def observe_idle_event(harness: str, sid: str, cwd: str, *, event_id: str, provi
         return "booking=off"
     if tokens < policy["min_tokens"]:
         return "booking=skipped reason=below-threshold"
+    reason = _clear_lineage_reason(harness, sid)
+    if reason:
+        return f"booking=skipped reason={reason}"
     seat = st.resolve_seat(harness, cwd or None, sid=sid)
     # Idle automation requires a transport whose exact session and empty input
     # can be checked by peer-steward at send time.
@@ -856,6 +868,9 @@ def schedule_compact_card_request(seat: "st.Seat", harness: str, sid: str, cwd: 
             return "clear=pending reason=queue-receipt-unavailable"
     except BaseException as exc:  # noqa: BLE001 - do not book a clear without a durable queue row
         return f"clear=pending reason=queue-write-{type(exc).__name__}"
+    reason = _clear_lineage_reason(harness, sid)
+    if reason:
+        return f"clear=skipped reason={reason}"
     try:
         with st.seat_lock(seat.key, wait=lock_wait):
             existing = read_reservation(seat.key)
@@ -929,10 +944,19 @@ def schedule_for_enqueue(seat: "st.Seat", harness: str, sid: str, cwd: str, *, o
     seat = st.session_seat(seat, harness, sid)
     now = st.now_epoch() if now is None else now
     hint = CLEAR_COMMAND.get(harness, "/clear")
+    if opt_out:
+        cancel(seat)
+        return "clear=off"
+    reason = _clear_lineage_reason(harness, sid)
+    if reason:
+        existing = read_reservation(seat.key)
+        if (compact_context and existing
+                and (existing.get("compact") or {}).get("identity") == compact_context.get("identity")
+                and existing.get("status") != "reserved"):
+            return ("clear=off" if existing.get("status") == "cancelled"
+                    else f"clear=completed reason={existing.get('status') or 'terminal'}")
+        return f"clear=skipped reason={reason}"
     if idle_context is not None:
-        if opt_out:
-            cancel(seat)
-            return "clear=off"
         return _accept_idle_enqueue(seat, harness, sid, cwd, idle_context,
                                     operation_id=operation_id, queue_id=queue_id, lock_wait=lock_wait,
                                     no_continue=no_continue)
@@ -950,9 +974,6 @@ def schedule_for_enqueue(seat: "st.Seat", harness: str, sid: str, cwd: str, *, o
                    ("identity", "trigger", "transcript", "transcript_identity", "summary_id", "parent_id",
                     "tail_start_id", "compaction_part_id", "boundary_offset")
                    if compact_context.get(key) is not None}
-    if opt_out:
-        cancel(seat)
-        return "clear=off"
     native = seat.kind == "native" and seat.native and harness == "claude"
     if not native and (seat.kind != "pane" or not seat.pane or harness not in CLEAR_COMMAND or herdr_command() is None):
         if compact:

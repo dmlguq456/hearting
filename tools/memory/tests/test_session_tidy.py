@@ -3637,6 +3637,161 @@ class PromptSeqTest(TidyCase):
         self.assertEqual(data["prompt_seq"], 2)
 
 
+class ConsumedClearLineageRegressionTest(TidyCase):
+    """One logical source cannot clear again after confirmed cross-pane handoff."""
+
+    def setUp(self):
+        super().setUp()
+        import dispatch_seat_handover as handover
+        self.handover = handover
+        import human_wait_state
+        transcript = self.iso.root / "source-A.jsonl"
+        transcript.write_text(json.dumps({"type": "assistant", "uuid": "summary", "isCompactSummary": True,
+            "compactMetadata": {"trigger": "auto"}, "message": {"content": [{"type": "text", "text": "summary"}]}}) + "\n")
+        info = transcript.stat()
+        self.context = {"identity": "synthetic-compact-operation", "trigger": "auto",
+                        "transcript": str(transcript), "prompt_seq": 0,
+                        "boundary_offset": info.st_size, "transcript_identity": f"{info.st_dev}:{info.st_ino}"}
+        with transcript.open("a") as stream:
+            stream.write(json.dumps({"type": "assistant", "uuid": "finished", "message": {
+                "stop_reason": "end_turn", "content": [{"type": "text", "text": "finished work"}]}}) + "\n")
+        self.stack = contextlib.ExitStack()
+        self.addCleanup(self.stack.close)
+        self.stack.enter_context(self.library())
+        self.stack.enter_context(mock.patch.object(pane_ownership, "_caller_runtime", return_value=(None, False)))
+        self.stack.enter_context(mock.patch.object(clear, "herdr_command", return_value="/bin/true"))
+        self.stack.enter_context(mock.patch.object(human_wait_state, "_request_producer"))
+        self.helpers = self.stack.enter_context(mock.patch.object(clear, "_start_helper", return_value=424242))
+        self.starts = self.stack.enter_context(mock.patch.object(runner, "_start_queued", side_effect=lambda item: item))
+        handover._LINEAGE_GRAPH_CACHE.clear()
+        self.seat = st.resolve_seat("claude", str(self.cwd), sid="source-A")
+
+    def compact(self, seat, harness="claude", sid="source-A", context=None):
+        context = context or self.context
+        st.write_card(seat, harness, sid, "synthetic summary", cwd=str(self.cwd),
+                      origin="runtime-compact", compact_context=context)
+        st._append_ledger_entry(seat, dict(event="compact", harness=harness, sid=sid, ts=1,
+            compact_identity=context["identity"], compact=dict(context), cwd=str(self.cwd)))
+        return st._enqueue_tidy(seat, harness, sid, str(self.cwd), str(context.get("transcript") or ""),
+                                compact_context=context, operation_id=context["identity"])
+
+    def handed_over(self):
+        item, result = self.compact(self.seat)
+        self.assertEqual(result, "clear=scheduled")
+        req = clear.read_reservation(self.seat.key)
+        claim, reason = clear.claim_clear(clear.reservation_path(self.seat.key), req["nonce"])
+        self.assertEqual(reason, "")
+        self.assertEqual(claim["clear_claim"]["state"], "sending")
+        self.assertIsNone(clear.claim_clear(clear.reservation_path(self.seat.key), req["nonce"])[0])
+        with st.seat_lock(self.seat.key):
+            self.handover.publish_snapshot_locked(self.seat, "claude", "source-A", [])
+        # Only native clear observation is synthetic; queue, booking, hook,
+        # succession and binding publication use the production paths.
+        self.assertTrue(clear._finish(self.seat.key, req["nonce"], "cleared", observed="successor-B"))
+        self.assertEqual(clear.read_reservation(self.seat.key)["clear_claim"]["outcome"], "cleared")
+        st.run_hook("claude", "start", "successor-B", source="clear", cwd=str(self.cwd), env=os.environ)
+        self.assertEqual(self.handover.chain_end("claude", "source-A"), ("successor-B", "successor"))
+        self.assertTrue(any(row.get("event") == "handover" and row.get("sid") == "successor-B"
+                            for row in st._read_ledger_lines(self.seat)))
+        return item
+
+    def test_same_compact_resume_in_another_pane_keeps_queue_without_clear(self):
+        item = self.handed_over()
+        # A failed continuation does not undo the already consumed clear.
+        req = clear.read_reservation(self.seat.key)
+        req["continued"] = {"state": "failed", "reason": "agent-not-found"}
+        clear._write_reservation(req)
+        self.helpers.reset_mock()
+        self.starts.reset_mock()
+        with self.library({"HERDR_PANE_ID": PANE_BESIDE}):
+            moved = st.resolve_seat("claude", str(self.cwd), sid="source-A")
+            self.assertNotEqual(moved.key, self.seat.key)
+            st.run_hook("claude", "start", "source-A", source="resume", cwd=str(self.cwd), env=os.environ)
+            result = st.reconcile_compact_frontier("claude", "source-A", str(self.cwd), env=os.environ)
+            self.assertIn("session-handed-over", result)
+            self.assertIsNone(clear.read_reservation(moved.key))
+            self.assertEqual([entry["id"] for entry in runner.list_items()], [item["id"]])
+            self.assertTrue(self.starts.called)
+            self.helpers.assert_not_called()
+            self.assertEqual(self.handover.lineage_graph().edges, (("claude", "source-A", "successor-B"),))
+
+    def test_terminal_booking_replay_and_missing_booking_cannot_create_second_clear(self):
+        self.handed_over()
+        self.assertEqual(clear.schedule_for_enqueue(self.seat, "claude", "source-A", str(self.cwd),
+            compact_context=self.context), "clear=completed reason=cleared")
+        clear.reservation_path(self.seat.key).unlink()  # fixture-owned lost physical booking
+        self.helpers.reset_mock()
+        self.assertIn("session-handed-over", self.compact(self.seat)[1])
+        self.helpers.assert_not_called()
+        self.assertIsNone(clear.read_reservation(self.seat.key))
+
+    def test_old_source_new_compact_manual_and_idle_acceptance_skip_but_queue_remains(self):
+        self.handed_over()
+        for context in (None, {"identity": "new-compact", "trigger": "auto", "transcript": ""}):
+            if context:
+                st.write_card(self.seat, "claude", "source-A", "new summary", compact_context=context)
+            item, result = st._enqueue_tidy(self.seat, "claude", "source-A", str(self.cwd), compact_context=context)
+            self.assertIn("session-handed-over", result)
+            self.assertIsNotNone(runner.read_item(item["id"]))
+        self.assertIn("session-handed-over", clear.schedule_for_enqueue(self.seat, "claude", "source-A",
+            str(self.cwd), idle_context={"identity": "old-idle"}))
+        self.assertEqual(clear.schedule_for_enqueue(self.seat, "claude", "source-A", str(self.cwd), opt_out=True),
+                         "clear=off")
+        self.assertEqual(clear.read_reservation(self.seat.key)["status"], "cancelled")
+
+    def test_successor_can_book_its_own_compact_and_pending_source_can_resume(self):
+        item, result = self.compact(self.seat)
+        self.assertEqual(result, "clear=scheduled")
+        req = clear.read_reservation(self.seat.key)
+        self.assertEqual(self.compact(self.seat)[1], "clear=scheduled")
+        self.assertEqual(clear.read_reservation(self.seat.key)["nonce"], req["nonce"])
+        clear._finish(self.seat.key, req["nonce"], "cleared", observed="successor-B")
+        st.run_hook("claude", "start", "successor-B", source="clear", cwd=str(self.cwd), env=os.environ)
+        self.assertEqual(self.compact(self.seat, sid="successor-B", context={
+            "identity": "successor-compact", "trigger": "auto", "transcript": ""})[1], "clear=scheduled")
+
+    def test_second_observed_booking_and_replay_publish_only_one_succession(self):
+        # Two stale physical bookings can both have observed native clears.
+        # Their edge publication must still serialize on the common lock.
+        from concurrent.futures import ThreadPoolExecutor
+        seats = [self.seat, st.Seat("pane", "synthetic-other-seat", pane=PANE_BESIDE)]
+        for i, seat in enumerate(seats):
+            clear._write_reservation(dict(schema=1, nonce=f"stale-{i}", status="cleared",
+                seat={"key": seat.key, "kind": "pane", "pane": seat.pane},
+                harness="claude", sid="source-A", new_session=f"next-{i}"))
+        real_lock = st.seat_lock
+        lock_keys = []
+        def observe_lock(key, *args, **kwargs):
+            lock_keys.append(key)
+            return real_lock(key, *args, **kwargs)
+        def publish(i):
+            with st.session_state_lock(st.session_seat(seats[i], "claude", f"next-{i}")):
+                return st._record_tidy_clear_succession_locked(seats[i], "claude", f"next-{i}", 10 + i)
+        with mock.patch.object(st, "seat_lock", side_effect=observe_lock), \
+                mock.patch.object(st, "bump_dispatch_edge_generation", wraps=st.bump_dispatch_edge_generation) as bump:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                results = list(pool.map(publish, (0, 1)))
+            self.assertEqual(sorted(results), [False, True])
+            self.assertIn(self.handover.LINEAGE_WRITE_KEY, lock_keys)
+            self.assertEqual(bump.call_count, 1)
+            self.assertFalse(publish(results.index(True)))
+            self.assertEqual(bump.call_count, 1)
+        self.assertEqual(len(self.handover.lineage_graph().edges), 1)
+
+    def test_known_fork_blocks_booking_but_unavailable_first_edge_fallback_is_preserved(self):
+        for target in ("branch-B", "branch-D"):
+            st._append_ledger_entry(self.seat, dict(event="succession", harness="claude", sid=target,
+                source="tidy-clear", ts=1, **{"from": "source-A"}))
+        self.assertIn("lineage-unresolved", clear.schedule_for_enqueue(self.seat, "claude", "source-A", str(self.cwd)))
+        clear._write_reservation(dict(schema=1, nonce="first", status="cleared",
+            seat={"key": self.seat.key, "kind": "pane", "pane": PANE},
+            harness="claude", sid="fresh-source", new_session="fresh-target"))
+        with mock.patch.object(self.handover, "lineage_graph", side_effect=OSError("unavailable")):
+            self.assertIn("lineage-unresolved", clear.schedule_for_enqueue(self.seat, "claude", "fresh-source", str(self.cwd)))
+            with st.session_state_lock(self.seat):
+                self.assertTrue(st._record_tidy_clear_succession_locked(self.seat, "claude", "fresh-target", 10))
+
+
 class ClearBookingTest(TidyCase):
     """``enqueue`` books at most one clear per seat; the helper is only started, never run here."""
 

@@ -41,7 +41,7 @@ keeps the accepted handover pending instead of treating unknown ownership as emp
 from __future__ import annotations
 
 import contextlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import importlib.util
 import json
@@ -82,6 +82,7 @@ class LineageGraph:
     generation: tuple
     seat_edges: tuple
     seat_unresolved: frozenset
+    binding_conflicts: frozenset = frozenset()
 
 
 def _lineage_generation(info):
@@ -395,47 +396,18 @@ def _build_lineage_graph_uncached(signature, contents, compact_rows=None) -> Lin
                 order = (float(row.get("ts", 0) or 0), index, ledger_key)
                 if key not in latest_bindings or order > latest_bindings[key][0]:
                     latest_bindings[key] = (order, row)
-    outgoing, incoming = {}, {}
-    for harness, origin, target in edges:
-        outgoing.setdefault((harness, origin), set()).add(target)
-        incoming.setdefault((harness, target), set()).add(origin)
-    unresolved = set()
-    for vertex in set(outgoing) | set(incoming):
-        if len(outgoing.get(vertex, ())) > 1 or len(incoming.get(vertex, ())) > 1:
-            unresolved.add(vertex)
-    # Mark every directed cycle, including self-loops, as unresolved.
-    for start in outgoing:
-        path, positions, cursor = [], {}, start
-        while cursor in outgoing and len(outgoing[cursor]) == 1:
-            if cursor in positions:
-                unresolved.update(path[positions[cursor]:])
-                break
-            positions[cursor] = len(path)
-            path.append(cursor)
-            target = next(iter(outgoing[cursor]))
-            cursor = (cursor[0], target)
-    # Ambiguity invalidates the connected lineage component in either direction.
-    adjacent = {}
-    for harness, origin, target in edges:
-        left, right = (harness, origin), (harness, target)
-        adjacent.setdefault(left, set()).add(right)
-        adjacent.setdefault(right, set()).add(left)
-    pending = list(unresolved)
-    while pending:
-        vertex = pending.pop()
-        for neighbor in adjacent.get(vertex, ()):
-            if neighbor not in unresolved:
-                unresolved.add(neighbor)
-                pending.append(neighbor)
+    unresolved = _unresolved_vertices({((h, origin), (h, target))
+                                       for h, origin, target in edges})
     frozen_rows = MappingProxyType({key: tuple(MappingProxyType(dict(row)) for row in rows)
                                     for key, rows in rows_by_key.items()})
     frozen_bindings = MappingProxyType({key: MappingProxyType(dict(value[1]))
                                         for key, value in latest_bindings.items()})
     seat_edges, seat_unresolved = _seat_graph(rows_by_key, edges)
-    return LineageGraph(tuple(sorted(edges)), frozenset(unresolved),
+    graph = LineageGraph(tuple(sorted(edges)), frozenset(unresolved),
                         MappingProxyType({vertex: tuple(sorted(keys))
                                           for vertex, keys in keys_by_vertex.items()}), frozen_rows,
                         frozen_bindings, signature, seat_edges, seat_unresolved)
+    return replace(graph, binding_conflicts=_binding_conflicts(graph))
 
 
 
@@ -460,29 +432,121 @@ def _seat_graph(rows_by_key, edges):
     for sid, target in legacy:
         origins = {vertex for vertex in vertices if vertex[1] == sid}
         qualified.update((origin, target) for origin in origins or {("", sid)})
+    return tuple(sorted(qualified)), _unresolved_vertices(qualified)
+
+
+def _unresolved_vertices(qualified):
+    """Forks block their ancestors; merges and cycles block their component.
+
+    Kahn elimination visits every edge, including cycles through a fork. Any
+    remainder belongs to a component containing a cycle; propagation below
+    intentionally invalidates that entire component, including its tails.
+    """
     outgoing, incoming, adjacent = {}, {}, {}
     for origin, target in qualified:
         outgoing.setdefault(origin, set()).add(target)
         incoming.setdefault(target, set()).add(origin)
         adjacent.setdefault(origin, set()).add(target)
         adjacent.setdefault(target, set()).add(origin)
-    invalid = {vertex for vertex in adjacent
-               if len(outgoing.get(vertex, ())) > 1 or len(incoming.get(vertex, ())) > 1}
-    for start in outgoing:
-        cursor, seen = start, set()
-        while len(outgoing.get(cursor, ())) == 1:
-            if cursor in seen:
-                invalid.update(seen)
-                break
-            seen.add(cursor)
-            cursor = next(iter(outgoing[cursor]))
-    remaining = list(invalid)
-    while remaining:
-        for neighbor in adjacent.get(remaining.pop(), ()):
+    degree = {v: len(incoming.get(v, ())) for v in adjacent}
+    ready = [v for v in degree if degree[v] == 0]
+    while ready:
+        for target in outgoing.get(ready.pop(), ()):
+            degree[target] -= 1
+            if degree[target] == 0:
+                ready.append(target)
+    invalid = {v for v in adjacent if degree[v] or len(incoming.get(v, ())) > 1}
+    pending = list(invalid)
+    while pending:
+        for neighbor in adjacent.get(pending.pop(), ()):
             if neighbor not in invalid:
                 invalid.add(neighbor)
-                remaining.append(neighbor)
-    return tuple(sorted(qualified)), frozenset(invalid)
+                pending.append(neighbor)
+    pending = [v for v in adjacent if len(outgoing.get(v, ())) > 1]
+    invalid.update(pending)
+    while pending:
+        for origin in incoming.get(pending.pop(), ()):
+            if origin not in invalid:
+                invalid.add(origin)
+                pending.append(origin)
+    return frozenset(invalid)
+
+
+def _binding_conflicts(graph):
+    """Compare every exact handoff, not just the chronologically latest row.
+
+    Duplicate logical/physical publications collapse to one transfer. Explicit
+    transfers take priority over implicit succession, including cross-harness
+    retire. Multiple targets are safe only if their exact transfers and normal
+    suffixes converge; a timestamp cannot choose between different fork arms.
+    """
+    transfers = {}
+    for rows in graph.ledger_rows.values():
+        for row in rows:
+            origin = _st()._handover_origin(row)
+            target = (row.get("harness"), row.get("sid"))
+            for binding in row.get("bindings") or ():
+                if not isinstance(binding, dict):
+                    continue
+                key = tuple(binding.get(field) for field in ("jobs", "route", "hash", "node"))
+                if all(isinstance(value, str) for value in key) and key in graph.binding_rows:
+                    legacy = isinstance(row.get("from"), str) and _st().tidy_lineage_edge(row) is None
+                    transfers.setdefault(key, set()).add((origin, target, legacy))
+    implicit = {(h, origin): (h, target) for h, origin, target in graph.edges
+                if (h, origin) not in graph.unresolved}
+    vertices_by_sid = {}
+    for pair in graph.seat_edges:
+        for vertex in pair:
+            vertices_by_sid.setdefault(vertex[1], set()).add(vertex)
+    conflicts = set()
+    for key, pairs in transfers.items():
+        targets = {target for _origin, target, _legacy in pairs}
+        if len(targets) < 2:
+            continue
+        exact, targets_by_sid = {}, {}
+        for target in targets:
+            targets_by_sid.setdefault(target[1], set()).add(target)
+        for origin, target, legacy in pairs:
+            if legacy and origin:
+                # Schema-1 strings have no source harness. Like _seat_graph,
+                # qualify only a unique known SID, including earlier exact
+                # holders whose legacy handoffs are not implicit tidy edges.
+                candidates = {v for v in vertices_by_sid.get(origin[1], set())
+                              | targets_by_sid.get(origin[1], set()) if v[0]}
+                if len(candidates) == 1:
+                    origin = next(iter(candidates))
+            if origin and origin != target:
+                exact.setdefault(origin, set()).add(target)
+        ends, seen, pending = set(), set(), list(targets)
+        # Resolve the union once per exact job. A directed cycle or branching
+        # with distinct terminal holders cannot produce unique authority.
+        links = set()
+        while pending:
+            vertex = pending.pop()
+            if vertex in seen:
+                continue
+            seen.add(vertex)
+            following = exact.get(vertex)
+            if following is None:
+                following = {implicit[vertex]} if vertex in implicit else set()
+            if not following:
+                ends.add(vertex)
+            links.update((vertex, target) for target in following)
+            pending.extend(following - seen)
+        degree = dict.fromkeys(seen, 0)
+        adjacency = {}
+        for origin, target in links:
+            degree[target] += 1
+            adjacency.setdefault(origin, set()).add(target)
+        ready = [v for v in degree if degree[v] == 0]
+        while ready:
+            for target in adjacency.get(ready.pop(), ()):
+                degree[target] -= 1
+                if degree[target] == 0:
+                    ready.append(target)
+        if len(ends) != 1 or any(degree.values()):
+            conflicts.add(key)
+    return frozenset(conflicts)
 
 
 def _seat_end(graph, harness, session):
@@ -1635,6 +1699,8 @@ def _lineage_holder(graph: LineageGraph, key: tuple, registered: str, harness: s
     queried session therefore answers only while it is the end of that chain.
     Keep the selected holder's disposition: an unresolved explicit handoff
     cannot restore the registered parent or authorize the ambiguous holder."""
+    if key in graph.binding_conflicts:
+        return registered, harness, "unresolved"
     latest = graph.binding_rows.get(key)
     holder = registered
     if latest is not None:
@@ -1948,6 +2014,9 @@ def _chain_to(rows: list, session: str, *, graph=None) -> list:
         return []
     while len(reverse.get(cursor, {})) == 1:
         origin = next(iter(reverse[cursor]))
+        if ((harness, origin) in graph.unresolved
+                or (harness, origin) in graph.seat_unresolved):
+            break
         if origin in seen:
             return []
         matches = reverse[cursor][origin]

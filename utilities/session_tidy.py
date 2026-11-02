@@ -1136,14 +1136,29 @@ def _record_tidy_clear_succession_locked(seat: Seat, harness: str, sid: str, now
         return False
     if isinstance(observed, dict) and observed.get("harness") not in (None, harness):
         return False
-    if any(row.get("event") == "succession" and row.get("harness") == harness
-           and row.get("sid") == sid and row.get("from") == old
-           for row in _read_ledger_lines(seat)):
-        return False
-    _append_ledger_entry(seat, {"ts": now, "harness": harness, "sid": sid,
-                                "event": "succession", "from": old, "source": "tidy-clear"})
-    bump_dispatch_edge_generation()
-    return True
+    import dispatch_seat_handover as handover
+    # All edge writers share this lock, after the caller's session/seat locks.
+    # Read fresh bytes inside it, never a pass context captured before waiting.
+    with seat_lock(handover.LINEAGE_WRITE_KEY):
+        try:
+            graph = handover.lineage_graph()
+        except (OSError, ValueError, TypeError):
+            # The matching booking already observed this first clear. Preserve
+            # its historical publication fallback; this grants no new booking.
+            graph = None
+        if graph is not None:
+            _end, state = handover._chain_end(graph, harness, old)
+            target, target_state = handover._chain_end(graph, harness, sid)
+            if state != "self" or target_state == "unresolved" or target == old:
+                return False
+        if any(row.get("event") == "succession" and row.get("harness") == harness
+               and row.get("sid") == sid and row.get("from") == old
+               for row in _read_ledger_lines(seat)):
+            return False
+        _append_ledger_entry(seat, {"ts": now, "harness": harness, "sid": sid,
+                                    "event": "succession", "from": old, "source": "tidy-clear"})
+        bump_dispatch_edge_generation()
+        return True
 
 
 def _confirmed_clear_predecessor(seat: Seat, harness: str, sid: str) -> Optional[dict]:
@@ -1271,7 +1286,11 @@ def _project_seat_lineage(rows: list[dict], cards: dict, locations: dict,
         key = (item["harness"], item["sid"])
         predecessors = edges.get(key, set())
         item["predecessor"] = None
-        unresolved = graph is not None and key in graph.unresolved
+        # A fork's child has its own valid authority, but its incoming
+        # relation still crosses an ambiguous source and cannot be displayed
+        # as a confirmed (or merely chronological) predecessor.
+        unresolved = graph is not None and (key in graph.unresolved or any(
+            (item["harness"], origin) in graph.unresolved for origin in predecessors))
         if unresolved:
             item["relation"] = "unknown"
         elif (len(predecessors) == 1
