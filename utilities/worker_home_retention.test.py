@@ -3649,6 +3649,7 @@ class Bounds(Fixture):
         self.assertEqual(R.VIEW_REFRESH_SECONDS, 300)
         self.assertLessEqual(R.VIEW_REFRESH_SECONDS, R.IDLE_SECONDS / 12)
         self.assertEqual(R.REMOVE_LIMIT, 16)
+        self.assertEqual(R.BACKLOG_DUE_SECONDS, 60)
         self.assertEqual(R.EXAMINE_LIMIT, 128)
         self.assertEqual(R.EXAMINE_BUDGET_SECONDS, 10)
         self.assertEqual(R.REMOVE_DEADLINE_SECONDS, 20)
@@ -3716,7 +3717,10 @@ class Bounds(Fixture):
             result = R.sweep(self.jobs, now_ns=sweep_now, force=True)
         elapsed = time.monotonic() - started
         within_deadline = sum(finished <= deadline for finished, deadline in detach_times)
-        self.assertGreaterEqual(result["due"], due_count)
+        # Examination stops once the removal budget is full of due homes.
+        self.assertEqual(result["due"], R.REMOVE_LIMIT)
+        self.assertLess(R.REMOVE_LIMIT, due_count)
+        self.assertEqual(result["more"], 1)
         self.assertLessEqual(result["examined"], R.EXAMINE_LIMIT)
         self.assertLessEqual(result["removed"] + result["partial"], R.REMOVE_LIMIT)
         self.assertGreaterEqual(within_deadline, 6, result)
@@ -3807,11 +3811,34 @@ class Bounds(Fixture):
         self.sweep(0)
         first = self.sweep(8 / 7)
         self.assertEqual(first["removed"], R.REMOVE_LIMIT)
-        self.assertEqual(self.kept(first, "deferred"), 3)
+        # Examination stops once the removal budget is full, so nothing is
+        # examined-then-deferred and the rest wait for the next pass.
+        self.assertEqual(first["examined"], R.REMOVE_LIMIT)
+        self.assertEqual(self.kept(first, "deferred"), 0)
         second = self.sweep(8.1 / 7)
         self.assertEqual(second["removed"], 3)
         self.assertFalse(any(path.exists() for path in homes))
         self.assertEqual(self.sweep(8.2 / 7)["removed"], 0)
+
+    def test_cursor_resumes_at_due_homes_the_pass_could_not_remove(self):
+        # More due homes than one pass removes, and more homes than one
+        # examine batch: the next pass must continue right after the last
+        # examined home instead of skipping the rest of a whole cycle.
+        attempts = [f"att-r{index}" for index in range(R.EXAMINE_LIMIT + R.REMOVE_LIMIT + 4)]
+        paths = {attempt: self.add(attempt) for attempt in attempts}
+        self.sweep(0)
+        first = self.sweep(8 / 7)
+        self.assertEqual((first["removed"], first["examined"]), (R.REMOVE_LIMIT, R.REMOVE_LIMIT))
+        remaining = len(attempts) - R.REMOVE_LIMIT
+        total = R.REMOVE_LIMIT
+        for step in range(1, 12):
+            result = self.sweep((8 + step / 1000) / 7)
+            self.assertLessEqual(result["removed"], R.REMOVE_LIMIT)
+            total += result["removed"]
+            if not any(path.exists() for path in paths.values()):
+                break
+        self.assertEqual(total, len(attempts))
+        self.assertLessEqual(step, -(-remaining // R.REMOVE_LIMIT))
 
     def test_fair_cursor_reaches_eligible_homes_behind_protected_ones(self):
         attempts = [f"att-f{index}" for index in range(R.EXAMINE_LIMIT + 5)]
@@ -3849,6 +3876,23 @@ class Bounds(Fixture):
             self.assertEqual(self.sweep((1) / 7), {"skipped": "busy"})
         finally:
             os.close(fd)
+
+    def test_next_pass_starts_sooner_only_while_due_homes_are_left_behind(self):
+        for index in range(R.REMOVE_LIMIT + 1):
+            self.add(f"att-more-{index}")
+        base = self.now + int(8 / 7 * RETENTION_NS)
+        R.sweep(self.jobs, now_ns=self.now, force=True)
+        first = R.sweep(self.jobs, now_ns=base, force=True)
+        self.assertEqual((first["removed"], first.get("more")), (R.REMOVE_LIMIT, 1))
+        gap = R.BACKLOG_DUE_SECONDS * 10**9
+        self.assertEqual(R.sweep(self.jobs, now_ns=base + gap - 10**9), {"skipped": "not-due"})
+        second = R.sweep(self.jobs, now_ns=base + gap)
+        self.assertEqual(second["removed"], 1)
+        self.assertNotIn("more", second)
+        # Nothing is left behind now, so the ordinary interval applies again.
+        self.assertEqual(R.sweep(self.jobs, now_ns=base + gap + 2 * gap),
+                         {"skipped": "not-due"})
+        self.assertNotIn("skipped", R.sweep(self.jobs, now_ns=base + gap + R.DUE_SECONDS * 10**9))
 
     def test_examine_time_budget_stops_before_the_candidate_limit(self):
         for index in range(5):
