@@ -54,6 +54,13 @@ print(json.dumps(result, sort_keys=True))
 """
 
 
+# Inner bubblewrap flags; keep in sync with the os.execvp argument list in
+# RUNNER. The probes run this same two-layer shape, because a runner image can
+# allow the outer bwrap yet refuse the nested one (user namespaces confined).
+INNER_BWRAP_ARGS = ["--die-with-parent", "--unshare-pid", "--ro-bind", "/", "/",
+                    "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]
+
+
 class ForegroundActivityNamespaceTests(unittest.TestCase):
     def _run_cell(self, wrapper: list[str], mode: str, env=None):
         with tempfile.TemporaryDirectory(prefix="foreground-activity-", dir=ROOT) as td:
@@ -88,14 +95,17 @@ class ForegroundActivityNamespaceTests(unittest.TestCase):
             os.chmod(codex_home, 0o700)
             env = os.environ.copy()
             env.update(HOME=home, CODEX_HOME=str(codex_home), XDG_RUNTIME_DIR=runtime)
-            probe = subprocess.run([codex, "sandbox", "-P", ":workspace", "--", "true"],
+            probe = subprocess.run([codex, "sandbox", "-P", ":workspace", "--", bwrap,
+                                    *INNER_BWRAP_ARGS, "true"],
                                    text=True, capture_output=True, timeout=10, env=env)
             if probe.returncode:
-                self._runtime_skip("Codex sandbox cell unavailable: " + probe.stderr.strip())
+                self._runtime_skip("nested bubblewrap under Codex sandbox unavailable: "
+                                   + probe.stderr.strip())
             for mode in ("busy", "quiet"):
                 result = self._run_cell([codex, "sandbox", "-P", ":workspace", "--"], mode, env)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 evidence = json.loads(result.stdout.strip().splitlines()[-1])
+                self.assertTrue(evidence["inner_started"], evidence.get("inner_error") or evidence)
                 self.assertIn("pid:[", evidence["pid_namespace"])
                 self.assertTrue(evidence["nspid"].startswith("NSpid:"))
                 self.assertTrue(evidence["group_empty"])
@@ -112,13 +122,15 @@ class ForegroundActivityNamespaceTests(unittest.TestCase):
         wrapper = [bwrap, "--die-with-parent", "--unshare-pid", "--ro-bind", "/", "/",
                    "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
                    "--bind", str(ROOT), str(ROOT)]
-        probe = subprocess.run([*wrapper, "true"], text=True, capture_output=True, timeout=10)
+        probe = subprocess.run([*wrapper, bwrap, *INNER_BWRAP_ARGS, "true"],
+                               text=True, capture_output=True, timeout=10)
         if probe.returncode:
             self._require_or_skip("bubblewrap PID namespace unavailable: " + probe.stderr.strip())
         for mode in ("busy", "quiet"):
             result = self._run_cell(wrapper, mode)
             self.assertEqual(result.returncode, 0, result.stderr)
             evidence = json.loads(result.stdout.strip().splitlines()[-1])
+            self.assertTrue(evidence["inner_started"], evidence.get("inner_error") or evidence)
             self.assertTrue(evidence["nspid"].startswith("NSpid:"))
             self.assertTrue(evidence["group_empty"])
             self.assertEqual(evidence["failure"], "" if mode == "busy" else "no-progress", evidence)
