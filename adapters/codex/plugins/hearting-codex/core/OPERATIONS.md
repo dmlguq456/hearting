@@ -1373,7 +1373,8 @@ reports its own obligation.
 
 `capability-route.py correct --attempt-id <id> --message-file <file>` (omit the
 file to inspect) targets only a registered dispatch-depth-1 owner attempt (else
-`correction-target-not-owner`). Any session can send it; `correction_source_session`
+`correction-target-not-owner`). A route id or route file in its place names that
+route's newest registered owner; with none, `correct` uses this session's open route. Any session can send it; `correction_source_session`
 records the sender without checking it. The runtime supervisor delivers it; only
 restoring an unavailable consumer requires the route's effective parent (below).
 The exact attempt binds one durable input receipt; repeating
