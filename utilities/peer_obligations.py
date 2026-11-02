@@ -667,9 +667,15 @@ def follow_installed_release(script: str | Path, arguments: Iterable[str], *, ro
         distribution = _distribution_module(code_root)
         if distribution is None:
             return False
+        # Nothing here waits: a lock path that is not the installer's regular
+        # lock file (a FIFO would block a plain open) or a held lock means the
+        # install cannot be judged now, so this helper keeps its own code.
         lock_fd = os.open(Path(distribution.state_root()) / "distribution.lock",
-                          os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
+                          os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
+                          | getattr(os, "O_CLOEXEC", 0))
         try:
+            if not stat.S_ISREG(os.fstat(lock_fd).st_mode):
+                return False
             try:
                 fcntl.flock(lock_fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
             except BlockingIOError:

@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -323,6 +324,44 @@ class FollowDecisionTest(unittest.TestCase):
         with mock.patch.object(os, "execve") as execve:
             self.assertFalse(peer_obligations.follow_installed_release(__file__, ()))
         execve.assert_not_called()
+
+    def test_an_install_that_cannot_be_judged_is_not_entered_and_nothing_waits(self):
+        self.install.point(self.install.b)
+        lock = self.install.state / "distribution.lock"
+        for kind in ("missing", "directory", "fifo", "symlink", "held"):
+            if lock.is_dir() and not lock.is_symlink():
+                lock.rmdir()
+            else:
+                lock.unlink(missing_ok=True)
+            holder = None
+            if kind == "directory":
+                lock.mkdir()
+            elif kind == "fifo":
+                os.mkfifo(lock)
+            elif kind == "symlink":
+                (self.install.state / "elsewhere.lock").touch()
+                lock.symlink_to(self.install.state / "elsewhere.lock")
+            elif kind == "held":
+                lock.touch()
+                holder = open(lock, "rb")
+                fcntl.flock(holder, fcntl.LOCK_EX)
+            outcome = []
+            worker = threading.Thread(
+                target=lambda: outcome.append(self.follow(self.install.a)), daemon=True)
+            worker.start()
+            worker.join(timeout=5)
+            blocked = worker.is_alive()
+            if blocked and kind == "fifo":
+                # Give the stuck reader a writer so the thread can end.
+                os.close(os.open(lock, os.O_WRONLY | os.O_NONBLOCK))
+                worker.join(timeout=5)
+            if holder is not None:
+                holder.close()
+            with self.subTest(kind=kind):
+                self.assertFalse(blocked, "deciding whether to move must never wait")
+                result, execve = outcome[0]
+                self.assertFalse(result)
+                execve.assert_not_called()
 
     def test_failed_exec_restores_working_directory_and_descriptors(self):
         self.install.point(self.install.b)
