@@ -1,340 +1,420 @@
 <h1 align="center">Hearting</h1>
 
-<p align="center"><strong>One complete agent workflow across Claude Code, Codex, and OpenCode.</strong></p>
+<p align="center"><strong>One way of working for your coding agents — on Claude Code, Codex, and OpenCode.</strong></p>
 
-<p align="center">A local-first workflow layer for Claude Code, Codex, and OpenCode.</p>
+<p align="center">Hearting keeps agent work on your intent: a capable model settles the plan,<br>
+lower-cost workers carry it out in small checked steps, and Fleet shows every session and worker live.</p>
 
 <p align="center">
   <img alt="Claude Code: native" src="https://img.shields.io/badge/Claude_Code-native-D97757?style=flat-square">
   <img alt="Codex: native" src="https://img.shields.io/badge/Codex-native-111827?style=flat-square">
   <img alt="OpenCode: native" src="https://img.shields.io/badge/OpenCode-native-2563EB?style=flat-square">
-  <img alt="Installation: managed release" src="https://img.shields.io/badge/installation-one--line_release-059669?style=flat-square">
+  <img alt="Platform: Linux and macOS" src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS-4B5563?style=flat-square">
+  <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-059669?style=flat-square">
 </p>
 
 <p align="center"><strong>English</strong> · <a href="README.ko.md">한국어</a></p>
 
-<p align="center"><a href="https://dmlguq456.github.io/hearting/"><strong>Landing page & agent map ↗</strong></a></p>
+<p align="center">
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#fleet-every-agent-on-one-screen">Fleet</a> ·
+  <a href="#permissions">Permissions</a> ·
+  <a href="https://dmlguq456.github.io/hearting/">Landing page &amp; agent map ↗</a>
+</p>
 
-Hearting closes research, planning, implementation, and verification work
-consistently across supported coding-agent runtimes. It is **not a setup for a
-single runtime**. Shared contracts are defined once, then projected only onto
-the native skill, agent, hook, mode, and command surfaces that each runtime
-actually discovers.
+<p align="center">
+  <img src="docs/fleet.svg" alt="Fleet's group view: a main Claude Code session, the owner it dispatched, and three stage workers under it on Claude Code and Codex — one running, one done, one waiting for input — each with its model, context gauge, and elapsed time." width="100%">
+</p>
+<p align="center"><sub>Fleet's group view (<code>fleet-monitor</code>): a main session, the owner it dispatched, and that owner's stage workers on two runtimes. Drawn from synthetic rows.</sub></p>
 
-```text
-"Implement and test the login API, then leave a change report."
-                                  ↓
-       plan → execute → test → report + durable evidence
-                                  ↓
-              watch every stage of it live in `fleet`
-```
+<!-- TODO(v4.0, Fleet F1): replace this image with the Explorer OVERVIEW capture once the single Fleet screen is accepted. -->
 
 ## Why Hearting
 
-- **Finish the whole cycle.** Research, specs, plans, implementation, tests,
-  reports, and durable evidence stay connected.
-- **Keep one contract across three runtimes.** Shared behavior is projected
-  onto the surfaces Claude Code, Codex, and OpenCode actually discover.
-- **Spend the right model on the right node.** Stage meaning and risk select
-  the execution profile, sealed at route-compile time rather than passed as a
-  trailing flag.
-- **Watch the work while it runs.** `fleet` shows interactive sessions and
-  dispatched workers from every runtime in one live tree.
-- **Know what is running.** Inspect the active release or checkout, revision,
-  freshness, duplicates, and required session action.
-- **One activation, the whole harness.** Every runtime discovers the full
-  manifest-derived capability set — no forked subsets or separate setups.
-- **Carry decisions safely.** Durable memory and executable guards preserve
-  conventions while checking spec, artifact, git, and projection boundaries.
+Agents differ by vendor, by model, and by what your workplace gives you, and
+working without them is no longer an option. Hearting keeps the way you work
+the same across them. You stay in charge, and the work holds together even
+when the agent contributes little on its own.
+
+- **Consistent work, whatever the agent.** Some agents do a lot on their own,
+  some very little. Hearting confirms the direction with you before work
+  starts, keeps each worker inside a bounded scope, and checks results
+  independently, so the work stays tied to what you asked rather than to how
+  capable the agent happens to be.
+- **One way of working everywhere.** The same requests, stages, artifacts, and
+  memory on Claude Code, Codex, and OpenCode — one of them or all three. Fleet
+  watches all of them in one view.
+- **A crutch for low-cost agents.** Hearting cannot make a weak model smarter.
+  It lets one carry out your intent anyway: a capable model settles the intent
+  and the plan (the *frame*), and cheaper workers carry it out in small,
+  checked steps (*dispatch*).
+- **Light on the agent.** Hearting is designed so that no step works only if an
+  agent memorizes a long procedure; the procedure lives in the harness.
+- **Existing work first.** Before planning, a cheap read-only scan lists what
+  your code, earlier artifacts, memory, and git history already settled, so the
+  plan starts from that instead of from what the model happens to know.
+
+## How a request runs
+
+Describe the outcome in your own words. There are no command names to learn,
+and output follows the language of your conversation.
+
+> “Implement and test the login API, then leave a change report.”
+
+```text
+your request
+  ├─ prior-art scan    what the project already has: code, artifacts, memory, git history
+  ├─ frame             two capable-model legs propose a route; you confirm the direction
+  └─ owner             one session keeps your request and its finish line to the end
+       ├─ plan ─► plan check
+       ├─ execute      a lower-cost worker; the only stage that edits source
+       ├─ test, review independent checks, on another runtime when one is available
+       └─ report       what changed, what was verified, what is left
+                       … and Fleet shows every step above while it runs
+```
+
+How much of this runs depends on the request. A one-line answer or a typo runs
+inline (`direct`). A small change gets the frame and one quick worker
+(`quick`). Bigger or riskier work adds a written plan and checklist,
+independent reviews, and finally adversarial or security checks
+(`standard → strong → thorough → adversarial`).
+
+Each stage runs in its own session on a model budget chosen for that stage —
+`deep` for hard judgment, `balanced-deep` for important judgment, `balanced`
+or `light` for planned execution, `mini` for small helper calls — and the
+choice is recorded with the request. Shared contracts never name a vendor
+model; you decide which real model each budget uses
+([Runtimes and models](#runtimes-and-models)).
+
+More requests that work as written:
+
+> “Analyze this repository and write a PRD for the next feature.”
+
+> “Review these papers and the experiment code, then build a reproduction plan.”
+
+> “Find the earlier decision and apply this project's naming convention.”
+
+See [capabilities/README.md](capabilities/README.md) for every entry point and
+[core/WORKFLOW.md](core/WORKFLOW.md) for the routing rules.
+
+## Fleet: every agent on one screen
+
+When agents work in the background, the usual problem is not knowing: is it
+still running, is it stuck, is it waiting for you, did it finish? Fleet
+answers that in one terminal view — for every Claude Code, Codex, and OpenCode
+session on the machine and every worker Hearting dispatched from them.
+
+### What you see at a glance
+
+Across the top: each runtime's usage-window gauges, and how many sessions are
+working, idle, or waiting for you. Below it, one screen per question:
+
+| Screen | What it tells you |
+|---|---|
+| **OVERVIEW** | Every session, grouped by project: runtime, model and effort, a short title, context left, what it is doing now, and for how long. Working, idle, and waiting-for-you have different marks. |
+| **ROUTES** | Each request's stage line — `plan › execute › test › report` — with the workers running under it. |
+| **QUESTIONS** | Every agent waiting for your answer or approval, oldest first. Answer from Fleet when the runtime offers a reply path; otherwise Fleet points you to the session. |
+| **PEERS** | Which sessions watch or steer which, and their last exchange. |
+| **HISTORY** | Earlier sessions of each terminal seat, so work that continued in a new session stays traceable. |
+| **RESOURCES** | CPU, memory, and per-GPU use on this machine and any configured hosts, with the session that owns each GPU process. |
+| **MEMORY** | What was saved to shared memory today, by project. |
+| **MODELS · SYSTEM** | Which real model each budget maps to, and the installed Hearting release. |
+
+Select a session or a request to open its page, and from there its raw output:
+tool calls and results in order, without opening the runtime itself.
+
+<!-- Key screens to capture for v4.0 (see the README design note):
+     F1 OVERVIEW (hero) · F2 ROUTES · F3 QUESTIONS · F4 session page ·
+     F5 RESOURCES · F6 raw output · F7 short walk-through (≤15 s) · F8 narrow width.
+     Captures are rendered off-screen with tools/fleet/tests/explorer_capture.py
+     from a scrubbed, English view-model fixture and labelled as demo data. -->
+
+### Why you can trust what it shows
+
+- **Built from the records the work itself writes.** Fleet reads the attempt
+  registry the dispatcher writes and each runtime's own session state. A stalled worker
+  shows up as a stalled worker, not as a parent session that went quiet, and
+  orphaned rows are shown rather than dropped.
+- **Unknown stays unknown.** A value Fleet could not read is shown as `?` —
+  never as zero, never as success.
+- **Watching changes nothing.** Observation never completes, retries, or
+  cleans up work. Fleet acts only on what you select, such as answering a
+  waiting question.
+
+### Commands
+
+```bash
+fleet              # the Explorer, full screen (needs curses)
+fleet --once       # one plain snapshot
+fleet --json       # the same state as JSON, for scripts
+fleet-monitor      # the group/process view pictured at the top of this page
+```
+
+`--once` and `--json` need no `curses`, so they also work on Windows under Git
+Bash. Session titles follow your language; set `title_language` in
+`${XDG_CONFIG_HOME:-~/.config}/hearting/fleet.json` to override it.
+
+### Known limits
+
+- The Explorer is the default `fleet` screen; its layout and keyboard handling
+  are still being finished for v4.0.
+- A few status words and activity lines are still Korean-only; moving them to
+  a shared translation table is planned.
 
 ## Quick start
 
-### Requirements
+### Before you start
 
-- Python 3.11+
-- PyYAML for that Python (e.g. `python3 -m pip install --user pyyaml`):
-  framed routes read their frame proposals with it, and `hearting verify`
-  checks it
-- `curl` or `wget`
-- The CLI for each runtime you want to activate
+- **Linux or macOS.** Windows (Git Bash) is experimental.
+- **Python 3.11+** with PyYAML for that Python:
+  `python3 -m pip install --user pyyaml`
+- **Git**, and `curl` or `wget`.
+- **At least one agent CLI, installed and signed in:** Claude Code, Codex, or
+  OpenCode. Claude Code alone is enough.
+
+<!-- TODO(public-readiness stage 5): add the tested OS × runtime matrix and confirm the minimum Python version. -->
 
 ### Install
+
+All three runtimes:
 
 ```bash
 curl -fsSL https://github.com/dmlguq456/hearting/releases/latest/download/install.sh | sh
 ~/.local/bin/hearting runtime doctor --runtime all --strict
 ```
 
-The installer and distribution logic come from the same immutable Release tag;
-that exact tag's SHA-256 integrity-checked archive is then installed. It activates
-the full capability set for all three runtimes as immutable packaged bundles and
-registers a daily user-level update check where the OS supports it. It does not
-touch runtime credentials, sessions, logs, or databases.
-
-Codex remains responsible for its executable and command binding. Runtime
-activation does not install a protected Codex ingress or edit shell profiles;
-the `codex` executable remains vendor-owned.
-
-Once `~/.local/bin` is on your `PATH`, manage it with:
+Claude Code only:
 
 ```bash
-hearting runtime status --runtime all
-hearting update
+curl -fsSL https://github.com/dmlguq456/hearting/releases/latest/download/install.sh | sh -s -- --runtime claude
+~/.local/bin/hearting runtime doctor --runtime claude --strict
+```
+
+The installer comes from the same release tag as the archive it installs and
+checks that archive's SHA-256 first. It activates the full capability set as
+immutable bundles for the runtimes you chose, puts `hearting`, `fleet`,
+`fleet-monitor`, `mem`, and `compute-hosts` in `~/.local/bin`, and registers a
+daily update check where the OS supports it. It does not touch runtime
+credentials, sessions, logs, databases, or shell startup files, and it cannot
+change the `PATH` of a shell that is already open: use the `~/.local/bin/...`
+paths until that directory is on your `PATH`.
+
+Read [Permissions](#permissions) before your first task.
+
+### First task
+
+Open your agent CLI inside a Git project and ask for something small:
+
+> “Fix the typo in the greeting output, run the existing test, and show me the diff.”
+
+Run `fleet` in a second terminal to watch it. When it finishes you get the
+change, what was run to check it, and anything left undone. For anything
+beyond a one-line fix, the plan, evidence, and report stay in the project's
+`.agent_reports/` folder.
+
+<!-- TODO(public-readiness stages 1 and 6): link QUICKSTART.md with the demo repository, expected patch, and measured time. -->
+
+### Update and status
+
+```bash
+hearting runtime status --runtime all   # active release, freshness, and whether a session must restart
+hearting update                         # stage and verify a release, switch, roll back on failure
 hearting auto-update status
-hearting runtime doctor --runtime all --strict
-
-fleet          # live cross-harness dashboard; --once for a plain snapshot
+hearting config status                  # every user-owned config file and its state
 ```
 
-The installer puts both `hearting` and `harness` on your `PATH` — the same
-launcher under two names, so anything written against the old name keeps
-working. It also drops `fleet` and the shared `compute-hosts` operator launcher
-into `~/.local/bin`. The live
-full-screen view needs `curses`; `fleet --once` and `fleet --json` do not, so
-scripting and snapshots work anywhere Python does.
-
-`compute-hosts` requires an explicit host choice and reads the user-owned
-`${XDG_CONFIG_HOME:-$HOME/.config}/hearting/compute-hosts.yaml`. Install and
-runtime activation seed that file once as a fully commented template (two
-example hosts, English comments) when absent and preserve any existing file or
-symlink; until a host is filled in, the tool
-and the Fleet panel report it as a template rather than failing. `harness
-config status` lists every user-owned config file with its state and the
-command that seeds it. The installer does not edit shell startup files,
-schedule GPU work, or dispatch remote agents. Foreign PATH files
-and symlinks are preserved; full uninstall removes only the owned shared link,
-while a partial runtime uninstall retains it.
-
-Fleet shows this machine's read-only compute observation even without inventory.
-Remote hosts and detached runs still need inventory configuration.
-
-`auto-update status` also reports the installed release, channel, and live
-scheduler health when Linux systemd-user or macOS LaunchAgent exposes it.
-Unavailable probes are reported as unknown; unsupported platforms are reported
-explicitly without changing the scheduler configuration. For a periodic
-LaunchAgent, `active` means the job is loaded and scheduled; its updater process
-does not need to remain running between triggers.
-
-`hearting update` stages and verifies a new release before switching the active
-pointer, and rolls back on failure. Existing agent sessions still follow their
-runtime-specific re-invocation, new-session, or restart boundary; check
-`runtime status` after an update.
-
-The checksum sidecar detects transfer or asset corruption. Publisher
-authenticity is anchored to the repository's GitHub Release and HTTPS account
-boundary; it is not an independent signature.
-
-To pin a version or disable scheduled checks:
+An update does not reload instructions in sessions that are already open;
+`runtime status` says whether each runtime needs a re-invocation, a new
+session, or a restart. To pin a release or skip scheduled checks, use that
+release's installer (replace `vX.Y.Z` with a release tag):
 
 ```bash
-curl -fsSL https://github.com/dmlguq456/hearting/releases/download/v2.0.0/install.sh | sh -s -- --no-auto-update
+curl -fsSL https://github.com/dmlguq456/hearting/releases/download/vX.Y.Z/install.sh | sh -s -- --no-auto-update
 ```
 
-## Use natural language
+The checksum detects transfer or asset corruption. Publisher authenticity
+rests on this repository's GitHub Releases over HTTPS; there is no separate
+signature.
 
-You do not need to memorize command names. Describe the outcome and constraints
-in your natural communication language. Runtime-native skills select the
-relevant pipeline, and user-facing output follows the conversation, audience,
-or artifact language instead of inheriting the language of this README.
+## Permissions
 
-> “Analyze this repository and create a PRD for the next feature.”
+**Background Claude Code workers run in bypass mode by default.** Workers that
+Hearting dispatches in the background start with
+`--permission-mode bypassPermissions`, because nobody is there to answer a
+permission prompt and a run of denials would stop the worker mid-task.
+Sessions you start yourself keep your own runtime permission settings.
 
-> “Implement and test the login API, then leave a change report.”
+To use allowlist mode instead, edit
+`${XDG_CONFIG_HOME:-$HOME/.config}/hearting/dispatch-defaults.yaml`. Change
+the value inside its existing `headless:` block, or add both lines if there is
+no such block:
 
-> “Review these papers and experiment code, then build a reproduction plan.”
-
-> “Render the current screen, refine the design, and produce a development handoff.”
-
-> “Find the previous decision and apply this project's existing naming convention.”
-
-See [capabilities/README.md](capabilities/README.md) for every entrypoint and
-[roles/README.md](roles/README.md) for the portable role model.
-
-## See the whole fleet
-
-`fleet` is a live view over the same attempt registry the dispatcher writes to,
-so it shows interactive sessions and dispatched workers from all three runtimes
-in one tree — not three dashboards you have to reconcile.
-
-<p align="center">
-  <img src="docs/fleet.svg" alt="fleet — a live cross-harness view. An owner session dispatches execute, impl-review and failure-mode workers at depth two, each with its own sealed model profile and context gauge." width="100%">
-</p>
-
-Read the middle of that view top to bottom and you have the dispatch contract
-in one picture. The bright row is a main session at depth 0. Under it, on the
-rail, sits the owner it dispatched at depth 1 — carrying its sealed route,
-`mp:deep`, and the stage pipeline with `execute` already ticked. Under that,
-dimmer again, are the depth-2 stage workers that owner started: `code-execute`
-on `mp:light` still running, `impl-review` done on a different harness,
-`failure-mode` blocked and waiting. Depth reads as brightness, so a three-level
-tree stays legible without a single connector line.
-
-Each row carries the harness it runs on, the model profile its route sealed for
-that node, how much context it has left, and how long it has been at it. A
-stalled worker is visible as a worker rather than as a session that
-mysteriously went quiet, and orphaned rows are surfaced instead of dropped.
-
-The full-screen view needs `curses`. `fleet --once` prints a plain snapshot and
-`fleet --json` emits the same state for scripting, so both work anywhere Python
-does — including native Windows under Git Bash.
-
-## What actually runs your request
-
-One sentence in, a routed pipeline out. Routing, model selection, verification
-depth, and evidence are the harness's job — and each decision is recorded
-rather than improvised.
-
-| Layer | What it does |
-|---|---|
-| **Routed capabilities** | 12 entry routers over 26 capabilities. Before material work the agent proposes a five-field route card — task, reason, route, scope, completion. You approve a filled-in proposal instead of recalling command names and flags. |
-| **Intensity ladder** | `direct → quick → standard → strong → thorough → adversarial` selects the stage graph and dispatch depth. Verification rigor is derived from intensity rather than set on a separate axis, and token pressure can never downshift it. |
-| **Sealed cross-harness dispatch** | At `standard+` each stage is a separately launched session with a sealed role, model profile, and disjoint write scope. Parallel groups of 2–4 legs start in exactly one transaction — a capacity shortage creates zero registry rows and zero model processes. Legs spread across harness families by default. Dispatch depth 3 is forbidden. |
-| **Per-node model tiers** | `deep`, `balanced-deep`, `light`, and `mini` are distinct operating points, sealed per node at compile time. Adapters map them to concrete models; shared contracts never name a vendor model. |
-| **Fleet** | A live dashboard over the same attempt registry: interactive sessions and dispatched workers from all three runtimes in one tree, each with state, harness, sealed profile, context gauge, and token accounting. Orphaned rows are surfaced, not dropped. |
-| **Guards, not good intentions** | 39 hooks, 5 of them hard blocks. Write scope, spec read, artifact root, git state, and memory path are denied before the tool call, not flagged in review. A source edit with no compiled route for this working directory is refused — hotfix included. |
-| **Fixed artifact system** | `research / analyze-project → spec → plans` for code and `research → draft → refine` for documents, under one project-wide `.agent_reports/` root. Each artifact has exactly one owning capability, and spec revisions snapshot the prior version. |
-| **One memory store** | SQLite + FTS5 across every session, project, and runtime. Changed decisions are superseded rather than deleted, and handoffs stay pending until explicitly consumed. |
-
-When a leg cannot start on its intended surface it degrades along a checked
-chain — `same-harness-headless → cross-harness-headless → native-subagent →
-inline` — preserving the route id, write scope, completion gate, and attempt
-identity. The degradation is recorded with its failure class; it is never
-silent.
-
-The [landing page and agent map](https://dmlguq456.github.io/hearting/)
-shows the same structure as a diagram.
-
-## How it works
-
-```text
-                       harness-manifest.json
-                        capability · role
-                               │
-             ┌─────────────────┼─────────────────┐
-             │                 │                 │
-      Claude Code native   Codex native    OpenCode native
-      skills / agents      skills / agents  skills / agents
-      hooks / commands     hooks / modes    commands / plugins
-             └─────────────────┼─────────────────┘
-                               │
-              activate · status · refresh · doctor
+```yaml
+headless:
+  claude_permission_mode: allowlist
 ```
 
-| Layer | Responsibility |
+- Allowlist runs workers with `acceptEdits` and a bounded tool list:
+  Hearting's own utilities, read-only git, test runners, and edits inside the
+  worktree and the artifact root.
+- Where bypass cannot apply — running as root or under sudo, or
+  `permissions.disableBypassPermissionsMode` set in any Claude settings scope —
+  Hearting switches to allowlist on its own and records the mode it used.
+- If the file is invalid or unreadable, the shipped default, bypass, applies.
+  `hearting config status` shows whether your file was read. Merge into an
+  existing block; do not add a second `headless:` key or an inline `{…}`
+  mapping. `DISPATCH_DEFAULTS_CONFIG` points to a different file.
+- Peer sessions started with `peer-steward start` also default to bypass; set
+  `child_permission_mode: inherit` under `steward:` in the same file to keep
+  the parent's mode.
+- This setting covers Claude Code workers only. Codex workers run in Codex's
+  `workspace-write` sandbox without approval prompts; OpenCode workers start
+  from your own OpenCode permission configuration.
+
+<!-- TODO(public-readiness stage 2): once the installer prints this default and the file path, say so here. -->
+
+## Artifacts and status
+
+Work leaves files you can read, not only a chat log. Each project has one
+artifact root, `.agent_reports/`, shared by every runtime and by every git
+worktree of the project:
+
+| Folder | What lands there |
 |---|---|
-| `core/` | Workflow, artifact, assurance, memory, and git/worktree contracts |
-| `harness-manifest.json` | Canonical machine contract for capabilities, roles, and modes |
-| `capabilities/`, `roles/` | Human-readable portable behavior sources |
-| `adapters/` | Native projections and bridges for each runtime |
-| `tools/install/` | Activation lifecycle that leaves runtime-owned state alone |
-| `.agent_reports/` | Project artifacts for specs, plans, test evidence, and handoffs |
+| `research/`, `analysis_project/` | Surveys and analyses of code, papers, or documents |
+| `spec/` | The current blueprint; a revision keeps the previous version |
+| `plans/<date>_<slug>/` | One work cycle: plan, checklist, dev and test logs, evidence, final report |
+| `documents/`, `experiments/` | Drafted documents; experiment setups and results |
 
-Immutable packaged releases or local snapshots are the default for users and
-maintainers. `linked` remains an explicit live-debug mode: checkout changes
-appear immediately on the discovery path, so it cannot guarantee one coherent
-runtime generation for a long session. File visibility and instruction reload
-are separate concerns, so `runtime status` reports whether each runtime needs a
-re-invocation, new session, or restart through `session_action`.
-
-## Runtime support
-
-| Runtime | `linked` projection | `packaged` projection |
-|---|---|---|
-| Claude Code | Skills, agents, commands, and hooks | Immutable bundle of the same native surfaces |
-| Codex | Skills, custom agents, modes, and hooks | Immutable bundle of the same native surfaces |
-| OpenCode | Skills, agents, commands, and local guard plugin | Immutable bundle of the same native surfaces |
-
-Runtime differences are reported rather than hidden. The installer marks
-unsupported surfaces as `SKIP` with a reason, while credentials, sessions,
-databases, logs, and foreign caches remain outside its ownership. See
-[INSTALL_LAYOUT.md](INSTALL_LAYOUT.md) for the detailed mapping.
-
-## Model settings
-
-The three adapters share a requested context operating budget, independent of
-profile model and effort. It defaults to `800000` tokens for Claude and
-OpenCode and `1000000` for Codex (Codex caps it at the selected model's
-maximum); valid values range from `100000` to `1000000`. Query or change it through the existing model
-command group:
+To follow a request while it runs:
 
 ```bash
-hearting model get codex context-window --json
+hearting run attempt-view <attempt-id> --follow                    # a worker's raw output; the agent gives you the id
+hearting run workflow-supervisor status --route <route-id> --json  # which stage a request is in
+```
+
+Do not delete `.agent_reports/` to unblock a task; the next stage reads the
+evidence it holds. An older `.claude_reports/` folder is still read as a
+legacy alias.
+
+<!-- TODO(v4 W4): a one-page project status, refreshed when a request closes or a PR merges; describe it here once it ships. -->
+<!-- TODO(public-readiness stage 4): the completion line with elapsed time and tokens; unknown values stay unknown. -->
+
+## Memory
+
+Decisions and conventions should outlive a session. Hearting keeps them in one
+local store shared by every session, project, and runtime on the machine.
+
+- **One store.** SQLite with full-text search, including CJK, under
+  `${XDG_DATA_HOME:-~/.local/share}/hearting/memory/`.
+- **The agent decides what matters.** Where the runtime supports it, each
+  prompt brings a few short candidate headlines, and the agent reads a record
+  in full before using it. The store itself enforces only schema, scope, and
+  lifecycle.
+- **History is kept.** A changed decision supersedes the old one instead of
+  deleting it, and a hand-off stays pending until a later session takes it.
+- **Local unless you opt in.** Sharing memory between machines is optional
+  ([Shared Memory Exchange](INSTALL_LAYOUT.md#shared-memory-exchange)).
+- `mem` is on your `PATH` for direct use, for example
+  `mem recall "naming convention"`.
+
+See [core/MEMORY.md](core/MEMORY.md) for the full contract.
+
+## Runtimes and models
+
+| Runtime | What Hearting adds through the runtime's own discovery paths |
+|---|---|
+| Claude Code | Skills, agents, commands, and hooks |
+| Codex | Skills, custom agents, modes, and hooks |
+| OpenCode | Skills, agents, commands, and local guard plugin |
+
+Every runtime sees the full capability set. Where a runtime lacks a surface,
+the installer marks it `SKIP` with a reason instead of hiding the difference.
+Claude Code alone is a supported setup; with more than one runtime installed,
+Hearting can place workers and independent reviews across them.
+
+Shared contracts name budgets, not vendor models. Each runtime maps the budgets
+to real models in a user-owned file,
+`<runtime-home>/agent-config/models.conf`, seeded once at install and never
+overwritten. This is where a cheaper model goes onto `light` work:
+
+```bash
+hearting model set codex light <model>[@effort]
+hearting model get claude context-window --json
 hearting model set claude context-window 800000
-hearting model set opencode context-window 800000
 ```
 
-The query reports the selected user/shipped config and whether the value is
-configured or defaulted. Activation and successful edits project the value to
-Claude's native environment setting and Codex's root config key; OpenCode
-caps catalog models above the budget for providers it already loads when the
-runtime starts. Existing native model limits and service capacity can reduce
-the usable window. New sessions and threads use the updated settings, including
-threads a running Codex daemon creates; active sessions keep their captured
-settings.
-All three runtimes also show the interactive main session a once-per-session
-notice above 500K input tokens and an urgent notice above 700K. Workers and
-subagents are excluded.
+The context budget defaults to 800,000 tokens for Claude Code and OpenCode and
+1,000,000 for Codex (capped at the selected model's maximum). New sessions use
+changed settings; running sessions keep theirs. Details are in
+[INSTALL_LAYOUT.md](INSTALL_LAYOUT.md#user-model-configuration).
 
-## Develop the harness
+## Optional features
 
-Maintainers build and activate a local immutable snapshot from a clean checkout:
+None of these is needed for the basic workflow.
+
+- **herdr** — a terminal pane manager. Fleet and peer sessions use it when it
+  is present; without it, the related hooks exit quietly.
+- **Cairn** — an optional reader for finished artifacts. When it is not set up
+  it reports itself unavailable; ordinary work is unaffected.
+- **Compute hosts and GPUs** — `compute-hosts` reads
+  `${XDG_CONFIG_HOME:-$HOME/.config}/hearting/compute-hosts.yaml`, seeded as a
+  commented template. Until you fill in a host it reports `template`, and a
+  compute request without a configured host fails with a clear error. Fleet
+  shows this machine's CPU and GPU use even without the file.
+- **Memory exchange between machines** — see [Memory](#memory).
+
+## What Hearting does not do
+
+| It does not | Instead |
+|---|---|
+| Replace your agent CLI | Claude Code, Codex, and OpenCode stay vendor-owned; Hearting adds to them through their own discovery paths |
+| Touch credentials, sessions, logs, or runtime databases | Those stay owned by each runtime |
+| Edit your shell startup files | You add `~/.local/bin` to `PATH` yourself |
+| Schedule GPU work or start remote agents just because it is installed | Compute runs only on a host you name |
+| Send memory anywhere by default | Memory stays local until you join an exchange |
+| Make a weak model smarter | It gives a weaker model a confirmed plan and small, checked steps |
+| Estimate your bill | Fleet shows the usage windows and token counts the runtimes report; that is not a bill or a quota forecast |
+
+## Develop Hearting
 
 ```bash
 git clone https://github.com/dmlguq456/hearting.git ~/hearting
 cd ~/hearting
 ./tools/install/harness.sh runtime activate --runtime all
-```
-
-Use `--mode linked` only when intentionally debugging live projection behavior.
-Updating the checkout does not activate a new snapshot; run `runtime refresh`
-explicitly, and only new sessions use the new root.
-
-Enable the repository's own Git hooks once per clone:
-
-```bash
 git config core.hooksPath tools/git-hooks
 ```
 
-`pre-push` runs the same generated-projection check CI runs and refuses a push
-that would fail it, so drift is caught before the commit is public. A release
-workflow publishes only after a separate maintainer request. The hook can be
-bypassed with the `--no-verify` option.
-
-After changing a shared definition, refresh every generated projection and
-check for drift:
+Shared behavior starts in `core/`, `capabilities/`, and `roles/`; the three
+adapters under `adapters/` are equal projections of it, and
+[AGENTS.md](AGENTS.md) holds the maintenance principles. After
+changing a shared definition, refresh and check every generated projection:
 
 ```bash
 python3 tools/generate.py
 python3 tools/generate.py --check
-
-./tools/generated-projections.test.sh
-./tools/install/projection-completeness.test.sh
-./tools/install/runtime-activation.test.sh
-./tools/skill-conformance/check.sh
 ./tools/check-adaptation-boundary.sh
-adapters/codex/bin/preflight.sh doctor
+./tools/skill-conformance/check.sh
 ```
 
-`tools/generate.py` is the single build/check entrypoint for every core
-projection — runtime adapter metadata, the operator hub, and the published
-landing surface included. Run the lifecycle suites from a clean working tree:
-packaged activation deliberately refuses to build a bundle from a dirty repo.
+The `pre-push` hook runs the same projection check CI runs. Packaged
+activation refuses to build from a dirty tree, so run the install lifecycle
+suites from a clean checkout; `--mode linked` exists only for live debugging.
 
-Marketplace bundle generation is not part of this path. Humans own the root
-README's value proposition and explanation; only machine contracts and runtime
-projections are generated.
+<!-- TODO(public-readiness stage 6): add CONTRIBUTING.md and link it here. -->
 
 ## Documentation
 
 | Purpose | Document |
 |---|---|
-| Complete usage guide | [MANUAL.md](MANUAL.md) |
+| Maintenance principles | [AGENTS.md](AGENTS.md) |
+| How the parts fit together | [MANUAL.md](MANUAL.md) |
 | Installation and runtime projections | [INSTALL_LAYOUT.md](INSTALL_LAYOUT.md) |
-| Release criteria and SemVer automation | [RELEASE_POLICY.md](RELEASE_POLICY.md) |
+| Releases and versioning | [RELEASE_POLICY.md](RELEASE_POLICY.md) |
 | Capabilities and roles | [capabilities/README.md](capabilities/README.md), [roles/README.md](roles/README.md), [roles/MODES.md](roles/MODES.md) |
 | Routing and artifacts | [core/WORKFLOW.md](core/WORKFLOW.md), [core/CONVENTIONS.md](core/CONVENTIONS.md) |
-| Git, worktrees, and dispatch | [core/OPERATIONS.md](core/OPERATIONS.md) |
-| Memory and recall | [core/MEMORY.md](core/MEMORY.md) |
+| Git, worktrees, dispatch, and Fleet | [core/OPERATIONS.md](core/OPERATIONS.md) |
+| Memory | [core/MEMORY.md](core/MEMORY.md) |
 | Hooks and design principles | [core/HOOKS.md](core/HOOKS.md), [core/DESIGN_PRINCIPLES.md](core/DESIGN_PRINCIPLES.md) |
 
 ## License
