@@ -71,6 +71,7 @@ EXEMPT_SUBSTRINGS = (
     "/loops/drill/",                    # drill fixtures pin explicit models on purpose
     ".test.",                           # test fixtures
     "/tests/",
+    "/utilities/fixtures/",             # read-only captured registry rows; the header already declares fixtures exempt
     "check-model-config.py",            # this guard's own doc/patterns
     "check-unit-config.py",             # sibling guard's mirrored patterns (incl. adapter projection symlink)
     "check-adaptation-boundary.sh",     # boundary guard references models in comments/tests
@@ -78,7 +79,7 @@ EXEMPT_SUBSTRINGS = (
 
 # Concrete model-ID patterns (unambiguous identifiers + alias-as-model-value).
 PATTERNS = [
-    re.compile(r"gpt-5\.\d"),                                   # codex: gpt-5.6-sol, gpt-5.4-mini, ...
+    re.compile(r"\bgpt-\d+\.\d"),                               # codex versioned ids: gpt-6.1-sol, gpt-5.4-mini, ...
     # codex: gpt-6-astra and any later gpt-<major>-<name>.
     re.compile(r"claude-(?:opus|sonnet|haiku|fable)-\d"),       # claude versioned full ids
     re.compile(r"(?<![\w./-])openai/gpt-\d+(?:\.\d+)?-[a-z]"), # OpenAI provider/model reference

@@ -1906,7 +1906,8 @@ def current_claude_usage(model, snapshot, now):
     return replace(model, usage=usage) if replaced or row is not None else model
 
 
-def _parse_clock(ts):
+def _clock_stamp(ts):
+    """The local datetime a journal/route timestamp names, or None when unparsable."""
     if not isinstance(ts, str):
         return None
     try:
@@ -1915,7 +1916,25 @@ def _parse_clock(ts):
         return None
     if stamp.tzinfo is not None:
         stamp = stamp.astimezone()
-    return stamp.strftime("%H:%M")
+    return stamp
+
+
+def _parse_clock(ts):
+    stamp = _clock_stamp(ts)
+    return stamp.strftime("%H:%M") if stamp else None
+
+
+def _memory_when(ts, clock=None):
+    """TIME cell for a memory row: ``HH:MM`` on the current local date, else ``MM-DD``.
+
+    The memory columns are 7 cells wide, so a full date would break the table; a
+    month-day is the same width as a clock and still says "not today".
+    """
+    stamp = _clock_stamp(ts)
+    if stamp is None:
+        return None
+    today = datetime.datetime.fromtimestamp(time.time() if clock is None else clock).date()
+    return stamp.strftime("%H:%M" if stamp.date() == today else "%m-%d")
 
 
 _SAVED = frozenset({"add", "note", "tidy-add", "decision-record"})
@@ -1932,7 +1951,7 @@ def _memory_text(snippet):
     return re.sub(r"^\d{4}-\d\d-\d\d(?:\s+\d\d:\d\d)?(?:\s*KST)?\s*[.:]?\s+", "", text) or text
 
 
-def _memory_records(snapshot, accepted_detail):
+def _memory_records(snapshot, accepted_detail, clock=None):
     detail = _get(accepted_detail, "memory")
     if detail is not None and not isinstance(detail, Mapping):
         return detail
@@ -1966,7 +1985,7 @@ def _memory_records(snapshot, accepted_detail):
             else:
                 project = project_source or _gpu_repo(_get(event, "cwd")) or _shown_repo(repo)
             grouped.setdefault(project, []).append((_epoch_of(event.get("ts")) or 0.0,
-                [_parse_clock(event.get("ts")), action, _text(event.get("type")), snippet]))
+                [_memory_when(event.get("ts"), clock), action, _text(event.get("type")), snippet]))
     return [[repo, [row for _stamp, row in sorted(rows, key=lambda item: -item[0])]]
             for repo, rows in sorted(grouped.items()) if rows]
 
@@ -2322,8 +2341,8 @@ def _peer_events(snapshot, session_index):
     return sorted(result, key=lambda item: -item[0])[:5]
 
 
-def _answered_records(snapshot):
-    """Decision records the user answered, per repo, newest first: ``[repo, [[HH:MM, text], ...]]``."""
+def _answered_records(snapshot, clock=None):
+    """Decision records the user answered, per repo, newest first: ``[repo, [[HH:MM|MM-DD, text], ...]]``."""
     memory = _get(snapshot, "memory")
     by_repo = memory.get("by_repo") if isinstance(memory, Mapping) else None
     if not isinstance(by_repo, Mapping):
@@ -2338,7 +2357,7 @@ def _answered_records(snapshot):
                     project = _gpu_repo(project)
                 project = project or _gpu_repo(_get(event, "cwd")) or _shown_repo(repo)
                 grouped.setdefault(project, []).append((_epoch_of(event.get("ts")) or 0.0,
-                    [_parse_clock(event.get("ts")), re.sub(r"^\[결정\]\s*", "", event["snippet"])]))
+                    [_memory_when(event.get("ts"), clock), re.sub(r"^\[결정\]\s*", "", event["snippet"])]))
     return [[repo, [row for _epoch, row in sorted(rows, key=lambda item: -item[0])]]
             for repo, rows in sorted(grouped.items()) if rows]
 
@@ -2752,7 +2771,7 @@ def build_view_model(snapshot, accepted_detail=None, cached_config=None, now=Non
         return current_claude_usage(ExplorerViewModel.from_mapping(snapshot), snapshot, clock)
     bindings = detail_bindings(snapshot)
     # Global view-only memory is independent of the selected session's incarnation.
-    memory = _memory_records(snapshot, accepted_detail)
+    memory = _memory_records(snapshot, accepted_detail, clock)
     accepted_detail = detail_for_bindings(accepted_detail, bindings)
     snapshot = _peer_snapshot(snapshot, accepted_detail, bindings)
     resolver = _resolver(snapshot)
@@ -2832,7 +2851,7 @@ def build_view_model(snapshot, accepted_detail=None, cached_config=None, now=Non
     feed.sort(key=lambda item: -item[0])
     feed = feed[:5]
     explicit = _get(focus, "source_records")
-    answered = _answered_records(snapshot)
+    answered = _answered_records(snapshot, clock)
     system = _system_record(snapshot, session_rows, compute, accepted_detail, usage, clock)
     system["answer_waits"] = answer_wait_summary
     observations = _get(snapshot, "observations", default={}) or {}
