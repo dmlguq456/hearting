@@ -1916,9 +1916,9 @@ class AutomaticDirectionTest(StartBase):
 
 
 class AutomaticDirectionStartTest(F.FramedStartTest):
-    """The start that reaches the interview releases it itself, once, and says so in one line."""
+    """The start that reaches the interview releases it itself, once, through the real settle path."""
 
-    def test_nothing_to_choose_releases_through_the_runtime_with_a_visible_notice(self):
+    def test_nothing_to_choose_releases_through_the_runtime_and_settles_for_real(self):
         self.start()
         self.ready = True
         record = P.list_cycle_records(self.root)[0]
@@ -1937,16 +1937,54 @@ class AutomaticDirectionStartTest(F.FramedStartTest):
         W.frame_interview_step.side_effect = step
         W._ROUTE_MODULE = R
         self.addCleanup(setattr, W, "_ROUTE_MODULE", None)
-        with mock.patch.object(W, "_framed_settle",
-                               side_effect=lambda route, path, jobs, result, **kw: {**result, "state": "settled"}):
+        settled = []
+        real_settle = W._framed_settle
+
+        def settle(*args, **kw):
+            settled.append(args[0]["route_id"])
+            return real_settle(*args, **kw)
+        with mock.patch.object(W, "_framed_settle", side_effect=settle):
             result = self.start()
         self.assertEqual([bool(kw.get("automatic")) for kw in seen], [False, True])
         automatic = seen[1]
         self.assertEqual(json.loads(Path(automatic["answers"]).read_text())["basis"], FI.AUTOMATIC_BASIS)
         self.assertTrue(str(automatic["interview"]).startswith(str(cycle / W.AUTOMATIC_DIRECTION_DIR)))
-        self.assertTrue(result["automatic_direction"])
-        self.assertTrue(result["direction_notice"].startswith("[방향 통지]"))
-        self.assertEqual(len(self.calls), 2)                     # no question, no extra launch
+        self.assertEqual(settled, [self.route["route_id"]])          # the real settle ran
+        self.assertIn("state", result)
+        self.assertEqual(len(self.calls), 2)                          # no question was asked
+
+
+class AutomaticDirectionNoticeTest(StartBase):
+    """The first leg's receipt -- the one the parent actually gets -- carries the notice, every time."""
+
+    def recorded(self, *, actor_kind="supervisor", basis=FI.AUTOMATIC_BASIS):
+        self.set_briefs(full_brief([DIRECT]), full_brief([DIRECT]))
+        root, record, output = W._framed_cycle(self.route)
+        interview, answers = W._automatic_direction(
+            self.route, W._proposal_rows(self.route, self.jobs, root, record, output), output)
+        self.interview, _ = W._marked_route_proposals(self.route, self.jobs, interview)
+        self.answers = {**answers, "actor_kind": actor_kind}
+        if basis is None:
+            self.answers.pop("basis")
+
+    def test_the_started_leg_receipt_and_its_replay_carry_the_direction_notice(self):
+        self.recorded()
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            first = self.settle()
+        self.assertTrue(first["direction_notice"].startswith("[방향 통지]"))
+        self.assertIn("Do the work", first["direction_notice"])
+        self.assertTrue(first["next_step"].startswith(W.DIRECTION_NOTICE_STEP))
+        self.assertIn(first["direction_notice"], stderr.getvalue())
+        self.assertEqual(len(self.leg_routes()), 1)                     # the leg really started
+        replay = self.settle()
+        self.assertEqual(replay["direction_notice"], first["direction_notice"])
+
+    def test_a_persons_answer_starts_the_leg_without_a_notice(self):
+        self.recorded(actor_kind="user", basis=None)
+        result = self.settle()
+        self.assertNotIn("direction_notice", result)
+        self.assertNotIn(W.DIRECTION_NOTICE_STEP, str(result.get("next_step") or ""))
 
 
 for _name in dir(F.FramedStartTest):

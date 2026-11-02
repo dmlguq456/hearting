@@ -759,8 +759,9 @@ proposals, no start approval is in scope, and neither brief's section 7 lists a
 question only the user can answer — the runtime records that interview itself as
 the depth-0 session's on-behalf answer (`supervisor`, basis
 `automatic-agreement`), releases frame-review through the same commands, and
-returns a one-line `[방향 통지]` the session shows; nothing waits. A
-hand-written answer cannot carry that basis. Every other case asks as below.
+the first leg's start receipt (each repeat too) carries a one-line `[방향 통지]`
+the session shows in its reply; nothing waits. A hand-written answer cannot
+carry that basis. Every other case asks as below.
 
 The interview proceeds in this order:
 

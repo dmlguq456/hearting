@@ -1203,10 +1203,12 @@ def _automatic_direction(route, rows, output):
     if any(FI.user_questions_left(text) for text in texts):
         return None
     brief = FI.brief_draft(texts[0])
-    request = route.get("work_request") or {}
-    understanding = (((request.get("intent") or {}).get("intent") or "")[:FI.MAX_UNDERSTANDING_CHARS]
-                     or FI.understanding_draft(request.get("text") or ""))
-    summary = " ".join(str(rows[0]["proposal"].get("summary") or "").split())
+    import work_intent
+    understanding = (work_intent.draft((route.get("work_request") or {}).get("text") or "")
+                     .get("intent") or "")[:FI.MAX_UNDERSTANDING_CHARS]
+    summaries = list(dict.fromkeys(" ".join(str(row["proposal"].get("summary") or "").split()) for row in rows))
+    # The legs agree on the route; when they word it differently, the notice shows both.
+    summary = " / ".join(item for item in summaries if item) if RP.wording_differs(rows) else summaries[0]
     if len(summary) > FI.MAX_OPTION_MEANS_CHARS:
         summary = summary[:FI.MAX_OPTION_MEANS_CHARS - 1].rstrip() + "…"
     question = {"id": FI.ROUTE_QUESTION_ID, "topic": "진행 방향", "kind": "yes-no",
@@ -1227,6 +1229,26 @@ def _automatic_direction(route, rows, output):
     return interview, answers
 
 
+def _automatic_direction_notice(route, jobs) -> str:
+    """The one-line notice for a frame review the runtime released itself; "" for any other release.
+
+    Read from the recorded release, so a repeated start returns the same notice."""
+    import frame_interview as FI
+    try:
+        interview, answers = _recorded_interview(route, jobs)
+        if not isinstance(answers, dict) or answers.get("basis") != FI.AUTOMATIC_BASIS:
+            return ""
+        option = str(interview["questions"][0]["options"][0].get("means") or "")
+    except (OSError, ValueError, KeyError, IndexError, TypeError, AttributeError):
+        return ""
+    return ("[방향 통지] 두 갈래 검토가 같은 방향을 내고 물을 것을 남기지 않아 묻지 않고 시작했습니다"
+            + (f": {option}" if option else "") + ". 고칠 점이 있으면 다음 말로 알려 주세요.")
+
+
+DIRECTION_NOTICE_STEP = ("Show direction_notice to the person in one line, as written, in this reply; "
+                         "nothing waits for an answer. ")
+
+
 def _automatic_frame_release(route, path, jobs, output, interview, answers):
     """Record the runtime's own interview and answer, release through the existing commands, and say so."""
     directory = Path(output) / AUTOMATIC_DIRECTION_DIR
@@ -1235,13 +1257,7 @@ def _automatic_frame_release(route, path, jobs, output, interview, answers):
     _store_once(interview_path, interview)
     _store_once(answers_path, answers)
     step = frame_interview_step(route, path, jobs, interview=interview_path, answers=answers_path, automatic=True)
-    option = interview["questions"][0]["options"][0]["means"]
-    return {**step, "automatic_direction": True,
-            "direction_notice": f"[방향 통지] 두 갈래 검토가 같은 방향을 내고 물을 것을 남기지 않아 묻지 않고 "
-                                f"시작합니다: {option}. 고칠 점이 있으면 다음 말로 알려 주세요.",
-            "next_step": "Show direction_notice to the person in one line; nothing waits for an answer. "
-                         "A correction in the person's next message goes through the route's existing "
-                         "correction path."}
+    return {**step, "automatic_direction": True}
 
 
 def _marked_route_proposals(route, jobs, interview):
@@ -1657,6 +1673,12 @@ def _framed_settle(route, path, jobs, result, *, closed=None, wait=False, run=su
             receipt = dict(_first_leg_state(root, decision_record, jobs, receipt))
         receipt["route_decision"] = {"record_file": str(record_path), "selected": decision["selected"],
                                      "frame_route_id": route["route_id"]}
+        notice = _automatic_direction_notice(route, jobs)
+        if notice:  # the first leg's own receipt carries it, on the first start and on every repeat
+            receipt["direction_notice"] = notice
+            receipt["next_step"] = DIRECTION_NOTICE_STEP + str(receipt.get("next_step") or "")
+            if not replayed:
+                print(notice, file=sys.stderr, flush=True)   # beside the leg's card in the start output
         return receipt
     intent_file = root / decision["intent"]["path"]
     return {**result, "state": "completed", "reason": "route-decision-none", "required_action": "compose-route",
@@ -2182,8 +2204,6 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
             result.update(frame_interview=step, gate="frame-review", task=request["text"])
             if step["state"] != "released":
                 return {**result, **step}
-            if step.get("direction_notice"):
-                result.update(direction_notice=step["direction_notice"], automatic_direction=True)
             owner_frame_launch_gate(SimpleNamespace(route_file=str(path)), "start", ROOT, jobs)
     if RP.is_framed_route(route):
         return _framed_settle(route, path, jobs, result, wait=wait, run=run, sleep=sleep, clock=clock)
