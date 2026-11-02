@@ -2188,6 +2188,44 @@ def mark_pending_prompt_queued(ref, claim, *, receipt="claude-pty-prompt-submitt
         return True
 
 
+def write_never_started(payload, rc):
+    """True only when the external writer proved exec never happened.
+
+    `rc is None` alone is ambiguous: a timeout, a lost reply, or a pipe error
+    after the process started may already have typed into the pane. The one
+    distinguishable case is the launcher's own start failure (nothing ran).
+    """
+    if rc is not None or not isinstance(payload, dict):
+        return False
+    error = payload.get("error")
+    return isinstance(error, dict) and error.get("code") == "herdr-not-started"
+
+
+def release_unstarted_pending_write(row, *, receipt="herdr-not-started"):
+    """Return a claimed row to `pending` when the external write never started.
+
+    This is the inverse of `begin_pending_write` for the one provable case: the
+    same claim, still `unverified`, owned by this live process, after a launch
+    failure that typed nothing. Ambiguous writes keep `unverified` and are never
+    retyped. The row returns to its existing carrier, not to a new one.
+    """
+    if not isinstance(row, dict) or not isinstance(row.get("rpc_claim"), dict):
+        return False
+    from dispatch_contract import process_start_ticks
+    claim = row["rpc_claim"]
+    current_pid = os.getpid()
+    if claim.get("pid") != current_pid or claim.get("start") != process_start_ticks(current_pid):
+        return False
+    ref = row.get("ref")
+    with pending_lock(ref):
+        current = _read_pending(ref)
+        if (not current or current.get("state") != "unverified"
+                or current.get("rpc_claim") != claim):
+            return False
+        _save_pending(dict(current, state="pending", rpc_claim=None, receipt=receipt))
+        return True
+
+
 def release_unsent_herdr_claim(row, *, receipt="target-form-open"):
     """Release this exact pending claim only before the external write.
 

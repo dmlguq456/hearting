@@ -19,6 +19,7 @@ its bounded-foreground semantics unchanged.
 import argparse
 import contextlib
 import datetime
+import errno
 import fcntl
 import hashlib
 import importlib.util
@@ -6048,25 +6049,50 @@ def _peer_reference_access_evidence(target, harness, session_id, pane):
         return None
 
 
-def _herdr_prompt(target, text, *, wait, timeout_ms):
+def _herdr_prompt_payload(stdout, stderr):
+    for stream in (stdout, stderr):
+        try:
+            candidate = json.loads(stream)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(candidate, dict):
+            return candidate
+    return None
+
+
+# `execve` failures happen before the child runs, so they typed nothing. Any
+# other `OSError` (EPIPE/ECONNRESET on the pipe, an unknown errno) may have
+# already delivered the prompt and must stay ambiguous.
+_EXEC_NEVER_STARTED_ERRNOS = frozenset(
+    value for value in (getattr(errno, name, None) for name in
+                        ("ENOENT", "EACCES", "ENOTDIR", "ENOEXEC"))
+    if value is not None)
+
+
+def _herdr_prompt(target, text, *, wait, timeout_ms, start_aware=False):
+    """One external herdr prompt write.
+
+    With `start_aware`, an `execve` failure is reported as `herdr-not-started`
+    (nothing reached the pane, so its carrier may retry); every later failure,
+    including a timeout, may already have typed and stays ambiguous. Only the
+    ordinary native-submission call sites ask for that distinction; the plain
+    call keeps the existing single-shot contract for every other caller.
+    """
     cmd = _herdr_argv("agent", "prompt", target, text)
     if wait:
         cmd += ["--wait", "--until", "working", "--timeout", str(timeout_ms)]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True,
                               timeout=timeout_ms / 1000 + 15)
-    except (OSError, subprocess.SubprocessError):
+    except subprocess.TimeoutExpired:
         return None, None
-    payload = None
-    for stream in (proc.stdout, proc.stderr):
-        try:
-            candidate = json.loads(stream)
-        except (json.JSONDecodeError, TypeError):
-            continue
-        if isinstance(candidate, dict):
-            payload = candidate
-            break
-    return proc.returncode, payload
+    except OSError as exc:
+        if start_aware and exc.errno in _EXEC_NEVER_STARTED_ERRNOS:
+            return None, {"error": {"code": "herdr-not-started"}}
+        return None, None
+    except subprocess.SubprocessError:
+        return None, None
+    return proc.returncode, _herdr_prompt_payload(proc.stdout, proc.stderr)
 
 
 def _prompt_foreground(pane, harness, *, info=None):
@@ -7081,7 +7107,10 @@ def _flush_pending_for_target(target, t_harness, t_sid, entry_state, skip=None,
                 _state, current_ident, _code, _reason = _retire_target(target)
                 if current_ident.get("pane") != expected_pane:
                     break
-            result = peer_message.deliver_pending_codex(row["ref"], timeout=0.25)
+            restart_gate = (_codex_interrupt_start_gate(expected_pane)
+                            if expected_pane else False)
+            result = peer_message.deliver_pending_codex(
+                row["ref"], timeout=0.25, start_interrupted=restart_gate)
             if result.get("status") == "received":
                 flushed += 1
         except (OSError, subprocess.SubprocessError, ValueError):
@@ -7270,10 +7299,17 @@ def _resume_message_obligation_scoped(duty, store, *, read_context=None):
                 checkpoint(state="unknown", observation={"ref": ref,
                            "reason": "delivery-inflight"})
                 return
-        if row.get("state") in {"queued", "unverified"}:
+        held_codex_restart = (
+            recipient.get("harness") == "codex"
+            and row.get("state") == "queued"
+            and str(row.get("receipt") or "").startswith("native-queue-held-interrupted"))
+        if row.get("state") in {"queued", "unverified"} and not held_codex_restart:
             # Keep the acceptance receipt intact when a fresh target check is
             # still inconclusive. It is not a receive, and another pass will
             # reobserve the target without rewriting this unchanged evidence.
+            # The sender notice is the existing one-hour rule; the Claude hook
+            # already sweeps these states, and this covers every other sender.
+            _ensure_sender_delay_notice_if_due(row)
             checkpoint(state="unknown", observation={"ref": ref,
                        "transport_state": row["state"],
                        "reason": row.get("receipt", "delivery-unconfirmed")})
@@ -7419,7 +7455,13 @@ def _resume_message_obligation_scoped(duty, store, *, read_context=None):
                 row, pinned_pane, recipient.get("session_id"), pinned_pane, state,
                 harness=recipient["harness"], no_trailer=row.get("no_trailer", False))
         if recipient.get("harness") == "codex":
-            peer_message.deliver_pending_codex(ref, timeout=0.25)
+            # Same sender-side screen gate as `cmd_prompt`: an interrupted
+            # thread starts only from the rechecked pane's empty, form-free
+            # composer. Without a rechecked pane there is no screen evidence.
+            restart_gate = (_codex_interrupt_start_gate(expected_pane)
+                            if expected_pane else False)
+            peer_message.deliver_pending_codex(
+                ref, timeout=0.25, start_interrupted=restart_gate)
         try:
             current = read_pending()
         except (OSError, ValueError):
@@ -10568,7 +10610,9 @@ def receiver_idle(recipient, pane, *, peer=True):
         return
     with contextlib.redirect_stdout(sys.stderr):
         if rows:
-            _flush_pending_for_target(pane, harness, sid, state)
+            # This pane/session was just rechecked above; the flush uses the same
+            # start gate as the runner so an interrupted thread can resume.
+            _flush_pending_for_target(pane, harness, sid, state, expected_pane=pane)
         if booked:
             # Booking/card/new-user-input checks still own this ordinary retry.
             clear._continue(seat.key, req["nonce"], clear._run_continue)
@@ -10620,9 +10664,15 @@ def _submit_pending_native(pending, target, sid, pane, state, *, harness, no_tra
                         direct_reason = "peer-delivery-already-claimed"
                     else:
                         rc, payload = _herdr_prompt(
-                            target_pane, pending["text"], wait=False,
+                            target_pane, pending["text"], wait=False, start_aware=True,
                             timeout_ms=_PROMPT_VERIFY_TIMEOUT_MS)
-                        if rc != 0:
+                        if peer_message.write_never_started(payload, rc):
+                            # exec failed: nothing reached the pane, so the same
+                            # row may be retried by its existing carrier.
+                            peer_message.release_unstarted_pending_write(
+                                claimed, receipt="herdr-not-started")
+                            direct_reason = "herdr-not-started"
+                        elif rc != 0:
                             outcome = "unverified"
                             verify = "native-prompt-unverified"
                             reason = (_herdr_error_reason(payload, rc)
@@ -10851,9 +10901,13 @@ def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_bind
                         # This is the one external submission attempt. A lost or
                         # malformed reply stays unverified; it is never retried.
                         rc, payload = _herdr_prompt(
-                            target_pane, pending["text"], wait=False,
+                            target_pane, pending["text"], wait=False, start_aware=True,
                             timeout_ms=_PROMPT_VERIFY_TIMEOUT_MS)
-                        if rc != 0:
+                        if peer_message.write_never_started(payload, rc):
+                            peer_message.release_unstarted_pending_write(
+                                claimed, receipt="herdr-not-started")
+                            direct_reason = "herdr-not-started"
+                        elif rc != 0:
                             outcome = "unverified"
                             verify = "native-first-input-unverified"
                             reason = (_herdr_error_reason(payload, rc)
@@ -10879,10 +10933,10 @@ def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_bind
             reason = direct_reason
         elif outcome == "unverified":
             _schedule_message_obligation(pending, resolved_target, target_pane)
-    elif t_harness == "claude":
+    elif t_harness in {"claude", "opencode"}:
         direct_reason, outcome, verify, reason = _submit_pending_native(
             pending, resolved_target, t_sid, target_pane, state_before,
-            harness="claude", no_trailer=args.no_trailer)
+            harness=t_harness, no_trailer=args.no_trailer)
         if direct_reason is not None:
             if pending["state"] == "pending":
                 _schedule_message_obligation(pending, resolved_target, target_pane)
