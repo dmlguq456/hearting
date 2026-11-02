@@ -866,6 +866,25 @@ REPOSITORY_OVERRIDE_EXIT=$?
 set -e
 [ "$REPOSITORY_OVERRIDE_EXIT" -eq 64 ]
 
+# An interpreter older than 3.11 stops the installer with a clear message
+# before any install step runs.
+OLD_PY_BIN="$INTEGRATION/old-python-bin"
+mkdir -p "$OLD_PY_BIN"
+cat > "$OLD_PY_BIN/python3" <<'OLDPY'
+#!/bin/sh
+case "$1" in
+  -V|--version) echo "Python 3.10.12" ;;
+  *) exit 1 ;;
+esac
+OLDPY
+chmod +x "$OLD_PY_BIN/python3"
+set +e
+PATH="$OLD_PY_BIN:$PATH" "$INTEGRATION/assets/install.sh" --no-auto-update --json > "$INTEGRATION/old-python.out" 2>&1
+OLD_PY_EXIT=$?
+set -e
+[ "$OLD_PY_EXIT" -eq 1 ]
+grep -Fq "Python 3.11+ is required, but $OLD_PY_BIN/python3 is Python 3.10.12" "$INTEGRATION/old-python.out"
+
 # Seed the exact legacy owned launcher to exercise retirement/rollback.
 python3 - "$ROOT/tools/install" "$CODEX_HOME" "$HARNESS_BIN_DIR" "$VENDOR_BIN/codex" <<'SEED'
 from pathlib import Path
