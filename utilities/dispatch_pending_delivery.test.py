@@ -1428,6 +1428,289 @@ class PruneTest(IsolatedRootMixin, unittest.TestCase):
         self.assertFalse(old_acked.exists())
 
 
+class BoundedPruneTest(IsolatedRootMixin, unittest.TestCase):
+    """`prune_bounded`: the stat-prefiltered, oldest-first, budgeted prune the
+    HOME retention pass and the reconcile actor share, with removal-only
+    admission (no jobs.log tail, no HOME manifest, no view.lock)."""
+
+    DAY = 86400
+    _record = PruneTest._record
+    _orphan_lock = PruneTest._orphan_lock
+
+    def _hold_view_lock_exclusive(self):
+        """Hold homes/worker-retention/view.lock EX like the final HOME detach."""
+        import threading
+        import worker_home_retention as R
+        for part in ("homes", "homes/workers"):
+            (self.root / part).mkdir(parents=True, exist_ok=True)
+            os.chmod(self.root / part, 0o700)
+        taken, release, done = threading.Event(), threading.Event(), threading.Event()
+
+        def hold():
+            import fcntl
+            # detach order: candidate reference (a different attempt), then view.lock EX
+            with AR.admission(self.root, ["att-" + "9" * 32]), \
+                    R._Layout(self.root) as layout:
+                with R._flock(layout.ret_fd, "view.lock", fcntl.LOCK_EX) as held:
+                    if held:
+                        taken.set()
+                        release.wait(30)
+            done.set()
+        thread = threading.Thread(target=hold, daemon=True)
+        thread.start()
+        self.assertTrue(taken.wait(5), "the fixture must really hold view.lock EX")
+        return release, done
+
+    def test_oldest_first_within_the_record_budget(self):
+        paths = [self._record(c, state="acked", age_seconds=(8 + i) * self.DAY)
+                 for i, c in enumerate("0123456789")]  # "9" is the oldest
+        before = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in paths}
+        result = PD.prune_bounded(self.root, max_records=3)
+        self.assertEqual(result["pruned_records"], 3)
+        self.assertEqual((result["deferred"], result["budget_exhausted"]), (7, 1))
+        self.assertEqual((result["records_seen"], result["aged_seen"]), (10, 10))
+        self.assertEqual(result["records_remaining"], 7)
+        gone = {p for p in paths if not p.exists()}
+        self.assertEqual(gone, set(paths[-3:]), "only the three oldest are removed")
+        for path in gone:
+            self.assertTrue(PD.tombstone_path(path).is_file())
+        for path in set(paths) - gone:
+            self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), before[path])
+        # the next passes finish the rest, still oldest first
+        PD.prune_bounded(self.root, max_records=3)
+        self.assertEqual({p for p in paths if not p.exists()}, set(paths[-6:]))
+        PD.prune_bounded(self.root, max_records=100)
+        self.assertEqual([p for p in paths if p.exists()], [])
+
+    def test_open_recent_and_tombstoned_records_are_untouched(self):
+        keep = [self._record("1", state="pending", age_seconds=30 * self.DAY),
+                self._record("2", state="claimed", age_seconds=30 * self.DAY),
+                self._record("3", state="sent-ambiguous", age_seconds=30 * self.DAY),
+                self._record("4", state="acked", age_seconds=1 * self.DAY),
+                self._record("5", state="acked", age_seconds=6 * self.DAY)]
+        victim = self._record("6", state="acked", age_seconds=9 * self.DAY)
+        PD.prune_bounded(self.root)  # tombstones victim
+        tomb = PD.tombstone_path(victim)
+        self.assertTrue(tomb.is_file())
+        tomb_state = (tomb.read_bytes(), tomb.stat().st_mtime_ns)
+        before = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in keep}
+        locks = {p: p.with_name(p.name + ".lock").exists() for p in keep}
+        result = PD.prune_bounded(self.root)
+        self.assertEqual(result["pruned_records"], 0)
+        self.assertEqual(result["kept_open_aged"], 3)
+        for path in keep:
+            self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), before[path])
+            self.assertEqual(path.with_name(path.name + ".lock").exists(), locks[path])
+        self.assertEqual((tomb.read_bytes(), tomb.stat().st_mtime_ns), tomb_state)
+
+    def test_removal_reads_no_home_manifest_and_no_jobs_log(self):
+        import builtins
+        import worker_home_retention as R
+        self.root.mkdir(parents=True, exist_ok=True)
+        jobs = self.root / "jobs.log"
+        jobs.write_text("fixture\n")
+        old = [self._record(c, state="acked", age_seconds=9 * self.DAY) for c in "abcd"]
+        self._record("e", state="pending", age_seconds=20 * self.DAY)
+        self._record("f", state="acked", age_seconds=1 * self.DAY)
+        opened = []
+        real_os_open, real_open, real_read_text = os.open, builtins.open, Path.read_text
+
+        def watch(name):
+            if "jobs.log" in str(name) or "worker-home.json" in str(name):
+                opened.append(str(name))
+
+        def os_open(path, *args, **kwargs):
+            watch(path)
+            return real_os_open(path, *args, **kwargs)
+
+        def bi_open(file, *args, **kwargs):
+            watch(file)
+            return real_open(file, *args, **kwargs)
+
+        def read_text(self_, *args, **kwargs):
+            watch(self_)
+            return real_read_text(self_, *args, **kwargs)
+
+        boom = unittest.mock.Mock(side_effect=AssertionError("HOME admission must not run"))
+        with unittest.mock.patch.object(R, "home_reference_relevant", boom), \
+             unittest.mock.patch.object(R, "home_view_admission", boom), \
+             unittest.mock.patch("os.open", os_open), \
+             unittest.mock.patch("builtins.open", bi_open), \
+             unittest.mock.patch.object(Path, "read_text", read_text):
+            result = PD.prune_bounded(self.root)
+        self.assertEqual(result["pruned_records"], 4)
+        self.assertEqual(opened, [])
+        boom.assert_not_called()
+        self.assertEqual(result["body_reads"], result["aged_seen"] - result["deferred"])
+        # 4 acked + the 30-day-old open record are aged; the fresh one is stat-only
+        self.assertEqual((result["aged_seen"], result["kept_open_aged"], result["records_seen"]), (5, 1, 6))
+        for path in old:
+            self.assertFalse(path.exists())
+        # the operator CLI path shares the removal body and is just as light
+        more = self._record("7", state="acked", age_seconds=9 * self.DAY)
+        with unittest.mock.patch.object(R, "home_reference_relevant", boom), \
+             unittest.mock.patch.object(R, "home_view_admission", boom), \
+             unittest.mock.patch("os.open", os_open), \
+             unittest.mock.patch("builtins.open", bi_open), \
+             unittest.mock.patch.object(Path, "read_text", read_text):
+            cli = PD.prune(self.root, apply=True)
+        self.assertEqual(cli["pruned_records"], 1)
+        self.assertEqual(opened, [])
+        self.assertFalse(more.exists())
+        # control: the writer admission does read jobs.log, so the watcher is live
+        probe = self._record("8", state="acked", age_seconds=9 * self.DAY)
+        with unittest.mock.patch("os.open", os_open):
+            with PD._record_reference_lock(probe):
+                pass
+        self.assertTrue(any("jobs.log" in name for name in opened), "control: watcher must see jobs.log")
+
+    def test_busy_reference_defers_without_waiting(self):
+        path = self._record("1", state="acked", age_seconds=9 * self.DAY)
+        attempt = json.loads(path.read_text("utf-8"))["attempt_ids"][0]
+        before = (path.read_bytes(), path.stat().st_mtime_ns)
+        with AR.admission(self.root, [attempt]) as admitted:
+            self.assertTrue(admitted)
+            started = time.monotonic()
+            result = PD.prune_bounded(self.root)
+            self.assertLess(time.monotonic() - started, 1.0)
+        self.assertEqual((result["busy"], result["pruned_records"]), (1, 0))
+        self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), before)
+        self.assertFalse(PD.tombstone_path(path).exists())
+        self.assertEqual(PD.prune_bounded(self.root)["pruned_records"], 1)
+
+    def test_view_lock_held_exclusively_never_blocks_the_removal(self):
+        """A HOME detach holds view.lock EX; a removal must neither wait for it
+        nor deadlock with it. The control proves the fixture really blocks the
+        old per-record admission."""
+        import threading
+        import worker_home_retention as R
+        path = self._record("1", state="acked", age_seconds=9 * self.DAY)
+        release, done = self._hold_view_lock_exclusive()
+        try:
+            started = time.monotonic()
+            result = PD.prune_bounded(self.root)
+            self.assertLess(time.monotonic() - started, 3.0)
+            self.assertEqual(result["pruned_records"], 1)
+            # control: the writer admission (no HOME-relevance shortcut) waits for view.lock
+            other = self._record("2", state="acked", age_seconds=9 * self.DAY)
+            entered = threading.Event()
+
+            def old_path():
+                with unittest.mock.patch.object(R, "home_reference_relevant", return_value=None):
+                    with PD._record_reference_lock(other):
+                        entered.set()
+            worker = threading.Thread(target=old_path, daemon=True)
+            worker.start()
+            self.assertFalse(entered.wait(1.0), "control: the old admission must block on view.lock EX")
+        finally:
+            release.set()
+            done.wait(5)
+        self.assertTrue(entered.wait(5), "control resumes once the lock is released")
+        self.assertFalse(path.exists())
+
+    def test_concurrent_writers_and_bounded_prune_finish_without_error(self):
+        import threading
+        import worker_home_retention as R
+        for part in ("homes", "homes/workers"):
+            (self.root / part).mkdir(parents=True, exist_ok=True)
+            os.chmod(self.root / part, 0o700)
+        for c in "abcdef":
+            self._record(c, state="acked", age_seconds=9 * self.DAY)
+        errors, created = [], []
+
+        def writer():
+            try:
+                for index in range(50):
+                    suffix = f"{index:02x}" * 16
+                    receipt = _receipt()
+                    delivery_id = "delivery-" + suffix
+                    PD.create(
+                        self.root, recipient_kind="claude-parent-runtime",
+                        recipient_key="sess-prune", delivery_id=delivery_id,
+                        session_generation="", session_generation_supported="0",
+                        attempt_ids=["att-" + suffix], parent_attempt_id="att-" + "a" * 32,
+                        route_id="rt-prune", route_node="execute", receipt=receipt,
+                        receipt_digest=_digest(receipt),
+                        row_revisions={"att-" + suffix: "deadbeef"})
+                    PD.claim(self.root, "sess-prune", delivery_id, claim_owner="w:1", lease_seconds=60)
+                    PD.ack(self.root, "sess-prune", delivery_id, acked_by="fixture")
+                    created.append(PD.record_path(self.root, "sess-prune", delivery_id))
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        def pruner():
+            try:
+                for _ in range(5):
+                    PD.prune_bounded(self.root)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        with unittest.mock.patch.object(R, "home_reference_relevant", return_value=None):
+            threads = [threading.Thread(target=writer, daemon=True),
+                       threading.Thread(target=pruner, daemon=True)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(10)
+        self.assertFalse(any(thread.is_alive() for thread in threads), "no deadlock")
+        self.assertEqual(errors, [])
+        # fresh acked records (the writer's) are all still there
+        self.assertEqual(len(created), 50)
+        self.assertTrue(all(path.is_file() for path in created))
+
+    def test_zero_time_budget_scans_but_removes_nothing(self):
+        paths = [self._record(c, state="acked", age_seconds=9 * self.DAY) for c in "123"]
+        result = PD.prune_bounded(self.root, time_budget_s=0)
+        self.assertEqual(result["pruned_records"], 0)
+        self.assertEqual((result["budget_exhausted"], result["deferred"]), (1, 3))
+        self.assertEqual(result["records_seen"], 3)
+        self.assertTrue(all(path.is_file() for path in paths))
+
+    def test_a_record_that_fails_validation_is_never_deleted(self):
+        bad = self._record("1", state="acked", age_seconds=9 * self.DAY)
+        bad.write_text('{"state":"acked"}', encoding="utf-8")
+        old = time.time() - 9 * self.DAY
+        os.utime(bad, (old, old))
+        result = PD.prune_bounded(self.root)
+        self.assertEqual(result["pruned_records"], 0)
+        self.assertEqual(result["unreadable"], 1)
+        self.assertTrue(bad.is_file())
+        self.assertFalse(PD.tombstone_path(bad).exists())
+
+    def test_pruned_record_is_not_resurrected_by_the_materialize_backstop(self):
+        path = self._record("1", state="acked", age_seconds=9 * self.DAY)
+        before = json.loads(path.read_text("utf-8"))
+        PD.prune_bounded(self.root)
+        self.assertFalse(path.exists())
+        tomb = json.loads(PD.tombstone_path(path).read_text("utf-8"))
+        self.assertEqual((tomb["delivery_id"], tomb["attempt_ids"]),
+                         (before["delivery_id"], before["attempt_ids"]))
+        self.assertEqual(PD.prune_bounded(self.root)["pruned_records"], 0)
+        self.assertFalse(path.exists())
+
+    def test_orphan_and_reference_locks_are_pruned_within_budget(self):
+        old_lock = self._orphan_lock("delivery-old", 2 * self.DAY)
+        new_lock = self._orphan_lock("delivery-new", 3600)
+        result = PD.prune_bounded(self.root)
+        self.assertEqual(result["pruned_locks"], 1)
+        self.assertFalse(old_lock.exists())
+        self.assertTrue(new_lock.exists())
+        # reference locks: only the stale one goes, and max_locks caps the pass
+        refs = []
+        for index in range(3):
+            lock = AR.lock_path(self.root, "att-" + f"{index}" * 32)
+            with AR.admission(self.root, ["att-" + f"{index}" * 32]):
+                pass
+            old = time.time() - 3 * self.DAY
+            os.utime(lock, (old, old))
+            refs.append(lock)
+        capped = PD.prune_bounded(self.root, max_locks=2)
+        self.assertEqual(capped["pruned_reference_locks"], 2)
+        self.assertEqual(capped["budget_exhausted"], 1)
+        self.assertEqual(PD.prune_bounded(self.root)["pruned_reference_locks"], 1)
+        self.assertFalse(any(lock.exists() for lock in refs))
+
+
 class ReferenceAdmissionTests(IsolatedRootMixin, unittest.TestCase):
     def _create(self, suffix, attempt):
         receipt = _receipt()

@@ -1183,6 +1183,305 @@ class Deliveries(Fixture):
         self.assertFalse(home.exists())
 
 
+class DeliveryPruneCarrier(Fixture):
+    """The bounded SD-111 (7) delivery-record prune rides the HOME retention
+    pass (reaper tail / selector-less reconcile) and runs before the pass
+    builds its delivery index, so one run's HOME and log judgments see it."""
+
+    DAY = 86400
+
+    def group(self, number):
+        import hashlib
+        return hashlib.sha256(f"prune-group-{number}".encode()).hexdigest()
+
+    def put(self, group, serial, state, age_days, attempt=None, **changes):
+        path = self.root / "pending-delivery" / self.group(group) / f"delivery-{serial:032x}.json"
+        self.delivery_record(path, attempt or f"att-{serial:032x}", state=state, **changes)
+        stamp = time.time() - age_days * self.DAY
+        os.utime(path, (stamp, stamp))
+        return path
+
+    def json_files(self):
+        return sorted((self.root / "pending-delivery").glob("*/*.json"))
+
+    def tombstones(self):
+        return sorted((self.root / "pending-delivery").glob("*/*.json.pruned"))
+
+    def last_prune(self):
+        return self.state()["last_result"]["delivery_prune"]
+
+    # --- (a) reduced shape --------------------------------------------------
+    def test_reduced_backlog_drains_below_the_cap_and_unknown_clears_in_the_same_pass(self):
+        home = self.add("att-cand")
+        serial = 0
+        for index in range(29):
+            serial += 1
+            self.put(index % 3, serial, "acked", 8 + index)
+        for index in range(25):
+            serial += 1
+            self.put(index % 3, serial, "acked", 1 + index / 10)
+        for index in range(7):
+            serial += 1
+            self.put(index % 3, serial, ("pending", "claimed", "sent-ambiguous")[index % 3], 1)
+        self.assertEqual(len(self.json_files()), 61)
+        with mock.patch.object(R, "MAX_DELIVERY_RECORDS", 40), \
+                mock.patch.object(P, "PRUNE_RECORD_LIMIT", 8):
+            runs = [self.sweep(0) for _ in range(5)]
+            remaining = []
+            for number, result in enumerate(runs, 1):
+                remaining.append(result["delivery_prune"]["records_remaining"])
+                if number <= 2:
+                    self.assertEqual(self.unknown(result, "delivery-index-unknown"), 1, (number, result))
+                else:
+                    self.assertEqual(self.unknown(result, "delivery-index-unknown"), 0, (number, result))
+            self.assertEqual(remaining, [53, 45, 37, 32, 32])
+            self.assertEqual(runs[3]["delivery_prune"]["aged_seen"], 5)
+            self.assertEqual(runs[4]["delivery_prune"]["pruned_records"], 0)
+        self.assertEqual(len(self.json_files()), 32)
+        self.assertEqual(len(self.tombstones()), 29)
+        self.assertEqual(self.last_prune()["records_remaining"], len(self.json_files()))
+        self.assertTrue(home.is_dir())
+
+    # --- (b) live-shaped backlog (6,133 records, cap 4,096) --------------------
+    def test_live_shaped_backlog_drains_below_cap_within_bounded_passes(self):
+        import math
+        import builtins
+        import dispatch_log_retention as LOGS
+        AGED, RECENT, OPEN, OPEN_OLD, GROUPS = 2933, 2503, 698, 60, 64
+        # The live case: a 6,134-record store above the 4,096-record index cap
+        # of the time. The cap is pinned so the fixture still exceeds it.
+        CAP = 4096
+        home = self.add("att-cand")
+        logs = self.root / "logs"
+        logs.mkdir(mode=0o700)
+        log_file = logs / "att-log-cand.jsonl"
+        log_file.write_text("log\n")
+        ended = datetime.fromtimestamp(self.now / 10**9 - 15 * self.DAY, timezone.utc)
+        self.timestamps["att-log-cand"] = ended.isoformat().replace("+00:00", "Z")
+        self.row("att-log-cand", status="done", log_file=str(log_file))
+
+        serial = 0
+        aged, recent, openers, tombs = [], [], [], []
+        for index in range(AGED):
+            serial += 1
+            state = ("acked", "rejected", "expired")[index % 3]
+            aged.append(self.put(serial % GROUPS, serial, state, 8 + 26 * index / AGED))
+        for index in range(RECENT):
+            serial += 1
+            recent.append(self.put(serial % GROUPS, serial, ("acked", "rejected")[index % 2],
+                                   5.5 * index / RECENT))
+        for index in range(OPEN):
+            serial += 1
+            old = 15 + index if index < OPEN_OLD else 5.5 * index / OPEN
+            openers.append(self.put(serial % GROUPS, serial,
+                                    ("pending", "claimed", "sent-ambiguous")[index % 3], old))
+        for index in range(5):
+            serial += 1
+            victim = self.put(serial % GROUPS, serial, "acked", 20)
+            P._write_prune_tombstone(victim, json.loads(victim.read_text()))
+            victim.unlink()
+            tombs.append(P.tombstone_path(victim))
+        total = AGED + RECENT + OPEN
+        self.assertEqual(len(self.json_files()), total)
+        keep = {path: (path.read_bytes(), path.stat().st_mtime_ns)
+                for path in recent + openers + tombs}
+        aged_mtimes = {path: path.stat().st_mtime for path in aged}
+
+        opened = []
+        real_os_open, real_open, real_read_text = os.open, builtins.open, Path.read_text
+        window = {"on": False}
+
+        def watch(name):
+            if window["on"] and ("jobs.log" in str(name) or "worker-home.json" in str(name)):
+                opened.append(str(name))
+
+        def os_open(path, *args, **kwargs):
+            watch(path)
+            return real_os_open(path, *args, **kwargs)
+
+        def bi_open(file, *args, **kwargs):
+            watch(file)
+            return real_open(file, *args, **kwargs)
+
+        def read_text(self_, *args, **kwargs):
+            watch(self_)
+            return real_read_text(self_, *args, **kwargs)
+
+        real_prune = P.prune_bounded
+
+        def measured_prune(*args, **kwargs):
+            before = len(opened)
+            window["on"] = True
+            try:
+                return real_prune(*args, **kwargs)
+            finally:
+                window["on"] = False
+                measured_prune.opens.append(len(opened) - before)
+        measured_prune.opens = []
+
+        table, oldest_removed_ok = [], True
+        first_below = None
+        pruned_total = 0
+        step = (R.DUE_SECONDS + 1) * 10**9
+        with mock.patch.object(P, "prune_bounded", measured_prune), \
+                mock.patch.object(R, "MAX_DELIVERY_RECORDS", CAP), \
+                self.replaced("open", os_open), mock.patch("builtins.open", bi_open), \
+                mock.patch.object(Path, "read_text", read_text):
+            for run in range(1, 13):
+                at = self.now + run * step
+                before = len(self.json_files())
+                home_result = R.sweep(self.jobs, now_ns=at)
+                log_result = LOGS.sweep(self.jobs, now_ns=at)
+                self.assertNotIn("skipped", home_result, home_result)
+                self.assertNotIn("skipped", log_result, log_result)
+                prune = home_result["delivery_prune"]
+                after = len(self.json_files())
+                pruned_total += prune["pruned_records"]
+                row = {
+                    "run": run, "before": before, "after": after,
+                    "pruned": prune["pruned_records"], "kept_open_aged": prune["kept_open_aged"],
+                    "deferred": prune["deferred"], "budget_exhausted": prune["budget_exhausted"],
+                    "home_unknown": home_result["unknown"], "home_kept": home_result["kept"],
+                    "log_unknown": log_result["kept_reasons"].get("delivery-index-unknown", 0),
+                    "log_removed": log_result["removed"],
+                    "prune_body_reads": prune["body_reads"],
+                    "prune_manifest_or_jobs_opens": measured_prune.opens[-1],
+                    "prune_elapsed_ms": prune["elapsed_ms"],
+                }
+                table.append(row)
+                self.assertLessEqual(prune["pruned_records"], P.PRUNE_RECORD_LIMIT, row)
+                self.assertEqual(prune["body_reads"], prune["aged_seen"] - prune["deferred"], row)
+                self.assertEqual(measured_prune.opens[-1], 0, row)
+                self.assertEqual(prune["records_remaining"], after, row)
+                # oldest first: nothing removed is younger than anything still waiting
+                gone = [aged_mtimes[path] for path in aged if not path.exists()]
+                waiting = [aged_mtimes[path] for path in aged if path.exists()]
+                if gone and waiting:
+                    self.assertLessEqual(max(gone), min(waiting), row)
+                if first_below is None and after <= CAP:
+                    first_below = run
+                if first_below is None:
+                    self.assertGreaterEqual(self.unknown(home_result, "delivery-index-unknown"), 1, row)
+                    self.assertGreaterEqual(row["log_unknown"], 1, row)
+                else:
+                    self.assertEqual(self.unknown(home_result, "delivery-index-unknown"), 0, row)
+                    self.assertEqual(row["log_unknown"], 0, row)
+                if pruned_total == AGED:
+                    break
+        print("\nDELIVERY-PRUNE-TABLE " + json.dumps(table, sort_keys=True))
+        for row in table:
+            print("run {run}: {before}->{after} pruned={pruned} open_aged={kept_open_aged} "
+                  "deferred={deferred} unknown={home_unknown} kept={home_kept} "
+                  "log_unknown={log_unknown} log_removed={log_removed} body_reads={prune_body_reads} "
+                  "manifest/jobs opens={prune_manifest_or_jobs_opens} elapsed_ms={prune_elapsed_ms}".format(**row))
+        smallest = min(row["pruned"] for row in table[:-1]) if len(table) > 1 else table[0]["pruned"]
+        excess = total - CAP
+        self.assertLessEqual(first_below, math.ceil(excess / smallest), table)
+        if all(row["pruned"] == P.PRUNE_RECORD_LIMIT for row in table[:-1]):
+            self.assertEqual(first_below, 4, table)
+            self.assertEqual(len(table), 6, table)
+        self.assertEqual(pruned_total, AGED)
+        self.assertTrue(all(not path.exists() for path in aged))
+        self.assertEqual(len(self.tombstones()), AGED + 5)
+        self.assertEqual(len(self.json_files()), RECENT + OPEN)
+        for path, expected in keep.items():
+            self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), expected, path)
+        self.assertGreaterEqual(table[first_below - 1]["log_removed"], 1, table)
+        self.assertFalse(log_file.exists())
+        self.assertTrue(home.is_dir())
+        self.assertTrue(any(k not in ("delivery-index-unknown",) for k in table[-1]["home_kept"]),
+                        "the HOME now fails on an ordinary rule, not on the index")
+
+    # --- (c) cadence ---------------------------------------------------------
+    def test_prune_follows_the_pass_due_gate_and_retention_lock(self):
+        self.add("att-cand")
+        for index in range(1, 7):
+            self.put(1, index, "acked", 9 + index)
+        with mock.patch.object(P, "PRUNE_RECORD_LIMIT", 2):
+            at = self.now
+            first = R.sweep(self.jobs, now_ns=at)
+            self.assertEqual(first["delivery_prune"]["pruned_records"], 2)
+            self.assertEqual(len(self.tombstones()), 2)
+            self.assertEqual(R.sweep(self.jobs, now_ns=at), {"skipped": "not-due"})
+            self.assertEqual(len(self.tombstones()), 2)
+            fd = os.open(self.root / "homes/worker-retention/lock", os.O_RDWR)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                busy = R.sweep(self.jobs, now_ns=at + 10 * R.DUE_SECONDS * 10**9)
+            finally:
+                os.close(fd)
+            self.assertEqual(busy, {"skipped": "busy"})
+            self.assertEqual(len(self.tombstones()), 2)
+            later = R.sweep(self.jobs, now_ns=at + 10 * R.DUE_SECONDS * 10**9)
+            self.assertEqual(later["delivery_prune"]["pruned_records"], 2)
+            self.assertEqual(len(self.tombstones()), 4)
+
+    def test_a_prune_failure_never_fails_the_home_pass(self):
+        home = self.add("att-cand")
+        with mock.patch.object(P, "prune_bounded", side_effect=RuntimeError("boom")):
+            result = self.sweep(0)
+        self.assertEqual(result["delivery_prune"], {"error": "RuntimeError"})
+        self.assertEqual(result["examined"], 1)
+        self.assertTrue(home.is_dir())
+
+    # --- (d) same-pass detach --------------------------------------------------
+    def _home_with_old_record(self):
+        """A done HOME idle for two hours whose delivery intent names a
+        9-day-old acked record (the `_delivery_state` path: a pruned record's
+        tombstone time becomes that HOME's activity)."""
+        digest, delivery = "a" * 64, "delivery-" + "b" * 32
+        home = self.add("att-same-pass", parent_attempt_id="att-parent", delivery_intent="1",
+                        delivery_id=delivery, delivery_recipient_digest=digest)
+        for path in (home, *home.rglob("*")):
+            os.utime(path, ns=(self.now - 2 * RETENTION_NS, self.now - 2 * RETENTION_NS))
+        ended = datetime.fromtimestamp(self.now / 10**9 - 3 * 3600, timezone.utc)
+        self.set_timestamp("att-same-pass", ended.isoformat().replace("+00:00", "Z"))
+        record = self.root / "pending-delivery" / digest / f"{delivery}.json"
+        self.delivery_record(record, "att-same-pass")
+        stamp = time.time() - 9 * self.DAY
+        os.utime(record, (stamp, stamp))
+        return home, record
+
+    def test_same_pass_detach_without_the_prune_is_due(self):
+        """Control: with no prune this HOME is due in the very first pass."""
+        home, record = self._home_with_old_record()
+        with mock.patch.object(R, "_prune_delivery_records", return_value={}):
+            result = self.sweep(0)
+        self.assertEqual(result["removed"], 1, result)
+        self.assertFalse(home.exists())
+        self.assertTrue(record.exists())
+
+    def test_same_pass_prune_restarts_the_idle_clock_and_never_deadlocks(self):
+        """The prune runs before the HOME is judged; its tombstone is that
+        HOME's newest activity, so the same pass keeps it (conservative) and a
+        later pass removes it."""
+        home, record = self._home_with_old_record()
+        result = self.sweep(0)
+        self.assertEqual(result["removed"], 0, result)
+        self.assertEqual(result["delivery_prune"]["pruned_records"], 1)
+        self.assertEqual(self.kept(result, "within-window"), 1, result)
+        self.assertFalse(record.exists())
+        self.assertTrue(P.tombstone_path(record).is_file())
+        self.assertTrue(home.is_dir())
+        self.assertEqual(self.sweep(8 / 7)["removed"], 1)
+        self.assertFalse(home.exists())
+
+    def test_a_record_naming_the_home_only_by_attempt_is_pruned_without_blocking_it(self):
+        """The attempt-only relation carries no activity once the record is old,
+        so pruning it neither protects nor endangers an already-due HOME."""
+        home = self.add("att-same-pass")
+        for path in (home, *home.rglob("*")):
+            os.utime(path, ns=(self.now - 2 * RETENTION_NS, self.now - 2 * RETENTION_NS))
+        ended = datetime.fromtimestamp(self.now / 10**9 - 3 * 3600, timezone.utc)
+        self.set_timestamp("att-same-pass", ended.isoformat().replace("+00:00", "Z"))
+        record = self.put(1, 1, "acked", 9, attempt="att-same-pass")
+        result = self.sweep(0)
+        self.assertEqual(result["delivery_prune"]["pruned_records"], 1)
+        self.assertEqual(result["removed"], 1, result)
+        self.assertFalse(home.exists())
+        self.assertTrue(P.tombstone_path(record).is_file())
+
+
 class Recovery(Fixture):
     def reserve(self, attempt, family="f" * 64, claim=None):
         base = self.root / "automatic-replacements"
