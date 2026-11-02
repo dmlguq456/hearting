@@ -10925,6 +10925,31 @@ def _submit_pending_native(pending, target, sid, pane, state, *, harness, no_tra
     return direct_reason, outcome, verify, reason
 
 
+def _prompt_carrier_note(ref, target, outcome):
+    """Say on stderr, in one plain line, that a message not received yet is still carried.
+
+    A queued or unverified send with a live message obligation is delivered by the
+    obligation runner once the target can take input, and an identical repeat reuses the
+    same ref; agents still re-sent such messages by hand. Nothing is said when no
+    obligation holds the ref. stderr only: stdout keeps the one `prompted=` line its
+    readers parse, and in-process callers keep their return codes.
+    """
+    if outcome == "true" or not ref:
+        return
+    try:
+        duty = peer_obligations.ObligationStore().get(_message_obligation_id(ref))
+    except Exception:  # noqa: BLE001 -- an unreadable store adds no line
+        return
+    if not isinstance(duty, dict) or duty.get("state") in {"complete", "cancelled"}:
+        return
+    try:
+        sys.stderr.write(f"next: nothing to resend - the runtime delivers ref={ref} to {target} "
+                         "once it can take input; the same body sent again keeps this ref\n")
+        sys.stderr.flush()
+    except (OSError, ValueError):
+        pass
+
+
 def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_binding=None,
                handoff=None, resolved_recipient=None, sender=None):
     """Seal a peer message and route it through the recipient's native carrier.
@@ -10995,6 +11020,7 @@ def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_bind
             if producer_binding is None:
                 _schedule_message_obligation(row, args.target)
             print(f"prompted=unverified reason={reason} ref={ref}")
+            _prompt_carrier_note(ref, args.target, "unverified")
         except (OSError, ValueError):
             print("prompted=unverified reason=peer-pending-unavailable")
         return 5
@@ -11068,6 +11094,7 @@ def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_bind
             _schedule_message_obligation(pending, pending.get("original_target") or args.target,
                                          pinned.get("pane_id"))
         print(f"prompted=unverified reason=target-identity-changed ref={transfer_ref}")
+        _prompt_carrier_note(transfer_ref, pending.get("original_target") or args.target, "unverified")
         return 5
 
     kind = _prompt_message_kind(body)
@@ -11217,6 +11244,7 @@ def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_bind
     if reason:
         line += f" reason={reason}"
     print(line)
+    _prompt_carrier_note(transfer_ref, args.target, outcome)
     return _PROMPT_EXIT[outcome]
 
 # --- clear: the one typed command that starts a fresh conversation (session-tidy auto-clear) ---
