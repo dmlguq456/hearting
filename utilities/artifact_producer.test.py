@@ -6192,6 +6192,29 @@ class OwnerLaunchBindingTest(ProducerTestBase):
         self.assertTrue(env["AGENT_ARTIFACT_CYCLE_ID"])
         self.assertEqual(len(list(P.list_cycle_records(root))), 1)
 
+    def test_owner_preparation_retries_for_the_lock_without_rereading_the_folders(self):
+        # Each reconcile walks every cycle of the root; a busy lock is waited out, not re-walked.
+        route, route_file, root = self._unbegun_route()
+        self._hold_admission_lock(root, 1.5)
+        busy = []
+        real_begin = P._begin_cycle_record
+
+        def counted_begin(*args, **kwargs):
+            try:
+                return real_begin(*args, **kwargs)
+            except P.artifact_admission.AdmissionBusy:
+                busy.append(1)
+                raise
+
+        with mock.patch.object(P.artifact_admission, "LOCK_TIMEOUT_DEFAULT", 0.5), \
+                mock.patch.object(P, "OWNER_LAUNCH_ADMISSION_WAIT_SECONDS", 5.0), \
+                mock.patch.object(P, "_begin_cycle_record", side_effect=counted_begin), \
+                mock.patch.object(P, "reconcile_root", wraps=P.reconcile_root) as reconcile:
+            env = P.prepare_route_artifact_env(route_file, start=True, jobs=self.jobs)
+        self.assertTrue(env["AGENT_ARTIFACT_CYCLE_ID"])
+        self.assertGreaterEqual(len(busy), 1)
+        self.assertEqual(reconcile.call_count, 1)
+
     def test_owner_preparation_at_the_wait_bound_reports_admission_busy(self):
         route, route_file, root = self._unbegun_route()
         holder = self._hold_admission_lock(root, 30)
