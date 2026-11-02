@@ -1,0 +1,285 @@
+"""D4 #3: a project's status line on its OVERVIEW rule and a four-line block on its page.
+
+The source is the project's status document (core/ARTIFACT_META.md "The project status
+document"); without one the line is built from routes, questions and results Fleet holds.
+"""
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+from dataclasses import replace
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT))
+
+from tools.fleet import details  # noqa: E402
+from tools.fleet.collectors import project_status  # noqa: E402
+from tools.fleet.explorer import tables  # noqa: E402
+from tools.fleet.explorer.frame import draw  # noqa: E402
+from tools.fleet.explorer.live import build_view_model  # noqa: E402
+from tools.fleet.explorer.state import NavState  # noqa: E402
+from tools.fleet.explorer.view_model import load_fixture  # noqa: E402
+from tools.fleet.model import Session  # noqa: E402
+from tools.fleet.refresh import LiveSnapshot  # noqa: E402
+
+FIXTURE = ROOT / "tools" / "fleet" / "tests" / "fixtures" / "explorer" / "view_model.json"
+
+STATUS_KO = """# 하팅 v4.0 캠페인 현황
+
+갱신 2026-11-02 21:5x · 계획은 `PLAN.md` · 근거는 `inputs/`
+
+**한 줄**: 백로그를 묶어 **v4.0.0** 정식 공개까지 간다.
+
+## PR
+| PR | 내용 |
+|---|---|
+| #1 | 결정 아님 |
+
+## 결정 필요
+- 케언 PR 병합(= 운영 배포)
+- artifact-relocation.py 이동 위치
+  - 들여 쓴 줄은 세지 않는다
+- W8을 v4에 넣을지
+
+## 사용자 결정 기록
+- 이미 내린 결정은 세지 않는다
+
+## 다음
+1. [50] 정리 뒤 계획 확정
+2. 현황 문서 자동 갱신
+"""
+
+STATUS_EN = """# Project status
+
+Updated 2026-11-01 · see PLAN.md
+
+Shipping the importer rewrite this week.
+
+## Decisions needed
+* Pick the default backend
+
+## Next steps
+- Land the parser
+"""
+
+
+def _touch(path, text="", mtime=None):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    if mtime is not None:
+        os.utime(path, (mtime, mtime))
+
+
+def _age(path, mtime):
+    os.utime(path, (mtime, mtime))
+
+
+class ParseTest(unittest.TestCase):
+    def test_korean_status_document(self):
+        parsed = project_status.parse(STATUS_KO)
+        self.assertEqual(parsed["title"], "하팅 v4.0 캠페인 현황")
+        self.assertEqual(parsed["line"], "백로그를 묶어 v4.0.0 정식 공개까지 간다.")
+        self.assertEqual(parsed["decisions"], ["케언 PR 병합(= 운영 배포)", "artifact-relocation.py 이동 위치",
+                                               "W8을 v4에 넣을지"])
+        self.assertEqual(parsed["next"], ["[50] 정리 뒤 계획 확정", "현황 문서 자동 갱신"])
+
+    def test_english_headings_and_first_paragraph(self):
+        parsed = project_status.parse(STATUS_EN)
+        self.assertEqual(parsed["line"], "Shipping the importer rewrite this week.")   # not the Updated stamp
+        self.assertEqual(parsed["decisions"], ["Pick the default backend"])
+        self.assertEqual(parsed["next"], ["Land the parser"])
+
+    def test_unrecognized_shape_falls_back_to_the_title(self):
+        parsed = project_status.parse("# Only a title\n\n## Notes\n- free form\n")
+        self.assertEqual(parsed, {"title": "Only a title", "line": "Only a title", "decisions": [], "next": []})
+
+
+class ArtifactRootTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def _git(self, *args, cwd):
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args],
+                       cwd=cwd, check=True, capture_output=True)
+
+    def _script(self, cwd):
+        env = {key: value for key, value in os.environ.items() if key != "AGENT_ARTIFACT_ROOT"}
+        result = subprocess.run(["sh", str(ROOT / "utilities" / "artifact-root.sh"), str(cwd)],
+                                capture_output=True, text=True, env=env, check=True)
+        return result.stdout.strip()
+
+    @unittest.skipUnless(shutil.which("git"), "git is not installed")
+    def test_linked_worktree_reads_the_primary_checkout_root_like_the_script(self):
+        primary = self.tmp / "repo"
+        primary.mkdir()
+        self._git("init", "-q", cwd=primary)
+        (primary / ".agent_reports").mkdir()
+        (primary / "f").write_text("x")
+        self._git("add", "f", cwd=primary)
+        self._git("commit", "-qm", "init", cwd=primary)
+        linked = self.tmp / "repo-wt" / "task"
+        self._git("worktree", "add", "-q", "-b", "task", str(linked), cwd=primary)
+        (linked / "sub").mkdir()
+        expected = os.path.realpath(primary / ".agent_reports")
+        for cwd in (primary, linked, linked / "sub"):
+            with self.subTest(cwd=str(cwd)):
+                self.assertEqual(project_status.artifact_root(cwd), expected)
+                self.assertEqual(self._script(cwd), expected)
+
+    def test_plain_folder_inherits_only_a_marked_ancestor(self):
+        parent = self.tmp / "work"
+        child = parent / "project"
+        child.mkdir(parents=True)
+        (parent / ".agent_reports").mkdir()
+        self.assertIsNone(project_status.artifact_root(child))
+        (parent / ".agent-workspace").write_text("")
+        self.assertEqual(project_status.artifact_root(child), os.path.realpath(parent / ".agent_reports"))
+        (child / ".agent_reports").mkdir()
+        self.assertEqual(project_status.artifact_root(child), os.path.realpath(child / ".agent_reports"))
+
+
+class FindTest(unittest.TestCase):
+    def setUp(self):
+        project_status.clear_cache()
+        self.addCleanup(project_status.clear_cache)
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.project = self.tmp / "project"
+        self.root = self.project / ".agent_reports"
+        self.now = time.time()
+
+    def test_newest_status_document_wins_and_old_or_nested_copies_are_not_read(self):
+        cycle = self.root / "campaigns" / "2026-11-02_v4" / "2026-11-02_status" / "artifacts"
+        _touch(cycle / "현황.md", STATUS_KO, self.now - 60)
+        _touch(cycle / "_internal" / "STATUS.md", STATUS_EN, self.now)          # a copy, not the document
+        _touch(self.root / "research" / "2026-10-01_old" / "STATUS.md", STATUS_EN, self.now - 3600)
+        stale = self.root / "campaigns" / "2026-09-01_quiet" / "2026-09-01_c" / "artifacts" / "STATUS.md"
+        _touch(stale, STATUS_EN, self.now)
+        _age(stale.parents[2], self.now - 30 * 86400)                          # campaign untouched for 30 days
+        record = project_status.newest(str(self.root), self.now)
+        self.assertEqual(record["relative"], "campaigns/2026-11-02_v4/2026-11-02_status/artifacts/현황.md")
+        self.assertEqual(len(record["decisions"]), 3)
+        _touch(self.root / "research" / "2026-10-01_old" / "STATUS.md", STATUS_EN, self.now)
+        self.assertEqual(project_status.newest(str(self.root), self.now)["relative"],
+                         "research/2026-10-01_old/STATUS.md")
+
+    def test_collect_scans_one_root_once_per_interval(self):
+        doc = self.root / "research" / "2026-11-02_x" / "STATUS.md"
+        _touch(doc, STATUS_EN, self.now - 10)
+        (self.project / "a").mkdir()
+        cwds = [str(self.project), str(self.project / "a"), str(self.tmp)]
+        spent = project_status.collect(cwds, now=self.now, budget=0)          # no time left: scanned later
+        self.assertIs(spent[str(self.project)], None)
+        first = project_status.collect(cwds, now=self.now)
+        self.assertEqual(first[str(self.project)]["line"], "Shipping the importer rewrite this week.")
+        self.assertIs(first[str(self.project / "a")], None)                    # its own folder has no root
+        self.assertIs(first[str(self.tmp)], None)
+        _touch(doc, STATUS_KO, self.now)
+        cached = project_status.collect(cwds, now=self.now + 5)
+        self.assertEqual(cached[str(self.project)]["line"], "Shipping the importer rewrite this week.")
+        later = project_status.collect(cwds, now=self.now + project_status.INTERVAL + 1)
+        self.assertEqual(later[str(self.project)]["line"], "백로그를 묶어 v4.0.0 정식 공개까지 간다.")
+
+
+class ProjectionTest(unittest.TestCase):
+    def test_document_and_derived_status_on_repo_records(self):
+        now = time.time()
+        sessions = [Session(harness="claude", pid=10, session_tag="a1", session_id="sid-a", cwd="/w/alpha",
+                            title="t", liveness="idle"),
+                    Session(harness="claude", pid=11, session_tag="b1", session_id="sid-b", cwd="/w/beta",
+                            title="t", liveness="idle")]
+        record = dict(project_status.parse(STATUS_KO), name="현황.md", mtime=now - 5 * 86400,
+                      relative="campaigns/c/cy/artifacts/현황.md")
+        snapshot = {"sessions": sessions, "jobs": [], "resources": [],
+                    "project_of": lambda cwd: os.path.basename(cwd),
+                    "project_status": {"/w/alpha": record, "/w/beta": None}}
+        repos = {repo["id"]: repo for repo in build_view_model(snapshot, now=now).repos}
+        status = repos["alpha"]["status"]
+        self.assertEqual((status["line"], status["decisions"], status["decision"], status["next"]),
+                         ("백로그를 묶어 v4.0.0 정식 공개까지 간다.", 3, "케언 PR 병합(= 운영 배포)",
+                          "[50] 정리 뒤 계획 확정"))
+        self.assertEqual((status["doc"], status["doc_age"], status["stale"]),
+                         ("campaigns/c/cy/artifacts/현황.md", "5d ago", True))
+        self.assertNotIn("status", repos["beta"])          # no document, no route, question or result
+
+
+class RenderTest(unittest.TestCase):
+    DOC = {"routes": 0, "questions": 2, "done": "importer", "done_age": "41m ago",
+           "line": "백로그를 묶어 v4.0.0 정식 공개까지 간다.", "decisions": 3,
+           "decision": "케언 PR 병합", "next": "[50] 정리 뒤 계획 확정",
+           "doc": "research/x/현황.md", "doc_age": "12m ago", "stale": False, "changed": "12m ago"}
+    DERIVED = {"routes": 2, "questions": 0, "done": "csi bundle", "done_age": "53m ago", "changed": "53m ago"}
+
+    def setUp(self):
+        self.vm = load_fixture(FIXTURE)
+        self.first, self.second = (str(repo["id"]) for repo in self.vm.repos[:2])
+
+    def _with(self, **statuses):
+        repos = tuple(dict(repo, status=statuses[str(repo["id"])]) if str(repo["id"]) in statuses else repo
+                      for repo in self.vm.repos)
+        return replace(self.vm, repos=repos)
+
+    @staticmethod
+    def _text(frame):
+        return ["".join(cell[0] for cell in row) for row in frame.cells]
+
+    def test_segments(self):
+        segments = tables.repo_status_segments(self.DOC, 120)
+        text = "".join(text for text, _key in segments)
+        self.assertEqual(text, "백로그를 묶어 v4.0.0 정식 공개까지 간다. · 3 to decide · 2 to answer · 12m ago")
+        self.assertIn(("3 to decide", "lvl_y"), segments)
+        self.assertEqual(tables.repo_status_segments(self.DOC, 120, narrow=True), [("3 to decide", "lvl_y")])
+        self.assertEqual("".join(text for text, _ in tables.repo_status_segments(self.DERIVED, 120)),
+                         "2 routes active · 53m ago ✓ csi bundle")
+        self.assertEqual(tables.repo_status_segments(dict(self.DOC, decisions=0), 120, narrow=True), [])
+        stale = dict(self.DOC, stale=True, doc_age="5d ago", changed="5d ago", questions=0)
+        self.assertEqual("".join(text for text, _ in tables.repo_status_segments(stale, 200)),
+                         "5d ago · 백로그를 묶어 v4.0.0 정식 공개까지 간다. · 3 to decide")
+        tight = tables.repo_status_segments(self.DOC, 50)
+        self.assertLessEqual(sum(tables._seg_width(text) for text, _ in tight), 50)
+        self.assertTrue(tight[0][0].endswith("…"))
+
+    def test_status_rides_on_the_rule_without_adding_rows(self):
+        plain = self._text(draw(self.vm, NavState(), 140, 45, beat=1))
+        shown = self._text(draw(self._with(**{self.first: self.DOC, self.second: self.DERIVED}),
+                                NavState(), 140, 45, beat=1))
+        changed = [y for y, (a, b) in enumerate(zip(plain, shown)) if a != b]
+        self.assertEqual(len(changed), 2, changed)                     # exactly the two group rules
+        self.assertIn(self.first + "/  백로그를 묶어", shown[changed[0]])
+        self.assertIn("3 to decide · 2 to answer · 12m ago ┈", shown[changed[0]])
+        self.assertIn(self.second + "/  2 routes active · 53m ago ✓ csi bundle ┈", shown[changed[1]])
+
+    def test_repo_page_opens_with_four_status_lines(self):
+        state = NavState(scope="repo:" + self.first)
+        plain = self._text(draw(self.vm, state, 140, 45, beat=1))
+        shown = self._text(draw(self._with(**{self.first: self.DOC}), state, 140, 45, beat=1))
+        top = next(y for y, row in enumerate(shown) if "status:" in row)
+        self.assertIn("백로그를 묶어 v4.0.0 정식 공개까지 간다.", shown[top])
+        self.assertIn("3 · 케언 PR 병합 · +2 more", shown[top + 1])
+        self.assertIn("2 to answer", shown[top + 1])
+        self.assertIn("[50] 정리 뒤 계획 확정", shown[top + 2])
+        self.assertIn("12m ago research/x/현황.md · 41m ago ✓ importer", shown[top + 3])
+        header = next(y for y, row in enumerate(plain) if " ID " in row and "HARNESS" in row)
+        pane = 32                                                     # the sidebar left of the pane is unchanged
+        self.assertEqual(shown[top + 5][pane:], plain[header][pane:])  # the page's table follows a blank row
+        self.assertNotIn("백로그", "".join(shown[top + 5:]))           # the page's own rule stays bare
+
+
+class SnapshotPlumbingTest(unittest.TestCase):
+    def test_merge_carries_the_detail_value_and_last_good_survives_a_pass_without_it(self):
+        found = {"/w/a": {"line": "x"}}
+        basic = LiveSnapshot()
+        detail = details.DetailSnapshot(details.state_key(basic), LiveSnapshot(project_status=found))
+        self.assertIs(details.merge(basic, detail).project_status, found)
+        later = details.DetailSnapshot(details.state_key(basic), LiveSnapshot())
+        kept = details.retain_optional_last_good(detail, later)
+        self.assertIs(kept.snapshot.project_status, found)
+
+
+if __name__ == "__main__":
+    unittest.main()

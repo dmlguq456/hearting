@@ -28,6 +28,56 @@ def repo_rule_label(value, limit=None):
     return _clip(text, limit) if limit else text
 
 
+def repo_status_segments(status, room, narrow=False):
+    """``(text, key)`` pieces of a project's status line on its OVERVIEW group rule.
+
+    With a status document: its one line, what waits on the person (yellow when any), the
+    questions waiting (when any), and when the project last changed. Without one: routes
+    with live work, the questions, and the newest completed result. The free text (the
+    line, or the result) gives way first; a narrow screen keeps only the count waiting on
+    the person.
+    """
+    room = int(room)
+    has_doc = status.get("line") is not None
+    decisions = int(status.get("decisions") or 0)
+    decide = (f"{decisions} to decide", "lvl_y" if decisions else "dim")
+    if narrow:
+        return [decide] if has_doc and decisions and _seg_width(decide[0]) <= room else []
+    tail = []
+    if has_doc:
+        tail.append(decide)
+    elif status.get("routes"):
+        count = int(status["routes"])
+        tail.append((f"{count} route{'s' if count != 1 else ''} active", "dim"))
+    if status.get("questions"):
+        tail.append((f"{int(status['questions'])} to answer", "blocked"))
+    if has_doc:
+        free = str(status["line"])
+        stale = bool(status.get("stale") and status.get("doc_age"))
+        if stale:
+            free = f"{status['doc_age']} · {free}"
+        if status.get("changed") and not (stale and status["changed"] == status["doc_age"]):
+            tail.append((str(status["changed"]), "dim"))
+    else:
+        done = status.get("done")
+        free = (f"{status['done_age']} ✓ {done}" if status.get("done_age") else f"✓ {done}") if done else ""
+    if not tail and not free:
+        return []
+    pieces = []
+    for text, key in tail:
+        pieces += [(" · ", "dim"), (text, key)] if pieces else [(text, key)]
+    fixed = sum(_seg_width(text) for text, _key in pieces)
+    if has_doc:
+        lead_room = room - fixed - 3
+        if lead_room >= 8:
+            return [(_clip(free, lead_room), "now_sub"), (" · ", "dim")] + pieces
+        return pieces if fixed <= room else []
+    tail_room = room - fixed - (3 if pieces else 0)
+    if free and tail_room >= 8:
+        return pieces + ([(" · ", "dim")] if pieces else []) + [(_clip(free, tail_room), "now_sub")]
+    return pieces if fixed <= room else []
+
+
 def gauge_cells(cells, pct):
     """Filled cells of a ``cells``-wide gauge: none at 0, all at 100, otherwise at least one and never all."""
     if pct <= 0:
@@ -99,8 +149,20 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3):
             grid.put(x + 1, y, "┈ ", "line")
             end = grid.put(x + 3, y, repo_rule_label(name, max(1, use - 6)),
                            "title_dim", limit=x + use - 1) + 2
-            grid.put(end, y, " ", "branch_s")
-            for xx in range(end + 2, right):
+            # The project's status line rides on its rule (no row of its own); its page shows
+            # the same facts as a block, so a page's own rule stays bare.
+            status = None if page_scope else repo.get("status")
+            segments = (repo_status_segments(status, right - 4 - end, narrow=grid.cols < 100)
+                        if isinstance(status, Mapping) else ())
+            if segments:
+                for text, key in segments:
+                    end = grid.put(end, y, text, key, limit=right - 4)
+                grid.put(end, y, " ", "branch_s")
+                rule_x = end + 1
+            else:
+                grid.put(end, y, " ", "branch_s")
+                rule_x = end + 2
+            for xx in range(rule_x, right):
                 grid.put(xx, y, "┈", "line")
             y += 1
         for session in mine:

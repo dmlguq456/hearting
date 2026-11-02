@@ -129,6 +129,49 @@ cap is reached, the writer replaces a proposed new code by `ETC`. The writer lim
 label to 40 and a note to 120 characters (stricter than the contract, which only needs
 strings). Without a project file the default display name is the project folder name.
 
+### `STATUS.md` / `현황.md` — the project status document
+
+One short page a person reads first to see where a project stands. Fleet puts its one
+line on the project's OVERVIEW rule and its parts at the top of the project page; Cairn
+pins it at the top of the project. Writing one is optional and nothing waits on it:
+without one, Fleet builds the line from the routes, questions and results it already
+shows.
+
+- **Where.** Directly in a cycle's `artifacts/`, as that cycle's primary artifact:
+  `campaigns/<campaign-locator>/<cycle-locator>/artifacts/STATUS.md` (or `현황.md`). A
+  campaign keeps one and edits it in place (a finalized cycle still takes writes,
+  D-123). The most recently modified one in the artifact root is the project's current
+  status. Copies under `_internal/` or `versions/`, or deeper inside `artifacts/`, are
+  not read. A file written before this convention at `research/<folder>/STATUS.md` is
+  still read.
+- **Shape.** Markdown in the reader's language. Only the parts below are read; other
+  sections are free.
+
+  ```markdown
+  # <project or campaign> 현황
+
+  갱신 2026-11-02 21:50 · optional pointers
+
+  **한 줄**: where the work stands, in one sentence.
+
+  ## 결정 필요
+  - one bullet per thing that waits on the person: a decision or an action
+
+  ## 다음
+  - the next step first
+  ```
+
+  English headings read the same: `**One line**:`, `## Decisions needed`, `## Next`.
+  Readers take the one-line paragraph (else the first paragraph above the first section
+  that is not the `갱신`/`Updated` stamp, else the title), count the top-level bullets
+  under the decisions heading, and take the first bullet under the next heading. A
+  section that records decisions already made (`## 사용자 결정 기록`, `## Decision log`)
+  is not counted. The file's modification time is when the status last changed.
+- **Refresh.** Whoever runs the work edits it when the state changes. Route closure
+  (`capability-route finish`) and a PR merge are the two events an automatic refresh
+  would attach to; none is installed, and nothing checks freshness. Fleet shows the age
+  in front of a document older than three days.
+
 ## Internal files (no reader duty)
 
 - `.runtime/artifact-producer/v1/artifact-meta-state.json` (`artifact-meta-state/v1`):

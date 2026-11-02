@@ -403,7 +403,8 @@ explicit declaration repair; its `auto`/`backfill` run that same job, and a seal
 starts no second one. `HEARTING_WORKFLOW_GROUP_REVIEW=off` disables the whole
 automatic job; `HEARTING_CAMPAIGN_TITLE_AUTO=off` keeps only the automatic
 campaign title out of it (everything else is still judged). Files, limits, the
-history line, and failure semantics: [ARTIFACT_META.md](ARTIFACT_META.md). No gate,
+history line, failure semantics, and the optional project status document
+(`STATUS.md`/`현황.md`, read by Fleet and Cairn): [ARTIFACT_META.md](ARTIFACT_META.md). No gate,
 input, or agent obligation results.
 
 **Campaign closure.** `artifact_producer.py campaign-status|campaign-close|campaign-reopen|campaign-recover`
