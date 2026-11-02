@@ -474,7 +474,8 @@ route alone is not a HOME consumer: the home remains only while an existing
 continuation, delivery/replacement, summary/provider, lease, process or recent-view
 obligation can read it. Route and attempt outcomes retain their semantic state;
 an unreadable or conflicting route binding remains unknown. The pass runs at the end
-of every post-exit reaper and in a `reconcile --apply` that is not scoped to one exact attempt. It is due at
+of every post-exit reaper and in a `reconcile --apply` that is not scoped to one exact attempt; when the
+reaper's pass runs it also carries the delivery store's seven-day terminal prune, at the same cadence. It is due at
 most every five minutes, examines at most 128 homes (a fair cursor), and removes at
 most 16 destructively touched homes, including partial leftovers of an interrupted removal. The idle clock starts
 from the best completion estimate: the terminal row timestamp or, when later, the
@@ -488,12 +489,15 @@ kept while: its row is not terminal; any open row references the attempt; a
 by-source replacement reservation or claim, a recovery-attention record or a
 pending delivery intent is unresolved or unreadable; only actual attempt IDs in
 delivery records protect worker homes (a depth-1 `-` parent and session notice
-identities refer to no worker home); a delivery record or group
+identities refer to no worker home, including route-free ordinary notices that
+name no attempt; one shared delivery-record reading decides which attempts a
+record binds); a delivery record or group
 is malformed, unreadable or unattributable; a pruned delivery has only a legacy
 zero-byte or mismatched tombstone; its route binding is missing, damaged or
 unreadable; a terminal replacement successor still has unresolved delivery or
 source-HOME obligations; a summary owner/provider or the supervisor lease is live or
-unverifiable; process quiescence is not proven; Fleet displayed it within the
+unverifiable (a provider lockdir is live only while a same-user process names it in
+its `--lockdir` argument, and a host-like reader's complete process table may decide absence even when the owner's recorded PID namespace is gone; an incomplete process read keeps the home); process quiescence is not proven; Fleet displayed it within the
 one-hour window; or its `.credentials.json` is a regular file, which a Claude native refresh
 left in place of the link and which may hold the only copy of a rotated token. A home
 is also kept, and counted rather than hidden in
@@ -507,7 +511,8 @@ identity or row is invented for it. A native reader or supervisor pins exactly i
 own home with a shared directory lock paired with detach's exclusive lock.
 Other homes remain independently reclaimable, and a detach-first outcome refuses
 new reads. The result preserves
-the existing top-level unknown counts and records bounded causes beside them;
+the existing top-level unknown counts and records bounded causes beside them,
+and the bytes one pass freed (`freed_bytes`);
 `summary-owner-unknown`, `quiescence-unverifiable` and `route-unknown` remain
 fail-closed categories. Shared `homes/codex`,
 `<slug>.<profile>` and `destination=` homes are not enumerated. Detaching is one

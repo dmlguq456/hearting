@@ -487,9 +487,10 @@ def main(argv=None) -> int:
     # Every drain, receipt and delivery obligation of this attempt is settled by
     # now. The tail is where an expired per-attempt home is retired, so no user
     # command is needed; it can never change this watcher's own outcome.
+    ran = False
     try:
         from worker_home_retention import sweep_best_effort
-        sweep_best_effort(args.jobs)
+        ran = sweep_best_effort(args.jobs)
     except Exception:  # noqa: BLE001
         pass
     try:
@@ -497,6 +498,16 @@ def main(argv=None) -> int:
         sweep_best_effort(args.jobs)
     except Exception:  # noqa: BLE001 -- independent best-effort retention
         pass
+    if ran:
+        # The same seven-day terminal prune the dispatch reconcile path runs, at
+        # the home pass's cadence, so settled delivery records do not pile up
+        # when nobody reconciles by hand.
+        try:
+            import dispatch_pending_delivery as pending_delivery
+            from dispatch_contract import dispatch_state_root
+            pending_delivery.prune(dispatch_state_root(args.jobs), apply=True)
+        except Exception:  # noqa: BLE001 -- independent best-effort retention
+            pass
     return result
 
 

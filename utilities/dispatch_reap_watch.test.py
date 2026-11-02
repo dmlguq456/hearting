@@ -1186,6 +1186,90 @@ class WorkerHomeRetentionCarrierTest(unittest.TestCase):
         sweep.assert_called_once()
 
 
+class DeliveryPruneCarrierTest(unittest.TestCase):
+    """The reaper's retention tail also runs the seven-day terminal prune."""
+
+    def record(self, base, suffix, state, age_days):
+        import dispatch_pending_delivery as P
+        receipt = {"schema_version": 2, "state": "delivered", "kind": "fixture",
+                   "parent_attempt_id": "att-" + "a" * 32, "job_registry": str(base / "jobs.log"),
+                   "children": [], "delivery_classification": "attention"}
+        delivery_id = "delivery-" + suffix * 32
+        P.create(base, recipient_kind="claude-parent-runtime", recipient_key="sess-reaper",
+                 delivery_id=delivery_id, session_generation="", session_generation_supported="0",
+                 attempt_ids=["att-" + suffix * 32], parent_attempt_id="att-" + "a" * 32,
+                 route_id="rt-reaper", route_node="execute", receipt=receipt,
+                 receipt_digest=P._canonical_receipt_digest(receipt),
+                 row_revisions={"att-" + suffix * 32: "deadbeef"})
+        if state == "acked":
+            P.claim(base, "sess-reaper", delivery_id, claim_owner="fixture", lease_seconds=60)
+            P.ack(base, "sess-reaper", delivery_id, acked_by="fixture")
+        path = P.record_path(base, "sess-reaper", delivery_id)
+        old = time.time() - age_days * 86400
+        os.utime(path, (old, old))
+        return path
+
+    def test_a_reaper_exit_prunes_week_old_terminal_deliveries(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td).resolve()
+            jobs = base / "jobs.log"
+            attempt = "att-reaper-prune"
+            (base / "homes" / "workers").mkdir(parents=True, mode=0o700)
+            old = self.record(base, "1", "acked", 8)
+            recent = self.record(base, "2", "acked", 1)
+            opened = self.record(base, "3", "pending", 30)
+            worker = subprocess.Popen(
+                ["sleep", "0.05"], env={**os.environ, D.ATTEMPT_DESCENDANT_ENV: attempt},
+                start_new_session=True)
+            identity = D.process_launch_identity(worker.pid)
+            metadata = ",".join(f"{k}={v}" for k, v in {
+                **identity, "attempt_id": attempt, "launch_lifecycle": "detached",
+                "log_file": str(base / "missing.jsonl")}.items())
+            jobs.write_text("2026-10-01T00:00:00Z\topen\t/repo\t/wt\tworker\t"
+                            f"{CURRENT},{metadata}\n", encoding="utf-8")
+            watcher = subprocess.Popen([
+                sys.executable, str(WATCH), "--jobs", str(jobs), "--attempt-id", attempt,
+                "--pid", str(worker.pid), "--pid-start", identity["pid_start"],
+                "--pgid", identity["pgid"], "--interval", "0.02"])
+            worker.wait(timeout=5)
+            self.assertEqual(watcher.wait(timeout=60), 0)
+            self.assertFalse(old.exists())
+            self.assertTrue(Path(str(old) + ".pruned").is_file())
+            self.assertTrue(recent.is_file())
+            self.assertTrue(opened.is_file())
+
+    def watch_main(self, ran, prune_effect=None):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("dispatch_reap_watch_prune", WATCH)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        import dispatch_pending_delivery
+        import worker_home_retention
+        outcome = {} if ran else {"skipped": "not-due"}
+        with mock.patch.object(module, "watch", return_value=65), \
+                mock.patch.object(worker_home_retention, "sweep", return_value=outcome), \
+                mock.patch.object(dispatch_pending_delivery, "prune",
+                                  side_effect=prune_effect) as prune:
+            code = module.main(["--jobs", "/nonexistent/jobs.log", "--attempt-id", "att-x",
+                                "--pid", "1", "--pid-start", "1", "--pgid", "1"])
+        return code, prune
+
+    def test_reaper_prune_follows_home_retention_cadence(self):
+        code, prune = self.watch_main(ran=False)
+        self.assertEqual(code, 65)
+        prune.assert_not_called()
+        code, prune = self.watch_main(ran=True)
+        self.assertEqual(code, 65)
+        prune.assert_called_once()
+        self.assertEqual(prune.call_args.args[0], Path("/nonexistent"))
+        self.assertIs(prune.call_args.kwargs["apply"], True)
+
+    def test_a_failing_prune_does_not_change_the_watcher_result(self):
+        code, prune = self.watch_main(ran=True, prune_effect=RuntimeError("boom"))
+        self.assertEqual(code, 65)
+        prune.assert_called_once()
+
+
 class AttemptRecordIndexTest(unittest.TestCase):
     """attempt_record reads the one row through the shared view, with the
     same last-match answer as the old whole-file text scan."""

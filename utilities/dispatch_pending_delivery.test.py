@@ -1670,6 +1670,64 @@ class ReferenceAdmissionTests(IsolatedRootMixin, unittest.TestCase):
                          tuple(sorted(AR.lock_path(self.root, item) for item in expected)))
 
 
+class RecordAttemptIdentitiesTest(IsolatedRootMixin, unittest.TestCase):
+    """The single decision on which attempts a record binds to a worker HOME."""
+
+    def _record(self, **changes):
+        value = dict.fromkeys(PD.REQUIRED_FIELDS)
+        receipt = _receipt()
+        value.update(
+            schema_version=PD.SCHEMA_VERSION, delivery_id="delivery-" + "1" * 32,
+            recipient_kind="claude-parent-runtime", recipient_digest="2" * 64,
+            attempt_ids=["att-a"], parent_attempt_id="-", state="pending", attempts=0,
+            claim_authority=next(iter(PD.CLAIM_AUTHORITIES)), receipt=receipt,
+            route_node="execute", row_revisions={"att-a": "x"})
+        value.update(changes)
+        return value
+
+    def test_producer_ordinary_notice_binds_no_attempt(self):
+        import session_notice
+        self.root.mkdir(parents=True, exist_ok=True)
+        jobs = self.root / "jobs.log"
+        jobs.write_text("")
+        record = session_notice.notify("claude", "sess-ident", key="ident", subject="S",
+                                       text="T", jobs=jobs)
+        self.assertEqual((record["attempt_ids"], record["parent_attempt_id"]), ([], ""))
+        self.assertEqual(PD.record_attempt_identities(record), ())
+
+    def test_legacy_notice_tag_binds_no_attempt(self):
+        tag = "notice-" + "a" * 32
+        self.assertEqual(PD.record_attempt_identities(self._record(
+            attempt_ids=[tag], parent_attempt_id=tag, route_node="notice",
+            row_revisions={tag: "notice"})), ())
+
+    def test_dash_parent_names_only_the_child(self):
+        self.assertEqual(PD.record_attempt_identities(self._record()), ("att-a",))
+
+    def test_children_then_parent_without_repeats(self):
+        self.assertEqual(PD.record_attempt_identities(self._record(
+            attempt_ids=["att-c", "att-p"], parent_attempt_id="att-p")), ("att-c", "att-p"))
+
+    def test_empty_parent_outside_an_ordinary_notice_is_refused(self):
+        notice = dict(parent_attempt_id="", route_node="notice", receipt={"kind": "notice"},
+                      row_revisions={})
+        for changes, detail in (
+                ({"parent_attempt_id": ""}, "parent-attempt-invalid"),
+                ({**notice, "attempt_ids": ["att-a"]}, "parent-attempt-invalid"),
+                ({**notice, "attempt_ids": [], "row_revisions": {"att-a": "x"}}, "attempt-ids-invalid")):
+            with self.subTest(changes=changes), self.assertRaises(PD.PendingDeliveryError) as raised:
+                PD.record_attempt_identities(self._record(**changes))
+            self.assertEqual(raised.exception.detail, detail)
+
+    def test_non_string_attempt_ids_and_bad_shapes_are_refused(self):
+        with self.assertRaises(PD.PendingDeliveryError) as raised:
+            PD.record_attempt_identities(self._record(attempt_ids=[7]))
+        self.assertEqual(raised.exception.detail, "attempt-ids-invalid")
+        for value in ("not-a-record", {}, self._record(state="bogus")):
+            with self.assertRaises(PD.PendingDeliveryError):
+                PD.record_attempt_identities(value)
+
+
 class ExpiryTest(IsolatedRootMixin, unittest.TestCase):
     def setUp(self):
         super().setUp()

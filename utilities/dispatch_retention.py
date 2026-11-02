@@ -332,7 +332,8 @@ def terminal_protection(ctx, attempt, *, probe_processes, delivery_state,
 
     refs, index_unknown = delivery_index()
     if index_unknown:
-        return Protection("unknown", "delivery-index-unknown")
+        return Protection("unknown", "delivery-index-unknown",
+                          detail=index_unknown if isinstance(index_unknown, str) else "")
     if attempt in refs:
         return Protection("keep", "delivery-open")
     activity = max(activity, ctx.delivery_activity.get(attempt, 0))
