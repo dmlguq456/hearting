@@ -4628,13 +4628,14 @@ def release_closed_session(harness, session_id, *, reason, settle_watch=None):
                 summary["marker"] = "absent"
     if selected:
         _steward_check("settle_session", harness, session_id, reason=reason)
-    if settle_watch is None:
-        settle_watch = _peer_steward_module().settle_steward_exited_watch
     state_root = str(peer_state_root())
     for watch in handover.resolved_watch_references(harness=harness, sid=session_id):
         if str(watch.get("storage_root")) != state_root:
             summary["skipped"] += 1
             continue
+        if settle_watch is None:
+            # Loaded only when a watch is there to settle; most closed sessions supervise none.
+            settle_watch = _peer_steward_module().settle_steward_exited_watch
         if settle_watch(watch["watch_id"]):
             summary["watches"] += 1
         else:
