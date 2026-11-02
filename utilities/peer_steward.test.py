@@ -4218,23 +4218,33 @@ class WatchMessageTransportSettlementTest(_WatchMixin, unittest.TestCase):
         peer_steward._write_json_atomic(arm_path, arm)
         return fields, env, seat
 
-    def _transfer_duty(self, watch_id, *, old_transfer):
-        sender = {"harness": "claude", "session_id": "transport-sender", "name": "sender"}
-        recipient = {"harness": "claude", "session_id": "steward-1", "name": "steward"}
+    _TRANSPORT_SENDER = {"harness": "claude", "session_id": "transport-sender", "name": "sender"}
+    _TRANSPORT_RECIPIENT = {"harness": "claude", "session_id": "steward-1", "name": "steward"}
+
+    def _transfer(self, watch_id, *, old_transfer):
         _text, ref = peer_steward.peer_message.prepare_peer_message(
-            "[peer-steward] watch receipt transport", sender, recipient, defer=True,
-            refs=[f"peer-watch:{watch_id}"])
+            "[peer-steward] watch receipt transport", self._TRANSPORT_SENDER,
+            self._TRANSPORT_RECIPIENT, defer=True, refs=[f"peer-watch:{watch_id}"])
         if old_transfer:
             path = peer_steward.peer_message._transfer_path(ref)
             transfer = json.loads(path.read_text(encoding="utf-8"))
             transfer.pop("refs", None)
             path.write_text(json.dumps(transfer), encoding="utf-8")
+        return ref
+
+    def _message_duty(self, ref):
         row = peer_steward.peer_message._read_pending(ref)
         store = peer_steward.peer_obligations.ObligationStore()
         duty = store.create("message-" + ref, "message",
-            {"server": "default", "pane": "fixture:watch-transport-seat", **recipient},
-            {"ref": ref, "body_digest": row["body_sha256"], "from": sender,
+            {"server": "default", "pane": "fixture:watch-transport-seat",
+             **self._TRANSPORT_RECIPIENT},
+            {"ref": ref, "body_digest": row["body_sha256"], "from": self._TRANSPORT_SENDER,
              "to": row["to"], "refs": row["refs"]})
+        return row, store, duty
+
+    def _transfer_duty(self, watch_id, *, old_transfer):
+        ref = self._transfer(watch_id, old_transfer=old_transfer)
+        row, store, duty = self._message_duty(ref)
         return ref, row, store, duty
 
     def _resume_until(self, store, duty_id, settled):
@@ -4290,8 +4300,12 @@ class WatchMessageTransportSettlementTest(_WatchMixin, unittest.TestCase):
         import dispatch_seat_handover as handover
 
         fields, env, seat = self._watch("watch-stale-transport")
-        ref, _row, store, duty = self._transfer_duty(
-            fields["watch_id"], old_transfer=True)
+        # The message duty is created only after the handover below. While it
+        # exists, the detached shared runner may resume it at any moment; one
+        # pass between the ACK and the handover settles it with the ACK's then
+        # still current binding (complete, which is correct), and this test
+        # would never see the stale-generation case it is about.
+        ref = self._transfer(fields["watch_id"], old_transfer=True)
         ack = self._run("ack", fields["watch_id"], "--carrier", "fixture-test", env=env)
         self.assertEqual(ack.returncode, 0, ack.stdout + ack.stderr)
         pending = peer_steward.peer_message._read_pending(ref)
@@ -4315,6 +4329,7 @@ class WatchMessageTransportSettlementTest(_WatchMixin, unittest.TestCase):
                 pending, include_acked=True)
             self.assertNotEqual(current_binding, old_binding)
 
+        _row, store, duty = self._message_duty(ref)
         latest = self._resume_until(
             store, duty["id"],
             lambda row: row["observation"].get("reason") == "received-binding-unverified")
