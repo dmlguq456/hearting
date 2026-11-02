@@ -13,7 +13,7 @@ structure or a change is sound.
 ## 0. Three standing goals
 
 The user set these as Hearting's core goals (2026-10-06). They serve the
-purpose stated at the top of [AGENTS.md](../AGENTS.md) ("Why Hearting exists").
+purpose stated at the top of the repository's AGENTS.md ("Why Hearting exists").
 Sections 1–6 describe how to reach them; judge any structure or change against
 these first.
 
