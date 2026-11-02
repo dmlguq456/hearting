@@ -494,7 +494,17 @@ from the best completion estimate: the terminal row timestamp or, when later, th
 regular log file mtime. Only when that timestamp cannot be parsed does the clock
 start at the first pass that proves every protection below. Uncertain prepared
 evidence defers without restarting an established clock, while freshly observed
-renewed protection restarts it. Later activity (a Fleet
+renewed protection restarts it. Delivery discovery shares the existing pass's
+budget and resumes a bounded candidate cohort from its saved directory position;
+an unfinished read remains deferred until observation completes. The saved
+position carries one filesystem-clock mark taken before the first group was read;
+the final candidate admission looks once for records published after that mark
+and rereads only those, so the number of recipient groups is never a limit.
+Only a complete, fresh candidate observation permits retirement. Open or
+unattributable evidence stays protected; terminal activity extends only the
+related attempt, parent, child, successor or verified legacy HOME binding.
+Normal and legacy notices use the delivery admission's same relation rule.
+Later activity (a Fleet
 view, a route outcome, a resolved delivery, a recovery record, a supervisor update,
 or a write to the home) extends it, including activity arriving before detach. A home is
 kept while: its row is not terminal; any open row references the attempt; a
@@ -530,7 +540,11 @@ fail-closed categories. Shared `homes/codex`,
 `<slug>.<profile>` and `destination=` homes are not enumerated. Detaching is one
 rename into `homes/worker-retention/retiring/` under a nonblocking registry lock
 and a reader-mark lock. Evidence is prepared outside the registry lock; its
-freshness and the full idle clock are checked before rename. Per-detach freshness
+freshness and the full idle clock are checked before rename. Sorted reference
+admission excludes related publication through the journal and rename; writer
+change tokens invalidate prepared observations without becoming absence evidence.
+Saved progress contains only the bounded cohort, directory position/generation
+and protection/activity summaries, not a copy of delivery history. Per-detach freshness
 covers candidate-relevant evidence; out-of-protocol late writes into unrelated
 historical delivery groups are caught by the next pass's discovery. Available,
 compatible mount identities are proved before detachment. Complete malformed
@@ -574,8 +588,10 @@ replaced, or otherwise uncertain evidence keeps the bytes. Eligible logs age
 from the latest verified terminal/settlement time: retain at least 14 days,
 then retire the oldest eligible logs as needed to approach 2 GiB. Protected
 and unknown bytes take precedence, so totals above 2 GiB are expected when
-needed. The bounded pass reuses one evidence snapshot, rechecks identity
-immediately before unlink, and resumes on the next normal cadence after
+needed. The bounded pass shares the resumable candidate delivery observation with
+HOME retention, rechecks identity and settlement immediately before removal, and
+holds all bound attempt/child/successor reference admissions through quarantine
+and unlink. It resumes on the next normal cadence after
 interruption; examining and removing have separate time budgets, and the next
 pass may start after one minute while removable files remain. It runs beside the existing post-exit reaper and selector-free
 `reconcile --apply`; exact-attempt transactions remain scoped to their attempt.

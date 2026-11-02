@@ -45,6 +45,7 @@ import stat
 import tempfile
 import time
 import re
+import secrets
 import dispatch_attempt_reference as attempt_reference
 import dispatch_lock_order
 from dispatch_receipt_identity import CANONICAL_RECEIPT_KEYS, CANONICAL_CHILD_KEYS, receipt_digest
@@ -326,6 +327,105 @@ def _validate_record(value: object) -> dict:
     return value
 
 
+def record_references(value: object, *, group: str | None = None,
+                      delivery_id: str | None = None) -> frozenset[str]:
+    """Validate the complete relationship before extracting actual HOME refs.
+
+    Keep this stricter than the permissive mutex extractor: a malformed identity
+    is unknown evidence, not an empty reference set. Use the validator's returned
+    envelope so legacy lazy upgrades follow the same admission semantics.
+    """
+    value = _validate_record(value)
+    ids, parent = value.get("attempt_ids"), value.get("parent_attempt_id")
+    notice = re.compile(r"notice-[0-9a-f]{32}")
+    if (not re.fullmatch(r"[0-9a-f]{64}", str(value.get("recipient_digest", "")))
+            or (delivery_id is not None and not re.fullmatch(
+                r"delivery-(?:[0-9a-f]{32}|[0-9a-f]{64})", delivery_id))
+            or (group is not None and value["recipient_digest"] != group)
+            or (delivery_id is not None and value["delivery_id"] != delivery_id)
+            or not isinstance(ids, list)
+            or any(not isinstance(item, str) or not (
+                attempt_reference.ATTEMPT_RE.fullmatch(item) or notice.fullmatch(item))
+                   for item in ids)
+            or not isinstance(parent, str)
+            or (parent not in ("", "-") and not (
+                attempt_reference.ATTEMPT_RE.fullmatch(parent) or notice.fullmatch(parent)))):
+        raise PendingDeliveryError("delivery-persistence-refused", "record-references-invalid")
+    ordinary_notice = (isinstance(value.get("receipt"), dict)
+                       and value["receipt"].get("kind") == "notice"
+                       and value.get("route_node") == "notice" and value.get("row_revisions") == {})
+    if not parent and not ordinary_notice:
+        raise PendingDeliveryError("delivery-persistence-refused", "record-parent-invalid")
+    return attempt_reference.record_attempts(value)
+
+
+_REFERENCE_TOKEN_PREFIX = b"delivery-change-v1:"
+_REFERENCE_TOKEN_BYTES = len(_REFERENCE_TOKEN_PREFIX) + 32 + 1
+
+
+def _change_token(path: Path, *, advance: bool = False) -> tuple | None:
+    """Small invalidation token in an existing admission file, never activity.
+
+    Callers that advance hold its admission. mtime is deliberately excluded:
+    acquiring an attempt mutex touches mtime even for a read-only observer.
+    A torn token, missing/replaced inode or unsafe file invalidates a scan.
+    """
+    fd = os.open(path, (os.O_RDWR if advance else os.O_RDONLY)
+                 | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    try:
+        before = os.fstat(fd)
+        named = os.stat(path, follow_symlinks=False)
+        identity = lambda st: (st.st_dev, st.st_ino, st.st_mode, st.st_uid, st.st_nlink)
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.geteuid()
+                or before.st_nlink != 1 or before.st_mode & 0o077
+                or identity(before) != identity(named)):
+            raise PendingDeliveryError("delivery-persistence-refused", "reference-token-untrusted")
+        if advance:
+            data = _REFERENCE_TOKEN_PREFIX + secrets.token_hex(16).encode("ascii") + b"\n"
+            if os.pwrite(fd, data, 0) != len(data):
+                raise OSError("reference-token-short-write")
+            os.ftruncate(fd, len(data))
+            os.fsync(fd)
+        data = os.pread(fd, _REFERENCE_TOKEN_BYTES + 1, 0)
+        after = os.fstat(fd)
+        if (len(data) != _REFERENCE_TOKEN_BYTES
+                or not data.startswith(_REFERENCE_TOKEN_PREFIX) or data[-1:] != b"\n"
+                or re.fullmatch(b"[0-9a-f]{32}", data[len(_REFERENCE_TOKEN_PREFIX):-1]) is None
+                or before.st_ino != after.st_ino
+                or identity(after) != identity(os.stat(path, follow_symlinks=False))):
+            return None
+        return (*identity(after), data.decode("ascii"))
+    finally:
+        os.close(fd)
+
+
+def reference_token(root: Path, attempt: str, *, initialize: bool = False):
+    if initialize and attempt not in attempt_reference.held_attempts():
+        raise PendingDeliveryError("delivery-persistence-refused", "attempt-reference-admission-missing")
+    path = attempt_reference.lock_path(root, attempt)
+    try:
+        value = _change_token(path)
+        return _change_token(path, advance=True) if value is None and initialize else value
+    except FileNotFoundError:
+        return None
+
+
+def _invalidate_references(root: Path, references) -> None:
+    if not set(references).issubset(attempt_reference.held_attempts()):
+        raise PendingDeliveryError("delivery-persistence-refused", "attempt-reference-admission-missing")
+    for attempt in sorted(references):
+        _change_token(attempt_reference.lock_path(root, attempt), advance=True)
+    # Identity-less legacy HOMEs have no attempt lock to name until discovery.
+    # Their existing view admission fences publication. Its token invalidates
+    # only those observations; known candidates use their own reference tokens.
+    view = root / "homes" / "worker-retention" / "view.lock"
+    if references:
+        try:
+            _change_token(view, advance=True)
+        except FileNotFoundError:
+            pass
+
+
 def record_attempt_identities(value: object) -> tuple[str, ...]:
     """The single decision on which attempts a delivery record binds to a worker HOME.
 
@@ -354,10 +454,23 @@ def record_attempt_identities(value: object) -> tuple[str, ...]:
 def _record_lock(path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
     for directory in (path.parent, path.parent.parent):
+        fd = None
         try:
-            os.chmod(directory, DIR_MODE)
-        except OSError:
-            pass
+            fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            opened = os.fstat(fd)
+            named = os.stat(directory, follow_symlinks=False)
+            if (opened.st_uid != os.geteuid()
+                    or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)):
+                raise PendingDeliveryError("delivery-persistence-refused", "record-directory-untrusted")
+            # Even chmod to the same mode changes ctime. A no-op create must
+            # not invalidate every partial delivery-directory observation.
+            if stat.S_IMODE(opened.st_mode) != DIR_MODE:
+                os.fchmod(fd, DIR_MODE)
+        except OSError as exc:
+            raise PendingDeliveryError("delivery-persistence-refused", "record-directory-unavailable") from exc
+        finally:
+            if fd is not None:
+                os.close(fd)
     lock_path = path.with_name(
         path.name[:-5] + _RECORD_LOCK_SUFFIX if path.name.endswith(".json")
         else path.name + ".lock"
@@ -430,10 +543,10 @@ def _record_reference_lock(path: Path, *, candidate: dict | None = None):
     group directory and first record become visible under the same admission.
     """
     root = Path(path).parents[2]
-    required = set(attempt_reference.record_attempts(candidate))
+    required = set(record_references(candidate) if candidate is not None else ())
     for _attempt in range(_LOCK_REOPEN_LIMIT):
         before = _read_unlocked(path)
-        required.update(attempt_reference.record_attempts(before))
+        required.update(record_references(before) if before is not None else ())
         retry = False
         from worker_home_retention import home_reference_relevant, home_view_admission
         home_relevant = home_reference_relevant(root, required)
@@ -449,7 +562,7 @@ def _record_reference_lock(path: Path, *, candidate: dict | None = None):
                                                "home-reference-admission-busy")
                 with _record_lock(path):
                     current = _read_unlocked(path)
-                    current_refs = set(attempt_reference.record_attempts(current))
+                    current_refs = set(record_references(current) if current is not None else ())
                     if not current_refs.issubset(required):
                         required.update(current_refs)
                         retry = True
@@ -730,6 +843,7 @@ def _write_unlocked(path: Path, record: dict) -> None:
     if not references.issubset(attempt_reference.held_attempts()):
         raise PendingDeliveryError("delivery-persistence-refused",
                                    "attempt-reference-admission-missing")
+    _invalidate_references(Path(path).parents[2], references)
     persisted = dict(record)
     retry = persisted.pop(COURIER_RETRY_FIELD, None)
     timeline = persisted.pop(TIMESTAMP_PROVENANCE_FIELD, None)
@@ -1836,6 +1950,7 @@ def tombstone_path(record_file: Path) -> Path:
 
 def _write_prune_tombstone(record_file: Path, value: dict) -> None:
     """Bind a pruned terminal obligation before unlinking its record."""
+    _invalidate_references(Path(record_file).parents[2], record_references(value))
     tomb = tombstone_path(record_file)
     proof = {"schema": PRUNE_TOMBSTONE_SCHEMA,
              "delivery_id": value["delivery_id"],
