@@ -130,7 +130,10 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
                                 'parent_attempt_id=att-parent\\n')
                 launch_race = os.environ.get('FAKE_LAUNCH_STARTED_RACE') == '1'
                 if launch_race and not resume:
-                    # Registered now, fenced start published a moment after this turn ends.
+                    # Registered now; the fenced start is published 1.5s after this turn's
+                    # process exits (the publisher waits for EOF on its stdin pipe, whose
+                    # write end only this process holds), i.e. after the supervisor's first
+                    # post-turn read and inside its settle window.
                     import subprocess
                     jobs = os.environ['FAKE_JOBS']
                     row = ('2026-08-11T00:00:0{n}Z\\topen\\t/repo\\t/wt\\tchild-race-{s}\\t'
@@ -139,11 +142,11 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
                            'launch_started={n},attempt_id=att-child-race-{s},parent_attempt_id=att-parent\\n')
                     with open(jobs, 'a', encoding='utf-8') as h:
                         h.write(row.format(n=0, s='a') + row.format(n=0, s='b'))
-                    subprocess.Popen([sys.executable, '-c',
-                                      'import sys, time; time.sleep(0.3); '
+                    publisher = subprocess.Popen([sys.executable, '-c',
+                                      'import sys, time; sys.stdin.buffer.read(); time.sleep(1.5); '
                                       'open(sys.argv[1], "a", encoding="utf-8").write(sys.argv[2])',
                                       jobs, row.format(n=1, s='a') + row.format(n=1, s='b')],
-                                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                     stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
                                      stderr=subprocess.DEVNULL, start_new_session=True)
                 final_first = os.environ.get('FAKE_NO_CHILD') == '1'
                 text = ('Started both children.' if launch_race and not resume
@@ -1111,7 +1114,8 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
         # ended without `runtime_wait`: the runtime waits for them, as Codex does.
         self.jobs.write_text(owner_row(self.lease), encoding="utf-8")
         command = self.command()
-        command[command.index("--join-interval") + 1] = "0.4"
+        # settle window = min(max(interval*5, 0.2), 5.0) = 5.0s
+        command[command.index("--join-interval") + 1] = "1.0"
         result = subprocess.run(
             command, input="initial assignment", text=True, capture_output=True, timeout=20,
             env=self.child_env(FAKE_TRACE=str(self.trace), FAKE_LAUNCH_STARTED_RACE="1",
