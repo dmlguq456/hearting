@@ -1,0 +1,42 @@
+{
+ "schema": 1,
+ "note": "User-facing text. Korean entries match the pre-catalog strings byte for byte. {name} fields are filled by str.format.",
+ "messages": {
+  "route.campaign.blocked": {
+   "en": "Campaign {key} (begin will refuse: {reason})",
+   "ko": "캠페인 {key} (begin 거부 예정: {reason})"
+  },
+  "route.campaign.create": {
+   "en": "Campaign {key} (new)",
+   "ko": "캠페인 {key} (신규 생성)"
+  },
+  "route.campaign.join": {
+   "en": "Campaign {key} (joining existing)",
+   "ko": "캠페인 {key} (기존 합류)"
+  },
+  "route.campaign.line": {
+   "en": "{text} · active campaigns {count}",
+   "ko": "{text} · 활성 캠페인 {count}개"
+  },
+  "route.campaign.parent": {
+   "en": "Campaign inherited from parent {parent}",
+   "ko": "캠페인 parent {parent} 상속"
+  },
+  "route.campaign.reopen": {
+   "en": "Campaign {key} (reopening a closed campaign)",
+   "ko": "캠페인 {key} (닫힌 캠페인 재개)"
+  },
+  "route.campaign.unassigned": {
+   "en": "No campaign assigned (_unassigned, degraded)",
+   "ko": "캠페인 미배정 (_unassigned, degraded)"
+  },
+  "route.campaign.unresolved": {
+   "en": "Campaign {key} (cannot tell whether it exists: campaign list unreadable)",
+   "ko": "캠페인 {key} (기존 여부 확인 불가: 캠페인 목록 읽기 실패)"
+  },
+  "route.spec.shared": {
+   "en": "Shared spec available — read: {path}",
+   "ko": "공유 spec 있음 — 읽을 경로: {path}"
+  }
+ }
+}
