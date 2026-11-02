@@ -590,10 +590,107 @@ def replace_managed_observer(pid: int, pid_start: str | None, lock_path: str | P
         return False
 
 
+def _exec_in_release(source_root: Path, target_root: Path, argv, *, keep_fds=()) -> bool:
+    """Replace this process with ``argv`` on another release of the same install.
+
+    PID, start time, session and the listed descriptors stay; the environment
+    is rebuilt for the target release, and a working directory inside the old
+    release moves to the same place in the new one so nothing keeps naming the
+    old tree. Preparation and the exec itself fail the same way: whatever was
+    changed is restored and the caller keeps running its own code.
+    """
+    restore = []
+    previous_cwd = None
+    try:
+        child_env = _service_exec_environment(source_root, target_root)
+        for fd in keep_fds:
+            restore.append((fd, os.get_inheritable(fd)))
+            os.set_inheritable(fd, True)
+        try:
+            relative_cwd = Path(os.getcwd()).resolve(strict=True).relative_to(source_root)
+        except (OSError, ValueError):
+            relative_cwd = None
+        if relative_cwd is not None:
+            previous_cwd = os.getcwd()
+            moved_cwd = target_root / relative_cwd
+            os.chdir(moved_cwd if moved_cwd.is_dir() else target_root)
+        os.execve(sys.executable, [str(item) for item in argv], child_env)
+    except OSError:
+        for fd, inheritable in restore:
+            with contextlib.suppress(OSError):
+                os.set_inheritable(fd, inheritable)
+        if previous_cwd is not None:
+            with contextlib.suppress(OSError):
+                os.chdir(previous_cwd)
+        return False
+    return True
+
+
+def _rebase_release_argument(value: str, source_root: Path, target_root: Path) -> str:
+    """Name the same place in the target release when an argument names the old one."""
+    if not value.startswith(os.sep):
+        return value
+    try:
+        relative = Path(os.path.abspath(value)).relative_to(source_root)
+    except ValueError:
+        return value
+    return str(target_root / relative)
+
+
+def follow_installed_release(script: str | Path, arguments: Iterable[str], *, root=None) -> bool:
+    """Re-run this long-lived helper from the installed release, in place.
+
+    A detached helper keeps the code of the release that started it. Its own
+    loop calls this only where nothing is half done. When the installer's
+    ``current`` pointer names another release of this same managed install,
+    the process becomes the same script of that release with the same
+    arguments (paths into the old release tree name the new one). The PID,
+    start time, session and standard streams stay, so every record that names
+    this helper stays true and the new code observes its inputs again.
+
+    The decision and the exec happen under the installer's shared lock, so a
+    release whose install is still in flight, and may yet be rolled back, is
+    never entered. Checkouts, other installs, a mismatched environment, and a
+    release without this script keep their code. Returns False whenever this
+    process keeps running; the caller simply continues.
+    """
+    try:
+        from parent_next_directive import release_moved
+        code_root = (Path(root).resolve(strict=True) if root is not None
+                     else _code_root().resolve(strict=True))
+        if not release_moved(code_root):
+            return False
+        relative = Path(script).resolve(strict=True).relative_to(code_root)
+        distribution = _distribution_module(code_root)
+        if distribution is None:
+            return False
+        lock_fd = os.open(Path(distribution.state_root()) / "distribution.lock",
+                          os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
+        try:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return False
+            binding = release_successor_binding(code_root)
+            target_root = active_service_root(binding, root=code_root) if binding else None
+            if target_root is None or target_root == code_root:
+                return False
+            target = target_root / relative
+            if target.is_symlink() or not target.is_file():
+                return False
+            argv = [sys.executable, str(target),
+                    *(_rebase_release_argument(str(value), code_root, target_root)
+                      for value in arguments)]
+            return _exec_in_release(code_root, target_root, argv)
+        finally:
+            os.close(lock_fd)
+    except (ImportError, OSError, RuntimeError, ValueError, TypeError, AttributeError):
+        return False
+
+
 def exec_service_runner(lock_fd: int, state_root: str | Path, service_current: str | Path,
                         *, herdr_session: str | None = None) -> bool:
     """Replace this process with the same-install runner while retaining its flock."""
-    was_inheritable = None
     try:
         source_root = _code_root().resolve(strict=True)
         binding = validate_service_binding(service_current, root=source_root)
@@ -609,21 +706,12 @@ def exec_service_runner(lock_fd: int, state_root: str | Path, service_current: s
         argv.extend(("__obligation-runner", "--lock-fd", str(lock_fd),
                      "--state-root", str(Path(state_root).resolve(strict=True)),
                      "--service-current", binding))
-        # Selection, strict root resolution and environment preparation are all
-        # pre-exec work. Any OSError here is the same unsuccessful handoff as an
-        # execve error: this process keeps its lock and retries on its next pass.
-        child_env = _service_exec_environment(source_root, target_root)
-        was_inheritable = os.get_inheritable(lock_fd)
-        os.set_inheritable(lock_fd, True)
-        os.execve(sys.executable, argv, child_env)
     except OSError:
-        if was_inheritable is not None:
-            try:
-                os.set_inheritable(lock_fd, was_inheritable)
-            except OSError:
-                pass
         return False
-    return True
+    # Selection, strict root resolution and environment preparation are all
+    # pre-exec work. Any OSError there is the same unsuccessful handoff as an
+    # execve error: this process keeps its lock and retries on its next pass.
+    return _exec_in_release(source_root, target_root, argv, keep_fds=(lock_fd,))
 
 
 def _runner_control_payload(service_current: str | Path, *, root=None) -> bytes | None:

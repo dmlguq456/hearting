@@ -227,8 +227,15 @@ argument vector and `AGENT_HOME` set to its real path, so admission runs once on
 that code. A runtime-owned long-lived observer follows the same rule at its own
 checkpoint boundary, before it projects or delivers and while it holds its duty
 lease: the completion observer hands the lease to the installed release's
-observer. Checkouts, different installations, and roots without both release
-markers keep their existing behavior. The row's `launch_home` records the release
+observer. A detached helper that can outlive its work, such as the per-attempt
+orphan watcher and a capacity resume wait, re-executes itself in place on the
+installed release at an idle point of its own loop: same PID, arguments and
+record, with release paths rebased, decided under the installer's shared lock so
+an install still in flight is not entered. Helpers bound to a live attempt
+(its governor and session controller, summary owner, reap watcher and completion
+join) stay on that attempt's release until it ends, because the attempt itself
+still runs that code. Checkouts, different installations, and roots without
+both release markers keep their existing behavior. The row's `launch_home` records the release
 the launch ran on; no new attempt is created and the route's sealed launch tuple
 is unchanged.
 

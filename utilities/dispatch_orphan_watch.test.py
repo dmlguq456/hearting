@@ -423,6 +423,19 @@ class SharedRunnerWakeTest(unittest.TestCase):
             self.assertEqual(self.watch.main(argv), 0)
         request.assert_called_once()
 
+    def test_main_keeps_its_exact_arguments_to_start_again_on_the_installed_release(self):
+        import dispatch_batch_obligations as obligations
+        argv = ["--jobs", str(self.jobs), "--agent-home", "/unused", "--attempt-id", "att-x",
+                "--pid", "4242", "--pid-start", "1", "--interval", "0.5"]
+        seen = []
+        with mock.patch.object(obligations, "request_runner", return_value=False), \
+             mock.patch.object(self.watch, "watch",
+                               side_effect=lambda args: seen.append(args.release_argv) or 0), \
+             mock.patch.object(self.watch, "attempt_record", return_value=(None, {})), \
+             mock.patch("route_parent_close.row_requested", return_value=False):
+            self.assertEqual(self.watch.main(list(argv)), 0)
+        self.assertEqual(seen, [argv])
+
 
 class AttemptRecordIndexTest(unittest.TestCase):
     """The index lookup answers like the first-match text scan it replaced."""
@@ -557,6 +570,45 @@ class WatchLifetimeTest(unittest.TestCase):
              mock.patch.object(self.watch, "reconcile_exact_exit", return_value=0) as exited:
             self.assertEqual(self.watch.watch(self.args), 0)
         exited.assert_called_once_with(self.args)
+
+    def test_each_idle_wait_offers_the_watch_to_the_installed_release_first(self):
+        self.write("open")
+        self.args.release_argv = ["--jobs", str(self.jobs), "--attempt-id", "att-life"]
+        events = []
+
+        def sleep(_seconds):
+            events.append("sleep")
+            if events.count("sleep") >= 5:
+                raise self.Stop()
+        import peer_obligations
+        with mock.patch.object(self.watch, "process_start", return_value="1"), \
+             mock.patch.object(self.watch.time, "sleep", side_effect=sleep), \
+             mock.patch.object(peer_obligations, "follow_installed_release",
+                               side_effect=lambda script, argv: events.append((script, list(argv)))):
+            with self.assertRaises(self.Stop):
+                self.watch.watch(self.args)
+        offer = (self.watch.__file__, self.args.release_argv)
+        self.assertEqual(events, [offer, "sleep"] * 5)
+
+    def test_an_exited_owner_is_reconciled_without_moving_in_between(self):
+        self.write("open")
+        self.args.release_argv = ["--jobs", str(self.jobs), "--attempt-id", "att-life"]
+        quiescent = SimpleNamespace(process_state="quiescent")
+        import peer_obligations
+        with mock.patch.object(self.watch, "process_start", return_value=None), \
+             mock.patch.object(self.watch, "observed_owner_lifecycle",
+                               return_value=(quiescent, "", {})), \
+             mock.patch.object(peer_obligations, "follow_installed_release") as follow, \
+             mock.patch.object(self.watch, "reconcile_exact_exit", return_value=0) as exited:
+            self.assertEqual(self.watch.watch(self.args), 0)
+        follow.assert_not_called()
+        exited.assert_called_once_with(self.args)
+
+    def test_a_direct_call_without_its_original_arguments_stays(self):
+        import peer_obligations
+        with mock.patch.object(peer_obligations, "follow_installed_release") as follow:
+            self.watch.follow_installed_release(self.args)
+        follow.assert_not_called()
 
     def test_finish_recovery_reads_only_the_owner_and_its_children(self):
         self.jobs.write_text(
