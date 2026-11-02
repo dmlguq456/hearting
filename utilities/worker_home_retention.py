@@ -71,6 +71,10 @@ MAX_TREE_DEPTH = 128
 REGISTRY_LOCK_WAIT_SECONDS = 0.100
 
 KEY_RE = re.compile(r"[0-9a-f]{32}")
+# OpenCode rows served by the shared service record this exact token instead of
+# a per-attempt home (adapters/opencode/bin/dispatch-headless.py); it claims no
+# home. Any other non-matching value remains a conflict.
+SHARED_SERVICE_RUNTIME_HOME = "shared-service"
 ATTEMPT_RE = attempt_reference.ATTEMPT_RE
 NOTICE_RE = LEGACY_NOTICE_ID_RE
 ATTEMPT_ID_RE = re.compile(r"(?:^|,)attempt_id=([^,]+)")
@@ -1958,7 +1962,8 @@ def _bind(ctx: _Context, key: str, home_fd: int):
         # every path-based consumer surface and the complete process scan.
         return binding
     claimed = row.meta.get("runtime_home", "")
-    if claimed and _declared_home(ctx.root, ctx.workers_real, claimed) != key:
+    if (claimed and claimed != SHARED_SERVICE_RUNTIME_HOME
+            and _declared_home(ctx.root, ctx.workers_real, claimed) != key):
         return _Verdict("unknown", "runtime-home-conflict")
     return binding
 
@@ -2158,6 +2163,16 @@ def _mount_id(fd: int) -> str | None:
 
 
 # destructive-ok: reason=empty one detached expired worker home by descriptor; boundary=one validated leaf directly under homes/worker-retention/retiring
+_FREED: contextvars.ContextVar = contextvars.ContextVar("retention_freed_bytes", default=None)
+
+
+def _note_freed(info: os.stat_result) -> None:
+    """Add the blocks a removal frees to the running pass (a file with other links frees none)."""
+    box = _FREED.get()
+    if box is not None and (stat.S_ISDIR(info.st_mode) or info.st_nlink == 1):
+        box[0] += info.st_blocks * 512
+
+
 def _empty_directory(dir_fd: int, device: int, deadline: float, depth: int = 0) -> bool:
     """Remove every entry below `dir_fd`; links are unlinked, never followed.
 
@@ -2176,6 +2191,7 @@ def _empty_directory(dir_fd: int, device: int, deadline: float, depth: int = 0) 
             return False
         st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
         if not stat.S_ISDIR(st.st_mode):
+            _note_freed(st)
             os.unlink(name, dir_fd=dir_fd)
             continue
         if st.st_dev != device:
@@ -2191,6 +2207,7 @@ def _empty_directory(dir_fd: int, device: int, deadline: float, depth: int = 0) 
                 return False
         finally:
             os.close(child)
+        _note_freed(st)
         os.rmdir(name, dir_fd=dir_fd)
     return True
 
@@ -2208,6 +2225,7 @@ def _remove_leaf(layout: _Layout, name: str, expected: list[int], deadline: floa
             if (_identity(info) != expected or info.st_uid != os.geteuid()
                     or info.st_dev != os.fstat(layout.retiring_fd).st_dev):
                 return "unproven"
+            _note_freed(info)
             os.unlink(name, dir_fd=layout.retiring_fd)
         except FileNotFoundError:
             pass
@@ -2231,6 +2249,7 @@ def _remove_leaf(layout: _Layout, name: str, expected: list[int], deadline: floa
     if not finished:
         return "partial"
     try:
+        _note_freed(opened)
         os.rmdir(name, dir_fd=layout.retiring_fd)
     except FileNotFoundError:
         pass
@@ -2787,12 +2806,15 @@ def sweep(jobs, *, now_ns: int | None = None, force: bool = False) -> dict:
         return {"skipped": "error", "error": type(exc).__name__}
 
 
-def sweep_best_effort(jobs) -> None:
-    """The carrier entry: whatever happens here never changes the caller's result."""
+def sweep_best_effort(jobs) -> bool:
+    """The carrier entry: whatever happens here never changes the caller's result.
+
+    True only when a retention pass actually ran (not skipped, not failed).
+    """
     try:
-        sweep(jobs)
+        return "skipped" not in sweep(jobs)
     except Exception:  # noqa: BLE001
-        pass
+        return False
 
 
 def _sweep(jobs: Path, now_ns: int, force: bool, started: float) -> dict:
@@ -2810,9 +2832,17 @@ def _sweep(jobs: Path, now_ns: int, force: bool, started: float) -> dict:
 
 
 def _pass(jobs: Path, root: Path, layout: _Layout, state: dict, now_ns: int, started: float) -> dict:
+    token = _FREED.set([0])
+    try:
+        return _run_pass(jobs, root, layout, state, now_ns, started)
+    finally:
+        _FREED.reset(token)
+
+
+def _run_pass(jobs: Path, root: Path, layout: _Layout, state: dict, now_ns: int, started: float) -> dict:
     result = {"examined": 0, "eligible": 0, "due": 0, "removed": 0, "partial": 0,
               "ignored": 0, "detached_leftover": 0, "unproven_leftover": 0,
-              "kept": {}, "unknown": {}, "unknown_causes": {}}
+              "freed_bytes": 0, "kept": {}, "unknown": {}, "unknown_causes": {}}
     deadline = time.monotonic() + REMOVE_DEADLINE_SECONDS
     budget = REMOVE_LIMIT
     # Keep one slot for newly due homes even if every interrupted leaf is stuck.
@@ -2923,6 +2953,7 @@ def _pass(jobs: Path, root: Path, layout: _Layout, state: dict, now_ns: int, sta
             with contextlib.suppress(OSError):
                 # destructive-ok: reason=drop a view marker whose home no longer exists; boundary=one marker file directly under homes/worker-retention/views
                 os.unlink(name, dir_fd=layout.views_fd)
+    result["freed_bytes"] = _FREED.get()[0]
     result["elapsed_ms"] = int((time.monotonic() - started) * 1000)
     state.update(schema=SCHEMA, last_pass_ns=now_ns, cursor=cursor, eligible_since=since,
                  last_result=result)

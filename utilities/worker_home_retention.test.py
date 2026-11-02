@@ -3239,6 +3239,29 @@ class Mapping(Fixture):
         self.assertEqual(self.unknown(result, "runtime-home-conflict"), 1)
         self.assertTrue(home.is_dir())
 
+    def test_opencode_shared_service_row_is_not_a_home_claim(self):
+        home = self.add("att-shared-service", harness="opencode", declare=False,
+                        runtime_home=R.SHARED_SERVICE_RUNTIME_HOME)
+        self.assertEqual(self.sweep(0)["eligible"], 1)
+        self.assertEqual(self.sweep(8 / 7)["removed"], 1)
+        self.assertFalse(home.exists())
+        # Only the exact token claims no home; any other relative value still conflicts.
+        other = self.add("att-shared-other", harness="opencode", declare=False,
+                         runtime_home="other-relative")
+        result = self.expire()
+        self.assertEqual(self.unknown(result, "runtime-home-conflict"), 1)
+        self.assertTrue(other.is_dir())
+
+    def test_freed_bytes_are_recorded_only_in_the_pass_result(self):
+        home = self.add("att-freed")
+        (home / "projects" / "big.bin").write_bytes(b"x" * 65536)
+        self.assertEqual(self.sweep(0)["freed_bytes"], 0)
+        result = self.sweep(8 / 7)
+        self.assertEqual(result["removed"], 1)
+        self.assertGreaterEqual(result["freed_bytes"], 65536)
+        self.assertEqual(self.state()["last_result"]["freed_bytes"], result["freed_bytes"])
+        self.assertEqual(self.sweep(9 / 7)["freed_bytes"], 0)
+
     def test_runtime_home_through_a_planted_link_is_not_followed(self):
         home = self.add("att-m5", declare=False)
         link = self.outside / "workers-link"
