@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import io
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -75,36 +76,59 @@ class FrameAlternativeSelectionTest(unittest.TestCase):
             jobs.write_text(jobs.read_text().rstrip() + ",harness=codex\n")
             self.assertEqual(OWNER._first_frame_attempt(route, jobs)[0]["harness"], "codex")
 
-    def choose(self, first, selected, *, states=None, policy=None):
-        policy = policy or {"primary": ["claude", "codex"], "relief": [],
-                            "last_resort": [], "promote_relief_below": 0}
-        states = states or {"claude": "ok", "codex": "ok", "opencode": "ok"}
-        return OWNER._prefer_other_frame_harness(
-            first, selected, None, 3, policy, states,
-            {"claude": 0, "codex": 0, "opencode": 0},
-            {"strategy": "capacity-aware", "harness_order": ["claude", "codex", "opencode"]},
-            {"claude": 80, "codex": 80, "opencode": 80},
-            list(policy["primary"]), lambda rows: rows, lambda h: states[h] == "ok")
+    def choose(self, first, selected, *, ranks=None, scores=None, band="primary",
+               strategy="capacity-aware", gate=90):
+        ranks = ranks if ranks is not None else {"primary": ["claude", "codex"], "relief": [],
+                                                  "last_resort": []}
+        scores = scores or {"claude": 80, "codex": 80, "opencode": 80}
+        return OWNER._frame_alternative_tiebreak(
+            first, selected, band, ranks, scores,
+            strategy=strategy, usage_gate_used_percent=gate)
 
     def test_frame_alternative_excludes_the_first_harness_in_both_directions(self):
         for first, other in (("claude", "codex"), ("codex", "claude")):
             with self.subTest(first=first):
-                self.assertEqual(self.choose(first, first)[0], other)
+                self.assertEqual(self.choose(first, first), other)
 
     def test_single_supported_harness_keeps_selection(self):
-        self.assertEqual(self.choose("codex", "codex", policy={
-            "primary": ["codex"], "relief": [], "last_resort": [],
-            "promote_relief_below": 0})[0], "codex")
+        self.assertEqual(self.choose("codex", "codex", ranks={
+            "primary": ["codex"], "relief": [], "last_resort": []}), "codex")
 
     def test_limited_other_harness_does_not_fake_diversity(self):
-        self.assertEqual(self.choose("codex", "codex", states={
-            "claude": "limited", "codex": "ok", "opencode": "ok"})[0], "codex")
+        # A limited harness is not ranked eligible by the first selection at all.
+        self.assertEqual(self.choose("codex", "codex", ranks={
+            "primary": ["codex"], "relief": [], "last_resort": []}), "codex")
 
     def test_explicit_same_harness_is_preserved(self):
-        selected, _, _ = OWNER._prefer_other_frame_harness(
-            "claude", "claude", "claude", 3,
-            {}, {}, {}, {}, {}, [], lambda rows: rows, lambda h: True)
-        self.assertEqual(selected, "claude")
+        # The call site never reaches the tie-break for an explicit or pinned choice; a
+        # selection that already differs from the first leg is left alone as well.
+        self.assertEqual(self.choose("claude", "codex"), "codex")
+        self.assertEqual(self.choose("claude", "claude", ranks=None, band=None), "claude")
+
+    def test_a_gated_other_harness_does_not_fake_diversity_under_balanced(self):
+        ranks = {"primary": ["claude", "codex"], "relief": [], "last_resort": []}
+        gated = self.choose("claude", "claude", ranks=ranks, strategy="balanced",
+                            scores={"claude": 94, "codex": 0})
+        self.assertEqual(gated, "claude")
+        ungated = self.choose("claude", "claude", ranks=ranks, strategy="balanced",
+                              scores={"claude": 94, "codex": 60})
+        self.assertEqual(ungated, "codex")
+
+    def test_a_different_quality_band_is_not_a_tie(self):
+        ranks = {"primary": ["claude"], "relief": ["opencode"], "last_resort": []}
+        self.assertEqual(self.choose("claude", "claude", ranks=ranks, strategy="balanced",
+                                     scores={"claude": 94, "opencode": 80}), "claude")
+
+    def test_the_first_leg_family_listed_ahead_in_its_band_is_never_its_own_alternative(self):
+        ranks = {"primary": ["codex", "claude", "opencode"], "relief": [], "last_resort": []}
+        self.assertEqual(self.choose("codex", "codex", ranks=ranks), "claude")
+
+    def test_a_non_balanced_strategy_skips_the_gate_judgment(self):
+        ranks = {"primary": ["claude", "codex"], "relief": [], "last_resort": []}
+        for strategy in ("capacity-aware", "least-recent-attempts"):
+            with self.subTest(strategy=strategy):
+                self.assertEqual(self.choose("claude", "claude", ranks=ranks, strategy=strategy,
+                                             scores={"claude": 94, "codex": 0}), "codex")
 
     def test_selector_places_frame_alternative_on_the_other_eligible_harness(self):
         import artifact_producer
@@ -285,7 +309,8 @@ class FrameTopDeclarationTest(unittest.TestCase):
 
     HARNESSES = ("claude", "codex", "opencode")
 
-    def run_selector(self, *, declared, explicit=None, profile="top", scores=None):
+    def run_selector(self, *, declared, explicit=None, profile="top", scores=None,
+                     owner_order=("claude", "opencode", "codex")):
         import artifact_producer
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
@@ -301,7 +326,8 @@ class FrameTopDeclarationTest(unittest.TestCase):
             policy = {"primary": list(self.HARNESSES), "relief": [], "last_resort": [],
                       "promote_relief_below": 0}
             allocation = {"strategy": "capacity-aware", "window": 30, "harness_order": list(self.HARNESSES)}
-            allocation["owner_order"] = ["claude", "opencode", "codex"]
+            if owner_order:
+                allocation["owner_order"] = list(owner_order)
             values = {"--model-profile": profile, "--worker-type": "frame", "--route-node": "frame",
                       "--worktree": str(base), "--capability": "autopilot-code",
                       "--capability-mode": "dev", "--intensity": "standard"}
@@ -332,6 +358,14 @@ class FrameTopDeclarationTest(unittest.TestCase):
 
     def test_a_harness_without_a_top_declaration_is_never_chosen_even_with_the_most_headroom(self):
         code, out, launch, _probe = self.run_selector(declared={"codex", "opencode"})
+        self.assertEqual(code, 0, out)
+        # `owner_order` is shared with frame legs (CONVENTIONS §2.1): of the two harnesses
+        # that declare `top`, the configured order puts opencode ahead of codex's headroom.
+        self.assertEqual(Path(launch.call_args.args[0][0]).parts[-3], "opencode")
+        self.assertIn("top_undeclared=claude", out)
+
+    def test_without_an_owner_order_the_declaring_harness_with_most_headroom_wins(self):
+        code, out, launch, _probe = self.run_selector(declared={"codex", "opencode"}, owner_order=None)
         self.assertEqual(code, 0, out)
         self.assertEqual(Path(launch.call_args.args[0][0]).parts[-3], "codex")
         self.assertIn("top_undeclared=claude", out)
@@ -1297,7 +1331,9 @@ class RouteEvidenceOwnerHarnessTest(unittest.TestCase):
                                  "status": "supported"}]},
                             "owner_harness_policy": {"primary": ["claude"]}})
         context = OWNER._sealed_owner_context(path, worker_type="frame")
-        self.assertEqual(context["harnesses"], {"codex"})
+        # A frame leg is eligible on the harness its owner may use (parent) and on the one its
+        # own launch was checked for (child): `route_authority.depth1_supported_harnesses`.
+        self.assertEqual(context["harnesses"], {"claude", "codex"})
         self.assertIsNone(context["policy"])
 
     def _frame_route(self, node_policy="unset", **override):
@@ -2455,6 +2491,162 @@ class D5LiveOwnerPolicyTest(unittest.TestCase):
                 with mock.patch.dict(os.environ,{"DISPATCH_DEFAULTS_CONFIG":str(config)}):
                     got=self._launch(path,None)
                 self.assertEqual(got.wrapper,"codex",got.out)
+
+class FrameAssignmentIncidentTest(unittest.TestCase):
+    """The two frame-assignment incidents of 2026-10-31/11-01, replayed from their sealed data.
+
+    rt-ad3fb: `--pin frame=opencode` was dropped because only the frame's own launch tuples
+    (opencode child: all unsupported) were read, and the pair went to codex/claude.
+    rt-c987: the second leg was pushed onto codex, whose headroom was 0 (credits only), because
+    "another harness" was demanded before the usage gate."""
+
+    FIXTURE = json.loads((ROOT / "utilities" / "fixtures" / "frame-assignment-incidents-1101.json")
+                         .read_text(encoding="utf-8"))
+    HARNESSES = ("claude", "codex", "opencode")
+
+    def _route(self, incident, *, pins="sealed"):
+        data = json.loads(json.dumps(self.FIXTURE[incident]))
+        doc = {k: data[k] for k in ("route_id", "capability", "capability_mode", "effective_intensity",
+                                    "owner_model_profile", "selection", "dispatch_allocation",
+                                    "owner_harness_policy", "dispatch_evidence")}
+        doc.update(route_hash="sha256:" + incident, slug="probe", cwd=str(ROOT),
+                   nodes=data["frame_nodes"])
+        if pins == "sealed":
+            pins = data.get("selection_pins")
+        if pins:
+            doc["selection_pins"] = pins
+        path = Path(tempfile.mkdtemp()) / "route.json"
+        path.write_text(json.dumps(doc), encoding="utf-8")
+        return path, doc
+
+    def _first_leg_row(self, doc, harness, model):
+        return ("2026-11-01\trunning\t/r\t/w\tframe\t"
+                f"route_id={doc['route_id']},route_hash={doc['route_hash']},route_node=frame,"
+                f"worker_type=frame,harness={harness},model={model},attempt_id=att-first\n")
+
+    def _launch(self, path, node, *, first=None, scores=None, states=None, usage_gate=None):
+        """One real `dispatch-owner.py` frame launch (`--start`), with the wrapper, the live
+        usage readers and the sealed-route hash binding replaced. The route evidence reader,
+        the pin and eligibility judgments, the gate/band selection and `frame_harness_admission`
+        are the real ones."""
+        import artifact_producer
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        jobs = path.parent / "jobs.log"
+        jobs.write_text(self._first_leg_row(doc, *first) if first else "", encoding="utf-8")
+        binding = SimpleNamespace(route_file=str(path), route_id=doc["route_id"],
+                                  route_hash=doc["route_hash"], route_node=node,
+                                  registry_digest="sha256:test", write_scope=str(path.parent),
+                                  completion_gate="test")
+        scores = scores or {h: 80.0 for h in self.HARNESSES}
+        states = states or {h: "ok" for h in self.HARNESSES}
+        out = io.StringIO()
+        with mock.patch.object(OWNER, "_load_defaults", return_value={
+                 "schema_version": 3, "harnesses": {"enabled": list(self.HARNESSES)}}), \
+             mock.patch.object(OWNER, "_usage", return_value=states), \
+             mock.patch.object(OWNER._allocation, "attempt_counts", return_value={h: 0 for h in self.HARNESSES}), \
+             mock.patch.object(OWNER._capacity, "capacity_report", return_value={
+                 "scores": scores, "sources": {h: "test" for h in self.HARNESSES}}), \
+             mock.patch.object(OWNER, "derive_frame_route_binding", return_value=binding), \
+             mock.patch.object(OWNER, "_declares_top", return_value=True), \
+             mock.patch.object(artifact_producer, "prepare_route_artifact_env", return_value={}), \
+             mock.patch.object(OWNER, "select_launch_lifecycle", return_value="detached"), \
+             mock.patch.object(OWNER, "record_frame_launch_degradation") as record, \
+             mock.patch.object(OWNER, "run_owner_wrapper", return_value=0) as wrapper, \
+             mock.patch.dict(os.environ, _isolated_env({"AGENT_DISPATCH_JOBS": str(jobs)}), clear=True), \
+             contextlib.redirect_stdout(out):
+            rc = OWNER.main(["--worker-type", "frame", "--route-node", node, "--start",
+                             "--route-evidence", str(path), "--prompt-text", "probe"])
+        argv = wrapper.call_args.args[0] if wrapper.called else []
+        return SimpleNamespace(
+            rc=rc, out=out.getvalue(), argv=argv, record=record,
+            wrapper=Path(argv[0]).parts[-3] if argv else None,
+            source=(re.search(r"(?m)^selection_source=(.*)$", out.getvalue()) or [None, None])[1])
+
+    # --- d1: rt-ad3fb ---------------------------------------------------------------------
+
+    def test_the_sealed_evidence_admits_opencode_only_through_its_parent_rows(self):
+        _, doc = self._route("rt_ad3fb")
+        rows = doc["dispatch_evidence"]["tuples"]
+        self.assertEqual({r["status"] for r in rows if r["child_harness"] == "opencode"}, {"unsupported"})
+        self.assertEqual({r["status"] for r in rows
+                          if r["parent_harness"] == "opencode" and r["child_harness"] != "opencode"},
+                         {"supported"})
+        import route_authority
+        self.assertEqual(sorted(route_authority.depth1_supported_harnesses(doc, worker_type="frame")),
+                         sorted(self.HARNESSES))
+
+    def test_a_frame_pin_places_both_legs_on_the_pinned_harness_as_route_pin(self):
+        path, doc = self._route("rt_ad3fb")
+        first = self._launch(path, "frame")
+        self.assertEqual((first.rc, first.wrapper, first.source), (0, "opencode", "route-pin"), first.out)
+        self.assertNotIn("--explicit-adapter", first.argv)
+        second = self._launch(path, "frame-alternative", first=("opencode", "muse-spark"))
+        self.assertEqual((second.rc, second.wrapper, second.source), (0, "opencode", "route-pin"), second.out)
+        # the pinned pair is the user's choice, not a degraded pair
+        self.assertNotIn("frame-other-harness-unusable", second.out)
+        self.assertNotIn("frame-single-available-harness", second.out)
+        second.record.assert_not_called()
+        # the real frame_harness_admission runs inside the launch and accepts the pair
+        import dispatch_contract
+        self.assertEqual(dispatch_contract.frame_harness_admission(
+            doc, path.parent / "jobs.log", [], ["opencode", "opencode"], ["top", "top"]), [])
+
+    def test_an_owner_pin_alone_leaves_the_frame_to_the_automatic_selection(self):
+        _, doc = self._route("rt_ad3fb")
+        owner_only = {"contract_version": 1, "owner": doc["selection_pins"]["owner"]}
+        path, _ = self._route("rt_ad3fb", pins=owner_only)
+        got = self._launch(path, "frame", scores={"claude": 40.0, "codex": 70.0, "opencode": 95.0})
+        self.assertEqual(got.rc, 0, got.out)
+        self.assertEqual(got.source, "configured-balanced", got.out)
+        self.assertNotEqual(got.source, "route-pin")
+        # primary (codex, claude) outranks the relief band although opencode has the most headroom
+        self.assertEqual(got.wrapper, "codex", got.out)
+
+    def test_a_frame_pin_on_a_limited_harness_gives_the_choice_back_to_the_selection(self):
+        path, _ = self._route("rt_ad3fb")
+        got = self._launch(path, "frame", states={"claude": "ok", "codex": "ok", "opencode": "limited(usage-gate)"})
+        self.assertEqual(got.rc, 0, got.out)
+        self.assertNotEqual(got.source, "route-pin")
+        self.assertIn(got.wrapper, {"claude", "codex"})
+
+    # --- d2: rt-c987 ----------------------------------------------------------------------
+
+    def _c987(self, scores=None, **kw):
+        path, doc = self._route("rt_c987")
+        incident = self.FIXTURE["rt_c987"]["incident_state"]
+        from model_config import resolve_config
+        from model_profile import resolve_profile_values
+        config, _ = resolve_config("claude", source_root=ROOT)
+        first_model = resolve_profile_values("claude", config, "top")["model"]
+        got = self._launch(path, "frame-alternative", first=("claude", first_model),
+                           scores=scores or incident["scores"], states=incident["states"], **kw)
+        return got, config, first_model
+
+    def test_a_gated_credit_only_harness_is_not_the_second_leg_and_the_reason_is_recorded(self):
+        from model_profile import pair_model_rotation
+        got, config, first_model = self._c987()
+        self.assertEqual((got.rc, got.wrapper), (0, "claude"), got.out)
+        self.assertIn("reason=frame-other-harness-unusable", got.out)
+        # opencode (80, ungated) is a different quality band (relief): not a tie-break candidate
+        self.assertNotEqual(got.wrapper, "opencode")
+        got.record.assert_called_once()
+        self.assertEqual(got.record.call_args.kwargs["reason"], "frame-other-harness-unusable")
+        detail = json.loads(got.record.call_args.kwargs["detail"])
+        self.assertTrue(detail["gated"]["codex"], detail)
+        self.assertEqual(detail["quality_band"], "primary")
+        self.assertEqual(sorted(detail["excluded_harnesses"]), ["codex", "opencode"])
+        # the same harness runs the second leg on another model
+        rotated = pair_model_rotation("claude", config, "top", first_model)
+        self.assertIn("model_diversity_proposal=proposed", got.out)
+        self.assertIn(f"model_diversity_proposal_profile={rotated['profile']}", got.out)
+        self.assertEqual(got.argv[got.argv.index("--pair-model-profile") + 1], rotated["profile"])
+
+    def test_an_ungated_harness_of_the_same_band_is_the_second_leg(self):
+        got, _, _ = self._c987(scores={"claude": 94, "codex": 60, "opencode": 80})
+        self.assertEqual((got.rc, got.wrapper), (0, "codex"), got.out)
+        self.assertNotIn("frame-other-harness-unusable", got.out)
+        got.record.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

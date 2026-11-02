@@ -1888,21 +1888,18 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
                         f"Python (e.g. `{python} -m pip install --user pyyaml`) and run resume_command. For one atomic, "
                         "reversible inline change, compose again with --shape direct."}
         in_force = route_authority.route_in_force(route)   # with the parent's later pin changes
-        candidates = (in_force.get("registered_headless_candidates") or []) if route["effective_intensity"] == "quick" else (in_force.get("dispatch_evidence") or {}).get("tuples", [])
-        key = "harness" if route["effective_intensity"] == "quick" else "child_harness"
-        harnesses = list(dict.fromkeys(c[key] for c in candidates if c.get("status") == "supported" and c.get(key)))
+        harnesses = sorted(route_authority.depth1_supported_harnesses(route, worker_type="frame"))
         if not harnesses:
             return {**result, "state": "needs-attention", "reason": "frame-harness-unavailable"}
-        # A tool the caller pinned (`compose --pin frame=H`, else the owner pin,
-        # which `--owner H` also seals) is the user's explicit choice, so it is
-        # passed on; with no pin the frame keeps the automatic selection. A
-        # pinned tool the route's evidence does not support is not forced: the
-        # legs fall back to automatic selection and the result says so.
+        # A frame pin (`compose --pin frame=H`; an owner pin selects only the owner) is the
+        # user's explicit choice. It is not passed as `--adapter`: the selector applies it
+        # through the same sealed-pin path as an owner pin and records `route-pin`. A pinned
+        # tool the route's evidence does not support is not forced: the legs fall back to
+        # automatic selection and the result says so.
         pins = in_force.get("selection_pins") or {}
         frame_pin = (pins.get("frame") or {}).get("harness")
         if frame_pin and frame_pin not in harnesses:
             result["frame_explicit_harness"] = f"unavailable:{frame_pin}"
-            frame_pin = None
         attempts = set()
         # Validate every reused identity before starting any missing sibling.
         slots = [_slot(route, node["id"], rows, jobs) for node in frames]
@@ -1913,7 +1910,7 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
                 # choice into a user override and bypassed the capacity gate.
                 # The selector rechecks live usage inside the sealed pool for
                 # each frame, just as it does for an automatic owner.
-                rows, refusal = _launch_admitted(route, path, jobs, node["id"], frame_pin, run, result,
+                rows, refusal = _launch_admitted(route, path, jobs, node["id"], None, run, result,
                                                   wait=wait, sleep=sleep, clock=clock)
                 if aid not in rows:
                     result["frame_attempts"] = sorted(attempts)
