@@ -94,7 +94,8 @@ EXPIRY_REASONS = frozenset({
 })
 EXPIRY_ACTOR = "dispatch-reconcile"
 # SD-111 §13.33.1-(7) v67: terminal records are kept for a retention window and
-# then pruned by the same single declared actor (the dispatch reconcile path);
+# then pruned by the selector-less dispatch reconcile path and the post-exit
+# reaper's retention tail (the same prune; it is safe under concurrent runs);
 # open-state records are never pruned whatever their age. Ages are file mtimes:
 # the terminal transition is the record's last write. A pruned record leaves a
 # binding-bearing tombstone (`<record>.json.pruned`, never deleted) so the
@@ -250,6 +251,18 @@ def _validate_submission_fence(fence: object, record: dict) -> dict:
     return fence
 
 
+LEGACY_NOTICE_ID_RE = re.compile(r"notice-[0-9a-f]{32}")
+
+
+def _is_ordinary_notice(value: dict) -> bool:
+    """A route-free session notice: it names no attempt and no parent."""
+    return (isinstance(value.get("receipt"), dict)
+            and value["receipt"].get("kind") == "notice"
+            and value.get("route_node") == "notice"
+            and value.get("parent_attempt_id") == ""
+            and value.get("row_revisions") == {})
+
+
 def _validate_record(value: object) -> dict:
     if not isinstance(value, dict):
         raise PendingDeliveryError("delivery-persistence-refused", "record-shape-invalid")
@@ -274,13 +287,8 @@ def _validate_record(value: object) -> dict:
         raise PendingDeliveryError("delivery-persistence-refused", "recipient-kind-invalid")
     if value.get("state") not in STATES:
         raise PendingDeliveryError("delivery-persistence-refused", "state-invalid")
-    ordinary_notice = (isinstance(value.get("receipt"), dict)
-                       and value["receipt"].get("kind") == "notice"
-                       and value.get("route_node") == "notice"
-                       and value.get("parent_attempt_id") == ""
-                       and value.get("row_revisions") == {})
     if (not isinstance(value.get("attempt_ids"), list)
-            or (not value["attempt_ids"] and not ordinary_notice)):
+            or (not value["attempt_ids"] and not _is_ordinary_notice(value))):
         raise PendingDeliveryError("delivery-persistence-refused", "attempt-ids-invalid")
     if not isinstance(value.get("attempts"), int):
         raise PendingDeliveryError("delivery-persistence-refused", "attempts-invalid")
@@ -308,6 +316,30 @@ def _validate_record(value: object) -> dict:
     if TIMESTAMP_PROVENANCE_FIELD in value:
         _validate_timestamp_provenance(value[TIMESTAMP_PROVENANCE_FIELD])
     return value
+
+
+def record_attempt_identities(value: object) -> tuple[str, ...]:
+    """The single decision on which attempts a delivery record binds to a worker HOME.
+
+    Returns the real attempt ids the record names (its `attempt_ids`, then its
+    parent), in order and without repeats. A route-free ordinary notice, a
+    legacy `notice-<hex>` tag and a `-` parent name no worker home and are left
+    out. A malformed record raises `PendingDeliveryError`.
+    """
+    value = _validate_record(value)
+    ids = value["attempt_ids"]
+    if not all(isinstance(item, str) and (attempt_reference.ATTEMPT_RE.fullmatch(item)
+                                          or LEGACY_NOTICE_ID_RE.fullmatch(item))
+               for item in ids):
+        raise PendingDeliveryError("delivery-persistence-refused", "attempt-ids-invalid")
+    parent = value["parent_attempt_id"]
+    if not isinstance(parent, str) or (not parent and (ids or not _is_ordinary_notice(value))):
+        raise PendingDeliveryError("delivery-persistence-refused", "parent-attempt-invalid")
+    named: list[str] = []
+    for item in (*ids, parent):
+        if attempt_reference.ATTEMPT_RE.fullmatch(item) and item not in named:
+            named.append(item)
+    return tuple(named)
 
 
 @contextmanager
@@ -924,7 +956,7 @@ def create(
         raise PendingDeliveryError("delivery-persistence-refused", "recipient-kind-unknown")
     ordinary_notice = (isinstance(receipt, dict) and receipt.get("kind") == "notice"
                        and route_node == "notice" and parent_attempt_id == ""
-                       and not attempt_ids and not row_revisions)
+                       and not attempt_ids and not row_revisions)  # same shape as _is_ordinary_notice
     if ((not attempt_ids or not parent_attempt_id) and not ordinary_notice) \
             or not route_id or not route_node:
         raise PendingDeliveryError("pending-delivery-identity-conflict", "identity-incomplete")
@@ -1880,7 +1912,8 @@ def prune(
     retention_seconds: float = TERMINAL_RETENTION_SECONDS,
     lock_retention_seconds: float = ORPHAN_LOCK_RETENTION_SECONDS,
 ) -> dict:
-    """Retention prune under the single declared actor (SD-111 §(7) v67).
+    """Retention prune (SD-111 §(7) v67), run by the selector-less dispatch
+    reconcile path and the post-exit reaper's retention tail.
 
     ``apply=False`` returns the plan only. With ``apply=True`` each planned
     record is re-read under its reference and record locks and unlinked only if it is still

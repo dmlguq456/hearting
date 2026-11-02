@@ -168,6 +168,13 @@ class Fixture(unittest.TestCase):
             (".lock-" + summary.summary_sid(attempt))
         return owner_lock, provider_lock
 
+    def start_provider(self, lockdir):
+        """A process shaped like the title provider: it names its lockdir in argv."""
+        provider = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)",
+                                     "--lockdir", str(lockdir)])
+        self.addCleanup(lambda: (provider.kill(), provider.wait(timeout=10)))
+        return provider
+
     def sweep(self, windows=0.0, **kwargs):
         return R.sweep(self.jobs, now_ns=self.now + int(windows * RETENTION_NS), force=True, **kwargs)
 
@@ -1102,6 +1109,79 @@ class Deliveries(Fixture):
         self.assertEqual(self.unknown(result, "delivery-index-unknown"), 1)
         self.assertTrue(home.is_dir())
 
+    def producer_notice(self, harness, session_id, key):
+        record = NOTICE.notify(harness, session_id, key=key, subject="Status",
+                               text="Read this", jobs=self.jobs)
+        self.assertIsNotNone(record)
+        self.assertEqual(record["parent_attempt_id"], "")
+        self.assertEqual(record["attempt_ids"], [])
+        return record
+
+    def test_ordinary_session_notice_from_producer_does_not_block_retention(self):
+        for harness in ("claude", "codex"):
+            with self.subTest(harness=harness):
+                home = self.add("att-ordinary-" + harness, harness=harness)
+                self.producer_notice(harness, "sess-ordinary-" + harness, "ordinary-" + harness)
+                self.assertEqual(self.sweep(0)["eligible"], 1)
+                result = self.sweep(8 / 7)
+                self.assertEqual(result["removed"], 1)
+                self.assertFalse(home.exists())
+
+    def test_ordinary_notice_with_corrupt_record_still_keeps_home(self):
+        home = self.add("att-ordinary-corrupt")
+        self.producer_notice("claude", "sess-corrupt", "ordinary-corrupt")
+        folder = self.root / "pending-delivery" / ("d" * 64)
+        folder.mkdir(parents=True)
+        corrupt = folder / ("delivery-" + "d" * 32 + ".json")
+        corrupt.write_text("{")
+        stamp = self.now / 1e9
+        os.utime(corrupt, (stamp, stamp))
+        self.sweep(0)
+        result = self.sweep(8 / 7)
+        self.assertEqual(self.unknown(result, "delivery-index-unknown"), 1)
+        self.assertEqual(result["unknown_causes"]["delivery-index-unknown"],
+                         {"record-unreadable": 1})
+        self.assertTrue(home.is_dir())
+
+    def test_ordinary_notice_over_record_limit_still_keeps_home(self):
+        home = self.add("att-ordinary-limit")
+        self.producer_notice("claude", "sess-limit", "ordinary-limit-a")
+        self.producer_notice("claude", "sess-limit", "ordinary-limit-b")
+        with mock.patch.object(R, "MAX_DELIVERY_RECORDS", 1):
+            self.sweep(0)
+            result = self.sweep(8 / 7)
+        self.assertEqual(self.unknown(result, "delivery-index-unknown"), 1)
+        self.assertEqual(result["unknown_causes"]["delivery-index-unknown"],
+                         {"record-limit": 1})
+        self.assertTrue(home.is_dir())
+
+    def test_delivery_relation_and_index_share_record_identities(self):
+        ordinary = self.producer_notice("claude", "sess-share", "share-ordinary")
+        legacy = self.legacy_notice("sess-share", "share-legacy")
+        opened = self.publish_delivery("delivery-" + "5" * 32, "sess-share", ["att-share"], "-")
+        paths = {name: self.root / "pending-delivery" / record["recipient_digest"]
+                 / (record["delivery_id"] + ".json")
+                 for name, record in (("ordinary", ordinary), ("legacy", legacy), ("open", opened))}
+        refs, cause = R._delivery_index(self.root)
+        self.assertEqual((refs, cause), ({"att-share"}, ""))
+        for name, expected in (("ordinary", "unrelated"), ("legacy", "unrelated"),
+                               ("open", "related")):
+            self.assertEqual(R._delivery_record_relation(paths[name], {"att-share"}), expected, name)
+        for name in ("ordinary", "legacy"):
+            self.assertEqual(R._delivery_record_relation(paths[name], {"att-other"}), "unrelated")
+
+    def test_tombstones_do_not_count_against_the_record_limit(self):
+        home = self.add("att-tombstones")
+        group = self.root / "pending-delivery" / ("a" * 64)
+        group.mkdir(parents=True)
+        for index in range(R.MAX_HOME_REFERENCE_ENTRIES + 1):
+            (group / f"delivery-{index:032x}.json.pruned").touch()
+        self.assertGreater(R.MAX_DIRECTORY_ENTRIES, R.MAX_DELIVERY_RECORDS)
+        self.assertEqual(self.sweep(0)["eligible"], 1)
+        result = self.sweep(8 / 7)
+        self.assertEqual(result["removed"], 1)
+        self.assertFalse(home.exists())
+
 
 class Recovery(Fixture):
     def reserve(self, attempt, family="f" * 64, claim=None):
@@ -1341,7 +1421,7 @@ class Liveness(Fixture):
         self.assertEqual(self.sweep(8 / 7)["removed"], 1)
         self.assertFalse(home.exists())
 
-    def test_held_owner_and_old_provider_lockdir_keep_home(self):
+    def test_held_owner_or_live_provider_keep_home_but_ownerless_lockdir_does_not(self):
         owner_home = self.add("att-summary-owner-lock")
         owner_lock, _provider_lock = self.attach_summary_owner("att-summary-owner-lock", owner_home)
         owner_fd = os.open(owner_lock, os.O_RDWR)
@@ -1357,8 +1437,35 @@ class Liveness(Fixture):
         provider_lock.mkdir()
         old = time.time() - 30 * 86400
         os.utime(provider_lock, (old, old))
+        # Intentional change: with no process naming the old lockdir, the home is released.
+        self.sweep(0)
+        self.sweep(8 / 7)
+        self.assertFalse(provider_home.exists())
+
+        live_home = self.add("att-summary-provider-live")
+        _owner_lock, live_lock = self.attach_summary_owner("att-summary-provider-live", live_home)
+        live_lock.parent.mkdir(parents=True, exist_ok=True)
+        live_lock.mkdir()
+        os.utime(live_lock, (old, old))
+        self.start_provider(live_lock)
         self.assertEqual(self.kept(self.expire(), "summary-live"), 1)
-        self.assertTrue(provider_home.is_dir())
+        self.assertTrue(live_home.is_dir())
+
+    def test_legacy_owner_state_without_runtime_home_is_not_a_conflict(self):
+        home = self.add("att-legacy-owner")
+        owner_lock, _provider_lock = self.attach_summary_owner("att-legacy-owner", home)
+        state_path = Path(self.rows["att-legacy-owner"][1]["summary_state_file"])
+        state = json.loads(state_path.read_text())
+        del state["runtime_home"]
+        state_path.write_text(json.dumps(state))
+        owner_fd = os.open(owner_lock, os.O_RDWR)
+        try:
+            fcntl.flock(owner_fd, fcntl.LOCK_EX)
+            self.assertEqual(self.kept(self.expire(), "summary-live"), 1)
+        finally:
+            os.close(owner_fd)
+        self.assertEqual(self.sweep(8 / 7 * 2)["removed"], 1)
+        self.assertFalse(home.exists())
 
     def test_live_or_unverifiable_quiescence_keeps(self):
         live = self.add("att-q1")
@@ -2024,8 +2131,10 @@ class Races(Fixture):
             if not provider_lock.exists():
                 with AR.admission(self.root, (candidate,), blocking=False) as admitted:
                     if admitted:
+                        # Same shape as the producer: lockdir, then a process naming it.
                         provider_lock.parent.mkdir(parents=True, exist_ok=True)
                         provider_lock.mkdir()
+                        self.start_provider(provider_lock)
             return original_check(ctx, candidate, deadline)
 
         with mock.patch.object(R, "_late_candidate_delivery_change", provider_admission):
@@ -3129,6 +3238,29 @@ class Mapping(Fixture):
         result = self.expire()
         self.assertEqual(self.unknown(result, "runtime-home-conflict"), 1)
         self.assertTrue(home.is_dir())
+
+    def test_opencode_shared_service_row_is_not_a_home_claim(self):
+        home = self.add("att-shared-service", harness="opencode", declare=False,
+                        runtime_home=R.SHARED_SERVICE_RUNTIME_HOME)
+        self.assertEqual(self.sweep(0)["eligible"], 1)
+        self.assertEqual(self.sweep(8 / 7)["removed"], 1)
+        self.assertFalse(home.exists())
+        # Only the exact token claims no home; any other relative value still conflicts.
+        other = self.add("att-shared-other", harness="opencode", declare=False,
+                         runtime_home="other-relative")
+        result = self.expire()
+        self.assertEqual(self.unknown(result, "runtime-home-conflict"), 1)
+        self.assertTrue(other.is_dir())
+
+    def test_freed_bytes_are_recorded_only_in_the_pass_result(self):
+        home = self.add("att-freed")
+        (home / "projects" / "big.bin").write_bytes(b"x" * 65536)
+        self.assertEqual(self.sweep(0)["freed_bytes"], 0)
+        result = self.sweep(8 / 7)
+        self.assertEqual(result["removed"], 1)
+        self.assertGreaterEqual(result["freed_bytes"], 65536)
+        self.assertEqual(self.state()["last_result"]["freed_bytes"], result["freed_bytes"])
+        self.assertEqual(self.sweep(9 / 7)["freed_bytes"], 0)
 
     def test_runtime_home_through_a_planted_link_is_not_followed(self):
         home = self.add("att-m5", declare=False)

@@ -428,6 +428,14 @@ class StormGuardTest(_ConfigHomeMixin, unittest.TestCase):
         self.assertEqual(started, rt.DEFAULT_CONCURRENCY)
         self.assertEqual(len(captured), rt.DEFAULT_CONCURRENCY)
 
+    def test_provider_argv_names_the_lockdir_the_summary_owner_judges(self):
+        # dispatch_summary.home_consumer_evidence treats a lockdir as live only
+        # while a process names it in `--lockdir`; this is that producer shape.
+        started, captured = self._fake_spawns([self._session("sid-lockdir")])
+        self.assertEqual(started, 1)
+        argv = captured[0]
+        self.assertEqual(argv[argv.index("--lockdir") + 1], titles.lock_path("sid-lockdir", "claude"))
+
     def test_rolling_start_budget_bounds_sequential_backlog(self):
         os.environ["FLEET_TITLE_CONCURRENCY"] = "1"
         os.environ["FLEET_TITLE_MAX_STARTS"] = "3"

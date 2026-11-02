@@ -44,6 +44,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 import dispatch_attempt_reference as attempt_reference
+from dispatch_pending_delivery import LEGACY_NOTICE_ID_RE
 
 IDLE_SECONDS = 3600
 DUE_SECONDS = 300
@@ -58,16 +59,24 @@ MAX_STATE_BYTES = 1024 * 1024
 MAX_MANIFEST_BYTES = 64 * 1024
 MAX_EVIDENCE_BYTES = 1024 * 1024
 MAX_DELIVERY_BYTES = 256 * 1024
-MAX_DELIVERY_RECORDS = 4096
-MAX_DEPENDENCY_STAMPS = MAX_DELIVERY_RECORDS * 8
+# Records read from the delivery store, and (separately) directory entries listed
+# there: tombstones, locks and sidecars are entries but not records.
+MAX_DELIVERY_RECORDS = 32768
+MAX_DIRECTORY_ENTRIES = 131072
+MAX_DEPENDENCY_STAMPS = 32768
+MAX_HOME_REFERENCE_ENTRIES = 4096
 MAX_HOME_SCAN_PIDS = 8192
 MAX_HOME_SCAN_FDS = 2048
 MAX_TREE_DEPTH = 128
 REGISTRY_LOCK_WAIT_SECONDS = 0.100
 
 KEY_RE = re.compile(r"[0-9a-f]{32}")
+# OpenCode rows served by the shared service record this exact token instead of
+# a per-attempt home (adapters/opencode/bin/dispatch-headless.py); it claims no
+# home. Any other non-matching value remains a conflict.
+SHARED_SERVICE_RUNTIME_HOME = "shared-service"
 ATTEMPT_RE = attempt_reference.ATTEMPT_RE
-NOTICE_RE = re.compile(r"notice-[0-9a-f]{32}")
+NOTICE_RE = LEGACY_NOTICE_ID_RE
 ATTEMPT_ID_RE = re.compile(r"(?:^|,)attempt_id=([^,]+)")
 LEAF_RE = re.compile(r"([0-9a-f]{32})\.([0-9]{1,20})(?:\.([0-9]{1,5}))?")
 DELIVERY_ID_RE = re.compile(r"delivery-(?:[0-9a-f]{32}|[0-9a-f]{64})")
@@ -799,7 +808,7 @@ def home_reference_relevant(root, attempt_ids) -> bool | None:
         with os.scandir(workers_fd) as listing:
             entries = []
             for entry in listing:
-                if len(entries) >= MAX_DELIVERY_RECORDS:
+                if len(entries) >= MAX_HOME_REFERENCE_ENTRIES:
                     return None
                 if KEY_RE.fullmatch(entry.name) and entry.is_dir(follow_symlinks=False):
                     entries.append(entry.name)
@@ -951,12 +960,17 @@ def _worker_home_read_matches(layout: _Layout, home: int, requested: Path, trans
 
 def _delivery_index(root: Path, *, observer=None, activity=None, records=None,
                     groups_seen=None):
-    """(attempt ids in open records, unknown evidence).
+    """(attempt ids in open records, unknown cause).
+
+    The cause is "" when the store was read completely, else a short bucket
+    (store-unreadable, group-untrusted, group-unreadable, record-limit,
+    record-unreadable, record-invalid, record-path-mismatch).
 
     `activity`, when given, receives the newest mtime of resolved records per
     attempt they name.
     """
-    from dispatch_pending_delivery import OPEN_STATES, PendingDeliveryError, _validate_record
+    from dispatch_pending_delivery import (OPEN_STATES, PendingDeliveryError,
+                                           record_attempt_identities)
     refs: set[str] = set()
     seen = 0
     base = root / "pending-delivery"
@@ -965,13 +979,13 @@ def _delivery_index(root: Path, *, observer=None, activity=None, records=None,
     try:
         groups = list(os.scandir(base))
     except FileNotFoundError:
-        return refs, False
+        return refs, ""
     except OSError:
-        return refs, True
+        return refs, "store-unreadable"
     for group in groups:
         try:
             if group.is_symlink() or not group.is_dir(follow_symlinks=False):
-                return refs, True
+                return refs, "group-untrusted"
             if groups_seen is not None:
                 groups_seen.add(group.name)
             if observer is not None:
@@ -980,7 +994,7 @@ def _delivery_index(root: Path, *, observer=None, activity=None, records=None,
                 observer("group", Path(group.path))
             entries = list(os.scandir(group.path))
         except OSError:
-            return refs, True
+            return refs, "group-unreadable"
         for entry in entries:
             if not entry.name.endswith(".json"):
                 continue
@@ -988,31 +1002,23 @@ def _delivery_index(root: Path, *, observer=None, activity=None, records=None,
                 observer("file", Path(entry.path))
             seen += 1
             if seen > MAX_DELIVERY_RECORDS:
-                return refs, True
+                return refs, "record-limit"
             try:
                 found = _read_json(entry.path, MAX_DELIVERY_BYTES)
             except _Unreadable:
-                return refs, True
+                return refs, "record-unreadable"
             if found is None:
                 continue
             value, mtime = found
             try:
-                _validate_record(value)
+                named = list(record_attempt_identities(value))
             except (PendingDeliveryError, TypeError, ValueError):
-                return refs, True
+                return refs, "record-invalid"
             if (not SHA256_RE.fullmatch(group.name)
                     or not DELIVERY_ID_RE.fullmatch(entry.name[:-5])
                     or value.get("recipient_digest") != group.name
                     or value.get("delivery_id") != entry.name[:-5]):
-                return refs, True
-            ids = value.get("attempt_ids")
-            parent = value.get("parent_attempt_id")
-            if (not isinstance(ids, list) or not all(
-                    isinstance(item, str) and (ATTEMPT_RE.fullmatch(item) or NOTICE_RE.fullmatch(item))
-                    for item in ids)
-                    or not isinstance(parent, str) or not parent):
-                return refs, True
-            named = [item for item in (*ids, parent) if ATTEMPT_RE.fullmatch(item)]
+                return refs, "record-path-mismatch"
             if records is not None:
                 digest = hashlib.sha256(json.dumps(
                     value, sort_keys=True, separators=(",", ":")
@@ -1025,7 +1031,7 @@ def _delivery_index(root: Path, *, observer=None, activity=None, records=None,
             elif activity is not None:
                 for item in named:
                     activity[item] = max(activity.get(item, 0), mtime)
-    return refs, False
+    return refs, ""
 
 
 def _replacement_state(root: Path, snapshot: _Snapshot, attempt: str):
@@ -1178,7 +1184,7 @@ class _Context:
         self.group_stamps = {}
         self.delivery_activity: dict[str, int] = {}
         self.delivery_records: dict[str, dict[str, tuple]] = {}
-        self.delivery_unknown_global = False
+        self.delivery_unknown_global = ""
         self.delivery_groups: set[str] = set()
         self.candidate_delivery_baseline: _CandidateDeliveryBaseline | None = None
         self.candidate_binding: _HomeBinding | None = None
@@ -1220,7 +1226,7 @@ class _Context:
             # registry row. They retain the exact attempt id needed to verify a
             # legacy key in the same forward direction used by the builder.
             _refs, delivery_unknown = self.delivery_index()
-            self.legacy_scan_unknown |= delivery_unknown
+            self.legacy_scan_unknown |= bool(delivery_unknown)
             attempts = set(self.snapshot.rows) | set(self.delivery_records)
             directories = [
                 (self.root / "automatic-replacements" / "by-source", "attempt-record"),
@@ -1504,7 +1510,7 @@ def _delivery_record_relation(path: Path, related: set[str] | frozenset[str],
                               binding: _HomeBinding | None = None, *,
                               dir_fd: int | None = None) -> str:
     """related | unrelated | unknown for a changed delivery record."""
-    from dispatch_pending_delivery import PendingDeliveryError, _validate_record
+    from dispatch_pending_delivery import PendingDeliveryError, record_attempt_identities
     for attempt in range(2):
         try:
             read_path = path.name if dir_fd is not None else str(path)
@@ -1512,23 +1518,14 @@ def _delivery_record_relation(path: Path, related: set[str] | frozenset[str],
             if found is None:
                 return "unrelated"
             value = found[0]
-            _validate_record(value)
+            identities = record_attempt_identities(value)
             if (value.get("delivery_id") != path.name[:-5]
                     or value.get("recipient_digest") != path.parent.name):
                 return "unknown"
-            ids = value.get("attempt_ids")
-            parent = value.get("parent_attempt_id")
-            if (not isinstance(ids, list) or not isinstance(parent, str)
-                    or not all(isinstance(item, str)
-                               and (ATTEMPT_RE.fullmatch(item) or NOTICE_RE.fullmatch(item))
-                               for item in ids)):
-                return "unknown"
-            identities = (item for item in (*ids, parent) if ATTEMPT_RE.fullmatch(item))
             if related.intersection(identities):
                 return "related"
             if binding is not None and any(
-                    _attempt_maps_to_binding(item, binding)
-                    for item in (*ids, parent) if ATTEMPT_RE.fullmatch(item)):
+                    _attempt_maps_to_binding(item, binding) for item in identities):
                 return "related"
             return "unrelated"
         except (_Unreadable, PendingDeliveryError, TypeError, ValueError):
@@ -1542,7 +1539,7 @@ def _bounded_directory_entries(path: Path, deadline: float) -> list | None:
     try:
         with os.scandir(path) as listing:
             for entry in listing:
-                if (len(entries) >= MAX_DELIVERY_RECORDS
+                if (len(entries) >= MAX_DIRECTORY_ENTRIES
                         or time.monotonic() >= deadline):
                     return None
                 entries.append(entry)
@@ -1556,7 +1553,7 @@ def _bounded_directory_entries_fd(dir_fd: int, deadline: float) -> list | None:
     try:
         with os.scandir(dir_fd) as listing:
             for entry in listing:
-                if (len(entries) >= MAX_DELIVERY_RECORDS
+                if (len(entries) >= MAX_DIRECTORY_ENTRIES
                         or time.monotonic() >= deadline):
                     return None
                 entries.append(entry)
@@ -1965,7 +1962,8 @@ def _bind(ctx: _Context, key: str, home_fd: int):
         # every path-based consumer surface and the complete process scan.
         return binding
     claimed = row.meta.get("runtime_home", "")
-    if claimed and _declared_home(ctx.root, ctx.workers_real, claimed) != key:
+    if (claimed and claimed != SHARED_SERVICE_RUNTIME_HOME
+            and _declared_home(ctx.root, ctx.workers_real, claimed) != key):
         return _Verdict("unknown", "runtime-home-conflict")
     return binding
 
@@ -2062,7 +2060,8 @@ def _orphan_protection(ctx: _Context, binding: _HomeBinding):
             activity = max(activity, mtime)
     refs, index_unknown = ctx.delivery_index()
     if index_unknown:
-        return _Verdict("unknown", "delivery-index-unknown", detail="delivery-scan-incomplete")
+        return _Verdict("unknown", "delivery-index-unknown",
+                        detail=index_unknown if isinstance(index_unknown, str) else "delivery-scan-incomplete")
     if attempt is not None and attempt in refs:
         return _Verdict("keep", "delivery-open")
     if attempt is not None:
@@ -2163,6 +2162,16 @@ def _mount_id(fd: int) -> str | None:
     return None
 
 
+_FREED: contextvars.ContextVar = contextvars.ContextVar("retention_freed_bytes", default=None)
+
+
+def _note_freed(info: os.stat_result) -> None:
+    """Add the blocks a removal frees to the running pass (a file with other links frees none)."""
+    box = _FREED.get()
+    if box is not None and (stat.S_ISDIR(info.st_mode) or info.st_nlink == 1):
+        box[0] += info.st_blocks * 512
+
+
 # destructive-ok: reason=empty one detached expired worker home by descriptor; boundary=one validated leaf directly under homes/worker-retention/retiring
 def _empty_directory(dir_fd: int, device: int, deadline: float, depth: int = 0) -> bool:
     """Remove every entry below `dir_fd`; links are unlinked, never followed.
@@ -2182,6 +2191,7 @@ def _empty_directory(dir_fd: int, device: int, deadline: float, depth: int = 0) 
             return False
         st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
         if not stat.S_ISDIR(st.st_mode):
+            _note_freed(st)
             os.unlink(name, dir_fd=dir_fd)
             continue
         if st.st_dev != device:
@@ -2197,6 +2207,7 @@ def _empty_directory(dir_fd: int, device: int, deadline: float, depth: int = 0) 
                 return False
         finally:
             os.close(child)
+        _note_freed(st)
         os.rmdir(name, dir_fd=dir_fd)
     return True
 
@@ -2214,6 +2225,7 @@ def _remove_leaf(layout: _Layout, name: str, expected: list[int], deadline: floa
             if (_identity(info) != expected or info.st_uid != os.geteuid()
                     or info.st_dev != os.fstat(layout.retiring_fd).st_dev):
                 return "unproven"
+            _note_freed(info)
             os.unlink(name, dir_fd=layout.retiring_fd)
         except FileNotFoundError:
             pass
@@ -2237,6 +2249,7 @@ def _remove_leaf(layout: _Layout, name: str, expected: list[int], deadline: floa
     if not finished:
         return "partial"
     try:
+        _note_freed(opened)
         os.rmdir(name, dir_fd=layout.retiring_fd)
     except FileNotFoundError:
         pass
@@ -2793,12 +2806,15 @@ def sweep(jobs, *, now_ns: int | None = None, force: bool = False) -> dict:
         return {"skipped": "error", "error": type(exc).__name__}
 
 
-def sweep_best_effort(jobs) -> None:
-    """The carrier entry: whatever happens here never changes the caller's result."""
+def sweep_best_effort(jobs) -> bool:
+    """The carrier entry: whatever happens here never changes the caller's result.
+
+    True only when a retention pass actually ran (not skipped, not failed).
+    """
     try:
-        sweep(jobs)
+        return "skipped" not in sweep(jobs)
     except Exception:  # noqa: BLE001
-        pass
+        return False
 
 
 def _sweep(jobs: Path, now_ns: int, force: bool, started: float) -> dict:
@@ -2816,9 +2832,17 @@ def _sweep(jobs: Path, now_ns: int, force: bool, started: float) -> dict:
 
 
 def _pass(jobs: Path, root: Path, layout: _Layout, state: dict, now_ns: int, started: float) -> dict:
+    token = _FREED.set([0])
+    try:
+        return _run_pass(jobs, root, layout, state, now_ns, started)
+    finally:
+        _FREED.reset(token)
+
+
+def _run_pass(jobs: Path, root: Path, layout: _Layout, state: dict, now_ns: int, started: float) -> dict:
     result = {"examined": 0, "eligible": 0, "due": 0, "removed": 0, "partial": 0,
               "ignored": 0, "detached_leftover": 0, "unproven_leftover": 0,
-              "kept": {}, "unknown": {}, "unknown_causes": {}}
+              "freed_bytes": 0, "kept": {}, "unknown": {}, "unknown_causes": {}}
     deadline = time.monotonic() + REMOVE_DEADLINE_SECONDS
     budget = REMOVE_LIMIT
     # Keep one slot for newly due homes even if every interrupted leaf is stuck.
@@ -2860,7 +2884,9 @@ def _pass(jobs: Path, root: Path, layout: _Layout, state: dict, now_ns: int, sta
         scan = contextlib.ExitStack()
         try:
             from dispatch_contract import process_table_scan_scope
+            from dispatch_summary import provider_reference_scan_scope
             scan.enter_context(process_table_scan_scope())
+            scan.enter_context(provider_reference_scan_scope())
             for key in batch:
                 if time.monotonic() - started > EXAMINE_BUDGET_SECONDS:
                     break
@@ -2927,6 +2953,7 @@ def _pass(jobs: Path, root: Path, layout: _Layout, state: dict, now_ns: int, sta
             with contextlib.suppress(OSError):
                 # destructive-ok: reason=drop a view marker whose home no longer exists; boundary=one marker file directly under homes/worker-retention/views
                 os.unlink(name, dir_fd=layout.views_fd)
+    result["freed_bytes"] = _FREED.get()[0]
     result["elapsed_ms"] = int((time.monotonic() - started) * 1000)
     state.update(schema=SCHEMA, last_pass_ns=now_ns, cursor=cursor, eligible_since=since,
                  last_result=result)
