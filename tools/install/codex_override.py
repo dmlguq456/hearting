@@ -10,15 +10,15 @@ never changed, and without a user override (or with an empty one) nothing is
 written, because Codex already reads ``AGENTS.md``.
 
 The begin marker records how many newlines were added in front of the block, so
-removal gives back the user's exact bytes without any stored state.
+removal gives back the user's exact bytes without any stored state. Worker homes
+reuse ``user_text`` and ``compose`` to pair the same user text with their own
+bootstrap; those two need only the standard library.
 """
 
 from __future__ import annotations
 
 import re
 from pathlib import Path
-
-import safe_fs
 
 
 OVERRIDE_NAME = "AGENTS.override.md"
@@ -63,15 +63,26 @@ def _parse(data: bytes):
     return before + data[end:], (start, end, sep)
 
 
-def _has_text(data: bytes) -> bool:
-    # Codex decodes lossily and skips a file whose trimmed text is empty.
+def has_text(data: bytes) -> bool:
+    """Codex decodes lossily and skips a file whose trimmed text is empty."""
     return bool(data.decode("utf-8", "replace").strip())
 
 
-def _separator(user: bytes) -> int:
+def user_text(data: bytes) -> bytes:
+    """The user's bytes without Hearting's block; damaged markers keep every byte."""
+    try:
+        return _parse(data)[0]
+    except ValueError:
+        return data
+
+
+def compose(user: bytes, body: bytes) -> bytes:
+    """The user's bytes unchanged, then ``body`` as Hearting's block."""
     if user.endswith(b"\n\n"):
-        return 0
-    return 1 if user.endswith(b"\n") else 2
+        sep = 0
+    else:
+        sep = 1 if user.endswith(b"\n") else 2
+    return user + b"\n" * sep + _block(sep, body)
 
 
 _LINES = {
@@ -96,13 +107,15 @@ def _result(path: Path, status: str, *, changed=False, dry_run=False, detail="")
             "changed": changed, "report_lines": [line] if line else []}
 
 
-def _write(path: Path, current: safe_fs.PathState, payload: bytes) -> None:
+def _write(path: Path, current, payload: bytes) -> None:
+    import safe_fs
     auth = safe_fs.authority(path, owner="codex-agents-override", allowed_paths=(path,),
                              allow_leaf_symlink=False, expected=current)
     safe_fs.atomic_write_bytes(auth, payload, current.mode, expected=current)
 
 
 def _update(codex_home: Path, bootstrap: Path | None, *, dry_run: bool) -> dict:
+    import safe_fs
     path = Path(codex_home) / OVERRIDE_NAME
     try:
         current = safe_fs.capture_state(path, include_payload=True)
@@ -115,14 +128,13 @@ def _update(codex_home: Path, bootstrap: Path | None, *, dry_run: bool) -> dict:
             user, span = _parse(data)
         except ValueError:
             return _result(path, "skipped-markers")
-        if bootstrap is None or not _has_text(user):
+        if bootstrap is None or not has_text(user):
             if span is None:
                 # Nothing of ours to remove, or an empty override Codex skips.
                 return _result(path, "unchanged")
             status, after = "removed", user
         elif span is None:
-            sep = _separator(user)
-            status, after = "added", data + b"\n" * sep + _block(sep, bootstrap.read_bytes())
+            status, after = "added", compose(data, bootstrap.read_bytes())
         else:
             start, end, sep = span
             status = "updated"
