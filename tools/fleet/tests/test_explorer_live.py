@@ -345,6 +345,16 @@ class SourceBackedRecords(unittest.TestCase):
                    "session_identity_evidence": {"pane": "w1:p2"}}
         self.assertEqual(self.vm([session]).sessions[0]["pane"], "w1:p2")
 
+    def test_a_steward_leads_its_repository_whatever_the_natural_order(self):
+        def session(tag, mtime, steward=False, cwd="/synthetic/repo"):
+            return {"harness": "claude", "session_id": "sid-" + tag, "session_tag": tag, "cwd": cwd,
+                    "liveness": "idle", "mtime": mtime, "steward": steward}
+        rows = [session("aa", 30), session("bb", 20), session("st", 10, steward=True)]
+        self.assertEqual([row["tag"] for row in self.vm(rows).sessions], ["st", "aa", "bb"])
+        ordered = self.vm(rows, session_order=["sid-aa", "sid-bb", "sid-st"]).sessions
+        self.assertEqual([row["tag"] for row in ordered], ["st", "aa", "bb"])
+        self.assertTrue(ordered[0]["steward"])
+
     def test_a_waiting_session_reads_answer_needed_not_the_raw_kind(self):
         session = {"harness": "codex", "session_id": "sid-a", "session_tag": "aa", "cwd": "/synthetic/repo",
                    "liveness": "blocked", "interaction_state": {"kind": "decision"}}
