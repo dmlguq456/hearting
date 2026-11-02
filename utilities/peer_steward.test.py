@@ -4065,6 +4065,18 @@ class StatusRearmTest(_WatchMixin, unittest.TestCase):
         flipping this branch back to `arms_hook=True` passed all 68 tests.
         """
         dead = self._arm(target="peer-dead", mode="held")
+        # Kill the watcher only after its one native wait is running: the
+        # rearmed watcher adopts that wait (the FIFO reader released below).
+        # A watcher killed before launching it leaves no reader at all, and
+        # under CI load that made the final release fail.
+        self._wait_for_lock(dead["watch_id"])
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not [
+                line for line in self._wait_calls() if " peer-dead" in f" {line} "]:
+            time.sleep(0.02)
+        self.assertEqual(
+            len([line for line in self._wait_calls() if " peer-dead" in f" {line} "]), 1,
+            self._wait_calls())
         os.kill(int(dead["pid"]), signal.SIGKILL)
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline and peer_steward._pid_identity_ok(
@@ -4453,7 +4465,13 @@ class KillFixtureTest(_WatchMixin, unittest.TestCase):
         deadline = time.monotonic() + 30
         arm = None
         while time.monotonic() < deadline:
-            arms = [p for p in self.watch_root.glob("*.json")] if self.watch_root.is_dir() else []
+            # Only "<watch_id>.json" is an arm record. The writer's atomic temp
+            # file (".tmp-*.json") matches "*.json" too and vanishes at its
+            # rename (FileNotFoundError on CI), and observation/receipt files
+            # carry no watcher identity.
+            arms = ([p for p in self.watch_root.glob("*.json")
+                     if not p.name.startswith(".") and p.name.count(".") == 1]
+                    if self.watch_root.is_dir() else [])
             if arms:
                 candidate = json.loads(arms[0].read_text())
                 # The accepted record exists before its observer is published.
