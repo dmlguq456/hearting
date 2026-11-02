@@ -9722,13 +9722,15 @@ def _publish_run_states(store, notice_duties):
     import dispatch_recipient_inbox as inbox
 
     root = store.root.parent.parent.resolve()
+    identity = store._state_root_identity
     state = peer_obligations.read_runner_duty_state(root, "run-states")
     if not peer_obligations.runner_duty_due(state, RUN_STATES_DUE_SECONDS):
         return {"runs": 0, "published": False, "due": False}
     run_ids = _open_run_ids(root, notice_duties)
     if not run_ids:
         peer_obligations.write_runner_duty_state(
-            root, "run-states", {"last_pass_ns": time.time_ns(), "runs": 0})
+            root, "run-states", {"last_pass_ns": time.time_ns(), "runs": 0},
+            expected_root_identity=identity)
         return {"runs": 0, "published": False, "due": True}
     import resource_run_registry as registry
     from resource_progress import read_public_run_record
@@ -9754,9 +9756,11 @@ def _publish_run_states(store, notice_duties):
                         "ended_at": ended_at, "artifact_root": artifact_root,
                         "parent_attempt_id": row.get("parent_attempt_id"),
                         "jobs": str(jobs) if jobs is not None else ""}
-    inbox.write_run_states(root, {"runs": runs})
+    inbox.write_run_states(
+        root, {"runs": runs}, expected_root_identity=identity)
     peer_obligations.write_runner_duty_state(
-        root, "run-states", {"last_pass_ns": time.time_ns(), "runs": len(runs)})
+        root, "run-states", {"last_pass_ns": time.time_ns(), "runs": len(runs)},
+        expected_root_identity=identity)
     return {"runs": len(runs), "published": True, "due": True}
 
 
@@ -9793,7 +9797,8 @@ def _live_recipients(root):
     return found
 
 
-def _prefill_recipient_inbox(root, harness, session_id, *, deadline_ns):
+def _prefill_recipient_inbox(root, harness, session_id, *, deadline_ns,
+                             expected_root_identity=None):
     """Derive and publish one recipient inbox from the real recipient scopes.
 
     Only open records are named: ``delivery_ids`` is the open-delivery list, so
@@ -9857,11 +9862,12 @@ def _prefill_recipient_inbox(root, harness, session_id, *, deadline_ns):
             root, session_id, harness, scopes, open_entries,
             edge_generation=edge_generation,
             folded_edge_digest=sweep.scopes_edge_digest(scopes))
-    inbox.write_inbox(root, harness, session_id, payload)
+    inbox.write_inbox(root, harness, session_id, payload,
+                      expected_root_identity=expected_root_identity)
     return payload
 
 
-def _prefill_live_inboxes(root, *, deadline_ns):
+def _prefill_live_inboxes(root, *, deadline_ns, expected_root_identity=None):
     """Refresh a missing/stale inbox for live sessions only, bounded per pass.
 
     The periodic reconciliation compares the published ``folded_edge_digest``
@@ -9907,8 +9913,9 @@ def _prefill_live_inboxes(root, *, deadline_ns):
             continue
         result["checked"] += 1
         try:
-            written = _prefill_recipient_inbox(root, harness, session_id,
-                                               deadline_ns=deadline_ns)
+            written = _prefill_recipient_inbox(
+                root, harness, session_id, deadline_ns=deadline_ns,
+                expected_root_identity=expected_root_identity)
         except (OSError, ValueError, KeyError, TypeError, RuntimeError):
             written = None
         if written is None:
@@ -9971,7 +9978,8 @@ def _prune_received_peer_history(*, now=None, deadline_ns=None, start_after=None
     return result
 
 
-def _publish_lineage_rows_duty(root, *, deadline_ns=None):
+def _publish_lineage_rows_duty(root, *, deadline_ns=None,
+                               expected_root_identity=None):
     """Keep the compact lineage observation published for the effect path.
 
     Without this first/periodic publication a fresh install has no
@@ -9990,18 +9998,21 @@ def _publish_lineage_rows_duty(root, *, deadline_ns=None):
     if deadline_ns is not None and time.monotonic_ns() >= deadline_ns:
         return {"published": False, "due": True, "deferred": True}
     try:
-        counts = handover.publish_lineage_rows(root)
+        counts = handover.publish_lineage_rows(
+            root, expected_root_identity=expected_root_identity)
     except (OSError, ValueError, TypeError, KeyError, RuntimeError):
         return {"published": False, "due": True, "deferred": True}
-    peer_obligations.write_runner_duty_state(root, "lineage-rows", {
-        "last_pass_ns": time.time_ns(),
-        "ledgers": counts.get("ledgers", 0),
-        "rows": counts.get("rows", 0),
-        "skipped": counts.get("skipped", 0)})
+    peer_obligations.write_runner_duty_state(
+        root, "lineage-rows", {
+            "last_pass_ns": time.time_ns(),
+            "ledgers": counts.get("ledgers", 0),
+            "rows": counts.get("rows", 0),
+            "skipped": counts.get("skipped", 0)},
+        expected_root_identity=expected_root_identity)
     return {"published": True, "due": True, **counts}
 
 
-def _publish_peer_indexes(root, *, deadline_ns=None):
+def _publish_peer_indexes(root, *, deadline_ns=None, expected_root_identity=None):
     """Publish each recipient's pending-row index so a Stop reads no full history.
 
     The Stop header retry is bounded by its own 3 s budget and may skip, so the
@@ -10014,12 +10025,21 @@ def _publish_peer_indexes(root, *, deadline_ns=None):
         return {"published": False, "due": False}
     if deadline_ns is not None and time.monotonic_ns() >= deadline_ns:
         return {"published": False, "due": True, "deferred": True}
+    peer_root = peer_message.peer_state_root()
+    if (expected_root_identity is not None
+            and Path(peer_root).resolve(strict=False)
+                == Path(root).resolve(strict=False)
+            and peer_obligations.state_root_identity(peer_root)
+                != tuple(expected_root_identity)):
+        # The runner's own root also carries recipient indexes in this layout;
+        # a vanished root must not be recreated by the publisher either.
+        return {"published": False, "due": True, "deferred": True}
     remaining = PEER_INDEX_TIME_BUDGET_S
     if deadline_ns is not None:
         remaining = min(remaining, max(
             0.0, (deadline_ns - time.monotonic_ns()) / 1_000_000_000))
     counts = peer_message.rebuild_recipient_index(
-        peer_message.peer_state_root(), time_budget_s=remaining)
+        peer_root, time_budget_s=remaining)
     complete = bool(counts.get("complete"))
     peer_obligations.write_runner_duty_state(
         root, "peer-index", {
@@ -10027,7 +10047,8 @@ def _publish_peer_indexes(root, *, deadline_ns=None):
             "scanned": counts.get("scanned", 0),
             "recipients": counts.get("recipients", 0),
             "rows": counts.get("rows", 0),
-            "complete": complete})
+            "complete": complete},
+        expected_root_identity=expected_root_identity)
     return {"published": complete, "due": True, "complete": complete,
             "scanned": counts.get("scanned", 0),
             "recipients": counts.get("recipients", 0)}
@@ -10296,7 +10317,7 @@ def _purge_retired_archives(*, now=None):
     return result
 
 
-def _publish_steward_relations(root, *, force=False):
+def _publish_steward_relations(root, *, force=False, expected_root_identity=None):
     """Publish the role relation the Stop header may reuse instead of a live walk.
 
     Display-only: the file feeds `fleet.herdr_projection.is_steward` on the Stop
@@ -10314,10 +10335,13 @@ def _publish_steward_relations(root, *, force=False):
     if not due:
         return {"published": False, "due": False, "relations": 0}
     relations = resolved_steward_relations(include_released=True)
-    inbox.write_steward_relations(root, relations)
-    peer_obligations.write_runner_duty_state(root, "steward-relations", {
-        "last_pass_ns": time.time_ns(), "edge_generation": generation,
-        "relations": len(relations)})
+    inbox.write_steward_relations(
+        root, relations, expected_root_identity=expected_root_identity)
+    peer_obligations.write_runner_duty_state(
+        root, "steward-relations", {
+            "last_pass_ns": time.time_ns(), "edge_generation": generation,
+            "relations": len(relations)},
+        expected_root_identity=expected_root_identity)
     return {"published": True, "due": True, "relations": len(relations)}
 
 
@@ -10325,17 +10349,25 @@ def _runner_maintenance_pass(store):
     """Publish derived observations and run the bounded global cleanup duties."""
     import dispatch_recipient_inbox as inbox
 
+    identity = store._state_root_identity
+    if not store._state_root_identity_is_current():
+        # The root that carries every duty below was removed or replaced (a
+        # finished test's temporary home). Stop writing; the runner loop's
+        # next lock check exits.
+        return {}
     root = store.root.parent.parent.resolve()
     deadline_ns = time.monotonic_ns() + int(MAINTENANCE_TIME_BUDGET_S * 1_000_000_000)
     result = {}
     # The Stop header reads this file; publish before the cleanup duties so a
     # long reconcile backlog cannot starve it for hours.
     try:
-        result["steward_relations"] = _publish_steward_relations(root)
+        result["steward_relations"] = _publish_steward_relations(
+            root, expected_root_identity=identity)
     except (OSError, ValueError, TypeError, RuntimeError):
         pass
     try:
-        result["lineage_rows"] = _publish_lineage_rows_duty(root, deadline_ns=deadline_ns)
+        result["lineage_rows"] = _publish_lineage_rows_duty(
+            root, deadline_ns=deadline_ns, expected_root_identity=identity)
     except (OSError, ValueError, TypeError, RuntimeError):
         pass
     try:
@@ -10352,16 +10384,18 @@ def _runner_maintenance_pass(store):
                 start_after=cursor if isinstance(cursor, str) else None)
             result["reconcile"] = counts
             complete = not counts.get("budget_exhausted") and counts.get("cursor") is None
-            peer_obligations.write_runner_duty_state(root, "reconcile", {
-                # An unfinished walk is due on the next pass, not in six hours:
-                # the first 2,575-record backlog then clears within hours.
-                "last_pass_ns": time.time_ns() if complete else 0,
-                "cursor": counts.get("cursor"),
-                "rows_read": counts.get("rows_read", 0),
-                "records_read": counts.get("records_read", 0),
-                "pruned_records": counts.get("pruned_records", 0),
-                "expired": counts.get("expired", 0),
-                "budget_exhausted": counts.get("budget_exhausted", 0)})
+            peer_obligations.write_runner_duty_state(
+                root, "reconcile", {
+                    # An unfinished walk is due on the next pass, not in six hours:
+                    # the first 2,575-record backlog then clears within hours.
+                    "last_pass_ns": time.time_ns() if complete else 0,
+                    "cursor": counts.get("cursor"),
+                    "rows_read": counts.get("rows_read", 0),
+                    "records_read": counts.get("records_read", 0),
+                    "pruned_records": counts.get("pruned_records", 0),
+                    "expired": counts.get("expired", 0),
+                    "budget_exhausted": counts.get("budget_exhausted", 0)},
+                expected_root_identity=identity)
     except (OSError, ValueError, RuntimeError):
         pass
     try:
@@ -10373,14 +10407,17 @@ def _runner_maintenance_pass(store):
                 deadline_ns=deadline_ns,
                 start_after=cursor if isinstance(cursor, str) else None)
             result["peer_history"] = counts
-            peer_obligations.write_runner_duty_state(root, "peer-history", {
-                "last_pass_ns": time.time_ns() if counts.get("complete", True) else 0,
-                "cursor": counts.get("cursor"),
-                "removed": counts["removed"]})
+            peer_obligations.write_runner_duty_state(
+                root, "peer-history", {
+                    "last_pass_ns": time.time_ns() if counts.get("complete", True) else 0,
+                    "cursor": counts.get("cursor"),
+                    "removed": counts["removed"]},
+                expected_root_identity=identity)
     except (OSError, ValueError, RuntimeError):
         pass
     try:
-        result["peer_index"] = _publish_peer_indexes(root, deadline_ns=deadline_ns)
+        result["peer_index"] = _publish_peer_indexes(
+            root, deadline_ns=deadline_ns, expected_root_identity=identity)
     except (OSError, ValueError, TypeError, RuntimeError):
         pass
     try:
@@ -10390,15 +10427,18 @@ def _runner_maintenance_pass(store):
             counts = _retire_finished_lineage_bundles(store, deadline_ns=deadline_ns)
             counts.update(_purge_retired_archives())
             result["retire"] = counts
-            peer_obligations.write_runner_duty_state(root, "retire", {
-                "last_pass_ns": time.time_ns(), "retired": counts.get("retired", 0),
-                "ledgers": counts.get("ledgers", 0),
-                "purged": counts.get("removed", 0)})
+            peer_obligations.write_runner_duty_state(
+                root, "retire", {
+                    "last_pass_ns": time.time_ns(), "retired": counts.get("retired", 0),
+                    "ledgers": counts.get("ledgers", 0),
+                    "purged": counts.get("removed", 0)},
+                expected_root_identity=identity)
             if counts.get("retired"):
                 # A retirement bumps the edge generation; republish in this
                 # same pass rather than waiting for the next due check.
                 try:
-                    result["steward_relations"] = _publish_steward_relations(root)
+                    result["steward_relations"] = _publish_steward_relations(
+                        root, expected_root_identity=identity)
                 except (OSError, ValueError, TypeError, RuntimeError):
                     pass
     except (OSError, ValueError, RuntimeError):
@@ -10413,11 +10453,14 @@ def _runner_maintenance_pass(store):
         due = (state.get("edge_generation") != generation
                or peer_obligations.runner_duty_due(state, INBOX_PREFILL_DUE_SECONDS))
         if due and time.monotonic_ns() < deadline_ns:
-            counts = _prefill_live_inboxes(root, deadline_ns=deadline_ns)
+            counts = _prefill_live_inboxes(
+                root, deadline_ns=deadline_ns, expected_root_identity=identity)
             result["inbox"] = counts
-            peer_obligations.write_runner_duty_state(root, "inbox-prefill", {
-                "last_pass_ns": time.time_ns(), "edge_generation": generation,
-                "written": counts["written"], "skipped": counts["skipped"]})
+            peer_obligations.write_runner_duty_state(
+                root, "inbox-prefill", {
+                    "last_pass_ns": time.time_ns(), "edge_generation": generation,
+                    "written": counts["written"], "skipped": counts["skipped"]},
+                expected_root_identity=identity)
     except (OSError, ValueError, RuntimeError):
         pass
     return result
@@ -10733,6 +10776,12 @@ def _acquire_ensure_obligations_lock(store, *, retain_directory=False):
 def cmd_ensure_obligations(_args):
     """Request the shared runner and return without repeating its global work."""
     store = peer_obligations.ObligationStore(allow_state_root_creation=True)
+    observed = peer_obligations.state_root_identity_from_environ()
+    if observed is not None and store._state_root_identity != observed:
+        # The producer observed this root, but it was removed or replaced
+        # before this detached writer started. Stop instead of recreating it;
+        # only a genuinely absent root (fresh install) takes the create path.
+        return 0
     if not store._initialize_state_root_for_producer(create_parents=False):
         return 0
     # The explicit lifecycle producer has completed the sole root-creation

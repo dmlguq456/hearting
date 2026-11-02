@@ -264,7 +264,12 @@ exists or session route-chain entry points to it. Staged, malformed,
 unsupported, unreadable, or otherwise uncertain records remain protected.
 The installer watches inline-finish and route-chain state through the existing
 discovery fingerprint and writer boundary, so a state change during pruning
-retains the release.
+retains the release. A smoke attestation that binds an input resolving inside a
+release tree records that binding as one line in
+`<stable state root>/attestation-refs.jsonl`; cleanup keeps that release with
+reason `attested-input:<attestation>` while the referenced attestation file
+exists, ignores a line whose attestation file is gone, and does not protect a
+seal made before the line was recorded.
 
 The same protection applies to an unclosed route whose current owner awaits
 correction to a readable BLOCKED or FAIL result, or whose turn ended normally
@@ -748,10 +753,10 @@ cannot override current/activation retention, `_release_in_use`, live or
 uncertain writers, unsafe or unreadable state, failed copy/archive/registry
 merge/re-anchor work, an unresolved containment root, a missing migration
 destination, or changed discovery inputs. Open rows and routes whose resolved
-`launch_home` names the release, and live processes whose pinned state names
-it, still keep it. The flag is never selected automatically. Re-running the
-command when the requested release is already current still performs this
-checked prune pass.
+`launch_home` names the release, attested inputs bound by a smoke attestation,
+and live processes whose pinned state names it, still keep it. The flag is
+never selected automatically. Re-running the command when the requested release
+is already current still performs this checked prune pass.
 
 The legacy/current collision exception covers only these observations:
 `logs/dispatch-session-sweep.log`, `logs/<slug>.heartbeat`, and

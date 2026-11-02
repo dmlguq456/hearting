@@ -679,7 +679,10 @@ class IdleObserverTests(unittest.TestCase):
                "HERDR_PANE_ID": self.pane, "HERDR_SOCKET_PATH": str(self.iso.root / "fake.sock"),
                "AGENT_SESSION_ROLE": "main", "AGENT_ARTIFACT_PRODUCER_ID": "parent"}
         payload = {"hook_event_name": "Stop", "session_id": "sid-A", "cwd": str(self.cwd)}
-        self.assertTrue(idle.launch_observer("claude", payload, environ=env, popen=spawn))
+        # The launcher reads the prompt sequence from the process state root even
+        # when the child environment is passed explicitly.
+        with self.iso.patched_environ(self.extra):
+            self.assertTrue(idle.launch_observer("claude", payload, environ=env, popen=spawn))
         self.assertEqual(json.loads(captured["payload"]), payload)
         self.assertTrue(captured["kwargs"]["start_new_session"])
         self.assertIn(captured["kwargs"]["stdin"], captured["kwargs"]["pass_fds"])
