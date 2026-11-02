@@ -284,7 +284,36 @@ class RunTest(unittest.TestCase):
             self.clock[0] += seconds
             self.path.unlink(missing_ok=True)
         self.assertEqual(C.run(self.path, sleep=sleep, now=lambda: self.clock[0],
-                               call=lambda *a, **k: self.fail("ran after removal")), 0)
+                               call=lambda *a, **k: self.fail("ran after removal"),
+                               follow=lambda path: self.fail("offered a removed record")), 0)
+
+    def test_each_wait_step_offers_the_record_to_the_installed_release_before_the_resume(self):
+        events = []
+        done = SimpleNamespace(returncode=0, stdout="{}\n")
+
+        def sleep(seconds):
+            events.append("sleep")
+            self.clock[0] += seconds
+        with mock.patch.object(C, "_notify"):
+            C.run(self.path, sleep=sleep, now=lambda: self.clock[0],
+                  call=lambda argv, **kw: events.append("start") or done,
+                  follow=lambda path: events.append(("follow", path)))
+        steps = events.count("sleep")
+        self.assertGreater(steps, 1)
+        self.assertEqual(events, ["sleep", ("follow", self.path)] * steps + ["start"])
+
+    def test_a_steady_wait_reads_only_the_pointer_and_a_moved_one_hands_over_its_record(self):
+        import peer_obligations
+        with mock.patch("parent_next_directive.release_moved", return_value=False) as moved, \
+             mock.patch.object(peer_obligations, "follow_installed_release") as follow:
+            C.follow_installed_release(self.path)
+        moved.assert_called_once_with(C.ROOT)
+        follow.assert_not_called()
+        with mock.patch("parent_next_directive.release_moved", return_value=True), \
+             mock.patch.object(peer_obligations, "follow_installed_release",
+                               side_effect=OSError("fixture")) as follow:
+            C.follow_installed_release(self.path)
+        follow.assert_called_once_with(C.__file__, ["run", "--record", str(self.path)])
 
 
 class ReceiptAndNoticeTest(unittest.TestCase):
