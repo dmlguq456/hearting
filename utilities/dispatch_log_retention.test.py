@@ -317,10 +317,17 @@ class DispatchLogRetentionTest(unittest.TestCase):
             paths.append(path)
         clock = [0.0]
         actual = R._log_protection
+        examined = set()
 
         def slow(ctx, attempt, *, probe_processes):
-            clock[0] += R.MAX_PASS_SECONDS + 1
-            return actual(ctx, attempt, probe_processes=probe_processes)
+            verdict = actual(ctx, attempt, probe_processes=probe_processes)
+            # The examination is slow after it has read its evidence (the
+            # delivery observation shares the examine deadline). The removal's
+            # own recheck of the same attempt runs inside the removal budget.
+            if attempt not in examined:
+                examined.add(attempt)
+                clock[0] += R.MAX_PASS_SECONDS + 1
+            return verdict
 
         with mock.patch.object(R.time, "monotonic", side_effect=lambda: clock[0]), \
                 mock.patch.object(R, "_log_protection", side_effect=slow):

@@ -591,7 +591,7 @@ def _pass(jobs, root, layout, state, now_ns, started):
             deferred += 1
             continue
         with _fresh_eligible(jobs, root, layout, name, rows, expected_stamp,
-                             now_ns, candidate_kind, ctx, started + MAX_PASS_SECONDS, settled) as admitted:
+                             now_ns, candidate_kind, ctx, removal_started + MAX_PASS_SECONDS, settled) as admitted:
             if not admitted:
                 protected_names.add(name)
                 unknown_names.add(name)
