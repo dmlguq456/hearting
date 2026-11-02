@@ -338,6 +338,10 @@ class ReceiptAndNoticeTest(unittest.TestCase):
         self.assertEqual((result["parent_next"], result["required_action"], result["parent_next_reason"]),
                          ("end-turn", "wait-for-auto-resume", "launch-auto-resume"))
         self.assertIn("did not start and nothing ran", result["next_step"])
+        # Reported as the pause it is, with its time, the same shape as a start-budget pause.
+        self.assertEqual((result["state"], result["retry_at"]), ("waiting-capacity", armed["resume_at"]))
+        with mock.patch.object(C, "arm", return_value=None):
+            self.assertEqual(work_start._arm_capacity_resume(dict(pause), "/r", "/j"), pause)   # unarmed: unchanged
 
     def test_a_start_budget_resume_receipt_ends_the_turn_instead_of_asking_for_a_report(self):
         import work_start
