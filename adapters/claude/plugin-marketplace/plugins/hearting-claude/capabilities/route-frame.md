@@ -39,7 +39,13 @@ shown on the card. If both same-harness legs resolve to the same concrete model,
    worktrees may be retained for reading; this does not approve a source leg to
    work there, which still needs the existing proposed `cwd` approval. The
    frame's newly allocated worktree is carried into its first source-changing
-   leg. The frame prompt names the basis it reads in one line.
+   leg. The frame prompt names the basis it reads in one line. The runtime also
+   starts one advisory prior-art scan (`hearting run prior-art`: a cheap model
+   lists what the code, artifacts, memory and history already hold, each line
+   with its source) and the first frame prompt waits at most 30 seconds for it.
+   A ready list joins the frame prompt, an unfinished scan is named by its path,
+   and the approved leg's prompt names the list's path. A blocked or failed
+   scan leaves one line and the launch goes on.
 2. `start` joins the frame legs.
 3. The existing single frame interview (`needs-interview`, then `needs-question`) asks the person once.
 4. On `proceed` the runtime fixes one `route_decision_v1` record, completes the terminal with that record as its evidence, closes the route and finalizes the producer cycle.
