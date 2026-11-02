@@ -226,7 +226,7 @@ class ModelContextLaunchTest(unittest.TestCase):
                 )
 
     def test_installed_opencode_v2_standalone_worker_consumes_prepared_custom_model_config(self):
-        executable = shutil.which("opencode") or "/home/Uihyeop/.opencode/bin/opencode"
+        executable = shutil.which("opencode") or "/home/example/.opencode/bin/opencode"
         if not Path(executable).is_file():
             self.skipTest("installed OpenCode CLI is unavailable")
         with tempfile.TemporaryDirectory(prefix="model-context-opencode-") as temporary:

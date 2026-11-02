@@ -254,6 +254,9 @@ class PublicInlineFinishTest(unittest.TestCase):
                                       "--route", str(self.route_file), "--jobs", str(self.jobs)],
                                      cwd=self.repo, env=os.environ.copy(), capture_output=True, text=True)
             self.assertEqual(started.returncode, 0, started.stderr)
+            # stdout stays the one JSON receipt; one plain "next:" line closes stderr.
+            json.loads(started.stdout)
+            self.assertTrue(started.stderr.rstrip().splitlines()[-1].startswith("next: "), started.stderr)
             start_output = started.stdout + started.stderr
         self.cycle = artifact_producer.route_cycle_for(self.root, self.route) if self.started else None
         if self.started:

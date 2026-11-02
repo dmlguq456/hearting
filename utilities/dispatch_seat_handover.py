@@ -327,13 +327,14 @@ def build_lineage_rows_payload(directory=None) -> dict:
             "snapshots": [list(item) for item in snapshot_after]}
 
 
-def publish_lineage_rows(dispatch_root=None) -> dict:
+def publish_lineage_rows(dispatch_root=None, *, expected_root_identity=None) -> dict:
     """Atomically publish the compact rows; only the existing runner calls this."""
     import dispatch_recipient_inbox as inbox
 
     root = Path(dispatch_root) if dispatch_root is not None else inbox.dispatch_inbox_root()
     payload = build_lineage_rows_payload()
-    inbox.write_lineage_rows(root, payload)
+    inbox.write_lineage_rows(root, payload,
+                             expected_root_identity=expected_root_identity)
     return {"path": str(inbox.lineage_rows_path(root)),
             "ledgers": len(payload["ledgers"]),
             "skipped": len(payload["skipped"]),

@@ -170,7 +170,8 @@ class ConfigFields(unittest.TestCase):
             {"id": "e", "ts": "2026-10-24T07:00:00+09:00", "action": "lifecycle-expire",
              "type": "note", "project": "actual-project", "snippet": "expired row"},
         ]}}
-        vm = build_view_model({"sessions": [], "resources": [], "memory": memory}, now=1792800000)
+        vm = build_view_model({"sessions": [], "resources": [], "memory": memory},
+                              now=datetime.fromisoformat("2026-10-24T08:00:00+09:00").timestamp() + 60)
         rows = vm.memory[0][1]
         self.assertEqual(len(rows), 1)
         local = datetime.fromisoformat("2026-10-24T08:00:00+09:00").astimezone().strftime("%H:%M")
@@ -330,9 +331,9 @@ class SourceBackedRecords(unittest.TestCase):
     """Fields the 22:53 parity ledger moved from the reference's hand values to their sources."""
 
     @staticmethod
-    def vm(sessions=(), **extra):
+    def vm(sessions=(), now=1_000_000.0, **extra):
         return build_view_model({"sessions": list(sessions), "project_of": lambda _cwd: "synthetic-repo",
-                                 **extra}, now=1_000_000.0)
+                                 **extra}, now=now)
 
     def test_running_line_names_the_executing_child_and_how_long(self):
         session = {"harness": "claude", "session_id": "sid-a", "session_tag": "aa", "cwd": "/synthetic/repo",
@@ -388,10 +389,26 @@ class SourceBackedRecords(unittest.TestCase):
              "snippet": "superseded_by=decision_x"},
             {"ts": "2026-10-21T21:00:00", "action": "decision-record", "type": "decision",
              "snippet": "[결정] 이대로 갈까요?"}]}}
-        rows = self.vm(memory=memory).memory
+        rows = self.vm(memory=memory, now=datetime.fromisoformat("2026-10-21T22:51:22").timestamp() + 60).memory
         self.assertEqual([tuple(r[:3]) for r in rows[0][1]],
                          [("22:51", "saved", "decision"), ("21:00", "saved", "decision")])
         self.assertEqual(rows[0][1][0][3], "승인 5단계 중 ②를 마쳤다")
+
+    def test_memory_time_cells_date_rows_that_are_not_today(self):
+        memory = {"by_repo": {"demo-app": [
+            {"id": "today", "ts": "2026-10-23T12:00:00", "action": "decision-record", "type": "decision",
+             "snippet": "[결정] 오늘 답"},
+            {"id": "older", "ts": "2026-10-22T09:30:00", "action": "decision-record", "type": "decision",
+             "snippet": "[결정] 어제 답"},
+            {"id": "oldest", "ts": "2026-10-21T22:51:22", "action": "add", "type": "note",
+             "snippet": "이틀 전 기록"}]}}
+        vm = self.vm(memory=memory, now=datetime.fromisoformat("2026-10-23T13:00:00").timestamp())
+        cells = {r[3]: r[0] for r in vm.memory[0][1]}
+        self.assertEqual(cells["[결정] 오늘 답"], "12:00")
+        self.assertEqual(cells["[결정] 어제 답"], "10-22")
+        self.assertEqual(cells["이틀 전 기록"], "10-21")
+        answered = {r[1]: r[0] for r in vm.answered[0][1]}
+        self.assertEqual(answered, {"오늘 답": "12:00", "어제 답": "10-22"})
 
     def test_gpu_rows_carry_the_card_class_and_the_session_that_uses_it(self):
         host = {"host": "h1", "self": True, "reachable": True, "cpu_count": 8, "cpu_utilization_pct": 10,
