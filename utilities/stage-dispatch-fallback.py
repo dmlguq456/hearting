@@ -2424,12 +2424,14 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
             round_block = prior_round_context(route, node["id"], args.jobs)
         except Exception:  # context is a help, never a reason to withhold a launch
             round_block = ""
-    if round_block:
+    carried = os.environ.get("AGENT_DISPATCH_RETRY_BRIEF", "")
+    if round_block and not carried.endswith(round_block):
         # One carrier with or without an owner prompt file: every adapter
         # renders it after the assignment and seals it in the attempt's
-        # launch input, so a replacement replays the same text.
-        os.environ["AGENT_DISPATCH_RETRY_BRIEF"] = (
-            os.environ.get("AGENT_DISPATCH_RETRY_BRIEF", "") + round_block)
+        # launch input, so a replacement replays the same text. A brief the
+        # parent passed (a batch leg's) stays first; the same block is not
+        # appended twice.
+        os.environ["AGENT_DISPATCH_RETRY_BRIEF"] = carried + round_block
 
     prior_failures = registry_failures(args.jobs, route["route_id"], node["id"])
     prior_rows = registry_rows(args.jobs, route["route_id"], node["id"])

@@ -1490,9 +1490,10 @@ class FallbackTest(unittest.TestCase):
    prompt=self.art/"closure-task.md"
    prompt.write_text(f"Check corrected HEAD {new_head}, only x, against {prior_input}.\n")
    prompt_bytes=prompt.read_bytes()
-   commands=[];spawn_claims=[]
+   commands=[];spawn_claims=[];briefs=[]
    def wrapper(_args,command,**_policy):
     commands.append(command)
+    briefs.append(F.direct_env().get("AGENT_DISPATCH_RETRY_BRIEF",""))
     aid=self.arg(command,"--attempt-id")
     metadata={"attempt_schema_version":"2","dispatch_depth":"2","transport":"headless",
      "execution_surface":"registered-headless","registered_worker":"1","fallback_hop":"same-harness-headless",
@@ -1519,11 +1520,13 @@ class FallbackTest(unittest.TestCase):
                                route,node,{"child_harness":"codex"},1,3)
    self.assertEqual(ids,[expected]*3)
    self.assertTrue(all("--automatic-retry-of" not in command for command in commands))
-   for command in commands:
+   # The round block rides the retry brief, once, beside the owner's untouched request.
+   for command,brief in zip(commands,briefs):
     task=Path(self.arg(command,"--prompt-file")).read_text()
     self.assertIn(new_head,task);self.assertIn(str(prior_input),task)
-    self.assertIn("Round protocol (round 3",task)
-    self.assertIn("dead-route-completion-rejected",task);self.assertIn("dead-worker-fail",task)
+    self.assertNotIn("Round protocol",task)
+    self.assertEqual(brief.count("Round protocol (round 3"),1)
+    self.assertIn("dead-route-completion-rejected",brief);self.assertIn("dead-worker-fail",brief)
     self.assertEqual(self.arg(command,"--write-scope"),";".join(node["write_scope"]))
    self.assertEqual(prior_input.read_bytes(),original_input);self.assertEqual(prompt.read_bytes(),prompt_bytes)
    self.assertEqual(spawn_claims,[expected])
