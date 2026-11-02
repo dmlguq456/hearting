@@ -855,6 +855,13 @@ class StewardCheckWindowClosedTest(CheckBase):
         self.advance()
         self.released.assert_not_called()
 
+    def test_an_unresolved_role_release_keeps_the_duty_for_the_next_pass(self):
+        self.arm()
+        self.released.return_value = {"roles": "unresolved", "marker": "kept"}
+        duty = self.advance()
+        self.released.assert_called_once()
+        self.assertNotEqual(duty["state"], "complete")
+
     def test_without_a_watch_arm_for_the_seat_nothing_is_concluded(self):
         self.arm(key="another-seat")
         self.arm(name="watch-2", sid="someone-else")
