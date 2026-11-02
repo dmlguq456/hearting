@@ -89,6 +89,21 @@ def command_home(agent_home) -> str:
     return root
 
 
+def release_moved(agent_home) -> bool:
+    """Whether a command printed now would run another release than `agent_home`.
+
+    The same rule as `command_home`, asked by a long-lived helper about itself:
+    once the installer's `current` pointer names another release, work that
+    starts now runs there, and a helper still running older code hands its work
+    over at its own safe point (`peer_obligations.follow_installed_release`,
+    which makes the validated decision). Read-only and cheap enough for every
+    idle pass; checkouts and other roots never move.
+    """
+    root = os.path.realpath(str(agent_home or "")) if agent_home else ""
+    pointer = command_home(root) if root else ""
+    return bool(pointer) and pointer != root and os.path.realpath(pointer) != root
+
+
 def entrypoint(agent_home, relative: str) -> str:
     """Absolute path to a checked entry point, or "" when the root is unknown.
 
