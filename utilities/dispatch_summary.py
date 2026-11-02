@@ -36,6 +36,7 @@ if str(Path(__file__).resolve().parent) not in sys.path:
 
 from claude_project_dir import resolve_session_transcript  # noqa: E402
 from dispatch_contract import (  # noqa: E402
+    _current_observer_is_host_like,
     DispatchContractError,
     PID_HOST_NAMESPACE_PROOF,
     REVIEW_GOVERNED_LEASE_KIND,
@@ -441,14 +442,19 @@ def _probe_owner_lock(path: Path) -> str:
 MAX_PROVIDER_SCAN_PIDS = 65536
 
 
-def _walk_provider_argv(proc_root: Path) -> tuple[tuple[str, ...], str]:
-    """(`--lockdir` argument values of this user's live processes, incomplete reason).
+def _walk_provider_argv(proc_root: Path) -> tuple[tuple[tuple[str, str, str], ...], str]:
+    """((`--lockdir` value, pid, mount namespace) of this user's processes), incomplete reason.
 
-    A process owned by another user is skipped only when its `status` was read:
-    the provider is started by this user's summary owner. The user is taken from
-    the `Uid:` line, not the `/proc/<pid>` directory owner, which is root for a
-    non-dumpable process. Any read that fails for another reason, or an empty
-    argv on a live process, leaves the reason non-empty so the caller keeps.
+    A process owned by another user is skipped only when its `status` was read
+    and carried a `Uid:` line: the provider is started by this user's summary
+    owner. The user is taken from that line, not the `/proc/<pid>` directory
+    owner, which is root for a non-dumpable process. A `status` without a
+    parsable `Uid:` line is incomplete, not "another user". Any read that fails
+    for another reason, or an empty argv on a process that still holds its
+    address space, leaves the reason non-empty so the caller keeps. A process in
+    `do_exit` (not yet a zombie, address space already released) holds no argv
+    and is skipped. The mount namespace is read only for a process that names a
+    lockdir; it is "" when it cannot be read.
     """
     me = os.geteuid()
     try:
@@ -457,7 +463,7 @@ def _walk_provider_argv(proc_root: Path) -> tuple[tuple[str, ...], str]:
         return (), f"proc-unreadable-{exc.errno or 'error'}"
     if len(names) > MAX_PROVIDER_SCAN_PIDS:
         return (), "proc-limit"
-    tokens: list[str] = []
+    tokens: list[tuple[str, str, str]] = []
     reason = ""
     for name in names:
         base = proc_root / name
@@ -467,13 +473,10 @@ def _walk_provider_argv(proc_root: Path) -> tuple[tuple[str, ...], str]:
             if exc.errno not in (errno.ENOENT, errno.ESRCH):
                 reason = reason or "status-unreadable"
             continue
-        uids: set[int] = set()
-        zombie = False
-        for line in status.splitlines():
-            if line.startswith("Uid:"):
-                uids = {int(item) for item in line[4:].split() if item.isdigit()}
-            elif line.startswith("State:"):
-                zombie = line[6:].strip().startswith("Z")
+        uids, zombie, _has_mm = _status_fields(status)
+        if not uids:
+            reason = reason or "status-incomplete"
+            continue
         if me not in uids or zombie:
             continue
         try:
@@ -483,15 +486,48 @@ def _walk_provider_argv(proc_root: Path) -> tuple[tuple[str, ...], str]:
                 reason = reason or "cmdline-unreadable"
             continue
         if not raw:
+            # Judge the empty argv by a status read taken after it: a process that
+            # has since released its address space or died holds no argv.
+            try:
+                after = (base / "status").read_bytes().decode("utf-8", "replace")
+            except OSError as exc:
+                if exc.errno not in (errno.ENOENT, errno.ESRCH):
+                    reason = reason or "status-unreadable"
+                continue
+            _uids, zombie, has_mm = _status_fields(after)
+            if zombie or not has_mm:
+                continue
             reason = reason or "cmdline-empty"
             continue
         argv = raw.decode("utf-8", "replace").split("\0")
+        found = []
         for index, item in enumerate(argv):
             if item == "--lockdir" and index + 1 < len(argv):
-                tokens.append(argv[index + 1])
+                found.append(argv[index + 1])
             elif item.startswith("--lockdir="):
-                tokens.append(item[len("--lockdir="):])
+                found.append(item[len("--lockdir="):])
+        if found:
+            try:
+                mount_ns = os.readlink(base / "ns" / "mnt")
+            except OSError:
+                mount_ns = ""
+            tokens.extend((token, name, mount_ns) for token in found)
     return tuple(tokens), reason
+
+
+def _status_fields(status: str) -> tuple[set[int], bool, bool]:
+    """(real/effective/saved/fs uids, is a zombie, still holds an address space)."""
+    uids: set[int] = set()
+    zombie = False
+    has_mm = False
+    for line in status.splitlines():
+        if line.startswith("Uid:"):
+            uids = {int(item) for item in line[4:].split() if item.isdigit()}
+        elif line.startswith("State:"):
+            zombie = line[6:].strip().startswith("Z")
+        elif line.startswith("VmSize:"):
+            has_mm = True
+    return uids, zombie, has_mm
 
 
 class _ProviderScan:
@@ -531,7 +567,12 @@ def provider_reference_scan_scope():
 
 
 def _provider_lockdir_reference(lockdir: Path, proc_root: Path = Path("/proc")) -> tuple[str, str]:
-    """referenced | unreferenced | unknown, with the reason, for one provider lockdir."""
+    """referenced | unreferenced | unknown, with the reason, for one provider lockdir.
+
+    A process in another mount namespace (or one whose namespace cannot be read)
+    names the lockdir by a path in its own view, so a token that does not match
+    here is also resolved through `/proc/<pid>/root` and compared by inode.
+    """
     scan = _PROVIDER_SCAN.get()
     if scan is not None and Path(proc_root) == Path("/proc"):
         tokens, reason = scan.get()
@@ -543,18 +584,32 @@ def _provider_lockdir_reference(lockdir: Path, proc_root: Path = Path("/proc")) 
         ident = (info.st_dev, info.st_ino)
     except OSError:
         ident = None
-    for token in tokens:
+    try:
+        own_mount_ns = os.readlink(Path(proc_root) / "self" / "ns" / "mnt")
+    except OSError:
+        own_mount_ns = ""
+    for token, pid, mount_ns in tokens:
         if os.path.normpath(token) == wanted:
             return "referenced", "argv-path"
         try:
             found = os.stat(token)
         except (FileNotFoundError, NotADirectoryError):
-            continue
+            found = None
         except (OSError, ValueError):
             reason = reason or "token-unreadable"
             continue
-        if ident is not None and (found.st_dev, found.st_ino) == ident:
+        if found is not None and ident is not None and (found.st_dev, found.st_ino) == ident:
             return "referenced", "argv-inode"
+        if (not mount_ns or mount_ns != own_mount_ns) and os.path.isabs(token) and ident is not None:
+            try:
+                theirs = os.stat(f"{proc_root}/{pid}/root{os.path.normpath(token)}")
+            except (FileNotFoundError, NotADirectoryError):
+                continue
+            except (OSError, ValueError):
+                reason = reason or "token-unreadable"
+                continue
+            if (theirs.st_dev, theirs.st_ino) == ident:
+                return "referenced", "argv-mount-view"
     return ("unknown", reason) if reason else ("unreferenced", "")
 
 
@@ -605,8 +660,11 @@ def home_consumer_evidence(metadata: dict[str, str]) -> tuple[str, str]:
             metadata.get("summary_owner_pid_host", "").isdigit()
             and metadata.get("summary_owner_pid_host_proof") == PID_HOST_NAMESPACE_PROOF
             and process_namespace_identity() == metadata.get("summary_owner_pid_host_ns"))
+        # A host-like reader walks every PID namespace on the machine, so a
+        # namespace the owner recorded and that is now gone is no obstacle
+        # (the same rule `dispatch_contract._tag_scan_authority` applies).
         if (process_namespace_identity() != metadata.get("summary_owner_pid_observer_ns", "")
-                and not host_proof):
+                and not host_proof and not _current_observer_is_host_like()):
             return "unknown", "provider-scan-namespace-unverifiable"
         found, reason = _provider_lockdir_reference(provider_lock)
         if found == "referenced":

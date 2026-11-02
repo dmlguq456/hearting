@@ -127,9 +127,32 @@ class DispatchSummaryTest(unittest.TestCase):
                     finally:
                         provider.kill()
                         provider.wait(timeout=5)
-            with mock.patch.object(S, "process_namespace_identity", return_value="pid:[other]"):
+            with mock.patch.object(S, "process_namespace_identity", return_value="pid:[other]"), \
+                    mock.patch.object(S, "_current_observer_is_host_like", return_value=False):
                 self.assertEqual(S.home_consumer_evidence(metadata),
                                  ("unknown", "provider-scan-namespace-unverifiable"))
+            # A host-like reader walks every PID namespace: the extinct recorded
+            # namespace is no obstacle, and absence is decided by the argv scan.
+            with mock.patch.object(S, "_current_observer_is_host_like", return_value=True):
+                stale = {**metadata, "summary_owner_pid_observer_ns": "pid:[4026534399]"}
+                original_state = state_path.read_text()
+                state_path.write_text(json.dumps({
+                    **json.loads(original_state), "observer_namespace": "pid:[4026534399]"}))
+                self.assertEqual(S.home_consumer_evidence(stale),
+                                 ("absent", "provider-lockdir-unreferenced"))
+                provider = subprocess.Popen(
+                    [sys.executable, "-c", "import time; time.sleep(30)",
+                     "--lockdir", str(provider_lock)])
+                try:
+                    self.assertEqual(S.home_consumer_evidence(stale),
+                                     ("live", "provider-lockdir-present"))
+                finally:
+                    provider.kill()
+                    provider.wait(timeout=5)
+            with mock.patch.object(S, "_current_observer_is_host_like", return_value=False):
+                self.assertEqual(S.home_consumer_evidence(stale),
+                                 ("unknown", "provider-scan-namespace-unverifiable"))
+            state_path.write_text(original_state)
         provider_lock.rmdir()
         self.assertEqual(S.home_consumer_evidence(metadata)[0], "absent")
 
@@ -1000,7 +1023,8 @@ class ProviderLockdirReferenceTest(unittest.TestCase):
         self.lockdir = Path(self._tmp.name) / "titles" / ".lock-sid"
         self.lockdir.mkdir(parents=True)
 
-    def process(self, pid, argv, *, uids=None, state="S (sleeping)", status=True, cmdline=True):
+    def process(self, pid, argv, *, uids=None, state="S (sleeping)", status=True, cmdline=True,
+                mm=True, uid_line=True, mount_ns=None):
         base = self.proc / str(pid)
         base.mkdir()
         me = os.geteuid()
@@ -1008,13 +1032,18 @@ class ProviderLockdirReferenceTest(unittest.TestCase):
         # A directory stands in for a file that exists but cannot be read (EISDIR).
         if status:
             (base / "status").write_text(
-                f"Name:\tx\nState:\t{state}\nUid:\t" + "\t".join(map(str, uids)) + "\n")
+                f"Name:\tx\nState:\t{state}\n"
+                + ("Uid:\t" + "\t".join(map(str, uids)) + "\n" if uid_line else "")
+                + ("VmSize:\t1000 kB\n" if mm else ""))
         else:
             (base / "status").mkdir()
         if cmdline:
             (base / "cmdline").write_bytes(("\0".join(argv) + "\0").encode() if argv else b"")
         else:
             (base / "cmdline").mkdir()
+        if mount_ns is not None:
+            (base / "ns").mkdir()
+            (base / "ns" / "mnt").symlink_to(mount_ns)
 
     def reference(self):
         return S._provider_lockdir_reference(self.lockdir, self.proc)
@@ -1051,6 +1080,50 @@ class ProviderLockdirReferenceTest(unittest.TestCase):
         me = os.geteuid()
         self.process(10, [], uids=(me + 1, me, me + 1, me + 1))
         self.assertEqual(self.reference()[0], "unknown")
+
+    def test_exiting_process_without_address_space_holds_no_argv(self):
+        # In do_exit: not yet a zombie, memory already released, cmdline empty.
+        self.process(10, [], mm=False)
+        self.assertEqual(self.reference(), ("unreferenced", ""))
+
+    def test_status_without_uid_line_is_incomplete_not_another_user(self):
+        self.process(10, ["sleep"], uid_line=False)
+        self.assertEqual(self.reference(), ("unknown", "status-incomplete"))
+
+    def test_holder_in_another_mount_view_is_found_through_its_root(self):
+        (self.proc / "self" / "ns").mkdir(parents=True)
+        (self.proc / "self" / "ns" / "mnt").symlink_to("mnt:[1]")
+        self.process(10, ["x", "--lockdir", "/their/view/.lock-sid"], mount_ns="mnt:[2]")
+        root = self.proc / "10" / "root"
+        (root / "their").mkdir(parents=True)
+        self.assertEqual(self.reference()[0], "unreferenced")  # their path does not resolve here
+        (root / "their" / "view").symlink_to(self.lockdir.parent)
+        self.assertEqual(self.reference(), ("referenced", "argv-mount-view"))
+
+    def test_same_mount_view_is_not_resolved_through_root(self):
+        mine = "mnt:[1]"
+        (self.proc / "self" / "ns").mkdir(parents=True)
+        (self.proc / "self" / "ns" / "mnt").symlink_to(mine)
+        self.process(10, ["x", "--lockdir", "/their/view/.lock-sid"], mount_ns=mine)
+        (self.proc / "10" / "root").mkdir()
+        (self.proc / "10" / "root" / "their").mkdir()
+        (self.proc / "10" / "root" / "their" / "view").symlink_to(self.lockdir.parent)
+        self.assertEqual(self.reference(), ("unreferenced", ""))
+
+    def test_unresolvable_root_of_a_lockdir_holder_is_unknown(self):
+        (self.proc / "self" / "ns").mkdir(parents=True)
+        (self.proc / "self" / "ns" / "mnt").symlink_to("mnt:[1]")
+        # The mount namespace cannot be read, and neither can the root: a file
+        # in place of the directory stands for EACCES-style refusal via ELOOP.
+        self.process(10, ["x", "--lockdir", "/their/view/.lock-sid"])
+        (self.proc / "10" / "root").symlink_to("root")  # loops onto itself: ELOOP
+        self.assertEqual(self.reference(), ("unknown", "token-unreadable"))
+
+    def test_process_without_lockdir_gets_no_root_or_namespace_read(self):
+        self.process(10, ["sleep", "30"])
+        with mock.patch.object(S.os, "readlink", side_effect=AssertionError("read")):
+            tokens, reason = S._walk_provider_argv(self.proc)
+        self.assertEqual((tokens, reason), ((), ""))
 
     def test_listing_limit_and_missing_proc_are_unknown(self):
         self.process(10, ["sleep"])

@@ -497,7 +497,7 @@ zero-byte or mismatched tombstone; its route binding is missing, damaged or
 unreadable; a terminal replacement successor still has unresolved delivery or
 source-HOME obligations; a summary owner/provider or the supervisor lease is live or
 unverifiable (a provider lockdir is live only while a same-user process names it in
-its `--lockdir` argument; an incomplete process read keeps the home); process quiescence is not proven; Fleet displayed it within the
+its `--lockdir` argument, and a host-like reader's complete process table may decide absence even when the owner's recorded PID namespace is gone; an incomplete process read keeps the home); process quiescence is not proven; Fleet displayed it within the
 one-hour window; or its `.credentials.json` is a regular file, which a Claude native refresh
 left in place of the link and which may hold the only copy of a rotated token. A home
 is also kept, and counted rather than hidden in
