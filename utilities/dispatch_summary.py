@@ -197,8 +197,9 @@ def _validate_prompt(path: str | Path | None, log_path: Path) -> Path | None:
     return target
 
 
-def _atomic_write(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+def _atomic_write(path: Path, payload: dict[str, Any], *, create_parent: bool = True) -> None:
+    if create_parent:
+        path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -1144,6 +1145,20 @@ def supervise(
             )
         _atomic_write(state_path, state)
 
+        def rewrite_state() -> bool:
+            """Rewrite the owner state in its existing directory.
+
+            The first write above created that directory. If it is gone, the
+            state home was removed (a finished test's temporary home, for
+            example): nothing reads this record any more, so stop instead of
+            recreating the tree while its removal runs (Errno 39 on CI).
+            """
+            try:
+                _atomic_write(state_path, state, create_parent=False)
+            except FileNotFoundError:
+                return False
+            return True
+
         first_eligible = time.monotonic() + max(0.0, initial_delay)
         initial_requested = False
         next_periodic_at = 0.0
@@ -1160,7 +1175,8 @@ def supervise(
             if resolved is not None and resolved != source:
                 source = resolved
                 state.update(summary_source=str(source))
-                _atomic_write(state_path, state)
+                if not rewrite_state():
+                    return 0
             if harness == "claude" and jobs_path and resolved is not None and not model_recorded:
                 model_recorded = _record_resolved_model(source, jobs_path, attempt_id, model_cursor)
             size = _log_signature(source)[0] if resolved is not None else 0
@@ -1172,7 +1188,8 @@ def supervise(
                         refresh_source=source_cache.get("refresh_source"), runtime_home=runtime_home)
                     if initial_requested:
                         state.update(last_refresh_phase="initial", last_refresh_at=time.time())
-                        _atomic_write(state_path, state)
+                        if not rewrite_state():
+                            return 0
                 else:
                     # The periodic refresh only changes anything after the 600s debounce,
                     # so trying it on every 2s poll is wasted probing; space the attempts.
@@ -1185,7 +1202,8 @@ def supervise(
                             refresh_source=source_cache.get("refresh_source"), runtime_home=runtime_home,
                         ):
                             state.update(last_refresh_phase="periodic", last_refresh_at=time.time())
-                            _atomic_write(state_path, state)
+                            if not rewrite_state():
+                                return 0
             if not live:
                 break
             time.sleep(max(0.05, poll))
@@ -1210,7 +1228,7 @@ def supervise(
                          summary_source_reason=source_cache.get("source_reason", "summary_source_unavailable"),
                          final_refresh_started=False, final_refresh_complete=False,
                          finished_at=time.time())
-            _atomic_write(state_path, state)
+            rewrite_state()
             return 0
         quiet_since = time.monotonic()
         last_signature = _log_signature(source)
@@ -1251,7 +1269,8 @@ def supervise(
                     refresh_source=source_cache.get("refresh_source"), runtime_home=runtime_home)
                 if final_started:
                     state.update(last_refresh_phase="final", last_refresh_at=time.time())
-                    _atomic_write(state_path, state)
+                    if not rewrite_state():
+                        return 0
             time.sleep(min(max(0.05, poll), 0.5))
         state.update(
             status="terminal" if final_complete or not final_size else "degraded",
@@ -1260,7 +1279,7 @@ def supervise(
             final_refresh_complete=final_complete,
             finished_at=time.time(),
         )
-        _atomic_write(state_path, state)
+        rewrite_state()
         return 0
     finally:
         if review_fd is not None:
