@@ -110,6 +110,11 @@ class PublicInlineFinishTest(unittest.TestCase):
     CAPABILITY_MODE = "dev"
     CAMPAIGN_ARGUMENTS = ("--campaign-key", "inline-finish-test")
     non_git = False
+    started = True
+    ARTIFACT_ENV_KEYS = (
+        "AGENT_ARTIFACT_ROOT", "AGENT_ARTIFACT_CAMPAIGN_ID", "AGENT_ARTIFACT_CYCLE_ID",
+        "AGENT_ARTIFACT_PRODUCER_ID", "AGENT_ARTIFACT_CYCLE_DIR", "AGENT_ARTIFACT_OUTPUT_DIR",
+        "AGENT_ARTIFACT_PARENT_OUTPUT_DIR", "AGENT_ARTIFACT_WORKFLOW_GROUP_ID")
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="inline-finish-test-")
@@ -138,7 +143,7 @@ class PublicInlineFinishTest(unittest.TestCase):
             "AGENT_DISPATCH_REGISTERED_WORKER",
             "OPENCODE_SESSION_ID", "AGENT_DISPATCH_CALLER_HARNESS", "XDG_STATE_HOME",
             "HEARTING_INLINE_FINISH_CRASH_AT", "AGENT_ARTIFACT_CHECKPOINT",
-            "HEARTING_WORKFLOW_GROUP_REVIEW", "GIT_CEILING_DIRECTORIES")}
+            "HEARTING_WORKFLOW_GROUP_REVIEW", "GIT_CEILING_DIRECTORIES", *self.ARTIFACT_ENV_KEYS)}
         os.environ.update({
             "AGENT_HOME": str(self.home), "AGENT_DISPATCH_JOBS": str(self.jobs),
             "GIT_CEILING_DIRECTORIES": str(self.base),
@@ -157,6 +162,9 @@ class PublicInlineFinishTest(unittest.TestCase):
                     "AGENT_DISPATCH_CALLER_HARNESS", "AGENT_DISPATCH_CURRENT_HARNESS",
                     "HEARTING_INLINE_FINISH_CRASH_AT"):
             os.environ.pop(key, None)
+        for key in self.ARTIFACT_ENV_KEYS:
+            os.environ.pop(key, None)
+        self.assertFalse(any(key in os.environ for key in self.ARTIFACT_ENV_KEYS))
         artifact_producer.activate(
             self.root, repository_id="repo_" + "a" * 32,
             artifact_root_id="root_" + "b" * 32,
@@ -170,7 +178,7 @@ class PublicInlineFinishTest(unittest.TestCase):
         self.prompt = self.base / "task.md"
         self.prompt.write_text("Exercise the direct inline finish transaction.\n", encoding="utf-8")
         compose = [sys.executable, str(ROOT / "utilities/capability-route.py"), "compose",
-                   *( ["--start"] if self.non_git else [] ),
+                   *( ["--start"] if self.non_git and self.started else [] ),
                    "--slug", "inline-finish-test", *self.CAMPAIGN_ARGUMENTS,
                    "--shape", "direct", "--capability", self.CAPABILITY, "--capability-mode", self.CAPABILITY_MODE,
                    "--intensity", "direct", "--cwd", str(self.repo),
@@ -189,19 +197,26 @@ class PublicInlineFinishTest(unittest.TestCase):
             self.route_file = Path(route_receipt["route_file"])
         self.route = json.loads(self.route_file.read_text(encoding="utf-8"))
         start_output = composed.stdout + composed.stderr
-        if not self.non_git:
+        if self.started and not self.non_git:
             started = subprocess.run([sys.executable, str(ROOT / "utilities/capability-route.py"), "start",
                                       "--route", str(self.route_file), "--jobs", str(self.jobs)],
                                      cwd=self.repo, env=os.environ.copy(), capture_output=True, text=True)
             self.assertEqual(started.returncode, 0, started.stderr)
             start_output = started.stdout + started.stderr
-        self.cycle = artifact_producer.route_cycle_for(self.root, self.route)
-        self.assertIsNotNone(self.cycle, start_output + repr(artifact_producer.status(self.root)))
-        self.cycle_dir = artifact_producer.cycle_dir(
-            self.root, self.cycle["campaign_id"], self.cycle["cycle_id"], self.cycle)
-        self.evidence = self.cycle_dir / "artifacts/documents/evidence.md"
-        self.evidence.parent.mkdir(parents=True)
-        self.evidence.write_bytes(b"exact terminal evidence\n")
+        self.cycle = artifact_producer.route_cycle_for(self.root, self.route) if self.started else None
+        if self.started:
+            self.assertIsNotNone(self.cycle, start_output + repr(artifact_producer.status(self.root)))
+            self.cycle_dir = artifact_producer.cycle_dir(
+                self.root, self.cycle["campaign_id"], self.cycle["cycle_id"], self.cycle)
+            self.evidence = self.cycle_dir / "artifacts/documents/evidence.md"
+            self.evidence.parent.mkdir(parents=True)
+            self.evidence.write_bytes(b"exact terminal evidence\n")
+        else:
+            # The interrupted direct start left this route without a cycle: its
+            # evidence still lives outside, exactly as the real incident's did.
+            self.cycle_dir = None
+            self.evidence = self.base / "outside-evidence.md"
+            self.evidence.write_bytes(b"exact terminal evidence\n")
         self.summary = self.base / "summary.md"
         self.summary.write_text("Finished the inline route.\n", encoding="utf-8")
         self.command = [
@@ -1038,15 +1053,33 @@ class PublicInlineFinishTest(unittest.TestCase):
         self.assertEqual(artifact_producer.read_cycle_record(self.root, self.cycle["cycle_id"])["state"], "open")
         self.assertFalse((self.cycle_dir / "manifest.json").exists())
 
-    def test_foreign_cycle_record_refuses_before_finish_intent(self):
+    def test_foreign_cycle_record_is_not_used_and_finish_opens_this_routes_cycle(self):
         record_path = artifact_producer.cycle_record_path(self.root, self.cycle["cycle_id"])
         record = json.loads(record_path.read_text(encoding="utf-8"))
         record["route_id"] = "rt-" + "f" * 16
         record_path.write_text(json.dumps(record), encoding="utf-8")
-        refused = self.finish()
-        self.assertNotEqual(refused.returncode, 0)
-        self.assertIn("finish-route-cycle-missing", refused.stderr)
-        self.assertFalse((self.root / ".runtime/inline-finish/v1" / self.route["route_id"] / "finish.json").exists())
+        foreign_bytes = record_path.read_bytes()
+        foreign_evidence = self.evidence.read_bytes()
+        finished = self.finish()
+        self.assertEqual(finished.returncode, 0, finished.stderr + finished.stdout)
+        # The other route's record is neither claimed nor rewritten.
+        self.assertEqual(record_path.read_bytes(), foreign_bytes)
+        self.assertEqual(json.loads(record_path.read_text())["route_id"], "rt-" + "f" * 16)
+        self.assertEqual(json.loads(record_path.read_text()).get("state"), record.get("state"))
+        state = json.loads((self.root / ".runtime/inline-finish/v1" /
+                            self.route["route_id"] / "finish.json").read_text(encoding="utf-8"))
+        self.assertNotEqual(state["intent"]["cycle_id"], self.cycle["cycle_id"])
+        opened = artifact_producer.route_cycle_for(self.root, self.route)
+        self.assertEqual(opened["cycle_id"], state["intent"]["cycle_id"])
+        self.assertEqual(artifact_producer.read_cycle_record(self.root, opened["cycle_id"])["state"], "sealed")
+        # The foreign cycle's own evidence is untouched; this route's finish
+        # imported its bytes into the cycle it sealed.
+        self.assertEqual(self.evidence.read_bytes(), foreign_evidence)
+        opened_dir = artifact_producer.cycle_dir(
+            self.root, opened["campaign_id"], opened["cycle_id"], opened)
+        copy = opened_dir / "artifacts" / state["intent"]["evidence_path"]
+        self.assertEqual(copy.read_bytes(), foreign_evidence)
+        self.assertEqual(inline_finish._digest(copy.read_bytes()), state["intent"]["evidence_sha256"])
 
     def test_non_direct_route_and_foreign_owner_context_refuse_before_slot(self):
         import inline_finish
@@ -1128,6 +1161,272 @@ class PublicInlineFinishTest(unittest.TestCase):
         refused = self.finish()
         self.assertNotEqual(refused.returncode, 0)
         self.assertFalse((self.root / ".runtime/inline-finish/v1" / self.route["route_id"] / "finish.json").exists())
+
+
+class UnstartedInlineFinishTest(unittest.TestCase):
+    """A direct route whose start was interrupted: finish prepares its own cycle."""
+
+    def setUp(self):
+        self.fixture = PublicInlineFinishTest()
+        self.fixture.started = False
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.tearDown)
+
+    def _fixture(self, *, started):
+        fixture = PublicInlineFinishTest()
+        fixture.started = started
+        fixture.setUp()
+        self.addCleanup(fixture.tearDown)
+        return fixture
+
+    @staticmethod
+    def _state(fixture):
+        return json.loads((fixture.root / ".runtime/inline-finish/v1" /
+                           fixture.route["route_id"] / "finish.json").read_text(encoding="utf-8"))
+
+    @staticmethod
+    def _state_path(fixture):
+        return (fixture.root / ".runtime/inline-finish/v1" /
+                fixture.route["route_id"] / "finish.json")
+
+    @staticmethod
+    def _cycle_dir(fixture, cycle_id):
+        record = artifact_producer.read_cycle_record(fixture.root, cycle_id)
+        return artifact_producer.cycle_dir(
+            fixture.root, record["campaign_id"], record["cycle_id"], record)
+
+    def _copy(self, fixture, state):
+        return self._cycle_dir(fixture, state["intent"]["cycle_id"]) / "artifacts" / state["intent"]["evidence_path"]
+
+    @staticmethod
+    def _copies(fixture):
+        record = artifact_producer.route_cycle_for(fixture.root, fixture.route)
+        if record is None:
+            return []
+        directory = UnstartedInlineFinishTest._cycle_dir(fixture, record["cycle_id"]) / "artifacts/finish-evidence"
+        return sorted(directory.glob("*")) if directory.is_dir() else []
+
+    @staticmethod
+    def _url_locator(url):
+        return ("finish-evidence/" + inline_finish._digest(("url\0" + url).encode())[:16] + ".url")
+
+    def test_unstarted_route_finishes_once_with_a_pr_url(self):
+        fixture = self.fixture
+        url = "https://github.com/example/repo/pull/897"
+        fixture.command[fixture.command.index("--evidence") + 1] = url
+        fixture.env.pop("AGENT_DISPATCH_JOBS", None)
+        fixture.env["XDG_STATE_HOME"] = str(fixture.base / "empty-state")
+        first = fixture.finish()
+        self.assertEqual(first.returncode, 0, first.stderr + first.stdout)
+        self.assertEqual(len(first.stdout.strip().splitlines()), 1, first.stdout)
+        receipt = json.loads(first.stdout)
+        self.assertEqual(receipt["schema"], "finish_receipt_v1")
+        self.assertFalse(receipt["replay"])
+        opened = artifact_producer.route_cycle_for(fixture.root, fixture.route)
+        self.assertIsNotNone(opened)
+        self.assertEqual(artifact_producer.read_cycle_record(fixture.root, opened["cycle_id"])["state"], "sealed")
+        state = self._state(fixture)
+        rel = self._url_locator(url)
+        self.assertEqual(state["intent"]["evidence_path"], rel)
+        self.assertEqual(state["intent"]["evidence_sha256"],
+                         inline_finish._digest((url + "\n").encode()))
+        copy = self._copy(fixture, state)
+        self.assertEqual(copy.read_bytes(), (url + "\n").encode())
+        manifest = json.loads((self._cycle_dir(fixture, opened["cycle_id"]) / "manifest.json").read_text())
+        revisions = [row for row in manifest["artifact_revisions"]
+                     if row["locator"]["path"] == "artifacts/" + rel]
+        self.assertEqual(len(revisions), 1, manifest["artifact_revisions"])
+        self.assertEqual(revisions[0]["content_digest"], "sha256:" + state["intent"]["evidence_sha256"])
+        self.assertFalse((fixture.base / "empty-state/hearting/dispatch/jobs.log").exists())
+        replay = fixture.finish()
+        self.assertEqual(replay.returncode, 0, replay.stderr)
+        replay_receipt = json.loads(replay.stdout)
+        self.assertTrue(replay_receipt["replay"])
+        self.assertEqual({key: value for key, value in replay_receipt.items() if key != "replay"},
+                         {key: value for key, value in receipt.items() if key != "replay"})
+
+    def test_unstarted_route_finishes_with_an_outside_file(self):
+        fixture = self.fixture
+        source = fixture.evidence.read_bytes()
+        first = fixture.finish()
+        self.assertEqual(first.returncode, 0, first.stderr + first.stdout)
+        receipt = json.loads(first.stdout)
+        state = self._state(fixture)
+        self.assertEqual(state["intent"]["evidence_path"].split("/")[0], "finish-evidence")
+        copy = self._copy(fixture, state)
+        self.assertEqual(copy.read_bytes(), source)
+        self.assertEqual(state["intent"]["evidence_sha256"], inline_finish._digest(source))
+        replay = fixture.finish()
+        self.assertEqual(replay.returncode, 0, replay.stderr)
+        self.assertTrue(json.loads(replay.stdout)["replay"])
+        self.assertEqual(json.loads(replay.stdout)["inline_finish_id"], receipt["inline_finish_id"])
+        # The recorded copy is the evidence; a vanished original does not change the replay.
+        fixture.evidence.unlink()
+        again = fixture.finish()
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertTrue(json.loads(again.stdout)["replay"])
+        self.assertEqual(json.loads(again.stdout)["inline_finish_id"], receipt["inline_finish_id"])
+        self.assertEqual(copy.read_bytes(), source)
+
+    def test_started_route_finishes_with_a_pr_url_or_outside_file(self):
+        for kind, value in (("url", "https://github.com/example/repo/pull/897"), ("file", None)):
+            with self.subTest(evidence=kind):
+                fixture = self._fixture(started=True)
+                cycle_id = fixture.cycle["cycle_id"]
+                if value is None:
+                    outside = fixture.base / "outside-started.md"
+                    fixture.evidence.rename(outside)
+                    value = str(outside)
+                fixture.command[fixture.command.index("--evidence") + 1] = value
+                first = fixture.finish()
+                self.assertEqual(first.returncode, 0, first.stderr + first.stdout)
+                self.assertEqual(artifact_producer.route_cycle_for(
+                    fixture.root, fixture.route)["cycle_id"], cycle_id)
+                state = self._state(fixture)
+                self.assertEqual(state["intent"]["cycle_id"], cycle_id)
+                self.assertEqual(state["intent"]["evidence_path"].split("/")[0], "finish-evidence")
+                expected = (value + "\n").encode() if kind == "url" else Path(value).read_bytes()
+                self.assertEqual(self._copy(fixture, state).read_bytes(), expected)
+                self.assertEqual(artifact_producer.read_cycle_record(fixture.root, cycle_id)["state"], "sealed")
+                replay = fixture.finish()
+                self.assertEqual(replay.returncode, 0, replay.stderr)
+                self.assertTrue(json.loads(replay.stdout)["replay"])
+                self.assertEqual(json.loads(replay.stdout)["inline_finish_id"],
+                                 json.loads(first.stdout)["inline_finish_id"])
+
+    def test_outside_file_drift_after_claim_refuses_then_exact_bytes_resume(self):
+        fixture = self.fixture
+        source = fixture.base / "drift.md"
+        source.write_bytes(b"first evidence\n")
+        fixture.command[fixture.command.index("--evidence") + 1] = str(source)
+        crashed = fixture.finish("after-claim")
+        self.assertNotEqual(crashed.returncode, 0)
+        self.assertIn("fault-injected-after-claim", crashed.stderr)
+        state = self._state(fixture)
+        copy = self._copy(fixture, state)
+        held = copy.read_bytes()
+        self.assertEqual(held, b"first evidence\n")
+        source.write_bytes(b"changed evidence\n")
+        drift = fixture.finish()
+        self.assertNotEqual(drift.returncode, 0)
+        self.assertIn("finish-evidence-drift", drift.stderr)
+        self.assertEqual(copy.read_bytes(), held)
+        source.write_bytes(b"first evidence\n")
+        resumed = fixture.finish()
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        self.assertEqual(artifact_producer.read_cycle_record(
+            fixture.root, state["intent"]["cycle_id"])["state"], "sealed")
+
+    def test_outside_file_changed_before_claim_replaces_the_copy(self):
+        fixture = self.fixture
+        source = fixture.base / "before-claim.md"
+        source.write_bytes(b"first\n")
+        fixture.command[fixture.command.index("--evidence") + 1] = str(source)
+        crashed = fixture.finish("before-claim")
+        self.assertNotEqual(crashed.returncode, 0)
+        self.assertIn("fault-injected-before-claim", crashed.stderr)
+        self.assertFalse(self._state_path(fixture).exists())
+        self.assertEqual(len(self._copies(fixture)), 1)
+        source.write_bytes(b"second\n")
+        finished = fixture.finish()
+        self.assertEqual(finished.returncode, 0, finished.stderr + finished.stdout)
+        state = self._state(fixture)
+        self.assertEqual(self._copy(fixture, state).read_bytes(), b"second\n")
+        self.assertEqual(state["intent"]["evidence_sha256"], inline_finish._digest(b"second\n"))
+        self.assertEqual(artifact_producer.read_cycle_record(
+            fixture.root, state["intent"]["cycle_id"])["state"], "sealed")
+
+    def test_outside_symlink_directory_empty_and_unreadable_evidence_refuse_before_intent(self):
+        unstarted = self.fixture
+        started = self._fixture(started=True)
+        real = unstarted.base / "real.md"
+        real.write_bytes(b"bytes\n")
+        link = unstarted.base / "link.md"
+        link.symlink_to(real)
+        directory = unstarted.base / "directory"
+        directory.mkdir()
+        empty = unstarted.base / "empty.md"
+        empty.write_bytes(b"")
+        cases = (
+            ("symlink", str(link), "finish-evidence-not-regular"),
+            ("directory", str(directory), "finish-evidence-not-regular"),
+            ("empty", str(empty), "finish-evidence-empty"),
+            ("missing", str(unstarted.base / "missing.md"),
+             "finish-evidence-outside-cycle-or-unreadable"),
+            ("other-scheme", "ftp://example.test/x", "finish-evidence-outside-cycle-or-unreadable"),
+        )
+        for label, target in (("unstarted", unstarted), ("started", started)):
+            for case, value, expected in cases:
+                with self.subTest(fixture=label, case=case):
+                    target.command[target.command.index("--evidence") + 1] = value
+                    refused = target.finish()
+                    self.assertNotEqual(refused.returncode, 0)
+                    self.assertIn(expected, refused.stderr)
+                    self.assertFalse(self._state_path(target).exists())
+                    self.assertEqual(self._copies(target), [])
+
+    def test_another_url_after_claim_conflicts(self):
+        fixture = self.fixture
+        first_url = "https://github.com/example/repo/pull/897"
+        second_url = "https://github.com/example/repo/pull/898"
+        fixture.command[fixture.command.index("--evidence") + 1] = first_url
+        self.assertNotEqual(fixture.finish("after-claim").returncode, 0)
+        state = self._state(fixture)
+        copy = self._copy(fixture, state)
+        held = copy.read_bytes()
+        fixture.command[fixture.command.index("--evidence") + 1] = second_url
+        refused = fixture.finish()
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("finish-intent-conflict", refused.stderr)
+        self.assertEqual(copy.read_bytes(), held)
+        second = self._cycle_dir(fixture, state["intent"]["cycle_id"]) / "artifacts" / self._url_locator(second_url)
+        self.assertFalse(second.exists())
+
+    def test_cycle_preparation_failure_is_a_typed_refusal_and_the_same_finish_resumes(self):
+        fixture = self.fixture
+        args = SimpleNamespace(evidence=str(fixture.evidence), summary_file=str(fixture.summary), commit=None)
+        with unittest.mock.patch.object(
+                artifact_producer, "_begin_waiting_for_admission",
+                side_effect=artifact_producer.ProducerError("admission-busy", "held")):
+            with self.assertRaisesRegex(inline_finish.InlineFinishError,
+                                        "finish-route-cycle-admission-busy"):
+                inline_finish.finish(args, fixture.route, fixture.route_file, CAP)
+        self.assertFalse(self._state_path(fixture).exists())
+        self.assertIsNone(artifact_producer.route_cycle_for(fixture.root, fixture.route))
+        resumed = inline_finish.finish(args, fixture.route, fixture.route_file, CAP)
+        self.assertEqual(resumed["schema"], "finish_receipt_v1")
+        self.assertEqual(artifact_producer.read_cycle_record(
+            fixture.root, resumed["cycle_id"])["state"], "sealed")
+
+    def test_entry_scope_preview_is_checked_in_the_cycle_finish_seals(self):
+        for started in (False, True):
+            with self.subTest(started=started):
+                fixture = self._fixture(started=started)
+                args = SimpleNamespace(evidence=str(fixture.evidence),
+                                       summary_file=str(fixture.summary), commit=None)
+                seen = []
+                original = CAP._require_entry_scope_review_preview
+
+                def recording(route, node, output):
+                    seen.append((dict(node), Path(output)))
+                    return original(route, node, output)
+
+                with unittest.mock.patch.object(CAP, "_require_entry_scope_review_preview",
+                                                side_effect=recording):
+                    result = inline_finish.finish(args, fixture.route, fixture.route_file, CAP)
+                output = self._cycle_dir(fixture, result["cycle_id"]) / "artifacts"
+                self.assertIn(({"id": "one-shot"}, output), seen)
+                self.assertEqual(result["schema"], "finish_receipt_v1")
+
+                refused = self._fixture(started=started)
+                refused_args = SimpleNamespace(evidence=str(refused.evidence),
+                                               summary_file=str(refused.summary), commit=None)
+                with unittest.mock.patch.object(CAP, "_require_entry_scope_review_preview",
+                                                side_effect=ValueError("completion-evidence-unreadable")):
+                    with self.assertRaisesRegex(ValueError, "completion-evidence-unreadable"):
+                        inline_finish.finish(refused_args, refused.route, refused.route_file, CAP)
+                self.assertFalse(self._state_path(refused).exists())
+                self.assertEqual(self._copies(refused), [])
 
 
 class NonGitInlineFinishTest(unittest.TestCase):

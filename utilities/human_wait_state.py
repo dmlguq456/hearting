@@ -46,6 +46,18 @@ def state_root() -> Path:
     return Path(xdg) / "hearting" / "human-waits"
 
 
+# Set only inside the detached producer: the root it was started for.
+_producer_root = None
+
+
+def _make_private_dir(path: Path) -> None:
+    """Create ``path`` (and parents), except that a producer whose own state root has
+    since been removed stops instead of recreating it: the root's owner deleted it."""
+    if _producer_root is not None and not _producer_root.is_dir():
+        raise FileNotFoundError("answer-wait state root is gone")
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+
+
 def _path(seat_key: str) -> Path:
     digest = hashlib.sha256(str(seat_key).encode("utf-8")).hexdigest()
     return state_root() / (digest + ".json")
@@ -62,7 +74,7 @@ def _fleet_cache_path() -> Path:
 @contextmanager
 def _cache_write_lock():
     root = state_root()
-    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    _make_private_dir(root)
     meta = os.lstat(root)
     if not stat.S_ISDIR(meta.st_mode) or meta.st_uid != os.getuid():
         raise OSError("answer-wait directory is not private owner state")
@@ -160,7 +172,7 @@ def marked_question(text: str) -> str | None:
 
 
 def _write(path: Path, value: dict) -> None:
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    _make_private_dir(path.parent)
     meta = os.lstat(path.parent)
     if not stat.S_ISDIR(meta.st_mode) or meta.st_uid != os.getuid():
         raise OSError("answer-wait directory is not private owner state")
@@ -3478,7 +3490,7 @@ def _refresh_cache() -> bool:
 def _claim_notification(item_id: str, boundary: str):
     digest = hashlib.sha256((item_id + "\0" + boundary).encode()).hexdigest()
     root = state_root() / "notifications"
-    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    _make_private_dir(root)
     os.chmod(root, 0o700)
     path = root / (digest + ".sent")
     try:
@@ -3566,8 +3578,12 @@ def _notification_delay(items, now, *, enabled):
 
 
 def _producer_loop(fd: int) -> None:
+    global _producer_root
     root = state_root()
+    _producer_root = root
     try:
+        if not root.is_dir():
+            return
         _refresh_cache()
         while True:
             now = time.time()
@@ -3597,10 +3613,13 @@ def _producer_loop(fd: int) -> None:
                 if boundary is not None:
                     delay = min(delay, max(1.0, boundary))
             time.sleep(delay)
+            if not root.is_dir():
+                return
             _refresh_cache()
     except Exception:
         return
     finally:
+        _producer_root = None
         try:
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
