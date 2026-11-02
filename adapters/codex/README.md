@@ -59,6 +59,12 @@ project Claude Skill, Agent, command, hook, or statusline files into Codex.
 | Selected tool projection | `adapters/codex/tools/` |
 | Selected utility projection | `adapters/codex/utilities/` |
 
+Codex reads one global instruction file: `$CODEX_HOME/AGENTS.override.md` when
+it has text, otherwise `AGENTS.md`. When a user keeps their own override,
+activation appends this bootstrap below their text as one marked block
+(`tools/install/codex_override.py`); update replaces only that block and
+uninstall removes only it.
+
 ## Session Command Reference
 
 The always-loaded `adapters/codex/AGENTS.md` keeps purpose, judgment, where
