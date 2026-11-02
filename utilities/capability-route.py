@@ -13091,7 +13091,8 @@ def main():
                 started={**started,"access_change":access_change}
             if worktree is not None and worktree.get("cwd"):
                 started={**started,"worktree":worktree}
-            print(json.dumps({**started, **compose_observations(route)},ensure_ascii=False),flush=True)
+            started={**started, **compose_observations(route)}
+            print(json.dumps(started,ensure_ascii=False),flush=True)
         # Bookkeeping runs after the work has started: the start does not depend on it (the sweep
         # never closes this route, and a cycle it seals is never the one this route begins or continues).
         _route_autoclose(artifact_root,"compose",route)
@@ -13099,6 +13100,9 @@ def main():
                            route_plan_unreadable=route_plan_unreadable,
                            campaign_selection=_campaign_for_card, include_decisions=not a.start,
                            non_git_decision=non_git_decision),file=sys.stderr)
+        if a.start:
+            from start_receipt import print_next_line
+            print_next_line(started)
         return 0
     if a.command=="correct":
         from dispatch_owner_input import submit, inspect, InputError
@@ -13122,10 +13126,13 @@ def main():
             result=(submit(jobs,attempt,a.message_file.read_text(),a.request_id)
                     if a.message_file else inspect(jobs,attempt))
         except InputError as exc:
-            print(json.dumps({"state":"not-admitted","reason":str(exc),
-                              "retry_when":getattr(exc,"retry_when",""),
-                              "next_action":getattr(exc,"next_action","same-command"),
-                              "next_step":"Retain the correction. Inspect the exact owner; do not restart it or treat a file edit as delivery."}))
+            refusal={"state":"not-admitted","reason":str(exc),
+                     "retry_when":getattr(exc,"retry_when",""),
+                     "next_action":getattr(exc,"next_action","same-command"),
+                     "next_step":"Retain the correction. Inspect the exact owner; do not restart it or treat a file edit as delivery."}
+            print(json.dumps(refusal))
+            from start_receipt import print_next_line
+            print_next_line(refusal)
             return 69
         if attempt!=a.attempt_id:
             result["redirected_from"]=a.attempt_id
@@ -13137,6 +13144,8 @@ def main():
             # one shared start (a replacement owner receives it).
             result=_continue_after_answer(jobs,attempt,result)
         print(json.dumps(result,ensure_ascii=False))
+        from start_receipt import print_next_line
+        print_next_line(result)
         return 0
     if a.command=="start":
         from work_start import start_work
@@ -13163,7 +13172,10 @@ def main():
             result={**result,"pin_change":pin_change}
         if access_change is not None:
             result={**result,"access_change":access_change}
-        print(json.dumps({**result, **compose_observations(route)},ensure_ascii=False))
+        result={**result, **compose_observations(route)}
+        print(json.dumps(result,ensure_ascii=False))
+        from start_receipt import print_next_line
+        print_next_line(result)
         return 0
     if a.command=="compile":
         spec_read=(compose_spec_read(a.cwd,a.artifact_root,None) if a.spec_read is None else
