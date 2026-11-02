@@ -192,6 +192,48 @@ class RoundBudgetTest(unittest.TestCase):
         self.assertEqual((within_cap.state, within_cap.round_kind, within_cap.verdict_rounds),
                          ("admit", "closure-check", 1))
 
+    def test_corrected_subject_after_blocking_review_is_a_closure_check_in_its_own_budget(self):
+        node = {"id": "impl-review", "kind": "review-worker", "unit": "qa/code-review",
+                "completion_gate": "code-impl-review"}
+        corrected = {"source_subject_digest": "subject-B"}
+        blocked_a = row("done", "completed-review-blocking", failure_class="fail", extra={
+            "attempt_id": "att-review-A", "review_subject_digest": "subject-A"})
+        budget = AUTH.decide_continuation(route(cap=2), action="round", node=node,
+                                          rows=[blocked_a], facts=corrected).budget
+        # The corrected content keeps its own verdict budget; only the round
+        # kind follows the lineage's open blocking verdict.
+        self.assertEqual((budget.state, budget.verdict_rounds, budget.round_kind),
+                         ("admit", 0, "closure-check"))
+        self.assertFalse(budget.closure_check_used)
+        crashed = row("done", "dead-invalid-envelope", extra={
+            "attempt_id": "att-review-B-crash", "review_subject_digest": "subject-B"})
+        self.assertEqual(AUTH.decide_continuation(route(cap=2), action="round", node=node,
+            rows=[blocked_a, crashed], facts=corrected).budget.round_kind, "closure-check")
+        # Two blocking corrections in a row never exhaust the next subject.
+        blocked_b = row("done", "completed-review-blocking", failure_class="fail", extra={
+            "attempt_id": "att-review-B", "review_subject_digest": "subject-B"})
+        third = AUTH.decide_continuation(route(cap=2), action="round", node=node,
+            rows=[blocked_a, blocked_b], facts={"source_subject_digest": "subject-C"}).budget
+        self.assertEqual((third.state, third.verdict_rounds, third.round_kind),
+                         ("admit", 0, "closure-check"))
+
+        passed_a = row("done", "completed-marker", extra={
+            "attempt_id": "att-review-A-pass", "review_subject_digest": "subject-A"})
+        after_pass = AUTH.decide_continuation(route(cap=2), action="round", node=node,
+                                              rows=[blocked_a, passed_a], facts=corrected).budget
+        self.assertEqual((after_pass.state, after_pass.round_kind), ("admit", "first"))
+        crash_only = AUTH.decide_continuation(route(cap=2), action="round", node=node,
+                                              rows=[crashed], facts=corrected).budget
+        self.assertEqual(crash_only.round_kind, "first")
+
+        # A source-bound test reruns its whole check on changed content.
+        test_node = {"id": "test", "kind": "pipeline-stage", "unit": "qa/test",
+                     "completion_gate": "code-test"}
+        failed_test = row("done", "dead-worker-fail", worker_type="stage", failure_class="fail",
+                          extra={"attempt_id": "att-test-A", "review_subject_digest": "subject-A"})
+        self.assertEqual(AUTH.decide_continuation(route(cap=2), action="round", node=test_node,
+            rows=[failed_test], facts=corrected).budget.round_kind, "first")
+
     def test_legacy_non_source_review_and_test_keep_cap_plus_one_closure(self):
         for node, worker_type in ((review_node(), "review"), (stage_node(), "test")):
             rows = [row("done", "completed-marker", worker_type=worker_type,
@@ -520,12 +562,13 @@ class RoundProtocolParityTest(unittest.TestCase):
                 self.assertIn("verdict-less attempts provide execution context only", block)
                 self.assertNotIn("This is a correction round", block)
                 if worker_type == "review":
-                    self.assertIn("full independent review", block)
-                    self.assertIn("full assigned scope", block)
+                    self.assertIn("independent first review", block)
+                    self.assertIn("no blocking verdict is open in this node's lineage", block)
+                    self.assertIn("Front-load every blocker", block)
                     self.assertNotIn("full execution of the original assigned task", block)
                 else:
                     self.assertIn("full execution of the original assigned task and scope", block)
-                    self.assertNotIn("full independent review", block)
+                    self.assertNotIn("independent first review", block)
 
     def test_first_round_renders_no_block(self):
         dispatch_node_spec = importlib.util.spec_from_file_location(

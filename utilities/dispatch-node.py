@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Materialize a registry route node onto existing adapter dispatch wrappers."""
-import argparse, importlib.util, json, os, subprocess, sys
+import argparse, base64, importlib.util, json, os, subprocess, sys
 from collections import namedtuple
 from dataclasses import dataclass
 from pathlib import Path
@@ -377,6 +377,9 @@ class RoundAdmission:
  current_attempt_ids: frozenset[str] = frozenset()
  requires_next_round: bool = False
  source_subject_digest: str | None = None
+ # The observed manifest behind that digest, so a closure check can name the
+ # exact paths that changed since the blocking verdict it closes.
+ source_subject_manifest: tuple = ()
 
 
 def _auto_record_revisions(route, node, jobs, rows, *, owner_attempt_id, record=True):
@@ -448,11 +451,14 @@ def admit_round(route, node, jobs, *, owner_attempt_id=None, exclude_slug=None, 
                              route=route if node.get("kind") == "review-worker" or source_bound else None)
  classified_rows = [(cols[1], meta) for cols, meta in rows]
  source_subject_digest = None
+ source_subject_manifest = ()
  if source_bound:
   from review_source_subject import SourceSubjectError, has_review_subject, observe, read_binding
   if has_review_subject(route, node, jobs):
    try:
-    source_subject_digest = observe(route, node, worktree=route.get("cwd"), jobs=jobs)["digest"]
+    observed_subject = observe(route, node, worktree=route.get("cwd"), jobs=jobs)
+    source_subject_digest = observed_subject["digest"]
+    source_subject_manifest = tuple(observed_subject.get("manifest") or ())
     source_rows = []
     for status, metadata in classified_rows:
      binding = read_binding(jobs, metadata, required=False)
@@ -504,6 +510,7 @@ def admit_round(route, node, jobs, *, owner_attempt_id=None, exclude_slug=None, 
    current_subject = observe(route, node, worktree=route.get("cwd"), jobs=jobs,
                              reviewed_input=reviewed_input)
    source_subject_digest = current_subject["digest"]
+   source_subject_manifest = tuple(current_subject.get("manifest") or ())
    classified_rows = annotate_rows(jobs, classified_rows, route=route, node=node,
                                    family=current_subject.get("family", "source"))
   except SourceSubjectError as exc:
@@ -551,13 +558,69 @@ def admit_round(route, node, jobs, *, owner_attempt_id=None, exclude_slug=None, 
   # exhausted fresh work must not be mistaken for a current exact replay.
   requires_next_round=unmet or superseded or budget.closure_check_used,
   source_subject_digest=source_subject_digest,
+  source_subject_manifest=source_subject_manifest,
  )
 
 
 max_review_rounds = REVIEW_ROUND_CAP.max_review_rounds
 review_budget_recovery_fields = REVIEW_ROUND_CAP.recovery_fields
 
-def round_protocol_block(budget, rows, worker_type, node_id):
+CLOSURE_DELTA_PATH_LIMIT = 20
+
+
+def _decoded_artifact(encoded):
+ try:
+  return Path(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)).decode("utf-8"))
+ except (ValueError, UnicodeDecodeError):
+  return None
+
+
+def closure_materials(rows, worker_type, *, jobs=None, current_manifest=None):
+ """Exact inputs a closure check reads, from records the runtime already keeps.
+
+ The latest verdict of the lineage, when it is a blocking review, names its
+ review artifact (`review_artifact_b64`) and its sealed source binding; the
+ binding manifest against the admitted subject's manifest is the delta. Only
+ paths are rendered, never file bodies; an unreadable record renders nothing.
+ """
+ prior = None
+ for cols, meta in reversed(rows):
+  status = cols[1] if isinstance(cols, (list, tuple)) else cols
+  if REVIEW_ROUND_CAP.classify_round_row(
+    status, meta, worker_type=meta.get("worker_type") or worker_type) == "verdict":
+   if REVIEW_ROUND_CAP.last_verdict_blocking([(status, meta)], worker_type):
+    prior = meta
+   break
+ if prior is None:
+  return ""
+ lines = []
+ artifact = _decoded_artifact(str(prior.get("review_artifact_b64") or ""))
+ if artifact is not None and artifact.is_file():
+  lines.append(f"- Prior blocking review ({prior.get('attempt_id', 'unknown')}): `{artifact}`")
+ if jobs and current_manifest is not None:
+  from review_source_subject import SourceSubjectError, read_binding
+  try:
+   binding = read_binding(jobs, prior, required=False)
+  except SourceSubjectError:
+   binding = None
+  if binding is not None:
+   def entries(manifest):
+    return {str(item["path"]): (item.get("kind"), item.get("content_sha256"))
+            for item in manifest or () if isinstance(item, dict) and item.get("path")}
+   before, after = entries(binding.get("manifest")), entries(current_manifest)
+   changed = sorted(path for path in before.keys() | after.keys() if before.get(path) != after.get(path))
+   head = str((binding.get("provenance") or {}).get("head") or "")
+   since = f" (reviewed at `{head[:12]}`)" if head else ""
+   if changed:
+    shown = ", ".join(f"`{path}`" for path in changed[:CLOSURE_DELTA_PATH_LIMIT])
+    more = len(changed) - CLOSURE_DELTA_PATH_LIMIT
+    lines.append(f"- Delta since that review{since}: {shown}" + (f" (+{more} more)" if more > 0 else ""))
+   else:
+    lines.append(f"- Delta since that review{since}: no reviewed path changed")
+ return "".join(line + "\n" for line in lines)
+
+
+def round_protocol_block(budget, rows, worker_type, node_id, *, jobs=None, current_manifest=None):
  """Render the shared attempt history and role-specific retry guidance.
 
  `budget` is the `RoundBudget` `admit_round` already computed for this
@@ -565,6 +628,9 @@ def round_protocol_block(budget, rows, worker_type, node_id):
  verdict-less row (crashed, capacity-dead, invalid envelope -- never an
  actual PASS/FAIL/blocking review) renders as "판정 없음(<note>)" in the
  history and does not create a correction obligation (SD-153 rule 5).
+ The round kind follows the node lineage, so a review after a correction is
+ a closure check even when the correction changed its content subject; the
+ exact prior review and delta are named when the runtime records them.
  """
  if budget.round_kind == "first":
   if not rows:
@@ -578,8 +644,9 @@ def round_protocol_block(budget, rows, worker_type, node_id):
   history="; ".join(history_parts)
   head=(f"Round protocol (round {budget.next_round} of route node `{node_id}`; prior attempts: {history}):\n")
   if worker_type=="review":
-   body=("- This is a full independent review of the current review subject, not a correction or closure check. "
-         "Report every current blocker and assess the full assigned scope.\n"
+   body=("- This is an independent first review of the current review subject, not a correction or closure check: "
+         "no blocking verdict is open in this node's lineage. Front-load every blocker you can substantiate now, "
+         "grouped by cause, each with `file:line` and the condition that reproduces it.\n"
          "- Earlier findings are context only; verdict-less attempts provide execution context only.\n")
   else:
    body=("- This is a full execution of the original assigned task and scope, not a correction or closure check.\n"
@@ -599,9 +666,11 @@ def round_protocol_block(budget, rows, worker_type, node_id):
  head=(f"Round protocol (round {budget.next_round} of route node `{node_id}`; prior attempts: {history}):\n"
        "- This is a correction round, not a fresh pass. One correction consumes one unit of the intensity retry budget and must close the whole prior 🔴 list at once.\n")
  if worker_type=="review":
-  body=("- Apply your unit's Round Protocol for round >= 2: read the prior round's review artifact first (the owner assignment names it; otherwise locate the latest `round_{N-1}.md` / `*_fix{M}.md` under the cycle's `_internal/`).\n"
-        "- Decide the verdict by exactly two questions: is every prior 🔴 closed, and did the delta introduce a correctness defect? Report each prior 🔴 as closed/open/regressed with evidence.\n"
+  body=("- Apply your unit's Round Protocol for round >= 2: read the prior blocking review first (named below when the runtime recorded it; otherwise the owner assignment names it, or locate the latest `round_{N-1}.md` / `*_fix{M}.md` under the cycle's `_internal/`).\n"
+        "- Decide the verdict by exactly two questions: is every prior 🔴 closed, and did the delta since that review introduce a correctness defect? Report each prior 🔴 as closed/open/regressed with evidence. "
+        "A changed source subject is that delta, not a new audit.\n"
         "- A finding that is neither a prior 🔴 nor a delta-introduced defect is 🟡 `deferred` and cannot flip the verdict. Do not re-audit unchanged material, even if the assignment above asks for a fresh independent review.\n")
+  body+=closure_materials(rows, worker_type, jobs=jobs, current_manifest=current_manifest)
  else:
   body=("- Read the failing review artifact first and close every 🔴 it lists together, including the follow-on gaps it named; do not fix one finding and return for another audit.\n"
         "- Record, in the stage artifact, each prior 🔴 with the change that closes it so the closure re-review can verify it item by item.\n")
@@ -1039,7 +1108,8 @@ def main():
   if review_candidate is not None: a.reviewed_evidence=review_candidate["path"]
  except DispatchContractError as e:
   print("check=failed");print(f"reason={e.reason}");print(f"detail={e.detail}");print("child_spawned=0");raise SystemExit(65)
- round_context=round_protocol_block(round_budget,prior_rounds,worker_type,node["id"])
+ round_context=round_protocol_block(round_budget,prior_rounds,worker_type,node["id"],jobs=registry.path,
+                                   current_manifest=getattr(admission,"source_subject_manifest",()) if admission.source_subject_digest else None)
  if original_task is None and group and os.environ.get(GOVERNOR_RESERVATION_ENV):
   # The reservation seals the raw group assignment, including on a later
   # round. Round guidance is recovery context, just like a partial retry brief.

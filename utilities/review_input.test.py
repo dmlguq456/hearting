@@ -303,10 +303,13 @@ class ReviewInputTest(unittest.TestCase):
             fresh = node_module.admit_round(self.route, self.node, self.jobs, reviewed_evidence=corrected)
         self.assertEqual(stale.budget.state, 'exhausted')
         self.assertEqual(fresh.budget.state, 'admit')
-        # B is a different content subject with its own first independent
-        # budget. The former input-revision closure permission remains for
-        # that input family but cannot relabel a new content review.
-        self.assertEqual(fresh.budget.round_kind, 'first')
+        # B is a different content subject with its own verdict budget. The
+        # former input-revision closure permission is not borrowed; B's
+        # review is a closure check only because the lineage's latest verdict
+        # (on A) is blocking.
+        self.assertEqual(fresh.budget.round_kind, 'closure-check')
+        self.assertFalse(fresh.budget.closure_check_used)
+        self.assertEqual(fresh.budget.verdict_rounds, 0)
         # The fence reads the same admission as the preview, so the former
         # permission is still not borrowed by the exhausted original input.
         (self.root/'review-input-revisions').mkdir()

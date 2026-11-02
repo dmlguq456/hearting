@@ -892,11 +892,15 @@ def decide_continuation(route=None, *, action, jobs=None, owner_attempt_id=None,
             any(last_id in (r.get("supersedes") or ()) for r in budget_revisions)))
         if closure:
             state = "admit"
-        # Attempt history does not establish a prior judgment. A crash,
-        # capacity death, or invalid envelope may advance the lineage's round
-        # number, but until a substantive verdict exists for this subject the
-        # next admitted pass is still a full first review.
-        round_kind = "closure-check" if closure else "correction" if verdicts else "first"
+        # The verdict budget stays with the content subject, but the round kind
+        # follows the node lineage: a correction always changes the reviewed
+        # content, so a review whose lineage ends in a blocking verdict checks
+        # that 🔴 list and the delta instead of auditing the new subject from
+        # scratch. Attempt history alone (crash, capacity death, invalid
+        # envelope) never establishes a prior judgment.
+        lineage_closure = bool(source_aware and not verdicts and node.get("kind") == "review-worker"
+                               and _ROUND.last_verdict_blocking(rows, worker_type))
+        round_kind = "closure-check" if closure or lineage_closure else "correction" if verdicts else "first"
         budget = _ROUND.RoundBudget(len(verdicts), counted, budget_kinds_for_streak.count("verdict-less"), cap, state,
             len(rows) + 1, len(rows) + 1 if rows else 0,
             round_kind,
