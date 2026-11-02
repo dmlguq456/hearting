@@ -5806,6 +5806,39 @@ class NextReadyReceiptTest(unittest.TestCase):
         self.assertTrue(text.startswith(self.old_text().split(self.BASE)[0] + self.BASE))
         self.assertTrue(text.endswith("This receipt creates no new approval step."))
 
+    def test_a_finished_stage_with_no_verification_after_it_hands_the_owner_its_checks(self):
+        # RV-1029: with no qa/test stage after it, a producing stage's handed-over checks reach the owner
+        # in the same completion receipt; with one after it, the verification stage receives them.
+        output = Path(self.tmp.name) / "cycle" / "artifacts"
+        (output / "dev_logs").mkdir(parents=True)
+        (output / "dev_logs" / "step_01.md").write_text(
+            "handed-over: `pytest -k socket` (reason: loopback bind EPERM)\n", encoding="utf-8")
+        from route_identity import route_hash, route_id_from_hash
+
+        def reseal():
+            for key in ("route_hash", "route_id"):
+                self.route.pop(key, None)
+            self.route["route_hash"] = route_hash(self.route)
+            self.route["route_id"] = route_id_from_hash(self.route["route_hash"])
+            self.path.write_text(json.dumps(self.route))
+            self.marker_dir = self.SA.ROUTE.completion_dir(self.route["route_id"], jobs=self.jobs)
+            self.finish_plan()
+
+        self.route["nodes"][0].update({"unit": "dev/backend", "outputs": ["source-diff", "dev_logs/**"]})
+        reseal()
+        with mock.patch.dict(os.environ, {"AGENT_ARTIFACT_OUTPUT_DIR": str(output)}):
+            text = self.render()
+            self.assertIn("\nHanded over to you by plan (no verification stage follows it): run each under the "
+                          "verification runner before you settle the leg; one your environment cannot run "
+                          "either stays unverified in your final report, not PASS.\n"
+                          "- `pytest -k socket` (reason: loopback bind EPERM) [dev_logs/step_01.md]\n", text)
+            self.assertLess(text.index("Next ready:"), text.index("Handed over to you"))
+            self.route["nodes"][1]["unit"] = "qa/test"
+            reseal()
+            text = self.render()
+            self.assertIn("Next ready:", text)
+            self.assertNotIn("Handed over to you", text)
+
     def test_an_owner_run_terminal_node_is_named_without_a_command(self):
         self.finish_plan()
         (self.marker_dir / "plan-check.json").write_text("{}")
