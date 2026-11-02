@@ -2828,19 +2828,41 @@ def _sweep(jobs: Path, now_ns: int, force: bool, started: float) -> dict:
             state = _load_state(layout)
             if not force and now_ns - state["last_pass_ns"] < DUE_SECONDS * 10**9 and state["last_pass_ns"] <= now_ns:
                 return {"skipped": "not-due"}
-            return _pass(jobs, root, layout, state, now_ns, started)
+            # The delivery-record prune runs under the retention lock and DUE
+            # gate (they are its cadence), before any delivery index is built,
+            # so this pass's HOME judgments see the pruned records. The HOME
+            # examine budget restarts after it: the prune has its own budget.
+            delivery_prune = _prune_delivery_records(root, now_ns)
+            started = time.monotonic()
+            return _pass(jobs, root, layout, state, now_ns, started,
+                         delivery_prune=delivery_prune)
 
 
-def _pass(jobs: Path, root: Path, layout: _Layout, state: dict, now_ns: int, started: float) -> dict:
+def _prune_delivery_records(root: Path, now_ns: int) -> dict:
+    """Bounded SD-111 (7) prune of aged terminal delivery records.
+
+    Removal-only and bounded (``dispatch_pending_delivery.prune_bounded``): it
+    reads no jobs.log tail and no HOME manifest, so it cannot stall this
+    pass. Like every retention step it never fails its carrier."""
+    try:
+        from dispatch_pending_delivery import prune_bounded
+        return prune_bounded(root, now=now_ns / 1e9)
+    except Exception as exc:  # noqa: BLE001 -- a prune bug must not escape a carrier
+        return {"error": type(exc).__name__}
+
+
+def _pass(jobs: Path, root: Path, layout: _Layout, state: dict, now_ns: int, started: float,
+          delivery_prune: dict | None = None) -> dict:
     token = _FREED.set([0])
     try:
-        return _run_pass(jobs, root, layout, state, now_ns, started)
+        return _run_pass(jobs, root, layout, state, now_ns, started, delivery_prune)
     finally:
         _FREED.reset(token)
 
 
-def _run_pass(jobs: Path, root: Path, layout: _Layout, state: dict, now_ns: int, started: float) -> dict:
-    result = {"examined": 0, "eligible": 0, "due": 0, "removed": 0, "partial": 0,
+def _run_pass(jobs: Path, root: Path, layout: _Layout, state: dict, now_ns: int, started: float,
+              delivery_prune: dict | None = None) -> dict:
+    result = {"delivery_prune": delivery_prune, "examined": 0, "eligible": 0, "due": 0, "removed": 0, "partial": 0,
               "ignored": 0, "detached_leftover": 0, "unproven_leftover": 0,
               "freed_bytes": 0, "kept": {}, "unknown": {}, "unknown_causes": {}}
     deadline = time.monotonic() + REMOVE_DEADLINE_SECONDS
@@ -2876,7 +2898,10 @@ def _run_pass(jobs: Path, root: Path, layout: _Layout, state: dict, now_ns: int,
         except _Unreadable as exc:
             skipped = {"skipped": "registry-oversized" if str(exc) == "registry-oversized"
                        else "registry-unreadable"}
-            state.update(last_pass_ns=now_ns, eligible_since=since, last_result=skipped)
+            # The returned skip shape is a fixed contract; the prune
+            # observation is recorded only in the persisted last_result.
+            state.update(last_pass_ns=now_ns, eligible_since=since,
+                         last_result={**skipped, "delivery_prune": delivery_prune})
             _store_state(layout, state)
             return skipped
         ctx = _Context(jobs, root, layout, snapshot, now_ns)

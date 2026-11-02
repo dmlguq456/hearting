@@ -404,6 +404,31 @@ class ReconcileDutyTest(IsolatedCase):
         self.assertEqual(bounded["records_read"], 2)
         self.assertEqual(bounded["budget_exhausted"], 1)
 
+    def test_retention_prune_is_bounded_per_call_and_runs_without_a_finished_walk(self):
+        records = self._open_records(5)
+        paths = []
+        for record in records:
+            delivery_id = record["delivery_id"]
+            pending.claim(self.root, "A", delivery_id, claim_owner="test", lease_seconds=60)
+            pending.ack(self.root, "A", delivery_id, acked_by="test")
+            path = pending.record_path(self.root, "A", delivery_id)
+            old = time.time() - 9 * 86400
+            os.utime(path, (old, old))
+            paths.append(path)
+        with mock.patch.object(pending, "PRUNE_RECORD_LIMIT", 2):
+            first = join.reconcile_pending_delivery(self.jobs, max_rows=500, time_budget_s=30)
+            self.assertEqual(first["pruned_records"], 2)
+            self.assertEqual(sum(path.exists() for path in paths), 3)
+            # the registry walk gets no time at all; the prune keeps its own budget
+            second = join.reconcile_pending_delivery(self.jobs, time_budget_s=0)
+            self.assertEqual(second["budget_exhausted"], 1)
+            self.assertEqual(second["pruned_records"], 2)
+            self.assertEqual(sum(path.exists() for path in paths), 1)
+            third = join.reconcile_pending_delivery(self.jobs, max_rows=500, time_budget_s=30)
+            self.assertEqual(third["pruned_records"], 1)
+        self.assertFalse(any(path.exists() for path in paths))
+        self.assertEqual(sum(pending.tombstone_path(path).is_file() for path in paths), 5)
+
     def test_maintenance_pass_runs_reconcile_once_per_due_window(self):
         self._open_records(3)
         first = peer_steward._runner_maintenance_pass(self.store)

@@ -1187,7 +1187,7 @@ class WorkerHomeRetentionCarrierTest(unittest.TestCase):
 
 
 class DeliveryPruneCarrierTest(unittest.TestCase):
-    """The reaper's retention tail also runs the seven-day terminal prune."""
+    """The reaper's home pass carries the one bounded seven-day terminal prune."""
 
     def record(self, base, suffix, state, age_days):
         import dispatch_pending_delivery as P
@@ -1238,36 +1238,58 @@ class DeliveryPruneCarrierTest(unittest.TestCase):
             self.assertTrue(recent.is_file())
             self.assertTrue(opened.is_file())
 
-    def watch_main(self, ran, prune_effect=None):
+    def watch_main(self, jobs):
         import importlib.util
         spec = importlib.util.spec_from_file_location("dispatch_reap_watch_prune", WATCH)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        import dispatch_pending_delivery
-        import worker_home_retention
-        outcome = {} if ran else {"skipped": "not-due"}
+        import dispatch_pending_delivery as P
+        real_bounded = P.prune_bounded
         with mock.patch.object(module, "watch", return_value=65), \
-                mock.patch.object(worker_home_retention, "sweep", return_value=outcome), \
-                mock.patch.object(dispatch_pending_delivery, "prune",
-                                  side_effect=prune_effect) as prune:
-            code = module.main(["--jobs", "/nonexistent/jobs.log", "--attempt-id", "att-x",
+                mock.patch.object(P, "PRUNE_RECORD_LIMIT", 1), \
+                mock.patch.object(P, "prune_bounded", side_effect=real_bounded) as bounded, \
+                mock.patch.object(P, "prune", side_effect=AssertionError("unbounded prune")) as unbounded:
+            code = module.main(["--jobs", str(jobs), "--attempt-id", "att-x",
                                 "--pid", "1", "--pid-start", "1", "--pgid", "1"])
-        return code, prune
+        return code, bounded, unbounded
 
-    def test_reaper_prune_follows_home_retention_cadence(self):
-        code, prune = self.watch_main(ran=False)
-        self.assertEqual(code, 65)
-        prune.assert_not_called()
-        code, prune = self.watch_main(ran=True)
-        self.assertEqual(code, 65)
-        prune.assert_called_once()
-        self.assertEqual(prune.call_args.args[0], Path("/nonexistent"))
-        self.assertIs(prune.call_args.kwargs["apply"], True)
+    def test_one_reaper_exit_prunes_once_within_the_bound(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td).resolve()
+            jobs = base / "jobs.log"
+            jobs.write_text("", encoding="utf-8")
+            (base / "homes" / "workers").mkdir(parents=True, mode=0o700)
+            olds = [self.record(base, "1", "acked", 9), self.record(base, "2", "acked", 8)]
+            code, bounded, unbounded = self.watch_main(jobs)
+            self.assertEqual(code, 65)
+            # One prune per pass, the bounded one, under its record limit.
+            bounded.assert_called_once()
+            unbounded.assert_not_called()
+            self.assertEqual([p.exists() for p in olds], [False, True])
+            # The next exit inside the pass interval is not due: no prune at all.
+            code, bounded, unbounded = self.watch_main(jobs)
+            self.assertEqual(code, 65)
+            bounded.assert_not_called()
+            unbounded.assert_not_called()
+            self.assertTrue(olds[1].exists())
 
     def test_a_failing_prune_does_not_change_the_watcher_result(self):
-        code, prune = self.watch_main(ran=True, prune_effect=RuntimeError("boom"))
-        self.assertEqual(code, 65)
-        prune.assert_called_once()
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("dispatch_reap_watch_prune_fail", WATCH)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        import dispatch_pending_delivery as P
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td).resolve()
+            jobs = base / "jobs.log"
+            jobs.write_text("", encoding="utf-8")
+            (base / "homes" / "workers").mkdir(parents=True, mode=0o700)
+            with mock.patch.object(module, "watch", return_value=65), \
+                    mock.patch.object(P, "prune_bounded", side_effect=RuntimeError("boom")) as bounded:
+                code = module.main(["--jobs", str(jobs), "--attempt-id", "att-x",
+                                    "--pid", "1", "--pid-start", "1", "--pgid", "1"])
+            self.assertEqual(code, 65)
+            bounded.assert_called_once()
 
 
 class AttemptRecordIndexTest(unittest.TestCase):
