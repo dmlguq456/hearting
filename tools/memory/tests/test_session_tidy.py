@@ -21,6 +21,7 @@ import sqlite3
 import stat
 import sys
 import tempfile
+import threading
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -3790,6 +3791,184 @@ class ConsumedClearLineageRegressionTest(TidyCase):
             self.assertIn("lineage-unresolved", clear.schedule_for_enqueue(self.seat, "claude", "fresh-source", str(self.cwd)))
             with st.session_state_lock(self.seat):
                 self.assertTrue(st._record_tidy_clear_succession_locked(self.seat, "claude", "fresh-target", 10))
+
+
+class ClearBookingLineageRaceTest(TidyCase):
+    """Booking mutations and lifecycle edges share the seat -> lineage order."""
+
+    CASES = ("idle", "codex-new", "codex-update", "enqueue", "compact-new",
+             "compact-update", "idle-accept")
+
+    def setUp(self):
+        super().setUp()
+        import dispatch_seat_handover as handover
+        self.handover = handover
+        self.stack = contextlib.ExitStack()
+        self.addCleanup(self.stack.close)
+        self.stack.enter_context(self.library())
+        self.stack.enter_context(mock.patch.object(clear, "herdr_command", return_value="/bin/true"))
+        self.helpers = self.stack.enter_context(mock.patch.object(clear, "_ensure_helper", return_value=(True, "")))
+        self.stack.enter_context(mock.patch.object(runner, "_start_queued", side_effect=lambda item: item))
+
+    def prepare(self, kind):
+        harness = "codex" if kind.startswith("codex") else "claude"
+        sid = "race-source-" + kind
+        seat = st.session_seat(st.Seat("pane", "race-" + kind, pane="test:" + kind), harness, sid)
+        context = {"identity": "race-operation-" + kind, "trigger": "auto", "prompt_seq": 0,
+                   "transcript": str(self.iso.root / "synthetic-transcript.jsonl"), "boundary_offset": 0,
+                   "card_request_required": harness == "codex"}
+        st.write_card(seat, harness, sid, "synthetic card", prompt_seq=0,
+                      origin="runtime-compact", compact_context=context)
+        # A real lifecycle writer can publish a same-seat clear without changing
+        # the booking under test. Its snapshot is prepared before either racer.
+        self.handover.publish_snapshot_locked(seat, harness, sid, [], now=1)
+        if kind == "idle":
+            def book():
+                with mock.patch.object(st, "resolve_seat", return_value=seat):
+                    return clear.observe_idle_event(harness, sid, str(self.cwd), event_id="race-turn",
+                                                    tokens=200000, now=10)
+        elif harness == "codex":
+            def book():
+                return clear.schedule_compact_card_request(seat, harness, sid, str(self.cwd), context, now=10)
+        else:
+            def book():
+                return st._enqueue_tidy(seat, harness, sid, str(self.cwd),
+                                        compact_context=context if kind.startswith("compact") else None,
+                                        operation_id=context["identity"])[1]
+        if kind.endswith("update"):
+            self.assertEqual(book(), "clear=scheduled")
+            req = clear.read_reservation(seat.key)
+            req.pop("queue_id", None)
+            req.pop("operation_id", None)
+            req.pop("memory_state", None)
+            clear._write_reservation(req)
+        if kind == "idle-accept":
+            with mock.patch.object(st, "resolve_seat", return_value=seat):
+                self.assertEqual(clear.observe_idle_event(harness, sid, str(self.cwd), event_id="race-turn",
+                                                          tokens=200000), "booking=scheduled")
+            req = clear.read_reservation(seat.key)
+            req["idle_request"] = {"state": "arrived", "token": "race-claim", "text_digest": "race-digest",
+                                   "arrival": {"sid": sid, "prompt_seq": 0}}
+            clear._write_reservation(req)
+            st.write_card(seat, harness, sid, "accepted card", prompt_seq=0)
+            idle_context = {"nonce": req["nonce"], "claim_id": "race-claim", "arrival_seq": 0,
+                            "identity": req["idle"]["identity"], "eligible": True}
+            def book():
+                return st._enqueue_tidy(seat, harness, sid, str(self.cwd), idle_context=idle_context)[1]
+        self.helpers.reset_mock()
+        return seat, harness, sid, book
+
+    def publish_clear_locked(self, seat, harness, sid):
+        successor = "race-successor-" + sid
+        target = st.session_seat(seat, harness, successor)
+        st.record_event(target, harness, successor, "start", source="clear", now=20)
+        self.assertIsNotNone(self.handover.record_locked(
+            target, harness, successor, "start", "clear", 20))
+
+    def test_successor_published_while_waiting_for_seat_rejects_new_and_updated_bookings(self):
+        self.waiting_successor(cross_seat=False)
+
+    def test_cross_harness_retire_in_another_seat_while_waiting_rejects_bookings(self):
+        self.waiting_successor(cross_seat=True)
+
+    def waiting_successor(self, *, cross_seat):
+        for kind in self.CASES:
+            with self.subTest(kind=kind):
+                seat, harness, sid, book = self.prepare(kind)
+                before = st.read_bytes(clear.reservation_path(seat.key))
+                waiting = threading.Event()
+                results, errors = [], []
+                real_lock = st.seat_lock
+
+                @contextlib.contextmanager
+                def lock(key, *, wait=None):
+                    if threading.current_thread() is worker and key == seat.key:
+                        waiting.set()
+                    with real_lock(key, wait=3 if wait is None else wait):
+                        yield
+
+                def schedule():
+                    try:
+                        results.append(book())
+                    except BaseException as exc:
+                        errors.append(exc)
+
+                worker = threading.Thread(target=schedule)
+                with mock.patch.object(st, "seat_lock", side_effect=lock):
+                    try:
+                        with real_lock(seat.key):
+                            worker.start()
+                            self.assertTrue(waiting.wait(3), "scheduler never reached the seat lock")
+                            if cross_seat:
+                                other = st.Seat("pane", seat.key + "-beside", pane="test:beside-" + kind)
+                                self.assertIsNotNone(self.handover.record_retire_handover(
+                                    sid, harness, "race-retired-" + sid, "opencode", successor_seat=other,
+                                    jobs=self.iso.root / "absent-jobs.log", now=20))
+                            else:
+                                self.publish_clear_locked(seat, harness, sid)
+                    finally:
+                        worker.join(5)
+                self.assertFalse(worker.is_alive())
+                self.assertEqual(errors, [])
+                self.assertEqual(results, [("booking" if kind == "idle" else "clear")
+                                            + "=skipped reason=session-handed-over"])
+                self.assertEqual(st.read_bytes(clear.reservation_path(seat.key)), before)
+                self.helpers.assert_not_called()
+                if kind != "idle":
+                    self.assertTrue(any(item.get("sid") == sid for item in runner.list_items()))
+
+    def test_cross_pane_writer_cannot_publish_between_fresh_check_and_booking_write(self):
+        for kind in self.CASES:
+            with self.subTest(kind=kind):
+                seat, harness, sid, book = self.prepare(kind)
+                other = st.Seat("pane", seat.key + "-beside", pane="test:beside-" + kind)
+                blocked, done = threading.Event(), threading.Event()
+                results, errors = [], []
+                real_lock, real_write = st.seat_lock, clear._write_reservation
+
+                @contextlib.contextmanager
+                def lock(key, *, wait=None):
+                    if threading.current_thread() is writer and key == self.handover.LINEAGE_WRITE_KEY:
+                        try:
+                            with real_lock(key, wait=0):
+                                raise AssertionError("cross-pane writer entered booking mutation")
+                        except BlockingIOError:
+                            blocked.set()
+                    with real_lock(key, wait=3 if wait is None else wait):
+                        yield
+
+                def publish():
+                    try:
+                        results.append(self.handover.record_retire_handover(
+                            sid, harness, "race-retired-" + sid, "opencode", successor_seat=other,
+                            jobs=self.iso.root / "absent-jobs.log", now=20))
+                    except BaseException as exc:
+                        errors.append(exc)
+                    finally:
+                        done.set()
+
+                writer = threading.Thread(target=publish)
+
+                def write(req):
+                    writer.start()
+                    self.assertTrue(blocked.wait(3), "writer did not block on the shared lineage lock")
+                    self.assertFalse(done.is_set())
+                    real_write(req)
+
+                with mock.patch.object(st, "seat_lock", side_effect=lock), \
+                     mock.patch.object(clear, "_write_reservation", side_effect=write):
+                    try:
+                        self.assertEqual(book(), "booking=scheduled" if kind == "idle" else "clear=scheduled")
+                    finally:
+                        if writer.ident is not None:
+                            writer.join(5)
+                self.assertFalse(writer.is_alive())
+                self.assertEqual(errors, [])
+                self.assertEqual(len(results), 1)
+                self.assertIsNotNone(results[0])
+                self.assertEqual(self.handover.session_successor(sid, harness=harness),
+                                 ("race-retired-" + sid, "opencode"))
+                self.assertEqual(clear.read_reservation(seat.key)["status"], "reserved")
 
 
 class ClearBookingTest(TidyCase):

@@ -261,11 +261,26 @@ def reconcile_pending(seat: "st.Seat", *, lock_wait: float = 0.2) -> bool:
 
 def _clear_lineage_reason(harness: str, sid: str) -> str:
     """A new automatic clear belongs only to the current source session."""
-    from dispatch_seat_handover import chain_end
-    _end, state = chain_end(harness, sid)
-    if state == "self":
+    from dispatch_seat_handover import resolve_recipient
+    # The qualified seat answer includes legacy and cross-harness retire edges;
+    # tidy-only chain_end cannot see a successor published in another harness.
+    result = resolve_recipient("seat-successor", harness=harness, session=sid)
+    if result.state == "no-handover":
         return ""
-    return "session-handed-over" if state == "successor" else "lineage-unresolved"
+    return "session-handed-over" if result.state == "confirmed" else "lineage-unresolved"
+
+
+@contextlib.contextmanager
+def _booking_lock(seat: "st.Seat", *, wait: Optional[float] = None):
+    """Keep fresh lineage validation and booking mutation together across panes.
+
+    Like lifecycle writers, take the physical seat before the common lineage
+    lock. Callers hold neither lock and acquire no further seat inside this
+    transaction; flock is not reentrant. Start helpers only after releasing it.
+    """
+    from dispatch_seat_handover import LINEAGE_WRITE_KEY
+    with st.seat_lock(seat.key, wait=wait), st.seat_lock(LINEAGE_WRITE_KEY, wait=wait):
+        yield
 
 
 def observe_idle_event(harness: str, sid: str, cwd: str, *, event_id: str, provider: str = "",
@@ -302,7 +317,10 @@ def observe_idle_event(harness: str, sid: str, cwd: str, *, event_id: str, provi
                      or (prompt_state.get("harness"), prompt_state.get("sid")) != (harness, sid)):
         return "booking=skipped reason=not-rearmed"
     identity = hashlib.sha256(f"{harness}\0{sid}\0{sequence}\0{event_id}".encode("utf-8")).hexdigest()
-    with st.seat_lock(seat.key, wait=lock_wait):
+    with _booking_lock(seat, wait=lock_wait):
+        reason = _clear_lineage_reason(harness, sid)
+        if reason:
+            return f"booking=skipped reason={reason}"
         existing = read_reservation(seat.key)
         old_idle = (existing or {}).get("idle") if isinstance((existing or {}).get("idle"), dict) else {}
         if existing and old_idle.get("identity") == identity:
@@ -720,7 +738,10 @@ def _accept_idle_enqueue(seat: "st.Seat", harness: str, sid: str, cwd: str, idle
     if idle_context.get("eligible") is False:
         return "clear=skipped reason=idle-request-not-eligible"
     try:
-        with st.seat_lock(seat.key, wait=lock_wait):
+        with _booking_lock(seat, wait=lock_wait):
+            reason = _clear_lineage_reason(harness, sid)
+            if reason:
+                return f"clear=skipped reason={reason}"
             req = read_reservation(seat.key)
             request = (req or {}).get("idle_request") if isinstance((req or {}).get("idle_request"), dict) else {}
             arrival = request.get("arrival") if isinstance(request.get("arrival"), dict) else {}
@@ -872,7 +893,10 @@ def schedule_compact_card_request(seat: "st.Seat", harness: str, sid: str, cwd: 
     if reason:
         return f"clear=skipped reason={reason}"
     try:
-        with st.seat_lock(seat.key, wait=lock_wait):
+        with _booking_lock(seat, wait=lock_wait):
+            reason = _clear_lineage_reason(harness, sid)
+            if reason:
+                return f"clear=skipped reason={reason}"
             existing = read_reservation(seat.key)
             if existing and (existing.get("compact") or {}).get("identity") == identity:
                 if existing.get("status") == "cancelled":
@@ -980,7 +1004,10 @@ def schedule_for_enqueue(seat: "st.Seat", harness: str, sid: str, cwd: str, *, o
             return "clear=skipped reason=outside-herdr"
         cancel(seat)
         return f"clear=manual hint={hint}"
-    with st.seat_lock(seat.key, wait=lock_wait):
+    with _booking_lock(seat, wait=lock_wait):
+        reason = _clear_lineage_reason(harness, sid)
+        if reason:
+            return f"clear=skipped reason={reason}"
         existing = read_reservation(seat.key)
         if compact and existing and (existing.get("compact") or {}).get("identity") == compact.get("identity"):
             if existing.get("status") == "reserved":
