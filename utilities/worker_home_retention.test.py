@@ -168,6 +168,13 @@ class Fixture(unittest.TestCase):
             (".lock-" + summary.summary_sid(attempt))
         return owner_lock, provider_lock
 
+    def start_provider(self, lockdir):
+        """A process shaped like the title provider: it names its lockdir in argv."""
+        provider = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)",
+                                     "--lockdir", str(lockdir)])
+        self.addCleanup(lambda: (provider.kill(), provider.wait(timeout=10)))
+        return provider
+
     def sweep(self, windows=0.0, **kwargs):
         return R.sweep(self.jobs, now_ns=self.now + int(windows * RETENTION_NS), force=True, **kwargs)
 
@@ -1414,7 +1421,7 @@ class Liveness(Fixture):
         self.assertEqual(self.sweep(8 / 7)["removed"], 1)
         self.assertFalse(home.exists())
 
-    def test_held_owner_and_old_provider_lockdir_keep_home(self):
+    def test_held_owner_or_live_provider_keep_home_but_ownerless_lockdir_does_not(self):
         owner_home = self.add("att-summary-owner-lock")
         owner_lock, _provider_lock = self.attach_summary_owner("att-summary-owner-lock", owner_home)
         owner_fd = os.open(owner_lock, os.O_RDWR)
@@ -1430,8 +1437,35 @@ class Liveness(Fixture):
         provider_lock.mkdir()
         old = time.time() - 30 * 86400
         os.utime(provider_lock, (old, old))
+        # Intentional change: with no process naming the old lockdir, the home is released.
+        self.sweep(0)
+        self.sweep(8 / 7)
+        self.assertFalse(provider_home.exists())
+
+        live_home = self.add("att-summary-provider-live")
+        _owner_lock, live_lock = self.attach_summary_owner("att-summary-provider-live", live_home)
+        live_lock.parent.mkdir(parents=True, exist_ok=True)
+        live_lock.mkdir()
+        os.utime(live_lock, (old, old))
+        self.start_provider(live_lock)
         self.assertEqual(self.kept(self.expire(), "summary-live"), 1)
-        self.assertTrue(provider_home.is_dir())
+        self.assertTrue(live_home.is_dir())
+
+    def test_legacy_owner_state_without_runtime_home_is_not_a_conflict(self):
+        home = self.add("att-legacy-owner")
+        owner_lock, _provider_lock = self.attach_summary_owner("att-legacy-owner", home)
+        state_path = Path(self.rows["att-legacy-owner"][1]["summary_state_file"])
+        state = json.loads(state_path.read_text())
+        del state["runtime_home"]
+        state_path.write_text(json.dumps(state))
+        owner_fd = os.open(owner_lock, os.O_RDWR)
+        try:
+            fcntl.flock(owner_fd, fcntl.LOCK_EX)
+            self.assertEqual(self.kept(self.expire(), "summary-live"), 1)
+        finally:
+            os.close(owner_fd)
+        self.assertEqual(self.sweep(8 / 7 * 2)["removed"], 1)
+        self.assertFalse(home.exists())
 
     def test_live_or_unverifiable_quiescence_keeps(self):
         live = self.add("att-q1")
@@ -2097,8 +2131,10 @@ class Races(Fixture):
             if not provider_lock.exists():
                 with AR.admission(self.root, (candidate,), blocking=False) as admitted:
                     if admitted:
+                        # Same shape as the producer: lockdir, then a process naming it.
                         provider_lock.parent.mkdir(parents=True, exist_ok=True)
                         provider_lock.mkdir()
+                        self.start_provider(provider_lock)
             return original_check(ctx, candidate, deadline)
 
         with mock.patch.object(R, "_late_candidate_delivery_change", provider_admission):

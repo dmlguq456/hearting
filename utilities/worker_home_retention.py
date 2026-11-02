@@ -2854,7 +2854,9 @@ def _pass(jobs: Path, root: Path, layout: _Layout, state: dict, now_ns: int, sta
         scan = contextlib.ExitStack()
         try:
             from dispatch_contract import process_table_scan_scope
+            from dispatch_summary import provider_reference_scan_scope
             scan.enter_context(process_table_scan_scope())
+            scan.enter_context(provider_reference_scan_scope())
             for key in batch:
                 if time.monotonic() - started > EXAMINE_BUDGET_SECONDS:
                     break

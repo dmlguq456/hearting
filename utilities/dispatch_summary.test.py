@@ -110,9 +110,60 @@ class DispatchSummaryTest(unittest.TestCase):
         old = time.time() - 30 * 86400
         os.utime(provider_lock, (old, old))
         with mock.patch.dict(os.environ, {"FLEET_TITLE_STATE_DIR": str(Path(self.tmp.name) / "wrong-root")}):
-            self.assertEqual(S.home_consumer_evidence(metadata), ("live", "provider-lockdir-present"))
+            # Intentional change: an old lockdir that no process names holds nothing.
+            self.assertEqual(S.home_consumer_evidence(metadata),
+                             ("absent", "provider-lockdir-unreferenced"))
+            link = Path(self.tmp.name) / "lockdir-link"
+            link.symlink_to(provider_lock)
+            for spelled in (["--lockdir", str(provider_lock)],
+                            ["--lockdir=" + str(provider_lock)],
+                            ["--lockdir", str(link)]):
+                with self.subTest(argv=spelled[0]):
+                    provider = subprocess.Popen(
+                        [sys.executable, "-c", "import time; time.sleep(30)", *spelled])
+                    try:
+                        self.assertEqual(S.home_consumer_evidence(metadata),
+                                         ("live", "provider-lockdir-present"))
+                    finally:
+                        provider.kill()
+                        provider.wait(timeout=5)
+            with mock.patch.object(S, "process_namespace_identity", return_value="pid:[other]"):
+                self.assertEqual(S.home_consumer_evidence(metadata),
+                                 ("unknown", "provider-scan-namespace-unverifiable"))
         provider_lock.rmdir()
         self.assertEqual(S.home_consumer_evidence(metadata)[0], "absent")
+
+    def test_owner_state_without_runtime_home_is_not_a_conflict(self):
+        attempt = "att-legacy-owner-state"
+        harness = "claude"
+        root = Path(self.tmp.name) / "recorded-title-state"
+        state_path = root / ".dispatch-owners" / harness / f"{attempt}.json"
+        state_path.parent.mkdir(parents=True)
+        home = Path(self.tmp.name) / "worker-home"
+        home.mkdir()
+        sid = S.summary_sid(attempt)
+        start = S.process_observation(os.getpid())[1]
+        namespace = S.process_namespace_identity()
+        state = {"schema_version": S.OWNER_SCHEMA, "status": "active", "attempt_id": attempt,
+                 "harness": harness, "sid": sid, "transcript": str(home / "t.jsonl"),
+                 "pid": os.getpid(), "proc_start": start, "observer_namespace": namespace}
+        state_path.write_text(json.dumps(state))
+        state_path.with_suffix(".lock").touch()
+        metadata = {
+            "attempt_id": attempt, "harness": harness, "runtime_home": str(home),
+            "summary_owner": S.OWNER_KIND, "summary_sid": sid,
+            "summary_owner_pid": str(os.getpid()), "summary_owner_pid_start": start,
+            "summary_owner_pid_observer_ns": namespace, "summary_state_file": str(state_path),
+        }
+        self.assertEqual(S.home_consumer_evidence(metadata)[0], "absent")
+        fd = os.open(state_path.with_suffix(".lock"), os.O_RDWR)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            self.assertEqual(S.home_consumer_evidence(metadata), ("live", "owner-lock-held"))
+        finally:
+            os.close(fd)
+        state_path.write_text(json.dumps({**state, "runtime_home": str(home / "other")}))
+        self.assertEqual(S.home_consumer_evidence(metadata), ("unknown", "state-home-conflict"))
 
     def test_summary_owner_admits_path_based_reads_of_identityless_legacy_home(self):
         import threading
@@ -936,6 +987,90 @@ class DispatchSummaryTest(unittest.TestCase):
                     except ProcessLookupError:
                         pass
                     process.wait(timeout=5)
+
+
+class ProviderLockdirReferenceTest(unittest.TestCase):
+    """`_provider_lockdir_reference` over a fake /proc tree."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.proc = Path(self._tmp.name) / "proc"
+        self.proc.mkdir()
+        self.lockdir = Path(self._tmp.name) / "titles" / ".lock-sid"
+        self.lockdir.mkdir(parents=True)
+
+    def process(self, pid, argv, *, uids=None, state="S (sleeping)", status=True, cmdline=True):
+        base = self.proc / str(pid)
+        base.mkdir()
+        me = os.geteuid()
+        uids = uids if uids is not None else (me, me, me, me)
+        # A directory stands in for a file that exists but cannot be read (EISDIR).
+        if status:
+            (base / "status").write_text(
+                f"Name:\tx\nState:\t{state}\nUid:\t" + "\t".join(map(str, uids)) + "\n")
+        else:
+            (base / "status").mkdir()
+        if cmdline:
+            (base / "cmdline").write_bytes(("\0".join(argv) + "\0").encode() if argv else b"")
+        else:
+            (base / "cmdline").mkdir()
+
+    def reference(self):
+        return S._provider_lockdir_reference(self.lockdir, self.proc)
+
+    def test_a_process_naming_the_lockdir_references_it(self):
+        self.process(10, ["python3", "refresh", "--lockdir", str(self.lockdir)])
+        self.assertEqual(self.reference()[0], "referenced")
+
+    def test_nothing_naming_it_is_unreferenced(self):
+        self.process(10, ["python3", "refresh", "--lockdir", str(self.lockdir) + "-other"])
+        self.process(11, ["sleep", "30"])
+        self.assertEqual(self.reference(), ("unreferenced", ""))
+
+    def test_unreadable_status_is_unknown_but_a_vanished_process_is_not(self):
+        self.process(10, ["sleep"], status=False)
+        self.assertEqual(self.reference()[0], "unknown")
+        (self.proc / "10" / "status").rmdir()  # ENOENT: the process is gone
+        self.assertEqual(self.reference()[0], "unreferenced")
+
+    def test_same_user_live_process_with_empty_cmdline_is_unknown(self):
+        self.process(10, [])
+        self.assertEqual(self.reference(), ("unknown", "cmdline-empty"))
+
+    def test_unreadable_cmdline_is_unknown(self):
+        self.process(10, ["sleep"], cmdline=False)
+        self.assertEqual(self.reference(), ("unknown", "cmdline-unreadable"))
+
+    def test_zombie_and_other_user_are_ignored(self):
+        self.process(10, [], state="Z (zombie)")
+        self.process(11, [], uids=(os.geteuid() + 1,) * 4)
+        self.assertEqual(self.reference(), ("unreferenced", ""))
+
+    def test_effective_uid_alone_makes_a_candidate(self):
+        me = os.geteuid()
+        self.process(10, [], uids=(me + 1, me, me + 1, me + 1))
+        self.assertEqual(self.reference()[0], "unknown")
+
+    def test_listing_limit_and_missing_proc_are_unknown(self):
+        self.process(10, ["sleep"])
+        with mock.patch.object(S, "MAX_PROVIDER_SCAN_PIDS", 0):
+            self.assertEqual(self.reference(), ("unknown", "proc-limit"))
+        self.assertEqual(S._provider_lockdir_reference(
+            self.lockdir, self.proc / "missing")[0], "unknown")
+
+    def test_scope_walks_the_real_table_once_for_every_lockdir(self):
+        with mock.patch.object(S, "_walk_provider_argv", return_value=((), "")) as walk, \
+                S.provider_reference_scan_scope():
+            S._provider_lockdir_reference(self.lockdir)
+            S._provider_lockdir_reference(self.lockdir)
+            with S.provider_reference_scan_scope():
+                S._provider_lockdir_reference(self.lockdir)
+        self.assertEqual(walk.call_count, 1)
+        with mock.patch.object(S, "_walk_provider_argv", return_value=((), "")) as walk:
+            S._provider_lockdir_reference(self.lockdir)
+            S._provider_lockdir_reference(self.lockdir)
+        self.assertEqual(walk.call_count, 2)
 
 
 if __name__ == "__main__":

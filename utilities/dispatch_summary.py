@@ -10,6 +10,9 @@ and records observational state.  It has no completion or signal authority.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import contextvars
+import errno
 import fcntl
 import json
 import os
@@ -394,7 +397,9 @@ def _owner_state_binding(metadata: dict[str, str]):
     )):
         return None, "state-identity-conflict"
     expected_home = metadata.get("runtime_home", "")
-    if expected_home and state.get("runtime_home") != expected_home:
+    # An owner state written before `runtime_home` existed has no such key: it
+    # claims no home, so it cannot conflict. A recorded value must still match.
+    if expected_home and "runtime_home" in state and state.get("runtime_home") != expected_home:
         return None, "state-home-conflict"
     expected_transcript = metadata.get("log_file", "")
     if expected_transcript:
@@ -433,13 +438,134 @@ def _probe_owner_lock(path: Path) -> str:
         os.close(fd)
 
 
+MAX_PROVIDER_SCAN_PIDS = 65536
+
+
+def _walk_provider_argv(proc_root: Path) -> tuple[tuple[str, ...], str]:
+    """(`--lockdir` argument values of this user's live processes, incomplete reason).
+
+    A process owned by another user is skipped only when its `status` was read:
+    the provider is started by this user's summary owner. The user is taken from
+    the `Uid:` line, not the `/proc/<pid>` directory owner, which is root for a
+    non-dumpable process. Any read that fails for another reason, or an empty
+    argv on a live process, leaves the reason non-empty so the caller keeps.
+    """
+    me = os.geteuid()
+    try:
+        names = [name for name in os.listdir(proc_root) if name.isdigit()]
+    except OSError as exc:
+        return (), f"proc-unreadable-{exc.errno or 'error'}"
+    if len(names) > MAX_PROVIDER_SCAN_PIDS:
+        return (), "proc-limit"
+    tokens: list[str] = []
+    reason = ""
+    for name in names:
+        base = proc_root / name
+        try:
+            status = (base / "status").read_bytes().decode("utf-8", "replace")
+        except OSError as exc:
+            if exc.errno not in (errno.ENOENT, errno.ESRCH):
+                reason = reason or "status-unreadable"
+            continue
+        uids: set[int] = set()
+        zombie = False
+        for line in status.splitlines():
+            if line.startswith("Uid:"):
+                uids = {int(item) for item in line[4:].split() if item.isdigit()}
+            elif line.startswith("State:"):
+                zombie = line[6:].strip().startswith("Z")
+        if me not in uids or zombie:
+            continue
+        try:
+            raw = (base / "cmdline").read_bytes()
+        except OSError as exc:
+            if exc.errno not in (errno.ENOENT, errno.ESRCH):
+                reason = reason or "cmdline-unreadable"
+            continue
+        if not raw:
+            reason = reason or "cmdline-empty"
+            continue
+        argv = raw.decode("utf-8", "replace").split("\0")
+        for index, item in enumerate(argv):
+            if item == "--lockdir" and index + 1 < len(argv):
+                tokens.append(argv[index + 1])
+            elif item.startswith("--lockdir="):
+                tokens.append(item[len("--lockdir="):])
+    return tuple(tokens), reason
+
+
+class _ProviderScan:
+    """One lazily taken walk, shared by every lockdir judged in one retention pass."""
+
+    def __init__(self) -> None:
+        self._walk: tuple[tuple[str, ...], str] | None = None
+
+    def get(self) -> tuple[tuple[str, ...], str]:
+        if self._walk is None:
+            self._walk = _walk_provider_argv(Path("/proc"))
+        return self._walk
+
+
+_PROVIDER_SCAN: contextvars.ContextVar = contextvars.ContextVar(
+    "dispatch_summary_provider_scan", default=None)
+
+
+@contextlib.contextmanager
+def provider_reference_scan_scope():
+    """Read the process table at most once for every lockdir judged inside this scope.
+
+    Separate from `dispatch_contract.process_table_scan_scope`, whose single walk
+    reads `stat`/`environ` for every observer in the system: a lockdir judgement
+    needs `status` and `cmdline` of this user's processes only, and only when a
+    provider lockdir exists, so the walk is taken on first use. A nested scope
+    joins the enclosing pass. Leave the scope before a final re-check.
+    """
+    if _PROVIDER_SCAN.get() is not None:
+        yield
+        return
+    token = _PROVIDER_SCAN.set(_ProviderScan())
+    try:
+        yield
+    finally:
+        _PROVIDER_SCAN.reset(token)
+
+
+def _provider_lockdir_reference(lockdir: Path, proc_root: Path = Path("/proc")) -> tuple[str, str]:
+    """referenced | unreferenced | unknown, with the reason, for one provider lockdir."""
+    scan = _PROVIDER_SCAN.get()
+    if scan is not None and Path(proc_root) == Path("/proc"):
+        tokens, reason = scan.get()
+    else:
+        tokens, reason = _walk_provider_argv(Path(proc_root))
+    wanted = os.path.normpath(str(lockdir))
+    try:
+        info = os.stat(lockdir)
+        ident = (info.st_dev, info.st_ino)
+    except OSError:
+        ident = None
+    for token in tokens:
+        if os.path.normpath(token) == wanted:
+            return "referenced", "argv-path"
+        try:
+            found = os.stat(token)
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        except (OSError, ValueError):
+            reason = reason or "token-unreadable"
+            continue
+        if ident is not None and (found.st_dev, found.st_ino) == ident:
+            return "referenced", "argv-inode"
+    return ("unknown", reason) if reason else ("unreferenced", "")
+
+
 def home_consumer_evidence(metadata: dict[str, str]) -> tuple[str, str]:
     """Whether this exact attempt's summary owner/provider can still read its HOME.
 
     This is a resource-use decision, separate from the process-death classifier.
     The owner lock covers native transcript resolution and remains held while the
     owner waits for its asynchronous provider. The provider's existing per-sid
-    lockdir extends that use after the owner unlocks.
+    lockdir extends that use after the owner unlocks, for as long as a process
+    of this user names that lockdir in its `--lockdir` argument.
     """
     declared = any(metadata.get(key) for key in (
         "summary_owner", "summary_sid", "summary_owner_pid", "summary_state_file"))
@@ -471,9 +597,23 @@ def home_consumer_evidence(metadata: dict[str, str]) -> tuple[str, str]:
     except OSError:
         return "unknown", "provider-lock-unreadable"
     if stat.S_ISDIR(provider_stat.st_mode) and provider_stat.st_uid == os.geteuid():
-        # The existing lockdir is created before spawn and held through provider
-        # reading. Its age does not prove that a reader has stopped.
-        return "live", "provider-lockdir-present"
+        # The lockdir is created before spawn and the provider's argv names it
+        # (`--lockdir`) for as long as the provider can read. Judge by that
+        # argv; a leftover directory no process names holds nothing, whatever
+        # its age. A process table that cannot be read completely keeps.
+        host_proof = (
+            metadata.get("summary_owner_pid_host", "").isdigit()
+            and metadata.get("summary_owner_pid_host_proof") == PID_HOST_NAMESPACE_PROOF
+            and process_namespace_identity() == metadata.get("summary_owner_pid_host_ns"))
+        if (process_namespace_identity() != metadata.get("summary_owner_pid_observer_ns", "")
+                and not host_proof):
+            return "unknown", "provider-scan-namespace-unverifiable"
+        found, reason = _provider_lockdir_reference(provider_lock)
+        if found == "referenced":
+            return "live", "provider-lockdir-present"
+        if found == "unreferenced":
+            return "absent", "provider-lockdir-unreferenced"
+        return "unknown", "provider-lockdir-" + reason
     return "unknown", "provider-lock-untrusted"
 
 
