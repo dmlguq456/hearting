@@ -408,6 +408,9 @@ if structured input is unavailable|structured-input fallback clause
 legacy `.claude_reports/` is only a fallback|legacy artifact-root fallback qualifier
 depth, tests, safety, and validation on fallback|fallback preservation guarantee
 before committing|expose-change-before-committing clause
+large scope, destructive work, or an external-system outcome|destructive-work structured-input clause
+use `--shape staged --graph <stage,…>` for stages the person named|person-named stage shape clause
+are handles, not orders|resume/correction handle clause
 BOOTSTRAP_PARITY_EOF
 done
 if grep -Fq '## Projected Portable Details' "$ROOT/adapters/codex/skills/autopilot-code/SKILL.md"; then

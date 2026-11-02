@@ -1302,7 +1302,8 @@ spawned a child, and every steward line that reports an armed watch, ends with
 `parent_next=end-turn` (a runtime carrier owns the wake — end the turn, start no
 wait, poll, re-arm, or recap) or `parent_next=bounded-wait` with the exact bounded
 `parent_next_command` to run once. An absent directive is not `end-turn`; never
-filter launch stdout. `parent_next` names the reader's next action; a watch wake
+filter launch stdout. `compose --start` also saves the receipt and prints its
+`receipt_file`; when a hook omits `parent_next`, that file holds it. `parent_next` names the reader's next action; a watch wake
 is observation, not a stage result (§5.14 S3). Completion names the next authorized
 action; normal success
 requires no harvest. For new registered owners, the completion controller also
@@ -1584,6 +1585,12 @@ is scheduling history, not proof of a live execution; it remains visible in
 the raw claims and journal fields. Current running or failed node evidence
 still prevents a completed projection. These observations rewrite no ledger,
 registry, claim, route or payload.
+
+Supervision reuses these runtime receipts, observations and hooks. When the
+coverage of a route is unclear, `hearting run workflow-supervisor status --route
+<id-or-file> --json` reports it; a session reports those observations rather
+than adding a harness-scheduled re-invocation, a Monitor or polling loop, or a
+manual role pane title.
 
 **Parent close.** The existing `capability-route close --route <route>` also
 ends that parent's unfinished current owner, without waiting for another model
@@ -3148,6 +3155,11 @@ one carrier.
   outside this class: no carrier can deliver it, so it keeps none and remains the
   sender's one-hour notice target. After one hour the sender is notified for any
   still-pending row.
+
+`peer-steward.py prompt` prints `prompted=queued` while the ref is pending or
+accepted by a native queue, and `prompted=true` only with the exact native
+receipt. `hearting run peer-steward prompt <name-or-pane> --body-file <file>` is
+the send path; reply text addressed to another session reaches nobody.
 
 A lost native response is reconciled from exact persisted history before continuing
 the same ref. Duplicate or ambiguous matches are left pending without resubmitting

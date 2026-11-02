@@ -551,7 +551,7 @@ def serial_chain_frontiers(
 
 
 def _resolve_artifact_root() -> str:
-    """The one canonical writable artifact root (CLAUDE.md `Runtime Router`),
+    """The one canonical writable artifact root (bootstrap "Where to look"),
     resolved the same way every other harness surface resolves it -- never a
     supervisor-local guess."""
 

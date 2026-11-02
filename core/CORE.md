@@ -667,7 +667,8 @@ Each adapter should provide:
 
 - a bootstrap note that declares it is derived from core and that edits start in
   core before adapter changes;
-- a bootstrap file that loads this core contract;
+- a bootstrap file that points to this core contract, which an agent reads when
+  the task needs it;
 - a way to expose portable capabilities (`capabilities/`) and portable role profiles (`roles/`);
 - a concrete mapping from portable model roles (`fast reviewer`, `deep reviewer`, `external adversary`, etc.) to runtime-specific models, tools, or prompt profiles;
 - a projection from the neutral `<agent-home>` repository into the runtime home using symlinks, generated files, or runtime-native registration;
