@@ -104,6 +104,13 @@ def demo_snapshot(now=None):
         {"ts": "2026-10-23T12:00:00+00:00", "action": "add", "type": "decision", "snippet": "keep the row"},
         {"ts": "2026-10-23T11:00:00+00:00", "action": "update", "type": "artifact-pointer", "snippet": None}]}
     memory["recent"] = [memory["by_repo"]["demo-app"][0]]
+    memory["database"] = {"state": "success", "limited": False, "record_count": 2, "by_repo": {
+        "demo-app": {"updated": "2026-10-23", "decisions_today": 1, "limited": False,
+                     "decisions": [{"id": "demo-decision", "type": "decision", "updated": "2026-10-23",
+                                    "headline": "결정: keep the row → 예"}],
+                     "open": [{"id": "demo-open", "type": "unresolved-obligation", "updated": "2026-10-22",
+                               "headline": "[진행 중] demo follow-up", "tags": (), "links": (),
+                               "artifact_refs": ()}]}}}
     return LiveSnapshot(sessions=sessions, jobs=jobs, memory=memory,
                         usage_snapshots={}, hearting={"version": "v3.42.0-2-gdc406c55a-dirty",
                                                       "install_method": "unmanaged"},

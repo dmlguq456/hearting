@@ -49,7 +49,7 @@ def host_snapshot(render):
         render.set_hearting(installinfo.collect(refresh_remote=False, fast_local=True))
     except Exception:
         render.set_hearting(None)
-    snapshot.memory = render._collect_memory()
+    snapshot.memory = render._collect_memory_observed(include_backlog=True)[0]   # as the explorer reads it
     try:
         render.set_compute_hosts(compute_hosts.collect())
     except Exception:
