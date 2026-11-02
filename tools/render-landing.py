@@ -797,7 +797,7 @@ FLEET_ROWS = [
     ("w",  "│", 1, "code-execute", "claude · light", "working", 21, "4m"),
     ("dn", "│", 1, "impl-review", "codex · light", "done", 34, "2m"),
     ("b2", "│", 1, "failure-mode", "codex · deep", "blocked", 11, "1m"),
-    ("i2", "○", 0, "corrnet_runtime", "interactive", "idle", 12, "38m"),
+    ("i2", "○", 0, "lab-runtime", "interactive", "idle", 12, "38m"),
 ]
 
 
