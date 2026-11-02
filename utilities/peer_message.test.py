@@ -4227,7 +4227,8 @@ class SupervisedHandoffTest(_TmpRootMixin, unittest.TestCase):
         self._write_source_card("진행 중: 카드 본문", prompt_seq=0)
         with mock.patch.object(peer_message, "deliver_pending_codex",
                                return_value={"status": "received"}), \
-             mock.patch.object(self.steward, "_codex_interrupt_start_gate", return_value=False):
+             mock.patch.object(self.steward, "_codex_interrupt_start_gate", return_value=False), \
+             mock.patch.object(self.steward, "_record", wraps=self.steward._record) as recorded:
             code, lines, stderr = self._run(["handoff", "--from", "w1:p1", "--kind", "codex"])
         self.assertEqual(code, 0, (lines, stderr))
         line = lines[-1]
@@ -4244,6 +4245,14 @@ class SupervisedHandoffTest(_TmpRootMixin, unittest.TestCase):
         row = rows[0]
         self.assertEqual((row["from"]["harness"], row["from"]["session_id"],
                           row["from"].get("pane_id")), ("claude", "predecessor", "w1:p1"))
+        # The sealed sender is the predecessor, so the peer ledger row names the
+        # source session's project, not the supervisor shell's working directory.
+        self.assertNotEqual(os.path.basename(os.getcwd()), os.path.basename(str(self.tmp_root)))
+        sent = [call.kwargs for call in recorded.call_args_list
+                if call.kwargs.get("transfer_ref") == row["ref"]]
+        self.assertEqual(len(sent), 1, recorded.call_args_list)
+        self.assertEqual(sent[0]["from_identity"],
+                         ("predecessor", "claude", os.path.basename(str(self.tmp_root))))
         context = row["handoff"]
         self.assertEqual(context["target"], "w1:p1")
         self.assertEqual(context["predecessor"]["pane"], "w1:p1")

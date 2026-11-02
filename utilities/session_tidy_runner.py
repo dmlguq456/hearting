@@ -1534,7 +1534,7 @@ def _handoff_send(seat: "st.Seat", target: str, *, caller=None, sender=None,
                 resolved_recipient=successor_candidate)
             if sender is not None:
                 prompt_kwargs["sender"] = {"harness": sender_harness, "session_id": sender_sid,
-                                           "pane": seat.pane or ""}
+                                           "pane": seat.pane or "", "cwd": sender.get("cwd")}
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
                 code = steward.cmd_prompt(args, **prompt_kwargs)
@@ -1738,7 +1738,7 @@ def supervised_handoff(source: str, *, kind=None, target=None, name=None) -> tup
 
     line, code, lineage = _handoff_send(
         p_seat, successor["pane"], caller=(p_seat, p_harness, p_sid),
-        sender={"harness": p_harness, "session_id": p_sid, "pane": p_pane},
+        sender={"harness": p_harness, "session_id": p_sid, "pane": p_pane, "cwd": cwd},
         relayed_by=relayed_by, steward=steward)
     verdict = line if " exit=" in line else f"{line} exit={code}"
     return _supervised_line(
