@@ -3,7 +3,7 @@ import datetime
 import math
 from collections.abc import Mapping
 from .grid import CellGrid, cell_width, clip_cells
-from .tables import repo_label
+from .tables import repo_label, route_counts
 from .style import steward_flag_key
 
 NAV_WIDTH = 32
@@ -92,6 +92,25 @@ def _answer_wait_summary(vm):
         return summary
     # Scrubbed viewer fixtures predate the live safe-cache summary.
     return {"state": "complete", "total": len(vm.questions or ()), "older": 0}
+
+
+def answer_wait_count(vm):
+    """The one current question count every surface shows, or None while it is not observed."""
+    waits = _answer_wait_summary(vm)
+    total = waits.get("total") if waits.get("state") == "complete" else None
+    return total if isinstance(total, int) and not isinstance(total, bool) else None
+
+
+def older_waits_text(waits):
+    """`` · older waits 6 (받을 세션 없음 1)``: folded waits stay counted, never dropped."""
+    if waits.get("state") != "complete":
+        return ""
+    older, ownerless = waits.get("older"), waits.get("ownerless")
+    if not isinstance(older, int) or isinstance(older, bool) or older <= 0:
+        return ""
+    note = (f" (받을 세션 없음 {ownerless})"
+            if isinstance(ownerless, int) and not isinstance(ownerless, bool) and ownerless > 0 else "")
+    return f" · older waits {older}{note}"
 
 
 def _peer_observation_summary(vm):
@@ -526,19 +545,24 @@ def draw_chrome(grid: CellGrid, vm, state, beat=1):
         elif scope_kind in ("session", "route"):
             status = "esc: back up"
         elif state.view == "OVERVIEW" and state.scope == "-":
+            # The same current count as the QUESTIONS tab: older waits are not counted here.
+            current = answer_wait_count(vm)
+            open_routes, no_response, _stopped = route_counts(routes)
             status = (f"{count_word(len(sessions), 'session')} · "
-                      f"{count_word(sum(1 for item in routes if item.get('state') != 'done'), 'route')} · "
-                      f"{count_word(len(questions), 'question')}")
+                      f"{count_word(open_routes, 'route')} · "
+                      + (f"응답 없음 {no_response} · " if no_response else "")
+                      + (count_word(current, 'question') if current is not None else "? questions"))
         elif state.view == "ROUTES":
-            status = (f"{sum(1 for item in routes if item.get('state') != 'done')} open · "
-                      f"{count_word(sum(1 for item in routes if item.get('state') == 'dead'), 'stopped leg')}")
+            open_routes, no_response, stopped = route_counts(routes)
+            status = (f"{open_routes} open · "
+                      + (f"응답 없음 {no_response} · " if no_response else "")
+                      + count_word(stopped, 'stopped leg'))
         elif state.view == "QUESTIONS":
             total = (system.get("answered_total") if isinstance(system, Mapping) else None)
             waits = _answer_wait_summary(vm)
             current = waits.get("total") if waits.get("state") == "complete" else None
             waiting = str(current) if current is not None else "?"
-            older = waits.get("older") if waits.get("state") == "complete" else None
-            older_text = f" · older waits {older}" if isinstance(older, int) and older > 0 else ""
+            older_text = older_waits_text(waits)
             records = total if total is not None else len(questions)
             suffix = "" if waits.get("state") == "complete" else " · observation " + str(waits.get("state"))
             status = f"{waiting} waiting{older_text} · {count_word(records, 'decision record')} today{suffix}"
@@ -653,13 +677,12 @@ def draw_explorer(grid: CellGrid, vm, state):
     if width <= 0 or height <= 0:
         return
     scope_kind, _, scope_id = str(getattr(state, "scope", "-") or "-").partition(":")
-    waits = _answer_wait_summary(vm)
-    question_count = waits.get("total") if waits.get("state") == "complete" else None
+    question_count = answer_wait_count(vm)
     peers = _peer_observation_summary(vm)
     peer_count = (len(vm.peer_edges.get("links", ()))
                   if peers.get("state") == "success" else None)
     counts = {"PEERS": peer_count,
-              "ROUTES": sum(1 for route in vm.routes if route.get("state") != "done"),
+              "ROUTES": route_counts(vm.routes)[0],
               "QUESTIONS": question_count, "HISTORY": len(vm.seats or ())}
     views = ("OVERVIEW", "PEERS", "ROUTES", "QUESTIONS", "HISTORY", "COMPUTE")
     y = 6 if getattr(state, "usage_open", False) else 4
@@ -871,7 +894,8 @@ def draw_explorer(grid: CellGrid, vm, state):
                 rh = route.get("harness") or "·"
                 label_x = branch_x + 3
                 mark, mark_key = {"running": ("⠏", "g_spin_dim"), "working": ("⠏", "g_spin_dim"),
-                                  "blocked": ("●", "lvl_r_dim")}.get(
+                                  "blocked": ("●", "lvl_r_dim"), "stale": ("◌", "dim")}.get(
+                    "stale" if route.get("state") == "stale" else
                     route.get("activity", route.get("state")), ("●", "idle"))
                 route_suffix = ": " + str(rh) + " " + mark
                 name_room = max(1, width - 1 - label_x - cell_width(route_suffix))

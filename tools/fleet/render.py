@@ -11990,9 +11990,9 @@ def _explorer_text_key(ch):
 
 
 def _explorer_question_refs():
+    from .explorer.state import older_waits_shown
     questions = getattr(_EXPLORER_MODEL, "questions", ()) if _EXPLORER_MODEL is not None else ()
-    older_open = getattr(_EXPLORER_STATE, "opened_for", lambda *_: "")(
-        "qolder:QUESTIONS", "") == "open"
+    older_open = older_waits_shown(_EXPLORER_STATE)
     return tuple(dict(item.get("ref") or {}) for item in questions
                  if isinstance(item, Mapping) and isinstance(item.get("ref"), Mapping)
                  and (not item.get("older") or older_open))
