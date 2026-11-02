@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import fcntl
 import json
+import shutil
 import stat
 import subprocess
 import sys
@@ -334,6 +335,66 @@ class HumanWaitStateTests(unittest.TestCase):
              mock.patch.object(state.fcntl, "flock"), mock.patch.object(state.os, "close"):
             state._producer_loop(123)
         sleep.assert_called_once_with(3600.0)
+
+    def _run_producer_with(self, *, during_refresh=None, during_sleep=None):
+        """Run the real producer loop with an instant observation and an injected wait.
+
+        Returns (reads, sleeps, kept_running); a second wait stops the loop there."""
+        root = state.state_root()
+        root.mkdir(parents=True, exist_ok=True)
+        (root / ".demand").touch()
+        lock = os.open(Path(self.tmp.name) / "producer.lock", os.O_CREAT | os.O_RDWR, 0o600)
+        result = {"items": [], "complete": True, "observed_at": time.time(), "health": []}
+        reads, sleeps = [], []
+
+        class KeptRunning(BaseException):   # not swallowed by the loop's ``except Exception``
+            pass
+
+        def read(**_kwargs):
+            reads.append(1)
+            if during_refresh and len(reads) == 1:
+                during_refresh()
+            return dict(result)
+
+        def wait(seconds):
+            sleeps.append(seconds)
+            if len(sleeps) > 1:
+                raise KeptRunning()
+            if during_sleep:
+                during_sleep()
+        import tools.fleet.collectors.dispatch as dispatch
+        kept_running = False
+        with mock.patch.object(observation, "read_answer_waits", side_effect=read), \
+             mock.patch.object(dispatch, "human_gate_registry_paths", return_value=[]), \
+             mock.patch.object(state.time, "sleep", side_effect=wait):
+            try:
+                state._producer_loop(lock)
+            except KeptRunning:
+                kept_running = True
+        return reads, sleeps, kept_running
+
+    def test_producer_ends_without_recreating_a_root_removed_while_it_waited(self):
+        xdg = Path(self.tmp.name) / "hearting"
+        reads, sleeps, kept_running = self._run_producer_with(during_sleep=lambda: shutil.rmtree(xdg))
+        self.assertFalse(kept_running)
+        self.assertEqual((len(reads), len(sleeps)), (1, 1))
+        self.assertFalse(xdg.exists())
+        self.assertIsNone(state._producer_root)
+
+    def test_producer_does_not_recreate_a_root_removed_during_its_refresh(self):
+        xdg = Path(self.tmp.name) / "hearting"
+        reads, sleeps, kept_running = self._run_producer_with(during_refresh=lambda: shutil.rmtree(xdg))
+        self.assertFalse(kept_running)
+        self.assertEqual((len(reads), sleeps), (1, []))
+        self.assertFalse(xdg.exists())
+
+    def test_producer_keeps_refreshing_on_its_cadence_while_its_root_exists(self):
+        reads, sleeps, kept_running = self._run_producer_with()
+        self.assertTrue(kept_running)
+        self.assertEqual(len(reads), 2)
+        self.assertTrue(0 < sleeps[0] <= 30.0)
+        self.assertTrue((state.state_root() / "projection.json").is_file())
+        self.assertIsNone(state._producer_root)
 
     def test_notification_claim_is_single_under_concurrent_refresh(self):
         bin_dir = Path(self.tmp.name) / "race-bin"
