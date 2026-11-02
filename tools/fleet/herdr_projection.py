@@ -425,6 +425,9 @@ def _formatter_overrides(harness: str, session_id: str, title: str) -> tuple:
 
 
 _PROOF_WAIT_S = 90
+# session_tidy.record_event writes every recorded start seq in epoch microseconds;
+# Herdr compares a source's seq in that harness's native publisher unit.
+_LEDGER_SEQ_TO_HERDR = {"claude": 1000, "codex": 1000, "opencode": 1}
 _THREAD_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 
@@ -554,28 +557,74 @@ def _await_tui_and_project(session_id: str, report_session: bool, *,
                            session_seq=None, session_start_source=None) -> None:
     import fcntl
     import tempfile
-    # One waiter per session: every later prompt's helper exits while one is waiting.
+    deadline = time.monotonic() + _PROOF_WAIT_S
+    # One waiter per session: every later prompt's helper exits while one is waiting. A waiter
+    # that carries a native start origin waits for the lock instead, so it is never lost to
+    # a sibling that started without one.
     lock = open(os.path.join(tempfile.gettempdir(),
                              "hearting-herdr-await-%s.lock" % session_id), "w")
+    while True:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except OSError:
+            if session_start_source is None or time.monotonic() >= deadline:
+                lock.close()
+                return
+            time.sleep(0.5)
     try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        lock.close()
-        return
-    try:
-        deadline = time.monotonic() + _PROOF_WAIT_S
         while time.monotonic() < deadline:
             endpoint = _codex_tui_endpoint(session_id)
             if endpoint:
                 pane, socket_path = endpoint
+                resume_argv = None
+                if report_session and session_seq is None and session_start_source is None:
+                    # The prompt callback has no lifecycle: reuse the start this exact proven
+                    # pane seat recorded for this session, never a new one.
+                    try:
+                        recorded = _recorded_start_lifecycle(
+                            "codex", session_id, pane, socket_path=socket_path or "")
+                    except Exception:
+                        recorded = {}
+                    if recorded.get("session_seq") is not None and recorded.get("session_start_source"):
+                        session_seq = recorded["session_seq"]
+                        session_start_source = recorded["session_start_source"]
+                        resume_argv = recorded.get("resume_argv")
                 with _herdr_endpoint(socket_path):
                     _report("codex", session_id, pane, report_session,
                             session_seq=session_seq, session_start_source=session_start_source,
+                            resume_argv=resume_argv,
                             _proof=lambda: _codex_tui_endpoint(session_id) == endpoint)
                 return
             time.sleep(2)
     finally:
         lock.close()
+
+
+def _recorded_start_lifecycle(harness, session_id, pane, *, socket_path=None) -> dict:
+    """This exact pane seat's recorded native start, in the unit Herdr compares.
+
+    ``socket_path`` (a proven frontend's socket, "" for the default endpoint) keys the seat
+    exactly as the shared-daemon writer did; ``None`` keeps this process's own endpoint.
+    The recorded seq is converted once; no new seq is ever made here.
+    """
+    # The deferred reporter runs this module as a script, without the hook's utilities path.
+    utilities = str(Path(__file__).resolve().parents[2] / "utilities")
+    if utilities not in sys.path:
+        sys.path.insert(0, utilities)
+    import session_tidy
+    endpoint = (None if socket_path is None
+                else session_tidy._endpoint_scope({"HERDR_SOCKET_PATH": socket_path}))
+    context = session_tidy.session_start_context(harness, session_id, pane, endpoint=endpoint)
+    result = {}
+    if context.get("session_start_source"):
+        result["session_start_source"] = context["session_start_source"]
+    seq = context.get("session_seq")
+    if type(seq) is int and seq > 0 and harness in _LEDGER_SEQ_TO_HERDR:
+        result["session_seq"] = seq * _LEDGER_SEQ_TO_HERDR[harness]
+    if context.get("resume_argv"):
+        result["resume_argv"] = context["resume_argv"]
+    return result
 
 
 def _session_lifecycle(harness, session_seq, session_start_source, resume_argv=None, *, session_id=None):
@@ -673,11 +722,7 @@ def project(harness: str, session_id: str, *, pane_id=None, worker=None,
         # A start may precede native process identity. The next existing callback
         # reuses that recorded source once this exact runtime is identifiable.
         try:
-            utilities = str(Path(__file__).resolve().parents[2] / "utilities")
-            if utilities not in sys.path:
-                sys.path.insert(0, utilities)
-            import session_tidy
-            context = session_tidy.session_start_context(harness, session_id, pane)
+            context = _recorded_start_lifecycle(harness, session_id, pane)
             session_seq = context.get("session_seq")
             session_start_source = context.get("session_start_source")
             resume_argv = context.get("resume_argv")
@@ -839,7 +884,7 @@ def main(argv=None) -> int:
     parser.add_argument("--no-report-session", action="store_true",
                         help="skip report-agent-session (the runtime's own hook owns it)")
     parser.add_argument("--seq", type=int,
-                        help="optional OpenCode native publisher sequence")
+                        help="optional native publisher sequence (Herdr unit)")
     parser.add_argument("--session-start-source", choices=["startup", "resume", "clear", "compact", "fork"],
                         help="the actual native session-start source")
     parser.add_argument("--print", action="store_true",

@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -15,6 +16,7 @@ sys.path.insert(0, str(ROOT / "utilities"))
 from fleet import herdr_projection as projection  # noqa: E402
 from fleet.collectors import procscan  # noqa: E402
 import pane_ownership  # noqa: E402
+import session_tidy  # noqa: E402
 
 _RUN = subprocess.run  # setUp replaces subprocess.run with the herdr double
 
@@ -23,6 +25,9 @@ THREAD_A = "01a133d1-5d32-7581-ac0c-c2dccaa26b4f"
 THREAD_B = "01a1336e-9aa6-75e2-80fc-cca13b79b1e3"
 THREAD_C = "01a133d1-5d32-7581-ac0c-c2dccaa26b4c"
 TREE_ROOT = "01a12d62-4ef3-7363-8d6a-9e12a26d250f"
+OLD_NS = 1792000000000000000  # an older session's hook-time nanosecond seq
+CLEAR_NOW = 1793262080.5  # binary-exact, so the recorded microsecond seq is exact
+CLEAR_US = 1793262080500000
 
 
 def screen(thread_ids, *, prompt=True, clipped=False):
@@ -219,10 +224,14 @@ class CodexFooterBindingTest(unittest.TestCase):
                  "import herdr_projection\n"
                  "herdr_projection._codex_tui_endpoint('not-a-thread')\n"
                  "print('pane_ownership' in sys.modules)\n"
-                 "print(herdr_projection._session_lifecycle('codex', None, None))\n")
+                 "print(herdr_projection._session_lifecycle('codex', None, None))\n"
+                 "print(herdr_projection._recorded_start_lifecycle("
+                 "'codex', 'not-a-thread', 'w:p', socket_path=''))\n"
+                 "print('session_tidy' in sys.modules)\n")
         done = _RUN([sys.executable, "-I", "-c", probe], capture_output=True,
-                    text=True, timeout=60, check=False)
-        self.assertEqual(done.stdout.split(), ["True", "{}"], done.stderr)
+                    text=True, timeout=60, check=False,
+                    env={"XDG_STATE_HOME": str(self.root / "state"), "HOME": str(self.root / "home")})
+        self.assertEqual(done.stdout.split(), ["True", "{}", "{}", "True"], done.stderr)
 
     def test_deferred_report_proof_rejects_socket_switch_before_session_report(self):
         pane = "wC:p7"
@@ -504,6 +513,221 @@ class CodexFooterBindingTest(unittest.TestCase):
                 mock.patch("tempfile.gettempdir", return_value=str(self.root)):
             projection.project("codex", THREAD_A)
         report.assert_not_called()
+
+    # --- recorded clear origin for the lifecycle-less prompt waiter -------------------------
+
+    def waiter_env(self, **extra):
+        env = {"HOME": str(self.root / "home"), "XDG_STATE_HOME": str(self.root / "state"),
+               "HERDR_PANE_ID": "stale:pane", "CODEX_THREAD_ID": THREAD_B,
+               "HERDR_SOCKET_PATH": "/inherited-service.sock",
+               "AGENT_HERDR_SESSION": "inherited"}
+        env.update(extra)
+        return env
+
+    def write_start(self, pane, socket_path, sid, *, source="clear", now=CLEAR_NOW, pid=1):
+        """One start row through the real writer, keyed like the shared-daemon caller's seat."""
+        seat = session_tidy.pane_seat_from_binding({
+            "pane": pane, "socket_path": socket_path, "pid": pid,
+            "pid_start": f"start-{pid}", "session_id": sid})
+        with mock.patch.dict(os.environ, self.waiter_env(), clear=True):
+            with session_tidy.session_state_lock(seat):
+                session_tidy.record_event(seat, "codex", sid, "start", source=source, now=now)
+        return seat
+
+    def run_prompt_waiter(self, pid, *, deferred_kwargs=None, env=None):
+        """project() on the lifecycle-less shared-service path with an inline waiter."""
+        scan = self.scan_panes([pid])
+        self.report_calls.clear()
+        with scan[0], scan[1], scan[2], \
+                mock.patch.object(projection.shutil, "which", return_value="/fake/herdr"), \
+                mock.patch.object(projection, "_in_shared_codex_service", return_value=True), \
+                mock.patch.object(projection, "_defer_until_proven",
+                                  side_effect=lambda sid, include, **lifecycle:
+                                  projection._await_tui_and_project(sid, include, **lifecycle)), \
+                mock.patch.object(projection, "session_title", return_value="fixture title"), \
+                mock.patch.object(projection, "_formatter_overrides", return_value=(None, None)), \
+                mock.patch.object(projection, "compose", return_value=("[46] codex", "fixture title")), \
+                mock.patch.object(projection, "header_title", return_value="fixture header"), \
+                mock.patch.dict(os.environ, env or self.waiter_env(), clear=True), \
+                mock.patch("tempfile.gettempdir", return_value=str(self.root)):
+            projection.project("codex", THREAD_B, **(deferred_kwargs or {}))
+            self.assertEqual(os.environ["HERDR_SOCKET_PATH"],
+                             (env or self.waiter_env())["HERDR_SOCKET_PATH"])
+        return [(command, env_) for command, env_ in self.report_calls]
+
+    def waiter_sleep(self, side_effect=None):
+        """Replace only the waiter's own ``time`` (pane_ownership shares the real module)."""
+        clock = mock.Mock(wraps=time)
+        clock.sleep = mock.Mock(side_effect=side_effect)
+        return mock.patch.object(projection, "time", clock), clock.sleep
+
+    def session_reports(self, calls):
+        return [command for command, _env in calls if command[1:3] == ["pane", "report-agent-session"]]
+
+    def test_prompt_waiter_restores_recorded_clear_origin_on_proven_endpoint(self):
+        pid, pane, sock = 43001, "wD:p1", "/isolated/clear.sock"
+        self.add_frontend(pid, pane, THREAD_B, socket_path=sock)
+        self.write_start(pane, sock, THREAD_B, pid=pid)
+        calls = self.run_prompt_waiter(pid)
+        self.assertEqual(len(calls), 2)
+        (first, first_env), (second, second_env) = calls
+        self.assertEqual(first[1:], [
+            "pane", "report-agent-session", pane, "--source", "herdr:codex", "--agent", "codex",
+            "--agent-session-id", THREAD_B, "--seq", str(CLEAR_US * 1000),
+            "--session-start-source", "clear"])
+        self.assertGreater(int(first[first.index("--seq") + 1]), OLD_NS)
+        self.assertEqual(first_env["HERDR_SOCKET_PATH"], sock)
+        self.assertEqual(second[1:4], ["pane", "report-metadata", pane])
+        self.assertEqual(second_env["HERDR_SOCKET_PATH"], sock)
+
+    def test_prompt_waiter_reads_the_writer_seat_when_socket_is_empty(self):
+        pid, pane = 43011, "wD:p2"
+        self.add_frontend(pid, pane, THREAD_B)
+        self.write_start(pane, "", THREAD_B, pid=pid)
+        # the fixture raises on any Herdr call it does not know, so a reader that asked Herdr
+        # for the inherited AGENT_HERDR_SESSION's socket would fail here
+        calls = self.run_prompt_waiter(pid)
+        sessions = self.session_reports(calls)
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0][sessions[0].index("--seq") + 1], str(CLEAR_US * 1000))
+        self.assertEqual(sessions[0][sessions[0].index("--session-start-source") + 1], "clear")
+
+    def test_restored_ledger_seq_is_converted_once_and_explicit_seq_is_kept(self):
+        pid, pane, sock = 43021, "wD:p3", "/isolated/explicit.sock"
+        self.add_frontend(pid, pane, THREAD_B, socket_path=sock)
+        self.write_start(pane, sock, THREAD_B, pid=pid)
+        explicit = 1793262080600000000
+        with mock.patch.object(session_tidy, "session_start_context",
+                               wraps=session_tidy.session_start_context) as read:
+            calls = self.run_prompt_waiter(
+                pid, deferred_kwargs=dict(session_seq=explicit, session_start_source="clear"))
+        read.assert_not_called()
+        sessions = self.session_reports(calls)
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0][sessions[0].index("--seq") + 1], str(explicit))
+
+    def test_recorded_source_without_seq_does_not_invent_one(self):
+        pid, pane, sock = 43031, "wD:p4", "/isolated/noseq.sock"
+        self.add_frontend(pid, pane, THREAD_B, socket_path=sock)
+        seat = session_tidy.pane_seat_from_binding({
+            "pane": pane, "socket_path": sock, "pid": pid,
+            "pid_start": f"start-{pid}", "session_id": THREAD_B})
+        # a hand-made row: the writer always records a seq, so only a direct append has none
+        with mock.patch.dict(os.environ, self.waiter_env(), clear=True):
+            with session_tidy.session_state_lock(seat):
+                session_tidy._append_ledger_entry(seat, {
+                    "harness": "codex", "sid": THREAD_B, "event": "start",
+                    "source": "clear", "epoch": 0})
+        calls = self.run_prompt_waiter(pid)
+        sessions = self.session_reports(calls)
+        self.assertEqual(len(sessions), 1)
+        self.assertNotIn("--seq", sessions[0])
+        self.assertNotIn("--session-start-source", sessions[0])
+
+    def test_prompt_waiter_ignores_other_sid_and_other_seat_start_rows(self):
+        cases = {
+            "other sid": lambda pane, sock: self.write_start(pane, sock, THREAD_A),
+            "other pane": lambda pane, sock: self.write_start("wD:other", sock, THREAD_B),
+            "other socket": lambda pane, sock: self.write_start(pane, "/isolated/else.sock", THREAD_B),
+        }
+        for index, (name, write) in enumerate(cases.items()):
+            with self.subTest(name):
+                pid, pane, sock = 43040 + index, f"wD:p5{index}", f"/isolated/seat{index}.sock"
+                self.add_frontend(pid, pane, THREAD_B, socket_path=sock)
+                write(pane, sock)
+                sessions = self.session_reports(self.run_prompt_waiter(pid))
+                for command in sessions:
+                    self.assertNotIn("--seq", command)
+                    self.assertNotIn("--session-start-source", command)
+
+    def test_restored_origin_never_reaches_worker_changed_process_or_flipped_proof(self):
+        pid, pane, sock = 43061, "wD:p6", "/isolated/guard.sock"
+        # (a) a registered worker frontend is never a reporter
+        self.add_frontend(pid, pane, THREAD_B, socket_path=sock)
+        self.write_start(pane, sock, THREAD_B, pid=pid)
+        self.workers.add(pid)
+        patch, nap = self.waiter_sleep(RuntimeError("gave up"))
+        with patch:
+            with self.assertRaises(RuntimeError):
+                self.run_prompt_waiter(pid)  # it kept waiting: no TUI was ever proven
+        self.assertEqual(nap.call_count, 1)
+        self.assertEqual(self.report_calls, [])
+        self.workers.clear()
+
+        # (b) the frontend's PID start changes after the first proof
+        proven = {"done": False}
+        real_endpoint = pane_ownership.codex_tui_pane_endpoint
+
+        def endpoint_then_move_process(session_id):
+            result = real_endpoint(session_id)
+            if result:
+                proven["done"] = True
+            return result
+
+        def moving_process(p):
+            record = self.read_process(p)
+            if record and proven["done"] and int(p) == pid:
+                proven["n"] = proven.get("n", 0) + 1
+                return (*record[:-1], f"reused-pid-start-{proven['n']}")
+            return record
+
+        with mock.patch.object(pane_ownership, "codex_tui_pane_endpoint",
+                               side_effect=endpoint_then_move_process), \
+                mock.patch.object(pane_ownership, "_process", side_effect=moving_process):
+            self.run_prompt_waiter(pid)
+        self.assertTrue(proven["done"])  # the first proof held; the later one did not
+        self.assertEqual(self.report_calls, [])
+
+        # (c) the proven endpoint flips to another socket before the session report
+        scan_calls = [(pane, sock), (pane, "/isolated/flipped.sock")]
+        sent = []
+        with mock.patch.object(pane_ownership, "codex_tui_pane_endpoint", side_effect=scan_calls), \
+                mock.patch.object(projection.shutil, "which", return_value="/fake/herdr"), \
+                mock.patch.object(projection, "_send_projection",
+                                  side_effect=lambda command, _o: sent.append(command)), \
+                mock.patch.dict(os.environ, self.waiter_env(), clear=True), \
+                mock.patch("tempfile.gettempdir", return_value=str(self.root)):
+            projection._await_tui_and_project(THREAD_B, True)
+        self.assertEqual(sent, [])
+
+    def test_origin_waiter_waits_for_the_lock_and_reports_clear_origin(self):
+        import fcntl
+        pane, sock = "wD:p7", "/isolated/lock.sock"
+        held = open(self.root / f"hearting-herdr-await-{THREAD_B}.lock", "w")
+        fcntl.flock(held, fcntl.LOCK_EX)
+        self.addCleanup(held.close)
+        sent = []
+        explicit = 1793262080600000000
+
+        def run(**lifecycle):
+            with mock.patch.object(pane_ownership, "codex_tui_pane_endpoint",
+                                   return_value=(pane, sock)), \
+                    mock.patch.object(projection.shutil, "which", return_value="/fake/herdr"), \
+                    mock.patch.object(projection, "_send_projection",
+                                      side_effect=lambda command, _o: sent.append(command)), \
+                    mock.patch.dict(os.environ, self.waiter_env(), clear=True), \
+                    mock.patch("tempfile.gettempdir", return_value=str(self.root)):
+                projection._await_tui_and_project(THREAD_B, True, **lifecycle)
+
+        # (1) a waiter with no origin leaves at once, as before
+        patch, nap = self.waiter_sleep()
+        with patch:
+            run()
+        self.assertEqual(sent, [])
+        nap.assert_not_called()
+
+        # (2) a waiter that carries an origin waits for the lock and then reports it
+        def release(_seconds):
+            fcntl.flock(held, fcntl.LOCK_UN)
+
+        patch, nap = self.waiter_sleep(release)
+        with patch:
+            run(session_seq=explicit, session_start_source="clear")
+        self.assertEqual(nap.call_count, 1)
+        sessions = [c for c in sent if c[2] == "report-agent-session"]
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0][sessions[0].index("--seq") + 1], str(explicit))
+        self.assertEqual(sessions[0][sessions[0].index("--session-start-source") + 1], "clear")
 
 
 if __name__ == "__main__":
