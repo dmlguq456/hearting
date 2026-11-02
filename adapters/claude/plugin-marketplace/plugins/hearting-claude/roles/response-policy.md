@@ -110,7 +110,7 @@ Each clause is one contract line plus the signal that it was violated.
 ### Pause and autonomy
 
 - **Confirm the primary entry route once** — before material work begins, the
-  main agent presents the completed five-field confirmation card from
+  main agent presents the completed intent card from
   `core/WORKFLOW.md §0.4` and waits for the user to approve or correct the
   proposed primary entry capability. This is an intent handshake before Skill
   execution, not an opt-in pipeline pause or an invitation for the user to
@@ -181,7 +181,7 @@ Each clause is one contract line plus the signal that it was violated.
   *Violation signal:* starting a contested design without shared intent, or
   re-confirming after intent was already aligned.
 
-**Structured input** — use structured input only for non-obvious choices that materially change the goal, architecture, UX, large scope, destructive work, or an external-system outcome, plus the `core/WORKFLOW.md §0.4` execution-confirmation card, which is a standing approved use (five fields as the question body, options 진행 (recommended) / 수정 / 중단). Continue low-risk reversible work autonomously. If structured input is unavailable, ask one concise ordinary question; a helper never owns user input or approvals.
+**Structured input** — use structured input only for non-obvious choices that materially change the goal, architecture, UX, large scope, destructive work, or an external-system outcome, plus the `core/WORKFLOW.md §0.4` intent card, which is a standing approved use (the card's fields as the question body, options 진행 (recommended) / 수정 / 중단). Continue low-risk reversible work autonomously. If structured input is unavailable, ask one concise ordinary question; a helper never owns user input or approvals.
 
 When a decision is needed before proceeding, prefer a native question surface
 that waits for the answer when the current runtime and mode support it. If only

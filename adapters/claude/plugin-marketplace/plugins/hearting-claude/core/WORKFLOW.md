@@ -541,38 +541,41 @@ recorded reason.
 
 ### 0.4. Primary Entry Confirmation
 
-For material work, the main agent proposes the route and the user confirms the
-intent before capability execution begins. The agent fills every field from
-the request and recovered context; the user reviews a completed proposal rather
-than recalling capability names, invocation syntax, or pipeline options.
+For material work, the main agent shows the intent sealed at compose and the
+user confirms it before capability execution begins. The agent writes the
+prompt file's leading intent lines from the request and recovered context
+(Sealed intent, below); compose adds the person's words and prints them as
+`[의도]` lines. The card shows those same values, so the user reviews a
+completed proposal rather than recalling capability names, invocation syntax,
+or pipeline options, and the card and the route say the same thing.
 
-Render labels in the user's communication language while preserving these five
+Render labels in the user's communication language while preserving these
 fields and this order. In Korean, the canonical card is:
 
 ```text
-[실행 확인]
+[의도 확인]
 
-작업: <무엇을 어떤 결과로 만들지>
-이유: <현재 배경과 작업이 필요한 이유>
-경로: <primary entry capability> · <mode/intensity> — <선택 이유>
-범위: <포함 범위와 중요한 제외 대상>
-시작 승인 (필요 시): <선택한 경로가 표시한 승인 대상 부품 — 이 leg의 실행 범위>
+원문: "<compose가 붙인 사람 말 발췌>"
+의도: <무엇을 어떤 결과로 만들지>
+안 할 것: <중요한 제외 대상 또는 없음>
 완료: <산출물과 검증 기준>
+경로: <primary entry capability> · <mode/intensity> — <선택 이유>
+시작 승인 (필요 시): <선택한 경로가 표시한 승인 대상 부품 — 이 leg의 실행 범위>
 
 → 진행 / 수정: <틀린 부분> / 중단
 ```
 
-In English, the same five fields in the same order are:
+In English, the same fields in the same order are:
 
 ```text
-[Run confirmation]
+[Intent confirmation]
 
-Task: <what to produce, and the expected result>
-Reason: <current background and why the work is needed>
-Route: <primary entry capability> · <mode/intensity> — <why this route>
-Scope: <what is included and the important exclusions>
-Start approval (if needed): <the marked part this route asks approval for — this leg's execution scope>
+Original: "<the excerpt of the person's words compose sealed>"
+Intent: <what to produce, and the expected result>
+Not doing: <the important exclusions, or none>
 Done: <deliverables and verification criteria>
+Route: <primary entry capability> · <mode/intensity> — <why this route>
+Start approval (if needed): <the marked part this route asks approval for — this leg's execution scope>
 
 → Proceed / Edit: <what is wrong> / Stop
 ```
@@ -581,13 +584,15 @@ The card follows the user's communication language; the shared UI-text
 selection (`tools/i18n/ui_text.py`) governs only text the tools print, such as
 the `[경로]` notice, whose marker prints as `[Route]` in English.
 
-When the runtime exposes a native structured-question surface (Claude
-`AskUserQuestion`, Codex `request_user_input`, OpenCode `question`), deliver this confirmation
-through it: the five confirmation fields form the question body; the optional
-start-approval line is scope metadata, and the options are exactly
-진행 (recommended) / 수정 / 중단 (in English Proceed (recommended) / Edit / Stop). The plain-text card above is the fallback when
+`원문` (Original) appears only when compose sealed an excerpt; `경로` (Route) is
+information, not a second question. When the runtime exposes a native
+structured-question surface (Claude `AskUserQuestion`, Codex
+`request_user_input`, OpenCode `question`), deliver this confirmation through
+it: the card's fields form the question body; the optional start-approval line
+is scope metadata, and the options are exactly 진행 (recommended) / 수정 / 중단
+(in English Proceed (recommended) / Edit / Stop). The plain-text card above is the fallback when
 no such surface exists or it fails. The structured form changes only the
-delivery surface — never the five fields, their order, the one-time approval
+delivery surface — never the fields, their order, the one-time approval
 semantics, or the exemptions below.
 
 Keep each confirmation value to one line. Include the start-approval line only
@@ -725,7 +730,7 @@ Deliver this card through the native question tool (Claude `AskUserQuestion`,
 Codex `request_user_input`, OpenCode `question`) when one is
 available, the plain-text form otherwise — the same fallback rule as the §0.4
 card. Only once the direction is confirmed does the owner start, and the §0.4
-gate then arrives as a non-blocking `[실행 통지]` — the same five fields, in
+gate then arrives as a non-blocking `[실행 통지]` — the same card fields, in
 order. It announces the route the confirmed direction produced; it does not
 re-ask a direction the user has already settled.
 `confirmation.mode` (`profiles/dispatch-defaults.yaml`, default `hybrid`)

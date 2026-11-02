@@ -17,7 +17,7 @@ contract. It is adapter-owned output, not a legacy compatibility Skill copy.
 ## Use
 
 1. Before approval, route from this compact metadata and `core/WORKFLOW.md §0.2`; do not read the full portable source merely to propose the route.
-2. Present the five-field confirmation card from `core/WORKFLOW.md §0.4` unless the same route and scope are already approved.
+2. Present the intent card from `core/WORKFLOW.md §0.4` unless the same route and scope are already approved.
 3. After approval, direct/quick acting sessions read `capabilities/autopilot-code.md`; at `standard+`, the dispatch-depth-1 owner reads it and stage workers read only their assigned contracts.
 4. Before the first durable capability artifact, compile and bind the checked route with `preflight.sh route --capability autopilot-code ...`; `preflight.sh route autopilot-code` is grounding only, not route participation. A native-subagent restriction never authorizes direct execution.
 5. Run `adapters/codex/bin/preflight.sh capability-info autopilot-code` and obey the reported status:

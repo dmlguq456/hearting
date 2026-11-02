@@ -259,8 +259,8 @@ grep -Fq '## Routing Boundary' "$ROOT/capabilities/analyze-project.md"
 grep -Fq 'orientation and is not an `analyze-project` trigger by itself' "$ROOT/capabilities/analyze-project.md"
 grep -Fq 'Pointer follow-through' "$ROOT/core/MEMORY.md"
 grep -Fq '### 0.4. Primary Entry Confirmation' "$ROOT/core/WORKFLOW.md"
-grep -Fq '[실행 확인]' "$ROOT/core/WORKFLOW.md"
-grep -Fq '작업: <무엇을 어떤 결과로 만들지>' "$ROOT/core/WORKFLOW.md"
+grep -Fq '[의도 확인]' "$ROOT/core/WORKFLOW.md"
+grep -Fq '의도: <무엇을 어떤 결과로 만들지>' "$ROOT/core/WORKFLOW.md"
 grep -Fq '→ 진행 / 수정: <틀린 부분> / 중단' "$ROOT/core/WORKFLOW.md"
 grep -Fq '### 0.5. Post-Execution Completion Report' "$ROOT/core/WORKFLOW.md"
 grep -Fq '[완료 보고]' "$ROOT/core/WORKFLOW.md"
@@ -335,7 +335,7 @@ grep -Fq 'completion_followup_text(' "$ROOT/utilities/dispatch_session_sweep.py"
 grep -Fq 'dispatch_session_sweep.py' "$ROOT/adapters/opencode/plugins/hearting-guards.js"
 has_entry_confirmation() {
   case "$1" in
-    *'present the five-field card in §0.4 before'*|*'present the §0.4 five-field card before'*|*'else the §0.4 card unless approved'*|*'for unapproved material work, use the §0.4 card'*) return 0 ;;
+    *'present the §0.4 intent card before'*|*'else the §0.4 card unless approved'*|*'for unapproved material work, use the §0.4 card'*) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -363,7 +363,7 @@ for bootstrap in \
   # Removing the entry action must fail even with the evidence-check exemption
   # elsewhere in each real bootstrap. Preserve the rest of the text verbatim.
   without_entry=$(printf '%s' "$bootstrap_flat" | sed -E \
-    's/present the (five-field card in §0\.4|§0\.4 five-field card) before//g; s/else the §0\.4 card unless approved//g; s/for unapproved material work, use the §0\.4 card//g')
+    's/present the §0\.4 intent card before//g; s/else the §0\.4 card unless approved//g; s/for unapproved material work, use the §0\.4 card//g')
   if has_entry_confirmation "$without_entry"; then
     echo "not ok - entry confirmation check accepts a missing action in $bootstrap" >&2
     exit 1
@@ -447,8 +447,8 @@ for owner in \
     exit 1
   }
 done
-grep -Fq 'five-field confirmation card' "$ROOT/adapters/codex/skills/analyze-project/SKILL.md"
-grep -Fq 'five-field confirmation card' "$ROOT/adapters/opencode/skills/analyze-project/SKILL.md"
+grep -Fq 'Present the intent card' "$ROOT/adapters/codex/skills/analyze-project/SKILL.md"
+grep -Fq 'Present the intent card' "$ROOT/adapters/opencode/skills/analyze-project/SKILL.md"
 
 for figure_contract in \
   "$ROOT/roles/units/material/figure-gen.md" \
