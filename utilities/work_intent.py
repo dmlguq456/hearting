@@ -508,3 +508,71 @@ def sealed_summary(metadata, attempt_id: str) -> str:
     if not text.startswith(SUMMARY_HEAD) or "\n\n" in text or any(m in text for m in _CARRIER_MARKERS):
         return ""
     return text
+
+
+# ---------------------------------------------------------------------------
+# A direction that crosses the intent's "not doing" is the person's to choose
+# ---------------------------------------------------------------------------
+
+_PARTICLES = ("으로", "에서", "에게", "까지", "부터", "하고", "이나", "을", "를", "은", "는", "이", "가", "의",
+              "에", "로", "도", "만", "와", "과")
+_STOPWORDS = frozenset(("하지", "않기", "않음", "않는다", "말기", "금지", "없이", "추가", "새로", "새로운",
+                        "the", "and", "any", "not", "new", "add", "adding", "without", "don't", "never"))
+# A proposal names parts in English; a "not doing" line is often Korean.
+_SYNONYMS = {"deploy": "배포", "push": "푸시", "merge": "병합", "delete": "삭제", "release": "릴리스",
+             "publish": "출판", "migration": "마이그레이션", "full-run": "본 실행"}
+
+
+def _content_words(text: str) -> list[str]:
+    words = []
+    for raw in re.findall(r"[0-9A-Za-z가-힣_./:-]+", (text or "").lower()):
+        word = raw.strip("./:-")
+        if not word.isascii():
+            for particle in _PARTICLES:
+                if len(word) > len(particle) + 1 and word.endswith(particle):
+                    word = word[:-len(particle)]
+                    break
+        if word in _STOPWORDS:
+            continue
+        if (word.isascii() and len(word) >= 3) or (not word.isascii() and len(word) >= 2):
+            words.append(word)
+    return words
+
+
+def _proposal_text(proposal) -> str:
+    parts = [json.dumps(proposal, ensure_ascii=False, sort_keys=True).lower()]
+    parts += [korean for english, korean in _SYNONYMS.items() if english in parts[0]]
+    return " ".join(parts)
+
+
+def crossed_not_doing(not_doing, proposal) -> list[str]:
+    """The `안 할 것` items whose content words all appear in the proposal; [] when none or unreadable.
+
+    Mechanical and leaning toward asking: a proposal that only mentions what an item names (even
+    to remove it) counts as crossing it, and the person is asked instead of a supervisor."""
+    if not isinstance(proposal, dict):
+        return []
+    text = _proposal_text(proposal)
+    crossed = []
+    for item in not_doing or []:
+        words = _content_words(item)
+        if words and all(word in text for word in words):
+            crossed.append(item)
+    return crossed
+
+
+def supervisor_crossing(route, interview, answers) -> list[str]:
+    """The `안 할 것` items a non-person answer would cross by choosing its route proposal.
+
+    A supervisor answer (and the runtime's automatic agreement, which uses that authority) may not
+    choose such a direction; the person answers that question. A person's own answer is never
+    limited here."""
+    import frame_interview
+    if not isinstance(answers, dict) or answers.get("actor_kind") == "user":
+        return []
+    choice = frame_interview.route_choice(interview, answers)
+    if not choice or choice.get("state") != "selected":
+        return []
+    request = route.get("work_request") if isinstance(route, dict) else None
+    not_doing = draft(request.get("text") or "").get("not_doing") if isinstance(request, dict) else None
+    return crossed_not_doing(not_doing, choice.get("proposal"))

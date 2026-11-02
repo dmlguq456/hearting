@@ -440,6 +440,7 @@ def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
                 "created": original.get("created") or datetime.now(timezone.utc).strftime("%Y-%m-%d")}
     errors = mark_errors + FI.validate(question, intensity=route["effective_intensity"])
     native = directory / FI.NATIVE_ANSWERS_NAME
+    refused_answer = None
     if not answers and not next_round and resolution["status"] == "blocked" and native.is_file():
         answers = native                    # the person's native reply, recorded when it arrived
     response = (FI.load_json_file(answers, max_bytes=FI.MAX_ANSWERS_BYTES, kind="answers")
@@ -471,6 +472,13 @@ def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
             raise ValueError("gate-release-authority-refused: frame-review takes the person's actual answer, "
                              "or a supervisor's answer on the person's behalf")
         response = {**response, "actor_kind": actor_kind}
+        import work_intent
+        crossed = work_intent.supervisor_crossing(route, question, response) if decision == "proceed" else []
+        if crossed:
+            # Outside the supervisor's delegation (user decision 2026-11-03): nothing is recorded,
+            # and the same registered question goes to the person.
+            refused_answer = {"actor_kind": actor_kind, "crossed_not_doing": crossed}
+            response = None
     if not next_round and resolution["status"] != "not-raised" and resolution.get("artifact") != str(question_path):
         raise ValueError("frame-interview-binding-conflict: use the currently registered interview")
     _store_once(question_path, question)
@@ -494,6 +502,19 @@ def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
     if resolution["status"] == "not-raised" or next_round:
         command("gate", "--block", "--artifact", str(question_path))
         resolution = WS.human_gate_resolution(ledger.journal(), "frame-review")
+    if response is None and decision == "proceed" and refused_answer:
+        return {"state": "needs-question", "required_action": "ask-registered-question",
+                "reason": "supervisor-choice-crosses-not-doing", "refused_answer": refused_answer,
+                "interview_file": str(question_path), "interview": question,
+                "answers_template": FI.answers_template(question),
+                "human_wait": {"state": "pending", "fallback": "ordinary-conversation",
+                               "question_block": FI.pending_question_block(question)},
+                "parent_next": "end-turn",
+                "next_step": ("The chosen direction crosses the intent's 안 할 것 ("
+                              + "; ".join(refused_answer["crossed_not_doing"]) + "), so only the person can "
+                              "choose it; the answer was not recorded. Present the registered question to the "
+                              "person once, then rerun resume_command with their answer (actor_kind user). "
+                              + FI.PENDING_ANSWER_RULE)}
     if response is None and decision == "proceed":
         return {"state": "needs-question", "required_action": "ask-registered-question" if ask_now else "wait-for-user-answer",
                 "interview_file": str(question_path), "interview": question,
@@ -1202,6 +1223,10 @@ def _automatic_direction(route, rows, output):
             return None
     if any(FI.user_questions_left(text) for text in texts):
         return None
+    import work_intent
+    not_doing = work_intent.draft((route.get("work_request") or {}).get("text") or "").get("not_doing")
+    if work_intent.crossed_not_doing(not_doing, rows[0]["proposal"]):
+        return None   # a direction past the intent's 안 할 것 is the person's to choose
     brief = FI.brief_draft(texts[0])
     import work_intent
     understanding = (work_intent.draft((route.get("work_request") or {}).get("text") or "")

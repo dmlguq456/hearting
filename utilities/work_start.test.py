@@ -2058,6 +2058,62 @@ class FrameInterviewStepTest(WF.WorkflowFixture):
         self.assertEqual(self.calls, ["gate", "release"])
         self.assertEqual(Path(asked["interview_file"]).parent, Path(released["interview_file"]).parent)
 
+    def crossing(self):
+        """A route whose intent says 안 할 것: 새 게이트, and a proposal that adds one."""
+        self.route["work_request"] = {"text": "의도: 의도 확인 정리\n안 할 것: 새 게이트; 필수 입력\n\nBody.",
+                                      "owner_harness": None}
+        self.path.write_text(json.dumps(self.route, indent=2), encoding="utf-8")
+        question, answer = self.routed(approve=1)
+        question["route_proposals"]["by_option"]["예, 이 순서로"]["summary"] = "frame-review에 새 게이트를 추가한다"
+        question["route_proposals"]["by_option"]["예, 이 순서로"]["entry_approvals"] = []
+        question["questions"] = question["questions"][:1]
+        self.question_file.write_text(json.dumps(question))
+        response = json.loads(answer.read_text())
+        response["answers"] = {"go": {"choice": 0, "note": ""}}
+        return question, answer, response
+
+    def test_a_supervisor_cannot_choose_a_direction_past_the_intents_not_doing(self):
+        # User decision 2026-11-03: the person chooses a direction that crosses 안 할 것.
+        question, answer, response = self.crossing()
+        self.step(interview=self.question_file)
+        answer.write_text(json.dumps({**response, "actor_kind": "supervisor"}))
+        refused = self.step(answers=answer)
+        self.assertEqual((refused["state"], refused["required_action"], refused["reason"]),
+                         ("needs-question", "ask-registered-question", "supervisor-choice-crosses-not-doing"))
+        self.assertEqual(refused["refused_answer"], {"actor_kind": "supervisor", "crossed_not_doing": ["새 게이트"]})
+        self.assertIn("only the person can choose it", refused["next_step"])
+        self.assertEqual(self.resolution()["status"], "blocked")            # the question stays for the person
+        self.assertIsNone(self.resolution()["answers"])
+        self.assertFalse((Path(refused["interview_file"]).parent / "answers.json").exists())
+        self.assertEqual(self.calls, ["gate"])
+        answer.write_text(json.dumps({**response, "actor_kind": "user"}))
+        released = self.step(answers=answer)                                 # the person may choose it
+        self.assertEqual(released["state"], "released")
+        self.assertEqual(self.resolution()["actor_kind"], "user")
+
+    def test_the_release_command_refuses_the_same_supervisor_choice(self):
+        import work_intent
+        question, answer, response = self.crossing()
+        self.step(interview=self.question_file)
+        answer.write_text(json.dumps({**response, "actor_kind": "supervisor"}))
+        completed = self.run_command([sys.executable, "workflow-supervisor.py", "release", "--route", str(self.path),
+                                      "--jobs", str(self.jobs), "--gate", "frame-review", "--decision", "proceed",
+                                      "--answers", str(answer)])
+        self.assertEqual(completed.returncode, 64)
+        self.assertIn("crosses the intent's 안 할 것 (새 게이트)", completed.stderr)
+        self.assertEqual(self.resolution()["status"], "blocked")
+        recorded = json.loads(Path(self.resolution()["artifact"]).read_text())
+        self.assertEqual(work_intent.supervisor_crossing(self.route, recorded, {**response, "actor_kind": "user"}), [])
+
+    def test_a_supervisor_answer_inside_the_intent_is_unchanged(self):
+        question, answer, response = self.crossing()
+        question["route_proposals"]["by_option"]["예, 이 순서로"]["summary"] = "Set the experiment up and run it"
+        self.question_file.write_text(json.dumps(question))
+        self.step(interview=self.question_file)
+        answer.write_text(json.dumps({**response, "actor_kind": "supervisor"}))
+        self.assertEqual(self.step(answers=answer)["state"], "released")
+        self.assertEqual(self.resolution()["actor_kind"], "supervisor")
+
     def test_only_the_runtime_records_an_automatic_agreement(self):
         import frame_interview as FI
         question, _ = self.routed()

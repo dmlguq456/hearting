@@ -1907,6 +1907,13 @@ class AutomaticDirectionTest(StartBase):
         with mock.patch.dict(os.environ, {"AGENT_DISPATCH_REGISTERED_WORKER": "1"}):
             self.assertIsNone(self.automatic())
 
+    def test_an_agreed_direction_past_the_intents_not_doing_is_asked(self):
+        self.set_briefs(full_brief([DIRECT]), full_brief([DIRECT]))
+        self.assertIsNotNone(self.automatic())
+        self.route = {**self.route, "work_request": {**self.route["work_request"],
+                                                     "text": "안 할 것: small edit\n\n" + self.route["work_request"]["text"]}}
+        self.assertIsNone(self.automatic())          # both legs agree, but only the person may choose it
+
     def test_section_seven_reads_none_in_either_language_and_anything_else_as_a_question(self):
         for body, left in (("없음.", False), ("없다(0건).", False), ("0개 — 모두 코드로 정한다.", False),
                            ("None.", False), ("", False), ("1. 지울까요?", True), ("없음을 확인할 질문", True)):
