@@ -103,13 +103,28 @@ created: {YYYY-MM-DD}
    parts and legs the work needs; do not choose a full preset out of habit. One
    `direct` step is a complete proposal when one direct step is enough.
 
+   Judge each leg's `size` from sections 2–4 before its shape, and let the
+   shape follow it:
+   - `one-change` → `direct`: one atomic, reversible edit the owner session
+     makes and checks itself.
+   - `one-pass` → `solo`: a bounded change one worker finishes and checks in
+     one pass (typically a few files in one module, no shared contract to
+     settle first).
+   - `multi-stage` → `staged`: the change needs its own plan check and
+     independent review — shared contracts or specs, several modules or
+     adapters, a migration, or a direction that can still bend.
+   A staged leg for one-pass work adds stages, review rounds and cost without
+   catching more. Omit `shape` and it follows `size`; a different `shape` is
+   kept and the difference is shown to the person.
+
    ```yaml
    route_proposal_v1:
      summary: "one plain sentence: what runs, in which order"
      legs:                       # 1-4 legs in run order; only legs[0] starts on approval
        - capability: autopilot-lab
          mode: eval              # only when the capability has several modes
-         shape: staged           # direct | solo | staged
+         size: multi-stage       # one-change | one-pass | multi-stage, judged before the shape
+         shape: staged           # direct | solo | staged; omitted, it follows size
          graph: [eval-run, metrics, report]   # staged only; stage ids or capability:stage[:unit] from the catalogue; never a frame stage
          intensity: standard     # optional; direct fixes direct, solo fixes quick, and staged allows standard+
          cwd: /path/to/existing-worktree  # optional: use this worktree for this leg; relative to the frame's cwd

@@ -2498,11 +2498,15 @@ def _arm_capacity_resume(result, path, jobs):
     if not armed:
         return result
     if armed.get("cause") == "launch-not-started":
-        return {**result, "auto_resume": armed, "required_action": "wait-for-auto-resume",
+        # A pause like a full start budget, not a refusal: the runtime starts the same owner
+        # itself. Parallel starts that met a busy admission lock read as refused and were
+        # restarted by hand although each one's resume was already armed (2026-11-02).
+        return {**result, "state": "waiting-capacity", "retry_at": armed["resume_at"],
+                "auto_resume": armed, "required_action": "wait-for-auto-resume",
                 "parent_next": "end-turn", "parent_next_reason": "launch-auto-resume",
-                "next_step": f"The owner did not start and nothing ran. The runtime runs resume_command once "
-                    f"at {armed['resume_at']} and then leaves this session one notice of the result. "
-                    "resume_command stays valid to try earlier."}
+                "next_step": f"Nothing failed: the owner did not start and nothing ran. The runtime runs "
+                    f"resume_command itself at {armed['resume_at']} and then leaves this session one notice "
+                    "of the result; there is nothing to run now. resume_command stays valid to try earlier."}
     if armed.get("cause") == "launch-capacity":
         return {**result, "auto_resume": armed, "required_action": "wait-for-auto-resume",
                 "parent_next": "end-turn", "parent_next_reason": "launch-capacity-auto-resume",

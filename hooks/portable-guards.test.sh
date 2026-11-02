@@ -1583,7 +1583,7 @@ if command -v codex >/dev/null 2>&1; then
   if CODEX_HOME="$TMP/codex_bootstrap_home" codex debug prompt-input 'bootstrap check' >"$TMP/codex_bootstrap.out" 2>"$TMP/codex_bootstrap.err" \
     && grep -q 'AGENTS.md — Codex Adapter Bootstrap' "$TMP/codex_bootstrap.out" \
     && grep -q 'adapters/codex/bin/preflight.sh capability-info' "$TMP/codex_bootstrap.out" \
-    && grep -q 'codex_setting/codex-hooks' "$TMP/codex_bootstrap.out" \
+    && grep -q 'hearting run capability-route compose' "$TMP/codex_bootstrap.out" \
     && ! grep -q 'adapters/claude/CLAUDE.md.*portable bootstrap' "$TMP/codex_bootstrap.out"; then
     ok "codex bootstrap projection is discoverable without Claude bootstrap"
   else
@@ -3820,7 +3820,6 @@ tools/migration-manifest.py 2
 tools/fleet/collectors/dispatch.py 6
 tools/fleet/collectors/__init__.py 1
 tools/render-landing.py 1
-adapters/codex/AGENTS.md 1
 adapters/codex/bin/preflight.sh 1
 adapters/opencode/bin/preflight.sh 1
 adapters/claude/plugin-marketplace/plugins/hearting-claude/core/ADAPTATION_INVENTORY.md 1

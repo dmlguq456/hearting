@@ -156,11 +156,11 @@ class OpencodeDispatchModelEligibilityTest(unittest.TestCase):
     def test_v2_automatic_profile_uses_only_configured_unavailable_fallbacks(self):
         with mock.patch.object(WRAPPER.opencode_runtime, "is_v2", return_value=True), \
              mock.patch.object(WRAPPER.opencode_runtime, "select_automatic_model",
-                               return_value=("openai/gpt-6.1-sol", "runtime-default",
+                               return_value=("openai/model-x", "runtime-default",
                                              {"state": "unknown", "reason": "no-observation"})) as select:
             result = WRAPPER.resolve_model_settings(selection(profile="balanced-deep", role="deep maker"))
         select.assert_called_once()
-        self.assertEqual(result["model"], "openai/gpt-6.1-sol")
+        self.assertEqual(result["model"], "openai/model-x")
         self.assertEqual(result["variant"], "runtime-default")
         self.assertEqual(result["source"], "profile+provider-fallback")
         self.assertNotIn(("opencode/beam-free", "runtime-default"),

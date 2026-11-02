@@ -160,14 +160,14 @@ class OwnerResourceChildrenTest(unittest.TestCase):
 
     def test_resource_dot_reuses_gpu_blink_and_observed_host_pid_without_log_age(self):
         self.attach()
-        self.resource.local_placement = {"hostname": "moving4.iip.lab", "processes": [
+        self.resource.local_placement = {"hostname": "mgpu-a1.example.test", "processes": [
             {"pid": self.resource.pid, "starttime": self.resource.starttime}]}
         self.resource.log_updated_at = 1
         for phase, key in ((True, "g_work"), (False, "g_work_off")):
             with self.subTest(phase=phase), mock.patch.object(render, "_BLINK_ON", phase):
                 rows = render._resource_child_rows(self.owner, term_width=168)
                 self.assertIn(("●", key), rows[0])
-                self.assertIn("moving4.iip.lab", flatten(rows))
+                self.assertIn("mgpu-a1.example.test", flatten(rows))
                 self.assertIn("PID 41", flatten(rows))
                 self.assertNotIn("ago", flatten(rows))
         for width in (24, 36, 60, 80, 168):
@@ -271,7 +271,7 @@ class OwnerResourceChildrenTest(unittest.TestCase):
         self.attach(resources=[self.resource, cpu])
         process = {"pid": 41, "proc_start": 123, "pgid": 41, "used_memory_mib": 6144,
                    "command": "python train.py", "cwd": "/unrelated"}
-        snapshot = {"configured": True, "hosts": [{"host": "moving4", "self": True,
+        snapshot = {"configured": True, "hosts": [{"host": "mgpu-a1", "self": True,
             "reachable": True, "gpus": [{"index": index, "name": "NVIDIA RTX 6000 Ada",
                                          "processes": [dict(process)]} for index in (0, 1)]}]}
         before = copy.deepcopy(snapshot)
@@ -292,8 +292,8 @@ class OwnerResourceChildrenTest(unittest.TestCase):
                     self.assertIn("2m ago", text)
                 if width >= 168:
                     self.assertIn("12/50 epoch", text)
-                    self.assertIn("GPU moving4:0", text)
-                    self.assertIn("GPU moving4:1", text)
+                    self.assertIn("GPU mgpu-a1:0", text)
+                    self.assertIn("GPU mgpu-a1:1", text)
                 self.assertNotIn("resource eval run", flatten(lines))
                 self.assertEqual(flatten(lines).count("resource eval smoke"), 1)
                 self.assertLessEqual(sum(render._dw(t) for t, _ in gpu[0]), width)
@@ -325,7 +325,7 @@ class OwnerResourceChildrenTest(unittest.TestCase):
 
     def test_remote_parent_attempt_merges_resource_and_project_gpu_rows(self):
         self.resource.elapsed_min = 720
-        snapshot = {"configured": True, "hosts": [{"host": "xavier", "self": False,
+        snapshot = {"configured": True, "hosts": [{"host": "xgpu-b", "self": False,
             "reachable": True, "gpus": [{"index": index, "name": "NVIDIA A100", "processes": [{
                 "pid": 900, "proc_start": 999, "pgid": 900, "cwd": "/other/project",
                 "owner": {"kind": "job", "id": self.owner.attempt_id}, "used_memory_mib": 12000,
@@ -345,7 +345,7 @@ class OwnerResourceChildrenTest(unittest.TestCase):
                             resources=[self.resource], governor=None)
                         gpu = [line for line in lines if line and "● GPU" in flatten([line])]
                         self.assertEqual(len(gpu), 1)
-                        self.assertIn("GPU xavier:0", flatten(gpu))
+                        self.assertIn("GPU xgpu-b:0", flatten(gpu))
                         self.assertIn("eval run 12h", flatten(gpu))
                         self.assertNotIn("resource eval run", flatten(lines))
                         self.assertNotIn("job:", flatten(gpu))
@@ -361,7 +361,7 @@ class OwnerResourceChildrenTest(unittest.TestCase):
     def test_remote_parent_match_requires_remote_host_and_exact_nonempty_attempt(self):
         process = {"pid": 900, "proc_start": 999, "pgid": 900,
                    "owner": {"kind": "job", "id": self.owner.attempt_id}}
-        host = {"host": "xavier", "self": False, "reachable": True,
+        host = {"host": "xgpu-b", "self": False, "reachable": True,
                 "gpus": [{"index": 0, "processes": [process]}]}
         snapshot = {"hosts": [host]}
         self.assertTrue(render._resource_gpu_resources(self.resource, snapshot))
@@ -386,7 +386,7 @@ class OwnerResourceChildrenTest(unittest.TestCase):
                 "pid": self.resource.pid, "proc_start": 123, "pgid": self.resource.pid,
                 "owner": claim, "session_owner": claim, "used_memory_mib": 6144,
             }]}
-            snapshot = {"configured": True, "hosts": [{"host": "moving4", "self": True,
+            snapshot = {"configured": True, "hosts": [{"host": "mgpu-a1", "self": True,
                 "reachable": True, "gpus": [gpu]}]}
             render.set_compute_hosts(snapshot)
             self.addCleanup(render.set_compute_hosts, None)
@@ -435,7 +435,7 @@ class OwnerResourceChildrenTest(unittest.TestCase):
             {"pid": 902, "proc_start": 1001, "owner": parent_claim, "used_memory_mib": 1024,
              "session_owner": parent_claim, "command": "python other.py"},
         ]}
-        snapshot = {"configured": True, "hosts": [{"host": "xavier", "self": False,
+        snapshot = {"configured": True, "hosts": [{"host": "xgpu-b", "self": False,
             "reachable": True, "gpus": [gpu]}]}
         render.set_compute_hosts(snapshot)
         self.addCleanup(render.set_compute_hosts, None)
