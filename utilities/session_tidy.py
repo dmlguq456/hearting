@@ -3786,25 +3786,35 @@ def cmd_enqueue(args) -> int:
     return 0
 
 
+def _ui_translator():
+    """The shared UI-text catalog (English by default, Korean when declared)."""
+    import importlib.util
+    path = Path(__file__).resolve().parents[1] / "tools" / "i18n" / "ui_text.py"
+    spec = importlib.util.spec_from_file_location("ui_text", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.translator()
+
+
 def tidy_report_line(booked: str, *, handoff: bool = False, origin: str = "", harness: str = "") -> str:
     """The one line the session shows the user after a tidy, from the enqueue ``clear=`` words."""
+    t = _ui_translator()
     fields = str(booked or "").split()
     outcome = next((field for field in fields if field.startswith("clear=")), "")
     if outcome == "clear=scheduled":
         # The clear waits for this turn to end with an empty input box; typing first keeps the window.
         if handoff or origin == "idle" or "continue=off" in fields:
-            return "입력창이 비어 있으면 곧 이 창을 비웁니다. 그 전에 입력하시면 비우지 않습니다."
-        return ("입력창이 비어 있으면 곧 이 창을 비우고, 새 세션이 카드를 받아 이어서 진행합니다. "
-                "그 전에 입력하시면 비우지 않습니다.")
+            return t("tidy.say.clear_soon")
+        return t("tidy.say.clear_and_continue")
     command = "/new" if harness == "opencode" else "/clear"
     if outcome == "clear=off":
-        return f"이 창은 그대로 둡니다. 이제 {command} 하거나 닫아도 됩니다."
+        return t("tidy.say.window_kept", command=command)
     hint = next((field.split("=", 1)[1] for field in fields if field.startswith("hint=")), "")
     if outcome == "clear=manual":
-        return f"이제 {hint or command} 하거나 닫아도 됩니다."
+        return t("tidy.say.you_can_now", command=hint or command)
     if outcome == "clear=skipped":
-        return f"이제 {command} 하거나 닫아도 됩니다."
-    return "카드와 기억 정리 접수를 마쳤습니다. 창 비우기 결과는 다음 입력 때 한 줄로 알려 드립니다."
+        return t("tidy.say.you_can_now", command=command)
+    return t("tidy.say.accepted")
 
 
 def cmd_tidy(args) -> int:
