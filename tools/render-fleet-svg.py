@@ -1,27 +1,15 @@
 #!/usr/bin/env python3
-"""Render the Fleet view as a wide, coloured SVG for the README.
+"""Render the Fleet Explorer OVERVIEW as a coloured SVG for the README (docs/fleet.svg).
 
-A fenced code block carries no colour and wraps at the README's column width,
-which is the wrong shape for a view whose whole point is one wide row per
-session and a visible dispatch tree beneath it. An SVG carries both, and GitHub
-renders it inline.
+The picture is the real cell renderer's frame, not a hand-drawn mock-up: ``readme_demo`` supplies
+English, neutral, synthetic rows (no home, registry, herdr or network read; no Fleet window is
+opened), ``tools/fleet/explorer`` draws the 160x45 cell grid, and every cell is written out with
+the colour ``render.py`` gives it. The same rows, drawn to PNG/GIF, are the other README screens
+(``python3 tools/fleet/tests/readme_captures.py``).
 
-This reproduces the real wide layout rather than inventing one: the bracketed
-usage header, the `harness (model·effort) / session (branch) / stages / time`
-column header, two-line session cards, and the `╻`/`╹` rail that dispatch rows
-hang from. Colours are the terminal palette from `tools/fleet/render.py` —
-sage green working, warm-beige idle, coral blocked, per-family model hues, and
-level-coloured gauges (green <50, yellow <80, red >=80). Depth reads as
-brightness, exactly as it does in the terminal: main rows bright, dispatched
-rows progressively dimmer.
-
-Colour is applied with presentation attributes, not a stylesheet: GitHub
-sanitises `<style>` out of the SVGs it serves, so classes would render as
-undifferentiated grey.
-
-Content is synthetic and ASCII-only. Real `fleet --once` output carries live
-project paths and session titles, and double-width CJK would break the
-character-grid alignment this layout depends on.
+Colour is applied with presentation attributes, not a stylesheet: GitHub sanitises ``<style>``
+out of the SVGs it serves. Each run of text carries ``textLength`` so the character grid holds
+whatever monospace font the viewer falls back to.
 
 Usage:
   python3 tools/render-fleet-svg.py          # write docs/fleet.svg
@@ -34,212 +22,94 @@ from pathlib import Path
 from xml.sax.saxutils import escape
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path[:0] = [str(ROOT), str(ROOT / "tools")]
 OUT = ROOT / "docs" / "fleet.svg"
 
-CHAR = 7.55
-FONT = 12.8
-LINE = 19.6
-PAD_X = 20.0
-PAD_Y = 16.0
-COLS = 200
-TOP = 40.0
-
-BG = "#0D0F16"
-BAR = "#151824"
-BORDER = "#2B2E3C"
-
-# tools/fleet/render.py palette
-P = {
-    "green":   "#addb81",   # working
-    "yellow":  "#dbdb81",   # idle, mid-level gauge
-    "red":     "#ffa9a9",   # blocked, high-level gauge
-    "cyan":    "#81dbdb",   # opus family
-    "magenta": "#db81db",   # fable family
-    "blue":    "#a9a9ff",   # sonnet family
-    "vanilla": "#ffffd7",   # spinner
-    "soft":    "#dadada",   # focal text
-    "chrome":  "#9a9aa8",   # header bands
-    "dim":     "#6a6a7c",
-    "dimmer":  "#4e4e60",
-    "rail":    "#5a5f7e",
-    "track":   "#464a63",   # unfilled gauge
-}
-# dispatch rows recede: same hue, lower intensity
-DIM = {
-    "green": "#8fb56b", "yellow": "#b5b56b", "red": "#d49090",
-    "cyan": "#5e9c9c", "blue": "#7878b8", "magenta": "#9c5e9c",
-    "soft": "#a6a6b4", "track": "#3a3d52",
-}
+CELL_W, CELL_H, FONT = 9, 18, 15
+TOP = 40                         # the window bar above the grid
+BAR, BORDER, DIM = "#151824", "#2B2E3C", "#8A8A9A"
+MONO = "ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', monospace"
+LABEL = ("Fleet's Explorer OVERVIEW, drawn from synthetic demo data: eight sessions in four projects "
+         "across Claude Code, Codex and OpenCode, grouped by project with model, context gauge and "
+         "what each is doing now, one session waiting for an answer, two open routes with their "
+         "stage lines, and per-host CPU and GPU use at the bottom left.")
 
 
-def lvl(pct: int, dim: bool = False) -> str:
-    """Gauge hue by level, as `lvl_g`/`lvl_y`/`lvl_r` do in the terminal."""
-    key = "green" if pct < 50 else ("yellow" if pct < 80 else "red")
-    return DIM[key] if dim else P[key]
+def hexcolour(rgb):
+    return "#%02x%02x%02x" % tuple(rgb)
 
 
-def s(text: str, colour: str, bold: bool = False):
-    return (text, colour, bold)
-
-
-def pad(text: str, width: int) -> str:
-    return text[:width] if len(text) > width else text + " " * (width - len(text))
-
-
-def gauge(pct: int, width: int, dim: bool = False):
-    filled = max(1, round(pct / 100 * width))
-    return [s("━" * filled, lvl(pct, dim)),
-            s("─" * (width - filled), DIM["track"] if dim else P["track"])]
-
-
-def bracket(pct, width, dim=False):
-    """The usage header's `[━━━━───  77%]` form."""
-    if pct is None:
-        return [s("[", P["dimmer"]), s("·" * width, P["dimmer"]),
-                s("   —]", P["dimmer"])]
-    filled = max(1, round(pct / 100 * width))
-    return [s("[", P["dimmer"]), s("━" * filled, lvl(pct, dim)),
-            s("─" * (width - filled), P["track"]),
-            s(f" {pct:>3}%", P["chrome"]), s("]", P["dimmer"])]
-
-
-FAMILY = {"Opus": "cyan", "Sonnet": "blue", "Fable": "magenta", "gpt": "yellow"}
-
-
-def card(depth, spin, spin_colour, harness, model, effort, title, branch,
-         stages, age, pct, detail, tag=None, where=None):
-    """One two-line session card; `depth` controls rail, indent, and brightness.
-
-    F-100 (2026-09-03): `tag` is the depth-0 session's 2-hex tag, drawn as a `[2f]`
-    outline badge (dim brackets, soft-white tag) between the status glyph and the
-    harness text; `where` is the context row's lead — "herdr" (soft white), "tty"
-    (dim) or None (blank). The old `working`/`idle` word no longer lives on the
-    second line: the first line's glyph is the one status indicator.
-    """
-    d = depth > 0
-    fam = FAMILY.get(model.split()[0].split("-")[0], "soft")
-    fam_c = DIM[fam] if d else P[fam]
-    text_c = DIM["soft"] if d else P["soft"]
-    lead = "▍ " + "   " * depth
-    rail_a = s("╻ ", P["rail"]) if d else s("", P["rail"])
-    rail_b = s("╹ ", P["rail"]) if d else s("", P["rail"])
-    who = f"{harness} ({model}·{effort})"
-    chip = ([s("[", P["dim"]), s(tag, P["soft"]), s("] ", P["dim"])] if tag
-            else [s("     ", P["dim"])])
-    if where == "herdr":
-        lead2 = [s(pad("herdr", 8), P["soft"])]
-    elif where == "tty":
-        lead2 = [s(pad("tty", 8), P["dim"])]
-    else:
-        lead2 = [s(" " * 8, P["dim"])]
-    line1 = [
-        s(lead, P["rail"]), rail_a,
-        s(spin + " ", spin_colour),
-        *chip,
-        s(pad(who, 31 - depth * 3), fam_c),
-        s(pad(f"{title} ({branch})", 44), text_c),
-        s(pad(stages, 96), DIM["blue"] if d else P["dim"]),
-        s(age.rjust(7), P["dimmer"]),
-    ]
-    line2 = [
-        s(lead + "  ", P["rail"]), rail_b,
-        *lead2,
-        *gauge(pct, 16, d),
-        s(f" {pct:>3}%   ", P["dim"]),
-        s(detail, P["dimmer"]),
-    ]
-    return [line1, line2]
-
-
-def lines():
-    out = [
-        [s("  usage ", P["chrome"]), s(pad("claude code", 14), P["soft"]),
-         s("5h ", P["dim"]), *bracket(77, 10), s(" ↻ 42m    ", P["dimmer"]),
-         s("7d ", P["dim"]), *bracket(89, 10), s(" ↻ 3d23h    ", P["dimmer"]),
-         s("fable ", P["dim"]), *bracket(93, 10)],
-        [s("       ", P["chrome"]), s(pad("codex", 14), P["soft"]),
-         s("5h ", P["dim"]), *bracket(None, 10), s("            ", P["dimmer"]),
-         s("7d ", P["dim"]), *bracket(100, 10), s(" ↻ 2d16h", P["dimmer"])],
-        [s("  fleet ", P["chrome"]), s("⣸ 3 working", P["green"]),
-         s("   ● 12 idle", P["yellow"]), s("   ↳ 4 jobs (3 working)", P["dim"]),
-         s("      ⚙ governor 3/5", P["dimmer"])],
-        [s("─" * 5, P["dimmer"])],
-        [],
-        [s("    ", P["dim"]), s(pad("harness (model·effort)", 38), P["dim"]),
-         s(pad("session (branch)", 44), P["dim"]),
-         s(pad("stages", 96), P["dim"]), s("time".rjust(7), P["dim"])],
-        [],
-        [s("● ", P["magenta"]), s("hearting/", P["magenta"], True),
-         s("   3 open   1 note", P["dimmer"])],
-    ]
-
-    out += card(0, "⣸", P["vanilla"], "claude code", "Opus 5", "xhigh",
-                "Promote Fleet on the landing page", "main", "—", "16h01m",
-                53, "⚙ python3   render a wide fleet svg for the readme",
-                tag="2f", where="herdr")
-    out += card(1, "⣸", P["vanilla"], "claude code", "Opus 5", "xhigh",
-                "autopilot-code owner", "opencode-pa…",
-                "code(debug·std·owner) / mp:deep / unit:_kernel/owner : execute✓ › impl-review › test › report", "1h43m",
-                27, "3 stage workers dispatched at depth 2, joined before continuation")
-    out += card(2, "⣸", P["vanilla"], "claude code", "Sonnet 5", "medium",
-                "code-execute", "opencode-pa…",
-                "code-execute(std) / mp:light / unit:dev/backend : running", "22m",
-                11, "⚙ pytest   dispatch_v20 regression")
-    out += card(2, "●", DIM["blue"], "codex", "gpt-5.6", "medium",
-                "impl-review", "opencode-pa…",
-                "impl-review(std) / mp:light / unit:qa/reviewer : done", "2m",
-                34, "0 blocking findings")
-    out += card(2, "●", DIM["red"], "codex", "gpt-5.6", "xhigh",
-                "failure-mode", "opencode-pa…",
-                "failure-mode(std) / mp:deep / unit:qa/adversary : blocked", "1m",
-                8, "waiting on input")
-    out += card(0, "●", P["yellow"], "codex", "gpt-5.6-sol", "xhigh",
-                "Fleet dispatch column widths", "main", "—", "1d6h",
-                12, "", where="herdr")
-    out += [
-        [s("▍", P["rail"]), s("─" * (COLS - 2), "#20222E")],
-        [s("▍ ", P["rail"]),
-         s("mem 16:52 + durable/decision   ", P["dimmer"]),
-         s("\"Fleet OpenCode display fixed in two commits…\"", P["dimmer"])],
-        [],
-        [s("○ ", P["dim"]), s("corrnet_runtime/", P["dim"])],
-    ]
-    out += card(0, "●", P["yellow"], "claude code", "Opus 5", "xhigh",
-                "Loss-function sampling investigation", "main", "—", "51m",
-                22, "", tag="9b", where="tty")
-    return out
+def grid_rows(frame, render, hues, tints, background):
+    """Per row: ``(backgrounds, texts)``; a background is ``(x, width, colour)``, a text
+    ``(x, width, string, colour, bold)``, both in cell units. Only non-default fills are kept."""
+    from tools.fleet.tests import explorer_capture as capture
+    rows = []
+    for row in frame.cells:
+        fills, runs, x = [], [], 0
+        while x < len(row):
+            glyph, key, tint = row[x]
+            width = 2 if x + 1 < len(row) and row[x + 1][0] == "" and glyph else 1
+            fg, bg, bold = capture.cell_style(render, hues, tints, key, tint)
+            if bg != background:
+                if fills and fills[-1][2] == bg and fills[-1][0] + fills[-1][1] == x:
+                    fills[-1] = (fills[-1][0], fills[-1][1] + width, bg)
+                else:
+                    fills.append((x, width, bg))
+            glyph = capture.GLYPH_FALLBACK.get(glyph, glyph)
+            if glyph.strip():
+                style = (fg, bold)
+                if runs and runs[-1][4] == style and runs[-1][0] + runs[-1][1] == x:
+                    last = runs[-1]
+                    runs[-1] = (last[0], last[1] + width, last[2] + glyph, last[3], style)
+                else:
+                    runs.append((x, width, glyph, None, style))
+            elif runs and runs[-1][0] + runs[-1][1] == x and width == 1 and x + 1 < len(row):
+                # A space inside a run of one style: keep it in the run when the next glyph
+                # continues that style, so one <text> covers a phrase.
+                nxt = row[x + 1]
+                nfg, _nbg, nbold = capture.cell_style(render, hues, tints, nxt[1], nxt[2])
+                if nxt[0].strip() and (nfg, nbold) == runs[-1][4]:
+                    last = runs[-1]
+                    runs[-1] = (last[0], last[1] + 1, last[2] + " ", last[3], last[4])
+            x += width
+        rows.append((fills, [(a, w, t, style[0], style[1]) for a, w, t, _n, style in runs]))
+    return rows
 
 
 def render() -> str:
-    rows = lines()
-    width = round(PAD_X * 2 + COLS * CHAR)
-    height = round(TOP + PAD_Y * 2 + len(rows) * LINE)
+    from tools.fleet import render as fleet_render
+    from tools.fleet.tests import explorer_capture as capture
+    from tools.fleet.tests import readme_captures
+    readme_captures.isolate()
+    frame = readme_captures.frames(fleet_render, ["overview"])["overview"]
+    hues, tints = capture.palette(fleet_render)
+    background = capture.BACKGROUND
+    rows = grid_rows(frame, fleet_render, hues, tints, background)
+    width, height = frame.cols * CELL_W, TOP + frame.rows * CELL_H
     body = []
-    for i, row in enumerate(rows):
-        if not row:
-            continue
-        y = TOP + PAD_Y + LINE * (i + 0.8)
-        spans = "".join(
-            '<tspan fill="%s"%s>%s</tspan>'
-            % (c, ' font-weight="600"' if b else "", escape(t))
-            for t, c, b in row
-        )
-        body.append(f'<text x="{PAD_X:.0f}" y="{y:.1f}" xml:space="preserve">{spans}</text>')
-
+    for y, (fills, texts) in enumerate(rows):
+        top = TOP + y * CELL_H
+        for x, span, colour in fills:
+            body.append(f'<rect x="{x * CELL_W}" y="{top}" width="{span * CELL_W}" height="{CELL_H}" '
+                        f'fill="{hexcolour(colour)}"/>')
+        for x, span, text, colour, bold in texts:
+            weight = ' font-weight="700"' if bold else ""
+            body.append(f'<text x="{x * CELL_W}" y="{top + 14}" textLength="{span * CELL_W}" '
+                        f'lengthAdjust="spacing" fill="{hexcolour(colour)}"{weight} '
+                        f'xml:space="preserve">{escape(text)}</text>')
     dots = "".join(f'<circle cx="{21 + n * 15}" cy="20" r="4.2" fill="#31344a"/>' for n in range(3))
-    mono = "ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', monospace"
-    return f"""<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" role="img" aria-label="fleet: a live cross-harness view. An owner session dispatches execute, impl-review and failure-mode workers at depth two, each with its own sealed model profile and context gauge.">
-  <rect width="{width}" height="{height}" rx="11" fill="{BG}"/>
-  <path d="M0 11a11 11 0 0 1 11-11h{width - 22}a11 11 0 0 1 11 11v{TOP - 11}H0Z" fill="{BAR}"/>
-  <line x1="0" y1="{TOP}" x2="{width}" y2="{TOP}" stroke="{BORDER}"/>
-  <rect x="0.5" y="0.5" width="{width - 1}" height="{height - 1}" rx="11" fill="none" stroke="{BORDER}"/>
-  {dots}
-  <text x="70" y="25" font-family="{mono}" font-size="12.5" fill="#8A8A9A">fleet</text>
-  <circle cx="{width - 76}" cy="20" r="3.3" fill="{P['green']}"/>
-  <text x="{width - 66}" y="24" font-family="{mono}" font-size="11.5" fill="{P['green']}">LIVE</text>
-  <g font-family="{mono}" font-size="{FONT}">
-  {chr(10).join("  " + b for b in body).strip()}
-  </g>
+    return f"""<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" role="img" aria-label="{escape(LABEL)}">
+<title>Fleet Explorer, OVERVIEW (demo data)</title>
+<rect width="{width}" height="{height}" rx="11" fill="{hexcolour(background)}"/>
+<path d="M0 11a11 11 0 0 1 11-11h{width - 22}a11 11 0 0 1 11 11v{TOP - 11}H0Z" fill="{BAR}"/>
+<line x1="0" y1="{TOP}" x2="{width}" y2="{TOP}" stroke="{BORDER}"/>
+{dots}
+<text x="70" y="25" font-family="{MONO}" font-size="12.5" fill="{DIM}">fleet</text>
+<text x="{width - 20}" y="25" text-anchor="end" font-family="{MONO}" font-size="11.5" fill="{DIM}">demo data</text>
+<g font-family="{MONO}" font-size="{FONT}">
+{chr(10).join(body)}
+</g>
+<rect x="0.5" y="0.5" width="{width - 1}" height="{height - 1}" rx="11" fill="none" stroke="{BORDER}"/>
 </svg>
 """
 
