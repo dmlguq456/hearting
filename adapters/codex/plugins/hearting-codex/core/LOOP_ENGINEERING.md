@@ -195,11 +195,15 @@ descriptor identifies the generation behind each cached registry view; path
 metadata is checked against that descriptor before reuse, and an atomic path
 replacement moves the cache to the new file generation. Append reuse is
 limited to the registry writer's append protocol and reads only the suffix
-through the retained descriptor. Scoped readers that already read current
-bytes compare their digest with the cached generation before reusing its
-indexes. Registry writers may append rows or atomically replace the file;
-arbitrary in-place truncation or rewrite is unsupported. A partial byte tail
-remains data, not a row, until its newline arrives. The projection must name
+through the retained descriptor. A scoped reader skips the read only while
+the path and descriptor still name a generation whose bytes were read after
+its last change outlived the file timestamp granularity; when the file's
+timestamps come from this host's clock, no later write can keep its stat.
+Otherwise it reads the current bytes and compares their digest with the
+cached generation before reusing its indexes. Registry writers may
+append rows or atomically replace the file; arbitrary in-place truncation or
+rewrite is unsupported. A partial byte tail remains data, not a row, until its
+newline arrives. The projection must name
 its dependencies, and a missing, unreadable, retargeted, or unstable input
 discards the prior result instead of turning it into authority. Mutable writer
 documents stay separate from historical read projections. Reusing parsed
