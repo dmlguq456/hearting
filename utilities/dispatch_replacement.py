@@ -1762,11 +1762,10 @@ def _completion_unproven(route, node, marker, currency):
                         'completion_reason': currency.reason,
                         **({'completion_evidence': evidence} if evidence else {})}
     if currency.state == 'resource-stage-not-current':
-        # An unsettled stage is continued and an unreadable one retried; this one settled but its
-        # proof did not match, or a record is missing or malformed. `revise` refuses such a marker.
-        error.next_step = (f"Completed node {node_id} reads {currency.state} ({currency.reason}): its "
-                           "settled run's proof did not match, or a run record is missing or malformed. "
-                           "Inspect that node's run records and completion marker, then resume.")
+        # An unsettled stage is continued and an unreadable one retried before this point; the
+        # shared step for the rest never offers `revise`, which refuses such a marker.
+        error.next_step = (f"Completed node {node_id} reads {currency.state} ({currency.reason}); "
+                           f"{DC.resource_stage_next_action(currency, node_id)}, then resume.")
         return error
     action = DC.route_state_next_action(currency.reason, node_id, route.get('route_id'), node,
                                         evidence=evidence or None)

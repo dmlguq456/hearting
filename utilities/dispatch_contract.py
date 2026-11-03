@@ -7721,6 +7721,7 @@ def completion_marker_gate(
         return
     _launch_completion_input(route, node)
     missing = []
+    resource_actions: dict[str, str] = {}
     markers = {}
     proceeding = []
     blocked: list[tuple[str, AttemptReadiness]] = []
@@ -7808,6 +7809,8 @@ def completion_marker_gate(
                     f"{dep}:{currency.state}:{currency.reason}",
                 )
             missing.append(dep)
+            if currency.state == "resource-stage-not-current":
+                resource_actions[dep] = resource_stage_next_action(currency, dep)
             continue
         markers[dep] = marker
         proceeding.append((dep_node, marker_path, marker))
@@ -7821,7 +7824,11 @@ def completion_marker_gate(
         if readiness.state != "ready":
             blocked.append((dep, readiness))
     if missing:
-        raise DispatchContractError("completion-marker-missing", ",".join(missing))
+        # A marker beside a resource stage that is not current names its own step (never `revise`).
+        raise DispatchContractError(
+            "completion-marker-missing", ",".join(missing),
+            next_action="; ".join(resource_actions.get(dep) or f"wait for node {dep} to publish a completion marker"
+                                  for dep in missing) if resource_actions else None)
     if not blocked:
         _frame_pair_attempt_gate(route, node, markers,
                                  jobs or (resolve_dispatch_state_root(agent_home) / "jobs.log"),
@@ -8747,6 +8754,20 @@ def resource_stage_unobservable(currency: GateCurrency) -> bool:
             and currency.reason == RESOURCE_STAGE_UNOBSERVABLE)
 
 
+def resource_stage_next_action(currency: GateCurrency, node_id: str) -> str:
+    """The supported step for a marker beside a resource stage that is not current.
+
+    `revise` refuses such a marker, so it is never the step.
+    """
+    if resource_stage_unsettled(currency):
+        return (f"continue resource stage {node_id}: its runs have not settled as succeeded, so run its "
+                "next registered resource; the next start of its successor after a successful run settles it")
+    if resource_stage_unobservable(currency):
+        return f"retry the same command when the run records of resource stage {node_id} can be read again"
+    return (f"inspect the run records and completion marker of resource stage {node_id}: its settled "
+            "run's proof did not match, or a run record is missing or malformed")
+
+
 def _completion_instant(marker: Mapping[str, object]):
     # An unreadable, timezone-less or otherwise unorderable value cannot be placed against
     # another completion, so it is no instant (never a reason to call a result older).
@@ -8943,9 +8964,9 @@ def _resource_stage_marker_current(route, node, marker, marker_path, jobs):
         return (GateCurrency("resource-stage-not-current", "completion-marker-missing")
                 if marker.get("resource_execution_identity") is not None else None)
     except OSError:
-        # A record that exists but cannot be read right now is not observed yet.
-        return (GateCurrency("resource-stage-not-current", RESOURCE_STAGE_UNOBSERVABLE)
-                if marker.get("resource_execution_identity") is not None else None)
+        # A record that exists but cannot be read right now is not observed yet, whatever the
+        # marker carries: a hand marker without an identity is not current on an unread ledger.
+        return GateCurrency("resource-stage-not-current", RESOURCE_STAGE_UNOBSERVABLE)
     except (ValueError, KeyError, TypeError, AttributeError):
         if marker.get("resource_execution_identity") is not None:
             return GateCurrency("resource-stage-not-current", "completion-marker-missing")

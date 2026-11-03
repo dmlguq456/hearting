@@ -3970,6 +3970,37 @@ class DispatchContractTest(unittest.TestCase):
    D.completion_marker_gate(str(path),node,"start",base,jobs,
                             registry_lines=[],attempt_id="att-plan-new")
 
+ def test_launch_gate_names_the_resource_step_not_revise(self):
+  with tempfile.TemporaryDirectory() as td:
+   base=Path(td)
+   route={"dispatch_contract_version":3,"route_id":"rt-resource-gate0001",
+          "route_hash":"sha256:"+"9"*64,"registry_digest":"sha256:"+"a"*64,
+          "nodes":[{"id":"host-run","depends_on":[],"kind":"resource-runner",
+                    "completion_gate":"resource-exit","continuation":{"kind":"supervised"}},
+                   {"id":"impl-review","depends_on":["host-run"],"kind":"review-worker",
+                    "completion_gate":"code-impl-review","dispatch_depth":2}]}
+   path=base/"route.json"; path.write_text(json.dumps(route),encoding="utf-8")
+   marker_dir=base/".dispatch"/"completion"/route["route_id"]
+   marker_dir.mkdir(parents=True,exist_ok=True)
+   (marker_dir/"host-run.json").write_text(json.dumps({"attempt_id":None,"registered_worker":False}),
+                                           encoding="utf-8")
+   jobs=base/"jobs.log"; jobs.write_text("",encoding="utf-8")
+   expected={D.RESOURCE_STAGE_UNOBSERVABLE:"can be read again",
+             D.RESOURCE_STAGE_UNSETTLED:"continue resource stage host-run",
+             "completion-marker-missing":"missing or malformed"}
+   for reason,step in expected.items():
+    currency=D.GateCurrency("resource-stage-not-current",reason)
+    with mock.patch.object(D,"completion_marker_is_current",return_value=False), \
+         mock.patch.object(D,"gate_currency",return_value=currency), \
+         mock.patch.object(D,"_sibling_attempt_gate"):
+     with self.assertRaises(D.DispatchContractError) as caught:
+      D.completion_marker_gate(str(path),"impl-review","start",base,jobs,
+                               registry_lines=[],attempt_id="att-review-new")
+    self.assertEqual((caught.exception.reason,caught.exception.detail),
+                     ("completion-marker-missing","host-run"))
+    self.assertIn(step,caught.exception.next_action)
+    self.assertNotIn("revise",caught.exception.next_action)
+
  def _gate_ledger(self,base,route):
   import workflow_state as WS
   return WS.WorkflowLedger(route["route_id"],route["route_hash"],root=base/"workflow")
@@ -7876,6 +7907,29 @@ class ResourceStageMarkerSuccessorTest(unittest.TestCase):
                          ("resource-stage-not-current", "resource-stage-unsettled"))
         self.assertTrue(D.resource_stage_unsettled(currency))
         self.assertFalse(D.completion_superseded(currency))
+
+    def test_hand_marker_on_an_unreadable_ledger_is_not_current(self):
+        # Cairn v216 on a stalled NAS: a hand marker (no resource identity) and an EIO reading the
+        # run registry. The marker is not reused as the stage's result; the read is retried.
+        import errno
+        hand = {"sequence": 1, "evidence": {"path": str(self.output)}}
+        self.marker_path.write_text(json.dumps(hand))
+        registry, read_text = self.registry, Path.read_text
+
+        def stalled(path, *args, **kwargs):
+            if Path(path) == registry:
+                raise OSError(errno.EIO, "Input/output error", str(path))
+            return read_text(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "read_text", stalled):
+            currency = D._resource_stage_marker_current(
+                self.route, self.route["nodes"][0], hand, self.marker_path, str(self.jobs))
+        self.assertIsNotNone(currency)
+        self.assertEqual((currency.state, currency.reason),
+                         ("resource-stage-not-current", "resource-stage-unobservable"))
+        self.assertTrue(D.resource_stage_unobservable(currency))
+        self.assertFalse(D.resource_stage_unsettled(currency))
+        self.assertIn("can be read again", D.resource_stage_next_action(currency, "full-run"))
 
     def test_settled_stage_with_a_mismatched_proof_or_unreadable_records_is_unknown_not_unsettled(self):
         node = self.route["nodes"][0]
