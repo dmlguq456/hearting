@@ -1158,8 +1158,13 @@ def retain_registered_completion(jobs, attempt_id, session_id, carrier, *, holde
     return True
 
 
-def retain_session_notice(jobs, harness, storage_sid, record):
-    """Retain one route-free notice under its immutable storage identity."""
+def retain_session_notice(jobs, harness, storage_sid, record, *, read_context=None):
+    """Retain one route-free notice under its immutable storage identity.
+
+    ``read_context`` is the caller's retention context: one current lineage
+    observation shared by the retentions of one runner pass, never its
+    discovery view.
+    """
     from dispatch_seat_handover import record_recipient_binding
     from harness_capabilities import parent_completion
     import dispatch_pending_delivery as pending
@@ -1188,7 +1193,8 @@ def retain_session_notice(jobs, harness, storage_sid, record):
         if any(isinstance(value, str) and value.startswith(session_notice.LINEAGE_PREFIX)
                for value in stored.get("lineage", [])):
             return session_notice.retain_pending(jobs, {**stored, "_storage_key": storage_sid})
-        if record_recipient_binding(stored, storage_sid, harness=harness, jobs=jobs) is None:
+        if record_recipient_binding(stored, storage_sid, harness=harness, jobs=jobs,
+                                    read_context=read_context) is None:
             return False
         identity = {"state_root": str(root), "storage_sid": storage_sid,
                     "harness": harness, "delivery_id": record["delivery_id"],
