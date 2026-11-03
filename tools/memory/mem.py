@@ -3838,6 +3838,36 @@ def export_profile(apply=False):
 
 
 # ---------- profile (read-only) ----------
+def _profile_read_con():
+    """A read-only connection when the store is already current, else ``get_con()``.
+
+    Units have workers read profiles at work start. A Codex worker sees the store
+    and ~/.local/state read-only, where ``get_con()`` fails on its identity chmod
+    and its read-write open; a current store needs neither to be read. With no
+    ``-wal`` file every commit is in the main file, so an unwritable directory
+    (no ``-shm`` can be made) is read as immutable.
+    """
+    if DB.is_file():
+        queries = ["?mode=ro"]
+        if not Path(f"{DB}-wal").exists():
+            queries.append("?mode=ro&immutable=1")
+        for query in queries:
+            con = None
+            try:
+                con = sqlite3.connect(DB.resolve().as_uri() + query, uri=True, timeout=1)
+                current = con.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+                if current:
+                    con.execute("PRAGMA query_only=ON")
+                    return con
+            except sqlite3.Error:
+                current = True  # unreadable this way; try the next way
+            if con is not None:
+                con.close()
+            if not current:
+                break  # an older store needs get_con()'s migration
+    return get_con()
+
+
 def _lookup_profile_aspect(aspect):
     """Resolve a profile aspect to (stem, meta, body), newest-wins.
 
@@ -3846,7 +3876,7 @@ def _lookup_profile_aspect(aspect):
     """
     # Query rowid explicitly because db_iter_records selects only RECORD_COLS.
     cols = ", ".join(RECORD_COLS)
-    con = get_con()
+    con = _profile_read_con()
     try:
         rows_raw = con.execute(
             f"SELECT rowid, {cols} FROM records WHERE type='profile'"

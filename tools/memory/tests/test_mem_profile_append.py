@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -112,6 +113,47 @@ class ProfileAppendTest(unittest.TestCase):
     def test_missing_aspect_and_empty_text_are_refused(self):
         self.assertEqual(self.mem("profile-append", "no-such-aspect", "x", check=False).returncode, 2)
         self.assertEqual(self.mem("profile-append", "06_collaboration_style", "  ", check=False).returncode, 2)
+
+    def _profile_read_only(self):
+        """Run `mem profile` as a Codex worker sandbox sees it: the store and
+        state are unwritable and the identity directory chmod fails with EROFS."""
+        paths = [self.store, *self.store.iterdir(), self.root / "state",
+                 *(self.root / "state").rglob("*")]
+        modes = {path: path.stat().st_mode & 0o777 for path in paths}
+        shim = (
+            "import errno, os, runpy, sys\n"
+            "def chmod(path, *a, **k):\n"
+            "    raise OSError(errno.EROFS, 'Read-only file system', str(path))\n"
+            "os.chmod = chmod\n"
+            "sys.argv = sys.argv[1:]\n"
+            "runpy.run_path(sys.argv[0], run_name='__main__')\n"
+        )
+        try:
+            for path in paths:
+                path.chmod(0o555 if path.is_dir() else 0o444)
+            result = subprocess.run(
+                [sys.executable, "-c", shim, str(MEM), "profile", "06_collaboration_style"],
+                cwd=self.project, env=self.env(), text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
+            unchanged = {path: path.stat().st_mode & 0o777 for path in paths}
+        finally:
+            for path in reversed(paths):
+                path.chmod(modes[path])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("먼저 방향을 짧게 확인한다.", result.stdout)
+        self.assertEqual(unchanged, {path: 0o555 if path.is_dir() else 0o444 for path in paths})
+
+    def test_profile_reads_a_checkpointed_read_only_store(self):
+        self.assertFalse(Path(f"{self.store / 'memory.db'}-wal").exists())
+        self._profile_read_only()
+
+    def test_profile_reads_a_live_read_only_store(self):
+        # Another process holds the store open, so -wal and -shm exist (the usual case).
+        holder = sqlite3.connect(self.store / "memory.db")
+        self.addCleanup(holder.close)
+        holder.execute("SELECT COUNT(*) FROM records").fetchone()
+        self.assertTrue(Path(f"{self.store / 'memory.db'}-shm").exists())
+        self._profile_read_only()
 
     def _profile_id(self):
         shown = self.mem("recall", "기존 메모 하나.", "--full").stdout
