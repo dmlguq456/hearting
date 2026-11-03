@@ -1098,6 +1098,9 @@ class AdapterV11Test(unittest.TestCase):
         "PYTHONDONTWRITEBYTECODE":"1"}
    with mock.patch.dict(os.environ,env,clear=True):
     home=wrapper.prepare_nested_codex_home(worktree,source,jobs=jobs)
+    # Without `jobs` the same inherited registry selects the same home; this
+    # call used to raise NameError on an unimported helper.
+    self.assertEqual(wrapper.prepare_nested_codex_home(worktree,source),home)
     agent_home=wrapper.resolve_agent_home().resolve()
    self.assertEqual(agent_home,ROOT.resolve())
    self.assertTrue((home/"auth.json").is_symlink())

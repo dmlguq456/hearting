@@ -63,6 +63,7 @@ from dispatch_contract import (
     codex_standard_owner_network_enabled,
     dispatch_state_root,
     dispatch_state_roots,
+    resolve_dispatch_state_root,
     ensure_global_registry_writable,
     headless_attempt_policy,
     launch_orphan_watch,
