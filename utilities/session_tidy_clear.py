@@ -403,6 +403,33 @@ def reply_card_guide(nonce: str) -> str:
             "턴이 끝나면 하팅이 이 답을 카드로 저장하고 기억 정리를 접수합니다. ")
 
 
+def idle_tidy_terms(req: Optional[dict] = None, *, request: bool = True) -> str:
+    """The real conditions of automatic idle tidy and how to turn it off, for the person.
+    ``request=False`` is the wording of its result line (which never suggests a clear)."""
+    from session_tidy_policy import DEFAULT_IDLE, config_path
+    idle = (req or {}).get("idle") if isinstance((req or {}).get("idle"), dict) else {}
+    tokens = idle.get("min_tokens", DEFAULT_IDLE["min_tokens"])
+    tokens = tokens if type(tokens) is int and tokens > 0 else DEFAULT_IDLE["min_tokens"]
+    try:
+        minutes = max(1, round(float(idle.get("wait_seconds", DEFAULT_IDLE["wait_seconds"])) / 60))
+    except (TypeError, ValueError):
+        minutes = round(DEFAULT_IDLE["wait_seconds"] / 60)
+    amount = f"{tokens // 10000}만" if tokens % 10000 == 0 else f"{tokens:,}"
+    path = config_path()
+    try:
+        shown = "~/" + str(path.relative_to(Path.home()))
+    except ValueError:
+        shown = str(path)
+    when = (f"마지막 요청 입력이 {amount} 토큰 이상이고, 턴이 끝난 뒤 사람 입력 없이 약 {minutes}분이 지났고, "
+            "화면이 쉬는 중이며 입력창이 비어 있고 질문·확인 창이 열려 있지 않을 때만")
+    off = f"끄려면 {shown}에 {{\"idle\": {{\"enabled\": false}}}}를 두세요."
+    if not request:
+        return (f"자동 유휴 정리는 {when} 동작하고, 백그라운드 에이전트가 있으면 창을 비우는 대신 /compact로 "
+                f"압축합니다. {off}")
+    return (f"{when} 이 요청을 보냅니다. 카드를 받으면 이 창을 비우고(백그라운드 에이전트가 있으면 /clear 대신 "
+            f"/compact) 현황만 짧게 보여 줍니다. {off}")
+
+
 def idle_card_request_text(req: dict) -> str:
     nonce = str(req.get("nonce") or "")
     if req.get("origin") == "compact":
@@ -411,7 +438,7 @@ def idle_card_request_text(req: dict) -> str:
                 "빈 요약을 만들거나 다음 작업을 시작하지 마세요. "
                 "이 요청이 끝나면 창 비우기와 이어서하기는 예약된 기존 절차가 처리합니다. "
                 f"요청 식별자: {nonce}")
-    return ("자동 유휴 정리 요청입니다. 지금까지의 이 대화만 바탕으로 session-tidy 카드를 쓰세요. "
+    return ("자동 유휴 정리 요청입니다. " + idle_tidy_terms(req) + " 지금까지의 이 대화만 바탕으로 session-tidy 카드를 쓰세요. "
             + reply_card_guide(nonce) +
             "별도 작업을 시작하거나 이어서 하지 말고, 답을 마치면 다음 입력을 기다리세요. "
             f"요청 식별자: {nonce}")
@@ -1970,7 +1997,9 @@ def _finish(seat_key: str, nonce: str, outcome: str, reason: str = "", *, observ
         _write_reservation(req)
     if outcome not in ("cleared", "cancelled"):
         with contextlib.suppress(BaseException):
-            if req.get("origin") in ("idle", "compact"):
+            if req.get("origin") == "idle":
+                notice = "[정리] 자동 유휴 정리의 창 전환을 확인하지 못했습니다. " + idle_tidy_terms(req, request=False)
+            elif req.get("origin") == "compact":
                 notice = "[정리] 자동 정리의 창 전환을 확인하지 못했습니다."
             else:
                 notice = _notice_text(outcome, reason, str(req.get("harness") or ""))

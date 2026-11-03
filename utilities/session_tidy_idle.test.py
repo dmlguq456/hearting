@@ -79,6 +79,24 @@ class IdleObserverTests(unittest.TestCase):
                              (first["nonce"], first["idle"]["due_at"]))
             self.assertEqual(self.started, [first["nonce"]])
 
+    def test_the_documented_off_switch_books_no_idle_tidy(self):
+        # Exactly the example the request text and capabilities/session-tidy.md give.
+        config = self.iso.xdg_config / "hearting" / "session-tidy.json"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text('{"idle": {"enabled": false}}', encoding="utf-8")
+        with self.iso.patched_environ(self.extra), \
+                mock.patch.object(clear, "herdr_command", return_value=str(self.iso.root / "fake-herdr")), \
+                mock.patch.object(clear, "_start_helper", side_effect=lambda key, nonce: self.started.append(nonce) or 1):
+            self.assertEqual(self.observe_claude(tokens=900000), "booking=off")
+            seat = st.resolve_seat("claude", str(self.cwd), sid="sid-A")
+            self.assertIsNone(clear.read_reservation(seat.key))
+            text = clear.idle_card_request_text({"nonce": "n1", "origin": "idle",
+                                                 "idle": {"min_tokens": 200000, "wait_seconds": 3240}})
+        self.assertEqual(self.started, [])
+        for shown in ("20만 토큰 이상", "약 54분", "입력창이 비어", "질문·확인 창", "/compact",
+                      '{"idle": {"enabled": false}}', "hearting/session-tidy.json"):
+            self.assertIn(shown, text)
+
     def test_threshold_unknown_and_worker_signals_fail_closed(self):
         with self.iso.patched_environ(self.extra), mock.patch.object(clear, "herdr_command", return_value="fake"), \
              mock.patch.object(clear, "_start_helper", return_value=12345):
