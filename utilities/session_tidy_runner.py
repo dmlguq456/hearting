@@ -115,7 +115,8 @@ WORKER_HARNESS = {"claude": "claude", "codex": "codex", "opencode": "claude"}
 
 UNFINISHED = ("queued", "waiting-lock", "assembling", "dispatching", "waiting-worker", "validating", "applying")
 ENV_DROP_KEYS = ("AGENT_SESSION_ROLE", "FLEET_TITLE_REFRESH", "MEM_DISTILL", "CLAUDE_CODE_SESSION_ID",
-                 "CLAUDE_SESSION_ID", "CODEX_THREAD_ID", "CODEX_SESSION_ID", "OPENCODE_SESSION_ID")
+                 "CLAUDE_SESSION_ID", "CODEX_THREAD_ID", "CODEX_SESSION_ID", "OPENCODE_SESSION_ID",
+                 "TMUX_PANE")   # $TMUX (the server) stays: a tmux seat is reached through it
 ENV_DROP_PREFIXES = ("AGENT_DISPATCH_", "OPENCODE_DISPATCH", "AGENT_ROUTE_", "AGENT_ARTIFACT_", "HERDR_")
 
 

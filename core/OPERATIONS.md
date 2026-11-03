@@ -2775,6 +2775,35 @@ the pane list read once right after opening (`pane-exited`,
 `pane-list-unconfirmed`); nothing is retried or closed. A person in an
 agentless Herdr shell keeps running Fleet in the current terminal.
 
+Without Herdr, the core pane operations run through tmux when Hearting runs
+inside it. The pane id chooses: a tmux pane id (`%N`) is the tmux server `$TMUX`
+names (tmux's default server when unset), any other id stays Herdr, and neither
+falls back to the other. The proof before typed input is unchanged: tmux names
+the pane's root process and terminal, the kernel names that terminal's
+foreground group, and `pane_ownership.verified_pane` and the prompt, clear and
+continue guards bind the foreground runtime and its process-proven session as
+on Herdr. tmux has no agent state, so the state is the runtime's own record for
+that exact process and session: Claude's session registry status (`busy`
+working, `waiting` blocked, `idle`) or Codex's latest rollout task lifecycle.
+Without such a record (OpenCode; a Codex thread without a rollout) the state is
+`unknown` and nothing is typed. A wait re-reads that record every 0.5 s inside
+its existing bound. Typed input reaches that pane only: one bracketed paste
+from a private tmux buffer, then the Enter as a one-byte paste. A pane in a
+tmux mode (copy, choose, tree), with synchronized panes or with input off gets
+nothing; a prompt or continue stays queued and a clear is skipped with its
+reason. So in a proven tmux pane session-tidy books and performs
+the automatic clear and continue, `peer-steward prompt`, `clear`, `continue`,
+`idle-card-request` and `wait` accept the pane id (without Herdr, names and
+Fleet tags resolve among that server's panes), the Claude idle callback retries
+pending delivery there, the pane header goes to the tmux pane title and the
+`@hearting_title` pane option, and `interactive-main-recovery` checks and opens
+through tmux on a checked owner-only socket. `peer-steward start`, `watch` and
+`retire` stay Herdr-only. tmux pane ids are unique per server only, so a pane
+travels as `%N@<socket>`: a bare `%N` given to `peer-steward prompt` or `wait`
+means the caller's own server, and a seat key includes the server. cmux's
+documented API reports no surface process or terminal, so Hearting does not
+type into cmux surfaces.
+
 `hearting run pane tidy` arranges the existing panes in the caller's tab once.
 It supports Herdr and tmux: two panes sit side by side, four form 2×2, six form
 3×2, and five fill two equal-height rows of three and two panes (equal widths
