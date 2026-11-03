@@ -502,6 +502,31 @@ class DispatchLogRetentionTest(unittest.TestCase):
         self.assertEqual((result["removed"], result["more"]), (0, 0))
         self.assertGreater(result["over_limit_bytes"], 0)
 
+    def test_renewed_protection_refusals_are_not_backlog_but_a_spent_recheck_budget_is(self):
+        # RV-1041 R2: a file whose protection was renewed between examination
+        # and removal stays, and that alone keeps the normal interval.
+        for index in range(3):
+            path = self.log(f"renewed-{index}.jsonl")
+            self.add_row(f"att-renewed-{index}", path, ended=self.now - 30 * DAY)
+
+        @contextlib.contextmanager
+        def refused(*args, **kwargs):
+            yield False
+
+        with mock.patch.object(R, "_fresh_eligible", refused):
+            result = self.sweep()
+        self.assertEqual((result["removed"], result["deferred"], result["more"]), (0, 3, 0))
+
+        @contextlib.contextmanager
+        def out_of_budget(*args, **kwargs):
+            args[8].admission_reason = "delivery-refresh-budget"
+            yield False
+
+        with mock.patch.object(R, "_fresh_eligible", out_of_budget):
+            result = R.sweep(self.jobs, now_ns=self.now, force=True)
+        self.assertEqual((result["removed"], result["more"]), (0, 1))
+        self.assertEqual(result["kept_reasons"].get("delivery-refresh-budget"), 3)
+
     def test_one_registry_read_serves_every_removal_while_jobs_log_is_unchanged(self):
         import worker_home_retention as WHR
 

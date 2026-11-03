@@ -624,6 +624,10 @@ def _pass(jobs, root, layout, state, now_ns, started):
     removed = 0
     removed_bytes = 0
     deferred = 0
+    # Only files this pass ran out of count or time for are backlog: a refusal
+    # because protection was renewed keeps the file and is not a reason to
+    # come back sooner (RV-1041 R2).
+    budget_deferred = 0
     # Examining and removing each get their own time budget, so a long
     # examination cannot leave eligible files undeleted.
     removal_started = time.monotonic()
@@ -631,6 +635,7 @@ def _pass(jobs, root, layout, state, now_ns, started):
         if ((removed >= REMOVE_LIMIT and not over_limit)
                 or time.monotonic() - removal_started > MAX_PASS_SECONDS):
             deferred += 1
+            budget_deferred += 1
             continue
         with _fresh_eligible(jobs, root, layout, name, rows, expected_stamp,
                              now_ns, candidate_kind, ctx, removal_started + MAX_PASS_SECONDS, settled) as admitted:
@@ -639,6 +644,8 @@ def _pass(jobs, root, layout, state, now_ns, started):
                 unknown_names.add(name)
                 deferred += 1
                 if ctx.admission_reason:
+                    # The delivery recheck ran out of this pass's budget.
+                    budget_deferred += 1
                     reasons[ctx.admission_reason] = reasons.get(ctx.admission_reason, 0) + 1
                     ctx.admission_reason = None
                 continue
@@ -662,7 +669,7 @@ def _pass(jobs, root, layout, state, now_ns, started):
         # Still over the limit after removing something: more is likely
         # reachable, so come back at the short interval. A pass that removed
         # nothing (bytes held by protected logs) waits the normal interval.
-        "more": int(removed >= REMOVE_LIMIT or deferred > 0
+        "more": int(removed >= REMOVE_LIMIT or budget_deferred > 0
                     or (removed > 0 and over_limit_bytes > 0)),
         "elapsed_ms": int((time.monotonic() - started) * 1000),
     }

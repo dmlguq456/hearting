@@ -3392,6 +3392,11 @@ def _run_pass(jobs: Path, root: Path, layout: _Layout, state: dict, now_ns: int,
             cohort = {s["id"] for s in ctx.observation.subjects}
             batch = [key for key in batch if key in cohort or key not in subject_ids]
         scan = contextlib.ExitStack()
+        # Examination stopped at a full removal budget. That is backlog only if
+        # the budget then removed something: due homes that `_detach` refuses
+        # again (renewed protection, unsafe partial retention) are not a reason
+        # to come back sooner (RV-1041 R2).
+        examination_cut = False
         try:
             from dispatch_contract import process_table_scan_scope
             from dispatch_summary import provider_reference_scan_scope
@@ -3432,7 +3437,7 @@ def _run_pass(jobs: Path, root: Path, layout: _Layout, state: dict, now_ns: int,
                     # starts there, rather than skipping a whole cycle of due
                     # homes this pass could not remove anyway.
                     if len(due) >= budget:
-                        result["more"] = 1
+                        examination_cut = True
                         break
                 else:
                     _count(result["kept"], "within-window")
@@ -3463,6 +3468,8 @@ def _run_pass(jobs: Path, root: Path, layout: _Layout, state: dict, now_ns: int,
                 continue
             name = outcome.split(":", 1)[1]
             since.pop(key, None)
+            if examination_cut:
+                result["more"] = 1
             with contextlib.suppress(OSError):
                 # destructive-ok: reason=drop the view marker of a detached home; boundary=one marker file directly under homes/worker-retention/views
                 os.unlink(key, dir_fd=layout.views_fd)
