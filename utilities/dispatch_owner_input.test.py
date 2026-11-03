@@ -655,6 +655,8 @@ class RegisteredOwnerInputTest(unittest.TestCase):
              mock.patch.object(route_authority, 'owns', return_value=None):
             receipt = I.submit(self.jobs, self.attempt, 'keep until the lineage reads', 'lineage-unknown')
         self.assertEqual(receipt['consumer_recovery'], 'not-started:handover-unreadable')
+        self.assertIn('run the same command', receipt['consumer_retry_when'])
+        self.assertIn(self.attempt, receipt['consumer_detail'])
         self.assertNotIn('restore this same owner', receipt.get('next_step', ''))
         self.assertEqual(I.inspect(self.jobs, self.attempt)['requests'][0]['state'], 'queued')
 
