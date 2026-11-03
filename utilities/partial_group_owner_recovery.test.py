@@ -300,7 +300,7 @@ class PartialGroupOwnerRecoveryTest(unittest.TestCase):
         self.assertIn("판정 없음(dead-launch-exit-1)", replacement_prompt)
         self.assertIn("full execution of the original assigned task and scope", replacement_prompt)
         self.assertIn("verdict-less attempts provide execution context only", replacement_prompt)
-        self.assertNotIn("This is a full independent review", replacement_prompt)
+        self.assertNotIn("This is an independent first review", replacement_prompt)
         self.assertNotIn("This is a correction round", replacement_prompt)
         self.complete(replacement)
         with mock.patch.dict(os.environ, self.env, clear=True):

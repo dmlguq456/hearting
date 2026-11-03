@@ -2413,6 +2413,9 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
         # blind to its prior rounds.
         round_block = DISPATCH_NODE.round_protocol_block(
             node_round_budget, round_rows, worker_type_for_kind(node["kind"]), node["id"],
+            jobs=args.jobs,
+            current_manifest=(getattr(node_round_admission, "source_subject_manifest", ())
+                              if node_round_admission.source_subject_digest else None),
         )
         if round_block and args.prompt_file:
             base_prompt = Path(args.prompt_file).read_text(encoding="utf-8")

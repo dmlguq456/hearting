@@ -1840,9 +1840,12 @@ class FallbackTest(unittest.TestCase):
    round_rows=F.DISPATCH_NODE.prior_round_attempts(
     self.jobs,route["route_id"],"plan-check",
     route=route if node.get("kind")=="review-worker" else None)
-   budget=F.DISPATCH_NODE.admit_round(route,node,self.jobs,owner_attempt_id="att-fallback-parent").budget
+   admission=F.DISPATCH_NODE.admit_round(route,node,self.jobs,owner_attempt_id="att-fallback-parent")
+   # The same records the wrapper passes: the prior blocking review and the
+   # delta since it are rendered from the jobs ledger and admitted subject.
    expected_block=F.DISPATCH_NODE.round_protocol_block(
-    budget,round_rows,F.worker_type_for_kind(node["kind"]),node["id"])
+    admission.budget,round_rows,F.worker_type_for_kind(node["kind"]),node["id"],jobs=self.jobs,
+    current_manifest=admission.source_subject_manifest if admission.source_subject_digest else None)
   self.assertEqual(code,0)
   self.assertNotEqual(expected_block,"")
   augmented=sorted(Path(self.jobs).parent.glob("round-protocol-plan-check-*.md"))
