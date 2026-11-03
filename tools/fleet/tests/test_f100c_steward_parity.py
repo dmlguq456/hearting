@@ -739,6 +739,73 @@ class StewardReverseIndexTest(unittest.TestCase):
                      {"sidOld": {"harness": "codex", "kind": "watch", "source": "watch"}})
         self.assertEqual(target.steward_parents[0]["session_id"], "sidP")
 
+    def test_a_cleared_claude_target_keeps_its_supervisor(self):
+        """The start marker names the id a Claude target had before /clear. Claude ids
+        are resolved after the herdr pane pass, so the pane's seat-history join waits
+        for the id; joined in the pane pass, it saw no id and the relation was lost."""
+        from fleet.collectors import herdr, procscan
+        parent = Session(harness="claude", pid=1, cwd="/x", slug="p", session_id="sidP")
+        target = Session(harness="claude", pid=2, proc_start="22", cwd="", slug="t")
+
+        def lineage(harness, sid, pane, cwd=None):
+            return ["sidOld"] if (harness, sid, pane, cwd) == ("claude", "sidNew", "w:p2", "/x") else []
+
+        with mock.patch.object(herdr, "pane_session_aliases", side_effect=lineage), \
+             mock.patch.object(herdr, "_clear_gpu_session_aliases", side_effect=lineage), \
+             mock.patch.object(procscan, "read_proc_start", return_value="22"), \
+             mock.patch.object(herdr, "pid_in_panes", return_value=False):
+            herdr.enrich([parent, target], agents=[], pids=(set(), {2}),
+                         pane_bindings={2: {"w:p2"}})
+            self.assertIsNone(target.session_aliases)
+            target.session_id, target.cwd = "sidNew", "/x"   # the Claude enricher, then its directory
+            herdr.join_deferred_pane_aliases([parent, target])
+        self.assertEqual(target.session_aliases, ["sidOld"])
+        self.assertEqual(target._gpu_session_aliases, ["sidOld"])
+        self._enrich([parent, target],
+                     {"sidOld": {"harness": "claude", "kind": "start", "source": "start"}})
+        self.assertTrue(parent.steward)
+        self.assertEqual(target.steward_parents[0]["session_id"], "sidP")
+
+    def test_collection_joins_claude_aliases_after_its_id_and_directory(self):
+        import importlib
+        from types import SimpleNamespace
+        from fleet import session_cwd
+        from fleet.collectors import herdr
+        collectors = importlib.import_module("fleet.collectors")
+        session = SimpleNamespace(harness="claude", pid=123, proc_start="1", cwd="",
+                                  session_id=None, is_child=False)
+        order = []
+
+        class Joined(BaseException):
+            pass
+
+        def claude_enrich(row, **_kwargs):
+            order.append("claude-id")
+            row.session_id = "sid-new"
+
+        def project(rows):
+            order.append("directory")
+            for row in rows:
+                row.cwd = "/work"
+
+        def join(rows):
+            order.append("join")
+            raise Joined([(row.session_id, row.cwd) for row in rows])
+
+        modules = {".claude": SimpleNamespace(enrich=claude_enrich),
+                   ".codex": SimpleNamespace(enrich=lambda *_a, **_k: None),
+                   ".opencode": SimpleNamespace(enrich=lambda *_a, **_k: None)}
+        with mock.patch.object(collectors.procscan, "scan", return_value=[session]), \
+             mock.patch.object(collectors.importlib, "import_module",
+                               side_effect=lambda name, _package: modules[name]), \
+             mock.patch.object(herdr, "enrich", side_effect=lambda *_a, **_k: order.append("pane")), \
+             mock.patch.object(session_cwd, "project", side_effect=project), \
+             mock.patch.object(herdr, "join_deferred_pane_aliases", side_effect=join):
+            with self.assertRaises(Joined) as joined:
+                collectors.collect_all(harness_filter=("claude",))
+        self.assertEqual(order, ["pane", "claude-id", "directory", "join"])
+        self.assertEqual(joined.exception.args[0], [("sid-new", "/work")])
+
     def test_no_markers_leaves_every_field_at_its_default(self):
         target = Session(harness="codex", pid=2, cwd="/x", slug="t", session_id="sidT")
         steward.enrich([target], markers={})

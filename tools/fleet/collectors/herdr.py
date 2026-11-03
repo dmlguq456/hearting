@@ -625,6 +625,37 @@ def _lineage_attachment(sessions, lineage):
             s.herdr_attached = None
 
 
+def _join_pane_aliases(s, pane, sessions):
+    """The ids this pane's current session had before a clear or compact (display joins).
+
+    A steward relation, a peer record or a GPU claim may still name the earlier id. The
+    process must be the same one the pane was matched on, and an id that is still some
+    live row's own identity is never an alias.
+    """
+    harness = str(getattr(s, "harness", "") or "").lower()
+    sid = getattr(s, "session_id", None)
+    session_cwd = getattr(s, "cwd", None)
+    aliases = _clear_gpu_session_aliases(harness, sid, pane, session_cwd)
+    pane_aliases = pane_session_aliases(harness, sid, pane, session_cwd)
+    if aliases or pane_aliases:
+        from . import procscan
+        if getattr(s, "proc_start", None) and procscan.read_proc_start(s.pid) == s.proc_start:
+            live = {(other.harness, other.session_id) for other in sessions}
+            s._gpu_session_aliases = [old for old in aliases if (harness, old) not in live]
+            s.session_aliases = list(dict.fromkeys(
+                list(getattr(s, "session_aliases", None) or [])
+                + [other for other in pane_aliases if (harness, other) not in live]))
+
+
+def join_deferred_pane_aliases(sessions):
+    """Finish ``enrich``'s pane alias join for rows whose id was resolved after it."""
+    for s in sessions:
+        pane = getattr(s, "_herdr_alias_pane", None)
+        if pane and getattr(s, "session_id", None):
+            _join_pane_aliases(s, pane, sessions)
+        s._herdr_alias_pane = None
+
+
 def enrich(sessions, agents=None, lineage=None, panes=None, pids=None, pane_bindings=None,
            wait_timeout=0.0):
     """Set ``herdr_attached`` on every eligible depth-0 session. ``agents`` = a
@@ -635,6 +666,7 @@ def enrich(sessions, agents=None, lineage=None, panes=None, pids=None, pane_bind
         session._gpu_session_aliases = []
         session._herdr_name = None
         session._pane_session_claim = None
+        session._herdr_alias_pane = None
     observation = None
     if agents is None and panes is None:
         observation = observation_view(wait_timeout=wait_timeout)
@@ -750,17 +782,13 @@ def enrich(sessions, agents=None, lineage=None, panes=None, pids=None, pane_bind
                      and agent.get("name")}
             if len(names) == 1:
                 s._herdr_name = names.pop()
-            session_cwd = getattr(s, "cwd", None)
-            aliases = _clear_gpu_session_aliases(harness, sid, pane, session_cwd)
-            pane_aliases = pane_session_aliases(harness, sid, pane, session_cwd)
-            if aliases or pane_aliases:
-                from . import procscan
-                if getattr(s, "proc_start", None) and procscan.read_proc_start(s.pid) == s.proc_start:
-                    live = {(other.harness, other.session_id) for other in sessions}
-                    s._gpu_session_aliases = [old for old in aliases if (harness, old) not in live]
-                    s.session_aliases = list(dict.fromkeys(
-                        list(getattr(s, "session_aliases", None) or [])
-                        + [other for other in pane_aliases if (harness, other) not in live]))
+            if sid:
+                _join_pane_aliases(s, pane, sessions)
+            else:
+                # A Claude row gets its id from the native enricher, which needs the
+                # pane claim made here and so runs after this pass: keep the pane and
+                # let ``join_deferred_pane_aliases`` finish the join once the id is known.
+                s._herdr_alias_pane = pane
     errors = list(getattr(pids, "errors", ()))
     last_error = "; ".join(errors) if errors else None
     if not probe_ok and not last_error:
