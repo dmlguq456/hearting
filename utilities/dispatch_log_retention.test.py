@@ -354,6 +354,83 @@ class DispatchLogRetentionTest(unittest.TestCase):
         self.assertEqual(R.sweep(self.jobs, now_ns=self.now + 2 * gap),
                          {"skipped": "not-due"})
 
+    def test_short_interval_continues_while_removing_and_still_over_the_limit(self):
+        paths = []
+        for index in range(4):
+            path = self.log(f"pressure-{index}.jsonl", b"p" * 8)
+            self.add_row(f"att-pressure-{index}", path, ended=self.now - (4 - index) * DAY)
+            paths.append(path)
+        with mock.patch.object(R, "MAX_LOG_BYTES", 8):
+            first = self.sweep()
+            self.assertEqual((first["removed"], first["over_limit_bytes"], first["more"]), (3, 0, 0))
+        # Still over the limit after removing something: come back soon.
+        for index in range(R.REMOVE_LIMIT - 1):
+            path = self.log(f"bulk-{index:03d}.jsonl", b"b" * 8)
+            self.add_row(f"att-bulk-{index:03d}", path, ended=self.now - 40 * DAY)
+        with mock.patch.object(R, "MAX_LOG_BYTES", 8), mock.patch.object(R, "EXAMINE_LIMIT", 4):
+            second = self.sweep()
+        self.assertGreater(second["removed"], 0)
+        self.assertGreater(second["over_limit_bytes"], 0)
+        self.assertEqual(second["more"], 1)
+
+    def test_over_the_limit_with_nothing_removable_keeps_the_normal_interval(self):
+        path = self.log("held.jsonl", b"h" * 32)
+        self.add_row("att-held", path, status="open", ended=self.now - 40 * DAY)
+        with mock.patch.object(R, "MAX_LOG_BYTES", 8):
+            result = self.sweep()
+        self.assertEqual((result["removed"], result["more"]), (0, 0))
+        self.assertGreater(result["over_limit_bytes"], 0)
+
+    def test_one_registry_read_serves_every_removal_while_jobs_log_is_unchanged(self):
+        import worker_home_retention as WHR
+
+        for index in range(3):
+            path = self.log(f"quiet-{index}.jsonl")
+            self.add_row(f"att-quiet-{index}", path, ended=self.now - 30 * DAY)
+        reads = []
+        original = WHR._Snapshot.__init__
+
+        def counting(snapshot, jobs):
+            reads.append(jobs)
+            original(snapshot, jobs)
+
+        with mock.patch.object(WHR._Snapshot, "__init__", counting):
+            result = self.sweep()
+        self.assertEqual(result["removed"], 3)
+        self.assertEqual(len(reads), 1)
+        self.assertEqual(R._LOG_DIR_CHECKED, {})
+
+    def test_a_registry_append_during_the_pass_is_read_again_before_each_removal(self):
+        import worker_home_retention as WHR
+
+        for index in range(3):
+            path = self.log(f"busy-{index}.jsonl")
+            self.add_row(f"att-busy-{index}", path, ended=self.now - 30 * DAY)
+        reads = []
+        original = WHR._Snapshot.__init__
+        unlink = R._unlink_if_same
+        appended = []
+
+        def counting(snapshot, jobs):
+            reads.append(jobs)
+            original(snapshot, jobs)
+
+        def unlink_then_append(layout, name, expected):
+            done = unlink(layout, name, expected)
+            if not appended:
+                appended.append(name)
+                with open(self.jobs, "a", encoding="utf-8") as handle:
+                    handle.write(f"{stamp(self.now)}\tdone\t/repo\t/wt\tjob\t"
+                                 "attempt_id=att-late-unrelated,harness=claude\n")
+            return done
+
+        with mock.patch.object(WHR._Snapshot, "__init__", counting), \
+                mock.patch.object(R, "_unlink_if_same", unlink_then_append):
+            result = self.sweep()
+        self.assertEqual(result["removed"], 3)
+        # The pass read, then one more per removal after the registry changed.
+        self.assertEqual(len(reads), 3)
+
     def test_inode_replacement_between_scan_and_unlink_is_preserved(self):
         path = self.log("swap.jsonl")
         info = os.stat(path, follow_symlinks=False)
