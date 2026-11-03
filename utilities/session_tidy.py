@@ -156,7 +156,22 @@ class StateError(Exception):
 
 def state_root() -> Path:
     base = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state")
-    return Path(base) / "hearting" / "session-tidy"
+    root = Path(base) / "hearting" / "session-tidy"
+    # Test isolation only: `tools/memory/tests/tidy_isolation.py` sets this for
+    # the lifetime of an IsolatedEnv so a bare in-process state access outside
+    # that root fails immediately instead of touching the developer's state.
+    # Production never sets it, so behavior without the variable is unchanged.
+    confinement = os.environ.get("HEARTING_STATE_CONFINEMENT")
+    if confinement:
+        try:
+            inside = os.path.commonpath(
+                (os.path.realpath(root), os.path.realpath(confinement))
+            ) == os.path.realpath(confinement)
+        except (OSError, ValueError):
+            inside = False
+        if not inside:
+            raise StateError(f"outside the test confinement {confinement}: {root}")
+    return root
 
 
 def _reject_symlink(path: Path) -> None:

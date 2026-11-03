@@ -156,7 +156,9 @@ def _repo_key(event):
     the same `project_of` grouping key the board's own cwd-project cards use) or a literal
     `project` field. Current writers emit `cwd`; `project` remains a tolerant compatibility
     field. Historical rows without either field degrade to no grouping (honest omission, F-3)
-    rather than guessing."""
+    rather than guessing. Grouping runs over the whole journal tail and each repo keeps its
+    latest RECENT_LIMIT rows; that replaced the 2026-07-16 today-only rule on 2026-11-02
+    (사용자 결정)."""
     cwd = event.get("cwd")
     if isinstance(cwd, str) and cwd:
         try:
@@ -290,6 +292,10 @@ def collect(now=None, *, include_summary=True, include_backlog=False):
 
     ``include_summary=False`` reads the write journal. ``include_backlog=True`` adds bounded,
     read-only DB metadata for the Explorer; the default collector surface stays journal-only.
+
+    ``by_repo`` is the latest RECENT_LIMIT journal rows per project, not today's rows: the
+    2026-11-02 사용자 결정 replaced the 2026-07-16 today-only display rule. ``today`` keeps
+    its name and its midnight boundary; only the per-repo display group widened.
     """
     now = now or datetime.datetime.now()
     midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -300,13 +306,14 @@ def collect(now=None, *, include_summary=True, include_backlog=False):
                ("ts", "action", "tier", "type", "actor", "sid", "snippet", "id", "cwd", "project", "scope")}
               for e in events[-RECENT_LIMIT:][::-1]]
     by_repo = {}
-    for e in today_events:
+    for e in events:
         rk = _repo_key(e)
         if rk:
             by_repo.setdefault(rk, []).append({key: e.get(key) for key in
                 ("ts", "action", "tier", "type", "actor", "sid", "snippet", "id", "cwd", "project", "scope")})
     for rows in by_repo.values():
         rows.sort(key=lambda e: e.get("ts") or "", reverse=True)
+        del rows[RECENT_LIMIT:]
     # Renderers only consume journal/project events. Keep the default aggregate API
     # for structured consumers without touching its DB, graveyard or curator in this mode.
     if not include_summary:

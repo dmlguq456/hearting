@@ -6,6 +6,7 @@ import io
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -1510,8 +1511,24 @@ class SupersessionEventTests(Fixture):
         self.assertEqual(record["disposition"]["superseded_event_id"], event["event_id"])
 
 
-HEARTING_CANARY_ROOT = Path("/home/nas/user/Uihyeop/personal/hearting/.agent_reports")
+def _checkout_artifact_root():
+    """This checkout's canonical artifact root, resolved as CORE §3 does."""
+    try:
+        out = subprocess.run(["sh", str(Path(__file__).with_name("artifact-root.sh")),
+                              str(Path(__file__).resolve().parent)],
+                             capture_output=True, text=True, timeout=30, check=True)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return Path(out.stdout.strip()) if out.stdout.strip() else None
+
+
+# The canary is the project's own 2026-09-03 resplit run. Only a root that holds
+# that exact run has it, so every other checkout skips the regression below.
+HEARTING_CANARY_ROOT = _checkout_artifact_root()
 HEARTING_CANARY_LUMP = "cyc_7d129f5a4b4059fdc8ff3005333e1668"
+HEARTING_CANARY_RUN_DIR = (
+    HEARTING_CANARY_ROOT / ".runtime" / "artifact-producer" / "v1" / "migrations"
+    / ("20260903T151118Z-resplit-" + HEARTING_CANARY_LUMP)) if HEARTING_CANARY_ROOT else None
 # The five deviations the canary run recorded before this cycle. It is spelled out
 # rather than derived from `DEVIATION_CHECKS` so that adding a check cannot silently
 # change what this regression claims the canary shows.
@@ -1855,9 +1872,8 @@ class DeviationAuditTests(Fixture):
         self.assertEqual({c["id"] for c in report["checks"]}, set(W.DEVIATION_CHECKS))
 
 
-@unittest.skipUnless(
-    (HEARTING_CANARY_ROOT / ".runtime" / "artifact-producer" / "v1" / "migrations").is_dir(),
-    "hearting canary artifact root not present on this machine")
+@unittest.skipUnless(HEARTING_CANARY_RUN_DIR is not None and HEARTING_CANARY_RUN_DIR.is_dir(),
+                     "this checkout's artifact root does not hold the 2026-09-03 canary run")
 class HeartingCanaryRegressionTests(unittest.TestCase):
     """The 2026-09-04 canary is a frozen read-only regression subject.
 
@@ -1889,8 +1905,7 @@ class HeartingCanaryRegressionTests(unittest.TestCase):
                             for r in by_id["capability"]["rows"]))
 
     def test_auditing_the_canary_mutates_nothing(self):
-        run_dir = HEARTING_CANARY_ROOT / ".runtime" / "artifact-producer" / "v1" / "migrations" / (
-            "20260903T151118Z-resplit-" + HEARTING_CANARY_LUMP)
+        run_dir = HEARTING_CANARY_RUN_DIR
         before = {str(p): (p.stat().st_mtime_ns, p.stat().st_size)
                   for p in P._walk_files(run_dir) if p.is_file()}
         W.resplit_deviations(HEARTING_CANARY_ROOT, lump_cycle_id=HEARTING_CANARY_LUMP)
