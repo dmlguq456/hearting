@@ -10103,7 +10103,8 @@ def _publish_lineage_rows_duty(root, *, deadline_ns=None,
 
 
 def _publish_peer_indexes(root, *, deadline_ns=None, expected_root_identity=None):
-    """Publish each recipient's pending-row index so a Stop reads no full history.
+    """Publish each session's pending-row index (rows it receives and rows it
+    sent) so the Stop and context hooks read no full history.
 
     The Stop header retry is bounded by its own 3 s budget and may skip, so the
     runner is the intended steady-state publisher. A pass cut off by its budget

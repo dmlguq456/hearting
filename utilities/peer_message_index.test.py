@@ -6,11 +6,14 @@ opening every retained row, and it must draw one pane header without listing
 every live agent. These tests pin:
 
 * index accuracy against the existing full scan (same rows, same order);
-* a current index means a recipient-only scan opens only its own rows;
-* every other call site (strict intent reuse, sender-or-recipient, full scans)
-  keeps the existing full scan;
+* a current index means a recipient-only scan, and the context hook's
+  received-or-sent scan of one session, open only that session's own rows;
+* every other call site (strict intent reuse, sender-only or mixed-session
+  scans, full scans) keeps the existing full scan;
 * partial, corrupt and stale indexes are never current;
-* the one-shot write hook keeps an existing recipient index current;
+* the one-shot write hook keeps an existing session index current (its
+  received and sent lists) and never refreshes one past a write it did not
+  observe;
 * `retry_receiver_idle` reuses the caller's `may_report` answer and loads the
   steward module once;
 * the real Stop hook reports the header with one `may_report` call, one
@@ -22,6 +25,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -85,6 +89,47 @@ class _OpenMeter:
         return False
 
 
+class _PendingRowOpens:
+    """Record every open of a ``pending/<ref>.json`` row inside one call."""
+
+    def __init__(self):
+        self.names = []
+        self._os_open = None
+        self._builtin_open = None
+
+    def _note(self, path):
+        try:
+            path = Path(os.fsdecode(path))
+        except TypeError:
+            return  # A file descriptor, not a pending row path.
+        if (path.parent.name == "pending" and path.parent.parent.name == "peer-messages"
+                and re.fullmatch(r"[0-9a-f]{32}\.json", path.name)):
+            self.names.append(path.name)
+
+    def __enter__(self):
+        import builtins
+        self._os_open = os.open
+        self._builtin_open = builtins.open
+
+        def counting_os_open(path, *args, **kwargs):
+            self._note(path)
+            return self._os_open(path, *args, **kwargs)
+
+        def counting_open(file, *args, **kwargs):
+            self._note(file)
+            return self._builtin_open(file, *args, **kwargs)
+
+        os.open = counting_os_open
+        builtins.open = counting_open
+        return self
+
+    def __exit__(self, *_exc):
+        import builtins
+        os.open = self._os_open
+        builtins.open = self._builtin_open
+        return False
+
+
 class IndexTestCase(unittest.TestCase):
     sender = {"harness": "codex", "session_id": "index-sender"}
     recipient = {"harness": "codex", "session_id": "index-recipient"}
@@ -132,9 +177,9 @@ class IndexTestCase(unittest.TestCase):
         return peer_message.prepare_peer_message(
             body, sender or self.sender, recipient or self.recipient, defer=True)
 
-    def received_history(self, count):
+    def received_history(self, count, start=0):
         pending = peer_message._pending_dir()
-        for index in range(count):
+        for index in range(start, start + count):
             ref = f"{index:032x}"
             path = pending / (ref + ".json")
             path.write_text(json.dumps({"schema_version": 1, "state": "received",
@@ -353,16 +398,20 @@ class RecipientIndexTest(IndexTestCase):
 
 
 class CallSitePinTest(IndexTestCase):
-    def test_sender_or_recipient_scan_keeps_reading_every_row(self):
+    def test_sender_only_and_mixed_session_scans_keep_reading_every_row(self):
         _text, _ref = self.pending()
         self.received_history(120)
         peer_message.rebuild_recipient_index(self.dispatch_root, time_budget_s=5.0)
         with _OpenMeter() as meter:
-            list(peer_message._pending_rows(recipient=self.recipient, sender=self.recipient))
+            list(peer_message._pending_rows(recipient=self.recipient, sender=self.other))
         self.assertGreaterEqual(meter.calls, 120)
         with _OpenMeter() as meter:
             list(peer_message._pending_rows(sender=self.recipient))
         self.assertGreaterEqual(meter.calls, 120)
+        # One session's own received-or-sent read (the context hook's) is indexed.
+        with _OpenMeter() as meter:
+            list(peer_message._pending_rows(recipient=self.recipient, sender=self.recipient))
+        self.assertLess(meter.calls, 30, meter.calls)
 
     def test_strict_scan_keeps_raising_instead_of_using_the_index(self):
         _text, _ref = self.pending()
@@ -401,6 +450,99 @@ class CallSitePinTest(IndexTestCase):
             peer_message.retry_receiver_idle(claude, permission=True)
             loaded.assert_called_once()
             self.assertEqual(loaded.return_value.receiver_idle.call_args.args[0], claude)
+
+
+class ContextHookIndexTest(IndexTestCase):
+    """The per-tool-call context hook opens only the session's own rows."""
+
+    target = {"harness": "opencode", "session_id": "context-target"}
+
+    def unrelated(self, count, start):
+        """Delivered history plus a few live rows between other sessions."""
+        live = count // 20
+        for index in range(start, start + live):
+            self.pending(f"unrelated {index}", sender=self.other,
+                         recipient={"harness": "codex", "session_id": f"far-{index}"})
+        self.received_history(count - live, start=start)
+
+    def target_index(self, **kwargs):
+        return peer_message.read_recipient_index(
+            self.dispatch_root, self.target["harness"], self.target["session_id"], **kwargs)
+
+    def test_context_hook_opens_only_its_own_rows_however_many_others_exist(self):
+        _text, inbound = self.pending("to the target", sender=self.other, recipient=self.target)
+        _text, outbound = self.pending("from the target", sender=self.target,
+                                       recipient=self.other)
+        own = {inbound + ".json", outbound + ".json"}
+        counts = []
+        for start in (0, 1000):  # 200 unrelated rows, then twice as many
+            self.unrelated(200, start)
+            result = peer_message.rebuild_recipient_index(self.dispatch_root,
+                                                          time_budget_s=60.0)
+            self.assertTrue(result["complete"], result)
+            out = io.StringIO()
+            with _PendingRowOpens() as meter:
+                peer_message.emit_peer_context(self.target, stream=out)
+            self.assertEqual(out.getvalue(), "")
+            foreign = set(meter.names) - own
+            self.assertFalse(foreign, f"{len(meter.names)} row opens, {len(foreign)} foreign")
+            counts.append(len(meter.names))
+        self.assertLessEqual(counts[0], len(own) + 2, counts)
+        self.assertEqual(counts[0], counts[1], counts)
+
+    def test_hour_old_sender_notice_is_emitted_once_through_the_index(self):
+        _text, outbound = self.pending("from the target", sender=self.target,
+                                       recipient=self.other)
+        self.unrelated(100, 0)
+        peer_message.rebuild_recipient_index(self.dispatch_root, time_budget_s=60.0)
+        with peer_message.pending_lock(outbound):
+            row = peer_message._read_pending(outbound)
+            peer_message._save_pending(dict(row, created=time.time() - 7200))
+        # The write itself kept the sender list current: no full scan follows.
+        self.assertEqual([entry["ref"] for entry in self.target_index(sent=True).sent],
+                         [outbound])
+        out = io.StringIO()
+        with _PendingRowOpens() as meter:
+            peer_message.emit_peer_context(self.target, stream=out)
+        self.assertIn(outbound[:8], out.getvalue())
+        self.assertIn("1시간 이상 전달 미확인", out.getvalue())
+        self.assertEqual(set(meter.names), {outbound + ".json"}, meter.names)
+        self.assertTrue(self.target_index(sent=True).complete)
+        again = io.StringIO()
+        peer_message.emit_peer_context(self.target, stream=again)
+        self.assertEqual(again.getvalue(), "")
+
+    def test_an_index_without_a_sender_list_falls_back_and_is_republished(self):
+        _text, outbound = self.pending("from the target", sender=self.target,
+                                       recipient=self.other)
+        peer_message.rebuild_recipient_index(self.dispatch_root, time_budget_s=60.0)
+        path = peer_message.recipient_index_path(
+            self.dispatch_root, self.target["harness"], self.target["session_id"])
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload.pop("sent")  # As an older writer publishes it.
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        self.assertTrue(self.target_index().complete)
+        self.assertFalse(self.target_index(sent=True).complete)
+        rows = list(peer_message._pending_rows(recipient=self.target, sender=self.target))
+        self.assertEqual([row["ref"] for row in rows], [outbound])
+        self.assertEqual([entry["ref"] for entry in self.target_index(sent=True).sent],
+                         [outbound])
+
+    def test_a_transition_after_an_unobserved_write_retires_the_sender_list_too(self):
+        _text, first = self.pending("first")
+        peer_message.rebuild_recipient_index(self.dispatch_root, time_budget_s=60.0)
+        self.assertTrue(peer_message.read_recipient_index(
+            self.dispatch_root, "codex", "index-sender", sent=True).complete)
+        # A writer that keeps no index (an older release) adds a second row.
+        with mock.patch.object(peer_message, "_update_recipient_index"):
+            _text, second = self.pending("second")
+        with peer_message.pending_lock(first):
+            row = peer_message._read_pending(first)
+            peer_message._save_pending(dict(row, state="queued"))
+        self.assertFalse(peer_message.read_recipient_index(
+            self.dispatch_root, "codex", "index-sender", sent=True).complete)
+        rows = list(peer_message._pending_rows(recipient=self.sender, sender=self.sender))
+        self.assertEqual(sorted(row["ref"] for row in rows), sorted([first, second]))
 
 
 class BoundedScanTest(IndexTestCase):

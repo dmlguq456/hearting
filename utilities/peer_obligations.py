@@ -1295,7 +1295,7 @@ def retain_ordinary_notice(jobs, record):
     return session_notice.retain_pending(jobs, record)
 
 
-def _ordinary_notice_target(identity, carrier):
+def _ordinary_notice_target(identity, carrier, *, read_context=None):
     from harness_capabilities import parent_completion
     from dispatch_seat_handover import _notice_recipient_binding
     import session_notice
@@ -1313,14 +1313,15 @@ def _ordinary_notice_target(identity, carrier):
         if not isinstance(identity.get("lineage"), dict):
             return None
         lineage = session_notice._lineage(identity["lineage"], harness, storage)
-        pair = _notice_recipient_binding(lineage, jobs, harness)
+        pair = _notice_recipient_binding(lineage, jobs, harness, read_context=read_context)
         return (*pair, storage) if pair is not None else None
     except (OSError, ValueError, KeyError, TypeError, RuntimeError):
         return None
 
 
 def _ordinary_notice_delivery(message, roots=None, *, received_only=False,
-                              require_current_recipient=True, original_body=None):
+                              require_current_recipient=True, original_body=None,
+                              read_context=None):
     binding = message.get("producer_binding") or {}
     if (binding.get("schema") != "retained-runtime-notice-v1"
             or message.get("state") not in {"pending", "queued", "unverified", "received"}
@@ -1367,7 +1368,8 @@ def _ordinary_notice_delivery(message, roots=None, *, received_only=False,
         saved = (observation.get("transfer_bindings") or {}).get(message.get("ref"))
         if saved != binding:
             return
-        if (require_current_recipient and _ordinary_notice_target(identity, intent["carrier"]) !=
+        if (require_current_recipient and _ordinary_notice_target(
+                identity, intent["carrier"], read_context=read_context) !=
                 (target.get("harness"), target.get("session_id"), identity.get("storage_recipient"))):
             return
         storage = identity.get("storage_recipient")
@@ -1404,10 +1406,10 @@ def ordinary_notice_delivery_settled(message, *, roots=None):
                                             require_current_recipient=False))
 
 
-def ordinary_notice_transfer_is_current(message):
+def ordinary_notice_transfer_is_current(message, *, read_context=None):
     """Whether this immutable transfer still targets the recorded live lineage."""
     return any(True for _ in _ordinary_notice_delivery(
-        message, require_current_recipient=True))
+        message, require_current_recipient=True, read_context=read_context))
 
 
 def acknowledge_ordinary_notice_delivery(message, *, roots=None):
