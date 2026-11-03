@@ -1119,10 +1119,61 @@ class WorkerHomes(unittest.TestCase):
                          ['/user/own.md'])
         self.assertEqual((claude / 'rules/external.md').read_bytes(), rule)
 
+        switch = self.base / 'dispatch-defaults.yaml'
+        switch.write_text((ROOT / 'profiles/dispatch-defaults.yaml').read_text()
+                          + '\nuser_rules:\n  opencode: off\n')
+        off_env = {**self.env, 'DISPATCH_DEFAULTS_CONFIG': str(switch)}
+        prepare_worker_home(ROOT, 'opencode', 'stage', 'rules', env=off_env)
+        self.assertFalse(target.exists())
+        self.assertEqual(json.loads((home / 'opencode.json').read_text())['instructions'], ['/user/own.md'])
+        prepare_worker_home(ROOT, 'opencode', 'stage', 'rules', env=self.env)
+        self.assertEqual(target.read_bytes().count(rule), 1)
+
         (claude / 'rules/external.md').write_text('  \n')
         prepare_worker_home(ROOT, 'opencode', 'stage', 'rules', env=self.env)
         self.assertFalse(target.exists())
         self.assertEqual(json.loads((home / 'opencode.json').read_text())['instructions'], ['/user/own.md'])
+
+    def _user_rules_parent(self, switch_text):
+        claude = self.base / 'claude-home'
+        (claude / 'rules').mkdir(parents=True, exist_ok=True)
+        (claude / 'rules/external.md').write_text('# read-only external communications\n')
+        config_home = self.base / 'parent-config'
+        (config_home / 'hearting').mkdir(parents=True, exist_ok=True)
+        (config_home / 'hearting/dispatch-defaults.yaml').write_text(
+            (ROOT / 'profiles/dispatch-defaults.yaml').read_text() + switch_text)
+        (self.source / 'opencode.json').write_text(json.dumps({'instructions': []}))
+        return {**self.env, 'HOME': str(self.base / 'parent-home'), 'XDG_CONFIG_HOME': str(config_home),
+                'OPENCODE_CONFIG_DIR': str(self.source), 'CLAUDE_CONFIG_DIR': str(claude)}
+
+    def test_nested_v1_opencode_worker_keeps_the_user_rules_switch(self):
+        parent = self._user_rules_parent('user_rules:\n  opencode: off\n')
+        first = prepare_worker_home(ROOT, 'opencode', 'owner', 'outer', env=parent)
+        self.assertFalse((Path(first['OPENCODE_CONFIG_DIR']) / 'hearting-user-rules.md').exists())
+        self.assertEqual(first.get('DISPATCH_DEFAULTS_CONFIG'),
+                         str((Path(parent['XDG_CONFIG_HOME']) / 'hearting/dispatch-defaults.yaml').resolve()))
+        nested_env = {**parent, **{key: value for key, value in first.items() if value is not None}}
+        nested = prepare_worker_home(ROOT, 'opencode', 'stage', 'inner', env=nested_env)
+        self.assertFalse((Path(nested['OPENCODE_CONFIG_DIR']) / 'hearting-user-rules.md').exists())
+
+    def test_a_deleted_user_config_means_the_default_for_nested_workers(self):
+        parent = self._user_rules_parent('')
+        first = prepare_worker_home(ROOT, 'opencode', 'owner', 'outer-deleted', env=parent)
+        pinned = Path(first['DISPATCH_DEFAULTS_CONFIG'])
+        pinned.unlink()  # the user removes their config while work is running
+        nested_env = {**parent, **{key: value for key, value in first.items() if value is not None}}
+        nested = prepare_worker_home(ROOT, 'opencode', 'stage', 'inner-deleted', env=nested_env)
+        rules = Path(nested['OPENCODE_CONFIG_DIR']) / 'hearting-user-rules.md'
+        self.assertTrue(rules.is_file())  # absent switch: on
+
+    def test_a_bad_user_rules_value_never_stops_worker_homes(self):
+        parent = self._user_rules_parent('user_rules: opencode: off\n')
+        for harness in ('opencode', 'claude', 'codex'):
+            with self.subTest(harness=harness):
+                prepare_worker_home(ROOT, harness, 'stage', f'bad-{harness}', env=parent)
+        home = Path(prepare_worker_home(ROOT, 'opencode', 'stage', 'bad-opencode', env=parent)[
+            'OPENCODE_CONFIG_DIR'])
+        self.assertFalse((home / 'hearting-user-rules.md').exists())  # the one-liner reads as off
 
     def test_opencode_v2_worker_uses_shared_service_without_db_or_auth_links(self):
         data_home = self.base / 'v2-data'

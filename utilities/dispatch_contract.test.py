@@ -2164,29 +2164,6 @@ class DispatchContractTest(unittest.TestCase):
      jobs,"att-mutation-test",{"launch_outcome":"governed-process-reaped"})
    self.assertEqual(caught.exception.reason,"attempt-launch-outcome-conflict")
 
- def test_depth_two_readiness_binds_hash_and_preserves_only_hashless_route_legacy(self):
-  node={"id":"execute","kind":"pipeline-stage","dispatch_depth":2}
-  marker={"attempt_id":"att-hash-readiness","registered_worker":True}
-  for route_hash,row_hash,state in (("sha256:expected","sha256:foreign","unverifiable"),
-                                    ("sha256:expected",None,"unverifiable"),
-                                    ("sha256:expected","sha256:expected","ready"),
-                                    (None,None,"ready")):
-   with self.subTest(route_hash=route_hash,row_hash=row_hash):
-    route={"route_id":"rt-hash-readiness"}
-    if route_hash is not None:route["route_hash"]=route_hash
-    meta={"route_id":route["route_id"],"route_node":node["id"],
-          "attempt_id":marker["attempt_id"],"note":"completed-marker"}
-    if row_hash is not None:meta["route_hash"]=row_hash
-    lines=[attempt_row(meta,status="done")]
-    with mock.patch.dict(os.environ,{"HEARTING_GATES":"on"}), mock.patch.object(D,"attempt_process_quiescence",
-                           return_value=D.ProcessQuiescence("quiescent","fixture")) as probe:
-     actual=D.completion_attempt_readiness(route,node,marker,Path("unused"),registry_lines=lines)
-     self.assertEqual(actual.state,state)
-     if state=="unverifiable":
-      self.assertEqual(actual.reason,"attempt-route-hash-mismatch")
-      probe.assert_not_called()
-     else:probe.assert_called_once()
-
  def test_semantic_completion_readiness_blocks_live_process_and_conflicting_retry(self):
   with tempfile.TemporaryDirectory() as td:
    jobs=Path(td)/"jobs.log"
@@ -3970,6 +3947,37 @@ class DispatchContractTest(unittest.TestCase):
    D.completion_marker_gate(str(path),node,"start",base,jobs,
                             registry_lines=[],attempt_id="att-plan-new")
 
+ def test_launch_gate_names_the_resource_step_not_revise(self):
+  with tempfile.TemporaryDirectory() as td:
+   base=Path(td)
+   route={"dispatch_contract_version":3,"route_id":"rt-resource-gate0001",
+          "route_hash":"sha256:"+"9"*64,"registry_digest":"sha256:"+"a"*64,
+          "nodes":[{"id":"host-run","depends_on":[],"kind":"resource-runner",
+                    "completion_gate":"resource-exit","continuation":{"kind":"supervised"}},
+                   {"id":"impl-review","depends_on":["host-run"],"kind":"review-worker",
+                    "completion_gate":"code-impl-review","dispatch_depth":2}]}
+   path=base/"route.json"; path.write_text(json.dumps(route),encoding="utf-8")
+   marker_dir=base/".dispatch"/"completion"/route["route_id"]
+   marker_dir.mkdir(parents=True,exist_ok=True)
+   (marker_dir/"host-run.json").write_text(json.dumps({"attempt_id":None,"registered_worker":False}),
+                                           encoding="utf-8")
+   jobs=base/"jobs.log"; jobs.write_text("",encoding="utf-8")
+   expected={D.RESOURCE_STAGE_UNOBSERVABLE:"can be read again",
+             D.RESOURCE_STAGE_UNSETTLED:"continue resource stage host-run",
+             "completion-marker-missing":"missing or malformed"}
+   for reason,step in expected.items():
+    currency=D.GateCurrency("resource-stage-not-current",reason)
+    with mock.patch.object(D,"completion_marker_is_current",return_value=False), \
+         mock.patch.object(D,"gate_currency",return_value=currency), \
+         mock.patch.object(D,"_sibling_attempt_gate"):
+     with self.assertRaises(D.DispatchContractError) as caught:
+      D.completion_marker_gate(str(path),"impl-review","start",base,jobs,
+                               registry_lines=[],attempt_id="att-review-new")
+    self.assertEqual((caught.exception.reason,caught.exception.detail),
+                     ("completion-marker-missing","host-run"))
+    self.assertIn(step,caught.exception.next_action)
+    self.assertNotIn("revise",caught.exception.next_action)
+
  def _gate_ledger(self,base,route):
   import workflow_state as WS
   return WS.WorkflowLedger(route["route_id"],route["route_hash"],root=base/"workflow")
@@ -4114,14 +4122,10 @@ class DispatchContractTest(unittest.TestCase):
     self._gate_journal(base,route,raised,proceed("user"))
     self.assertEqual(verdict(release_proof=True),"ok")
     preview.write_text("a different edit")
-    with mock.patch.dict(os.environ,{"HEARTING_GATES":"on"}):   # the opt-in same-work identity check
-     self.assertEqual(verdict(release_proof=True),"human-gate-unreleased")
-    with mock.patch.dict(os.environ,{"HEARTING_GATES":"off"}), contextlib.redirect_stderr(io.StringIO()):
-     self.assertEqual(verdict(release_proof=True),"ok")           # off (the default): only reported, as everywhere else
+    with contextlib.redirect_stderr(io.StringIO()):
+     self.assertEqual(verdict(release_proof=True),"ok")           # a changed preview is only reported, as everywhere else
      preview.unlink()
      self.assertEqual(verdict(release_proof=True),"ok")           # a preview that is gone is read as a changed one: only reported
-     with mock.patch.dict(os.environ,{"HEARTING_GATES":"on"}):
-      self.assertEqual(verdict(release_proof=True),"human-gate-unreleased")   # on: a gone preview is still unbound
     preview.write_text("the edit")
     self.assertEqual(verdict(release_proof=True),"ok")
     for decision,event in (("revise",("RUNNING",{"released_gate":"preview-disposition","decision":"revise","actor_kind":"user"})),
@@ -7861,6 +7865,82 @@ class ResourceStageMarkerSuccessorTest(unittest.TestCase):
         self.assertEqual(self.current(
             {**evidence, "owner_attempt_id": "att-other"},
             self.holder(False), self.binding()).state, "resource-stage-not-current")
+
+    def test_hand_marker_beside_a_stage_still_running_after_a_failed_run_is_not_its_result(self):
+        # The owner's last run failed, the stage stayed RUNNING, and a hand `complete`
+        # wrote a marker without a resource identity (Cairn v216 host-run).
+        self.ledger._append({"at": self.ledger.journal()[-1]["at"], "route_id": self.route_id,
+                             "route_hash": self.route_hash, "node": "full-run",
+                             "state": "RUNNING", "evidence": {"next_resource": "run-2"}})
+        hand = {"sequence": 1, "evidence": {"path": str(self.output)}}
+        self.marker_path.write_text(json.dumps(hand))
+        currency = D._resource_stage_marker_current(
+            self.route, self.route["nodes"][0], hand, self.marker_path, str(self.jobs))
+        self.assertEqual((currency.state, currency.reason),
+                         ("resource-stage-not-current", "resource-stage-unsettled"))
+        self.assertTrue(D.resource_stage_unsettled(currency))
+        self.assertFalse(D.completion_superseded(currency))
+
+    def test_hand_marker_on_an_unreadable_ledger_is_not_current(self):
+        # Cairn v216 on a stalled NAS: a hand marker (no resource identity) and an EIO reading the
+        # run registry. The marker is not reused as the stage's result; the read is retried.
+        import errno
+        hand = {"sequence": 1, "evidence": {"path": str(self.output)}}
+        self.marker_path.write_text(json.dumps(hand))
+        registry, read_text = self.registry, Path.read_text
+
+        def stalled(path, *args, **kwargs):
+            if Path(path) == registry:
+                raise OSError(errno.EIO, "Input/output error", str(path))
+            return read_text(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "read_text", stalled):
+            currency = D._resource_stage_marker_current(
+                self.route, self.route["nodes"][0], hand, self.marker_path, str(self.jobs))
+        self.assertIsNotNone(currency)
+        self.assertEqual((currency.state, currency.reason),
+                         ("resource-stage-not-current", "resource-stage-unobservable"))
+        self.assertTrue(D.resource_stage_unobservable(currency))
+        self.assertFalse(D.resource_stage_unsettled(currency))
+        self.assertIn("can be read again", D.resource_stage_next_action(currency, "full-run"))
+
+    def test_settled_stage_with_a_mismatched_proof_or_unreadable_records_is_unknown_not_unsettled(self):
+        node = self.route["nodes"][0]
+        # Settled, but the admitting owner is not this route's current one.
+        mismatched = self.current({**self.evidence, "owner_attempt_id": "att-outsider"},
+                                  self.holder(True), self.binding(self.source_id, self.source_hash))
+        self.assertEqual((mismatched.state, mismatched.reason),
+                         ("resource-stage-not-current", "completion-marker-missing"))
+        self.assertFalse(D.resource_stage_unsettled(mismatched))
+        def read():
+            return D._resource_stage_marker_current(
+                self.route, node, self.marker_doc, self.marker_path, str(self.jobs))
+        # The run registry exists but cannot be read right now: unobservable, not unsettled.
+        registry = self.registry.read_bytes()
+        self.registry.unlink()
+        self.registry.mkdir()
+        unreadable = read()
+        self.assertEqual(unreadable.reason, "resource-stage-unobservable")
+        self.assertTrue(D.resource_stage_unobservable(unreadable))
+        self.assertFalse(D.resource_stage_unsettled(unreadable))
+        # The run registry is missing: unknown.
+        self.registry.rmdir()
+        missing = read()
+        self.assertEqual(missing.reason, "completion-marker-missing")
+        self.assertFalse(D.resource_stage_unsettled(missing) or D.resource_stage_unobservable(missing))
+        self.registry.write_bytes(registry)
+        # The ledger records no state for this stage: no observation, not unsettled.
+        self.ledger.journal_path.write_text(json.dumps(
+            {"at": "2026-11-03T00:00:00Z", "route_id": self.route_id, "route_hash": self.route_hash,
+             "node": "other-node", "state": "RUNNING"}) + "\n", encoding="utf-8")
+        absent = read()
+        self.assertEqual(absent.reason, "completion-marker-missing")
+        self.assertFalse(D.resource_stage_unsettled(absent))
+        # The journal is malformed: damage, not unsettled.
+        self.ledger.journal_path.write_text("not json\n", encoding="utf-8")
+        corrupt = read()
+        self.assertEqual(corrupt.reason, "completion-marker-missing")
+        self.assertFalse(D.resource_stage_unsettled(corrupt) or D.resource_stage_unobservable(corrupt))
 
 
 class RegistryLineageWriterTest(unittest.TestCase):

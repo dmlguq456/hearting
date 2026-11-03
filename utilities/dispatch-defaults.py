@@ -7,6 +7,8 @@ canonical topology node ids in capabilities/topologies.json and exposes
 affinity/owner/allocation/quality-band queries.  Schemas v1/v2 remain readable;
 schema v3 adds user-local enabled harnesses and per-profile quality bands;
 schema v4 adds confirmation/steward policy and optional `worker_account` auth-source paths.
+Every schema also accepts the `user_rules` switch for carrying Claude user rules
+into OpenCode; its problems are warnings, never errors.
 """
 import copy
 import json
@@ -29,8 +31,20 @@ DEFAULT_USAGE_GATE_USED_PERCENT = 90
 TOP_LEVEL_KEYS = {
     "schema_version", "depth1_owner", "opencode", "allocation", "capabilities",
     "harnesses", "profiles", "headless", "confirmation", "steward", "runtime",
-    "worker_account",
+    "worker_account", "user_rules",
 }
+# Whether activation carries the user's unscoped Claude user rules
+# ($CLAUDE_CONFIG_DIR/rules) into OpenCode's global AGENTS.md. One value table
+# serves the reader and the validator (user_rules_opencode): absent or an on
+# value carries, an off value stops, anything else stops with a warning. No
+# value of this switch is a validation error, so it cannot stop routing or
+# worker-home creation; a syntax error on its line breaks the file like on any
+# other line, and the line scan still honors an off value then.
+USER_RULES_KEYS = {"opencode"}
+USER_RULES_ON = ("carry", "on", "true", "yes")
+USER_RULES_OFF = ("off", "false", "no")
+USER_RULES_DOTTED = "user_rules.opencode"
+DEFAULT_USER_RULES_OPENCODE = "carry"
 # PRD §13.53.2: the operator kill switch for the SD-120/121 terminal fast
 # path. `auto` lets the sealed runtime-capability census decide (the default,
 # and the only value that can ever open the gate); `off` keeps every route on
@@ -222,6 +236,10 @@ def parse_yaml_subset(text):
         stripped = _strip_comment(raw).rstrip()
         if not stripped.strip():
             continue
+        if "\t" in stripped[:len(stripped) - len(stripped.lstrip(" \t"))]:
+            # YAML forbids tab indentation; counting it as zero spaces would
+            # silently lift a nested key to the top level.
+            raise DefaultsConfigError(f"line {lineno}: tab indentation is not supported: {raw!r}")
         indent = len(stripped) - len(stripped.lstrip(" "))
         if indent % 2 != 0:
             raise DefaultsConfigError(f"line {lineno}: odd indentation is not supported: {raw!r}")
@@ -275,7 +293,7 @@ def validate(config, capmap):
     if not isinstance(config, dict):
         return ["config root must be a mapping"]
 
-    unknown_top = sorted(set(config) - TOP_LEVEL_KEYS)
+    unknown_top = sorted(set(config) - TOP_LEVEL_KEYS - {USER_RULES_DOTTED})
     for key in unknown_top:
         errors.append(f"unknown top-level key: {key!r}")
 
@@ -454,6 +472,7 @@ def validate(config, capmap):
     confirmation = config.get("confirmation")
     steward = config.get("steward")
     runtime = config.get("runtime")
+    # `user_rules` is valid in every schema and only ever warns (policy_warnings).
     if version == 4:
         if confirmation is not None:
             if not isinstance(confirmation, dict):
@@ -583,7 +602,7 @@ def policy_warnings(config):
     while claude or codex is enabled: an OpenCode-only user has no
     recommendation left to break.
     """
-    warnings = []
+    warnings = list(user_rules_opencode(config)[1])
     headless = config.get("headless")
     if isinstance(headless, dict) and "no_progress_minutes" in headless:
         _minutes, warning = normalize_no_progress_minutes(headless["no_progress_minutes"])
@@ -1015,6 +1034,120 @@ def load_steward_policy(config_path=None, topology_path=None):
     except (DefaultsConfigError, OSError, json.JSONDecodeError) as exc:
         return query_steward_policy({}), [f"steward-settings-unreadable: {exc}"]
     return query_steward_policy(config), []
+
+
+_ABSENT = object()
+
+
+def _user_rules_mode(value, where):
+    if value is True:
+        return "carry", []
+    if value is False:
+        return "off", []
+    if isinstance(value, str):
+        word = value.strip().lower()
+        if word in USER_RULES_ON:
+            return "carry", []
+        if word in USER_RULES_OFF:
+            return "off", []
+    return "off", [f"{where}: {value!r} is not an on value (carry, on, true, yes) or an "
+                   "off value (off, false, no); reading it as off"]
+
+
+def user_rules_opencode(config):
+    """`(mode, warnings)` for the OpenCode user-rules switch. Total; never raises.
+
+    The expected form is `user_rules:` with `opencode: <value>` nested under it.
+    A one-line `user_rules: <value>` or a dotted `user_rules.opencode: <value>`
+    key is read through the same table with a warning, so a reasonable attempt
+    gets what it meant and an unreadable one never leaves the rules flowing.
+    """
+    if not isinstance(config, dict):
+        return DEFAULT_USER_RULES_OPENCODE, []
+    section = config.get("user_rules", _ABSENT)
+    dotted = config.get(USER_RULES_DOTTED, _ABSENT)
+    warnings = []
+    value, where = _ABSENT, "user_rules.opencode"
+    if isinstance(section, dict):
+        for key in sorted(set(section) - USER_RULES_KEYS):
+            warnings.append(f"user_rules: unknown key {key!r} ignored")
+        value = section.get("opencode", _ABSENT)
+    elif section is not _ABSENT:
+        value, where = section, "user_rules"
+        warnings.append("user_rules: expected `opencode: <value>` on its own line under "
+                        "`user_rules:`; reading the one-line value")
+    if dotted is not _ABSENT:
+        warnings.append("user_rules.opencode: put `opencode: <value>` on its own line under "
+                        "`user_rules:`; reading the dotted key")
+        if value is _ABSENT:
+            value, where = dotted, USER_RULES_DOTTED
+        elif _user_rules_mode(value, where)[0] != _user_rules_mode(dotted, USER_RULES_DOTTED)[0]:
+            warnings.append(f"user_rules.opencode: the dotted key ({dotted!r}) and the "
+                            f"`user_rules:` section ({value!r}) disagree; using the section")
+    if value is _ABSENT:
+        return DEFAULT_USER_RULES_OPENCODE, warnings
+    mode, problems = _user_rules_mode(value, where)
+    return mode, warnings + problems
+
+
+def query_user_rules_opencode(config):
+    """`carry` or `off`; see user_rules_opencode for the value table."""
+    return user_rules_opencode(config)[0]
+
+
+def _scan_user_rules(text):
+    """Only the switch's own lines, for a file the full parser rejects."""
+    found, section = {}, None
+    for raw in text.splitlines():
+        line = _strip_comment(raw).rstrip()
+        if not line.strip():
+            continue
+        indent = len(line) - len(line.lstrip(" \t"))  # a tab counts as indentation here
+        key, colon, value = line.strip().partition(":")
+        key, value = key.strip(), value.strip()
+        if not colon:
+            continue
+        if indent == 0:
+            section = None
+            if key == "user_rules":
+                if value:
+                    found["user_rules"] = _scalar(value)
+                else:
+                    section = found["user_rules"] = {}
+            elif key == USER_RULES_DOTTED:
+                found[key] = _scalar(value)
+        elif section is not None and key == "opencode":
+            section["opencode"] = _scalar(value) if value else {}
+    return found
+
+
+def user_config_path(environ=None):
+    """The user-owned file a person edits: the override, else the XDG path even if absent."""
+    environment = os.environ if environ is None else environ
+    override = environment.get("DISPATCH_DEFAULTS_CONFIG")
+    if override:
+        return override
+    config_home = environment.get("XDG_CONFIG_HOME") or os.path.join(
+        environment.get("HOME") or os.path.expanduser("~"), ".config")
+    return os.path.join(config_home, "hearting", "dispatch-defaults.yaml")
+
+
+def load_user_rules_opencode(config_path=None):
+    """Read only this switch; a problem elsewhere in the file does not flip it.
+
+    A file the full parser rejects is scanned line by line for the switch, so
+    an off value stays off. An unreadable file keeps the shipped default.
+    """
+    try:
+        with open(config_path or default_config_path(), encoding="utf-8") as handle:
+            text = handle.read()
+    except (OSError, UnicodeError):
+        return DEFAULT_USER_RULES_OPENCODE
+    try:
+        config = parse_yaml_subset(text)
+    except DefaultsConfigError:
+        config = _scan_user_rules(text)
+    return query_user_rules_opencode(config)
 
 
 def query_steward_child_permission_mode(config):

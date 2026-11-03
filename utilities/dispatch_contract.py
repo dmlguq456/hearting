@@ -36,7 +36,7 @@ from types import MappingProxyType
 _CODE_ROOT_FD = os.open(Path(__file__).resolve().parents[1],
                         os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
 
-from hearting_gates import gates_on, same_work_or_refuse
+from hearting_gates import note_same_work_drift
 from session_identity import session_label
 from route_identity import registered_node_identity
 from governor_identity import close_witness, create_witness
@@ -1796,13 +1796,13 @@ def validate_review_output_binding(
         or metadata.get("worktree", expected_worktree) != expected_worktree
         or str(Path(fields[2]).resolve(strict=False)) != expected_worktree
     ):
-        same_work_or_refuse("review-binding-worktree-mismatch", attempt_id)
+        note_same_work_drift("review-binding-worktree-mismatch", attempt_id)
     if metadata.get("artifact_root") != expected_root:
-        same_work_or_refuse("review-binding-artifact-root-mismatch", attempt_id)
+        note_same_work_drift("review-binding-artifact-root-mismatch", attempt_id)
     if metadata.get("review_cycle_id") != cycle_id:
-        same_work_or_refuse("review-binding-cycle-mismatch", cycle_id)
+        note_same_work_drift("review-binding-cycle-mismatch", cycle_id)
     if metadata.get("review_producer_id") != producer_id:
-        same_work_or_refuse("review-binding-producer-mismatch", producer_id)
+        note_same_work_drift("review-binding-producer-mismatch", producer_id)
     try:
         locator = target.relative_to(Path(expected_root)).as_posix()
     except ValueError as exc:
@@ -1824,7 +1824,7 @@ def validate_review_output_binding(
     binding["digest"] = review_output_binding_digest(binding)
     mirrored = metadata.get("review_output_digest")
     if mirrored != binding["digest"]:
-        same_work_or_refuse("review-binding-digest-mismatch", attempt_id)
+        note_same_work_drift("review-binding-digest-mismatch", attempt_id)
     binding["_registry_metadata"] = metadata
     binding["_registry_status"] = fields[1]
     return binding
@@ -7721,6 +7721,7 @@ def completion_marker_gate(
         return
     _launch_completion_input(route, node)
     missing = []
+    resource_actions: dict[str, str] = {}
     markers = {}
     proceeding = []
     blocked: list[tuple[str, AttemptReadiness]] = []
@@ -7790,24 +7791,18 @@ def completion_marker_gate(
                     next_action=currency.next_action,
                 )
             if completion_superseded(currency):
-                if not gates_on():
-                    # Gates-off execution may continue, but the old marker is
-                    # omitted from the admitted observations so no consumer
-                    # can treat its superseded PASS as current.
-                    continue
-                superseded_by = marker.get("superseded_by") or {}
-                upstream = superseded_by.get("node") if isinstance(superseded_by, dict) else None
-                sequence = superseded_by.get("sequence") if isinstance(superseded_by, dict) else None
-                cause = f"{dep}:superseded-by={upstream}@{sequence}" if upstream and sequence else dep
-                raise DispatchContractError(
-                    currency.reason, cause, next_action=currency.next_action,
-                )
+                # Execution may continue, but the old marker is omitted from the
+                # admitted observations so no consumer can treat its superseded
+                # PASS as current.
+                continue
             if currency.state.startswith("integrity-broken:") or currency.state == "completion-evidence-unreadable":
                 raise DispatchContractError(
                     "completion-marker-integrity-broken",
                     f"{dep}:{currency.state}:{currency.reason}",
                 )
             missing.append(dep)
+            if currency.state == "resource-stage-not-current":
+                resource_actions[dep] = resource_stage_next_action(currency, dep)
             continue
         markers[dep] = marker
         proceeding.append((dep_node, marker_path, marker))
@@ -7821,7 +7816,11 @@ def completion_marker_gate(
         if readiness.state != "ready":
             blocked.append((dep, readiness))
     if missing:
-        raise DispatchContractError("completion-marker-missing", ",".join(missing))
+        # A marker beside a resource stage that is not current names its own step (never `revise`).
+        raise DispatchContractError(
+            "completion-marker-missing", ",".join(missing),
+            next_action="; ".join(resource_actions.get(dep) or f"wait for node {dep} to publish a completion marker"
+                                  for dep in missing) if resource_actions else None)
     if not blocked:
         _frame_pair_attempt_gate(route, node, markers,
                                  jobs or (resolve_dispatch_state_root(agent_home) / "jobs.log"),
@@ -8101,18 +8100,18 @@ def _marker_schema_identity_ok(
         "completion_gate": node.get("completion_gate"),
     }
     if any(marker.get(key) != value for key, value in expected.items()):
-        if observe or gates_on() or any(key not in marker for key in expected):
+        if observe or any(key not in marker for key in expected):
             return False, None
-        same_work_or_refuse("completion-marker-identity-mismatch", node_id)
+        note_same_work_drift("completion-marker-identity-mismatch", node_id)
     history_path = marker_path.parent / f"{node_id}.{sequence}.json"
     try:
         history = json.loads(history_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return False, None
     if history != marker:
-        if observe or gates_on() or not isinstance(history, dict):
+        if observe or not isinstance(history, dict):
             return False, None
-        same_work_or_refuse("completion-marker-history-changed", node_id)
+        note_same_work_drift("completion-marker-history-changed", node_id)
     return True, history_path
 
 
@@ -8722,6 +8721,45 @@ def completion_superseded(currency: GateCurrency, *, answered: bool = False) -> 
     return answered and currency.state in ANSWERED_CURRENCY_STATES
 
 
+# `resource-stage-not-current` reasons. Unsettled is an observation: the readable ledger records
+# the supervised stage in a state other than STAGE_SUCCEEDED (or its success was retracted).
+# Unobservable is a record that exists but could not be read right now. Everything else (a settled
+# stage whose proof does not match, a missing or malformed record) keeps `completion-marker-missing`.
+RESOURCE_STAGE_UNSETTLED = "resource-stage-unsettled"
+RESOURCE_STAGE_UNOBSERVABLE = "resource-stage-unobservable"
+
+
+def resource_stage_unsettled(currency: GateCurrency) -> bool:
+    """Whether a marker stands beside a resource stage observed not to have settled as succeeded.
+
+    Such a marker is not the stage's result. The launch gate reads it as missing, as it reads every
+    not-current resource marker, and a replacement owner continues that stage. Nothing else is read
+    this way: a proof mismatch or an unreadable record stays unknown and keeps its refusal.
+    """
+    return (currency.state == "resource-stage-not-current"
+            and currency.reason == RESOURCE_STAGE_UNSETTLED)
+
+
+def resource_stage_unobservable(currency: GateCurrency) -> bool:
+    """Whether a resource stage's records could not be read right now: unknown, never unsettled."""
+    return (currency.state == "resource-stage-not-current"
+            and currency.reason == RESOURCE_STAGE_UNOBSERVABLE)
+
+
+def resource_stage_next_action(currency: GateCurrency, node_id: str) -> str:
+    """The supported step for a marker beside a resource stage that is not current.
+
+    `revise` refuses such a marker, so it is never the step.
+    """
+    if resource_stage_unsettled(currency):
+        return (f"continue resource stage {node_id}: its runs have not settled as succeeded, so run its "
+                "next registered resource; the next start of its successor after a successful run settles it")
+    if resource_stage_unobservable(currency):
+        return f"retry the same command when the run records of resource stage {node_id} can be read again"
+    return (f"inspect the run records and completion marker of resource stage {node_id}: its settled "
+            "run's proof did not match, or a run record is missing or malformed")
+
+
 def _completion_instant(marker: Mapping[str, object]):
     # An unreadable, timezone-less or otherwise unorderable value cannot be placed against
     # another completion, so it is no instant (never a reason to call a result older).
@@ -8874,15 +8912,20 @@ def _resource_stage_marker_current(route, node, marker, marker_path, jobs):
         raw = marker_path.read_bytes()
         marker_sha = hashlib.sha256(raw).hexdigest()
         marker_sequence = marker.get("sequence")
+        stage = state.get("nodes", {}).get(node["id"], {})
+        # Only a recorded stage state is an observation: no entry for the node is not "unsettled".
+        observed = stage.get("state")
+        not_current = GateCurrency("resource-stage-not-current",
+                                   RESOURCE_STAGE_UNSETTLED if observed and observed != "STAGE_SUCCEEDED"
+                                   else "completion-marker-missing")
         for entry in ledger.journal():
             evidence = entry.get("evidence") or {}
             if (entry.get("actor") == "resource-false-success-reconciliation"
                     and evidence.get("marker_sha256") == marker_sha
                     and evidence.get("marker_sequence") == marker_sequence):
-                return GateCurrency("resource-stage-not-current", "completion-marker-missing")
-        stage = state.get("nodes", {}).get(node["id"], {})
-        if stage.get("state") != "STAGE_SUCCEEDED":
-            return GateCurrency("resource-stage-not-current", "completion-marker-missing")
+                return not_current
+        if observed != "STAGE_SUCCEEDED":
+            return not_current
         resource_identity = marker.get("resource_execution_identity")
         if resource_identity is None:
             return None
@@ -8912,7 +8955,11 @@ def _resource_stage_marker_current(route, node, marker, marker_path, jobs):
     except FileNotFoundError:
         return (GateCurrency("resource-stage-not-current", "completion-marker-missing")
                 if marker.get("resource_execution_identity") is not None else None)
-    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+    except OSError:
+        # A record that exists but cannot be read right now is not observed yet, whatever the
+        # marker carries: a hand marker without an identity is not current on an unread ledger.
+        return GateCurrency("resource-stage-not-current", RESOURCE_STAGE_UNOBSERVABLE)
+    except (ValueError, KeyError, TypeError, AttributeError):
         if marker.get("resource_execution_identity") is not None:
             return GateCurrency("resource-stage-not-current", "completion-marker-missing")
         return None
@@ -8972,7 +9019,7 @@ def record_evidence_change(
 ) -> None:
     """Record one evidence edit after its completion marker; never refuse it.
 
-    Gates off (the default), an artifact stays editable after its stage
+    An artifact stays editable after its stage
     completed (user decision 2026-10-01): the edit is kept as one history line
     -- when, by whom, why, and the digest it replaced -- instead of a refusal.
     The same change is written once however often it is read, and a failed
@@ -9035,14 +9082,11 @@ def note_evidence_change(
     marker_path: Path,
     marker: Mapping[str, object] | None = None,
 ) -> None:
-    """Keep a gates-off evidence edit as history at an operation that proceeds on the marker.
+    """Keep an evidence edit as history at an operation that proceeds on the marker.
 
     Called by continuation, a stage start, `complete` and a replacement owner's
     claim -- never by a read (dry-run, status, Fleet), which stays write-free.
-    With gates on the edit is still `revised-unrecorded` and this records nothing.
     """
-    if gates_on():
-        return
     try:
         marker = marker if marker is not None else json.loads(marker_path.read_text(encoding="utf-8"))
         currency = evidence_currency(route, dict(node), marker_path, dict(marker))
@@ -9130,9 +9174,9 @@ def evidence_currency(
         )
         if detail != node.get("id"):
             action += f" (upstream revision {detail})"
-        if observe or gates_on():
+        if observe:
             return GateCurrency("superseded", "completion-evidence-superseded", action)
-        same_work_or_refuse("completion-evidence-superseded", str(detail))
+        note_same_work_drift("completion-evidence-superseded", str(detail))
     if check_source:
         from review_source_subject import marker_currency as source_marker_currency
         source_currency = source_marker_currency(
@@ -9175,7 +9219,7 @@ def evidence_currency(
         try:
             marker_stat = marker_path.lstat()
             recorded_sha = evidence_record.get("sha256")
-            if (not observe and not gates_on() and stat.S_ISREG(marker_stat.st_mode)
+            if (not observe and stat.S_ISREG(marker_stat.st_mode)
                     and isinstance(recorded_sha, str)
                     and re.fullmatch(r"[0-9a-f]{64}", recorded_sha)):
                 return GateCurrency("current", "completion-evidence-recorded-missing",
@@ -9191,7 +9235,7 @@ def evidence_currency(
         return GateCurrency("completion-evidence-unreadable", "completion-evidence-unreadable")
     if digest != evidence_record.get("sha256"):
         node_id = str(node.get("id"))
-        if not observe and not gates_on():
+        if not observe:
             # Gates off an edit is not a refusal (nor a warning line). This read
             # stays a read: the operations that proceed on the marker keep the
             # edit as history (`note_evidence_change`).
@@ -9595,9 +9639,9 @@ def completion_attempt_readiness(
         # depth, just as registered complete does.
         if row_hash != str(route.get("route_hash") or ""):
             if metadata.get("attempt_id") == attempt_id:
-                if observe or gates_on():
+                if observe:
                     return AttemptReadiness("unverifiable", "attempt-route-hash-mismatch", attempt_id)
-                same_work_or_refuse("attempt-route-hash-mismatch", attempt_id)
+                note_same_work_drift("attempt-route-hash-mismatch", attempt_id)
             else:
                 continue
         if metadata.get("attempt_id") == attempt_id:

@@ -16,7 +16,7 @@ DEFAULTS_SPEC = importlib.util.spec_from_file_location("dispatch_defaults", ROOT
 DEFAULTS = importlib.util.module_from_spec(DEFAULTS_SPEC); DEFAULTS_SPEC.loader.exec_module(DEFAULTS)
 VALID_AFFINITY = DEFAULTS.AFFINITY_VALUES | {"unspecified"}
 sys.path.insert(0, str(ROOT/"utilities"))
-from hearting_gates import gates_on, same_work_or_refuse
+from hearting_gates import note_same_work_drift
 import artifact_locator as ARTIFACT_LOCATOR
 import harness_state_roots as HARNESS_STATE_ROOTS
 import git_index_lock
@@ -700,8 +700,8 @@ def revalidate_launch_compatibility(route):
             mismatches[name]={
                 "expected":expected,"actual":actual,"fields":sorted(changed),
             }
-    if mismatches and not malformed_roots and not gates_on():
-        same_work_or_refuse("launch-runtime-root-mismatch", ",".join(sorted(mismatches)))
+    if mismatches and not malformed_roots:
+        note_same_work_drift("launch-runtime-root-mismatch", ",".join(sorted(mismatches)))
         return True, mismatches
     return not mismatches,mismatches
 
@@ -830,9 +830,8 @@ def _continuation_reused_evidence(route, node):
             f"continuation-source-node-unverified:{node_id}:quiescence-proof"
         )
     evidence=marker.get("evidence") or {}
-    if not gates_on():
-        currency = evidence_currency(route, node, marker_path, marker)
-        evidence = dict(evidence, sha256=currency.evidence_digest)
+    currency = evidence_currency(route, node, marker_path, marker)
+    evidence = dict(evidence, sha256=currency.evidence_digest)
     public={
         "node_id":node_id,
         "completion_gate":node.get("completion_gate"),
@@ -1093,9 +1092,7 @@ def _continuation_lineage(
     )
     selected_turn=last_turn_id or expected_turn
     if last_turn_id and expected_turn and last_turn_id != expected_turn:
-        if gates_on():
-            raise ValueError("continuation-last-turn-mismatch")
-        same_work_or_refuse("continuation-last-turn-mismatch")
+        note_same_work_drift("continuation-last-turn-mismatch")
     if operation=="resume":
         if new_thread_id or forked_from_id:
             raise ValueError("continuation-resume-lineage-switch-forbidden")
@@ -1106,13 +1103,9 @@ def _continuation_lineage(
     if not source_thread or not new_thread_id or new_thread_id==source_thread:
         raise ValueError("continuation-fork-lineage-incomplete")
     if forked_from_id != source_thread:
-        if gates_on():
-            raise ValueError("continuation-fork-source-mismatch")
-        same_work_or_refuse("continuation-fork-source-mismatch")
+        note_same_work_drift("continuation-fork-source-mismatch")
     if not expected_turn or selected_turn != expected_turn:
-        if gates_on():
-            raise ValueError("continuation-last-turn-mismatch")
-        same_work_or_refuse("continuation-last-turn-mismatch")
+        note_same_work_drift("continuation-last-turn-mismatch")
     return {
         "operation":"fork","thread_id":new_thread_id,
         "forkedFromId":source_thread,"lastTurnId":selected_turn,
@@ -1297,9 +1290,7 @@ def _verify_continuation_gate_release_proofs(route):
             raise ValueError("continuation-human-gate-release-proof-unreadable") from exc
         resolution = WS.human_gate_resolution(entries, gate)
         if resolution.get("status") != "proceed" or resolution.get("epoch") != proof["epoch"]:
-            if gates_on():
-                raise ValueError("continuation-human-gate-release-proof-drift")
-            same_work_or_refuse("continuation-human-gate-release-proof-drift")
+            note_same_work_drift("continuation-human-gate-release-proof-drift")
         raise_count=0; matched_raise=False; matched_release=False
         for entry in entries:
             evidence=entry.get("evidence") if isinstance(entry,dict) else None
@@ -1322,9 +1313,7 @@ def _verify_continuation_gate_release_proofs(route):
                 )
                 matched_release=True
         if not matched_raise or not matched_release:
-            if gates_on():
-                raise ValueError("continuation-human-gate-release-proof-drift")
-            same_work_or_refuse("continuation-human-gate-release-proof-drift")
+            note_same_work_drift("continuation-human-gate-release-proof-drift")
     return proofs
 
 def build_continuation_route(
@@ -1672,9 +1661,7 @@ def _verify_continuation_route(route):
             _inside_git_worktree(cwd)
             and source_lineage_verdict(cwd,inherited).kind not in ("exact","descendant")
         ):
-            if gates_on():
-                raise ValueError("continuation-source-commit-rebind-lineage-unproven")
-            same_work_or_refuse("continuation-source-commit-rebind-lineage-unproven")
+            note_same_work_drift("continuation-source-commit-rebind-lineage-unproven")
     _validate_output_scopes(route.get("nodes",[]))
     return route
 
@@ -1703,9 +1690,7 @@ def publish_continuation_route(route,source_route,output_path):
             current_digest != route.get("source_evidence_digest")
             or canonical(current) != canonical(route.get("reused_nodes"))
         ):
-            if gates_on():
-                raise ValueError("continuation-source-evidence-drift")
-            same_work_or_refuse("continuation-source-evidence-drift")
+            note_same_work_drift("continuation-source-evidence-drift")
         path=Path(output_path)
         if classify_route_location(path,route["artifact_root"]) != "canonical":
             raise ValueError("route-output-outside-canonical")
@@ -1799,11 +1784,7 @@ def _assert_pin_matches_grounding(source_commit, launch):
     if not _COMMIT_SHA.fullmatch(base) or not _COMMIT_SHA.fullmatch(source_commit):
         return
     if base != source_commit:
-        if gates_on():
-            raise ValueError(
-                f"continuation-source-commit-grounding-mismatch: pin={source_commit} grounding={base}"
-            )
-        same_work_or_refuse(f"continuation-source-commit-grounding-mismatch: pin={source_commit} grounding={base}")
+        note_same_work_drift(f"continuation-source-commit-grounding-mismatch: pin={source_commit} grounding={base}")
 
 def _continuation_source_commit(source_route):
     """Reseal the resume-time HEAD as the continuation's `source_commit`.
@@ -1838,11 +1819,7 @@ def _continuation_source_commit(source_route):
         return inherited,None
     if verdict.kind == "diverged":
         observed=verdict.commits[0] if verdict.commits else _git_commit(cwd)
-        if gates_on():
-            raise ValueError(
-                f"continuation-source-commit-diverged: expected={inherited} observed={observed}"
-            )
-        same_work_or_refuse("continuation-source-commit-diverged", f"expected={inherited} observed={observed}")
+        note_same_work_drift("continuation-source-commit-diverged", f"expected={inherited} observed={observed}")
         return observed, None
     head=verdict.commits[0]
     return head,{
@@ -5068,7 +5045,7 @@ def compose_decision_lines(route, non_git_decision=None, t=None):
 
 
 def compose_card(route, plan=None, plan_source=None, *, owner_harness=None, route_plan_unreadable=False,
-                 campaign_selection=None, include_decisions=True, non_git_decision=None):
+                 campaign_selection=None, include_decisions=True, non_git_decision=None, intent_original=None):
     """One-line `[경로]` notice the acting session pastes instead of a card."""
     shape = route.get("selection", {}).get("shape") or shape_for_intensity(route["effective_intensity"])
     ids = [node["id"] for node in route["nodes"]]
@@ -5083,6 +5060,9 @@ def compose_card(route, plan=None, plan_source=None, *, owner_harness=None, rout
         + _compose_campaign_line(campaign_selection if campaign_selection is not None
                                  else compose_campaign_selection(route), t)
     )
+    import work_intent
+    for line in work_intent.card_lines(route, original=intent_original, t=t):
+        card += "\n" + line
     observed = compose_observations(route, t)
     if include_decisions:
         card += "\n" + "\n".join(compose_decision_lines(route, non_git_decision, t))
@@ -5732,17 +5712,13 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
     if reason:
         raise ValueError(reason)
     if route.get("route_hash") != route_hash(route):
-        if gates_on():
-            raise ValueError("stale or modified route hash")
-        same_work_or_refuse("route-hash-mismatch")
+        note_same_work_drift("route-hash-mismatch")
     if route.get("route_id") != "rt-"+route["route_hash"].split(":",1)[1][:16]:
-        if gates_on() or not re.fullmatch(r"rt-[0-9a-f]{16}", str(route.get("route_id") or "")):
+        if not re.fullmatch(r"rt-[0-9a-f]{16}", str(route.get("route_id") or "")):
             raise ValueError("invalid route id")
-        same_work_or_refuse("route-id-mismatch", str(route.get("route_id")))
+        note_same_work_drift("route-id-mismatch", str(route.get("route_id")))
     if expected_cwd and Path(expected_cwd).resolve()!=Path(route["cwd"]):
-        if gates_on():
-            raise ValueError("route cwd mismatch")
-        same_work_or_refuse("route-cwd-mismatch", str(expected_cwd))
+        note_same_work_drift("route-cwd-mismatch", str(expected_cwd))
         route = dict(route, cwd=str(Path(expected_cwd).resolve()))
     _verify_profile_contract(route)
     scope_version = route.get("entry_scope_contract_version")
@@ -5805,8 +5781,6 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
             }
     if classification["verdict"] != "current":
         if not allow_stale_registry:
-            if gates_on():
-                raise ValueError(classification["message"])
             # Catalog drift is expected across releases. Default continuation
             # uses the current tooling without prescribing an unverified old runtime.
             _validate_output_scopes(route.get("nodes", []))
@@ -8250,9 +8224,7 @@ def _marker_identity_row(route, node, node_id, gate, *, jobs=None, exact_termina
             or marker.get("route_hash") != route.get("route_hash")
             or marker.get("node_id") != node_id
             or marker.get("completion_gate") != gate):
-        if gates_on():
-            return {"passed": False, "reason": "completion-marker-identity-mismatch"}
-        same_work_or_refuse("completion-marker-identity-mismatch", node_id)
+        note_same_work_drift("completion-marker-identity-mismatch", node_id)
     evidence = marker.get("evidence") or {}
     # SD-154 A-SD154-8: `evidence_currency` is the only place non-writer code
     # recomputes a completion marker's evidence sha256 -- this used to keep
@@ -12683,18 +12655,8 @@ def _emit_compiled_route(a,route,artifact_root,output=None):
     """Shared tail of compile/compose: runtime-root check, canonical write-once, owner binding, prints."""
     output=output if output is not None else getattr(a,"output",None)
     vbasis=route.get("validation_basis") or {}
-    if vbasis.get("runtime_root_match") is False and not gates_on():
-        same_work_or_refuse("launch-runtime-root-mismatch")
-    if vbasis.get("runtime_root_match") is False and gates_on():
-        launch_tuple=route.get("launch_compatibility_tuple") or {}
-        expected=launch_tuple.get("registry_root")
-        observed=launch_tuple.get("runtime_root")
-        print("route_file_written=0 registered=0 started=0 child_spawned=0",file=sys.stderr)
-        print(runtime_root_hint(),file=sys.stderr)
-        raise ValueError(
-            "launch-runtime-root-mismatch "
-            f"expected={canonical(expected).decode()} observed={canonical(observed).decode()}"
-        )
+    if vbasis.get("runtime_root_match") is False:
+        note_same_work_drift("launch-runtime-root-mismatch")
     expected_output=canonical_route_path(artifact_root,route["route_id"])
     if output:
         output_path=Path(output)
@@ -12705,6 +12667,11 @@ def _emit_compiled_route(a,route,artifact_root,output=None):
     else:
         output_path=expected_output
     write_once(output_path,route)
+    try:  # the person's words, once and beside the route: never part of its identity (WORKFLOW §0.4)
+        import work_intent
+        work_intent.seal_original(route)
+    except Exception:  # noqa: BLE001 -- optional record; the route stands without it
+        pass
     retired=retire_stale_closure(output_path)
     if retired is not None:
         print(f"route_closure_retired={retired}",file=sys.stderr)
@@ -13244,9 +13211,13 @@ def main():
         # original choice instead of calling the newly-created stream a join.
         _campaign_for_card = compose_campaign_selection(route)
         if a.explain:
+            import work_intent
             print(compose_card(route, _plan_for_card, _plan_source_for_card, owner_harness=owner_pin,
                                route_plan_unreadable=route_plan_unreadable,
-                               campaign_selection=_campaign_for_card),file=sys.stderr)
+                               campaign_selection=_campaign_for_card,
+                               intent_original=(None if route.get("route_plan") else
+                                                work_intent.original_excerpt(route.get("cwd")) or None)),
+                  file=sys.stderr)
             print("route_file_written=0 explain=1",file=sys.stderr)
             print(json.dumps({"route_id":route["route_id"],"capability":route["capability"],
                               "effective_intensity":route["effective_intensity"],"shape":shape,

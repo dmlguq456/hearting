@@ -64,8 +64,7 @@ class ParentCloseTest(unittest.TestCase):
         env.update(AGENT_HOME=str(HERE.parent), AGENT_DISPATCH_JOBS=str(self.jobs),
             AGENT_ARTIFACT_ROOT=str(self.artifacts), AGENT_ARTIFACT_CHECKPOINT="off",
             AGENT_RESOURCE_RUN_INDEX=str(self.base / "resource-index.json"),
-            XDG_STATE_HOME=str(self.base / "state"), CODEX_THREAD_ID="fixture-parent",
-            HEARTING_GATES="off", COMPUTE_HOSTS_CONFIG=str(self.base / "no-compute.yaml"))
+            XDG_STATE_HOME=str(self.base / "state"), CODEX_THREAD_ID="fixture-parent", COMPUTE_HOSTS_CONFIG=str(self.base / "no-compute.yaml"))
         self.env = mock.patch.dict(os.environ, env, clear=True)
         self.env.start()
         self.addCleanup(self.env.stop)

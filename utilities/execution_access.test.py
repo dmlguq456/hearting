@@ -1089,6 +1089,18 @@ class DerivedAccessTest(unittest.TestCase):
             with self.subTest(line=line):
                 self.assertEqual({row[1]: row[2] for row in EA._task_paths(line)}, expected)
 
+    def test_the_intent_card_keeps_the_scope_line_that_names_write_roots(self):
+        # WORKFLOW §0.4 [의도 확인]: without its 범위 line an output folder would be read-only,
+        # and a Codex owner (OS sandbox) would be blocked where Claude/OpenCode go on.
+        card = ('원문: "결과를 /x/out에 저장해 줘"\n의도: 평가 결과 저장\n범위: /x/out에 결과 저장\n'
+                '안 할 것: /x/raw 수정\n완료: 표 생성\n')
+        self.assertEqual({row[1]: row[2] for row in EA._task_paths(card)}, {"/x/out": "write", "/x/raw": "read"})
+        without = card.replace("범위: /x/out에 결과 저장\n", "")
+        self.assertEqual({row[1]: row[2] for row in EA._task_paths(without)}, {"/x/out": "read", "/x/raw": "read"})
+        workflow = (Path(__file__).resolve().parents[1] / "core/WORKFLOW.md").read_text(encoding="utf-8")
+        card_block = workflow[workflow.index("[의도 확인]"):workflow.index("→ 진행 / 수정", workflow.index("[의도 확인]"))]
+        self.assertIn("\n범위: ", card_block)
+
     def test_the_verifier_probe_never_widens_to_write(self):
         # ACCESS-DERIVATION-PROBE.py (hearting-verify-cc [28]), as a regression.
         X = self.root / "X"
