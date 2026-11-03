@@ -558,6 +558,33 @@ class SweepTest(IsolatedRootMixin, unittest.TestCase):
             second, _ = SWEEP.sweep_deliver(self.root, "claude-parent-runtime", "sess-owner")
         self.assertEqual([record["delivery_id"] for record in second], [left])
 
+    def test_prompt_pass_starts_no_work_after_six_seconds_of_the_hook(self):
+        # b6 decision 2026-11-04 (HOOK-LATENCY 7-4): a prompt pass that reaches
+        # a root after 6 s of the 10 s hook leaves it pending for the next
+        # prompt, keeping 4 s for rendering and ACK. Fake clock, no sleeping.
+        self._seed()
+        delivery_id = "delivery-" + "a" * 32
+        start = time.monotonic_ns()
+
+        def prompt(elapsed_seconds):
+            ticks = iter([start])  # the pass start; every later read is `elapsed`
+            clock = SimpleNamespace(
+                monotonic_ns=lambda: next(ticks, start + int(elapsed_seconds * 1e9)))
+            output = io.StringIO()
+            with mock.patch.object(HOOK, "resolve_agent_home", return_value=ROOT), \
+                 mock.patch.object(HOOK, "dispatch_state_roots", return_value=(self.root,)), \
+                 mock.patch.object(HOOK, "time", clock), \
+                 contextlib.redirect_stdout(output):
+                self.assertEqual(HOOK._process_session(
+                    {"hook_event_name": "UserPromptSubmit", "cwd": str(ROOT)}, "sess-owner"), 0)
+            return output.getvalue()
+
+        self.assertEqual(prompt(6.5), "")
+        self.assertEqual(PD.read(self.root, "sess-owner", delivery_id)["state"], "pending")
+        delivered = json.loads(prompt(5.5))["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("required_action=", delivered)
+        self.assertEqual(PD.read(self.root, "sess-owner", delivery_id)["state"], "acked")
+
     def test_near_budget_24_member_batch_releases_whole_then_next_sweep_delivers(self):
         from types import SimpleNamespace
         self.root.mkdir(parents=True, exist_ok=True)
