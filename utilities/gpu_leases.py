@@ -524,13 +524,26 @@ def description(row):
 
 
 def ui_translator():
-    """The shared UI-text catalog (English by default, Korean when declared)."""
-    import importlib.util
-    path = Path(__file__).resolve().parents[1] / "tools" / "i18n" / "ui_text.py"
-    spec = importlib.util.spec_from_file_location("ui_text", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.translator()
+    """The shared UI-text catalog (English by default, Korean when declared).
+
+    Admission and probe output never fail over their words: without a readable catalog a line
+    names its fields instead.
+    """
+    try:
+        import importlib.util
+        path = Path(__file__).resolve().parents[1] / "tools" / "i18n" / "ui_text.py"
+        spec = importlib.util.spec_from_file_location("ui_text", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.translator()
+    except Exception:  # noqa: BLE001 -- a missing or broken catalog must not change admission
+        return _plain_text
+
+
+def _plain_text(message, /, **fields):
+    if fields:
+        return "; ".join(f"{name}={value}" for name, value in fields.items())
+    return message.rsplit(".", 1)[-1].replace("_", " ")
 
 
 def gpu_status_text(status, t=None):

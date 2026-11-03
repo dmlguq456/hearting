@@ -289,6 +289,12 @@ class NVMLFallbackTest(unittest.TestCase):
                                         r" · cannot reserve a GPU for a new run$"):
                 gpu_leases.select(host, [], requested=None)
 
+    def test_admission_still_refuses_without_a_readable_catalog(self):
+        host = self.probe()
+        with mock.patch("importlib.util.spec_from_file_location", side_effect=FileNotFoundError("gone")):
+            with self.assertRaisesRegex(gpu_leases.GPUUnavailable, "gpu unavailable"):
+                gpu_leases.select(host, [], requested=None)
+
     @staticmethod
     def _english(function, *args):
         with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "English"}):
