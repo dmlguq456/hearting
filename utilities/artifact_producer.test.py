@@ -6170,6 +6170,19 @@ class RouteLaunchContextTest(ProducerTestBase):
         self.assertEqual(Path(env["AGENT_ARTIFACT_OUTPUT_DIR"]), Path(env["AGENT_ARTIFACT_CYCLE_DIR"]) / "artifacts")
 
 
+class OutputInvalidDetailTest(unittest.TestCase):
+    def test_a_short_list_is_named_whole_and_a_long_one_is_bounded(self):
+        few = [f"locator-invalid-component:artifacts/a|{index}" for index in range(3)]
+        self.assertEqual(P.output_invalid_detail(few), ";".join(few))
+        many = [f"locator-invalid-component:artifacts/{'d' * 300}/b|{index}" for index in range(701)]
+        detail = P.output_invalid_detail(many)
+        items = detail.split(";")
+        self.assertEqual(items[-1], f"and {701 - (len(items) - 1)} more")
+        self.assertEqual(items[:-1], many[:len(items) - 1])
+        self.assertLessEqual(len(items) - 1, P.OUTPUT_INVALID_NAMED)
+        self.assertLessEqual(len(detail), P.OUTPUT_INVALID_NAMED_BYTES + 32)
+
+
 class FinalizeRefusalOfInvalidNamesTest(ProducerTestBase):
     """W3 (2026-11-03): a controller retried one refused close 3,719 times, each try hashing the
     open cycle's 64,272 files (1.7 GB) only to refuse it on one file name."""

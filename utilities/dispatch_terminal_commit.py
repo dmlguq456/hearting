@@ -1059,6 +1059,8 @@ def _refused_output_evidence(artifact_root: Path, record: Mapping[str, Any],
     def observe() -> Optional[list]:
         rows = []
         for item in items:
+            if re.fullmatch(r"and [0-9]+ more", item):
+                continue   # the unnamed rest: fixing the named files makes the next close name them
             code, sep, rel = item.partition(":")
             parts = rel.split("/")
             if (not sep or not code or not rel or rel.startswith("/")
