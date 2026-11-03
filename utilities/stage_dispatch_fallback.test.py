@@ -96,6 +96,26 @@ class FallbackTest(unittest.TestCase):
    self.assertEqual(self.degradation_rows(path)[-1]["candidate_outcomes"],rows)
    self.assertEqual(self.degradation_rows(path)[-1]["last_direct_failure"],"interrupted:exit-130")
 
+ def test_producing_stage_launch_carries_its_previous_round_context(self):
+  import worker_bootstrap
+  context="\n\n## Previous round (runtime record)\n- Findings to close: fixture\n"
+  with self.dispatch_env():
+   path=self.route(same_status="supported")
+   os.environ.pop("AGENT_DISPATCH_RETRY_BRIEF",None)
+   seen,carried=[],[]
+   def previous(route,node_id,jobs):
+    seen.append(node_id)
+    return context
+   def wrapper(args,command,**_policy):
+    carried.append(F.direct_env().get("AGENT_DISPATCH_RETRY_BRIEF"))
+    return SimpleNamespace(returncode=130,stdout="worker_failure=interrupted\n",stderr="")
+   with mock.patch.object(worker_bootstrap,"prior_round_context",side_effect=previous), \
+        mock.patch.object(F,"run_wrapper",side_effect=wrapper), contextlib.redirect_stdout(io.StringIO()):
+    self.run_inline(path)
+  self.assertEqual(seen,["plan"])
+  self.assertTrue(carried)
+  self.assertEqual(set(carried),{context})
+
  def test_direct_timeout_with_registered_attempt_remains_unknown(self):
   with self.dispatch_env():
    path=self.route(same_status="supported")
@@ -1470,9 +1490,10 @@ class FallbackTest(unittest.TestCase):
    prompt=self.art/"closure-task.md"
    prompt.write_text(f"Check corrected HEAD {new_head}, only x, against {prior_input}.\n")
    prompt_bytes=prompt.read_bytes()
-   commands=[];spawn_claims=[]
+   commands=[];spawn_claims=[];briefs=[]
    def wrapper(_args,command,**_policy):
     commands.append(command)
+    briefs.append(F.direct_env().get("AGENT_DISPATCH_RETRY_BRIEF",""))
     aid=self.arg(command,"--attempt-id")
     metadata={"attempt_schema_version":"2","dispatch_depth":"2","transport":"headless",
      "execution_surface":"registered-headless","registered_worker":"1","fallback_hop":"same-harness-headless",
@@ -1499,11 +1520,13 @@ class FallbackTest(unittest.TestCase):
                                route,node,{"child_harness":"codex"},1,3)
    self.assertEqual(ids,[expected]*3)
    self.assertTrue(all("--automatic-retry-of" not in command for command in commands))
-   for command in commands:
+   # The round block rides the retry brief, once, beside the owner's untouched request.
+   for command,brief in zip(commands,briefs):
     task=Path(self.arg(command,"--prompt-file")).read_text()
     self.assertIn(new_head,task);self.assertIn(str(prior_input),task)
-    self.assertIn("Round protocol (round 3",task)
-    self.assertIn("dead-route-completion-rejected",task);self.assertIn("dead-worker-fail",task)
+    self.assertNotIn("Round protocol",task)
+    self.assertEqual(brief.count("Round protocol (round 3"),1)
+    self.assertIn("dead-route-completion-rejected",brief);self.assertIn("dead-worker-fail",brief)
     self.assertEqual(self.arg(command,"--write-scope"),";".join(node["write_scope"]))
    self.assertEqual(prior_input.read_bytes(),original_input);self.assertEqual(prompt.read_bytes(),prompt_bytes)
    self.assertEqual(spawn_claims,[expected])
@@ -1811,15 +1834,21 @@ class FallbackTest(unittest.TestCase):
       code,output=self.closure_action(path,"start")
      self.assertNotEqual(code,0,output);self.assertIn("reason="+reason,output)
      self.assertEqual(self.jobs.read_bytes(),before)
- def test_review_round_cap_correction_round_attaches_protocol_block_to_prompt_file(self):
+ def test_review_round_cap_correction_round_carries_protocol_block_with_prompt_file(self):
+  self._round_block_carrier(with_prompt_file=True)
+
+ def test_review_round_cap_correction_round_carries_protocol_block_without_prompt_file(self):
+  self._round_block_carrier(with_prompt_file=False)
+
+ def _round_block_carrier(self,*,with_prompt_file):
   # Plan-correction B2 (third surface): unlike dispatch-node.py (which builds
   # its own prompt) and dispatch-batch.py (which gets the block for free by
   # re-invoking dispatch-node.py for the actual leg -- see the comment beside
   # this call site in stage-dispatch-fallback.py), THIS wrapper calls the
   # adapter directly, so it must attach the identical
-  # `DISPATCH_NODE.round_protocol_block` output itself. Proves the wiring
-  # (the `--prompt-file` rewrite), not just the shared function (already
-  # unit-tested by review_round_cap.test.py::RoundProtocolParityTest).
+  # `DISPATCH_NODE.round_protocol_block` output itself. It rides the retry
+  # brief every adapter renders and seals, so an owner that writes no
+  # `--prompt-file` no longer loses it.
   with self.dispatch_env():
    path=self.route(same_status="supported")
    route=json.loads(path.read_text())
@@ -1831,26 +1860,37 @@ class FallbackTest(unittest.TestCase):
    prompt_file.write_text("BASE PROMPT TEXT\n",encoding="utf-8")
    argv=["stage-dispatch-fallback.py","--route",str(path),"--node","plan-check","--slug","fallback-plan-check",
          "--parent","owner","--capability-mode","dev","--worker-mode","qa/plan-review",
-         "--model-role","fast reviewer","--jobs",str(self.jobs),
-         "--prompt-file",str(prompt_file),"--dry-run"]
-   with self.prior_process_observation({"att-plan-check-round-1"}),mock.patch.object(sys,"argv",argv):
+         "--model-role","fast reviewer","--jobs",str(self.jobs),"--dry-run"]
+   if with_prompt_file:
+    argv+=["--prompt-file",str(prompt_file)]
+   os.environ.pop("AGENT_DISPATCH_RETRY_BRIEF",None)
+   import dispatch_replacement
+   original_instructions=dispatch_replacement.recovery_instructions
+   rendered=[]
+   def instructions(wrapper_args):
+    # The dry-run wrapper runs in this process and consumes the carrier.
+    rendered.append((os.environ.get("AGENT_DISPATCH_RETRY_BRIEF"),original_instructions(wrapper_args)))
+    return rendered[-1][1]
+   with self.prior_process_observation({"att-plan-check-round-1"}),mock.patch.object(sys,"argv",argv), \
+        mock.patch.object(dispatch_replacement,"recovery_instructions",side_effect=instructions):
     observation=F.LAUNCH_TUPLE.ReportOnlyObservation()
     code=F._dispatch(observation)
+   self.assertEqual(len(rendered),1,rendered)
+   carried,prompt_tail=rendered[0]
    node=next(n for n in route["nodes"] if n["id"]=="plan-check")
    round_rows=F.DISPATCH_NODE.prior_round_attempts(
     self.jobs,route["route_id"],"plan-check",
     route=route if node.get("kind")=="review-worker" else None)
    admission=F.DISPATCH_NODE.admit_round(route,node,self.jobs,owner_attempt_id="att-fallback-parent")
-   # The same records the wrapper passes: the prior blocking review and the
-   # delta since it are rendered from the jobs ledger and admitted subject.
    expected_block=F.DISPATCH_NODE.round_protocol_block(
     admission.budget,round_rows,F.worker_type_for_kind(node["kind"]),node["id"],jobs=self.jobs,
     current_manifest=admission.source_subject_manifest if admission.source_subject_digest else None)
-  self.assertEqual(code,0)
-  self.assertNotEqual(expected_block,"")
-  augmented=sorted(Path(self.jobs).parent.glob("round-protocol-plan-check-*.md"))
-  self.assertEqual(len(augmented),1,augmented)
-  self.assertEqual(augmented[0].read_text(encoding="utf-8"),"BASE PROMPT TEXT\n"+expected_block)
+   self.assertEqual(code,0)
+   self.assertNotEqual(expected_block,"")
+   self.assertEqual(carried,expected_block)
+   self.assertTrue(prompt_tail.startswith("\n\n## Batch leg / retry brief\n"+expected_block),prompt_tail)
+   self.assertEqual(prompt_file.read_text(encoding="utf-8"),"BASE PROMPT TEXT\n")
+   self.assertEqual(sorted(Path(self.jobs).parent.glob("round-protocol-plan-check-*.md")),[])
 
  def _producer_revision_entry(self,surface):
   with self.dispatch_env():

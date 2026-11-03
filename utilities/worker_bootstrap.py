@@ -1114,6 +1114,196 @@ def handed_over_prompt(route, node_id, output_dir) -> str:
             + "\n".join(handed_over_lines(found, "- ")) + "\n")
 
 
+_PRIOR_ROUND_LIMITS = {"paths": 20, "commits": 20, "chars": 300}
+# One parse per unchanged registry file: a chain continuation asks once per session.
+_LINEAGE_CACHE: dict = {}
+
+
+def _lineage_rows(route, jobs) -> dict[str, list[tuple[str, dict]]]:
+    """``{node id: [(status, metadata)]}`` for this route and its verified ancestors, in registry order."""
+    from dispatch_contract import parse_registry_metadata, terminal_attempt_never_started
+    identities = {route.get("route_id")}
+    try:
+        from route_lineage import verified_route_lineage
+        identities |= {generation.get("route_id") for generation in verified_route_lineage(route)}
+    except Exception:  # an unverifiable ancestor only narrows the history read
+        pass
+    rows: dict[str, list[tuple[str, dict]]] = {}
+    try:
+        path = Path(jobs).resolve()
+        info = path.stat()
+        key = (str(path), info.st_ino, info.st_mtime_ns, info.st_ctime_ns, info.st_size,
+               frozenset(map(str, identities)))
+        if key in _LINEAGE_CACHE:
+            return _LINEAGE_CACHE[key]
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except (OSError, TypeError):
+        return rows
+    for line in lines:
+        fields = line.split("\t")
+        if len(fields) != 6:
+            continue
+        meta = parse_registry_metadata(fields[5])
+        if ((meta.get("route_id") or meta.get("route")) not in identities or not meta.get("route_node")
+                or terminal_attempt_never_started(fields[1], meta)):
+            continue
+        rows.setdefault(meta["route_node"], []).append((fields[1], meta))
+    _LINEAGE_CACHE.clear()
+    _LINEAGE_CACHE[key] = rows
+    return rows
+
+
+def judging_stages(route, node_id) -> list[dict]:
+    """The round-capped stages that judge this node's work, in route order: its dependents and
+    theirs through judging stages only, up to the next stage that produces work (so execute is
+    judged by impl-review and the test after it, not by the report that follows)."""
+    import review_round_cap as ROUND
+    nodes = _route_nodes(route)
+    found, pending = set(), [node_id]
+    while pending:
+        current = pending.pop(0)
+        for node in nodes:
+            if (current in (node.get("depends_on") or ()) and node["id"] not in found
+                    and node["id"] != node_id and ROUND.is_round_capped_node(node)):
+                found.add(node["id"])
+                pending.append(node["id"])
+    return [node for node in nodes if node["id"] in found]
+
+
+def _decoded(encoded) -> str:
+    import base64
+    try:
+        return base64.urlsafe_b64decode(str(encoded) + "=" * (-len(str(encoded)) % 4)).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return ""
+
+
+def attempt_outcome(route, meta) -> dict:
+    """The recorded end of one attempt: verdict, blocker line and root-bound artifact path, read
+    from its own terminal envelope. Missing or unreadable parts are omitted, never inferred."""
+    from codex_dispatch_terminal import inspect_terminal_attempt, inspect_terminal_log
+    found = {}
+    try:
+        view = inspect_terminal_log(meta.get("log_file")) or {}
+    except (OSError, ValueError, TypeError):
+        view = {}
+    blocker = " ".join(str(view.get("blocker") or "").split())
+    if view.get("verdict"):
+        found["verdict"] = str(view["verdict"])
+    if blocker and blocker not in {"-", "none"}:
+        found["blocker"] = blocker[:_PRIOR_ROUND_LIMITS["chars"]]
+    artifact = _decoded(meta.get("review_artifact_b64") or "")
+    if not artifact:
+        try:
+            terminal = inspect_terminal_attempt(
+                meta.get("log_file"), worktree=meta.get("cwd") or route.get("cwd"),
+                artifact_root_metadata=meta.get("artifact_root") or route.get("artifact_root"),
+                artifact_binding=meta)
+            artifact = _decoded(terminal.get("artifact_path_b64") or "")
+        except (OSError, ValueError, TypeError):
+            artifact = ""
+    if artifact and Path(artifact).is_file():
+        found["artifact"] = artifact
+    return found
+
+
+def attempt_changes(route, meta) -> list[str]:
+    """Commits and paths changed since one attempt's recorded ``launch_head``, by read-only Git."""
+    import artifact_context
+    head, worktree = str(meta.get("launch_head") or ""), route.get("cwd")
+    if (not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", head) or not worktree
+            or route.get("source_commit") == "unversioned"):
+        return []
+
+    def git(*args):
+        try:
+            result = subprocess.run(["git", "-C", str(worktree), *args], capture_output=True,
+                                    env=artifact_context._readonly_git_env(), timeout=5, check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        return result.stdout.decode("utf-8", "replace") if result.returncode == 0 else None
+
+    lines = []
+    log = git("log", "--format=%h %s", f"{head}..HEAD")
+    commits = [line[:160] for line in (log or "").splitlines() if line.strip()]
+    if log is not None:
+        shown = "; ".join(commits[:_PRIOR_ROUND_LIMITS["commits"]]) or "none"
+        more = len(commits) - _PRIOR_ROUND_LIMITS["commits"]
+        lines.append(f"commits since `{head[:12]}`: {shown}" + (f" (+{more} more)" if more > 0 else ""))
+    diff = git("diff", "--name-only", head, "--")
+    paths = [line for line in (diff or "").splitlines() if line.strip()]
+    if diff is not None:
+        shown = ", ".join(f"`{path}`" for path in paths[:_PRIOR_ROUND_LIMITS["paths"]]) or "none"
+        more = len(paths) - _PRIOR_ROUND_LIMITS["paths"]
+        lines.append(f"paths changed since `{head[:12]}`: {shown}" + (f" (+{more} more)" if more > 0 else ""))
+    return lines
+
+
+def judge_findings(route, node_id, rows=None, jobs=None) -> list[str]:
+    """``<judge> <attempt>: <artifact>`` for each stage that judges this node (``judging_stages``)
+    whose latest verdict still holds an open 🔴 list (``open_blocking_verdict``: not one the owner
+    already disposed): the findings this node's next round closes."""
+    import review_round_cap as ROUND
+    rows = _lineage_rows(route, jobs) if rows is None else rows
+    found = []
+    for judge in judging_stages(route, node_id):
+        worker = judge.get("worker_type") or ("review" if judge.get("kind") == "review-worker" else "test")
+        meta = ROUND.open_blocking_verdict(rows.get(judge["id"], ()), worker)
+        if meta is None:
+            continue
+        outcome = attempt_outcome(route, meta)
+        text = f"{judge['id']} {meta.get('attempt_id', 'unknown')} ({meta.get('note', 'blocking')})"
+        if outcome.get("artifact"):
+            text += f": `{outcome['artifact']}`"
+        if outcome.get("blocker"):
+            text += f" — blocker: {outcome['blocker']}"
+        found.append(text)
+    return found
+
+
+def prior_round_context(route, node_id, jobs) -> str:
+    """What the next round of a producing stage needs from the round before it, from records the
+    runtime already keeps: the blocking findings of the stages that judge it, its own previous
+    attempt's recorded end, the leg items it left unmet, and what changed since that attempt began.
+
+    Empty when neither its own latest settled attempt nor a judging stage's latest verdict is
+    blocking: an ordinary first run carries no history."""
+    from dispatch_attempt_policy import OPEN_STATES, readable_result
+    node = {n["id"]: n for n in _route_nodes(route)}.get(node_id)
+    if not node or not jobs:
+        return ""
+    rows = _lineage_rows(route, jobs)
+    findings = judge_findings(route, node_id, rows)
+    settled = [meta for status, meta in rows.get(node_id, ()) if status not in OPEN_STATES]
+    own = settled[-1] if settled else None
+    own_result = readable_result(own) if own else ""
+    if not findings and own_result not in {"FAIL", "BLOCKED"}:
+        return ""
+    lines = []
+    if findings:
+        lines.append("- Findings to close: " + "; ".join(findings))
+    if own is not None:
+        outcome = attempt_outcome(route, own)
+        text = f"- Your previous attempt {own.get('attempt_id', 'unknown')} ended {own.get('note') or own_result or 'settled'}"
+        if outcome.get("blocker"):
+            text += f" — blocker: {outcome['blocker']}"
+        if outcome.get("artifact"):
+            text += f"; its report: `{outcome['artifact']}`"
+        lines.append(text)
+        if own_result == "BLOCKED":
+            try:
+                import route_authority
+                unmet = route_authority._blocked_round_items(route, own)
+            except Exception:  # the items are a help, never a reason to withhold the context
+                unmet = None
+            if unmet:
+                lines.append("- Leg items it left unmet: " + ", ".join(sorted(unmet)))
+        lines += [f"- {line}" for line in attempt_changes(route, own)]
+    return ("\n\n## Previous round (runtime record)\n" + "\n".join(lines) + "\n"
+            "- Read the findings and your previous report first; close every 🔴 they list together, "
+            "building on the changes already made rather than starting over.\n")
+
+
 def plan_leg_prompt(route, node_id=None, primary_report=None) -> str:
     """The approved plan for this leg, read from the sealed decision: what finishes it, what
     verification looks at, what it hands over, and the direction the person chose. Empty for a

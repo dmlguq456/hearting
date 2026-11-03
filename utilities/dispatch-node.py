@@ -1108,6 +1108,16 @@ def main():
   print("check=failed");print(f"reason={e.reason}");print(f"detail={e.detail}");print("child_spawned=0");raise SystemExit(65)
  round_context=round_protocol_block(round_budget,prior_rounds,worker_type,node["id"],jobs=registry.path,
                                    current_manifest=getattr(admission,"source_subject_manifest",()) if admission.source_subject_digest else None)
+ if original_task is None and not a.subsession_id and not REVIEW_ROUND_CAP.is_round_capped_node(node):
+  # A producing stage's next round gets the findings that judged it and
+  # what its last attempt did, through the same retry-brief carrier.
+  try:
+   from worker_bootstrap import prior_round_context
+   producer_context=prior_round_context(route,node["id"],registry.path)
+  except Exception:  # context is a help, never a reason to withhold a launch
+   producer_context=""
+  if producer_context:
+   os.environ["AGENT_DISPATCH_RETRY_BRIEF"]=os.environ.get("AGENT_DISPATCH_RETRY_BRIEF", "")+producer_context
  if original_task is None and group and os.environ.get(GOVERNOR_RESERVATION_ENV):
   # The reservation seals the raw group assignment, including on a later
   # round. Round guidance is recovery context, just like a partial retry brief.

@@ -1378,6 +1378,98 @@ class LegPlanRoleTest(unittest.TestCase):
         self.assertIn("do not report it as PASS", owner)
 
 
+class PriorRoundContextTest(unittest.TestCase):
+    """A producing stage's next round reads the findings that judged it and what its last attempt
+    did, from records the runtime already keeps (D1 seam 2)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.repo = self.root / "repo"
+        self.repo.mkdir()
+        git = lambda *args: subprocess.run(["git", "-C", str(self.repo), *args], check=True,
+                                           capture_output=True, text=True).stdout.strip()
+        self.git = git
+        git("init", "-q")
+        git("config", "user.email", "fixture@example.invalid")
+        git("config", "user.name", "fixture")
+        (self.repo / "engine.py").write_text("value = 1\n", encoding="utf-8")
+        git("add", "engine.py")
+        git("commit", "-q", "-m", "base")
+        self.launch_head = git("rev-parse", "HEAD")
+        (self.repo / "engine.py").write_text("value = 2\n", encoding="utf-8")
+        git("commit", "-q", "-am", "execute round one")
+        (self.repo / "notes.py").write_text("pending = True\n", encoding="utf-8")
+        self.jobs = self.root / "jobs.log"
+        self.jobs.write_text("", encoding="utf-8")
+        self.route = code_leg_route(cwd=str(self.repo), artifact_root=str(self.root))
+        self.review = self.root / "round_1.md"
+        self.review.write_text("🔴 engine value is wrong\n", encoding="utf-8")
+
+    def row(self, node, attempt, note, failure_class, **extra):
+        meta = {"attempt_id": attempt, "route_id": "rt-code-leg", "route_node": node,
+                "worker_type": "review" if node == "impl-review" else "stage",
+                "note": note, "failure_class": failure_class, **extra}
+        with self.jobs.open("a", encoding="utf-8") as stream:
+            stream.write("\t".join(("2026-11-02T00:00:00Z", "done", str(self.repo), str(self.repo), attempt,
+                                    ",".join(f"{k}={v}" for k, v in meta.items()))) + "\n")
+
+    def encoded(self, path):
+        import base64
+        return base64.urlsafe_b64encode(str(path).encode("utf-8")).decode("ascii").rstrip("=")
+
+    def test_blocking_review_names_findings_previous_attempt_and_changes(self):
+        self.row("execute", "att-execute-1", "completed-marker", "pass", launch_head=self.launch_head)
+        self.row("impl-review", "att-review-1", "completed-review-blocking", "fail",
+                 review_artifact_b64=self.encoded(self.review))
+        context = W.prior_round_context(self.route, "execute", self.jobs)
+        self.assertIn("## Previous round (runtime record)", context)
+        self.assertIn(f"Findings to close: impl-review att-review-1 (completed-review-blocking): `{self.review}`",
+                      context)
+        self.assertIn("Your previous attempt att-execute-1 ended completed-marker", context)
+        self.assertRegex(context, rf"commits since `{self.launch_head[:12]}`: [0-9a-f]+ execute round one")
+        self.assertIn(f"paths changed since `{self.launch_head[:12]}`: `engine.py`", context)
+        # The judge's own round block, not this one, carries a review's context.
+        self.assertEqual(W.prior_round_context(self.route, "impl-review", self.jobs), "")
+
+    def test_passing_history_carries_nothing_and_own_blocked_round_carries_its_blocker(self):
+        self.row("execute", "att-execute-1", "completed-marker", "pass", launch_head=self.launch_head)
+        self.row("impl-review", "att-review-1", "completed-marker", "pass")
+        self.assertEqual(W.prior_round_context(self.route, "execute", self.jobs), "")
+        self.assertEqual(W.prior_round_context(self.route, "plan", self.jobs), "")
+        log = self.root / "execute-2.log"
+        with mock.patch("codex_dispatch_terminal.inspect_terminal_log",
+                        return_value={"verdict": "BLOCKED", "blocker": "loopback bind EPERM in sandbox"}):
+            self.row("execute", "att-execute-2", "dead-worker-blocked", "blocked",
+                     launch_head=self.launch_head, log_file=str(log))
+            context = W.prior_round_context(self.route, "execute", self.jobs)
+        self.assertIn("Your previous attempt att-execute-2 ended dead-worker-blocked — blocker: "
+                      "loopback bind EPERM in sandbox", context)
+        self.assertNotIn("Findings to close", context)
+
+    def test_a_test_after_the_review_is_followed_and_a_disposed_review_is_not_reopened(self):
+        self.row("execute", "att-execute-1", "completed-marker", "pass", launch_head=self.launch_head)
+        self.row("impl-review", "att-review-1", "completed-marker", "pass")
+        self.row("test", "att-test-1", "dead-worker-fail", "fail")
+        self.assertEqual([n["id"] for n in W.judging_stages(self.route, "execute")], ["impl-review", "test"])
+        self.assertEqual([n["id"] for n in W.judging_stages(self.route, "plan")], ["plan-check"])
+        context = W.prior_round_context(self.route, "execute", self.jobs)
+        self.assertIn("Findings to close: test att-test-1 (dead-worker-fail)", context)
+        # The owner closed a review in place: its findings were ruled on, not reopened.
+        self.row("impl-review", "att-review-2", "completed-marker", "fail",
+                 review_gate_closure="owner-closure", review_independence="owner-overridden")
+        self.assertNotIn("impl-review", " ".join(W.judge_findings(self.route, "execute", jobs=self.jobs)))
+
+    def test_unreadable_records_render_only_what_is_known(self):
+        self.row("execute", "att-execute-1", "dead-worker-fail", "fail", launch_head="not-a-commit")
+        context = W.prior_round_context(self.route, "execute", self.jobs)
+        self.assertIn("Your previous attempt att-execute-1 ended dead-worker-fail", context)
+        self.assertNotIn("commits since", context)
+        self.assertEqual(W.prior_round_context(self.route, "execute", self.root / "absent.log"), "")
+        self.assertEqual(W.prior_round_context(self.route, "missing-node", self.jobs), "")
+
+
 class HandedOverChecksTest(unittest.TestCase):
     """execute records what its environment cannot run; the later qa/test stage receives it (D1 seam 5)."""
 
