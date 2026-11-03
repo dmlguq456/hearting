@@ -4,8 +4,8 @@ The screens read the fixture's records positionally and by key. A live builder t
 puts an object where the fixture has a pair, or changes a type breaks a screen only on real data
 (that is how a ``ResourceJob`` object once reached the COMPUTE rail). Each section is compared here:
 the live record's keys are drawn from the fixture's keys, its value types are the fixture's types,
-and an unknown value is ``None``. Additive route fields and the repo ``status`` record have the
-explicit optional contracts below, so old render fixtures remain valid inputs.
+and an unknown value is ``None``. Additive route and question fields and the repo ``status``
+record have the explicit optional contracts below, so old render fixtures remain valid inputs.
 """
 import unittest
 from datetime import datetime
@@ -46,6 +46,21 @@ def route_extension(key, value):
             and optional_pct(row["context"]) and optional_number(row["window"])
             for row in value)
     raise ValueError(key)
+
+
+_QUESTION_TEXT_FIELDS = frozenset(("node", "since_at", "route_id", "route_title", "owner_sid",
+                                   "registered"))
+_QUESTION_ENUMS = {"owner_state": ("live", "successor", "none", "unknown"),
+                   "fold": ("older", "ownerless")}
+
+
+def question_extension(key, value):
+    """Validate the optional who/when/route fields of an answer-wait row (body-free text)."""
+    if value is None:
+        return True
+    if key in _QUESTION_ENUMS:
+        return value in _QUESTION_ENUMS[key]
+    return isinstance(value, str)
 
 
 REPO_STATUS_TEXT = frozenset(("done", "done_age", "changed", "line", "decision", "next", "doc", "doc_age"))
@@ -130,6 +145,10 @@ def conform(live, samples, path, problems):
             if path == "routes[]" and key in ("owner_gauge", "worker_contexts", "current", "worker_context_index"):
                 if not route_extension(key, live[key]):
                     problems.append(f"{path}.{key}: invalid optional route field shape")
+                continue
+            if path == "questions[]" and (key in _QUESTION_TEXT_FIELDS or key in _QUESTION_ENUMS):
+                if not question_extension(key, live[key]):
+                    problems.append(f"{path}.{key}: invalid optional question field shape")
                 continue
             if path == "repos[]" and key == "status":
                 if not repo_status(live[key]):

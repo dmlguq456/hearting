@@ -1012,7 +1012,7 @@ class FleetQuestionBackendIntegrationTests(unittest.TestCase):
         ExplorerRuntime.execute_question_action(effects[0])
         self.assertEqual(len(self.replies), 1)
 
-    def test_older_wait_is_folded_and_selected_only_when_expanded(self):
+    def test_older_wait_is_listed_and_selectable_until_the_person_folds_it(self):
         from fleet.explorer.live import _question_records
         from fleet.explorer.state import NavState, reduce, question_draft_from_backend
         from fleet import render
@@ -1039,10 +1039,15 @@ class FleetQuestionBackendIntegrationTests(unittest.TestCase):
         self.assertTrue(older_row["older"])
         with mock.patch.object(render, "_EXPLORER_MODEL", SimpleNamespace(questions=questions)), \
              mock.patch.object(render, "_EXPLORER_STATE", NavState(view="QUESTIONS")):
+            # Age folds a wait into OLDER WAITS but never hides it: it is listed by default.
             self.assertEqual([item["id"] for item in render._explorer_question_refs()],
-                             ["S1:current-integration"])
-            state, _ = reduce(NavState(view="QUESTIONS"), {"type": "click", "action":
-                                                ("question.older.toggle",)})
+                             ["S1:current-integration", self.item_id])
+            folded, _ = reduce(NavState(view="QUESTIONS"), {"type": "click", "action":
+                                                 ("question.older.toggle",)})
+            with mock.patch.object(render, "_EXPLORER_STATE", folded):
+                self.assertEqual([item["id"] for item in render._explorer_question_refs()],
+                                 ["S1:current-integration"])
+            state, _ = reduce(folded, {"type": "click", "action": ("question.older.toggle",)})
             with mock.patch.object(render, "_EXPLORER_STATE", state):
                 self.assertEqual([item["id"] for item in render._explorer_question_refs()],
                                  ["S1:current-integration", self.item_id])
