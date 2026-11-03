@@ -312,6 +312,18 @@ class PeerDerivedElements(unittest.TestCase):
                                                          f"{tag} and {other} overlap at row {a.y}")
 
 
+def _long_title_repo(count):
+    from tools.fleet.explorer.view_model import ExplorerViewModel
+    values = load_fixture(FIXTURES / "view_model.json").to_mapping()
+    tags = [f"x{index}" for index in range(count)]
+    values["sessions"] = [{"tag": tag, "harness": "codex", "state": "idle", "repo": "hearting",
+                           "title": f"fix fleet peers card layout at narrow width {index}"}
+                          for index, tag in enumerate(tags)]
+    values["peer_nodes"] = [("hearting", [[tag] for tag in tags])]
+    values["peer_edges"] = {"links": [], "cross": [], "side_lanes": [], "cards": {}, "watches": []}
+    return ExplorerViewModel.from_mapping(values)
+
+
 def _one_repo(count, lane=False, owners=False):
     from tools.fleet.explorer.view_model import ExplorerViewModel
     values = load_fixture(FIXTURES / "view_model.json").to_mapping()
@@ -346,6 +358,17 @@ class PeerWrappedLayout(unittest.TestCase):
         ordered = sorted(boxes, key=lambda tag: (boxes[tag][1], boxes[tag][0]))
         self.assertEqual(ordered, [f"x{index}" for index in range(8)])
         self.assertTrue(all(box[2] < 180 - 2 for box in boxes.values()))
+
+    def test_long_titles_still_put_cards_side_by_side_at_120_columns(self):
+        # Long titles used to make 44-cell cards, so a 120-column screen held one per line.
+        for cols, per_line in ((120, 2), (140, 2), (168, 3), (180, 3)):
+            with self.subTest(cols=cols):
+                frame = draw(_long_title_repo(6), NavState(view="PEERS", title="PEERS"), cols, 60, beat=1)
+                boxes = _card_boxes(frame)
+                self.assertEqual(len(boxes), 6)
+                self.assertEqual(len({box[0] for box in boxes.values()}), per_line)
+                self.assertTrue(all(box[2] < cols - 2 for box in boxes.values()))
+                self.assertTrue(all(box[2] - box[0] + 1 >= 36 for box in boxes.values()))
 
     def test_narrow_pane_still_stacks_one_card_per_row(self):
         frame = draw(_one_repo(4), NavState(view="PEERS", title="PEERS"), 80, 60, beat=1)
