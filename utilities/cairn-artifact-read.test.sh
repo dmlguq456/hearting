@@ -5,8 +5,6 @@ root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 cli=$root/utilities/cairn-artifact-read.sh
 cairn=${CAIRN_W3A_ROOT:-/home/example/cairn}
 tsx=$cairn/node_modules/.bin/tsx
-[ -x "$tsx" ] || { echo "missing Cairn W3a tsx runtime: $tsx" >&2; exit 1; }
-git -C "$cairn" merge-base --is-ancestor 1fa0d99e4b714b5ce305f78c8f7c7773255e8f87 HEAD
 
 tmp=$(mktemp -d)
 server_pid=
@@ -16,6 +14,55 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 mkdir -p "$tmp/fixture-root"
+
+assert_json_object() {
+  python3 - "$1" "$2" <<'PY'
+import json, sys
+raw = open(sys.argv[1], encoding="utf-8").read()
+decoder = json.JSONDecoder()
+value, end = decoder.raw_decode(raw.lstrip())
+assert isinstance(value, dict)
+assert not raw.lstrip()[end:].strip(), raw
+expected = sys.argv[2]
+if expected != "-":
+    assert value.get("error", {}).get("code") == expected, value
+PY
+}
+
+# The wrapper's own bootstrap contract needs no Cairn checkout, so it runs everywhere.
+set +e
+env -u CAIRN_ROOT "$cli" >"$tmp/out" 2>"$tmp/err" </dev/null
+status=$?
+set -e
+test "$status" -eq 18
+assert_json_object "$tmp/out" INTERNAL_FAILURE
+
+mkdir -p "$tmp/no-runtime"
+set +e
+env -u CAIRN_TSX CAIRN_ROOT="$tmp/no-runtime" "$cli" >"$tmp/out" 2>"$tmp/err" </dev/null
+status=$?
+set -e
+test "$status" -eq 18
+assert_json_object "$tmp/out" INTERNAL_FAILURE
+
+set +e
+env CAIRN_ROOT="$tmp/no-runtime" "$cli" --apply >"$tmp/out" 2>"$tmp/err" </dev/null
+status=$?
+set -e
+test "$status" -eq 4
+assert_json_object "$tmp/out" INVALID_REQUEST
+
+# The read contract itself runs against a real Cairn W3a checkout (CAIRN_W3A_ROOT).
+# CI and isolated runs have none; say so instead of failing on a missing sibling repo.
+if [ ! -x "$tsx" ]; then
+  echo "cairn artifact read bootstrap contract: ok"
+  echo "skip - Cairn W3a read contract: no Cairn checkout with node_modules at $cairn (set CAIRN_W3A_ROOT)"
+  exit 0
+fi
+# Trust exactly that checkout (it may belong to another uid): the isolated test
+# HOME trusts only hearting, and the client checks the Cairn revision with git.
+export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0="$cairn"
+git -C "$cairn" merge-base --is-ancestor 1fa0d99e4b714b5ce305f78c8f7c7773255e8f87 HEAD
 
 cat >"$tmp/server.py" <<'PY'
 import json, sys
@@ -88,20 +135,6 @@ test "$(wc -l <"$tmp/codes.tsv" | tr -d ' ')" = 17
 test "$(cut -f1 "$tmp/codes.tsv" | paste -sd, -)" = "AUTH_FAILED,FORBIDDEN,INVALID_REQUEST,INVALID_CURSOR,MISSING_TARGET,UNREADABLE_TARGET,STALE_SNAPSHOT,STALE_PROJECTION,VERSION_MISMATCH,DIGEST_MISMATCH,BROKEN_POINTER,TIMEOUT,UNAVAILABLE_PROJECTION,LEGACY_MAPPING_MISSING,LEGACY_MAPPING_MISMATCH,CONFLICT_QUARANTINED,INTERNAL_FAILURE"
 test "$(cut -f2 "$tmp/codes.tsv" | paste -sd, -)" = "2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18"
 
-assert_json_object() {
-  python3 - "$1" "$2" <<'PY'
-import json, sys
-raw = open(sys.argv[1], encoding="utf-8").read()
-decoder = json.JSONDecoder()
-value, end = decoder.raw_decode(raw.lstrip())
-assert isinstance(value, dict)
-assert not raw.lstrip()[end:].strip(), raw
-expected = sys.argv[2]
-if expected != "-":
-    assert value.get("error", {}).get("code") == expected, value
-PY
-}
-
 invoke() {
   expected_exit=$1
   expected_code=$2
@@ -115,7 +148,7 @@ invoke() {
   set -e
   test "$status" -eq "$expected_exit" || { cat "$tmp/out" >&2; cat "$tmp/err" >&2; return 1; }
   assert_json_object "$tmp/out" "$expected_code"
-  ! rg -q 'w3b-read-token-secret|secret-response-body|CAIRN_READ_ENDPOINT|database_url' "$tmp/out" "$tmp/err"
+  ! grep -Eq 'w3b-read-token-secret|secret-response-body|CAIRN_READ_ENDPOINT|database_url' "$tmp/out" "$tmp/err"
 }
 
 invoke 0 - '{"artifact_root_id":"root-a","resolve_active":true,"query":"ok"}'
@@ -155,19 +188,5 @@ done <"$tmp/codes.tsv"
 
 invoke 4 INVALID_REQUEST '{not-json'
 invoke 4 INVALID_REQUEST '{"artifact_root_id":"root-a","resolve_active":true,"nested":{"apply":true}}'
-
-set +e
-env -u CAIRN_ROOT "$cli" >"$tmp/out" 2>"$tmp/err" </dev/null
-status=$?
-set -e
-test "$status" -eq 18
-assert_json_object "$tmp/out" INTERNAL_FAILURE
-
-set +e
-env CAIRN_ROOT="$cairn" "$cli" --apply >"$tmp/out" 2>"$tmp/err" </dev/null
-status=$?
-set -e
-test "$status" -eq 4
-assert_json_object "$tmp/out" INVALID_REQUEST
 
 echo 'cairn artifact read contract: ok'
