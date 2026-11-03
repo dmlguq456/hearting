@@ -210,15 +210,48 @@ class RaceAndCrashTest(Fixture):
         keep = row("att-c1", route="rt-00000000000000c3")
         self.write(settled + [keep])
         with mock.patch.object(A, "_remove", side_effect=OSError("crash")):
-            with self.assertRaises(OSError):
-                A.sweep(self.jobs, now_ns=NOW, force=True)
+            failed = {"skipped": "error", "error": "OSError", "detail": "crash"}
+            self.assertEqual(A.sweep(self.jobs, now_ns=NOW, force=True), failed)
             with mock.patch.object(A.time, "time_ns", return_value=NOW + DAY):
-                self.assertIsNone(A.sweep_best_effort(self.jobs))   # the reap-watch tail never sees it
+                self.assertEqual(A.sweep_best_effort(self.jobs), failed)   # the reap-watch tail goes on
+        state = json.loads((self.root / A.STATE_NAME).read_text())
+        self.assertEqual(state["last_result"], failed)   # the failure stays where a later look finds it
         self.assertEqual(self.live(), settled + [keep])
         self.assertEqual(sorted(self.archived()), sorted(settled))
         A.sweep(self.jobs, now_ns=NOW, force=True)
         self.assertEqual(self.live(), [keep])
         self.assertEqual(sorted(self.archived()), sorted(settled))
+
+    def test_a_later_pass_appends_to_the_same_month_segment(self):
+        first = row("att-a1")
+        later = row("att-b1", route="rt-00000000000000b2")
+        keep = row("att-c1", days_ago=0, status="open", route="rt-00000000000000c3")
+        self.write([first, later, keep])
+        del self.closed_days["rt-00000000000000b2"]   # still open at the first pass
+        self.assertEqual(A.sweep(self.jobs, now_ns=NOW, force=True)["removed"], 1)
+        self.closed_days["rt-00000000000000b2"] = 20   # its route closed meanwhile
+        self.assertEqual(A.sweep(self.jobs, now_ns=NOW, force=True),
+                         {"archived": 1, "rows": 2, "removed": 1})
+        self.assertEqual(self.archived(), [first, later])   # one segment, both appends
+        self.assertEqual(len(list((self.root / "archive").glob(A.SEGMENT_PREFIX + "*"))), 1)
+        self.assertEqual(self.live(), [keep])
+
+    def test_restore_never_doubles_an_attempt_and_brings_back_its_last_version(self):
+        first = row("att-a1")
+        keep = row("att-c1", days_ago=0, status="open", route="rt-00000000000000c3")
+        self.write([first, keep])
+        A.sweep(self.jobs, now_ns=NOW, force=True)
+        self.assertEqual(A.restore(self.jobs, "rt-00000000000000a1"), 1)   # a closed-route replay
+        marked = first + ",parent_completion_harvested=1"                  # e.g. dispatch-harvest --mark-done
+        self.write([marked, keep])
+        self.assertEqual(A.restore(self.jobs), 0)                            # att-a1 is live: not again
+        self.assertEqual(A.restore(self.jobs, "att-a1"), 0)
+        self.assertEqual(self.live(), [marked, keep])
+        A.sweep(self.jobs, now_ns=NOW, force=True)                           # the marked version moves too
+        self.assertEqual(self.archived(), [first, marked])
+        self.assertEqual(self.live(), [keep])
+        self.assertEqual(A.restore(self.jobs, "rt-00000000000000a1"), 1)
+        self.assertEqual(self.live(), [marked, keep])                        # only its last version
 
     def test_a_registration_whose_preparation_spans_a_move_is_not_refused(self):
         import dispatch_contract as D

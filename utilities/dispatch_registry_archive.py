@@ -273,7 +273,7 @@ def _archive(root: Path, jobs: Path, raws, now_ns: int) -> int:
                                       "archived_at": stamp, "raw": raw}) + "\n"
                           for raw in rows if raw not in present).encode("utf-8")
         if payload:
-            fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            fd = os.open(str(path), os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o600)   # read: the last byte
             try:
                 if os.fstat(fd).st_size and os.pread(fd, 1, os.fstat(fd).st_size - 1) != b"\n":
                     payload = b"\n" + payload   # a torn earlier append stays its own unreadable line
@@ -453,7 +453,8 @@ def _pass_lock(root: Path):
 
 
 def sweep(jobs, *, now_ns=None, force=False) -> dict:
-    """One best-effort pass over the canonical registry; failures change nothing."""
+    """One best-effort pass over the canonical registry; a failure changes no row and is
+    recorded as the pass's `last_result` in the state file."""
     now_ns = time.time_ns() if now_ns is None else int(now_ns)
     jobs = Path(jobs).expanduser().resolve(strict=False)
     if jobs.name != "jobs.log" or not jobs.is_file():
@@ -469,7 +470,10 @@ def sweep(jobs, *, now_ns=None, force=False) -> dict:
             return {"skipped": "not-due"}
         state["last_pass_ns"] = now_ns
         _write_state(root, state)   # one pass per due window, whatever this one meets
-        result = _pass(jobs, root, state, now_ns)
+        try:
+            result = _pass(jobs, root, state, now_ns)
+        except Exception as exc:  # noqa: BLE001 -- kept in the state, where a later look finds it
+            result = {"skipped": "error", "error": type(exc).__name__, "detail": str(exc)[:200]}
         state["last_result"] = result
         _write_state(root, state)
         return result
@@ -482,14 +486,15 @@ def sweep_best_effort(jobs):
         return None
 
 
-def archived_rows(jobs, needle: str = ""):
-    """Raw registry lines moved to the archive, oldest segment first, each once; with `needle`
-    (a route or attempt id, or any text) only those that contain it. History, id resolution
-    and closed-route replays read these; liveness, terminal and marker judgments never do
-    (the archive holds only settled rows)."""
+def archived_rows(jobs, needle: str = "", *, needles=()):
+    """Raw registry lines moved to the archive, oldest first (a segment keeps its appends in
+    order), each once; with `needle` or `needles` (route or attempt ids, or any text) only those
+    that contain one. History, id resolution and closed-route replays read these; liveness,
+    terminal and marker judgments never do (the archive holds only settled rows)."""
     archive = Path(jobs).expanduser().resolve(strict=False).parent / "archive"
     found, seen = [], set()
-    encoded = needle.encode("utf-8")
+    texts = [text for text in (needle, *needles) if text] or [""]
+    encoded = [text.encode("utf-8") for text in texts]
     try:
         segments = sorted(archive.glob(SEGMENT_PREFIX + "*"))
     except OSError:
@@ -500,13 +505,13 @@ def archived_rows(jobs, needle: str = ""):
         except OSError:
             continue
         for line in data.split(b"\n"):
-            if encoded not in line:
+            if not any(text in line for text in encoded):
                 continue
             try:
                 raw = json.loads(line).get("raw")
             except (ValueError, AttributeError):
                 continue
-            if isinstance(raw, str) and needle in raw and raw not in seen:
+            if isinstance(raw, str) and any(text in raw for text in texts) and raw not in seen:
                 seen.add(raw)
                 found.append(raw)
     return found
@@ -515,17 +520,29 @@ def archived_rows(jobs, needle: str = ""):
 def restore(jobs, needle: str = "") -> int:
     """Put archived rows back into the registry in time order; returns how many came back.
 
-    With `needle` (a route or attempt id), only the archived groups that name it. Rows still
-    in the registry are not doubled. The archive keeps its copy, so a later pass moves rows
-    that still qualify again. Runs under the registry's own lock and atomic replace."""
+    With `needle` (a route or attempt id), only the archived groups that name it. An attempt
+    comes back once, as its last archived version, and never while a row of it is live (a
+    replay may have marked the row it brought back). The archive keeps its copy, so a later
+    pass moves rows that still qualify again. Runs under the registry's own lock and atomic
+    replace."""
     from dispatch_contract import _atomic_registry_replace
     jobs = Path(jobs).expanduser().resolve(strict=False)
-    archived = archived_rows(jobs)
     if needle:
-        groups = _groups(archived)
-        wanted = {groups[index] for index, raw in enumerate(archived) if needle in raw}
-        archived = [raw for index, raw in enumerate(archived) if groups[index] in wanted]
-    if not archived:
+        # The group: rows that name the needle, then rows that name their ids, until it closes.
+        # Each round reads the archive once and parses only the lines that name an id.
+        ids, archived = {needle}, []
+        while True:
+            archived = archived_rows(jobs, needles=sorted(ids))
+            grown = ids | {token for raw in archived for token in _ID_RE.findall(raw)}
+            if grown == ids:
+                break
+            ids = grown
+    else:
+        archived = archived_rows(jobs)
+    latest = {}
+    for raw in archived:   # oldest first: a later version of an attempt replaces an earlier one
+        latest[_attempt_of(raw) or raw] = raw
+    if not latest:
         return 0
     with open(f"{jobs}.lock", "a", encoding="utf-8") as lock:
         if not _lock_registry(lock, time.monotonic() + LOCK_WAIT_SECONDS):
@@ -534,7 +551,9 @@ def restore(jobs, needle: str = "") -> int:
         if lines is None:
             raise OSError("registry-not-whole-utf8")
         present = set(lines)
-        back = sorted((raw for raw in archived if raw not in present), key=lambda raw: raw.split("\t", 1)[0])
+        live = {_attempt_of(line) for line in lines} - {""}
+        back = sorted((raw for key, raw in latest.items() if raw not in present and key not in live),
+                      key=lambda raw: raw.split("\t", 1)[0])
         if not back:
             return 0
         merged, position = [], 0
