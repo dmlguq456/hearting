@@ -135,6 +135,8 @@ class OpenCodeGuardDiscoveryTest(unittest.TestCase):
         self.assertEqual(agents.read_bytes(), self.expected_render())
         self.assertIn("OpenCode user rules: skipped legacy-cp949.md is not UTF-8 text",
                       report["report_lines"])
+        self.assertEqual(report["notices"],
+                         ["OpenCode user rules: skipped legacy-cp949.md is not UTF-8 text"])
         self.assertEqual(activation.refresh("opencode")["freshness"], "fresh")
 
     def test_an_edited_render_is_kept_aside_and_rewritten_without_a_collision(self):
@@ -151,6 +153,7 @@ class OpenCodeGuardDiscoveryTest(unittest.TestCase):
         self.assertEqual([path.read_bytes() for path in kept], [edited])
         self.assertEqual(kept[0].stat().st_mode & 0o777, 0o600)
         self.assertTrue(any(str(kept[0]) in line for line in report["report_lines"]))
+        self.assertTrue(any(str(kept[0]) in line for line in report["notices"]))
 
         # Rules gone after an edit: no collision, the link returns, the edit is kept.
         second = agents.read_bytes() + b"\n- another edit\n"
@@ -161,6 +164,21 @@ class OpenCodeGuardDiscoveryTest(unittest.TestCase):
         self.assertTrue(agents.is_symlink())
         self.assertEqual(sorted(path.read_bytes() for path in self.home.glob("AGENTS.md.edited-*")),
                          sorted([edited, second]))
+
+    def test_a_user_link_in_place_of_the_render_is_preserved_when_rules_go(self):
+        rule_file = self.seed_rule()
+        agents = self.home / "AGENTS.md"
+        self.run_activation()
+        own = self.root / "my-agents.md"
+        own.write_bytes(b"# my own global rules\n")
+        self.remove(agents)
+        agents.symlink_to(own)
+        self.remove(rule_file)
+        report = activation.refresh("opencode")
+        self.assertIn(str(agents), report["preserved"])
+        self.assertTrue(agents.is_symlink())
+        self.assertEqual(os.readlink(agents), str(own))
+        self.assertEqual(own.read_bytes(), b"# my own global rules\n")
 
     def test_render_bytes_do_not_depend_on_the_claude_config_path(self):
         self.seed_rule()

@@ -3250,8 +3250,10 @@ def _trusted_owned(
         else:
             trusted.discard(value)
             # Keep the renderer's existing collision behavior when a user-edited
-            # regular definition would be replaced by a shipped symlink.
+            # regular definition would be replaced by a shipped symlink. A link
+            # the user put in its place stays a preserved user change.
             if (item.get("kind") == "render" and desired_kind.get(value) == "symlink"
+                    and not dest.is_symlink()
                     and not (runtime == "opencode" and projector.opencode_guard_leaf(dest, home))):
                 continue
             user_changed[value] = item
@@ -4028,13 +4030,16 @@ def activate(
                                             if item.get("guard") and item.get("detail")))
     agent_report_lines.extend(_edited_render_lines(runtime, previous, desired))
     rewrite_owned: List[str] = []
+    # Notices reach the person on every path, including release install/update.
+    notices: List[str] = []
     if runtime == "opencode":
-        agent_report_lines.extend(
+        notices.extend(
             f"OpenCode user rules: skipped {note}"
             for note in user_rules.collect(paths.runtime_home("claude"))[1])
         edited, kept_lines = _keep_edited_opencode_bootstrap(previous, scope)
         rewrite_owned.extend([edited] if edited else [])
-        agent_report_lines.extend(kept_lines)
+        notices.extend(kept_lines)
+    agent_report_lines.extend(notices)
     digest = _projection_digest(desired)
     packaged_checksum = _bundle_checksum(active_root) if mode == "packaged" else None
     if mode == "packaged" and packaged_checksum is None:
@@ -4192,6 +4197,7 @@ def activate(
     report["preserved"] = list(report.get("user_changed", []))
     report["report_lines"] = (list(context_report_lines) + list(agent_report_lines)
                               + list(report.get("report_lines", [])))
+    report["notices"] = notices
     return report
 
 
