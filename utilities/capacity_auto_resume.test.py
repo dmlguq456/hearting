@@ -323,6 +323,20 @@ class RunTest(unittest.TestCase):
         self.assertEqual(json.loads(self.path.read_text())["state"], "armed")  # the new pause's own record
         notify.assert_called_once()
 
+    def test_a_followed_wait_keeps_its_recheck_schedule(self):
+        # RV-1027#2: a release follow starts `run` again on the same record; the
+        # usage recheck keeps its arm-time schedule instead of waiting 10 more minutes.
+        self.clock[0] = RETRY_EPOCH - 7200
+        armed_at = time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                 time.gmtime(self.clock[0] - C.RECHECK_SECONDS + 30))
+        self.claude_pause(armed_at=armed_at)
+        start, checks = self.clock[0], []
+        done = SimpleNamespace(returncode=0, stdout="{}\n")
+        with mock.patch.object(C, "_notify"):
+            C.run(self.path, sleep=self.sleep, now=lambda: self.clock[0], call=lambda argv, **kw: done,
+                  cleared=lambda rec: checks.append(self.clock[0]) or True)
+        self.assertLess(checks[0] - start, C.RECHECK_SECONDS)
+
     def test_a_pause_the_recheck_never_clears_waits_for_its_reset(self):
         self.claude_pause()
         self.clock[0] = RETRY_EPOCH - 3000

@@ -261,7 +261,12 @@ def run(path: Path, *, sleep=time.sleep, now=time.time, call=subprocess.run, cle
         return 0
     slack = 0 if record.get("cause") in {"answer", "replacement"} else SLACK_SECONDS
     deadline = now() + min(MAX_SLEEP_SECONDS, max(0.0, epoch + slack - now()))
+    # The recheck schedule runs from the arm time, so a new `run` of the same
+    # record (a release follow, same PID) keeps it instead of restarting it.
     recheck_at = now() + RECHECK_SECONDS
+    armed = _epoch(record.get("armed_at") or "")
+    if armed is not None and armed <= now():
+        recheck_at = armed + RECHECK_SECONDS * (int((now() - armed) // RECHECK_SECONDS) + 1)
     early = False
     while now() < deadline:
         # Short steps: a record removed (or disarmed) meanwhile ends the wait.
