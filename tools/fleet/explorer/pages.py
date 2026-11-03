@@ -51,16 +51,76 @@ def _repo_page(grid, vm, ident, x, right, bottom, nav=None):
     scoped_vm = replace(vm, repos=(repo,), sessions=sessions, routes=routes,
                         questions=questions)
     folds = dict(getattr(nav, "folds", ()) or ())
+    status = repo.get("status")
+    top = _repo_status_block(grid, x, right, 3, status) + 1 if isinstance(status, Mapping) else 3
     draw_overview(grid, scoped_vm, state=type("ScopedOverview", (), {
         "opened": "", "scope": "repo:" + ident,
         "opened_for": staticmethod(lambda key, default="": folds.get(str(key), default)),
-    })(), x=x, y=3)
+    })(), x=x, y=top)
     for column in range(1, 9):
-        glyph, _key, _tint = grid.cells[3][column]
-        grid.cells[3][column] = (glyph, "loc_repo", None)
+        glyph, _key, _tint = grid.cells[top][column]
+        grid.cells[top][column] = (glyph, "loc_repo", None)
     for column in range(0, x - 2):
-        glyph, key, _tint = grid.cells[3][column]
-        grid.cells[3][column] = (glyph, key, None)
+        glyph, key, _tint = grid.cells[top][column]
+        grid.cells[top][column] = (glyph, key, None)
+
+
+def _repo_status_block(grid, x, right, y, status):
+    """The project's status, four lines at the top of its page (D4 #3); returns the next row.
+
+    From its status document when there is one (``status`` is its one line); otherwise from
+    the routes, questions and results Fleet already holds, with the missing parts as ``·``.
+    """
+    asked = int(status.get("questions") or 0)
+    has_doc = status.get("line") is not None
+    if has_doc:
+        head = [(str(status["line"]), "soft")]
+        if status.get("stale") and status.get("doc_age"):
+            head.insert(0, (str(status["doc_age"]) + " · ", "dim"))
+    else:
+        count = int(status.get("routes") or 0)
+        head = [(f"{count} route{'s' if count != 1 else ''} active", "soft" if count else "dim"),
+                (" · no status document", "dim")]
+    decisions = int(status.get("decisions") or 0)
+    if has_doc and decisions:
+        decide = [(f"{decisions}", "lvl_y"), (" · " + str(status.get("decision") or ""), "soft")]
+        if decisions > 1:
+            decide.append((f" · +{decisions - 1} more", "dim"))
+    else:
+        decide = [("0" if has_doc else "·", "dim")]
+    decide.append((f"      {asked} to answer", "blocked" if asked else "dim"))
+    following = status.get("next")
+    changed = []
+    if has_doc:
+        changed += [(str(status.get("doc_age") or "·") + " ", "soft"),
+                    (str(status.get("doc") or "status document"), "dim")]
+    if status.get("done"):
+        changed += [(" · " if changed else "", "dim"),
+                    ((str(status["done_age"]) + " " if status.get("done_age") else "") + "✓ ", "done"),
+                    (str(status["done"]), "now_sub")]
+    rows = (("status:", head), ("decide:", decide),
+            ("next:", [(str(following), "soft")] if following else [("·", "dim")]),
+            ("changed:", changed or [("·", "dim")]))
+    for label, parts in rows:
+        grid.put(x + 3, y, label, "label", limit=right)
+        _segs(grid, x + 16, y, _fit(parts, right - x - 17), right)
+        y += 1
+    return y
+
+
+def _fit(parts, room):
+    """``parts`` cut to ``room`` cells: the piece that runs over ends in ``…``, the rest is left out."""
+    fitted, used = [], 0
+    for text, key in parts:
+        width = cell_width(text)
+        if used + width <= room:
+            fitted.append((text, key))
+            used += width
+            continue
+        if room - used >= 2:
+            fitted.append((clip(text, room - used), key))
+        break
+    return fitted
 
 
 def _session_page(grid, vm, tag, x, right, bottom, state=None):
