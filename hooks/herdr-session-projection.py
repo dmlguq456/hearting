@@ -32,8 +32,14 @@ def main() -> int:
     session_id = payload.get("session_id") if isinstance(payload, dict) else None
     if not isinstance(session_id, str) or not session_id:
         return 0
+    # Herdr's pane, else the tmux pane this hook runs in; either is only a hint
+    # until may_report proves the runtime there.
+    tmux_pane = ""
     if not os.environ.get("HERDR_PANE_ID"):
-        return 0
+        tmux = os.environ.get("TMUX_PANE", "")
+        if not (os.environ.get("TMUX") and tmux.startswith("%") and tmux[1:].isdigit()):
+            return 0
+        tmux_pane = tmux
     try:
         home = os.environ.get("AGENT_HOME") or os.environ.get("CLAUDE_HOME")
         roots = [Path(home) / "tools"] if home else []
@@ -48,12 +54,12 @@ def main() -> int:
             # The display report and the idle-receive retry name the same pane.
             # Decide that identity once, then hand the answer to both; the retry
             # would otherwise repeat the full process-identity walk.
-            permission = (may_report("claude", session_id)
+            permission = (may_report("claude", session_id, pane_id=tmux_pane or None)
                           if event in {"Stop", "UserPromptSubmit"} else None)
             # The v11 SessionStart hook reports the exact session once. This
             # Hearting hook owns display metadata and never duplicates that report.
             project("claude", session_id, report_session=False, permission=permission,
-                    display_relations=True)
+                    display_relations=True, pane_id=tmux_pane or None)
             if (event in {"SessionStart", "UserPromptSubmit", "Stop"}
                     and os.environ.get("AGENT_SESSION_ROLE", "").lower() != "worker"
                     and os.environ.get("AGENT_DISPATCH_CHILD") != "1"
