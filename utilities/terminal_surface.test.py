@@ -1231,5 +1231,169 @@ class TidyTmuxTest(_IsolatedMixin, unittest.TestCase):
         self.assertEqual(final["focused_pane_id"], ids[-1])
 
 
+
+_FAKE_TUI = r"""
+import json, os, sys, termios, time, tty
+from pathlib import Path
+log = open(sys.argv[1], "ab", buffering=0)
+if len(sys.argv) > 2:
+    # The runtime's own session registry, as Claude writes it for this exact process.
+    stat = Path(f"/proc/{os.getpid()}/stat").read_text().rsplit(")", 1)[1].split()
+    record = {"pid": os.getpid(), "sessionId": sys.argv[2], "procStart": stat[19],
+              "kind": "interactive", "status": sys.argv[3]}
+    registry = Path(os.environ["HOME"]) / ".claude" / "sessions"
+    registry.mkdir(parents=True, exist_ok=True)
+    (registry / f"{os.getpid()}.json").write_text(json.dumps(record))
+if len(sys.argv) > 4:
+    sys.path.insert(0, sys.argv[5])
+    import pane_ownership
+    Path(sys.argv[4]).write_text(json.dumps(pane_ownership.verified_pane(
+        os.environ.get("TMUX_PANE", ""), "claude", sys.argv[2])))
+fd = sys.stdin.fileno()
+tty.setraw(fd)
+sys.stdout.write("\x1b[?2004h\x1b[2mTry a suggestion\x1b[0m\r\n> ")
+sys.stdout.flush()
+while True:
+    data = os.read(fd, 4096)
+    if not data:
+        break
+    log.write(data)
+"""
+
+
+@unittest.skipUnless(shutil.which("tmux") and shutil.which("bash"), "tmux or bash is not installed")
+class TmuxAgentTerminalTest(_IsolatedMixin, unittest.TestCase):
+    """The agent terminal operations on a private tmux server, against a fake runtime."""
+
+    def setUp(self):
+        super().setUp()
+        for key in ("CLAUDE_CONFIG_DIR", "CODEX_HOME"):
+            os.environ.pop(key, None)
+        self.socket = self.root / f"t{time.monotonic_ns() % 10**8}.sock"
+        self.env = {key: value for key, value in os.environ.items()
+                    if key not in _SURFACE_ENV and not key.startswith(("AGENT_DISPATCH", "OPENCODE_DISPATCH"))
+                    and key not in ("AGENT_SESSION_ROLE", "FLEET_TITLE_REFRESH", "MEM_DISTILL")}
+        self.env.update(SHELL="/bin/sh", PS1="$ ")
+        started = self.tmux("-f", "/dev/null", "new-session", "-d", "-s", "a1", "-x", "160", "-y", "40",
+                            "sh")
+        if started.returncode:
+            self.fail(f"isolated tmux server did not start: {started.stderr.strip()}")
+        self.addCleanup(lambda: subprocess.run(["tmux", "-S", str(self.socket), "kill-server"],
+                                               capture_output=True, env=self.env, timeout=10, check=False))
+        self.pane = self.tmux("display-message", "-p", "-t", "a1", "#{pane_id}").stdout.strip()
+        self.surface = ts.TmuxSurface(socket=str(self.socket))
+        (self.root / "tui.py").write_text(_FAKE_TUI)
+        self.log = self.root / "input.log"
+
+    def tmux(self, *args):
+        return subprocess.run(["tmux", "-S", str(self.socket), *args], capture_output=True, text=True,
+                              env=self.env, timeout=10, check=False)
+
+    def start_runtime(self, *extra, name="claude"):
+        line = shlex.join(["exec", "-a", name, sys.executable, str(self.root / "tui.py"),
+                           str(self.log), *extra])
+        # bash's `exec -a` names the runtime the way its launcher does (argv[0]).
+        self.tmux("send-keys", "-t", self.pane, "-l", "bash -c " + shlex.quote(line))
+        self.tmux("send-keys", "-t", self.pane, "Enter")
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            info = self.surface.process_info(self.pane)
+            found = [item for item in (info or {}).get("foreground_processes", ()) if item["argv"][:1] == [name]]
+            screen = self.surface.read_visible(self.pane) or ""
+            if found and "Try a suggestion" in screen and (len(extra) < 3 or Path(extra[2]).exists()):
+                return found[0]["pid"]
+            time.sleep(.05)
+        self.fail("the fake runtime never took the pane's foreground")
+
+    def test_process_info_lists_the_foreground_group_with_argv_and_the_shell(self):
+        pid = self.start_runtime()
+        info = self.surface.process_info(self.pane)
+        shell = int(self.tmux("display-message", "-p", "-t", self.pane, "#{pane_pid}").stdout)
+        self.assertEqual((info["pane_id"], info["shell_pid"]), (self.pane, shell))
+        self.assertEqual(info["foreground_process_group_id"], pid)
+        self.assertEqual([item["pid"] for item in info["foreground_processes"]], [pid])
+        self.assertEqual(info["foreground_processes"][0]["argv"][0], "claude")
+        self.assertEqual(os.stat(info["tty"]).st_rdev, os.stat(f"/proc/{pid}/fd/0").st_rdev)
+        self.assertIsNone(self.surface.process_info("%999"))
+        self.assertIsNone(self.surface.process_info("w1:p0"))
+
+    def test_agent_reads_harness_session_and_the_runtime_turn_record(self):
+        sid = "0f6d1b9e-4a47-4c26-9a1e-6f5f2a3d7c10"
+        pid = self.start_runtime(sid, "idle")
+        agent = self.surface.agent(self.pane)["result"]["agent"]
+        self.assertEqual((agent["pane_id"], agent["agent"], agent["pid"], agent["agent_status"]),
+                         (self.pane, "claude", pid, "idle"))
+        self.assertEqual(agent["agent_session"], {"kind": "id", "value": sid})
+        registry = Path(os.environ["HOME"]) / ".claude" / "sessions" / f"{pid}.json"
+        record = json.loads(registry.read_text())
+        for status, state in (("busy", "working"), ("waiting", "blocked"), ("shell", "unknown")):
+            registry.write_text(json.dumps(dict(record, status=status)))
+            self.assertEqual(self.surface.agent(self.pane)["result"]["agent"]["agent_status"], state)
+        # A record of another process birth names nothing about this one.
+        registry.write_text(json.dumps(dict(record, status="idle", procStart="1")))
+        agent = self.surface.agent(self.pane)["result"]["agent"]
+        self.assertNotIn("agent_session", agent)
+        self.assertEqual(agent["agent_status"], "unknown")
+
+    def test_a_shell_pane_has_no_agent_and_an_absent_server_is_unanswered(self):
+        self.assertEqual(self.surface.agent(self.pane), {"error": {"code": "agent_not_found"}})
+        self.assertEqual(self.surface.agents(), {"result": {"agents": []}})
+        gone = ts.TmuxSurface(socket=str(self.root / "absent.sock"))
+        self.assertIsNone(gone.agent("%0"))
+        self.assertIsNone(gone.agents())
+
+    def test_prompt_is_one_bracketed_paste_then_enter_and_keeps_leading_dashes(self):
+        self.start_runtime()
+        self.assertEqual(self.surface.prompt(self.pane, "-n /clear\nsecond line"),
+                         (0, {"result": {"type": "prompt", "pane_id": self.pane}}))
+        self.assertTrue(self.surface.send_text(self.pane, "draft"))
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not self.log.read_bytes().endswith(b"draft\x1b[201~"):
+            time.sleep(.05)
+        self.assertEqual(self.log.read_bytes(),
+                         b"\x1b[200~-n /clear\rsecond line\x1b[201~\r\x1b[200~draft\x1b[201~")
+        self.assertEqual(self.tmux("list-buffers").stdout, "")
+        self.assertEqual(self.surface.prompt("%999", "x"), (1, {"error": {"code": "tmux_paste_failed"}}))
+        self.assertEqual(self.surface.prompt(self.pane, ""), (None, {"error": {"code": "herdr-not-started"}}))
+
+    def test_read_visible_keeps_faint_text_only_with_ansi(self):
+        self.start_runtime()
+        self.assertIn("\x1b[2mTry a suggestion", self.surface.read_visible(self.pane, ansi=True))
+        self.assertNotIn("\x1b[", self.surface.read_visible(self.pane))
+        self.assertIsNone(self.surface.read_visible("%999"))
+
+    def test_wait_agent_returns_on_the_wanted_state_or_times_out(self):
+        sid = "5a0c6c1e-0b3b-4e0d-8a55-2f0c1b7d9e21"
+        pid = self.start_runtime(sid, "busy")
+        registry = Path(os.environ["HOME"]) / ".claude" / "sessions" / f"{pid}.json"
+        self.assertEqual(self.surface.wait_agent(self.pane, ("idle",), 300), {"error": {"code": "timeout"}})
+        record = json.loads(registry.read_text())
+        registry.write_text(json.dumps(dict(record, status="idle")))
+        waited = self.surface.wait_agent(self.pane, ("idle", "done"), 5000)
+        self.assertEqual(waited["result"]["agent"]["agent_status"], "idle")
+        self.assertEqual(self.surface.wait_agent("%999", ("idle",), 100), {"error": {"code": "agent_not_found"}})
+
+    def test_pane_surface_chooses_by_pane_id(self):
+        with mock.patch.object(ts.shutil, "which", side_effect=lambda name: f"/usr/bin/{name}"):
+            self.assertIsInstance(ts.pane_surface("%3", tmux="/s"), ts.TmuxSurface)
+            self.assertEqual(ts.pane_surface("%3", tmux="/s").socket, "/s")
+            self.assertIsInstance(ts.pane_surface("w1:p3"), ts.HerdrSurface)
+        with mock.patch.object(ts.shutil, "which", return_value=None):
+            self.assertIsNone(ts.pane_surface("%3"))
+            self.assertIsNone(ts.pane_surface("w1:p3"))
+        self.assertEqual(ts.caller_tmux_pane({"TMUX": "/s,1,0", "TMUX_PANE": "%4"}), ("%4", "/s"))
+        self.assertEqual(ts.caller_tmux_pane({"TMUX_PANE": "%4"}), ("", None))
+        self.assertEqual(ts.caller_tmux_pane({"TMUX": "/s,1,0", "TMUX_PANE": "w1:p0"}), ("", None))
+
+    def test_verified_pane_proves_the_runtime_in_its_own_tmux_pane_only(self):
+        sid = "9b2f3c4d-5e6f-4a1b-8c2d-3e4f5a6b7c8d"
+        out = self.root / "verified.json"
+        self.start_runtime(sid, "idle", str(out), str(_HERE), name="claude")
+        self.assertEqual(json.loads(out.read_text()), self.pane)
+        import pane_ownership
+        # This test process is not that runtime: the same pane proves nothing for it.
+        self.assertEqual(pane_ownership.verified_pane(self.pane, "claude", sid, tmux=str(self.socket)), "")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
