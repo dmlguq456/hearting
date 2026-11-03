@@ -578,7 +578,7 @@ def _launcher_session_setup(values=None, *, owner=_LAUNCHER_OWNER_UNSET):
 # lifecycle/registry claim, and a payload must treat every one of them as
 # optional: a launcher run outside any checkout or registered attempt
 # legitimately omits them, so a strict lookup must never fail the run.
-# (2026-10-06 BC_ResNet eval loss: a payload's strict os.environ lookups for
+# (2026-10-06 KWS_Net eval loss: a payload's strict os.environ lookups for
 # exactly these two keys raised KeyError before the first inference, scoring
 # zero evaluations while training was unaffected.)
 PROVENANCE_ATTEMPT_PATTERN = re.compile(r"att-[A-Za-z0-9._-]{1,240}\Z")

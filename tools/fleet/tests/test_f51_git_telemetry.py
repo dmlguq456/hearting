@@ -350,32 +350,32 @@ class F51GitTelemetryTest(unittest.TestCase):
 
     def test_project_groups_linked_worktrees_by_their_common_repository(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = os.path.join(tmp, "home-os")
+            root = os.path.join(tmp, "home-app")
             os.mkdir(root)
             self._make_repo(root, configure_upstream=False)
-            for index, relative in enumerate(("home-os/.worktrees/foo", "home-os-wt/foo",
-                                               "home-os_worktrees/foo", "other-wt/foo")):
+            for index, relative in enumerate(("home-app/.worktrees/foo", "home-app-wt/foo",
+                                               "home-app_worktrees/foo", "other-wt/foo")):
                 with self.subTest(layout=relative):
                     linked = os.path.join(tmp, relative)
                     self._run_git(root, "worktree", "add", "-q", "-b", "topic-%d" % index, linked)
                     child = os.path.join(linked, "nested")
                     os.mkdir(child)
                     with mock.patch.object(gitinfo.subprocess, "run", side_effect=AssertionError):
-                        self.assertEqual(project_of(root), "home-os")
-                        self.assertEqual(project_of(linked), "home-os")
-                        self.assertEqual(project_of(child), "home-os")
+                        self.assertEqual(project_of(root), "home-app")
+                        self.assertEqual(project_of(linked), "home-app")
+                        self.assertEqual(project_of(child), "home-app")
                         for harness in ("claude", "codex", "opencode"):
                             session = Session(harness=harness, pid=1, cwd=child)
                             job = DispatchJob(key="code", cwd=child, harness=harness)
                             observations = display_snapshot.build([session], [job])
                             with mock.patch("fleet.model.project_of", side_effect=AssertionError("lookup during draw")):
-                                self.assertEqual(render._group_key_session(session, observations), "home-os")
-                                self.assertEqual(render._group_key_job(job, display_snapshot=observations), "home-os")
+                                self.assertEqual(render._group_key_session(session, observations), "home-app")
+                                self.assertEqual(render._group_key_job(job, display_snapshot=observations), "home-app")
 
     def test_project_path_fallback_keeps_worktree_precedence(self):
-        cases = (("/x/home-os/.worktrees/foo", "home-os"),
-                 ("/x/home-os-wt/foo", "home-os"),
-                 ("/x/home-os_worktrees/foo", "home-os"),
+        cases = (("/x/home-app/.worktrees/foo", "home-app"),
+                 ("/x/home-app-wt/foo", "home-app"),
+                 ("/x/home-app_worktrees/foo", "home-app"),
                  ("/a/foo_worktrees/bar-wt/leaf", "bar"),
                  ("/x/.claude/worklog-board-wt/studio-c2", "worklog-board"),
                  ("/x/.claude-wt/definitions-manifest", ".claude"),
@@ -387,7 +387,7 @@ class F51GitTelemetryTest(unittest.TestCase):
                 with self.subTest(cwd=cwd):
                     self.assertEqual(project_of(cwd), expected)
         with mock.patch.object(gitinfo, "resolve_gitdir", side_effect=OSError("unreadable")):
-            self.assertEqual(project_of("/x/home-os-wt/foo"), "home-os")
+            self.assertEqual(project_of("/x/home-app-wt/foo"), "home-app")
 
     def test_real_drill_repository_keeps_its_case_group(self):
         with tempfile.TemporaryDirectory(prefix="drill-g9-") as tmp:

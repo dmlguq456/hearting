@@ -227,7 +227,7 @@ Composite modes are valid. Keep shared decisions in the common PRD section and e
 Contract modes (`app`, `library`, `api`, `cli`) describe a target state. A
 `research` blueprint is a progressive roadmap advanced step by step; results
 legitimately reshape the remaining ladder. Grounded in live usage
-(BC_ResNet_tf WWD blueprint v4, 2026-07), a research-mode `prd.md` requires:
+(KWS_Net_tf WWD blueprint v4, 2026-07), a research-mode `prd.md` requires:
 
 - **Step ladder**: ordered steps, each with status (done/active/planned),
   objective, configuration, decision criteria, and follow-on work. A closed

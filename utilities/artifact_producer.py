@@ -2419,8 +2419,8 @@ def _campaign_naming(campaign_key: Optional[str]) -> Tuple[str, str, str, bool]:
     A campaign is the work stream the agent proposed; its locator and title
     come from that proposal, never from the first route that happened to
     join it.  Deriving the campaign name from the first cycle's slug produced
-    ``<date>_tf-rehancer-analysis-cx`` for the stream ``tf-rehancer-icassp``
-    (TF-Rehancer 2026-09-15).  The reserved `_unassigned` container keeps its
+    ``<date>_project-c-analysis-cx`` for the stream ``project-c-icassp``
+    (Project-C 2026-09-15).  The reserved `_unassigned` container keeps its
     fixed name.
     """
     if campaign_key is None:

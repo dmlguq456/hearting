@@ -80,7 +80,7 @@ were delivered with a verified state transition.
 Local verification records: `/tmp/owner-terminal-settlement.tsv`,
 `/tmp/owner-terminal-settlement-final.tsv`, `/tmp/owner-terminal-start-race.tsv`,
 `/tmp/owner-terminal-settlement-boundary-final.log`,
-`/tmp/homeos-hearting-stall-investigation.json`.
+`/tmp/homeapp-hearting-stall-investigation.json`.
 
 ## Release and installation
 
@@ -101,4 +101,4 @@ helper works against their existing canonical registry without another owner.
 
 Installation evidence: `/tmp/owner-terminal-runtime-doctor.json`,
 `/tmp/owner-terminal-runtime-verify.json`, `/tmp/owner-terminal-install-integrity.json`,
-`/tmp/homeos-owner-terminal-installed-inspect.json`.
+`/tmp/homeapp-owner-terminal-installed-inspect.json`.

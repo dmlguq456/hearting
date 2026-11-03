@@ -304,6 +304,21 @@ class ReplacementTest(unittest.TestCase):
             self.assertEqual(refused.exception.reason,'replacement-launch-binding-mismatch')
         self.assertFalse(any(fields[1]=='open' for fields,_ in R._rows(lines).values()))
 
+    def test_handover_admission_waits_when_the_lineage_cannot_be_read(self):
+        # RV-1142 M1: an unreadable seat record during the parent check is a wait for the same
+        # command (the recipient judgment), not a definitive binding mismatch.
+        import dispatch_seat_handover as H
+        self.bind_source_parent()
+        self.handover()
+        record=self.claim();candidate=self.replacement_candidate(record)
+        lines=self.jobs.read_text().splitlines()
+        self.assertEqual(R.admission(self.jobs,lines,candidate),record)
+        with mock.patch.object(H,'_readable_lineage_signature',side_effect=OSError('lineage-directory-changed')):
+            with self.assertRaises(D.DispatchContractError) as waiting:
+                R.admission(self.jobs,lines,candidate)
+        self.assertEqual((waiting.exception.reason,waiting.exception.next_action),
+                         ('handover-unreadable','same-command'))
+
     def test_handover_for_a_different_route_node_or_registry_does_not_authorize(self):
         self.bind_source_parent()
         record=self.claim();candidate=self.replacement_candidate(record)

@@ -107,7 +107,7 @@ class ReadingTest(unittest.TestCase):
             self.assertIn("[4d]", "\n".join(render._plain(x) for x in render._gpu_work_strip([entry], 168)))
 
     def test_r5_process_header_names_work_project_and_fleet(self):
-        owner = DispatchJob(key="lab", cwd="/work/TF-Rehancer", slug="resume-training", pid=2,
+        owner = DispatchJob(key="lab", cwd="/work/Project-C", slug="resume-training", pid=2,
                             proc_start="22", harness="codex", worker_type="owner", parent_sid="sid")
         parent = Session(harness="claude", pid=1, cwd=owner.cwd, session_id="sid", session_tag="4d")
         owner._parent_edge_sid = "sid"
@@ -116,7 +116,7 @@ class ReadingTest(unittest.TestCase):
                         dict(id="resume-run", state="active", level=0, job=owner, unit="_kernel/resource")])
         lines, _ = render._route_card(view, {(1, None): parent}, 100, 0, resource_owners=[owner])
         header = render._plain(lines[0])
-        for token in ("TF-Rehancer", "resume-training", "[4d]"):
+        for token in ("Project-C", "resume-training", "[4d]"):
             self.assertIn(token, header)
         self.assertNotIn("rt-53b", header)
 
