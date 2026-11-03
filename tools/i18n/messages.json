@@ -1182,6 +1182,62 @@
    "en": "This is an automatic idle tidy request. {terms} Write the session-tidy card from this conversation only. {guide}Do not start or continue other work; when the reply is done, wait for the next input. Request id: {nonce}",
    "ko": "자동 유휴 정리 요청입니다. {terms} 지금까지의 이 대화만 바탕으로 session-tidy 카드를 쓰세요. {guide}별도 작업을 시작하거나 이어서 하지 말고, 답을 마치면 다음 입력을 기다리세요. 요청 식별자: {nonce}"
   },
+  "tidy.runner.done": {
+   "en": "tidy finished.",
+   "ko": "정리를 마쳤습니다."
+  },
+  "tidy.runner.landed": {
+   "en": "{count} applied",
+   "ko": "{count}건 반영"
+  },
+  "tidy.runner.landed_unconfirmed": {
+   "en": ", {count} not confirmed",
+   "ko": ", {count}건은 반영 여부 불명"
+  },
+  "tidy.runner.landed_unknown": {
+   "en": "whether anything landed is not confirmed",
+   "ko": "반영 여부를 확인하지 못했습니다"
+  },
+  "tidy.runner.not_finished": {
+   "en": "[Tidy] The memory tidy did not finish. The card and existing memory are unchanged, and it continues in the next tidy. (reason: {reason})",
+   "ko": "[정리] 기억 정리를 끝내지 못했습니다. 카드와 기존 기억은 그대로이고 다음 정리 때 이어서 처리됩니다. (사유: {reason})"
+  },
+  "tidy.runner.nothing_in_range": {
+   "en": "[Tidy] Nothing to tidy in the part that was read · {note}",
+   "ko": "[정리] 읽은 범위에는 정리할 대화가 없었습니다 · {note}"
+  },
+  "tidy.runner.nothing_new": {
+   "en": "[Tidy] No new conversation to tidy.",
+   "ko": "[정리] 새로 정리할 대화가 없습니다."
+  },
+  "tidy.runner.over_limit": {
+   "en": "proposals over the limit are looked at again in the next tidy",
+   "ko": "상한을 넘은 제안은 다음 정리에서 다시 봅니다"
+  },
+  "tidy.runner.partial": {
+   "en": "partly read ({why}{coverage}){more} — the earlier part continues in the next tidy",
+   "ko": "일부만 읽음({why}{coverage}){more} — 앞부분은 다음 정리에서 계속"
+  },
+  "tidy.runner.partial_blocked": {
+   "en": "up to the open question, ",
+   "ko": "열린 질문 앞까지, "
+  },
+  "tidy.runner.partial_more": {
+   "en": " · other records also partly read: {count}",
+   "ko": " 외 기록 {count}개도 일부만 읽음"
+  },
+  "tidy.runner.still_working": {
+   "en": "Previous session still working: {harness} {sid} is still doing its work. The old window closes once that work ends.",
+   "ko": "앞 세션 작업 중: {harness} {sid}는 아직 하던 일을 진행 중입니다. 옛 창은 그 일이 끝난 뒤 닫힙니다."
+  },
+  "tidy.runner.stopped": {
+   "en": "[Tidy] The memory tidy stopped partway ({landed}). The rest continues in the next tidy. (reason: {reason}) — undo: mem tidy-undo {batch}",
+   "ko": "[정리] 기억 정리가 중간에 멈췄습니다({landed}). 나머지는 다음 정리 때 이어서 처리됩니다. (사유: {reason}) — 되돌리기: mem tidy-undo {batch}"
+  },
+  "tidy.runner.unreadable": {
+   "en": "could not read the conversation record ({reason})",
+   "ko": "대화 기록을 읽지 못했습니다({reason})"
+  },
   "tidy.say.accepted": {
    "en": "The card and memory tidy are accepted. The window-clear result will be reported in one line on your next input.",
    "ko": "카드와 기억 정리 접수를 마쳤습니다. 창 비우기 결과는 다음 입력 때 한 줄로 알려 드립니다."

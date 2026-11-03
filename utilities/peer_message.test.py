@@ -4482,6 +4482,7 @@ class SupervisedHandoffTest(_TmpRootMixin, unittest.TestCase):
         self.assertEqual(self._pending_count(), before_pending)
         self.assertEqual(self.store.list(), before_duties)
 
+    @mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"})   # Korean card words
     def test_working_source_is_handed_over_immediately_with_the_working_line(self):
         self._register_job()
         self.states["w1:p1"] = "working"

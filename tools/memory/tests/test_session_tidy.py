@@ -7743,6 +7743,16 @@ class CardWordLanguage(unittest.TestCase):
         self.assertIsNone(re.search(r"[가-힣]", request.replace(" → ".join(st.CARD_FIELDS), "")
                                     .replace("·".join(st.CARD_FIXED_FIELDS), "")), request)
 
+    def test_runner_notices_in_english(self):
+        with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "English"}):
+            note = runner.coverage_note(SimpleNamespace(unread=[{"coverage": "10-20%"}]))
+            stopped = runner.failure_line("boom", "b1", (2, 1))
+            line = runner._with_coverage("[tidy] batch b1: added 1 — undo: mem tidy-undo b1", note)
+        self.assertEqual(note, "partly read (10-20%) — the earlier part continues in the next tidy")
+        self.assertEqual(stopped, "[Tidy] The memory tidy stopped partway (2 applied, 1 not confirmed). The rest "
+                                  "continues in the next tidy. (reason: boom) — undo: mem tidy-undo b1")
+        self.assertEqual(line, "[tidy] batch b1: added 1 · " + note + " — undo: mem tidy-undo b1")
+
     def test_card_injection_and_compact_body_in_english(self):
         previous = {"harness": "claude", "sid": "a" * 36,
                     "transcript": {"path": "/" + "x" * 400, "status": "available"}}
