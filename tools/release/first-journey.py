@@ -46,6 +46,67 @@ WORLD_COMMANDS = ("python3", "bash", "sh", "git", "curl", "tar", "gzip", "mktemp
                   "uniq", "tr", "cut", "env", "date", "diff", "touch", "ln", "stat", "sleep",
                   "tee", "xargs", "id", "ps", "realpath", "printf", "test", "true", "false")
 _ACTIVE_AUTH: dict | None = None
+# The sandbox is a PID namespace: when the agent CLI exits, every process left in it dies.
+# On a user's machine the product's automatic change record (utilities/turn_change_record.py,
+# a detached step its turn-end hook starts) keeps running after the CLI exits, so each
+# sandboxed turn runs under this subreaper, which then waits up to SETTLE_SECONDS for that
+# step only -- not for the shared observers that are meant to outlive a turn (for example
+# the human-wait producer's 600 s refresh loop) -- and reports the CLI's own time apart from
+# the wait. The wait is outside the task deadline.
+SETTLE_SECONDS = 30
+SETTLE_WATCH = "turn_change_record.py"
+SETTLE_SCRIPT = r'''
+import ctypes, json, os, subprocess, sys, time
+try:
+    ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0)  # PR_SET_CHILD_SUBREAPER
+except Exception:
+    pass
+grace, watch, began = float(sys.argv[1]), sys.argv[2], time.monotonic()
+code = subprocess.call(sys.argv[3:])
+cli = time.monotonic() - began
+def descendants():
+    parents = {}
+    for pid in os.listdir("/proc"):
+        try:
+            parents[int(pid)] = int(open(f"/proc/{pid}/stat").read().rsplit(")", 1)[1].split()[1])
+        except (ValueError, OSError, IndexError):
+            continue
+    mine = {os.getpid()}
+    for _ in range(16):
+        mine |= {pid for pid, parent in parents.items() if parent in mine}
+    rows = []
+    for pid in sorted(mine - {os.getpid()}):
+        try:
+            argv = [w.decode("utf-8", "replace") for w in open(f"/proc/{pid}/cmdline", "rb").read().split(b"\0") if w]
+        except OSError:
+            continue
+        if argv:
+            rows.append(argv)
+    return rows
+def reap():
+    try:
+        while os.waitpid(-1, os.WNOHANG)[0] > 0:
+            pass
+    except ChildProcessError:
+        pass
+deadline = time.monotonic() + max(grace, 0)
+watched = grace > 0
+while watched:
+    reap()
+    watched = any(any(watch in word for word in argv) for argv in descendants())
+    if not watched or time.monotonic() >= deadline:
+        break
+    time.sleep(0.1)
+reap()
+names = sorted({" ".join(os.path.basename(w) for w in argv[:2])[:80] for argv in descendants()})
+print(json.dumps({"journey_settle": {"cli_seconds": round(cli, 3), "left_running": watched,
+                                     "left": names[:12],
+                                     "settle_seconds": round(time.monotonic() - began - cli, 3)}}),
+      flush=True)
+sys.exit(code)
+'''
+# The automatic change record (utilities/turn_change_record.py) marks its tracked gate values.
+AUTO_RECORD_PREFIX = "auto-record:"
 
 
 def credential_complete(harness: str, data: bytes, generation: str | None = None) -> bool:
@@ -831,10 +892,51 @@ def judge_repo(repo: Path, baseline_test: bytes, wrap=None, env: dict[str, str] 
             "seconds": result["seconds"], **data}
 
 
+def route_records(world: Path, *, closed: bool | None = True) -> list[Path]:
+    """Route records the installed product wrote anywhere in the world (`.runtime/routes/rt-*.json`):
+    closed ones (an outcome beside them) by default, open ones with ``closed=False``, all with None."""
+    found = [path for routes in world.rglob("routes") if routes.is_dir() and routes.parent.name == ".runtime"
+             for path in routes.glob("rt-*.json") if re.fullmatch(r"rt-[0-9a-f]+\.json", path.name)]
+    if closed is None:
+        return found
+    return [path for path in found if path.with_suffix(".outcome.json").is_file() is closed]
+
+
 def route_evidence(world: Path) -> int:
-    """Route files the installed product wrote anywhere in the world (`.runtime/routes/*.json`)."""
-    return sum(1 for routes in world.rglob("routes") if routes.is_dir() and routes.parent.name == ".runtime"
-               for _ in routes.glob("*.json"))
+    """Closed routes only: a route left open is not a finished record."""
+    return len(route_records(world))
+
+
+def open_route_evidence(world: Path) -> int:
+    return len(route_records(world, closed=False))
+
+
+def auto_route_evidence(world: Path) -> int:
+    """Routes the product recorded on its own for a turn that changed files without one."""
+    count = 0
+    for path in route_records(world):
+        try:
+            guard = json.loads(path.read_text(encoding="utf-8"))["tracked_gate_evidence"]["artifact_guard"]
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        if isinstance(guard, dict) and str(guard.get("source", "")).startswith(AUTO_RECORD_PREFIX):
+            count += 1
+    return count
+
+
+def settle_argv(argv: list[str], seconds: int = SETTLE_SECONDS, watch: str = SETTLE_WATCH) -> list[str]:
+    return ["python3", "-c", SETTLE_SCRIPT, str(seconds), watch, *argv]
+
+
+def settle_result(output: str) -> dict | None:
+    for line in reversed(output.splitlines()):
+        if '"journey_settle"' in line:
+            try:
+                value = json.loads(line)["journey_settle"]
+            except (ValueError, KeyError, TypeError):
+                return None
+            return value if isinstance(value, dict) else None
+    return None
 
 
 def turn_argv(harness: str, command: str, cwd: Path, sid: str | None, message: str,
@@ -905,13 +1007,22 @@ def headless_turn(harness: str, command: str, prompt: str, cwd: Path, world: Pat
         remaining = int(deadline - time.monotonic())
         if remaining < 5:
             status = "task-timeout"; break
-        step = run(sandbox(turn_argv(harness, command, cwd, sid, message, opencode_generation, platform.system() == "Linux", model), world, env, cwd, mounts),
-                   env=env, timeout=remaining, cwd=cwd)
+        sandboxed = platform.system() == "Linux"
+        argv = turn_argv(harness, command, cwd, sid, message, opencode_generation, sandboxed, model)
+        # The settle wait is the product's background work, not the task: it is outside the deadline.
+        step = run(sandbox(settle_argv(argv) if sandboxed else argv, world, env, cwd, mounts),
+                   env=env, timeout=remaining + (SETTLE_SECONDS if sandboxed else 0), cwd=cwd)
         text, found, denials = event_text(step["output"], harness)
         sid = sid or found
         texts.append(text)
-        turns.append({"index": len(turns) + 1, "exit": step["exit"], "seconds": step["seconds"],
-                      "session_id": sid, "permission_denials": denials})
+        settled = settle_result(step["output"]) or {}
+        deadline += settled.get("settle_seconds") or 0
+        turns.append({"index": len(turns) + 1, "exit": step["exit"],
+                      "seconds": settled.get("cli_seconds", step["seconds"]),
+                      "session_id": sid, "permission_denials": denials,
+                      **({"settle_seconds": settled.get("settle_seconds"),
+                          "settle_left_running": settled.get("left_running"),
+                          "settle_left": settled.get("left") or []} if settled else {})})
         if step["exit"] == 124: status = "task-timeout"; break
         if step["exit"] != 0: status = "task-failed"; break
         if judge and judge():
@@ -1243,10 +1354,17 @@ def journey_profile(profile: str, args: argparse.Namespace, repo: Path) -> dict:
                                 _ACTIVE_AUTH = None
                             if cleanup_error is not None and pending_error is None:
                                 raise cleanup_error
+                        settle_total = round(sum(turn.get("settle_seconds") or 0 for turn in outcome["turns"]), 3)
                         record["steps"].append({"name": f"task:{harness}", "exit": outcome["turns"][-1]["exit"] if outcome["turns"] else 1,
-                                                "seconds": round(time.monotonic() - started, 3), "turns": len(outcome["turns"])})
+                                                "seconds": round(time.monotonic() - started - settle_total, 3), "turns": len(outcome["turns"]),
+                                                "settle_seconds": settle_total})
                         for turn in outcome["turns"]:
                             record["steps"].append({"name": f"turn:{harness}:{turn['index']}", "exit": turn["exit"], "seconds": turn["seconds"]})
+                            if "settle_seconds" in turn:
+                                record["steps"].append({"name": f"settle:{harness}:{turn['index']}", "exit": 0,
+                                                        "seconds": turn["settle_seconds"],
+                                                        "left_running": turn.get("settle_left_running"),
+                                                        "left": turn.get("settle_left") or []})
                         usage_started = time.monotonic()
                         account_after = claude_account_snapshot(home / ".claude") if harness == "claude" else None
                         if harness == "claude": record["steps"].append({"name":"usage-after:claude","exit":0 if account_after else 1,"seconds":round(time.monotonic()-usage_started,3),"status":"measured" if account_after else "unknown"})
@@ -1274,6 +1392,8 @@ def journey_profile(profile: str, args: argparse.Namespace, repo: Path) -> dict:
                         verify_started = time.monotonic()
                         verification = judge_repo(repo_dir, baseline_test, lambda argv: sandbox(argv, world, baseline_env, repo_dir), baseline_env)
                         verification["route_evidence_count"] = route_evidence(world)
+                        verification["route_evidence_auto"] = auto_route_evidence(world)
+                        verification["route_evidence_open"] = open_route_evidence(world)
                         verification["route_evidence_observed"] = verification["route_evidence_count"] > 0
                         record["steps"].append({"name": f"verify:{harness}", "exit": 0 if verification["focused_test_passed"] else 1,
                                                 "seconds": round(time.monotonic() - verify_started, 3)})
@@ -1341,6 +1461,8 @@ def write_report(record: dict, output: Path) -> None:
         if verification:
             lines.append(f"  - verification: code_fixed={verification.get('code_fixed')} focused_test_passed="
                          f"{verification.get('focused_test_passed')} route_evidence={verification.get('route_evidence_count')} "
+                         f"(automatic={verification.get('route_evidence_auto')}, "
+                         f"open={verification.get('route_evidence_open')}) "
                          f"candidate={verification.get('candidate')}")
     account = record.get("account_usage") or {}
     lines += ["", "## Account usage", "",
