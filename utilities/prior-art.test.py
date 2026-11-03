@@ -301,6 +301,37 @@ class FramedHookupTest(unittest.TestCase):
         self.assertEqual(W._prior_art_section(self.route), "")
         self.assertEqual(W._frame_prompt_file(self.route).read_text(), plain)
 
+    def test_a_failing_marker_write_starts_nothing_and_holds_no_prompt(self):
+        real_fdopen = os.fdopen
+
+        def full_disk(fd, *args, **kwargs):
+            handle = real_fdopen(fd, *args, **kwargs)
+            handle.write = mock.Mock(side_effect=OSError(28, "No space left on device"))
+            return handle
+        with mock.patch.object(W.subprocess, "Popen") as popen, \
+                mock.patch.object(W.os, "fdopen", side_effect=full_disk), \
+                mock.patch.dict(os.environ, {"HEARTING_PRIOR_ART": ""}):
+            W._start_prior_art(self.route, "Add a widget scan")
+        popen.assert_not_called()
+        started = time.monotonic()
+        self.assertEqual(W._frame_prompt_file(self.route).read_text(), W.frame_task_text(self.route))
+        self.assertLess(time.monotonic() - started, 5)
+
+    def test_an_undecodable_list_or_a_broken_scan_module_adds_nothing(self):
+        output = self.root / "cycle"
+        (output / "shards/frame").mkdir(parents=True)
+        (output / "shards/frame/intent.md").write_text("intent\n")
+        approvals = {"given": [], "execution_scope": "complete"}
+        self.started()
+        self.out.write_bytes(PA.HEADER.encode() + b"\n- [same] a.py \xff\xfe exists\n")
+        self.assertEqual(W._prior_art_section(self.route), "")
+        self.assertNotIn("prior-art scan", W._leg_task_text(self.route, self.root, output, [], None, approvals))
+        self.out.write_text(PA.HEADER + "\n- [same] a.py — exists\n")
+        with mock.patch.object(W, "_prior_art_module", side_effect=SyntaxError("broken prior-art.py")):
+            self.assertEqual(W._prior_art_section(self.route), "")
+            self.assertNotIn("prior-art scan",
+                             W._leg_task_text(self.route, self.root, output, [], None, approvals))
+
     def test_the_approved_leg_prompt_names_a_useful_list_by_path(self):
         output = self.root / "cycle"
         (output / "shards/frame").mkdir(parents=True)
