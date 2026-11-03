@@ -14,6 +14,26 @@
    "en": "Checks: {items}",
    "ko": "검증: {items}"
   },
+  "completion.cost": {
+   "en": "Cost: {elapsed} elapsed · {tokens}",
+   "ko": "비용: 걸린 시간 {elapsed} · {tokens}"
+  },
+  "completion.cost_tokens": {
+   "en": "{tokens} session tokens ({sessions} sessions)",
+   "ko": "세션 토큰 {tokens} (세션 {sessions}개)"
+  },
+  "completion.cost_tokens_partial": {
+   "en": "{tokens} session tokens from {known} of {sessions} sessions ({unknown} unknown)",
+   "ko": "세션 토큰 {tokens} (세션 {sessions}개 중 {known}개, {unknown}개 unknown)"
+  },
+  "completion.cost_tokens_unknown": {
+   "en": "session tokens unknown",
+   "ko": "세션 토큰 unknown"
+  },
+  "completion.cost_unknown": {
+   "en": "unknown",
+   "ko": "unknown"
+  },
   "completion.degraded": {
    "en": "Nodes closed without independent review: {nodes}",
    "ko": "독립 리뷰 없이 닫힌 노드: {nodes}"

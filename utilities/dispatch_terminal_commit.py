@@ -15,6 +15,7 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping, Optional
 from contextlib import contextmanager
@@ -543,10 +544,70 @@ def _seal_completion_summary(request, route, primary, slot) -> None:
     """Write-once runtime close text beside the envelope (WORKFLOW §0.5); never fails the commit."""
     try:
         import work_intent
-        text = work_intent.completion_summary(route, primary, route_file=request.route_file)
+        if (slot / work_intent.SUMMARY_NAME).exists():
+            return
+        text = work_intent.completion_summary(route, primary, route_file=request.route_file,
+                                              cost=_completion_cost(request, route))
         _write_exclusive(slot / work_intent.SUMMARY_NAME, text.encode())
     except Exception:  # noqa: BLE001 -- an existing or unrenderable summary keeps the delivery as it was
         return
+
+
+def _row_epoch(stamp) -> Optional[float]:
+    try:
+        parsed = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed.timestamp() if parsed.tzinfo is not None else None
+
+
+def _completion_cost(request, route, *, now=None) -> dict[str, Any]:
+    """Elapsed time and session tokens of this route's registered attempts (the owner, its
+    workers and their retries), for the summary's cost line.
+
+    Elapsed runs from the first registry row of those attempts to this seal. Tokens are
+    the counts each session wrote into its exact attempt log -- the rows Fleet reads,
+    through the same shared path check (`attempt_view.session_tokens`); an attempt whose
+    log reports none is counted as unknown, never estimated."""
+    cost: dict[str, Any] = {"elapsed_seconds": None, "tokens": None, "sessions": 0, "unknown": 0}
+    try:
+        from dispatch_registry_cache import registry_view
+        records = registry_view(Path(request.jobs)).completion_related(
+            request.owner_attempt_id, str(route.get("route_id") or ""), str(route.get("route_hash") or ""))
+        latest: dict[str, Mapping[str, Any]] = {}
+        started = []
+        for record in records:
+            metadata = record.completion_metadata()
+            attempt = metadata.get("attempt_id")
+            if not attempt:
+                continue
+            latest[attempt] = metadata
+            epoch = _row_epoch(record.fields[0])
+            if epoch is not None:
+                started.append(epoch)
+    except Exception:  # noqa: BLE001 -- an unreadable registry leaves the line `unknown`
+        return cost
+    if started:
+        cost["elapsed_seconds"] = max(0.0, (now if now is not None else time.time()) - min(started))
+    if not latest:
+        return cost
+    try:
+        from attempt_view import session_tokens
+    except Exception:  # noqa: BLE001 -- without the reader every session is unknown
+        session_tokens = None
+    total = None
+    for metadata in latest.values():
+        cost["sessions"] += 1
+        try:
+            tokens = session_tokens(metadata, request.jobs) if session_tokens else None
+        except Exception:  # noqa: BLE001
+            tokens = None
+        if tokens is None:
+            cost["unknown"] += 1
+        else:
+            total = (total or 0) + tokens
+    cost["tokens"] = total
+    return cost
 
 
 def _component(value: str, label: str) -> str:

@@ -896,7 +896,11 @@ Writing a report file does not by itself complete the user-facing report.
 **Runtime completion summary.** When the runtime seals a registered owner's
 completion it also writes `completion-summary.md`, once, beside the owner
 envelope: the intent (§0.4) with the person's words, the result (one leg of a
-plan says a later leg remains), what changed, what was checked, what stayed
+plan says a later leg remains), one cost line (time from the route's first
+registered attempt to the seal, and the session tokens its owner, workers and
+retries wrote into their own attempt logs, summed; a session that wrote none is
+counted as `unknown`; the line shows token counts, not a share of a plan), what
+changed, what was checked, what stayed
 unverified or remains, nodes closed without an independent review, and the
 artifact path, in the shared UI-text catalog's language (English by default,
 Korean when declared). A code report's numbered sections 1/4/5/6 are read as the

@@ -471,13 +471,44 @@ def _result_line(route, t) -> str:
     return t("completion.result_done")
 
 
-def completion_summary(route, primary, *, route_file=None, t=None) -> str:
-    """The runtime's close text for one completed owner: intent, result, changes, checks, the rest.
+def _elapsed_text(seconds) -> str | None:
+    if not isinstance(seconds, (int, float)) or isinstance(seconds, bool) or seconds < 0:
+        return None
+    minutes, sec = divmod(int(seconds), 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h {minutes:02d}m"
+    return f"{minutes}m {sec:02d}s" if minutes else f"{sec}s"
 
-    Every value comes from the sealed route, the route outcome and the primary
-    report itself; a report whose headings cannot be matched is named, not
-    summarised, so nothing is invented and nothing unverified reads as verified.
-    The labels come from the shared UI-text catalog (`t`; English unless Korean is declared).
+
+def cost_line(cost, t) -> str:
+    """Elapsed time and session tokens, each `unknown` when not observed; never a share of a plan.
+
+    `cost` holds `elapsed_seconds`, `tokens` (the sum over the sessions that reported one),
+    `sessions` (attempts counted) and `unknown` (how many of them reported none)."""
+    cost = cost if isinstance(cost, dict) else {}
+    elapsed = _elapsed_text(cost.get("elapsed_seconds")) or t("completion.cost_unknown")
+    sessions = cost.get("sessions") if isinstance(cost.get("sessions"), int) else 0
+    unknown = cost.get("unknown") if isinstance(cost.get("unknown"), int) else sessions
+    tokens = cost.get("tokens")
+    if not isinstance(tokens, int) or isinstance(tokens, bool) or sessions <= unknown:
+        words = t("completion.cost_tokens_unknown")
+    elif unknown:
+        words = t("completion.cost_tokens_partial", tokens=f"{tokens:,}", known=sessions - unknown,
+                  sessions=sessions, unknown=unknown)
+    else:
+        words = t("completion.cost_tokens", tokens=f"{tokens:,}", sessions=sessions)
+    return t("completion.cost", elapsed=elapsed, tokens=words)
+
+
+def completion_summary(route, primary, *, route_file=None, t=None, cost=None) -> str:
+    """The runtime's close text for one completed owner: intent, result, cost, changes, checks, the rest.
+
+    Every value comes from the sealed route, the route outcome, the registered
+    attempts (`cost`, when the caller observed them) and the primary report
+    itself; a report whose headings cannot be matched is named, not summarised,
+    so nothing is invented and nothing unverified reads as verified. The labels
+    come from the shared UI-text catalog (`t`; English unless Korean is declared).
     """
     t = t or ui_translator()
     request = route.get("work_request") if isinstance(route.get("work_request"), dict) else {}
@@ -492,6 +523,8 @@ def completion_summary(route, primary, *, route_file=None, t=None) -> str:
                     if intent.get("original") else "")
         lines.append(t("completion.intent", intent=_line(goal, 200), original=original))
     lines.append(t("completion.result", result=_result_line(route, t)))
+    if cost is not None:
+        lines.append(cost_line(cost, t))
     try:
         text = Path(primary).read_text(encoding="utf-8") if primary else ""
     except (OSError, UnicodeError):

@@ -412,6 +412,115 @@ class CompletionSummaryLanguageTest(unittest.TestCase):
         self.assertTrue(WI.sealed_summary(meta, "att-en").startswith("[Completion summary]"))
 
 
+class CompletionCostLineTest(unittest.TestCase):
+    """One cost line: elapsed time and session tokens from the route's registered attempts.
+
+    A value nobody observed reads `unknown`; tokens are never turned into a share of a plan."""
+
+    ROUTE_ID = "rt-6666666666666666"
+
+    def setUp(self):
+        declared_language(self, None)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.state = self.root / "dispatch"
+        (self.state / "logs").mkdir(parents=True)
+        self.jobs = self.state / "jobs.log"
+        self.route = {"route_id": self.ROUTE_ID, "route_hash": "sha256:" + "6" * 64,
+                      "capability": "autopilot-code", "artifact_root": str(self.root),
+                      "work_request": {"text": "Intent: Show the cost\n\nBody.", "owner_harness": None}}
+        self.report = self.root / "final_report.md"
+        self.report.write_text("## 1. Change Overview\n- one\n")
+        self.rows = []
+
+    def attempt(self, attempt, harness, stamp, rows, *, parent=None, status="done"):
+        log = self.state / "logs" / f"slug-{attempt}.{attempt}.{harness}.jsonl"
+        log.write_text("".join(json.dumps(row) + "\n" for row in rows))
+        meta = {"attempt_schema_version": "2", "attempt_id": attempt, "harness": harness,
+                "log_file": str(log), "route_id": self.ROUTE_ID, "route_hash": self.route["route_hash"]}
+        if parent:
+            meta["parent_attempt_id"] = parent
+        line = "\t".join([stamp, status, str(self.root), str(self.root), f"slug-{attempt}",
+                          ",".join(f"{k}={v}" for k, v in meta.items())])
+        self.rows.append(line)
+        self.jobs.write_text("\n".join(self.rows) + "\n")
+
+    def cost(self, now):
+        import dispatch_terminal_commit as DTC
+        request = mock.Mock(jobs=self.jobs, owner_attempt_id="att-owner", route_file=None)
+        return DTC._completion_cost(request, self.route, now=now)
+
+    def test_sessions_from_all_three_harnesses_add_up_and_elapsed_runs_from_the_first_row(self):
+        start = "2026-11-04T01:00:00.000000Z"
+        # A supervised Claude owner: one token row per resume-process turn.
+        self.attempt("att-owner", "claude", start, [
+            {"type": "dispatch.supervisor.session", "session_id": "s-owner", "cwd": "/w"},
+            {"type": "dispatch.supervisor.token_usage", "token_usage": {"turn": {"input_tokens": 10,
+             "cache_read_input_tokens": 1000, "output_tokens": 90}}},
+            {"type": "dispatch.supervisor.token_usage", "token_usage": {"turn": {"input_tokens": 5,
+             "cache_creation_input_tokens": 200, "output_tokens": 95}}},
+            {"type": "result", "usage": {"input_tokens": 5, "output_tokens": 95}}])        # the last turn again
+        # A `claude -p` worker: its single result is already the running total.
+        self.attempt("att-claude", "claude", "2026-11-04T01:02:00.000000Z", [
+            {"type": "assistant", "message": {"usage": {"input_tokens": 1, "output_tokens": 1}}},
+            {"type": "result", "usage": {"input_tokens": 2, "cache_creation_input_tokens": 3,
+                                         "cache_read_input_tokens": 400, "output_tokens": 50}}], parent="att-owner")
+        # A Codex worker: the supervisor's thread total.
+        self.attempt("att-codex", "codex", "2026-11-04T01:03:00.000000Z", [
+            {"type": "dispatch.supervisor.token_usage", "thread_id": "t1", "turn_id": "u1",
+             "token_usage": {"last": {"total_tokens": 9}, "total": {"total_tokens": 700}}},
+            {"type": "dispatch.supervisor.token_usage", "thread_id": "t1", "turn_id": "u2",
+             "token_usage": {"last": {"total_tokens": 9}, "total": {"total_tokens": 1500}}}], parent="att-owner")
+        # An OpenCode worker: each finished step is one request.
+        self.attempt("att-opencode", "opencode", "2026-11-04T01:04:00.000000Z", [
+            {"type": "step_finish", "sessionID": "ses_a", "part": {"tokens": {"input": 10, "output": 5,
+             "reasoning": 1, "cache": {"read": 100, "write": 0}}}},
+            {"type": "step_finish", "sessionID": "ses_a", "part": {"tokens": {"input": 4, "output": 2,
+             "reasoning": 0, "cache": {"read": 110, "write": 0}}}}], parent="att-owner")
+        start_epoch = WI_epoch(start)
+        cost = self.cost(start_epoch + 3725)
+        self.assertEqual(cost["sessions"], 4)
+        self.assertEqual(cost["unknown"], 0)
+        self.assertEqual(cost["tokens"], 1400 + 455 + 1500 + 232)
+        self.assertEqual(cost["elapsed_seconds"], 3725)
+        line = WI.cost_line(cost, WI.ui_translator())
+        self.assertEqual(line, "Cost: 1h 02m elapsed · 3,587 session tokens (4 sessions)")
+        self.assertNotIn("%", line)
+
+    def test_a_session_without_counts_is_unknown_never_estimated(self):
+        self.attempt("att-owner", "claude", "2026-11-04T01:00:00.000000Z", [
+            {"type": "dispatch.supervisor.session", "session_id": "s-owner", "cwd": "/w"},
+            {"type": "result", "usage": {"input_tokens": 5, "output_tokens": 95}}])   # stream transport: no turn rows
+        self.attempt("att-claude", "claude", "2026-11-04T01:01:00.000000Z", [
+            {"type": "result", "usage": {"input_tokens": 1, "output_tokens": 9}}], parent="att-owner")
+        cost = self.cost(WI_epoch("2026-11-04T01:00:45.000000Z"))
+        self.assertEqual((cost["sessions"], cost["unknown"], cost["tokens"]), (2, 1, 10))
+        t = WI.ui_translator()
+        self.assertEqual(WI.cost_line(cost, t),
+                         "Cost: 45s elapsed · 10 session tokens from 1 of 2 sessions (1 unknown)")
+        self.assertEqual(WI.cost_line({"elapsed_seconds": None, "tokens": None, "sessions": 0, "unknown": 0}, t),
+                         "Cost: unknown elapsed · session tokens unknown")
+        declared_language(self, "ko")
+        self.assertEqual(WI.cost_line(cost, WI.ui_translator()),
+                         "비용: 걸린 시간 45s · 세션 토큰 10 (세션 2개 중 1개, 1개 unknown)")
+
+    def test_the_sealed_summary_carries_the_line_and_an_unreadable_registry_says_unknown(self):
+        import dispatch_terminal_commit as DTC
+        slot = DTC.terminal_slot(self.root, self.ROUTE_ID, "att-owner")
+        request = mock.Mock(jobs=self.root / "absent" / "jobs.log", owner_attempt_id="att-owner", route_file=None)
+        DTC._seal_completion_summary(request, self.route, self.report, slot)
+        lines = (slot / WI.SUMMARY_NAME).read_text().splitlines()
+        self.assertTrue(lines[2].startswith("Result: "))
+        self.assertEqual(lines[3], "Cost: unknown elapsed · session tokens unknown")
+        self.assertNotIn("Cost:", WI.completion_summary(self.route, self.report))   # no observation, no line
+
+
+def WI_epoch(stamp):
+    from datetime import datetime
+    return datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
+
+
 class ClaudeWakeSummaryTest(unittest.TestCase):
     """The Claude wake receipt carries the same sealed text the Codex/OpenCode delivery carries."""
 
