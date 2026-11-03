@@ -6129,6 +6129,43 @@ class RouteLaunchContextTest(ProducerTestBase):
         self.assertEqual(Path(env["AGENT_ARTIFACT_OUTPUT_DIR"]), Path(env["AGENT_ARTIFACT_CYCLE_DIR"]) / "artifacts")
 
 
+class FinalizeRefusalWithoutAdmissionLockTest(ProducerTestBase):
+    """W3 (2026-11-03): a controller retried one refused close 3,719 times, each try holding
+    the root's admission lock for seconds and stalling every start of the root meanwhile."""
+
+    def test_an_invalid_output_name_refuses_the_close_without_the_lock_or_hashing(self):
+        self.activate()
+        _route, _route_file, result = self.begin()
+        self.write_output(result)
+        bad = self.write_output(result, rel="evidence/snapshot/<sid>.jsonl", data=b"row\n")
+        with mock.patch.object(P.artifact_admission, "_acquire_lock",
+                               wraps=P.artifact_admission._acquire_lock) as acquire, \
+                mock.patch.object(P, "_stream_file_facts", wraps=P._stream_file_facts) as hashed:
+            with self.assertRaises(P.ProducerError) as caught:
+                P.finalize(self.root, cycle_id=result["cycle_id"], allow_open_route=True)
+        self.assertEqual(caught.exception.code, "output-invalid")
+        self.assertIn("<sid>.jsonl", caught.exception.detail)
+        self.assertEqual(acquire.call_count, 0)
+        self.assertEqual(hashed.call_count, 0)
+        self.assertEqual(P.read_cycle_record(self.root, result["cycle_id"])["state"], "open")
+        bad.rename(bad.with_name("sid.jsonl"))   # fixed by hand, the next close seals as before
+        closed = P.finalize(self.root, cycle_id=result["cycle_id"], allow_open_route=True)
+        self.assertEqual(P.read_cycle_record(self.root, result["cycle_id"])["state"], "sealed", closed)
+
+    def test_a_cycle_with_a_close_journal_keeps_the_locked_path(self):
+        self.activate()
+        _route, _route_file, result = self.begin()
+        self.write_output(result, rel="evidence/<sid>.jsonl", data=b"row\n")
+        journal = P.journal_path(self.root, result["cycle_id"])
+        journal.parent.mkdir(parents=True, exist_ok=True)
+        journal.write_text("{}", encoding="utf-8")
+        with mock.patch.object(P.artifact_admission, "_acquire_lock",
+                               wraps=P.artifact_admission._acquire_lock) as acquire:
+            with self.assertRaises(P.ProducerError):
+                P.finalize(self.root, cycle_id=result["cycle_id"], allow_open_route=True)
+        self.assertGreaterEqual(acquire.call_count, 1)
+
+
 _ADMISSION_HOLDER = """
 import fcntl, os, sys, time
 fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)
