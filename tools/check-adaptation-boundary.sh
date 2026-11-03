@@ -1093,7 +1093,6 @@ check_codex_bin_wrappers() {
     || ! grep -Fq 'This does not replace Codex `/statusline` for model/context/token/session fields' adapters/codex/README.md \
     || ! grep -Fq 'Codex has its own `/statusline` configuration for the TUI footer.' adapters/codex/ADAPTATION.md \
     || ! grep -Fq 'preflight.sh ui-info' adapters/codex/README.md \
-    || ! grep -Fq 'preflight.sh ui-info' adapters/codex/README.md \
     || ! grep -Fq 'preflight.sh ui-info' adapters/codex/ADAPTATION.md \
     || ! grep -Fq 'statusline_custom_dynamic_fields=unsupported' adapters/codex/bin/preflight.sh \
     || ! grep -Fq 'autopilot_auto_routing=instruction-guided-not-claude-slash-router' adapters/codex/bin/preflight.sh \
@@ -1113,7 +1112,6 @@ check_codex_bin_wrappers() {
     || ! grep -Fq 'git dirty/worktree/dead-branch risks' adapters/codex/README.md \
     || ! grep -Fq 'git dirty/worktree/dead-branch risk fields' adapters/codex/README.md \
     || ! grep -Fq 'git dirty/worktree/dead-branch risk fields' adapters/codex/ADAPTATION.md \
-    || ! grep -Fq 'preflight.sh subagent-info --check' adapters/codex/README.md \
     || ! grep -Fq 'preflight.sh subagent-info --check' adapters/codex/README.md \
     || ! grep -Fq 'preflight.sh subagent-info --check' adapters/codex/ADAPTATION.md \
     || ! grep -Fq 'do not duplicate Codex-native footer' adapters/codex/ADAPTATION.md; then
@@ -3439,8 +3437,6 @@ check_adaptation_inventory_native_surfaces() {
     || ! grep -Fq 'status_line = ["thread-id", "thread-title", "git-branch", "context-used", "model-with-reasoning", "five-hour-limit", "weekly-limit"]' adapters/codex/config/tui-statusline.toml \
     || ! grep -Fq 'status_line_use_colors = true' adapters/codex/config/tui-statusline.toml \
     || ! grep -Fq 'codex_setting/codex-config/tui-statusline.toml' adapters/codex/README.md \
-    || ! grep -Fq 'codex_setting/codex-config/tui-statusline.toml' adapters/codex/README.md \
-    || ! grep -Fq 'preflight.sh tui-config' adapters/codex/README.md \
     || ! grep -Fq 'preflight.sh tui-config' adapters/codex/README.md \
     || ! grep -Fq 'preflight.sh tui-config' core/ADAPTATION_INVENTORY.md \
     || ! grep -Fq 'statusline_fragment=codex_setting/codex-config/tui-statusline.toml' adapters/codex/bin/preflight.sh \

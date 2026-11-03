@@ -2552,6 +2552,10 @@ carries no launch, gate, write, or approval authority over the session it addres
 peer messages are advisory context between two already-running sessions, and the
 append-only ledger below is the only record of them (SD-122 §13.37.2-(1)).
 
+Keep work in this session's route by default; start another interactive session
+(`peer-steward start`) only for long work that needs its own human answers or
+recovery, because each one adds a seat, a model context, and supervision.
+
 | Question | Existing identifier |
 |---|---|
 | Who talks with the user? | any dispatch depth 0 session: main, peer or steward (elsewhere also "supervisor"). |
