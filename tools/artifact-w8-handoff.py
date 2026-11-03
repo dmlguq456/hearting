@@ -628,7 +628,9 @@ def main(argv=None):
     ap.add_argument("--w7c-run", required=True)
     ap.add_argument("--retirement-run", required=True)
     ap.add_argument("--backup-tar")
-    ap.add_argument("--census", help="delta-census json to cite")
+    ap.add_argument("--census", help="optional: an existing W7C delta-census report json (runs, stable_across_runs, "
+                    "unclassified_total) to cite; no shipped tool writes one any more, so omit it unless "
+                    "you hold an earlier report")
     ap.add_argument("--notes", help="Cairn body-free note export (cairn-w8-notes/v1) to seal as notes.json")
     ap.add_argument("--include-w16-namespace-delete", action="store_true",
                     help="add the optional, unauthorized W16 boundary to a new bundle; use this same bundle for D20 and W16")
