@@ -691,12 +691,20 @@ def verify_request_identity(request, route, *, registry_rows=None):
 
 def publish_producer_binding(*, artifact_root: Path, jobs: Path, route_file: Path,
                              owner_attempt_id: str, cycle_id: str,
-                             owner_begin: bool) -> ProducerBindingResult:
+                             owner_begin: bool, owner=None) -> ProducerBindingResult:
+    """Write (or replay) the owner's producer binding for ``cycle_id``.
+
+    ``owner`` is the `validate_owner_route` result its caller already has for
+    this exact owner and route; `begin` validates before it takes the admission
+    lock, so the registry is not read a second time while the lock is held.
+    The registry is never under that lock, so the second read proved nothing more.
+    """
     if owner_attempt_id == "-" or not owner_attempt_id:
         raise TerminalCommitError("producer-binding-required", "owner-attempt")
     root = Path(artifact_root).resolve()
     route_path = Path(route_file).resolve()
-    owner = validate_owner_route(jobs=jobs, route_file=route_path, owner_attempt_id=owner_attempt_id)
+    if owner is None:
+        owner = validate_owner_route(jobs=jobs, route_file=route_path, owner_attempt_id=owner_attempt_id)
     try:
         route = json.loads(route_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, ValueError) as exc:
