@@ -1579,7 +1579,7 @@ def selected_providers(profile="mini", pin_env="FLEET_TITLE_PROVIDER"):
         usage = subprocess.run(
             [str(home / "utilities" / "usage-check.sh"), "--harness", "all", "--jobs", str(jobs),
              "--model-profile", profile],
-            text=True,
+            stdin=subprocess.DEVNULL, text=True,
             capture_output=True,
             check=False,
         )

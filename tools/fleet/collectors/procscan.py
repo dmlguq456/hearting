@@ -410,7 +410,7 @@ def _ps_lines():
     try:
         result = subprocess.run(
             argv,
-            capture_output=True, text=True, timeout=5, env=env,
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=5, env=env,
         )
     except subprocess.TimeoutExpired as exc:
         output = getattr(exc, "stdout", None)
@@ -566,7 +566,7 @@ def proc_tree():
     if argv is None:
         return {}
     try:
-        out = subprocess.run(argv,
+        out = subprocess.run(argv, stdin=subprocess.DEVNULL,
                              capture_output=True, text=True, timeout=5).stdout
     except Exception:
         return {}
@@ -802,7 +802,7 @@ def _pid_ttys():
     if argv is None:
         return {}
     try:
-        out = subprocess.run(argv,
+        out = subprocess.run(argv, stdin=subprocess.DEVNULL,
                              capture_output=True, text=True, timeout=3).stdout
     except Exception:
         return {}
@@ -823,7 +823,7 @@ def _detached_ttys():
     try:
         out = subprocess.run(
             ["tmux", "list-panes", "-a", "-F", "#{pane_tty}\t#{session_attached}"],
-            capture_output=True, text=True, timeout=2).stdout
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=2).stdout
     except Exception:
         return set()
     det = set()
@@ -851,7 +851,8 @@ def _orca_dead_socks(socks):
     if not socks:
         return set()
     try:
-        out = subprocess.run(["ss", "-x"], capture_output=True, text=True, timeout=2).stdout
+        out = subprocess.run(["ss", "-x"], stdin=subprocess.DEVNULL, capture_output=True,
+                             text=True, timeout=2).stdout
     except Exception:
         return set()
     return {s for s in socks if s not in out}

@@ -514,7 +514,8 @@ def read_pane_map(timeout=3.0):
     """``{session id: pane id}`` from one ``herdr pane list``; empty when herdr is not reachable."""
     import subprocess
     try:
-        proc = subprocess.run(_herdr_argv("pane", "list"), capture_output=True, text=True, timeout=timeout)
+        proc = subprocess.run(_herdr_argv("pane", "list"), stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True, timeout=timeout)
         if proc.returncode:
             return {}
         panes = ((json.loads(proc.stdout or "{}").get("result") or {}).get("panes")) or ()
@@ -538,7 +539,8 @@ def read_pane_visible(pane, *, rows=PANE_ROWS, timeout=2.5):
         return None
     try:
         proc = subprocess.run(_herdr_argv("pane", "read", pane, "--source", "visible", "--format", "text"),
-                              capture_output=True, text=True, timeout=timeout)
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                              timeout=timeout)
     except (OSError, subprocess.SubprocessError):
         return None
     text = proc.stdout if isinstance(proc.stdout, str) else ""

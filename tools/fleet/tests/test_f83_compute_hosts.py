@@ -155,6 +155,38 @@ class ComputeHostCollectorTest(unittest.TestCase):
             timed_out = compute_hosts.collect(timeout=0.05)
         self.assertIn("timed out", timed_out["error"])
 
+    def test_probe_never_reads_the_viewer_terminal(self):
+        """GH#840: the probe's ssh read the keys typed into Fleet, including ``q``."""
+        self.tool.write_text(
+            "import json, os, select\n"
+            "ready = select.select([0], [], [], 1.0)[0]\n"
+            "data = os.read(0, 64).decode() if ready else None\n"
+            "devnull = os.path.samestat(os.fstat(0), os.stat(os.devnull))\n"
+            "print(json.dumps({'hosts': [{'host': 'probe', 'read': data,"
+            " 'devnull': devnull}]}))\n",
+            encoding="utf-8")
+        for config in (self.config, self.root / "missing.yaml"):
+            with self.subTest(configured=config.exists()):
+                keys, typed = os.pipe()
+                saved = os.dup(0)
+                try:
+                    os.write(typed, b"q")
+                    os.dup2(keys, 0)
+                    with mock.patch.dict(os.environ, {
+                            "COMPUTE_HOSTS_CONFIG": str(config),
+                            "FLEET_COMPUTE_HOSTS_TOOL": str(self.tool)}, clear=False):
+                        snapshot = compute_hosts.collect(timeout=10)
+                    os.dup2(saved, 0)
+                    os.set_blocking(keys, False)
+                    left = os.read(keys, 8)
+                finally:
+                    os.dup2(saved, 0)
+                    for fd in (saved, keys, typed):
+                        os.close(fd)
+                self.assertEqual(snapshot["hosts"][0]["read"], "")
+                self.assertTrue(snapshot["hosts"][0]["devnull"])
+                self.assertEqual(left, b"q", "the key stays for the viewer")
+
 
 class ComputeHostRenderTest(unittest.TestCase):
     def test_expanded_reservation_keeps_start_without_task_description(self):

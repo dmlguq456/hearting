@@ -412,7 +412,7 @@ def _formatter_overrides(harness: str, session_id: str, title: str) -> tuple:
         result = subprocess.run(
             [str(formatter), "--harness", harness, "--session-id", session_id,
              "--summary", title],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
             timeout=_FORMATTER_TIMEOUT, check=False)
         if result.returncode or len(result.stdout.encode("utf-8")) > 4096:
             return None, None
@@ -783,7 +783,8 @@ def _assign_observed_tag(harness, session_id, pane):
 def _send_projection(command, observation):
     field = "session_report" if command[2] == "report-agent-session" else "metadata_report"
     try:
-        result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        result = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL,
                                 timeout=_HERDR_TIMEOUT, check=False)
         if observation is not None:
             observation[field] = "exit0" if result.returncode == 0 else "nonzero"
