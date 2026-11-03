@@ -6661,11 +6661,11 @@ def _gpu_activity_tail(groups, warnings, available):
     return tail
 
 
-def _gpu_session_line_runs(sessions):
-    """``(host, pid, proc_start)`` of every run a drawn session's own GPU line names."""
+def _gpu_session_line_runs(drawn_strip_keys):
+    """``(host, pid, proc_start)`` of every run a GPU line drawn on this screen names."""
     index = _gpu_session_resources()
     return {(resource["host"], process["pid"], str(process["proc_start"]))
-            for key in _gpu_strip_keys(sessions or (), index)
+            for key in drawn_strip_keys or ()
             for resource in index.get(key, ())
             for process in resource.get("processes") or ()}
 
@@ -6679,7 +6679,10 @@ def _gpu_on_session_lines(host, gpu, session_runs):
                     for process in processes))
 
 
-def _compute_host_rows(term_width=None, sessions=None, resources=None, display_snapshot=None):
+def _compute_host_rows(term_width=None, sessions=None, resources=None, display_snapshot=None,
+                       drawn_strip_keys=None):
+    """``drawn_strip_keys``: the GPU lines this screen actually draws (folded cards and repos
+    excluded). Only a GPU whose runs those lines name stays folded here (GH#184)."""
     _compute_host_rows.fold_rows = []
     snapshot = _COMPUTE_HOSTS
     if not isinstance(snapshot, dict):
@@ -6720,7 +6723,7 @@ def _compute_host_rows(term_width=None, sessions=None, resources=None, display_s
 
     max_host = max((_dw(_gpu_safe_text(row.get("host") or "?")) for row in hosts), default=1)
     host_width = min(max_host, 16 if width >= 100 else 10)
-    session_runs = _gpu_session_line_runs(sessions)
+    session_runs = _gpu_session_line_runs(drawn_strip_keys)
     gpu_indexes = [gpu.get("index")
                    for host in hosts
                    for gpu in (host.get("gpus") or ())
@@ -9641,7 +9644,14 @@ def _build_unbounded_lines(sessions, jobs, section, narrow, malformed, layout="w
     # Keep tint directory-only so the intelligence zone is not confused with active cards.
     compute_start = len(lines)
     lines.append([(_HFILL, None)])
-    compute_rows = _compute_host_rows(term_width, sessions, resources, display_snapshot)
+    drawn_strip_keys = set()
+    for name, emission in emission_by_group.items():
+        if (emission["empty"] or emission["fold"]
+                or (name not in ("loops", _SYSTEM_GROUP) and _REPO_FOLD.get(name, False))):
+            continue
+        drawn_strip_keys |= emission["gpu_strip_keys"]
+    compute_rows = _compute_host_rows(term_width, sessions, resources, display_snapshot,
+                                      drawn_strip_keys=drawn_strip_keys)
     _register_compute_folds(len(lines))
     lines.extend(compute_rows)
     if compute_rows:
