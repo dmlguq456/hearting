@@ -409,6 +409,26 @@ def classify_escaped_terminal_commit_error(exc, *, route_file, route_id, owner_a
     return terminal, event
 
 
+# The one observation that says "the runtime ended without the model's final
+# result": the supervisor itself recorded the end. Harness-specific reason
+# names (`terminal-event-missing`, `opencode-final-stop-missing`, ...) stay in
+# `reconcile_reason` and are not judged. `tools/install/distribution.py` keeps
+# a standalone copy of the same two columns.
+SUPERVISOR_ERROR_EVENT = "dispatch.supervisor.error"
+RUNTIME_END_FAILURE_CLASSES = frozenset({"runtime", "protocol"})
+RUNTIME_END_NOTES = frozenset({"dead-runtime-exit", "dead-runtime-error"})
+
+
+def runtime_ended_without_result(meta) -> bool:
+    """Whether the runtime, not the model, ended this attempt with no readable result."""
+    from dispatch_attempt_policy import readable_result
+    return bool(
+        (meta.get("note") in RUNTIME_END_NOTES
+         or (meta.get("terminal_event") == SUPERVISOR_ERROR_EVENT
+             and meta.get("failure_class") in RUNTIME_END_FAILURE_CLASSES))
+        and not readable_result(meta))
+
+
 def classify_supervisor_error(
     runtime: str,
     reason: str,

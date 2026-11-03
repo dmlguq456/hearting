@@ -283,7 +283,11 @@ def _sealed_owner_harnesses(path):
 
 
 def _first_frame_attempt(route, jobs):
-    """Find the exact first leg claimed by this route before selecting leg two."""
+    """Find the exact first leg claimed by this route before selecting leg two.
+
+    A leg that already ended is still the first leg: its harness is the one the other leg must
+    avoid. It counts only once its cleanup is settled, so leg two never starts over an unsettled
+    failure; a leg that is neither live, completed nor settled is reported as not yet placed."""
     try:
         lines = Path(jobs).read_text().splitlines()
     except OSError as exc:
@@ -294,15 +298,20 @@ def _first_frame_attempt(route, jobs):
         if len(fields) != 6:
             continue
         meta = parse_registry_metadata(fields[5])
-        if (fields[1] in {"open", "running"} or meta.get("note") == "completed-marker") and (
-                meta.get("route_id") == route.get("route_id")
+        if (meta.get("route_id") == route.get("route_id")
                 and meta.get("route_hash") == route.get("route_hash")
                 and meta.get("route_node") == "frame"
                 and meta.get("worker_type") == "frame"):
+            meta["_status"] = fields[1]
             matches.append(meta)
     if not matches or not matches[-1].get("attempt_id") or not matches[-1].get("harness"):
         return None, lines
-    return matches[-1], lines
+    last = matches[-1]
+    if last["_status"] in {"open", "running"} or last.get("note") == "completed-marker":
+        return last, lines
+    settled = bool(last.get("cleanup_receipt_digest")) or (
+        last.get("launch_outcome") == "never-launched" and last.get("launch_started") != "1")
+    return (last, lines) if last["_status"] in {"done", "killed", "cancelled"} and settled else (None, lines)
 
 
 def _frame_alternative_tiebreak(first_harness, selected, band, ranks, scores, *,
