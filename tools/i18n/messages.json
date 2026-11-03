@@ -2,6 +2,74 @@
  "schema": 1,
  "note": "User-facing text. Korean entries match the pre-catalog strings byte for byte. {name} fields are filled by str.format.",
  "messages": {
+  "completion.artifact": {
+   "en": "Artifact: {path}",
+   "ko": "산출물: {path}"
+  },
+  "completion.changed": {
+   "en": "Changed: {items}",
+   "ko": "바뀐 것: {items}"
+  },
+  "completion.checks": {
+   "en": "Checks: {items}",
+   "ko": "검증: {items}"
+  },
+  "completion.degraded": {
+   "en": "Nodes closed without independent review: {nodes}",
+   "ko": "독립 리뷰 없이 닫힌 노드: {nodes}"
+  },
+  "completion.head": {
+   "en": "[Completion summary]",
+   "ko": "[완료 요약]"
+  },
+  "completion.intent": {
+   "en": "Intent: {intent}{original}",
+   "ko": "의도: {intent}{original}"
+  },
+  "completion.intent_original": {
+   "en": " (original \"{original}\")",
+   "ko": " (원문 \"{original}\")"
+  },
+  "completion.no_artifact": {
+   "en": "Artifact: none",
+   "ko": "산출물: 없음"
+  },
+  "completion.no_checks": {
+   "en": "the report has no verification section",
+   "ko": "보고서에 검증 절이 없음"
+  },
+  "completion.no_remaining": {
+   "en": "nothing else is listed in the report",
+   "ko": "보고서에 따로 적힌 것 없음"
+  },
+  "completion.remaining": {
+   "en": "Unverified / remaining: {items}",
+   "ko": "미검증·남은 것: {items}"
+  },
+  "completion.result": {
+   "en": "Result: {result}",
+   "ko": "결과: {result}"
+  },
+  "completion.result_done": {
+   "en": "Done — the runtime confirmed the route and cycle closed",
+   "ko": "완료 — 런타임이 route·사이클 종결을 확인함"
+  },
+  "completion.result_leg": {
+   "en": "This leg ({index}/{legs}) is done — a later leg remains",
+   "ko": "이 leg({index}/{legs}) 완료 — 다음 leg가 남음"
+  },
+  "completion.unreadable": {
+   "en": "Checks / remaining: the report's format differs, so no machine summary — read the report itself",
+   "ko": "검증·남은 것: 보고서 형식이 달라 기계 요약 안 함 — 보고서 본문을 그대로 볼 것"
+  },
+  "direction.default_means": {
+   "en": "Start in the direction both legs agreed on",
+   "ko": "두 갈래가 함께 낸 방향대로 시작합니다"
+  },
+  "direction.notice": {
+   "en": "[Direction notice] The two review legs agreed on a direction and left nothing to ask, so work started without asking{option}. If anything needs fixing, let me know in your next message.",
+   "ko": "[방향 통지] 두 갈래 검토가 같은 방향을 내고 물을 것을 남기지 않아 묻지 않고 시작했습니다{option}. 고칠 점이 있으면 다음 말로 알려 주세요."
+  },
   "route.a.depends_on_work": {
    "en": "unconfirmed (depends on the work)",
    "ko": "미확인 (작업 의미에 따름)"
