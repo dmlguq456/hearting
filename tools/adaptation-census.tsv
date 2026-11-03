@@ -369,7 +369,6 @@ tool-deferred	opencode-text-request.test.py
 tool-deferred	profile
 tool-deferred	release
 tool-deferred	render-fleet-svg.py
-tool-deferred	render-hub.py
 tool-deferred	render-landing.py
 tool-deferred	report-bundle.py
 tool-deferred	report-manifest-verify.py
