@@ -975,7 +975,11 @@ guarded, with tracked status read again under the finish lock. The returned
 result may report unscoped tracked dirt as an observation, without attributing
 authorship or changing the stored receipt. Finish preserves the worktree and
 index, while its evidence, route/session identity, commit lineage and replay
-checks remain in force.
+checks remain in force. Review fixes pushed to the same PR branch after the
+finish are recorded by the same command: the finishing session, the same
+evidence and a commit that descends from the recorded one add an update (new
+commit and summary) beside the finish, which stays as it was; anything else
+still conflicts.
 
 ```text
 python3 utilities/capability-route.py finish [--route <route.json|rt-id>] --evidence <file|http(s)-url> --summary-file <file> [--commit <full-sha>]
