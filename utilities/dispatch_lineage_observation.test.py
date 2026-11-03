@@ -1497,5 +1497,204 @@ class BindingScopeDiscoveryTest(peer._TmpRootMixin, unittest.TestCase):
         self.assertEqual(handover.effective_parent(metas[0], jobs), "latest-holder")
 
 
+class ForkDescendantAuthorityTest(peer._TmpRootMixin, unittest.TestCase):
+    """Historical forks isolate authority without granting ancestor jobs."""
+    edge = peer.SessionNoticeIntegrationCorrectionTest.edge
+    notice = peer.SessionNoticeIntegrationCorrectionTest.notice
+    store = peer.SessionNoticeIntegrationCorrectionTest.store
+    duties = peer.SessionNoticeIntegrationCorrectionTest.duties
+    transport = peer.SessionNoticeIntegrationCorrectionTest.transport
+    unreadable = ObservationTest.unreadable
+
+    def setUp(self):
+        super().setUp()
+        os.environ["AGENT_HOME"] = str(ROOT)
+        handover._LINEAGE_GRAPH_CACHE.clear()
+        self.seat = tidy.Seat("pane", "historical-fork", pane="fixture:fork", harness="claude")
+        self.rows = []
+        for origin, target in (("P", "A"), ("A", "B"), ("B", "C"), ("A", "D")):
+            self.rows.append(dict(event="succession", source="tidy-clear", harness="claude",
+                                 sid=target, ts=1, **{"from": origin}))
+        self.write_rows()
+
+    def write_rows(self, reverse=False):
+        path = tidy._ledger_path(self.seat)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        rows = list(reversed(self.rows)) if reverse else self.rows
+        path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+        return path
+
+    def job(self, parent, tag):
+        meta = dict(attempt_schema_version="2", attempt_id="att-fork-" + tag,
+            parent_sid=parent, parent_harness="claude", dispatch_depth="1", worker_type="owner",
+            registered_worker="1", route_id="rt-" + tag, route_hash="sha256:" + tag, route_node="execute")
+        with self.jobs_path.open("a") as stream:
+            stream.write("now\trunning\t/w\t/w\tfixture\t" +
+                         ",".join(k + "=" + v for k, v in meta.items()) + "\n")
+        return meta
+
+    def bind(self, meta, origin, target, ts=2, harness="claude", source="clear"):
+        row = dict(event="handover", source=source, harness=harness, sid=target, ts=ts,
+            bindings=[handover.binding_of(self.jobs_path, meta)],
+            **{"from": {"harness": "claude", "sid": origin}})
+        self.rows.append(row)
+        self.write_rows()
+        return row
+
+    def completion(self, meta):
+        receipt = dict(schema_version=2, state="delivered", parent_attempt_id="att-fork-parent",
+            job_registry=str(self.jobs_path), children=[dict(attempt_id=meta["attempt_id"], status="done",
+            readiness="ready", required_action="inspect-done-failure", reason="terminal-failure-or-unclosed",
+            harness="claude")])
+        return pending.create(root=self.tmp_root, recipient_kind="claude-parent-runtime",
+            recipient_key=meta["parent_sid"], delivery_id="delivery-" + meta["attempt_id"],
+            session_generation="", session_generation_supported="0", attempt_ids=[meta["attempt_id"]],
+            parent_attempt_id="att-fork-parent", route_id=meta["route_id"], route_node="execute", receipt=receipt,
+            receipt_digest=pending._canonical_receipt_digest(receipt), row_revisions={meta["attempt_id"]: "original"})
+
+    def test_only_fork_source_and_ancestors_are_unresolved_in_both_graphs(self):
+        graph = handover.lineage_graph()
+        self.assertEqual(graph.unresolved, frozenset({("claude", "P"), ("claude", "A")}))
+        self.assertEqual(graph.seat_unresolved, graph.unresolved)
+        for sid, end, state in (("P", "P", "unresolved"), ("A", "A", "unresolved"),
+                                ("B", "C", "successor"), ("C", "C", "self"), ("D", "D", "self")):
+            self.assertEqual(handover.chain_end("claude", sid), (end, state))
+        self.assertEqual([(tidy._handover_origin(row)[1], row["sid"])
+                          for row in handover._chain_to(self.rows, "C", graph=graph)], [("B", "C")])
+
+    def test_direct_descendant_jobs_resolve_and_ancestors_remain_unowned(self):
+        for sid in ("P", "A", "B", "C"):
+            meta = self.job(sid, "direct-" + sid)
+            answer = handover.resolve_recipient("job-holder", metadata=meta, jobs=self.jobs_path)
+            if sid in ("P", "A"):
+                self.assertEqual((answer.state, handover.effective_parent(meta, self.jobs_path)), ("unreadable", ""))
+                for actor in ("P", "A", "B", "C", "D"):
+                    self.assertFalse(handover.owns(meta, actor, self.jobs_path))
+            else:
+                self.assertEqual((answer.session_id, answer.harness), ("C", "claude"))
+                self.assertTrue(handover.owns(meta, "C", self.jobs_path))
+        scopes = dict(handover.storage_recipients("C", harness="claude"))
+        self.assertEqual(set(scopes), {"B", "C"})
+        # Enumeration is never an authority fallback.
+        ancestor = self.job("A", "enumerated-ancestor")
+        record = {"attempt_ids": [ancestor["attempt_id"]]}
+        self.assertFalse(handover.record_for_session(record, frozenset(record["attempt_ids"]),
+            session="C", harness="claude", storage_key="A", jobs=self.jobs_path))
+
+    def test_unique_binding_is_exact_and_missing_attempt_uses_same_authority(self):
+        bound = self.job("A", "unique")
+        self.bind(bound, "A", "B")
+        self.assertTrue(handover.owns(bound, "C", self.jobs_path))
+        scopes = dict(handover.storage_recipients("C", harness="claude"))
+        self.assertEqual(set(scopes["A"]), {bound["attempt_id"]})
+        self.assertTrue(scopes["A"].lineage_notice)
+        # Route-free notices still require the seat judgment, not the binding.
+        notice = self.notice(sid="A", key="unbound-notice")
+        self.assertIsNone(handover.record_recipient(notice, "A", harness="claude", jobs=self.jobs_path))
+        for field in ("route_id", "route_hash", "route_node"):
+            self.assertEqual(handover.effective_parent(dict(bound, **{field: "different"}), self.jobs_path), "")
+        self.jobs_path.write_text("")
+        self.assertEqual(handover.record_recipient_binding({"attempt_ids": [bound["attempt_id"]]}, "A",
+            harness="claude", jobs=self.jobs_path), ("claude", "C"))
+
+    def test_competing_binding_siblings_and_different_depths_ignore_recency_and_duplicates(self):
+        for deep in (False, True):
+            meta = self.job("A", "conflict-" + str(deep))
+            first = self.bind(meta, "A", "B")
+            self.bind(meta, "A" if not deep else "D", "D" if not deep else "E", ts=20)
+            self.rows.append(dict(first))  # physical/logical duplicate
+            for reverse in (False, True):
+                with self.subTest(deep=deep, reverse=reverse):
+                    first["ts"] = 200 if reverse else 2
+                    self.write_rows(reverse=reverse)
+                    graph = handover.lineage_graph()
+                    key = tuple(handover.binding_of(self.jobs_path, meta)[f] for f in ("jobs", "route", "hash", "node"))
+                    self.assertIn(key, getattr(graph, "binding_conflicts", frozenset()))
+                    self.assertEqual(handover.effective_parent(meta, self.jobs_path), "")
+                    for actor in ("B", "C", "D", "E"):
+                        self.assertFalse(handover.owns(meta, actor, self.jobs_path))
+                    record = {"attempt_ids": [meta["attempt_id"]]}
+                    self.jobs_path.write_text("")
+                    self.assertIsNone(handover.record_recipient_binding(record, "A", harness="claude", jobs=self.jobs_path))
+
+    def test_serial_exact_transfers_and_cross_harness_retire_are_not_conflicts(self):
+        for cross in (False, True, "legacy"):
+            meta = self.job("A", "serial-" + str(cross))
+            self.bind(meta, "A", "B")
+            row = self.bind(meta, "B", "retired-Z" if cross else "C", ts=3,
+                            harness="codex" if cross else "claude", source="retire" if cross else "clear")
+            if cross == "legacy":
+                row["from"] = "B"
+                self.write_rows()
+            self.assertEqual(handover.effective_parent(meta, self.jobs_path), "retired-Z" if cross else "C")
+            self.assertFalse(getattr(handover.lineage_graph(), "binding_conflicts", frozenset()))
+
+    def test_merge_self_loop_and_cycle_through_fork_keep_whole_component_invalid(self):
+        for extra in ((("other", "B"),), (("D", "D"),), (("C", "A"),)):
+            original = list(self.rows)
+            for origin, target in extra:
+                self.rows.append(dict(event="succession", source="tidy-clear", harness="claude",
+                                      sid=target, ts=2, **{"from": origin}))
+            self.write_rows()
+            graph = handover.lineage_graph()
+            for sid in ("P", "A", "B", "C", "D"):
+                self.assertIn(("claude", sid), graph.unresolved)
+                self.assertIn(("claude", sid), graph.seat_unresolved)
+            self.rows = original
+
+    def test_warm_context_sees_hidden_fork_then_unreadable_and_recovery(self):
+        meta = self.job("C", "warm")
+        context = PeerReadContext()
+        self.assertTrue(handover.owns(meta, "C", self.jobs_path, read_context=context))
+        hidden = self.edge("claude", "C", "E")
+        self.edge("claude", "C", "F")
+        self.assertFalse(handover.owns(meta, "C", self.jobs_path, read_context=context))
+        path = tidy._ledger_path(hidden)
+        with self.unreadable(path):
+            self.assertFalse(handover.owns(self.job("B", "unreadable"), "C", self.jobs_path, read_context=context))
+        self.assertEqual(handover.effective_parent(meta, self.jobs_path), "")
+        # Repair only the fixture's new fork; a fresh pass recovers the suffix.
+        for copy in ledger_copies(hidden, dict(harness="claude", sid="F")):
+            if copy.exists():
+                copy.write_text("")
+        # E's logical copy also contains its incoming C->E row.
+        tidy._native_ledger_path(tidy.session_seat(hidden, "claude", "E")).write_text("")
+        self.assertTrue(handover.owns(meta, "C", self.jobs_path, read_context=context))
+
+    def test_pending_descendant_and_unique_bound_job_deliver_and_ack_original_storage(self):
+        direct = self.job("C", "pending-direct")
+        bound = self.job("A", "pending-bound")
+        ancestor = self.job("A", "pending-unbound")
+        self.bind(bound, "A", "B")
+        records = [self.completion(meta) for meta in (direct, bound, ancestor)]
+        self.notice(sid="A", key="ancestor-notice")
+        with mock.patch("dispatch_notice_state.keep_claim", return_value=True):
+            delivered, _count = sweep.sweep_deliver(self.tmp_root, "claude-parent-runtime", "C")
+        self.assertEqual({a for record in delivered for a in record["attempt_ids"]},
+                         {direct["attempt_id"], bound["attempt_id"]})
+        self.assertEqual(sweep.ack_delivered(self.tmp_root, "C", delivered, acked_by="fixture-render"), 2)
+        for meta, record in zip((direct, bound), records):
+            self.assertEqual(pending.read(self.tmp_root, meta["parent_sid"], record["delivery_id"])["state"], "acked")
+        self.assertIsNone(pending.read(self.tmp_root, "C", records[1]["delivery_id"]))
+        self.assertEqual(pending.read(self.tmp_root, "A", records[2]["delivery_id"])["state"], "pending")
+
+    def test_native_notice_preparation_uses_descendant_only_and_rechecks_new_fork(self):
+        direct = self.notice(sid="B", key="descendant-notice")
+        self.notice(sid="A", key="ancestor-notice")
+        with self.transport("C") as native:
+            steward._resume_session_notice_obligations(self.duties(), self.store())
+        self.assertEqual(native.call_count, 1)
+        self.assertEqual(pending.read(self.tmp_root, "B", direct["delivery_id"])["state"], "sent-ambiguous")
+        another = self.notice(sid="B", key="new-notice")
+        def fork_before_native(*args, **kwargs):
+            self.edge("claude", "C", "E")
+            self.edge("claude", "C", "F")
+            return SimpleNamespace(state="ready")
+        with self.transport("C", readiness=fork_before_native) as native:
+            steward._resume_session_notice_obligations(self.duties(), self.store())
+        native.assert_not_called()
+        self.assertNotEqual(pending.read(self.tmp_root, "B", another["delivery_id"])["state"], "acked")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
