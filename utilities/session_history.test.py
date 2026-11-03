@@ -12,6 +12,18 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import session_history as viewer
 
+# Viewer text comes from tools/i18n/messages.json. These suites keep the Korean words byte for
+# byte under a Korean declaration; ``EnglishTextTests`` checks the default.
+_KOREAN = patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"})
+
+
+def setUpModule():
+    _KOREAN.start()
+
+
+def tearDownModule():
+    _KOREAN.stop()
+
 
 class HistoryTests(unittest.TestCase):
     def test_confirmed_predecessor_beats_chronological_neighbor(self):
@@ -325,6 +337,43 @@ TARGET = "5ed20fe8-0000-4000-8000-000000000004"
 STRANGER = "0dd5e55a-0000-4000-8000-000000000005"   # never recorded anywhere
 
 
+@patch.dict(os.environ, {"FLEET_NOW_LANG": "English"})
+class EnglishTextTests(unittest.TestCase):
+    """Without a Korean declaration the viewer speaks English."""
+
+    def test_labels_status_and_prompts(self):
+        rows = [
+            {"harness": "claude", "sid": "new", "relation": "confirmed",
+             "predecessor": {"harness": "claude", "sid": "old"}},
+            {"harness": "claude", "sid": "old", "relation": "unknown"},
+            {"harness": "claude", "sid": "neighbor", "relation": "chronological"},
+        ]
+        entries, _reason = viewer._entries_for_generation(rows, 1)
+        self.assertEqual([row["_label"] for row in entries],
+                         ["confirmed earlier conversation", "relation not confirmed"])
+        self.assertEqual(viewer._entries_for_generation(rows, 9)[1], "generation out of range (1–2)")
+        self.assertEqual(viewer._entries_for_generation([], 1)[1], "link not confirmed")
+        lone = [{"harness": "claude", "sid": "new", "relation": "unknown"}]
+        self.assertEqual(viewer._entries_for_generation(lone, 1)[1],
+                         "no confirmed earlier conversation · hearting run session_history "
+                         "--harness <harness> --session-id <SID>")
+        missing = {"harness": "claude", "sid": "missing0123", "transcript": {"path": "/missing/transcript"},
+                   "_label": "confirmed earlier conversation"}
+        self.assertEqual(viewer._render(missing)[0], "confirmed earlier conversation · claude missing0 · "
+                                                     "transcript missing: the transcript file is gone")
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertEqual(viewer._render({"harness": "claude", "sid": "folder", "transcript": {"path": directory}})[0],
+                             "earlier conversation · claude folder · transcript unreadable: not a regular file")
+        with patch.object(viewer, "_show", return_value=True), \
+             patch("builtins.input", side_effect=["p", "q"]) as prompt, \
+             contextlib.redirect_stdout(io.StringIO()):
+            viewer._display(rows[:2], 1)
+        self.assertEqual(prompt.call_args_list[0].args[0],
+                         "p earlier generation · n newer generation · q quit: ")
+        self.assertEqual(prompt.call_args_list[1].args[0],
+                         "p earlier generation · n newer generation · q quit · no earlier generation: ")
+
+
 class ExplicitTargetTests(unittest.TestCase):
     """An explicit other session or seat key never opens the caller's conversation."""
 
@@ -335,7 +384,8 @@ class ExplicitTargetTests(unittest.TestCase):
         state = Path(directory.name) / "state"
         self.env = {"HOME": directory.name, "XDG_STATE_HOME": str(state),
                     "HERDR_SOCKET_PATH": SOCKET, "HERDR_PANE_ID": CALLER_PANE,
-                    "HERDR_ACTIVE_PANE_ID": CALLER_PANE, "CLAUDE_CODE_SESSION_ID": CALLER}
+                    "HERDR_ACTIVE_PANE_ID": CALLER_PANE, "CLAUDE_CODE_SESSION_ID": CALLER,
+                    "FLEET_NOW_LANG": "Korean"}
         for context in (
                 patch.dict("os.environ", self.env, clear=True),
                 patch.dict(self.st._PROJECT_KEYS, {}, clear=True),
