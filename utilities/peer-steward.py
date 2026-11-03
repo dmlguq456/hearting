@@ -10321,8 +10321,24 @@ def _prefill_live_inboxes(root, *, deadline_ns, expected_root_identity=None):
     return result
 
 
+_REF_LOCK_NAME = re.compile(r"\.lock-[0-9a-f]{32}")
+
+
+def _peer_history_order(name):
+    # Rows first, then ref lock files: one cursor walks both, and an older
+    # row-only cursor keeps its place.
+    return (name.startswith(".lock-"), name)
+
+
 def _prune_received_peer_history(*, now=None, deadline_ns=None, start_after=None):
     """Drop received queue rows past the 7-day history window; transfers stay.
+
+    The same walk then removes ``.lock-<ref>`` files whose row no longer exists
+    and that were created before the window (`remove_rowless_ref_lock`); no
+    other code deletes them. Preparation locks are left alone: a ``prepare-``
+    key is a hash of sender, recipient and body that any later identical send
+    takes again, so no row or state says it is finished. Current releases
+    remove their own preparation lock directories on release.
 
     ``start_after`` resumes the sorted walk at the next file name. A pass cut
     off by the shared deadline returns ``complete=False`` and the last examined
@@ -10331,16 +10347,23 @@ def _prune_received_peer_history(*, now=None, deadline_ns=None, start_after=None
     """
     now = time.time() if now is None else float(now)
     cutoff = now - PEER_HISTORY_RETENTION_SECONDS
-    result = {"removed": 0, "examined": 0, "cursor": None, "complete": True}
+    result = {"removed": 0, "locks_removed": 0, "examined": 0, "cursor": None,
+              "complete": True}
     try:
         pending_dir = peer_message._pending_dir()
-        names = sorted(path.name for path in pending_dir.glob("*.json"))
+        with os.scandir(pending_dir) as entries:
+            listed = [entry.name for entry in entries]
     except OSError:
         return result
+    rows = {name for name in listed if name.endswith(".json")}
+    names = sorted((name for name in listed
+                    if name in rows or _REF_LOCK_NAME.fullmatch(name)),
+                   key=_peer_history_order)
     start_after = start_after if isinstance(start_after, str) and start_after else None
     last = start_after
     for name in names:
-        if start_after is not None and name <= start_after:
+        if (start_after is not None
+                and _peer_history_order(name) <= _peer_history_order(start_after)):
             continue
         if deadline_ns is not None and time.monotonic_ns() >= deadline_ns:
             result["complete"] = False
@@ -10348,6 +10371,12 @@ def _prune_received_peer_history(*, now=None, deadline_ns=None, start_after=None
             return result
         result["examined"] += 1
         last = name
+        if name.startswith(".lock-"):
+            ref = name[len(".lock-"):]
+            if ref + ".json" not in rows and peer_message.remove_rowless_ref_lock(
+                    pending_dir, ref, created_before=cutoff):
+                result["locks_removed"] += 1
+            continue
         path = pending_dir / name
         try:
             row = json.loads(path.read_text(encoding="utf-8"))
@@ -10363,6 +10392,7 @@ def _prune_received_peer_history(*, now=None, deadline_ns=None, start_after=None
             os.unlink(path)
         except OSError:
             continue
+        rows.discard(name)
         result["removed"] += 1
     if result["removed"]:
         try:
@@ -10786,7 +10816,8 @@ def _runner_maintenance_pass(store):
                 root, "peer-history", {
                     "last_pass_ns": time.time_ns() if counts.get("complete", True) else 0,
                     "cursor": counts.get("cursor"),
-                    "removed": counts["removed"]},
+                    "removed": counts["removed"],
+                    "locks_removed": counts.get("locks_removed", 0)},
                 expected_root_identity=identity)
     except (OSError, ValueError, RuntimeError):
         pass
