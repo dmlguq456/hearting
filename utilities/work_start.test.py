@@ -4027,6 +4027,39 @@ class NeverStartedReplacementNormalStartTest(unittest.TestCase):
         self.assertEqual(len(self.launches), 1)
         self.assertIn("continue the host runs", self.delivered_prompts[replacement])
 
+    def test_unreadable_lineage_during_the_claim_parent_check_waits_for_the_same_command(self):
+        # RV-1142 #1147 R1: the successor of a /clear handover starts once while the seat lineage
+        # cannot be read during the claim-time parent check. That is a wait for the same command,
+        # not an identity refusal: nothing launches and no identity notice is left for the parent.
+        import dispatch_seat_handover as handover
+        import dispatch_supervision
+        import route_authority
+        owner = self._seed_initial_owner()
+        self._finish_blocked(owner)
+        self._store(owner, "continue the host runs", "input-unreadable")
+        self._handover(owner, "successor")
+        W.default_parent_session_id.return_value = "successor"
+        check = route_authority.require_replacement_parent
+
+        def unreadable(*args, **kwargs):
+            with mock.patch.object(handover, "_readable_lineage_signature",
+                                   side_effect=OSError("lineage-directory-changed")):
+                return check(*args, **kwargs)
+
+        with mock.patch.object(route_authority, "require_replacement_parent", unreadable), \
+                mock.patch.object(dispatch_supervision, "handover_identity_refusal",
+                                  side_effect=AssertionError("identity notice")) as notice:
+            result = self._cli_start()
+        self.assertEqual((result.get("reason"), result.get("next_action")),
+                         ("handover-unreadable", "same-command"), result)
+        self.assertTrue(result.get("retry_when"), result)
+        self.assertEqual(self.launches, [])
+        notice.assert_not_called()
+        # Once the lineage reads again, the same command launches the replacement.
+        again = self._cli_start()
+        self.assertEqual(again.get("state"), "running", again)
+        self.assertEqual(len(self.launches), 1)
+
     def test_off_chair_start_retains_correction_without_launching(self):
         owner_a, owner_b, owner_c, _ = self._build_unstarted_chain()
         self._store(owner_b, "off-chair retained correction", "input-off-chair")

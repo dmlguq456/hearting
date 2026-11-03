@@ -1085,7 +1085,8 @@ def require_replacement_parent(jobs, rows, meta, *, current_session) -> None:
     Dispatch depth 2: the caller's own attempt is the registered parent attempt
     or its final launched replacement, and is live. Otherwise: the registered
     parent session or its same-seat successor. ``current_session`` is called
-    only on that second path.
+    only on that second path, where an unreadable lineage is the recipient
+    judgment's wait for the same command, never a verdict on the caller.
     """
     if meta.get('dispatch_depth') == '2':
         import dispatch_contract as DC
@@ -1097,8 +1098,18 @@ def require_replacement_parent(jobs, rows, meta, *, current_session) -> None:
         fields, caller_meta = rows[caller]
         if fields[1] not in {'open', 'running'} or not DC._parent_liveness_evidence(Path(jobs), caller_meta)[0]:
             raise DC.DispatchContractError('replacement-parent-not-live')
-    elif not meta.get('parent_sid') or not owns(meta, current_session(), jobs):
+    elif not meta.get('parent_sid'):
         raise _contract_error('replacement-parent-identity-unproven')
+    else:
+        session = current_session()
+        if not session:
+            raise _contract_error('replacement-parent-identity-unproven')
+        from dispatch_seat_handover import recipient_continuation, resolve_recipient
+        holder = resolve_recipient("job-holder", metadata=meta, jobs=jobs)
+        if holder.state == "unreadable":
+            require_continuation(recipient_continuation(holder))
+        if holder.session_id != session:
+            raise _contract_error('replacement-parent-identity-unproven')
 
 
 def replacement_parent_matches(source, candidate, jobs, *, lineage=False) -> bool:
@@ -1761,14 +1772,14 @@ def require_recovery_binding(record, source, candidate, jobs):
     if source.get("dispatch_depth") == "1" and candidate.get("parent_sid") != source.get("parent_sid"):
         # An unreadable lineage is the existing recipient judgment's wait for the same
         # command, never a verdict that the candidate is not the parent (LOOP §4).
+        if not (candidate.get("parent_sid") and parent_attempt_succeeded(
+                jobs, source.get("parent_attempt_id"), candidate.get("parent_attempt_id"))):
+            raise _contract_error("replacement-launch-binding-mismatch", source.get("attempt_id", ""))
         from dispatch_seat_handover import recipient_continuation, resolve_recipient
         holder = resolve_recipient("job-holder", metadata=source, jobs=jobs)
         if holder.state == "unreadable":
             require_continuation(recipient_continuation(holder))
-        parent_matches = (parent_attempt_succeeded(jobs, source.get("parent_attempt_id"),
-                                                   candidate.get("parent_attempt_id"))
-                          and bool(candidate.get("parent_sid"))
-                          and holder.session_id == candidate.get("parent_sid"))
+        parent_matches = holder.session_id == candidate.get("parent_sid")
     else:
         parent_matches = replacement_parent_matches(source, candidate, jobs)
     if not parent_matches:
