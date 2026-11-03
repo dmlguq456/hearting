@@ -43,6 +43,17 @@ class LifecycleTest(unittest.TestCase):
 
     def _run_fake_runtime_chain(self, harness, mode):
         from foreground_activity import ForegroundActivityContext
+        deadline = 2
+        # A blocked chain must reach no-progress inside the hard deadline,
+        # after five interpreter start-ups. An active chain's runtime-only
+        # phases (the fake CLI's own quiet time before and after its tool,
+        # plus interpreter start-up and exit, none of which counts as
+        # progress) must stay inside one window. A quarter of the deadline
+        # leaves both sides room on a loaded runner.
+        window = deadline / 4
+        # Two of the launcher's samples (window / 20 each) are enough for it
+        # to observe the CLI alone before and after its tool.
+        runtime_only = window / 10
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
             helper = base / "runtime_helper.py"
@@ -64,10 +75,10 @@ class LifecycleTest(unittest.TestCase):
             fake_cli.write_text(
                 "import subprocess,sys,time\n"
                 "mode,log,tool=sys.argv[1:]\n"
-                "time.sleep(0.04)\n"
+                f"time.sleep({runtime_only})\n"
                 "p=subprocess.Popen([sys.executable,tool,mode,log])\n"
                 "p.wait()\n"
-                "time.sleep(0.12)\n",
+                f"time.sleep({runtime_only})\n",
                 encoding="utf-8",
             )
             helper.write_text(
@@ -93,10 +104,10 @@ class LifecycleTest(unittest.TestCase):
             )
             start = L.process_start_ticks(child.pid)
             context = ForegroundActivityContext(
-                0.22, harness, log, {}, runtime_executable=harness,
+                window, harness, log, {}, runtime_executable=harness,
             )
             try:
-                outcome = L.wait_foreground(child, 2, poll_interval=0.01,
+                outcome = L.wait_foreground(child, deadline, poll_interval=0.01,
                                             activity_context=context)
                 return outcome
             finally:
