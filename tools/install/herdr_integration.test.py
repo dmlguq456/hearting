@@ -666,7 +666,9 @@ class NativeSessionReporterFixtureTest(unittest.TestCase):
                 mock.patch("peer_obligations.request_obligation_recovery"), \
                 mock.patch.object(module.time, "time_ns", return_value=123456):
             module.project({"hook_event_name": "SessionStart", "source": "resume"}, "ses-A")
+        # A display header: the steward mark reads the runner-published relations.
         project.assert_called_once_with("codex", "ses-A", worker=False, report_session=True,
+                                        display_relations=True,
                                         session_seq=123456, session_start_source="resume")
 
 

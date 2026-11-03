@@ -1014,15 +1014,18 @@ class ProjectionObservationTest(unittest.TestCase):
             with redirect_stdout(output):
                 self.assertEqual(hp.main(["--harness", "opencode", "--session-id", "ses_A", "--pane", "fixture-pane",
                                           "--seq", "1000001", "--session-start-source", "startup"]), 0)
+            # The CLI only refreshes a pane header, so it reads published relations.
             project.assert_called_once_with("opencode", "ses_A", pane_id="fixture-pane", report_session=True,
-                                            observation={}, session_seq=1000001, session_start_source="startup")
+                                            observation={}, display_relations=True,
+                                            session_seq=1000001, session_start_source="startup")
             self.assertEqual(output.getvalue(), "{}\n")
         for harness in ("codex", "claude"):
             with self.subTest(harness=harness), unittest.mock.patch.object(hp, "project") as project:
                 output = StringIO()
                 with redirect_stdout(output):
                     self.assertEqual(hp.main(["--harness", harness, "--session-id", "actual"]), 0)
-                project.assert_called_once_with(harness, "actual", pane_id=None, report_session=True, observation=None)
+                project.assert_called_once_with(harness, "actual", pane_id=None, report_session=True,
+                                                observation=None, display_relations=True)
                 self.assertEqual(output.getvalue(), "")
 
 

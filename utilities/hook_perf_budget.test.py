@@ -184,12 +184,6 @@ KNOWN_GROWTH = {
     "prompt-runner": (("stats",), _LINEAGE_WALKS),
     "rewake-bash": (("growth", "stats"), _REWAKE.format(event="Bash call")),
     "rewake-stop": (("growth", "stats"), _REWAKE.format(event="Stop")),
-    "codex-prompt": (("growth", "stats"), (
-        "adapters/codex/hooks/herdr_session_projection.py:58 - the Codex projection does not "
-        "ask for published steward relations, so is_steward (tools/fleet/herdr_projection.py:358 "
-        "-> :267) resolves live relations and a legacy steward marker makes "
-        "utilities/dispatch_seat_handover.py:939-941 list and read every ledger (710 -> 1,378 "
-        "opens, 5.8k -> 7.8k stat calls) - removed by the Codex projection relations follow-up")),
 }
 # The peer-module scans each case reaches; a renamed scan function would run
 # with its 2.5 s deadline again, so the lift itself is asserted.
