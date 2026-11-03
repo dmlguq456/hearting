@@ -50,8 +50,9 @@ class ActivityWindow:
 
     Foreground workers (``dispatch_lifecycle.wait_foreground``) and ordinary
     supervised owner turns both decide through it. Unknown samples discard
-    accumulated quiet time; a later known quiet sample starts a fresh full
-    window, so time the observer could not see never counts as quiet.
+    accumulated quiet time. A later known sample starts a fresh full window
+    when its observation completes, so neither unknown time nor the time spent
+    taking that opening observation counts as quiet.
     Sampling is throttled separately from the caller's polling so transport
     or wait-loop bookkeeping cannot drive a broad process scan on every tick.
     """
@@ -87,13 +88,16 @@ class ActivityWindow:
                 active = bool(observation.active)
             except Exception:
                 uncertain, active = True, False
+            # A window opens when the observation that opens it is complete;
+            # a slow scan's own duration is not observed quiet.
+            seen = self.clock() if now is None else stamp
             self.last_uncertain = uncertain
             if uncertain:
                 self.quiet_since = None
             elif payload_progress or active:
-                self.quiet_since = stamp
+                self.quiet_since = seen
             elif self.quiet_since is None:
-                self.quiet_since = stamp
+                self.quiet_since = seen
         elif self.last_uncertain:
             self.quiet_since = None
         elif payload_progress:
@@ -237,7 +241,7 @@ def build_activity_context(*, worker_type: str, harness: str, log_path: Path,
 
 def owner_turn_activity(args, process, *, harness: str,
                         session_id: str | None = None,
-                        window_seconds: float = 7200.0):
+                        window_seconds: float = OWNER_TURN_IDLE_SECONDS):
     """Bind one owner-turn observer to its registered attempt and native PID.
 
     Any missing or conflicting identity becomes an uncertain observer. That

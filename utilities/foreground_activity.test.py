@@ -475,6 +475,47 @@ class ForegroundActivityTests(unittest.TestCase):
                 process.terminate()
                 process.wait(timeout=5)
 
+    def test_an_elapsed_window_is_acted_on_only_after_a_fresh_observation(self):
+        clock = SimpleNamespace(now=0.0)
+        observed = SimpleNamespace(active=False, uncertain=False)
+        window = A.ActivityWindow(lambda: observed, window_seconds=10, sample_seconds=3,
+                                  clock=lambda: clock.now)
+        for stamp in (0.0, 3.0, 6.0, 9.0):
+            clock.now = stamp
+            self.assertFalse(window.expired())
+        clock.now = 10.0
+        # The throttled sample from t=9 already makes the window look elapsed.
+        self.assertTrue(window.expired())
+        # Activity since that sample shows only in a fresh observation.
+        observed.active = True
+        self.assertFalse(window.expired(resample=True))
+
+    def test_the_observation_that_opens_a_window_is_not_counted_as_quiet(self):
+        quiet = SimpleNamespace(active=False, uncertain=False)
+        unknown = SimpleNamespace(active=True, uncertain=True)
+        for observations, opened in (([quiet], 0.3), ([unknown, quiet], 0.6)):
+            with self.subTest(first=[o.uncertain for o in observations]):
+                clock = SimpleNamespace(now=0.0)
+                pending = list(observations)
+
+                def observe():
+                    observation = pending.pop(0) if pending else quiet
+                    if not observation.uncertain:
+                        # A known sample whose /proc scan is slow on a loaded host.
+                        clock.now += 0.3
+                    return observation
+
+                window = A.ActivityWindow(observe, window_seconds=1, sample_seconds=0.3,
+                                          clock=lambda: clock.now)
+                while window.quiet_since is None:
+                    self.assertFalse(window.expired())
+                    clock.now = max(clock.now, window.next_sample)
+                self.assertEqual(window.quiet_since, opened)
+                clock.now = opened + 0.99
+                self.assertFalse(window.expired())
+                clock.now = opened + 1.0
+                self.assertTrue(window.expired())
+
 
 if __name__ == "__main__":
     unittest.main()
