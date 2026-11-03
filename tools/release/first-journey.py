@@ -27,6 +27,11 @@ from pathlib import Path
 VERSION = "1"
 PROFILES = {"claude-only": ["claude"], "all": ["claude", "codex", "opencode"]}
 TASK_HARNESSES = {"claude-only": ["claude"], "all": ["codex", "opencode"]}
+
+
+def task_harnesses(profile: str, selected=None) -> list[str]:
+    """The harnesses whose task `profile` measures: every one, or only those `--harness` names."""
+    return [name for name in TASK_HARNESSES[profile] if not selected or name in selected]
 AUTH_NAMES = {"claude": [".credentials.json"], "codex": ["auth.json"], "opencode": ["auth.json"]}
 OPENCODE_V2_AUTH_NAME = "credentials-v2.json"
 AUTH_CAPTURE_LIMIT = 64 * 1024
@@ -1054,6 +1059,7 @@ def opencode_last_model() -> str | None:
 def journey_profile(profile: str, args: argparse.Namespace, repo: Path) -> dict:
     global _ACTIVE_AUTH
     began = time.monotonic()
+    tasks = task_harnesses(profile, getattr(args, "harness", None))
     record: dict = {"schema": "hearting-first-journey-v1", "schema_version": 1, "profile": profile,
                     "mode": "model-free" if args.model_free else "real",
                     "source": {"kind": args.source, "tag": None, "ref": args.ref if args.source == "checkout" else None, "sha256": None},
@@ -1063,7 +1069,8 @@ def journey_profile(profile: str, args: argparse.Namespace, repo: Path) -> dict:
                                   "host_io_exceptions": ["source-staging", "summary-export"]},
                     "steps": [], "failures": [], "harnesses": [],
                     "account_usage": {"before": None, "after": None, "delta_pp": None, "attribution": "uncertain", "note": "may include other work", "reason": "measurement-credential-unavailable"},
-                    "headless_uncovered": ["login", "first trust dialog", "theme", "native question tool"]}
+                    "headless_uncovered": ["login", "first trust dialog", "theme", "native question tool"],
+                    "task_harnesses": tasks}
     scrub: set[str] = set()
     tempbase = Path(args.local_root).resolve()
     world = Path(tempfile.mkdtemp(prefix=f"first-journey-{profile}-", dir=tempbase))
@@ -1171,7 +1178,7 @@ def journey_profile(profile: str, args: argparse.Namespace, repo: Path) -> dict:
                         versions[name] = version["output"][-120:].strip().replace(str(world), "<world>") if generations[name] else "unknown"
                     else:
                         versions[name] = version["output"][-120:].strip().replace(str(world), "<world>") if version["exit"] == 0 else "unknown"
-                    if name in TASK_HARNESSES[profile]:
+                    if name in tasks:
                         transport_supported[name] = probe_transport(name, binaries[name][1], world, env,
                                                                      cli_mounts, args.step_timeout, generations.get(name))
             expected_visible = ["claude"] if profile == "claude-only" else ["claude", "codex", "opencode"]
@@ -1227,7 +1234,7 @@ def journey_profile(profile: str, args: argparse.Namespace, repo: Path) -> dict:
                                                            "detail": ", ".join(missing[:3])})
                 except (ValueError, OSError): record["failures"].append({"reason": "claude-settings-invalid"})
         # Demo test is explicitly observed before and after; baseline failure is expected.
-        for harness in TASK_HARNESSES[profile]:
+        for harness in tasks:
             repo_dir = world / "repos" / harness
             repo_dir.mkdir()
             fixture = repo / "tools/release/fixtures/first-journey"
@@ -1495,6 +1502,8 @@ def main() -> int:
     runp.add_argument("--local-root", default="/tmp"); runp.add_argument("--prompt", default=DEFAULT_PROMPT); runp.add_argument("--model-free", action="store_true")
     runp.add_argument("--keep-world", choices=("always", "failure", "never"), default="failure"); runp.add_argument("--step-timeout", type=int, default=300); runp.add_argument("--task-timeout", type=int, default=600)
     runp.add_argument("--profile", action="append", choices=tuple(PROFILES), help="run only this profile (repeatable; default: every profile)")
+    runp.add_argument("--harness", action="append", choices=tuple(AUTH_NAMES),
+                      help="measure the task only with this harness (repeatable; default: every task harness of the profile)")
     args = parser.parse_args()
     if args.command == "login":
         try:
@@ -1575,7 +1584,15 @@ def main() -> int:
     signal.signal(signal.SIGINT, auth_signal)
     signal.signal(signal.SIGTERM, auth_signal)
     signal.signal(signal.SIGHUP, auth_signal)
-    for profile in dict.fromkeys(args.profile or ("claude-only", "all")):
+    profiles = list(dict.fromkeys(args.profile or ("claude-only", "all")))
+    if args.harness:
+        empty = [profile for profile in profiles if not task_harnesses(profile, args.harness)]
+        if args.profile and empty:
+            print(f"no-selected-harness: profile {', '.join(empty)} measures none of "
+                  f"{', '.join(args.harness)}", file=sys.stderr)
+            return 2
+        profiles = [profile for profile in profiles if profile not in empty]
+    for profile in profiles:
         record = journey_profile(profile, args, repo)
         write_report(record, output / profile)
         if record["failures"]: overall = 1
