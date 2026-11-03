@@ -1135,6 +1135,116 @@ class FramedStartTest(FramedBase):
         self.start()
         self.assertEqual(len(self.calls), 2)  # both rows exist: a repeat launches nothing
 
+    def _overlap_launcher(self, *, after_alternative=None, alternative=None, report=True):
+        """A launcher whose first leg registers its row, reports it (or not), then waits for the
+        alternative before its launch returns; `after_alternative` is what that rest then does."""
+        import threading
+        alternative_started, first_returned, seen = threading.Event(), threading.Event(), {}
+
+        def launcher(command, **kwargs):
+            node = command[command.index("--route-node") + 1]
+            if node == "frame":
+                completed = self.run_fake(command)               # the row is registered here
+                if report:
+                    kwargs.get("on_registered", lambda: None)()
+                seen["first saw the alternative start"] = alternative_started.wait(timeout=10 if report else 0.2)
+                first_returned.set()
+                return after_alternative(command, completed) if after_alternative else completed
+            seen["alternative saw the first return"] = first_returned.is_set()
+            alternative_started.set()
+            return alternative(command) if alternative else self.run_fake(command)
+        return launcher, seen
+
+    def test_the_alternative_launches_once_the_first_leg_is_registered_not_after_its_whole_launch(self):
+        """The alternative reads only the first leg's row (its harness and model): it is launched while
+        the first leg's launch still spawns and watches its worker, and the receipts stay in leg order."""
+        launcher, seen = self._overlap_launcher()
+        result = W.start_work(self.route, self.path, self.jobs, run=launcher)
+        self.assertEqual(result["state"], "preparing", result)
+        self.assertEqual(seen, {"first saw the alternative start": True,
+                                "alternative saw the first return": False})
+        nodes = [c[c.index("--route-node") + 1] for c in self.calls]
+        self.assertEqual(nodes, FRAME_IDS)
+        self.assertEqual([launch["attempt_id"] for launch in result["launches"]],
+                         [W.attempt_id(self.route, node) for node in FRAME_IDS])
+        first, second = result["launches"]
+        # the start receipt keeps when each launch began, had its row registered and returned
+        self.assertLessEqual(first["started_at"], first["registered_at"])
+        self.assertLessEqual(first["registered_at"], second["started_at"])
+        self.assertLessEqual(second["started_at"], first["ended_at"])
+        self.assertNotIn("registered_at", second)   # the last leg reports its row to no one
+        self.assertEqual(sorted(result["frame_attempts"]),
+                         sorted(W.attempt_id(self.route, node) for node in FRAME_IDS))
+
+    def test_without_the_registration_line_the_start_waits_for_the_whole_first_launch(self):
+        """A line that never arrives (not written, nobody reading) leaves the start sequential, same result."""
+        launcher, seen = self._overlap_launcher(report=False)
+        result = W.start_work(self.route, self.path, self.jobs, run=launcher)
+        self.assertEqual(result["state"], "preparing", result)
+        self.assertEqual(seen, {"first saw the alternative start": False,
+                                "alternative saw the first return": True})
+        self.assertEqual([launch["attempt_id"] for launch in result["launches"]],
+                         [W.attempt_id(self.route, node) for node in FRAME_IDS])
+        self.assertNotIn("registered_at", result["launches"][0])
+
+    def test_a_first_leg_that_fails_after_registering_ends_as_the_sequential_start_did(self):
+        """The first launch closes its row unlaunched after the alternative began: both legs stay
+        registered once, and the frame goes on to its join and replacement exactly as before."""
+        def unlaunched(command, completed):
+            aid = command[command.index("--attempt-id") + 1]
+            meta = {"attempt_id": aid, "parent_sid": "parent", "worker_type": "frame", "route_node": "frame",
+                    "route_id": self.route["route_id"], "route_hash": self.route["route_hash"],
+                    "launch_outcome": "never-launched", "parent_completion_delivery": "codex-managed-gateway"}
+            with self.jobs.open("a") as stream:
+                stream.write("now\tdone\t12\tparent\ttask\t" + ",".join(k + "=" + v for k, v in meta.items()) + "\n")
+            return subprocess.CompletedProcess(
+                command, 73, "attempt_registered=" + aid + "\ncheck=failed\nreason=spawn-failed\nchild_spawned=0\n", "")
+
+        launcher, seen = self._overlap_launcher(after_alternative=unlaunched)
+        overlapped = W.start_work(self.route, self.path, self.jobs, run=launcher)
+        self.assertEqual(seen["alternative saw the first return"], False)
+        nodes = [c[c.index("--route-node") + 1] for c in self.calls]
+        self.assertEqual(nodes, FRAME_IDS)                          # each leg launched once, no duplicate
+        self.assertEqual(sorted(overlapped["frame_attempts"]),
+                         sorted(W.attempt_id(self.route, node) for node in FRAME_IDS))
+        self.assertEqual([launch["exit_code"] for launch in overlapped["launches"]], [73, 0])
+        # the same failure on a launcher that never reports the row: the start main always ran
+        rows = self.jobs.read_text()
+        self.jobs.write_text("")
+        self.calls.clear()
+        launcher, seen = self._overlap_launcher(after_alternative=unlaunched, report=False)
+        sequential = W.start_work(self.route, self.path, self.jobs, run=launcher)
+        self.assertEqual(seen["alternative saw the first return"], True)
+        for key in ("state", "reason", "required_action", "frame_attempts", "parent_next"):
+            self.assertEqual(overlapped.get(key), sequential.get(key), key)
+        self.assertEqual(self.jobs.read_text().count("\n"), rows.count("\n"))
+
+    def test_an_alternative_error_is_not_masked_by_the_first_legs_late_error(self):
+        """Both launches fail: the alternative's error is the one raised, the first leg's is noted on it."""
+        def tail_error(command, completed):
+            raise OSError("first-tail-error")
+
+        def alternative_error(command):
+            raise RuntimeError("alternative-error")
+
+        launcher, _ = self._overlap_launcher(after_alternative=tail_error, alternative=alternative_error)
+        with self.assertRaises(RuntimeError) as raised:
+            W.start_work(self.route, self.path, self.jobs, run=launcher)
+        self.assertEqual(str(raised.exception), "alternative-error")
+        self.assertTrue(any("first-tail-error" in note for note in getattr(raised.exception, "__notes__", [])))
+
+    def test_a_first_leg_that_is_never_registered_launches_no_alternative(self):
+        """No row, no second leg: the refusal comes back exactly as a sequential start returned it."""
+        def refused(command, **kwargs):
+            self.calls.append(command)
+            return subprocess.CompletedProcess(
+                command, 65, "check=failed\nreason=no-eligible-candidate\nchild_spawned=0\n", "")
+
+        result = W.start_work(self.route, self.path, self.jobs, run=refused)
+        self.assertEqual((result["state"], result["reason"]), ("needs-attention", "frame-launch-not-admitted"))
+        self.assertEqual([c[c.index("--route-node") + 1] for c in self.calls], ["frame"])
+        self.assertEqual(len(result["launches"]), 1)
+
     def test_without_pyyaml_the_start_launches_no_frame_leg_and_names_the_fix(self):
         self.pyyaml.stop()
         with mock.patch.dict(sys.modules, {"yaml": None}):

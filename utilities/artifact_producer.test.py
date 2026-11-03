@@ -6457,6 +6457,23 @@ class OwnerLaunchBindingTest(ProducerTestBase):
         self.assertEqual(reconcile.call_count, 0)
         self.assertEqual(history.call_count, 0)
 
+    def test_a_live_sibling_legs_cycle_is_joined_without_walking_the_root_again(self):
+        # The second frame leg joins the cycle its live first leg's preparation began and looked
+        # the root over for; only that leg's own preparation reads every folder and record.
+        self.activate()
+        route, route_file = self.route("quick")
+        with mock.patch.object(P, "reconcile_root", wraps=P.reconcile_root) as reconcile, \
+                mock.patch.object(P, "deliver_pending_history", wraps=P.deliver_pending_history) as history:
+            first = P.prepare_route_artifact_env(route_file, start=True, jobs=self.jobs)
+            self.assertEqual((reconcile.call_count, history.call_count), (1, 1))
+            second = P.prepare_route_artifact_env(route_file, start=True, jobs=self.jobs, sibling_looked=True)
+            self.assertEqual((reconcile.call_count, history.call_count), (1, 1))
+            again = P.prepare_route_artifact_env(route_file, start=True, jobs=self.jobs)
+            self.assertEqual((reconcile.call_count, history.call_count), (2, 2))
+        self.assertEqual(second, first)
+        self.assertEqual(again, first)
+        self.assertEqual(len(P.list_cycle_records(self.root)), 1)
+
     def test_resume_only_owner_launch_publishes_and_replays_binding(self):
         route, route_file, launch_env, owner, args = self._prepared_owner()
         self.assertFalse(P.dispatch_terminal_commit.producer_binding_path(
