@@ -228,6 +228,16 @@ class PeerDerivedElements(unittest.TestCase):
         self.assertNotIn("GPU ×8", text)
         self.assertIn("answer needed · 3d 7h", text)
 
+    def test_a_live_question_reaches_its_card_by_session_tag_and_older_waits_stay_folded(self):
+        # The live question record's `tag` is the question id; the card is its `session_tag`.
+        session = {"tag": "bb", "ask": "answer needed"}
+        live = {"tag": "S2:rt-x:frame-review", "session_tag": "bb", "older": False, "wait": "22h"}
+        self.assertEqual(peers._extra_lines(session, (live,)), [("answer needed · 22h", "blocked")])
+        self.assertEqual(peers._extra_lines(session, (dict(live, session_tag="cc"),)),
+                         [("answer needed", "blocked")])
+        older = dict(live, older=True, wait="9d")
+        self.assertEqual(peers._extra_lines({"tag": "bb"}, (older,)), [])
+
     def test_watch_footer_and_lane_labels_follow_the_vm(self):
         base = load_fixture(FIXTURES / "view_model.json").to_mapping()
         edges = dict(base["peer_edges"])

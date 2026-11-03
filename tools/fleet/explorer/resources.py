@@ -2,7 +2,7 @@
 import re
 from collections.abc import Mapping
 
-from .grid import CellGrid
+from .grid import CellGrid, cell_width
 from .grid import clip_cells as clip
 
 
@@ -168,85 +168,112 @@ def draw_compute(grid: CellGrid, vm, state=None, x=34, y=3):
              "dim", limit=grid.cols - 1)
 
 
+OPEN_STAGE_WORDS = {"doing": ("진행 중", "g_spin_dim"), "waiting": ("확인 대기", "lvl_y"),
+                    "open": ("열림", "dim")}
+
+
+def memory_projects(vm):
+    """``(data, order, journal)``: the per-project memory record, its project order, and the
+    journal rows by project. Without a DB summary the journal's own projects are the order."""
+    system = vm.system if isinstance(vm.system, Mapping) else {}
+    data = system.get("project_memory") if isinstance(system.get("project_memory"), Mapping) else {}
+    journal = {}
+    for item in vm.memory or ():
+        try:
+            name, rows = item
+        except (TypeError, ValueError):
+            continue
+        journal[str(name)] = tuple(rows or ())
+    order = [str(name) for name in data.get("order") or ()]
+    order += [name for name in journal if name not in order]
+    return data, order, journal
+
+
+def memory_status(vm):
+    """The MEMORY status line: project count, today's decisions, work in progress."""
+    data, order, _journal = memory_projects(vm)
+    state = str(data.get("state") or "unknown")
+    if data.get("decisions_today") is None:
+        return f"프로젝트 {len(order)} · 메모리 DB {state}"
+    return (f"프로젝트 {len(order)} · 오늘 결정 {data.get('decisions_today')} · "
+            f"진행 중 {data.get('doing', '·')}" + ("" if state == "success" else f" · DB {state}"))
+
+
+def _memory_line(grid, x, y, right, label, when, text, key="soft", mark=None):
+    if label:
+        grid.put(x + 3, y, label, "label", limit=right)
+    grid.put(x + 12, y, "·" if when is None else str(when), "dim", limit=right)
+    cursor = x + 19
+    if mark is not None:
+        word, mark_key = mark
+        cursor = grid.put(cursor, y, word, mark_key, limit=right) + 2
+    grid.put(cursor, y, clip("·" if text is None else str(text), max(1, right - cursor)), key, limit=right)
+    return y + 1
+
+
 def draw_memory(grid: CellGrid, vm, state=None, x=34, y=3):
-    """Show bounded memory journal rows and explicit DB backlog metadata."""
+    """Per project: newest decisions, open work and recent changes, from stored headlines."""
     use = max(0, grid.cols - x - 2)
-    records = vm.memory
-    c_time, c_action, c_type, c_record = 14, 21, 32, 55
-    if records:
-        y = _table_head(grid, x, use, y, ((1, "PROJECT"), (c_time, "TIME"), (c_action, "ACTION")) +
-                        (((c_type, "TYPE"),) if c_type else ()) + ((c_record, "RECORD"),))
-        for project_index, project in enumerate(records):
-            if project_index:
-                y = _group_sep(grid, x, use, y)
-            try:
-                name, rows = project
-            except (TypeError, ValueError):
-                continue
-            for row_index, row in enumerate(rows or ()):
-                when, action, kind, text = (tuple(row) + (None,) * 4)[:4]
-                if row_index == 0:
-                    grid.put(x + 1, y, clip(str(name), 12), "soft")
-                grid.put(x + c_time, y, "·" if when is None else str(when), "dim")
-                grid.put(x + c_action, y, "+ saved" if action == "saved" else "· changed", "done" if action == "saved" else "dim")
-                if c_type:
-                    grid.put(x + c_type, y, "·" if kind is None else str(kind), "dim")
-                grid.put(x + c_record, y, "·" if text is None else clip(str(text), use - c_record),
-                         "soft" if action == "saved" else "now_sub", limit=x + use + 1)
-                y += 1
-    backlog = (vm.system or {}).get("memory_backlog") if isinstance(vm.system, Mapping) else None
-    if isinstance(backlog, Mapping):
-        grid.put(x, y, "── ", "line")
-        cursor = grid.put(x + 3, y, "BACKLOG", "sect")
-        state_name = str(backlog.get("state") or "unknown")
-        grid.put(cursor + 2, y, state_name, "soft" if state_name == "success" else "dim")
+    right = x + use + 1
+    data, order, journal = memory_projects(vm)
+    projects = data.get("projects") if isinstance(data.get("projects"), Mapping) else {}
+    db_state = str(data.get("state") or "unknown")
+    if data and db_state != "success":
+        detail = " · 마지막으로 읽은 값" if data.get("stale") else " · 결정·남은 일 모름"
+        grid.put(x + 1, y, "메모리 DB " + db_state + detail, "dim", limit=right)
         y += 1
-        groups = backlog.get("by_repo") if isinstance(backlog.get("by_repo"), Mapping) else {}
-        if state_name != "success":
-            detail = " · showing last good" if backlog.get("stale") else " · count unknown"
-            grid.put(x + 1, y, "database " + state_name + detail, "dim",
-                     limit=x + use + 1)
+    if not order:
+        grid.put(x + 1, y, "프로젝트 기억 없음", "dim", limit=right)
+        return
+    opened = state.opened_for("memory:open", "") if state is not None else ""
+    for index, name in enumerate(order):
+        if index:
+            y = _group_sep(grid, x, use, y)
+        project = projects.get(name) if isinstance(projects.get(name), Mapping) else {}
+        recent = journal.get(name, ())
+        last = project.get("last") or (recent[0][0] if recent and recent[0] else None)
+        tail = f"마지막 변화 {last}" if last else ""
+        grid.put(x + 1, y, clip(name + "/" if name else "·", max(1, use - cell_width(tail) - 3)),
+                 "title_dim", limit=right)
+        if tail:
+            grid.put(right - 1 - cell_width(tail), y, tail, "dim", limit=right)
+        y += 1
+        for row_index, row in enumerate(tuple(project.get("decisions") or ())):
+            when, text = (tuple(row) + (None,) * 2)[:2]
+            y = _memory_line(grid, x, y, right, "결정" if row_index == 0 else None, when, text)
+        items = tuple(project.get("open") or ())
+        if items:
+            counts = project.get("counts") if isinstance(project.get("counts"), Mapping) else {}
+            grid.add_hit(y, x, right, ("fold", "memory:open", name))
+            grid.put(x + 3, y, "남은 일", "label", limit=right)
+            cursor = x + 12
+            more = "+" if project.get("limited") else ""
+            parts = [(f"진행 중 {counts.get('doing', 0)}", "g_spin_dim"),
+                     (f"확인 대기 {counts.get('waiting', 0)}", "lvl_y"),
+                     (f"기록상 열림 {counts.get('open', 0)}{more}", "dim")]
+            if cell_width(" · ".join(text for text, _key in parts)) >= right - cursor:
+                parts = [(f"진행 {counts.get('doing', 0)}", "g_spin_dim"),
+                         (f"대기 {counts.get('waiting', 0)}", "lvl_y"),
+                         (f"열림 {counts.get('open', 0)}{more}", "dim")]
+            for part_index, (text, key) in enumerate(parts):
+                if part_index:
+                    cursor = grid.put(cursor, y, " · ", "dim", limit=right)
+                zero = text.rsplit(" ", 1)[-1] == "0"           # a zero count is not highlighted
+                cursor = grid.put(cursor, y, text, "dim" if zero else key, limit=right)
+            toggle = "▼ 접기" if opened == name else "▶ 펼치기"
+            if cursor + 2 + cell_width(toggle) < right - 1:
+                grid.put(right - 1 - cell_width(toggle), y, toggle, "soft", limit=right)
             y += 1
-        elif not groups:
-            grid.put(x + 1, y, "no active backlog records", "dim", limit=x + use + 1)
-            y += 1
-        opened = state.opened_for("memory:backlog", "") if state is not None else ""
-        for repo, items in sorted(groups.items()):
-            items = tuple(items or ())
-            counts = {name: sum(1 for item in items if item.get("progress") == name)
-                      for name in ("TODO", "DOING", "DONE")}
-            grid.add_hit(y, x, x + use + 1, ("fold", "memory:backlog", str(repo)))
-            marker = "▼" if opened == str(repo) else "▶"
-            grid.put(x + 1, y, marker, "soft")
-            grid.put(x + 3, y, clip(str(repo) + "/", 22), "title_dim")
-            cursor = x + 27
-            for name, key in (("TODO", "lvl_y"), ("DOING", "g_spin_dim"), ("DONE", "done")):
-                cursor = grid.put(cursor, y, f"{name} {counts[name]}", key, limit=x + use)
-                cursor = grid.put(cursor + 1, y, " · ", "dim", limit=x + use) + 1
-            if backlog.get("limited"):
-                grid.put(x + use - 8, y, "more…", "dim", limit=x + use + 1)
-            y += 1
-            if opened != str(repo):
-                continue
-            for item in items:
-                progress = str(item.get("progress") or "TODO")
-                key = {"TODO": "lvl_y", "DOING": "g_spin_dim", "DONE": "done"}.get(progress, "dim")
-                title = clip(str(item.get("title") or "backlog item"), max(1, use - 35))
-                cursor = grid.put(x + 4, y, progress, key, limit=x + use)
-                cursor = grid.put(cursor + 2, y, title, "soft", limit=x + use)
-                record_id = str(item.get("id") or "")
-                if record_id:
-                    grid.put(x + use - min(12, len(record_id)), y,
-                             clip(record_id, 12), "dim", limit=x + use + 1)
-                y += 1
-    summary = (vm.system or {}).get("memory_summary") if isinstance(vm.system, Mapping) else None
-    if isinstance(summary, Mapping):
-        expired_at = summary.get("expired_at")
-        text = (f"{summary.get('added_today', '·')} added today · "
-                f"{summary.get('projects', '·')} projects · "
-                f"{summary.get('expired', '·')} expired" + (f" at {expired_at}" if expired_at else "") +
-                f" (lifecycle) · {summary.get('latest', '·')} latest shown")
-        grid.put(x + 1, y, text, "dim", limit=x + use + 1)
+            for row in (items if opened == name else items[:1]):
+                stage, when, text = (tuple(row) + (None,) * 3)[:3]
+                word = OPEN_STAGE_WORDS.get(stage, (str(stage), "dim"))
+                y = _memory_line(grid, x, y, right, None, when, text, mark=word)
+        for row_index, row in enumerate(recent[:2]):
+            when, action, _kind, text = (tuple(row) + (None,) * 4)[:4]
+            saved = action == "saved"
+            y = _memory_line(grid, x, y, right, "최근" if row_index == 0 else None, when, text,
+                             key="soft" if saved else "now_sub",
+                             mark=("+", "done") if saved else ("·", "dim"))
 
 
 def draw_system(grid: CellGrid, vm, state=None, x=34, y=3):

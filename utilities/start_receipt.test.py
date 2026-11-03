@@ -37,6 +37,7 @@ class StartReceiptTest(unittest.TestCase):
         text = receipt.context('codex', 'own', self.jobs)
         self.assertIn('parent_next=bounded-wait', text)
         self.assertIn(self.result['parent_next_command'], text)
+        self.assertEqual(text.splitlines()[-1], receipt.next_line(saved))
         self.assertEqual(receipt.context('codex', 'own', self.jobs), '')
         self.result['parent_next'] = 'end-turn'
         self.result['parent_next_command'] = ''
@@ -104,6 +105,63 @@ hooks.dispose();'''
         output = json.loads(proc.stdout)
         self.assertTrue(output['output'].startswith('FILTERED\n[start-receipt]'))
         self.assertIn('parent_next=bounded-wait', output['output'])
+
+
+class NextLineTest(unittest.TestCase):
+    """One plain line restating the receipt's directive, so nobody parses the JSON to act."""
+
+    def test_each_common_receipt_names_its_next_action_in_plain_words(self):
+        wait = 'dispatch-wait.sh --attempt-id att-1 --max 600'
+        cases = [
+            ({'state': 'running', 'parent_next': 'end-turn', 'next_step': 'You are the parent session.'},
+             'next: end this turn; the runtime brings the result back to this session'),
+            ({'state': 'running', 'parent_next': 'bounded-wait', 'parent_next_command': wait},
+             'next: run this bounded wait, then read its result: ' + wait),
+            ({'state': 'needs-attention', 'reason': 'owner-launch-not-admitted', 'parent_next': 'end-turn',
+              'required_action': 'wait-for-auto-resume', 'auto_resume': {'resume_at': '2026-11-02T00:53:37Z'}},
+             'next: end this turn; nothing to run - the runtime starts this route again at '
+             '2026-11-02T00:53:37Z and leaves one notice'),
+            ({'state': 'needs-attention', 'required_action': 'answer-blocked-owner',
+              'correction_command': 'py capability-route.py correct --attempt-id att-o'},
+             "next: get the person's answer to owner_report, then run: "
+             'py capability-route.py correct --attempt-id att-o --message-file <answer file>'),
+            ({'state': 'completed', 'required_action': 'advance-completed'},
+             'next: the route is complete; report its result'),
+            ({'state': 'needs-attention', 'reason': 'frame-launch-not-admitted', 'required_action': 'inspect-preparation',
+              'next_step': 'Fix it,\n  then use resume_command.', 'resume_command': 'py start --route rt-x'},
+             'next: inspect-preparation (frame-launch-not-admitted): Fix it, then use resume_command. '
+             'resume_command=py start --route rt-x'),
+            ({'state': 'not-admitted', 'reason': 'owner-input-unsupported', 'next_step': 'Retain the correction.'},
+             'next: not-admitted (owner-input-unsupported): Retain the correction.'),
+            ({'applied': 'not-verified', 'next_step': 'Inspect delivery receipts.'},
+             'next: Inspect delivery receipts.'),
+            ({'state': 'preparing', 'resume_command': 'py start --route rt-x'},
+             'next: state preparing; to continue, run: py start --route rt-x'),
+        ]
+        for value, expected in cases:
+            with self.subTest(value=value):
+                line = receipt.next_line(value)
+                self.assertEqual(line, expected)
+                self.assertNotIn('\n', line)
+        self.assertEqual(receipt.next_line({}), '')
+        self.assertEqual(receipt.next_line(None), '')
+
+    def test_an_inline_route_is_told_to_do_the_work_and_finish_it(self):
+        line = receipt.next_line({'state': 'inline', 'required_action': 'execute-inline', 'route_id': 'rt-' + 'a' * 16,
+                                  'route_file': '/r/.runtime/routes/rt-' + 'a' * 16 + '.json'})
+        self.assertTrue(line.startswith('next: do the work in this session, then run: '), line)
+        self.assertIn('capability-route.py finish --route rt-' + 'a' * 16
+                      + ' --evidence <FILE|URL> --summary-file <FILE>', line)
+
+    def test_the_line_goes_last_to_stderr_and_stdout_keeps_only_the_json(self):
+        script = ('import json, sys; sys.path.insert(0, %r); import start_receipt as r; '
+                  'value = {"state": "running", "parent_next": "end-turn"}; '
+                  'print(json.dumps(value)); r.print_next_line(value)') % str(ROOT / 'utilities')
+        proc = subprocess.run([sys.executable, '-c', script], capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(json.loads(proc.stdout), {'state': 'running', 'parent_next': 'end-turn'})
+        self.assertEqual(proc.stderr.splitlines()[-1],
+                         'next: end this turn; the runtime brings the result back to this session')
 
 
 if __name__ == '__main__':

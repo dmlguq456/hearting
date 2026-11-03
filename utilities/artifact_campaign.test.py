@@ -265,7 +265,8 @@ class CampaignTest(F.ProducerTestBase):
                               campaign_key="campaign-closure")
         selection = F.R.compose_campaign_selection(route)
         self.assertEqual(selection["mode"], "reopen")
-        self.assertIn("닫힌 캠페인 재개", F.R._compose_campaign_line(selection))
+        self.assertIn("닫힌 캠페인 재개",
+                      F.R._compose_campaign_line(selection, F.R.UI_TEXT.translator("Korean")))
         _, view = C.locator.scan_index(self.root)
         self.assertEqual(view[self.campaign]["status"], "satisfied")
 

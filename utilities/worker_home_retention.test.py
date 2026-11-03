@@ -7,6 +7,7 @@ import contextlib
 import fcntl
 import json
 import os
+import select
 import subprocess
 import sys
 import tempfile
@@ -31,6 +32,366 @@ from worker_runtime_home import _builder  # noqa: E402
 
 RETENTION_NS = R.IDLE_SECONDS * 10**9
 SOURCE = str(ROOT)
+
+
+class VirtualDeliveries:
+    """Virtual entry/body seam; only a few real, command-owned directories.
+
+    Use production validation, clocks, state, admissions and removal unchanged.
+    The opaque position seam is the same one used by the real cookie backend.
+    """
+    def __init__(self, root, now, *, groups=1, count=4097, open_refs=(), terminal_ref=None,
+                 malformed=False, tombstones=False, terminal_state="acked", recipient_keys=None):
+        self.root, self.now = Path(root), now
+        self.groups, self.count = groups, count
+        self.open_refs, self.terminal_ref = list(open_refs), terminal_ref
+        self.malformed, self.tombstones = malformed, tombstones
+        self.terminal_state = terminal_state
+        self.reads = self.entries = self.stats = 0
+        self.paths = []
+        (self.root / "pending-delivery").mkdir(mode=0o700, exist_ok=True)
+        for i in range(groups):
+            group_name = P.recipient_digest(recipient_keys[i]) if recipient_keys else f"{i + 1:064x}"
+            group = self.root / "pending-delivery" / group_name
+            group.mkdir(mode=0o700, exist_ok=True)
+            self.paths.append(group)
+        self.real_page, self.real_read, self.real_stamp = R._directory_page, R._read_json, R._stamp
+        self.stack = contextlib.ExitStack()
+
+    def _range(self, group):
+        i = self.paths.index(group)
+        low, high = self.count * i // self.groups, self.count * (i + 1) // self.groups
+        return low, high + (len(self.open_refs) if i == self.groups - 1 else 0)
+
+    def _virtual(self, path):
+        path = Path(path)
+        if path.parent in self.paths and path.name.startswith("delivery-") and path.name.endswith(".json"):
+            try:
+                index = int(path.name[9:-5], 16)
+            except ValueError:
+                return None
+            low, high = self._range(path.parent)
+            if low <= index < high:
+                return path
+        return None
+
+    def page(self, path, cookie, limit, deadline):
+        if Path(path) == self.root / "pending-delivery":
+            extras = sorted(p.name for p in Path(path).iterdir() if p not in self.paths)
+            names = [".", "..", *[p.name for p in self.paths], *extras]
+            end = min(len(names), cookie + limit)
+            return ([(names[i], i + 1, 4) for i in range(cookie, end)],
+                    cookie == len(names), self.real_stamp(path))
+        if Path(path) not in self.paths:
+            return self.real_page(path, cookie, limit, deadline)
+        low, high = self._range(Path(path))
+        # Real normal-API publications remain visible when a group is revisited.
+        extras = sorted(p.name for p in Path(path).iterdir())
+        length = high - low
+        end = min(length + len(extras), cookie + min(limit, 317))
+        suffix = ".json.pruned" if self.tombstones else ".json"
+        entries = [((f"delivery-{i + low:032x}" + suffix if i < length else extras[i - length]), i + 1, 8)
+                   for i in range(cookie, end)]
+        self.entries += len(entries)
+        return entries, cookie == length + len(extras), self.real_stamp(path)
+
+    def read(self, path, *args, **kwargs):
+        virtual = self._virtual(path)
+        if virtual is None:
+            return self.real_read(path, *args, **kwargs)
+        self.reads += 1
+        index = int(virtual.name[9:-5], 16)
+        value = dict.fromkeys(P.REQUIRED_FIELDS)
+        ids, parent, state = [f"att-history-{index}"], "-", self.terminal_state
+        if index >= self.count:
+            ids, parent = self.open_refs[index - self.count]
+            state = "pending"
+        if index == 0 and self.terminal_ref:
+            ids = [self.terminal_ref]
+        value.update(schema_version=1, recipient_kind="codex-native-queue", attempts=0,
+                     delivery_id=virtual.name[:-5], recipient_digest=virtual.parent.name,
+                     attempt_ids=ids, parent_attempt_id=parent, state=state,
+                     claim_authority=next(iter(P.CLAIM_AUTHORITIES)))
+        if self.malformed and index == self.count - 1:
+            value["attempt_ids"] = ["malformed"]
+        return value, self.now
+
+    def stamp(self, path):
+        virtual = self._virtual(path)
+        if virtual is None:
+            return self.real_stamp(path)
+        self.stats += 1
+        info = list(self.real_stamp(virtual.parent))
+        info[1] = int(virtual.name[9:-5], 16) + 100000
+        info[2] = __import__("stat").S_IFREG | 0o600
+        info[4:] = [100, self.now, self.now]
+        return tuple(info)
+
+    def __enter__(self):
+        self.stack.enter_context(mock.patch.object(R, "_directory_page", self.page))
+        self.stack.enter_context(mock.patch.object(R, "_read_json", self.read))
+        self.stack.enter_context(mock.patch.object(R, "_stamp", self.stamp))
+        return self
+
+    def __exit__(self, *exc):
+        self.stack.close()
+
+
+@contextlib.contextmanager
+def normal_delivery_writer(root, recipient, attempt, *, pinned=False, relation="attempt", gated=False,
+                           hold=False):
+    """A real separate-process writer, optionally the pre-G03 single Git blob.
+
+    Only observe entry into reference admission; never replace its lock/API.
+    Settle this owned child before the fixture can be retired, even on failure.
+    """
+    code = r'''
+import json,subprocess,sys,types
+from pathlib import Path
+sys.path.insert(0,sys.argv[1]+'/utilities')
+import dispatch_attempt_reference as ar
+if sys.argv[5]=='pinned':
+    source=subprocess.check_output(['git','show','f0f6788418d2c50fb506e1bd0be43162c09c43d7:utilities/dispatch_pending_delivery.py'],cwd=sys.argv[1])
+    p=types.ModuleType('g03_pinned_writer');exec(compile(source,'git-blob/dispatch_pending_delivery.py','exec'),p.__dict__)
+else:
+    import dispatch_pending_delivery as p
+real_open=ar._open_locked
+announced=False
+def observe(*args,**kwargs):
+    global announced
+    if not announced:
+        print('reference-attempt',flush=True);announced=True
+    return real_open(*args,**kwargs)
+ar._open_locked=observe
+if sys.argv[7]=='gated':
+    sys.stdin.readline()
+if sys.argv[7]=='hold':
+    # Pause inside the record's reference admission, after the writer's own
+    # lock-time chmod and before the payload is published (no lock/API change).
+    real_write=p._write_unlocked
+    def held_write(*args,**kwargs):
+        print('record-admitted',flush=True)
+        sys.stdin.readline()
+        return real_write(*args,**kwargs)
+    p._write_unlocked=held_write
+attempt=sys.argv[4];receipt={'schema_version':2,'fixture':'g03-normal-writer'}
+v=p.create(Path(sys.argv[2]),recipient_kind='codex-native-queue',recipient_key=sys.argv[3],
+    delivery_id='delivery-'+'f'*32,session_generation='',session_generation_supported='0',
+    attempt_ids=[attempt] if sys.argv[6]=='attempt' else ['att-normal-child'],
+    parent_attempt_id='-' if sys.argv[6]=='attempt' else attempt,
+    route_id='rt-g03',route_node='execute',receipt=receipt,
+    receipt_digest=p._canonical_receipt_digest(receipt),row_revisions={})
+print(json.dumps({'state':v['state']}),flush=True)
+'''
+    child = subprocess.Popen([sys.executable, "-B", "-c", code, str(ROOT), str(root),
+                              recipient, attempt, "pinned" if pinned else "current", relation,
+                              "hold" if hold else "gated" if gated else "immediate"],
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        yield child
+    finally:
+        if (gated or hold) and child.poll() is None:
+            try:
+                child.stdin.write("go\n"); child.stdin.flush()
+            except BrokenPipeError:
+                pass
+        try:
+            stdout, stderr = child.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            stdout, stderr = child.communicate()
+            raise AssertionError(f"normal writer timed out: {stdout} {stderr}")
+        if child.returncode:
+            raise AssertionError(f"normal writer exit {child.returncode}: {stdout} {stderr}")
+
+
+def child_line(child, deadline):
+    """One stdout line from a fixture child; "" at EOF, None at the deadline.
+
+    Read the pipe a byte at a time. select() only sees the OS pipe, so a
+    buffered readline() can pull a second line that already arrived into the
+    file object's buffer, and the next select() then waits out the deadline
+    although the line is there (a busy runner reads both writer lines at once).
+    """
+    fd = child.stdout.fileno()
+    data = b""
+    while True:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return None
+        if not select.select([fd], [], [], min(1.0, left))[0]:
+            continue
+        byte = os.read(fd, 1)
+        if not byte or byte == b"\n":
+            return data.decode("utf-8", "replace")
+        data += byte
+
+
+def wait_for_reference_attempt(child):
+    line = child_line(child, time.monotonic() + 10)
+    if line is None:
+        raise AssertionError("normal writer did not reach reference admission")
+    if line.strip() != "reference-attempt":
+        raise AssertionError("normal writer failed before reference admission")
+
+
+def wait_for_record_admitted(child):
+    deadline = time.monotonic() + 10
+    while True:
+        line = child_line(child, deadline)
+        if line is None or not line.strip():
+            break
+        if line.strip() == "record-admitted":
+            return
+    raise AssertionError("normal writer did not hold inside its record admission")
+
+
+def r1_publication_run(case, *, attempt, paths, sweep, at, history_time, timing, pinned, relation,
+                       new_group, real_history=0, first_at=None, group_index=0):
+    """One real old/current writer against a two-pass (or large single-pass) observation.
+
+    No stamp value is forged. The writer is a separate process; it publishes through
+    its own record admission. Timings (see the R1 plan): T1 the writer is inside its
+    record admission before the first root snapshot and publishes after pass 1; T2 it
+    enters between the two root snapshots of the resumed pass and publishes before the
+    candidate check; T3 it publishes between the passes; T4 it publishes just before
+    the final candidate check (outside the final admission). `L1` is T2 over a large
+    single pass of real files (`real_history` per group).
+    """
+    recipients = ["r1-a", "r1-b", "r1-c"]
+    recipient = "r1-new" if new_group else recipients[group_index]
+    base = case.root / "pending-delivery"
+    events = {}
+    stack = contextlib.ExitStack()
+    with stack:
+        if real_history:
+            for recipient_key in recipients:
+                group = P.record_directory(case.root, recipient_key)
+                group.mkdir(parents=True, mode=0o700, exist_ok=True)
+                for i in range(real_history):
+                    Fixture.delivery_record(case, group / f"delivery-{i:032x}.json", f"att-history-{i}",
+                                            parent=f"att-history-parent-{i}")
+        else:
+            stack.enter_context(VirtualDeliveries(case.root, history_time, groups=3,
+                                                   recipient_keys=recipients))
+        child = [None]
+        writer = [None]
+
+        def start_writer(hold):
+            writer[0] = normal_delivery_writer(case.root, recipient, attempt, pinned=pinned,
+                                               relation=relation, hold=hold)
+            child[0] = stack.enter_context(writer[0])
+            events["hold"] = hold
+            if hold:
+                wait_for_record_admitted(child[0])
+
+        def finish_writer():
+            running = child[0]
+            if running is None or running.poll() is not None:
+                return
+            if events.get("hold"):
+                try:
+                    running.stdin.write("go\n"); running.stdin.flush()
+                except BrokenPipeError:
+                    pass
+            running.wait(timeout=10)
+
+        real_stamp, real_late = R._stamp, R._late_candidate_delivery_change
+        armed = {"stamp": False, "late": False}
+
+        def stamp(path):
+            if armed["stamp"] and child[0] is None and Path(path) == base:
+                sampled = real_stamp(path)
+                start_writer(hold=True)
+                return sampled
+            return real_stamp(path)
+
+        def late(ctx, selected, deadline, binding=None):
+            if armed["late"] and not events.get("published"):
+                events["published"] = True
+                if timing == "T4":
+                    start_writer(hold=False)
+                    finish_writer()
+                else:
+                    finish_writer()
+            return real_late(ctx, selected, deadline, binding)
+
+        before = None
+        with mock.patch.object(R, "_stamp", stamp), mock.patch.object(R, "_late_candidate_delivery_change", late):
+            if real_history:
+                # A large single pass: establish the idle clock first, then observe once.
+                if first_at is not None:
+                    events["first"] = sweep(case.jobs, now_ns=first_at)
+                with AR.admission(case.root, [attempt]):
+                    before = P.reference_token(case.root, attempt, initialize=True)
+                armed["stamp"] = armed["late"] = True
+                events["second"] = sweep(case.jobs, now_ns=at)
+            else:
+                armed["stamp"] = timing in ("T1",)
+                events["first"] = sweep(case.jobs, now_ns=at)
+                assert events["first"]["removed"] == 0, events["first"]
+                before = P.reference_token(case.root, attempt)
+                if timing == "T1":
+                    armed["stamp"] = False
+                    finish_writer()
+                    events["after_first_token_unchanged"] = before == P.reference_token(case.root, attempt)
+                elif timing == "T3":
+                    start_writer(hold=False)
+                    finish_writer()
+                elif timing == "T2":
+                    armed["stamp"] = True
+                armed["late"] = timing in ("T2", "T4")
+                events["second"] = sweep(case.jobs, now_ns=at + 301 * 10**9)
+        finish_writer()
+        record = P.read(case.root, recipient, "delivery-" + "f" * 32)
+        assert record is not None, ("the writer never published", events)
+        return {"timing": timing, "pinned": pinned, "relation": relation, "new_group": new_group,
+                "second": events["second"], "exists": [p.exists() for p in paths],
+                "record_state": record["state"],
+                "token_unchanged": before == P.reference_token(case.root, attempt)}
+
+
+class VirtualRecipientGroups:
+    """Many recipient directories with one historical tombstone each, in memory."""
+    def __init__(self, root, count):
+        self.base, self.count = Path(root) / "pending-delivery", count
+        self.base.mkdir(exist_ok=True)
+        self.real_page, self.real_stamp = R._directory_page, R._stamp
+        self.entries = 0
+        self.stack = contextlib.ExitStack()
+
+    def _group(self, path):
+        path = Path(path)
+        return (path.parent == self.base and R.SHA256_RE.fullmatch(path.name)
+                and int(path.name, 16) < self.count)
+
+    def stamp(self, path):
+        if self._group(path):
+            value = list(self.real_stamp(self.base))
+            value[1] += int(Path(path).name, 16) + 1
+            return tuple(value)
+        return self.real_stamp(path)
+
+    def page(self, path, cookie, limit, deadline):
+        if Path(path) == self.base:
+            end = min(self.count, cookie + min(limit, 317))
+            entries = [(f"{i:064x}", i + 1, 4) for i in range(cookie, end)]
+            eof = cookie == self.count
+        elif self._group(path):
+            entries = [("delivery-" + "0" * 32 + ".json.pruned", 1, 8)] if cookie == 0 else []
+            eof = cookie != 0
+        else:
+            return self.real_page(path, cookie, limit, deadline)
+        self.entries += len(entries)
+        return entries, eof, self.stamp(path)
+
+    def __enter__(self):
+        self.stack.enter_context(mock.patch.object(R, "_directory_page", self.page))
+        self.stack.enter_context(mock.patch.object(R, "_stamp", self.stamp))
+        return self
+
+    def __exit__(self, *exc):
+        self.stack.close()
 
 
 class Fixture(unittest.TestCase):
@@ -396,7 +757,7 @@ class Expiry(Fixture):
         with mock.patch.object(R._Context, "home_process_evidence",
                                return_value=("absent", "fixture-process-scan-complete")), \
                 mock.patch.object(R, "_remove_leaf", wraps=remove):
-            resumed = self.sweep(2.02)
+            resumed = R.sweep(self.jobs, now_ns=self.now + int(2.02 * RETENTION_NS))
         self.assertGreaterEqual(resumed["detached_leftover"], 3)
         self.assertTrue(home.is_dir())
         self.assertFalse(any(retiring.iterdir()))
@@ -1098,15 +1459,16 @@ class Deliveries(Fixture):
         self.assertEqual(self.unknown(self.sweep((8) / 7), "delivery-index-unknown"), 1)
         self.assertTrue(home.exists())
 
-    def test_oversized_index_keeps_everything_that_pass(self):
+    def test_partial_delivery_read_defers_without_claiming_unknown(self):
         home = self.add("att-d7")
-        with mock.patch.object(R, "MAX_DELIVERY_RECORDS", 1):
+        with mock.patch.object(R, "DELIVERY_READ_BUDGET", 1):
             folder = self.root / "pending-delivery" / ("c" * 64)
             folder.mkdir(parents=True)
             for index in range(3):
-                (folder / f"delivery-{index:032x}.json").write_text(json.dumps({"state": "acked"}))
+                self.delivery_record(folder / f"delivery-{index:032x}.json", f"att-other-{index}")
             result = self.expire()
-        self.assertEqual(self.unknown(result, "delivery-index-unknown"), 1)
+        self.assertEqual(self.unknown(result, "delivery-index-unknown"), 0)
+        self.assertEqual(result["deferred"], 1)
         self.assertTrue(home.is_dir())
 
     def producer_notice(self, harness, session_id, key):
@@ -1143,41 +1505,42 @@ class Deliveries(Fixture):
                          {"record-unreadable": 1})
         self.assertTrue(home.is_dir())
 
-    def test_ordinary_notice_over_record_limit_still_keeps_home(self):
-        home = self.add("att-ordinary-limit")
-        self.producer_notice("claude", "sess-limit", "ordinary-limit-a")
-        self.producer_notice("claude", "sess-limit", "ordinary-limit-b")
-        with mock.patch.object(R, "MAX_DELIVERY_RECORDS", 1):
-            self.sweep(0)
-            result = self.sweep(8 / 7)
-        self.assertEqual(self.unknown(result, "delivery-index-unknown"), 1)
-        self.assertEqual(result["unknown_causes"]["delivery-index-unknown"],
-                         {"record-limit": 1})
-        self.assertTrue(home.is_dir())
-
-    def test_delivery_relation_and_index_share_record_identities(self):
+    def test_delivery_relation_and_observation_share_record_identities(self):
         ordinary = self.producer_notice("claude", "sess-share", "share-ordinary")
         legacy = self.legacy_notice("sess-share", "share-legacy")
         opened = self.publish_delivery("delivery-" + "5" * 32, "sess-share", ["att-share"], "-")
         paths = {name: self.root / "pending-delivery" / record["recipient_digest"]
                  / (record["delivery_id"] + ".json")
                  for name, record in (("ordinary", ordinary), ("legacy", legacy), ("open", opened))}
-        refs, cause = R._delivery_index(self.root)
-        self.assertEqual((refs, cause), ({"att-share"}, ""))
+        # The observation and the late-change relation read through one function,
+        # which is the record's identity decision plus its own path.
+        for name, expected in (("ordinary", frozenset()), ("legacy", frozenset()),
+                               ("open", frozenset({"att-share"}))):
+            value = json.loads(paths[name].read_text())
+            self.assertEqual(P.record_references(value, group=paths[name].parent.name,
+                                                 delivery_id=paths[name].stem), expected, name)
+            self.assertEqual(frozenset(P.record_attempt_identities(value)), expected, name)
+        moved = json.loads(paths["open"].read_text())
+        with self.assertRaises(P.PendingDeliveryError) as raised:
+            P.record_references(moved, group="0" * 64, delivery_id=paths["open"].stem)
+        self.assertEqual(raised.exception.detail, "record-path-mismatch")
         for name, expected in (("ordinary", "unrelated"), ("legacy", "unrelated"),
                                ("open", "related")):
             self.assertEqual(R._delivery_record_relation(paths[name], {"att-share"}), expected, name)
         for name in ("ordinary", "legacy"):
             self.assertEqual(R._delivery_record_relation(paths[name], {"att-other"}), "unrelated")
 
-    def test_tombstones_do_not_count_against_the_record_limit(self):
+    def test_tombstones_do_not_spend_the_read_budget(self):
         home = self.add("att-tombstones")
         group = self.root / "pending-delivery" / ("a" * 64)
         group.mkdir(parents=True)
-        for index in range(R.MAX_HOME_REFERENCE_ENTRIES + 1):
+        count = R.DELIVERY_READ_BUDGET + 1
+        for index in range(count):
             (group / f"delivery-{index:032x}.json.pruned").touch()
-        self.assertGreater(R.MAX_DIRECTORY_ENTRIES, R.MAX_DELIVERY_RECORDS)
-        self.assertEqual(self.sweep(0)["eligible"], 1)
+        # More tombstones than one pass may read records: they are never read,
+        # so the first pass still finishes its observation.
+        first = self.sweep(0)
+        self.assertEqual((first["eligible"], first["delivery_reads"]), (1, 0), first)
         result = self.sweep(8 / 7)
         self.assertEqual(result["removed"], 1)
         self.assertFalse(home.exists())
@@ -1224,16 +1587,29 @@ class DeliveryPruneCarrier(Fixture):
             serial += 1
             self.put(index % 3, serial, ("pending", "claimed", "sent-ambiguous")[index % 3], 1)
         self.assertEqual(len(self.json_files()), 61)
-        with mock.patch.object(R, "MAX_DELIVERY_RECORDS", 40), \
+        with mock.patch.object(R, "DELIVERY_READ_BUDGET", 40), \
                 mock.patch.object(P, "PRUNE_RECORD_LIMIT", 8):
             runs = [self.sweep(0) for _ in range(5)]
-            remaining = []
+            remaining, completed = [], []
             for number, result in enumerate(runs, 1):
                 remaining.append(result["delivery_prune"]["records_remaining"])
-                if number <= 2:
-                    self.assertEqual(self.unknown(result, "delivery-index-unknown"), 1, (number, result))
+                # G03: more records than one pass reads is a resumable deferral of
+                # the one candidate, never a global unknown.
+                self.assertEqual(self.unknown(result, "delivery-index-unknown"), 0, (number, result))
+                self.assertEqual(result["unknown"], {}, (number, result))
+                if result["deferred"]:
+                    self.assertEqual(self.kept(result, "delivery-read-deferred"), 1, (number, result))
+                    self.assertLessEqual(result["delivery_reads"], 40, (number, result))
+                    self.assertEqual(self.kept(result, "within-window"), 0, (number, result))
                 else:
-                    self.assertEqual(self.unknown(result, "delivery-index-unknown"), 0, (number, result))
+                    # The prune ran first, so the finished observation read only
+                    # what was left, and the ordinary rule decides in the same pass.
+                    completed.append(number)
+                    self.assertEqual(self.kept(result, "within-window"), 1, (number, result))
+                    self.assertLessEqual(result["delivery_reads"],
+                                         result["delivery_prune"]["records_remaining"], (number, result))
+            self.assertTrue(completed and completed[0] <= 3, (completed, runs))
+            print("reduced-backlog observation-complete passes", completed)
             self.assertEqual(remaining, [53, 45, 37, 32, 32])
             self.assertEqual(runs[3]["delivery_prune"]["aged_seen"], 5)
             self.assertEqual(runs[4]["delivery_prune"]["pruned_records"], 0)
@@ -1242,15 +1618,12 @@ class DeliveryPruneCarrier(Fixture):
         self.assertEqual(self.last_prune()["records_remaining"], len(self.json_files()))
         self.assertTrue(home.is_dir())
 
-    # --- (b) live-shaped backlog (6,133 records, cap 4,096) --------------------
+    # --- (b) live-shaped backlog (6,133 records, 4,096 reads per pass) ---------
     def test_live_shaped_backlog_drains_below_cap_within_bounded_passes(self):
         import math
         import builtins
         import dispatch_log_retention as LOGS
         AGED, RECENT, OPEN, OPEN_OLD, GROUPS = 2933, 2503, 698, 60, 64
-        # The live case: a 6,134-record store above the 4,096-record index cap
-        # of the time. The cap is pinned so the fixture still exceeds it.
-        CAP = 4096
         home = self.add("att-cand")
         logs = self.root / "logs"
         logs.mkdir(mode=0o700)
@@ -1278,7 +1651,10 @@ class DeliveryPruneCarrier(Fixture):
         for index in range(5):
             serial += 1
             victim = self.put(serial % GROUPS, serial, "acked", 20)
-            P._write_prune_tombstone(victim, json.loads(victim.read_text()))
+            value = json.loads(victim.read_text())
+            # Production writes a tombstone inside the removal's reference admission.
+            with AR.admission(self.root, P.record_references(value)):
+                P._write_prune_tombstone(victim, value)
             victim.unlink()
             tombs.append(P.tombstone_path(victim))
         total = AGED + RECENT + OPEN
@@ -1324,7 +1700,6 @@ class DeliveryPruneCarrier(Fixture):
         pruned_total = 0
         step = (R.DUE_SECONDS + 1) * 10**9
         with mock.patch.object(P, "prune_bounded", measured_prune), \
-                mock.patch.object(R, "MAX_DELIVERY_RECORDS", CAP), \
                 self.replaced("open", os_open), mock.patch("builtins.open", bi_open), \
                 mock.patch.object(Path, "read_text", read_text):
             for run in range(1, 13):
@@ -1358,14 +1733,18 @@ class DeliveryPruneCarrier(Fixture):
                 waiting = [aged_mtimes[path] for path in aged if path.exists()]
                 if gone and waiting:
                     self.assertLessEqual(max(gone), min(waiting), row)
-                if first_below is None and after <= CAP:
+                if first_below is None and after <= R.DELIVERY_READ_BUDGET:
                     first_below = run
-                if first_below is None:
-                    self.assertGreaterEqual(self.unknown(home_result, "delivery-index-unknown"), 1, row)
-                    self.assertGreaterEqual(row["log_unknown"], 1, row)
-                else:
-                    self.assertEqual(self.unknown(home_result, "delivery-index-unknown"), 0, row)
-                    self.assertEqual(row["log_unknown"], 0, row)
+                # G03: more records than one pass reads defers the candidate and resumes; it
+                # is never a global unknown, before or after the first pass below the budget.
+                self.assertEqual(self.unknown(home_result, "delivery-index-unknown"), 0, row)
+                self.assertEqual(home_result["unknown"], {}, row)
+                self.assertEqual(row["log_unknown"], 0, row)
+                if run == 1:
+                    # 5,600+ records cannot be read in one 4,096-read pass; a resumed
+                    # observation may finish on a later pass while still over the budget.
+                    self.assertGreaterEqual(self.kept(home_result, "delivery-read-deferred"), 1, row)
+                    self.assertGreaterEqual(log_result["kept_reasons"].get("delivery-read-deferred", 0), 1, row)
                 if pruned_total == AGED:
                     break
         print("\nDELIVERY-PRUNE-TABLE " + json.dumps(table, sort_keys=True))
@@ -1375,7 +1754,7 @@ class DeliveryPruneCarrier(Fixture):
                   "log_unknown={log_unknown} log_removed={log_removed} body_reads={prune_body_reads} "
                   "manifest/jobs opens={prune_manifest_or_jobs_opens} elapsed_ms={prune_elapsed_ms}".format(**row))
         smallest = min(row["pruned"] for row in table[:-1]) if len(table) > 1 else table[0]["pruned"]
-        excess = total - CAP
+        excess = total - R.DELIVERY_READ_BUDGET
         self.assertLessEqual(first_below, math.ceil(excess / smallest), table)
         if all(row["pruned"] == P.PRUNE_RECORD_LIMIT for row in table[:-1]):
             self.assertEqual(first_below, 4, table)
@@ -1389,8 +1768,42 @@ class DeliveryPruneCarrier(Fixture):
         self.assertGreaterEqual(table[first_below - 1]["log_removed"], 1, table)
         self.assertFalse(log_file.exists())
         self.assertTrue(home.is_dir())
-        self.assertTrue(any(k not in ("delivery-index-unknown",) for k in table[-1]["home_kept"]),
+        self.assertTrue(any(k not in ("delivery-index-unknown", "delivery-read-deferred")
+                            for k in table[-1]["home_kept"]),
                         "the HOME now fails on an ordinary rule, not on the index")
+
+    # --- R1 (d) prune, unrelated publication and the final look together ------
+    def test_prune_tombstones_and_unrelated_publication_every_pass_do_not_stretch_the_observation(self):
+        import math
+        home = self.add("att-cand")
+        serial = 0
+        for index in range(600):
+            serial += 1
+            self.put(serial % 16, serial, ("acked", "rejected", "expired")[index % 3], 8 + 20 * index / 600)
+        for index in range(200):
+            serial += 1
+            self.put(serial % 16, serial, "acked", 2 * index / 200)
+        extra = [700000]
+        passes = []
+        step = (R.DUE_SECONDS + 1) * 10**9
+        at = self.now + 2 * RETENTION_NS
+        for run in range(4):
+            before_json = len(self.json_files())
+            result = R.sweep(self.jobs, now_ns=at + run * step)
+            passes.append(result)
+            self.assertEqual(result["unknown"], {}, result)
+            # tombstones and unlinks never cost a body read: only `.json` records are read
+            self.assertLessEqual(result["delivery_reads"], before_json, result)
+            if not home.exists():
+                break
+            for _ in range(5):
+                extra[0] += 1
+                self.publish_delivery(f"delivery-{extra[0]:032x}", "r1-unrelated-prune-group",
+                                      [f"att-unrelated-{extra[0]}"], "-")
+        self.assertFalse(home.exists(), passes)
+        self.assertLessEqual(len(passes), 1 + math.ceil(600 / P.PRUNE_RECORD_LIMIT), passes)
+        print(json.dumps({"g03_r1_prune_passes": len(passes),
+                          "pruned": [r["delivery_prune"]["pruned_records"] for r in passes]}))
 
     # --- (c) cadence ---------------------------------------------------------
     def test_prune_follows_the_pass_due_gate_and_retention_lock(self):
@@ -1973,7 +2386,7 @@ class Races(Fixture):
             self.assertEqual(json.loads(record.read_text())["state"], "pending")
             self.assertEqual(order, ["rename", "publish"])
 
-    def test_unrelated_normal_publishers_run_during_candidate_admission_and_home_is_removed(self):
+    def test_unrelated_new_group_publishers_run_during_admission_and_next_due_pass_removes_home(self):
         home = self.add("att-unrelated-normal-publisher")
         self.sweep(0)
         original_final = R._late_candidate_delivery_change
@@ -2026,6 +2439,11 @@ class Races(Fixture):
         self.assertFalse(thread.is_alive())
         self.assertEqual(errors, [])
         self.assertEqual(completed_inside, [True], "unrelated publication must complete under candidate admission")
+        # The candidate's reference admission was won before this unrelated writer
+        # started, and no writer that can name the candidate can publish while it is
+        # held. A new group made meanwhile is not evidence about the candidate, so
+        # the same pass removes the HOME (the old root-metadata backstop deferred it
+        # a whole pass); unrelated publication itself remains unblocked.
         self.assertEqual(result["removed"], 1, result)
         self.assertFalse(home.exists())
         self.assertEqual(len(list(P.record_directory(self.root, "unrelated-normal-publisher").glob("*.json"))), 3)
@@ -2114,8 +2532,8 @@ class Races(Fixture):
         real_relation = R._delivery_record_relation
         real_prepare = R._prepare_candidate_delivery_baseline
 
-        def observed_relation(path, related, binding=None):
-            result = real_relation(path, related, binding)
+        def observed_relation(path, related, binding=None, **kwargs):
+            result = real_relation(path, related, binding, **kwargs)
             if Path(path) == record:
                 late_reads.append(result)
             return result
@@ -2380,15 +2798,19 @@ class Races(Fixture):
                 writer.join(5)
             return original_detach(ctx, *args, **kwargs)
 
-        with mock.patch.object(P.fcntl, "flock", observed), mock.patch.object(R, "_detach", detach):
-            writer.start()
-            self.assertTrue(parked.wait(5))
-            result = self.sweep((8) / 7)
-        writer.join(5)
+        try:
+            with mock.patch.object(P.fcntl, "flock", observed), mock.patch.object(R, "_detach", detach):
+                writer.start()
+                self.assertTrue(parked.wait(5))
+                result = self.sweep((8) / 7)
+        finally:
+            original_flock(held, fcntl.LOCK_UN)
+            writer.join(5)
+        self.assertFalse(writer.is_alive())
         self.assertEqual(errors, [])
         self.assertEqual(json.loads(path.read_text())["attempt_ids"], ["att-owner"])
         self.assertEqual(result["removed"], 0)
-        self.assertEqual(self.kept(result, "late-evidence-changed"), 1)
+        self.assertGreaterEqual(result["deferred"] + self.kept(result, "late-evidence-changed"), 1)
         self.assertTrue(home.is_dir())
         self.assertEqual(self.kept(self.sweep((8.1) / 7), "delivery-open"), 1)
 
@@ -2678,10 +3100,13 @@ class Races(Fixture):
         home = self.add("att-history")
         folder = self.root / "pending-delivery" / ("d" * 64)
         folder.mkdir(parents=True)
-        for number in range(R.MAX_DEPENDENCY_STAMPS + 2):
-            (folder / f"delivery-{number:032x}.json.pruned").touch()
-        self.sweep(0)
-        result = self.sweep((8) / 7)
+        with VirtualDeliveries(self.root, self.now, count=R.MAX_DEPENDENCY_STAMPS + 2,
+                               tombstones=True) as history:
+            for number in range(20):
+                result = R.sweep(self.jobs, now_ns=self.now + 2 * RETENTION_NS + number * 301 * 10**9)
+                if result["removed"]:
+                    break
+            self.assertEqual(history.reads, 0)
         self.assertEqual(result["removed"], 1, result)
         self.assertFalse(home.exists())
 
@@ -2882,11 +3307,9 @@ class Races(Fixture):
             related=frozenset({candidate}),
             related_file_stamps=(),
             baseline_files=(),
-            baseline_file_paths=frozenset(),
-            group_stamps=((group, before),),
-            group_names=frozenset({group.name}),
+            token=None,
+            subject_id=candidate,
             base=base,
-            base_stamp=R._stamp(base),
         )
 
         displaced = self.root / "displaced-pending-group"
@@ -2905,7 +3328,7 @@ class Races(Fixture):
         with mock.patch.object(R, "_delivery_record_relation", replace_group_before_read):
             result = R._late_candidate_group_change(
                 baseline, baseline.related, baseline.binding,
-                baseline.baseline_file_paths, time.monotonic() + 2)
+                {}, time.monotonic() + 2, mark=old_ns)
 
         self.assertEqual(swapped, [True])
         self.assertEqual(result, "changed")
@@ -3649,6 +4072,7 @@ class Bounds(Fixture):
         self.assertEqual(R.VIEW_REFRESH_SECONDS, 300)
         self.assertLessEqual(R.VIEW_REFRESH_SECONDS, R.IDLE_SECONDS / 12)
         self.assertEqual(R.REMOVE_LIMIT, 16)
+        self.assertEqual(R.BACKLOG_DUE_SECONDS, 60)
         self.assertEqual(R.EXAMINE_LIMIT, 128)
         self.assertEqual(R.EXAMINE_BUDGET_SECONDS, 10)
         self.assertEqual(R.REMOVE_DEADLINE_SECONDS, 20)
@@ -3716,7 +4140,10 @@ class Bounds(Fixture):
             result = R.sweep(self.jobs, now_ns=sweep_now, force=True)
         elapsed = time.monotonic() - started
         within_deadline = sum(finished <= deadline for finished, deadline in detach_times)
-        self.assertGreaterEqual(result["due"], due_count)
+        # Examination stops once the removal budget is full of due homes.
+        self.assertEqual(result["due"], R.REMOVE_LIMIT)
+        self.assertLess(R.REMOVE_LIMIT, due_count)
+        self.assertEqual(result["more"], 1)
         self.assertLessEqual(result["examined"], R.EXAMINE_LIMIT)
         self.assertLessEqual(result["removed"] + result["partial"], R.REMOVE_LIMIT)
         self.assertGreaterEqual(within_deadline, 6, result)
@@ -3787,7 +4214,11 @@ class Bounds(Fixture):
                             mock.patch.object(R, "_detach", detached), \
                             mock.patch.object(R, "_fresh", fresh), \
                             mock.patch.object(R, "_registry_lock", locked):
-                        result = fixture.sweep((8) / 7)
+                        for invocation in range(40):
+                            result = R.sweep(fixture.jobs, now_ns=fixture.now + int(8 / 7 * RETENTION_NS)
+                                             + invocation * 301 * 10**9)
+                            if result["removed"] == 3:
+                                break
                     self.assertEqual(result["removed"], 3, (kind, result))
                     self.assertTrue(all(not home.exists() for home in homes))
                     self.assertEqual(len(preparation), 3)
@@ -3807,11 +4238,34 @@ class Bounds(Fixture):
         self.sweep(0)
         first = self.sweep(8 / 7)
         self.assertEqual(first["removed"], R.REMOVE_LIMIT)
-        self.assertEqual(self.kept(first, "deferred"), 3)
+        # Examination stops once the removal budget is full, so nothing is
+        # examined-then-deferred and the rest wait for the next pass.
+        self.assertEqual(first["examined"], R.REMOVE_LIMIT)
+        self.assertEqual(self.kept(first, "deferred"), 0)
         second = self.sweep(8.1 / 7)
         self.assertEqual(second["removed"], 3)
         self.assertFalse(any(path.exists() for path in homes))
         self.assertEqual(self.sweep(8.2 / 7)["removed"], 0)
+
+    def test_cursor_resumes_at_due_homes_the_pass_could_not_remove(self):
+        # More due homes than one pass removes, and more homes than one
+        # examine batch: the next pass must continue right after the last
+        # examined home instead of skipping the rest of a whole cycle.
+        attempts = [f"att-r{index}" for index in range(R.EXAMINE_LIMIT + R.REMOVE_LIMIT + 4)]
+        paths = {attempt: self.add(attempt) for attempt in attempts}
+        self.sweep(0)
+        first = self.sweep(8 / 7)
+        self.assertEqual((first["removed"], first["examined"]), (R.REMOVE_LIMIT, R.REMOVE_LIMIT))
+        remaining = len(attempts) - R.REMOVE_LIMIT
+        total = R.REMOVE_LIMIT
+        for step in range(1, 12):
+            result = self.sweep((8 + step / 1000) / 7)
+            self.assertLessEqual(result["removed"], R.REMOVE_LIMIT)
+            total += result["removed"]
+            if not any(path.exists() for path in paths.values()):
+                break
+        self.assertEqual(total, len(attempts))
+        self.assertLessEqual(step, -(-remaining // R.REMOVE_LIMIT))
 
     def test_fair_cursor_reaches_eligible_homes_behind_protected_ones(self):
         attempts = [f"att-f{index}" for index in range(R.EXAMINE_LIMIT + 5)]
@@ -3849,6 +4303,23 @@ class Bounds(Fixture):
             self.assertEqual(self.sweep((1) / 7), {"skipped": "busy"})
         finally:
             os.close(fd)
+
+    def test_next_pass_starts_sooner_only_while_due_homes_are_left_behind(self):
+        for index in range(R.REMOVE_LIMIT + 1):
+            self.add(f"att-more-{index}")
+        base = self.now + int(8 / 7 * RETENTION_NS)
+        R.sweep(self.jobs, now_ns=self.now, force=True)
+        first = R.sweep(self.jobs, now_ns=base, force=True)
+        self.assertEqual((first["removed"], first.get("more")), (R.REMOVE_LIMIT, 1))
+        gap = R.BACKLOG_DUE_SECONDS * 10**9
+        self.assertEqual(R.sweep(self.jobs, now_ns=base + gap - 10**9), {"skipped": "not-due"})
+        second = R.sweep(self.jobs, now_ns=base + gap)
+        self.assertEqual(second["removed"], 1)
+        self.assertNotIn("more", second)
+        # Nothing is left behind now, so the ordinary interval applies again.
+        self.assertEqual(R.sweep(self.jobs, now_ns=base + gap + 2 * gap),
+                         {"skipped": "not-due"})
+        self.assertNotIn("skipped", R.sweep(self.jobs, now_ns=base + gap + R.DUE_SECONDS * 10**9))
 
     def test_examine_time_budget_stops_before_the_candidate_limit(self):
         for index in range(5):
@@ -4288,6 +4759,1363 @@ class Views(Fixture):
         link = self.workers / ("a" * 32)
         link.symlink_to(self.outside / "x")
         self.assertFalse(R.note_view(self.jobs, str(link)))
+
+
+
+class G03(Fixture):
+    def test_g03_pinned_and_current_publisher_first_after_resumed_scan(self):
+        for pinned in (True, False):
+            for new_group in (False, True):
+                for relation in ("attempt", "parent"):
+                    with self.subTest(pinned=pinned, new_group=new_group, relation=relation):
+                        case = Fixture(); case.setUp()
+                        try:
+                            attempt = "att-g03-final-publication"
+                            home = case.add(attempt, harness="codex")
+                            recipients = ["g03-a", "g03-b", "g03-c"]
+                            with VirtualDeliveries(case.root, case.now - 3 * RETENTION_NS,
+                                    groups=3, recipient_keys=recipients):
+                                at = case.now + 2 * RETENTION_NS
+                                first = R.sweep(case.jobs, now_ns=at)
+                                self.assertGreater(first["deferred"], 0)
+                                before = P.reference_token(case.root, attempt)
+                                original, published = R._late_candidate_delivery_change, []
+                                recipient = "g03-new" if new_group else recipients[0]
+                                def publish_then_check(ctx, selected, deadline, binding=None):
+                                    if not published:
+                                        self.assertNotIn(attempt, AR.held_attempts())
+                                        with normal_delivery_writer(case.root, recipient, attempt,
+                                                pinned=pinned, relation=relation):
+                                            pass
+                                        published.append(True)
+                                    return original(ctx, selected, deadline, binding)
+                                with mock.patch.object(R, "_late_candidate_delivery_change", publish_then_check):
+                                    result = R.sweep(case.jobs, now_ns=at + 301 * 10**9)
+                                self.assertEqual(result["removed"], 0, result)
+                                self.assertTrue(home.exists())
+                                self.assertEqual(published, [True])
+                                self.assertEqual(before == P.reference_token(case.root, attempt), pinned)
+                                record = P.read(case.root, recipient, "delivery-" + "f" * 32)
+                                self.assertEqual(record["state"], "pending")
+                                print(json.dumps({"g03_home_publisher_first": True, "pinned": pinned,
+                                    "new_group": new_group, "relation": relation, "result": result}))
+                        finally:
+                            case.doCleanups()
+
+    def test_g03_pinned_and_current_deletion_first_fences_home_rename(self):
+        for pinned in (True, False):
+            for new_group in (False, True):
+                for relation in ("attempt", "parent"):
+                    with self.subTest(pinned=pinned, new_group=new_group, relation=relation):
+                        case = Fixture(); case.setUp()
+                        try:
+                            attempt = "att-g03-home-delete-first"
+                            home = case.add(attempt, harness="codex")
+                            recipients = ["g03-a", "g03-b", "g03-c"]
+                            with VirtualDeliveries(case.root, case.now - 3 * RETENTION_NS,
+                                    groups=3, recipient_keys=recipients):
+                                at = case.now + 2 * RETENTION_NS
+                                self.assertGreater(R.sweep(case.jobs, now_ns=at)["deferred"], 0)
+                                recipient = "g03-new" if new_group else recipients[0]
+                                real_rename, renamed = os.rename, []
+                                with normal_delivery_writer(case.root, recipient, attempt,
+                                        pinned=pinned, relation=relation, gated=True) as child:
+                                    def rename(name, target, **kwargs):
+                                        if name == home.name:
+                                            child.stdin.write("go\n"); child.stdin.flush()
+                                            wait_for_reference_attempt(child)
+                                            self.assertIsNone(child.poll())
+                                            result = real_rename(name, target, **kwargs)
+                                            self.assertIsNone(child.poll(), "publisher passed HOME rename")
+                                            renamed.append(True)
+                                            return result
+                                        return real_rename(name, target, **kwargs)
+                                    with case.replaced("rename", rename):
+                                        result = R.sweep(case.jobs, now_ns=at + 301 * 10**9)
+                                self.assertEqual(renamed, [True])
+                                self.assertEqual(result["removed"], 1, result)
+                                self.assertFalse(home.exists())
+                                self.assertEqual(P.read(case.root, recipient, "delivery-" + "f" * 32)["state"], "pending")
+                        finally:
+                            case.doCleanups()
+
+    def test_g03_idempotent_unrelated_create_preserves_multi_pass_progress(self):
+        for groups, writer_group in ((1, 0), (3, 0), (3, 2)):
+            with self.subTest(groups=groups, writer_group=writer_group):
+                case = Fixture(); case.setUp()
+                try:
+                    free = case.add("att-g03-cadence-free", harness="codex")
+                    opened = case.add("att-g03-cadence-open", harness="codex")
+                    parent = case.add("att-g03-cadence-parent", harness="codex")
+                    recipients = [f"g03-cadence-{i}" for i in range(groups)]
+                    with VirtualDeliveries(case.root, case.now - 3 * RETENTION_NS, groups=groups,
+                            recipient_keys=recipients,
+                            open_refs=[(["att-g03-cadence-open"], "att-g03-cadence-parent")]):
+                        recipient = recipients[writer_group]
+                        def noop():
+                            case.publish_delivery("delivery-" + "f" * 32, recipient, ["att-unrelated"], "-")
+                        noop()
+                        stamps = [R._stamp(case.root / "pending-delivery"),
+                                  R._stamp(P.record_directory(case.root, recipient))]
+                        passes = []
+                        for i in range(3):
+                            noop()
+                            self.assertEqual(stamps, [R._stamp(case.root / "pending-delivery"),
+                                                     R._stamp(P.record_directory(case.root, recipient))])
+                            result = R.sweep(case.jobs, now_ns=case.now + 2 * RETENTION_NS + i * 301 * 10**9)
+                            passes.append(result)
+                            self.assertLessEqual(result["delivery_reads"], R.DELIVERY_READ_BUDGET)
+                            self.assertEqual(result["unknown"], {})
+                            self.assertTrue(opened.exists() and parent.exists())
+                            if not free.exists():
+                                break
+                        self.assertEqual(len(passes), 2, passes)
+                        self.assertGreater(passes[0]["deferred"], 0)
+                        self.assertEqual(passes[1]["removed"], 1, passes)
+                        self.assertLess(passes[1]["delivery_reads"], 32)
+                        print(json.dumps({"g03_home_cadence": groups, "writer_group": writer_group, "passes": passes}))
+                finally:
+                    case.doCleanups()
+
+    def test_g03_large_history_late_open_candidate_progress_across_adapters(self):
+        self.assertEqual(R.DELIVERY_READ_BUDGET, 4096)
+        for groups in (1, 3):
+            for harness in ("claude", "codex", "opencode"):
+                with self.subTest(groups=groups, harness=harness):
+                    case = Fixture(); case.setUp()
+                    try:
+                        free = case.add("att-g03-free", harness=harness)
+                        child = case.add("att-g03-child", harness=harness)
+                        parent = case.add("att-g03-parent", harness=harness)
+                        with VirtualDeliveries(case.root, case.now - 3 * RETENTION_NS,
+                                groups=groups, open_refs=[(["att-g03-child"], "att-g03-parent")]) as history:
+                            at = case.now + 2 * RETENTION_NS
+                            first = R.sweep(case.jobs, now_ns=at)
+                            self.assertEqual((first["eligible"], first["removed"]), (0, 0), first)
+                            self.assertGreater(first["deferred"], 0)
+                            self.assertEqual(first["unknown"], {})
+                            self.assertEqual(first["kept"].get("delivery-open", 0), 0,
+                                             "the open reference must be beyond the first page")
+                            first_reads = history.reads
+                            second = R.sweep(case.jobs, now_ns=at + 301 * 10**9)
+                            self.assertEqual(second["removed"], 1, second)
+                            self.assertFalse(free.exists())
+                            self.assertTrue(child.exists() and parent.exists())
+                            self.assertLessEqual(first_reads, R.DELIVERY_READ_BUDGET)
+                            self.assertEqual(history.reads, 4098)
+                            self.assertLessEqual(second["delivery_reads"], R.DELIVERY_READ_BUDGET)
+                            state = case.state()["delivery_observation"]
+                            self.assertNotRegex(json.dumps(state), r"delivery-[0-9a-f]{32}")
+                            print(json.dumps({"g03": harness, "groups": groups,
+                                "reads_by_pass": [first_reads, history.reads - first_reads],
+                                "entries_by_pass": [first["delivery_entries"], second["delivery_entries"]],
+                                "state_bytes": len(json.dumps(state)), "removed": second["removed"]}))
+                    finally:
+                        case.doCleanups()
+
+    def test_g03_membership_inode_and_mode_changes_still_invalidate_resume(self):
+        """A replaced store or a changed in-progress group is read again; a group
+        added later or a mode correction does not restart the traversal, and a
+        record naming the HOME still protects it (its writer moved the token)."""
+        for mutation in ("new-group", "new-record", "root-inode", "group-inode", "mode-correction"):
+            with self.subTest(mutation=mutation):
+                case = Fixture(); case.setUp()
+                try:
+                    home = case.add("att-g03-generation", harness="codex")
+                    recipients = ["g03-generation-a", "g03-generation-b", "g03-generation-c"]
+                    with VirtualDeliveries(case.root, case.now - 3 * RETENTION_NS,
+                            groups=3, recipient_keys=recipients) as history:
+                        base = case.root / "pending-delivery"
+                        case.publish_delivery("delivery-" + "f" * 32, recipients[2], ["att-unrelated"], "-")
+                        at = case.now + 2 * RETENTION_NS
+                        first = R.sweep(case.jobs, now_ns=at)
+                        self.assertGreater(first["deferred"], 0)
+                        # Groups are walked in name order; the last one is still in progress.
+                        current = case.state()["delivery_observation"]["position"]["group"]
+                        in_progress = next(key for key in recipients if P.recipient_digest(key) == current)
+                        if mutation == "new-group":
+                            case.publish_delivery("delivery-" + "e" * 32, "g03-added-group", ["att-g03-generation"], "-")
+                        elif mutation == "new-record":
+                            case.publish_delivery("delivery-" + "e" * 32, in_progress, ["att-g03-generation"], "-")
+                        elif mutation == "root-inode":
+                            base.rename(case.root / "old-deliveries")
+                            for group in history.paths:
+                                group.mkdir(parents=True)
+                        elif mutation == "group-inode":
+                            group = base / current
+                            group.rename(case.root / "old-group"); group.mkdir()
+                        else:
+                            os.chmod(base, 0o750)
+                            case.publish_delivery("delivery-" + "f" * 32, recipients[2], ["att-unrelated"], "-")
+                            self.assertEqual(__import__("stat").S_IMODE(base.stat().st_mode), 0o700)
+                        second = R.sweep(case.jobs, now_ns=at + 301 * 10**9)
+                        self.assertEqual(second["unknown"], {}, second)
+                        if mutation in ("new-group", "mode-correction"):
+                            # Stable no-op cadence: the traversal resumes, no reread.
+                            self.assertLess(second["delivery_reads"], 32, second)
+                        else:
+                            # A genuine changed generation must reread its directory.
+                            self.assertGreater(second["delivery_reads"], 1300, second)
+                        if mutation in ("new-group", "new-record"):
+                            self.assertEqual(second["removed"], 0, second)
+                            self.assertTrue(home.exists())
+                        print(json.dumps({"g03_generation_mutation": mutation, "result": second}))
+                finally:
+                    case.doCleanups()
+
+    def test_g03_ack_and_prune_keep_related_home_and_unrelated_resume_progress(self):
+        for action in ("ack", "prune"):
+            with self.subTest(action=action):
+                case = Fixture(); case.setUp()
+                try:
+                    free = case.add("att-g03-mutation-free", harness="codex")
+                    related = case.add("att-g03-mutation-related", harness="codex")
+                    recipients = ["g03-mutation-a", "g03-mutation-b", "g03-mutation-c"]
+                    # Groups are read in name order: mutate one the first pass finished.
+                    recipients.sort(key=P.recipient_digest)
+                    with VirtualDeliveries(case.root, case.now - 3 * RETENTION_NS,
+                            groups=3, recipient_keys=recipients):
+                        delivery = "delivery-" + "f" * 32
+                        case.publish_delivery(delivery, recipients[0], ["att-g03-mutation-related"], "-")
+                        P.claim(case.root, recipients[0], delivery, claim_owner="g03", lease_seconds=30)
+                        at = case.now + 2 * RETENTION_NS
+                        first = R.sweep(case.jobs, now_ns=at)
+                        self.assertEqual(first["removed"], 0)
+                        self.assertGreater(first["deferred"], 0)
+                        base_stamp = R._stamp(case.root / "pending-delivery")
+                        token = P.reference_token(case.root, "att-g03-mutation-related")
+                        P.ack(case.root, recipients[0], delivery, acked_by="g03")
+                        if action == "prune":
+                            pruned = P.prune(case.root, apply=True, now=time.time() + 1, retention_seconds=0)
+                            self.assertEqual(pruned["pruned_records"], 1, pruned)
+                            self.assertTrue(Path(str(P.record_path(case.root, recipients[0], delivery)) + ".pruned").exists())
+                        self.assertNotEqual(token, P.reference_token(case.root, "att-g03-mutation-related"))
+                        self.assertEqual(base_stamp, R._stamp(case.root / "pending-delivery"))
+                        second = R.sweep(case.jobs, now_ns=at + 301 * 10**9)
+                        self.assertEqual(second["removed"], 1, second)
+                        self.assertLess(second["delivery_reads"], 32)
+                        self.assertFalse(free.exists())
+                        self.assertTrue(related.exists(), "changed related evidence must remain conservative")
+                        print(json.dumps({"g03_interpass_mutation": action, "result": second}))
+                finally:
+                    case.doCleanups()
+
+    def test_g03_unknown_is_protected_and_partial_keeps_established_clock(self):
+        home = self.add("att-g03-clock")
+        self.set_timestamp("att-g03-clock", "unparseable")
+        self.sweep(0)
+        first_clock = self.state()["eligible_since"][home.name]
+        with VirtualDeliveries(self.root, self.now - 3 * RETENTION_NS, malformed=True):
+            at = self.now + 2 * RETENTION_NS
+            partial = R.sweep(self.jobs, now_ns=at)
+            self.assertEqual(partial["unknown"], {})
+            self.assertEqual(self.state()["eligible_since"][home.name], first_clock)
+            last = R.sweep(self.jobs, now_ns=at + 301 * 10**9)
+            self.assertEqual(last["unknown"].get("delivery-index-unknown"), 1)
+            self.assertTrue(home.exists())
+            self.assertEqual(self.state()["eligible_since"][home.name], first_clock)
+
+    def test_g03_resumes_virtual_history_in_another_process(self):
+        free = self.add("att-g03-restart-free", harness="codex")
+        related = self.add("att-g03-restart-open", harness="codex")
+        at = self.now + 2 * RETENTION_NS
+        with VirtualDeliveries(self.root, self.now - 3 * RETENTION_NS,
+                              open_refs=[(["att-g03-restart-open"], "-")]) as history:
+            first = R.sweep(self.jobs, now_ns=at)
+            first_reads = history.reads
+        self.assertGreater(first["deferred"], 0)
+        code = """import importlib.util,sys,json
+from pathlib import Path
+spec=importlib.util.spec_from_file_location('g03_fixture',sys.argv[1]); m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+root=Path(sys.argv[2]); now=int(sys.argv[3]);at=int(sys.argv[4])
+with m.VirtualDeliveries(root,now-3*m.RETENTION_NS,open_refs=[(['att-g03-restart-open'],'-')]) as h:
+ result=m.R.sweep(root/'jobs.log',now_ns=at)
+ print(json.dumps({'result':result,'reads':h.reads}))
+"""
+        child = subprocess.run([sys.executable, "-B", "-c", code, __file__, str(self.root),
+                                str(self.now), str(at + 301 * 10**9)],
+                               capture_output=True, text=True, check=True)
+        resumed = json.loads(child.stdout)
+        self.assertEqual(resumed["result"]["removed"], 1, resumed)
+        self.assertEqual(first_reads + resumed["reads"], 4098)
+        self.assertTrue(related.exists()); self.assertFalse(free.exists())
+        print(json.dumps({"g03_process_restart": True, "reads": [first_reads, resumed["reads"]]}))
+
+    def test_g03_real_directory_cookie_restart(self):
+        directory = self.root / "cookie-fixture"
+        directory.mkdir()
+        for i in range(12):
+            (directory / f"file-{i}").touch()
+        cookie, seen = 0, []
+        code = """import sys,json,time
+sys.path.insert(0,sys.argv[1]);import worker_home_retention as r
+from pathlib import Path
+print(json.dumps(r._directory_page(Path(sys.argv[2]),int(sys.argv[3]),3,time.monotonic()+5)[:2]))
+"""
+        for _ in range(10):
+            child = subprocess.run([sys.executable, "-B", "-c", code, str(ROOT/'utilities'),
+                                    str(directory), str(cookie)], capture_output=True, text=True, check=True)
+            entries, eof = json.loads(child.stdout)
+            for name, cookie, _dtype in entries:
+                if name not in (".", ".."):
+                    seen.append(name)
+            if eof:
+                break
+        self.assertEqual(set(seen), {f"file-{i}" for i in range(12)})
+        self.assertEqual(len(seen), 12)
+
+    def test_g03_supported_root_bindings_resume_guarded_inventory_in_separate_processes(self):
+        for kind in ("home", "xdg", "harness", "explicit", "inherited", "activation"):
+            with self.subTest(binding=kind):
+                owned = self.root / kind
+                env = {"HOME": str(owned / "home")}
+                agent = owned / "checkout"
+                explicit = None
+                if kind == "xdg":
+                    env["XDG_STATE_HOME"] = str(owned / "xdg")
+                elif kind == "harness":
+                    env["HARNESS_STATE_ROOT"] = str(owned / "state")
+                elif kind == "explicit":
+                    explicit = str(owned / "selected/jobs.log")
+                elif kind == "inherited":
+                    env["AGENT_DISPATCH_JOBS"] = str(owned / "inherited/jobs.log")
+                elif kind == "activation":
+                    agent = owned / "runtime/.harness/bundles/fixture/source"
+                selected = DC.resolve_global_registry(agent, explicit, 1, "start", environ=env)
+                root = DC.resolve_dispatch_state_root(agent, explicit, environ=env)
+                self.assertEqual(root, selected.path.parent)
+                self.assertEqual(root, R._state_root(selected.path))
+                # Exercise initialization too, without using the real user's
+                # state-root binding or changing an operational location.
+                with mock.patch.dict(os.environ, env, clear=True):
+                    DC.ensure_global_registry_writable(selected.path)
+                recipient = "g03-root-binding"
+                for i in range(3):
+                    receipt = {"schema_version": 2, "fixture": "g03-root-binding"}
+                    P.create(root, recipient_kind="codex-native-queue", recipient_key=recipient,
+                             delivery_id=f"delivery-{i:032x}", session_generation="",
+                             session_generation_supported="0", attempt_ids=[f"att-root-{i}"],
+                             parent_attempt_id="-", route_id="rt-root", route_node="execute",
+                             receipt=receipt, receipt_digest=P._canonical_receipt_digest(receipt), row_revisions={})
+                directory = P.record_directory(root, recipient)
+                expected = {p.name for p in directory.iterdir()}
+                cookie, seen, pages, generation = 0, [], [], None
+                code = """import sys,json,time
+from pathlib import Path
+sys.path.insert(0,sys.argv[1]);import dispatch_contract as dc,worker_home_retention as r
+agent,explicit,env,root=json.loads(sys.argv[4])
+assert dc.resolve_dispatch_state_root(Path(agent),explicit,environ=env)==Path(root)
+print(json.dumps(r._directory_page(Path(sys.argv[2]),int(sys.argv[3]),3,time.monotonic()+5)))
+"""
+                binding = json.dumps([str(agent), explicit, env, str(root)])
+                for _ in range(12):
+                    child = subprocess.run([sys.executable, "-B", "-c", code, str(ROOT / "utilities"),
+                                            str(directory), str(cookie), binding],
+                                           capture_output=True, text=True, check=True, timeout=10)
+                    entries, eof, stamp = json.loads(child.stdout)
+                    if generation is None:
+                        generation = stamp
+                    self.assertEqual(stamp, generation)
+                    pages.append(len(entries))
+                    for name, cookie, _dtype in entries:
+                        if name not in (".", ".."):
+                            seen.append(name)
+                    if eof:
+                        break
+                self.assertTrue(eof)
+                self.assertEqual(set(seen), expected)
+                self.assertEqual(len(seen), len(expected))
+                self.assertEqual(directory.stat().st_uid, os.geteuid())
+                for path in directory.glob("*.json"):
+                    value, _ = R._read_json(str(path), R.MAX_DELIVERY_BYTES)
+                    self.assertTrue(P.record_references(value, group=directory.name, delivery_id=path.name[:-5]))
+                print(json.dumps({"g03_guarded_root_binding": kind, "pages": pages,
+                                  "inventory_entries": len(seen), "uid": generation[3], "euid": os.geteuid()}))
+
+    def test_g03_recent_terminal_activity_and_identityless_open(self):
+        recent = self.add("att-g03-recent")
+        legacy = self.add_unmapped_legacy("att-g03-legacy")
+        free = self.add_unmapped_legacy("att-g03-legacy-free")
+        with VirtualDeliveries(self.root, self.now, count=17,
+                terminal_ref="att-g03-recent", open_refs=[(["att-g03-legacy"], "-")]), \
+                mock.patch.object(R._Context, "home_process_evidence", return_value=("absent", "fixture")):
+            first = self.sweep(0)
+            self.assertEqual(first["kept"].get("delivery-open"), 1, first)
+            self.assertTrue(legacy.exists())
+            second = self.sweep(2)
+            self.assertTrue(legacy.exists()); self.assertFalse(free.exists())
+            self.assertFalse(recent.exists())
+            self.assertEqual(second["removed"], 2, second)
+
+
+    def test_g03_deadline_pages_resume_and_preserve_clock(self):
+        home = self.add("att-g03-deadline")
+        self.set_timestamp("att-g03-deadline", "invalid")
+        self.sweep(0)
+        established = self.state()["eligible_since"][home.name]
+        with VirtualDeliveries(self.root, self.now - 4 * RETENTION_NS, count=41) as history:
+            read = history.read
+            clock = [0.0]
+            def timed_read(*args, **kwargs):
+                value = read(*args, **kwargs)
+                if history._virtual(args[0]):
+                    clock[0] += 1.0
+                return value
+            with mock.patch.object(R, "_read_json", timed_read), \
+                    mock.patch.object(R.time, "monotonic", side_effect=lambda: clock[0]):
+                counts = []
+                for i in range(8):
+                    clock[0] = 0.0
+                    before = history.reads
+                    result = R.sweep(self.jobs, now_ns=self.now + 2 * RETENTION_NS + i * 301 * 10**9)
+                    counts.append(history.reads - before)
+                    self.assertEqual(result["unknown"], {})
+                    if result["removed"]:
+                        break
+                    self.assertEqual(self.state()["eligible_since"][home.name], established)
+                    self.assertGreater(result["deferred"], 0)
+                self.assertEqual(result["removed"], 1, result)
+                self.assertEqual(sum(counts), 41)
+                self.assertTrue(all(n <= 10 for n in counts), counts)
+                print(json.dumps({"g03_deadline_reads": counts, "established_clock_preserved": True}))
+
+    def test_g03_final_admission_does_not_scan_history_or_processes(self):
+        home = self.add("att-g03-critical", harness="codex")
+        with VirtualDeliveries(self.root, self.now - 3 * RETENTION_NS) as history:
+            at = self.now + 2 * RETENTION_NS
+            R.sweep(self.jobs, now_ns=at)
+            active = [False]
+            real_lock, real_page, real_read = R._registry_lock_until, R._directory_page, R._read_json
+            real_probe = DC.attempt_process_quiescence
+            @contextlib.contextmanager
+            def lock(*args):
+                with real_lock(*args) as admitted:
+                    active[0] = True
+                    try:
+                        yield admitted
+                    finally:
+                        active[0] = False
+            def page(*args):
+                self.assertFalse(active[0], "history enumeration under registry admission")
+                return real_page(*args)
+            def read(path, *args, **kwargs):
+                if history._virtual(path):
+                    self.assertFalse(active[0], "history body under registry admission")
+                return real_read(path, *args, **kwargs)
+            def probe(*args, **kwargs):
+                self.assertFalse(active[0], "process census under registry admission")
+                return real_probe(*args, **kwargs)
+            with mock.patch.object(R, "_registry_lock_until", lock), \
+                    mock.patch.object(R, "_directory_page", page), mock.patch.object(R, "_read_json", read), \
+                    mock.patch.object(DC, "attempt_process_quiescence", probe):
+                result = R.sweep(self.jobs, now_ns=at + 301 * 10**9)
+            self.assertEqual(result["removed"], 1, result)
+            self.assertFalse(home.exists())
+
+    def test_g03_corrupt_progress_and_token_reobserve_automatically(self):
+        for fault in ("missing", "torn", "cohort", "root", "cookie", "token", "inode",
+                      "mark-torn", "mark-forged", "mark-future", "mark-missing"):
+            with self.subTest(fault=fault):
+                case = Fixture(); case.setUp()
+                try:
+                    home = case.add("att-g03-state", harness="codex")
+                    with VirtualDeliveries(case.root, case.now - 3 * RETENTION_NS, count=7), \
+                            mock.patch.object(R, "DELIVERY_READ_BUDGET", 5):
+                        at = case.now + 2 * RETENTION_NS
+                        first = R.sweep(case.jobs, now_ns=at)
+                        self.assertEqual(first["removed"], 0)
+                        path = case.root / "homes/worker-retention/state.json"
+                        state = case.state()
+                        if fault == "missing": path.unlink()
+                        elif fault == "torn": path.write_text('{"delivery_observation":')
+                        elif fault == "token": AR.lock_path(case.root, "att-g03-state").write_bytes(b"torn")
+                        elif fault == "inode":
+                            group = case.root / "pending-delivery" / f"{1:064x}"
+                            group.rename(case.root / "old-group"); group.mkdir()
+                        elif fault.startswith("mark-"):
+                            obs = state["delivery_observation"]
+                            self.assertIsInstance(obs["mark"], int)
+                            if fault == "mark-torn": obs["mark"] = "torn"
+                            if fault == "mark-forged": obs["mark"] = time.time_ns() - 1
+                            if fault in ("mark-future", "mark-missing"):
+                                # A consistent record that still cannot be trusted: re-sealed.
+                                if fault == "mark-future": obs["mark"] = time.time_ns() + 86400 * 10**9
+                                else: del obs["mark"]
+                                obs["integrity"] = R._generation({k: v for k, v in obs.items() if k != "integrity"})
+                            path.write_text(json.dumps(state))
+                        else:
+                            obs = state["delivery_observation"]
+                            if fault == "cohort": obs["identity"] = "foreign"
+                            if fault == "root": obs["position"]["root_generation"] = "foreign"
+                            if fault == "cookie": obs["position"]["cookie"] = "torn"
+                            path.write_text(json.dumps(state))
+                        real_advance, resumed = R._DeliveryObservation.advance, []
+
+                        def advance(self_):
+                            resumed.append(self_.resumed)
+                            return real_advance(self_)
+                        with mock.patch.object(R._DeliveryObservation, "advance", advance):
+                            for i in range(1, 12):
+                                result = R.sweep(case.jobs, now_ns=at + i * 301 * 10**9)
+                                if result["removed"]:
+                                    break
+                        if fault.startswith("mark-"):
+                            # An untrusted mark is never resumed; the cohort is observed afresh.
+                            self.assertEqual(resumed[:1], [False], (fault, resumed))
+                        self.assertEqual(result["removed"], 1, result)
+                        self.assertFalse(home.exists())
+                finally:
+                    case.doCleanups()
+
+
+    def test_g03_pending_cohort_finishes_while_another_protection_is_open(self):
+        homes = {a: self.add(a, harness="codex") for a in ("att-g03-rotate-a", "att-g03-rotate-b")}
+        with VirtualDeliveries(self.root, self.now - 3 * RETENTION_NS, count=17), \
+                mock.patch.object(R, "DELIVERY_READ_BUDGET", 5), mock.patch.object(R, "EXAMINE_LIMIT", 1):
+            at = self.now + 2 * RETENTION_NS
+            first = R.sweep(self.jobs, now_ns=at)
+            self.assertGreater(first["deferred"], 0)
+            pending_key = self.state()["delivery_observation"]["subjects"][0]
+            pending = next(a for a, home in homes.items() if home.name == pending_key)
+            other = next(a for a in homes if a != pending)
+            self.set_status(pending, "open")
+            for i in range(1, 20):
+                result = R.sweep(self.jobs, now_ns=at + i * 301 * 10**9)
+                self.assertLessEqual(result["examined"], 1)
+                if not homes[other].exists():
+                    break
+            self.assertFalse(homes[other].exists(), result)
+            self.assertTrue(homes[pending].exists())
+
+
+    def test_g03_journal_rename_and_partial_tree_interruptions_resume_normally(self):
+        class Interrupted(BaseException):
+            pass
+        for phase in ("journal", "rename", "tree"):
+            with self.subTest(phase=phase):
+                case = Fixture(); case.setUp()
+                try:
+                    attempt = "att-g03-interrupted-" + phase
+                    home = case.add(attempt, harness="codex")
+                    key = home.name
+                    real_rename, real_unlink = os.rename, os.unlink
+                    def rename(name, target, **kwargs):
+                        if name == key and phase == "journal":
+                            raise Interrupted()
+                        result = real_rename(name, target, **kwargs)
+                        if name == key and phase == "rename":
+                            raise Interrupted()
+                        return result
+                    def unlink(name, **kwargs):
+                        result = real_unlink(name, **kwargs)
+                        if name == "transcript.jsonl" and phase == "tree":
+                            raise Interrupted()
+                        return result
+                    at = case.now + 2 * RETENTION_NS
+                    with case.replaced("rename", rename), case.replaced("unlink", unlink):
+                        with self.assertRaises(Interrupted):
+                            R.sweep(case.jobs, now_ns=at)
+                    retiring = case.root / "homes/worker-retention/retiring"
+                    self.assertTrue(list(retiring.glob("*.journal")))
+                    if phase == "journal":
+                        case.publish_delivery("delivery-" + "e" * 32, "g03-interrupted-parent", [attempt], "-")
+                    else:
+                        home.mkdir()
+                        (home / "new-writer").write_text("keep replacement inode")
+                    result = R.sweep(case.jobs, now_ns=at + 301 * 10**9)
+                    self.assertTrue(home.exists(), result)
+                    if phase != "journal":
+                        self.assertEqual((home / "new-writer").read_text(), "keep replacement inode")
+                        self.assertEqual(result["detached_leftover"], 1, result)
+                    self.assertFalse(list(retiring.iterdir()))
+                finally:
+                    case.doCleanups()
+
+
+    def test_g03_related_terminal_activity_uses_same_idle_clock_across_adapters(self):
+        for harness in ("claude", "codex", "opencode"):
+            for state in ("acked", "expired", "rejected"):
+                with self.subTest(harness=harness, state=state):
+                    case = Fixture(); case.setUp()
+                    try:
+                        related = case.add("att-g03-terminal", harness=harness)
+                        free = case.add("att-g03-terminal-free", harness=harness)
+                        old = case.now - 3 * RETENTION_NS
+                        for attempt, home in (("att-g03-terminal", related), ("att-g03-terminal-free", free)):
+                            case.set_timestamp(attempt, datetime.fromtimestamp(old / 10**9, timezone.utc).isoformat())
+                            os.utime(home, ns=(old, old))
+                        with VirtualDeliveries(case.root, case.now, count=1,
+                                terminal_ref="att-g03-terminal", terminal_state=state):
+                            first = R.sweep(case.jobs, now_ns=case.now)
+                            self.assertEqual(first["removed"], 1, first)
+                            self.assertFalse(free.exists()); self.assertTrue(related.exists())
+                            before_hour = R.sweep(case.jobs, now_ns=case.now + RETENTION_NS - 1)
+                            self.assertEqual(before_hour["removed"], 0)
+                            after_hour = R.sweep(case.jobs, now_ns=case.now + RETENTION_NS + 301 * 10**9)
+                            self.assertEqual(after_hour["removed"], 1, after_hour)
+                    finally:
+                        case.doCleanups()
+
+
+    def test_g03_numeric_cookie_corruption_cannot_skip_a_late_open_reference(self):
+        free = self.add("att-g03-corrupt-free", harness="codex")
+        opened = self.add("att-g03-corrupt-open", harness="codex")
+        with VirtualDeliveries(self.root, self.now - 3 * RETENTION_NS, count=7,
+                open_refs=[(["att-g03-corrupt-open"], "-")]), mock.patch.object(R, "DELIVERY_READ_BUDGET", 5):
+            at = self.now + 2 * RETENTION_NS
+            first = R.sweep(self.jobs, now_ns=at)
+            self.assertEqual(first["removed"], 0)
+            state = self.state()
+            state["delivery_observation"]["position"]["cookie"] = 8  # valid integer, wrong opaque position
+            (self.root / "homes/worker-retention/state.json").write_text(json.dumps(state))
+            partial = R.sweep(self.jobs, now_ns=at + 301 * 10**9)
+            self.assertEqual(partial["removed"], 0, partial)
+            self.assertGreater(partial["delivery_reads"], 0, "damaged progress needs cold observation")
+            for i in range(2, 9):
+                result = R.sweep(self.jobs, now_ns=at + i * 301 * 10**9)
+                self.assertTrue(opened.exists(), result)
+                if not free.exists():
+                    break
+            self.assertFalse(free.exists(), result)
+            self.assertTrue(opened.exists())
+
+
+    def test_g03_many_recipient_groups_resume_without_per_candidate_history(self):
+        homes = [self.add(f"att-g03-many-groups-{i}", harness="codex") for i in range(3)]
+        with VirtualRecipientGroups(self.root, 32769) as history:
+            counts = []
+            for invocation in range(40):
+                result = R.sweep(self.jobs, now_ns=self.now + 2 * RETENTION_NS + invocation * 301 * 10**9)
+                counts.append(result["delivery_entries"])
+                # Directory entries are never read, so they cost only pass time.
+                self.assertEqual(result["unknown"], {})
+                self.assertEqual(result["delivery_reads"], 0)
+                self.assertLess(len(json.dumps(self.state()["delivery_observation"])), 4096)
+                if result["removed"]:
+                    break
+            self.assertEqual(result["removed"], 3, result)
+            # Each group once, plus the group names listed again by later passes.
+            self.assertGreaterEqual(sum(counts), 32769 * 2)
+            self.assertTrue(all(not home.exists() for home in homes))
+            print(json.dumps({"g03_recipient_groups": 32769, "entries_by_pass": counts,
+                              "durable_bytes": len(json.dumps(self.state()["delivery_observation"]))}))
+
+
+    def test_g03_unrelated_publisher_in_large_existing_group_does_not_rescan_at_detach(self):
+        attempt, recipient = "att-g03-large-group-free", "g03-large-existing-group"
+        home = self.add(attempt, harness="codex")
+        with VirtualDeliveries(self.root, self.now - 3 * RETENTION_NS,
+                               recipient_keys=[recipient]) as history:
+            at = self.now + 2 * RETENTION_NS
+            first = R.sweep(self.jobs, now_ns=at)
+            self.assertGreater(first["deferred"], 0)
+            group = P.record_directory(self.root, recipient)
+            original_check, original_scandir = R._late_candidate_delivery_change, os.scandir
+            published, errors = [], []
+            def check(ctx, selected, deadline, binding=None):
+                if selected == attempt and attempt in AR.held_attempts() and not published:
+                    def writer():
+                        try:
+                            self.publish_delivery("delivery-" + "f" * 32, recipient,
+                                                  ["att-g03-large-group-unrelated"], "-")
+                            published.append(True)
+                        except Exception as exc:
+                            errors.append(repr(exc))
+                    child = threading.Thread(target=writer)
+                    child.start(); child.join(5)
+                    self.assertFalse(child.is_alive())
+                    self.assertEqual(errors, [])
+                    self.assertEqual(published, [True])
+                return original_check(ctx, selected, deadline, binding)
+            def scandir(path):
+                actual = os.readlink(f"/proc/self/fd/{path}") if isinstance(path, int) else str(path)
+                if attempt in AR.held_attempts():
+                    self.assertNotEqual(actual, str(group), "history enumeration under final admission")
+                return original_scandir(path)
+            # The clock slack only tolerates the coarse kernel clock for groups touched
+            # within a moment of the mark. This fixture's group is genuinely older than
+            # the observation, which a few milliseconds of test setup cannot express.
+            with mock.patch.object(R, "_late_candidate_delivery_change", check), \
+                    mock.patch.object(R, "MARK_SLACK_NS", 0), self.replaced("scandir", scandir):
+                result = R.sweep(self.jobs, now_ns=at + 301 * 10**9)
+            self.assertEqual(result.get("removed"), 1, result)
+            self.assertFalse(home.exists())
+            self.assertEqual(published, [True])
+            self.assertTrue(P.record_path(self.root, recipient, "delivery-" + "f" * 32).is_file())
+
+
+    def _r1_assert(self, outcome, n_paths=1):
+        self.assertEqual(outcome["exists"], [True] * n_paths, outcome)
+        self.assertEqual(outcome["record_state"], "pending", outcome)
+        self.assertEqual(outcome["second"].get("removed"), 0, outcome)
+        self.assertEqual(outcome["second"].get("unknown", {}), {}, outcome)
+        self.assertEqual(outcome["token_unchanged"], outcome["pinned"], outcome)
+
+    def test_g03_r1_publication_timing_matrix(self):
+        """R1: an old (pinned) or current writer publishing around a bounded observation never loses the HOME."""
+        for timing in ("T1", "T2", "T3", "T4"):
+            for pinned in (True, False):
+                for relation in ("attempt", "parent"):
+                    for new_group in (False, True):
+                        with self.subTest(timing=timing, pinned=pinned, relation=relation, new_group=new_group):
+                            case = Fixture(); case.setUp()
+                            try:
+                                attempt = "att-r1-matrix-home"
+                                home = case.add(attempt, harness="codex")
+                                outcome = r1_publication_run(
+                                    case, attempt=attempt, paths=[home], sweep=R.sweep,
+                                    at=case.now + 2 * RETENTION_NS, history_time=case.now - 3 * RETENTION_NS,
+                                    timing=timing, pinned=pinned, relation=relation, new_group=new_group)
+                                self._r1_assert(outcome)
+                                print(json.dumps({"r1_home": outcome}))
+                            finally:
+                                case.doCleanups()
+
+    def test_g03_r1_large_single_pass_keeps_publication_after_the_group_was_read(self):
+        """A large (not resumed) single pass is protected by the same recheck, not by the root stamp alone."""
+        for pinned in (True, False):
+            for relation in ("attempt", "parent"):
+                with self.subTest(pinned=pinned, relation=relation):
+                    case = Fixture(); case.setUp()
+                    try:
+                        attempt = "att-r1-large-single-home"
+                        home = case.add(attempt, harness="codex")
+                        outcome = r1_publication_run(
+                            case, attempt=attempt, paths=[home], sweep=R.sweep,
+                            first_at=case.now, at=case.now + 2 * RETENTION_NS,
+                            history_time=case.now, timing="L1", pinned=pinned, relation=relation,
+                            new_group=False, real_history=120)
+                        self.assertGreater(outcome["second"].get("delivery_reads", 0), 33, outcome)
+                        self._r1_assert(outcome)
+                        print(json.dumps({"r1_home_large_single": outcome}))
+                    finally:
+                        case.doCleanups()
+
+    # --- R1 follow-ups: other groups, bindings, replacement, fs premise, progress ----
+
+    def test_g03_r1_publication_into_a_group_the_candidate_does_not_name_is_protected(self):
+        for timing in ("T1", "T4"):
+            for relation in ("attempt", "parent"):
+                with self.subTest(timing=timing, relation=relation):
+                    case = Fixture(); case.setUp()
+                    try:
+                        attempt = "att-r1-other-group"
+                        home = case.add(attempt, harness="codex")
+                        outcome = r1_publication_run(
+                            case, attempt=attempt, paths=[home], sweep=R.sweep,
+                            at=case.now + 2 * RETENTION_NS, history_time=case.now - 3 * RETENTION_NS,
+                            timing=timing, pinned=True, relation=relation, new_group=False, group_index=2)
+                        self._r1_assert(outcome)
+                    finally:
+                        case.doCleanups()
+
+    def test_g03_r1_home_key_binding_publication_is_protected(self):
+        """An older writer naming an attempt that maps onto a legacy HOME key is fenced by the HOME view."""
+        for timing in ("T1", "T2", "T4"):
+            with self.subTest(timing=timing):
+                case = Fixture(); case.setUp()
+                try:
+                    attempt = "att-r1-legacy-binding"
+                    home = case.add_unmapped_legacy(attempt, harness="codex")
+                    with case.process_inventory(os.getpid()):
+                        case.sweep(0)
+                        outcome = r1_publication_run(
+                            case, attempt=attempt, paths=[home], sweep=R.sweep,
+                            at=case.now + 2 * RETENTION_NS, history_time=case.now - 3 * RETENTION_NS,
+                            timing=timing, pinned=True, relation="attempt", new_group=False)
+                    self.assertEqual(outcome["exists"], [True], outcome)
+                    self.assertEqual(outcome["record_state"], "pending", outcome)
+                    self.assertEqual(outcome["second"].get("removed"), 0, outcome)
+                    self.assertEqual(outcome["second"].get("unknown", {}), {}, outcome)
+                finally:
+                    case.doCleanups()
+
+    def _r1_real_history_case(self, attempt, groups=3, per_group=40):
+        case = Fixture(); case.setUp()
+        home = case.add(attempt, harness="codex")
+        paths = []
+        for number in range(groups):
+            group = P.record_directory(case.root, f"r1-real-{number}")
+            group.mkdir(parents=True, mode=0o700, exist_ok=True)
+            paths.append(group)
+            for i in range(per_group):
+                Fixture.delivery_record(case, group / f"delivery-{i:032x}.json", f"att-history-{number}-{i}")
+        # Age every directory beyond the clock slack: an existing, already read history.
+        old = time.time_ns() - 60 * 10**9
+        for group in paths:
+            os.utime(group, ns=(old, old))
+        os.utime(case.root / "pending-delivery", ns=(old, old))
+        case.sweep(0)
+        return case, home, paths
+
+    def test_g03_r1_group_directory_replaced_after_it_was_read_keeps_the_home(self):
+        for variant in ("fresh-directory", "older-directory-moved-in"):
+            with self.subTest(variant=variant):
+                attempt = "att-r1-group-replaced"
+                case, home, paths = self._r1_real_history_case(attempt)
+                try:
+                    target = paths[1]
+                    real_late, done = R._late_candidate_delivery_change, []
+
+                    def swap_then_check(ctx, selected, deadline, binding=None):
+                        if not done:
+                            aside = case.root / "aside-group"
+                            replacement = case.root / "replacement-group"
+                            replacement.mkdir(mode=0o700)
+                            Fixture.delivery_record(case, replacement / ("delivery-" + "e" * 32 + ".json"),
+                                                    attempt, state="pending")
+                            if variant == "older-directory-moved-in":
+                                old = time.time_ns() - 3600 * 10**9
+                                os.utime(replacement, ns=(old, old))
+                            os.rename(target, aside)
+                            os.rename(replacement, target)
+                            done.append(True)
+                        return real_late(ctx, selected, deadline, binding)
+
+                    with mock.patch.object(R, "_late_candidate_delivery_change", swap_then_check):
+                        result = R.sweep(case.jobs, now_ns=case.now + 2 * RETENTION_NS)
+                    self.assertEqual(done, [True])
+                    self.assertTrue(home.exists(), result)
+                    self.assertEqual(result["removed"], 0, result)
+                    self.assertEqual(result["unknown"], {}, result)
+                finally:
+                    case.doCleanups()
+
+    def test_g03_r1_unrelated_changes_after_the_read_do_not_block_and_read_only_new_entries(self):
+        attempt = "att-r1-unrelated-changes"
+        case, home, paths = self._r1_real_history_case(attempt)
+        try:
+            real_late, real_relation, held_reads, done = (
+                R._late_candidate_delivery_change, R._delivery_record_relation, [], [])
+
+            def mutate_then_check(ctx, selected, deadline, binding=None):
+                if not done:
+                    done.append(True)
+                    Fixture.delivery_record(case, paths[0] / ("delivery-" + "d" * 32 + ".json"), "att-unrelated-new")
+                    Fixture.delivery_record(case, paths[1] / ("delivery-" + "c" * 32 + ".json"), "att-unrelated-newer",
+                                            state="pending")
+                    victim = sorted(paths[2].glob("*.json"))[0]
+                    P._write_prune_tombstone  # the tombstone path is exercised in the prune tests
+                    victim.unlink()
+                return real_late(ctx, selected, deadline, binding)
+
+            def counted_relation(path, related, binding=None, **kwargs):
+                if attempt in AR.held_attempts():
+                    held_reads.append(path.name)
+                return real_relation(path, related, binding, **kwargs)
+
+            with mock.patch.object(R, "_late_candidate_delivery_change", mutate_then_check), \
+                    mock.patch.object(R, "_delivery_record_relation", counted_relation):
+                result = R.sweep(case.jobs, now_ns=case.now + 2 * RETENTION_NS)
+            self.assertEqual(result["removed"], 1, result)
+            self.assertFalse(home.exists())
+            self.assertEqual(result["unknown"], {}, result)
+            # Only the two entries published after the refresh may be read under admission... or none,
+            # when the refresh already folded them in; never an old entry.
+            self.assertLessEqual(len(held_reads), 2, held_reads)
+            self.assertTrue(all(name in ("delivery-" + "d" * 32 + ".json", "delivery-" + "c" * 32 + ".json")
+                                for name in held_reads), held_reads)
+        finally:
+            case.doCleanups()
+
+    def test_g03_r1_rename_publication_updates_the_ctime_of_the_published_inode(self):
+        """The premise of the mark rule, pinned on this filesystem (see the R1 plan)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            group = Path(tmp) / "group"
+            group.mkdir()
+            old = time.time_ns() - 3600 * 10**9
+            staged = group / ".staged"
+            staged.write_text("{}")
+            os.utime(staged, ns=(old, old))
+            before_dir = group.stat().st_mtime_ns
+            mark = time.time_ns()
+            time.sleep(0.02)
+            os.replace(staged, group / "delivery.json")
+            published = (group / "delivery.json").stat()
+            self.assertEqual(published.st_mtime_ns, old)
+            self.assertGreaterEqual(published.st_ctime_ns, mark)
+            self.assertGreaterEqual(group.stat().st_mtime_ns, mark)
+            self.assertGreater(group.stat().st_mtime_ns, before_dir)
+
+    def _r1_progress_case(self, attempt_suffix, *, unrelated_groups=2):
+        case = Fixture(); case.setUp()
+        free = case.add("att-r1-free-" + attempt_suffix, harness="codex")
+        opened = case.add("att-r1-open-" + attempt_suffix, harness="codex")
+        parent = case.add("att-r1-parent-" + attempt_suffix, harness="codex")
+        keys = [f"r1-{attempt_suffix}-{i}" for i in range(3)]
+        un = [f"r1-unrelated-{attempt_suffix}-{i}" for i in range(unrelated_groups)]
+        return case, free, opened, parent, keys, un
+
+    def test_g03_r1_unrelated_publications_never_stretch_the_observation(self):
+        case, free, opened, parent, keys, un = self._r1_progress_case("p1")
+        try:
+            for index, key in enumerate(un):
+                case.publish_delivery("delivery-" + f"{index + 1:032x}", key, [f"att-unrelated-seed-{index}"], "-")
+            with VirtualDeliveries(case.root, case.now - 3 * RETENTION_NS, groups=3, recipient_keys=keys,
+                                   open_refs=[(["att-r1-open-p1"], "att-r1-parent-p1")]) as history:
+                serial, passes, held_scans = [100], [], []
+                real_page, real_scan = R._directory_page, R._admission_scan
+
+                def publish(n=1):
+                    for _ in range(n):
+                        serial[0] += 1
+                        # existing groups only; a new group would legitimately restart the traversal
+                        case.publish_delivery("delivery-" + f"{serial[0]:032x}", un[serial[0] % len(un)],
+                                              [f"att-unrelated-{serial[0]}"], "-")
+
+                def page(path, cookie, limit, deadline):
+                    entries, eof, stamp = real_page(path, cookie, limit, deadline)
+                    if Path(path) in history.paths and eof:
+                        publish()
+                    return entries, eof, stamp
+
+                def scan(ctx, deadline):
+                    # A normal writer in another thread, as in the admission-time races above.
+                    writer = threading.Thread(target=publish)
+                    writer.start(); writer.join(5)
+                    self.assertFalse(writer.is_alive())
+                    outcome = real_scan(ctx, deadline)
+                    held_scans.append(outcome)
+                    return outcome
+
+                at = case.now + 2 * RETENTION_NS
+                with mock.patch.object(R, "_directory_page", page), mock.patch.object(R, "_admission_scan", scan):
+                    for i in range(6):
+                        result = R.sweep(case.jobs, now_ns=at + i * 301 * 10**9)
+                        passes.append(result)
+                        self.assertNotIn("skipped", result)
+                        self.assertLessEqual(result["delivery_reads"], R.DELIVERY_READ_BUDGET, result)
+                        self.assertEqual(result["unknown"], {}, result)
+                        self.assertTrue(opened.exists() and parent.exists())
+                        if not free.exists():
+                            break
+                        publish(5)
+                self.assertFalse(free.exists(), passes)
+                self.assertLessEqual(len(passes), 3, passes)
+                self.assertTrue(all(outcome is None for outcome in held_scans), held_scans)
+                print(json.dumps({"g03_r1_progress_passes": len(passes), "scans": held_scans}))
+        finally:
+            case.doCleanups()
+
+    def test_g03_r1_admission_reread_budget_defers_without_deleting_and_later_passes_remove(self):
+        attempt = "att-r1-reread-budget"
+        case, home, paths = self._r1_real_history_case(attempt)
+        try:
+            real_scan, stage = R._admission_scan, {"n": 0}
+
+            def burst(count, tag):
+                for i in range(count):
+                    Fixture.delivery_record(case, paths[0] / (f"delivery-{tag}{i:031x}.json"), f"att-unrelated-{tag}{i}")
+
+            def scan(ctx, deadline):
+                if stage["n"] == 0:
+                    stage["n"] = 1
+                    burst(R.ADMISSION_REREAD_LIMIT + 8, "a")
+                return real_scan(ctx, deadline)
+
+            with mock.patch.object(R, "_admission_scan", scan):
+                first = R.sweep(case.jobs, now_ns=case.now + 2 * RETENTION_NS)
+            self.assertEqual(first["removed"], 0, first)
+            self.assertEqual(self.kept(first, "defer:delivery-reread-budget"), 1, first)
+            self.assertEqual(first["unknown"], {}, first)
+            self.assertTrue(home.exists())
+            second = R.sweep(case.jobs, now_ns=case.now + 2 * RETENTION_NS + 301 * 10**9)
+            self.assertEqual(second["removed"], 1, second)
+            self.assertFalse(home.exists())
+        finally:
+            case.doCleanups()
+
+    def test_g03_r1_publication_after_the_admission_look_is_not_read_again(self):
+        attempt = "att-r1-after-look"
+        case, home, paths = self._r1_real_history_case(attempt)
+        try:
+            real_late, real_scan, scandirs, done = (R._late_candidate_delivery_change, R._admission_scan, [], [])
+            real_scandir = os.scandir
+
+            def check(ctx, selected, deadline, binding=None):
+                if attempt in AR.held_attempts() and not done:
+                    done.append(True)
+                    for i in range(R.ADMISSION_REREAD_LIMIT + 8):
+                        Fixture.delivery_record(case, paths[0] / (f"delivery-b{i:031x}.json"), f"att-unrelated-b{i}")
+                return real_late(ctx, selected, deadline, binding)
+
+            def scandir(path):
+                if attempt in AR.held_attempts() and done:
+                    scandirs.append(path)
+                return real_scandir(path)
+
+            with mock.patch.object(R, "_late_candidate_delivery_change", check), \
+                    self.replaced("scandir", scandir):
+                result = R.sweep(case.jobs, now_ns=case.now + 2 * RETENTION_NS)
+            self.assertEqual(done, [True])
+            self.assertEqual(result["removed"], 1, result)
+            self.assertEqual(scandirs, [])
+        finally:
+            case.doCleanups()
+
+    def test_g03_r1_pinned_unrelated_writer_between_passes_is_safe_and_progress_resumes_when_it_stops(self):
+        case, free, opened, parent, keys, un = self._r1_progress_case("p4", unrelated_groups=1)
+        try:
+            with VirtualDeliveries(case.root, case.now - 3 * RETENTION_NS, groups=3, recipient_keys=keys,
+                                   open_refs=[(["att-r1-open-p4"], "att-r1-parent-p4")]):
+                case.publish_delivery("delivery-" + "1" * 32, un[0], ["att-unrelated-seed"], "-")
+                at = case.now + 2 * RETENTION_NS
+                for i in range(3):
+                    with normal_delivery_writer(case.root, un[0], "att-unrelated-pinned", pinned=True):
+                        pass
+                    result = R.sweep(case.jobs, now_ns=at + i * 301 * 10**9)
+                    self.assertEqual(result["unknown"], {}, result)
+                    self.assertTrue(opened.exists() and parent.exists(), result)
+                # The old writer re-modes the store on every publication. That moves
+                # its ctime but replaces nothing, so the read is not restarted and the
+                # unrelated HOME is retired while the writer is still active.
+                self.assertFalse(free.exists(), result)
+        finally:
+            case.doCleanups()
+
+    def test_g03_r1_thousands_of_real_recipient_groups_never_defer_globally(self):
+        """Group count is not a global limit: the final look stats each group once, no cap."""
+        attempt = "att-r1-many-real-groups"
+        case = Fixture(); case.setUp()
+        try:
+            home = case.add(attempt, harness="codex")
+            base = case.root / "pending-delivery"
+            base.mkdir(mode=0o700)
+            count = 4600
+            for number in range(count):
+                (base / f"{number + 1:064x}").mkdir(mode=0o700)
+            old = time.time_ns() - 60 * 10**9
+            for group in base.iterdir():
+                os.utime(group, ns=(old, old))
+            os.utime(base, ns=(old, old))
+            at = case.now + 2 * RETENTION_NS
+            seen = []
+            for i in range(8):
+                result = R.sweep(case.jobs, now_ns=at + i * 301 * 10**9)
+                seen.append(result)
+                self.assertEqual(result["unknown"], {}, result)
+                for reason in result["kept"]:
+                    self.assertNotIn("budget", reason, result)
+                    self.assertNotIn("groups-over", reason, result)
+                if result["removed"]:
+                    break
+            self.assertFalse(home.exists(), seen)
+            # Group entries are never read, so they cost only pass time, never the read budget
+            self.assertLessEqual(len(seen), 4, seen)
+        finally:
+            case.doCleanups()
+
+    def test_g03_r1_record_for_another_cohort_member_read_by_a_refresh_still_protects_that_member(self):
+        """A refresh moves the shared mark; the member it did not belong to must still see the record."""
+        for pinned in (True, False):
+            with self.subTest(pinned=pinned):
+                case = Fixture(); case.setUp()
+                try:
+                    homes = {a: case.add(a, harness="codex") for a in ("att-r1-member-a", "att-r1-member-b")}
+                    for number in range(2):
+                        group = P.record_directory(case.root, f"r1-member-{number}")
+                        group.mkdir(parents=True, mode=0o700, exist_ok=True)
+                        for i in range(40):
+                            Fixture.delivery_record(case, group / f"delivery-{i:032x}.json", f"att-history-{number}-{i}")
+                    old = time.time_ns() - 60 * 10**9
+                    for path in (case.root / "pending-delivery").rglob("*"):
+                        os.utime(path, ns=(old, old))
+                    os.utime(case.root / "pending-delivery", ns=(old, old))
+                    case.sweep(0)
+                    real_late, state = R._late_candidate_delivery_change, {}
+
+                    def check(ctx, selected, deadline, binding=None):
+                        if "first" not in state:
+                            state["first"] = selected
+                            state["other"] = next(a for a in homes if a != selected)
+                            # published after both verdicts; it names only the member not being detached
+                            with normal_delivery_writer(case.root, "r1-member-0", state["other"], pinned=pinned):
+                                pass
+                        return real_late(ctx, selected, deadline, binding)
+
+                    with mock.patch.object(R, "_late_candidate_delivery_change", check):
+                        result = R.sweep(case.jobs, now_ns=case.now + 2 * RETENTION_NS)
+                    self.assertEqual(result["removed"], 1, result)
+                    self.assertFalse(homes[state["first"]].exists())
+                    self.assertTrue(homes[state["other"]].exists(), result)
+                    self.assertEqual(P.read(case.root, "r1-member-0", "delivery-" + "f" * 32)["state"], "pending")
+                finally:
+                    case.doCleanups()
+
+    def test_g03_r1_refresh_budget_overrun_defers_without_deleting(self):
+        attempt = "att-r1-refresh-budget"
+        case, home, paths = self._r1_real_history_case(attempt)
+        try:
+            real_late, done = R._late_candidate_delivery_change, []
+
+            def check(ctx, selected, deadline, binding=None):
+                if not done:
+                    done.append(True)
+                    # more entries published since the mark than one refresh may read
+                    for n in range(8):
+                        Fixture.delivery_record(case, paths[0] / f"delivery-{0xd000 + n:032x}.json",
+                                                f"att-unrelated-new-{n}")
+                    patched = mock.patch.object(R, "DELIVERY_READ_BUDGET", 5)
+                    patched.start()
+                    self.addCleanup(patched.stop)
+                return real_late(ctx, selected, deadline, binding)
+
+            with mock.patch.object(R, "_late_candidate_delivery_change", check):
+                first = R.sweep(case.jobs, now_ns=case.now + 2 * RETENTION_NS)
+            self.assertEqual(first["removed"], 0, first)
+            self.assertEqual(self.kept(first, "defer:delivery-refresh-budget"), 1, first)
+            self.assertEqual(first["unknown"], {}, first)
+            self.assertTrue(home.exists())
+            mock.patch.stopall()
+            second = third = None
+            for i in range(1, 5):
+                second = R.sweep(case.jobs, now_ns=case.now + 2 * RETENTION_NS + i * 301 * 10**9)
+                if second["removed"]:
+                    break
+            self.assertEqual(second["removed"], 1, second)
+            self.assertFalse(home.exists())
+        finally:
+            case.doCleanups()
+
+    def _r1_progress_under_churn_case(self, suffix, *, groups=3, per_group=20):
+        """Aged unrelated groups, one open reference, a free candidate and a related parent."""
+        case = Fixture(); case.setUp()
+        free = case.add("att-r1-churn-free-" + suffix, harness="codex")
+        opened = case.add("att-r1-churn-open-" + suffix, harness="codex")
+        parent = case.add("att-r1-churn-parent-" + suffix, harness="codex")
+        paths = []
+        for number in range(groups):
+            group = P.record_directory(case.root, f"r1-churn-{suffix}-{number}")
+            paths.append(group)
+            for i in range(per_group):
+                Fixture.delivery_record(case, group / f"delivery-{i:032x}.json", f"att-churn-{number}-{i}")
+        held = P.record_directory(case.root, f"r1-churn-{suffix}-open")
+        Fixture.delivery_record(case, held / ("delivery-" + "f" * 32 + ".json"), "att-r1-churn-open-" + suffix,
+                                parent="att-r1-churn-parent-" + suffix, state="pending")
+        return case, free, opened, parent, paths
+
+    def _r1_churn_between_passes(self, case, paths, round_number):
+        """What a busy system does between two passes: publications, a prune-like unlink, a touch."""
+        for number, group in enumerate(paths):
+            Fixture.delivery_record(case, group / f"delivery-{0xa000 + round_number * 16 + number:032x}.json",
+                                    f"att-churn-new-{round_number}-{number}")
+            victims = sorted(group.glob("delivery-*.json"))
+            if victims:
+                victims[0].unlink()
+        os.utime(paths[-1])
+
+    def test_g03_r1_refresh_budget_counts_entries_read_not_entries_in_changed_groups(self):
+        """N > cap while every pass changes several groups whose entries sum past the cap.
+
+        The saved mark only moves when a refresh completes, so a refresh that charged
+        every `.json` of a changed group (read or not) would defer on each observation.
+        """
+        case, free, opened, parent, paths = self._r1_progress_under_churn_case("a")
+        try:
+            time.sleep(0.05)  # fixture records are older than the (patched) slack
+            total = sum(1 for _ in (case.root / "pending-delivery").glob("*/*.json"))
+            passes, deferred = [], []
+            at = case.now + 2 * RETENTION_NS
+            with mock.patch.object(R, "DELIVERY_READ_BUDGET", 40), \
+                    mock.patch.object(R, "MARK_SLACK_NS", 5 * 10**6):
+                self.assertGreater(total, R.DELIVERY_READ_BUDGET)
+                for i in range(10):
+                    result = R.sweep(case.jobs, now_ns=at + i * 301 * 10**9)
+                    passes.append(result)
+                    deferred.append(self.kept(result, "defer:delivery-refresh-budget"))
+                    self.assertNotIn("skipped", result)
+                    self.assertEqual(result["unknown"], {}, result)
+                    self.assertTrue(opened.exists() and parent.exists(), result)
+                    if not free.exists():
+                        break
+                    self._r1_churn_between_passes(case, paths, i)
+            print(json.dumps({"g03_r1_churn_passes": len(passes), "refresh_budget_deferrals": deferred,
+                              "records": total}))
+            self.assertFalse(free.exists(), (len(passes), deferred, passes[-1]))
+            self.assertLessEqual(len(passes), 8, (len(passes), deferred))
+            self.assertEqual(sum(deferred), 0, deferred)
+        finally:
+            case.doCleanups()
+
+    def test_g03_r1_records_inside_the_clock_slack_keep_every_pass_bounded_and_still_finish(self):
+        """The slack may make a refresh re-read just-made entries; a pass stays bounded and the removal still comes."""
+        case, free, opened, parent, paths = self._r1_progress_under_churn_case("s")
+        try:
+            slack = 10**8
+            passes, reasons, at = [], [], case.now + 2 * RETENTION_NS
+            with mock.patch.object(R, "DELIVERY_READ_BUDGET", 40), mock.patch.object(R, "MARK_SLACK_NS", slack):
+                for i in range(12):
+                    # the fixture was made inside the first observation's slack; passes are minutes apart
+                    if i:
+                        time.sleep(slack / 1e9 + 0.05)
+                    result = R.sweep(case.jobs, now_ns=at + i * 301 * 10**9)
+                    passes.append(result)
+                    reasons.append(sorted(result["kept"]))
+                    self.assertEqual(result["unknown"], {}, result)
+                    self.assertTrue(opened.exists() and parent.exists(), result)
+                    # one pass reads at most the entries it visits, a refresh's reads and the admission's few
+                    self.assertLessEqual(result["delivery_reads"],
+                                         2 * R.DELIVERY_READ_BUDGET + R.ADMISSION_REREAD_LIMIT, result)
+                    if not free.exists():
+                        break
+                    self._r1_churn_between_passes(case, paths, i)
+            print(json.dumps({"g03_r1_slack_passes": len(passes), "kept": reasons,
+                              "reads": [r["delivery_reads"] for r in passes]}))
+            self.assertFalse(free.exists(), (len(passes), reasons))
+            self.assertLessEqual(len(passes), 8, reasons)
+        finally:
+            case.doCleanups()
+
+    def test_g03_r1_saved_progress_holds_one_mark_and_no_per_group_or_per_record_state(self):
+        case, free, opened, parent, keys, un = self._r1_progress_case("s1")
+        try:
+            with VirtualDeliveries(case.root, case.now - 3 * RETENTION_NS, groups=3, recipient_keys=keys,
+                                   open_refs=[(["att-r1-open-s1"], "att-r1-parent-s1")]):
+                R.sweep(case.jobs, now_ns=case.now + 2 * RETENTION_NS)
+                saved = case.state()["delivery_observation"]
+                self.assertIsInstance(saved["mark"], int)
+                self.assertNotIn("groups", saved)
+                self.assertNotRegex(json.dumps(saved), r"delivery-[0-9a-f]{32}")
+                self.assertLess(len(json.dumps(saved)), 4096)
+        finally:
+            case.doCleanups()
+
+    def test_writer_lines_written_together_are_both_seen(self):
+        """The fixture reads a writer's progress lines even when one pipe read
+        returns both; a buffered readline() used to hide the second line and the
+        wait then failed after ten seconds (CI run 41571381252)."""
+        code = ("import sys; print('reference-attempt'); print('record-admitted', flush=True); "
+                "sys.stdin.readline()")
+        child = subprocess.Popen([sys.executable, "-c", code], stdin=subprocess.PIPE,
+                                 stdout=subprocess.PIPE, text=True)
+        try:
+            started = time.monotonic()
+            wait_for_record_admitted(child)
+            self.assertLess(time.monotonic() - started, 5)
+        finally:
+            child.stdin.write("\n"); child.stdin.flush()
+            child.communicate(timeout=10)
+
+    # --- RV-1079 review fixes ---------------------------------------------------
+    def test_rv1079_related_change_or_new_group_does_not_restart_the_cohort(self):
+        """M1: a cohort that spans passes keeps its progress when one member's related
+        attempts change (a child ends) or a recipient group is added. That member alone
+        waits for a fresh token; the others are judged in the next pass."""
+        for change in ("child", "new-group"):
+            with self.subTest(change=change):
+                case = Fixture(); case.setUp()
+                try:
+                    free = case.add("att-m1-free", harness="codex")
+                    owner = case.add("att-m1-owner", "running", harness="codex")
+                    with VirtualDeliveries(case.root, case.now - 3 * RETENTION_NS, groups=3):
+                        at = case.now + 2 * RETENTION_NS
+                        first = R.sweep(case.jobs, now_ns=at)
+                        self.assertGreater(first["deferred"], 0, first)
+                        identity = case.state()["delivery_observation"]["identity"]
+                        if change == "child":
+                            case.row("att-m1-child", "done", parent_attempt_id="att-m1-owner",
+                                     delivery_intent="1")
+                        else:
+                            case.publish_delivery("delivery-" + "e" * 32, "rv1079-new-group",
+                                                  ["att-m1-other"], "-")
+                        second = R.sweep(case.jobs, now_ns=at + 301 * 10**9)
+                        self.assertEqual(case.state()["delivery_observation"]["identity"], identity)
+                        self.assertLess(second["delivery_reads"], 32, second)
+                        self.assertEqual(second["unknown"], {}, second)
+                        self.assertEqual(second["removed"], 1, second)
+                        self.assertFalse(free.exists())
+                        self.assertTrue(owner.exists())
+                finally:
+                    case.doCleanups()
+
+    def test_rv1079_a_token_that_cannot_be_written_defers_only_its_home(self):
+        """M2: a full disk while a HOME's reference token is first written keeps that
+        HOME (deferred); the pass still runs, judges and removes the others."""
+        import errno
+        early = self.add("att-m2-early", harness="codex")
+        self.sweep(0)  # writes the early HOME's token and starts its clock
+        late = self.add("att-m2-late", harness="codex")
+        real = P._change_token
+
+        def full(path, *, advance=False):
+            if advance:
+                raise OSError(errno.ENOSPC, "No space left on device")
+            return real(path, advance=advance)
+
+        with mock.patch.object(P, "_change_token", full):
+            result = self.sweep(8 / 7)
+        self.assertNotIn("skipped", result)
+        self.assertEqual(result["removed"], 1, result)
+        self.assertEqual(self.kept(result, "delivery-read-deferred"), 1, result)
+        self.assertFalse(early.exists())
+        self.assertTrue(late.exists())
+        self.assertEqual(self.sweep(9 / 7)["unknown"], {})
+
+    def test_rv1079_without_getdents64_a_sorted_listing_resumes_and_judges(self):
+        """M3: where libc has no getdents64 (macOS, glibc < 2.30) the observation
+        still resumes across passes and decides, instead of deferring forever."""
+        free = self.add("att-m3-free", harness="codex")
+        opened = self.add("att-m3-open", harness="codex")
+        for index in range(7):
+            self.publish_delivery(f"delivery-{index + 1:032x}", f"rv1079-m3-{index % 2}",
+                                  [f"att-m3-history-{index}"], "-")
+        self.publish_delivery("delivery-" + "e" * 32, "rv1079-m3-1", ["att-m3-open"], "-")
+        time.sleep(0.05)  # the records are older than the (patched) clock slack
+        at = self.now + 2 * RETENTION_NS
+        with mock.patch.object(R, "_getdents64", lambda: None), \
+                mock.patch.object(R, "DELIVERY_READ_BUDGET", 3), \
+                mock.patch.object(R, "MARK_SLACK_NS", 5 * 10**6):
+            self.assertEqual(R._listing_mode(), "sorted")
+            passes = []
+            for i in range(8):
+                result = R.sweep(self.jobs, now_ns=at + i * 301 * 10**9)
+                passes.append(result)
+                self.assertEqual(result["unknown"], {}, result)
+                self.assertLessEqual(result["delivery_reads"], 3, result)
+                if not free.exists():
+                    break
+        self.assertGreater(passes[0]["deferred"], 0, passes)
+        self.assertFalse(free.exists(), passes)
+        self.assertTrue(opened.exists())
+        self.assertEqual(self.kept(passes[-1], "delivery-open"), 1, passes[-1])
+
+    def test_rv1079_a_rejected_late_record_stays_new_for_the_next_candidate(self):
+        """S1: a record published after the observation mark that cannot be read keeps
+        every candidate whose late check meets it, not only the first one."""
+        homes = [self.add(f"att-s1-{name}", harness="codex") for name in ("a", "b")]
+        for index in range(40):  # more than 32 files: the mark-based late check runs
+            self.publish_delivery(f"delivery-{index + 1:032x}", "rv1079-s1",
+                                  [f"att-s1-history-{index}"], "-")
+        group = P.record_directory(self.root, "rv1079-s1")
+        real, written = R._late_candidate_delivery_change, []
+
+        def late(ctx, attempt, deadline, binding=None):
+            if not written:
+                # An old or foreign writer: no token moves, the body cannot be read.
+                (group / ("delivery-" + "d" * 32 + ".json")).write_text("{")
+                written.append(True)
+            return real(ctx, attempt, deadline, binding)
+
+        with mock.patch.object(R, "_late_candidate_delivery_change", late):
+            result = R.sweep(self.jobs, now_ns=self.now + 2 * RETENTION_NS)
+        self.assertEqual(written, [True])
+        self.assertEqual(result["removed"], 0, result)
+        self.assertEqual(self.kept(result, "late-evidence-unreadable"), 2, result)
+        self.assertTrue(all(home.exists() for home in homes))
+
+    def test_rv1079_a_ledger_anomaly_keeps_only_identity_less_homes(self):
+        """S2: an unexpected ledger file keeps the identity-less HOMEs that need the
+        ledger; HOMEs with an exact identity in the same cohort are still judged."""
+        free = self.add("att-s2-free")
+        legacy = self.add_unmapped_legacy("att-s2-legacy")
+        ledger = self.root / "supervisor-state"
+        ledger.mkdir(exist_ok=True)
+        (ledger / "not-an-attempt.json").write_text("{}")
+        result = self.expire()
+        self.assertEqual(result["removed"], 1, result)
+        self.assertFalse(free.exists())
+        self.assertTrue(legacy.exists())
+        self.assertNotIn("delivery-index-unknown", result["unknown"], result)
 
 
 if __name__ == "__main__":

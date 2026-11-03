@@ -31,6 +31,9 @@ from dispatch_attempt_policy import (
 
 SCHEMA_VERSION = 1
 RUNNER_LOCK_NAME = "runner-current.lock"
+# The producer that spawns `__ensure-obligations` observed this state root; the
+# detached writer must not recreate it if it disappeared before the child ran.
+STATE_ROOT_IDENTITY_ENV = "AGENT_PEER_STATE_ROOT_IDENTITY"
 _RUNNER_CONTROL_SCHEMA = 1
 _SAFE_ID = re.compile(r"[A-Za-z0-9._-]{1,160}\Z")
 _MAX_RECORD_BYTES = 128 * 1024
@@ -590,10 +593,116 @@ def replace_managed_observer(pid: int, pid_start: str | None, lock_path: str | P
         return False
 
 
+def _exec_in_release(source_root: Path, target_root: Path, argv, *, keep_fds=()) -> bool:
+    """Replace this process with ``argv`` on another release of the same install.
+
+    PID, start time, session and the listed descriptors stay; the environment
+    is rebuilt for the target release, and a working directory inside the old
+    release moves to the same place in the new one so nothing keeps naming the
+    old tree. Preparation and the exec itself fail the same way: whatever was
+    changed is restored and the caller keeps running its own code.
+    """
+    restore = []
+    previous_cwd = None
+    try:
+        child_env = _service_exec_environment(source_root, target_root)
+        for fd in keep_fds:
+            restore.append((fd, os.get_inheritable(fd)))
+            os.set_inheritable(fd, True)
+        try:
+            relative_cwd = Path(os.getcwd()).resolve(strict=True).relative_to(source_root)
+        except (OSError, ValueError):
+            relative_cwd = None
+        if relative_cwd is not None:
+            previous_cwd = os.getcwd()
+            moved_cwd = target_root / relative_cwd
+            os.chdir(moved_cwd if moved_cwd.is_dir() else target_root)
+        os.execve(sys.executable, [str(item) for item in argv], child_env)
+    except OSError:
+        for fd, inheritable in restore:
+            with contextlib.suppress(OSError):
+                os.set_inheritable(fd, inheritable)
+        if previous_cwd is not None:
+            with contextlib.suppress(OSError):
+                os.chdir(previous_cwd)
+        return False
+    return True
+
+
+def _rebase_release_argument(value: str, source_root: Path, target_root: Path) -> str:
+    """Name the target release when an argument names the old code root itself.
+
+    Only the root moves. A path beneath it can be state that stays where it is
+    (a release-local `.dispatch/jobs.log`, a resume record), so it is passed on
+    unchanged.
+    """
+    if value.startswith(os.sep) and os.path.abspath(value) == str(source_root):
+        return str(target_root)
+    return value
+
+
+def follow_installed_release(script: str | Path, arguments: Iterable[str], *, root=None) -> bool:
+    """Re-run this long-lived helper from the installed release, in place.
+
+    A detached helper keeps the code of the release that started it. Its own
+    loop calls this only where nothing is half done. When the installer's
+    ``current`` pointer names another release of this same managed install,
+    the process becomes the same script of that release with the same
+    arguments (one naming the old code root names the new one; state paths,
+    even beneath the old tree, stay). These arguments are therefore a contract
+    between releases: a later release accepts what an earlier one passed. The PID,
+    start time, session and standard streams stay, so every record that names
+    this helper stays true and the new code observes its inputs again.
+
+    The decision and the exec happen under the installer's shared lock, so a
+    release whose install is still in flight, and may yet be rolled back, is
+    never entered. Checkouts, other installs, a mismatched environment, and a
+    release without this script keep their code. Returns False whenever this
+    process keeps running; the caller simply continues.
+    """
+    try:
+        from parent_next_directive import release_moved
+        code_root = (Path(root).resolve(strict=True) if root is not None
+                     else _code_root().resolve(strict=True))
+        if not release_moved(code_root):
+            return False
+        relative = Path(script).resolve(strict=True).relative_to(code_root)
+        distribution = _distribution_module(code_root)
+        if distribution is None:
+            return False
+        # Nothing here waits: a lock path that is not the installer's regular
+        # lock file (a FIFO would block a plain open) or a held lock means the
+        # install cannot be judged now, so this helper keeps its own code.
+        lock_fd = os.open(Path(distribution.state_root()) / "distribution.lock",
+                          os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
+                          | getattr(os, "O_CLOEXEC", 0))
+        try:
+            if not stat.S_ISREG(os.fstat(lock_fd).st_mode):
+                return False
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return False
+            binding = release_successor_binding(code_root)
+            target_root = active_service_root(binding, root=code_root) if binding else None
+            if target_root is None or target_root == code_root:
+                return False
+            target = target_root / relative
+            if target.is_symlink() or not target.is_file():
+                return False
+            argv = [sys.executable, str(target),
+                    *(_rebase_release_argument(str(value), code_root, target_root)
+                      for value in arguments)]
+            return _exec_in_release(code_root, target_root, argv)
+        finally:
+            os.close(lock_fd)
+    except (ImportError, OSError, RuntimeError, ValueError, TypeError, AttributeError):
+        return False
+
+
 def exec_service_runner(lock_fd: int, state_root: str | Path, service_current: str | Path,
                         *, herdr_session: str | None = None) -> bool:
     """Replace this process with the same-install runner while retaining its flock."""
-    was_inheritable = None
     try:
         source_root = _code_root().resolve(strict=True)
         binding = validate_service_binding(service_current, root=source_root)
@@ -609,21 +718,12 @@ def exec_service_runner(lock_fd: int, state_root: str | Path, service_current: s
         argv.extend(("__obligation-runner", "--lock-fd", str(lock_fd),
                      "--state-root", str(Path(state_root).resolve(strict=True)),
                      "--service-current", binding))
-        # Selection, strict root resolution and environment preparation are all
-        # pre-exec work. Any OSError here is the same unsuccessful handoff as an
-        # execve error: this process keeps its lock and retries on its next pass.
-        child_env = _service_exec_environment(source_root, target_root)
-        was_inheritable = os.get_inheritable(lock_fd)
-        os.set_inheritable(lock_fd, True)
-        os.execve(sys.executable, argv, child_env)
     except OSError:
-        if was_inheritable is not None:
-            try:
-                os.set_inheritable(lock_fd, was_inheritable)
-            except OSError:
-                pass
         return False
-    return True
+    # Selection, strict root resolution and environment preparation are all
+    # pre-exec work. Any OSError there is the same unsuccessful handoff as an
+    # execve error: this process keeps its lock and retries on its next pass.
+    return _exec_in_release(source_root, target_root, argv, keep_fds=(lock_fd,))
 
 
 def _runner_control_payload(service_current: str | Path, *, root=None) -> bytes | None:
@@ -691,6 +791,27 @@ def peer_state_root() -> Path:
     return Path(module.peer_state_root()).resolve()
 
 
+def state_root_identity(path: str | Path) -> tuple[int, int] | None:
+    """``(device, inode)`` of an existing directory, or ``None`` when absent."""
+    try:
+        info = os.stat(Path(path).expanduser(), follow_symlinks=False)
+    except OSError:
+        return None
+    return (info.st_dev, info.st_ino) if stat.S_ISDIR(info.st_mode) else None
+
+
+def state_root_identity_from_environ(environ=None) -> tuple[int, int] | None:
+    """Read the identity a producer observed, tolerating absent/foreign values."""
+    value = (os.environ if environ is None else environ).get(STATE_ROOT_IDENTITY_ENV)
+    if not isinstance(value, str):
+        return None
+    try:
+        device, inode = value.split(":", 1)
+        return (int(device), int(inode))
+    except (TypeError, ValueError):
+        return None
+
+
 def obligations_root(root: str | Path | None = None) -> Path:
     base = Path(root).expanduser().resolve() if root is not None else peer_state_root()
     if base.is_symlink():
@@ -720,15 +841,25 @@ def read_runner_duty_state(root: str | Path, name: str) -> dict:
     return value if isinstance(value, dict) else {}
 
 
-def write_runner_duty_state(root: str | Path, name: str, payload: dict) -> None:
+def write_runner_duty_state(root: str | Path, name: str, payload: dict, *,
+                            expected_root_identity=None) -> None:
     """Atomically record one runner duty's cursor/due state."""
     if not isinstance(payload, dict):
         raise ObligationError("runner-duty-state-invalid")
     path = runner_duty_state_path(root, name)
     # A duty record may never resurrect a state root that its runner lost; the
-    # caller's next lock check owns stopping.
+    # caller's next lock check owns stopping. A recorded identity also refuses
+    # a root that was removed and recreated at the same path.
     if not Path(root).expanduser().is_dir() or not path.parent.parent.is_dir():
         raise ObligationError("runner-duty-state-root-missing")
+    if expected_root_identity is not None:
+        actual = state_root_identity(root)
+        try:
+            expected = (int(expected_root_identity[0]), int(expected_root_identity[1]))
+        except (TypeError, ValueError, IndexError):
+            raise ObligationError("runner-duty-state-identity-invalid") from None
+        if actual != expected:
+            raise ObligationError("runner-duty-state-root-replaced")
     path.parent.mkdir(mode=0o700, exist_ok=True)
     data = (json.dumps(payload, ensure_ascii=False, sort_keys=True,
                        separators=(",", ":")) + "\n").encode("utf-8")
@@ -761,17 +892,32 @@ def runner_duty_due(state: dict, due_seconds: float, *, now: float | None = None
 
 
 def request_obligation_recovery(*, lifecycle_root: str | Path | None = None) -> bool:
-    """Start the common recovery entry detached with its caller environment."""
+    """Start the common recovery entry detached with its caller environment.
+
+    The caller records the state root it observed. A child that starts after
+    that root disappeared therefore stops instead of creating it again (the
+    fixture-lifetime rule); a fresh install with no root yet passes no identity
+    and keeps the explicit lifecycle creation path.
+    """
     root = Path(lifecycle_root).expanduser().resolve(strict=False) if lifecycle_root is not None else _code_root()
     script = root / "utilities" / "peer-steward.py"
     command = [sys.executable, str(script), "__ensure-obligations"]
     if lifecycle_root is not None:
         command.extend(["--lifecycle-root", str(root)])
+    child_env = os.environ.copy()
+    try:
+        identity = state_root_identity(peer_state_root())
+    except (ObligationError, OSError):
+        identity = None
+    if identity is None:
+        child_env.pop(STATE_ROOT_IDENTITY_ENV, None)
+    else:
+        child_env[STATE_ROOT_IDENTITY_ENV] = f"{identity[0]}:{identity[1]}"
     try:
         subprocess.Popen(
             command,
             cwd=str(root),
-            env=os.environ.copy(),
+            env=child_env,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -2300,8 +2446,31 @@ class ObligationStore:
             return {str(self.root / (duty_id + ".json")): record
                     for duty_id, record in active_records.items()}
 
+    def _read_active_without_index(self, root_fd):
+        """Read active records without creating the index a reader never owns.
+
+        A reader must not materialize ``obligations/active`` (or the state root
+        above it) after a fixture removed the root while the process was still
+        alive. Without an index the bounded record scan is authoritative; the
+        next writer creates the index as part of its own mutation.
+        """
+        output = {}
+        with os.scandir(root_fd) as entries:
+            for entry in entries:
+                if not entry.name.endswith(".json"):
+                    continue
+                try:
+                    record = self._read_list_record(self.root / entry.name)
+                except ObligationError:
+                    continue
+                if record is not None and self._active_record(record):
+                    output[str(self.root / entry.name)] = record
+        return output
+
     def _discover_active(self, root_fd, *, fast_active_only=False):
-        active_fd = self._active_directory_fd(root_fd, create=True)
+        active_fd = self._active_directory_fd(root_fd, create=False)
+        if active_fd is None:
+            return self._read_active_without_index(root_fd)
         try:
             _ids, pending = self._active_names(active_fd)
             if pending or fast_active_only:
@@ -3738,7 +3907,7 @@ def bound_work_for_pane(pane: str, harness: str, session_id: str, *,
                                     == expected_revision):
                             delivery_state = (delivery.get("state") if delivery.get("state") in {
                                 "pending", "claimed", "queued", "unverified", "sent-ambiguous",
-                                "acked"} else "unknown")
+                                "acked", "rejected", "expired"} else "unknown")
                     except (OSError, ValueError, KeyError, TypeError, RuntimeError):
                         pass
         result.append(RegisteredWorkObservation(

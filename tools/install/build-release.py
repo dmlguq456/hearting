@@ -89,6 +89,10 @@ if [ -z "$PY" ]; then
   echo "hearting: Python 3.11+ is required." >&2
   exit 1
 fi
+if ! "$PY" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1; then
+  echo "hearting: Python 3.11+ is required, but $PY is $("$PY" -V 2>&1). Install Python 3.11 or newer, then run this installer again." >&2
+  exit 1
+fi
 
 TMP=$(mktemp -d "${{TMPDIR:-/tmp}}/hearting-bootstrap.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM

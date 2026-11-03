@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import fcntl
 import json
 import os
@@ -35,6 +36,15 @@ if str(UTILITIES) not in sys.path:
     sys.path.insert(0, str(UTILITIES))
 from opencode_runtime import is_v2 as opencode_is_v2, parse_version as parse_opencode_version
 DEFAULT_PROMPT = "Fix the typo in greet's output, run the existing focused test, and show the diff."
+# The standard tools every user shell has, so hooks and the agent's own shell commands
+# behave as they do for a user. Optional host tools such as herdr stay off PATH, and the
+# fresh world has no NAS mount, Cairn setting, compute-host inventory or memory remote,
+# so a completed run also shows the basic task does not need them.
+WORLD_COMMANDS = ("python3", "bash", "sh", "git", "curl", "tar", "gzip", "mktemp",
+                  "mkdir", "chmod", "cp", "mv", "rm", "cat", "uname", "dirname", "readlink",
+                  "basename", "grep", "sed", "awk", "head", "tail", "ls", "find", "wc", "sort",
+                  "uniq", "tr", "cut", "env", "date", "diff", "touch", "ln", "stat", "sleep",
+                  "tee", "xargs", "id", "ps", "realpath", "printf", "test", "true", "false")
 _ACTIVE_AUTH: dict | None = None
 
 
@@ -123,6 +133,129 @@ def credential_complete(harness: str, data: bytes, generation: str | None = None
                     return False
         return bool(value)
     return False
+
+
+def existing_login_source(harness: str) -> Path:
+    """Where the host harness keeps its own login (honors the harness's own env override)."""
+    home = Path.home()
+    if harness == "claude":
+        return Path(os.environ.get("CLAUDE_CONFIG_DIR") or home / ".claude") / ".credentials.json"
+    if harness == "codex":
+        return Path(os.environ.get("CODEX_HOME") or home / ".codex") / "auth.json"
+    return Path(os.environ.get("XDG_DATA_HOME") or home / ".local/share") / "opencode" / "auth.json"
+
+
+def seed_marker(store: Path) -> Path:
+    return store.with_name(store.name + ".seeded")
+
+
+def can_seed(harness: str, generation: str | None, cli: str | None) -> bool:
+    """Cheap hint (no lock, no secrets read): is there an existing login worth copying?"""
+    if not cli:
+        return False
+    if harness == "opencode" and generation == "v2":
+        return True
+    return existing_login_source(harness).is_file()
+
+
+def drop_stale_seed(store: Path) -> None:
+    """A seed marker without a running owner means an earlier run died; its copy is not a login."""
+    marker = seed_marker(store)
+    if marker.exists() or marker.is_symlink():
+        for path in (store, marker):
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def seed_from_existing_login(root: Path, harness: str, generation: str | None, cli: str | None):
+    """Without a dedicated measurement login, use the login the user already has (caller holds the lock).
+
+    The credential is copied only into the private measurement store (mode 0600, under the
+    auth root) next to a seed marker, and removed again by `release_seed`; it is never printed.
+    OpenCode V2 leaves out OAuth entries that expire within an hour: a refresh inside the
+    world could not be handed back (`auth import` keeps existing entries) and would rotate
+    the host's token.
+    Returns (harness, source, seed bytes) for `release_seed`, or None when nothing was seeded.
+    """
+    store = auth_file(root, harness, generation)
+    drop_stale_seed(store)
+    if store.exists() or store.is_symlink() or not cli:
+        return None
+    source: Path | None = None
+    if harness == "opencode" and generation == "v2":
+        exported = private_auth_command([cli, "auth", "export", "--standalone"], env=dict(os.environ))
+        data = b""
+        if exported["ok"]:
+            try:
+                horizon = (time.time() + 3600) * 1000
+                kept = [row for row in json.loads(exported["stdout"])
+                        if isinstance(row, dict) and isinstance(row.get("value"), dict)
+                        and (row["value"].get("type") != "oauth"
+                             or (isinstance(row["value"].get("expires"), (int, float))
+                                 and row["value"]["expires"] > horizon))]
+                data = json.dumps(kept).encode() if kept else b""
+            except (ValueError, TypeError):
+                data = b""
+    else:
+        source = existing_login_source(harness)
+        try:
+            data = source.read_bytes() if source.is_file() else b""
+        except OSError:
+            data = b""
+    if not data or not credential_complete(harness, data, generation):
+        return None
+    atomic_auth_write(seed_marker(store), b"seeded\n")  # marker first: a crash can never leave an unmarked copy
+    atomic_auth_write(store, data)
+    return harness, source, data
+
+
+def release_seed(record: dict, entry, store: Path) -> None:
+    """End of one harness's task, still under the lock: hand a refreshed file login back to the
+    original only if the original is still the seed, then delete the copy and its marker."""
+    harness, source, seed = entry
+    try:
+        if source is None and store.is_file() and _credential_identity(store.read_bytes()) != _credential_identity(seed):
+            raise OSError("OpenCode V2 login changed inside the world and cannot be handed back")
+        if source is not None and store.is_file() and not store.is_symlink():
+            latest = store.read_bytes()
+            if latest != seed and credential_complete(harness, latest):
+                if source.is_symlink() or not source.is_file() or source.read_bytes() != seed:
+                    raise OSError("original login changed or is not a plain file")
+                # Replace in place: keep the original's mode and leave its directory alone.
+                fd, name = tempfile.mkstemp(prefix=f".{source.name}.", suffix=".tmp", dir=source.parent)
+                try:
+                    with os.fdopen(fd, "wb") as stream:
+                        stream.write(latest)
+                    os.chmod(name, source.stat().st_mode & 0o777)
+                    os.replace(name, source)
+                finally:
+                    try: os.unlink(name)
+                    except FileNotFoundError: pass
+    except OSError:
+        print(f"login-writeback-failed:{harness} (refreshed login not returned; sign in to {harness} again)",
+              file=sys.stderr)
+        record["failures"].append({"harness": harness, "reason": "login-writeback-failed"})
+    finally:
+        for path in (store, seed_marker(store)):
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+
+def scrub_world_credentials(world: Path, harnesses: set[str]) -> None:
+    """A kept world must not hold the user's own login: drop credential files and the OpenCode V2 store."""
+    home = world / "home"
+    for path in list(home.rglob("*")) if harnesses and home.is_dir() else []:
+        if (path.is_file() or path.is_symlink()) and (
+                path.name in {".credentials.json", "auth.json"}
+                or ("opencode" in harnesses and path.parent.name == "opencode" and path.name.startswith("opencode.db"))):
+            try:
+                path.unlink()
+            except OSError:
+                pass
 
 
 def atomic_auth_write(store: Path, data: bytes) -> None:
@@ -409,8 +542,9 @@ def _credential_identity(data: bytes) -> list[dict] | None:
         return None
     if not isinstance(value, list):
         return None
-    return [{key: entry.get(key) for key in ("id", "integrationID", "active", "value")}
-            for entry in value if isinstance(entry, dict)]
+    # Import may reorder the export, so compare by id.
+    return sorted(({key: entry.get(key) for key in ("id", "integrationID", "active", "value")}
+                   for entry in value if isinstance(entry, dict)), key=lambda row: str(row["id"]))
 
 
 def import_v2_credentials(store: Path, world: Path, executable: str, env: dict[str, str],
@@ -698,15 +832,20 @@ def route_evidence(world: Path) -> int:
 
 
 def turn_argv(harness: str, command: str, cwd: Path, sid: str | None, message: str,
-              opencode_generation: str | None = None) -> list[str]:
+              opencode_generation: str | None = None, sandboxed: bool = False,
+              model: str | None = None) -> list[str]:
+    """`sandboxed` means the bwrap world is the safety boundary, so the harness's own approval
+    prompts (which a headless run cannot answer) are switched off; elsewhere they stay on."""
     if harness == "claude":
-        return [command, "-p", "--output-format", "stream-json", "--verbose", *(["--resume", sid] if sid else []), message]
+        return [command, "-p", *(["--dangerously-skip-permissions"] if sandboxed else []),
+                "--output-format", "stream-json", "--verbose", *(["--resume", sid] if sid else []), message]
     if harness == "codex":
-        return [command, "exec", "resume", "--json", sid, message] if sid else [command, "exec", "--json", "--cd", str(cwd), message]
+        skip = ["--dangerously-bypass-approvals-and-sandbox"] if sandboxed else []
+        return [command, "exec", "resume", "--json", *skip, sid, message] if sid else [command, "exec", "--json", *skip, "--cd", str(cwd), message]
     if opencode_generation not in {"v1", "v2"}:
         raise ValueError("opencode-version-unknown")
     return [command, "run", *( ["--standalone"] if opencode_generation == "v2" else []), "--format", "json",
-            *(["--session", sid] if sid else []), message]
+            *(["--auto"] if sandboxed else []), *(["--model", model] if model else []), *(["--session", sid] if sid else []), message]
 
 
 TRANSPORT_HELP = {
@@ -744,7 +883,8 @@ def probe_transport(harness: str, executable: str, world: Path, env: dict[str, s
 
 def headless_turn(harness: str, command: str, prompt: str, cwd: Path, world: Path,
                   env: dict[str, str], timeout: int, mounts: list[tuple[Path, str]], judge=None,
-                  transport_supported: bool = True, opencode_generation: str | None = None) -> dict:
+                  transport_supported: bool = True, opencode_generation: str | None = None,
+                  model: str | None = None) -> dict:
     """Drive one task session: answer only the confirmation card, stop on anything else."""
     if not transport_supported:
         return {"status": "unsupported-headless-transport", "turns": [], "canned_answers": 0,
@@ -759,7 +899,7 @@ def headless_turn(harness: str, command: str, prompt: str, cwd: Path, world: Pat
         remaining = int(deadline - time.monotonic())
         if remaining < 5:
             status = "task-timeout"; break
-        step = run(sandbox(turn_argv(harness, command, cwd, sid, message, opencode_generation), world, env, cwd, mounts),
+        step = run(sandbox(turn_argv(harness, command, cwd, sid, message, opencode_generation, platform.system() == "Linux", model), world, env, cwd, mounts),
                    env=env, timeout=remaining, cwd=cwd)
         text, found, denials = event_text(step["output"], harness)
         sid = sid or found
@@ -784,6 +924,16 @@ def headless_turn(harness: str, command: str, prompt: str, cwd: Path, world: Pat
             "turn_index": len(turns), "output": "\n".join(texts)}
 
 
+def opencode_last_model() -> str | None:
+    """The model the user used last (`provider/model`); OpenCode's own default can be a stale login."""
+    state = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "opencode" / "model.json"
+    try:
+        recent = json.loads(state.read_text())["recent"][0]
+        return f"{recent['providerID']}/{recent['modelID']}"
+    except (OSError, ValueError, KeyError, IndexError, TypeError):
+        return None
+
+
 def journey_profile(profile: str, args: argparse.Namespace, repo: Path) -> dict:
     global _ACTIVE_AUTH
     began = time.monotonic()
@@ -797,17 +947,16 @@ def journey_profile(profile: str, args: argparse.Namespace, repo: Path) -> dict:
                     "steps": [], "failures": [], "harnesses": [],
                     "account_usage": {"before": None, "after": None, "delta_pp": None, "attribution": "uncertain", "note": "may include other work", "reason": "measurement-credential-unavailable"},
                     "headless_uncovered": ["login", "first trust dialog", "theme", "native question tool"]}
+    scrub: set[str] = set()
     tempbase = Path(args.local_root).resolve()
     world = Path(tempfile.mkdtemp(prefix=f"first-journey-{profile}-", dir=tempbase))
     os.chmod(world, 0o700)
     record["isolation"]["world"] = str(world)
     try:
         for part in ("home", "tmp", "bin", "logs", "repos"): (world / part).mkdir(mode=0o700)
-        commands = ["python3", "bash", "sh", "git", "curl", "tar", "gzip", "mktemp",
-                    "mkdir", "chmod", "cp", "mv", "rm", "cat", "uname", "dirname", "readlink"]
         sysbin = world / "sysbin"
         sysbin.mkdir()
-        for name in commands:
+        for name in WORLD_COMMANDS:
             found = shutil.which(name)
             if found:
                 resolved = Path(found).resolve()
@@ -913,7 +1062,7 @@ def journey_profile(profile: str, args: argparse.Namespace, repo: Path) -> dict:
                                       "transport_flags": {"claude": "-p --output-format stream-json --verbose [--resume <id>]",
                                                           "codex": "exec --json --cd <repo> | exec resume --json <id>",
                                                           "opencode": "run [--standalone] --format json [--session <id>]"},
-                                      "env_hygiene": ["DISABLE_AUTOUPDATER=1", "no permission flags"],
+                                      "env_hygiene": ["DISABLE_AUTOUPDATER=1", "approval prompts off only inside the bwrap world"],
                                       "transport_supported": transport_supported,
                                       "allowlist_names": sorted(env)}
             if visible != expected_visible: record["failures"].append({"reason": "cli-visibility-mismatch"})
@@ -925,7 +1074,7 @@ def journey_profile(profile: str, args: argparse.Namespace, repo: Path) -> dict:
                 checks = {"real_home_empty": probe_values.get("real_home_empty") is True,
                           "nas_empty": probe_values.get("nas_empty") is True,
                           "home_write_not_host_visible": not (Path.home()/world.name).exists(), "nas_write_not_host_visible": not (Path("/home/nas")/world.name).exists(),
-                          "forbidden_env_absent": not any(k.startswith(("HERDR_", "AGENT_", "CLAUDE_CODE_")) for k in env),
+                          "forbidden_env_absent": not any(k.startswith(("HERDR_", "AGENT_", "CLAUDE_CODE_", "CAIRN_")) for k in env),
                           "herdr_absent_from_path": probe_values.get("herdr_absent_from_path") is True}
                 record["isolation"]["checks"] = [{"check": k, "passed": v} for k,v in checks.items()]
                 record["isolation"]["probe_exit"] = probe["exit"]
@@ -1002,6 +1151,7 @@ def journey_profile(profile: str, args: argparse.Namespace, repo: Path) -> dict:
                 model = {"status": "unsupported-headless-transport", "turns": 0, "canned_answers": 0,
                          "session_tokens": "unknown", "transport": transport_supported.get(harness)}
             elif (not auth_file(Path(args.auth_root), harness, generations.get(harness)).is_file()
+                  and not can_seed(harness, generations.get(harness), cli_map.get(harness))
                   or auth_file(Path(args.auth_root), harness, generations.get(harness)).is_symlink()
                   or auth_file(Path(args.auth_root), harness, generations.get(harness)).parent.is_symlink()):
                 model = {"status": "measurement-login-missing", "turns": 0, "canned_answers": 0, "session_tokens": "unknown"}
@@ -1015,12 +1165,22 @@ def journey_profile(profile: str, args: argparse.Namespace, repo: Path) -> dict:
                     root = safe_root(args.auth_root, "auth-root", [Path.home(), Path("/home/nas")])
                     if root.stat().st_uid != os.getuid():
                         raise ValueError("auth-root must be owned by the current user")
-                    with (root / ".lock").open("a") as lock:
+                    with (root / ".lock").open("a") as lock, contextlib.ExitStack() as cleanup:
                         os.chmod(root, 0o700)
                         os.chmod(root / ".lock", 0o600)
                         fcntl.flock(lock, fcntl.LOCK_EX)
                         if store.is_symlink() or store.parent.is_symlink():
                             raise ValueError("credential store path is a symlink")
+                        # Seed, run, hand back, and delete all under this one lock.
+                        seed_entry = seed_from_existing_login(root, harness, generation, cli_map[harness])
+                        if seed_entry:
+                            scrub.add(harness)
+                            cleanup.callback(release_seed, record, seed_entry, store)
+                        if not store.is_file():
+                            model["status"] = "measurement-login-missing"
+                            record["harnesses"].append({"name": harness, "model": model})
+                            record["failures"].append({"harness": harness, "reason": "measurement-login-missing"})
+                            continue
                         before = store.read_bytes()
                         if harness == "claude":
                             target = home / ".claude/.credentials.json"
@@ -1060,7 +1220,8 @@ def journey_profile(profile: str, args: argparse.Namespace, repo: Path) -> dict:
                         try:
                             outcome = headless_turn(harness, harness, args.prompt, repo_dir, world,
                                                     env, args.task_timeout, cli_mounts, judge,
-                                                    opencode_generation=generation if harness == "opencode" else None)
+                                                    opencode_generation=generation if harness == "opencode" else None,
+                                                    model=opencode_last_model() if harness == "opencode" and seed_entry else None)
                         finally:
                             pending_error = sys.exc_info()[1]
                             cleanup_error = None
@@ -1132,6 +1293,7 @@ def journey_profile(profile: str, args: argparse.Namespace, repo: Path) -> dict:
         record["duration_s"] = record["elapsed_seconds"]
         record["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         if args.keep_world == "always" or (args.keep_world == "failure" and record["failures"]):
+            scrub_world_credentials(world, scrub)
             record["world"] = str(world)
         else:
             shutil.rmtree(world, ignore_errors=True)
@@ -1204,6 +1366,7 @@ def main() -> int:
     runp.add_argument("--tag", default="latest"); runp.add_argument("--ref", default="HEAD"); runp.add_argument("--auth-root", default=f"/tmp/hearting-measure-auth-{os.getuid()}")
     runp.add_argument("--local-root", default="/tmp"); runp.add_argument("--prompt", default=DEFAULT_PROMPT); runp.add_argument("--model-free", action="store_true")
     runp.add_argument("--keep-world", choices=("always", "failure", "never"), default="failure"); runp.add_argument("--step-timeout", type=int, default=300); runp.add_argument("--task-timeout", type=int, default=600)
+    runp.add_argument("--profile", action="append", choices=tuple(PROFILES), help="run only this profile (repeatable; default: every profile)")
     args = parser.parse_args()
     if args.command == "login":
         try:
@@ -1255,6 +1418,7 @@ def main() -> int:
                             print("login-credential-incomplete", file=sys.stderr)
                             return 1
                         atomic_auth_write(auth_file(root, harness, generation), credential)
+                        seed_marker(auth_file(root, harness, generation)).unlink(missing_ok=True)
                         return result.returncode
                     candidates = {"claude": config / ".credentials.json", "codex": config / "auth.json",
                                   "opencode": world / "data/opencode/auth.json"}
@@ -1265,6 +1429,7 @@ def main() -> int:
                         print("login-credential-incomplete", file=sys.stderr); return 1
                     target = auth_file(root, harness, generation)
                     atomic_auth_write(target, credential)
+                    seed_marker(target).unlink(missing_ok=True)
                 return result.returncode
             finally:
                 shutil.rmtree(world, ignore_errors=True)
@@ -1281,7 +1446,8 @@ def main() -> int:
     overall = 0
     signal.signal(signal.SIGINT, auth_signal)
     signal.signal(signal.SIGTERM, auth_signal)
-    for profile in ("claude-only", "all"):
+    signal.signal(signal.SIGHUP, auth_signal)
+    for profile in dict.fromkeys(args.profile or ("claude-only", "all")):
         record = journey_profile(profile, args, repo)
         write_report(record, output / profile)
         if record["failures"]: overall = 1

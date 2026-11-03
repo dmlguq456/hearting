@@ -374,6 +374,9 @@ Change this single value to `ko`/`Korean` or `en`/`English` to override only the
 title; NOW keeps its existing language. Korean/Japanese/Chinese titles use at
 most 20 characters, English titles at most 40 characters and 3–6 words.
 Absent or invalid preferences use `auto`; `harness config status` reports the file.
+The same selection also chooses the language of screen text kept in the shared
+catalog `tools/i18n/messages.json` (English unless Korean is declared); no
+separate language setting exists.
 
 To use another small provider, point `FLEET_TITLE_COMMAND` at a no-tools wrapper. The
 value is parsed as an argv template, never through a shell:
@@ -406,6 +409,7 @@ harness install codex
 | hooks | `codex_setting/codex-hooks` → `hooks.json` | Adapter-owned hook bridge; executes only `type:"command"` entries |
 | Herdr SessionStart reporter | managed regular copy at `$CODEX_HOME/herdr-agent-state.sh` (fallback `~/.codex/herdr-agent-state.sh`) | Matches Herdr's native consumer path; `hooks.json` registers one SessionStart call and the manifest tracks this same asset |
 | `config.toml` | not copied; narrow managed leaves | Runtime-owned config remains intact; activation owns recorded Codex hook `trusted_hash` leaves and statusline/identity fragments, with conditional restoration. |
+| `AGENTS.override.md` | user-owned; one managed block, only when the file already has text | Codex reads only the first non-empty of `AGENTS.override.md` and `AGENTS.md` in `$CODEX_HOME`, so a user override hides the linked bootstrap. Activation appends the bootstrap below the user's text between `hearting:codex-bootstrap` begin/end markers; update replaces only that block and uninstall removes only it. A missing or empty override is never created or edited; a symlinked one is reported and left alone. |
 
 - **Runtime activation:** both linked and packaged modes use Codex-native
   skills, agents, modes, and hooks. Existing harness plugin enable entries are
@@ -447,7 +451,14 @@ bootstrap uses exactly one of those two carriers: `runtime activate` owns the
 `AGENTS.md` link, and `harness install opencode` merges the `instructions[]`
 entry only when that link is absent. Both at once inject the bootstrap twice —
 OpenCode dedupes instruction sources by resolved path, so a projection and the
-link count as two sources (`core/ADAPTATION.md §6.1`).
+link count as two sources (`core/ADAPTATION.md §6.1`). When the user keeps
+Claude user rules (`$CLAUDE_CONFIG_DIR/rules/*.md`), activation writes
+`AGENTS.md` as a regular file instead: those rules in one
+`hearting:user-rules` block, then the bootstrap. Update rewrites the file and
+uninstall removes it, as it removes the link; the rule files are only read. The
+whole file is Hearting's: an edit is kept beside it as `AGENTS.md.edited-<time>`
+before the rewrite, and a rule file that is not UTF-8 text is skipped and named
+in the activation report.
 
 Keep `$HOME/.config/opencode` and `$HOME/.local/share/opencode` runtime-owned;
 the harness merges its skill entries — and the fallback instruction entry — into

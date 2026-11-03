@@ -23,11 +23,9 @@ lower-cost workers carry it out in small checked steps, and Fleet shows every se
 </p>
 
 <p align="center">
-  <img src="docs/fleet.svg" alt="Fleet's group view: a main Claude Code session, the owner it dispatched, and three stage workers under it on Claude Code and Codex — one running, one done, one waiting for input — each with its model, context gauge, and elapsed time." width="100%">
+  <img src="docs/fleet.svg" alt="Fleet's Explorer OVERVIEW: eight sessions in four projects across Claude Code, Codex, and OpenCode, grouped by project with model, context gauge, and what each is doing now; one session waiting for an answer, two open routes with their stage lines, and per-host CPU and GPU use at the bottom left." width="100%">
 </p>
-<p align="center"><sub>Fleet's group view (<code>fleet-monitor</code>): a main session, the owner it dispatched, and that owner's stage workers on two runtimes. Drawn from synthetic rows.</sub></p>
-
-<!-- TODO(v4.0, Fleet F1): replace this image with the Explorer OVERVIEW capture once the single Fleet screen is accepted. -->
+<p align="center"><sub>Fleet's Explorer, OVERVIEW: sessions from all three runtimes grouped by project, one waiting for your answer, two requests mid-flight, and GPU use per host. Drawn from synthetic demo data (<a href="docs/fleet/overview.png">PNG</a>).</sub></p>
 
 ## Why Hearting
 
@@ -106,6 +104,11 @@ session on the machine and every worker Hearting dispatched from them.
 
 ### What you see at a glance
 
+<p align="center">
+  <img src="docs/fleet/walkthrough.gif" alt="Fleet walk-through in four steps: the OVERVIEW of all sessions, the ROUTES list of open requests, one session's page, and one request's stage graph with the owner's raw output." width="100%">
+</p>
+<p align="center"><sub>OVERVIEW → ROUTES → a session page → a request's raw output. Demo data.</sub></p>
+
 Across the top: each runtime's usage-window gauges, and how many sessions are
 working, idle, or waiting for you. Below it, one screen per question:
 
@@ -120,14 +123,29 @@ working, idle, or waiting for you. Below it, one screen per question:
 | **MEMORY** | What was saved to shared memory today, by project. |
 | **MODELS · SYSTEM** | Which real model each budget maps to, and the installed Hearting release. |
 
+### Key screens
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/fleet/routes.png" alt="ROUTES: two open requests, a code route in its execute stage and a lab route running its eval-asr worker, each with the worker's model and elapsed time."><br><sub><b>ROUTES</b> — each request's stage line and the worker running it.</sub></td>
+    <td width="50%"><img src="docs/fleet/questions.png" alt="QUESTIONS: one decision waiting seven minutes with how to answer it, one older wait folded, and three questions answered today."><br><sub><b>QUESTIONS</b> — what is waiting for you, how to answer it, and what you answered today.</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/fleet/session.png" alt="A session page: one Claude Code session's state, context gauge, and current activity, its route, the OpenCode session it steers, and the GPU it holds."><br><sub><b>Session page</b> — one session's state, context, current activity, route, peers, and GPU.</sub></td>
+    <td width="50%"><img src="docs/fleet/resources.png" alt="RESOURCES: two hosts with per-GPU utilisation and memory, the session and command behind each GPU process, and CPU and memory use."><br><sub><b>RESOURCES</b> — per-GPU use on each host and the session and command behind each process.</sub></td>
+  </tr>
+</table>
+
 Select a session or a request to open its page, and from there its raw output:
 tool calls and results in order, without opening the runtime itself.
 
-<!-- Key screens to capture for v4.0 (see the README design note):
-     F1 OVERVIEW (hero) · F2 ROUTES · F3 QUESTIONS · F4 session page ·
-     F5 RESOURCES · F6 raw output · F7 short walk-through (≤15 s) · F8 narrow width.
-     Captures are rendered off-screen with tools/fleet/tests/explorer_capture.py
-     from a scrubbed, English view-model fixture and labelled as demo data. -->
+<p align="center">
+  <img src="docs/fleet/output.png" alt="A request's page: the stage graph with setup done, eval-asr running, eval-sep and report pending, and below it the owner's raw output listing an edit, a shell command, and their results." width="100%">
+</p>
+<p align="center"><sub>A lab request's page: setup done, one evaluation running, the next stages pending, and the owner's raw output underneath. Demo data.</sub></p>
+
+The layout holds in narrow terminals too; see the
+[100-column OVERVIEW](docs/fleet/narrow.png).
 
 ### Why you can trust what it shows
 
@@ -147,7 +165,7 @@ tool calls and results in order, without opening the runtime itself.
 fleet              # the Explorer, full screen (needs curses)
 fleet --once       # one plain snapshot
 fleet --json       # the same state as JSON, for scripts
-fleet-monitor      # the group/process view pictured at the top of this page
+fleet-monitor      # the earlier group/process view
 ```
 
 `--once` and `--json` need no `curses`, so they also work on Windows under Git

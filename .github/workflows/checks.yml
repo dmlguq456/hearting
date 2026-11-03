@@ -265,24 +265,6 @@ jobs:
           }, sort_keys=True))
           PY
           }
-          if [ "${{ matrix.shard }}" = "1" ]; then
-            observe_claude focused-before | tee "${{ runner.temp }}/shard-out/focused-before.log"
-            focused_status=0
-            python3 tools/run-tests.py --retries 0 \
-              --select hooks/peer_steward_rewake.test.py \
-              --select utilities/peer_runner_lifecycle.test.py \
-              --select utilities/peer_obligations.test.py \
-              --select utilities/peer_steward.test.py \
-              --select utilities/recipient_lifetime.test.py \
-              --select utilities/dispatch_registry_cache.test.py \
-              --select hooks/peer_message_record.test.py \
-              --select utilities/dispatch_lifecycle.test.py \
-              --report "${{ runner.temp }}/shard-out/focused-report.tsv" \
-              --diagnostics-dir "${{ runner.temp }}/shard-out/focused-diagnostics" \
-              2>&1 | tee "${{ runner.temp }}/shard-out/focused-progress.log" || focused_status=$?
-            observe_claude focused-after | tee "${{ runner.temp }}/shard-out/focused-after.log"
-            if [ "$focused_status" -ne 0 ]; then exit "$focused_status"; fi
-          fi
           observe_claude full-suite-before | tee "${{ runner.temp }}/shard-out/progress.log"
           python3 tools/run-tests.py --retries 1 \
             --shard ${{ matrix.shard }}/8 \

@@ -656,7 +656,7 @@ def directory_artifact_reason(artifact_path: Path, root: Path | None = None) -> 
 def same_tail_artifact(candidate: Path, root: Path) -> Path | None:
     """The one existing path under ``root`` that a missing absolute artifact path
     names by the same tail after the root's own directory name -- a mistyped
-    parent such as ``/home/nas/user/NN_Zoo/...`` for ``/home/nas/user/Uihyeop/NN_Zoo/...``
+    parent such as ``/home/Project_Zoo/...`` for ``/home/example/Project_Zoo/...``
     (RA-8). None when no such path exists or more than one does; the caller
     still checks that the result stays inside ``root``.
     """

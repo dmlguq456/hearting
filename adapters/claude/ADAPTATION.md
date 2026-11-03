@@ -23,7 +23,8 @@ selected specialization. Changed files, commands, logs, and findings remain in
 the canonical artifact; the child returns only artifact path, verdict, and a
 one-line blocker. Registered print-mode workers and session-tidy support use a
 fresh `CLAUDE_CONFIG_DIR` with the attach template, linked login and copied user
-guard hooks/permissions. `--disable-slash-commands` removes skills and commands;
+guard hooks/permissions. Claude reads user rules only from its config home
+(`rules/*.md`), so the home also gets read-only copies of the user's rule files. `--disable-slash-commands` removes skills and commands;
 `--strict-mcp-config` with an empty MCP configuration excludes connectors.
 The normal project/local and managed settings remain, as does the native system
 prompt. The resumed owner uses the same options on every turn. This headless
@@ -480,8 +481,8 @@ verify through the runtime path above.
 Claude conductors launch checked same- or cross-harness dispatch-depth-2 headless
 adapters directly. The immutable v3 route binds the checked tuple and stable
 attempt identity; register/start are atomically claimed in the canonical
-registry. The retired broker retains diagnostic `status`/`stop` only, and
-historical v1/v2 broker routes are read-only.
+registry. The launch broker is retired and removed; historical v1/v2 broker
+routes are read-only.
 
 ## Stage-session capacity contract (2026-08-06)
 

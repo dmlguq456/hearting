@@ -4,11 +4,11 @@ The screens read the fixture's records positionally and by key. A live builder t
 puts an object where the fixture has a pair, or changes a type breaks a screen only on real data
 (that is how a ``ResourceJob`` object once reached the COMPUTE rail). Each section is compared here:
 the live record's keys are drawn from the fixture's keys, its value types are the fixture's types,
-and an unknown value is ``None``. Additive route fields have the explicit
-optional contract below, so old render fixtures remain valid inputs.
+and an unknown value is ``None``. Additive route and question fields and the repo ``status``
+record have the explicit optional contracts below, so old render fixtures remain valid inputs.
 """
-import time
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 from tools.fleet.explorer.live import build_view_model
@@ -46,6 +46,64 @@ def route_extension(key, value):
             and optional_pct(row["context"]) and optional_number(row["window"])
             for row in value)
     raise ValueError(key)
+
+
+_QUESTION_TEXT_FIELDS = frozenset(("node", "since_at", "route_id", "route_title", "owner_sid",
+                                   "registered"))
+_QUESTION_ENUMS = {"owner_state": ("live", "successor", "none", "unknown"),
+                   "fold": ("older", "ownerless")}
+
+
+def question_extension(key, value):
+    """Validate the optional who/when/route fields of an answer-wait row (body-free text)."""
+    if value is None:
+        return True
+    if key in _QUESTION_ENUMS:
+        return value in _QUESTION_ENUMS[key]
+    return isinstance(value, str)
+
+
+REPO_STATUS_TEXT = frozenset(("done", "done_age", "changed", "line", "decision", "next", "doc", "doc_age"))
+REPO_STATUS_COUNT = frozenset(("routes", "questions", "decisions"))
+
+
+def repo_status(value):
+    """The optional per-project status line (D4 #3): counts, optional texts and the stale flag."""
+    if not isinstance(value, dict) or set(value) - REPO_STATUS_TEXT - REPO_STATUS_COUNT - {"stale"}:
+        return False
+    return (all(type(value[key]) is int and value[key] >= 0 for key in REPO_STATUS_COUNT & set(value))
+            and all(value[key] is None or isinstance(value[key], str) for key in REPO_STATUS_TEXT & set(value))
+            and type(value.get("stale", False)) is bool)
+
+
+def project_memory_shape(value):
+    """Validate the MEMORY tab's per-project record (``system.project_memory``)."""
+    from tools.fleet.explorer.live import OPEN_STAGES
+    seq = lambda item: isinstance(item, (list, tuple))
+    text = lambda item: item is None or isinstance(item, str)
+    count = lambda item: item is None or type(item) is int
+    if not isinstance(value, dict) or set(value) != {"state", "stale", "decisions_today", "doing",
+                                                      "order", "projects"}:
+        return False
+    if not (isinstance(value["state"], str) and type(value["stale"]) is bool
+            and count(value["decisions_today"]) and count(value["doing"])
+            and seq(value["order"]) and all(isinstance(name, str) for name in value["order"])
+            and isinstance(value["projects"], dict) and set(value["projects"]) == set(value["order"])):
+        return False
+    for project in value["projects"].values():
+        if not isinstance(project, dict) or set(project) != {"last", "decisions", "open", "limited", "counts"}:
+            return False
+        if not (text(project["last"]) and type(project["limited"]) is bool
+                and isinstance(project["counts"], dict) and set(project["counts"]) == set(OPEN_STAGES)
+                and all(type(number) is int for number in project["counts"].values())):
+            return False
+        if not all(seq(row) and len(row) == 2 and all(text(item) for item in row)
+                   for row in project["decisions"]):
+            return False
+        if not all(seq(row) and len(row) == 4 and row[0] in OPEN_STAGES and all(text(item) for item in row)
+                   for row in project["open"]):
+            return False
+    return True
 
 
 def bucket(value):
@@ -88,9 +146,21 @@ def conform(live, samples, path, problems):
                 if not route_extension(key, live[key]):
                     problems.append(f"{path}.{key}: invalid optional route field shape")
                 continue
+            if path == "questions[]" and (key in _QUESTION_TEXT_FIELDS or key in _QUESTION_ENUMS):
+                if not question_extension(key, live[key]):
+                    problems.append(f"{path}.{key}: invalid optional question field shape")
+                continue
+            if path == "repos[]" and key == "status":
+                if not repo_status(live[key]):
+                    problems.append(f"{path}.status: invalid optional status shape")
+                continue
             if path == "system.gpu_processes[]" and key == "session_tag":
                 if live[key] is not None and not isinstance(live[key], str):
                     problems.append(f"{path}.session_tag: expected optional string")
+                continue
+            if path == "system" and key == "project_memory":           # MEMORY tab field contract
+                if not project_memory_shape(live[key]):
+                    problems.append("system.project_memory: invalid per-project memory shape")
                 continue
             if path == "system" and key in ("gpu_process_summary", "unregistered_gpu_summary"):
                 if not isinstance(live[key], dict) or set(live[key]) - {"count", "unregistered", "owner", "remaining"}:
@@ -174,7 +244,7 @@ class SectionShapes(unittest.TestCase):
             {"ts": "2026-10-23T12:00:00", "action": "decision-record", "type": "decision",
              "snippet": "[결정] 이대로 시작할까요?"},
             {"ts": "2026-10-23T11:00:00", "action": "add", "type": "decision", "snippet": "not an answer"}]}})
-        live = build_view_model(snapshot, now=time.time()).to_mapping()
+        live = build_view_model(snapshot, now=datetime(2026, 10, 23, 12, 30).timestamp()).to_mapping()
         self.assertEqual(live["answered"], [["demo-app", [["12:00", "이대로 시작할까요?"]]]])
         problems = []
         conform(live["answered"], [self.fixture["answered"]], "answered", problems)
@@ -304,13 +374,13 @@ class CensusHeaderTests(unittest.TestCase):
                              (" idle", "dim"), ("  ● 0", "blocked"), (" answer needed", "dim"),
                              ("   ", "branch_s")]}
         version, freshness = "v3.50.3-20-gad247e2b6", "02:38"
-        vm = ExplorerViewModel(hosts=[{"mark": "⌂", "name": "moving4"}], census=census,
+        vm = ExplorerViewModel(hosts=[{"mark": "⌂", "name": "gpu-a"}], census=census,
                                system={"install": {"version": version},
                                        "usage_api": {"freshness": freshness}})
         frame, trace = ef.trace_draw(draw, vm, NavState(view="OVERVIEW", scope="-"), 120, 45)
         row = frame.text_rows()[0]
 
-        self.assertTrue(row.startswith(" hosts ⌂ moving4 1/1"), row)
+        self.assertTrue(row.startswith(" hosts ⌂ gpu-a 1/1"), row)
         self.assertTrue(row.rstrip().endswith(
             "⠏ 0 working  ● 0 idle  ● 0 answer needed   hearting " + version +
             " · unmanaged  " + freshness), row)
@@ -333,14 +403,14 @@ class CensusHeaderTests(unittest.TestCase):
         self.assertTrue(row.rstrip().endswith(freshness), row)
         self.assertEqual(ef.frame_violations(frame, trace, 80, 45), [])
 
-    def test_18_session_moving4_header_keeps_identity_counts_version_and_clock_in_80_cells(self):
+    def test_18_session_gpu_a_header_keeps_identity_counts_version_and_clock_in_80_cells(self):
         from tools.fleet.explorer.frame import draw
         from tools.fleet.explorer.grid import cell_width
         from tools.fleet.explorer.state import NavState
 
-        hosts = [{"mark": "⌂", "name": "moving4"},
-                 {"mark": "◇", "name": "cnn"}, {"mark": "◇", "name": "xavier"},
-                 {"mark": "◇", "name": "larynx"}, {"mark": "◇", "name": "mpwav"}]
+        hosts = [{"mark": "⌂", "name": "gpu-a"},
+                 {"mark": "◇", "name": "cnn"}, {"mark": "◇", "name": "gpu-b"},
+                 {"mark": "◇", "name": "gpu-legacy"}, {"mark": "◇", "name": "gpu-c"}]
         states = ["working"] * 15 + ["idle"] * 2 + ["blocked"]
         version, freshness = "v3.50.3-20-gad247e2b6", "02:38"
         vm = self._header_vm(session_states=states, hosts=hosts, version=version, freshness=freshness)
@@ -348,7 +418,7 @@ class CensusHeaderTests(unittest.TestCase):
         row = frame.text_rows()[0]
 
         self.assertEqual(len(states), 18)
-        self.assertTrue(row.startswith("⌂ moving4 +4"), row)
+        self.assertTrue(row.startswith("⌂ gpu-a +4"), row)
         for fragment in ("⠏ 15", "● 2", "● 1", version, "hearting " + version + " · unmanaged", freshness):
             self.assertIn(fragment, row)
         self.assertTrue(row.rstrip().endswith(freshness), row)
@@ -379,12 +449,12 @@ class CensusHeaderTests(unittest.TestCase):
 
         version = "v" + "x" * 100
         vm = self._header_vm(session_states=["working"] * 15 + ["idle"] * 2 + ["blocked"],
-                             hosts=[{"mark": "⌂", "name": "moving4"}],
+                             hosts=[{"mark": "⌂", "name": "gpu-a"}],
                              version=version, freshness="02:38")
         frame, trace = ef.trace_draw(draw, vm, NavState(view="OVERVIEW", scope="-"), 80, 45)
         row = frame.text_rows()[0]
 
-        self.assertIn("⌂ moving4", row)
+        self.assertIn("⌂ gpu-a", row)
         self.assertIn("hearting", row)
         self.assertIn("unmanaged", row)
         self.assertIn("…", row)
@@ -401,8 +471,8 @@ class CensusHeaderTests(unittest.TestCase):
 
         host_name = "trainer-west-gpu-node-01"
         hosts = [{"mark": "⌂", "name": host_name}, {"mark": "◇", "name": "cnn"},
-                 {"mark": "◇", "name": "xavier"}, {"mark": "◇", "name": "larynx"},
-                 {"mark": "◇", "name": "mpwav"}]
+                 {"mark": "◇", "name": "gpu-b"}, {"mark": "◇", "name": "gpu-legacy"},
+                 {"mark": "◇", "name": "gpu-c"}]
         version, freshness = "v3.50.3-20-gad247e2b6", "02:38"
         vm = self._header_vm(session_states=["working"] * 15 + ["idle"] * 2 + ["blocked"],
                              hosts=hosts, version=version, freshness=freshness)
@@ -533,8 +603,8 @@ class CensusHeaderTests(unittest.TestCase):
 
         version, freshness = "v3.50.3-20-gad247e2界6", "02:38"
         hosts = [{"mark": "⌂", "name": "moving界4"}, {"mark": "◇", "name": "cnn"},
-                 {"mark": "◇", "name": "xavier"}, {"mark": "◇", "name": "larynx"},
-                 {"mark": "◇", "name": "mpwav"}]
+                 {"mark": "◇", "name": "gpu-b"}, {"mark": "◇", "name": "gpu-legacy"},
+                 {"mark": "◇", "name": "gpu-c"}]
         vm = self._header_vm(session_states=["working"] * 15 + ["idle"] * 2 + ["blocked"],
                              hosts=hosts, version=version, freshness=freshness)
         frame, trace = ef.trace_draw(draw, vm, NavState(view="OVERVIEW", scope="-"), 80, 45)
