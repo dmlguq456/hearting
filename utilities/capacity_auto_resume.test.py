@@ -97,6 +97,11 @@ class ArmTest(unittest.TestCase):
                                      env={C.CHAIN_ENV: str(chain)})
                     self.assertEqual((armed["state"], armed["cause"]), ("armed", cause))
                     self.assertGreaterEqual(C._epoch(armed["resume_at"]), now + floor)
+        # A huge recorded chain neither computes a huge power nor passes the longest wait.
+        self.spawned.clear()
+        armed = self.arm({**past, "route_id": "rt-huge-chain"}, env={C.CHAIN_ENV: str(10 ** 9)})
+        self.assertLessEqual(C._epoch(armed["resume_at"]),
+                             now + C.MAX_SLEEP_SECONDS - C.SLACK_SECONDS)
 
     def test_only_a_capacity_pause_waits_to_the_cap(self):
         """keep-human-exits ② is out of this rule: `launch-not-started` keeps its
