@@ -1163,7 +1163,7 @@ def mark_prompt_source(seat: Seat, harness: str, sid: str, sequence: int, source
         current["claim_id"] = claim_id[:96]
     else:
         current.pop("claim_id", None)
-    if source == "notification" and type(current.get("prior_human_seq")) is int:
+    if source in NON_HUMAN_SOURCES and type(current.get("prior_human_seq")) is int:
         current["last_human_seq"] = current["prior_human_seq"]
     atomic_write_json(path, current)
 
@@ -2776,9 +2776,41 @@ def last_human_prompt_seq(seat: Seat) -> int:
     return value if type(value) is int and value >= 0 else int(current.get("seq", 0) or 0)
 
 
+# Turns the runtime itself starts: a finished background task (Claude ``<task-notification>``,
+# Codex ``<subagent_notification>``), a message from another session of the same user
+# (Claude ``<agent-message>`` with its fixed framing) and runtime ``<system-reminder>`` text.
+_RUNTIME_BLOCK = re.compile(
+    r"<(task-notification|subagent_notification|agent-message|system-reminder)\b[^>]*>.*?</\1>", re.S)
+_PEER_FRAMING = (
+    re.compile(r"^\s*Another Claude session sent a message[^\n:]*:"),
+    re.compile(r'That "other Claude session" is an agent working inside this same session\b.*?(?:\n\s*\n|\Z)', re.S),
+)
+# Prompt sources that are not the person: they answer no wait, rearm no idle tidy and keep
+# ``last_human_seq`` where it was.
+NON_HUMAN_SOURCES = frozenset({"notification", "peer", "runtime"})
+
+
+def runtime_turn_source(prompt_text: str) -> str:
+    """``notification``, ``peer`` or ``runtime`` when the prompt holds nothing but runtime blocks
+    and their fixed framing; "" as soon as the person wrote anything of their own in it."""
+    if not isinstance(prompt_text, str):
+        return ""
+    kinds = [match.group(1) for match in _RUNTIME_BLOCK.finditer(prompt_text)]
+    if not kinds:
+        return ""
+    rest = _RUNTIME_BLOCK.sub("", prompt_text)
+    for framing in _PEER_FRAMING:
+        rest = framing.sub("", rest)
+    if rest.strip():
+        return ""
+    if any(kind in ("task-notification", "subagent_notification") for kind in kinds):
+        return "notification"
+    return "peer" if "agent-message" in kinds else "runtime"
+
+
 def is_task_notification(prompt_text: str) -> bool:
     """A turn the runtime started for a finished background task (Claude ``<task-notification>``)."""
-    return isinstance(prompt_text, str) and prompt_text.lstrip().startswith("<task-notification>")
+    return runtime_turn_source(prompt_text) == "notification"
 
 
 def _current_request_origin(prompt_text: str, harness: str, sid: str) -> Optional[dict]:
@@ -3160,14 +3192,18 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
             return text
         if event == "prompt":
             sequence = bump_prompt_seq(seat, harness, sid, now)
-            notification = is_task_notification(prompt_text)
-            request_origin = None if notification else _current_request_origin(prompt_text, harness, sid)
-            if notification:
-                # A finished background task reporting back is new content, not the person:
-                # it neither answers a wait nor rearms or cancels automatic tidy.
-                mark_prompt_source(seat, harness, sid, sequence, "notification")
+            runtime_source = runtime_turn_source(prompt_text)
+            request_origin = None if runtime_source else _current_request_origin(prompt_text, harness, sid)
+            notification = bool(runtime_source or request_origin)
+            if runtime_source:
+                # A finished background task or another session reporting in is new content,
+                # not the person: it neither answers a wait nor rearms or cancels automatic tidy.
+                mark_prompt_source(seat, harness, sid, sequence, runtime_source)
             elif request_origin:
+                # A verified Hearting transfer (peer or runtime completion, any harness) is the
+                # same: another session speaking, not the person.
                 record_prompt_origin(seat, harness, sid, sequence, request_origin)
+                mark_prompt_source(seat, harness, sid, sequence, "peer")
             else:
                 # A physical user prompt closes this exact seat's marked wait.
                 # Transfer/automatic prompts are not answers from the user.
@@ -3176,8 +3212,8 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
                     human_wait_state.close_signal(seat.key, sequence=sequence)
             with contextlib.suppress(BaseException):
                 import session_tidy_clear as clear
-                if not notification and not clear.observe_prompt_locked(seat, harness, sid, prompt_text,
-                                                                        now, sequence):
+                claimed = clear.observe_prompt_locked(seat, harness, sid, prompt_text, now, sequence)
+                if not claimed and not notification:
                     clear.note_real_prompt_locked(seat, harness, sid, sequence, now)
         sessions = session_summary(seat)
         prior = sessions.get((harness, sid))
