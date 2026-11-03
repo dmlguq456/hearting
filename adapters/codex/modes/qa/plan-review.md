@@ -117,10 +117,10 @@ gate must converge, not peel one layer per pass.
   gap that was visible and unreported in an earlier round you could have raised.
 - **A verdict-less prior attempt is history only.** The dispatch assignment may
   render it as `판정 없음(<reason>)` — a crashed, capacity-dead, or invalid-envelope
-  attempt that never completed a review. If no substantive verdict exists for the
-  current review subject, perform the full first review; there is no prior 🔴 list
-  to close. If a substantive verdict exists for this subject, read the nearest one
-  as the prior round even when verdict-less attempts follow it, and use the closure
+  attempt that never completed a review. If the node lineage has no substantive
+  verdict, perform the full first review; there is no prior 🔴 list to close. A
+  corrected plan is a new content subject but not a new review: if a substantive
+  verdict exists in the lineage, read the nearest one as the prior round even when verdict-less attempts follow it, and use the closure
   questions for that finding set plus the delta.
 
 ## Output
