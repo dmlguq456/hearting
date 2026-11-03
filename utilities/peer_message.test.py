@@ -4873,6 +4873,39 @@ class PendingLockLifetimeTest(_TmpRootMixin, unittest.TestCase):
         self.assertEqual(old_flocks, [])
         self.assertFalse(path.exists())
 
+    def test_t14_ref_lock_retries_when_its_file_is_replaced_before_flock(self):
+        # The history prune unlinks a rowless ref lock while holding it. A locker
+        # that opened the old file first must not end up holding that unlinked
+        # inode while the next opener locks the new file at the same path.
+        key = "d" * 32
+        path = self.lock_path(key)
+        path.touch(mode=0o600)
+        real_flock = fcntl.flock
+        key_flocks, replaced = [], []
+
+        def replace_before_first_flock(fd, operation):
+            info = os.fstat(fd)
+            if stat.S_ISREG(info.st_mode) and operation & fcntl.LOCK_EX:
+                key_flocks.append(info.st_ino)
+                if not replaced:
+                    path.unlink()
+                    path.touch(mode=0o600)
+                    replaced.append(path.stat().st_ino)
+            return real_flock(fd, operation)
+
+        with mock.patch.object(fcntl, "flock", side_effect=replace_before_first_flock):
+            with peer_message.pending_lock(key):
+                other = os.open(path, os.O_RDWR)
+                try:
+                    with self.assertRaises(BlockingIOError):
+                        real_flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                finally:
+                    os.close(other)
+        self.assertEqual(len(replaced), 1)
+        self.assertEqual(len(key_flocks), 2)
+        self.assertEqual(key_flocks[1], replaced[0])
+        self.assertTrue(path.is_file())
+
     def test_t12_short_mixed_multiprocess_old_and_new_writers(self):
         import multiprocessing
         ctx = multiprocessing.get_context("fork")

@@ -778,6 +778,64 @@ class PeerHistoryCleanupTest(IsolatedCase):
         self.assertTrue(old_pending.exists())
         self.assertTrue(transfer.exists())
 
+    def _lock(self, ref, mtime):
+        path = peer_steward.peer_message._pending_dir() / (".lock-" + ref)
+        path.touch(mode=0o600)
+        os.utime(path, (mtime, mtime))
+        return path
+
+    def test_rowless_ref_locks_are_removed_and_held_or_rowed_locks_stay(self):
+        import fcntl
+        pending_dir = peer_steward.peer_message._pending_dir()
+        now = time.time()
+        old = now - 8 * 86400
+        for index in range(5):
+            self._lock(f"{index:032x}", old)
+        rowed = self._lock("c" * 32, old)
+        (pending_dir / ("c" * 32 + ".json")).write_text(
+            json.dumps(self._row("c" * 32, "pending", old)))
+        held = self._lock("d" * 32, old)
+        young = self._lock("e" * 32, now - 86400)
+        legacy_prepare = self._lock("prepare-" + "f" * 64, old)
+        # A received row past the window goes first; its lock goes in the same pass.
+        expired = self._lock("a" * 32, old)
+        (pending_dir / ("a" * 32 + ".json")).write_text(
+            json.dumps(self._row("a" * 32, "received", old)))
+        holder = os.open(held, os.O_RDWR)
+        try:
+            fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            result = peer_steward._prune_received_peer_history(now=now)
+        finally:
+            os.close(holder)
+        self.assertEqual(sorted(path.name for path in pending_dir.glob(".lock-*")),
+                         sorted(path.name for path in (rowed, held, young, legacy_prepare)))
+        self.assertFalse(expired.exists())
+        self.assertEqual(result["removed"], 1)
+        self.assertEqual(result.get("locks_removed"), 6)
+        self.assertTrue(result["complete"])
+
+    def test_lock_backlog_clears_across_budgeted_passes(self):
+        import itertools
+        pending_dir = peer_steward.peer_message._pending_dir()
+        now = time.time()
+        for index in range(7):
+            self._lock(f"{index:032x}", now - 8 * 86400)
+        ticks = itertools.count()
+        clock = SimpleNamespace(time=lambda: now, monotonic_ns=lambda: next(ticks))
+        cursor, passes, removed = None, 0, 0
+        with mock.patch.object(peer_steward, "time", clock):
+            while passes < 20:
+                passes += 1
+                counts = peer_steward._prune_received_peer_history(
+                    now=now, deadline_ns=next(ticks) + 3, start_after=cursor)
+                removed += counts.get("locks_removed", 0)
+                if counts["complete"]:
+                    break
+                cursor = counts["cursor"]
+        self.assertEqual(removed, 7)
+        self.assertGreater(passes, 3)
+        self.assertEqual(list(pending_dir.glob(".lock-*")), [])
+
 
 class LineageBundleRetirementTest(IsolatedCase):
     OLD = 1_000_000.0
