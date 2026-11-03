@@ -558,6 +558,10 @@ smoke). This avoids mixing activation's per-file discovery paths with the old
 installer layout while retaining verification for installations that have not
 migrated to activation yet.
 
+PyYAML is a required dependency (framed routes read frame proposals with it):
+`verify` fails when the harness's Python cannot import it, and `runtime doctor`
+prints one `missing:` line for it without changing its exit code.
+
 With no runtime named, or `all`, `verify` covers the runtimes installed in this
 scope (an activation record or a legacy copy-install manifest), and
 `runtime status|doctor|refresh --runtime all` cover the activated ones, so a
