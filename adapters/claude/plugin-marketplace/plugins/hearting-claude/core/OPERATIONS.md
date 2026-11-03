@@ -403,8 +403,10 @@ retain their sealed exit result, and live or unobservable processes stay pending
 For every non-owner foreground worker (stage, review, support, or frame), the
 launcher also samples activity and may seal `no-progress` after the optional
 `headless.no_progress_minutes` window (default 30 minutes; 0 disables it).
-This conservative activity check treats runtime/tool uncertainty as activity;
-owners and detached workers are outside that launcher policy. An ordinary
+Like the owner window below, uncertainty suspends this conservative check:
+an unknown observation discards the quiet time before it, and the child stops
+only after a later full, successfully observed quiet window. Owners and
+detached workers are outside that launcher policy. An ordinary
 supervised owner turn still uses its existing 7200-second timeout as a
 no-progress window: validated payload output or exact activity attributed to
 that turn restarts the window. A quiet turn expires only after a full,
