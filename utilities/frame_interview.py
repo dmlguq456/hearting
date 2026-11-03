@@ -267,7 +267,12 @@ def _question_outcome(question: dict, row):
     option_index = _native_option_index(picked, labels)
     if option_index is None and any(_plain(picked) == _plain(label) for label in labels):
         return None
-    return {"choice": option_index, "note": ""} if option_index is not None else {"choice": NONE_SENTINEL, "note": picked}
+    if option_index is None:
+        return {"choice": NONE_SENTINEL, "note": picked}
+    # The words the person added beside the option they picked; a reply is never asked again
+    # for its length, so an over-long note keeps its first MAX_NOTE_CHARS characters.
+    note = _text(row.get("note")).strip()
+    return {"choice": option_index, "note": note if len(note) <= MAX_NOTE_CHARS else note[:MAX_NOTE_CHARS - 1] + "…"}
 
 
 def native_slots(interview: dict, asked) -> dict | None:
@@ -281,7 +286,8 @@ def native_slots(interview: dict, asked) -> dict | None:
     shown = [row for row in asked or [] if isinstance(row, dict) and _plain(row.get("question"))]
     find = lambda text: next((row for row in shown if _plain(text) and _plain(text) in _plain(row["question"])), None)
     keep = lambda row: {"question": _text(row.get("question")), "options": list(row.get("options") or []),
-                        "answer": _text(row.get("answer"))}
+                        "answer": _text(row.get("answer")),
+                        **({"note": _text(row.get("note"))} if _plain(row.get("note")) else {})}
     slots = {}
     row = find(interview.get("understanding"))
     if row is not None:
