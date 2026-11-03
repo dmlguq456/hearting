@@ -173,12 +173,20 @@ def _service_layout(root: Path):
 
 def _service_environment_matches(root: Path, environ=None) -> bool:
     environ = os.environ if environ is None else environ
+    layout = None
     for name in ("AGENT_HOME", "CLAUDE_HOME"):
         raw = environ.get(name)
         if not raw:
             continue
         try:
-            if Path(raw).expanduser().resolve(strict=True) != root:
+            if Path(raw).expanduser().resolve(strict=True) == root:
+                continue
+            # The installer's own `current` pointer names this install whichever
+            # release it points at now. Resolving it after an install names the
+            # new release, which made a helper started under it refuse to follow.
+            if layout is None:
+                layout = _service_layout(root) or ()
+            if not layout or Path(os.path.abspath(os.path.expanduser(raw))) != layout[3]:
                 return False
         except (OSError, RuntimeError, ValueError):
             return False
