@@ -444,6 +444,8 @@ class NativeAnswerNormalizationTest(unittest.TestCase):
         asked[1]["note"] = "x" * (FI.MAX_NOTE_CHARS + 50)      # never asked again for its length
         kept = FI.answers_from_native(interview, asked)["answers"][first["id"]]["note"]
         self.assertEqual(len(kept), FI.MAX_NOTE_CHARS)
+        self.assertTrue(kept.endswith(FI._truncated_mark()))          # the cut says so
+        self.assertIn(FI._truncated_mark(), ("…(truncated)", "…(잘림)"))
         self.assertEqual(FI.validate_answers(interview, FI.answers_from_native(interview, asked)), [])
 
     def test_native_slots_and_answers_from_native_agree_with_the_single_call_rules(self):

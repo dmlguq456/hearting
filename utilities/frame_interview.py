@@ -270,9 +270,21 @@ def _question_outcome(question: dict, row):
     if option_index is None:
         return {"choice": NONE_SENTINEL, "note": picked}
     # The words the person added beside the option they picked; a reply is never asked again
-    # for its length, so an over-long note keeps its first MAX_NOTE_CHARS characters.
+    # for its length, so an over-long note keeps its head and says it was cut.
     note = _text(row.get("note")).strip()
-    return {"choice": option_index, "note": note if len(note) <= MAX_NOTE_CHARS else note[:MAX_NOTE_CHARS - 1] + "…"}
+    if len(note) > MAX_NOTE_CHARS:
+        mark = _truncated_mark()
+        note = note[:MAX_NOTE_CHARS - len(mark)] + mark
+    return {"choice": option_index, "note": note}
+
+
+def _truncated_mark() -> str:
+    """The visible cut marker, in the shared UI-text catalog's language."""
+    try:
+        import work_intent
+        return work_intent.ui_translator()("frame.note_truncated")
+    except Exception:  # noqa: BLE001 -- the catalog is optional here; English stands in
+        return "…(truncated)"
 
 
 def native_slots(interview: dict, asked) -> dict | None:
