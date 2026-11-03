@@ -275,6 +275,21 @@ class RetainedReviewTest(unittest.TestCase):
         self.register("att-retained-later","codex","PASS",self.saved)
         self.assertFalse(self.preview()["can_reuse_prior_review"])
 
+    def test_unreadable_seat_lineage_waits_instead_of_refusing_the_parent(self):
+        # Whether this session is the owner's current parent is unknown: the apply waits for the
+        # same command and changes nothing; the preview names the wait, not "not the parent".
+        import dispatch_seat_handover as handover
+        self.seed()
+        before=self.f.jobs.read_bytes()
+        with mock.patch.object(handover,"_readable_lineage_signature",
+                               side_effect=OSError("lineage-directory-changed")):
+            preview=self.preview()
+            with self.assertRaises(D.DispatchContractError) as waiting:self.apply()
+        self.assertEqual((preview["authority_ready"],preview["authority_reason"]),(False,"handover-unreadable"))
+        self.assertEqual((waiting.exception.reason,waiting.exception.next_action),("handover-unreadable","same-command"))
+        self.assertEqual(before,self.f.jobs.read_bytes())
+        self.assertTrue(self.preview()["authority_ready"])
+
     def test_partial_publication_resumes_without_a_new_history_or_round(self):
         self.seed()
         route_module=D._route_module()

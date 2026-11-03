@@ -337,10 +337,45 @@ class Case1ParentSessionTest(unittest.TestCase):
                 self.assertEqual(holder.session_id, "codex-sid-after-clear")
 
     def test_unreadable_handover_waits_without_registered_parent_authority(self):
+        # The answer is unknown (None), neither the registered parent nor another session.
         jobs = Path("/tmp/registered-parent-unreadable-jobs")
         with mock.patch.object(HANDOVER, "_readable_lineage_signature", side_effect=OSError("unreadable")):
-            self.assertFalse(RA.owns(self.OWNER, "codex-sid", jobs))
-            self.assertFalse(RA.owns(self.OWNER, "claude-sid", jobs))
+            self.assertIsNone(RA.owns(self.OWNER, "codex-sid", jobs))
+            self.assertIsNone(RA.owns(self.OWNER, "claude-sid", jobs))
+            self.assertIs(RA.owns(self.OWNER, "", jobs), False)        # no session named is not unknown
+            with self.assertRaises(DC.DispatchContractError) as waiting:
+                RA.require_owner(self.OWNER, "claude-sid", jobs, "parent-only")
+        self.assertEqual((waiting.exception.reason, waiting.exception.next_action, waiting.exception.retry_when),
+                         ("handover-unreadable", "same-command", RA.LINEAGE_UNREADABLE_WAIT.retry_when))
+        with tempfile.TemporaryDirectory() as td, \
+                mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(Path(td) / "state")}):
+            self.assertIs(RA.owns(self.OWNER, "codex-sid", Path(td) / "jobs.log"), True)
+            self.assertIs(RA.owns(self.OWNER, "claude-sid", Path(td) / "jobs.log"), False)
+            with self.assertRaises(DC.DispatchContractError) as refused:
+                RA.require_owner(self.OWNER, "claude-sid", Path(td) / "jobs.log", "parent-only")
+            self.assertEqual((refused.exception.reason, refused.exception.next_action), ("parent-only", None))
+
+    def test_an_unreadable_lineage_neither_matches_nor_refuses_a_successor_parent(self):
+        # A replacement registered by the /clear successor: whether that successor still answers
+        # for the source is unknown, so lineage confirmation waits instead of "not the parent".
+        candidate = {**self.OWNER, "attempt_id": "att-owner-next", "parent_sid": "codex-sid-after-clear"}
+        jobs = Path("/tmp/registered-parent-unreadable-jobs")
+        with mock.patch.object(HANDOVER, "_readable_lineage_signature",
+                               side_effect=OSError("lineage-directory-changed")):
+            for lineage in (False, True):
+                with self.subTest(lineage=lineage), self.assertRaises(DC.DispatchContractError) as waiting:
+                    RA.replacement_parent_matches(self.OWNER, candidate, jobs, lineage=lineage)
+                self.assertEqual((waiting.exception.reason, waiting.exception.next_action),
+                                 ("handover-unreadable", "same-command"))
+            # The same parent session needs no lineage and still matches.
+            self.assertTrue(RA.replacement_parent_matches(self.OWNER, {**self.OWNER}, jobs, lineage=True))
+        with tempfile.TemporaryDirectory() as td, \
+                mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(Path(td) / "state")}):
+            jobs = Path(td) / "jobs.log"
+            self.assertFalse(RA.replacement_parent_matches(self.OWNER, candidate, jobs, lineage=True))
+            binding = HANDOVER.binding_of(jobs, self.OWNER)
+            self._record_handover(binding, "codex-sid", "codex-sid-after-clear", "codex", "case-match", 1, "clear")
+            self.assertTrue(RA.replacement_parent_matches(self.OWNER, candidate, jobs, lineage=True))
 
     def test_a_non_owner_cannot_start_the_replacement_owner(self):
         with self.assertRaises(DC.DispatchContractError) as refused:
@@ -618,6 +653,16 @@ class OwnerPinChangeTest(unittest.TestCase):
         self.assertEqual(row["by"], {"harness": "codex", "session_id": "codex-sid"})
         again, _ = self.start_pin(["owner=claude"])
         self.assertFalse(again["changed"])
+
+    def test_start_pin_waits_while_the_lineage_cannot_be_read(self):
+        # Unknown is not "another session": the same start is the way on and nothing is recorded.
+        with mock.patch.object(HANDOVER, "_readable_lineage_signature",
+                               side_effect=OSError("lineage-directory-changed")):
+            with self.assertRaises(DC.DispatchContractError) as waiting:
+                self.start_pin(["owner=claude"], caller=("claude", "another-sid"))
+        self.assertEqual((waiting.exception.reason, waiting.exception.next_action),
+                         ("handover-unreadable", "same-command"))
+        self.assertEqual(RA.pin_changes(self.route), [])
 
     def test_start_pin_refuses_what_it_cannot_do_and_records_nothing(self):
         for values, kwargs, reason in (
@@ -1649,11 +1694,14 @@ class AccessChangeTest(unittest.TestCase):
         other = dict(self.route, route_hash="sha256:" + "0" * 64)
         self.assertIsNone(RA.access_in_force(other))
 
-    def given(self, *, caller=("opencode", "oc-sid"), owner_parent="oc-sid", env=True):
+    def given(self, *, caller=("opencode", "oc-sid"), owner_parent="oc-sid", env=True, lineage=False):
         router = _load("route_authority_capability_route_access", "utilities/capability-route.py")
         import work_start
         rows = {"att-owner": ("done", {"worker_type": "owner", "owner_route_id": self.route["route_id"],
-                                       "parent_sid": owner_parent, "attempt_id": "att-owner"})}
+                                       "parent_sid": owner_parent, "attempt_id": "att-owner",
+                                       # a depth-1 route-bound owner, whose holder the seat lineage answers
+                                       **({"dispatch_depth": "1", "owner_route_hash": self.route["route_hash"]}
+                                          if lineage else {})})}
         extra = {"AGENT_DISPATCH_EXECUTION_ACCESS_FILE": str(self.request_file)} if env else {}
         with mock.patch.dict(os.environ, extra), \
              mock.patch.object(RA, "caller_identity", return_value=caller), \
@@ -1681,6 +1729,17 @@ class AccessChangeTest(unittest.TestCase):
         self.assertFalse(invalid["changed"])
         self.assertTrue(invalid["reason"].startswith("execution-access-root-too-broad"))
         self.assertEqual(RA.access_changes(self.route), [])
+
+    def test_an_unreadable_lineage_records_nothing_and_waits_for_the_same_start(self):
+        with mock.patch.object(HANDOVER, "_readable_lineage_signature",
+                               side_effect=OSError("lineage-directory-changed")):
+            waiting = self.given(caller=("claude", "other-sid"), lineage=True)
+        self.assertEqual((waiting["changed"], waiting["reason"], waiting["next_action"]),
+                         (False, "handover-unreadable", "same-command"), waiting)
+        self.assertTrue(waiting["retry_when"])
+        self.assertEqual(RA.access_changes(self.route), [])
+        self.assertEqual(self.given(caller=("claude", "other-sid"), lineage=True),
+                         {"changed": False, "reason": "access-change-parent-only"})
 
 
 class RelocationAuthorityTest(unittest.TestCase):

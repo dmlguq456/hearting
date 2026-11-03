@@ -167,6 +167,34 @@ class ReplacementTest(unittest.TestCase):
         candidate.update(D.parse_registry_metadata(R.seal_launch_input(args,'codex','the raw task')))
         return candidate
 
+    def test_handover_replacement_lineage_waits_while_the_seat_lineage_cannot_be_read(self):
+        # A launched replacement registered by the /clear successor: whether that successor still
+        # answers for the source is unknown, so the lineage projection waits for the same command
+        # instead of "replacement-lineage-unproven".
+        import dispatch_seat_handover as H
+        self.meta.update(worker_type='owner',owner_route_id='rt-test',owner_route_hash='sha256:test')
+        self.bind_source_parent()
+        self.handover()
+        record=self.claim();candidate=self.replacement_candidate(record)
+        row='now\topen\t'+str(self.root)+'\t'+str(self.root)+'\treplacement\t'+','.join(k+'='+v for k,v in candidate.items())
+        self.assertTrue(D.claim_attempt_row(self.jobs,candidate['attempt_id'],row,launch=False))
+        self.assertTrue(D.claim_attempt_row(self.jobs,candidate['attempt_id'],row,launch=True))
+        lines=self.jobs.read_text().splitlines()
+        for index,line in enumerate(lines):
+            fields=line.split('\t')
+            if D.row_has_attempt(fields[5], candidate['attempt_id']):
+                fields[5]=D._updated_attempt_metadata(fields[5], {'launch_started':'1'})
+                lines[index]='\t'.join(fields)
+        D._atomic_registry_replace(self.jobs, lines)
+        expected=R.effective_attempts(self.jobs,{'att-source'})
+        self.assertEqual(expected[0],{candidate['attempt_id']})
+        with mock.patch.object(H,'_readable_lineage_signature',side_effect=OSError('lineage-directory-changed')):
+            with self.assertRaises(D.DispatchContractError) as waiting:
+                R.effective_attempts(self.jobs,{'att-source'})
+        self.assertEqual((waiting.exception.reason,waiting.exception.next_action),
+                         ('handover-unreadable','same-command'))
+        self.assertEqual(R.effective_attempts(self.jobs,{'att-source'}),expected)
+
     def test_handover_owner_replacement_registers_and_lineage_reuses_the_same_claim(self):
         import review_round_cap as ROUND
         self.meta.update(worker_type='owner',owner_route_id='rt-test',owner_route_hash='sha256:test')

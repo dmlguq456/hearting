@@ -102,6 +102,13 @@ class ContinuationDecision(NamedTuple):
     census: object = None
 
 
+# The recipient judgment when the seat lineage cannot be read: wait and run the same
+# command (``recipient_continuation``, ``require_known``).
+LINEAGE_UNREADABLE_WAIT = ContinuationDecision(
+    False, "wait", "handover-unreadable", "same-command",
+    "The existing controller observes the same lineage again.")
+
+
 PROVEN_BLOCKED_GATE_REASONS = frozenset({
     "completion-attempt-not-current", "completion-evidence-revised-unrecorded",
 })
@@ -1020,13 +1027,12 @@ def correction_source_session(environ=None) -> str:
     return session_label(environ)
 
 
-def owns(meta, session, jobs, *, read_context=None) -> bool:
+def owns(meta, session, jobs, *, read_context=None):
     """Only the session that answers for the attempt now (``effective_parent``).
 
     That is the registered parent before a confirmed handover and the end of its
-    lineage after one. Unreadable handover state owns nothing here (False); a caller
-    that must tell waiting from refusing resolves the holder once and applies
-    ``recipient_continuation`` to it, as ``require_recovery_binding`` does.
+    lineage after one. True, False, or None when the seat lineage cannot be read:
+    unknown is neither, so a caller that refuses goes through ``require_owner``.
     """
     if not session:
         return False
@@ -1034,6 +1040,24 @@ def owns(meta, session, jobs, *, read_context=None) -> bool:
     if read_context is None:
         return seat_owns(meta, session, jobs)
     return seat_owns(meta, session, jobs, read_context=read_context)
+
+
+def require_known(answer):
+    """``answer`` unless it is unknown (None): then the recipient judgment's wait for the
+    same command is raised, never a refusal and never ownership (LOOP §4)."""
+    if answer is None:
+        require_continuation(LINEAGE_UNREADABLE_WAIT)
+    return answer
+
+
+def require_owner(meta, session, jobs, reason, detail="", *, read_context=None) -> None:
+    """Refuse ``session`` with ``reason`` only when the lineage names another holder.
+
+    The one place an ownership answer becomes a refusal: an unreadable seat lineage
+    waits for the same command (``require_known``) instead.
+    """
+    if not require_known(owns(meta, session, jobs, read_context=read_context)):
+        raise _contract_error(reason, detail)
 
 
 def parent_attempt_succeeded(jobs, recorded, actual) -> bool:
@@ -1109,33 +1133,31 @@ def require_replacement_parent(jobs, rows, meta, *, current_session) -> None:
     elif not meta.get('parent_sid'):
         raise _contract_error('replacement-parent-identity-unproven')
     else:
-        session = current_session()
-        if not session:
-            raise _contract_error('replacement-parent-identity-unproven')
-        from dispatch_seat_handover import recipient_continuation, resolve_recipient
-        holder = resolve_recipient("job-holder", metadata=meta, jobs=jobs)
-        if holder.state == "unreadable":
-            require_continuation(recipient_continuation(holder))
-        if holder.session_id != session:
-            raise _contract_error('replacement-parent-identity-unproven')
+        require_owner(meta, current_session(), jobs, 'replacement-parent-identity-unproven')
 
 
 def replacement_parent_matches(source, candidate, jobs, *, lineage=False) -> bool:
-    """The parent attempt follows the replacement lineage; a depth-1 session may be its recorded successor."""
+    """The parent attempt follows the replacement lineage; a depth-1 session may be its recorded successor.
+
+    When that depends on a seat lineage that cannot be read, the answer is neither:
+    the recipient judgment's wait is raised (``require_known``).
+    """
     if not parent_attempt_succeeded(jobs, source.get('parent_attempt_id'), candidate.get('parent_attempt_id')):
         return False
     if candidate.get('parent_sid') == source.get('parent_sid'):
         return True
     if source.get('dispatch_depth') != '1':
         return False
-    if owns(source, candidate.get('parent_sid'), jobs):
+    if require_known(owns(source, candidate.get('parent_sid'), jobs)):
         return True
     if lineage and candidate.get('dispatch_depth') == '1':
         # A registered A -> B edge survives a later B -> C handover. Admission
         # still accepts only the source's current effective parent.
         from dispatch_seat_handover import effective_parent
         current = effective_parent(source, jobs)
-        return bool(current) and effective_parent(candidate, jobs) == current
+        if not current and source.get('parent_sid'):
+            require_known(None)  # the source's holder cannot be read now
+        return bool(current) and bool(require_known(owns(candidate, current, jobs)))
     return False
 
 

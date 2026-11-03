@@ -1523,10 +1523,9 @@ class RecipientResolution(NamedTuple):
 
 
 def recipient_continuation(result, actor=None):
-    from route_authority import ContinuationDecision
+    from route_authority import ContinuationDecision, LINEAGE_UNREADABLE_WAIT
     if result.state == "unreadable":
-        return ContinuationDecision(False, "wait", "handover-unreadable", "same-command",
-                                    "The existing controller observes the same lineage again.")
+        return LINEAGE_UNREADABLE_WAIT
     if actor is not None and result.session_id != actor:
         return ContinuationDecision(False, "protected", "work-parent-recovery-required", "report")
     return ContinuationDecision(True, "continue")
@@ -1831,9 +1830,21 @@ def _own_seat(session: str):
         return None
 
 
-def owns(meta: dict, session: str, jobs=None, *, read_context=None) -> bool:
-    """Whether this exact session is the shared reader's confirmed current holder."""
-    return bool(session) and effective_parent(meta, jobs, read_context=read_context) == session
+def owns(meta: dict, session: str, jobs=None, *, read_context=None) -> Optional[bool]:
+    """Whether this exact session is the shared reader's confirmed current holder.
+
+    Three answers: True, False (another session holds it, or no session was named), and
+    None when the lineage cannot be read. A registered parent always has a holder while the
+    lineage reads (itself or its successor), so no holder for one is that unknown. Unknown
+    is neither owner nor not-owner: a caller that refuses on False maps it through
+    ``route_authority.require_owner`` to the recipient judgment's wait (LOOP §4).
+    """
+    if not session:
+        return False
+    holder = effective_parent(meta, jobs, read_context=read_context)
+    if holder:
+        return holder == session
+    return None if meta.get("parent_sid") else False
 
 
 class RecipientScopes(list):

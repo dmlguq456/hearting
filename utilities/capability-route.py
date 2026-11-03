@@ -3886,8 +3886,9 @@ def _change_pins(route, jobs, values):
     pins, warnings = _filter_top_pins(_parse_selection_pins(values))
     harness, session = RA.caller_identity()
     owner = RA.current_route_owner(route, jobs, _rows(jobs))
-    if owner and not RA.owns(owner, session, jobs):
-        raise ValueError("start-pin-parent-only: only this route's parent session moves its pins")
+    if owner:
+        RA.require_owner(owner, session, jobs, "start-pin-parent-only",
+                         "start-pin-parent-only: only this route's parent session moves its pins")
     targets = [target for target in RA.PIN_CHANGE_TARGETS if target in pins]
     probed = {target: _pin_change_probe(route, jobs, target, pins[target]["harness"], harness)
               for target in targets}
@@ -3922,8 +3923,12 @@ def _record_access_change(route, jobs):
         return None
     harness, session = RA.caller_identity()
     owner = RA.current_route_owner(route, jobs, _rows(jobs))
-    if owner and not RA.owns(owner, session, jobs):
-        return {"changed": False, "reason": "access-change-parent-only"}
+    if owner:
+        try:
+            RA.require_owner(owner, session, jobs, "access-change-parent-only")
+        except DispatchContractError as exc:  # not recorded; an unreadable lineage waits for the same start
+            return {"changed": False, "reason": exc.reason,
+                    **{key: getattr(exc, key) for key in ("next_action", "retry_when") if getattr(exc, key, None)}}
     try:
         context = AccessContext.build(worktree=str(route.get("cwd") or ""),
                                       artifact_root=str(route.get("artifact_root") or ""),
@@ -7612,8 +7617,9 @@ def _review_self_disposition_actor(route, jobs, metadata):
     else:
         owner = _find_attempt_row_metadata(Path(jobs), actor) if actor else None
         sid = ROUTE_AUTHORITY.caller_identity()[1]
-        if not owner or not ROUTE_AUTHORITY.owns(owner, sid, jobs):
+        if not owner:
             raise ValueError("review-self-disposition-actor-unproven")
+        ROUTE_AUTHORITY.require_owner(owner, sid, jobs, "review-self-disposition-actor-unproven")
         # The actual parent can settle this existing judgment while its current
         # owner waits for an answer. This is ordinary parent authority, not
         # permission to impersonate or revive that stopped owner.
@@ -13806,7 +13812,12 @@ if __name__=="__main__":
     try: main()
     # OSError too: completion walks a worker-supplied tree, and a refusal there
     # must be a typed line, never a traceback (review S-a).
-    except (ValueError,OSError,TOPO.TopologyError,DEFAULTS.DefaultsConfigError) as exc: print(f"capability-route: {exc}",file=sys.stderr); raise SystemExit(64)
+    except (ValueError,OSError,TOPO.TopologyError,DEFAULTS.DefaultsConfigError) as exc:
+        print(f"capability-route: {exc}",file=sys.stderr)
+        if getattr(exc,"next_action",None)=="same-command" and getattr(exc,"retry_when",""):
+            # A typed wait, not a refusal: the same command is the way on.
+            print(f"capability-route: next_action=same-command retry_when={exc.retry_when}",file=sys.stderr)
+        raise SystemExit(64)
     except Exception as exc:
         # A producer refusal (e.g. cutover-inactive) is a typed line too, never a traceback.
         import artifact_producer

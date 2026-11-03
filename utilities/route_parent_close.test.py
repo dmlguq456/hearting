@@ -2135,6 +2135,22 @@ class ParentCloseTest(unittest.TestCase):
         self.assertEqual(worker.wait(timeout=2), -signal.SIGTERM)
         self.assertEqual(CLOSE._rows(self.jobs)[self.aid("att-worker")][1]["failure_class"], "pass")
 
+    def test_unreadable_seat_lineage_waits_instead_of_refusing_or_skipping_the_owner(self):
+        # Whether this session holds the live owner is unknown: neither "not owned" nor a close
+        # that skips the owner. The same close is the way on; nothing is signalled meanwhile.
+        import dispatch_seat_handover as handover
+        owner = self.process("att-owner")
+        self.row("att-owner", process=owner)
+        with mock.patch.object(handover, "_readable_lineage_signature",
+                               side_effect=OSError("lineage-directory-changed")):
+            with self.assertRaises(DC.DispatchContractError) as waiting:
+                self.close()
+        self.assertEqual((waiting.exception.reason, waiting.exception.next_action),
+                         ("handover-unreadable", "same-command"))
+        self.assertIsNone(owner.poll())
+        self.assertIsNone(CLOSE.intent(self.route, self.jobs))
+        self.assertEqual(self.close()["state"], "cancelled")
+
     def test_confirmed_handover_refuses_old_parent_close_and_allows_successor(self):
         import dispatch_seat_handover as handover
         import session_tidy as tidy

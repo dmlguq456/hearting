@@ -166,10 +166,13 @@ def _owner(route, path, jobs, rows):
             continue
         if str(Path(fields[3]).resolve()) != str(Path(route["cwd"]).resolve()):
             continue
-        owned = AUTH.owns(meta, AUTH.default_parent_session_id(), jobs)
         relevant = (meta.get("owner_route_id") == route["route_id"]
                     or meta.get("owner_route_file") == str(path.resolve())
                     or route.get("owner_attempt_id") == aid)
+        owned = AUTH.owns(meta, AUTH.default_parent_session_id(), jobs)
+        if relevant or fields[1] in OPEN:
+            # Who holds this route's owner, or a live one, is a wait while the lineage is unreadable.
+            owned = AUTH.require_known(owned)
         # Ordinary route-free owners and unrelated historical rows coexist in
         # this registry. Their absent/old binding is not current-route evidence.
         if (not owned or fields[1] not in OPEN) and not relevant:
@@ -205,8 +208,7 @@ def _owner(route, path, jobs, rows):
     aid, fields, meta = active[0]
     if aid == os.environ.get("AGENT_DISPATCH_ATTEMPT_ID"):
         raise ValueError("parent-close-requires-parent")
-    if not AUTH.owns(meta, AUTH.default_parent_session_id(), jobs):
-        raise ValueError("parent-close-owner-not-owned")
+    AUTH.require_owner(meta, AUTH.default_parent_session_id(), jobs, "parent-close-owner-not-owned")
     OWNER._owner_row_proof(fields, meta, route=route, environ={})
     return aid, False
 

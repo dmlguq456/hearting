@@ -665,7 +665,9 @@ def _current_parent_session_id():
 
 
 def _owns(meta, parent, jobs):
-    """The launching session, or its confirmed same-seat successor after a /clear (seat handover)."""
+    """The launching session, or its confirmed same-seat successor after a /clear (seat handover).
+
+    None when the seat lineage cannot be read; a refusal maps it with ``route_authority.require_known``."""
     return route_authority.owns(meta, parent, jobs)
 
 
@@ -708,7 +710,7 @@ def _slot(route, node, rows, jobs=None):
         # the session a supervisor handed the route to may harvest it.
         if status != "done":
             parent = _current_parent_session_id()
-            if not _owns(meta, parent, jobs):
+            if not route_authority.require_known(_owns(meta, parent, jobs)):
                 raise DispatchContractError("work-parent-recovery-required", aid)
         digest = (meta.get("owner_route_hash") or meta.get("route_hash")) if node == "owner" else meta.get("route_hash")
         if aid in adopted:
@@ -1905,7 +1907,13 @@ def pin_handoff_continuation(route, path, jobs, outcome):
     if outcome.get("state") != "cancelled":
         return {**outcome, "recovery_command": _pin_handoff_close_command(path, jobs)}
     metadata = (_rows(jobs).get(outcome.get("owner_attempt_id")) or (None, {}))[1]
-    if not _owns(metadata, _current_parent_session_id(), jobs):
+    owned = _owns(metadata, _current_parent_session_id(), jobs)
+    if owned is None:  # an unreadable seat lineage: wait, as the preparation failure below does
+        wait = route_authority.LINEAGE_UNREADABLE_WAIT
+        return {**outcome, "handoff_reason": wait.reason, "next_action": wait.next_action,
+                "retry_when": wait.retry_when, "recovery_command": resume_command(path, jobs, agent_home=ROOT),
+                "next_step": "Owner cleanup settled; continuation preparation waits. " + wait.retry_when}
+    if not owned:
         return {**outcome, "handoff_reason": "work-parent-recovery-required"}
     pinned = route_authority.sealed_pin_harness(route, worker_type="owner")
     if not pinned:
@@ -2605,6 +2613,9 @@ def start_work(route, path, jobs, *, wait=False, interview=None, answers=None,
         result = {**result, "state": "needs-attention",
                   "reason": "source-worktree-preparation-failed" if preparation_failed else
                             getattr(exc, "reason", type(exc).__name__), "detail": str(exc)}
+        if getattr(exc, "retry_when", ""):
+            # A typed wait (e.g. an unreadable seat lineage) keeps its own retry condition.
+            result.update(next_action=exc.next_action, retry_when=exc.retry_when, next_step=exc.retry_when)
         # A caller can lose the launch reply after the adapter claimed a row.
         # Preserve those durable obligations in this receipt too; do not spawn
         # a replacement or infer completion from the caller's exception.

@@ -7254,6 +7254,20 @@ class HistoricalReviewSelfDispositionTest(InlineStageCompletionRecipeTest):
      self.replay(actor=actor)
     self.assertEqual(before,{p:p.read_bytes() for p in self.base.rglob('*') if p.is_file()})
 
+ def test_unreadable_seat_lineage_waits_for_the_parent_without_publication(self):
+  # The parent path: whether this session still answers for the owner is unknown, so the
+  # disposition waits for the same command instead of "actor unproven", and publishes nothing.
+  import dispatch_seat_handover as handover
+  import route_authority
+  self.historical_fixture()
+  before={p:p.read_bytes() for p in self.base.rglob('*') if p.is_file()}
+  with mock.patch.object(route_authority,"caller_identity",return_value=("codex","parent")), \
+       mock.patch.object(handover,"_readable_lineage_signature",side_effect=OSError("lineage-directory-changed")), \
+       self.assertRaises(D.DispatchContractError) as waiting:
+   self.replay(actor="")
+  self.assertEqual((waiting.exception.reason,waiting.exception.next_action),("handover-unreadable","same-command"))
+  self.assertEqual(before,{p:p.read_bytes() for p in self.base.rglob('*') if p.is_file()})
+
  def test_crash_retry_preserves_commit_boundary_and_origin(self):
   for boundary in ("history","canonical","pointer"):
    with self.subTest(boundary=boundary):

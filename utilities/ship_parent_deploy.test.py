@@ -122,6 +122,33 @@ class ParentDeployTest(unittest.TestCase):
                 S.run(request)
         self.assertFalse(self.counter.exists())
 
+    def test_unreadable_seat_lineage_waits_for_the_same_command_without_running(self):
+        # Whether this session is the owner's current parent is unknown: prepare, run and the
+        # completion check wait for the same command instead of refusing the parent; nothing runs.
+        import dispatch_seat_handover as handover
+        self.meta.update(attempt_id="owner", owner_route_id="rt-test", owner_route_hash="sha256:sealed")
+        unreadable = patch.object(handover, "_readable_lineage_signature",
+                                  side_effect=OSError("lineage-directory-changed"))
+        with unreadable, contextlib.redirect_stdout(io.StringIO()) as output:
+            code = S.main(["prepare", "--jobs", str(self.jobs), "--attempt-id", "owner",
+                           "--command-file", str(self.command)])
+        failure = json.loads(output.getvalue())
+        self.assertEqual((code, failure["reason"], failure["next_action"]),
+                         (69, "handover-unreadable", "same-command"), failure)
+        self.assertTrue(failure["retry_when"])
+        self.assertFalse(S.paths(self.jobs, "rt-test")[0].exists())
+        request = self.prepared()
+        with unreadable, self.assertRaises(S.DC.DispatchContractError) as waiting:
+            S.run(request)
+        self.assertEqual((waiting.exception.reason, waiting.exception.next_action),
+                         ("handover-unreadable", "same-command"))
+        self.assertFalse(self.counter.exists())
+        self.assertEqual(S.run(request)["state"], "success")
+        with unreadable, self.assertRaises(S.DC.DispatchContractError) as waiting:
+            S.validate_completion(self.route, self.jobs, self.record)
+        self.assertEqual(waiting.exception.reason, "handover-unreadable")
+        S.validate_completion(self.route, self.jobs, self.record)
+
     def test_registered_current_owner_can_prepare_but_cannot_execute(self):
         with patch.dict(os.environ, {"AGENT_DISPATCH_ATTEMPT_ID": "owner", "AGENT_DISPATCH_CHILD": "1"}), patch.object(S.authority, "review_owner_authority") as auth:
             request = self.prepared()
