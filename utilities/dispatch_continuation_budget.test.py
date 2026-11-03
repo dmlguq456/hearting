@@ -40,6 +40,27 @@ class ContinuationBudgetTest(unittest.TestCase):
         self.assertEqual(8, budget.declared_nodes)
         self.assertEqual(7, budget.retry_slots)
 
+    def test_continuation_route_counts_only_its_declared_retry_boundaries(self):
+        # Shape of a continuation route (cairn v216): the source graph's boundaries
+        # stay, while only the remaining nodes are declared.
+        with tempfile.TemporaryDirectory() as raw:
+            route = Path(raw) / "route.json"
+            value = self.seal({
+                "schema_version": 2,
+                "nodes": [{"id": node} for node in ("host-run", "impl-review", "test", "report")],
+                "resume_retry_boundaries": [
+                    "plan", "plan-check", "execute", "host-run", "impl-review", "test", "report"],
+            })
+            route.write_text(json.dumps(value), encoding="utf-8")
+            budget = MODULE.resolve_continuation_budget(
+                route_file=route, route_id=value["route_id"], route_hash=value["route_hash"],
+            )
+        self.assertEqual("bound-route", budget.source)
+        self.assertEqual(4, budget.declared_nodes)
+        self.assertEqual(4, budget.retry_slots)
+        self.assertEqual(MODULE.derive_workload_ordinary(
+            declared_nodes=4, retry_slots=4, review_round_cap=2, terminal_nodes=1), budget.ordinary)
+
     def test_unbound_or_mismatched_route_keeps_finite_floor(self):
         with tempfile.TemporaryDirectory() as raw:
             route = Path(raw) / "route.json"

@@ -1114,6 +1114,324 @@ def handed_over_prompt(route, node_id, output_dir) -> str:
             + "\n".join(handed_over_lines(found, "- ")) + "\n")
 
 
+_PRIOR_ROUND_LIMITS = {"paths": 20, "commits": 20, "chars": 300}
+# One parse per unchanged registry file: a chain continuation asks once per session.
+_LINEAGE_CACHE: dict = {}
+
+
+def _lineage_rows(route, jobs) -> dict[str, list[tuple[str, dict]]]:
+    """``{node id: [(status, metadata)]}`` for this route and its verified ancestors, in registry order."""
+    from dispatch_contract import parse_registry_metadata, terminal_attempt_never_started
+    identities = {route.get("route_id")}
+    try:
+        from route_lineage import verified_route_lineage
+        identities |= {generation.get("route_id") for generation in verified_route_lineage(route)}
+    except Exception:  # an unverifiable ancestor only narrows the history read
+        pass
+    rows: dict[str, list[tuple[str, dict]]] = {}
+    try:
+        path = Path(jobs).resolve()
+        info = path.stat()
+        key = (str(path), info.st_ino, info.st_mtime_ns, info.st_ctime_ns, info.st_size,
+               frozenset(map(str, identities)))
+        if key in _LINEAGE_CACHE:
+            return _LINEAGE_CACHE[key]
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except (OSError, TypeError):
+        return rows
+    for index, line in enumerate(lines):
+        fields = line.split("\t")
+        if len(fields) != 6:
+            continue
+        meta = parse_registry_metadata(fields[5])
+        if ((meta.get("route_id") or meta.get("route")) not in identities or not meta.get("route_node")
+                or terminal_attempt_never_started(fields[1], meta)):
+            continue
+        rows.setdefault(meta["route_node"], []).append((fields[1], {**meta, "_registry_line": index}))
+    _LINEAGE_CACHE.clear()
+    _LINEAGE_CACHE[key] = rows
+    return rows
+
+
+def judging_stages(route, node_id) -> list[dict]:
+    """The round-capped stages that judge this node's work, in route order: its dependents and
+    theirs through judging stages only, up to the next stage that produces work (so execute is
+    judged by impl-review and the test after it, not by the report that follows)."""
+    import review_round_cap as ROUND
+    nodes = _route_nodes(route)
+    found, pending = set(), [node_id]
+    while pending:
+        current = pending.pop(0)
+        for node in nodes:
+            if (current in (node.get("depends_on") or ()) and node["id"] not in found
+                    and node["id"] != node_id and ROUND.is_round_capped_node(node)):
+                found.add(node["id"])
+                pending.append(node["id"])
+    return [node for node in nodes if node["id"] in found]
+
+
+def _decoded(encoded) -> str:
+    import base64
+    try:
+        return base64.urlsafe_b64decode(str(encoded) + "=" * (-len(str(encoded)) % 4)).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return ""
+
+
+def attempt_outcome(route, meta) -> dict:
+    """The recorded end of one attempt: verdict, blocker line and root-bound artifact path, read
+    from its own terminal envelope. Missing or unreadable parts are omitted, never inferred."""
+    from codex_dispatch_terminal import inspect_terminal_attempt, inspect_terminal_log
+    found = {}
+    try:
+        view = inspect_terminal_log(meta.get("log_file")) or {}
+    except (OSError, ValueError, TypeError):
+        view = {}
+    blocker = " ".join(str(view.get("blocker") or "").split())
+    if view.get("verdict"):
+        found["verdict"] = str(view["verdict"])
+    if blocker and blocker not in {"-", "none"}:
+        found["blocker"] = blocker[:_PRIOR_ROUND_LIMITS["chars"]]
+    artifact = _decoded(meta.get("review_artifact_b64") or "")
+    if not artifact:
+        try:
+            terminal = inspect_terminal_attempt(
+                meta.get("log_file"), worktree=meta.get("cwd") or route.get("cwd"),
+                artifact_root_metadata=meta.get("artifact_root") or route.get("artifact_root"),
+                artifact_binding=meta)
+            artifact = _decoded(terminal.get("artifact_path_b64") or "")
+        except (OSError, ValueError, TypeError):
+            artifact = ""
+    if artifact and Path(artifact).is_file():
+        found["artifact"] = artifact
+    return found
+
+
+def attempt_changes(route, meta) -> list[str]:
+    """Commits and paths changed since one attempt's recorded ``launch_head``, by read-only Git."""
+    import artifact_context
+    head, worktree = str(meta.get("launch_head") or ""), route.get("cwd")
+    if (not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", head) or not worktree
+            or route.get("source_commit") == "unversioned"):
+        return []
+
+    def git(*args):
+        try:
+            result = subprocess.run(["git", "-C", str(worktree), *args], capture_output=True,
+                                    env=artifact_context._readonly_git_env(), timeout=5, check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        return result.stdout.decode("utf-8", "replace") if result.returncode == 0 else None
+
+    lines = []
+    log = git("log", "--format=%h %s", f"{head}..HEAD")
+    commits = [line[:160] for line in (log or "").splitlines() if line.strip()]
+    if log is not None:
+        shown = "; ".join(commits[:_PRIOR_ROUND_LIMITS["commits"]]) or "none"
+        more = len(commits) - _PRIOR_ROUND_LIMITS["commits"]
+        lines.append(f"commits since `{head[:12]}`: {shown}" + (f" (+{more} more)" if more > 0 else ""))
+    diff = git("diff", "--name-only", head, "--")
+    paths = [line for line in (diff or "").splitlines() if line.strip()]
+    if diff is not None:
+        shown = ", ".join(f"`{path}`" for path in paths[:_PRIOR_ROUND_LIMITS["paths"]]) or "none"
+        more = len(paths) - _PRIOR_ROUND_LIMITS["paths"]
+        lines.append(f"paths changed since `{head[:12]}`: {shown}" + (f" (+{more} more)" if more > 0 else ""))
+    return lines
+
+
+def judge_findings(route, node_id, rows=None, jobs=None) -> list[str]:
+    """``<judge> <attempt>: <artifact>`` for each stage that judges this node (``judging_stages``)
+    whose latest verdict still holds an open 🔴 list (``open_blocking_verdict``: not one the owner
+    already disposed): the findings this node's next round closes."""
+    import review_round_cap as ROUND
+    rows = _lineage_rows(route, jobs) if rows is None else rows
+    found = []
+    for judge in judging_stages(route, node_id):
+        worker = judge.get("worker_type") or ("review" if judge.get("kind") == "review-worker" else "test")
+        meta = ROUND.open_blocking_verdict(rows.get(judge["id"], ()), worker)
+        if meta is None:
+            continue
+        outcome = attempt_outcome(route, meta)
+        text = f"{judge['id']} {meta.get('attempt_id', 'unknown')} ({meta.get('note', 'blocking')})"
+        if outcome.get("artifact"):
+            text += f": `{outcome['artifact']}`"
+        if outcome.get("blocker"):
+            text += f" — blocker: {outcome['blocker']}"
+        found.append(text)
+    return found
+
+
+def prior_round_context(route, node_id, jobs) -> str:
+    """What the next round of a producing stage needs from the round before it, from records the
+    runtime already keeps: the blocking findings of the stages that judge it, its own previous
+    attempt's recorded end, the leg items it left unmet, and what changed since that attempt began.
+
+    Empty when neither its own latest settled attempt nor a judging stage's latest verdict is
+    blocking: an ordinary first run carries no history."""
+    from dispatch_attempt_policy import OPEN_STATES, readable_result
+    node = {n["id"]: n for n in _route_nodes(route)}.get(node_id)
+    if not node or not jobs:
+        return ""
+    rows = _lineage_rows(route, jobs)
+    findings = judge_findings(route, node_id, rows)
+    settled = [meta for status, meta in rows.get(node_id, ()) if status not in OPEN_STATES]
+    own = settled[-1] if settled else None
+    own_result = readable_result(own) if own else ""
+    if not findings and own_result not in {"FAIL", "BLOCKED"}:
+        return ""
+    lines = []
+    if findings:
+        lines.append("- Findings to close: " + "; ".join(findings))
+    if own is not None:
+        outcome = attempt_outcome(route, own)
+        text = f"- Your previous attempt {own.get('attempt_id', 'unknown')} ended {own.get('note') or own_result or 'settled'}"
+        if outcome.get("blocker"):
+            text += f" — blocker: {outcome['blocker']}"
+        if outcome.get("artifact"):
+            text += f"; its report: `{outcome['artifact']}`"
+        lines.append(text)
+        if own_result == "BLOCKED":
+            try:
+                import route_authority
+                unmet = route_authority._blocked_round_items(route, own)
+            except Exception:  # the items are a help, never a reason to withhold the context
+                unmet = None
+            if unmet:
+                lines.append("- Leg items it left unmet: " + ", ".join(sorted(unmet)))
+        lines += [f"- {line}" for line in attempt_changes(route, own)]
+    return ("\n\n## Previous round (runtime record)\n" + "\n".join(lines) + "\n"
+            "- Read the findings and your previous report first; close every 🔴 they list together, "
+            "building on the changes already made rather than starting over.\n")
+
+
+# A blocker line's class, from fixed patterns read in order. The class decides what changes
+# when a failure repeats: an environment or host limit moves the work, a scope or input gap goes
+# to the owner, any other one moves it to a stronger profile. Unmatched text is "other", whose
+# only cost is a stronger model.
+_BLOCKER_CLASSES = (
+    ("environment", re.compile(
+        r"EPERM|EACCES|permission denied|operation not permitted|sandbox|socket|AF_UNIX|loopback"
+        r"|\bbind\b|network|tmux|/proc\b|index\.lock|chromium|browser|playwright|소켓|샌드박스"
+        r"|\bnode(?:js)?\b[^.;]{0,30}(?:not found|missing|unavailable|absent)|command not found"
+        r"|not installed", re.I)),
+    ("host-resource", re.compile(
+        r"out of memory|\bOOM\b|no space left|disk (?:full|quota)|\bGPU\b|CUDA|memory cap|cgroup|no-swap",
+        re.I)),
+    ("scope", re.compile(
+        r"out-of-scope|outside (?:the |its |my )?(?:fixed[- ]file |write[_ -]?)?scope|fixed[_ -]files?"
+        r"|not (?:in|within) (?:the )?scope", re.I)),
+    ("input", re.compile(
+        r"missing (?:input|artifact|plan|brief|handoff)|handoff (?:was |is )?(?:missing|absent)"
+        r"|(?:predecessor|upstream) (?:stage|output|marker|artifact)s? (?:is |are )?"
+        r"(?:missing|absent|not (?:ready|published))", re.I)),
+    ("test-failure", re.compile(r"\btests? (?:fail|failed|failing)\b|assertion|\bFAILED\b|regression", re.I)),
+)
+PLACE_CLASSES = frozenset({"environment", "host-resource"})
+# A scope or missing-input repeat needs the owner's decision, not a stronger model.
+OWNER_CLASSES = frozenset({"scope", "input"})
+
+
+def blocker_class(text) -> str:
+    """The fixed class of one blocker line; "other" when no pattern matches."""
+    text = str(text or "")
+    return next((name for name, pattern in _BLOCKER_CLASSES if pattern.search(text)), "other")
+
+
+def _own_round_signature(route, meta, result) -> dict:
+    """One failed round of a producing stage: its blocker class and unmet leg items."""
+    unmet = None
+    if result == "BLOCKED":
+        try:
+            import route_authority
+            unmet = route_authority._blocked_round_items(route, meta)
+        except Exception:  # unjudgeable items leave the class to sign the round
+            unmet = None
+    return {"kind": "own", "cls": blocker_class(attempt_outcome(route, meta).get("blocker", "")),
+            "unmet": unmet, "attempt": meta.get("attempt_id", "")}
+
+
+def repeat_failure(route, node_id, jobs, rows=None) -> dict | None:
+    """How many of a producing stage's latest settled rounds failed the same way.
+
+    A round is one settled attempt of the stage that ended FAIL or BLOCKED -- a sub-session chain
+    (serial sessions or parallel slices sharing ``session_chain_id``) is one round, signed by its
+    latest failed session -- or one open blocking verdict of a stage that judges it
+    (``judging_stages``, ``open_blocking_verdict``). Two rounds are the same failure when both
+    come from the same judging stage, or both are the stage's own with the same blocker class and
+    no progress on the unmet leg items (``route_authority.unmet_progress``, the rule
+    ``blocked_progress`` reads). A judging PASS or a review the owner disposed ends the run, the
+    stage's own pass ends a run of its own failures, and a transport death or a verdict-less judge
+    is not a round. Returns ``{"streak", "signature", "class", "attempts"}``, None without a run."""
+    import review_round_cap as ROUND
+    import route_authority
+    from dispatch_attempt_policy import OPEN_STATES, readable_result, verdict_pass
+    rows = _lineage_rows(route, jobs) if rows is None else rows
+    events = []
+    chains: dict[str, list] = {}
+    for status, meta in rows.get(node_id, ()):
+        line = meta.get("_registry_line", -1)
+        if meta.get("session_chain_id"):
+            chains.setdefault(meta["session_chain_id"], []).append((line, status, meta))
+            continue
+        if status in OPEN_STATES:
+            continue
+        result = readable_result(meta)
+        if result in {"FAIL", "BLOCKED"}:
+            events.append((line, _own_round_signature(route, meta, result)))
+        elif status == "done" and verdict_pass(meta):
+            events.append((line, {"kind": "pass"}))
+    for sessions in chains.values():
+        if any(status in OPEN_STATES for _line, status, _meta in sessions):
+            continue  # a chain still running is not a settled round
+        sessions.sort(key=lambda item: item[0])
+        failed = [(line, meta, readable_result(meta)) for line, _status, meta in sessions
+                  if readable_result(meta) in {"FAIL", "BLOCKED"}]
+        last_line = sessions[-1][0]
+        if failed:
+            _line, meta, result = failed[-1]
+            events.append((last_line, _own_round_signature(route, meta, result)))
+        elif any(status == "done" and verdict_pass(meta) for _l, status, meta in sessions):
+            events.append((last_line, {"kind": "pass"}))
+    for judge in judging_stages(route, node_id):
+        worker = judge.get("worker_type") or ("review" if judge.get("kind") == "review-worker" else "test")
+        for status, meta in rows.get(judge["id"], ()):
+            if ROUND.classify_round_row(status, meta, worker_type=meta.get("worker_type") or worker) != "verdict":
+                continue
+            open_list = ROUND.open_blocking_verdict([(status, meta)], worker) is not None
+            events.append((meta.get("_registry_line", -1),
+                           {"kind": "judge", "judge": judge["id"], "attempt": meta.get("attempt_id", "")}
+                           if open_list else {"kind": "break"}))
+    events.sort(key=lambda item: item[0])
+
+    def same(earlier, later):
+        if earlier["kind"] != later["kind"]:
+            return False
+        if earlier["kind"] == "judge":
+            return earlier["judge"] == later["judge"]
+        return (earlier["cls"] == later["cls"]
+                and not route_authority.unmet_progress(earlier["unmet"], later["unmet"]))
+
+    run: list[dict] = []
+    for _line, event in reversed(events):
+        if event["kind"] == "break":
+            break
+        if event["kind"] == "pass":
+            if not run or run[0]["kind"] == "own":
+                break
+            continue  # the stage passing its own checks is no news to a judge that keeps failing it
+        if run and not same(event, run[-1]):
+            break
+        run.append(event)
+    if not run:
+        return None
+    latest = run[0]
+    signature = (("judge", latest["judge"]) if latest["kind"] == "judge"
+                 else ("own", latest["cls"], tuple(sorted(latest["unmet"] or ()))))
+    return {"streak": len(run), "signature": signature,
+            "class": "judge" if latest["kind"] == "judge" else latest["cls"],
+            "attempts": [event["attempt"] for event in reversed(run)]}
+
+
 def plan_leg_prompt(route, node_id=None, primary_report=None) -> str:
     """The approved plan for this leg, read from the sealed decision: what finishes it, what
     verification looks at, what it hands over, and the direction the person chose. Empty for a

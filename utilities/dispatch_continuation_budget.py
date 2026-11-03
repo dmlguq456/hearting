@@ -165,9 +165,12 @@ def resolve_continuation_budget(
     if len(node_ids) != len(nodes) or len(set(node_ids)) != len(node_ids):
         return ContinuationBudget(COMPATIBILITY_FLOOR, "compatibility-floor")
     retry_ids = [item for item in boundaries if isinstance(item, str) and item]
-    if len(retry_ids) != len(boundaries) or not set(retry_ids).issubset(node_ids):
+    if len(retry_ids) != len(boundaries):
         return ContinuationBudget(COMPATIBILITY_FLOOR, "compatibility-floor")
-    retry_slots = len(set(retry_ids))
+    # A continuation route keeps its source graph's boundaries while declaring only the
+    # nodes still to run; a boundary on a node this route does not declare gives it no
+    # retry slot, so count the declared ones instead of dropping to the floor.
+    retry_slots = len(set(retry_ids) & set(node_ids))
     import review_round_cap
     sealed_budget = route.get("continuation_budget")
     cap = sealed_budget.get("review_round_cap") if isinstance(sealed_budget, dict) else None
