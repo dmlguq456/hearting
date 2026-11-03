@@ -1453,7 +1453,8 @@ def note_start_locked(seat: "st.Seat", harness: str, sid: str, now: float) -> No
 
 def _drop_unverified_notice(seat: "st.Seat", req: dict) -> None:
     """Remove the "could not confirm" line this booking left (caller holds the seat lock)."""
-    text = _notice_text("unverified", "", str(req.get("harness") or ""))
+    text = _notice_text("unverified", "", str(req.get("harness") or ""),
+                        compact=req.get("clear_command") == "compact")
     path = st._notices_path(seat)
     data = st.read_json(path)
     items = data.get("items") if isinstance(data, dict) else None
@@ -1989,7 +1990,7 @@ def _notice_text(outcome: str, reason: str, harness: str, *, compact: bool = Fal
         if outcome == "unverified":
             return ("[정리] 백그라운드 에이전트가 있어 /compact를 보냈지만 압축을 확인하지 못했습니다. "
                     f"창 상태를 확인하고 압축되지 않았으면 /compact 하세요.{kept}")
-        verb = "하지 못했습니다" if outcome == "failed" else "하지 않았습니다"
+        verb = "실패했습니다" if outcome == "failed" else "하지 않았습니다"
         return (f"[정리] 백그라운드 에이전트가 있어 /compact로 정리하려 했지만 {verb}({why}). "
                 f"필요하면 /compact 하세요(에이전트가 모두 끝난 뒤라면 /clear도 됩니다).{kept}")
     hint = CLEAR_COMMAND.get(harness, "/clear")

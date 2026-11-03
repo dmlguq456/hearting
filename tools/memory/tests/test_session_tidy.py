@@ -4666,6 +4666,7 @@ class ClearHelperTest(TidyCase):
                       "HEARTING_TIDY_HERDR": str(self.fake_herdr), "HEARTING_TIDY_CLEAR_OBSERVE": "0.3",
                       "AGENT_DISPATCH_JOBS": str(self.jobs)}
         self.calls = []
+        self.claude_without_agents("sid-A", "sid-B")
 
     def test_helper_env_keeps_the_herdr_socket_but_not_the_callers_pane(self):
         env = clear._helper_env({"HERDR_PANE_ID": PANE, "HERDR_TAB_ID": "t", "HERDR_ENV": "1",
