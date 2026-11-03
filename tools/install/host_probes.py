@@ -87,9 +87,9 @@ def probe_herdr() -> dict:
             "id": "host.herdr",
             "status": "warning",
             "detail": (
-                "herdr CLI not found (optional): peer windows (peer-steward start/watch) "
-                "are off; inside tmux, pane titles, peer delivery, automatic /clear and "
-                "question notifications use tmux, elsewhere they are off; a desktop "
+                "herdr CLI not found (optional): peer-steward watch is off; inside tmux, "
+                "peer windows (start/retire), pane titles, peer delivery, automatic /clear "
+                "and question notifications use tmux, elsewhere they are off; a desktop "
                 "session also gets question notifications through notify-send; "
                 "core work is unaffected"
             ),
