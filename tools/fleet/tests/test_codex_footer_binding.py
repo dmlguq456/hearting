@@ -40,10 +40,11 @@ def screen(thread_ids, *, prompt=True, clipped=False):
     return "\x1b[?25l" + "\r\n".join(lines) + "\r\n\x1b[?25h"
 
 
-def narrow_screen(thread_id, *, width, thread_first=True):
+def narrow_screen(thread_id, *, width, thread_first=True, title="fixture-project"):
     """A pane narrower than the status line: Codex clips the row on the right
-    with an ellipsis and the help row drops "? for shortcuts" first."""
-    items = ["fixture-project", "main", "Context 44% used", "gpt-test high", "weekly 0% left"]
+    with an ellipsis and the help row drops "? for shortcuts" first. An unnamed
+    thread draws its thread-title as the thread id."""
+    items = [title, "main", "Context 44% used", "gpt-test high", "weekly 0% left"]
     items = [thread_id, *items] if thread_first else [*items, thread_id]
     status = "  " + " · ".join(items)
     if len(status) > width:
@@ -174,8 +175,17 @@ class CodexFooterBindingTest(unittest.TestCase):
         self.assertEqual(pane_ownership.codex_footer_threads(
             ["› Ask Codex", "", "  " + THREAD_A + " · project · Context 4…", hint],
             current_id_only=True), {THREAD_A})
+        # Two different complete UUIDs at the two ends: neither is chosen.
         self.assertEqual(pane_ownership.codex_footer_threads(
-            ["› Ask Codex", "", THREAD_A + " · " + THREAD_B, hint], current_id_only=True), {THREAD_B})
+            ["› Ask Codex", "", THREAD_A + " · " + THREAD_B, hint], current_id_only=True), set())
+        self.assertEqual(pane_ownership.codex_footer_threads(
+            ["› Ask Codex", "", THREAD_A + " · main · " + THREAD_A, hint],
+            current_id_only=True), {THREAD_A})
+        # An unnamed thread draws thread-title as its id; the clipped copy of
+        # the same UUID behind it confirms the first field.
+        self.assertEqual(pane_ownership.codex_footer_threads(
+            ["› Ask Codex", "", THREAD_A + " · " + THREAD_A[:16] + "…", hint],
+            current_id_only=True), {THREAD_A})
         # A middle field, or a first-field UUID ahead of a clipped trailing
         # thread-id (the former order, so that field is a title), is no identity.
         self.assertEqual(pane_ownership.codex_footer_threads(
@@ -190,6 +200,14 @@ class CodexFooterBindingTest(unittest.TestCase):
             ["› Ask Codex", "", THREAD_A + " · proj…", compact], current_id_only=True), {THREAD_A})
         self.assertEqual(pane_ownership._codex_current_footer(
             ["› Ask Codex", "", THREAD_A + " · ← for agents"]), ("none", ""))
+        self.assertEqual(pane_ownership.codex_footer_threads(
+            ["› Ask Codex", "", THREAD_A + " · proj…", "alt+← for agents · ⚠ 2"],
+            current_id_only=True), {THREAD_A})
+        # Transcript text that merely mentions agents is not a help row.
+        for row in ("Waiting for agents", "• Waiting for agents", "Spawned 2 for agents"):
+            with self.subTest(row=row):
+                self.assertEqual(pane_ownership._codex_current_footer(
+                    ["› Ask Codex", "", THREAD_A + " · telemetry", row]), ("none", ""))
         self.assertEqual(pane_ownership.codex_footer_threads(
             ["› Ask Codex", "", "Where should the new conversation run?", "❯ Use current Git worktree", hint],
             current_id_only=True), set())
@@ -216,6 +234,13 @@ class CodexFooterBindingTest(unittest.TestCase):
                 self.screens[pane] = [leading] * 2
                 self.assertEqual(pane_ownership.current_codex_thread(
                     pane, pid, executable="/fake/herdr"), THREAD_A)
+        # The new default with an unnamed thread: "T · T · main …" clipped
+        # inside the second copy of the same UUID.
+        unnamed = narrow_screen(THREAD_A, width=60, title=THREAD_A)
+        self.assertRegex(unnamed.split("\r\n")[3], " · " + THREAD_A[:9] + "[0-9a-f-]*…$")
+        self.screens[pane] = [unnamed] * 2
+        self.assertEqual(pane_ownership.current_codex_thread(
+            pane, pid, executable="/fake/herdr"), THREAD_A)
 
     def test_current_thread_from_normal_callback_drives_the_deferred_report(self):
         for index, (source, thread_id) in enumerate((("startup", THREAD_A),

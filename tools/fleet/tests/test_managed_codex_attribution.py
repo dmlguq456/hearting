@@ -192,6 +192,27 @@ class ManagedCodexAttributionTest(unittest.TestCase):
             self.assertEqual((tui.session_id, tui.active_context_tokens,
                               tui.context_window_tokens), (new_sid, 30, 200))
 
+    def test_pane_showing_a_subagent_thread_keeps_the_tui_row(self):
+        # The footer follows the thread on screen; viewing a subagent must not
+        # rename the TUI row or move its rollout.
+        with tempfile.TemporaryDirectory() as tmp:
+            home, cwd = os.path.join(tmp, "dot-codex"), os.path.join(tmp, "project")
+            os.makedirs(cwd)
+            main_sid = "019facc9-fe83-7480-89f6-9e64fbebf0cb"
+            sub_sid = "019facc9-fe83-7480-89f6-9e64fbebf0cc"
+            main = _make_rollout(home, cwd, main_sid)
+            sub = _make_rollout(home, cwd, sub_sid)
+            with open(sub, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps({"type": "session_meta", "payload": {
+                    "cwd": cwd, "id": sub_sid, "source": {"subagent": {"thread_spawn": {
+                        "parent_thread_id": main_sid}}}}}) + "\n")
+            tui = _session(200, cwd, None)
+            with mock.patch.object(herdr, "codex_pane_sessions", return_value={200: sub_sid}), \
+                    mock.patch.object(procscan, "read_environ", return_value={}):
+                tick = self._prepare([tui], {200: [main]}, home)
+            self.assertEqual(tick.proc_paths[200], main)
+            self.assertIsNone(getattr(tui, "_herdr_session_id", None))
+
     def test_current_pane_thread_without_rollout_drops_old_session_telemetry(self):
         with tempfile.TemporaryDirectory() as tmp:
             home, cwd = os.path.join(tmp, "dot-codex"), os.path.join(tmp, "project")

@@ -123,11 +123,12 @@ item, so a narrow pane clips trailing telemetry rather than the UUID; installs
 not yet refreshed keep it last. Two fresh complete reads of the complete UUID
 in the first or last visible native footer field can prove the selected thread
 when an open rollout still names the previous conversation. A UUID in a middle
-field, title, transcript, partial or clipped field (a clipped trailing UUID
-also voids the first field), or hidden footer is unknown. A late callback may
-report only while its session still matches this current proof. Registered
-workers and shared services never gain pane ownership from an inherited pane
-label. When current selection cannot be proved, leave it unknown.
+field, title, transcript, partial or clipped field, two different complete
+UUIDs at the two ends, or hidden footer is unknown; a clipped trailing UUID
+voids a first field it is not a prefix of. A late callback may report only
+while its session still matches this current proof. Registered workers and
+shared services never gain pane ownership from an inherited pane label. When
+current selection cannot be proved, leave it unknown.
 
 The native harness and full session/thread ID identify the same conversation in
 Herdr, Fleet, and peer delivery. Short display numbers are aliases allocated by

@@ -870,7 +870,9 @@ the complete UUID in the first or last visible native footer field provides the
 current `Thread.id`; `sessionId` remains its tree root. A UUID in a middle
 field, title, transcript, or arbitrary screen text is not current identity. A
 missing, clipped, wrapped, partial, ambiguous, or hidden identity field stays
-unknown, and a clipped trailing UUID voids the first field too. Two fresh
+unknown, as do two different complete UUIDs at the two ends; a clipped
+trailing UUID voids a first field it is not a prefix of. Fleet keeps a TUI
+row on its own thread while the footer shows one of its subagents. Two fresh
 samples share stable foreground PID/start/TTY and one unique endpoint/pane, also
 used for reporting, number lookup and title. Managed apply preserves every other
 custom footer item and its order. Callback or environment SID, cwd, title,

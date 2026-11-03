@@ -154,6 +154,24 @@ class CodexTuiConfigTest(unittest.TestCase):
                 merged, record = self._tracked_merge(source)
                 self.assertEqual(config.restore_status_line_text(merged, record), source)
 
+    def test_one_item_per_line_array_keeps_its_comments_and_layout(self):
+        array = ('status_line = [ # footer\n  "project-name", # mine\n\n  # note\n'
+                 "  'git-branch',\n" + '  "thread-id", # managed\n  "weekly-limit" # last\n] # end\n')
+        source = '# head\n[tui]\n' + array + 'status_line_use_colors = false\n\n[other]\nx = 1\n'
+        merged = config.merge_status_line_text(source)
+        self.assertEqual(merged, source.replace(array, (
+            'status_line = [ # footer\n  "thread-id",\n  "project-name", # mine\n\n  # note\n'
+            "  'git-branch',\n" + '  "weekly-limit" # last\n] # end\n')))
+        self.assertEqual(tomllib.loads(merged)["tui"]["status_line"],
+                         ["thread-id", "project-name", "git-branch", "weekly-limit"])
+        self.assertEqual(config.merge_status_line_text(merged), merged)
+        merged, record = self._tracked_merge(source)
+        self.assertEqual(config.restore_status_line_text(merged, record), source)
+        # Without the managed item the line is added on top in the same layout.
+        bare = source.replace('  "thread-id", # managed\n', "")
+        self.assertIn('status_line = [ # footer\n  "thread-id",\n  "project-name", # mine\n',
+                      config.merge_status_line_text(bare))
+
     def test_startup_default_preserves_explicit_values_and_inserts_at_toml_root(self):
         for value in (True, False):
             source = f'"check_for_update_on_startup" = {str(value).lower()} # user choice\r\n[tui]\r\n'
