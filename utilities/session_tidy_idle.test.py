@@ -665,6 +665,26 @@ class IdleObserverTests(unittest.TestCase):
             self.assertEqual((saved_claim["state"], saved_claim["arrival_seq"]), ("arrived", 1))
             self.assertEqual((prompt_state["source"], frontier["sequence"]), ("real", prompt_state["seq"]))
 
+    def test_a_task_notification_after_the_idle_booking_still_lets_the_request_go(self):
+        notice = "<task-notification>\n<task-id>bx1</task-id>\n<status>completed</status>\n</task-notification>"
+        with self.iso.patched_environ(self.extra), \
+                mock.patch.object(clear, "herdr_command", return_value=str(self.iso.root / "fake-herdr")), \
+                mock.patch.object(clear, "_start_helper", return_value=12345):
+            self.assertEqual(self.observe_claude(), "booking=scheduled")
+            seat = st.resolve_seat("claude", str(self.cwd), sid="sid-A")
+            path = clear.reservation_path(seat.key)
+            nonce = clear.read_reservation(seat.key)["nonce"]
+            st.run_hook("claude", "prompt", "sid-A", cwd=str(self.cwd), prompt_text=notice)
+            # Its own turn's Stop neither rearms nor replaces the booking.
+            self.assertEqual(self.observe_claude(event_id="turn-notice", now=1100),
+                             "booking=skipped reason=not-rearmed")
+            held, why = clear.validate_idle_request(path, nonce, now=4241)
+            self.assertEqual((why, held and held["status"]), ("", "reserved"))
+            st.run_hook("claude", "prompt", "sid-A", cwd=str(self.cwd), prompt_text="사람이 친 말")
+            self.assertEqual(clear.validate_idle_request(path, nonce, now=4241)[1], "superseded")
+            held = clear.read_reservation(seat.key)
+            self.assertEqual((held["status"], held["reason"]), ("cancelled", "new-input"))   # the person did
+
     def test_detached_launcher_keeps_pane_hint_and_strips_worker_context(self):
         captured = {}
 

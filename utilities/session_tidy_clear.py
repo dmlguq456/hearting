@@ -105,6 +105,8 @@ REASON_TEXT = {
     "usage-unknown": "현재 입력 토큰을 확인하지 못했습니다",
     "idle-card-not-accepted": "유휴 정리 카드를 접수하지 못했습니다",
 }
+# A clear booking whose card a later task-notification turn would miss: cancelled without a line.
+NOTIFICATION_TURN = "notification-turn"
 # Reasons after which this seat holds no card for the next session to receive.
 NO_CARD_REASONS = frozenset({"card-taken", "idle-card-not-accepted"})
 # Continue skips the person caused (or chose) themselves: no result line for these.
@@ -371,7 +373,10 @@ def validate_idle_request(path, nonce: Optional[str] = None, *, now: Optional[fl
         return None, "turn-not-ended"
     if now > float(req.get("deadline", 0) or 0):
         return None, "expired"
-    if st.read_prompt_seq(seat) != int(req.get("prompt_seq", -1)):
+    sequence, booked = st.read_prompt_seq(seat), int(req.get("prompt_seq", -1))
+    if sequence != booked and not _only_notifications_since(seat, booked, sequence):
+        # A task notification is not the person: the request follows its turn, so the
+        # card written in reply covers it.
         return None, "new-input"
     card = st.read_latest_card(seat)
     if (int(card.get("generation", 0) or 0) if card else 0) != int(req.get("card_generation", -1)):
@@ -1182,7 +1187,7 @@ def background_agents_running(harness: str, sid: str, seat: Optional["st.Seat"] 
             launched[name[len("agent-"):-len(".meta.json")]] = str(meta.get("parentAgentId") or "")
     if not launched:
         return False
-    notices: dict = {}      # agent id -> (epoch of its last notification, that one says "waiting")
+    events: dict = {}       # (agent id, notification text) -> (earliest row epoch: its enqueue, "waiting")
     sources = {main, *(folder / f"agent-{parent}.jsonl" for parent in launched.values() if parent)}
     for source in sources:
         try:
@@ -1199,13 +1204,17 @@ def background_agents_running(harness: str, sid: str, seat: Optional["st.Seat"] 
                         agent = _TASK_ID.search(block)
                         if not agent:
                             continue
-                        agent_id = agent.group(1).decode("ascii")
-                        if at >= notices.get(agent_id, (float("-inf"), False))[0]:
-                            notices[agent_id] = (at, any(mark in block for mark in _WAITING))
+                        key = (agent.group(1).decode("ascii"), block)
+                        if at < events.get(key, (float("inf"), False))[0]:
+                            events[key] = (at, any(mark in block for mark in _WAITING))
         except FileNotFoundError:
             continue
         except OSError:
             return True
+    notices: dict = {}      # agent id -> its newest notification (enqueued at, says "waiting")
+    for (agent_id, _block), event in events.items():
+        if event[0] >= notices.get(agent_id, (float("-inf"), False))[0]:
+            notices[agent_id] = event
     for agent_id in launched:
         notice = notices.get(agent_id)
         if notice is None or notice[1]:
@@ -1439,11 +1448,18 @@ def _unchanged_since_card(req: dict, seat: "st.Seat") -> str:
     card, sequence = observation
     reason = _card_unchanged_reason(req, card, sequence)
     booked = int(req.get("prompt_seq", -1))
-    if (reason == "new-input" and req.get("clear_command") == "compact" and sequence > booked >= 0
-            and st.last_human_prompt_seq(seat) <= booked):
-        # Only task notifications arrived since the booking; /compact keeps their turns too.
+    if reason == "new-input" and _only_notifications_since(seat, booked, sequence):
+        if req.get("clear_command") != "compact":
+            # The card misses that turn, so no clear; nobody typed, so nothing to report.
+            return NOTIFICATION_TURN
+        # /compact keeps the notification turns too.
         reason = _card_unchanged_reason(req, card, booked)
     return reason
+
+
+def _only_notifications_since(seat: "st.Seat", booked: int, sequence: int) -> bool:
+    """Every prompt after ``booked`` up to ``sequence`` was a runtime task notification."""
+    return sequence > booked >= 0 and st.last_human_prompt_seq(seat) <= booked
 
 
 def _card_unchanged_reason(req: dict, card, sequence: int) -> str:
@@ -1935,6 +1951,8 @@ def _finish(seat_key: str, nonce: str, outcome: str, reason: str = "", *, observ
         if not req or req.get("nonce") != nonce or req.get("status") not in ("reserved", "unverified"):
             return False
         now = st.now_epoch()
+        if reason == NOTIFICATION_TURN:
+            outcome = "cancelled"
         req.update(status=outcome, reason=reason, finished=now)
         claim = req.get("clear_claim")
         if isinstance(claim, dict) and claim.get("state") == "sending":
@@ -1950,7 +1968,7 @@ def _finish(seat_key: str, nonce: str, outcome: str, reason: str = "", *, observ
             req["continued"] = {"state": "pending", "kind": kind,
                                 "deadline": now + _tunable("CONTINUE_WINDOW", CONTINUE_WINDOW_SEC)}
         _write_reservation(req)
-    if outcome != "cleared":
+    if outcome not in ("cleared", "cancelled"):
         with contextlib.suppress(BaseException):
             if req.get("origin") in ("idle", "compact"):
                 notice = "[정리] 자동 정리의 창 전환을 확인하지 못했습니다."

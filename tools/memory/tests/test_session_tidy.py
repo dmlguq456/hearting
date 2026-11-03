@@ -4977,6 +4977,16 @@ class BackgroundAgentCompactTest(TidyCase):
         self.assertTrue(self.running())
         os.utime(transcript, (resumed - 120, resumed - 120))             # last write before the notice
         self.assertFalse(self.running())
+        # A notice is queued, then delivered later; its enqueue time is the one that counts.
+        self.agent("a2", finished=True)
+        for at in ("2026-11-03T14:10:00.000Z", "2026-11-03T14:10:10.000Z"):
+            self.notify("a2", at=at)
+        written = self.agents / "agent-a2.jsonl"
+        written.write_text("{}\n", encoding="utf-8")
+        resumed = datetime.datetime(2026, 11, 3, 14, 10, 6, tzinfo=datetime.timezone.utc).timestamp()
+        os.utime(written, (resumed, resumed))                             # woken 6 s after enqueue
+        self.assertTrue(self.running())
+        written.unlink()
         (self.agents / "agent-a5.meta.json").write_text("{not json", encoding="utf-8")
         self.assertTrue(self.running())                           # unreadable counts as running
         (self.agents / "agent-a5.meta.json").unlink()
@@ -5065,11 +5075,25 @@ class BackgroundAgentCompactTest(TidyCase):
             held = clear.read_reservation(seat.key)
             held.pop("clear_command")
             clear._write_reservation(held)
-            self.assertEqual(clear.validate_request(path, req["nonce"])[1], "new-input")  # a clear does not
+            self.assertEqual(clear.validate_request(path, req["nonce"])[1], "notification-turn")  # a clear does not
             held["clear_command"] = "compact"
             clear._write_reservation(held)
             st.run_hook("claude", "prompt", "sid-A", cwd=str(self.cwd), prompt_text="사람이 친 말")
             self.assertEqual(clear.validate_request(path, req["nonce"])[1], "new-input")  # the person did
+
+    def test_a_task_notification_cancels_a_clear_booking_without_a_line(self):
+        notice = "<task-notification>\n<task-id>bx1</task-id>\n<status>completed</status>\n</task-notification>"
+        seat, req = self.booked()                                   # no agent: an ordinary clear
+        with self.iso.patched_environ(self.extra):
+            st.run_hook("claude", "prompt", "sid-A", cwd=str(self.cwd), prompt_text=notice)
+        outcome = self.run_helper(seat, req, lambda _claim: {"cleared": "true", "new_session": "sid-B"})
+        self.assertEqual(outcome, "skipped")
+        self.assertEqual(self.calls, [])                            # nothing typed
+        with self.iso.patched_environ(self.extra):
+            held = clear.read_reservation(seat.key)
+            notes = st.read_json(st._notices_path(self.logical_seat(seat, "claude", "sid-A")))
+        self.assertEqual((held["status"], held["reason"]), ("cancelled", "notification-turn"))
+        self.assertEqual((notes or {}).get("items", []), [])
 
     def test_tidy_says_once_that_background_agents_make_it_a_compact(self):
         def tidy():
