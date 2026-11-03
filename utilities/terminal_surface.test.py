@@ -1353,8 +1353,74 @@ class TmuxAgentTerminalTest(_IsolatedMixin, unittest.TestCase):
         self.assertEqual(self.log.read_bytes(),
                          b"\x1b[200~-n /clear\rsecond line\x1b[201~\r\x1b[200~draft\x1b[201~")
         self.assertEqual(self.tmux("list-buffers").stdout, "")
-        self.assertEqual(self.surface.prompt("%999", "x"), (1, {"error": {"code": "tmux_paste_failed"}}))
+        self.assertEqual(self.surface.prompt("%999", "x"),
+                         (None, {"error": {"code": "herdr-not-started", "reason": "pane-unavailable"}}))
         self.assertEqual(self.surface.prompt(self.pane, ""), (None, {"error": {"code": "herdr-not-started"}}))
+
+    def test_every_byte_of_a_long_or_semicolon_ended_body_arrives(self):
+        self.start_runtime()
+        body = "x" * 20000 + " end;"
+        self.assertEqual(self.surface.prompt(self.pane, body)[0], 0)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not self.log.read_bytes().endswith(b"\x1b[201~\r"):
+            time.sleep(.05)
+        self.assertEqual(self.log.read_bytes(), b"\x1b[200~" + body.encode() + b"\x1b[201~\r")
+
+    def test_a_pane_in_a_tmux_mode_receives_nothing(self):
+        self.start_runtime()
+        for mode in (("copy-mode",), ("choose-tree",)):
+            with self.subTest(mode=mode[0]):
+                self.assertEqual(self.tmux(*mode, "-t", self.pane).returncode, 0)
+                self.assertEqual(self.surface.input_refusal(self.pane), "pane-in-mode")
+                self.assertEqual(self.surface.prompt(self.pane, "first\nsecond"),
+                                 (None, {"error": {"code": "herdr-not-started", "reason": "pane-in-mode"}}))
+                self.assertFalse(self.surface.send_text(self.pane, "draft"))
+                self.assertFalse(self.surface.send_keys(self.pane, "Enter"))
+                self.assertFalse(self.surface.run(self.pane, "echo no"))
+                self.assertFalse(self.surface.empty_shell(self.pane))
+                self.assertEqual(self.tmux("display-message", "-p", "-t", self.pane, "#{pane_in_mode}").stdout.strip(),
+                                 "1")
+                self.assertEqual(self.log.read_bytes(), b"")
+                self.tmux("send-keys", "-t", self.pane, *(("-X", "cancel") if mode[0] == "copy-mode" else ("q",)))
+
+    def test_a_synchronized_pane_is_refused_and_a_paste_never_reaches_its_neighbour(self):
+        self.start_runtime()
+        neighbour_log = self.root / "neighbour.log"
+        line = shlex.join([sys.executable, str(self.root / "tui.py"), str(neighbour_log)])
+        neighbour = self.tmux("split-window", "-d", "-t", self.pane, "-P", "-F", "#{pane_id}", line).stdout.strip()
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and "Try a suggestion" not in (self.surface.read_visible(neighbour) or ""):
+            time.sleep(.05)
+        self.tmux("set-option", "-w", "-t", self.pane, "synchronize-panes", "on")
+        self.assertEqual(self.surface.input_refusal(self.pane), "pane-synchronized")
+        self.assertEqual(self.surface.prompt(self.pane, "hello")[1]["error"]["reason"], "pane-synchronized")
+        self.assertFalse(self.surface.run(self.pane, "echo no"))
+        # A paste goes to its target only, even while the window is synchronized.
+        self.assertEqual(self.surface._paste(self.pane, "only here\r", bracketed=False), "pasted")
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not self.log.read_bytes():
+            time.sleep(.05)
+        self.assertEqual(self.log.read_bytes(), b"only here\r")
+        self.assertEqual(neighbour_log.read_bytes(), b"")
+
+    def test_a_title_is_shown_literally(self):
+        self.assertTrue(self.surface.set_title(self.pane, "id=#{pane_id} #(echo x)"))
+        self.assertEqual(self.tmux("display-message", "-p", "-t", self.pane, "#{pane_title}").stdout.strip(),
+                         "id=#{pane_id} #(echo x)")
+
+    def test_a_pane_address_names_its_server(self):
+        real = os.path.realpath(self.socket)
+        self.assertEqual(self.surface.address(self.pane), f"{self.pane}@{real}")
+        listed = [agent["pane_id"] for agent in self.surface.agents()["result"]["agents"]]
+        self.assertEqual(listed, [])
+        other = self.root / "other.sock"
+        self.assertEqual(self.surface.agent(f"{self.pane}@{other}"), {"error": {"code": "agent_not_found"}})
+        self.assertIsNone(self.surface.process_info(f"{self.pane}@{other}"))
+        self.assertIsNone(self.surface.read_visible(f"{self.pane}@{other}"))
+        with mock.patch.object(ts.shutil, "which", side_effect=lambda name: f"/usr/bin/{name}"):
+            self.assertEqual(ts.pane_surface(f"%3@{other}", tmux="/s").socket, str(other))
+        self.assertTrue(ts.same_tmux_pane(f"%3@{real}", "%3"))
+        self.assertFalse(ts.same_tmux_pane(f"%3@{real}", f"%3@{other}"))
 
     def test_read_visible_keeps_faint_text_only_with_ansi(self):
         self.start_runtime()
@@ -1381,7 +1447,7 @@ class TmuxAgentTerminalTest(_IsolatedMixin, unittest.TestCase):
         with mock.patch.object(ts.shutil, "which", return_value=None):
             self.assertIsNone(ts.pane_surface("%3"))
             self.assertIsNone(ts.pane_surface("w1:p3"))
-        self.assertEqual(ts.caller_tmux_pane({"TMUX": "/s,1,0", "TMUX_PANE": "%4"}), ("%4", "/s"))
+        self.assertEqual(ts.caller_tmux_pane({"TMUX": "/s,1,0", "TMUX_PANE": "%4"}), ("%4@/s", "/s"))
         self.assertEqual(ts.caller_tmux_pane({"TMUX_PANE": "%4"}), ("", None))
         self.assertEqual(ts.caller_tmux_pane({"TMUX": "/s,1,0", "TMUX_PANE": "w1:p0"}), ("", None))
 

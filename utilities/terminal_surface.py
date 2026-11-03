@@ -15,7 +15,8 @@ separately by ``compose_command``, so every surface runs the same line.
 The same surfaces carry the agent terminal operations of the core loop: who runs
 in a pane (``process_info``), what it shows (``read_visible``), and one typed
 input (``send_text`` / ``send_keys`` / ``prompt``). ``pane_surface`` chooses by the
-pane id itself: a tmux pane id (``%N``) is tmux, anything else stays Herdr. tmux
+pane id itself: a tmux pane id (``%N``) is tmux, anything else stays Herdr. Pane
+ids are only unique per tmux server, so the core loop carries ``%N@<socket>``. tmux
 has no agent API, so ``TmuxSurface.agent`` answers Herdr's ``agent get`` shape from
 the pane's foreground runtime, its process-proven session and that runtime's own
 turn record (Claude's session registry status, Codex's rollout lifecycle). What
@@ -43,7 +44,8 @@ from typing import Optional
 
 
 _HERE = Path(__file__).resolve().parent
-_TMUX_PANE_ID = re.compile(r"%[0-9]+")
+# A tmux pane address: the pane id, and the server socket it belongs to once known.
+_TMUX_PANE_ID = re.compile(r"(%[0-9]+)(?:@(/[^\s@]+))?")
 _HARNESSES = ("claude", "codex", "opencode")
 _PASTE_SETTLE_SEC = 0.2   # a TUI ends its bracketed-paste read before the separate Enter
 _WAIT_POLL_SEC = 0.5      # tmux has no agent event; its wait re-reads the native turn record
@@ -187,8 +189,28 @@ def _run(argv):
 
 
 def is_tmux_pane(pane):
-    """tmux pane ids are ``%N``; Herdr's carry a workspace (``w1:p2``), so they never meet."""
+    """tmux pane ids are ``%N`` (``%N@<socket>`` with their server); Herdr's carry a
+    workspace (``w1:p2``), so they never meet."""
     return isinstance(pane, str) and _TMUX_PANE_ID.fullmatch(pane) is not None
+
+
+def tmux_address(pane):
+    """``(pane id, server socket or None)`` of a tmux pane address, else ``("", None)``."""
+    found = _TMUX_PANE_ID.fullmatch(pane) if isinstance(pane, str) else None
+    return (found.group(1), found.group(2)) if found else ("", None)
+
+
+def _real(path):
+    try:
+        return os.path.realpath(path)
+    except (OSError, TypeError, ValueError):
+        return path
+
+
+def same_tmux_pane(left, right):
+    """Two tmux addresses name one pane: the same id, and the same server where both say."""
+    (a, a_socket), (b, b_socket) = tmux_address(left), tmux_address(right)
+    return bool(a) and a == b and (not a_socket or not b_socket or _real(a_socket) == _real(b_socket))
 
 
 def tmux_socket(environ=None):
@@ -198,17 +220,22 @@ def tmux_socket(environ=None):
 
 
 def caller_tmux_pane(environ=None):
-    """``($TMUX_PANE, socket)`` for a process started inside tmux; a hint, never proof."""
+    """``("%N@<socket>", socket)`` for a process started inside tmux; a hint, never proof."""
     env = os.environ if environ is None else environ
     pane = str(env.get("TMUX_PANE") or "").strip()
     socket = tmux_socket(env)
-    return (pane, socket) if socket and is_tmux_pane(pane) else ("", None)
+    if not socket or not is_tmux_pane(pane) or tmux_address(pane)[1]:
+        return "", None
+    return f"{pane}@{_real(socket)}", socket
 
 
 def pane_surface(pane, *, tmux=None, herdr_session=None):
-    """The surface that owns ``pane``: tmux for a tmux pane id, else Herdr."""
+    """The surface that owns ``pane``: tmux for a tmux pane id (its own server first,
+    then ``tmux``, then ``$TMUX``), else Herdr."""
     if is_tmux_pane(pane):
-        return TmuxSurface(socket=tmux or tmux_socket()) if shutil.which("tmux") else None
+        if not shutil.which("tmux"):
+            return None
+        return TmuxSurface(socket=tmux_address(pane)[1] or tmux or tmux_socket())
     return HerdrSurface(session=herdr_session) if shutil.which("herdr") else None
 
 
@@ -602,10 +629,56 @@ class TmuxSurface:
         rows = [line.split("\t") for line in out.splitlines() if line]
         return rows if all(len(row) == width for row in rows) else None
 
+    def _target(self, pane):
+        """The bare id of a pane on this server; an address naming another server is None."""
+        bare, socket = tmux_address(pane)
+        if not bare or (socket and self.socket and _real(socket) != _real(self.socket)):
+            return None
+        return bare
+
+    def _tmux_stdin(self, data, *args):
+        argv = ["tmux"] + (["-S", self.socket] if self.socket else []) + [str(a) for a in args]
+        try:
+            proc = subprocess.run(argv, input=data, capture_output=True, text=True, timeout=15,
+                                  check=False)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return proc.stdout if proc.returncode == 0 else None
+
     def _describe(self, pane, *fields):
+        pane = self._target(pane)
+        if pane is None:
+            return None
         rows = self._rows(1 + len(fields), "display-message", "-p", "-t", pane,
                           "\t".join(["#{pane_id}", *fields]))
         return rows[0][1:] if rows and len(rows) == 1 and rows[0][0] == pane else None
+
+    def address(self, pane):
+        """``%N@<socket>``: the pane id with the server that answers for it, else None."""
+        found = self._describe(pane, "#{socket_path}")
+        return f"{self._target(pane)}@{_real(found[0])}" if found and found[0] else None
+
+    def input_refusal(self, pane):
+        """Why typed input must not reach this pane now, else None.
+
+        A pane in a tmux mode (copy, choose-client, tree...) gives keys to the mode,
+        not to the program, and drops the paste brackets; a synchronized pane copies
+        keys to its neighbours; input-off ignores them. Unknown state refuses too.
+        """
+        found = self._describe(pane, "#{pane_in_mode}", "#{pane_input_off}",
+                               "#{pane_synchronized}", "#{pane_dead}")
+        if not found:
+            return "pane-unavailable"
+        in_mode, off, synchronized, dead = found
+        if dead != "0":
+            return "pane-dead" if dead == "1" else "pane-state-unknown"
+        if in_mode != "0":
+            return "pane-in-mode" if in_mode.isdigit() else "pane-state-unknown"
+        if off != "0":
+            return "pane-input-off" if off == "1" else "pane-state-unknown"
+        if synchronized != "0":
+            return "pane-synchronized" if synchronized == "1" else "pane-state-unknown"
+        return None
 
     def lock_key(self, session):
         return hashlib.sha256(f"tmux:{self.socket}:{session}".encode()).hexdigest()
@@ -658,6 +731,8 @@ class TmuxSurface:
 
     def empty_shell(self, pane):
         """The shell owns the terminal's foreground group and its last line is a prompt."""
+        if self.input_refusal(pane):
+            return False
         found = self._describe(pane, "#{pane_pid}", "#{pane_current_command}")
         if not found or found[1] not in _SHELLS:
             return False
@@ -668,7 +743,8 @@ class TmuxSurface:
                 return False
         except (OSError, ValueError, IndexError):
             return False
-        lines = [line.rstrip() for line in (self._tmux("capture-pane", "-p", "-t", pane) or "").splitlines()
+        lines = [line.rstrip() for line in (self._tmux("capture-pane", "-p", "-t", self._target(pane))
+                                            or "").splitlines()
                  if line.strip()]
         return bool(lines) and _PROMPT_LINE.search(lines[-1]) is not None
 
@@ -687,13 +763,19 @@ class TmuxSurface:
             "-P", "-F", "#{pane_id}"), None)
 
     def run(self, pane, command):
-        # Typed into the pane's shell like Herdr `pane run`, so both surfaces keep the shell after.
-        return (self._tmux("send-keys", "-t", pane, "-l", command) is not None
-                and self._tmux("send-keys", "-t", pane, "Enter") is not None)
+        # Written into the pane's shell like Herdr `pane run`, so both surfaces keep the shell
+        # after. A paste reaches this pane only; `send-keys` would also reach synchronized
+        # neighbours, so the line and its Enter both go through private buffers.
+        return (not self.input_refusal(pane) and self._paste(pane, command, bracketed=False) == "pasted"
+                and self._paste(pane, "\r", bracketed=False) == "pasted")
 
     def annotate(self, pane, title, labels):
         # A program can retitle its pane; the `@hearting_*` pane options are what stays.
-        ok = not title or self._tmux("select-pane", "-t", pane, "-T", title) is not None
+        # `select-pane -T` expands formats, so a literal `#` is doubled.
+        pane = self._target(pane)
+        if pane is None:
+            return False
+        ok = not title or self._tmux("select-pane", "-t", pane, "-T", title.replace("#", "##")) is not None
         for name, value in labels.items():
             ok = self._tmux("set-option", "-p", "-t", pane, f"@hearting_{name}", value) is not None and ok
         return ok
@@ -706,7 +788,7 @@ class TmuxSurface:
         terminal is listed with its argv. The root, its terminal and the group must
         read the same before and after the listing, else nothing is claimed.
         """
-        found = self._describe(pane, "#{pane_pid}", "#{pane_tty}") if is_tmux_pane(pane) else None
+        found = self._describe(pane, "#{pane_pid}", "#{pane_tty}")
         if not found:
             return None
         try:
@@ -726,47 +808,64 @@ class TmuxSurface:
 
     def read_visible(self, pane, *, ansi=False):
         """The pane's visible screen; ``ansi`` keeps SGR, so faint text stays faint."""
-        if not is_tmux_pane(pane):
+        pane = self._target(pane)
+        if pane is None:
             return None
         return self._tmux("capture-pane", "-p", *(["-e"] if ansi else []), "-t", pane)
 
     def send_text(self, pane, text):
         """Paste ``text`` once, bracketed when the program asked for it; no Enter."""
-        return self._paste(pane, text) == "pasted"
+        return not self.input_refusal(pane) and self._paste(pane, text) == "pasted"
 
-    def _paste(self, pane, text):
-        if not is_tmux_pane(pane) or not isinstance(text, str) or not text:
+    def _paste(self, pane, text, *, bracketed=True):
+        """Write ``text`` to this pane only, through a private buffer read from stdin.
+
+        stdin keeps every byte (an argument loses a trailing ``;`` to tmux's command
+        parser and stops near 16 KB). ``-p`` brackets the paste when the program asked.
+        """
+        pane = self._target(pane)
+        if pane is None or not isinstance(text, str) or not text:
             return "not-started"
         name = f"hearting-{os.getpid()}-{secrets.token_hex(6)}"
-        if self._tmux("set-buffer", "-b", name, "--", text) is None:
+        if self._tmux_stdin(text, "load-buffer", "-b", name, "-") is None:
             return "not-started"
-        if self._tmux("paste-buffer", "-p", "-d", "-b", name, "-t", pane) is None:
+        if self._tmux("paste-buffer", *(["-p"] if bracketed else []), "-d", "-b", name, "-t", pane) is None:
             self._tmux("delete-buffer", "-b", name)
             return "failed"
         return "pasted"
 
     def send_keys(self, pane, *keys):
-        return is_tmux_pane(pane) and self._tmux("send-keys", "-t", pane, *keys) is not None
+        target = self._target(pane)
+        return (target is not None and not self.input_refusal(pane)
+                and self._tmux("send-keys", "-t", target, *keys) is not None)
 
     def prompt(self, pane, text):
         """One typed input in ``herdr agent prompt``'s ``(rc, payload)`` shape.
 
-        Only a buffer tmux never accepted is ``herdr-not-started`` (nothing reached
-        the pane, so a carrier may retry it); a failed paste or Enter may already
-        have typed and stays an error that is never repeated.
+        Nothing is typed into a pane that is in a tmux mode, synchronized or has input
+        off; that, or a buffer tmux never accepted, is ``herdr-not-started`` (nothing
+        reached the pane, so a carrier may retry it). The Enter is a one-byte paste to
+        this pane only, after the same check; a failed paste or Enter may already have
+        typed and stays an error that is never repeated.
         """
+        refusal = self.input_refusal(pane)
+        if refusal:
+            return None, {"error": {"code": "herdr-not-started", "reason": refusal}}
         pasted = self._paste(pane, text)
         if pasted == "not-started":
             return None, {"error": {"code": "herdr-not-started"}}
         if pasted != "pasted":
             return 1, {"error": {"code": "tmux_paste_failed"}}
         time.sleep(_PASTE_SETTLE_SEC)
-        if not self.send_keys(pane, "Enter"):
+        refusal = self.input_refusal(pane)
+        if refusal:
+            return 1, {"error": {"code": "tmux_" + refusal.replace("-", "_")}}
+        if self._paste(pane, "\r", bracketed=False) != "pasted":
             return 1, {"error": {"code": "tmux_enter_failed"}}
         return 0, {"result": {"type": "prompt", "pane_id": pane}}
 
     def set_title(self, pane, title):
-        return is_tmux_pane(pane) and self._tmux("select-pane", "-t", pane, "-T", str(title)) is not None
+        return self.annotate(pane, str(title), {})
 
     def answers(self):
         return self._tmux("display-message", "-p", "#{pid}") is not None
@@ -778,7 +877,7 @@ class TmuxSurface:
         foreground processes; its session is the one that process proves; its state
         is that runtime's own turn record for that session (``unknown`` without one).
         """
-        if not is_tmux_pane(pane):
+        if self._target(pane) is None:
             return {"error": {"code": "agent_not_found"}}
         info = self.process_info(pane, table=table)
         if info is None:
@@ -801,8 +900,11 @@ class TmuxSurface:
         if rows is None:
             return None
         table, found = _proc_table(), []
+        socket = self._tmux("display-message", "-p", "#{socket_path}")
+        if not socket or not socket.strip():
+            return None
         for (pane,) in rows:
-            payload = self.agent(pane, table=table)
+            payload = self.agent(f"{pane}@{_real(socket.strip())}", table=table)
             if payload is None:
                 return None
             agent = (payload.get("result") or {}).get("agent")

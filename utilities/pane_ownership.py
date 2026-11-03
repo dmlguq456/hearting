@@ -144,11 +144,9 @@ def _herdr_env(socket_path):
 
 
 def _tmux_surface(pane, tmux=None):
-    """The tmux server of a tmux pane id (``$TMUX``'s unless named), else None."""
-    from terminal_surface import TmuxSurface, is_tmux_pane, tmux_socket
-    if not is_tmux_pane(pane) or not shutil.which("tmux"):
-        return None
-    return TmuxSurface(socket=tmux or tmux_socket())
+    """The tmux server of a tmux pane address (its own, else ``tmux``, else ``$TMUX``), else None."""
+    from terminal_surface import is_tmux_pane, pane_surface
+    return pane_surface(pane, tmux=tmux) if is_tmux_pane(pane) else None
 
 
 def _pane_reader(pane, executable):
@@ -598,7 +596,7 @@ def codex_tui_process_bindings(session_id, *, pane_hint=None, executable=None,
     if not _THREAD_ID_RE.fullmatch(session_id or ""):
         return []
     from fleet.collectors import procscan
-    from terminal_surface import caller_tmux_pane
+    from terminal_surface import caller_tmux_pane, same_tmux_pane
 
     executable = executable or shutil.which("herdr")
     tmux_found = shutil.which("tmux")
@@ -630,7 +628,8 @@ def codex_tui_process_bindings(session_id, *, pane_hint=None, executable=None,
                     continue
             elif not executable:
                 continue
-            if not pane or pane_hint and pane != pane_hint:
+            if not pane or pane_hint and pane != pane_hint and not (
+                    tmux and same_tmux_pane(pane, pane_hint)):
                 continue
             # The endpoint travels with the pane. An empty value is an explicit
             # default-endpoint binding, never permission to inherit another socket.
