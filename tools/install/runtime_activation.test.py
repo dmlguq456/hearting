@@ -1828,7 +1828,7 @@ class RuntimeActivationOwnershipTest(unittest.TestCase):
                     self.assertTrue(config.is_symlink())
                     self.assertEqual(os.readlink(config), link_target)
                     projected = target.read_text(encoding="utf-8")
-                    self.assertIn('status_line = ["project-name", "custom", "thread-id"]', projected)
+                    self.assertIn('status_line = ["thread-id", "project-name", "custom"]', projected)
                     self.assertIn(activation.CODEX_IDENTITY_BEGIN, projected)
                     self.assertIn('status_line_use_colors = false', projected)
                     self.assertEqual(backup.read_bytes(), original)
@@ -1994,7 +1994,7 @@ class NativeContextLifecycleTest(unittest.TestCase):
                 config.symlink_to(link_target)
                 activation.activate("codex", "linked", str(source))
                 edited = target.read_text(encoding="utf-8").replace(
-                    '["custom", "thread-id"]', '["custom", "later", "thread-id"]')
+                    '["thread-id", "custom"]', '["thread-id", "custom", "later"]')
                 edited = edited.replace('status_line_use_colors = true', 'status_line_use_colors = false')
                 target.write_text(edited + '\n[projects."/mine"]\ntrust_level = "trusted"\n', encoding="utf-8")
                 activation.activate("codex", "linked", str(source))
@@ -2463,7 +2463,7 @@ class CodexIdentityConfigTest(unittest.TestCase):
             self.assertIn(self.BEGIN, config.read_text(encoding="utf-8"))
             self._assert_clears_inherited(config)
 
-    def test_runtime_config_preparation_moves_thread_id_last_and_deactivation_restores_it(self):
+    def test_runtime_config_preparation_moves_thread_id_first_and_deactivation_restores_it(self):
         import tomllib
         import native_context
         with tempfile.TemporaryDirectory() as temporary:
@@ -2484,7 +2484,7 @@ class CodexIdentityConfigTest(unittest.TestCase):
             parsed_root = tomllib.loads(config.read_text(encoding="utf-8"))
             self.assertIs(parsed_root["check_for_update_on_startup"], False)
             parsed = parsed_root["tui"]
-            self.assertEqual(parsed["status_line"], ["project-name", "custom", "thread-id"])
+            self.assertEqual(parsed["status_line"], ["thread-id", "project-name", "custom"])
             self.assertIs(parsed["status_line_use_colors"], False)
             self.assertIn(self.BEGIN, config.read_text(encoding="utf-8"))
 
@@ -2583,7 +2583,7 @@ class CodexIdentityConfigTest(unittest.TestCase):
             parsed_root = tomllib.loads(applied)
             self.assertIs(parsed_root["check_for_update_on_startup"], False)
             parsed = parsed_root["tui"]
-            self.assertEqual(parsed["status_line"], ["project-name", "custom", "thread-id"])
+            self.assertEqual(parsed["status_line"], ["thread-id", "project-name", "custom"])
             self.assertIs(parsed["status_line_use_colors"], False)
             self.assertIn(self.BEGIN, applied)
 

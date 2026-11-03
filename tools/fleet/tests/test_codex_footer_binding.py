@@ -40,6 +40,21 @@ def screen(thread_ids, *, prompt=True, clipped=False):
     return "\x1b[?25l" + "\r\n".join(lines) + "\r\n\x1b[?25h"
 
 
+def narrow_screen(thread_id, *, width, thread_first=True, title="fixture-project"):
+    """A pane narrower than the status line: Codex clips the row on the right
+    with an ellipsis and the help row drops "? for shortcuts" first. An unnamed
+    thread draws its thread-title as the thread id."""
+    items = [title, "main", "Context 44% used", "gpt-test high", "weekly 0% left"]
+    items = [thread_id, *items] if thread_first else [*items, thread_id]
+    status = "  " + " · ".join(items)
+    if len(status) > width:
+        status = status[:width - 1] + "…"
+    left = "  ← for agents · ? for shortcuts" if width >= 60 else "  ← for agents"
+    right = "⚠ 2 warnings · f2 to view"
+    hint = left + " " * (width - len(left) - len(right)) + right
+    return "\r\n".join(["Codex", "› Ask Codex", "", status, hint]) + "\r\n"
+
+
 class CodexFooterBindingTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="codex-footer-binding-")
@@ -154,14 +169,78 @@ class CodexFooterBindingTest(unittest.TestCase):
             ["› Ask Codex", "", THREAD_A + " suffix", hint], current_id_only=True), set())
         self.assertEqual(pane_ownership.codex_footer_threads(
             ["› Ask Codex", "", THREAD_A + " | " + THREAD_B, hint], current_id_only=True), set())
+        # thread-id first (current Hearting order) or last (not yet refreshed).
         self.assertEqual(pane_ownership.codex_footer_threads(
-            ["› Ask Codex", "", THREAD_A + " · telemetry", hint], current_id_only=True), set())
+            ["› Ask Codex", "", THREAD_A + " · telemetry", hint], current_id_only=True), {THREAD_A})
         self.assertEqual(pane_ownership.codex_footer_threads(
-            ["› Ask Codex", "", THREAD_A + " · " + THREAD_B, hint], current_id_only=True), {THREAD_B})
+            ["› Ask Codex", "", "  " + THREAD_A + " · project · Context 4…", hint],
+            current_id_only=True), {THREAD_A})
+        # Two different complete UUIDs at the two ends: neither is chosen.
+        self.assertEqual(pane_ownership.codex_footer_threads(
+            ["› Ask Codex", "", THREAD_A + " · " + THREAD_B, hint], current_id_only=True), set())
+        self.assertEqual(pane_ownership.codex_footer_threads(
+            ["› Ask Codex", "", THREAD_A + " · main · " + THREAD_A, hint],
+            current_id_only=True), {THREAD_A})
+        # An unnamed thread draws thread-title as its id; the clipped copy of
+        # the same UUID behind it confirms the first field.
+        self.assertEqual(pane_ownership.codex_footer_threads(
+            ["› Ask Codex", "", THREAD_A + " · " + THREAD_A[:16] + "…", hint],
+            current_id_only=True), {THREAD_A})
+        # A middle field, or a first-field UUID ahead of a clipped trailing
+        # thread-id (the former order, so that field is a title), is no identity.
+        self.assertEqual(pane_ownership.codex_footer_threads(
+            ["› Ask Codex", "", "project · " + THREAD_A + " · telemetry", hint],
+            current_id_only=True), set())
+        self.assertEqual(pane_ownership.codex_footer_threads(
+            ["› Ask Codex", "", THREAD_B + " · main · " + THREAD_A[:16] + "…", hint],
+            current_id_only=True), set())
+        # The compact help row of a narrow pane counts only in the two-row layout.
+        compact = "  ← for agents ·  ⚠ 2 · f2"
+        self.assertEqual(pane_ownership.codex_footer_threads(
+            ["› Ask Codex", "", THREAD_A + " · proj…", compact], current_id_only=True), {THREAD_A})
+        self.assertEqual(pane_ownership._codex_current_footer(
+            ["› Ask Codex", "", THREAD_A + " · ← for agents"]), ("none", ""))
+        self.assertEqual(pane_ownership.codex_footer_threads(
+            ["› Ask Codex", "", THREAD_A + " · proj…", "alt+← for agents · ⚠ 2"],
+            current_id_only=True), {THREAD_A})
+        # Transcript text that merely mentions agents is not a help row.
+        for row in ("Waiting for agents", "• Waiting for agents", "Spawned 2 for agents"):
+            with self.subTest(row=row):
+                self.assertEqual(pane_ownership._codex_current_footer(
+                    ["› Ask Codex", "", THREAD_A + " · telemetry", row]), ("none", ""))
         self.assertEqual(pane_ownership.codex_footer_threads(
             ["› Ask Codex", "", "Where should the new conversation run?", "❯ Use current Git worktree", hint],
             current_id_only=True), set())
         self.assertEqual(pane_ownership.codex_footer_threads(["activity " + THREAD_A], current_id_only=True), set())
+
+    def test_narrow_pane_reads_the_leading_thread_id_a_trailing_one_loses(self):
+        pid, pane = 42501, "wN:pnarrow"
+        self.add_frontend(pid, pane, THREAD_A)
+        # Nothing else proves this TUI's thread: the pane Fleet shows as `?n`.
+        self.native[pid] = ""
+        # Former order: the trailing UUID is clipped, so the pane stays unknown.
+        trailing = narrow_screen(THREAD_A, width=96, thread_first=False)
+        self.assertIn(THREAD_A[:16] + "…", trailing)
+        self.assertNotIn(THREAD_A, trailing)
+        self.screens[pane] = [trailing] * 2
+        self.assertEqual(pane_ownership.current_codex_thread(
+            pane, pid, executable="/fake/herdr"), "")
+        # thread-id first: the same width clips telemetry and keeps the UUID,
+        # and so does a narrower pane whose help row lost "? for shortcuts".
+        for width in (96, 50):
+            with self.subTest(width=width):
+                leading = narrow_screen(THREAD_A, width=width)
+                self.assertTrue(leading.split("\r\n")[3].endswith("…"))
+                self.screens[pane] = [leading] * 2
+                self.assertEqual(pane_ownership.current_codex_thread(
+                    pane, pid, executable="/fake/herdr"), THREAD_A)
+        # The new default with an unnamed thread: "T · T · main …" clipped
+        # inside the second copy of the same UUID.
+        unnamed = narrow_screen(THREAD_A, width=60, title=THREAD_A)
+        self.assertRegex(unnamed.split("\r\n")[3], " · " + THREAD_A[:9] + "[0-9a-f-]*…$")
+        self.screens[pane] = [unnamed] * 2
+        self.assertEqual(pane_ownership.current_codex_thread(
+            pane, pid, executable="/fake/herdr"), THREAD_A)
 
     def test_current_thread_from_normal_callback_drives_the_deferred_report(self):
         for index, (source, thread_id) in enumerate((("startup", THREAD_A),
@@ -323,6 +402,8 @@ class CodexFooterBindingTest(unittest.TestCase):
              mock.patch.dict(os.environ, {"CODEX_HOME": str(self.root / "masked-home")}):
             self.assertEqual(projection._codex_status_line_feasibility(), "incapable")
             config.write_text('[tui]\nstatus_line = ["custom", "thread-id"]\n', encoding="utf-8")
+            self.assertEqual(projection._codex_status_line_feasibility(), "capable")
+            config.write_text('[tui]\nstatus_line = ["thread-id", "custom"]\n', encoding="utf-8")
             self.assertEqual(projection._codex_status_line_feasibility(), "capable")
             with mock.patch.object(procscan, "_read_argv",
                                    return_value=["codex", "--profile", "custom"]):

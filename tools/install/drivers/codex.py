@@ -97,7 +97,7 @@ def install(scope="global", plugin=False, dry_run=False):
     try:
         tui_result = codex_tui_config.apply_status_line(
             runtime_home / "config.toml", fragment, dry_run=dry_run)
-        detail = "thread-id is last; other items and explicit colors are preserved"
+        detail = "thread-id is first; other items, their order, and explicit colors are preserved"
         if tui_result.get("startup_changed"):
             detail += "; absent startup-update setting defaults to false"
         if tui_result.get("startup_error"):
