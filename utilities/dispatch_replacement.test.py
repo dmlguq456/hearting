@@ -4962,7 +4962,15 @@ class ReplacementReuseCurrencyTest(unittest.TestCase):
         self.assertEqual(error.completion["completion_reason"], "completion-marker-missing")
         self.assertNotIn("not settled", error.next_step)
         self.assertNotIn("revise", error.next_step)
-        self.assertIn("could not be read", error.next_step)
+        self.assertIn("missing or malformed", error.next_step)
+        # Records that exist but cannot be read right now follow the unobservable rule: retry.
+        states["impl-review"] = ("resource-stage-not-current", D.RESOURCE_STAGE_UNOBSERVABLE)
+        with self.assertRaises(D.DispatchContractError) as waiting:
+            self.snapshot(states)
+        error = waiting.exception
+        self.assertEqual((error.reason, error.detail), ("replacement-completion-unobservable", "impl-review"))
+        self.assertEqual(error.next_action, "same-command")
+        self.assertIn("can be read again", error.retry_when)
 
     def test_claim_to_launch_drift_shrinks_the_same_successors_reuse_projection(self):
         settled = {node["id"]: ("current", "completion-marker-verified")

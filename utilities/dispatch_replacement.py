@@ -1741,6 +1741,14 @@ def _bind_source(jobs, lines, aid, record):
     raise DC.DispatchContractError('replacement-source-missing')
 
 
+def _completion_unobservable(node, retry_when):
+    """A completion whose records exist but cannot be read right now: the same command retries it."""
+    waiting = DC.DispatchContractError('replacement-completion-unobservable', str(node['id']))
+    waiting.next_action = 'same-command'
+    waiting.retry_when = retry_when
+    return waiting
+
+
 def _completion_unproven(route, node, marker, currency):
     """A completed node's evidence judgement blocks reuse; retrying cannot change it.
 
@@ -1754,10 +1762,10 @@ def _completion_unproven(route, node, marker, currency):
                         'completion_reason': currency.reason,
                         **({'completion_evidence': evidence} if evidence else {})}
     if currency.state == 'resource-stage-not-current':
-        # An unsettled stage is continued, never refused; this one settled but its proof did not
-        # match, or its records could not be read. `revise` refuses such a marker, so it is not offered.
+        # An unsettled stage is continued and an unreadable one retried; this one settled but its
+        # proof did not match, or a record is missing or malformed. `revise` refuses such a marker.
         error.next_step = (f"Completed node {node_id} reads {currency.state} ({currency.reason}): its "
-                           "settled run's proof did not match or its run records could not be read. "
+                           "settled run's proof did not match, or a run record is missing or malformed. "
                            "Inspect that node's run records and completion marker, then resume.")
         return error
     action = DC.route_state_next_action(currency.reason, node_id, route.get('route_id'), node,
@@ -1887,10 +1895,7 @@ def _reuse_snapshot(jobs, route, lines, *, proof=None, pinned=None):
         except DC.DispatchContractError as exc:
             if exc.reason == 'replacement-record-unreadable' and isinstance(exc.__cause__, OSError):
                 # A marker that exists but cannot be read right now is not observed yet; it is not damage.
-                waiting = DC.DispatchContractError('replacement-completion-unobservable', str(node['id']))
-                waiting.next_action = 'same-command'
-                waiting.retry_when = 'The completion marker can be read again.'
-                raise waiting from exc
+                raise _completion_unobservable(node, 'The completion marker can be read again.') from exc
             raise  # malformed JSON, symlink or non-object is damage evidence and stays refused
         present.append((node, path, marker))
     basis, reference = _answered_fail_basis(jobs, proof, pinned)
@@ -1910,10 +1915,13 @@ def _reuse_snapshot(jobs, route, lines, *, proof=None, pinned=None):
         # approved fix answered, is not reused; its node is reopened.
         superseded = DC.completion_superseded(currency)
         reopened = str(node['id']) in answered and DC.completion_superseded(currency, answered=True)
+        if DC.resource_stage_unobservable(currency):
+            # Its run records exist but cannot be read right now: not observed yet, never unsettled.
+            raise _completion_unobservable(node, "The resource stage's run records can be read again.")
         # A resource stage observed not to have settled as succeeded is unfinished, whatever
         # marker a hand `complete` wrote beside it: the launch gate already reads that marker
         # as missing. The replacement continues the same stage; it is neither reused nor refused.
-        # A settled stage whose proof does not match, or an unreadable record, stays refused.
+        # A settled stage whose proof does not match, or a missing or malformed record, stays refused.
         unfinished = DC.resource_stage_unsettled(currency)
         if (currency.state != 'current' and not superseded and not merge_unobservable
                 and not gates_off_edit and not reopened and not unfinished):

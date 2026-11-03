@@ -7885,20 +7885,35 @@ class ResourceStageMarkerSuccessorTest(unittest.TestCase):
         self.assertEqual((mismatched.state, mismatched.reason),
                          ("resource-stage-not-current", "completion-marker-missing"))
         self.assertFalse(D.resource_stage_unsettled(mismatched))
-        # The run registry cannot be read.
+        def read():
+            return D._resource_stage_marker_current(
+                self.route, node, self.marker_doc, self.marker_path, str(self.jobs))
+        # The run registry exists but cannot be read right now: unobservable, not unsettled.
         registry = self.registry.read_bytes()
         self.registry.unlink()
-        unreadable = D._resource_stage_marker_current(
-            self.route, node, self.marker_doc, self.marker_path, str(self.jobs))
-        self.assertEqual(unreadable.reason, "completion-marker-missing")
+        self.registry.mkdir()
+        unreadable = read()
+        self.assertEqual(unreadable.reason, "resource-stage-unobservable")
+        self.assertTrue(D.resource_stage_unobservable(unreadable))
         self.assertFalse(D.resource_stage_unsettled(unreadable))
+        # The run registry is missing: unknown.
+        self.registry.rmdir()
+        missing = read()
+        self.assertEqual(missing.reason, "completion-marker-missing")
+        self.assertFalse(D.resource_stage_unsettled(missing) or D.resource_stage_unobservable(missing))
         self.registry.write_bytes(registry)
-        # The journal cannot be read.
+        # The ledger records no state for this stage: no observation, not unsettled.
+        self.ledger.journal_path.write_text(json.dumps(
+            {"at": "2026-11-03T00:00:00Z", "route_id": self.route_id, "route_hash": self.route_hash,
+             "node": "other-node", "state": "RUNNING"}) + "\n", encoding="utf-8")
+        absent = read()
+        self.assertEqual(absent.reason, "completion-marker-missing")
+        self.assertFalse(D.resource_stage_unsettled(absent))
+        # The journal is malformed: damage, not unsettled.
         self.ledger.journal_path.write_text("not json\n", encoding="utf-8")
-        corrupt = D._resource_stage_marker_current(
-            self.route, node, self.marker_doc, self.marker_path, str(self.jobs))
+        corrupt = read()
         self.assertEqual(corrupt.reason, "completion-marker-missing")
-        self.assertFalse(D.resource_stage_unsettled(corrupt))
+        self.assertFalse(D.resource_stage_unsettled(corrupt) or D.resource_stage_unobservable(corrupt))
 
 
 class RegistryLineageWriterTest(unittest.TestCase):

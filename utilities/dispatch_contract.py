@@ -8722,11 +8722,12 @@ def completion_superseded(currency: GateCurrency, *, answered: bool = False) -> 
     return answered and currency.state in ANSWERED_CURRENCY_STATES
 
 
-# The one `resource-stage-not-current` reason that is an observation, not an unknown: the
-# readable ledger shows the supervised stage has not settled as succeeded (or its success was
-# retracted). A settled stage whose proof does not match, and records that could not be read,
-# keep `completion-marker-missing`.
+# `resource-stage-not-current` reasons. Unsettled is an observation: the readable ledger records
+# the supervised stage in a state other than STAGE_SUCCEEDED (or its success was retracted).
+# Unobservable is a record that exists but could not be read right now. Everything else (a settled
+# stage whose proof does not match, a missing or malformed record) keeps `completion-marker-missing`.
 RESOURCE_STAGE_UNSETTLED = "resource-stage-unsettled"
+RESOURCE_STAGE_UNOBSERVABLE = "resource-stage-unobservable"
 
 
 def resource_stage_unsettled(currency: GateCurrency) -> bool:
@@ -8738,6 +8739,12 @@ def resource_stage_unsettled(currency: GateCurrency) -> bool:
     """
     return (currency.state == "resource-stage-not-current"
             and currency.reason == RESOURCE_STAGE_UNSETTLED)
+
+
+def resource_stage_unobservable(currency: GateCurrency) -> bool:
+    """Whether a resource stage's records could not be read right now: unknown, never unsettled."""
+    return (currency.state == "resource-stage-not-current"
+            and currency.reason == RESOURCE_STAGE_UNOBSERVABLE)
 
 
 def _completion_instant(marker: Mapping[str, object]):
@@ -8893,16 +8900,19 @@ def _resource_stage_marker_current(route, node, marker, marker_path, jobs):
         marker_sha = hashlib.sha256(raw).hexdigest()
         marker_sequence = marker.get("sequence")
         stage = state.get("nodes", {}).get(node["id"], {})
-        settled = stage.get("state") == "STAGE_SUCCEEDED"
+        # Only a recorded stage state is an observation: no entry for the node is not "unsettled".
+        observed = stage.get("state")
+        not_current = GateCurrency("resource-stage-not-current",
+                                   RESOURCE_STAGE_UNSETTLED if observed and observed != "STAGE_SUCCEEDED"
+                                   else "completion-marker-missing")
         for entry in ledger.journal():
             evidence = entry.get("evidence") or {}
             if (entry.get("actor") == "resource-false-success-reconciliation"
                     and evidence.get("marker_sha256") == marker_sha
                     and evidence.get("marker_sequence") == marker_sequence):
-                return GateCurrency("resource-stage-not-current",
-                                    "completion-marker-missing" if settled else RESOURCE_STAGE_UNSETTLED)
-        if not settled:
-            return GateCurrency("resource-stage-not-current", RESOURCE_STAGE_UNSETTLED)
+                return not_current
+        if observed != "STAGE_SUCCEEDED":
+            return not_current
         resource_identity = marker.get("resource_execution_identity")
         if resource_identity is None:
             return None
@@ -8932,7 +8942,11 @@ def _resource_stage_marker_current(route, node, marker, marker_path, jobs):
     except FileNotFoundError:
         return (GateCurrency("resource-stage-not-current", "completion-marker-missing")
                 if marker.get("resource_execution_identity") is not None else None)
-    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+    except OSError:
+        # A record that exists but cannot be read right now is not observed yet.
+        return (GateCurrency("resource-stage-not-current", RESOURCE_STAGE_UNOBSERVABLE)
+                if marker.get("resource_execution_identity") is not None else None)
+    except (ValueError, KeyError, TypeError, AttributeError):
         if marker.get("resource_execution_identity") is not None:
             return GateCurrency("resource-stage-not-current", "completion-marker-missing")
         return None
