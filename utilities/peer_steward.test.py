@@ -10168,23 +10168,64 @@ class UndeliveredWatchSweepReadsTest(_TmpRootMixin, unittest.TestCase):
         with mock.patch.object(self.tidy, "read_bytes", side_effect=read_bytes), \
                 mock.patch.object(peer_steward, "_read_json", side_effect=read_json):
             rows = peer_steward.undelivered_watch_rows()
-        arms = sum(1 for path in self.root.glob("*.json")
-                   if not path.name.endswith((".receipt.json", ".ack.json", ".observation.json")))
         ledgers = sum(1 for path in reads if path.suffix == ".jsonl")
         watch_files = sum(1 for path in reads if path.parent == self.root)
-        # Listing the watches reads each arm once; that is the record the filter uses.
-        return sorted(row["watch_id"] for row in rows), ledgers, watch_files - arms
+        return sorted(row["watch_id"] for row in rows), ledgers, watch_files
 
     def test_reads_do_not_grow_with_other_sessions_watches(self):
         self._watch("mine", "claude", "me", "seat-me")
         self._hand_over("seat-pred", self._watch("inherited", "claude", "pred", "seat-pred"), "me")
         self._unrelated(0, 40)
+        learn = self._counted_sweep()  # the first call reads each arm once and keeps its steward
         forty = self._counted_sweep()
         self._unrelated(40, 40)
+        new_arms = self._counted_sweep()
         eighty = self._counted_sweep()
-        self.assertEqual(forty[0], ["inherited", "mine"])
-        self.assertEqual(eighty[0], ["inherited", "mine"])
+        for result in (learn, forty, new_arms, eighty):
+            self.assertEqual(result[0], ["inherited", "mine"])
+        # This session's two arms plus their ten status files. Base: every arm
+        # on every call, 52 and 92 watch-file reads.
         self.assertEqual(forty[1:], eighty[1:], {"40": forty, "80": eighty})
+        self.assertEqual(forty[1:], (4, 12), forty)
+        self.assertEqual(learn[2] - forty[2], 40, learn)
+        self.assertEqual(new_arms[2] - forty[2], 40, new_arms)
+
+    def test_an_unreadable_or_missing_index_reads_the_arms_again(self):
+        self._watch("mine", "claude", "me", "seat-me")
+        self._unrelated(0, 8)
+        index = self.root / ".steward-index.json"
+        for damage in ("missing", "torn", "wrong-schema"):
+            with self.subTest(damage=damage):
+                self._counted_sweep()
+                if damage == "missing":
+                    index.unlink()
+                elif damage == "torn":
+                    index.write_text('{"schema": 1, "watches": {', encoding="utf-8")
+                else:
+                    index.write_text('{"schema": 2, "watches": {}}', encoding="utf-8")
+                rows, _ledgers, reads = self._counted_sweep()
+                self.assertEqual(rows, ["mine"])
+                self.assertEqual(reads - self._counted_sweep()[2], 8)
+                self.assertEqual(json.loads(index.read_text(encoding="utf-8"))["schema"], 1)
+
+    def test_index_keeps_only_the_steward_and_a_new_receipt_is_found(self):
+        self._unrelated(0, 4)
+        self._counted_sweep()
+        # An arm armed earlier whose receipt lands after the index was written.
+        arm = self._watch("late", "claude", "me", "seat-me")
+        receipt = self.root / "late.receipt.json"
+        receipt.unlink()
+        self.assertEqual(self._counted_sweep()[0], [])
+        receipt.write_text(json.dumps({"watch_id": "late", "steward": arm["steward"]}),
+                           encoding="utf-8")
+        self.assertEqual(self._counted_sweep()[0], ["late"])
+        stored = json.loads((self.root / ".steward-index.json").read_text(encoding="utf-8"))
+        self.assertEqual(stored["watches"]["late"], ["claude", "me", "seat-me"])
+        # A receipt whose arm was never written still describes itself.
+        (self.root / "orphan.receipt.json").write_text(json.dumps(
+            {"watch_id": "orphan", "steward": {"harness": "claude", "session_id": "me"}}),
+            encoding="utf-8")
+        self.assertEqual(self._counted_sweep()[0], ["late", "orphan"])
 
 
 # --- clear (session-tidy auto-clear) ---------------------------------------------------
