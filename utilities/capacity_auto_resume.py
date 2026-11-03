@@ -254,12 +254,11 @@ def follow_installed_release(path: Path) -> None:
 
 
 def _route_finished(record: dict) -> bool:
-    """Whether the waited route closed as finished work that `start` has nothing to say about.
+    """Whether the waited route is closed as proven finished work.
 
     Only a closure whose terminal gate is proven, with no inline finish
-    pending, not closed automatically and not a framed route (whose `start`
-    still settles its decision) qualifies. Every other closure, and anything
-    unreadable, keeps the existing `start`, which reports what it finds.
+    pending, not closed automatically and not a framed route qualifies;
+    anything unreadable does not.
     """
     try:
         route_file = Path(record["route_file"])
@@ -300,13 +299,6 @@ def run(path: Path, *, sleep=time.sleep, now=time.time, call=subprocess.run, cle
     record = json.loads(path.read_text(encoding="utf-8"))
     if record.get("state") != "armed":
         return 0
-    if _route_finished(record):
-        # The route finished while this wait slept (continued and closed by
-        # another path): nothing is left to resume and nothing to report.
-        record.update(state="route-closed",
-                      settled_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
-        _write(path, record)
-        return 0
     capped = (record.get("cause") in {"capacity", "launch-capacity"}
               and path != record_path(Path(record["jobs"]), record.get("route_id") or "", record["retry_at"]))
     if early or capped:
@@ -328,11 +320,19 @@ def run(path: Path, *, sleep=time.sleep, now=time.time, call=subprocess.run, cle
         receipt = json.loads(lines[-1]) if lines else {}
     except ValueError:
         receipt = {}
+    # `start` always runs: on a closed route it still retries settlement and
+    # shared-spec publication and reports what is left. Only a plain
+    # `completed` of a route that finished as proven work while this wait
+    # slept has nothing to tell its session.
+    quiet = (done.returncode == 0 and receipt.get("state") == "completed"
+             and not receipt.get("next_leg") and _route_finished(record))
     record.update(state="resumed", resumed_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                   exit_code=done.returncode, result_state=receipt.get("state"),
-                  owner_attempt_id=receipt.get("owner_attempt_id"), **({"early": True} if early else {}))
+                  owner_attempt_id=receipt.get("owner_attempt_id"), **({"early": True} if early else {}),
+                  **({"notice": "skipped-route-completed"} if quiet else {}))
     _write(path, record)
-    _notify(record, receipt, capped=capped and not early)
+    if not quiet:
+        _notify(record, receipt, capped=capped and not early)
     return 0
 
 
