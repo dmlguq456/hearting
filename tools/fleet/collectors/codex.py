@@ -1740,7 +1740,30 @@ def session_id_of_process(pid, live_codex=None, *, observation=None):
         return None
     if observation is None:
         observation = _DAEMON_IDENTITY_SCOPE.get()
-    return _daemon_session_for_process(pid, initial_env, observation=observation)
+    found = _daemon_session_for_process(pid, initial_env, observation=observation)
+    return found or _hook_recorded_session(pid)
+
+
+def _hook_recorded_session(pid):
+    """The thread this TUI's own hook recorded (``tui-identity``), when the daemon cannot say.
+
+    A resumed thread can keep the daemon's earlier ``codex_tui`` address, so no loaded
+    thread's listener belongs to this TUI (or two threads share it after a switch). The hook
+    below this TUI records its current thread by ``(pid, start)``; the record counts only for
+    that live conversation TUI and a root thread whose rollout exists.
+    """
+    from . import procscan
+    from .. import codex_tui_identity
+    start = _live_tui_start(pid)
+    if not start:
+        return None
+    thread_id = codex_tui_identity.read_thread(pid, start)
+    if not thread_id:
+        return None
+    path = exact_rollout_for_session_id(thread_id)
+    if not path or _is_subagent(_rollout_meta(path)):
+        return None
+    return thread_id if procscan.read_proc_start(pid) == start else None
 
 
 

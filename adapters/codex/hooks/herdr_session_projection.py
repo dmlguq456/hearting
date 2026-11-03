@@ -46,6 +46,14 @@ def _state_hook_owns_report(payload: dict[str, Any] | None, session_id: str,
 
 def project(payload: dict[str, Any] | None, session_id: str, *, worker: bool = False,
             request_recovery: bool = True) -> bool:
+    if session_id and not worker:
+        try:
+            # The TUI above this hook now runs this thread: the same tui-identity record
+            # OpenCode's TUI writes, read by Fleet when the daemon's TUI address is stale.
+            from fleet.codex_tui_identity import record as _record_tui_thread
+            _record_tui_thread(session_id)
+        except Exception:
+            pass
     lifecycle = {}
     if isinstance(payload, dict) and payload.get("hook_event_name") == "SessionStart":
         source = payload.get("source")
