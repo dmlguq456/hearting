@@ -697,7 +697,23 @@ def resource_evidence(armed, *, compute_observation=None):
         # This reader cannot settle a host process or contradict its controller.
         return {"terminal": False, "liveness": "stale", "quiescent": None,
                 "reason": "resource-host-observation-unavailable"}
-    row, _settled = runner().settle(registry, run_id, row)
+    try:
+        row, _settled = runner().settle(registry, run_id, row)
+    except ValueError as exc:
+        if str(exc) == "unknown run id":
+            return {"terminal": False, "reason": "resource-run-absent"}
+        if str(exc) != "resource-reservation-changed":
+            raise
+        # Another writer changed the row between this read and the settle. That is
+        # an observation race, not a resource result: report the row as not settled
+        # yet, bound to the row as it now is, and let the next look read it again.
+        try:
+            current = (json.loads(registry.read_text(encoding="utf-8")).get("runs") or {}).get(run_id)
+        except (OSError, ValueError, AttributeError):
+            current = None
+        return {"terminal": False, "reason": "resource-reservation-changed",
+                "resource_sha256": (RESOURCE_RESUME.row_digest(current)
+                                    if isinstance(current, dict) else None)}
     liveness, _current, reason = RR.classify_identity(row)
     identity = f"{run_id}:{row.get('pid')}:{row.get('starttime')}:{row.get('exit_code')}"
     if liveness == "working":
