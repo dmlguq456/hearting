@@ -42,7 +42,9 @@ Before selecting checks, read available execution logs, independent review, prio
 CI evidence. Reuse a result only when its source, target and scope, relevant inputs and
 dependencies, and execution conditions still match. A stage, person, worktree, or
 interruption change alone does not invalidate it. Identify changed behavior, unresolved
-failures, and required dimensions not covered by the existing evidence. The evidence
+failures, and required dimensions not covered by the existing evidence. Run a further check
+only when its result could change the verdict or an open risk; once neither can change, stop
+and report — an unconfirmed level stays BLOCKED or FAIL, never PASS. The evidence
 supports the current assessment but does not transfer a historical test-gate PASS or
 change source-subject binding and verdict-budget rules.
 
