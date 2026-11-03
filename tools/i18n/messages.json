@@ -115,7 +115,7 @@
    "ko": "최근={latest}; 최고={best}; 기준 delta={delta}; 추세={trend}"
   },
   "resource.eta": {
-   "en": "ETA total {total}; planned {plan}; elapsed {elapsed}",
+   "en": "estimated total time {total}; planned {plan}; elapsed {elapsed}",
    "ko": "ETA 총 {total}; 계획 {plan}; 경과 {elapsed}"
   },
   "resource.final_metrics": {

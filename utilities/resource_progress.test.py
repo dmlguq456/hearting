@@ -1648,7 +1648,7 @@ class ExperimentObservationTest(unittest.TestCase):
         self.assertIn("actual=1h02m; planned=unknown", final)
         self.assertIn("latest=loss=0.5@3; best=loss=0.4@2; baseline delta=no baseline; trend=worsening",
                       checkpoint)
-        self.assertIn("ETA total unknown; planned unknown; elapsed 1h02m", checkpoint)
+        self.assertIn("estimated total time unknown; planned unknown; elapsed 1h02m", checkpoint)
         self.assertIn("source jsonl=no path", checkpoint)
         final, checkpoint = texts["Korean"]
         self.assertIn("public run record=기록 경로 없음", final)
