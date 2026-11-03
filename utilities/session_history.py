@@ -134,14 +134,19 @@ def _identity(args):
     return None, "", ""
 
 
+_COMMAND_HINT = " · hearting run session_history --harness <harness> --session-id <SID>"
+
+
 def _render(entry):
+    t = session_tidy._ui_translator()
     result = conversation_reader.read_conversation(entry)
     name = f"{entry.get('harness', 'unknown')} {str(entry.get('sid', ''))[:8]}"
-    label = entry.get("_label", "이전 대화")
+    label = entry.get("_label", t("conversation.earlier"))
     if result.status != "available":
-        return f"{label} · {name} · 원문 {result.status}: {result.reason or '읽을 수 없습니다'}", result
-    header = f"{label} · {name} · 읽기 전용 원문 (도구 호출은 접혀 있습니다)"
-    return header + "\n\n" + (result.text or "원문 파일은 있지만 표시할 대화가 없습니다"), result
+        return t("conversation.unavailable", label=label, name=name, status=result.status,
+                 reason=result.reason or t("conversation.cannot_read")), result
+    header = t("conversation.header", label=label, name=name)
+    return header + "\n\n" + (result.text or t("conversation.empty")), result
 
 
 def _show(text):
@@ -174,26 +179,27 @@ def _view(args):
 
 
 def _entries_for_generation(rows, generation):
+    t = session_tidy._ui_translator()
     if not rows:
-        return [], "연결 미확인"
+        return [], t("conversation.not_linked")
     current = rows[0]
     current_id = current.get("harness"), current.get("sid")
     confirmed = session_tidy._confirmed_predecessor(
         rows, current.get("harness", ""), current.get("sid", ""))
     if confirmed is None:
         if len(rows) < 2 or current.get("relation") != "chronological":
-            return [], "확정된 이전 대화가 없습니다 · hearting run session_history --harness <harness> --session-id <SID>"
+            return [], t("conversation.no_confirmed") + _COMMAND_HINT
         confirmed = rows[1]
-        first_label = "시간순 이웃 · 인계 미확인"
+        first_label = t("conversation.label_chronological")
     else:
-        first_label = "확정된 이전 대화"
+        first_label = t("conversation.label_confirmed")
 
     items = [dict(confirmed, _label=first_label)]
     seen = {current_id, (confirmed.get("harness"), confirmed.get("sid"))}
     relation_labels = {
-        "confirmed": "확정된 이전 대화",
-        "chronological": "시간순 이웃 · 인계 미확인",
-        "unknown": "관계 미확인",
+        "confirmed": t("conversation.label_confirmed"),
+        "chronological": t("conversation.label_chronological"),
+        "unknown": t("conversation.label_unknown"),
     }
     for index, row in enumerate(rows[1:], 1):
         ident = row.get("harness"), row.get("sid")
@@ -205,10 +211,10 @@ def _entries_for_generation(rows, generation):
         if relation == "confirmed" and isinstance(predecessor, dict):
             if (predecessor.get("harness"), predecessor.get("sid")) != ident:
                 relation = "unknown"
-        items.append(dict(row, _label=relation_labels.get(relation, "관계 미확인")))
+        items.append(dict(row, _label=relation_labels.get(relation, relation_labels["unknown"])))
         seen.add(ident)
     if generation < 1 or generation > len(items):
-        return [], f"세대 범위 밖입니다 (1–{len(items)})"
+        return [], t("conversation.out_of_range", count=len(items))
     return items, ""
 
 
@@ -220,6 +226,7 @@ def _display(rows, generation, stdout=False, clear_before_prompt=False):
         else:
             _show(reason)
         return 0
+    t = session_tidy._ui_translator()
     index = generation - 1
     boundary_message = ""
     while True:
@@ -233,7 +240,7 @@ def _display(rows, generation, stdout=False, clear_before_prompt=False):
             if clear_before_prompt:
                 print("\x1b[2J\x1b[H", end="")
             try:
-                prompt = "p 이전 세대 · n 최근 세대 · q 종료"
+                prompt = t("conversation.prompt")
                 if boundary_message:
                     prompt += " · " + boundary_message
                 choice = input(prompt + ": ").strip().lower()
@@ -249,9 +256,9 @@ def _display(rows, generation, stdout=False, clear_before_prompt=False):
                 index -= 1
                 continue
             if choice == "p":
-                boundary_message = "더 앞 세대가 없습니다"
+                boundary_message = t("conversation.no_earlier")
             elif choice == "n":
-                boundary_message = "더 최근 세대가 없습니다"
+                boundary_message = t("conversation.no_newer")
             continue
         return 0
 
@@ -272,7 +279,7 @@ def main(argv=None):
         return _view(args)
     seat, pane, socket = _identity(args)
     if seat is None:
-        print("연결 미확인 · hearting run session_history --harness <harness> --session-id <SID>")
+        print(session_tidy._ui_translator()("conversation.not_linked") + _COMMAND_HINT)
         return 0
     if pane:
         endpoint = seat.endpoint
@@ -291,7 +298,8 @@ def main(argv=None):
             env["HERDR_SOCKET_PATH"] = socket
             return subprocess.run(command, capture_output=True, text=True, timeout=15, env=env, check=False)
         near = Near(HerdrSurface(runner=runner), pane=pane)
-        result = open_pane(argv, title="이전 대화", near=near, cwd=active_cwd,
+        title = session_tidy._ui_translator()("conversation.earlier")
+        result = open_pane(argv, title=title, near=near, cwd=active_cwd,
                            env={"HERDR_SOCKET_PATH": socket})
         if result.pane:
             if result.placement == "split":
@@ -313,7 +321,8 @@ def main(argv=None):
                         runner(["herdr", "pane", "focus", "--pane", pane,
                                 "--direction", direction])
             return 0
-        print("옆 창을 열지 못했습니다: " + ", ".join(result.notes or [result.placement]))
+        print(session_tidy._ui_translator()("conversation.pane_failed",
+                                             notes=", ".join(result.notes or [result.placement])))
     rows = session_tidy.seat_lineage(seat)
     return _display(rows, args.generation, args.stdout)
 

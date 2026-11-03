@@ -1203,7 +1203,8 @@ class ObservationTest(peer._TmpRootMixin, unittest.TestCase):
                 self.assertIsNone(rows[0]["predecessor"])
                 self.assertEqual(rows[0]["relation"], "unknown")
                 entries, _reason = session_history._entries_for_generation(rows, 1)
-                self.assertTrue(all(row.get("_label") != "확정된 이전 대화" for row in entries))
+                confirmed = session_history.session_tidy._ui_translator()("conversation.label_confirmed")
+                self.assertTrue(all(row.get("_label") != confirmed for row in entries))
                 self.assertEqual([self.snapshot(path) for path in paths], before)
 
     def test_same_sid_on_different_harnesses_and_mixed_aggregate(self):

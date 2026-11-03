@@ -98,6 +98,98 @@
    "en": "Checks / remaining: the report's format differs, so no machine summary — read the report itself",
    "ko": "검증·남은 것: 보고서 형식이 달라 기계 요약 안 함 — 보고서 본문을 그대로 볼 것"
   },
+  "conversation.cannot_read": {
+   "en": "cannot be read",
+   "ko": "읽을 수 없습니다"
+  },
+  "conversation.earlier": {
+   "en": "earlier conversation",
+   "ko": "이전 대화"
+  },
+  "conversation.empty": {
+   "en": "the transcript file exists but has no conversation to show",
+   "ko": "원문 파일은 있지만 표시할 대화가 없습니다"
+  },
+  "conversation.header": {
+   "en": "{label} · {name} · read-only transcript (tool calls are folded)",
+   "ko": "{label} · {name} · 읽기 전용 원문 (도구 호출은 접혀 있습니다)"
+  },
+  "conversation.label_chronological": {
+   "en": "earlier in time · handoff not confirmed",
+   "ko": "시간순 이웃 · 인계 미확인"
+  },
+  "conversation.label_confirmed": {
+   "en": "confirmed earlier conversation",
+   "ko": "확정된 이전 대화"
+  },
+  "conversation.label_unknown": {
+   "en": "relation not confirmed",
+   "ko": "관계 미확인"
+  },
+  "conversation.no_confirmed": {
+   "en": "no confirmed earlier conversation",
+   "ko": "확정된 이전 대화가 없습니다"
+  },
+  "conversation.no_earlier": {
+   "en": "no earlier generation",
+   "ko": "더 앞 세대가 없습니다"
+  },
+  "conversation.no_newer": {
+   "en": "no newer generation",
+   "ko": "더 최근 세대가 없습니다"
+  },
+  "conversation.not_linked": {
+   "en": "link not confirmed",
+   "ko": "연결 미확인"
+  },
+  "conversation.out_of_range": {
+   "en": "generation out of range (1–{count})",
+   "ko": "세대 범위 밖입니다 (1–{count})"
+  },
+  "conversation.pane_failed": {
+   "en": "could not open the side pane: {notes}",
+   "ko": "옆 창을 열지 못했습니다: {notes}"
+  },
+  "conversation.prompt": {
+   "en": "p earlier generation · n newer generation · q quit",
+   "ko": "p 이전 세대 · n 최근 세대 · q 종료"
+  },
+  "conversation.reason.bad_entry": {
+   "en": "the session location record is not valid",
+   "ko": "세션 위치 정보가 올바르지 않습니다"
+  },
+  "conversation.reason.bad_identity": {
+   "en": "the session identity is not valid",
+   "ko": "세션 식별 정보가 올바르지 않습니다"
+  },
+  "conversation.reason.empty": {
+   "en": "the conversation is empty",
+   "ko": "대화 내용이 없습니다"
+  },
+  "conversation.reason.no_file": {
+   "en": "the transcript file is gone",
+   "ko": "원문 파일이 없습니다"
+  },
+  "conversation.reason.no_place": {
+   "en": "the transcript location is not known",
+   "ko": "원문 위치를 찾을 수 없습니다"
+  },
+  "conversation.reason.not_regular": {
+   "en": "not a regular file",
+   "ko": "일반 파일이 아닙니다"
+  },
+  "conversation.reason.not_to_end": {
+   "en": "the transcript could not be read to the end",
+   "ko": "원문을 끝까지 읽지 못했습니다"
+  },
+  "conversation.reason.place_unreadable": {
+   "en": "the transcript location cannot be read",
+   "ko": "원문 위치를 읽을 수 없습니다"
+  },
+  "conversation.unavailable": {
+   "en": "{label} · {name} · transcript {status}: {reason}",
+   "ko": "{label} · {name} · 원문 {status}: {reason}"
+  },
   "direction.default_means": {
    "en": "Start in the direction both legs agreed on",
    "ko": "두 갈래가 함께 낸 방향대로 시작합니다"
