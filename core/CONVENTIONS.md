@@ -534,9 +534,11 @@ does not duplicate that rule list, only the obligation and its consequence.
 A helper Hearting starts in its own session (an obligation runner, a watcher,
 a resource observer) outlives its caller by design. Started under a test, it
 ends with that test: each detaching spawn site passes its child to
-`utilities/detached_lifetime.py` `bind`, which finds the nearest test process
-among the caller's ancestors (a test file or `-m unittest`/`pytest`; a helper
-recorded under a test passes that test on). When that process ends, however it
+`utilities/detached_lifetime.py` `bind`, which finds the nearest Hearting test
+among the caller's ancestors: a test file inside a tree that carries that module,
+or `-m unittest`/`pytest`/`node --test` working in one (a helper recorded under a
+test passes that test on; a test-shaped program elsewhere, such as a user's
+`run_test.py`, is not a test). When that process ends, however it
 ends and whether or not it ran through `tools/run-tests.py`, a reaper kills the
 recorded children and their descendants. Outside a test `bind` records nothing,
 so production lifetimes are unchanged. A new detaching spawn site calls `bind`

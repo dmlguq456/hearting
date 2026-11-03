@@ -176,6 +176,11 @@ class DetachedLifetimeTest(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.sleeper = self.root / "sleeper.py"
         self.sleeper.write_text(SLEEPER)
+        # A tree that carries the module, as a checkout, worktree or release does: the
+        # fake tests live in it, so they are Hearting tests.
+        self.tree = self.root / "tree" / "utilities"
+        self.tree.mkdir(parents=True)
+        (self.tree / "detached_lifetime.py").symlink_to(UTILITIES / "detached_lifetime.py")
         self.token = "dl-" + uuid.uuid4().hex[:12]
         self.started: list[tuple[int, str]] = []
         self.addCleanup(self.stop_started)
@@ -205,13 +210,14 @@ class DetachedLifetimeTest(unittest.TestCase):
     def gone(self, process: tuple[int, str]) -> bool:
         return identity(process[0]) != process
 
-    def run_fake_test(self, mode: str = "", *, name: str = "leak.test.py", extra: str = "") -> Path:
-        script = self.root / name
+    def run_fake_test(self, mode: str = "", *, name: str = "leak.test.py", extra: str = "",
+                      directory: Path | None = None, utilities: Path = UTILITIES) -> Path:
+        script = (self.tree if directory is None else directory) / name
         script.write_text(FAKE_TEST + extra)
         out = self.root / (name + ".pid")
         result = subprocess.run(
-            [sys.executable, str(script), str(UTILITIES), str(self.sleeper), self.token, str(out),
-             mode], capture_output=True, text=True, timeout=120)
+            [sys.executable, str(script), str(utilities), str(self.sleeper), self.token, str(out),
+             mode], capture_output=True, text=True, timeout=120, cwd=str(self.root))
         for path in (out, Path(str(out) + ".second")):
             if path.exists() and len(path.read_text().split()) >= 2:
                 self.remember(path)  # stopped in tearDown even if this case fails below
@@ -221,27 +227,47 @@ class DetachedLifetimeTest(unittest.TestCase):
 
     # --- which process is the test ---
 
-    def test_test_commands_are_recognised_and_other_commands_are_not(self):
-        tests = [
-            ["python3", "utilities/x.test.py"], ["/usr/bin/python3", "-u", "x.test.py"],
-            ["python3", "-X", "dev", "a/test_foo.py"], ["python3", "-m", "unittest", "-v"],
-            ["python3", "-munittest"], ["python3", "-m", "pytest"], ["pytest", "-q"],
-            ["python3.12", "-W", "error", "foo_test.py"], ["bash", "hooks/x.test.sh"],
-            ["bash", "-o", "pipefail", "x.test.sh"], ["node", "--test", "a.mjs"],
-            ["node", "x.test.mjs"],
+    def test_a_hearting_test_is_a_test_shape_located_in_a_hearting_tree(self):
+        tree = str(UTILITIES.parent)
+        outside = str(self.root)
+        shapes = [
+            ["python3", "utilities/x.test.py"], ["/usr/bin/python3", "-u", "utilities/x.test.py"],
+            ["python3", "-X", "dev", "tools/fleet/tests/test_foo.py"],
+            ["python3.12", "-W", "error", "utilities/foo_test.py"], ["bash", "hooks/x.test.sh"],
+            ["bash", "-o", "pipefail", "hooks/x.test.sh"], ["node", "adapters/x.test.mjs"],
         ]
-        others = [
+        runners = [
+            ["python3", "-m", "unittest", "-v"], ["python3", "-munittest"],
+            ["python3", "-m", "pytest"], ["pytest", "-q"],
+            ["/usr/bin/python3", "/home/u/.local/bin/pytest", "-q"],  # pytest via its shebang
+            ["node", "--test", "a.mjs"], ["node", "--test"],
+        ]
+        not_tests = [
             ["python3", "-c", "print('x.test.py')"], ["python3", "-uc", "code", "x.test.py"],
             ["python3", "utilities/peer-steward.py", "watch"],
             ["python3", "tools/run-tests.py", "--select", "x.test.py"],
+            ["python3", "-m", "unittest.mock"], ["python3", "-m", "pytest_cov"],
             ["bash", "-c", "python3 x.test.py"], ["zsh", "-ic", "x.test.sh"],
-            ["node", "-e", "x.test.js"], ["claude", "-p", "run utilities/x.test.py"],
+            ["node", "-e", "x.test.js"], ["node", "/srv/app.js", "--test"],
+            ["node", "--require", "r.test.js", "app.js"],
+            ["claude", "-p", "run utilities/x.test.py"], ["x_test.py"],
             ["vim", "x.test.py"], ["git", "diff", "x.test.py"], ["bash"], ["python3"], [],
         ]
-        for argv in tests:
-            self.assertTrue(lifetime.is_test_command(argv), argv)
-        for argv in others:
-            self.assertFalse(lifetime.is_test_command(argv), argv)
+        for argv in shapes + runners:
+            self.assertTrue(lifetime.is_test_command(argv, tree), argv)
+            self.assertFalse(lifetime.is_test_command(argv, outside), argv)
+        for argv in not_tests:
+            self.assertFalse(lifetime.is_test_command(argv, tree), argv)
+        # A user's test-shaped driver outside any Hearting tree is not a Hearting test,
+        # wherever it runs from.
+        for name in ("run_test.py", "test_runner.py", "speed_test.py", "eval.test.py"):
+            driver = str(self.root / "project" / name)
+            self.assertFalse(lifetime.is_test_command(["python3", driver, "--days", "3"], tree))
+            self.assertFalse(lifetime.is_test_command(["python3", name], outside))
+        self.assertFalse(lifetime.is_test_command(["python3", "utilities/x.test.py"], None))
+        # An absolute test file path in the tree counts from any working directory.
+        self.assertTrue(lifetime.is_test_command([sys.executable, str(UTILITIES / "x.test.py")],
+                                                 outside))
 
     def test_bind_ignores_what_is_not_a_child_of_the_caller(self):
         fake = mock.Mock(pid=mock.Mock())
@@ -297,6 +323,29 @@ class DetachedLifetimeTest(unittest.TestCase):
                         f"the next reaper did not finish the abandoned helper {abandoned[0]}")
 
     # --- production lifetimes do not change ---
+
+    def test_a_test_shaped_driver_outside_any_hearting_tree_does_not_end_its_work(self):
+        project = self.root / "project"
+        project.mkdir()
+        # Not a Hearting test: the job it starts must outlive it (RV-BC-1293).
+        out = self.run_fake_test(name="run_test.py", directory=project)
+        helper = self.remember(out)
+        time.sleep(1.0)
+        self.assertFalse(self.gone(helper), "a user's run_test.py is not a Hearting test")
+
+    def test_a_spawn_site_in_a_partial_tree_without_the_module_still_imports(self):
+        # A fixture release may copy only a few modules (release_follow does). The spawn
+        # site's guarded import then gives a no-op instead of an ImportError.
+        partial = self.root / "partial" / "utilities"
+        partial.mkdir(parents=True)
+        (partial / "git_index_lock.py").write_text((UTILITIES / "git_index_lock.py").read_text())
+        result = subprocess.run(
+            [sys.executable, "-I", "-c",
+             "import sys; sys.path.insert(0, sys.argv[1]); import git_index_lock as g; "
+             "print(g.end_with_test.__module__, g.end_with_test(12345))", str(partial)],
+            capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.split(), ["git_index_lock", "12345"])
 
     def test_outside_a_test_a_detached_helper_keeps_its_production_lifetime(self):
         script = self.root / "outside.py"

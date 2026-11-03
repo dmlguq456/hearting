@@ -12,10 +12,12 @@ environment. Reapers in the test runner or in one fixture miss every test run di
 cleanup ran.
 
 So each detaching spawn site passes the child it just started to :func:`bind`. ``bind``
-looks for the nearest *test process* among the caller and its ancestors: an interpreter
-running a test file (``*.test.py``, ``test_*.py``, ``*_test.py``, ``*.test.sh``,
-``*.test.js`` ...) or ``-m unittest`` / ``pytest``; of a test and its forks (which run
-the same command) the outermost is the test. Outside a test there is none and
+looks for the nearest *Hearting test process* among the caller and its ancestors: an
+interpreter running a test file (``*.test.py``, ``test_*.py``, ``*_test.py``,
+``*.test.sh``, ``*.test.js`` ...) that lies in a Hearting tree, or a test runner
+(``-m unittest``, ``pytest``, ``node --test``) working in one; of a test and its forks
+(which run the same command) the outermost is the test. A test-shaped program outside
+any Hearting tree (a user's ``run_test.py``) is not one. Outside a test there is none and
 ``bind`` returns after reading a few ``/proc`` entries, so production lifetimes do not
 change. Under a test it records the child under that test process and makes sure one
 small reaper waits for the test process to end. However the test ends (normally, by an
@@ -23,8 +25,9 @@ exception, or SIGKILL), the reaper then kills each recorded child that is still 
 process, together with its descendants, and removes the record. A helper started by a
 recorded helper is recorded under the same test, even after its own parent is gone.
 
-The record is a directory private to the user: ``/run/user/<uid>/hearting-detached-
-lifetime`` (``/tmp/hearting-detached-lifetime-<uid>`` without a runtime directory).
+The record is a directory private to the user and to this boot: ``/run/user/<uid>/
+hearting-detached-lifetime/<boot id>`` (under ``/tmp/hearting-detached-lifetime-<uid>``
+without a runtime directory).
 ``<pid>-<start>.child`` is a symlink naming the test it belongs to, ``<pid>-<start>.lock``
 is held by that test's reaper, and the reaper runs from a copy of this file there
 (``reaper-<digest>.py``) so it never pins the checkout or release the test ran from.
@@ -47,8 +50,14 @@ _SHELLS = frozenset({"bash", "sh", "dash", "zsh", "ksh"})
 _SHELL_VALUE_OPTIONS = frozenset({"-o", "+o", "-O", "+O", "--rcfile", "--init-file"})
 _NODES = frozenset({"node", "nodejs"})
 _NODE_EVAL = frozenset({"-e", "--eval", "-p", "--print"})
+_NODE_VALUE_OPTIONS = frozenset({"-r", "--require", "--import", "--loader",
+                                 "--experimental-loader", "--conditions", "-C"})
 _TEST_MODULES = frozenset({"unittest", "pytest"})
+_RUNNERS = frozenset({"pytest", "py.test"})
+_RUNNER = "<runner>"  # a test runner (no test file named): its working directory decides
 _IDENTITY = re.compile(r"^([0-9]+)-([0-9]+)$")
+_BOOT = re.compile(r"^[0-9a-f-]{1,64}$")
+_MARKER = os.path.join("utilities", "detached_lifetime.py")
 _MAX_DEPTH = 64
 _SETTLE_S = 5.0
 _COPY_AGE_S = 7 * 86400
@@ -60,7 +69,7 @@ def _is_test_file(path: str) -> bool:
     return bool(_TEST_FILE.search(os.path.basename(path)))
 
 
-def _python_runs_test(args: list[str]) -> bool:
+def _python_target(args: list[str]) -> str | None:
     i = 0
     while i < len(args):
         arg = args[i]
@@ -74,10 +83,10 @@ def _python_runs_test(args: list[str]) -> bool:
             cluster = arg[1:]
             for j, flag in enumerate(cluster):
                 if flag == "c":
-                    return False
+                    return None
                 if flag == "m":
                     module = cluster[j + 1:] or (args[i + 1] if i + 1 < len(args) else "")
-                    return module.split(".")[0] in _TEST_MODULES
+                    return _RUNNER if module in _TEST_MODULES else None
                 if flag in "XWQ":
                     if not cluster[j + 1:]:
                         i += 1
@@ -85,10 +94,15 @@ def _python_runs_test(args: list[str]) -> bool:
             i += 1
             continue
         break
-    return i < len(args) and _is_test_file(args[i])
+    if i >= len(args):
+        return None
+    script = args[i]
+    if os.path.basename(script) in _RUNNERS:  # `pytest` through its shebang
+        return _RUNNER
+    return script if _is_test_file(script) else None
 
 
-def _shell_runs_test(args: list[str]) -> bool:
+def _shell_target(args: list[str]) -> str | None:
     i = 0
     while i < len(args):
         arg = args[i]
@@ -100,33 +114,91 @@ def _shell_runs_test(args: list[str]) -> bool:
             continue
         if arg[:1] in ("-", "+") and arg not in ("-", "+"):
             if not arg.startswith("--") and "c" in arg[1:]:
-                return False
+                return None
             i += 1
             continue
         break
-    return i < len(args) and _is_test_file(args[i])
+    return args[i] if i < len(args) and _is_test_file(args[i]) else None
 
 
-def is_test_command(argv: list[str]) -> bool:
-    """Whether ``argv`` runs a test file, a test runner module, or ``pytest``."""
+def _node_target(args: list[str]) -> str | None:
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg in _NODE_EVAL:
+            return None
+        if arg == "--test":  # a node option only before the script; after it, the script's
+            return _RUNNER
+        if arg in _NODE_VALUE_OPTIONS:
+            i += 2
+            continue
+        if arg.startswith("-"):
+            i += 1
+            continue
+        return arg if _is_test_file(arg) else None
+    return None
+
+
+def _test_target(argv: list[str]) -> str | None:
+    """The test file ``argv`` runs, ``_RUNNER`` for a test runner, else ``None``."""
     if not argv:
-        return False
+        return None
     name = os.path.basename(argv[0])
     args = list(argv[1:])
-    if name in ("pytest", "py.test"):
-        return True
+    if name in _RUNNERS:
+        return _RUNNER
     if _PYTHON.match(name):
-        return _python_runs_test(args)
+        return _python_target(args)
     if name in _SHELLS:
-        return _shell_runs_test(args)
+        return _shell_target(args)
     if name in _NODES:
-        if "--test" in args:
+        return _node_target(args)
+    return None
+
+
+def _in_hearting_tree(path: str) -> bool:
+    """Whether ``path`` lies in a tree that carries this module (checkout, worktree, release)."""
+    directory = path if os.path.isdir(path) else os.path.dirname(path)
+    for _ in range(_MAX_DEPTH):
+        if os.path.isfile(os.path.join(directory, _MARKER)):
             return True
-        if any(arg in _NODE_EVAL for arg in args):
+        parent = os.path.dirname(directory)
+        if parent == directory:
             return False
-        operands = [arg for arg in args if not arg.startswith("-")]
-        return bool(operands) and _is_test_file(operands[0])
-    return _is_test_file(name)
+        directory = parent
+    return False
+
+
+def is_test_command(argv: list[str], cwd: str | None) -> bool:
+    """Whether ``argv``, run in ``cwd``, is a Hearting test.
+
+    The shape is a test file (``*.test.py``, ``test_*.py``, ``*_test.py``,
+    ``*.test.sh``, ``*.test.js`` ...) run by python, a shell or node, or a test runner
+    (``-m unittest``, ``-m pytest``, ``pytest``, ``node --test``). Only one located in a
+    Hearting tree counts: the test file, or for a runner its working directory, has
+    ``utilities/detached_lifetime.py`` above it. A user's ``run_test.py`` elsewhere is
+    not a Hearting test, so work Hearting starts under it keeps its lifetime.
+    """
+    target = _test_target(argv)
+    if target is None:
+        return False
+    if target == _RUNNER:
+        location = cwd
+    elif os.path.isabs(target):
+        location = target
+    else:
+        location = os.path.join(cwd, target) if cwd else None
+    return bool(location) and _in_hearting_tree(os.path.realpath(location))
+
+
+def _is_test_process(pid: int, argv: list[str]) -> bool:
+    if _test_target(argv) is None:  # the common case: no filesystem look at all
+        return False
+    try:
+        cwd = os.readlink(f"/proc/{pid}/cwd")
+    except OSError:
+        cwd = None
+    return is_test_command(argv, cwd)
 
 
 # --- /proc ------------------------------------------------------------------------------
@@ -160,8 +232,37 @@ def _live(identity: tuple[int, str]) -> bool:
 
 # --- the record -------------------------------------------------------------------------
 
+def _private_dir(path: str, create: bool) -> bool:
+    if create:
+        try:
+            os.mkdir(path, 0o700)
+        except FileExistsError:
+            pass
+        except OSError:
+            return False
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return False
+    return (stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid()
+            and not info.st_mode & 0o077)
+
+
+def _boot_id() -> str:
+    try:
+        with open("/proc/sys/kernel/random/boot_id") as fh:
+            value = fh.read().strip()
+    except OSError:
+        return "unknown-boot"
+    return value if _BOOT.match(value) else "unknown-boot"
+
+
 def _record_dir(create: bool) -> str | None:
-    """The user's private record directory; ``None`` if it is missing or not private."""
+    """This boot's private record directory; ``None`` if it is missing or not private.
+
+    Records live under the boot id: a pid and start time from an earlier boot (the /tmp
+    fallback survives a reboot) never name a process of this one.
+    """
     uid = os.getuid()
     runtime = f"/run/user/{uid}"
     try:
@@ -169,22 +270,12 @@ def _record_dir(create: bool) -> str | None:
         private_runtime = stat.S_ISDIR(info.st_mode) and info.st_uid == uid
     except OSError:
         private_runtime = False
-    path = (os.path.join(runtime, "hearting-detached-lifetime") if private_runtime
+    base = (os.path.join(runtime, "hearting-detached-lifetime") if private_runtime
             else f"/tmp/hearting-detached-lifetime-{uid}")
-    if create:
-        try:
-            os.mkdir(path, 0o700)
-        except FileExistsError:
-            pass
-        except OSError:
-            return None
-    try:
-        info = os.lstat(path)
-    except OSError:
+    if not _private_dir(base, create):
         return None
-    if not stat.S_ISDIR(info.st_mode) or info.st_uid != uid or info.st_mode & 0o077:
-        return None
-    return path
+    path = os.path.join(base, _boot_id())
+    return path if _private_dir(path, create) else None
 
 
 def _name(identity: tuple[int, str]) -> str:
@@ -211,7 +302,7 @@ def test_anchor(pid: int | None = None) -> tuple[int, str] | None:
         if info is None:
             return None
         argv = _argv(pid)
-        if is_test_command(argv):
+        if _is_test_process(pid, argv):
             # A fork of the test (multiprocessing "fork", os.fork) runs the very same
             # command; the test is the outermost of them, not the worker that ends first.
             while info[1] > 1 and _argv(info[1]) == argv:
@@ -449,7 +540,23 @@ def reap(record: str, anchor: tuple[int, str]) -> None:
 
 
 def _finish_abandoned(record: str, own: tuple[int, str]) -> None:
-    """Reap the records of ended tests whose reaper is gone (killed, or never started)."""
+    """Reap the records of ended tests whose reaper is gone (killed, or never started).
+
+    Records of an earlier boot name no process of this one: they are only removed.
+    """
+    import shutil
+
+    base, current = os.path.split(record)
+    for entry in os.listdir(base):
+        if entry == current or not (_BOOT.match(entry) or entry == "unknown-boot"):
+            continue
+        path = os.path.join(base, entry)
+        try:
+            earlier_boot = stat.S_ISDIR(os.lstat(path).st_mode)
+        except OSError:
+            continue
+        if earlier_boot:
+            shutil.rmtree(path, ignore_errors=True)
     now = time.time()
     tests = set(_records(record))
     for entry in os.listdir(record):
