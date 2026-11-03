@@ -391,6 +391,17 @@ def stop_attempt(attempt_id, *, jobs=None, grace=0.3, kill_wait=0.5):
             "pending_attempts": pending}
 
 
+def explain_stop(receipt, translate):
+    """Add the relaunch fact to a receipt of a frame leg that is actually stopped.
+
+    It is an explanation, never ``next_step``: a main session follows ``next_step``
+    first, and nothing is to be done now. A terminal or still-pending stop gets nothing.
+    """
+    if receipt.get("worker_type") == "frame" and receipt.get("state") == "cancelled":
+        receipt["explanation"] = translate("route.close.stopped_leg_next")
+    return receipt
+
+
 def stop_route_legs(route, *, jobs=None, grace=0.3, kill_wait=0.5):
     """Route close of a route whose running work is its frame legs: stop those legs first.
 

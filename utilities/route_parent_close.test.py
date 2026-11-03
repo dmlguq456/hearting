@@ -2289,12 +2289,18 @@ class ParentCloseTest(unittest.TestCase):
         self.frame_leg("att-frame-alt", second, node="frame-alternative")
         result = CLOSE.stop_attempt(self.aid("att-frame"), jobs=self.jobs)
         self.assertEqual(result["state"], "cancelled", result)
-        # The close CLI adds this catalog line for a frame leg (its next start relaunches it).
+        # The close CLI explains that its next start relaunches it -- never as next_step.
         self.assertEqual(result["worker_type"], "frame")
         sys.path.insert(0, str(HERE.parent / "tools" / "i18n"))
         import ui_text
         for lang in ("en", "ko"):
             self.assertIn("close", ui_text.text("route.close.stopped_leg_next", lang))
+        explained = CLOSE.explain_stop(dict(result), ui_text.translator("en"))
+        self.assertIn("runs again the next time this route starts", explained["explanation"])
+        self.assertNotIn("next_step", explained)
+        for other in ({**result, "state": "terminal"}, {**result, "state": "termination-pending"},
+                      {**result, "worker_type": "stage"}):
+            self.assertNotIn("explanation", CLOSE.explain_stop(dict(other), ui_text.translator("en")))
         first.wait(timeout=5)
         self.assert_user_stopped("att-frame")
         self.assertIsNone(second.poll())

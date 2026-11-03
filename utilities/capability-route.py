@@ -13556,10 +13556,7 @@ def main():
                 import route_parent_close
                 stopped=route_parent_close.stop_attempt(a.named_attempt)
                 if stopped is not None:
-                    if stopped.get("worker_type")=="frame":
-                        # A stopped frame leg is relaunched by the route's next start.
-                        stopped["next_step"]=UI_TEXT.translator()("route.close.stopped_leg_next")
-                    print(json.dumps(stopped,sort_keys=True))
+                    print(json.dumps(route_parent_close.explain_stop(stopped,UI_TEXT.translator()),sort_keys=True))
                     return
         if a.command=="complete" and getattr(a, "inline", False) and not getattr(a, "route", None):
             try:
