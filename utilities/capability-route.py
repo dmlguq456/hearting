@@ -12222,13 +12222,25 @@ def attempt_route_file(value, jobs=None):
     if not text or any(ch in text for ch in "\t\n,=/"):
         return None
     row = _registry_rows(jobs, needle="attempt_id=" + text).get(text)
-    if row is None:
-        return None
-    meta = row[1]
-    for key in ("owner_route_file", "route_file"):
-        if meta.get(key) and Path(meta[key]).is_file():
-            return Path(meta[key])
+    metas = [row[1]] if row is not None else _archived_metadata(jobs, "attempt_id=" + text)
+    for meta in metas:
+        if meta.get("attempt_id") != text:
+            continue
+        for key in ("owner_route_file", "route_file"):
+            if meta.get(key) and Path(meta[key]).is_file():
+                return Path(meta[key])
     return None
+
+
+def _archived_metadata(jobs, needle):
+    """Metadata of the settled rows the dispatch registry archive holds that contain `needle`."""
+    try:
+        from dispatch_registry_archive import archived_rows
+        lines = archived_rows(jobs or _compose_default_jobs(), needle)
+    except (OSError, ValueError):
+        return []
+    return [parse_registry_metadata(fields[5]) for fields in (line.split("\t") for line in lines)
+            if len(fields) == 6]
 
 
 ROUTE_ATTEMPT_FIELDS = ("worker_type", "route_node", "harness", "failure_class", "note", "log_file")
@@ -12280,6 +12292,12 @@ def resolve_route_argument(value, jobs=None):
                         named.append(meta[f"{key}_file"])
     except OSError:
         pass
+    if not any(Path(path).is_file() for path in named):
+        # A route closed long ago may have its settled rows in the dispatch registry archive.
+        for meta in _archived_metadata(jobs, text):
+            for key in ("owner_route", "route"):
+                if meta.get(f"{key}_id") == text and meta.get(f"{key}_file"):
+                    named.append(meta[f"{key}_file"])
     rc = _route_chain_module()
     if rc is not None:
         # This session's ledger first, then the newest ledgers of every session (any event).

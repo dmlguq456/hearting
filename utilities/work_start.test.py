@@ -1448,6 +1448,34 @@ class WorkStartTest(unittest.TestCase):
                                                         "reason": "parent-identity-unmatched"}])
         self.assertEqual(self.calls, [])
 
+    def test_a_closed_route_whose_rows_moved_to_the_archive_replays_as_completed(self):
+        # The registry archive moved the settled owner row; its completion proof reads the live
+        # registry (owner_route_binding._owner_snapshot), so the replay puts the rows back first.
+        import dispatch_registry_archive as archive
+        import dispatch_terminal_commit as terminal
+        self.path.with_suffix(".outcome.json").write_text(json.dumps({
+            "route_id": self.route["route_id"], "route_hash": self.route["route_hash"],
+            "terminal_gate_proven": True, "terminal_owner_attempt_id": "att-owner"}))
+        owner = ("2026-09-01T00:00:00.000000Z\tdone\t/repo\t/repo\towner\tattempt_id=att-owner,"
+                 f"worker_type=owner,workflow_completion=runtime-v1,owner_route_id={self.route['route_id']}")
+        other = "2026-11-01T00:00:00.000000Z\topen\t/repo\t/repo\tother\tattempt_id=att-other"
+        archive._archive(self.jobs.parent, self.jobs, [owner], time.time_ns())
+        self.jobs.write_text(other + "\n")
+        seen = []
+
+        def completion(jobs, status, meta):
+            records = __import__("dispatch_registry_cache").registry_view(jobs).completion_attempt_records(
+                meta["attempt_id"])
+            seen.append((meta["attempt_id"], len(records)))
+            return terminal.CompletionState("complete" if len(records) == 1 else "unknown")
+        with mock.patch.object(terminal, "owner_completion_state", side_effect=completion), \
+                mock.patch.object(terminal, "completed_owner_publication", return_value=None):
+            result = self.start()
+        self.assertEqual((result["state"], result["required_action"]), ("completed", "advance-completed"), result)
+        self.assertEqual(seen, [("att-owner", 1)])
+        self.assertEqual(self.jobs.read_text().splitlines(), [owner, other])
+        self.assertEqual(self.calls, [])
+
     def test_a_replaced_owner_with_nothing_to_settle_does_not_hold_a_closed_route(self):
         # The first owner stopped at a gate and was replaced; its BLOCKED row is `not-applicable`,
         # and the replacement settled the route (Claude r4 leg1, defect 2).

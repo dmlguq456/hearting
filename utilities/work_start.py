@@ -661,17 +661,19 @@ def _rows(jobs):
     return rows
 
 
-def _archived_rows(jobs, route_id):
-    """`_rows` of the settled rows naming this route that the registry archive holds."""
-    from dispatch_registry_archive import archived_rows
-    rows = {}
-    for line in archived_rows(jobs, route_id):
-        fields = line.split("\t")
-        if len(fields) == 6:
-            meta = parse_registry_metadata(fields[5])
-            if meta.get("attempt_id"):
-                rows[meta["attempt_id"]] = (fields[1], meta)
-    return rows
+def _restore_archived_route(jobs, route_id):
+    """Put a closed route's archived rows back before its replay reads the registry.
+
+    Settled rows of routes closed long ago move to the dispatch archive; every check of a
+    replay (the owner row, its completion proof, a framed decision's legs) reads the live
+    registry, so they come back first. A route any live row still names was never moved."""
+    try:
+        if f"={route_id}".encode() in Path(jobs).read_bytes():
+            return
+        from dispatch_registry_archive import restore
+        restore(jobs, route_id)
+    except OSError:
+        pass   # an unreadable registry or a busy lock: the replay reports what it finds
 
 
 def _current_parent_session_id():
@@ -2102,6 +2104,7 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
                 "next_step": "This route was closed automatically after it sat unused; run parent_next_command "
                              "to compose the same work again."}
     if closed:
+        _restore_archived_route(jobs, route["route_id"])
         if closed.get("finish_pending"):
             return {**result, "state": "needs-attention", "reason": "finish-pending",
                     "required_action": "resume-inline-finish", "outcome": closed}
@@ -2115,9 +2118,6 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
                                   sleep=sleep, clock=clock)
         owner = closed.get("terminal_owner_attempt_id")
         rows = _rows(jobs)
-        if owner and owner not in rows:
-            # A route closed long ago may have its settled rows in the dispatch archive.
-            rows = {**_archived_rows(jobs, route["route_id"]), **rows}
         if owner and owner not in rows:
             raise ValueError("closed-route-owner-missing")
         publication = None

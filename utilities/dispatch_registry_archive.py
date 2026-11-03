@@ -8,9 +8,13 @@ shown by `dispatch-registry.py inventory --include-archive`) and leaves every ot
 
 Rows that share any attempt or route id form one group, and a group moves only as a
 whole, when each of its rows
-  - is terminal and ended at least ARCHIVE_AFTER_NS ago,
+  - is terminal and ended at least ARCHIVE_AFTER_NS ago (its end is the last write of its
+    attempt log, remembered while the log exists; the registration time when no later
+    write was seen),
   - is bound to a route whose exact closure is at least ARCHIVE_AFTER_NS old,
   - owes no parent delivery (none, or resolved),
+  - if it ever started, has its route's completion markers on disk (whether a continuation
+    ran is read from its started rows or its markers; the markers then still answer),
   - has no attempt log left: the attempt-log retention, which needs the row to
     judge the log, retires a settled log first, and
   - is valid UTF-8, one line by every reader's line rules, and appears once.
@@ -24,6 +28,13 @@ atomic replace, so a registration or close that ran meanwhile keeps its row. A c
 between the two steps leaves a row in both places, never in neither, and a later pass
 does not archive it twice. The pass runs from the dispatch reap watch, beside the
 attempt-log retention, at most once every DUE_SECONDS.
+
+Readers that decide from a row's absence find moved rows: a replay of a closed route puts
+its rows back (`restore`), route and attempt ids resolve through `archived_rows`, and a
+registration whose preparation spanned a move does not count the moved rows as a change
+(`moved_only`). `python3 dispatch_registry_archive.py restore [--id <route or attempt id>]`
+puts archived rows back into the registry in time order; a later pass moves rows that
+still qualify again.
 """
 
 from __future__ import annotations
@@ -43,6 +54,8 @@ DUE_SECONDS = 6 * 3600
 MAX_SELECT_SECONDS = 120
 LOCK_WAIT_SECONDS = 10
 STATE_NAME = "registry-archive.json"
+MOVED_NAME = "registry-archive.moved.json"   # the attempts the last rewrite moved
+LATE_END_NS = 3600 * 1_000_000_000   # a log written this long after registration is remembered
 LOCK_NAME = "registry-archive.lock"
 SEGMENT_PREFIX = "registry-"
 SCHEMA_VERSION = 1   # the dispatch archive row schema (dispatch_registry_inventory)
@@ -97,14 +110,46 @@ def _groups(lines):
     return [find(index) for index in range(len(lines))]
 
 
-def select(lines, *, now_ns, route_closed_ns, delivery_settled, deadline=None):
+def _log_written_ns(path):
+    """Last write of the attempt log, or None when it is gone or unreadable."""
+    if not path or not os.path.isabs(path):
+        return None
+    try:
+        return os.lstat(path).st_mtime_ns
+    except OSError:
+        return None
+
+
+def _markers_present(root: Path):
+    """Whether a route's completion markers exist (`completion/<route id>` is not empty)."""
+    seen = {}
+
+    def present(route_id):
+        if route_id not in seen:
+            try:
+                with os.scandir(root / "completion" / route_id) as entries:
+                    seen[route_id] = any(True for _entry in entries)
+            except OSError:
+                seen[route_id] = False
+        return seen[route_id]
+
+    return present
+
+
+def select(lines, *, now_ns, route_closed_ns, delivery_settled, deadline=None, ended=None,
+           markers_present=None):
     """The indexes of `lines` whose whole groups may move to the archive.
 
     `route_closed_ns(metadata)` is the exact closure time of the row's route, or None when
     it is open, pending or unknown; `delivery_settled(metadata)` says the row owes no parent
-    delivery. Past `deadline` (monotonic) no further row is judged, so it stays."""
+    delivery; `markers_present(route_id)` says the route's completion markers exist. `ended`
+    maps an attempt to its remembered end (the last write of its log seen well after
+    registration); this call adds what it sees. Past `deadline` (monotonic) no further row
+    is judged, so it stays."""
     from dispatch_contract import parse_registry_metadata
+    from route_authority import continuation_attempt_state
     horizon = now_ns - ARCHIVE_AFTER_NS
+    ended = {} if ended is None else ended
     counts = Counter(lines)
     eligible = [False] * len(lines)
     for index, line in enumerate(lines):
@@ -114,15 +159,23 @@ def select(lines, *, now_ns, route_closed_ns, delivery_settled, deadline=None):
         if (len(fields) != 6 or fields[1] not in TERMINAL or counts[line] != 1
                 or len(line.splitlines()) != 1):
             continue
-        ended = _ended_ns(fields[0])
-        if ended is None or ended > horizon:
-            continue
+        registered = _ended_ns(fields[0])
         metadata = parse_registry_metadata(fields[5])
-        if not metadata.get("attempt_id") or not _log_retired(metadata.get("log_file")):
+        attempt = metadata.get("attempt_id")
+        if registered is None or not attempt:
+            continue
+        written = _log_written_ns(metadata.get("log_file"))
+        if written is not None and written > registered + LATE_END_NS:
+            ended[attempt] = max(written, ended.get(attempt, 0))
+        if max(registered, ended.get(attempt, 0)) > horizon or not _log_retired(metadata.get("log_file")):
             continue
         closed = route_closed_ns(metadata)
         if closed is None or closed > horizon or not delivery_settled(metadata):
             continue
+        if markers_present is not None and continuation_attempt_state(metadata) != "unstarted" and not all(
+                markers_present(metadata[key]) for key in ("route_id", "route", "owner_route_id")
+                if metadata.get(key)):
+            continue   # its started rows are the only proof this route's work ran
         eligible[index] = True
     groups = _groups(lines)
     blocked = {group for index, group in enumerate(groups) if not eligible[index]}
@@ -285,8 +338,63 @@ def _remove(jobs: Path, archived: dict, snapshot: set) -> dict:
         if not remove:
             return {"removed": 0}
         kept = [line for line in lines if line not in remove]
+        if not kept:
+            return {"removed": 0, "skipped": "registry-would-be-empty"}   # its replace writes one blank line
+        _record_moved(jobs.parent, remove)
         _atomic_registry_replace(jobs, kept)
         return {"removed": len(lines) - len(kept)}
+
+
+def _attempt_of(row) -> str:
+    """The attempt id of a raw registry line or a parsed `(*fields[:5], metadata items)` value."""
+    if isinstance(row, str):
+        fields = row.split("\t")
+        pipe = fields[5] if len(fields) == 6 else ""
+        values = dict(part.split("=", 1) for part in pipe.split(",") if "=" in part)
+    elif isinstance(row, tuple) and len(row) == 6 and isinstance(row[5], tuple):
+        values = dict(row[5])
+    else:
+        return ""
+    return values.get("attempt_id", "")
+
+
+def _status_of(row) -> str:
+    if isinstance(row, str):
+        fields = row.split("\t")
+        return fields[1] if len(fields) == 6 else ""
+    return row[1] if isinstance(row, tuple) and len(row) == 6 else ""
+
+
+def _record_moved(root: Path, raws) -> None:
+    """Name the attempts this rewrite moves, for a registration whose preparation spans it."""
+    moved = sorted({_attempt_of(raw) for raw in raws} - {""})
+    temporary = root / (MOVED_NAME + ".tmp")
+    temporary.write_text(json.dumps({"schema_version": 1, "attempt_ids": moved}) + "\n", encoding="utf-8")
+    os.replace(temporary, root / MOVED_NAME)
+
+
+def moved_only(jobs, prepared, fresh) -> bool:
+    """`fresh` is `prepared` less rows the last archive rewrite moved, and nothing else changed.
+
+    A registration pins the registry rows its preparation read; moving settled rows to the
+    archive changes none of their facts, so it is not a change of those dependencies. Both
+    sides are the pin's values: raw lines or `(*fields[:5], metadata items)`."""
+    fresh, prepared = tuple(fresh), tuple(prepared)
+    if len(fresh) >= len(prepared):
+        return False
+    try:
+        record = json.loads((Path(jobs).expanduser().resolve(strict=False).parent
+                             / MOVED_NAME).read_text(encoding="utf-8"))
+        moved = set(record["attempt_ids"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+    position = 0
+    for row in prepared:
+        if position < len(fresh) and fresh[position] == row:
+            position += 1
+        elif _status_of(row) not in TERMINAL or _attempt_of(row) not in moved:
+            return False
+    return position == len(fresh)
 
 
 def _pass(jobs: Path, root: Path, state: dict, now_ns: int) -> dict:
@@ -294,14 +402,19 @@ def _pass(jobs: Path, root: Path, state: dict, now_ns: int) -> dict:
     if lines is None:
         return {"skipped": "registry-not-whole-utf8"}
     proven = state.get("closed_routes") if isinstance(state.get("closed_routes"), dict) else {}
+    ended = {key: value for key, value in (state.get("ended") or {}).items()
+             if isinstance(key, str) and isinstance(value, int)}
     closed, seen = _route_closure(jobs, proven)
     indexes = select(lines, now_ns=now_ns, route_closed_ns=closed,
                      delivery_settled=_delivery_settled(root),
-                     deadline=time.monotonic() + MAX_SELECT_SECONDS)
-    # Proven closures are final; keep those of routes the registry still names.
+                     deadline=time.monotonic() + MAX_SELECT_SECONDS, ended=ended,
+                     markers_present=_markers_present(root))
+    # Proven closures are final; keep those of routes the registry still names, and the
+    # remembered ends of attempts it still holds.
     named = set(_ID_RE.findall("\n".join(lines)))
     state["closed_routes"] = {key: value for key, value in {**proven, **seen}.items()
                               if value is not None and key.split(":", 1)[0] in named}
+    state["ended"] = {key: value for key, value in ended.items() if key in named}
     if not indexes:
         return {"archived": 0, "removed": 0, "rows": len(lines)}
     groups = _groups(lines)
@@ -369,14 +482,14 @@ def sweep_best_effort(jobs):
         return None
 
 
-def archived_rows(jobs, needle: str):
-    """Raw registry lines moved to the archive that contain `needle` (a route or attempt id),
-    oldest segment first, each once. History and closed-route replays read these; liveness,
-    terminal and marker judgments never do (the archive holds only settled rows)."""
+def archived_rows(jobs, needle: str = ""):
+    """Raw registry lines moved to the archive, oldest segment first, each once; with `needle`
+    (a route or attempt id, or any text) only those that contain it. History, id resolution
+    and closed-route replays read these; liveness, terminal and marker judgments never do
+    (the archive holds only settled rows)."""
     archive = Path(jobs).expanduser().resolve(strict=False).parent / "archive"
     found, seen = [], set()
-    if not needle:
-        return found
+    encoded = needle.encode("utf-8")
     try:
         segments = sorted(archive.glob(SEGMENT_PREFIX + "*"))
     except OSError:
@@ -386,7 +499,6 @@ def archived_rows(jobs, needle: str):
             data = (segment / "rows.jsonl").read_bytes()
         except OSError:
             continue
-        encoded = needle.encode("utf-8")
         for line in data.split(b"\n"):
             if encoded not in line:
                 continue
@@ -398,3 +510,61 @@ def archived_rows(jobs, needle: str):
                 seen.add(raw)
                 found.append(raw)
     return found
+
+
+def restore(jobs, needle: str = "") -> int:
+    """Put archived rows back into the registry in time order; returns how many came back.
+
+    With `needle` (a route or attempt id), only the archived groups that name it. Rows still
+    in the registry are not doubled. The archive keeps its copy, so a later pass moves rows
+    that still qualify again. Runs under the registry's own lock and atomic replace."""
+    from dispatch_contract import _atomic_registry_replace
+    jobs = Path(jobs).expanduser().resolve(strict=False)
+    archived = archived_rows(jobs)
+    if needle:
+        groups = _groups(archived)
+        wanted = {groups[index] for index, raw in enumerate(archived) if needle in raw}
+        archived = [raw for index, raw in enumerate(archived) if groups[index] in wanted]
+    if not archived:
+        return 0
+    with open(f"{jobs}.lock", "a", encoding="utf-8") as lock:
+        if not _lock_registry(lock, time.monotonic() + LOCK_WAIT_SECONDS):
+            raise OSError("registry-busy")
+        lines = _read_lines(jobs)
+        if lines is None:
+            raise OSError("registry-not-whole-utf8")
+        present = set(lines)
+        back = sorted((raw for raw in archived if raw not in present), key=lambda raw: raw.split("\t", 1)[0])
+        if not back:
+            return 0
+        merged, position = [], 0
+        for line in lines:
+            stamp = line.split("\t", 1)[0]
+            while position < len(back) and back[position].split("\t", 1)[0] <= stamp:
+                merged.append(back[position])
+                position += 1
+            merged.append(line)
+        merged.extend(back[position:])
+        _atomic_registry_replace(jobs, merged)
+        return len(back)
+
+
+def _main(argv=None) -> int:
+    import argparse
+    parser = argparse.ArgumentParser(description="Put archived dispatch registry rows back.")
+    parser.add_argument("action", choices=("restore",))
+    parser.add_argument("--jobs", default="", help="registry path (default: the canonical jobs.log)")
+    parser.add_argument("--id", default="", help="only the archived groups that name this route or attempt id")
+    args = parser.parse_args(argv)
+    jobs = args.jobs or os.environ.get("AGENT_DISPATCH_JOBS", "")
+    if not jobs:
+        from dispatch_contract import stable_state_root
+        jobs = stable_state_root(os.environ) / "jobs.log"
+    print(f"restored={restore(jobs, args.id)}")
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    raise SystemExit(_main())
