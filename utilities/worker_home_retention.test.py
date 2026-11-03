@@ -4304,6 +4304,20 @@ class Bounds(Fixture):
         finally:
             os.close(fd)
 
+    def test_due_homes_that_detach_refuses_do_not_keep_the_short_interval(self):
+        # RV-1041 R2: a full budget of due homes that `_detach` refuses again
+        # (renewed protection, unsafe partial retention) is not backlog.
+        for index in range(R.REMOVE_LIMIT + 1):
+            self.add(f"att-refused-{index}")
+        base = self.now + int(8 / 7 * RETENTION_NS)
+        R.sweep(self.jobs, now_ns=self.now, force=True)
+        with mock.patch.object(R, "_detach", return_value="defer:partial-retention-unsafe"):
+            refused = R.sweep(self.jobs, now_ns=base, force=True)
+        self.assertEqual((refused["due"], refused["removed"]), (R.REMOVE_LIMIT, 0))
+        self.assertNotIn("more", refused)
+        self.assertTrue(all(self.home_path(f"att-refused-{index}").exists()
+                            for index in range(R.REMOVE_LIMIT + 1)))
+
     def test_next_pass_starts_sooner_only_while_due_homes_are_left_behind(self):
         for index in range(R.REMOVE_LIMIT + 1):
             self.add(f"att-more-{index}")
