@@ -458,7 +458,7 @@ def idle_tidy_terms(req: Optional[dict] = None, *, request: bool = True) -> str:
     off = f"끄려면 {shown}에 {{\"idle\": {{\"enabled\": false}}}}를 두세요."
     claude = (req or {}).get("harness") == "claude"     # only Claude windows compact for agents
     if not request:
-        agents = ", 백그라운드 에이전트가 있으면 창을 비우는 대신 /compact로 압축합니다" if claude else "합니다"
+        agents = "하고, 백그라운드 에이전트가 있으면 창을 비우는 대신 /compact로 압축합니다" if claude else "합니다"
         return f"자동 유휴 정리는 {when} 동작{agents}. {off}"
     agents = "(백그라운드 에이전트가 있으면 /clear 대신 /compact)" if claude else ""
     return f"{when} 이 요청을 보냅니다. 카드를 받으면 이 창을 비우고{agents} 현황만 짧게 보여 줍니다. {off}"
@@ -2005,6 +2005,35 @@ def _notice_text(outcome: str, reason: str, harness: str, *, compact: bool = Fal
     return f"[정리] 창을 자동으로 비우지 않았습니다({why}). 필요하면 {hint} 하세요.{kept}"
 
 
+# Why an idle card request was not sent, as it was at the last look.
+_IDLE_WAIT_TEXT = {
+    "form-open": "질문·확인 창이 열려 있었습니다",
+    "draft": "입력창에 쓰던 글이 있었습니다",
+    "draft-unknown": "입력창이 비어 있는지 알 수 없었습니다",
+    "screen-unknown": "화면을 읽지 못했습니다",
+    "expired": "보낼 수 있는 때가 예약 시간 안에 오지 않았습니다",
+}
+# Not-sent reasons the person caused (typing, a new card): no line for these.
+_IDLE_QUIET = frozenset({"new-input", "draft", "card-changed", "superseded", "off"})
+
+
+def _idle_notice_text(req: dict, reason: str) -> str:
+    """The automatic idle tidy result line, true to what happened: whether its request was
+    typed at all, and why it stopped. "" when the person's own input stopped it."""
+    request = req.get("idle_request") if isinstance(req.get("idle_request"), dict) else {}
+    sent = request.get("state") in ("sending", "arrived", "sent", "accepted", "unverified")
+    why = (_IDLE_WAIT_TEXT.get(reason)
+           or ("화면이 쉬는 중이 아니었습니다" if str(reason).startswith("not-idle-") else "")
+           or REASON_TEXT.get(reason, reason or "알 수 없음"))
+    terms = idle_tidy_terms(req, request=False)
+    if not sent:
+        if reason in _IDLE_QUIET:
+            return ""
+        return (f"[정리] 자동 유휴 정리 요청을 보내지 않았습니다({why}). 이 창에는 아무것도 입력하지 않았고, "
+                f"다음 사람 입력 뒤 조건이 맞으면 다시 시도합니다. {terms}")
+    return f"[정리] 자동 유휴 정리 요청은 보냈지만 창 전환을 확인하지 못했습니다({why}). {terms}"
+
+
 def _continue_notice_text(outcome: str, reason: str, prompt_text: str = CONTINUE_TEXT) -> str:
     said = f'"{prompt_text}"'
     if outcome == "unverified":
@@ -2071,14 +2100,15 @@ def _finish(seat_key: str, nonce: str, outcome: str, reason: str = "", *, observ
     if outcome not in ("cleared", "cancelled"):
         with contextlib.suppress(BaseException):
             if req.get("origin") == "idle":
-                notice = "[정리] 자동 유휴 정리의 창 전환을 확인하지 못했습니다. " + idle_tidy_terms(req, request=False)
+                notice = _idle_notice_text(req, reason)
             elif req.get("origin") == "compact":
                 notice = "[정리] 자동 정리의 창 전환을 확인하지 못했습니다."
             else:
                 notice = _notice_text(outcome, reason, str(req.get("harness") or ""),
                                       compact=req.get("clear_command") == "compact")
-            st.write_notice(_booked_seat(req, seat_key), notice,
-                            author_harness=str(req.get("harness") or ""), author_sid=str(req.get("sid") or ""))
+            if notice:
+                st.write_notice(_booked_seat(req, seat_key), notice,
+                                author_harness=str(req.get("harness") or ""), author_sid=str(req.get("sid") or ""))
     return True
 
 
@@ -2209,6 +2239,7 @@ def _wait_idle_card_acceptance(seat_key: str, nonce: str, sleep: Callable[[float
 
 def _idle_due_and_request(seat_key: str, nonce: str, sleep: Callable[[float], None]) -> str:
     path = reservation_path(seat_key)
+    waited = ""         # why the last look did not send (a form, a draft, a busy screen)
     while True:
         req = read_reservation(seat_key)
         if not req or req.get("nonce") != nonce or req.get("status") != "reserved":
@@ -2225,7 +2256,7 @@ def _idle_due_and_request(seat_key: str, nonce: str, sleep: Callable[[float], No
         due = float(idle.get("due_at", 0) or 0)
         now = st.now_epoch()
         if now > float(req.get("deadline", 0) or 0):
-            return "skipped" if _finish(seat_key, nonce, "skipped", "expired") else "superseded"
+            return "skipped" if _finish(seat_key, nonce, "skipped", waited or "expired") else "superseded"
         if now < due:
             # The same absolute due_at survives interruptions and duplicate events.
             sleep(min(30.0, due - now))
@@ -2248,6 +2279,7 @@ def _idle_due_and_request(seat_key: str, nonce: str, sleep: Callable[[float], No
                                                     request.get("reason") or verdict.get("reason")) else "superseded"
                 return "pending"
             if verdict.get("accepted") == "queued" and st.now_epoch() < float(req.get("deadline", 0) or 0):
+                waited = str(verdict.get("reason") or waited)
                 sleep(min(5.0, max(0.0, float(req.get("deadline", 0) or 0) - st.now_epoch())))
                 continue
             reason = verdict.get("reason") or "idle-card-not-accepted"
