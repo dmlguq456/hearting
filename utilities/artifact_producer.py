@@ -6005,7 +6005,10 @@ def finalize(
         if prescan is not None and prescan.open_cycle:
             # First close.  The cycle's own refresh lock (before the admission lock, as a refresh
             # takes them) holds off a second close of it while `lstat` confirms what was read; the
-            # admission lock then covers only the short write section below.
+            # admission lock then covers only the short write section below.  A read that found
+            # invalid names stopped there and read no file (`_prescan_open_cycle`), so no name it
+            # listed is `lstat`-confirmed here: the `output-invalid` refusal rests on that listing,
+            # and a name fixed after it is seen by the next close.
             if not prescan.complete:
                 _keep_prescan_digests(root, cycle_id, prescan)
                 return {"status": "deferred", "reason": "scan-budget", "cycle_id": cycle_id}
