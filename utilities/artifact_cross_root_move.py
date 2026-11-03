@@ -173,7 +173,8 @@ def _supports(root, records, campaign_path, route_ids):
         if not path.is_file() or path.suffix not in {".json", ".jsonl", ".md", ".log", ".txt"}:
             continue
         rel = path.relative_to(root).as_posix()
-        if "/relocations/" in rel or "/shared" in rel or path.name in {"LATEST.json", "index.json"}:
+        if ("/relocations/" in rel or "/shared" in rel or "/index.bulk/" in rel
+                or path.name in {"LATEST.json", "index.json"}):
             continue
         raw = path.read_bytes()
         if any(token in rel or token.encode() in raw for token in ids):

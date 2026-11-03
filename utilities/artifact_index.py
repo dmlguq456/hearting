@@ -204,6 +204,16 @@ def canonical_bytes(index: IndexDocument) -> bytes:
     return _manifest_canonical_bytes(to_payload(index))
 
 
+def copy_section(section: Mapping[str, Any]) -> Any:
+    """A writable copy of one section that shares nothing a caller can change.
+
+    A plain section is copied as a dict.  A section that keeps most of its rows outside
+    `index.json` (`artifact_admission`'s per-cycle rows) copies only what it holds in
+    memory, so changing one cycle's rows never costs a copy of every other cycle's."""
+    copier = getattr(section, "copy_section", None)
+    return copier() if callable(copier) else dict(section)
+
+
 def idempotent_match(
     index: IndexDocument,
     document: Mapping[str, Any],
@@ -422,10 +432,10 @@ def apply(
     manifest_digest: str,
     idempotency_key: str,
 ) -> IndexDocument:
-    stable_ids = dict(index.stable_ids)
+    stable_ids = copy_section(index.stable_ids)
     routes = {k: dict(v) for k, v in index.routes.items()}
-    event_ids = dict(index.event_ids)
-    streams = dict(index.streams)
+    event_ids = copy_section(index.event_ids)
+    streams = copy_section(index.streams)
     manifests = dict(index.manifests)
     cycles = dict(index.cycles)
 
