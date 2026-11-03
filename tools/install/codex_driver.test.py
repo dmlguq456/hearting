@@ -71,7 +71,7 @@ class CodexDriverLauncherRetirementTest(unittest.TestCase):
         merged_root = tomllib.loads(config.read_text(encoding="utf-8"))
         merged = merged_root["tui"]
         self.assertIs(merged_root["check_for_update_on_startup"], False)
-        self.assertEqual(merged["status_line"], ["custom", "thread-id"])
+        self.assertEqual(merged["status_line"], ["thread-id", "custom"])
         self.assertIs(merged["status_line_use_colors"], False)
         self.assertEqual((self.runtime_home / "config.toml.pre-harness-tui").read_text(), original)
         action = next(item for item in applied["actions"] if item["action"] == "codex-tui-statusline")
@@ -83,8 +83,8 @@ class CodexDriverLauncherRetirementTest(unittest.TestCase):
             with self.subTest(value=value):
                 config = self.runtime_home / "config.toml"
                 original = (f'check_for_update_on_startup = {str(value).lower()}\n'
-                            '[tui]\nstatus_line = ["thread-title", "git-branch", "context-used", '
-                            '"model-with-reasoning", "five-hour-limit", "weekly-limit", "thread-id"]\n'
+                            '[tui]\nstatus_line = ["thread-id", "thread-title", "git-branch", '
+                            '"context-used", "model-with-reasoning", "five-hour-limit", "weekly-limit"]\n'
                             'status_line_use_colors = true\n')
                 config.write_text(original, encoding="utf-8")
                 result = codex_driver.install(dry_run=False)
@@ -115,8 +115,28 @@ class CodexDriverLauncherRetirementTest(unittest.TestCase):
         parsed_root = tomllib.loads(target.read_text(encoding="utf-8"))
         parsed = parsed_root["tui"]
         self.assertIs(parsed_root["check_for_update_on_startup"], False)
-        self.assertEqual(parsed["status_line"], ["custom", "thread-id"])
+        self.assertEqual(parsed["status_line"], ["thread-id", "custom"])
         self.assertIs(parsed["status_line_use_colors"], False)
+
+    def test_install_refresh_moves_the_former_default_thread_id_first(self):
+        import tomllib
+        config = self.runtime_home / "config.toml"
+        former = ('status_line = ["thread-title", "git-branch", "context-used", '
+                  '"model-with-reasoning", "five-hour-limit", "weekly-limit", "thread-id"]')
+        current = ('status_line = ["thread-id", "thread-title", "git-branch", '
+                   '"context-used", "model-with-reasoning", "five-hour-limit", "weekly-limit"]')
+        original = ('check_for_update_on_startup = true\nmodel = "keep"\n[tui]\n' + former
+                    + '\nstatus_line_use_colors = true\n\n[hooks.state]\n"example" = "keep"\n')
+        config.write_text(original, encoding="utf-8")
+        result = codex_driver.install(dry_run=False)
+        self.assertEqual(config.read_text(encoding="utf-8"), original.replace(former, current))
+        self.assertEqual(tomllib.loads(config.read_text(encoding="utf-8"))["tui"]["status_line"][0],
+                         "thread-id")
+        action = next(item for item in result["actions"] if item["action"] == "codex-tui-statusline")
+        self.assertEqual(action["status"], "updated")
+        again = codex_driver.install(dry_run=False)
+        action = next(item for item in again["actions"] if item["action"] == "codex-tui-statusline")
+        self.assertEqual(action["status"], "unchanged")
 
     def test_invalid_statusline_is_skipped_without_blocking_install(self):
         config = self.runtime_home / "config.toml"

@@ -507,7 +507,7 @@ class WrapperCommonTest(unittest.TestCase):
                          mock.patch.object(C, "validate_route_mode_axes"), \
                          mock.patch.object(C.subprocess, "run", side_effect=fake_run), \
                          mock.patch("subprocess.check_output", return_value=str(fixture.base)), \
-                         mock.patch("review_input.preview_request_nodes", return_value=frozenset()), \
+                         mock.patch("review_input.preview_request_admission", return_value=None), \
                          redirect_stdout(io.StringIO()):
                         self.assertEqual(wrapper.validate_route_record(args), 0)
                         self.assertEqual(durable_snapshot(), before)

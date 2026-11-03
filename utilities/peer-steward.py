@@ -6008,16 +6008,6 @@ def _status_entry(watch_id, arm, root):
     }
 
 
-def _watch_notice_pending(watch_id, recipient):
-    """A queued exact native notice owns the display/ACK path for this receipt."""
-    try:
-        ref = f"peer-watch:{watch_id}"
-        return any(ref in (row.get("refs") or ())
-                   for row in peer_message._pending_rows(recipient=recipient))
-    except Exception:
-        return False
-
-
 _PEER_STATUS_MAX_ROWS = 20
 _PEER_STATUS_MAX_THREADS = 8
 _PEER_STATUS_RPC_TIMEOUT = 0.25
@@ -6139,21 +6129,51 @@ def _peer_status_line(entry):
     return line
 
 
+def undelivered_watch_rows(entries=None, root=None, *, deadline=None):
+    """This session's watch receipts that nobody acknowledged and no queued
+    exact notice carries: `status --undelivered` and the Claude prompt sweep.
+
+    ``deadline`` (``time.monotonic()``) bounds a hook. Watches it did not reach
+    stay un-acked for the next prompt, the Stop path and the asyncRewake hook;
+    when it cuts the queued-notice read short nothing is listed, because an
+    unproven notice could show the same receipt twice.
+    """
+    root = root or _watch_root()
+    entries = _watch_entries(root) if entries is None else entries
+    sid, harness = _current_session_identity()
+    rows = []
+    for watch_id, arm in entries:  # newest arm first
+        if deadline is not None and time.monotonic() >= deadline:
+            break
+        row = _status_entry(watch_id, arm, root)
+        recipient = row.get("recipient") or {}
+        if (row["state"] == "receipt" and recipient.get("session_id") == sid
+                and recipient.get("harness") == harness):
+            rows.append(row)
+    if not rows:
+        return rows
+    # A queued exact native notice owns the display/ACK path for its receipt.
+    # One read of this recipient's queued rows instead of one per receipt.
+    try:
+        queued = {ref for pending in peer_message._pending_rows(
+                      recipient={"harness": harness, "session_id": sid}, deadline=deadline)
+                  for ref in pending.get("refs") or () if isinstance(ref, str)}
+    except Exception:  # noqa: BLE001 - as before: an unreadable queue never hides a receipt
+        queued = set()
+    if deadline is not None and time.monotonic() >= deadline:
+        return []
+    return [row for row in rows if f"peer-watch:{row['watch_id']}" not in queued]
+
+
 def cmd_status(args):
     root = _watch_root()
     entries = _watch_entries(root)
     if args.watch:
         entries = [(w, a) for w, a in entries if w == args.watch]
-    rows = [_status_entry(w, a, root) for w, a in entries]
     if args.undelivered:
-        sid, harness = _current_session_identity()
-        rows = [
-            row for row in rows
-            if row["state"] == "receipt"
-            and (row.get("recipient") or {}).get("session_id") == sid
-            and (row.get("recipient") or {}).get("harness") == harness
-            and not _watch_notice_pending(row["watch_id"], row.get("recipient") or {})
-        ]
+        rows = undelivered_watch_rows(entries, root)
+    else:
+        rows = [_status_entry(w, a, root) for w, a in entries]
     peer_rows, peer_omitted, peer_error = [], 0, None
     if not args.watch:
         try:

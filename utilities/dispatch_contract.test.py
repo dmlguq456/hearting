@@ -211,6 +211,25 @@ def controlled_metadata_scope(metadata):
   jobs=Path(td)/"jobs.log";jobs.write_text(attempt_row(metadata)+"\n")
   with controlled_process_scope(jobs):yield
 
+class RegistrationParseTest(unittest.TestCase):
+ def test_the_literal_attempt_check_agrees_with_the_parsed_identity(self):
+  for pipe,attempt,expected in (("attempt_id=att-a1,x=1","att-a1",True),
+                                ("attempt_id=att-a10","att-a1",False),
+                                ("parent_attempt_id=att-a1,attempt_id=att-b","att-a1",False),
+                                ("note=attempt_id=att-a1,attempt_id=att-b","att-a1",False),
+                                ("attempt_id=att-b,attempt_id=att-a1","att-a1",True),
+                                ("attempt_id=,x=1","",True),("x=1","",False)):
+   self.assertEqual(D.row_has_attempt(pipe,attempt),expected,(pipe,attempt))
+   self.assertEqual(D.row_has_attempt(pipe,attempt),D.parse_registry_metadata(pipe).get("attempt_id")==attempt)
+ def test_one_parse_per_row_text_stays_aligned_with_every_read(self):
+  parsed=D._RegistryParse(); row="t\topen\tr\tw\ts\tattempt_id=att-a1"
+  first=parsed.rows([row,"malformed"]); later=parsed.rows(["new\tdone\tr\tw\ts\tattempt_id=att-b",row])
+  self.assertIsNone(first[1]); self.assertIs(later[1],first[0])
+  self.assertEqual(later[0][1]["attempt_id"],"att-b"); self.assertEqual(first[0][0][1],"open")
+  with mock.patch.object(D,"parse_registry_metadata",side_effect=AssertionError("parsed again")):
+   self.assertIs(parsed.rows([row])[0],first[0])
+
+
 class FrameLaunchGateTest(unittest.TestCase):
  def test_launch_degradation_uses_existing_writer_and_write_failure_is_harmless(self):
   with tempfile.TemporaryDirectory() as td:
@@ -601,61 +620,13 @@ class DispatchContractTest(unittest.TestCase):
    values.update(changed)
    self.assertFalse(D.codex_standard_owner_network_enabled(**values), changed)
 
- def test_recovery_identity_is_canonical_and_process_stable(self):
-  identity={
-   "source_route_id":"rt-source",
-   "source_route_hash":"sha256:"+"1"*64,
-   "node_or_group_leg":"execute/leg-1",
-   "original_attempt_id":"att-original",
-   "cancellation_receipt_digest":"sha256:"+"2"*64,
-  }
-  expected="rec-"+hashlib.sha256(json.dumps(
-   identity,ensure_ascii=False,sort_keys=True,separators=(",",":"),
-  ).encode("utf-8")).hexdigest()
-  self.assertEqual(D.recovery_id(**identity),expected)
-  self.assertEqual(D.recovery_id(
-   cancellation_receipt_digest=identity["cancellation_receipt_digest"],
-   original_attempt_id=identity["original_attempt_id"],
-   node_or_group_leg=identity["node_or_group_leg"],
-   source_route_hash=identity["source_route_hash"],
-   source_route_id=identity["source_route_id"],
-  ),expected)
-  code=("import json,sys;from pathlib import Path;"
-        "sys.path.insert(0,sys.argv[1]);import dispatch_contract as D;"
-        "print(D.recovery_id(**json.loads(sys.argv[2])))")
-  ordered=json.dumps(identity)
-  reversed_order=json.dumps(dict(reversed(tuple(identity.items()))))
-  observed=[subprocess.run(
-   [sys.executable,"-c",code,str(P.parent),payload],
-   check=True,text=True,capture_output=True,
-  ).stdout.strip() for payload in (ordered,reversed_order)]
-  self.assertEqual(observed,[expected,expected])
-
- def test_recovery_identity_rejects_every_incomplete_field(self):
-  identity={
-   "source_route_id":"rt-source",
-   "source_route_hash":"sha256:"+"1"*64,
-   "node_or_group_leg":"execute",
-   "original_attempt_id":"att-original",
-   "cancellation_receipt_digest":"sha256:"+"2"*64,
-  }
-  for key in identity:
-   with self.subTest(key=key):
-    incomplete={**identity,key:""}
-    with self.assertRaises(D.DispatchContractError) as caught:
-     D.recovery_id(**incomplete)
-    self.assertEqual(caught.exception.reason,"recovery-identity-incomplete")
-
  def test_recovery_metadata_round_trips_through_annotate_and_close(self):
   with tempfile.TemporaryDirectory() as td:
    jobs=Path(td)/"jobs.log";attempt="att-recovery-schema"
    row=(f"2026-08-25T00:00:00Z\topen\t/r\t/w\texecute\t{CURRENT},"
         f"route_id=rt-source,route_node=execute,attempt_id={attempt}")
    self.assertTrue(D.claim_attempt_row(jobs,attempt,row))
-   rid=D.recovery_id(
-    source_route_id="rt-source",source_route_hash="sha256:"+"1"*64,
-    node_or_group_leg="execute",original_attempt_id=attempt,
-    cancellation_receipt_digest="sha256:"+"2"*64)
+   rid="rec-"+"3"*64  # an existing SD-106 recovery row's identity
    mutable={
     "recovery_id":rid,
     "retry_ordinal":"1",
@@ -820,129 +791,6 @@ class DispatchContractTest(unittest.TestCase):
     D.seal_cancellation_quiescence_receipt(jobs,metadata["attempt_id"],proof)
    self.assertEqual(caught.exception.reason,"cancellation-quiescence-receipt-conflict")
    self.assertNotEqual(digest,"sha256:"+"f"*64)
-
- def test_recovery_retry_claim_is_stable_and_idempotent(self):
-  with tempfile.TemporaryDirectory() as td:
-   jobs=Path(td)/"jobs.log";metadata=cancellation_metadata()
-   jobs.write_text(attempt_row(metadata)+"\n",encoding="utf-8")
-   empty=D.ProcessGroupObservation("empty")
-   with mock.patch.object(
-    D,"process_group_observation",return_value=empty,
-   ),mock.patch.object(
-    D,"attempt_tagged_descendants",return_value=empty,
-   ),mock.patch.object(
-    D,"attempt_scan_namespace_authority",return_value=True,
-   ):
-    proof=D.prove_attempt_quiescence(metadata,max_wait_seconds=0)
-   receipt=D.seal_cancellation_quiescence_receipt(
-    jobs,metadata["attempt_id"],proof)
-   rid=D.recovery_id(
-    source_route_id=metadata["route_id"],
-    source_route_hash=metadata["route_hash"],node_or_group_leg="execute",
-    original_attempt_id=metadata["attempt_id"],
-    cancellation_receipt_digest=receipt)
-   kwargs=dict(
-    recovery_id=rid,source_route_id=metadata["route_id"],
-    source_route_hash=metadata["route_hash"],node_or_group_leg="execute",
-    original_attempt_id=metadata["attempt_id"],remaining_cascade=7)
-   with mock.patch.object(
-    D,"_atomic_registry_replace",wraps=D._atomic_registry_replace,
-   ) as replace:
-    first=D.claim_recovery_retry(jobs,**kwargs)
-    replay=D.claim_recovery_retry(jobs,**{**kwargs,"remaining_cascade":0})
-   self.assertEqual(replay,first)
-   self.assertTrue(first.start_permitted)
-   self.assertEqual(first.retry_ordinal,1)
-   self.assertEqual(first.retry_attempt_id,D._stable_recovery_attempt_id(rid))
-   self.assertEqual(replace.call_count,1)
-   self.assertEqual(len(jobs.read_text().splitlines()),1)
-   claimed=D.parse_registry_metadata(jobs.read_text().strip().split("\t",5)[5])
-   self.assertEqual(claimed["retry_attempt_id"],first.retry_attempt_id)
-   self.assertEqual(claimed["retry_ordinal"],"1")
-   self.assertTrue(D.seal_recovery_blocked(
-    jobs,original_attempt_id=metadata["attempt_id"],recovery_id=rid))
-   blocked=D.parse_registry_metadata(jobs.read_text().strip().split("\t",5)[5])
-   self.assertEqual(blocked["start_permitted"],"0")
-   self.assertEqual(blocked["retry_attempt_id"],first.retry_attempt_id)
-   self.assertEqual(blocked["retry_ordinal"],"1")
-   exhausted=D.claim_recovery_retry(jobs,**kwargs)
-   self.assertEqual(exhausted.retry_attempt_id,first.retry_attempt_id)
-   self.assertEqual(exhausted.retry_ordinal,1)
-   self.assertFalse(exhausted.start_permitted)
-
- def test_recovery_retry_exhaustion_is_permanent_and_never_claims_start(self):
-  with tempfile.TemporaryDirectory() as td:
-   jobs=Path(td)/"jobs.log";metadata=cancellation_metadata()
-   metadata.update({
-    "cancellation_quiescence_receipt":
-     D.ATTEMPT_CANCELLATION_QUIESCENCE_RECEIPT,
-    "cancellation_receipt_digest":"sha256:"+"7"*64,
-    "quiescence_pgid_proof":D.GROUP_REAP_PROOF,
-    "quiescence_descendant_proof":D.ATTEMPT_DESCENDANT_PROOF,
-   })
-   jobs.write_text(attempt_row(metadata,status="done")+"\n",encoding="utf-8")
-   rid=D.recovery_id(
-    source_route_id=metadata["route_id"],
-    source_route_hash=metadata["route_hash"],node_or_group_leg="execute",
-    original_attempt_id=metadata["attempt_id"],
-    cancellation_receipt_digest=metadata["cancellation_receipt_digest"])
-   kwargs=dict(
-    recovery_id=rid,source_route_id=metadata["route_id"],
-    source_route_hash=metadata["route_hash"],node_or_group_leg="execute",
-    original_attempt_id=metadata["attempt_id"],remaining_cascade=0)
-   with mock.patch.object(
-    D,"_atomic_registry_replace",wraps=D._atomic_registry_replace,
-   ) as replace:
-    exhausted=D.claim_recovery_retry(jobs,**kwargs)
-    replay=D.claim_recovery_retry(jobs,**{**kwargs,"remaining_cascade":3})
-   self.assertEqual(replay,exhausted)
-   self.assertFalse(exhausted.start_permitted)
-   self.assertEqual(exhausted.reason,"receipt-unavailable-retry-exhausted")
-   self.assertEqual(replace.call_count,1)
-   fields=jobs.read_text().strip().split("\t",5)
-   sealed=D.parse_registry_metadata(fields[5])
-   self.assertEqual(fields[1],"done")
-   self.assertEqual(sealed.get("note"),metadata.get("note"))
-   self.assertEqual(sealed["recovery_exhausted"],"1")
-   self.assertEqual(sealed.get("failure_class"),metadata.get("failure_class"))
-   self.assertNotIn("retry_attempt_id",sealed)
-   self.assertFalse(D.attempt_launch_is_available(jobs,metadata["attempt_id"]))
-
- def test_route_wide_retry_limit_is_recomputed_inside_claim_lock(self):
-  with tempfile.TemporaryDirectory() as td:
-   jobs=Path(td)/"jobs.log";rows=[];identities=[]
-   for index in range(2):
-    metadata=cancellation_metadata(f"att-route-cas-{index}")
-    metadata.update({
-     "cancellation_quiescence_receipt":D.ATTEMPT_CANCELLATION_QUIESCENCE_RECEIPT,
-     "cancellation_receipt_digest":"sha256:"+str(index+7)*64,
-     "quiescence_pgid_proof":D.GROUP_REAP_PROOF,
-     "quiescence_descendant_proof":D.ATTEMPT_DESCENDANT_PROOF,
-    })
-    rows.append(attempt_row(metadata,status="done"))
-    identities.append((metadata,D.recovery_id(
-     source_route_id=metadata["route_id"],source_route_hash=metadata["route_hash"],
-     node_or_group_leg="execute",original_attempt_id=metadata["attempt_id"],
-     cancellation_receipt_digest=metadata["cancellation_receipt_digest"])))
-   jobs.write_text("\n".join(rows)+"\n")
-   metadata,rid=identities[0]
-   first=D.claim_recovery_retry(
-    jobs,recovery_id=rid,source_route_id=metadata["route_id"],
-    source_route_hash=metadata["route_hash"],node_or_group_leg="execute",
-    original_attempt_id=metadata["attempt_id"],remaining_cascade=1)
-   with jobs.open("a") as stream:
-    stream.write(attempt_row({
-     **cancellation_metadata(first.retry_attempt_id),
-     "recovery_id":rid,"retry_ordinal":"1",
-    })+"\n")
-   metadata,rid=identities[1]
-   second=D.claim_recovery_retry(
-    jobs,recovery_id=rid,source_route_id=metadata["route_id"],
-    source_route_hash=metadata["route_hash"],node_or_group_leg="execute",
-    original_attempt_id=metadata["attempt_id"],remaining_cascade=1)
-   claims=[first,second]
-   self.assertEqual([claim.start_permitted for claim in claims],[True,False])
-   self.assertEqual(claims[1].reason,"receipt-unavailable-retry-exhausted")
 
  def test_four_field_marker_never_advances_to_false_pass(self):
   with tempfile.TemporaryDirectory() as td:
@@ -2980,12 +2828,6 @@ class DispatchContractTest(unittest.TestCase):
     execution_surface="claude-agent-team-teammate",registered_worker=False,
     fallback_hop="native-subagent"))
   self.assertEqual(caught.exception.reason,"teammate-not-dispatch-attempt")
- def test_launch_broker_is_retired(self):
-  with tempfile.TemporaryDirectory() as td:
-   root=Path(td); jobs=root/"jobs.log"
-   with self.assertRaises(D.DispatchContractError) as caught:
-    D.ensure_launch_broker(root,jobs,dispatch_depth=1,action="start",intensity="strong")
-   self.assertEqual(caught.exception.reason,"launch-broker-retired")
  def test_atomic_attempt_claim_is_exact_and_idempotent(self):
   with tempfile.TemporaryDirectory() as td:
    jobs=Path(td)/"jobs.log"; attempt="att-123456789abc"; prefix="att-123456789abc-extra"
@@ -3246,28 +3088,6 @@ class DispatchContractTest(unittest.TestCase):
    self._run_terminal_claim_race(start_actor,terminal_actor)
    self.assertNotIn("launch_claimed=1",jobs.read_text())
 
- def test_retry_precheck_can_pass_then_terminal_claim_fence_blocks_retry(self):
-  with tempfile.TemporaryDirectory() as td:
-   jobs=Path(td)/"jobs.log"; route="rt-retry-race"; attempt="att-retry-race"
-   metadata=cancellation_metadata(attempt)
-   metadata.update({"route_id":route,"route_hash":"sha256:"+"1"*64})
-   jobs.write_text(attempt_row(metadata)+"\n")
-   precheck_passed=threading.Event(); release_retry=threading.Event()
-   def retry_actor():
-    self.assertIsNone(D.terminal_claim_observation(jobs,route,attempt))
-    precheck_passed.set()
-    self.assertTrue(release_retry.wait(timeout=5))
-    return D.claim_recovery_retry(jobs,recovery_id="recovery-race",source_route_id=route,
-      source_route_hash=metadata["route_hash"],node_or_group_leg="execute",
-      original_attempt_id=attempt,remaining_cascade=1)
-   def terminal_actor():
-    self.assertTrue(precheck_passed.wait(timeout=5))
-    with (Path(f"{jobs}.lock")).open("a") as lock:
-     fcntl.flock(lock.fileno(),fcntl.LOCK_EX)
-     result=D.claim_terminal_route_locked(jobs,route,attempt,lock_fd=lock.fileno(),proof={"writer":"terminal"})
-    release_retry.set()
-    return result
-   self._run_terminal_claim_race(retry_actor,terminal_actor)
  def test_register_to_start_transition_is_crash_atomic(self):
   with tempfile.TemporaryDirectory() as td:
    jobs=Path(td)/"jobs.log"; attempt="att-crashatomic123"
@@ -5771,7 +5591,7 @@ class StageAdvanceClaimTest(unittest.TestCase):
  def test_A11_cancelled_successor_row_is_started_not_reclaimable(self):
   # A cancelled/receiptless successor row must still count as "started" so
   # `runnable_successors` (dispatch_stage_advance.py) never reclaims it --
-  # its recovery is SD-105/106's `claim_recovery_retry`, never stage advance
+  # its recovery is SD-106's same-node retry, never stage advance
   # (plan-check round 1, non-blocking finding 1).
   import dispatch_stage_advance as SA
   with tempfile.TemporaryDirectory() as td:

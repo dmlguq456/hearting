@@ -1513,10 +1513,8 @@ class ReviewRoundCapTest(unittest.TestCase):
     def test_a_sd154_10_admit_round_is_the_one_admission_entry_on_every_surface(self):
         """A-SD154-10 parity: `dispatch-node.py`'s own `main()`, `dispatch-
         batch.py` and `stage-dispatch-fallback.py` all call the SAME
-        `admit_round` (this module's live, auto-recording implementation
-        `CompletionMarkerTest::test_a_sd154_10_admit_round_auto_records_once`
-        exercises end to end) -- none keeps a separate `round_budget(...,
-        revisions=())` call of its own that would silently never auto-record.
+        `admit_round` -- none keeps a separate `round_budget(...,
+        revisions=())` call of its own that would bypass the shared admission.
         """
         root = Path(__file__).resolve().parents[1]
         surfaces = {

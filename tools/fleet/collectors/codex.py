@@ -1982,6 +1982,13 @@ def prepare_tick(sessions, *, wait_timeout=0.0):
             sid = pane_ids.get(sess.pid)
             if not sid or _sid("rollout-x-%s.jsonl" % sid) != sid:
                 continue
+            runtime_home = procscan.read_environ(sess.pid).get("CODEX_HOME")
+            homes = (home, runtime_home) if runtime_home else (home,)
+            path = exact_rollout_for_session_id(sid, homes=homes)
+            if path and _is_subagent(_rollout_meta(path)):
+                # The footer follows the thread on screen; a TUI showing one of
+                # its subagents keeps its own row and that row's rollout.
+                continue
             old_path = paths.get(sess.pid)
             old_sid = _sid(old_path) if old_path else None
             if old_sid != sid and old_path:
@@ -1994,9 +2001,6 @@ def prepare_tick(sessions, *, wait_timeout=0.0):
                 continue
             sess._herdr_session_id = sid
             claimed.add(sid)
-            runtime_home = procscan.read_environ(sess.pid).get("CODEX_HOME")
-            homes = (home, runtime_home) if runtime_home else (home,)
-            path = exact_rollout_for_session_id(sid, homes=homes)
             if path:
                 paths[sess.pid] = path
     _PROC_PATHS.clear()

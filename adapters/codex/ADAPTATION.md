@@ -775,3 +775,8 @@ Session and prompt bridges retain `hookSpecificOutput.additionalContext` for opt
 ## Parent authority and peer transport
 
 Parent-only route actions use the shared current `effective_parent`. A readable handover chain grants them to its last confirmed recipient; an unreadable handover keeps the existing registered-parent fallback. Native Codex queue delivery keeps its current thread identity, stable queue submission, and exact pending/history reconciliation; the shared parent change does not alter that transport.
+
+## Resume and model fallback
+
+- **Resume:** a registered owner's turns are `turn/start` calls on one App Server thread while its supervisor process lives. That thread is `ephemeral` unless the route has a supervised resource-runner continuation; only then does a supervisor restarted during the resource wait call `thread/resume` with the saved thread id, and a different returned id fails as `resource-native-session-changed` (`utilities/codex-app-server-supervisor.py`, `dispatch_resource_wait.durable_native_session`).
+- **Model fallback:** Codex CLI 0.163.0 offers no fallback-model option. A dispatched stage that dies of capacity gets the one shared SD-59 retry on the next model of `CFG_TIER_DEEP_FAILOVER_CASCADE` in `config/models.conf` (`utilities/stage-dispatch-fallback.py`: `capacity_retry`); a `top` stage takes no cascade step there.

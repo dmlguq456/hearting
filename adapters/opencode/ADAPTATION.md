@@ -584,3 +584,8 @@ approval defaults. Cross-launch propagation is not implemented by this slice.
 ## Parent authority and peer transport
 
 Parent-only route actions use the shared current `effective_parent`. A readable handover chain grants them to its last confirmed recipient; an unreadable handover keeps the existing registered-parent fallback. The OpenCode plugin reserves a pending delivery under its verified process identity, rechecks the native root, then marks the exact claim unverified immediately before `client.prompt(noReply: true)`. Each transition has its own 1500 ms subprocess bound; exact native history remains the only response-loss reconciliation.
+
+## Resume and model fallback
+
+- **Resume:** every owner turn is its own `opencode run --format json` process. The first binds the observed `sessionID` in `<lease>.opencode-session.json`, later turns pass `--session <id>`, and a restarted supervisor reads that binding back (`utilities/opencode_session_runtime.py`: `command`, `read_binding`).
+- **Model fallback:** OpenCode v2.0.32 `run` offers no fallback-model option. A dispatched stage that dies of capacity gets the one shared SD-59 retry on the next model of `CFG_TIER_DEEP_FAILOVER_CASCADE` in `config/models.conf` (`utilities/stage-dispatch-fallback.py`: `capacity_retry`); a `top` stage takes no cascade step there.

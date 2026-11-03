@@ -10025,6 +10025,41 @@ class CodexPromptGateAndPeerStatusTest(_TmpRootMixin, unittest.TestCase):
             self.assertEqual((rc, payload["peer_messages"], payload["peer_messages_error"]), (0, [], "OSError"))
             self.assertEqual(self.status()[0], 0)
 
+    # --- the undelivered-receipt reader the Claude prompt sweep shares ---
+    def _receipt_entry(self, watch_id):
+        return {"watch_id": watch_id, "state": "receipt",
+                "recipient": {"harness": "claude", "session_id": "sender-session"}}
+
+    def test_undelivered_watch_rows_read_nothing_past_the_deadline(self):
+        entries = [(f"w{index}", {"watch_id": f"w{index}"}) for index in range(3)]
+        with mock.patch.object(peer_steward, "_status_entry",
+                               side_effect=AssertionError("read past the deadline")):
+            self.assertEqual(peer_steward.undelivered_watch_rows(
+                entries, self.watch_root, deadline=time.monotonic() - 1), [])
+
+    def test_undelivered_watch_rows_skip_queued_notices_and_hold_unproven_ones(self):
+        entries = [("w1", {"watch_id": "w1"}), ("w2", {"watch_id": "w2"})]
+        queued = [{"refs": ["peer-watch:w2"]}]
+
+        def entry(watch_id, _arm, _root):
+            return self._receipt_entry(watch_id)
+
+        with mock.patch.object(peer_steward, "_status_entry", side_effect=entry), \
+                mock.patch.object(self.pm, "_pending_rows", return_value=iter(queued)):
+            rows = peer_steward.undelivered_watch_rows(entries, self.watch_root)
+        self.assertEqual([row["watch_id"] for row in rows], ["w1"])
+
+        def slow_queue(**_kwargs):
+            time.sleep(0.3)
+            return iter(())
+
+        # The queued-notice read ran out of time: listing w1/w2 now could show a
+        # receipt its own notice also carries, so the prompt shows none of them.
+        with mock.patch.object(peer_steward, "_status_entry", side_effect=entry), \
+                mock.patch.object(self.pm, "_pending_rows", side_effect=slow_queue):
+            self.assertEqual(peer_steward.undelivered_watch_rows(
+                entries, self.watch_root, deadline=time.monotonic() + 0.2), [])
+
     def test_status_reads_but_never_writes_the_native_queue(self):
         for index in range(3):
             self.row("note %d" % index, thread="thread-%d" % index)

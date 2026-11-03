@@ -1433,13 +1433,13 @@ class WrapperAdmissionTest(unittest.TestCase):
                                jobs=None, agent_home=ROOT)
         seen = []
         def refusing(*a, **k):
-            seen.append(k["planned_revision_nodes"])
+            seen.append(k["attempt_id"])
             raise DC.DispatchContractError("human-gate-not-raised", "preview-disposition")
-        with mock.patch("review_input.preview_request_nodes", return_value=("plan",)), \
+        with mock.patch("review_input.preview_request_admission", return_value=None), \
              mock.patch.object(DC, "recover_preview_gate_after_refusal", return_value="preview_gate_recovery=unavailable"):
             reason, code, fields = RA.completion_gate(args, "start", ROOT, Path("/j/jobs.log"), gate=refusing,
                                                       before=(lambda: seen.append("before"),))
-        self.assertEqual(seen, ["before", ("plan",)])
+        self.assertEqual(seen, ["before", "att-x"])
         self.assertEqual((reason, code, fields["detail"], fields["child_spawned"]),
                          ("human-gate-not-raised", 65, "preview_gate_recovery=unavailable", "0"))
         self.assertIsNone(RA.completion_gate(args, "start", ROOT, Path("/j/jobs.log"), gate=lambda *a, **k: None))

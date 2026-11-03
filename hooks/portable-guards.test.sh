@@ -493,7 +493,7 @@ else
   fi
 fi
 if AGENT_HOME="$ROOT" CODEX_HOME="$TMP/codex_headless_home" "$ROOT/adapters/codex/bin/install-runtime-projection.sh" >"$TMP/codex_headless_install.out" 2>"$TMP/codex_headless_install.err" \
-  && grep -Fq 'status_line = ["thread-title", "git-branch", "context-used", "model-with-reasoning", "five-hour-limit", "weekly-limit", "thread-id"]' "$TMP/codex_headless_home/config.toml" \
+  && grep -Fq 'status_line = ["thread-id", "thread-title", "git-branch", "context-used", "model-with-reasoning", "five-hour-limit", "weekly-limit"]' "$TMP/codex_headless_home/config.toml" \
   && AGENT_HOME="$ROOT" CODEX_HOME="$TMP/codex_headless_home" CODEX_DISPATCH_SANDBOX_FORCE=danger-full-access "$CODEX" headless --check "$TMP/repo" >"$TMP/codex_headless_check.out" 2>"$TMP/codex_headless_check.err" \
   && grep -q '^runtime_projection=ok$' "$TMP/codex_headless_check.out" \
   && grep -q '^check=hook-trust:skipped reason=authoritative-current-hash-check-not-requested' "$TMP/codex_headless_check.out" \
@@ -1152,7 +1152,7 @@ EOF
 if AGENT_HOME="$ROOT" CODEX_HOME="$TUIHOME" "$CODEX" tui-config >"$TMP/codex_tui.out" 2>"$TMP/codex_tui.err" \
   && grep -q '^status=ok$' "$TMP/codex_tui.out" \
   && grep -q '^changed=yes$' "$TMP/codex_tui.out" \
-  && grep -Fq 'status_line = ["old", "thread-id"]' "$TUIHOME/config.toml" \
+  && grep -Fq 'status_line = ["thread-id", "old"]' "$TUIHOME/config.toml" \
   && grep -Fq 'status_line_use_colors = true' "$TUIHOME/config.toml" \
   && grep -Fq 'model = "keep-me"' "$TUIHOME/config.toml" \
   && grep -Fq '[hooks.state]' "$TUIHOME/config.toml" \

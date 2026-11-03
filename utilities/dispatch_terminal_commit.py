@@ -709,7 +709,15 @@ def publish_producer_binding(*, artifact_root: Path, jobs: Path, route_file: Pat
     ``owner`` is the `validate_owner_route` result its caller already has for
     this exact owner and route; `begin` validates before it takes the admission
     lock, so the registry is not read a second time while the lock is held.
-    The registry is never under that lock, so the second read proved nothing more.
+    The registry is never under that lock, so a second read only narrowed the
+    window in which the row can close or the owner route advance after it was
+    checked; it never closed it.  The window is now the admission wait (at most
+    `LOCK_TIMEOUT_DEFAULT`) plus the locked work.  A binding published inside it
+    names the owner as checked: it is keyed by this route and attempt, its write
+    is exclusive and replay-compared, and the cycle-route admission below (under
+    the caller's admission lock) still refuses a cycle the route cannot bind.
+    A launch binding is written before the owner is spawned, so that owner
+    cannot have advanced yet.
     """
     if owner_attempt_id == "-" or not owner_attempt_id:
         raise TerminalCommitError("producer-binding-required", "owner-attempt")

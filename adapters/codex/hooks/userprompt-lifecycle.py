@@ -10,6 +10,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -480,7 +481,9 @@ def retry_pending_peer(sid: str) -> None:
         spec = importlib.util.spec_from_file_location("_pending_peer", ROOT / "utilities" / "peer-message.py")
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
-        mod.retry_pending_codex({"harness": "codex", "session_id": sid})
+        # Bounded like the Claude prompt hook: unreached rows stay pending.
+        mod.retry_pending_codex({"harness": "codex", "session_id": sid},
+                                deadline=time.monotonic() + 2.5)
     except Exception:
         pass
 

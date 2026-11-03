@@ -621,6 +621,10 @@ def decide_continuation(route=None, *, action, jobs=None, owner_attempt_id=None,
         if _plain_retry_successor(facts.get("registry_rows") or {}, metadata.get("attempt_id")):
             # An ordinary retry already continues this attempt; a claim would only compete with it.
             return ContinuationDecision(False, "not-applicable", next_action="observe")
+        if facts.get("completed_since") and not _replacement_in_flight(
+                jobs, facts.get("registry_rows") or {}, metadata):
+            # Another attempt finished this stage after this one began: it has its result.
+            return ContinuationDecision(False, "not-applicable", next_action="observe")
         if not facts.get("resume_capacity") and not _replacement_in_flight(jobs, facts["registry_rows"], metadata):
             if kind == "capacity":
                 return ContinuationDecision(False, "capacity", "replacement-capacity-wait", "arm-capacity-resume")
@@ -3498,7 +3502,7 @@ def completion_gate(args, action: str, agent_home, jobs, *, gate, before=()):
     preview-gate recovery detail attached; None admits the launch."""
     from dispatch_contract import (DispatchContractError, PRELAUNCH_PROCESS_BLOCK_REASONS,
                                    recover_preview_gate_after_refusal)
-    from review_input import preview_request_nodes
+    from review_input import preview_request_admission
     try:
         for check in before:
             check()
@@ -3513,8 +3517,9 @@ def completion_gate(args, action: str, agent_home, jobs, *, gate, before=()):
             proof = _saved_resource_output_preview(args, jobs)
             if isinstance(proof, dict) and proof.get("resource_node"):
                 saved_resource_admissions = {proof["resource_node"]: proof}
-        gate_args = {"attempt_id": args.attempt_id,
-                     "planned_revision_nodes": preview_request_nodes(args, jobs)}
+        # A dry-run's round admission still refuses an unadmitted review input.
+        preview_request_admission(args, jobs)
+        gate_args = {"attempt_id": args.attempt_id}
         if saved_resource_admissions is not None:
             gate_args["saved_resource_admissions"] = saved_resource_admissions
         gate(args.route_file, args.route_node, action, agent_home, jobs, **gate_args)

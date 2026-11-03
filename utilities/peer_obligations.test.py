@@ -3029,8 +3029,14 @@ class CanonicalNoticeJoinTest(unittest.TestCase):
                     tidy._ledger_path(seat).write_bytes(b"{unreadable")
                 for origin in (old, middle, current):
                     for harness in (None, "codex"):
-                        with self.assertRaises(OSError):
-                            handover.session_successor(origin, harness=harness)
+                        if kind == "fork" and origin == current:
+                            # SID-only lookup also supplies the known harness;
+                            # qualified lookup reports no further handover.
+                            expected = (current, "codex") if harness is None else ("", "")
+                            self.assertEqual(handover.session_successor(origin, harness=harness), expected)
+                        else:
+                            with self.assertRaises(OSError):
+                                handover.session_successor(origin, harness=harness)
 
     def test_provenance_same_sid_in_another_harness_does_not_transfer_authority(self):
         import dispatch_seat_handover as handover

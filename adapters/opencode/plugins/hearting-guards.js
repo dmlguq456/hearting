@@ -422,18 +422,22 @@ function spawnCheckpoint(sid) {
 // skipped: its work happens inside the parent's turn and is the parent's, as a Claude
 // subagent's is. No SDK request is made for this. Fire-and-forget like the checkpoint
 // above; the child step applies the shared exemptions and judges the rest.
-function spawnTurnChangeRecord(phase, sid, cwd) {
+// `--at` is the event time; a step older than this plugin (AGENT_HOME naming an older
+// release) rejects that argument with exit 2, so the same step runs once more without it.
+function spawnTurnChangeRecord(phase, sid, cwd, at = (Date.now() / 1000).toFixed(6)) {
   if (!sid || isWorkerSession()) return
   if (sessionInfoById.get(sid)?.parentID || v2SessionInfo.get(sid)?.parentID) return
   try {
-    const child = spawn("python3", [turnChangeRecord, phase, "--harness", "opencode",
-      "--session", sid, "--cwd", cwd || root], {
+    const args = [turnChangeRecord, phase, "--harness", "opencode", "--session", sid,
+      "--cwd", cwd || root, ...(at ? ["--at", at] : [])]
+    const child = spawn("python3", args, {
       cwd: root,
       env: { ...process.env, AGENT_HOME: root },
       detached: true,
       stdio: "ignore",
     })
     child.on("error", () => {})
+    if (at) child.on("exit", (code) => { if (code === 2) spawnTurnChangeRecord(phase, sid, cwd, "") })
     child.unref()
   } catch {
     // best-effort; a turn never depends on its record

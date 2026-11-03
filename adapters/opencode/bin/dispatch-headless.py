@@ -24,7 +24,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "utilities"))
-from review_input import preview_request_nodes
 import opencode_context_window as opencode_context
 import opencode_runtime
 from worker_runtime_home import prepare_worker_home

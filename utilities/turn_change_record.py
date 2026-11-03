@@ -53,6 +53,10 @@ written at a later boundary, at most ``MAX_ATTEMPTS`` times. Changes another pro
 in the same work tree during the turn cannot be told apart from the session's own; the
 evidence names the other Hearting sessions whose turns overlapped there instead of
 guessing. A turn the runtime ends without its end event (an interrupt) is not compared.
+Each hook passes its own event time (``--at``): when the next turn's start step runs before
+the previous turn's end step (a prompt queued or injected at once), that late end never
+closes the newer turn; it compares its own turn against the start snapshot kept from it,
+and the newer turn's start snapshot stands in for its end.
 
 ``HEARTING_AUTO_RECORD=off`` turns it off. Registered owners and workers, CI and dev
 activation are left alone, as by the gate (``skipped``).
@@ -106,6 +110,8 @@ FINISH_TIMEOUT = 300
 CHECKPOINT_TIMEOUT = 120
 CLOCK_SLACK = 2.0
 APPENDED = "auto-record-turns.md"
+# The open turn's start snapshot kept at the next start for its late end step.
+PRIOR_KEYS = ("turn_started_at", "top", "root", "head", "entries")
 GATE_VALUE = (f"{MARK}: changes observed at turn end and recorded after the fact; "
               "this gate was not assessed")
 # Byte code Python writes beside sources; untracked, it is never a reason for a record.
@@ -173,7 +179,7 @@ def launch(phase: str, harness: str, payload, *, environ=None, popen=None) -> bo
             return False
         cwd = _field(payload, "cwd", "working_directory", "workingDirectory") or os.getcwd()
         command = [sys.executable, str(Path(__file__).resolve()), phase, "--harness", harness,
-                   "--session", sid, "--cwd", cwd]
+                   "--session", sid, "--cwd", cwd, "--at", f"{time.time():.6f}"]
         spawn = subprocess.Popen if popen is None else popen
         spawn(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
               stderr=subprocess.DEVNULL, close_fds=True, start_new_session=True,
@@ -252,6 +258,10 @@ def _locked(lock: Path, wait: float):
                     yield False
                     return
                 time.sleep(0.2)
+        # flock never changes mtime: mark the use, so pruning by age (``_prune``) never
+        # removes a lock some long-lived session is holding.
+        with contextlib.suppress(OSError):
+            os.utime(fd)
         yield True
     finally:
         os.close(fd)
@@ -814,6 +824,14 @@ def turn_start(harness: str, sid: str, cwd: str, env, *, now=None, recorder=None
         if not state:
             _prune(path.parent, now)
             _prune_markers(env)
+        # The previous turn is still open: its end step may simply not have run yet (the
+        # next prompt came at once). Keep its start snapshot for that late end; an
+        # interrupted turn's is dropped at the next start or end.
+        if (state.get("turn_ended_at") is None and isinstance(state.get("turn_started_at"), (int, float))
+                and state.get("entries") is not None and state.get("root")):
+            state["prior_turn"] = {key: state.get(key) for key in PRIOR_KEYS}
+        else:
+            state.pop("prior_turn", None)
         top = _top(cwd, env)
         state.update(harness=harness, session_id=sid, top=str(top) if top else None,
                      turn_started_at=now, turn_ended_at=None, head="", entries=None, root="")
@@ -851,11 +869,50 @@ def turn_end(harness: str, sid: str, cwd: str, env, *, now=None, recorder=None, 
     path = state_path(env, harness, sid)
     result = {"state": "busy"}
 
+    def queue(state, before, after, top, root, began):
+        """Queue the source changes between ``before`` and ``after`` as one turn."""
+        top_path = Path(top)
+        source, commits = changes(before, after, top_path, root, began, env)
+        result["state"] = "unchanged"
+        if source:
+            overlap = concurrent_sessions(env, harness, sid, top, began, now)
+            pending = state.setdefault("pending", [])
+            pending.append({
+                "id": f"{began:.6f}", "root": root, "top": top, "began": began, "ended": now,
+                "source": source,
+                "fresh": [p for p in source if p not in (before.get("entries") or {})],
+                "section": turn_section(harness, sid, top_path, source, commits, before, after,
+                                        began, now, overlap, env)})
+            del pending[:-MAX_PENDING]
+            _mark_pending(env, state, harness, sid)
+            result["state"] = "changed"
+
     def finish_turn(state):
         if not state:
             result["state"] = "no-start-snapshot"
             return
         began, top = state.get("turn_started_at"), state.get("top")
+        prior = state.get("prior_turn")
+        if isinstance(began, (int, float)) and now < began:
+            # This end happened before the open turn began: the next turn's start step ran
+            # first. The open turn is not this one's to close. This turn's own start
+            # snapshot was kept; the newer turn's start snapshot stands in for its end.
+            result["state"] = "late-end"
+            if (isinstance(prior, dict) and isinstance(prior.get("turn_started_at"), (int, float))
+                    and prior["turn_started_at"] > now):
+                return  # a later turn's kept snapshot: that turn's own late end still needs it
+            state.pop("prior_turn", None)
+            if (isinstance(prior, dict) and isinstance(prior.get("turn_started_at"), (int, float))
+                    and prior["turn_started_at"] <= now and prior.get("entries") is not None
+                    and state.get("entries") is not None and prior.get("top") == top
+                    and prior.get("root") == state.get("root") and top and Path(top).is_dir()):
+                mode, root = _mode(harness, sid, Path(top), state, env)
+                result["root"] = root
+                if mode == "record" and root == prior["root"]:
+                    queue(state, prior, {"head": state.get("head") or "", "entries": state["entries"]},
+                          top, root, prior["turn_started_at"])
+            return
+        state.pop("prior_turn", None)
         opened = (state.get("turn_ended_at") is None and isinstance(began, (int, float)) and top
                   and Path(top).is_dir())
         result["state"] = "no-start-snapshot"
@@ -872,20 +929,7 @@ def turn_end(harness: str, sid: str, cwd: str, env, *, now=None, recorder=None, 
                 if after is not None and after.get("entries") is None:
                     after = None
             if after is not None:
-                source, commits = changes(state, after, top_path, root, began, env)
-                result["state"] = "unchanged"
-                if source:
-                    overlap = concurrent_sessions(env, harness, sid, top, began, now)
-                    pending = state.setdefault("pending", [])
-                    pending.append({
-                        "id": f"{began:.6f}", "root": root, "top": top, "began": began, "ended": now,
-                        "source": source,
-                        "fresh": [p for p in source if p not in (state.get("entries") or {})],
-                        "section": turn_section(harness, sid, top_path, source, commits, state, after,
-                                                began, now, overlap, env)})
-                    del pending[:-MAX_PENDING]
-                    _mark_pending(env, state, harness, sid)
-                    result["state"] = "changed"
+                queue(state, state, after, top, root, began)
         state.update(turn_ended_at=now, entries=None, head="")
 
     if _update(path, finish_turn) is None:
@@ -963,12 +1007,17 @@ def main(argv=None) -> int:
     parser.add_argument("--harness", choices=HARNESSES, required=True)
     parser.add_argument("--session", required=True)
     parser.add_argument("--cwd", required=True)
+    # The hook's own event time; the detached steps of two turns may run out of order.
+    parser.add_argument("--at", type=float, default=None)
     args = parser.parse_args(argv)
     if not _SAFE_SID.match(args.session) or skipped(os.environ):
         return 0
+    at = args.at
+    if at is not None and not (0 < at <= time.time() + CLOCK_SLACK):
+        at = None
     try:
         step = turn_start if args.phase == "start" else turn_end
-        step(args.harness, args.session, args.cwd, os.environ)
+        step(args.harness, args.session, args.cwd, os.environ, now=at)
     except Exception:  # noqa: BLE001 -- detached and silent: a failure leaves only its state
         pass
     return 0

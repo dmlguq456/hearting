@@ -169,7 +169,7 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
             worktree=str(self.base), dispatch_depth=2, parent_slug='fixture-owner',
             parent_attempt_id=owner_attempt, parent_harness='claude',
             parent_transport='headless', parent_sandbox='workspace-write', subsession_id=None)
-        with mock.patch('review_input.preview_request_nodes', return_value=frozenset()), \
+        with mock.patch('review_input.preview_request_admission', return_value=None), \
              mock.patch('subprocess.check_output', return_value=str(self.base)):
             result = RA.completion_gate(start_args, 'start', ROOT, jobs,
                                         gate=DC.completion_marker_gate)
@@ -195,7 +195,7 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
         self.assertEqual(raw.read_bytes(), raw_before)
         self.assertEqual(receipt.read_bytes(), receipt_before)
         journal_before = ledger.journal_path.read_bytes()
-        with mock.patch('review_input.preview_request_nodes', return_value=frozenset()), \
+        with mock.patch('review_input.preview_request_admission', return_value=None), \
              mock.patch('subprocess.check_output', return_value=str(self.base)):
             preview = RA.completion_gate(start_args, 'dry-run', ROOT, jobs,
                                           gate=DC.completion_marker_gate)
@@ -233,7 +233,7 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
                     worktree=str(self.base), dispatch_depth=2, parent_slug='fixture-owner',
                     parent_attempt_id=owner_attempt, parent_harness='claude',
                     parent_transport='headless', parent_sandbox='workspace-write', subsession_id=None)
-                with mock.patch('review_input.preview_request_nodes', return_value=frozenset()), \
+                with mock.patch('review_input.preview_request_admission', return_value=None), \
                      mock.patch('subprocess.check_output', return_value=str(self.base)):
                     refused = RA.completion_gate(start_args, 'start', ROOT, jobs,
                                                  gate=DC.completion_marker_gate)
@@ -257,7 +257,7 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
             worktree=str(self.base), dispatch_depth=2, parent_slug='fixture-owner',
             parent_attempt_id=owner_attempt, parent_harness='claude',
             parent_transport='headless', parent_sandbox='workspace-write', subsession_id=None)
-        with mock.patch('review_input.preview_request_nodes', return_value=frozenset()):
+        with mock.patch('review_input.preview_request_admission', return_value=None):
             admitted = RA.completion_gate(start_args, 'start', ROOT, jobs,
                                            gate=DC.completion_marker_gate)
         self.assertIsNone(admitted, admitted)
@@ -539,7 +539,7 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
                             finally:
                                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
                     return {'state': 'quiescent', 'reason': 'fixture-remote-empty'}
-                with mock.patch('review_input.preview_request_nodes', return_value=frozenset()), \
+                with mock.patch('review_input.preview_request_admission', return_value=None), \
                      mock.patch('subprocess.check_output', return_value=str(self.base)), \
                      mock.patch.object(SUP.RR, 'compute_execution_observation',
                                        side_effect=observe_outside_writer_locks), \
@@ -623,7 +623,7 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
                             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
                 return {'state': 'quiescent', 'reason': 'fixture-remote-empty'}
 
-            with mock.patch('review_input.preview_request_nodes', return_value=frozenset()), \
+            with mock.patch('review_input.preview_request_admission', return_value=None), \
                  mock.patch('subprocess.check_output', return_value=str(self.base)), \
                  mock.patch.object(SUP.RR, 'compute_execution_observation',
                                    side_effect=observe_outside_writer_locks):
@@ -833,7 +833,7 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
             self.assertEqual(RUN_EVIDENCE.outputs(armed_outputs), ['run.json'])
             self.assertEqual(SUP.artifact_evidence(armed_outputs), {
                 'checked': True, 'missing': [], 'reason': 'artifacts-present'})
-            with mock.patch('review_input.preview_request_nodes', return_value=frozenset()), \
+            with mock.patch('review_input.preview_request_admission', return_value=None), \
                  mock.patch('subprocess.check_output', return_value=str(self.base)), \
                  mock.patch.object(DC, 'canonical_repository_identity', return_value='fixture-repository'), \
                  mock.patch.object(RR, 'compute_execution_observation', return_value={
@@ -2343,7 +2343,7 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
             parent_attempt_id=owner, parent_harness='codex', parent_transport='headless',
             parent_sandbox='workspace-write', subsession_id=None)
         with self.foreign_resource_reader(), \
-             mock.patch('review_input.preview_request_nodes', return_value=frozenset()), \
+             mock.patch('review_input.preview_request_admission', return_value=None), \
              mock.patch('subprocess.check_output', return_value=str(self.base)):
             self.assertIsNone(RA.completion_gate(args, 'start', ROOT, jobs, gate=DC.completion_marker_gate))
             self.assertIsNone(RA.completion_gate(args, 'start', ROOT, jobs, gate=DC.completion_marker_gate))
@@ -2599,7 +2599,7 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
         )
         marker_path = jobs.parent / 'completion' / route['route_id'] / 'full-run.json'
         before = ledger.journal_path.read_bytes()
-        with mock.patch('review_input.preview_request_nodes', return_value=frozenset()), \
+        with mock.patch('review_input.preview_request_admission', return_value=None), \
              mock.patch('subprocess.check_output', return_value=str(self.base)):
             self.assertIsNone(RA.completion_gate(
                 args, 'register', ROOT, jobs, gate=DC.completion_marker_gate,
@@ -2699,7 +2699,7 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
             parent_harness='codex', parent_transport='headless',
             parent_sandbox='workspace-write', subsession_id=None,
         )
-        with mock.patch('review_input.preview_request_nodes', return_value=frozenset()), \
+        with mock.patch('review_input.preview_request_admission', return_value=None), \
              mock.patch('subprocess.check_output', return_value=str(self.base)):
             self.assertIsNone(RA.completion_gate(
                 args, 'start', ROOT, jobs, gate=DC.completion_marker_gate,
@@ -2745,7 +2745,7 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
                         if crash_after == 'claim' and payload.get('predecessor') == 'full-run':
                             raise OSError('crash after exclusive successor claim')
                         return result
-                    with mock.patch('review_input.preview_request_nodes', return_value=frozenset()), \
+                    with mock.patch('review_input.preview_request_admission', return_value=None), \
                          mock.patch('subprocess.check_output', return_value=str(case.base)), \
                          mock.patch.object(WS.WorkflowLedger, 'record', interrupted_record), \
                          mock.patch.object(WS.WorkflowLedger, 'claim', interrupted_claim):
@@ -2761,7 +2761,7 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
                         self.assertEqual(len(claim_files), 1)
                     else:
                         self.assertEqual(claim_files, {})
-                    with mock.patch('review_input.preview_request_nodes', return_value=frozenset()), \
+                    with mock.patch('review_input.preview_request_admission', return_value=None), \
                          mock.patch('subprocess.check_output', return_value=str(case.base)):
                         self.assertIsNone(RA.completion_gate(
                             args, 'start', ROOT, jobs, gate=DC.completion_marker_gate,
@@ -2811,7 +2811,7 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
             parent_harness='codex', parent_transport='headless',
             parent_sandbox='workspace-write', subsession_id=None,
         )
-        with mock.patch('review_input.preview_request_nodes', return_value=frozenset()), \
+        with mock.patch('review_input.preview_request_admission', return_value=None), \
              mock.patch('subprocess.check_output', return_value=str(self.base)):
             self.assertIsNone(RA.completion_gate(
                 args, 'start', ROOT, jobs, gate=DC.completion_marker_gate,
@@ -3351,7 +3351,7 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
             worktree=str(self.base), dispatch_depth=2, parent_slug='fixture-owner',
             parent_attempt_id=current_attempt, parent_harness='claude',
             parent_transport='headless', parent_sandbox='workspace-write', subsession_id=None)
-        with mock.patch('review_input.preview_request_nodes', return_value=frozenset()), \
+        with mock.patch('review_input.preview_request_admission', return_value=None), \
              mock.patch('subprocess.check_output', return_value=str(self.base)):
             self.assertTrue(RA._admit_supervised_owner_resource_start(start_args, ROOT, jobs))
             RA.completion_gate(start_args, 'start', ROOT, jobs, gate=DC.completion_marker_gate)
@@ -4371,7 +4371,7 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
         )
 
         def current_successor_start():
-            with mock.patch('review_input.preview_request_nodes', return_value=frozenset()), \
+            with mock.patch('review_input.preview_request_admission', return_value=None), \
                  mock.patch('subprocess.check_output', return_value=str(self.base)):
                 return RA.completion_gate(
                     successor_args, 'start', ROOT, jobs, gate=DC.completion_marker_gate)
