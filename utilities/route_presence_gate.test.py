@@ -250,7 +250,7 @@ class ExemptionTest(Fixture):
         good = self.edit(self.repo / "src" / "engine.py")
         with mock.patch.object(G, "_route_chain", side_effect=ImportError("gone")):
             self.assertEqual(self.judge(good), "")
-        with mock.patch.object(G, "_ledger_roots", side_effect=PermissionError("denied")):
+        with mock.patch.object(G, "_ledger_routes", side_effect=PermissionError("denied")):
             self.assertEqual(self.judge(good), "")
         self.assertEqual(G.judge("claude", "not-a-dict", self.env), "")
 
