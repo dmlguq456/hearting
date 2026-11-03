@@ -368,6 +368,39 @@ class ResourceRegistryTest(unittest.TestCase):
             except ProcessLookupError:
                 pass
 
+    def test_detached_wrapper_zombie_is_exited_not_unreadable(self):
+        # A detached wrapper (no launch controller) is reaped by whichever
+        # process adopted it. Until then /proc keeps a zombie with no cmdline.
+        child = subprocess.Popen(["/bin/sleep", "30"])
+        try:
+            # Until exec has set it up, a new child's cmdline can still be empty.
+            deadline = time.monotonic() + 10
+            identity = registry.proc_identity(child.pid)
+            while identity is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+                identity = registry.proc_identity(child.pid)
+            self.assertIsNotNone(identity)
+            row = {key: identity[key] for key in registry.IDENTITY_KEYS}
+            os.kill(child.pid, signal.SIGKILL)
+            stat = Path(f"/proc/{child.pid}/stat")
+            deadline = time.monotonic() + 10
+            while (stat.read_text().rsplit(") ", 1)[1].split()[0] != "Z"
+                   and time.monotonic() < deadline):
+                time.sleep(0.01)
+            self.assertEqual(stat.read_text().rsplit(") ", 1)[1].split()[0], "Z")
+            self.assertEqual(registry.classify_identity(row),
+                             ("exited", None, "process-exited-unreaped"))
+            # A controller-launched child keeps the exact-owner rule.
+            controlled = {**row, "launch_controller": {"pid": os.getpid()}}
+            self.assertEqual(registry.classify_identity(controlled),
+                             ("stale", None, "process-identity-unreadable"))
+            self.assertEqual(registry.classify_identity({**row, "starttime": "1"})[0], "stale")
+        finally:
+            if child.returncode is None:
+                child.kill()
+                child.wait()
+        self.assertEqual(registry.classify_identity(row), ("exited", None, "process-absent"))
+
     def test_owned_zombie_requires_exact_kernel_and_controller_identity(self):
         pid = 999999999
         parent = registry.proc_identity(os.getpid())

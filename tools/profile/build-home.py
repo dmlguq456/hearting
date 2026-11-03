@@ -319,13 +319,13 @@ def _codex_override_format():
     return _install_module('codex_override')
 
 
-def publish_opencode_user_rules(claude_home, home, config):
+def publish_opencode_user_rules(claude_home, home, config, environ=None):
     """A v1 OpenCode worker reads only its own config home, so list the user's rules there.
 
     The main session gets the same block in front of its global AGENTS.md; a v2
     worker shares that main service and its global instructions.
     """
-    rules = _install_module('user_rules').block(Path(claude_home))
+    rules = _install_module('user_rules').block(Path(claude_home), environ)
     target = Path(home) / 'hearting-user-rules.md'
     if rules:
         write_worker_copy(target, rules)
@@ -558,7 +558,10 @@ def _worker_account_selection(harness, env):
     """Read the existing validated dispatch-defaults config from this env."""
     defaults = _dispatch_defaults_module()
     config_path = defaults.default_config_path(environ=env)
-    if not env.get('DISPATCH_DEFAULTS_CONFIG') and not os.path.lexists(config_path):
+    # Inside a worker the path was pinned by the parent's build; a file the
+    # user removed since then means the shipped defaults, like at top level.
+    vanished = bool(env.get('HEARTING_WORKER_HOME'))
+    if (not env.get('DISPATCH_DEFAULTS_CONFIG') or vanished) and not os.path.lexists(config_path):
         # Account selection is optional. A minimal packaged root may omit the
         # shipped defaults file entirely; keep the pre-account worker-home
         # behavior in that case. Explicit paths and present configs still pass
@@ -569,8 +572,13 @@ def _worker_account_selection(harness, env):
         config_path, defaults.default_topology_path())
     account = defaults.query_worker_account(config, harness)
     configured = config.get('worker_account')
-    pin_config = (str(Path(config_path).resolve(strict=False))
-                  if isinstance(configured, dict) and configured else None)
+    # A v1 OpenCode worker masks XDG_CONFIG_HOME, so a nested worker would fall
+    # back to the shipped defaults and miss the user's file (account selection
+    # and the user_rules switch). Pin any user file for OpenCode workers.
+    user_file = (os.path.realpath(config_path)
+                 != os.path.realpath(defaults.SHIPPED_CONFIG_PATH))
+    pin = (isinstance(configured, dict) and configured) or (harness == 'opencode' and user_file)
+    pin_config = str(Path(config_path).resolve(strict=False)) if pin else None
     return account, pin_config
 
 
@@ -686,7 +694,8 @@ def build_worker_home(agent_home, harness, worker_type, identity, *, env=None, d
     )
     if defaults_config is not None:
         # OpenCode's worker XDG_CONFIG_HOME is private. Carry the existing
-        # config path so nested workers read the same account selection.
+        # config path so nested workers read the same account selection and
+        # user_rules switch.
         values['DISPATCH_DEFAULTS_CONFIG'] = defaults_config
     if harness == 'codex':
         model_config_home = env.get('CODEX_HOME') or Path(home_env) / '.codex'
@@ -900,7 +909,7 @@ def build_worker_home(agent_home, harness, worker_type, identity, *, env=None, d
             for name in ('plugins', 'plugin'):
                 symlink(source / name, home / name)
             publish_opencode_user_rules(env.get('CLAUDE_CONFIG_DIR') or Path(home_env) / '.claude',
-                                        home, config)
+                                        home, config, env)
         write_json(home / 'opencode.json', config)
         runtime = home / 'runtime'
         for kind in ('data', 'cache', 'state', 'config'):

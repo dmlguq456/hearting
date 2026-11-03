@@ -602,7 +602,7 @@ class ParentDeployTest(unittest.TestCase):
         import shlex
         args = shlex.split(command_line)[2:]
         with patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(self.jobs), "AGENT_DISPATCH_ATTEMPT_ID": "owner",
-                                     "AGENT_ARTIFACT_CHECKPOINT": "off", "HEARTING_GATES": "on"}), patch.object(sys, "argv", [str(cr.__file__), *args]), contextlib.redirect_stdout(io.StringIO()) as output:
+                                     "AGENT_ARTIFACT_CHECKPOINT": "off"}), patch.object(sys, "argv", [str(cr.__file__), *args]), contextlib.redirect_stdout(io.StringIO()) as output:
             cr.main()
         marker = json.loads(output.getvalue().splitlines()[0])
         self.assertEqual(marker["node_id"], "deploy")

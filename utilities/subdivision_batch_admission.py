@@ -29,7 +29,6 @@ from typing import Any, Callable
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
 
-from hearting_gates import gates_on  # noqa: E402
 from route_authority import pinned_launch_harness  # noqa: E402
 from stage_session_contract import (  # noqa: E402
     ADAPTERS,
@@ -637,7 +636,7 @@ def route_allocated_harness(route: dict, node: dict, jobs) -> str:
 def _default_slice_worktree(sealed_cwd: Path) -> Path:
     """The caller's worktree when it is a usable worktree of the route's repository, else the route cwd."""
     top = _git_path(Path.cwd(), "--show-toplevel")
-    if top is not None and top != sealed_cwd and not gates_on() and same_repository_worktree(top, sealed_cwd):
+    if top is not None and top != sealed_cwd and same_repository_worktree(top, sealed_cwd):
         return top
     return sealed_cwd
 
@@ -703,9 +702,9 @@ def plan_slices(
         raise StageSessionError("plan-slices-route-cwd-missing")
     sealed_cwd = Path(sealed_cwd).resolve()
     worktree = Path(worktree).resolve() if worktree is not None else _default_slice_worktree(sealed_cwd)
-    if worktree != sealed_cwd and (gates_on() or not same_repository_worktree(worktree, sealed_cwd)):
+    if worktree != sealed_cwd and (not same_repository_worktree(worktree, sealed_cwd)):
         # The manifest's `worktree` becomes every slice's launch tree; it must be
-        # the route's sealed cwd or (gates off) a linked worktree of the same
+        # the route's sealed cwd or a linked worktree of the same
         # repository, never a foreign tree whose identity fields still match
         # (canary review round 1, B2).
         raise StageSessionError(f"plan-slices-worktree-mismatch:{worktree}:{sealed_cwd}")

@@ -301,6 +301,37 @@ def _owned_wrapper_awaiting_reap(run, pid, identity_reader):
         return False
 
 
+_PF_EXITING = 0x4
+
+
+def _detached_wrapper_exited(run, pid):
+    """One stat read for a recorded process whose full identity is unreadable.
+
+    None when the PID is gone. True when a run with no launch controller still
+    has its exact single-threaded process in /proc only because it exited: a
+    zombie (or one being reaped) waiting for whatever reaper adopted the
+    detached wrapper, or a process past exit_mm, which has already emptied its
+    cmdline. Its exit proof is the sentinel it wrote before exiting, so it is
+    exited, not unreadable. A controller-launched run keeps the exact-owner
+    rule above: only its controller collects that child.
+    """
+    if run.get("launch_controller"):
+        return False if Path(f"/proc/{pid}").exists() else None
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        return False
+    try:
+        fields = raw.rsplit(") ", 1)[1].split()
+        exiting = fields[0] in {"Z", "X"} or int(fields[6]) & _PF_EXITING
+        return bool(exiting and int(fields[17]) <= 1
+                    and fields[19] == str(run.get("starttime")))
+    except (IndexError, ValueError):
+        return False
+
+
 def classify_identity(run: dict, identity_reader=proc_identity) -> tuple[str, dict | None, str]:
     """Return working/reaping/exited/stale without trusting registry status."""
     if not isinstance(run, dict):
@@ -336,9 +367,12 @@ def classify_identity(run: dict, identity_reader=proc_identity) -> tuple[str, di
     if current is None:
         if _owned_wrapper_awaiting_reap(run, pid, identity_reader):
             return "reaping", None, "owned-wrapper-awaiting-reap"
-        if Path(f"/proc/{pid}").exists():
-            return "stale", None, "process-identity-unreadable"
-        return "exited", None, "process-absent"
+        exited = _detached_wrapper_exited(run, pid)
+        if exited is None:
+            return "exited", None, "process-absent"
+        if exited:
+            return "exited", None, "process-exited-unreaped"
+        return "stale", None, "process-identity-unreadable"
     if all(str(current[key]) == str(run[key]) for key in IDENTITY_KEYS):
         return "working", current, "exact-identity-match"
     return "stale", current, "process-identity-mismatch"

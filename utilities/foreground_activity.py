@@ -42,6 +42,71 @@ class ActivityObservation:
     reasons: tuple[str, ...]
 
 
+OWNER_TURN_IDLE_SECONDS = 7200.0
+
+
+class ActivityWindow:
+    """The one quiet-window decision over a conservative activity observer.
+
+    Foreground workers (``dispatch_lifecycle.wait_foreground``) and ordinary
+    supervised owner turns both decide through it. Unknown samples discard
+    accumulated quiet time. A later known sample starts a fresh full window
+    when its observation completes, so neither unknown time nor the time spent
+    taking that opening observation counts as quiet.
+    Sampling is throttled separately from the caller's polling so transport
+    or wait-loop bookkeeping cannot drive a broad process scan on every tick.
+    """
+
+    def __init__(self, observer, *, window_seconds=OWNER_TURN_IDLE_SECONDS,
+                 sample_seconds=1.0, clock=time.monotonic, bind_session=None):
+        self.observer = observer
+        self.window_seconds = float(window_seconds)
+        self.sample_seconds = float(sample_seconds)
+        self.clock = clock
+        self._bind_session = bind_session
+        self.quiet_since = None
+        self.next_sample = None
+        self.last_uncertain = True
+
+    def bind_session(self, session_id: str) -> None:
+        if self._bind_session is not None:
+            self._bind_session(session_id)
+
+    def expired(self, *, payload_progress=False, now=None, resample=False) -> bool:
+        """Return whether a confirmed quiet window has elapsed.
+
+        ``resample`` takes a fresh observation now instead of reusing the last
+        throttled one, for a caller about to act on an expired window.
+        """
+        stamp = self.clock() if now is None else float(now)
+        new_sample = resample or self.next_sample is None or stamp >= self.next_sample
+        if new_sample:
+            self.next_sample = stamp + self.sample_seconds
+            try:
+                observation = self.observer()
+                uncertain = bool(observation.uncertain)
+                active = bool(observation.active)
+            except Exception:
+                uncertain, active = True, False
+            # A window opens when the observation that opens it is complete;
+            # a slow scan's own duration is not observed quiet.
+            seen = self.clock() if now is None else stamp
+            self.last_uncertain = uncertain
+            if uncertain:
+                self.quiet_since = None
+            elif payload_progress or active:
+                self.quiet_since = seen
+            elif self.quiet_since is None:
+                self.quiet_since = seen
+        elif self.last_uncertain:
+            self.quiet_since = None
+        elif payload_progress:
+            self.quiet_since = stamp
+        if self.quiet_since is None:
+            return False
+        return stamp - self.quiet_since >= self.window_seconds
+
+
 OWNER_BINDING_STATUSES = {
     "owner-route-launch-binding",
     "owner-route-post-launch-attachment",
@@ -176,14 +241,12 @@ def build_activity_context(*, worker_type: str, harness: str, log_path: Path,
 
 def owner_turn_activity(args, process, *, harness: str,
                         session_id: str | None = None,
-                        window_seconds: float = 7200.0):
+                        window_seconds: float = OWNER_TURN_IDLE_SECONDS):
     """Bind one owner-turn observer to its registered attempt and native PID.
 
     Any missing or conflicting identity becomes an uncertain observer. That
     preserves the owner turn when local evidence cannot prove inactivity.
     """
-    from session_supervisor_decisions import OwnerTurnActivity
-
     def uncertain_observation():
         return ActivityObservation(True, True, ("owner-activity-binding-unavailable",))
 
@@ -248,13 +311,13 @@ def owner_turn_activity(args, process, *, harness: str,
             owner_turn=True,
         )
         monitor = ForegroundActivityMonitor(pid, start, context)
-        return OwnerTurnActivity(
+        return ActivityWindow(
             monitor.sample, window_seconds=window_seconds,
             sample_seconds=min(1.0, max(0.05, float(window_seconds) / 4.0)),
             bind_session=monitor.bind_session,
         )
     except Exception:
-        return OwnerTurnActivity(
+        return ActivityWindow(
             uncertain_observation, window_seconds=window_seconds,
             sample_seconds=min(1.0, max(0.05, float(window_seconds) / 4.0)),
         )

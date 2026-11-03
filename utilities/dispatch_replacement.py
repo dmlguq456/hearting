@@ -1912,8 +1912,7 @@ def _reuse_snapshot(jobs, route, lines, *, proof=None, pinned=None):
             import commit_policy
             merge_unobservable = commit_policy.git_operation(route.get('cwd', '')) == 'merge'
         gates_off_edit = (currency.state == 'revised-unrecorded'
-                          and currency.reason == 'completion-evidence-revised-unrecorded'
-                          and not DC.gates_on())
+                          and currency.reason == 'completion-evidence-revised-unrecorded')
         # One rule (`completion_superseded`): a result that is no longer current, or a verdict an
         # approved fix answered, is not reused; its node is reopened.
         superseded = DC.completion_superseded(currency)
