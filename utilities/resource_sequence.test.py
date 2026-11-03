@@ -3614,9 +3614,15 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
             identity = None
             if live_group:
                 # The group leader exits while its forked child remains in the group.
-                code = 'import os,time\nchild=os.fork()\nif child: os._exit(0)\ntime.sleep(120)\n'
-                live_proc = subprocess.Popen([sys.executable, '-c', code], start_new_session=True)
-                identity = RR.proc_identity(live_proc.pid)
+                # It waits on stdin until its identity is read: right after Popen its
+                # cmdline can still be empty, and it must not exit before it is read.
+                code = ('import os,sys,time\nsys.stdin.buffer.read(1)\nchild=os.fork()\n'
+                        'if child: os._exit(0)\ntime.sleep(120)\n')
+                live_proc = subprocess.Popen([sys.executable, '-c', code], start_new_session=True,
+                                             stdin=subprocess.PIPE)
+                identity = RR.launched_identity(live_proc, attempts=1000)
+                live_proc.stdin.write(b'x')
+                live_proc.stdin.close()
                 self.assertIsNotNone(identity)
                 live_proc.wait(timeout=5)
 
@@ -3921,7 +3927,10 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
         self.assertEqual([row['run_id'] for _, row in discovery[2][3]], ['h0-a2'])
         released = controller_release(world, found=discovery)
         self.assertIsNone(released.error, released.output)
-        self.assertEqual(len(released.payloads), 1)
+        # A runner check that fails before the release settles the row as not
+        # started and returns quietly; the row's launch_error names that check
+        # (CI 41554007480 saw 0 payloads here once, with no detail).
+        self.assertEqual(len(released.payloads), 1, released.row)
         self.assertEqual(released.payloads[0].wait(timeout=10), 0)
         started = json.loads(world.registry.read_text())['runs']['h0-a2']
         self.assertEqual(started['launch_state'], 'started')
