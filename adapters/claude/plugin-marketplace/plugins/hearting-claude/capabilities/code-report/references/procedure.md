@@ -52,10 +52,10 @@ Procedure:
    - inference entrypoint → engine_inference.md
    - utility → utilities.md
    - architecture/config/data flow/cross-variant → architecture.md
-   - project structure, document table, or file rename → the existing project bootstrap document, including CLAUDE.md only when it is the project's intended target
+   - project structure, document table, or file rename → architecture.md; the project bootstrap document (`CLAUDE.md`, `AGENTS.md`) is source outside this stage's write scope, so name a needed bootstrap update under Follow-Ups for the source-owning stage instead of editing it
    Update Interface Reference signatures, callers, and line numbers. Verify every class/function line number against post-edit source. If analysis_project/code/ is absent, skip and recommend `analyze-project --mode code` once.
 6. Confirm documentation writes with:
-   git diff --stat -- $AGENT_ARTIFACT_OUTPUT_DIR/analysis_project/code/ CLAUDE.md
+   git diff --stat -- $AGENT_ARTIFACT_OUTPUT_DIR/analysis_project/code/
    Report a documentation update only when the relevant diff proves it happened. If the expected diff is empty, re-read and correct the update.
 7. Read pipeline_summary.md. Summarize its Decision Points in section 4.5. If no events exist, write the natural equivalent of "No autonomous decision events (clean run)" in the selected artifact language.
 8. Synthesize causes, effects, and durable lessons; do not merely enumerate steps.
