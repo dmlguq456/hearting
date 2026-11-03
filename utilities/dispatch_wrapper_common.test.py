@@ -886,6 +886,214 @@ sys.exit(int(os.environ.get("ADMISSION_EXIT", "0")))
                 C.write_reset_cache(Path(tmp), "claude", "usage-limit", "12:00")  # no raise
 
 
+class WatcherLaunchFailureTest(unittest.TestCase):
+    def setUp(self):
+        import dispatch_contract as D
+        self.D = D
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+        self.jobs = self.base / "jobs.log"
+        self.attempt = "att-watcher-failure"
+        self.identity = {"pid": "99999996", "pid_start": "123", "pgid": "99999996",
+                         "pid_ns": D.process_namespace_identity(),
+                         "pid_observer_ns": D.process_namespace_identity()}
+        self.meta = {**self.identity, "attempt_id": self.attempt,
+                     "attempt_schema_version": "2", "dispatch_depth": "2",
+                     "transport": "headless", "execution_surface": "registered-headless",
+                     "registered_worker": "1", "fallback_hop": "same-harness-headless",
+                     "worker_type": "stage", "launch_lifecycle": "detached", "launch_started": "1"}
+        self.sibling = "2026-10-29\topen\t/r\t/w\tsibling\tattempt_id=att-sibling,opaque=unchanged\n"
+        self.write()
+        self.proc = mock.Mock(pid=99999996)
+        self.proc.wait.side_effect = subprocess.TimeoutExpired("finite fake child", .5)
+        self.delivery = mock.Mock()
+        self.environment = mock.patch.dict(os.environ, {
+            "AGENT_ARTIFACT_ROOT": str(self.base), "AGENT_DISPATCH_JOBS": str(self.jobs),
+            "AGENT_RESOURCE_RUN_INDEX": str(self.base / "resource-index.json"),
+            "COMPUTE_HOSTS_CONFIG": str(self.base / "compute.yaml")})
+        self.environment.start()
+        self.addCleanup(self.environment.stop)
+
+    def write(self, status="open"):
+        self.jobs.write_text("2026-10-29\t" + status + "\t/r\t/w\tworker\t" +
+                             ",".join(f"{k}={v}" for k, v in self.meta.items()) + "\n" + self.sibling)
+
+    def invoke(self, identity=None):
+        stream = io.StringIO()
+        with redirect_stdout(stream):
+            code = C.watcher_launch_failure(
+                self.jobs, self.attempt, self.proc, identity or self.identity,
+                "reap-watch-launch-error", "original-watcher-reason", "original detail",
+                materialize=self.delivery, fail=C.fail)
+        self.assertEqual(code, 70)
+        fields = dict(line.split("=", 1) for line in stream.getvalue().splitlines())
+        self.assertEqual(fields["reason"], "original-watcher-reason")
+        self.assertEqual(fields["detail"], "original detail")
+        self.assertEqual(fields["child_spawned"], "1")
+        self.assertEqual(fields["launch_started"], "1")
+        return fields
+
+    def test_wait_delay_keeps_cleanup_pending_then_existing_join_settles_same_row(self):
+        import dispatch_completion_join as J
+        with mock.patch("route_parent_close.stop_failed_launch") as stop, \
+                mock.patch.object(self.D, "_terminal_cleanup_values", return_value={}), \
+                mock.patch.object(self.D, "resolve_attempt_cleanup", return_value={
+                    "settled": False, "reason": "governed-leader-live"}):
+            self.assertEqual(self.invoke()["cleanup_settled"], "0")
+        stop.assert_called_once()
+        self.proc.wait.assert_called_once_with(timeout=.5)
+        self.proc.terminate.assert_not_called()
+        self.proc.kill.assert_not_called()
+        self.assertTrue(self.jobs.read_text().endswith(self.sibling))
+        empty = self.D.ProcessGroupObservation("empty")
+        with mock.patch.object(self.D, "_proc_observation", return_value=("missing", "", "")), \
+                mock.patch.object(self.D, "process_group_observation", return_value=empty), \
+                mock.patch.object(self.D, "attempt_tagged_descendants", return_value=empty), \
+                mock.patch.object(self.D, "attempt_scan_namespace_authority", return_value=True):
+            result = J.recover_receiptless_attempt(self.jobs, J.exact_attempt_row(self.jobs, self.attempt))
+            self.assertTrue(result["settled"], result)
+            before = self.jobs.read_bytes()
+            self.assertTrue(J.recover_receiptless_attempt(
+                self.jobs, J.exact_attempt_row(self.jobs, self.attempt))["settled"])
+            self.assertEqual(self.jobs.read_bytes(), before)
+        self.assertIn("launch_started=1", self.jobs.read_text())
+        self.assertTrue(self.jobs.read_text().endswith(self.sibling))
+
+    def test_binding_failure_has_no_numeric_signal_or_wait_fallback(self):
+        before = self.jobs.read_bytes()
+        for changes in ({"pid_start": "reused"}, {"pgid": "not-a-pgid"}, {"pid_ns": "foreign"}):
+            with self.subTest(changes=changes), mock.patch("route_parent_close.stop_failed_launch") as stop:
+                self.assertEqual(self.invoke({**self.identity, **changes})["cleanup_settled"], "0")
+                stop.assert_not_called()
+                self.assertEqual(self.jobs.read_bytes(), before)
+        self.proc.wait.assert_not_called()
+        self.delivery.assert_not_called()
+
+    def test_unknown_resource_inventory_does_not_apply_cleanup_or_fabricate_settlement(self):
+        with mock.patch("route_parent_close.stop_failed_launch", return_value="cleanup-resource-unverifiable"), \
+                mock.patch.object(self.D, "_terminal_cleanup_values", return_value={}), \
+                mock.patch.object(self.D, "resolve_attempt_cleanup") as resolve:
+            result = self.invoke()
+        self.assertEqual(result["cleanup_settled"], "0")
+        self.assertEqual(result["cleanup_reason"], "cleanup-resource-unverifiable")
+        resolve.assert_not_called()
+
+    def test_success_result_and_delivery_identity_are_preserved(self):
+        self.meta.update(note="completed-marker", failure_class="pass", completion_marker="original-marker",
+                         delivery_id="delivery-original", delivery_receipt_b64="original-receipt")
+        self.write("done")
+        before = self.jobs.read_bytes()
+        with mock.patch("route_parent_close.stop_failed_launch") as stop, \
+                mock.patch.object(self.D, "resolve_attempt_cleanup", return_value={
+                    "settled": False, "reason": "governed-leader-live"}):
+            self.assertEqual(self.invoke()["cleanup_settled"], "0")
+        self.assertEqual(self.jobs.read_bytes(), before)
+        stop.assert_not_called()
+        self.delivery.assert_not_called()
+
+    def test_row_cas_conflicts_and_late_success_never_grant_stop_authority(self):
+        original = self.D.close_attempt_row_if
+        for after in (False, True):
+            for change in ({"note": "completed-marker", "failure_class": "pass"},
+                           {"teardown_claim": "another-controller"}, {"pid_start": "456"}):
+                with self.subTest(after=after, change=change):
+                    self.write()
+                    saved = []
+                    def raced(*args, **kwargs):
+                        if after:
+                            result = original(*args, **kwargs)
+                        row = self.jobs.read_text().splitlines()[0].split("\t")
+                        meta = self.D.parse_registry_metadata(row[5]); meta.update(change)
+                        if change.get("failure_class") == "pass": row[1] = "done"
+                        row[5] = ",".join(f"{k}={v}" for k, v in meta.items())
+                        self.jobs.write_text("\t".join(row) + "\n" + self.sibling)
+                        saved.append(self.jobs.read_bytes())
+                        return result if after else original(*args, **kwargs)
+                    with mock.patch.object(self.D, "close_attempt_row_if", side_effect=raced), \
+                            mock.patch.object(self.D, "_terminal_cleanup_values", return_value={}), \
+                            mock.patch("route_parent_close.stop_failed_launch") as stop:
+                        self.assertEqual(self.invoke()["cleanup_settled"], "0")
+                    stop.assert_not_called()
+                    self.assertEqual(self.jobs.read_bytes(), saved[0])
+
+    def test_foreground_sealed_exit_is_preserved_byte_for_byte(self):
+        for exit_code, failure in ((0, ""), (7, "exit-7")):
+            self.meta.update(dispatch_depth="1", worker_type="review", launch_lifecycle="foreground-scoped")
+            self.write()
+            seal = self.D.seal_foreground_result(
+                self.jobs, self.attempt, self.proc.pid, self.identity["pid_start"], self.proc.pid,
+                exit_code=exit_code, failure=failure, group_empty=True)
+            before = self.jobs.read_bytes()
+            with mock.patch("route_parent_close.stop_failed_launch") as stop:
+                self.assertEqual(self.invoke()["cleanup_reason"], "cleanup-terminal-result-required")
+            self.assertEqual(self.jobs.read_bytes(), before)
+            current = self.D.parse_registry_metadata(self.jobs.read_text().splitlines()[0].split("\t")[5])
+            self.assertEqual({k: current[k] for k in seal.values}, dict(seal.values))
+            stop.assert_not_called()
+        self.delivery.assert_not_called()
+
+
+class WatcherRealCleanupTest(unittest.TestCase):
+    def test_term_ignoring_owned_child_is_killed_waited_and_settled(self):
+        import dispatch_contract as D
+        import dispatch_completion_join as J
+        import signal
+        from route_parent_close import _signal
+        temporary = tempfile.TemporaryDirectory(prefix="watcher-exact-child-")
+        temporary._finalizer.detach()
+        base = Path(temporary.name)
+        jobs = base / "jobs.log"
+        attempt = "att-real-watcher-cleanup"
+        children = []
+
+        def finish():
+            for proc, start in children:
+                if start:
+                    _signal(proc.pid, start, signal.SIGKILL)
+                proc.wait(timeout=5)
+                proc.stdout.close()
+            temporary.cleanup()
+
+        self.addCleanup(finish)
+        env = {**os.environ, "AGENT_ARTIFACT_ROOT": str(base), "AGENT_DISPATCH_JOBS": str(jobs),
+               "AGENT_RESOURCE_RUN_INDEX": str(base / "resource-index.json"),
+               "COMPUTE_HOSTS_CONFIG": str(base / "compute.yaml"), "XDG_STATE_HOME": str(base / "state")}
+        with mock.patch.dict(os.environ, env, clear=True):
+            proc = subprocess.Popen(
+                [sys.executable, "-c", "import signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); "
+                 "print('READY',flush=True); time.sleep(3)"],
+                env={**env, D.ATTEMPT_DESCENDANT_ENV: attempt}, stdout=subprocess.PIPE, start_new_session=True)
+            children.append((proc, D.process_start_ticks(proc.pid)))
+            self.assertEqual(proc.stdout.readline(), b"READY\n")
+            identity = D.process_launch_identity(proc.pid)
+            meta = {**identity, "attempt_id": attempt, "attempt_schema_version": "2", "dispatch_depth": "2",
+                    "transport": "headless", "execution_surface": "registered-headless", "registered_worker": "1",
+                    "fallback_hop": "same-harness-headless", "worker_type": "stage", "launch_lifecycle": "detached",
+                    "launch_started": "1"}
+            sibling = "2026-10-29\topen\t/r\t/w\tsibling\tattempt_id=att-other,opaque=unchanged\n"
+            jobs.write_text("2026-10-29\topen\t" + str(base) + "\t" + str(base) + "\tworker\t" +
+                            ",".join(f"{k}={v}" for k, v in meta.items()) + "\n" + sibling)
+            spec = importlib.util.spec_from_file_location("watcher_actor_scope", ROOT / "utilities/dispatch_registry.test.py")
+            fixture = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(fixture)
+            stream = io.StringIO()
+            # Existing controlled-actor census keeps unrelated host procfs
+            # churn outside this synthetic namespace; signals and wait are real.
+            with fixture.fixture_process_scope(jobs), redirect_stdout(stream):
+                code = C.watcher_launch_failure(
+                    jobs, attempt, proc, identity, "reap-watch-launch-error", "reap-watch-launch-failed", "synthetic",
+                    materialize=mock.Mock(), fail=C.fail)
+                self.assertEqual(code, 70)
+                self.assertEqual(proc.returncode, -signal.SIGKILL)
+                self.assertIn("cleanup_settled=1", stream.getvalue())
+                before = jobs.read_bytes()
+                self.assertTrue(J.recover_receiptless_attempt(jobs, J.exact_attempt_row(jobs, attempt))["settled"])
+                self.assertEqual(jobs.read_bytes(), before)
+                self.assertTrue(jobs.read_text().endswith(sibling))
+            print(stream.getvalue(), end="")
+
+
 class CloseJobRowTest(unittest.TestCase):
     def row(self, status="open", slug="slug", worktree="/wt", pipe="attempt_schema_version=2"):
         return f"2026-10-07T00:00:00Z\t{status}\t/repo\t{worktree}\t{slug}\t{pipe}\n"

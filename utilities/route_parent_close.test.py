@@ -45,6 +45,87 @@ ROUTE = load("parent_close_route_fixture", "capability-route.py")
 SUP = load("parent_close_supervisor_fixture", "workflow-supervisor.py")
 
 
+class FailedLaunchStopTest(unittest.TestCase):
+    def setUp(self):
+        self.meta = {"attempt_id": "att-failed-launch", "pid": "41", "pid_start": "900", "pgid": "41"}
+        self.fields = ["2026-10-29", "done", "/r", "/w", "worker",
+                       ",".join(f"{k}={v}" for k, v in self.meta.items())]
+        self.stack = contextlib.ExitStack()
+        self.addCleanup(self.stack.close)
+        self.patch(DC, "authoritative_process_identities", return_value=(
+            DC.AuthoritativeProcessIdentity("local", 41, "900"),))
+        self.namespace = self.patch(DC, "attempt_scan_namespace_authority", return_value=True)
+        self.authority = self.patch(DC, "exact_process_group_signal_authority", return_value="authoritative")
+        self.rows = self.patch(CLOSE, "_rows", return_value={"att-failed-launch": (self.fields, self.meta)})
+        self.resources = self.patch(CLOSE, "known_resources", return_value=[])
+        self.inventory = self.patch(RR, "scan", return_value=([], []))
+        self.group = self.patch(DC, "process_group_observation", return_value=DC.ProcessGroupObservation(
+            "populated", ((41, "900", "S"), (42, "901", "S"))))
+        self.agents = self.patch(CLOSE, "_agent_processes", return_value=([(41, "900"), (42, "901")], True))
+        self.env = self.patch(Path, "read_bytes", return_value=b"AGENT_DISPATCH_ATTEMPT_ID=att-failed-launch\0")
+        self.signals = self.patch(CLOSE, "_signal")
+        self.clock = self.patch(CLOSE.time, "monotonic", side_effect=[0, .1, .2, .35, .4, .9, .95])
+        self.patch(CLOSE.time, "sleep")
+
+    def patch(self, target, name, **kwargs):
+        return self.stack.enter_context(mock.patch.object(target, name, **kwargs))
+
+    def run_stop(self):
+        CLOSE.stop_failed_launch(Path("/synthetic/jobs.log"), self.fields)
+
+    def test_delayed_term_escalates_exact_descendant_with_existing_boundaries(self):
+        self.run_stop()
+        self.assertEqual(self.signals.call_args_list, [
+            mock.call(42, "901", signal.SIGTERM), mock.call(42, "901", signal.SIGKILL),
+            mock.call(42, "901", signal.SIGKILL)])
+
+    def test_reuse_or_nonleader_immediately_before_signal_has_no_fallback(self):
+        for reason in ("pid-reused", "non-group-leader", "identity-unverifiable"):
+            with self.subTest(reason=reason):
+                self.clock.side_effect = [0, .1]
+                self.authority.side_effect = ["authoritative", reason]
+                self.run_stop()
+                self.signals.assert_not_called()
+
+    def test_unknown_namespace_group_or_selection_never_signals(self):
+        for kind in ("namespace", "group", "selection"):
+            with self.subTest(kind=kind):
+                self.clock.side_effect = [0]
+                self.namespace.return_value = kind != "namespace"
+                self.group.return_value = DC.ProcessGroupObservation(
+                    "unverifiable" if kind == "group" else "populated", ((41, "900", "S"),))
+                self.agents.return_value = ([(42, "901")], kind != "selection")
+                self.run_stop()
+                self.signals.assert_not_called()
+
+    def test_resource_compute_setsid_and_other_attempt_tags_preserve_holder(self):
+        # The leader must stay live while any protected same-group member lives.
+        pairs = [(41, "900"), (43, "902"), (44, "903"), (45, "904"), (46, "905")]
+        self.agents.return_value = (pairs, True)
+        self.group.return_value = DC.ProcessGroupObservation("populated", tuple((p, s, "S") for p, s in pairs[:3]))
+        tag = b"AGENT_DISPATCH_ATTEMPT_ID=att-failed-launch\0"
+        self.env.side_effect = [tag, tag+b"HEARTING_RESOURCE_RUN_ID=resource\0",
+                               tag+b"HEARTING_COMPUTE_RUN_ID=compute\0",
+                               tag+b"HEARTING_RESOURCE_REGISTRY=/unknown/resource\0",
+                               b"AGENT_DISPATCH_ATTEMPT_ID=another-attempt\0"]
+        self.run_stop()
+        self.signals.assert_not_called()
+
+    def test_unknown_resource_inventory_retains_cleanup_without_signals(self):
+        self.inventory.return_value = ([], [{"kind": "malformed-registry"}])
+        self.assertEqual(CLOSE.stop_failed_launch(Path("/synthetic/jobs.log"), self.fields),
+                         "cleanup-resource-unverifiable")
+        self.signals.assert_not_called()
+
+    def test_new_branch_in_grace_is_reclassified_and_racing_row_stops_signals(self):
+        self.agents.side_effect = [([(41, "900"), (42, "901")], True),
+                                  ([(41, "900"), (47, "906")], True)]
+        self.rows.side_effect = [{"att-failed-launch": (self.fields, self.meta)}] * 4 + [{}]
+        self.run_stop()
+        self.assertEqual(self.signals.call_args_list, [mock.call(42, "901", signal.SIGTERM),
+                                                     mock.call(47, "906", signal.SIGKILL)])
+
+
 class ParentCloseTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
