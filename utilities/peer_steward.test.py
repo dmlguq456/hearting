@@ -4633,7 +4633,7 @@ class KillFixtureTest(_WatchMixin, unittest.TestCase):
         receipt = self._wait_for_receipt(arm["watch_id"])
         self.assertEqual(receipt["state"], "idle")
 
-    def _run_spawner(self, argv, after_spawn):
+    def _run_spawner(self, argv, after_spawn, env=None):
         """Run one peer-steward command with `after_spawn` right after its observer spawn.
 
         Spawners record the observer identity in the arm only after the spawn;
@@ -4655,7 +4655,7 @@ class KillFixtureTest(_WatchMixin, unittest.TestCase):
             "subprocess.Popen = popen\n"
             f"sys.exit(module.main({list(argv)!r}))\n"
         )
-        return subprocess.run([sys.executable, "-c", source], env=self._env("held"),
+        return subprocess.run([sys.executable, "-c", source], env=env or self._env("held"),
                               capture_output=True, text=True, timeout=60)
 
     def _run_killed_after_spawn(self, argv):
@@ -4695,6 +4695,46 @@ class KillFixtureTest(_WatchMixin, unittest.TestCase):
 
         self._release()
         receipt = self._wait_for_receipt(arm["watch_id"])
+        self.assertEqual(receipt["state"], "idle")
+        self.assertEqual(receipt["watcher"], arm["watcher"])
+
+    def test_watcher_that_cannot_name_itself_exits_so_a_respawn_can(self):
+        # The spawner dies before naming its observer, and the observer's own
+        # arm write fails (ENOSPC). The observer must end and release the
+        # watch lock: an unnamed lock holder can be neither woken nor replaced.
+        site = self.tmp_root / "fixture-site"
+        site.mkdir()
+        (site / "sitecustomize.py").write_text(
+            "import errno, os, re\n"
+            "if b'__watch-run' in open('/proc/self/cmdline', 'rb').read().split(b'\\0'):\n"
+            "    _replace = os.replace\n"
+            "    def replace(src, dst, *args, **kwargs):\n"
+            "        if re.fullmatch(r'[0-9a-f]{16}\\.json', os.path.basename(str(dst))):\n"
+            "            raise OSError(errno.ENOSPC, 'fixture: arm write refused')\n"
+            "        return _replace(src, dst, *args, **kwargs)\n"
+            "    os.replace = replace\n", encoding="utf-8")
+        env = self._env("held")
+        env["PYTHONPATH"] = os.pathsep.join(
+            item for item in (str(site), env.get("PYTHONPATH")) if item)
+        spawner = self._run_spawner(["watch", "peer-a"], "os.kill(os.getpid(), signal.SIGKILL)",
+                                    env=env)
+        self.assertEqual(spawner.returncode, -signal.SIGKILL, spawner.stdout + spawner.stderr)
+        arms = self._arm_records()
+        self.assertEqual(len(arms), 1, arms)
+        watch_id = json.loads(arms[0].read_text())["watch_id"]
+        lock = self.watch_root / f"{watch_id}.lock"
+        deadline = time.monotonic() + 10
+        while peer_steward._lock_held(lock) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertFalse(peer_steward._lock_held(lock),
+                         "an observer that could not name itself kept the watch lock")
+        self.assertEqual(json.loads(arms[0].read_text())["watcher"], {})
+
+        rearmed = self._fields(self._run("rearm", watch_id, env=self._env("held")).stdout)
+        self.assertEqual(rearmed.get("state"), "rearmed", rearmed)
+        arm = self._wait_for_named_observer(arms[0])
+        self._release()
+        receipt = self._wait_for_receipt(watch_id)
         self.assertEqual(receipt["state"], "idle")
         self.assertEqual(receipt["watcher"], arm["watcher"])
 

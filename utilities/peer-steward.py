@@ -4862,11 +4862,10 @@ def _record_own_watch_identity(watch_id, paths, server):
         if not needs_naming(current) or paths.receipt.exists():
             return current if isinstance(current, dict) else arm
         updated = {**current, "watcher": own}
-        try:
-            _write_json_atomic(paths.arm, updated)
-        except OSError:
-            # A repair that cannot be written must not end this observer.
-            return current
+        # A failed write raises: this observer then ends and releases the lock,
+        # so the next spawn can start and name a replacement. An unnamed
+        # observer that kept the lock could be neither woken nor replaced.
+        _write_json_atomic(paths.arm, updated)
         return updated
     finally:
         os.close(claim_fd)
@@ -5815,7 +5814,6 @@ def _spawn_watch_observer(watch_id, arm, *, service_current=None,
             return True
         arm = current_arm
         os.set_inheritable(lock_fd, True)
-        log_fd = os.open(str(paths.log), os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
         server = arm.get("server") or "default"
         import peer_obligations
         env = _herdr_env_for_server(server)
@@ -5835,6 +5833,8 @@ def _spawn_watch_observer(watch_id, arm, *, service_current=None,
         ledger["rearm_count"] = int(arm.get("rearm_count", 0)) + 1
         ledger["observer_protocol"] = 2
         _write_json_atomic(paths.arm, ledger)
+        # Opened last: nothing that can fail before the spawn holds it open.
+        log_fd = os.open(str(paths.log), os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
         try:
             # As in `cmd_watch`: a wake sent before the observer installs its
             # handler stays pending instead of killing it.
