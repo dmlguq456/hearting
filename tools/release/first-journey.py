@@ -47,56 +47,60 @@ WORLD_COMMANDS = ("python3", "bash", "sh", "git", "curl", "tar", "gzip", "mktemp
                   "tee", "xargs", "id", "ps", "realpath", "printf", "test", "true", "false")
 _ACTIVE_AUTH: dict | None = None
 # The sandbox is a PID namespace: when the agent CLI exits, every process left in it dies.
-# On a user's machine the product's detached hook steps (the automatic change record
-# among them) keep running after the CLI exits, so each sandboxed turn runs under this
-# subreaper, which then waits up to SETTLE_SECONDS for those descendants and reports the
-# CLI's own time apart from the wait.
+# On a user's machine the product's automatic change record (utilities/turn_change_record.py,
+# a detached step its turn-end hook starts) keeps running after the CLI exits, so each
+# sandboxed turn runs under this subreaper, which then waits up to SETTLE_SECONDS for that
+# step only -- not for the shared observers that are meant to outlive a turn (for example
+# the human-wait producer's 600 s refresh loop) -- and reports the CLI's own time apart from
+# the wait. The wait is outside the task deadline.
 SETTLE_SECONDS = 30
+SETTLE_WATCH = "turn_change_record.py"
 SETTLE_SCRIPT = r'''
-import ctypes, json, os, signal, subprocess, sys, time
+import ctypes, json, os, subprocess, sys, time
 try:
     ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0)  # PR_SET_CHILD_SUBREAPER
 except Exception:
     pass
-grace, began = float(sys.argv[1]), time.monotonic()
-code = subprocess.call(sys.argv[2:])
+grace, watch, began = float(sys.argv[1]), sys.argv[2], time.monotonic()
+code = subprocess.call(sys.argv[3:])
 cli = time.monotonic() - began
-class Late(Exception):
-    pass
-def late(*_):
-    raise Late()
-left = grace > 0
-if grace > 0:
-    signal.signal(signal.SIGALRM, late)
-    signal.setitimer(signal.ITIMER_REAL, grace)
+def descendants():
+    parents = {}
+    for pid in os.listdir("/proc"):
+        try:
+            parents[int(pid)] = int(open(f"/proc/{pid}/stat").read().rsplit(")", 1)[1].split()[1])
+        except (ValueError, OSError, IndexError):
+            continue
+    mine = {os.getpid()}
+    for _ in range(16):
+        mine |= {pid for pid, parent in parents.items() if parent in mine}
+    rows = []
+    for pid in sorted(mine - {os.getpid()}):
+        try:
+            argv = [w.decode("utf-8", "replace") for w in open(f"/proc/{pid}/cmdline", "rb").read().split(b"\0") if w]
+        except OSError:
+            continue
+        if argv:
+            rows.append(argv)
+    return rows
+def reap():
     try:
-        while True:
-            os.wait()
+        while os.waitpid(-1, os.WNOHANG)[0] > 0:
+            pass
     except ChildProcessError:
-        left = False
-    except Late:
         pass
-    finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-parents = {}
-for pid in (os.listdir("/proc") if left else []):
-    try:
-        parents[int(pid)] = int(open(f"/proc/{pid}/stat").read().rsplit(")", 1)[1].split()[1])
-    except (ValueError, OSError, IndexError):
-        continue
-mine, names = {os.getpid()}, []
-for _ in range(16):
-    mine |= {pid for pid, parent in parents.items() if parent in mine}
-for pid in sorted(mine - {os.getpid()}):
-    try:
-        argv = open(f"/proc/{pid}/cmdline", "rb").read().split(b"\0")
-    except OSError:
-        continue
-    words = [os.path.basename(w.decode("utf-8", "replace")) for w in argv[:2] if w]
-    if words:
-        names.append(" ".join(words)[:80])
-print(json.dumps({"journey_settle": {"cli_seconds": round(cli, 3), "left_running": left,
-                                     "left": sorted(set(names))[:12],
+deadline = time.monotonic() + max(grace, 0)
+watched = grace > 0
+while watched:
+    reap()
+    watched = any(any(watch in word for word in argv) for argv in descendants())
+    if not watched or time.monotonic() >= deadline:
+        break
+    time.sleep(0.1)
+reap()
+names = sorted({" ".join(os.path.basename(w) for w in argv[:2])[:80] for argv in descendants()})
+print(json.dumps({"journey_settle": {"cli_seconds": round(cli, 3), "left_running": watched,
+                                     "left": names[:12],
                                      "settle_seconds": round(time.monotonic() - began - cli, 3)}}),
       flush=True)
 sys.exit(code)
@@ -888,14 +892,23 @@ def judge_repo(repo: Path, baseline_test: bytes, wrap=None, env: dict[str, str] 
             "seconds": result["seconds"], **data}
 
 
-def route_records(world: Path) -> list[Path]:
-    """Route records the installed product wrote anywhere in the world (`.runtime/routes/rt-*.json`)."""
-    return [path for routes in world.rglob("routes") if routes.is_dir() and routes.parent.name == ".runtime"
-            for path in routes.glob("rt-*.json") if re.fullmatch(r"rt-[0-9a-f]+\.json", path.name)]
+def route_records(world: Path, *, closed: bool | None = True) -> list[Path]:
+    """Route records the installed product wrote anywhere in the world (`.runtime/routes/rt-*.json`):
+    closed ones (an outcome beside them) by default, open ones with ``closed=False``, all with None."""
+    found = [path for routes in world.rglob("routes") if routes.is_dir() and routes.parent.name == ".runtime"
+             for path in routes.glob("rt-*.json") if re.fullmatch(r"rt-[0-9a-f]+\.json", path.name)]
+    if closed is None:
+        return found
+    return [path for path in found if path.with_suffix(".outcome.json").is_file() is closed]
 
 
 def route_evidence(world: Path) -> int:
+    """Closed routes only: a route left open is not a finished record."""
     return len(route_records(world))
+
+
+def open_route_evidence(world: Path) -> int:
+    return len(route_records(world, closed=False))
 
 
 def auto_route_evidence(world: Path) -> int:
@@ -911,8 +924,8 @@ def auto_route_evidence(world: Path) -> int:
     return count
 
 
-def settle_argv(argv: list[str], seconds: int = SETTLE_SECONDS) -> list[str]:
-    return ["python3", "-c", SETTLE_SCRIPT, str(seconds), *argv]
+def settle_argv(argv: list[str], seconds: int = SETTLE_SECONDS, watch: str = SETTLE_WATCH) -> list[str]:
+    return ["python3", "-c", SETTLE_SCRIPT, str(seconds), watch, *argv]
 
 
 def settle_result(output: str) -> dict | None:
@@ -996,12 +1009,14 @@ def headless_turn(harness: str, command: str, prompt: str, cwd: Path, world: Pat
             status = "task-timeout"; break
         sandboxed = platform.system() == "Linux"
         argv = turn_argv(harness, command, cwd, sid, message, opencode_generation, sandboxed, model)
+        # The settle wait is the product's background work, not the task: it is outside the deadline.
         step = run(sandbox(settle_argv(argv) if sandboxed else argv, world, env, cwd, mounts),
-                   env=env, timeout=remaining, cwd=cwd)
+                   env=env, timeout=remaining + (SETTLE_SECONDS if sandboxed else 0), cwd=cwd)
         text, found, denials = event_text(step["output"], harness)
         sid = sid or found
         texts.append(text)
         settled = settle_result(step["output"]) or {}
+        deadline += settled.get("settle_seconds") or 0
         turns.append({"index": len(turns) + 1, "exit": step["exit"],
                       "seconds": settled.get("cli_seconds", step["seconds"]),
                       "session_id": sid, "permission_denials": denials,
@@ -1378,6 +1393,7 @@ def journey_profile(profile: str, args: argparse.Namespace, repo: Path) -> dict:
                         verification = judge_repo(repo_dir, baseline_test, lambda argv: sandbox(argv, world, baseline_env, repo_dir), baseline_env)
                         verification["route_evidence_count"] = route_evidence(world)
                         verification["route_evidence_auto"] = auto_route_evidence(world)
+                        verification["route_evidence_open"] = open_route_evidence(world)
                         verification["route_evidence_observed"] = verification["route_evidence_count"] > 0
                         record["steps"].append({"name": f"verify:{harness}", "exit": 0 if verification["focused_test_passed"] else 1,
                                                 "seconds": round(time.monotonic() - verify_started, 3)})
@@ -1445,7 +1461,8 @@ def write_report(record: dict, output: Path) -> None:
         if verification:
             lines.append(f"  - verification: code_fixed={verification.get('code_fixed')} focused_test_passed="
                          f"{verification.get('focused_test_passed')} route_evidence={verification.get('route_evidence_count')} "
-                         f"(automatic={verification.get('route_evidence_auto')}) "
+                         f"(automatic={verification.get('route_evidence_auto')}, "
+                         f"open={verification.get('route_evidence_open')}) "
                          f"candidate={verification.get('candidate')}")
     account = record.get("account_usage") or {}
     lines += ["", "## Account usage", "",

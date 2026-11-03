@@ -644,7 +644,7 @@ else: raise SystemExit(5)
         self.assertIn("Headless uncovered", markdown)
         self.assertIn("Isolation checks", markdown)
 
-    def test_route_evidence_counts_route_records_and_names_automatic_ones(self):
+    def test_route_evidence_counts_closed_route_records_and_names_automatic_ones(self):
         with tempfile.TemporaryDirectory() as tmp:
             routes = Path(tmp) / "repos/greet/.agent_reports/.runtime/routes"
             routes.mkdir(parents=True)
@@ -653,32 +653,66 @@ else: raise SystemExit(5)
             (routes / "rt-0a1b.outcome.json").write_text("{}")
             (routes / ".route-children-index.json").write_text("{}")
             (routes / "rt-2c3d.json").write_text(json.dumps(guard("compose-prechecked")))
+            (routes / "rt-2c3d.outcome.json").write_text("{}")
+            # Composed but never closed (a record cut off before finish): not evidence.
+            (routes / "rt-4e5f.json").write_text(json.dumps(guard("auto-record: changes observed at turn end")))
             self.assertEqual(fj.route_evidence(Path(tmp)), 2)
             self.assertEqual(fj.auto_route_evidence(Path(tmp)), 1)
+            self.assertEqual(fj.open_route_evidence(Path(tmp)), 1)
 
-    def test_settle_wrapper_keeps_detached_work_alive_and_reports_cli_time_apart(self):
+    def test_settle_wrapper_waits_for_the_record_step_and_reports_cli_time_apart(self):
         with tempfile.TemporaryDirectory() as tmp:
             marker = Path(tmp) / "recorded"
-            command = f"setsid sh -c 'sleep 1; touch {marker}' </dev/null >/dev/null 2>&1 & exit 3"
+            command = (f"setsid sh -c 'sleep 1; touch {marker}' turn_change_record.py </dev/null >/dev/null 2>&1 & "
+                       "exit 3")
             result = subprocess.run(fj.settle_argv(["sh", "-c", command], seconds=20),
                                     capture_output=True, text=True, timeout=60)
             self.assertEqual(result.returncode, 3)
-            self.assertTrue(marker.exists(), "the detached step finished before the wrapper returned")
+            self.assertTrue(marker.exists(), "the record step finished before the wrapper returned")
             settled = fj.settle_result(result.stdout)
             self.assertFalse(settled["left_running"])
             self.assertLess(settled["cli_seconds"], 1)
             self.assertGreaterEqual(settled["settle_seconds"], 0.5)
 
+    def test_settle_wrapper_does_not_wait_for_observers_meant_to_outlive_the_turn(self):
+        started = time.monotonic()
+        command = "setsid sleep 5 </dev/null >/dev/null 2>&1 & exit 0"  # e.g. the human-wait producer
+        result = subprocess.run(fj.settle_argv(["sh", "-c", command], seconds=20),
+                                capture_output=True, text=True, timeout=60)
+        self.assertLess(time.monotonic() - started, 3)
+        settled = fj.settle_result(result.stdout)
+        self.assertFalse(settled["left_running"])
+        self.assertIn("sleep 5", settled["left"])
+
     def test_settle_wrapper_stops_waiting_at_its_bound(self):
         started = time.monotonic()
-        result = subprocess.run(fj.settle_argv(["sh", "-c", "setsid sleep 5 </dev/null >/dev/null 2>&1 & exit 0"],
-                                               seconds=1), capture_output=True, text=True, timeout=60)
+        command = "setsid sh -c 'sleep 5' turn_change_record.py </dev/null >/dev/null 2>&1 & exit 0"
+        result = subprocess.run(fj.settle_argv(["sh", "-c", command], seconds=1),
+                                capture_output=True, text=True, timeout=60)
         self.assertLess(time.monotonic() - started, 4)
         self.assertEqual(result.returncode, 0)
-        settled = fj.settle_result(result.stdout)
-        self.assertTrue(settled["left_running"])
-        self.assertIn("sleep 5", settled["left"])
+        self.assertTrue(fj.settle_result(result.stdout)["left_running"])
         self.assertIsNone(fj.settle_result("no settle line"))
+
+    def test_the_settle_wait_is_outside_the_task_deadline(self):
+        # The CLI answers at once and leaves a record step running past the task budget.
+        with tempfile.TemporaryDirectory() as tmp:
+            result_line = json.dumps({"type": "result", "result": "Done.", "session_id": "s1"})
+            command = ("setsid sh -c 'sleep 8' turn_change_record.py </dev/null >/dev/null 2>&1 & "
+                       f"printf '%s\\n' '{result_line}'")
+            old = (fj.sandbox, fj.turn_argv, fj.platform.system)
+            try:
+                fj.sandbox = lambda argv, *a, **k: argv
+                fj.turn_argv = lambda *a, **k: ["sh", "-c", command]
+                fj.platform.system = lambda: "Linux"
+                outcome = fj.headless_turn("claude", "claude", "task", Path(tmp), Path(tmp), dict(os.environ),
+                                           7, [], judge=lambda: True)
+            finally:
+                fj.sandbox, fj.turn_argv, fj.platform.system = old
+        self.assertEqual(outcome["status"], "candidate-complete", outcome)
+        self.assertEqual(outcome["turns"][0]["exit"], 0)
+        self.assertLess(outcome["turns"][0]["seconds"], 5)
+        self.assertGreaterEqual(outcome["turns"][0]["settle_seconds"], 6)
 
     def test_success_judgment_accepts_non_main_branch(self):
         with tempfile.TemporaryDirectory() as tmp:
