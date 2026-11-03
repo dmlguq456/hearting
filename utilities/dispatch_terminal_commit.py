@@ -1033,15 +1033,76 @@ def _judgment_runtime() -> str:
         return str(root)
 
 
+_OUTPUT_INVALID = "output-invalid:"
+
+
+def _refused_output_evidence(artifact_root: Path, record: Mapping[str, Any],
+                             detail: str) -> Optional[list]:
+    """What an `output-invalid` refusal stands on: each file it names and the folders above it.
+
+    The detail lists `<code>:<cycle-relative path>` items. Renaming, moving or removing a
+    named file, or marking a folder above it for self-exclusion, changes these identities, so
+    the next settle judges the close again. `None` (no evidence, judged again) when a name
+    cannot be read back, a named file is gone or no longer what was refused, a folder above
+    it is now excluded, or the files moved while they were read.
+    """
+    import artifact_payload
+    import artifact_producer
+    items = [item.strip() for item in detail[len(_OUTPUT_INVALID):].split(";")]
+    try:
+        directory = artifact_producer.cycle_dir(Path(artifact_root).resolve(), record["campaign_id"],
+                                                record["cycle_id"], record)
+    except Exception:  # noqa: BLE001 -- an unresolvable cycle is no evidence
+        return None
+    payload_root = directory / "artifacts"
+
+    def observe() -> Optional[list]:
+        rows = []
+        for item in items:
+            code, sep, rel = item.partition(":")
+            parts = rel.split("/")
+            if (not sep or not code or not rel or rel.startswith("/")
+                    or any(part in ("", ".", "..") for part in parts)):
+                return None
+            folders = []
+            current = directory
+            for part in parts[:-1]:
+                current = current / part
+                if current != payload_root and payload_root not in current.parents:
+                    continue
+                excluded, snapshot = artifact_payload.observe_directory(current, payload_root=payload_root)
+                if excluded or (isinstance(snapshot, tuple) and snapshot[:1] == ("error",)):
+                    return None
+                folders.append(snapshot)
+            try:
+                info = os.lstat(str(directory / rel))
+            except OSError:
+                return None
+            if code == "non-regular-file" and stat.S_ISREG(info.st_mode):
+                return None
+            rows.append([code, rel, [info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns,
+                                     info.st_ctime_ns], folders])
+        return rows
+
+    try:
+        first = observe()
+        return first if first is not None and _canonical(observe()) == _canonical(first) else None
+    except (OSError, ValueError, TypeError):
+        return None
+
+
 def _finalize_refusal_evidence(artifact_root: Path,
-                               record: Optional[Mapping[str, Any]]) -> Optional[str]:
+                               record: Optional[Mapping[str, Any]],
+                               detail: Optional[str] = None) -> Optional[str]:
     """sha256(installed runtime, cycle lineage, cycle state) for a held refusal.
 
     Only durable records enter it. The jobs registry is shared and changes for
     unrelated work, so it must not resurrect a held refusal that only a route
     lineage or installed-runtime change can resolve. The cycle's storage state
     is part of the judgment: when another route seals or deletes the cycle, the
-    refusal no longer describes what the next settle will see.
+    refusal no longer describes what the next settle will see. An
+    `output-invalid` refusal (``detail``) also stands on the files it names
+    (`_refused_output_evidence`), which a person fixes.
     """
     if not isinstance(record, Mapping):
         return None
@@ -1054,11 +1115,16 @@ def _finalize_refusal_evidence(artifact_root: Path,
         return None
     if not isinstance(lineage, str) or not lineage:
         return None
-    return _digest(_canonical([_judgment_runtime(), lineage,
-                               record.get("state"), record.get("deleted_at")]))
+    parts = [_judgment_runtime(), lineage, record.get("state"), record.get("deleted_at")]
+    if isinstance(detail, str) and detail.startswith(_OUTPUT_INVALID):
+        files = _refused_output_evidence(artifact_root, record, detail)
+        if files is None:
+            return None
+        parts.append(files)
+    return _digest(_canonical(parts))
 
 
-def _current_finalize_evidence(request, route_id: str) -> Optional[str]:
+def _current_finalize_evidence(request, route_id: str, detail: Optional[str] = None) -> Optional[str]:
     """Recompute the refusal evidence from the cycle a historic binding names."""
     try:
         binding = load_producer_binding(artifact_root=request.artifact_root, route_id=route_id,
@@ -1073,7 +1139,7 @@ def _current_finalize_evidence(request, route_id: str) -> Optional[str]:
         record = artifact_producer.read_cycle_record(request.artifact_root, cycle_id)
     except (OSError, ValueError, TypeError, ImportError):
         return None
-    return _finalize_refusal_evidence(request.artifact_root, record)
+    return _finalize_refusal_evidence(request.artifact_root, record, detail)
 
 
 def _finalize_refusal_held(request, checkpoint: Optional[str]) -> bool:
@@ -1099,7 +1165,7 @@ def _finalize_refusal_held(request, checkpoint: Optional[str]) -> bool:
         return False
     if not isinstance(route_id, str) or not route_id:
         return False
-    return _current_finalize_evidence(request, route_id) == recorded
+    return _current_finalize_evidence(request, route_id, refusal.get("detail")) == recorded
 
 
 @functools.lru_cache(maxsize=1)
@@ -1513,6 +1579,7 @@ def settle_terminal_commit(request: TerminalCommitRequest, services: Any = None)
         _record_attempt(request, proof.reason or "recovery-unavailable", proof.detail or "")
         return _unsettled_result(proof.reason, proof.detail)
     refusal_evidence: Optional[str] = None
+    refusal_record = None
     try:
         route = json.loads(Path(request.route_file).read_text(encoding="utf-8"))
         route_module = _route_module()
@@ -1726,9 +1793,14 @@ def settle_terminal_commit(request: TerminalCommitRequest, services: Any = None)
         return TerminalCommitResult("recoverable", "recovery-unavailable", "partial-state", terminal_nodes)
     except TerminalCommitError as exc:
         from route_authority import deterministic_finalize_refusal
-        _record_attempt(request, exc.code, exc.detail,
-                        evidence=(refusal_evidence
-                                  if deterministic_finalize_refusal(exc.code, exc.detail) else None))
+        evidence = refusal_evidence if deterministic_finalize_refusal(exc.code, exc.detail) else None
+        if evidence is not None and str(exc.detail).startswith(_OUTPUT_INVALID):
+            # The named files can only be read once the refusal names them; the lineage half is
+            # still what the judgment saw, so it must not have moved meanwhile.
+            unchanged = _finalize_refusal_evidence(request.artifact_root, refusal_record) == evidence
+            evidence = (_finalize_refusal_evidence(request.artifact_root, refusal_record, exc.detail)
+                        if unchanged else None)
+        _record_attempt(request, exc.code, exc.detail, evidence=evidence)
         return _unsettled_result(exc.code, exc.detail)
     except RuntimeError as exc:
         _record_attempt(request, "recovery-unavailable", str(exc))

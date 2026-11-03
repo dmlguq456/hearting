@@ -3983,6 +3983,50 @@ class NeverStartedReplacementNormalStartTest(unittest.TestCase):
         self.assertIn(admitted.get("state"), {"running", "preparing"}, admitted)
         self.assertEqual(len(self.launches), launches_before)
 
+    def test_one_start_launches_after_a_handover_while_other_sessions_write_their_ledgers(self):
+        # Cairn v216 resume: the owner's parent session was cleared (handover parent -> successor),
+        # the successor answered and ran one start. Other sessions keep appending to their own
+        # seat ledgers while the launch reads the lineage; that one start must launch.
+        import session_tidy as tidy
+        owner = self._seed_initial_owner()
+        self._finish_blocked(owner)
+        self._store(owner, "continue the host runs", "input-handover")
+        self._handover(owner, "successor")
+        busy = tidy._ledger_path(tidy.Seat("pane", "fixture-busy-seat", "wZ:p1"))
+        busy.parent.mkdir(parents=True, exist_ok=True)
+        busy.write_text(json.dumps({"event": "prompt", "sid": "busy", "harness": "claude", "ts": 1}) + "\n")
+        read_bytes = tidy.read_bytes
+
+        def busy_read(path):
+            if Path(path).suffix == ".jsonl":
+                with busy.open("a") as handle:
+                    handle.write(json.dumps({"event": "prompt", "sid": "busy", "harness": "claude",
+                                             "ts": 3}) + "\n")
+            return read_bytes(path)
+
+        def caller_runner(command, **_kwargs):
+            # The real launcher binds the replacement to its calling session, not the old parent.
+            aid = command[command.index("--attempt-id") + 1]
+            prior = command[command.index("--automatic-retry-of") + 1]
+            self.launches.append({"attempt_id": aid, "prior": prior, "command": command})
+            source = self.replacement._rows(self.jobs.read_text().splitlines())[prior][1]
+            record = self.replacement._read(self.replacement._record_path(
+                self.jobs, self.replacement.source_binding(self.jobs, source)[0]))
+            with mock.patch.object(tidy, "read_bytes", busy_read):
+                _metadata, task = self._register(aid, parent_sid="successor", prior=prior,
+                                                 record=record, source=source)
+            self.delivered_prompts[aid] = task + self.replacement.recovery_instructions(SimpleNamespace(
+                automatic_retry_of=prior, attempt_id=aid, jobs_path=self.jobs, worker_type="owner"))
+            return subprocess.CompletedProcess(command, 0, "registered=1 started=1 child_spawned=1\n", "")
+
+        W.default_parent_session_id.return_value = "successor"
+        result = self._cli_start(runner=caller_runner)
+        self.assertEqual(result.get("state"), "running", result)
+        replacement = result["owner_attempt_id"]
+        self.assertNotEqual(replacement, owner)
+        self.assertEqual(len(self.launches), 1)
+        self.assertIn("continue the host runs", self.delivered_prompts[replacement])
+
     def test_off_chair_start_retains_correction_without_launching(self):
         owner_a, owner_b, owner_c, _ = self._build_unstarted_chain()
         self._store(owner_b, "off-chair retained correction", "input-off-chair")
