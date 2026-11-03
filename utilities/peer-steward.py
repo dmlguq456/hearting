@@ -6165,13 +6165,127 @@ def _watch_may_reach(watch_id, arm, sid, harness, seat_holders):
             and holder.get("sid") == sid)
 
 
+_WATCH_STEWARD_INDEX = ".steward-index.json"
+_WATCH_STEWARD_INDEX_MAX_BYTES = 8 * 1024 * 1024
+
+
+def _arm_steward_facts(arm):
+    """What decides a watch's recipient: its steward and steward seat.
+
+    Both are written when the watch is armed and every later arm rewrite
+    copies them (the watch id itself is derived from the steward), so they are
+    fixed for the watch's life and safe to keep beside the arms.
+    """
+    steward = arm.get("steward")
+    seat = arm.get("steward_seat")
+    if not isinstance(steward, dict):
+        return None  # no steward: the full status entry decides
+    harness, sid = steward.get("harness"), steward.get("session_id")
+    key = seat.get("key") if isinstance(seat, dict) else None
+    return [harness if isinstance(harness, str) else None,
+            sid if isinstance(sid, str) else None,
+            key if isinstance(key, str) and key else None]
+
+
+def _read_watch_steward_index(root):
+    try:
+        path = root / _WATCH_STEWARD_INDEX
+        if path.is_symlink() or path.stat().st_size > _WATCH_STEWARD_INDEX_MAX_BYTES:
+            return {}
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    watches = data.get("watches") if isinstance(data, dict) and data.get("schema") == 1 else None
+    if not isinstance(watches, dict):
+        return {}
+    known = {}
+    for watch_id, facts in watches.items():
+        if facts is None or (isinstance(facts, list) and len(facts) == 3 and all(
+                value is None or isinstance(value, str) for value in facts)):
+            known[watch_id] = facts
+    return known
+
+
+def _write_watch_steward_index(root, watches):
+    """Derived and rebuildable: a lost or torn write only costs the next call arm reads."""
+    tmp = None
+    try:
+        fd, tmp = tempfile.mkstemp(dir=str(root), prefix=".tmp-steward-index-", suffix=".json")
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump({"schema": 1, "watches": watches}, handle, separators=(",", ":"))
+        os.replace(tmp, root / _WATCH_STEWARD_INDEX)
+        tmp = None
+    except OSError:
+        pass
+    finally:
+        if tmp is not None:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+
+
+def _receipt_watch_entries(root, sid, harness, seat_holders):
+    """The watches the undelivered sweep reads in full, newest arm first.
+
+    Only a watch with a receipt can be undelivered, and only its steward (or
+    that seat's confirmed successor) can receive it. One directory listing
+    names the receipts; `.steward-index.json` gives each one's steward, and
+    only an arm the index does not know yet is read, once, then kept there.
+    The cost is this session's watches plus arms new since the last call,
+    not every arm and every file's stat.
+    """
+    try:
+        with os.scandir(root) as directory:
+            names = {entry.name for entry in directory}
+    except FileNotFoundError:
+        return []
+    arms = {name[: -len(".json")] for name in names
+            if name.endswith(".json") and not name.startswith(".")
+            and not name.endswith((".receipt.json", ".ack.json", ".observation.json"))}
+    receipts = {name[: -len(".receipt.json")] for name in names
+                if name.endswith(".receipt.json") and not name.startswith(".")}
+    known = _read_watch_steward_index(root)
+    kept, read_arms, reachable = {}, {}, []
+    for watch_id in sorted(receipts & arms):
+        if watch_id in known:
+            facts = known[watch_id]
+        else:
+            arm = _read_json(root / f"{watch_id}.json")
+            if not isinstance(arm, dict):
+                reachable.append(watch_id)  # unreadable: the full status entry decides
+                continue
+            read_arms[watch_id] = arm
+            facts = _arm_steward_facts(arm)
+        kept[watch_id] = facts
+        if facts is None or _watch_may_reach(
+                watch_id, {"steward": {"harness": facts[0], "session_id": facts[1]},
+                           "steward_seat": {"key": facts[2]}},
+                sid, harness, seat_holders):
+            reachable.append(watch_id)
+    if kept != known:
+        _write_watch_steward_index(root, kept)
+
+    def _mtime(watch_id):
+        try:
+            return (root / f"{watch_id}.json").stat().st_mtime
+        except OSError:
+            return 0.0
+
+    entries = [(watch_id, read_arms[watch_id] if watch_id in read_arms
+                else _read_json(root / f"{watch_id}.json"))
+               for watch_id in sorted(reachable, key=_mtime, reverse=True)]
+    # A receipt without an arm (killed between spawn and arm write) describes itself.
+    entries.extend((watch_id, None) for watch_id in sorted(receipts - arms))
+    return entries
+
+
 def undelivered_watch_rows(entries=None, root=None, *, deadline=None):
     """This session's watch receipts that nobody acknowledged and no queued
     exact notice carries: `status --undelivered` and the Claude prompt sweep.
 
-    Only watches whose recipient can be this session reach the per-watch
-    status read, and each seat ledger is parsed once per call, so the cost
-    follows this session's watches instead of every session's.
+    Only watches with a receipt whose recipient can be this session reach the
+    per-watch status read (`_receipt_watch_entries`), and each seat ledger is
+    parsed once per call, so the cost follows this session's watches instead
+    of every session's.
 
     ``deadline`` (``time.monotonic()``) bounds a hook. Watches it did not reach
     stay un-acked for the next prompt, the Stop path and the asyncRewake hook;
@@ -6179,7 +6293,6 @@ def undelivered_watch_rows(entries=None, root=None, *, deadline=None):
     unproven notice could show the same receipt twice.
     """
     root = root or _watch_root()
-    entries = _watch_entries(root) if entries is None else entries
     sid, harness = _current_session_identity()
     rows, seat_holders = [], {}
     try:
@@ -6188,6 +6301,8 @@ def undelivered_watch_rows(entries=None, root=None, *, deadline=None):
     except Exception:  # noqa: BLE001 - without the shared cache each read happens as before
         one_ledger_read = contextlib.nullcontext()
     with one_ledger_read:
+        if entries is None:
+            entries = _receipt_watch_entries(root, sid, harness, seat_holders)
         for watch_id, arm in entries:  # newest arm first
             if deadline is not None and time.monotonic() >= deadline:
                 break
@@ -6215,7 +6330,11 @@ def undelivered_watch_rows(entries=None, root=None, *, deadline=None):
 
 def cmd_status(args):
     root = _watch_root()
-    entries = _watch_entries(root)
+    if args.undelivered and not args.watch:
+        # The same bounded read as the prompt sweep; not every arm.
+        entries = None
+    else:
+        entries = _watch_entries(root)
     if args.watch:
         entries = [(w, a) for w, a in entries if w == args.watch]
     if args.undelivered:
