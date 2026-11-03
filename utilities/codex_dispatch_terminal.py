@@ -463,7 +463,33 @@ def _has_control(value: str) -> bool:
     return any(ord(char) < 32 or ord(char) == 127 for char in value)
 
 
+# Main worktree per repository (its common git directory), for this process.
+_PRIMARY_WORKTREES: dict[str, Path] = {}
+
+
+def _common_git_dir(worktree: Path) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(worktree), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False)
+    except OSError:
+        return None
+    common = result.stdout.strip()
+    return common if not result.returncode and os.path.isabs(common) else None
+
+
 def _primary_worktree(worktree: Path) -> Path | None:
+    """The repository's main worktree, asked of `git worktree list` once per repository.
+
+    That listing visits every linked worktree (0.6 s on a NAS repository with
+    many of them) and one status pass inspects several attempts of the same
+    repository; the common git directory names the repository cheaply. The
+    main worktree of a common directory does not move while it stays there.
+    Only an answer is kept: a failure is asked again next time.
+    """
+    common = _common_git_dir(worktree)
+    if common is not None and common in _PRIMARY_WORKTREES:
+        return _PRIMARY_WORKTREES[common]
     try:
         result = subprocess.run(
             ["git", "-C", str(worktree), "worktree", "list", "--porcelain"],
@@ -479,9 +505,12 @@ def _primary_worktree(worktree: Path) -> Path | None:
     for line in result.stdout.splitlines():
         if line.startswith("worktree "):
             try:
-                return Path(line[9:]).resolve(strict=True)
+                primary = Path(line[9:]).resolve(strict=True)
             except OSError:
                 return None
+            if common is not None:
+                _PRIMARY_WORKTREES[common] = primary
+            return primary
     return None
 
 
