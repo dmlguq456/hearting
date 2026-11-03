@@ -4,8 +4,9 @@
 Fixtures were emitted by capability-route.py and topologies.json from 63a92974,
 using compose_route(autopilot-code/dev, staged, standard|strong), all eight base
 nodes, Codex parent, checked Codex/Claude children, and --unassigned. No current
-compiler or _sd160_legacy_registry generated their graphs. Their original
-absolute locators and route hashes are intentionally retained. Tests never run
+compiler or _sd160_legacy_registry generated their graphs. Their graphs are
+retained as emitted; only the author's worktree locator was replaced by a
+neutral path, and route_hash/route_id were recomputed over that one change. Tests never run
 Git, the old compiler, a model, or a wrapper child process. Registration, launch
 claim and completion run the real common writers against temporary state;
 this does not assert adapter process spawning or workflow/human-gate release.
@@ -32,10 +33,10 @@ import replica_batch_contract as M
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = Path(__file__).with_name('test-fixtures')
 LEGACY_REGISTRY = 'sha256:4260c26aebc1ab2f5bbb722d1b77a0d3fe555504a4122ec5dd3c891dd8071f10'
-# SHA-256 of the exact, inspectable fixture files; locators are not rewritten.
+# SHA-256 of the exact, inspectable fixture files.
 FIXTURE_SHA256 = {
-    'standard': '57d184dc645a5a8a446a3574b25bcbe45d50eb5b472df5bad4f3a557b48610f3',
-    'strong': 'a22b05e449725a14e8c02de3428c0d4d6afa341598e05ef3f3739250348e5f18',
+    'standard': '1805653983279c7f051567c71b2cb217f68e5390e97a30f477358228a51336e2',
+    'strong': 'b32df0492492fcf46c0940773a0c72dea8d34092488bf681fe04c731f07af929',
 }
 
 
