@@ -288,6 +288,96 @@ def write_profile_bootstrap(path, text):
         Path(temporary).unlink(missing_ok=True)
 
 
+def write_worker_copy(path, data):
+    """Publish a read-only copy of user bytes; identical bytes are left in place."""
+    path = Path(path)
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise ValueError(f'worker home collision: {path}')
+    if path.is_file() and path.read_bytes() == data:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix='.worker-file-', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(data)
+        os.chmod(temporary, 0o400)
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def _install_module(name):
+    """Load one stdlib-only installer module by path, off the dispatch import path."""
+    path = Path(__file__).resolve().parents[1] / 'install' / f'{name}.py'
+    spec = importlib.util.spec_from_file_location(f'hearting_install_{name}', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _codex_override_format():
+    return _install_module('codex_override')
+
+
+def publish_opencode_user_rules(claude_home, home, config):
+    """A v1 OpenCode worker reads only its own config home, so list the user's rules there.
+
+    The main session gets the same block in front of its global AGENTS.md; a v2
+    worker shares that main service and its global instructions.
+    """
+    rules = _install_module('user_rules').block(Path(claude_home))
+    target = Path(home) / 'hearting-user-rules.md'
+    if rules:
+        write_worker_copy(target, rules)
+        if str(target) not in config['instructions']:
+            config['instructions'].append(str(target))
+    elif target.is_file() and not target.is_symlink():
+        target.unlink()
+
+
+def publish_codex_user_override(source, home, bootstrap_name):
+    """Codex reads one global file, so pair the user's override text with this worker's bootstrap.
+
+    The user's own text is copied byte for byte; Hearting's main-session block
+    is replaced by the worker bootstrap the home already uses.
+    """
+    form = _codex_override_format()
+    user_file, target = Path(source) / form.OVERRIDE_NAME, Path(home) / form.OVERRIDE_NAME
+    try:
+        user = form.user_text(user_file.read_bytes()) if user_file.is_file() else b''
+    except OSError:
+        user = b''
+    if form.has_text(user):
+        write_worker_copy(target, form.compose(user, (Path(home) / bootstrap_name).read_bytes()))
+    elif target.is_file() and not target.is_symlink():
+        target.unlink()
+
+
+def publish_claude_user_rules(source, home):
+    """Claude reads user rules only from its config dir, so copy the user's rule files in."""
+    source_rules, target_rules = Path(source) / 'rules', Path(home) / 'rules'
+    if target_rules.is_symlink() or (target_rules.exists() and not target_rules.is_dir()):
+        raise ValueError(f'worker home collision: {target_rules}')
+    wanted = {}
+    if source_rules.is_dir():
+        for root, _dirs, names in os.walk(source_rules):
+            for name in names:
+                path = Path(root) / name
+                if name.endswith('.md') and path.is_file():
+                    try:
+                        wanted[path.relative_to(source_rules)] = path.read_bytes()
+                    except OSError:
+                        continue
+    for relative, data in sorted(wanted.items()):
+        write_worker_copy(target_rules / relative, data)
+    if target_rules.is_dir() and not target_rules.is_symlink():
+        for root, _dirs, names in os.walk(target_rules):
+            for name in names:
+                path = Path(root) / name
+                if name.endswith('.md') and path.relative_to(target_rules) not in wanted:
+                    path.unlink(missing_ok=True)
+
+
 def link(target, linkpath):
     """Python port of install-runtime-projection.sh's link() primitive.
 
@@ -571,8 +661,9 @@ def codex_worker_launch_values(agent_home, source, home, worker_type, home_envir
 def build_worker_home(agent_home, harness, worker_type, identity, *, env=None, destination=None, profile=None):
     """Default typed profile for every launch; never changes the caller's home.
 
-    Runtime-owned credentials stay linked. User permissions and hooks retain
-    their original bytes; only automatic main/catalog discovery is narrowed.
+    Runtime-owned credentials stay linked. User permissions, hooks, and rule
+    text (Codex AGENTS.override.md, Claude rules/) retain their original bytes;
+    only automatic main/catalog discovery is narrowed.
     The existing declaration profiles still add their selected specialization
     through build_instance; both paths use the same runtime attach templates.
     """
@@ -648,6 +739,7 @@ def build_worker_home(agent_home, harness, worker_type, identity, *, env=None, d
     symlink(agent_home, home / 'hearting')
     if harness == 'codex':
         source = Path(env.get('CODEX_HOME') or Path.home() / '.codex').expanduser()
+        publish_codex_user_override(source, home, filename)
         symlink(source / 'hooks', home / 'hooks')
         for name in ('auth.json', 'config.toml'):
             auth_source = account_source if account_source is not None else source
@@ -708,6 +800,7 @@ def build_worker_home(agent_home, harness, worker_type, identity, *, env=None, d
         account = config.get('oauthAccount') if isinstance(config, dict) else None
         if account:
             write_json(home / '.claude.json', {'oauthAccount': account})
+        publish_claude_user_rules(source, home)
         symlink(source / 'hooks', home / 'hooks')
         settings = read_json(source / 'settings.json')
         settings['enabledPlugins'] = {name: False for name in settings.get('enabledPlugins', {})}
@@ -806,6 +899,8 @@ def build_worker_home(agent_home, harness, worker_type, identity, *, env=None, d
             config['permission'] = permission
             for name in ('plugins', 'plugin'):
                 symlink(source / name, home / name)
+            publish_opencode_user_rules(env.get('CLAUDE_CONFIG_DIR') or Path(home_env) / '.claude',
+                                        home, config)
         write_json(home / 'opencode.json', config)
         runtime = home / 'runtime'
         for kind in ('data', 'cache', 'state', 'config'):

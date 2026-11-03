@@ -170,13 +170,34 @@ class RepoGroupingTest(_TmpStoreCase):
         result = memcol.collect(now=now)
         self.assertEqual(set(result["by_repo"].keys()), {"myrepo"})
 
-    def test_yesterday_events_excluded_from_by_repo(self):
-        now = datetime.datetime(2026, 7, 16, 12, 0, 0)
+    def test_yesterday_events_stay_in_by_repo_but_not_in_today(self):
+        # 2026-11-02 사용자 결정: by_repo shows each project's latest journal rows, not
+        # only today's. The `today` aggregate keeps its midnight boundary.
+        now = datetime.datetime(2026, 7, 16, 0, 1, 0)
         _write_lines(self.journal, [
-            _event("2026-07-15T09:00:00", "add", cwd="/home/demo/agent_setting"),
+            _event("2026-07-15T23:59:00", "add", cwd="/home/demo/agent_setting"),
         ])
         result = memcol.collect(now=now)
-        self.assertEqual(result["by_repo"], {})
+        self.assertEqual(len(result["by_repo"]["agent_setting"]), 1)
+        self.assertEqual(result["by_repo"]["agent_setting"][0]["ts"], "2026-07-15T23:59:00")
+        self.assertEqual(result["today"]["added"], 0)
+
+    def test_by_repo_keeps_only_the_latest_k_per_repo(self):
+        now = datetime.datetime(2026, 7, 31, 12, 0, 0)
+        days = range(10, 10 + memcol.RECENT_LIMIT + 3)
+        _write_lines(self.journal, [
+            _event("2026-07-%02dT09:00:00" % day, "add", cwd="/home/demo/agent_setting")
+            for day in days
+        ] + [
+            _event("2026-07-01T09:00:00", "add", cwd="/home/demo/other-repo"),
+        ])
+        result = memcol.collect(now=now)
+        rows = result["by_repo"]["agent_setting"]
+        self.assertEqual(len(rows), memcol.RECENT_LIMIT)
+        stamps = [row["ts"] for row in rows]
+        self.assertEqual(stamps, sorted(stamps, reverse=True))
+        self.assertEqual(stamps[0], "2026-07-%02dT09:00:00" % (10 + memcol.RECENT_LIMIT + 2))
+        self.assertEqual(len(result["by_repo"]["other-repo"]), 1)
 
 
 class DurableOverTest(_TmpStoreCase):
@@ -204,49 +225,116 @@ class DurableOverTest(_TmpStoreCase):
         self.assertEqual(result["alerts"]["durable_over"], [])
 
 
-class BacklogMetadataReadTest(_TmpStoreCase):
+class ProjectMemoryReadTest(_TmpStoreCase):
+    """The Explorer's per-project DB summary: headline-only, read-only, per project not global."""
+
+    COLUMNS = ("id", "tier", "scope", "cwd_origin", "type", "source", "tags", "links", "body",
+               "headline", "artifact_refs", "status", "canonical_id", "superseded_by", "created",
+               "updated", "delivery_state", "injection_flag")
+
+    def _make_db(self, rows):
+        db = self.store / "memory.db"
+        con = sqlite3.connect(str(db))
+        con.execute("CREATE TABLE records (%s)" % ", ".join(
+            name + (" INTEGER" if name == "injection_flag" else " TEXT") for name in self.COLUMNS))
+        defaults = {"tier": "durable", "scope": "project", "source": "manual", "tags": "[]",
+                    "links": "[]", "body": "PRIVATE-BODY-SENTINEL", "artifact_refs": "[]",
+                    "status": "active", "superseded_by": None, "delivery_state": "ordinary",
+                    "injection_flag": 0}
+        for row in rows:
+            values = dict(defaults, **row)
+            values.setdefault("canonical_id", values["id"])
+            values.setdefault("created", values["updated"])
+            con.execute("INSERT INTO records VALUES (%s)" % ", ".join("?" * len(self.COLUMNS)),
+                        [values.get(name) for name in self.COLUMNS])
+        con.commit()
+        con.close()
+        return db
+
     def test_database_extension_is_opt_in_and_default_journal_contract_is_unchanged(self):
-        with mock.patch.object(memcol, "_read_backlog_records",
+        with mock.patch.object(memcol, "_read_project_memory",
                                side_effect=AssertionError("default collector must not query DB")):
             self.assertIsNone(memcol.collect(include_summary=False))
 
-    def test_backlog_reads_only_active_explicit_metadata_in_read_only_mode(self):
-        db = self.store / "memory.db"
-        con = sqlite3.connect(str(db))
-        con.execute("""CREATE TABLE records (
-            id TEXT, tier TEXT, scope TEXT, cwd_origin TEXT, type TEXT, source TEXT,
-            tags TEXT, links TEXT, body TEXT, headline TEXT, artifact_refs TEXT,
-            status TEXT, canonical_id TEXT, superseded_by TEXT, updated TEXT,
-            delivery_state TEXT, injection_flag INTEGER)""")
-        con.executemany("INSERT INTO records VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", [
-            ("todo-1", "durable", "project", "git:github.com/team/repo", "project",
-             "user-backlog:fixture", '["fleet","backlog"]', '["rt-0123456789abcdef"]',
-             "PRIVATE-BODY-SENTINEL", "[Backlog] fix repo view", '["rt-0123456789abcdef"]',
-             "active", "todo-1", None, "2026-10-26", "ordinary", 0),
-            ("note-1", "durable", "project", "git:github.com/team/repo", "fact",
-             "manual", '["fleet"]', "[]", "NOT-A-BACKLOG", "fact", "[]",
-             "active", "note-1", None, "2026-10-25", "ordinary", 0),
-            ("old-1", "durable", "project", "git:github.com/team/repo", "project",
-             "user-backlog:old", '["backlog"]', "[]", "SUPERSEDED-BODY", "old", "[]",
-             "superseded", "old-1", "todo-1", "2026-10-24", "ordinary", 0),
-        ])
-        con.commit()
-        con.close()
+    def test_every_project_keeps_its_own_newest_decisions_without_reading_bodies(self):
+        busy = "git:github.com/team/busy"
+        rows = [{"id": "busy-%03d" % i, "cwd_origin": busy, "type": "decision",
+                 "headline": "busy decision %d" % i, "updated": "2026-11-%02d" % (1 + i % 2)}
+                for i in range(600)]
+        rows += [
+            {"id": "quiet-new", "cwd_origin": "git:github.com/team/quiet", "type": "decision",
+             "headline": "quiet newest", "updated": "2026-08-10"},
+            {"id": "quiet-old", "cwd_origin": "git:github.com/team/quiet", "type": "decision",
+             "headline": "quiet older", "updated": "2026-08-01"},
+            {"id": "quiet-gone", "cwd_origin": "git:github.com/team/quiet", "type": "decision",
+             "headline": "quiet superseded", "updated": "2026-08-20", "status": "superseded"},
+            {"id": "encoded", "cwd_origin": "id:5e3e0f2ec365009e", "type": "decision",
+             "headline": "no project name", "updated": "2026-11-02"},
+            {"id": "fact", "cwd_origin": "git:github.com/team/quiet", "type": "fact",
+             "headline": "not read", "updated": "2026-11-02"},
+        ]
+        db = self._make_db(rows)
         before = db.read_bytes()
 
-        result = memcol.collect(include_summary=False, include_backlog=True)
+        database = memcol._read_project_memory("2026-11-02")
 
-        self.assertEqual(result["database"]["state"], "success")
-        records = result["database"]["by_repo"]["repo"]
-        self.assertEqual([item["id"] for item in records], ["todo-1"])
-        self.assertEqual(records[0]["canonical_id"], "todo-1")
-        self.assertEqual(records[0]["artifact_refs"], ("rt-0123456789abcdef",))
-        self.assertNotIn("body", records[0])
-        self.assertNotIn("PRIVATE-BODY-SENTINEL", repr(result))
-        self.assertNotIn("SUPERSEDED-BODY", repr(result))
+        self.assertEqual(database["state"], "success")
+        self.assertEqual(set(database["by_repo"]), {"busy", "quiet"})
+        quiet = database["by_repo"]["quiet"]
+        self.assertEqual([item["headline"] for item in quiet["decisions"]], ["quiet newest", "quiet older"])
+        self.assertEqual(quiet["open"], [])
+        busy_rows = database["by_repo"]["busy"]
+        self.assertEqual(len(busy_rows["decisions"]), memcol.DECISIONS_PER_PROJECT)
+        self.assertTrue(all(item["updated"] == "2026-11-02" for item in busy_rows["decisions"]))
+        self.assertEqual(busy_rows["decisions"][0]["id"], "busy-599")      # newest write first
+        self.assertEqual(busy_rows["decisions_today"], 300)
+        self.assertNotIn("PRIVATE-BODY-SENTINEL", repr(database))
+        self.assertNotIn("not read", repr(database))
         self.assertEqual(db.read_bytes(), before)
 
-    def test_database_unavailable_is_not_reported_as_empty_backlog(self):
+    def test_open_candidates_carry_markers_tags_and_route_links(self):
+        self._make_db([
+            {"id": "ob", "cwd_origin": "git:github.com/team/repo", "type": "unresolved-obligation",
+             "headline": "fix the repo view", "updated": "2026-10-30",
+             "links": '["rt-0123456789abcdef"]'},
+            {"id": "tagged", "cwd_origin": "git:github.com/team/repo", "type": "project",
+             "headline": "tagged task", "updated": "2026-10-29", "tags": '["fleet","backlog"]'},
+            {"id": "marked", "cwd_origin": "/home/demo/repo", "type": "project",
+             "headline": "[진행 중] marked task", "updated": "2026-10-28"},
+            {"id": "plain", "cwd_origin": "git:github.com/team/repo", "type": "project",
+             "headline": "plain project fact", "updated": "2026-10-31"},
+        ])
+        open_items = memcol._read_project_memory("2026-11-02")["by_repo"]["repo"]["open"]
+        self.assertEqual([item["id"] for item in open_items], ["ob", "tagged", "marked"])
+        self.assertEqual(open_items[0]["links"], ("rt-0123456789abcdef",))
+        self.assertIn("backlog", open_items[1]["tags"])
+
+    def test_journal_rows_take_their_stored_headline(self):
+        self._make_db([{"id": "rec-1", "cwd_origin": "git:github.com/team/repo", "type": "note",
+                        "headline": "the stored one-liner", "updated": "2026-11-02"}])
+        _write_lines(self.journal, [
+            _event("2026-11-02T09:00:00", "add", snippet="2026-11-02 [aa](claude x): long body",
+                   cwd="/home/demo/repo", id="rec-1"),
+            _event("2026-11-02T09:01:00", "add", snippet="no record", cwd="/home/demo/repo",
+                   id="rec-2"),
+        ])
+        result = memcol.collect(now=datetime.datetime(2026, 11, 2, 12, 0, 0),
+                                include_summary=False, include_backlog=True)
+        rows = {row["id"]: row for row in result["by_repo"]["repo"]}
+        self.assertEqual(rows["rec-1"]["headline"], "the stored one-liner")
+        self.assertNotIn("headline", rows["rec-2"])
+        self.assertNotIn("headlines", result["database"])
+
+    def test_unchanged_database_is_not_queried_again(self):
+        self._make_db([{"id": "d", "cwd_origin": "git:github.com/team/repo", "type": "decision",
+                        "headline": "kept", "updated": "2026-11-02"}])
+        first = memcol._read_project_memory("2026-11-02")
+        with mock.patch.object(memcol.sqlite3, "connect",
+                               side_effect=AssertionError("cached result must be reused")):
+            again = memcol._read_project_memory("2026-11-02")
+        self.assertEqual(again["by_repo"], first["by_repo"])
+
+    def test_database_unavailable_is_not_reported_as_empty(self):
         result = memcol.collect(include_summary=False, include_backlog=True)
         self.assertEqual(result["database"]["state"], "unavailable")
         self.assertIsNone(result["database"]["record_count"])

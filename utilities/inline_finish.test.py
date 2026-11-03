@@ -9,6 +9,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import concurrent.futures
 import unittest
 import unittest.mock
@@ -103,6 +104,154 @@ class PendingForCycleTest(unittest.TestCase):
                 path.write_bytes(payload)
                 with self.assertRaisesRegex(inline_finish.InlineFinishError, "finish-intent-corrupt"):
                     inline_finish.pending_for_cycle(self.root, "cyc-current")
+
+
+class ResultLocationLineTest(unittest.TestCase):
+    """finish ends with one line naming where the change is, only when its start moved the work.
+
+    The fixture follows real preparation: a bare origin whose `main` is ahead of the person's
+    folder, which sits on another branch, and a worktree prepared from the fetched remote tip."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="result-location-")
+        base = Path(os.path.realpath(self.temp.name))
+        self.base = base
+        self.env = {**os.environ, "GIT_CEILING_DIRECTORIES": str(base)}
+        origin, self.repo, writer = base / "origin.git", base / "repo", base / "writer"
+        self.git(base, "init", "-q", "--bare", "-b", "main", str(origin))
+        self.git(base, "clone", "-q", str(origin), str(self.repo))
+        self.identity(self.repo)
+        (self.repo / "greet.py").write_text("print('Helo')\n", encoding="utf-8")
+        self.git(self.repo, "add", "greet.py")
+        self.git(self.repo, "commit", "-qm", "base")
+        self.git(self.repo, "push", "-q", "-u", "origin", "main")
+        self.git(self.repo, "switch", "-q", "-c", "feature")          # the person is on another branch
+        self.git(base, "clone", "-q", str(origin), str(writer))
+        self.identity(writer)
+        (writer / "upstream.txt").write_text("upstream\n", encoding="utf-8")
+        self.git(writer, "add", "upstream.txt")
+        self.git(writer, "commit", "-qm", "upstream moves on")         # origin/main is ahead of the folder
+        self.git(writer, "push", "-q", "origin", "main")
+        self.root = base / "reports"
+        self.root.mkdir()
+        with unittest.mock.patch.dict(os.environ, {"GIT_CEILING_DIRECTORIES": str(base)}):
+            made = CAP.prepare_isolated_worktree(self.repo, "greet", artifact_root=self.root,
+                                                 preparation_key={"request": "fix the greeting"})
+        self.assertEqual(made["state"], "created", made)
+        self.wt = Path(made["path"])
+        self.route = {"cwd": str(self.wt), "artifact_root": str(self.root),
+                      "source_commit": self.git(self.wt, "rev-parse", "HEAD")}
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def git(self, cwd, *args):
+        return subprocess.run(["git", "-C", str(cwd), *args], check=True, env=self.env,
+                              capture_output=True, text=True).stdout.strip()
+
+    def identity(self, repo):
+        self.git(repo, "config", "user.email", "test@example.com")
+        self.git(repo, "config", "user.name", "Result Location Test")
+
+    def line(self, route=None):
+        with unittest.mock.patch.dict(os.environ, {"GIT_CEILING_DIRECTORIES": str(self.base)}):
+            return CAP._result_location_line(route or self.route)
+
+    def fix(self, commit=False):
+        (self.wt / "greet.py").write_text("print('Hello')\n", encoding="utf-8")
+        if commit:
+            self.identity(self.wt)
+            self.git(self.wt, "commit", "-qam", "fix greeting")
+
+    def test_untouched_prepared_worktree_says_nothing_though_the_folder_is_behind(self):
+        # F1: the worktree starts at origin/main, which the person's folder does not hold.
+        self.assertEqual(self.line(), "")
+
+    def test_change_names_both_folders_and_its_commit_state(self):
+        self.fix()
+        line = self.line()
+        self.assertEqual(line, f"result: the change is in {self.wt} (branch greet, not committed yet), "
+                               f"not in {self.repo}")
+        self.fix(commit=True)
+        self.assertEqual(self.line(), f"result: the change is in {self.wt} (branch greet), not in {self.repo}")
+
+    def test_no_merge_command_even_when_the_folder_holds_the_base(self):
+        self.git(self.repo, "switch", "-q", "main")
+        self.git(self.repo, "pull", "-q", "--ff-only")
+        self.fix(commit=True)
+        self.assertEqual(self.line(), f"result: the change is in {self.wt} (branch greet), not in {self.repo}")
+        self.git(self.repo, "merge", "-q", "greet")
+        self.assertEqual(self.line(), "")                              # already in the person's folder
+
+    def upstream_moves(self):
+        writer = self.base / "writer"
+        (writer / "later.txt").write_text("later\n", encoding="utf-8")
+        self.git(writer, "add", "later.txt")
+        self.git(writer, "commit", "-qm", "upstream moves again")
+        self.git(writer, "push", "-q", "origin", "main")
+        self.git(self.wt, "fetch", "-q", "origin")
+
+    def test_rebased_or_main_merged_worktree_gets_no_merge_command(self):
+        # R1: after a rebase onto (or merge of) upstream, `git merge greet` would also carry the
+        # upstream commits into the person's branch, so the line names the place only.
+        self.git(self.repo, "switch", "-q", "main")
+        self.git(self.repo, "pull", "-q", "--ff-only")                 # the folder holds the base only
+        self.fix(commit=True)
+        fix_only = self.git(self.wt, "rev-parse", "HEAD")
+        self.upstream_moves()
+        self.git(self.wt, "rebase", "-q", "origin/main")
+        self.assertEqual(self.line(), f"result: the change is in {self.wt} (branch greet), not in {self.repo}")
+        self.git(self.wt, "reset", "-q", "--hard", fix_only)          # back to the fix alone, then merge main
+        self.git(self.wt, "merge", "-q", "--no-edit", "origin/main")
+        self.assertEqual(self.git(self.wt, "rev-list", "--count", "HEAD", "--not", self.git(self.repo, "rev-parse", "HEAD")), "3")
+        self.assertEqual(self.line(), f"result: the change is in {self.wt} (branch greet), not in {self.repo}")
+
+    def test_folder_moved_to_another_branch_is_still_named_by_place(self):
+        self.git(self.repo, "switch", "-q", "main")
+        self.git(self.repo, "pull", "-q", "--ff-only")
+        self.git(self.repo, "switch", "-q", "-c", "other")             # holds the base, different name
+        self.fix()
+        self.assertEqual(self.line(), f"result: the change is in {self.wt} (branch greet, not committed yet), "
+                                      f"not in {self.repo}")
+
+    def test_old_route_without_source_commit_says_nothing(self):
+        self.fix(commit=True)
+        old = {key: value for key, value in self.route.items() if key != "source_commit"}
+        self.assertEqual(self.line(old), "")
+
+    def test_detached_head_names_the_folder_only(self):
+        self.fix(commit=True)
+        self.git(self.wt, "switch", "-q", "--detach")
+        self.assertEqual(self.line(), f"result: the change is in {self.wt} (detached HEAD), not in {self.repo}")
+
+    def test_work_in_the_persons_own_folders_says_nothing(self):
+        # F2: the primary itself, a linked worktree the person made, and an approved linked task.
+        (self.repo / "greet.py").write_text("print('Hello')\n", encoding="utf-8")
+        head = self.git(self.repo, "rev-parse", "HEAD")
+        self.assertEqual(self.line({**self.route, "cwd": str(self.repo), "source_commit": head}), "")
+        mine = self.base / "repo-wt" / "mine"
+        self.git(self.repo, "worktree", "add", "-q", "-b", "mine", str(mine))
+        mine_route = {**self.route, "cwd": str(mine), "source_commit": self.git(mine, "rev-parse", "HEAD")}
+        self.identity(mine)
+        (mine / "greet.py").write_text("print('Hello')\n", encoding="utf-8")
+        self.git(mine, "commit", "-qam", "my own fix")
+        self.assertEqual(self.line(mine_route), "")
+        with unittest.mock.patch.dict(os.environ, {"GIT_CEILING_DIRECTORIES": str(self.base)}):
+            approved = CAP.prepare_isolated_worktree(mine, "mine", artifact_root=self.root,
+                                                     preparation_key={"request": "continue"},
+                                                     explicitly_approved=True)
+        self.assertEqual(approved["reason"], "approved-linked-task", approved)
+        self.assertEqual(self.line(mine_route), "")
+        # The approved record's base is this route's start, so only the exclusion keeps it quiet.
+        approved_route = {**mine_route, "source_commit": self.git(mine, "rev-parse", "HEAD")}
+        (mine / "greet.py").write_text("print('Hello again')\n", encoding="utf-8")
+        self.assertEqual(self.line(approved_route), "")
+        self.fix()
+        self.assertEqual(self.line({**self.route, "cwd": str(self.base / "missing")}), "")
+
+    def test_unversioned_route_runs_no_git(self):
+        with unittest.mock.patch.object(CAP, "_git", side_effect=AssertionError("git probed")):
+            self.assertEqual(self.line({**self.route, "source_commit": "unversioned"}), "")
 
 
 class PublicInlineFinishTest(unittest.TestCase):
@@ -202,6 +351,9 @@ class PublicInlineFinishTest(unittest.TestCase):
                                       "--route", str(self.route_file), "--jobs", str(self.jobs)],
                                      cwd=self.repo, env=os.environ.copy(), capture_output=True, text=True)
             self.assertEqual(started.returncode, 0, started.stderr)
+            # stdout stays the one JSON receipt; one plain "next:" line closes stderr.
+            json.loads(started.stdout)
+            self.assertTrue(started.stderr.rstrip().splitlines()[-1].startswith("next: "), started.stderr)
             start_output = started.stdout + started.stderr
         self.cycle = artifact_producer.route_cycle_for(self.root, self.route) if self.started else None
         if self.started:
@@ -633,6 +785,8 @@ class PublicInlineFinishTest(unittest.TestCase):
         self.assertEqual(first.returncode, 0, first.stderr)
         receipt = json.loads(first.stdout)
         self.assertEqual(receipt["schema"], "finish_receipt_v1")
+        # The route ran in the person's own folder, so no result-location line.
+        self.assertNotIn("result:", first.stderr)
         self.assertFalse(receipt["replay"])
         record = artifact_producer.read_cycle_record(self.root, self.cycle["cycle_id"])
         self.assertEqual(record["state"], "sealed")
@@ -1143,11 +1297,22 @@ class PublicInlineFinishTest(unittest.TestCase):
     def test_active_review_lease_is_refused_before_intent(self):
         lease_path = artifact_producer._review_lease_path(self.root, self.cycle["cycle_id"], "att-review")
         lease_path.parent.mkdir(parents=True, exist_ok=True)
+        # A holder that cannot be observed still blocks the write, but it is reported as unobservable.
         lease_path.write_text("{}\n", encoding="utf-8")
         refused = self.finish()
         self.assertNotEqual(refused.returncode, 0)
-        self.assertIn("finish-active-review-lease", refused.stderr)
+        self.assertIn("finish-review-lease-unobservable", refused.stderr)
+        self.assertNotIn("finish-active-review-lease", refused.stderr)
         self.assertFalse((self.root / ".runtime/inline-finish/v1" / self.route["route_id"] / "finish.json").exists())
+        # A holder observed running (this process: exact pid, start and group) is reported live.
+        now = time.time()
+        lease_path.write_text(json.dumps({
+            "deadline": artifact_producer._rfc3339(now + 300), "released_at": None, "pid": os.getpid(),
+            "pid_start": artifact_producer.process_start_ticks(os.getpid()),
+            "pgid": os.getpgid(os.getpid())}), encoding="utf-8")
+        live = self.finish()
+        self.assertNotEqual(live.returncode, 0)
+        self.assertIn("finish-active-review-lease", live.stderr)
         lease_path.unlink()
         resumed = self.finish()
         self.assertEqual(resumed.returncode, 0, resumed.stderr)

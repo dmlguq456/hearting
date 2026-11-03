@@ -167,6 +167,23 @@ class PyYamlProbeTest(unittest.TestCase):
         with mock.patch.object(host_probes.shutil, "which", return_value=None):
             self.assertIn("host.pyyaml", {p["id"] for p in host_probes.run()})
 
+    def test_doctor_says_once_when_pyyaml_is_missing_and_keeps_its_exit(self):
+        # README sends a new install to `runtime doctor --strict`; before this it was
+        # silent about PyYAML, and the first non-direct task stopped on yaml-unavailable.
+        args = installer.build_parser().parse_args(["runtime", "doctor", "--runtime", "claude", "--strict"])
+        report = {"ok": True, "status": "ok", "freshness": "fresh", "next_action": "none"}
+        skew = {"ok": True, "surfaces": [], "compared": [], "skewed": []}
+        for module, expected in ((_fake_yaml(), 0), (None, 1)):
+            with mock.patch.dict(sys.modules, {"yaml": module}), \
+                 mock.patch.object(installer.runtime_activation, "doctor", return_value=dict(report)), \
+                 mock.patch.object(installer.runtime_activation, "surface_skew", return_value=skew):
+                result = installer.cmd_runtime(args)
+            missing = [line for line in result["lines"] if line.startswith("missing: PyYAML")]
+            self.assertEqual(len(missing), expected, result["lines"])
+            self.assertEqual(result["exit"], installer.EXIT_OK)
+            if expected:
+                self.assertIn("-m pip install --user pyyaml", missing[0])
+
     def test_verify_passes_with_pyyaml_and_fails_without_it(self):
         args = SimpleNamespace(runtimes=["claude"], target=None, scope="global", plugin=False)
         ok_config = {"ok": True, "status": "ok", "path": "x"}

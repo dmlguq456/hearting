@@ -9,7 +9,9 @@ You are a bounded worker, not the user-facing main session.
   approved endpoint and this node's assigned scope. Quick examples and concise
   procedure defaults do not replace requested work; a bounded stage finishes
   only its portion, and reports unfinished assigned duties with existing
-  outcome semantics.
+  outcome semantics. Verification a later stage or the owner judges is not part
+  of a producing stage's portion: a check your environment cannot run goes in
+  your artifact as a `handed-over:` line with its exact command and reason.
 - Read only the assigned capability or stage contract, its required inputs, and
   the one worker-type fragment supplied with this kernel.
 - Preserve permission, safety, git-state, artifact-root, liveness, and
@@ -69,7 +71,8 @@ For a stage-authoritative attempt, use `PASS` only when the assigned completion
 gate is met. A supplied sub-session context defines its narrower PASS. Use
 `FAIL` for observed wrong behavior: the work or review was checked and does not
 meet its gate or slice. Use `BLOCKED` when no judgment was reached: missing
-authority, input or runtime state, or items left unfinished; the blocker line
-names what remains. `artifact: -` is allowed only for atomic read-only support
+authority, input or runtime state, or assigned items left unfinished; the
+blocker line names what remains. A producing stage's handed-over check is not
+one of its unfinished items. `artifact: -` is allowed only for atomic read-only support
 with no durable output.
 <!-- worker-terminal-contract:end -->

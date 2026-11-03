@@ -173,7 +173,7 @@ class PreservedResourceHandoffReplayTest(unittest.TestCase):
             ("{DISPATCH}", str(self.dispatch)),
             ("{RELEASES}", str(self.base / "releases")),
             ("{COMPUTE_RUNS}", str(self.base / "compute-runs")),
-            ("/home/nas/user/Uihyeop/NN_Zoo/SR_CorrNet", str(self.repo)),
+            ("/home/example/Project_Zoo/SR_ModelA", str(self.repo)),
         ]
 
     def _remove_base(self):

@@ -982,6 +982,7 @@ def merge(basic, detail):
         display_snapshot = basic.display_snapshot
     return replace(basic, sessions=sessions, jobs=jobs, resources=resources,
                    memory=value.memory, governor=value.governor,
+                   project_status=getattr(value, "project_status", None),
                    hearting=value.hearting or basic.hearting,
                    display_snapshot=display_snapshot, observations=observations, **evidence)
 
@@ -1018,6 +1019,9 @@ def retain_optional_last_good(previous, current):
         new.memory = dict(current_data, database=current_database)
         new_db = dict(new_db, last_good=True)
         new_observations["optional:memory-db"] = new_db
+
+    if getattr(new, "project_status", None) is None:      # read once a minute; a pass without it keeps the last
+        new.project_status = getattr(old, "project_status", None)
 
     old_rows = {}
     for row in old.sessions:

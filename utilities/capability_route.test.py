@@ -3,6 +3,9 @@ import base64, contextlib, copy, hashlib, importlib.util, io, json, os, re, shut
 from pathlib import Path
 from unittest import mock
 
+# The card screens stored below are Korean and UI text defaults to English, so this
+# suite declares the Korean operator language itself (tools/i18n/ui_text.py).
+os.environ["FLEET_NOW_LANG"]="Korean"
 P=Path(__file__).with_name("capability-route.py")
 S=importlib.util.spec_from_file_location("route",P); R=importlib.util.module_from_spec(S); S.loader.exec_module(R)
 GUARD_P=P.with_name("worker-route-guard.py")
@@ -2536,6 +2539,30 @@ class TestRoute(unittest.TestCase):
    with self.assertRaisesRegex(ValueError,"route-close-outside-canonical-or-legacy"):
     R.close_route(route,outside,commit="5"*40)
    self.assertFalse(R.outcome_path(outside).exists())
+ def test_route_copy_outside_root_closes_canonical_same_identity(self):
+  # Hand-built shape: a route passed by a copy's path closes the one canonical record of the same route.
+  route=R.compile_route(**self.args())
+  with tempfile.TemporaryDirectory() as tmp:
+   artifact_root=Path(tmp); route=dict(route); route["artifact_root"]=str(artifact_root)
+   canonical=R.canonical_route_path(artifact_root,route["route_id"]); canonical.parent.mkdir(parents=True)
+   canonical.write_text(json.dumps(route),encoding="utf-8")
+   outside=artifact_root/"nested"/"copy-route.json"; outside.parent.mkdir(parents=True)
+   outside.write_text(json.dumps(route),encoding="utf-8")
+   outcome,created=R.close_route(route,outside,commit="6"*40,summary="copy close",allow_unproven=True)
+   self.assertTrue(created)
+   self.assertTrue(R.outcome_path(canonical).is_file())
+   self.assertFalse(R.outcome_path(outside).exists())
+ def test_outside_copy_of_a_different_identity_is_still_refused(self):
+  route=R.compile_route(**self.args())
+  with tempfile.TemporaryDirectory() as tmp:
+   artifact_root=Path(tmp); route=dict(route); route["artifact_root"]=str(artifact_root)
+   canonical=R.canonical_route_path(artifact_root,route["route_id"]); canonical.parent.mkdir(parents=True)
+   canonical.write_text(json.dumps({**route,"route_hash":"sha256:"+"9"*64}),encoding="utf-8")
+   outside=artifact_root/"nested"/"copy-route.json"; outside.parent.mkdir(parents=True)
+   outside.write_text(json.dumps(route),encoding="utf-8")
+   with self.assertRaisesRegex(ValueError,"route-close-outside-canonical-or-legacy"):
+    R.close_route(route,outside,commit="6"*40)
+   self.assertFalse(R.outcome_path(canonical).exists())
  def test_f47_1_new_route_records_carry_owner_attempt_and_family_key(self):
   previous=os.environ.pop("AGENT_DISPATCH_ATTEMPT_ID",None)
   try:
@@ -4219,6 +4246,70 @@ class TestContinuation(unittest.TestCase):
    finally:
     if previous_jobs is None: os.environ.pop("AGENT_DISPATCH_JOBS",None)
     else: os.environ["AGENT_DISPATCH_JOBS"]=previous_jobs
+
+ def _u11_registered_node(self,tmp,rows):
+  """Hand-built registry shape: one `execute` node and a done row per `rows` entry (id, note, failure_class)."""
+  jobs=Path(tmp)/"state"/"jobs.log"; jobs.parent.mkdir(parents=True)
+  artifact=Path(tmp)/"artifacts"
+  source=self._source(artifact)
+  node=next(row for row in source["nodes"] if row["id"]=="execute")
+  lines=[]
+  for attempt_id,note,failure_class in rows:
+   meta={"attempt_id":attempt_id,"attempt_schema_version":"2","dispatch_depth":str(node["dispatch_depth"]),
+         "transport":"headless","execution_surface":"registered-headless","registered_worker":"1",
+         "fallback_hop":"same-harness-headless","route_id":source["route_id"],"route_hash":source["route_hash"],
+         "route_node":node["id"],"note":note,"failure_class":failure_class}
+   lines.append("\t".join(["2026-09-24T00:00:00Z","done",str(tmp),str(tmp),"slug",",".join(f"{k}={v}" for k,v in meta.items())]))
+  jobs.write_text("\n".join(lines)+"\n",encoding="utf-8")
+  evidence=Path(tmp)/"evidence"/"execute.md"; evidence.parent.mkdir(parents=True,exist_ok=True)
+  evidence.write_text("execute exact output\n",encoding="utf-8")
+  return source,node,jobs,evidence
+
+ def test_single_current_attempt_is_used_without_flag(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   source,node,jobs,evidence=self._u11_registered_node(tmp,[("att-only","completed-supervisor","pass")])
+   previous=os.environ.get("AGENT_DISPATCH_JOBS"); os.environ["AGENT_DISPATCH_JOBS"]=str(jobs)
+   try:
+    marker,_row=R.complete_node(source,node,node["id"],evidence,jobs=jobs)
+   finally:
+    if previous is None: os.environ.pop("AGENT_DISPATCH_JOBS",None)
+    else: os.environ["AGENT_DISPATCH_JOBS"]=previous
+   self.assertIsNotNone(marker)
+   self.assertIn("note=completed-marker",jobs.read_text(encoding="utf-8"))
+
+ def test_two_candidate_attempts_still_require_flag(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   source,node,jobs,evidence=self._u11_registered_node(
+    tmp,[("att-one","completed-supervisor","pass"),("att-two","completed-supervisor","pass")])
+   with self.assertRaisesRegex(ValueError,"registered completion requires --attempt-id"):
+    R.complete_node(source,node,node["id"],evidence,jobs=jobs)
+   self.assertNotIn("completed-marker",jobs.read_text(encoding="utf-8"))
+
+ def test_pass_row_with_other_note_is_marker_eligible(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   source,node,jobs,evidence=self._u11_registered_node(tmp,[("att-pass","completed-owner-envelope","pass")])
+   previous=os.environ.get("AGENT_DISPATCH_JOBS"); os.environ["AGENT_DISPATCH_JOBS"]=str(jobs)
+   try:
+    marker,_row=R.complete_node(source,node,node["id"],evidence,jobs=jobs,attempt_id="att-pass")
+   finally:
+    if previous is None: os.environ.pop("AGENT_DISPATCH_JOBS",None)
+    else: os.environ["AGENT_DISPATCH_JOBS"]=previous
+   self.assertIsNotNone(marker)
+
+ def test_fail_row_never_gets_marker(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   source,node,jobs,evidence=self._u11_registered_node(tmp,[("att-fail","dead-worker-fail","fail")])
+   with self.assertRaisesRegex(ValueError,"attempt-row-terminal-without-completion:dead-worker-fail"):
+    R.complete_node(source,node,node["id"],evidence,jobs=jobs,attempt_id="att-fail")
+   self.assertNotIn("completed-marker",jobs.read_text(encoding="utf-8"))
+
+ def test_verdict_pass_row_with_terminal_conflict_gets_no_marker(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   source,node,jobs,evidence=self._u11_registered_node(tmp,[("att-conflict","completed-owner-envelope","pass")])
+   with mock.patch.object(R,"terminal_conflict_pending",return_value=True):
+    with self.assertRaisesRegex(ValueError,"attempt-row-terminal-without-completion"):
+     R.complete_node(source,node,node["id"],evidence,jobs=jobs,attempt_id="att-conflict")
+   self.assertNotIn("completed-marker",jobs.read_text(encoding="utf-8"))
 
  def test_recorded_move_corrects_only_exact_artifact_missing_terminal(self):
   with tempfile.TemporaryDirectory() as tmp:
@@ -10394,10 +10485,14 @@ class RouteChainWriterTest(ComposeRouteTest):
    route=self.compose(artifact_root=tmp)
   with mock.patch.dict(os.environ,{"CLAUDE_CODE_SESSION_ID":"sid-starter"}):
    R._record_route_chain(route,str(Path(tmp)/"r.json"),"start")
-   R._record_route_chain(route,str(Path(tmp)/"r.json"),"start")
+   err=io.StringIO()
+   with contextlib.redirect_stderr(err):
+    R._record_route_chain(route,str(Path(tmp)/"r.json"),"start")
    lines=self.RC.read_tail("claude","sid-starter")
    self.assertEqual(len(lines),1)
    self.assertEqual(lines[0]["event"],"start")
+   # A repeated start is a normal continuation: no `written=0 reason=` line that reads as a refusal.
+   self.assertEqual(err.getvalue().strip(),"route_chain_already_recorded=1")
  def test_depth1_non_continuation_event_writes_nothing(self):
   with mock.patch.dict(os.environ,{"AGENT_DISPATCH_DEPTH":"1",
                                    "AGENT_DISPATCH_PARENT_SESSION_ID":"sid-parent",
@@ -11052,6 +11147,121 @@ class ProducerRevisionAdmissionTest(unittest.TestCase):
    with mock.patch.object(R,"gate_currency",return_value=SimpleNamespace(state="current",reason="")), \
         self.assertRaisesRegex(ValueError,"producer-revision-basis-unverified"):
     R.producer_revision_admission(route,route["nodes"][:2],jobs)
+
+
+class RouteOrAttemptArgumentTest(unittest.TestCase):
+ """Route commands take the route id, the route file or a registry attempt id alike.
+
+ Two weeks of sessions spent ~300 calls on CLI-shape errors: `status --route`, `correct` with a
+ route only, an attempt id where a route was asked (R2 manual-steps, 2026-11-02)."""
+ def setUp(self):
+  tmp=tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+  self.tmp=Path(tmp.name); self.root=self.tmp/"reports"; self.rid="rt-"+"a"*16
+  self.route_file=self._route(self.rid)
+  self.jobs=self.tmp/"jobs.log"
+  owner=f"worker_type=owner,owner_route_id={self.rid},owner_route_file={self.route_file},harness=claude"
+  stage=f"worker_type=stage,route_id={self.rid},route_file={self.route_file},route_node=test"
+  self.jobs.write_text(
+   f"t1\topen\t/r\t/w\towner\t{owner},attempt_id=att-owner-1\n"
+   f"t2\tdone\t/r\t/w\towner\t{owner},attempt_id=att-owner-1,note=dead-capacity\n"
+   f"t3\topen\t/r\t/w\tstage\t{stage},attempt_id=att-stage-1\n"
+   f"t4\topen\t/r\t/w\towner\t{owner},attempt_id=att-owner-2\n"
+   "t5\topen\t/r\t/w\tother\tworker_type=owner,owner_route_id=rt-"+"c"*16+",attempt_id=att-other\n",encoding="utf-8")
+ def _route(self,rid):
+  path=R.canonical_route_path(self.root,rid); path.parent.mkdir(parents=True,exist_ok=True)
+  path.write_text(json.dumps({"route_id":rid,"nodes":[],"artifact_root":str(self.root),
+                              "capability":"autopilot-code"}),encoding="utf-8")
+  return path
+ def test_an_attempt_id_names_its_route_wherever_a_route_is_asked(self):
+  from types import SimpleNamespace
+  for attempt in ("att-owner-1","att-owner-2","att-stage-1"):
+   self.assertEqual(R.resolve_route_argument(attempt,self.jobs),self.route_file)
+   self.assertEqual(R._close_route_argument(SimpleNamespace(route=attempt,jobs=self.jobs,artifact_root=None,
+                                                            command="close")),str(self.route_file))
+  self.assertEqual(R.resolve_route_argument(str(self.route_file),self.jobs),self.route_file)   # a file stays a file
+  self.assertEqual(R.resolve_route_argument("att-unknown",self.jobs),Path("att-unknown"))       # unchanged refusal path
+ def test_correct_reaches_a_routes_newest_owner_and_keeps_an_attempt_as_given(self):
+  with mock.patch.object(R,"_compose_artifact_root",return_value=str(self.root)):
+   self.assertEqual(R._correct_attempt_argument(self.rid,self.jobs),"att-owner-2")
+   self.assertEqual(R._correct_attempt_argument(str(self.route_file),self.jobs),"att-owner-2")
+   self.assertEqual(R._correct_attempt_argument("att-owner-1",self.jobs),"att-owner-1")
+   lonely=self._route("rt-"+"b"*16)
+   with self.assertRaisesRegex(ValueError,"route-owner-unregistered:rt-"+"b"*16):
+    R._correct_attempt_argument(str(lonely),self.jobs)
+ def test_status_takes_a_route_or_an_attempt_in_every_spelling(self):
+  env={**os.environ,"AGENT_ARTIFACT_ROOT":str(self.root)}
+  for env_key in ("AGENT_DISPATCH_ATTEMPT_ID","AGENT_DISPATCH_JOBS"): env.pop(env_key,None)
+  def status(*argv):
+   result=subprocess.run([sys.executable,str(P),"status",*argv,"--jobs",str(self.jobs)],
+                         capture_output=True,text=True,cwd=str(self.tmp),env=env)
+   self.assertEqual(result.returncode,0,result.stderr)
+   return json.loads(result.stdout)
+  for argv in ((self.rid,),("--route",self.rid),("--route-id",self.rid),("--attempt-id","att-stage-1"),
+               ("att-owner-1",),(str(self.route_file),)):
+   rows=status(*argv)
+   self.assertEqual([row["route_id"] for row in rows],[self.rid],argv)
+   self.assertEqual([(a["attempt_id"],a["status"]) for a in rows[0]["attempts"]],
+                    [("att-owner-1","done"),("att-stage-1","open"),("att-owner-2","open")],argv)
+   self.assertIn("start --route "+self.rid,rows[0]["resume_command"])
+  self.assertEqual(rows[0]["attempts"][0]["note"],"dead-capacity")
+  # Without a target the listing is the same as before: every route, no attempt read.
+  every=status("--artifact-root",str(self.root))
+  self.assertEqual([row["route_id"] for row in every],[self.rid])
+  self.assertNotIn("attempts",every[0])
+ def test_correct_without_an_owner_named_points_at_the_flag_instead_of_a_usage_error(self):
+  env={key:value for key,value in os.environ.items()
+       if not key.startswith(("CLAUDE_CODE_SESSION","CODEX_THREAD","CODEX_SESSION","OPENCODE_SESSION",
+                              "AGENT_DISPATCH_","FLEET_ROUTE_CHAIN"))}
+  env["FLEET_ROUTE_CHAIN_DIR"]=str(self.tmp/"chain")
+  result=subprocess.run([sys.executable,str(P),"correct","--jobs",str(self.jobs)],
+                        capture_output=True,text=True,cwd=str(self.tmp),env=env)
+  self.assertEqual(result.returncode,0,result.stderr)
+  self.assertEqual(json.loads(result.stdout)["state"],"no-open-route")
+  self.assertNotIn("usage:",result.stderr)
+
+
+class U7TargetResolutionTest(unittest.TestCase):
+    """Hand-built owner/stage registry shapes (d8); no installed state or recorded copy needed."""
+
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+        self.jobs=Path(self.tmp.name)/"jobs.log"
+
+    def row(self,aid,status="done",**meta):
+        base={"attempt_schema_version":"2","attempt_id":aid,"route_id":"rt-a"}
+        base.update(meta)
+        with self.jobs.open("a") as handle:
+            handle.write("\t".join(["now",status,"repo","wt","slug",",".join(f"{k}={v}" for k,v in base.items())])+"\n")
+
+    def test_correction_to_stage_attempt_reaches_route_owner(self):
+        self.row("att-owner",worker_type="owner",dispatch_depth="1")
+        self.row("att-stage",worker_type="stage",dispatch_depth="2",parent_attempt_id="att-owner")
+        self.assertEqual(R._current_owner_attempt(self.jobs,"att-stage"),"att-owner")
+
+    def test_other_route_attempt_refused(self):
+        self.row("att-owner",worker_type="owner",dispatch_depth="1")
+        self.row("att-stage",worker_type="stage",dispatch_depth="2",parent_attempt_id="att-owner",route_id="rt-b")
+        self.assertEqual(R._current_owner_attempt(self.jobs,"att-stage"),"att-stage")   # `_target` then refuses it
+        import dispatch_owner_input as I
+        with self.assertRaisesRegex(I.InputError,"correction-target-not-owner"):
+            I._target(self.jobs,"att-stage")
+
+    def test_frame_attempt_is_refused_with_the_runtime_owned_next_step(self):
+        self.row("att-frame",worker_type="frame",dispatch_depth="1")
+        import dispatch_owner_input as I
+        with self.assertRaises(I.InputError) as caught:
+            I._target(self.jobs,"att-frame")
+        self.assertIn("resume_command",caught.exception.retry_when)
+
+    def test_unreadable_lineage_does_not_fall_back_to_old_owner(self):
+        self.row("att-owner",worker_type="owner",dispatch_depth="1",replacement_family_id="fam",
+                 replacement_attempt_id="att-new")
+        with mock.patch("dispatch_replacement.effective_attempts",side_effect=D.DispatchContractError("replacement-record-unreadable")):
+            with self.assertRaisesRegex(ValueError,"owner-input-unavailable-retain-correction"):
+                R._current_owner_attempt(self.jobs,"att-owner")
+        self.row("att-plain",worker_type="owner",dispatch_depth="1")
+        with mock.patch("dispatch_replacement.effective_attempts",side_effect=OSError("unreadable")):
+            self.assertEqual(R._current_owner_attempt(self.jobs,"att-plain"),"att-plain")   # nothing was replaced
 
 
 if __name__=="__main__": unittest.main()

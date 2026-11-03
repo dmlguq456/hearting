@@ -466,7 +466,7 @@ if "$CODEX" headless >"$TMP/codex_headless.out" 2>"$TMP/codex_headless.err" \
   && grep -q '^dispatch_input_validation=capability-info,capability-mode-catalog,optional-worker-mode-info,owner-mode-axis-consistency,qa-level,intensity-dispatch_depth-parent$' "$TMP/codex_headless.out" \
   && grep -q '^worker_startup_signal=wrapper-validated-metadata-or-immutable-route$' "$TMP/codex_headless.out" \
   && grep -q '^worker_startup_signal_contract=dispatch-wrapper-validates-before-materializing-prompt; worker rechecks only for safety$' "$TMP/codex_headless.out" \
-  && grep -q '^broker_lifecycle=retired-status-stop-only$' "$TMP/codex_headless.out" \
+  && grep -q '^broker_lifecycle=retired$' "$TMP/codex_headless.out" \
   && grep -q '^launch_authority=conductor$' "$TMP/codex_headless.out" \
   && grep -q '^constraints=main-or-owner-dispatched,max-dispatch-depth-2-for-standard-plus-owner,register-open-job,headless-owner-supervisor-or-managed-gateway-or-interactive-poll-fallback,explicit-capability-mode-qa-intensity-dispatch_depth-parent-parent_sid,transcript-liveness-required$' "$TMP/codex_headless.out"; then
   ok "codex headless wrapper reports dispatch contract"
@@ -1583,7 +1583,7 @@ if command -v codex >/dev/null 2>&1; then
   if CODEX_HOME="$TMP/codex_bootstrap_home" codex debug prompt-input 'bootstrap check' >"$TMP/codex_bootstrap.out" 2>"$TMP/codex_bootstrap.err" \
     && grep -q 'AGENTS.md — Codex Adapter Bootstrap' "$TMP/codex_bootstrap.out" \
     && grep -q 'adapters/codex/bin/preflight.sh capability-info' "$TMP/codex_bootstrap.out" \
-    && grep -q 'codex_setting/codex-hooks' "$TMP/codex_bootstrap.out" \
+    && grep -q 'hearting run capability-route compose' "$TMP/codex_bootstrap.out" \
     && ! grep -q 'adapters/claude/CLAUDE.md.*portable bootstrap' "$TMP/codex_bootstrap.out"; then
     ok "codex bootstrap projection is discoverable without Claude bootstrap"
   else
@@ -3820,7 +3820,6 @@ tools/migration-manifest.py 2
 tools/fleet/collectors/dispatch.py 6
 tools/fleet/collectors/__init__.py 1
 tools/render-landing.py 1
-adapters/codex/AGENTS.md 1
 adapters/codex/bin/preflight.sh 1
 adapters/opencode/bin/preflight.sh 1
 adapters/claude/plugin-marketplace/plugins/hearting-claude/core/ADAPTATION_INVENTORY.md 1

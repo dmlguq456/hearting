@@ -4594,6 +4594,18 @@ def _release_role_relations(harness, session_id, *, seat=None, holder_only=False
     for key, selected in sorted(relations_by_seat.items()):
         with tidy.seat_lock(key):
             ledger_seat = tidy.Seat("pane", key)
+            if holder_only:
+                # The choice above was read outside the seat lock. A same-seat handover
+                # committed meanwhile moved the role to its successor, and a release row
+                # written now would bind to that successor's role. Release only what this
+                # session still holds as the lock sees it.
+                current = handover.resolved_steward_relations(seat_key=key, include_released=True)
+                held_now = {handover._role_identity(row) for row in current
+                            if (row.get("holder") or {}).get("harness") == harness
+                            and (row.get("holder") or {}).get("sid") == session_id}
+                selected = [relation for relation in selected
+                            if handover._role_identity(relation) in held_now]
+                relations_by_seat[key] = selected
             for relation in selected:
                 if not handover.record_steward_release(
                         ledger_seat, harness, session_id,

@@ -19,6 +19,7 @@ import runtime_activation as activation  # noqa: E402
 import installer  # noqa: E402
 import fixture_env  # noqa: E402
 import codex_hook_trust  # noqa: E402
+import user_rules  # noqa: E402
 
 
 class OpenCodeGuardDiscoveryTest(unittest.TestCase):
@@ -81,6 +82,113 @@ class OpenCodeGuardDiscoveryTest(unittest.TestCase):
         state["owned_paths"].append(activation._entry(self.module, self.js, "hook_config"))
         activation._atomic_json(activation._state_path("opencode"), state)
         return report
+
+    RULE = "# 외부 소통은 읽기 전용\n- 메일은 읽기만 한다.\n".encode()
+
+    def seed_rule(self):
+        rules = Path(os.environ["CLAUDE_CONFIG_DIR"]) / "rules"
+        rules.mkdir(parents=True, exist_ok=True)
+        rule_file = rules / "external-communications-read-only.md"
+        rule_file.write_bytes(self.RULE)
+        return rule_file
+
+    def expected_render(self):
+        bootstrap = (self.source / "adapters/opencode/AGENTS.md").read_bytes()
+        return user_rules.block(Path(os.environ["CLAUDE_CONFIG_DIR"])) + bootstrap
+
+    def test_user_rules_ride_in_front_of_the_bootstrap_and_leave_with_it(self):
+        rule_file = self.seed_rule()
+        agents = self.home / "AGENTS.md"
+        for mode in ("linked", "packaged"):
+            with self.subTest(mode=mode):
+                report = self.run_activation(mode)
+                self.assertEqual(report["freshness"], "fresh", report)
+                data = agents.read_bytes()
+                self.assertFalse(agents.is_symlink())
+                self.assertEqual(data, self.expected_render())
+                self.assertEqual(data.count(self.RULE), 1)
+                self.assertEqual(agents.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(activation.refresh("opencode")["freshness"], "fresh")
+                self.assertEqual(agents.read_bytes(), data)
+
+        rule_file.write_bytes(self.RULE + b"- added later\n")
+        activation.refresh("opencode")
+        self.assertIn(b"- added later\n", agents.read_bytes())
+        self.remove(rule_file)
+        activation.refresh("opencode")
+        self.assertTrue(agents.is_symlink())
+
+        rule_file.write_bytes(self.RULE)
+        self.run_activation()
+        self.assertFalse(agents.is_symlink())
+        result = activation.deactivate("opencode")
+        self.assertIn(str(agents), result["removed"])
+        self.assertFalse(agents.exists() or agents.is_symlink())
+        self.assertEqual(rule_file.read_bytes(), self.RULE)
+
+    def test_a_rule_file_that_is_not_utf8_is_skipped_and_reported(self):
+        rule_file = self.seed_rule()
+        (rule_file.parent / "legacy-cp949.md").write_bytes("한글 규칙\n".encode("cp949"))
+        agents = self.home / "AGENTS.md"
+        report = self.run_activation()
+        self.assertEqual(report["freshness"], "fresh", report)
+        self.assertEqual(agents.read_bytes(), self.expected_render())
+        self.assertIn("OpenCode user rules: skipped legacy-cp949.md is not UTF-8 text",
+                      report["report_lines"])
+        self.assertEqual(report["notices"],
+                         ["OpenCode user rules: skipped legacy-cp949.md is not UTF-8 text"])
+        self.assertEqual(activation.refresh("opencode")["freshness"], "fresh")
+
+    def test_an_edited_render_is_kept_aside_and_rewritten_without_a_collision(self):
+        rule_file = self.seed_rule()
+        agents = self.home / "AGENTS.md"
+        self.run_activation()
+        edited = agents.read_bytes() + b"\n- my own line\n"
+        agents.write_bytes(edited)
+        # Same rules: the edit is kept aside and the file is Hearting's render again.
+        report = activation.refresh("opencode")
+        self.assertEqual(report["freshness"], "fresh", report)
+        self.assertEqual(agents.read_bytes(), self.expected_render())
+        kept = sorted(self.home.glob("AGENTS.md.edited-*"))
+        self.assertEqual([path.read_bytes() for path in kept], [edited])
+        self.assertEqual(kept[0].stat().st_mode & 0o777, 0o600)
+        self.assertTrue(any(str(kept[0]) in line for line in report["report_lines"]))
+        self.assertTrue(any(str(kept[0]) in line for line in report["notices"]))
+
+        # Rules gone after an edit: no collision, the link returns, the edit is kept.
+        second = agents.read_bytes() + b"\n- another edit\n"
+        agents.write_bytes(second)
+        self.remove(rule_file)
+        report = activation.refresh("opencode")
+        self.assertEqual(report["freshness"], "fresh", report)
+        self.assertTrue(agents.is_symlink())
+        self.assertEqual(sorted(path.read_bytes() for path in self.home.glob("AGENTS.md.edited-*")),
+                         sorted([edited, second]))
+
+    def test_a_user_link_in_place_of_the_render_is_preserved_when_rules_go(self):
+        rule_file = self.seed_rule()
+        agents = self.home / "AGENTS.md"
+        self.run_activation()
+        own = self.root / "my-agents.md"
+        own.write_bytes(b"# my own global rules\n")
+        self.remove(agents)
+        agents.symlink_to(own)
+        self.remove(rule_file)
+        report = activation.refresh("opencode")
+        self.assertIn(str(agents), report["preserved"])
+        self.assertTrue(agents.is_symlink())
+        self.assertEqual(os.readlink(agents), str(own))
+        self.assertEqual(own.read_bytes(), b"# my own global rules\n")
+
+    def test_render_bytes_do_not_depend_on_the_claude_config_path(self):
+        self.seed_rule()
+        report = self.run_activation()
+        self.assertEqual(report["freshness"], "fresh", report)
+        other = self.root / "other-claude-home"
+        (other / "rules").mkdir(parents=True)
+        (other / "rules/external-communications-read-only.md").write_bytes(self.RULE)
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(other)}):
+            self.assertEqual(activation.status("opencode")["freshness"], "fresh")
 
     def test_v2_linked_packaged_update_and_repeat_keep_one_direct_bundle_import(self):
         for mode in ("linked", "packaged"):
@@ -1653,6 +1761,72 @@ class RuntimeActivationOwnershipTest(unittest.TestCase):
                 self.assertTrue(config.is_symlink())
                 self.assertEqual(os.readlink(config), link_target)
                 self.assertEqual(target.read_bytes(), original)
+
+
+class CodexOverrideActivationTest(unittest.TestCase):
+    """A user AGENTS.override.md hides AGENTS.md from Codex, so it carries the bootstrap block."""
+
+    ORIGINAL = "# 외부 소통은 읽기 전용\n- 메일은 읽기만 한다.".encode()
+
+    def _seed(self, root: Path) -> Path:
+        home = activation.paths.runtime_home("codex")
+        home.mkdir(parents=True, exist_ok=True)
+        override = home / "AGENTS.override.md"
+        override.write_bytes(self.ORIGINAL)
+        override.chmod(0o600)
+        return override
+
+    def test_activate_refresh_deactivate_round_trip_keeps_user_bytes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = Path(__file__).resolve().parents[2]
+            with fixture_env.patched_environment(root / "fixture", source):
+                override = self._seed(root)
+                report = activation.activate("codex", "linked", str(source))
+                data = override.read_bytes()
+                self.assertTrue(data.startswith(self.ORIGINAL))
+                self.assertIn((source / "adapters/codex/AGENTS.md").read_bytes(), data)
+                self.assertTrue(any("AGENTS.override.md" in line for line in report["report_lines"]))
+                self.assertTrue((override.parent / "AGENTS.md").is_symlink())
+
+                activation.refresh("codex")
+                self.assertEqual(override.read_bytes(), data)
+
+                result = activation.deactivate("codex")
+                self.assertIn(str(override), result["restored_configs"])
+                self.assertEqual(override.read_bytes(), self.ORIGINAL)
+                self.assertEqual(override.stat().st_mode & 0o777, 0o600)
+
+    def test_failed_activation_restores_the_override(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = Path(__file__).resolve().parents[2]
+            with fixture_env.patched_environment(root / "fixture", source):
+                override = self._seed(root)
+                original_prepare = activation._prepare_runtime_config
+
+                def project_then_fail(*args, **kwargs):
+                    original_prepare(*args, **kwargs)
+                    self.assertNotEqual(override.read_bytes(), self.ORIGINAL)
+                    raise activation.ActivationError("injected after override block")
+
+                activation._prepare_runtime_config = project_then_fail
+                try:
+                    with self.assertRaisesRegex(activation.ActivationError, "injected"):
+                        activation.activate("codex", "linked", str(source))
+                finally:
+                    activation._prepare_runtime_config = original_prepare
+                self.assertEqual(override.read_bytes(), self.ORIGINAL)
+
+    def test_without_an_override_activation_creates_none(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = Path(__file__).resolve().parents[2]
+            with fixture_env.patched_environment(root / "fixture", source):
+                activation.activate("codex", "linked", str(source))
+                home = activation.paths.runtime_home("codex")
+                self.assertTrue((home / "AGENTS.md").is_symlink())
+                self.assertFalse((home / "AGENTS.override.md").exists())
 
 
 class NativeContextLifecycleTest(unittest.TestCase):

@@ -19,8 +19,8 @@ from fleet.collectors import compute_hosts  # noqa: E402
 from fleet.model import DispatchJob, ResourceJob, Session, fmt_min  # noqa: E402
 
 
-SR_CWD = "/home/nas/user/Uihyeop/NN_Zoo/SR_CorrNet_DSC"
-M6_COMMAND = ("/home/nas/env/bin/python run.py --engine_mode train "
+SR_CWD = "/home/example/Project_Zoo/SR_ModelA_DSC"
+M6_COMMAND = ("/home/example/env/bin/python run.py --engine_mode train "
               "--config _m6_lx3nx4.yaml --gpuid 0")
 SESSION_ID = "01a0e597-1111-2222-3333-444455556666"
 
@@ -35,7 +35,7 @@ def _process(pid=3697573, **overrides):
     return row
 
 
-def _snapshot(*gpus, host="moving4", is_self=True, reachable=True):
+def _snapshot(*gpus, host="mgpu-a1", is_self=True, reachable=True):
     return {"configured": True, "observed_at": time.time(), "hosts": [{
         "host": host, "self": is_self, "reachable": reachable, "gpus": [
             {"index": index, "name": "NVIDIA RTX A6000", "processes": list(processes)}
@@ -75,8 +75,8 @@ class UnregisteredGpuRowTest(UnregisteredGpuTestBase):
 
     def test_unregistered_process_renders_in_its_project_card(self):
         text = self.lines(_snapshot((0, [_process()])))
-        header = next(i for i, line in enumerate(text) if "SR_CorrNet_DSC/" in line)
-        row = next(i for i, line in enumerate(text) if "GPU moving4:0" in line)
+        header = next(i for i, line in enumerate(text) if "SR_ModelA_DSC/" in line)
+        row = next(i for i, line in enumerate(text) if "GPU mgpu-a1:0" in line)
         self.assertGreater(row, header)
         for token in ("M6 train", "19 GB", fmt_min(4500), "unregistered"):
             self.assertIn(token, text[row])
@@ -122,7 +122,7 @@ class UnregisteredGpuRowTest(UnregisteredGpuTestBase):
         owner = _session_owner()
         snapshot = _snapshot((0, [_process(owner=owner, session_owner=owner)]))
         text = self.lines(snapshot)
-        rows = [line for line in text if "● GPU moving4:0" in line]
+        rows = [line for line in text if "● GPU mgpu-a1:0" in line]
         self.assertEqual(len(rows), 1)
         self.assertIn("unregistered", rows[0])
 
@@ -157,7 +157,7 @@ class UnregisteredGpuRowTest(UnregisteredGpuTestBase):
             with self.subTest(cwd=cwd):
                 text = self.lines(_snapshot((0, [_process(cwd=cwd)])))
                 header = next(i for i, line in enumerate(text) if "(unknown)/" in line)
-                row = next(i for i, line in enumerate(text) if "GPU moving4:0" in line)
+                row = next(i for i, line in enumerate(text) if "GPU mgpu-a1:0" in line)
                 self.assertGreater(row, header)
                 self.assertIn("unregistered", text[row])
 
@@ -169,7 +169,7 @@ class UnregisteredGpuRowTest(UnregisteredGpuTestBase):
         for width in (168, 100, 60, 40):
             row = render._plain(render._gpu_work_row(entry, width))
             self.assertLessEqual(render._dw(row), width, row)
-            self.assertIn("GPU moving4:0", row)
+            self.assertIn("GPU mgpu-a1:0", row)
             self.assertNotIn("/home/test/envs/xxx/bin/python", row)
             if width == 168:
                 self.assertIn("python run.py --flag 'full path'", row)
@@ -188,9 +188,9 @@ class UnregisteredGpuRowTest(UnregisteredGpuTestBase):
         # plus a long script path with no --run-id/--name/--config identifier.
         # Path prefixes must not hide the script, even in the narrower row.
         entry = compute_hosts.unregistered_gpu(_snapshot((0, [_process(
-            command="/home/nas/user/Uihyeop/NN_Zoo/TF-Rehancer_artifacts/envs/"
+            command="/home/example/Project_Zoo/TF-Rehancer_artifacts/envs/"
                      "private_cnn_cu128_20261006/bin/python "
-                     "/home/nas/user/Uihyeop/NN_Zoo/TF-Rehancer_artifacts/envs/"
+                     "/home/example/Project_Zoo/TF-Rehancer_artifacts/envs/"
                      "private_cnn_train.py",
             used_memory_mib=4915, elapsed_s=8 * 3600 + 47 * 60,
         )])))[0]
@@ -206,7 +206,7 @@ class UnregisteredGpuRowTest(UnregisteredGpuTestBase):
         # Filename compaction leaves the script visible at the narrower width.
         narrow = render._plain(render._gpu_work_row(entry, 60))
         self.assertLessEqual(render._dw(narrow), 60)
-        self.assertIn("GPU moving4:0", narrow)
+        self.assertIn("GPU mgpu-a1:0", narrow)
         self.assertIn("private_cnn_train.py", narrow)
         self.assertEqual(json.dumps(entry, sort_keys=True), original)
 
@@ -242,7 +242,7 @@ class UnregisteredGpuRowTest(UnregisteredGpuTestBase):
                 self.assertTrue(all(render._dw(row) <= width for row in rows))
                 joined = "\n".join(rows)
                 if width >= 60:
-                    for identity in ("GPU cnn:0", "GPU cnn:1", "GPU moving4:1"):
+                    for identity in ("GPU cnn:0", "GPU cnn:1", "GPU mgpu-a1:1"):
                         self.assertIn(identity, joined)
                 if width >= 60:
                     self.assertIn("UMA_7ch_fix_2spk_v2_1", joined)
@@ -279,8 +279,8 @@ class UnregisteredGpuRowTest(UnregisteredGpuTestBase):
         self.assertEqual(render._gpu_strip_keys([mem], gpu_resources), set())
         text = self.lines(snapshot, [mem])
         self.assertEqual(sum(line.count("● GPU") for line in text), 1)
-        header = next(i for i, line in enumerate(text) if "SR_CorrNet_DSC/" in line)
-        row = next(i for i, line in enumerate(text) if "● GPU moving4:0" in line)
+        header = next(i for i, line in enumerate(text) if "SR_ModelA_DSC/" in line)
+        row = next(i for i, line in enumerate(text) if "● GPU mgpu-a1:0" in line)
         self.assertGreater(row, header)
 
     def _job_owned_gpu(self, **job_overrides):
@@ -454,7 +454,7 @@ class UnregisteredGpuJsonTest(unittest.TestCase):
         self.assertNotIn("unregistered_gpu", bare)
         (entry,) = payload["unregistered_gpu"]
         self.assertEqual(entry["pid"], 600)
-        self.assertEqual(entry["project"], "SR_CorrNet_DSC")
+        self.assertEqual(entry["project"], "SR_ModelA_DSC")
         self.assertEqual(entry["used_memory_mib"], 19208)
         self.assertEqual(entry["gpu_indexes"], [0])
         self.assertEqual(entry["cwd"], SR_CWD)

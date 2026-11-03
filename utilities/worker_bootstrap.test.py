@@ -1287,6 +1287,211 @@ class NodeInputsPromptTest(unittest.TestCase):
         self.assertEqual(W.node_inputs_prompt(route, None, "/od"), "")
 
 
+def code_leg_route(*, with_test=True, **extra) -> dict:
+    """The standard+ code graph: plan -> plan-check -> execute -> impl-review -> test -> report."""
+    nodes = [
+        {"id": "plan", "kind": "pipeline-stage", "unit": "plan/plan-author", "depends_on": [],
+         "outputs": ["plan.md", "checklist.md"], "write_scope": ["plan.md", "checklist.md"]},
+        {"id": "plan-check", "kind": "review-worker", "unit": "qa/plan-review", "depends_on": ["plan"],
+         "outputs": ["_internal/plan_reviews/round_1.md"], "write_scope": ["_internal/plan_reviews/**"]},
+        {"id": "execute", "kind": "pipeline-stage", "unit": "dev/backend", "depends_on": ["plan-check"],
+         "outputs": ["source-diff", "dev_logs/**"], "write_scope": ["source/**", "dev_logs/**", "evidence/**"]},
+        {"id": "impl-review", "kind": "review-worker", "unit": "qa/code-review", "depends_on": ["execute"],
+         "outputs": ["_internal/dev_reviews/phase_review.md"], "write_scope": ["_internal/dev_reviews/**"]},
+        {"id": "test", "kind": "pipeline-stage", "unit": "qa/test", "depends_on": ["impl-review"],
+         "outputs": ["test_logs/**"], "write_scope": ["test_logs/**"]},
+        {"id": "report", "kind": "pipeline-stage", "unit": "editorial/report",
+         "depends_on": ["test" if with_test else "impl-review"],
+         "outputs": ["final_report.md"], "write_scope": ["final_report.md"]},
+    ]
+    if not with_test:
+        nodes = [node for node in nodes if node["id"] != "test"]
+    return {"route_id": "rt-code-leg", "nodes": nodes, **extra}
+
+
+LEG = {"leg": {"done_when": [{"id": "d1", "text": "the socket tests pass", "check": "pytest -k socket"}],
+               "verify": "run the whole suite"}}
+VERDICT_HEADER = "Plan for this leg (approved in the frame interview; base the verdict on it):"
+CONTEXT_HEADER = "Plan for this leg, as context (approved in the frame interview)."
+
+
+class LegPlanRoleTest(unittest.TestCase):
+    """A producing stage reads the leg's completion as context; the stages that judge it and the owner
+    base their verdict on it (D1 seam 1)."""
+
+    def render(self, route, node_id, primary=None):
+        import route_plan as RP
+        with mock.patch.object(RP, "leg_plan", return_value=LEG):
+            return W.plan_leg_prompt(route, node_id, primary)
+
+    def test_a_producing_stage_reads_the_leg_as_context_and_judges_keep_the_verdict(self):
+        route = code_leg_route()
+        execute = self.render(route, "execute")
+        self.assertTrue(execute.startswith(CONTEXT_HEADER), execute)
+        self.assertNotIn("base the verdict on it", execute)
+        self.assertIn("The leg's verdict belongs to impl-review, test and the owner", execute)
+        self.assertIn("base your verdict on your assignment and the checks your environment can run", execute)
+        self.assertIn("handed over to test, not left unfinished", execute)
+        self.assertIn("- d1: the socket tests pass (check: `pytest -k socket`)", execute)
+        self.assertIn("Verify: run the whole suite", execute)
+        self.assertIn("belongs to plan-check, impl-review, test and the owner", self.render(route, "plan"))
+        for judge in ("plan-check", "impl-review", "test", None, "no-such-node"):
+            with self.subTest(judge=judge):
+                rendered = self.render(route, judge)
+                self.assertTrue(rendered.startswith(VERDICT_HEADER), rendered)
+                self.assertIn("- d1: the socket tests pass", rendered)
+
+    def test_without_a_later_verification_stage_the_owner_judges_and_runs_the_handed_over_checks(self):
+        report = self.render(code_leg_route(), "report")
+        self.assertTrue(report.startswith(CONTEXT_HEADER), report)
+        self.assertIn("The leg's verdict belongs to the owner;", report)
+        self.assertIn("handed over to the owner", report)
+        no_test = self.render(code_leg_route(with_test=False), "execute")
+        self.assertIn("belongs to impl-review and the owner", no_test)
+        self.assertIn("handed over to the owner", no_test)
+
+    def test_only_a_qa_verification_stage_gets_the_items_sidecar(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            primary = str(Path(tmp) / "report.md")
+            self.assertIn(primary + ".items.json", self.render(code_leg_route(), "test", primary))
+            self.assertNotIn("items.json", self.render(code_leg_route(), "execute", primary))
+
+    def test_completion_precedence_hands_an_unrunnable_check_over_instead_of_blocking(self):
+        text = W.completion_scope_prompt()
+        self.assertIn("runs the checks its environment can run, and one that ran and failed is a FAIL, "
+                      "not a handed-over check", text)
+        self.assertIn("handed-over: `<exact command>` (reason: <why it cannot run here>)", text)
+        self.assertIn("it is not an unfinished duty of a stage that produces the work", text)
+        self.assertIn("the verification stage or owner runs it", text)
+        self.assertIn("do not replace requested investigation, deliverables, or verification", text)
+
+    def test_the_worker_contracts_define_blocked_the_same_way(self):
+        stage = W.render_worker_bootstrap(ROOT, "stage")
+        self.assertIn("A producing stage's handed-over check is not\none of its unfinished items.",
+                      W.worker_terminal_contract(ROOT))
+        self.assertIn("is not part\n  of a producing stage's portion", stage)
+        self.assertIn("a check that ran and failed is a `FAIL`, not a handed-over check", stage)
+        self.assertIn("A verification\nstage runs the checks handed over to it", stage)
+        self.assertIn("one your environment cannot run is handed over the same way, not left unfinished", stage)
+        owner = W.render_worker_bootstrap(ROOT, "owner")
+        self.assertIn("One your own environment cannot run either stays\nunverified", owner)
+        self.assertIn("do not report it as PASS", owner)
+
+
+class HandedOverChecksTest(unittest.TestCase):
+    """execute records what its environment cannot run; the later qa/test stage receives it (D1 seam 5)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.cycle = self.root / "artifact_root" / "campaigns" / "camp1" / "cyc1"
+        self.output = self.cycle / "artifacts"
+        (self.output / "dev_logs").mkdir(parents=True)
+
+    def write(self, relative, text):
+        path = self.output / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_only_earlier_declared_text_outputs_are_read(self):
+        route = code_leg_route()
+        self.write("dev_logs/step_01.md",
+                   "Ran the unit tests.\n"
+                   "- handed-over: `pytest -k socket` (reason: loopback bind EPERM in the sandbox)\n"
+                   "Handed over by leg 0: not a stage line\n"
+                   "  * Handed-Over: `node scripts/e2e.js` (reason: no Node in this environment)\n")
+        self.write("dev_logs/nested/step_02.md", "handed-over: `nvidia-smi` (reason: no GPU)\n")
+        self.write("evidence/slice-a/report.md", "handed-over: `make e2e` (reason: no browser)\n")
+        self.write("source/handed.md", "handed-over: `a source scope is not an artifact`\n")
+        self.write("dev_logs/raw.png", "handed-over: `binary is skipped`\n")
+        self.write("notes/undeclared.md", "handed-over: `undeclared output is skipped`\n")
+        self.write("test_logs/own.md", "handed-over: `the stage's own output is skipped`\n")
+        outside = self.root / "outside.md"
+        outside.write_text("handed-over: `outside the cycle is skipped`\n", encoding="utf-8")
+        (self.output / "dev_logs" / "link.md").symlink_to(outside)
+        rows = W.handed_over_checks(route, "test", str(self.output))
+        self.assertEqual(rows, [
+            ("`pytest -k socket` (reason: loopback bind EPERM in the sandbox)", "dev_logs/step_01.md"),
+            ("`node scripts/e2e.js` (reason: no Node in this environment)", "dev_logs/step_01.md"),
+            ("`nvidia-smi` (reason: no GPU)", "dev_logs/nested/step_02.md"),
+            ("`make e2e` (reason: no browser)", "evidence/slice-a/report.md"),
+        ])
+        for node_id in ("execute", "impl-review", "report", None, "missing"):
+            with self.subTest(node=node_id):
+                self.assertEqual(W.handed_over_checks(route, node_id, str(self.output)), [])
+        self.assertEqual(W.handed_over_checks(route, "test", None), [])
+        self.assertEqual(W.handed_over_checks(route, "test", str(self.root / "absent")), [])
+
+    def test_reading_is_bounded_and_deduplicated(self):
+        lines = "".join(f"handed-over: `check {index}` (reason: sandbox)\n" for index in range(30))
+        self.write("dev_logs/step_00.md", "handed-over: `" + "x" * 400 + "`\n")
+        # the same command with another reason (a later correction round) is one check
+        self.write("dev_logs/step_01.md", "handed-over: `check 0` (reason: sandbox)\n" + lines
+                   + "handed-over: `check 0` (reason: still no loopback)\n")
+        found = W.handed_over_scan(code_leg_route(), "test", str(self.output))
+        rows = found.rows
+        self.assertEqual(len(rows), 20)
+        self.assertEqual(len({text for text, _ in rows}), 20)
+        self.assertEqual(len(rows[0][0]), 300)
+        self.assertEqual([text for text, _ in rows[1:3]],
+                         ["`check 0` (reason: sandbox)", "`check 1` (reason: sandbox)"])
+        self.assertEqual((found.omitted, found.files), (11, ["dev_logs/step_00.md", "dev_logs/step_01.md"]))
+        prompt = W.handed_over_prompt(code_leg_route(), "test", str(self.output))
+        self.assertIn("- +11 more not listed; see dev_logs/step_00.md, dev_logs/step_01.md\n", prompt)
+
+    def test_common_markdown_forms_count_and_a_copied_template_does_not(self):
+        self.write("dev_logs/step_01.md", "\n".join([
+            "1. handed-over: `make one` (reason: a)",
+            "2) handed-over: `make two` (reason: b)",
+            "**handed-over:** `make three` (reason: c)",
+            "- **handed-over**: `make four` (reason: d)",
+            "- [ ] handed-over: `make five` (reason: e)",
+            "> handed-over: `make six` (reason: f)",
+            "| handed-over: `make seven` (reason: g) |",
+            "handed-over: `<exact command>` (reason: <why it cannot run here>)",
+            "- handed-over: <command> (reason: ...)",
+            "This step handed-over nothing: not at the start of a line.",
+        ]) + "\n")
+        texts = [text for text, _ in W.handed_over_checks(code_leg_route(), "test", str(self.output))]
+        self.assertEqual(texts, [f"`make {word}` (reason: {letter})" for word, letter in
+                                 zip(("one", "two", "three", "four", "five", "six", "seven"), "abcdefg")])
+
+    def test_the_owner_receives_what_no_later_verification_stage_takes(self):
+        self.write("dev_logs/step_01.md", "handed-over: `pytest -k socket` (reason: loopback bind EPERM)\n")
+        with_test, without_test = code_leg_route(), code_leg_route(with_test=False)
+        self.assertEqual(W.owner_handed_over(with_test, "execute", str(self.output)).rows, [])
+        self.assertEqual(W.owner_handed_over(without_test, "execute", str(self.output)).rows,
+                         [("`pytest -k socket` (reason: loopback bind EPERM)", "dev_logs/step_01.md")])
+        # a verification stage the owner now runs itself hands it everything it received
+        self.assertEqual(W.owner_handed_over(with_test, "test", str(self.output)).rows,
+                         W.handed_over_checks(with_test, "test", str(self.output)))
+        for node_id in ("impl-review", "report", "missing"):
+            with self.subTest(node=node_id):
+                self.assertEqual(W.owner_handed_over(without_test, node_id, str(self.output)).rows, [])
+
+    def test_the_verification_stage_assignment_carries_what_execute_handed_over(self):
+        route = code_leg_route(artifact_root=str(self.root / "artifact_root"))
+        route_file = self.root / "route.json"
+        route_file.write_text(json.dumps(route), encoding="utf-8")
+        env = {"AGENT_ARTIFACT_CYCLE_ID": "cyc1", "AGENT_ARTIFACT_CYCLE_DIR": str(self.cycle)}
+        assign = lambda node: W.assignment_prompt(
+            SimpleNamespace(worker_type="stage", route_file=str(route_file), route_node=node), "do it", env)
+        self.assertNotIn("handed over (their environment", assign("test"))
+        # execute finishes its own steps and records the check its sandbox refused
+        self.write("dev_logs/step_01.md", "handed-over: `pytest -k socket` (reason: loopback bind EPERM)\n")
+        test = assign("test")
+        self.assertIn("Checks earlier stages handed over (their environment could not run them); "
+                      "run each as part of your verification.", test)
+        self.assertIn("- `pytest -k socket` (reason: loopback bind EPERM) [dev_logs/step_01.md]", test)
+        self.assertIn("leaves your verdict BLOCKED: repeat its handed-over line", test)
+        self.assertLess(test.index("Completion precedence:"), test.index("Checks earlier stages handed over"))
+        for other in ("execute", "impl-review", "report"):
+            with self.subTest(node=other):
+                self.assertNotIn("Checks earlier stages handed over", assign(other))
+
+
 class ReportContractTest(unittest.TestCase):
     def _contract(self, capability, gate, node, root=ROOT):
         return W.assigned_contract(capability=capability, worker_type="stage", route_node=node,

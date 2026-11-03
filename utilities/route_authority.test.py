@@ -687,32 +687,32 @@ class WorkerPinChangeTest(unittest.TestCase):
         import model_profile
         before = model_profile.route_selection_pin(self.route_file, worker_type="stage", adapter="codex")
         self.assertEqual(before, {"status": "harness-only"})
-        result, readiness = self.start_pin(["worker=codex:gpt-6.1-sol@high"], caller=("claude", "claude-sid"),
+        result, readiness = self.start_pin(["worker=codex:codex-model-deep@high"], caller=("claude", "claude-sid"),
                                            owner_parent="claude-sid")
         self.assertTrue(result["changed"])
-        self.assertEqual(result["worker"], {"harness": "codex", "model": "gpt-6.1-sol", "effort": "high"})
+        self.assertEqual(result["worker"], {"harness": "codex", "model": "codex-model-deep", "effort": "high"})
         self.assertEqual((readiness.call_args.args[2], readiness.call_args.args[3]), ("claude", ["codex"]))
         rows = RA.pin_changes(self.route)
         self.assertEqual([row["target"] for row in rows], ["owner", "worker"])
         self.assertEqual(rows[-1]["previous"], {"harness": "codex", "model": None, "effort": None})
         self.assertEqual(model_profile.route_selection_pin(self.route_file, worker_type="stage", adapter="codex"),
-                         {"status": "applied", "model": "gpt-6.1-sol", "effort": "high"})
+                         {"status": "applied", "model": "codex-model-deep", "effort": "high"})
         self.assertEqual(model_profile.route_selection_pin(self.route_file, worker_type="review", adapter="codex"),
-                         {"status": "applied", "model": "gpt-6.1-sol", "effort": "high"})
+                         {"status": "applied", "model": "codex-model-deep", "effort": "high"})
         self.assertEqual(RA.sealed_pin_harness(self.route, worker_type="owner"), "claude")   # owner unchanged
         self.assertEqual(self.route, json.loads(self.route_file.read_text()))               # sealed route unchanged
-        again, _ = self.start_pin(["worker=codex:gpt-6.1-sol@high"], caller=("claude", "claude-sid"),
+        again, _ = self.start_pin(["worker=codex:codex-model-deep@high"], caller=("claude", "claude-sid"),
                                   owner_parent="claude-sid")
         self.assertFalse(again["changed"])
 
     def test_composing_the_work_again_carries_the_pins_in_force(self):
         import shlex
         import work_start
-        self.start_pin(["worker=codex:gpt-6.1-sol@high"], caller=("claude", "claude-sid"), owner_parent="claude-sid")
+        self.start_pin(["worker=codex:codex-model-deep@high"], caller=("claude", "claude-sid"), owner_parent="claude-sid")
         argv = shlex.split(work_start._compose_again({**self.route, "capability": "autopilot-code", "slug": "s"}))
         pins = [argv[i + 1] for i, word in enumerate(argv) if word == "--pin"]
         self.assertIn("owner=claude", pins)
-        self.assertIn("worker=codex:gpt-6.1-sol@high", pins)
+        self.assertIn("worker=codex:codex-model-deep@high", pins)
 
     def test_a_frame_pin_is_probed_from_this_session(self):
         result, readiness = self.start_pin(["frame=claude"], caller=("claude", "claude-sid"),
@@ -2203,6 +2203,144 @@ class ProducerFinalizeHeldCompletionStateTest(unittest.TestCase):
         decision = self._decide(commit_exists=True, checkpoint="claimed",
                                 finalize_refusal_held=True)
         self.assertEqual((decision.state, decision.reason), ("pending", "claimed"))
+
+
+class U7RuntimeEndRuleTest(unittest.TestCase):
+    """Hand-built shape of SR rt-aad5 / A39 / A42; no installed state or recorded copy needed."""
+
+    OWNER = {"worker_type": "owner", "launch_started": "1", "supervisor_lease": "flock-v1",
+             "supervisor_lease_file": "/unused", "note": "dead-protocol", "failure_class": "protocol",
+             "terminal_event": "dispatch.supervisor.error"}
+
+    def test_supervisor_error_without_result_resumes_for_any_reason_name(self):
+        for reason in ("terminal-event-missing", "opencode-final-stop-missing",
+                       "app-server-turn-failed", "codex-turn-stop-missing"):
+            for failure_class in ("protocol", "runtime"):
+                with self.subTest(reason=reason, failure_class=failure_class):
+                    meta = {**self.OWNER, "reconcile_reason": reason, "failure_class": failure_class}
+                    self.assertTrue(RA.runtime_owner_can_resume("done", meta))
+                    self.assertEqual(RA._replacement_kind("done", meta), "runtime")
+
+    def test_live_owner_hands_back(self):
+        choice = RA.decide_continuation(action="owner", status="running", metadata=self.OWNER,
+            facts={"process": SimpleNamespace(state="live", reason="pid"), "reachable": True})
+        self.assertEqual((choice.allowed, choice.state, choice.next_action), (True, "running", "handback"))
+
+    def test_readable_result_or_unlaunched_or_cancelled_not_resumed(self):
+        for change in ({"note": "dead-worker-blocked", "failure_class": "blocked"},
+                       {"note": "dead-worker-fail", "failure_class": "fail"},
+                       {"launch_started": "0"}, {"supervisor_lease": ""}, {"supervisor_lease_file": ""},
+                       {"terminal_event": "dispatch.supervisor.done"}, {"failure_class": "fail"},
+                       {"worker_type": "stage"}):
+            with self.subTest(change=change):
+                self.assertFalse(RA.runtime_owner_can_resume("done", {**self.OWNER, **change}))
+        self.assertFalse(RA.runtime_owner_can_resume("cancelled", self.OWNER))
+        self.assertFalse(RA.runtime_owner_can_resume("killed", self.OWNER))
+
+
+class U4FrameRuntimeKindTest(unittest.TestCase):
+    """Hand-built shape of BC45 / E4-C3 frame rows; no installed state or recorded copy needed."""
+
+    FRAME = {"worker_type": "frame", "launch_started": "1", "note": "dead-launch-exit-1",
+             "failure_class": "launch"}
+
+    def test_resultless_frame_runtime_end_is_replaceable(self):
+        self.assertEqual(RA._replacement_kind("done", self.FRAME), "runtime")
+        # the rule reads observed columns, never the note's name
+        self.assertEqual(RA._replacement_kind("done", {**self.FRAME, "note": "dead-anything-new"}), "runtime")
+
+    def test_a_frame_result_or_unlaunched_leg_is_not_replaced(self):
+        for change in ({"note": "dead-worker-fail", "failure_class": "fail"},
+                       {"note": "dead-worker-blocked", "failure_class": "blocked"},
+                       {"note": "completed-supervisor", "failure_class": "pass"},
+                       {"launch_started": "0"}, {"parent_close_requested": "1"}):
+            with self.subTest(change=change):
+                self.assertIsNone(RA._replacement_kind("done", {**self.FRAME, **change}))
+        self.assertIsNone(RA._replacement_kind("cancelled", self.FRAME))
+        # a usage-limit stop keeps its own capacity path, not the runtime one
+        self.assertNotEqual(RA._replacement_kind(
+            "done", {**self.FRAME, "note": "dead-capacity", "failure_class": "capacity"}), "runtime")
+
+
+class U4CapacityNextActionTest(unittest.TestCase):
+    def test_replacement_capacity_wait_names_auto_resume(self):
+        choice = RA.decide_continuation(action="replacement-progress", status="done",
+            metadata={"attempt_id": "att-cap", "worker_type": "owner"},
+            facts={"kind": "capacity", "registry_rows": {}, "resume_capacity": False})
+        self.assertEqual((choice.allowed, choice.reason, choice.next_action),
+                         (False, "replacement-capacity-wait", "arm-capacity-resume"))
+
+
+class U4ChildUnsettledTest(unittest.TestCase):
+    def test_child_unsettled_is_wait_with_retry_when(self):
+        choice = RA.decide_continuation(action="replacement", status="done",
+            metadata={"attempt_id": "att-x"}, facts={"child_unsettled": "att-child"})
+        self.assertEqual((choice.allowed, choice.state, choice.reason),
+                         (False, "wait", "replacement-owner-child-unsettled"))
+        self.assertTrue(choice.retry_when)
+
+
+class U7BudgetStateTest(unittest.TestCase):
+    def test_budget_only_is_budget_state_not_protected(self):
+        choice = RA.decide_continuation(action="replacement", status="done",
+            metadata={"attempt_id": "att-x"}, facts={"budget_exhausted": True})
+        self.assertEqual((choice.allowed, choice.state, choice.reason),
+                         (False, "budget", "automatic-replacement-exhausted"))
+        self.assertTrue(choice.retry_when)
+
+    def test_competing_successor_stays_protected(self):
+        choice = RA.decide_continuation(action="replacement-budget", status="done",
+            facts={"competing_successor": True})
+        self.assertEqual((choice.allowed, choice.state, choice.reason),
+                         (False, "protected", "automatic-replacement-exhausted"))
+
+
+class U11ArtifactStateTest(unittest.TestCase):
+    def test_unlocated_result_is_never_replaced_and_only_absence_is_(self):
+        """N32: `missing`, `outside-root` and `unchecked` all stop at settlement; none reads as 'no result'."""
+        for state in ("missing", "outside-root", "unchecked"):
+            terminal = {"state": "invalid", "artifact_state": state, "failure_class": "", "reason": "artifact-outside-root"}
+            for kind in ("silent", "runtime", "capacity"):
+                with self.subTest(state=state, kind=kind):
+                    choice = RA.decide_continuation(action="replacement-result", facts={"terminal": terminal, "kind": kind})
+                    self.assertEqual((choice.allowed, choice.reason, choice.next_action),
+                                     (False, "replacement-result-settlement-required", "settle"))
+        self.assertTrue(RA.decide_continuation(action="replacement-result",
+            facts={"terminal": {"state": "absent"}, "kind": "silent"}).allowed)
+
+
+class U11CompletionStateTest(unittest.TestCase):
+    def test_sealed_settled_owner_is_complete(self):
+        """A sealed envelope whose settlement observation finished without error is complete (no extra proof flag)."""
+        decision = RA.decide_continuation(action="completion-state", facts={
+            "commit_exists": True, "checkpoint": "owner-envelope-sealed",
+            "publication_pending": False, "goal_pending": False})
+        self.assertEqual((decision.allowed, decision.state, decision.reason), (True, "complete", ""))
+        self.assertNotIn("forward-recovery-not-proved", repr(decision))
+
+    def test_pending_publication_and_goal_still_hold_the_owner(self):
+        for fact, reason in (("publication_pending", "shared-spec-publication-pending"),
+                             ("goal_pending", "campaign-goal-close-pending")):
+            decision = RA.decide_continuation(action="completion-state", facts={
+                "commit_exists": True, "checkpoint": "owner-envelope-sealed", fact: True})
+            self.assertEqual((decision.state, decision.reason), ("pending", reason))
+
+    def test_terminal_conflict_stays_protected(self):
+        choice = RA.decide_continuation(action="replacement", status="done",
+            metadata={"attempt_id": "att-x"}, facts={"terminal_conflict": True, "death_kind": "silent"})
+        self.assertEqual((choice.allowed, choice.state, choice.reason),
+                         (False, "protected", "replacement-terminal-conflict"))
+
+
+class U11ReviewLeaseDecisionTest(unittest.TestCase):
+    def test_unobservable_review_lease_is_wait_reason(self):
+        unobservable = RA.decide_continuation(action="finish-cycle", facts={"review_unobservable": True})
+        self.assertEqual((unobservable.allowed, unobservable.state, unobservable.reason, unobservable.next_action),
+                         (False, "wait", "finish-review-lease-unobservable", "same-command"))
+        self.assertTrue(unobservable.retry_when)
+        live = RA.decide_continuation(action="finish-cycle", facts={"review_live": True, "review_unobservable": True})
+        self.assertEqual((live.allowed, live.reason), (False, "finish-active-review-lease"))
+        self.assertTrue(RA.decide_continuation(action="finish-cycle", facts={}).allowed)
 
 
 if __name__ == "__main__":

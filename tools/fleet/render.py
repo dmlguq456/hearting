@@ -10143,8 +10143,9 @@ def _build_unbounded_lines(sessions, jobs, section, narrow, malformed, layout="w
             lines.extend(gpu_rows + resource_rows)
         lines.extend(_gpu_work_strip(emission["gpu"], term_width))
 
-        # F-19 repo rows (사용자 확정 2026-07-16): this card's own today-mem events, below a
-        # subtle in-band divider — entirely silent when the repo has none (healthy-silent,
+        # F-19 repo rows (사용자 결정 2026-11-02, replacing the 2026-07-16 today-only rule):
+        # this card's own recent mem events (latest K per repo, dated), below a subtle
+        # in-band divider — entirely silent when the repo has none (healthy-silent,
         # §4.7 F-19 convention). Rides the same body-tint loop below, unmodified.
         repo_events = (memory or {}).get("by_repo", {}).get(name) if memory else None
         if repo_events:
@@ -10350,6 +10351,17 @@ def _collect_memory_observed(*, include_backlog=False):
         return None, "failed"
 
 
+def _collect_project_status(sessions):
+    """Status documents for the sessions' projects (collectors.project_status); None in demo or on failure."""
+    if os.environ.get("FLEET_DEMO"):
+        return None
+    try:
+        from .collectors import project_status
+        return project_status.collect(getattr(session, "cwd", None) for session in sessions or ())
+    except Exception:
+        return None
+
+
 def _collect_governor():
     try:
         from .collectors import governor
@@ -10428,6 +10440,7 @@ def render_once(collect_all, hfilter, section, *, compute_hosts_refresh=None):
         import shutil
         size = shutil.get_terminal_size((100, 45))
         snapshot.governor, snapshot.memory = governor_snapshot, mem_snapshot
+        snapshot.project_status = _collect_project_status(sessions)
         gitinfo.enrich_entities(list(sessions) + list(jobs), schedule_ahead=False)
         frame = _explorer_once_frame(snapshot, size.columns, size.lines, detail=True)
         sys.stdout.write("\n".join(frame.text_rows()).rstrip() + "\n")
@@ -11989,9 +12002,9 @@ def _explorer_text_key(ch):
 
 
 def _explorer_question_refs():
+    from .explorer.state import older_waits_shown
     questions = getattr(_EXPLORER_MODEL, "questions", ()) if _EXPLORER_MODEL is not None else ()
-    older_open = getattr(_EXPLORER_STATE, "opened_for", lambda *_: "")(
-        "qolder:QUESTIONS", "") == "open"
+    older_open = older_waits_shown(_EXPLORER_STATE)
     return tuple(dict(item.get("ref") or {}) for item in questions
                  if isinstance(item, Mapping) and isinstance(item.get("ref"), Mapping)
                  and (not item.get("older") or older_open))
@@ -12265,6 +12278,7 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
             gitinfo.enrich_entities(value.sessions + value.jobs, schedule_ahead=True)
             value.memory, memory_state = _collect_memory_observed(include_backlog=_EXPLORER_ENABLED)
             value.governor = governor
+            value.project_status = _collect_project_status(value.sessions)
             observations = dict(getattr(value, "observations", None) or {})
             observations["optional:memory"] = {"state": memory_state,
                                                 "observed_at": time.time()}

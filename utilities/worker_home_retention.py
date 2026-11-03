@@ -30,8 +30,11 @@ component cannot redirect them, and no symlink is ever followed.
 
 from __future__ import annotations
 
+import bisect
 import contextlib
 import contextvars
+import ctypes
+import struct
 import errno
 import fcntl
 import hashlib
@@ -48,6 +51,8 @@ from dispatch_pending_delivery import LEGACY_NOTICE_ID_RE
 
 IDLE_SECONDS = 3600
 DUE_SECONDS = 300
+# While the last pass left due homes behind, the next pass may start sooner.
+BACKLOG_DUE_SECONDS = 60
 EXAMINE_LIMIT = 128
 REMOVE_LIMIT = 16
 EXAMINE_BUDGET_SECONDS = 10
@@ -59,9 +64,12 @@ MAX_STATE_BYTES = 1024 * 1024
 MAX_MANIFEST_BYTES = 64 * 1024
 MAX_EVIDENCE_BYTES = 1024 * 1024
 MAX_DELIVERY_BYTES = 256 * 1024
-# Records read from the delivery store, and (separately) directory entries listed
-# there: tombstones, locks and sidecars are entries but not records.
-MAX_DELIVERY_RECORDS = 32768
+# Delivery records one pass reads. It is a per-pass budget, not a store limit:
+# past it the candidate is deferred and the next pass resumes from the saved
+# position. Tombstones, locks and other directory entries are never read, so
+# they cost only time (the pass deadline), not this budget.
+DELIVERY_READ_BUDGET = 4096
+# Entries one late-change directory listing may hold before it is unknown.
 MAX_DIRECTORY_ENTRIES = 131072
 MAX_DEPENDENCY_STAMPS = 32768
 MAX_HOME_REFERENCE_ENTRIES = 4096
@@ -69,6 +77,12 @@ MAX_HOME_SCAN_PIDS = 8192
 MAX_HOME_SCAN_FDS = 2048
 MAX_TREE_DEPTH = 128
 REGISTRY_LOCK_WAIT_SECONDS = 0.100
+# A publication that landed after the observation's mark has a file ctime at or
+# after it. The slack only covers the coarse kernel clock and a small clock step.
+MARK_SLACK_NS = 2 * 10**9
+# Bodies the final admission may read; more goes back to the next pass.
+ADMISSION_REREAD_LIMIT = 32
+_NO_SCAN = object()
 
 KEY_RE = re.compile(r"[0-9a-f]{32}")
 # OpenCode rows served by the shared service record this exact token instead of
@@ -958,80 +972,526 @@ def _worker_home_read_matches(layout: _Layout, home: int, requested: Path, trans
             and (current.st_dev, current.st_ino) == (info.st_dev, info.st_ino))
 
 
-def _delivery_index(root: Path, *, observer=None, activity=None, records=None,
-                    groups_seen=None):
-    """(attempt ids in open records, unknown cause).
+_GETDENTS: list = []
 
-    The cause is "" when the store was read completely, else a short bucket
-    (store-unreadable, group-untrusted, group-unreadable, record-limit,
-    record-unreadable, record-invalid, record-path-mismatch).
 
-    `activity`, when given, receives the newest mtime of resolved records per
-    attempt they name.
-    """
-    from dispatch_pending_delivery import (OPEN_STATES, PendingDeliveryError,
-                                           record_attempt_identities)
-    refs: set[str] = set()
-    seen = 0
-    base = root / "pending-delivery"
-    if observer is not None:
-        observer("members", base)
-    try:
-        groups = list(os.scandir(base))
-    except FileNotFoundError:
-        return refs, ""
-    except OSError:
-        return refs, "store-unreadable"
-    for group in groups:
+def _getdents64():
+    """libc's getdents64, or None where it is missing (macOS, glibc < 2.30)."""
+    if not _GETDENTS:
         try:
-            if group.is_symlink() or not group.is_dir(follow_symlinks=False):
-                return refs, "group-untrusted"
-            if groups_seen is not None:
-                groups_seen.add(group.name)
-            if observer is not None:
-                # Before the scan: a record published into this group later
-                # must still change the stamp a candidate's detach compares.
-                observer("group", Path(group.path))
-            entries = list(os.scandir(group.path))
-        except OSError:
-            return refs, "group-unreadable"
-        for entry in entries:
-            if not entry.name.endswith(".json"):
-                continue
-            if observer is not None:
-                observer("file", Path(entry.path))
-            seen += 1
-            if seen > MAX_DELIVERY_RECORDS:
-                return refs, "record-limit"
+            function = ctypes.CDLL(None, use_errno=True).getdents64
+            function.argtypes = (ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t)
+            function.restype = ctypes.c_ssize_t
+        except (AttributeError, OSError):
+            function = None
+        _GETDENTS.append(function)
+    return _GETDENTS[0]
+
+
+def _listing_mode() -> str:
+    """What a saved directory cookie means; a saved observation is only resumed in the same mode."""
+    return "getdents64" if _getdents64() is not None else "sorted"
+
+
+def _sorted_page(fd: int, path, before, cookie: int, limit: int):
+    """Portable page: the cookie is a 1-based index into the sorted names.
+
+    It stays valid while the directory's stamp is unchanged, and a changed
+    directory restarts at 0 (the caller's generation check), as with d_off.
+    """
+    found = []
+    with os.scandir(fd) as listing:
+        for entry in listing:
             try:
-                found = _read_json(entry.path, MAX_DELIVERY_BYTES)
-            except _Unreadable:
-                return refs, "record-unreadable"
-            if found is None:
+                dtype = (10 if entry.is_symlink() else 4 if entry.is_dir(follow_symlinks=False)
+                         else 8 if entry.is_file(follow_symlinks=False) else 0)
+            except OSError:
+                dtype = 0
+            found.append((entry.name, dtype))
+    found.sort()
+    if not 0 <= cookie <= len(found):
+        raise _Unreadable("directory-cookie-invalid")
+    entries = [(name, index + 1, dtype)
+               for index, (name, dtype) in enumerate(found[cookie:cookie + limit], cookie)]
+    if (_stamp_from_stat(os.fstat(fd)) != before or _stamp(path) != before):
+        raise _Unreadable("directory-changed")
+    return entries, not entries, before
+
+
+def _directory_page(path: Path, cookie: int, limit: int, deadline: float):
+    """One bounded directory read; the cookie is an opaque restart position.
+
+    Linux uses getdents64 (d_off is the cookie). Where libc has no getdents64
+    (macOS, glibc < 2.30) a sorted listing gives index cookies instead.
+    Reopen on every page (and process). Never use scandir's read-ahead offset.
+    No guessed syscall numbers or portable/NFS resume claim is made here.
+    """
+    if time.monotonic() >= deadline or limit <= 0:
+        return [], False, None
+    try:
+        fd = os.open(path, _DIR_FLAGS)
+    except FileNotFoundError:
+        return [], True, None
+    try:
+        before = _stamp_from_stat(os.fstat(fd))
+        if before[3] != os.geteuid():
+            raise _Unreadable("directory-owner")
+        getdents = _getdents64()
+        if getdents is None:
+            return _sorted_page(fd, path, before, cookie, limit)
+        if cookie:
+            os.lseek(fd, cookie, os.SEEK_SET)
+        buf = ctypes.create_string_buffer(8192)
+        count = getdents(fd, buf, len(buf))
+        if count < 0:
+            raise _Unreadable("directory-cookie-unavailable")
+        entries, pos, last_cookie = [], 0, cookie
+        while pos < count and len(entries) < limit:
+            if count - pos < 20:
+                raise _Unreadable("directory-entry-truncated")
+            _ino, next_cookie, reclen, dtype = struct.unpack_from("=QqHB", buf.raw, pos)
+            if (reclen < 20 or pos + reclen > count or dtype not in (0, 1, 2, 4, 6, 8, 10, 12, 14)):
+                raise _Unreadable("directory-entry-invalid")
+            name = buf.raw[pos + 19:pos + reclen].split(b"\0", 1)
+            if len(name) != 2 or not name[0] or b"/" in name[0] or next_cookie == last_cookie:
+                raise _Unreadable("directory-cookie-invalid")
+            entries.append((os.fsdecode(name[0]), next_cookie, dtype))
+            pos += reclen
+            last_cookie = next_cookie
+        if (_stamp_from_stat(os.fstat(fd)) != before or _stamp(path) != before):
+            raise _Unreadable("directory-changed")
+        return entries, count == 0, before
+    finally:
+        os.close(fd)
+
+
+def _generation(stamp):
+    return hashlib.sha256(json.dumps(stamp, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _reference_fingerprint(root, identities, *, initialize=False, deadline=None):
+    """The candidate's reference tokens, or None (busy, deadline, or they cannot
+    be read or created, e.g. on a full disk): None defers only this candidate."""
+    from dispatch_pending_delivery import PendingDeliveryError, reference_token
+    values = []
+    try:
+        scope = (contextlib.nullcontext(True) if set(identities).issubset(attempt_reference.held_attempts())
+                 else attempt_reference.admission(root, identities, blocking=False))
+        with scope as admitted:
+            if not admitted:
+                return None
+            for identity in sorted(identities):
+                if deadline is not None and time.monotonic() >= deadline:
+                    return None
+                value = reference_token(root, identity, initialize=initialize)
+                if value is None:
+                    return None
+                values.append((identity, value))
+    except (OSError, attempt_reference.AttemptReferenceError, PendingDeliveryError):
+        return None
+    return _generation(values)
+
+
+def _cohort_identity(root, subjects):
+    """A subject's related attempts are not part of it: when they change, the
+    subject's reference token changes and only that subject is deferred."""
+    return _generation((str(root), _listing_mode(),
+                        [{k: v for k, v in s.items() if k != "related"} for s in subjects]))
+
+
+def _directory_identity(path):
+    stamp = _stamp(path)
+    return None if stamp is None else [stamp[0], stamp[1], stamp[3]]
+
+
+class _DeliveryObservation:
+    """A resumable read for one bounded cohort, owned by existing pass state.
+
+    Durable data is a directory position and candidate protection/activity
+    reductions. Payloads and history file stamps live only in this invocation.
+    Normal writers invalidate only related candidates. A completed observation
+    is consumed in this pass, then cold discovery runs again as the backstop.
+    """
+    def __init__(self, ctx, subjects, saved, deadline):
+        self.ctx, self.subjects, self.deadline = ctx, subjects, deadline
+        self.visits = self.reads = self.metadata = 0
+        self.advanced = False
+        # Subjects whose recorded evidence moved after their verdict was read.
+        self.fresh_related: set[str] = set()
+        self.identity = _cohort_identity(ctx.root, subjects)
+        self.tokens = {}
+        for subject in subjects:
+            refs = subject["related"]
+            self.tokens[subject["id"]] = (_reference_fingerprint(ctx.root, refs, initialize=True, deadline=deadline)
+                                           if refs else self._view_token(initialize=True))
+        valid = (isinstance(saved, dict) and saved.get("schema") == 1 and saved.get("started") is True
+                 and saved.get("integrity") == _generation({k: v for k, v in saved.items() if k != "integrity"})
+                 and saved.get("identity") == self.identity and not saved.get("complete")
+                 and isinstance(saved.get("results"), dict)
+                 and set(saved["results"]) == {s["id"] for s in subjects}
+                 and isinstance(saved.get("position"), dict))
+        self.resumed = valid
+        self.data = saved if valid else {
+            "schema": 1, "identity": self.identity, "complete": False, "started": False,
+            # One filesystem-clock reading taken before the first group is read.
+            "mark": time.time_ns(),
+            # Recipient groups are walked in name order: `root_done` is the last
+            # finished group, `cookie` the position inside the current `group`.
+            "position": {"root_done": "", "group": "", "cookie": 0,
+                         "root_generation": _generation(_directory_identity(ctx.root / "pending-delivery")),
+                         "generation": "", "inventory": 0},
+            # "unknown" holds the first cause that left the read incomplete.
+            "results": {s["id"]: {"token": self.tokens[s["id"]], "open": False,
+                                    "unknown": "", "activity": 0, "matches": []}
+                        for s in subjects}}
+        try:
+            pos = self.data["position"]
+            mark = self.data.get("mark")
+            if (type(mark) is not int or mark <= 0 or mark > time.time_ns() + MARK_SLACK_NS
+                    or type(pos.get("cookie")) is not int or not -(1 << 63) <= pos["cookie"] < (1 << 63)
+                    or not isinstance(pos.get("root_done"), str)
+                    or (pos["root_done"] and SHA256_RE.fullmatch(pos["root_done"]) is None)
+                    or type(pos.get("inventory")) is not int or pos["inventory"] < 0
+                    or not isinstance(pos.get("root_generation"), str)
+                    or SHA256_RE.fullmatch(pos["root_generation"]) is None
+                    or not isinstance(pos.get("generation"), str)
+                    or (pos["generation"] and SHA256_RE.fullmatch(pos["generation"]) is None)
+                    or type(pos.get("delivery_done", False)) is not bool
+                    or not isinstance(pos.get("group"), str)
+                    or (pos["group"] and SHA256_RE.fullmatch(pos["group"]) is None)
+                    or any(not isinstance(row, dict) or set(row) != {
+                        "token", "open", "unknown", "activity", "matches"}
+                        or type(row["open"]) is not bool or type(row["unknown"]) is not str
+                        or len(row["unknown"]) > 64
+                        or type(row["activity"]) is not int or row["activity"] < 0
+                        or not isinstance(row["matches"], list)
+                        or len(row["matches"]) > MAX_INTENT_CHILDREN
+                        or any(not isinstance(a, str) or not ATTEMPT_RE.fullmatch(a)
+                               for a in row["matches"])
+                        for row in self.data["results"].values())):
+                raise ValueError("observation-shape")
+        except (KeyError, TypeError, ValueError):
+            # A torn/untrusted cursor never supplies negative evidence.
+            self.__init__(ctx, subjects, None, deadline)
+            return
+        self.inventories = []
+        if any(s.get("legacy") for s in subjects):
+            self.inventories = [
+                (ctx.root / "automatic-replacements/by-source", "record"),
+                (ctx.root / "recovery-attention/by-source", "record"),
+                (ctx.root / "supervisor-state", "supervisor"),
+            ]
+            import dispatch_summary
+            for harness in sorted({s["binding"][1] for s in subjects if s.get("binding")}):
+                self.inventories.extend([
+                    (dispatch_summary.owner_root() / harness, "record"),
+                    (dispatch_summary._state_root() / harness, "provider")])
+
+    def _view_token(self, *, initialize=False):
+        from dispatch_pending_delivery import PendingDeliveryError, _change_token
+        path = self.ctx.root / "homes/worker-retention/view.lock"
+        try:
+            if initialize:
+                with _flock(self.ctx.layout.ret_fd, "view.lock", fcntl.LOCK_EX | fcntl.LOCK_NB) as held:
+                    if not held:
+                        return None
+                    value = _change_token(path)
+                    return _generation(value or _change_token(path, advance=True))
+            value = _change_token(path)
+            return _generation(value) if value else None
+        except (OSError, AttributeError, PendingDeliveryError):
+            return None
+
+    def _match(self, subject, identity):
+        if identity in subject["related"]:
+            return True
+        binding = subject.get("binding")
+        if binding is None:
+            return False
+        source, harness, worker_type, key = binding
+        from worker_runtime_home import _builder
+        return _builder.worker_home_key(source, harness, worker_type, identity) == key
+
+    def _unknown(self, cause, *, legacy_only=False):
+        # The first cause is kept; it is reported, never used as evidence.
+        # Ledger inventories are read only for identity-less (legacy) subjects.
+        for subject in self.subjects:
+            if legacy_only and not subject.get("legacy"):
                 continue
-            value, mtime = found
+            result = self.data["results"][subject["id"]]
+            result["unknown"] = result["unknown"] or cause
+
+    def _record(self, path, dir_fd=None, *, flag=False):
+        """Fold one record into the cohort; `_Unreadable(<cause>)` if it cannot be."""
+        from dispatch_pending_delivery import record_references, OPEN_STATES, PendingDeliveryError
+        self.reads += 1
+        try:
+            found = (_read_json(str(path), MAX_DELIVERY_BYTES) if dir_fd is None
+                     else _read_json(path.name, MAX_DELIVERY_BYTES, dir_fd=dir_fd))
+        except _Unreadable as exc:
+            raise _Unreadable("record-unreadable") from exc
+        if found is None:
+            return
+        value, mtime = found
+        try:
+            named = record_references(value, group=path.parent.name, delivery_id=path.name[:-5])
+        except (PendingDeliveryError, TypeError, ValueError) as exc:
+            raise _Unreadable("record-path-mismatch" if getattr(exc, "detail", "") == "record-path-mismatch"
+                              else "record-invalid") from exc
+        for subject in self.subjects:
+            matches = {a for a in named if self._match(subject, a)}
+            if not matches:
+                continue
+            result = self.data["results"][subject["id"]]
+            seen = (result["open"], result["unknown"], result["activity"], tuple(result["matches"]))
+            result["matches"] = sorted(set(result["matches"]) | (matches - set(subject["related"])))
+            if len(result["matches"]) > MAX_INTENT_CHILDREN:
+                result["matches"] = result["matches"][:MAX_INTENT_CHILDREN]
+                result["unknown"] = result["unknown"] or "match-limit"
+            if value["state"] in OPEN_STATES:
+                result["open"] = True
+            else:
+                result["activity"] = max(result["activity"], mtime)
+            if flag and seen != (result["open"], result["unknown"], result["activity"],
+                                 tuple(result["matches"])):
+                self.fresh_related.add(subject["id"])
+            # Only bounded candidate-bound direct evidence is kept in memory.
+            if len(self.ctx.delivery_records) < MAX_INTENT_CHILDREN:
+                for identity in matches:
+                    records = self.ctx.delivery_records.setdefault(identity, {})
+                    if len(records) < 8:
+                        records[str(path)] = _stamp(path)
+
+    def checkpoint(self):
+        # A damaged but still numeric opaque cookie can otherwise skip entries.
+        # This detects cache corruption; only a real scan supplies completeness.
+        self.data["integrity"] = _generation({k: v for k, v in self.data.items() if k != "integrity"})
+
+    def refresh(self, deadline):
+        """Read what was published after the saved mark, outside any final admission.
+
+        Every new record is checked against the whole cohort, so evidence for a
+        later candidate is not consumed unseen. On success the mark moves to the
+        reading taken before this scan; its cost then follows the publications
+        since the previous refresh. The read budget counts only entries that pass
+        the ctime filter and are not already known, so unlinks and untouched old
+        entries in a changed group are free; the window is one observation.
+        Returns None, "unknown" or "deferred".
+        """
+        from dispatch_pending_delivery import PendingDeliveryError
+        mark = self.data.get("mark")
+        if type(mark) is not int:
+            return "unknown"
+        next_mark = time.time_ns()
+        base = self.ctx.root / "pending-delivery"
+
+        def visit(group_fd, group, name, stamp):
+            path = base / group / name
+            self._record(path, group_fd, flag=True)
+            # Only a record that was read is known; a rejected one stays new for
+            # every later candidate in this pass.
+            self.ctx.discovery_stamps[path] = stamp
+            return None
+
+        try:
+            outcome = _scan_published(base, mark - MARK_SLACK_NS, deadline, DELIVERY_READ_BUDGET,
+                                      self.ctx.discovery_stamps, visit)
+        except (_Unreadable, PendingDeliveryError, OSError, ValueError, TypeError):
+            return "unknown"
+        if outcome is not None:
+            return outcome
+        self.data["mark"] = next_mark
+        return None
+
+    def _bound_state(self):
+        while len(json.dumps(self.data, separators=(",", ":")).encode()) > self.state_budget:
+            if len(self.subjects) <= 1:
+                self.data["complete"] = False
+                return False
+            self.subjects = self.subjects[:len(self.subjects) // 2]
+            ids = {s["id"] for s in self.subjects}
+            self.data["results"] = {k: v for k, v in self.data["results"].items() if k in ids}
+            self.data["subjects"] = [s["id"] for s in self.subjects]
+            self.identity = self.data["identity"] = _cohort_identity(self.ctx.root, self.subjects)
+        return True
+
+    def _groups(self, base):
+        """Recipient-group names in name order, listed whole for this pass.
+
+        None at the deadline. A store that changes between pages is listed again.
+        """
+        cookie, names, before = 0, [], _stamp(base)
+        while time.monotonic() < self.deadline:
+            self.metadata += 1
             try:
-                named = list(record_attempt_identities(value))
-            except (PendingDeliveryError, TypeError, ValueError):
-                return refs, "record-invalid"
-            if (not SHA256_RE.fullmatch(group.name)
-                    or not DELIVERY_ID_RE.fullmatch(entry.name[:-5])
-                    or value.get("recipient_digest") != group.name
-                    or value.get("delivery_id") != entry.name[:-5]):
-                return refs, "record-path-mismatch"
-            if records is not None:
-                digest = hashlib.sha256(json.dumps(
-                    value, sort_keys=True, separators=(",", ":")
-                ).encode("utf-8")).hexdigest()
-                fact = (str(Path(entry.path)), digest, mtime, _stamp(entry.path))
-                for item in named:
-                    records.setdefault(item, {})[fact[0]] = fact[1:]
-            if value.get("state") in OPEN_STATES:
-                refs.update(named)
-            elif activity is not None:
-                for item in named:
-                    activity[item] = max(activity.get(item, 0), mtime)
-    return refs, ""
+                entries, eof, observed = _directory_page(base, cookie, DELIVERY_READ_BUDGET, self.deadline)
+            except _Unreadable as exc:
+                if str(exc) != "directory-changed":
+                    raise
+                entries, eof, observed = [], False, object()
+            if observed != before:
+                cookie, names, before = 0, [], _stamp(base)
+                continue
+            if eof:
+                return sorted(names)
+            for name, next_cookie, dtype in entries:
+                self.visits += 1
+                if name in (".", ".."):
+                    pass
+                elif not SHA256_RE.fullmatch(name) or dtype not in (0, 4):
+                    self._unknown("group-untrusted")
+                else:
+                    names.append(name)
+                cookie = next_cookie
+        return None
+
+    def advance(self):
+        if self.advanced:
+            return
+        self.advanced = True
+        self.data["started"] = True
+        pos = self.data["position"]
+        base = self.ctx.root / "pending-delivery"
+        from dispatch_pending_delivery import PendingDeliveryError
+        # Only a replaced store restarts the traversal. Groups are walked in name
+        # order, so a group added later cannot shift the position, and its
+        # records are newer than the mark, where refresh and the final look
+        # read them. Strong protections already found remain until a new
+        # complete cold scan.
+        root = _generation(_directory_identity(base))
+        if root != pos["root_generation"]:
+            pos.update(root_done="", cookie=0, group="", generation="", root_generation=root, delivery_done=False)
+            # The traversal starts over, so every group is read after this reading.
+            self.data["mark"] = time.time_ns()
+        self.ctx.discovery_stamps[base] = _stamp(base)
+        kind = "groups"
+        groups = None
+        try:
+            # Only record reads spend the budget; every other entry costs time.
+            while time.monotonic() < self.deadline:
+                if pos.get("delivery_done"):
+                    if pos["inventory"] >= len(self.inventories):
+                        self.data["complete"] = True
+                        break
+                    directory, kind = self.inventories[pos["inventory"]]
+                elif pos["group"]:
+                    directory, kind = base / pos["group"], "delivery"
+                else:
+                    kind = "groups"
+                    if groups is None:
+                        groups = self._groups(base)
+                        if groups is None:
+                            return
+                    index = bisect.bisect_right(groups, pos["root_done"])
+                    if index < len(groups):
+                        pos.update(group=groups[index], cookie=0, generation="")
+                    else:
+                        pos.update(delivery_done=True, cookie=0, generation="")
+                    if not self._bound_state():
+                        return
+                    continue
+                before = _stamp(directory)
+                self.metadata += 1
+                generation = _generation(before)
+                if pos["generation"] and pos["generation"] != generation:
+                    pos["cookie"] = 0
+                pos["generation"] = generation
+                entries, eof, observed = _directory_page(
+                    directory, pos["cookie"], DELIVERY_READ_BUDGET, self.deadline)
+                if observed != before:
+                    break
+                if kind == "delivery":
+                    self.ctx.group_stamps[directory] = before
+                    self.ctx.delivery_groups.add(directory.name)
+                else:
+                    self.ctx.legacy_dirs[directory] = before
+                for name, cookie, dtype in entries:
+                    if time.monotonic() >= self.deadline:
+                        return
+                    if (kind == "delivery" and name.endswith(".json")
+                            and self.reads >= DELIVERY_READ_BUDGET):
+                        # The budget is spent: the next pass reads this record first.
+                        self._bound_state()
+                        return
+                    self.visits += 1
+                    if name not in (".", ".."):
+                        path = directory / name
+                        if kind == "delivery":
+                            if name.endswith(".json"):
+                                stamp = _stamp(path)
+                                self._record(path)
+                                self.ctx.discovery_stamps[path] = stamp
+                        else:
+                            identity = None
+                            if kind == "provider" and name.startswith(".lock-dispatch-"):
+                                identity = name[len(".lock-dispatch-"):]
+                            elif kind in ("record", "supervisor") and name.endswith(".json"):
+                                identity = name[:-5]
+                            elif kind == "supervisor" and name.endswith(".lease"):
+                                identity = name[:-6]
+                            if identity is not None:
+                                try:
+                                    info = os.stat(path, follow_symlinks=False)
+                                except FileNotFoundError:
+                                    info = None  # removed since the listing: nothing to match
+                                if info is None:
+                                    pass
+                                elif (not ATTEMPT_RE.fullmatch(identity) or info.st_uid != os.geteuid()
+                                        or (not stat.S_ISDIR(info.st_mode) if kind == "provider"
+                                            else not stat.S_ISREG(info.st_mode))):
+                                    self._unknown("ledger-entry-untrusted", legacy_only=True)
+                                else:
+                                    for subject in self.subjects:
+                                        if self._match(subject, identity):
+                                            result = self.data["results"][subject["id"]]
+                                            result["matches"] = sorted(set(result["matches"]) | {identity})
+                    pos["cookie"] = cookie
+                if not self._bound_state():
+                    return
+                if eof:
+                    if kind == "delivery":
+                        pos.update(root_done=pos["group"], group="", cookie=0, generation="")
+                    else:
+                        pos.update(inventory=pos["inventory"] + 1, cookie=0, generation="")
+            self._bound_state()
+            if _generation(_directory_identity(base)) != pos["root_generation"]:
+                self.data["complete"] = False
+        except (OSError, _Unreadable, ValueError, TypeError, PendingDeliveryError) as exc:
+            if str(exc) in ("directory-changed", "directory-cookie-unavailable"):
+                return
+            text = str(exc) if isinstance(exc, _Unreadable) else ""
+            place = {"groups": "store", "delivery": "group"}.get(kind, "ledger")
+            self._unknown(text if text.startswith("record-")
+                          else place + ("-untrusted" if text == "directory-owner" else "-unreadable"),
+                          legacy_only=place == "ledger")
+            self.data["complete"] = True
+
+    def result(self, subject_id):
+        self.advance()
+        result = self.data["results"].get(subject_id)
+        if result is None:
+            return "deferred", False, 0, ""
+        if result["unknown"]:
+            return "unknown", result["open"], result["activity"], result["unknown"]
+        if not result["token"] or result["token"] != self.tokens.get(subject_id):
+            return "deferred", result["open"], result["activity"], ""
+        if result["open"]:
+            return "complete", True, result["activity"], ""
+        if not self.data["complete"]:
+            return "deferred", False, result["activity"], ""
+        return "complete", False, result["activity"], ""
+
+
+def _delivery_index(root: Path, *, observation):
+    """(attempts in open records, first unknown cause or "") after this pass's read."""
+    observation.advance()
+    refs = set()
+    unknown = ""
+    for result in observation.data["results"].values():
+        if result["open"]:
+            refs.update(result["matches"])
+        unknown = unknown or result["unknown"]
+    return refs, unknown
 
 
 def _replacement_state(root: Path, snapshot: _Snapshot, attempt: str):
@@ -1172,6 +1632,45 @@ def _stat_mtime(path, **kwargs) -> int:
         return 0
 
 
+def _delivery_subject(ctx, subject_id, attempt, binding=None):
+    return {"id": subject_id, "legacy": binding is not None and binding.identity is None,
+            "related": sorted(_candidate_related_attempts(ctx.root, ctx.snapshot, attempt)),
+            "binding": ([binding.source, binding.harness, binding.worker_type, binding.key]
+                        if binding is not None else None)}
+
+
+def _home_delivery_subjects(ctx, keys):
+    subjects = []
+    for key in keys:
+        try:
+            home = os.open(key, _DIR_FLAGS, dir_fd=ctx.layout.workers_fd)
+            try:
+                found = _read_json("worker-home.json", MAX_MANIFEST_BYTES, dir_fd=home)
+            finally:
+                os.close(home)
+            if found is None:
+                continue
+            manifest = found[0]
+            source, harness, kind = (manifest.get(k) for k in ("source", "harness", "worker_type"))
+            if (not isinstance(source, str) or not os.path.isabs(source)
+                    or harness not in HARNESSES or kind not in WORKER_TYPES):
+                continue
+            declared = ctx.by_key.get(key, set())
+            attempt = next(iter(declared)) if len(declared) == 1 else manifest.get("identity")
+            if attempt is not None and (not isinstance(attempt, str) or not ATTEMPT_RE.fullmatch(attempt)):
+                continue
+            binding = _HomeBinding(key, attempt, manifest.get("identity"), source,
+                                   harness, kind, manifest.get("schema"))
+            if attempt is None:
+                matched = _candidate_attempt_ids(ctx.snapshot, binding)
+                if len(matched) == 1:
+                    attempt = next(iter(matched))
+            subjects.append(_delivery_subject(ctx, key, attempt, binding))
+        except (OSError, _Unreadable):
+            continue
+    return subjects
+
+
 class _Context:
     """Everything one examination reads that is shared by every home."""
 
@@ -1179,6 +1678,7 @@ class _Context:
         self.jobs, self.root, self.layout, self.snapshot, self.now_ns = jobs, root, layout, snapshot, now_ns
         self.workers_real = os.path.realpath(root / "homes" / "workers")
         self.delivery = None
+        self.observation = None
         self.discovery_stamps = {}
         # Every group's discovery-time stamp; a detach seeds only its own groups.
         self.group_stamps = {}
@@ -1187,116 +1687,83 @@ class _Context:
         self.delivery_unknown_global = ""
         self.delivery_groups: set[str] = set()
         self.candidate_delivery_baseline: _CandidateDeliveryBaseline | None = None
+        # The one look taken just after the final reference admission was won.
+        self.admission_scan = _NO_SCAN
+        self.admission_reason: str | None = None
         self.candidate_binding: _HomeBinding | None = None
+        self.delivery_subject_id = None
         self.by_key: dict[str, set[str]] = {}
         self.legacy: dict[tuple, dict[str, set[str]]] = {}
         self.legacy_scan_unknown = False
         self.legacy_dirs: dict[Path, object] = {}
         self.home_process_scan = None
 
+    def configure_delivery(self, state, subjects, deadline, *, state_budget=MAX_STATE_BYTES // 2):
+        # Keep a pending cohort until its traversal completes, even while the
+        # ordinary artifact cursor visits other candidates. Shrink oversized
+        # cohorts automatically rather than persisting history or dropping data.
+        saved = state.get("delivery_observation")
+        if isinstance(saved, dict) and saved.get("started") and not saved.get("complete"):
+            wanted = saved.get("subjects", [])
+            available = {s["id"]: s for s in subjects}
+            if (isinstance(wanted, list) and wanted
+                    and all(isinstance(key, str) and key in available for key in wanted)):
+                subjects = [available[key] for key in wanted]
+        subjects = list(subjects)
+        while subjects:
+            observation = _DeliveryObservation(self, subjects, saved, deadline)
+            observation.data["subjects"] = [s["id"] for s in subjects]
+            observation.state_budget = state_budget
+            if len(json.dumps(observation.data, separators=(",", ":")).encode()) <= state_budget:
+                self.observation = observation
+                state["delivery_observation"] = observation.data
+                if observation.data.get("started"):
+                    self.delivery_index()
+                return
+            subjects = subjects[:len(subjects) // 2]
+        self.observation = None
+        state.pop("delivery_observation", None)
+
     def delivery_index(self):
         if self.delivery is None:
-            def observe(kind, path):
-                table = self.group_stamps if kind == "group" else self.discovery_stamps
-                table[path] = _stamp(path)
+            if self.observation is None:
+                return set(), ""
             self.delivery, self.delivery_unknown_global = _delivery_index(
-                self.root, observer=observe, activity=self.delivery_activity,
-                records=self.delivery_records, groups_seen=self.delivery_groups)
+                self.root, observation=self.observation)
         return self.delivery, self.delivery_unknown_global
 
-    def delivery_projection(self, attempt: str | None,
-                            binding: _HomeBinding | None = None) -> tuple:
-        related = _candidate_related_attempts(self.root, self.snapshot, attempt)
+    def delivery_observation(self, attempt=None, binding=None):
         binding = binding or self.candidate_binding
-        if binding is not None:
-            related.update(identity for identity in self.delivery_records
-                           if _attempt_maps_to_binding(identity, binding))
-        return tuple(sorted(
-            (identity, path, *fact)
-            for identity in related
-            for path, fact in self.delivery_records.get(identity, {}).items()
-        ))
+        subject_id = self.delivery_subject_id or (binding.key if binding is not None else attempt)
+        if self.observation is None:
+            subject = _delivery_subject(self, subject_id, attempt, binding)
+            self.configure_delivery({}, [subject], time.monotonic() + EXAMINE_BUDGET_SECONDS)
+        self.delivery_index()
+        if self.observation is None:
+            return "deferred", False, 0, ""
+        result = self.observation.result(subject_id)
+        # A verdict read now already includes whatever a refresh recorded.
+        self.observation.fresh_related.discard(subject_id)
+        if attempt:
+            self.delivery_activity[attempt] = result[2]
+        return result
 
-    def legacy_matches(self, source: str, harness: str, worker_type: str) -> dict[str, set[str]]:
-        table = self.legacy.get((source, harness, worker_type))
-        if table is None:
-            from worker_runtime_home import _builder
-            table = {}
-            # Append-only delivery and recovery records can outlive their
-            # registry row. They retain the exact attempt id needed to verify a
-            # legacy key in the same forward direction used by the builder.
-            _refs, delivery_unknown = self.delivery_index()
-            self.legacy_scan_unknown |= bool(delivery_unknown)
-            attempts = set(self.snapshot.rows) | set(self.delivery_records)
-            directories = [
-                (self.root / "automatic-replacements" / "by-source", "attempt-record"),
-                (self.root / "recovery-attention" / "by-source", "attempt-record"),
-                (self.root / "supervisor-state", "supervisor-state"),
-            ]
-            try:
-                import dispatch_summary
-                state_root = dispatch_summary._state_root()
-                directories.extend((
-                    (dispatch_summary.owner_root() / harness, "summary-owner"),
-                    (state_root / harness, "summary-provider"),
-                ))
-            except (OSError, RuntimeError, ValueError):
-                self.legacy_scan_unknown = True
-
-            visited = 0
-            for directory, kind in directories:
-                directory = Path(directory)
-                self.legacy_dirs[directory] = _stamp(directory)
-                try:
-                    parent = os.stat(directory, follow_symlinks=False)
-                    if not stat.S_ISDIR(parent.st_mode) or parent.st_uid != os.geteuid():
-                        self.legacy_scan_unknown = True
-                        continue
-                    with os.scandir(directory) as entries:
-                        for entry in entries:
-                            visited += 1
-                            if visited > MAX_DELIVERY_RECORDS * 5:
-                                self.legacy_scan_unknown = True
-                                break
-                            attempt = None
-                            relevant = False
-                            if kind == "attempt-record" and entry.name.endswith(".json"):
-                                relevant, attempt = True, entry.name[:-5]
-                            elif kind == "supervisor-state":
-                                suffix = ".lease" if entry.name.endswith(".lease") else ".json"
-                                if entry.name.endswith(suffix):
-                                    relevant, attempt = True, entry.name[:-len(suffix)]
-                            elif kind == "summary-owner" and entry.name.endswith(".json"):
-                                relevant, attempt = True, entry.name[:-5]
-                            elif kind == "summary-provider" and entry.name.startswith(".lock-dispatch-"):
-                                relevant, attempt = True, entry.name[len(".lock-dispatch-"):]
-                            if not relevant:
-                                continue
-                            if entry.is_symlink():
-                                self.legacy_scan_unknown = True
-                                continue
-                            if kind == "summary-provider":
-                                if not entry.is_dir(follow_symlinks=False):
-                                    self.legacy_scan_unknown = True
-                                    continue
-                            elif not entry.is_file(follow_symlinks=False):
-                                self.legacy_scan_unknown = True
-                                continue
-                            if not ATTEMPT_RE.fullmatch(attempt or ""):
-                                self.legacy_scan_unknown = True
-                                continue
-                            attempts.add(attempt)
-                            if len(attempts) > MAX_DELIVERY_RECORDS * 2:
-                                self.legacy_scan_unknown = True
-                                break
-                except FileNotFoundError:
-                    continue
-                except OSError:
-                    self.legacy_scan_unknown = True
-            for attempt in attempts:
-                key = _builder.worker_home_key(source, harness, worker_type, attempt)
-                table.setdefault(key, set()).add(attempt)
-            self.legacy[(source, harness, worker_type)] = table
+    def legacy_matches(self, source, harness, worker_type):
+        cache_key = (source, harness, worker_type)
+        if cache_key in self.legacy:
+            return self.legacy[cache_key]
+        table = {}
+        from worker_runtime_home import _builder
+        attempts = set(self.snapshot.rows)
+        if self.observation is not None:
+            self.delivery_index()
+            for result in self.observation.data["results"].values():
+                attempts.update(result["matches"])
+                self.legacy_scan_unknown |= bool(result["unknown"])
+        for attempt in attempts:
+            key = _builder.worker_home_key(source, harness, worker_type, attempt)
+            table.setdefault(key, set()).add(attempt)
+        self.legacy[cache_key] = table
         return table
 
     def home_process_evidence(self, key: str) -> tuple[str, str]:
@@ -1510,22 +1977,19 @@ def _delivery_record_relation(path: Path, related: set[str] | frozenset[str],
                               binding: _HomeBinding | None = None, *,
                               dir_fd: int | None = None) -> str:
     """related | unrelated | unknown for a changed delivery record."""
-    from dispatch_pending_delivery import PendingDeliveryError, record_attempt_identities
+    from dispatch_pending_delivery import PendingDeliveryError, record_references
     for attempt in range(2):
         try:
             read_path = path.name if dir_fd is not None else str(path)
             found = _read_json(read_path, MAX_DELIVERY_BYTES, dir_fd=dir_fd)
             if found is None:
                 return "unrelated"
-            value = found[0]
-            identities = record_attempt_identities(value)
-            if (value.get("delivery_id") != path.name[:-5]
-                    or value.get("recipient_digest") != path.parent.name):
-                return "unknown"
+            identities = record_references(found[0], group=path.parent.name, delivery_id=path.name[:-5])
             if related.intersection(identities):
                 return "related"
             if binding is not None and any(
-                    _attempt_maps_to_binding(item, binding) for item in identities):
+                    _attempt_maps_to_binding(item, binding)
+                    for item in identities):
                 return "related"
             return "unrelated"
         except (_Unreadable, PendingDeliveryError, TypeError, ValueError):
@@ -1548,20 +2012,6 @@ def _bounded_directory_entries(path: Path, deadline: float) -> list | None:
     return entries
 
 
-def _bounded_directory_entries_fd(dir_fd: int, deadline: float) -> list | None:
-    entries = []
-    try:
-        with os.scandir(dir_fd) as listing:
-            for entry in listing:
-                if (len(entries) >= MAX_DIRECTORY_ENTRIES
-                        or time.monotonic() >= deadline):
-                    return None
-                entries.append(entry)
-    except OSError:
-        return None
-    return entries
-
-
 def _late_delivery_change(ctx: _Context, attempt: str | None, deadline: float,
                            binding: _HomeBinding | None = None) -> str | None:
     """Return changed/unknown when candidate evidence moved after discovery.
@@ -1571,6 +2021,9 @@ def _late_delivery_change(ctx: _Context, attempt: str | None, deadline: float,
     and memberships whose directories changed.
     """
     binding = binding or ctx.candidate_binding
+    if (ctx.observation is not None and ctx.observation.resumed
+            or len(ctx.discovery_stamps) > 32 or len(ctx.group_stamps) > 32):
+        return _late_candidate_delivery_change(ctx, attempt, deadline, binding)
     base = ctx.root / "pending-delivery"
     related = _candidate_related_attempts(ctx.root, ctx.snapshot, attempt)
     candidate_groups = _candidate_recipient_groups(ctx.root, ctx.snapshot, attempt)
@@ -1586,7 +2039,7 @@ def _late_delivery_change(ctx: _Context, attempt: str | None, deadline: float,
             if time.monotonic() >= deadline:
                 return "unknown"
             path = Path(raw_path)
-            if _stamp(path) != fact[-1]:
+            if _stamp(path) != fact:
                 return "changed"
 
     # A file rewrite can turn an unrelated record into a reference without
@@ -1614,7 +2067,9 @@ def _late_delivery_change(ctx: _Context, attempt: str | None, deadline: float,
     try:
         base_after = _stamp(base)
         base_before = ctx.discovery_stamps.get(base)
-        groups_now = list(os.scandir(base)) if base_after is not None else []
+        groups_now = _bounded_directory_entries(base, deadline) if base_after is not None else []
+        if groups_now is None:
+            return "unknown"
     except OSError:
         return "unknown"
     if base_after != base_before:
@@ -1628,7 +2083,9 @@ def _late_delivery_change(ctx: _Context, attempt: str | None, deadline: float,
             group_path = Path(group.path)
             group_stamp = _stamp(group_path)
             try:
-                entries = list(os.scandir(group_path))
+                entries = _bounded_directory_entries(group_path, deadline)
+                if entries is None:
+                    return "unknown"
             except OSError:
                 return "unknown"
             for entry in entries:
@@ -1666,7 +2123,9 @@ def _late_delivery_change(ctx: _Context, attempt: str | None, deadline: float,
         if after == before:
             continue
         try:
-            entries = list(os.scandir(group_path))
+            entries = _bounded_directory_entries(group_path, deadline)
+            if entries is None:
+                return "unknown"
         except FileNotFoundError:
             continue
         except OSError:
@@ -1690,202 +2149,198 @@ class _CandidateDeliveryBaseline:
     attempt: str | None
     binding: _HomeBinding | None
     related: frozenset[str]
-    related_file_stamps: tuple[tuple[Path, object], ...]
-    baseline_files: tuple[tuple[Path, object], ...]
-    baseline_file_paths: frozenset[Path]
-    group_stamps: tuple[tuple[Path, object], ...]
-    group_names: frozenset[str]
+    token: str | None
+    subject_id: str
+    related_file_stamps: tuple
+    baseline_files: tuple
     base: Path
-    base_stamp: object
 
 
-def _late_candidate_group_change(baseline: _CandidateDeliveryBaseline,
-                                 related: frozenset[str],
-                                 binding: _HomeBinding | None,
-                                 baseline_files: frozenset[Path],
-                                 deadline: float) -> str | None:
-    """Freshly inspect changed groups relative to one pinned delivery directory."""
-    if not baseline.group_stamps:
+def _prepare_candidate_delivery_baseline(ctx, attempt, deadline):
+    binding = ctx.candidate_binding
+    if ctx.observation is None or time.monotonic() >= deadline:
         return None
+    subject_id = ctx.delivery_subject_id or (binding.key if binding else attempt)
+    result = ctx.observation.data["results"].get(subject_id)
+    if result is None or ctx.observation.result(subject_id)[:2] != ("complete", False):
+        return None
+    subject = next(s for s in ctx.observation.subjects if s["id"] == subject_id)
+    related = set(subject["related"]) | set(result["matches"])
+    # A small in-command backstop preserves descriptor-bound legacy checks of an
+    # in-place rewrite. Publications are rechecked from the observation mark
+    # instead (`_scan_published`); history file stamps are never persisted and
+    # never walked again at detach.
+    small_history = not ctx.observation.resumed and len(ctx.discovery_stamps) <= 33
+    small_files = (tuple((p, v) for p, v in ctx.discovery_stamps.items() if p.suffix == ".json")
+                   if small_history else ())
+    direct = tuple((Path(path), fact) for identity in related
+                   for path, fact in ctx.delivery_records.get(identity, {}).items())[:8]
+    return _CandidateDeliveryBaseline(
+        attempt, binding, frozenset(related), result["token"], subject_id,
+        direct, small_files, ctx.root / "pending-delivery")
+
+
+def _scan_published(base, low, deadline, limit, known, visit, *, stat_limit=None):
+    """Visit each `.json` that may have been published at or after `low`.
+
+    A publication lands by rename, so it leaves its recipient group's mtime and
+    its own ctime at or after the moment it happened. Only groups whose mtime
+    changed contribute entries newer than `low`; a group that merely had its
+    ctime changed (a replaced or re-moded directory) contributes all of its
+    entries. Costs one stat per recipient group and per entry of a changed
+    group, with no cap on the number of groups. `limit` bounds the entries that
+    pass the ctime filter and are not already known, i.e. the ones `visit` is
+    asked to read, so churn that only unlinks or leaves old entries in a changed
+    group never exhausts it. The stats that precede that filter are bounded by
+    the deadline, or by `stat_limit` where the caller holds something while it
+    looks (the final admission).
+    `visit(group_fd, group, name, stamp)` returns None or a result to stop on.
+    Returns None, "unknown", "deferred" or a visit result.
+    """
     try:
-        base_fd = os.open(baseline.base, _DIR_FLAGS)
+        base_fd = os.open(base, _DIR_FLAGS)
     except FileNotFoundError:
         return None
     except OSError:
         return "unknown"
     try:
-        opened_base = _stamp_from_stat(os.fstat(base_fd))
-        path_base = _stamp(baseline.base)
-        if (path_base is None or not stat.S_ISDIR(path_base[2])
-                or path_base[:4] != opened_base[:4]):
-            return "unknown"
-
-        for group, before in baseline.group_stamps:
+        changed = []
+        with os.scandir(base_fd) as listing:
+            for index, entry in enumerate(listing):
+                if index & 1023 == 1023 and time.monotonic() >= deadline:
+                    return "deferred"
+                name = entry.name
+                if len(name) != 64 or not entry.is_dir(follow_symlinks=False):
+                    continue
+                try:
+                    info = entry.stat(follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
+                if info.st_mtime_ns >= low and SHA256_RE.fullmatch(name):
+                    changed.append((name, True))
+                elif info.st_ctime_ns >= low and SHA256_RE.fullmatch(name):
+                    changed.append((name, False))
+        budget, stats = limit, stat_limit
+        for group, membership in changed:
             if time.monotonic() >= deadline:
-                return "unknown"
-            after = _stamp_at(base_fd, group.name)
-            if after == before or after is None:
+                return "deferred"
+            try:
+                group_fd = os.open(group, _DIR_FLAGS, dir_fd=base_fd)
+            except FileNotFoundError:
                 continue
-            if not stat.S_ISDIR(after[2]):
-                return "unknown"
             try:
-                group_fd = os.open(group.name, _DIR_FLAGS, dir_fd=base_fd)
-            except OSError:
-                return "unknown"
-            try:
-                if _stamp_from_stat(os.fstat(group_fd)) != after:
-                    return "unknown"
-                entries = _bounded_directory_entries_fd(group_fd, deadline)
-                if entries is None or _stamp_at(base_fd, group.name) != after:
-                    return "unknown"
-                for entry in entries:
-                    if time.monotonic() >= deadline:
-                        return "unknown"
-                    path = group / entry.name
-                    if not entry.name.endswith(".json") or path in baseline_files:
-                        continue
-                    relation = _delivery_record_relation(
-                        path, related, binding, dir_fd=group_fd)
-                    if relation == "related":
-                        return "changed"
-                    if relation == "unknown":
-                        return "unknown"
+                with os.scandir(group_fd) as listing:
+                    for entry in listing:
+                        if not entry.name.endswith(".json"):
+                            continue
+                        if stats is not None:
+                            stats -= 1
+                            if stats < 0:
+                                return "deferred"
+                        if time.monotonic() >= deadline:
+                            return "deferred"
+                        try:
+                            info = entry.stat(follow_symlinks=False)
+                        except FileNotFoundError:
+                            continue
+                        if membership and info.st_ctime_ns < low:
+                            continue
+                        stamp = _stamp_from_stat(info)
+                        if known.get(base / group / entry.name) == stamp:
+                            continue
+                        budget -= 1
+                        if budget < 0:
+                            return "deferred"
+                        stopped = visit(group_fd, group, entry.name, stamp)
+                        if stopped is not None:
+                            return stopped
+            except FileNotFoundError:
+                continue
             finally:
                 os.close(group_fd)
-
-        # The path must still name the directory descriptor used above. Its
-        # metadata may have changed because new groups appeared; the later
-        # base-membership pass handles those just as before.
-        path_base = _stamp(baseline.base)
-        if (path_base is None or not stat.S_ISDIR(path_base[2])
-                or path_base[:4] != opened_base[:4]):
-            return "unknown"
+    except OSError:
+        return "unknown"
     finally:
         os.close(base_fd)
     return None
 
 
-def _prepare_candidate_delivery_baseline(ctx: _Context, attempt: str | None,
-                                         deadline: float) -> _CandidateDeliveryBaseline | None:
-    """Prepare immutable lookup sets outside jobs.log.lock for final freshness."""
-    binding = ctx.candidate_binding
-    related = _candidate_related_attempts(ctx.root, ctx.snapshot, attempt)
-    if time.monotonic() >= deadline:
+def _late_candidate_group_change(baseline, related, binding, known, deadline, *, mark):
+    """The final admission's one look: published since `mark`, read through the scanned group."""
+    reads = [0]
+
+    def visit(group_fd, group, name, stamp):
+        reads[0] += 1
+        if reads[0] > ADMISSION_REREAD_LIMIT:
+            return "deferred"
+        relation = _delivery_record_relation(baseline.base / group / name, related, binding,
+                                             dir_fd=group_fd)
+        if relation == "related":
+            return "changed"
+        if relation == "unknown":
+            return "unknown"
         return None
-    related_file_stamps = []
-    for identity in related:
-        for raw_path, fact in ctx.delivery_records.get(identity, {}).items():
-            if time.monotonic() >= deadline:
-                return None
-            related_file_stamps.append((Path(raw_path), fact[-1]))
-    baseline_files = []
-    for path, stamp in ctx.discovery_stamps.items():
-        if time.monotonic() >= deadline:
-            return None
-        if isinstance(path, Path) and path.suffix == ".json":
-            baseline_files.append((path, stamp))
-    group_stamps = tuple(ctx.group_stamps.items())
-    if time.monotonic() >= deadline:
-        return None
-    base = ctx.root / "pending-delivery"
-    return _CandidateDeliveryBaseline(
-        attempt=attempt,
-        binding=binding,
-        related=frozenset(related),
-        related_file_stamps=tuple(related_file_stamps),
-        baseline_files=tuple(baseline_files),
-        baseline_file_paths=frozenset(path for path, _stamp_value in baseline_files),
-        group_stamps=group_stamps,
-        group_names=frozenset(ctx.delivery_groups),
-        base=base,
-        base_stamp=ctx.discovery_stamps.get(base),
-    )
+
+    # The look holds the reference admission, so its stats are capped as well.
+    return _scan_published(baseline.base, mark - MARK_SLACK_NS, deadline, DELIVERY_READ_BUDGET,
+                           known, visit, stat_limit=DELIVERY_READ_BUDGET)
 
 
-def _late_candidate_delivery_change(ctx: _Context, attempt: str | None,
-                                   deadline: float,
-                                   binding: _HomeBinding | None = None) -> str | None:
-    """Compare prepared delivery metadata, parsing only changed/new records.
+def _admission_scan(ctx, deadline):
+    """Look once, as soon as the candidate's reference admission is held.
 
-    _detach calls this once outside the registry lock to reject known changes,
-    then again inside final admission immediately before journal/rename. The
-    immutable baseline is prepared by the first call and reused by the second.
+    Every writer that can name a related attempt holds that reference for the
+    whole of its publication, so after this point none can publish; before it,
+    its rename already landed and is newer than the observation mark.
     """
+    baseline = ctx.candidate_delivery_baseline
+    mark = ctx.observation.data.get("mark") if ctx.observation is not None else None
+    if baseline is None or type(mark) is not int:
+        return "unknown"
+    return _late_candidate_group_change(baseline, baseline.related, baseline.binding,
+                                        ctx.discovery_stamps, deadline, mark=mark)
+
+
+def _late_outcome(value, budget_reason):
+    if value == "unknown":
+        return "late-evidence-unreadable"
+    return "defer:" + budget_reason if value == "deferred" else "late-evidence-changed"
+
+
+def _late_candidate_delivery_change(ctx, attempt, deadline, binding=None):
     binding = binding or ctx.candidate_binding
     baseline = ctx.candidate_delivery_baseline
-    if (baseline is None or baseline.attempt != attempt
-            or baseline.binding != binding):
+    if baseline is None or baseline.attempt != attempt or baseline.binding != binding:
         baseline = _prepare_candidate_delivery_baseline(ctx, attempt, deadline)
         if baseline is None:
             return "unknown"
         ctx.candidate_delivery_baseline = baseline
-    related = baseline.related
-    baseline_files = baseline.baseline_file_paths
-
-    # Candidate-related records have already been indexed. A changed record
-    # stays fail-closed even if a rewrite would remove its previous relation.
+    if time.monotonic() >= deadline:
+        return "unknown"
+    subject = next(s for s in ctx.observation.subjects if s["id"] == baseline.subject_id)
+    fresh = (_reference_fingerprint(ctx.root, subject["related"], deadline=deadline)
+             if subject["related"] else ctx.observation._view_token())
+    if fresh is None or fresh != baseline.token:
+        return "changed"
     for path, before in baseline.related_file_stamps:
         if time.monotonic() >= deadline:
             return "unknown"
         if _stamp(path) != before:
             return "changed"
-
-    # Stat the bounded discovery set and parse only changed payloads.
     for path, before in baseline.baseline_files:
-        if time.monotonic() >= deadline:
-            return "unknown"
-        after = _stamp(path)
-        if after == before:
-            continue
-        if after is None:
-            continue
-        relation = _delivery_record_relation(path, related, binding)
-        if relation == "related":
-            return "changed"
-        if relation == "unknown":
-            return "unknown"
-
-    # Fresh per-group metadata observations use one pinned directory handle,
-    # avoiding repeated resolution of the shared pending-delivery path.
-    group_change = _late_candidate_group_change(
-        baseline, related, binding, baseline_files, deadline)
-    if group_change is not None:
-        return group_change
-
-    if _stamp(baseline.base) != baseline.base_stamp:
-        groups = _bounded_directory_entries(baseline.base, deadline)
-        if groups is None:
-            if _stamp(baseline.base) is None:
-                groups = []
-            else:
-                return "unknown"
-        elif _stamp(baseline.base) is None:
-            groups = []
-        for group in groups:
-            if group.name in baseline.group_names:
-                continue
-            if time.monotonic() >= deadline:
-                return "unknown"
-            if group.is_symlink() or not group.is_dir(follow_symlinks=False):
-                return "unknown"
-            group_path = Path(group.path)
-            group_stamp = _stamp(group_path)
-            entries = _bounded_directory_entries(group_path, deadline)
-            if entries is None:
-                return "unknown"
-            for entry in entries:
-                if time.monotonic() >= deadline:
-                    return "unknown"
-                if not entry.name.endswith(".json"):
-                    continue
-                relation = _delivery_record_relation(Path(entry.path), related, binding)
-                if relation == "related":
-                    return "changed"
-                if relation == "unknown":
-                    return "unknown"
-            if _stamp(group_path) != group_stamp:
-                return "unknown"
-    return None
+        if _stamp(path) != before and _stamp(path) is not None:
+            relation = _delivery_record_relation(path, baseline.related, binding)
+            if relation != "unrelated":
+                return "changed" if relation == "related" else "unknown"
+    if ctx.admission_scan is _NO_SCAN:
+        # Outside the final admission: fold what was published since the mark into
+        # the cohort (a normal pinned writer publishes without advancing a token).
+        refreshed = ctx.observation.refresh(deadline)
+        if refreshed is not None:
+            return refreshed
+    elif ctx.admission_scan is not None:
+        return ctx.admission_scan
+    return "changed" if baseline.subject_id in ctx.observation.fresh_related else None
 
 
 def _split_credential(home_fd: int) -> bool:
@@ -1936,9 +2391,13 @@ def _bind(ctx: _Context, key: str, home_fd: int):
     elif identity is not None:
         attempt = identity
     else:
+        status, _open, _activity, _cause = ctx.delivery_observation(None, _HomeBinding(
+            key, None, None, source, harness, worker_type, schema))
         matches = ctx.legacy_matches(source, harness, worker_type).get(key, set())
         if ctx.legacy_scan_unknown:
             return _Verdict("unknown", "legacy-ledger-unverifiable")
+        if status == "deferred":
+            return _Verdict("deferred", "delivery-read-deferred")
         if len(matches) > 1:
             return _Verdict("unknown", "ambiguous")
         if matches:
@@ -1995,7 +2454,7 @@ def _protections(ctx: _Context, key: str, attempt: str, *, probe_processes: bool
         route_state=lambda meta: _route_evidence(ctx.jobs, meta),
         owner_state=home_consumer_evidence,
         lease_state=lambda meta: _lease_state(ctx.jobs, meta),
-        delivery_index=ctx.delivery_index,
+        delivery_observation=lambda identity: ctx.delivery_observation(identity),
         supervisor_activity=lambda identity: _stat_mtime(
             "supervisor-state/%s.json" % identity,
             dir_fd=ctx.layout.root_fd, follow_symlinks=False),
@@ -2058,12 +2517,14 @@ def _orphan_protection(ctx: _Context, binding: _HomeBinding):
             if state == "unknown":
                 return _Verdict("unknown", "delivery-unknown", detail="intent-state-unreadable")
             activity = max(activity, mtime)
-    refs, index_unknown = ctx.delivery_index()
-    if index_unknown:
-        return _Verdict("unknown", "delivery-index-unknown",
-                        detail=index_unknown if isinstance(index_unknown, str) else "delivery-scan-incomplete")
-    if attempt is not None and attempt in refs:
+    status, is_open, delivery_activity, cause = ctx.delivery_observation(attempt, binding)
+    if status == "unknown":
+        return _Verdict("unknown", "delivery-index-unknown", detail=cause)
+    if status == "deferred":
+        return _Verdict("deferred", "delivery-read-deferred")
+    if is_open:
         return _Verdict("keep", "delivery-open")
+    activity = max(activity, delivery_activity)
     if attempt is not None:
         state, mtime = _replacement_state(ctx.root, ctx.snapshot, attempt)
         if state == "unresolved":
@@ -2527,10 +2988,8 @@ def _detach(ctx: _Context, key: str, ident: list[int], attempt: str | None, raw:
     lock_file = os.open(str(ctx.jobs) + ".lock",
                         os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
     os.close(lock_file)
-    ctx.delivery_index()
     binding = binding or ctx.candidate_binding
     prior_registry = _registry_projection(ctx.snapshot, key, attempt, ctx.by_key, binding)
-    prior_delivery = ctx.delivery_projection(attempt, binding)
     watched = {}
     try:
         try:
@@ -2542,14 +3001,20 @@ def _detach(ctx: _Context, key: str, ident: list[int], attempt: str | None, raw:
             return "row-changed"
         current = _Context(ctx.jobs, ctx.root, layout, fresh, ctx.now_ns)
         current.candidate_binding = binding
+        current.observation = ctx.observation
+        current.delivery = ctx.delivery
+        current.delivery_records = ctx.delivery_records
+        current.discovery_stamps = ctx.discovery_stamps
+        current.group_stamps = ctx.group_stamps
+        current.delivery_groups = ctx.delivery_groups
+        current.legacy_dirs = ctx.legacy_dirs
+        current.home_process_scan = ctx.home_process_scan
         token = _DEPENDENCIES.set(watched)
         try:
             current.by_key = _declared_index(fresh, ctx.root, current.workers_real)
         finally:
             _DEPENDENCIES.reset(token)
-        current.delivery_index()
-        if (_registry_projection(fresh, key, attempt, current.by_key, binding) != prior_registry
-                or current.delivery_projection(attempt, binding) != prior_delivery):
+        if _registry_projection(fresh, key, attempt, current.by_key, binding) != prior_registry:
             return "late-evidence-changed"
         token = _DEPENDENCIES.set(watched)
         try:
@@ -2573,7 +3038,7 @@ def _detach(ctx: _Context, key: str, ident: list[int], attempt: str | None, raw:
             if (row is not None and row.raw != raw) or verdict.kind != "eligible":
                 if verdict.kind == "keep":
                     return "protected:" + verdict.reason
-                if verdict.kind == "unknown":
+                if verdict.kind in ("unknown", "deferred"):
                     return "defer:" + verdict.reason
                 return "activity:row-changed"
             ended = _ended_ns(row) if row is not None else None
@@ -2609,15 +3074,13 @@ def _detach(ctx: _Context, key: str, ident: list[int], attempt: str | None, raw:
                        _rechecks + 1, binding)
     late_delivery = _late_delivery_change(current, attempt, deadline)
     if late_delivery is not None:
-        return ("late-evidence-unreadable" if late_delivery == "unknown"
-                else "late-evidence-changed")
+        return _late_outcome(late_delivery, "delivery-refresh-budget")
     # The final metadata pass reuses discovery and stays outside jobs.log.lock.
     # Its larger directory set may need the existing removal budget; the lock
     # is acquired only after related new/changed delivery evidence is rejected.
     late_delivery = _late_candidate_delivery_change(current, attempt, deadline)
     if late_delivery is not None:
-        return ("late-evidence-unreadable" if late_delivery == "unknown"
-                else "late-evidence-changed")
+        return _late_outcome(late_delivery, "delivery-refresh-budget")
 
     baseline = current.candidate_delivery_baseline
     if (baseline is None or baseline.attempt != attempt
@@ -2646,6 +3109,14 @@ def _detach(ctx: _Context, key: str, ident: list[int], attempt: str | None, raw:
                 with _flock(layout.ret_fd, "view.lock", fcntl.LOCK_EX | fcntl.LOCK_NB) as acquired:
                     if not acquired:
                         return "view-lock-busy"
+                    # Held for the rest of this detach: look once for what was
+                    # published since the refresh, before anything else.
+                    # Its cost is one stat per recipient group, so it follows the
+                    # group count under the removal deadline instead of a count cap.
+                    current.admission_scan = _admission_scan(current, deadline)
+                    if current.admission_scan is not None:
+                        return _late_outcome(current.admission_scan, "delivery-reread-budget")
+                    final_deadline = max(final_deadline, min(deadline, time.monotonic() + 0.05))
                     if not _legacy_inventory_fresh(current):
                         return "late-evidence-changed"
                     # Process-table observation stays outside the registry lock.
@@ -2709,8 +3180,7 @@ def _detach(ctx: _Context, key: str, ident: list[int], attempt: str | None, raw:
                     late_delivery = _late_candidate_delivery_change(
                         current, attempt, final_deadline)
                     if late_delivery is not None:
-                        return ("late-evidence-unreadable" if late_delivery == "unknown"
-                                else "late-evidence-changed")
+                        return _late_outcome(late_delivery, "delivery-reread-budget")
                     row = fresh.rows.get(attempt) if attempt else None
                     if (row is not None and binding.harness in {"claude", "opencode"}
                             and _retain_raw_for_main(row, first_ns, ctx.now_ns)):
@@ -2784,6 +3254,8 @@ def _renewed_protection(ctx: _Context, key: str, attempt: str | None) -> bool:
         current = _Context(ctx.jobs, ctx.root, ctx.layout, fresh, ctx.now_ns)
         current.by_key = _declared_index(fresh, ctx.root, current.workers_real)
         current.delivery = ctx.delivery
+        current.observation = ctx.observation
+        current.candidate_binding = ctx.candidate_binding
         return _protections(current, key, attempt, probe_processes=False).kind == "keep"
     except (OSError, _Unreadable):
         return False
@@ -2826,7 +3298,9 @@ def _sweep(jobs: Path, now_ns: int, force: bool, started: float) -> dict:
             if not admitted:
                 return {"skipped": "busy"}
             state = _load_state(layout)
-            if not force and now_ns - state["last_pass_ns"] < DUE_SECONDS * 10**9 and state["last_pass_ns"] <= now_ns:
+            last = state.get("last_result")
+            gap = BACKLOG_DUE_SECONDS if isinstance(last, dict) and last.get("more") else DUE_SECONDS
+            if not force and now_ns - state["last_pass_ns"] < gap * 10**9 and state["last_pass_ns"] <= now_ns:
                 return {"skipped": "not-due"}
             # The delivery-record prune runs under the retention lock and DUE
             # gate (they are its cadence), before any delivery index is built,
@@ -2864,7 +3338,7 @@ def _run_pass(jobs: Path, root: Path, layout: _Layout, state: dict, now_ns: int,
               delivery_prune: dict | None = None) -> dict:
     result = {"delivery_prune": delivery_prune, "examined": 0, "eligible": 0, "due": 0, "removed": 0, "partial": 0,
               "ignored": 0, "detached_leftover": 0, "unproven_leftover": 0,
-              "freed_bytes": 0, "kept": {}, "unknown": {}, "unknown_causes": {}}
+              "freed_bytes": 0, "kept": {}, "unknown": {}, "unknown_causes": {}, "deferred": 0}
     deadline = time.monotonic() + REMOVE_DEADLINE_SECONDS
     budget = REMOVE_LIMIT
     # Keep one slot for newly due homes even if every interrupted leaf is stuck.
@@ -2906,6 +3380,17 @@ def _run_pass(jobs: Path, root: Path, layout: _Layout, state: dict, now_ns: int,
             return skipped
         ctx = _Context(jobs, root, layout, snapshot, now_ns)
         ctx.by_key = _declared_index(snapshot, root, ctx.workers_real)
+        # Resume the previous cohort before rotating the candidate cursor.
+        saved = state.get("delivery_observation")
+        if isinstance(saved, dict) and saved.get("started") and not saved.get("complete"):
+            pending = [s for s in saved.get("subjects", []) if isinstance(s, str)]
+            batch = list(dict.fromkeys([k for k in pending if k in present] + batch))[:EXAMINE_LIMIT]
+        subjects = _home_delivery_subjects(ctx, batch)
+        subject_ids = {s["id"] for s in subjects}
+        ctx.configure_delivery(state, subjects, started + EXAMINE_BUDGET_SECONDS)
+        if ctx.observation is not None:
+            cohort = {s["id"] for s in ctx.observation.subjects}
+            batch = [key for key in batch if key in cohort or key not in subject_ids]
         scan = contextlib.ExitStack()
         try:
             from dispatch_contract import process_table_scan_scope
@@ -2915,13 +3400,16 @@ def _run_pass(jobs: Path, root: Path, layout: _Layout, state: dict, now_ns: int,
             for key in batch:
                 if time.monotonic() - started > EXAMINE_BUDGET_SECONDS:
                     break
-                cursor = key
+                if ctx.observation is None or key in cohort:
+                    cursor = key
                 result["examined"] += 1
                 try:
                     verdict, ident, binding = _examine(ctx, key)
                 except Exception:  # noqa: BLE001 -- one bad home must not stall every pass
                     verdict, ident, binding = _Verdict("unknown", "examine-error"), None, None
                 if verdict.kind != "eligible":
+                    if verdict.kind == "deferred":
+                        result["deferred"] += 1
                     if verdict.kind == "keep":
                         since.pop(key, None)
                     _count(result["unknown" if verdict.kind == "unknown" else "kept"], verdict.reason)
@@ -2938,6 +3426,14 @@ def _run_pass(jobs: Path, root: Path, layout: _Layout, state: dict, now_ns: int,
                 idle_from = max(start, verdict.activity_ns, mark, ident[3])
                 if now_ns - idle_from >= IDLE_SECONDS * 10**9:
                     due.append((key, ident[:3], verdict, start, binding))
+                    # Each detach re-reads the registry, so removal is the slow
+                    # step. Once the removal budget is full, stop examining:
+                    # the cursor stays on the last candidate and the next pass
+                    # starts there, rather than skipping a whole cycle of due
+                    # homes this pass could not remove anyway.
+                    if len(due) >= budget:
+                        result["more"] = 1
+                        break
                 else:
                     _count(result["kept"], "within-window")
         finally:
@@ -2946,6 +3442,7 @@ def _run_pass(jobs: Path, root: Path, layout: _Layout, state: dict, now_ns: int,
         for key, ident, verdict, start, binding in due:
             if budget <= 0 or time.monotonic() > deadline:
                 _count(result["kept"], "deferred")
+                result["more"] = 1
                 continue
             budget -= 1
             outcome = _detach(ctx, key, ident, verdict.attempt, verdict.raw, start,
@@ -2978,6 +3475,14 @@ def _run_pass(jobs: Path, root: Path, layout: _Layout, state: dict, now_ns: int,
             with contextlib.suppress(OSError):
                 # destructive-ok: reason=drop a view marker whose home no longer exists; boundary=one marker file directly under homes/worker-retention/views
                 os.unlink(name, dir_fd=layout.views_fd)
+    if batch and ctx.observation is not None:
+        obs = ctx.observation
+        result["delivery_reads"] = obs.reads
+        result["delivery_entries"] = obs.visits
+        result["delivery_metadata"] = obs.metadata
+        obs.checkpoint()
+        if len(json.dumps(obs.data).encode()) > MAX_STATE_BYTES // 2:
+            state.pop("delivery_observation", None)
     result["freed_bytes"] = _FREED.get()[0]
     result["elapsed_ms"] = int((time.monotonic() - started) * 1000)
     state.update(schema=SCHEMA, last_pass_ns=now_ns, cursor=cursor, eligible_since=since,

@@ -249,7 +249,7 @@ MAX_INTENT_CHILDREN = 256
 
 def terminal_protection(ctx, attempt, *, probe_processes, delivery_state,
                         replacement_state, route_state, owner_state, lease_state,
-                        delivery_index, supervisor_activity, process_quiescence,
+                        delivery_observation, supervisor_activity, process_quiescence,
                         protect_open_route=True, owner_detail=None):
     """Return ``eligible`` only when the exact attempt has no live consumer.
 
@@ -330,13 +330,14 @@ def terminal_protection(ctx, attempt, *, probe_processes, delivery_state,
     if lease == "unknown":
         return Protection("unknown", "lease-unknown")
 
-    refs, index_unknown = delivery_index()
-    if index_unknown:
-        return Protection("unknown", "delivery-index-unknown",
-                          detail=index_unknown if isinstance(index_unknown, str) else "")
-    if attempt in refs:
+    status, is_open, delivery_activity, cause = delivery_observation(attempt)
+    if status == "unknown":
+        return Protection("unknown", "delivery-index-unknown", detail=cause)
+    if status == "deferred":
+        return Protection("deferred", "delivery-read-deferred")
+    if is_open:
         return Protection("keep", "delivery-open")
-    activity = max(activity, ctx.delivery_activity.get(attempt, 0))
+    activity = max(activity, delivery_activity)
     activity = max(activity, supervisor_activity(attempt))
 
     if probe_processes:

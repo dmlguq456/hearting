@@ -56,6 +56,7 @@ class LiveSnapshot:
     governor: object = None
     hearting: dict = None
     answer_waits: object = None
+    project_status: object = None   # {cwd: status document record} (collectors.project_status)
 
     def __iter__(self):
         # Keep the existing sessions, jobs unpacking surface for CLI readers.
@@ -153,7 +154,8 @@ def fleet_answer_wait_view(result):
         if not isinstance(item, dict):
             continue
         allowed = ("id", "source", "kind", "route_id", "node", "attempt_id", "since", "stale",
-                   "session_id", "harness", "pane_id")
+                   "session_id", "harness", "pane_id", "owner_state", "fold", "cwd",
+                   "registered_harness", "registered_session_id")
         row = {key: item[key] for key in allowed if key in item}
         owner = item.get("owner") if isinstance(item.get("owner"), dict) else {}
         for key in ("harness", "session_id"):
@@ -175,6 +177,8 @@ def fleet_answer_wait_view(result):
         "unattributed": list(result.get("unattributed", ()) or ()),
         "total": result.get("total") if type(result.get("total")) is int and result["total"] >= 0 else None,
         "older": result.get("older") if type(result.get("older")) is int and result["older"] >= 0 else None,
+        "ownerless": (result.get("ownerless") if type(result.get("ownerless")) is int
+                      and result["ownerless"] >= 0 else None),
         "health": health,
         "observed_at": result.get("observed_at"),
         "complete": bool(result.get("complete", False)),

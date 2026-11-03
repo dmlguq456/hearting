@@ -1551,6 +1551,41 @@ class FinalizeTest(ProducerTestBase):
         self.assertEqual(again["status"], "already-sealed")
         self.assertEqual(P.status(self.root)["cycle_counts"], {"sealed": 1})
 
+    def test_reader_documents_carry_user_audience_and_status_document_is_primary(self):
+        # W4 2026-11-02: Cairn shows `audience: "user"` rows by default, folds the rest as
+        # work records, and pins a cycle whose primary is a status document as the
+        # project's status row. Nothing extra is asked of the agent.
+        self.activate()
+        route, route_file, result = self.begin()
+        self.write_output(result, "현황.md", "# 현황\n\n**한 줄**: 진행 중\n".encode())
+        self.write_output(result, "final_report.md", b"report\n")
+        self.write_output(result, "plan.md")
+        self.write_output(result, "dev_logs/before-merge/final_report.md", b"older report\n")
+        self.write_output(result, "evidence/summary.md", b"evidence\n")
+        self.write_output(result, "_internal/report.md", b"support\n")
+        self.close(route, route_file)
+        sealed = P.finalize(self.root, cycle_id=result["cycle_id"])
+        self.assertEqual(sealed["status"], "sealed", sealed)
+        manifest_path = Path(result["cycle_dir"]) / "manifest.json"
+        document = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertTrue(m.validate(document).ok, m.validate(document).violations)
+        rows = {row["title"]: row for row in document["artifacts"]}
+        self.assertEqual(rows["현황.md"]["role"], "primary")
+        self.assertEqual({title: row.get("audience") for title, row in rows.items()}, {
+            "현황.md": "user", "final_report.md": "user", "plan.md": None,
+            "dev_logs/before-merge/final_report.md": None, "evidence/summary.md": None,
+            "_internal/report.md": None,
+        })
+        # A report that appears after the seal is marked the same way.
+        self.write_output(result, "summary.md", b"summary\n")
+        refreshed = P.refresh_cycle(self.root, result["cycle_id"], trigger="explicit")
+        self.assertEqual(refreshed["status"], "emitted", refreshed)
+        current = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertTrue(m.validate(current).ok, m.validate(current).violations)
+        audience = {row["title"]: row.get("audience") for row in current["artifacts"]}
+        self.assertEqual((audience["summary.md"], audience["현황.md"], audience["plan.md"]),
+                         ("user", "user", None))
+
     def test_general_sealed_replay_keeps_the_past_result_when_an_index_row_is_removed(self):
         self.activate()
         route, route_file, result = self.begin()
@@ -3458,6 +3493,29 @@ class ReviewPublicationLeaseTest(ProducerTestBase):
         with self.assertRaises(P.ProducerError) as caught:
             P.finalize(self.root, cycle_id=cycle_id, state="abandoned", abandon_reason="operator-decision")
         self.assertEqual(caught.exception.code, "cycle-abandon-blocked-live-review")
+
+    def test_unobservable_lease_reports_unobservable_not_live(self):
+        self.activate()
+        _route, _route_file, result = self.begin()
+        cycle_id = result["cycle_id"]
+        self.assertEqual(P._review_lease_observation(self.root, cycle_id), "ended")
+        lease_dir = P._review_lease_dir(self.root, cycle_id)
+        lease_dir.mkdir(parents=True, exist_ok=True)
+        (lease_dir / "att-corrupt.json").write_text("{not json", encoding="utf-8")
+        self.assertEqual(P._review_lease_observation(self.root, cycle_id), "unobservable")
+        # the write guard is unchanged: an unobservable holder still blocks
+        self.assertIsNotNone(P._live_review_lease(self.root, cycle_id))
+        self.assertTrue(P._lease_record_is_live({"deadline": "not-a-time"}))
+        self.assertEqual(P._lease_record_state({"deadline": "not-a-time"}), "unobservable")
+
+    def test_observed_live_holder_blocks_and_reports_live(self):
+        now = time.time()
+        record = {"deadline": P._rfc3339(now + 300), "released_at": None, "pid": os.getpid(),
+                  "pid_start": P.process_start_ticks(os.getpid()), "pgid": os.getpgid(os.getpid())}
+        self.assertEqual(P._lease_record_state(record, now=now), "live")
+        self.assertTrue(P._lease_record_is_live(record, now=now))
+        self.assertEqual(P._lease_record_state({**record, "pid_start": "0"}, now=now), "ended")
+        self.assertFalse(P._lease_record_is_live({**record, "released_at": P._rfc3339(now)}, now=now))
 
     def test_double_acquire_and_double_release_are_idempotent(self):
         self.activate()
@@ -6104,6 +6162,87 @@ time.sleep(float(sys.argv[2]))
 """
 
 
+# One owner start as `start` runs it in its own process: the preparation `begin`, then the
+# launch binding. It notes every root-wide read made while the admission lock is held.
+_PARALLEL_OWNER_START = r"""
+import json, os, sys, time
+from pathlib import Path
+from types import SimpleNamespace
+sys.path.insert(0, sys.argv[1])
+import artifact_admission
+import artifact_producer as P
+import dispatch_terminal_commit as T
+route_file, jobs, attempt, start_at = Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4], float(sys.argv[5])
+root = Path(json.loads(route_file.read_text())["artifact_root"]).resolve()
+under_lock = []
+
+def watch(name, real, when=lambda *a, **k: True):
+    def wrapped(*args, **kwargs):
+        if artifact_admission.holds_lock(root) and when(*args, **kwargs):
+            under_lock.append(name)
+        return real(*args, **kwargs)
+    return wrapped
+
+P._env_for = watch("env", P._env_for)
+P.list_cycle_records = watch("every-cycle-record", P.list_cycle_records,
+                             lambda *a, **k: k.get("route_ids") is None)
+T.validate_owner_route = watch("registry", T.validate_owner_route)
+while time.time() < start_at:
+    time.sleep(0.005)
+env = P.prepare_route_artifact_env(route_file, start=True, jobs=jobs)
+args = SimpleNamespace(worker_type="owner", dispatch_depth=1, route_file=str(route_file),
+                       owner_route_binding=None, attempt_id=attempt)
+bound = P.bind_owner_launch(args, jobs, environ=env)
+print(json.dumps({"cycle": env["AGENT_ARTIFACT_CYCLE_ID"], "bound": bound["cycle_id"],
+                  "under_lock": under_lock}))
+"""
+
+
+class ParallelOwnerStartTest(ProducerTestBase):
+    """W3 (2026-11-02): five owner starts at once all met admission-busy past the 120 s wait.
+
+    The admission lock is one per artifact root; every start takes it twice. Held only for
+    the reservation, several starts that arrive together are all admitted well inside the
+    wait, and none of them reads the root's other records while it holds the lock."""
+
+    def test_parallel_owner_starts_are_all_admitted_and_hold_the_lock_only_to_reserve(self):
+        self.activate()
+        count = 6
+        starts = []
+        rows = []
+        for index in range(count):
+            route, route_file = self.route("quick", slug=f"w3-parallel-{index}", campaign_key="w3-parallel")
+            node = route["nodes"][0]
+            attempt = f"att-w3-parallel-{index}"
+            metadata = dict(attempt_id=attempt, worker_type="owner", dispatch_depth="1",
+                registered_worker="1", harness="codex", capability="autopilot-code",
+                capability_mode="dev", intensity="quick", route_file=str(route_file),
+                route_id=route["route_id"], route_hash=route["route_hash"], route_node=node["id"],
+                registry_digest=route["registry_digest"], completion_gate=node["completion_gate"],
+                write_scope=";".join(node["write_scope"]))
+            rows.append("2026-11-02T00:50:00Z\topen\t" + str(R.ROOT) + "\t" + str(R.ROOT)
+                        + f"\towner-{index}\t" + ",".join(f"{k}={v}" for k, v in metadata.items()) + "\n")
+            starts.append((route_file, attempt))
+        self.jobs.write_text("".join(rows), encoding="utf-8")
+        start_at = time.time() + 1.0
+        procs = [subprocess.Popen(
+            [sys.executable, "-c", _PARALLEL_OWNER_START, str(Path(P.__file__).resolve().parent),
+             str(route_file), str(self.jobs), attempt, str(start_at)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for route_file, attempt in starts]
+        results = []
+        for proc in procs:
+            out, err = proc.communicate(timeout=P.OWNER_LAUNCH_ADMISSION_WAIT_SECONDS)
+            self.assertEqual(proc.returncode, 0, err[-3000:])
+            results.append(json.loads(out.strip().splitlines()[-1]))
+        cycles = [result["cycle"] for result in results]
+        self.assertEqual(len(set(cycles)), count)
+        self.assertEqual([result["bound"] for result in results], cycles)
+        self.assertEqual([result["under_lock"] for result in results], [[]] * count)
+        campaigns = [row for row in P._campaigns_by_key(self.root, "w3-parallel")]
+        self.assertEqual(len(campaigns), 1)  # the starts that arrived together joined one campaign
+        self.assertEqual(sorted(campaigns[0]["cycles"]), sorted(cycles))
+
+
 class OwnerLaunchBindingTest(ProducerTestBase):
     def _prepared_owner(self):
         from types import SimpleNamespace
@@ -6191,6 +6330,29 @@ class OwnerLaunchBindingTest(ProducerTestBase):
             env = P.prepare_route_artifact_env(route_file, start=True, jobs=self.jobs)
         self.assertTrue(env["AGENT_ARTIFACT_CYCLE_ID"])
         self.assertEqual(len(list(P.list_cycle_records(root))), 1)
+
+    def test_owner_preparation_retries_for_the_lock_without_rereading_the_folders(self):
+        # Each reconcile walks every cycle of the root; a busy lock is waited out, not re-walked.
+        route, route_file, root = self._unbegun_route()
+        self._hold_admission_lock(root, 1.5)
+        busy = []
+        real_begin = P._begin_cycle_record
+
+        def counted_begin(*args, **kwargs):
+            try:
+                return real_begin(*args, **kwargs)
+            except P.artifact_admission.AdmissionBusy:
+                busy.append(1)
+                raise
+
+        with mock.patch.object(P.artifact_admission, "LOCK_TIMEOUT_DEFAULT", 0.5), \
+                mock.patch.object(P, "OWNER_LAUNCH_ADMISSION_WAIT_SECONDS", 5.0), \
+                mock.patch.object(P, "_begin_cycle_record", side_effect=counted_begin), \
+                mock.patch.object(P, "reconcile_root", wraps=P.reconcile_root) as reconcile:
+            env = P.prepare_route_artifact_env(route_file, start=True, jobs=self.jobs)
+        self.assertTrue(env["AGENT_ARTIFACT_CYCLE_ID"])
+        self.assertGreaterEqual(len(busy), 1)
+        self.assertEqual(reconcile.call_count, 1)
 
     def test_owner_preparation_at_the_wait_bound_reports_admission_busy(self):
         route, route_file, root = self._unbegun_route()
@@ -7454,18 +7616,21 @@ class RouteLineageBindingTest(ProducerTestBase):
         unused = self._continuation(a, reason="published-never-run")
         successor = self._continuation(a, reason="owner-pin-handoff")
         record = P.read_cycle_record(self.root, begun["cycle_id"])
-        # Without a verified handoff the two continuations of an open source stay a fork.
+        # Without a verified handoff the two continuations of an open source stay a fork for a begin;
+        # at seal time a sibling that never ran is not a branch.
         self.assertEqual(P.cycle_route_admission(self.root, record, successor).reason,
                          "cycle-route-binding-mismatch:lineage-fork")
+        self.assertTrue(P.cycle_route_admission(self.root, record, successor, finalize=True).allow)
         def handoff(route, *, jobs=None):
             return {"successor": successor} if route["route_id"] == a["route_id"] else None
         with mock.patch.object(route_parent_close, "verified_owner_pin_handoff_close",
                                side_effect=handoff):
             self.assertTrue(P.cycle_route_admission(self.root, record, successor).allow)
             self.assertTrue(P.cycle_route_admission(self.root, record, successor, finalize=True).allow)
-            # The unused sibling is not the handed-off route; it stays refused.
+            # The unused sibling is not the handed-off route; beginning it stays refused.
             self.assertEqual(P.cycle_route_admission(self.root, record, unused).reason,
                              "cycle-route-binding-mismatch:lineage-fork")
+            # Once the sibling has run it is a branch, whatever closed its parent.
             self._ran(unused)
             self.assertEqual(P.cycle_route_admission(self.root, record, successor).reason,
                              "cycle-route-binding-mismatch:lineage-fork")
@@ -7773,6 +7938,43 @@ class PrimarySupportExclusionTest(unittest.TestCase):
         rows = [("artifacts/_internal/dispatch/retrieval_prompt.md", b""),
                 ("artifacts/shards/retrieval/_internal/raw.txt", b"")]
         self.assertEqual(P._choose_primary(rows, None), "artifacts/_internal/dispatch/retrieval_prompt.md")
+
+    def test_status_document_directly_under_artifacts_is_the_automatic_primary(self):
+        # The same file Cairn pins as the project's status row and Fleet's project line reads.
+        rows = [("artifacts/STATUS.md", b""), ("artifacts/final_report.md", b""),
+                ("artifacts/plans/현황.md", b"")]
+        self.assertEqual(P._choose_primary(rows, None), "artifacts/STATUS.md")
+        rows.append(("artifacts/현황.md", b""))
+        self.assertEqual(P._choose_primary(rows, None), "artifacts/현황.md")
+        self.assertEqual(P._choose_primary(rows, "final_report.md"), "artifacts/final_report.md")
+        nested = [("artifacts/plans/현황.md", b""), ("artifacts/final_report.md", b"")]
+        self.assertEqual(P._choose_primary(nested, None), "artifacts/final_report.md")
+
+    def test_work_record_copy_never_outranks_the_same_name_elsewhere(self):
+        rows = [("artifacts/dev_logs/before-merge/final_report.md", b""),
+                ("artifacts/evidence/report.md", b""), ("artifacts/final_report.md", b"")]
+        self.assertEqual(P._choose_primary(rows, None), "artifacts/final_report.md")
+        self.assertEqual(P._choose_primary(rows[:2], None),
+                         "artifacts/dev_logs/before-merge/final_report.md")
+
+    def test_user_audience_marks_reader_documents_outside_record_folders(self):
+        user = P.artifact_manifest.USER_AUDIENCE
+        cases = {
+            "artifacts/final_report.md": user, "artifacts/plans/cycle/final_report.md": user,
+            "artifacts/report/REPORT.md": user, "artifacts/documents/report.html": user,
+            "artifacts/research/summary.md": user, "artifacts/reviews/audit/audit-report.md": user,
+            "artifacts/현황.md": user, "artifacts/research/STATUS.md": user,
+            "artifacts/prd.md": user, "artifacts/spec/prd.md": user, "artifacts/spec/a/prd.md": user,
+            "artifacts/plans/a/b/prd.md": None, "artifacts/spec/_internal/versions/v1/prd.md": None,
+            "artifacts/plan.md": None, "artifacts/README.md": None, "artifacts/notes.md": None,
+            "artifacts/dev_logs/x/final_report.md": None, "artifacts/test_logs/summary.md": None,
+            "artifacts/evidence/REPORT.md": None, "artifacts/shards/a/report.md": None,
+            "artifacts/_internal/report.md": None, "_internal/reviews/report.md": None,
+        }
+        self.assertEqual({rel: P.artifact_audience(rel) for rel in cases}, cases)
+        decomposed = "artifacts/" + __import__("unicodedata").normalize("NFD", "현황.md")
+        self.assertEqual(P.artifact_audience(decomposed), user)
+        self.assertEqual(P._status_rank(decomposed), 0)
 
     def test_explicit_primary_inside_support_still_wins(self):
         rows = [("artifacts/_internal/notes.md", b""), ("artifacts/plans/report.md", b"")]
@@ -8261,6 +8463,18 @@ class LineageForkFinalizeJudgmentTest(_LineageForkFinalizeFixture):
         # The advisory field is not cycle identity.
         self.assertEqual(terminal.cycle_identity_digest(stored),
                          terminal.cycle_identity_digest({**stored, "skipped_continuations": []}))
+
+    def test_unexecuted_sibling_does_not_fork_without_a_handoff_close(self):
+        """Hand-built shape: one candidate ran, the others never did, and the parent made no handoff close."""
+        begin, unused, successor, started, record = self._handoff_cycle("lineage-fork-no-handoff-ran")
+        self.write_output(started, "plans/lineage/plan.md")
+        self._close(successor)
+        self._ran(successor)
+        self.assertEqual(P._finalize_route(self.root, record)["route_id"], successor["route_id"])
+        sealed = P.finalize(self.root, cycle_id=record["cycle_id"])
+        self.assertEqual(sealed["status"], "sealed")
+        self.assertEqual(sorted(row["route_id"] for row in sealed["skipped_continuations"]),
+                         sorted(route["route_id"] for route in unused))
 
     def test_walk_refuses_an_executed_sibling(self):
         begin, unused, successor, started, record = self._handoff_cycle("lineage-fork-walk-harm")

@@ -273,7 +273,9 @@ atomic, reversible direct source change, use
 the isolated worktree first. If the source change was already made in place,
 `compose --shape direct` records its route without preparing a worktree.
 Otherwise use `compose --start --prompt-file <task>` with no `--shape`; the
-frame chooses the capability, stages, and solo or staged shape.
+frame chooses the capability, stages, and solo or staged shape, judging each
+leg's optional `size` (`one-change`, `one-pass`, `multi-stage`) first; an
+omitted shape follows it.
 
 | Main decision | Command | Result |
 |---|---|---|
@@ -560,11 +562,30 @@ fields and this order. In Korean, the canonical card is:
 → 진행 / 수정: <틀린 부분> / 중단
 ```
 
+In English, the same five fields in the same order are:
+
+```text
+[Run confirmation]
+
+Task: <what to produce, and the expected result>
+Reason: <current background and why the work is needed>
+Route: <primary entry capability> · <mode/intensity> — <why this route>
+Scope: <what is included and the important exclusions>
+Start approval (if needed): <the marked part this route asks approval for — this leg's execution scope>
+Done: <deliverables and verification criteria>
+
+→ Proceed / Edit: <what is wrong> / Stop
+```
+
+The card follows the user's communication language; the shared UI-text
+selection (`tools/i18n/ui_text.py`) governs only text the tools print, such as
+the `[경로]` notice, whose marker prints as `[Route]` in English.
+
 When the runtime exposes a native structured-question surface (Claude
 `AskUserQuestion`, Codex `request_user_input`, OpenCode `question`), deliver this confirmation
 through it: the five confirmation fields form the question body; the optional
 start-approval line is scope metadata, and the options are exactly
-진행 (recommended) / 수정 / 중단. The plain-text card above is the fallback when
+진행 (recommended) / 수정 / 중단 (in English Proceed (recommended) / Edit / Stop). The plain-text card above is the fallback when
 no such surface exists or it fails. The structured form changes only the
 delivery surface — never the five fields, their order, the one-time approval
 semantics, or the exemptions below.
@@ -910,10 +931,13 @@ completion and close steps below keep working for recovery consoles:
 ```text
 python3 utilities/capability-route.py close --route <route.json> [--commit <sha>] [--summary <line>]
 python3 utilities/capability-route.py status [--artifact-root <dir>] --open-only
+python3 utilities/capability-route.py status <route id | route file | attempt id>
 ```
 
 `status` defaults the artifact root from the cwd, and each open row carries its
-`resume_command`. That command names a canonical route by its ID
+`resume_command`. Given one route or attempt, it reports that route and its
+registry attempts. `start`, `finish`, `close`, `correct` and `status` each take a
+route id, route file or attempt id. That command names a canonical route by its ID
 (`start --route rt-<16 hex>`); `start` finds the record under the cwd's artifact
 root, `AGENT_ARTIFACT_ROOT`, the jobs registry or a session's route-chain ledger,
 and still takes a route file. A `start` without `--route` continues this session's newest
@@ -1184,12 +1208,15 @@ automatic replacement, so a replacement or continuation owner, which its prompt'
 recovery context identifies, keeps calling the bounded `await-release` at a later
 gate instead of parking. A revise or stop recorded while the owner is parked keeps
 its meaning and starts nothing automatically.
-An owner that needs a person's answer at a node no declared gate covers ends
-`BLOCKED` and names the question in its handoff. `resume_command` reports it as
-`owner-blocked` with that report. The answer sent with `correct` starts one
-replacement owner that receives it and continues the route. No gate, close, or
-recompose is needed.
-An owner whose turn ended normally but whose final result does not follow the three-line handoff format waits for an answer the same way: `correct` continues the route, the format failure stays recorded, and nothing retries automatically.
+An owner that ends `BLOCKED` or with a malformed final handoff, outside any declared
+gate and with no kept answer, is continued once by the runtime in a replacement owner
+that receives the original result and its report as observations, not as an answer.
+Only a real user decision reaches a person: the continuation names it and ends
+`BLOCKED`, and `resume_command` then reports `owner-blocked`; the answer sent with
+`correct` starts one replacement owner that receives it. A readable FAIL keeps
+waiting for an approved fix. An owner that ended `PASS` with declared stages undone is
+continued the same way once: its PASS stays as recorded, and the replacement receives the
+undone stages as observations. No gate, close, or recompose is needed.
 
 A continuation route projects this contract onto its suffix. It drops a gate
 whose gated entry node was cut, never rebinds a retained raising continuation to

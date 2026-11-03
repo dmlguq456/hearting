@@ -23,6 +23,11 @@ PATH (minus entries under the real home), LANG/LC_ALL/TZ.  Worker markers,
 ``HERDR_*``, ``MEM_SYNC_*``, ``MEM_EXCHANGE_*`` and ``MEM_DUMP_PUSH`` therefore never
 leak in (``MEM_EXCHANGE_AUTO=0`` is pinned, so no background exchange starts); a test
 that needs one passes it through ``extra`` on purpose.
+
+While an ``IsolatedEnv`` is alive it also confines *this* process's own
+session-tidy state access: ``HEARTING_STATE_CONFINEMENT`` names the root, so a
+forgotten bare in-process write that would resolve the runner's or developer's
+state root raises ``StateError`` instead of touching it.
 """
 
 from __future__ import annotations
@@ -85,7 +90,33 @@ ISOLATED_PATH_KEYS = (
     "CODEX_HOME",
     "OPENCODE_DB",
     "CLAUDE_CONFIG_DIR",
+    "HEARTING_STATE_CONFINEMENT",
 )
+
+# One stack entry per live IsolatedEnv: [token, root, previous process value].
+# The top entry always mirrors `os.environ["HEARTING_STATE_CONFINEMENT"]`;
+# popping out of order is safe because the remaining top wins.
+_CONFINEMENT_STACK: list[list] = []
+
+
+def _push_confinement(token: object, root: str) -> None:
+    _CONFINEMENT_STACK.append([token, root, os.environ.get("HEARTING_STATE_CONFINEMENT")])
+    os.environ["HEARTING_STATE_CONFINEMENT"] = root
+
+
+def _pop_confinement(token: object) -> None:
+    for index in range(len(_CONFINEMENT_STACK) - 1, -1, -1):
+        if _CONFINEMENT_STACK[index][0] is token:
+            _, _, previous = _CONFINEMENT_STACK.pop(index)
+            break
+    else:
+        return
+    if _CONFINEMENT_STACK:
+        os.environ["HEARTING_STATE_CONFINEMENT"] = _CONFINEMENT_STACK[-1][1]
+    elif previous is None:
+        os.environ.pop("HEARTING_STATE_CONFINEMENT", None)
+    else:
+        os.environ["HEARTING_STATE_CONFINEMENT"] = previous
 
 
 class IsolationError(AssertionError):
@@ -146,6 +177,8 @@ class IsolatedEnv:
         (sync_dir / "memory-sync.json").write_text(
             json.dumps({"enabled": False}) + "\n", encoding="utf-8")
         self.assert_isolated()
+        self._confinement_token = object()
+        _push_confinement(self._confinement_token, str(self.root))
 
     # -- environment -------------------------------------------------------
 
@@ -162,9 +195,12 @@ class IsolatedEnv:
             "CLAUDE_CONFIG_DIR": str(self.claude_dir),
             "OPENCODE_DB": str(self.opencode_db),
             "PYTHONDONTWRITEBYTECODE": "1",
+            "HEARTING_STATE_CONFINEMENT": str(self.root),
             # Same pin as tools/memory/test-isolation.sh: no detached exchange worker is
             # spawned by a write or read made inside a test.
             "MEM_EXCHANGE_AUTO": "0",
+            # UI text defaults to English; the tidy suites' stored lines are Korean.
+            "FLEET_NOW_LANG": "Korean",
         }
         path = _safe_path(os.environ.get("PATH", ""))
         env["PATH"] = path or "/usr/local/bin:/usr/bin:/bin"
@@ -251,6 +287,7 @@ class IsolatedEnv:
             text=True, capture_output=True, timeout=timeout)
 
     def cleanup(self) -> None:
+        _pop_confinement(getattr(self, "_confinement_token", None))
         shutil.rmtree(self.root, ignore_errors=True)
 
     def __enter__(self) -> "IsolatedEnv":

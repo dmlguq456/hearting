@@ -138,6 +138,8 @@ class WorkerHomes(unittest.TestCase):
         root = self.base / 'packaged-root'
         files = (
             'tools/profile/build-home.py',
+            'tools/install/codex_override.py',
+            'tools/install/user_rules.py',
             'utilities/dispatch-defaults.py',
             'utilities/dispatch_allocation.py',
             'utilities/claude_credential_recovery.py',
@@ -412,6 +414,66 @@ class WorkerHomes(unittest.TestCase):
             self.assertIn('mcp_servers={"external"={"command"="true","enabled"=false}}', args)
             self.assertTrue(any('test-skill' in arg for arg in args))
         self.assertEqual(before, {p.name: p.read_bytes() for p in self.source.iterdir() if p.is_file()})
+
+    def test_codex_worker_reads_the_user_override_text_with_its_own_bootstrap(self):
+        form = worker_runtime_home._builder._codex_override_format()
+        user = '# 외부 소통은 읽기 전용\n\n# 기존 Hearting bootstrap 유지\nread ~/.codex/AGENTS.md\n'.encode()
+        override = self.source / 'AGENTS.override.md'
+        override.write_bytes(form.compose(user, b'MAIN-SESSION-BOOTSTRAP\n'))
+        before = override.read_bytes()
+        self.env['CODEX_HOME'] = str(self.source)
+        for typ in ('owner', 'review'):
+            home = Path(prepare_worker_home(ROOT, 'codex', typ, typ, env=self.env)['CODEX_HOME'])
+            copied = (home / 'AGENTS.override.md')
+            data = copied.read_bytes()
+            self.assertFalse(copied.is_symlink())
+            self.assertEqual(copied.stat().st_mode & 0o777, 0o400)
+            self.assertTrue(data.startswith(user))
+            self.assertIn((home / 'AGENTS.md').read_bytes(), data)
+            self.assertNotIn(b'MAIN-SESSION-BOOTSTRAP', data)
+            self.assertEqual(form.user_text(data), user)
+        self.assertEqual(override.read_bytes(), before)
+
+        override.write_text('  \n')
+        home = Path(prepare_worker_home(ROOT, 'codex', 'owner', 'owner', env=self.env)['CODEX_HOME'])
+        self.assertFalse((home / 'AGENTS.override.md').exists())
+        override.unlink()
+        nested = Path(prepare_worker_home(ROOT, 'codex', 'stage', 'stage', env=self.env)['CODEX_HOME'])
+        self.assertFalse((nested / 'AGENTS.override.md').exists())
+
+    def test_nested_codex_worker_keeps_the_user_text_from_its_parent_home(self):
+        user = b'# read-only external communications\n'
+        (self.source / 'AGENTS.override.md').write_bytes(user)
+        self.env['CODEX_HOME'] = str(self.source)
+        parent = prepare_worker_home(ROOT, 'codex', 'owner', 'owner', env=self.env)
+        child = prepare_worker_home(ROOT, 'codex', 'stage', 'child',
+                                    env={**self.env, 'CODEX_HOME': parent['CODEX_HOME']})
+        data = (Path(child['CODEX_HOME']) / 'AGENTS.override.md').read_bytes()
+        self.assertTrue(data.startswith(user))
+        self.assertEqual(data.count(b'hearting:codex-bootstrap'), 2)
+
+    def test_claude_worker_reads_copies_of_the_user_rules(self):
+        (self.source / 'rules/team').mkdir(parents=True)
+        (self.source / 'rules/external-communications-read-only.md').write_text('메일은 읽기만 한다.\n')
+        (self.source / 'rules/team/style.md').write_text('style\n')
+        (self.source / 'rules/notes.txt').write_text('not a rule\n')
+        before = {p: p.read_bytes() for p in (self.source / 'rules').rglob('*') if p.is_file()}
+        self.env['CLAUDE_CONFIG_DIR'] = str(self.source)
+        home = Path(prepare_worker_home(ROOT, 'claude', 'stage', 'rules', env=self.env)['CLAUDE_CONFIG_DIR'])
+        rules = home / 'rules'
+        self.assertFalse(rules.is_symlink())
+        copied = sorted(str(p.relative_to(rules)) for p in rules.rglob('*') if p.is_file())
+        self.assertEqual(copied, ['external-communications-read-only.md', 'team/style.md'])
+        rule = rules / 'external-communications-read-only.md'
+        self.assertFalse(rule.is_symlink())
+        self.assertEqual(rule.read_text(), '메일은 읽기만 한다.\n')
+        self.assertEqual(rule.stat().st_mode & 0o777, 0o400)
+        self.assertEqual(before, {p: p.read_bytes() for p in (self.source / 'rules').rglob('*') if p.is_file()})
+
+        (self.source / 'rules/team/style.md').unlink()
+        prepare_worker_home(ROOT, 'claude', 'stage', 'rules', env=self.env)
+        self.assertEqual(sorted(str(p.relative_to(rules)) for p in rules.rglob('*') if p.is_file()),
+                         ['external-communications-read-only.md'])
 
     def test_codex_owner_retains_native_policy_without_main_agent_catalog(self):
         (self.source / 'agents').mkdir()
@@ -1039,6 +1101,28 @@ class WorkerHomes(unittest.TestCase):
         self.assertEqual(actual['permission']['skill'], {'*': 'deny'})
         self.assertEqual((home / 'plugins').resolve(), (self.source / 'plugins').resolve())
         self.assertEqual(env['OPENCODE_DISABLE_CLAUDE_CODE_PROMPT'], '1')
+
+    def test_opencode_v1_worker_lists_the_user_rules_block(self):
+        claude = self.base / 'claude-home'
+        (claude / 'rules').mkdir(parents=True)
+        rule = '# 외부 소통은 읽기 전용\n- 메일은 읽기만 한다.\n'.encode()
+        (claude / 'rules/external.md').write_bytes(rule)
+        (self.source / 'opencode.json').write_text(json.dumps({'instructions': ['/user/own.md']}))
+        self.env.update(OPENCODE_CONFIG_DIR=str(self.source), CLAUDE_CONFIG_DIR=str(claude))
+        home = Path(prepare_worker_home(ROOT, 'opencode', 'stage', 'rules', env=self.env)['OPENCODE_CONFIG_DIR'])
+        target = home / 'hearting-user-rules.md'
+        self.assertEqual(json.loads((home / 'opencode.json').read_text())['instructions'],
+                         ['/user/own.md', str(target)])
+        self.assertEqual(target.read_bytes().count(rule), 1)
+        self.assertEqual(target.stat().st_mode & 0o777, 0o400)
+        self.assertEqual(json.loads((self.source / 'opencode.json').read_text())['instructions'],
+                         ['/user/own.md'])
+        self.assertEqual((claude / 'rules/external.md').read_bytes(), rule)
+
+        (claude / 'rules/external.md').write_text('  \n')
+        prepare_worker_home(ROOT, 'opencode', 'stage', 'rules', env=self.env)
+        self.assertFalse(target.exists())
+        self.assertEqual(json.loads((home / 'opencode.json').read_text())['instructions'], ['/user/own.md'])
 
     def test_opencode_v2_worker_uses_shared_service_without_db_or_auth_links(self):
         data_home = self.base / 'v2-data'

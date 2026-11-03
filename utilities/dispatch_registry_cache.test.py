@@ -569,6 +569,22 @@ class RegistryLinesCacheTest(unittest.TestCase):
             self.assertIs(CACHE.registry_view(self.jobs), view)
             self.assertEqual(CACHE.metrics_snapshot()["cache_hits"], 1)
 
+    def test_largest_registry_is_not_pushed_out_by_smaller_paths(self):
+        self.jobs.write_text("L\topen\t/repo\t/wt\towner\tnote=" + "x" * 60 + "\n",
+                             encoding="utf-8")
+        with mock.patch.object(CACHE, "_CACHE_MAX_BYTES", 30):  # one 19-byte path beside it
+            main = CACHE.registry_view(self.jobs)
+            for number in range(3):
+                path = Path(self.tmp.name) / f"small-{number}.log"
+                path.write_text(f"s\topen\t/r\t/w\to\tf={number}\n", encoding="utf-8")
+                CACHE.registry_view(path)  # the large view stays least recently used
+            metrics = CACHE.metrics_snapshot()
+            self.assertEqual(metrics["cache_entries"], 2)
+            self.assertEqual(metrics["cache_evictions"], 2)
+            self.assertIs(CACHE.registry_view(self.jobs), main)
+            self.assertGreaterEqual(main._fd, 0)
+        self.assertEqual(CACHE.metrics_snapshot()["content_reads"], 4)
+
     def test_cached_raw_content_is_included_in_budget_and_released_on_clear(self):
         content = b"a\tb\tc\td\te\tf=1\n"
         self.jobs.write_bytes(content)
@@ -917,6 +933,167 @@ class RegistryLinesCacheTest(unittest.TestCase):
             with CACHE.registry_read_scope():
                 CACHE.current_registry_view(self.jobs)
         self.assertEqual(constructed, [0])
+
+    def _scoped(self):
+        with CACHE.registry_read_scope():
+            view = CACHE.current_registry_view(self.jobs)
+            return view, CACHE.registry_text_lines(self.jobs)
+
+    def test_scoped_reader_does_not_reread_a_settled_unchanged_generation(self):
+        row = "t\topen\t/repo\t/wt\tone\tattempt_id=one\n"
+        self.jobs.write_text(row, encoding="utf-8")
+        with mock.patch.object(CACHE, "_SETTLED_NS", 0):
+            first, lines = self._scoped()
+            for _ in range(3):
+                view, again = self._scoped()
+                snapshot = CACHE.registry_snapshot(self.jobs)
+                self.assertIs(view, first)
+                self.assertIs(snapshot.view, first)
+                self.assertIsNone(snapshot._pinned[1])  # text lines decode only on use
+                self.assertEqual(again, lines)
+                self.assertEqual(snapshot.lines, (row[:-1],))
+        metrics = CACHE.metrics_snapshot()
+        self.assertEqual(metrics["content_reads"], 1)
+        self.assertEqual(metrics["bytes_read"], len(row))
+
+    def test_scoped_reader_keeps_verifying_until_the_last_write_is_settled(self):
+        self.jobs.write_text("t\topen\t/repo\t/wt\tone\tattempt_id=one\n", encoding="utf-8")
+        with mock.patch.object(CACHE, "_SETTLED_NS", 10**18), \
+                mock.patch.object(CACHE, "_SETTLED_FINE_NS", 10**18):
+            self._scoped()
+            self._scoped()
+        # Read within the timestamp granularity of the write: a same-tick rewrite
+        # could keep the stat, so each scope still compares the bytes.
+        self.assertEqual(CACHE.metrics_snapshot()["content_reads"], 2)
+        with mock.patch.object(CACHE, "_SETTLED_NS", 0):
+            self._scoped()  # verified once more, now settled
+            self._scoped()
+        self.assertEqual(CACHE.metrics_snapshot()["content_reads"], 3)
+        self.assertEqual(CACHE.metrics_snapshot()["full_metadata_parses"], 1)
+
+    def test_lf_only_stat_collision_inside_the_racy_window_is_still_read(self):
+        old = b"t\topen\t/repo\t/wt\tone\tattempt_id=one\n"
+        new = old.replace(b"open", b"done")
+        self.jobs.write_bytes(old)
+        signature = lambda s: (s.st_dev, 515151, s.st_size, 23, 29)
+        # Rewritten in place within the first write's timestamp tick, so even
+        # the real stat could stay equal; the generation is not settled yet.
+        with mock.patch.object(CACHE, "_stat_signature", side_effect=signature), \
+                mock.patch.object(CACHE, "_SETTLED_NS", 10**18), \
+                mock.patch.object(CACHE, "_SETTLED_FINE_NS", 10**18):
+            first, _lines = self._scoped()
+            self.jobs.write_bytes(new)
+            second, lines = self._scoped()
+        self.assertFalse(first._settled)
+        self.assertIsNot(second, first)
+        self.assertEqual(second.records[0].status, "done")
+        self.assertEqual(lines, (new[:-1].decode(),))
+        self.assertEqual(CACHE.metrics_snapshot()["content_reads"], 2)
+
+    def test_whole_second_timestamps_need_the_coarse_settle_margin(self):
+        second = 1_800_000_000 * 10**9
+        coarse = mock.Mock(st_mtime_ns=second, st_ctime_ns=second)
+        fine = mock.Mock(st_mtime_ns=second + 1, st_ctime_ns=second + 1)
+        with mock.patch.object(CACHE.os, "fstat", return_value=coarse):
+            self.assertFalse(CACHE._settled_read(0, second + CACHE._SETTLED_FINE_NS))
+            self.assertFalse(CACHE._settled_read(0, second + CACHE._SETTLED_NS - 1))
+            self.assertTrue(CACHE._settled_read(0, second + CACHE._SETTLED_NS))
+        with mock.patch.object(CACHE.os, "fstat", return_value=fine):
+            self.assertFalse(CACHE._settled_read(0, second + CACHE._SETTLED_FINE_NS))
+            self.assertTrue(CACHE._settled_read(0, second + 1 + CACHE._SETTLED_FINE_NS))
+        with mock.patch.object(CACHE.os, "fstat", side_effect=OSError("closed")):
+            self.assertFalse(CACHE._settled_read(0, second * 2))
+
+    def test_settled_scoped_reuse_sees_late_appends_and_completed_partial_rows(self):
+        first = "t\topen\t/repo\t/wt\tone\tattempt_id=one\n"
+        partial = "t\topen\t/repo\t/wt\ttwo\tattempt_id=two"
+        with mock.patch.object(CACHE, "_SETTLED_NS", 0):
+            self.jobs.write_text(first + partial, encoding="utf-8")
+            view, lines = self._scoped()
+            self.assertEqual([record.slug for record in view.records], ["one"])
+            self.assertTrue(view.has_partial_tail)
+            self.assertEqual(lines, (first[:-1], partial))
+            self.assertIs(self._scoped()[0], view)
+            with self.jobs.open("a", encoding="utf-8") as stream:
+                stream.write(",late=1\n")
+            completed, lines = self._scoped()
+            self.assertIsNot(completed, view)
+            self.assertEqual([record.slug for record in completed.records], ["one", "two"])
+            self.assertFalse(completed.has_partial_tail)
+            self.assertEqual(lines, (first[:-1], partial + ",late=1"))
+            self.assertIs(self._scoped()[0], completed)
+        metrics = CACHE.metrics_snapshot()
+        self.assertEqual(metrics["content_reads"], 2)
+        self.assertEqual(metrics["append_reuses"], 1)
+
+    def test_settled_scoped_reuse_follows_rotation_and_atomic_replacement(self):
+        row = "t\t{}\t/repo\t/wt\tone\tattempt_id=one\n"
+        with mock.patch.object(CACHE, "_SETTLED_NS", 0):
+            self.jobs.write_text(row.format("open"), encoding="utf-8")
+            view, _lines = self._scoped()
+            os.rename(self.jobs, self.jobs.with_name("jobs.log.1"))
+            self.jobs.write_text(row.format("done"), encoding="utf-8")  # same size, new file
+            rotated, _lines = self._scoped()
+            self.assertIsNot(rotated, view)
+            self.assertEqual(rotated.records[0].status, "done")
+            staged = self.jobs.with_name("jobs.staged")
+            staged.write_text(row.format("kill"), encoding="utf-8")
+            os.replace(staged, self.jobs)
+            replaced, _lines = self._scoped()
+            self.assertEqual(replaced.records[0].status, "kill")
+            self.assertIs(self._scoped()[0], replaced)
+            self.jobs.unlink()
+            with self.assertRaises(OSError):
+                self._scoped()
+        self.assertEqual(CACHE.metrics_snapshot()["content_reads"], 3)
+
+    def test_parent_session_projection_uses_latest_rows_once_per_generation(self):
+        row = "t\t{status}\t/repo\t/wt\ts\tattempt_id={attempt},parent_sid={sid},{extra}\n"
+        self.jobs.write_text(
+            row.format(status="open", attempt="a", sid="old", extra="parent_harness=codex")
+            + row.format(status="done", attempt="a", sid="new",
+                         extra="parent_completion_delivery=codex-native-queue")
+            + row.format(status="open", attempt="b", sid="new",
+                         extra="parent_completion_delivery=codex-native-queue")
+            + row.format(status="open", attempt="c", sid="", extra="main_runtime_harness=claude"),
+            encoding="utf-8")
+        view = CACHE.registry_view(self.jobs, append_only=True)
+        expected = {meta and tuple(meta.get(key) for key in view.PARENT_SESSION_KEYS)
+                    for _status, meta in view.handover_latest().values()}
+        with mock.patch.object(CACHE, "_parse_handover", wraps=CACHE._parse_handover) as parse:
+            first = view.handover_parent_sessions()
+            parsed = parse.call_count
+            self.assertIs(view.handover_parent_sessions(), first)
+        self.assertEqual(parsed, 1)  # only the terminal latest row lacks retained pairs
+        self.assertEqual(parse.call_count, parsed)
+        self.assertEqual(set(first), expected)
+        self.assertEqual(set(first), {("new", None, None, "codex-native-queue"),
+                                      ("", None, "claude", None)})
+        with self.jobs.open("a", encoding="utf-8") as stream:
+            stream.write(row.format(status="done", attempt="b", sid="later", extra="parent_harness=x"))
+        appended = CACHE.registry_view(self.jobs, append_only=True)
+        self.assertIsNot(appended, view)
+        self.assertIn(("later", "x", None, None), appended.handover_parent_sessions())
+
+    def test_scoped_reader_verifies_a_generation_extended_by_an_asserted_suffix(self):
+        old = "t\topen\t/repo\t/wt\tone\tattempt_id=one\n"
+        with mock.patch.object(CACHE, "_SETTLED_NS", 0):
+            self.jobs.write_text(old, encoding="utf-8")
+            self._scoped()
+            # An unsupported in-place rewrite that also grows the file: only the
+            # plain append_only reader trusts the old prefix.
+            self.jobs.write_text(old.replace("open", "done")
+                                 + "t\topen\t/repo\t/wt\ttwo\tattempt_id=two\n", encoding="utf-8")
+            asserted = CACHE.registry_view(self.jobs, append_only=True)
+            self.assertEqual(asserted.records[0].status, "open")
+            verified, lines = self._scoped()
+            self.assertIsNot(verified, asserted)
+            self.assertEqual([record.status for record in verified.records], ["done", "open"])
+            self.assertEqual(lines, tuple(self.jobs.read_text(encoding="utf-8").splitlines()))
+            self.assertIs(self._scoped()[0], verified)
+        metrics = CACHE.metrics_snapshot()
+        self.assertEqual(metrics["content_reads"], 3)
+        self.assertEqual(metrics["delta_reads"], 1)
 
 
 class LightRegistryViewTest(unittest.TestCase):

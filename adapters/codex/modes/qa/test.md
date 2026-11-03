@@ -69,6 +69,9 @@ not-observed-wrong.
 - A **list of changed files** is provided: use them directly.
 - **No target given**: use recent Git changes only when the task requests changed-code
   verification; otherwise report the missing input instead of inventing a target.
+- **Handed-over checks** listed in the assignment (`handed-over:` lines an earlier stage
+  could not run in its environment) are part of the target. One you cannot run either
+  leaves the verdict BLOCKED; repeat its line in the report for the owner.
 
 Before selecting checks, read available execution logs, independent review, prior test, and
 CI evidence. Reuse a result only when its source, target and scope, relevant inputs and

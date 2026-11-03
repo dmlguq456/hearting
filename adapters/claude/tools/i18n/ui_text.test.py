@@ -1,0 +1,1 @@
+../../../../tools/i18n/ui_text.test.py

@@ -470,7 +470,37 @@ class WorkStartTest(unittest.TestCase):
         self.assertEqual(self.start()["state"], "preparing")
         self.assertEqual(len(self.calls), 2)
 
-    def test_terminal_frame_cleanup_unavailable_reports_attention_without_relaunch(self):
+    def test_bc45_terminal_first_frame_does_not_park_as_preparing(self):
+        """Hand-built shape of BC45: the first frame ended `dead-launch-exit-1`; leg two was deferred."""
+        def deferred(command, **kwargs):
+            if "frame-alternative" in command:
+                self.calls.append(command)
+                return subprocess.CompletedProcess(
+                    command, 75, "check=deferred\nreason=frame-first-attempt-pending\nchild_spawned=0\n", "")
+            return self.admit(command, **kwargs)
+        first = W.start_work(self.route, self.path, self.jobs, run=deferred)
+        self.assertEqual((first["state"], first["reason"]), ("preparing", "frame-first-attempt-pending"), first)
+        # While the first leg is still open the wait is right; once it ended it is not.
+        self.jobs.write_text(self.jobs.read_text().replace("\topen\t", "\tdone\t").replace(
+            "worker_type=frame", "worker_type=frame,note=dead-launch-exit-1,failure_class=launch"))
+        with mock.patch("dispatch_replacement.advance_batch", return_value=(set(first["frame_attempts"]), [], [])) as batch:
+            second = W.start_work(self.route, self.path, self.jobs, run=deferred)
+        batch.assert_called_once()
+        self.assertEqual(batch.call_args.args[1], set(first["frame_attempts"]))
+        self.assertNotEqual(second.get("reason"), "frame-first-attempt-pending", second)
+        self.assertNotEqual(second.get("required_action"), "wait-for-first-frame-attempt")
+
+    def test_opencode_turn_parent_gets_needs_interview_receipt(self):
+        """Regression fix: an OpenCode v2 parent's `opencode-turn` carrier ends the turn and owns the wake."""
+        rows = {"att-a": ("done", {"parent_completion_delivery": "opencode-turn"}),
+                "att-b": ("done", {"parent_completion_delivery": "opencode-turn"})}
+        self.assertEqual(W._wait_fields({"att-a", "att-b"}, rows, "resume"),
+                         {"parent_next": "end-turn", "parent_next_command": ""})
+        # a carrier-less parent is told to wait with the bounded command instead
+        rows["att-b"] = ("done", {"parent_completion_delivery": ""})
+        self.assertEqual(W._wait_fields({"att-a", "att-b"}, rows, "resume")["parent_next"], "bounded-wait")
+
+    def test_cleanup_unverifiable_is_bounded_wait_not_manual_report(self):
         first = self.start()
         original = self.jobs.read_bytes()
         children = [{"attempt_id": aid, "status": "done", "readiness": "pending",
@@ -478,10 +508,11 @@ class WorkStartTest(unittest.TestCase):
         W.join_selected_attempts.side_effect = None
         W.join_selected_attempts.return_value = {"state": "timeout", "children": children}
         result = self.start()
-        self.assertEqual((result["state"], result["reason"]),
-                         ("needs-attention", "frame-cleanup-unverifiable"))
-        self.assertNotIn("parent_next", result)
-        self.assertNotIn("parent_next_command", result)
+        self.assertEqual((result["state"], result["reason"], result["required_action"]),
+                         ("preparing", "frame-cleanup-unverifiable", "wait-for-frame-results"))
+        self.assertEqual(result["parent_next"], "bounded-wait")
+        self.assertTrue(result["parent_next_command"].endswith(" --wait"))
+        self.assertNotIn("report", result["required_action"])
         self.assertEqual(result["observation"]["children"], children)
         self.assertEqual(self.jobs.read_bytes(), original)
         self.assertEqual(len(self.calls), 2)
@@ -753,7 +784,9 @@ class WorkStartTest(unittest.TestCase):
 
     def test_question_failure_after_frame_completion_does_not_promise_another_wake(self):
         self.start(); self.ready = True
-        self.jobs.write_text(self.jobs.read_text().replace("\topen\t", "\tdone\t"))
+        # A completed frame leg carries its pass; a done row with no result is a resultless end.
+        self.jobs.write_text(self.jobs.read_text().replace("\topen\t", "\tdone\t").replace(
+            "worker_type=frame", "failure_class=pass,worker_type=frame"))
         with mock.patch.object(W, "frame_interview_step", side_effect=ValueError("bad-question")):
             result = self.start(interview="question.json")
         self.assertEqual(result["state"], "needs-attention", result)
@@ -772,6 +805,41 @@ class WorkStartTest(unittest.TestCase):
         self.assertEqual(result["reason"], "workflow-executor-exited")
         self.assertNotIn("parent_next", result)
         self.assertEqual(len(self.calls), 3)
+
+    def _exited_pass_owner_with_gaps(self):
+        self.start(); self.ready = self.released = True; self.start()
+        self.jobs.write_text(self.jobs.read_text().replace("\topen\t", "\tdone\t").replace(
+            "worker_type=owner", "workflow_completion=runtime-v1,failure_class=pass,worker_type=owner"))
+
+    def test_exited_owner_with_missing_work_is_continued_once_by_the_runtime(self):
+        """U11-J: unfinished work after a PASS goes to the `observed` continuation before any report."""
+        import dispatch_terminal_commit as T, dispatch_replacement as DR
+        self._exited_pass_owner_with_gaps()
+        seen = []
+        def advance(jobs, aid, **kw):
+            seen.append((aid, kw)); return {"state": "needs-attention", "reason": "replacement-owner-child-unsettled",
+                "next_action": "same-command", "retry_when": "The exact child is settled and quiescent."}
+        with mock.patch.object(T, "owner_workflow_gaps", return_value={"report": "completion-marker-absent"}), \
+             mock.patch.object(DR, "advance", side_effect=advance), \
+             mock.patch.object(W, "join_selected_attempts", side_effect=AssertionError("cannot wait for an absent executor")):
+            result = self.start(wait=True)
+        self.assertEqual([kw.get("resume_capacity") for _, kw in seen], [True])   # one explicit-start continuation
+        self.assertEqual(result["state"], "needs-attention", result)
+        self.assertEqual(result["reason"], "replacement-owner-child-unsettled")
+        self.assertEqual(result["missing_terminal_gates"], {"report": "completion-marker-absent"})
+        self.assertEqual(result["retry_when"], "The exact child is settled and quiescent.")
+
+    def test_exited_replacement_owner_with_missing_work_goes_to_the_route_owner(self):
+        import dispatch_terminal_commit as T, dispatch_replacement as DR
+        self._exited_pass_owner_with_gaps()
+        with mock.patch.object(T, "owner_workflow_gaps", return_value={"report": "completion-marker-absent"}), \
+             mock.patch.object(DR, "created_as", return_value="observed"), \
+             mock.patch.object(DR, "advance", side_effect=AssertionError("a replacement owner is not continued again")), \
+             mock.patch.object(W, "join_selected_attempts", side_effect=AssertionError("cannot wait for an absent executor")):
+            result = self.start(wait=True)
+        self.assertEqual((result["state"], result["reason"], result["required_action"]),
+                         ("needs-attention", "workflow-executor-exited", "report-unfinished-work"), result)
+        self.assertIn("already a continuation", result["next_step"])
 
     def test_completed_deferred_owner_still_reports_workflow_gaps(self):
         """C15 (S3a): `verdict_pass` recognizes a marker-bound deferred owner
@@ -965,15 +1033,25 @@ class WorkStartTest(unittest.TestCase):
         launches=len(self.calls);seen={}
         def wait(jobs,aid,**kwargs):
             seen.update(kwargs);return self._wait_attention(aid)
-        with mock.patch('dispatch_replacement.advance',side_effect=wait):
+        # The runtime arms the wait itself (a reset past the longest wait waits to that cap); no real process here.
+        with mock.patch('dispatch_replacement.advance',side_effect=wait), \
+             mock.patch('capacity_auto_resume.arm',return_value=None) as arm:
             result=self.start()
         self.assertTrue(seen['resume_capacity'])          # start is the one explicit resume
+        arm.assert_called_once()
         self.assertEqual((result['state'],result['reason'],result['required_action']),
                          ('waiting-capacity','owner-capacity-wait','resume-after-capacity'))
         self.assertEqual((result['retry_at'],result['harness'],result['source_attempt_id']),
                          ('2099-01-01T00:00:00Z','claude',owner))
         self.assertNotIn('parent_next',result);self.assertNotIn('parent_next_command',result)
-        self.assertIn('from the session that owns the route',result['next_step'])
+        self.assertIn('usage gate reports capacity again',result['next_step'])
+        self.assertNotIn('run resume_command once',result['next_step'])
+        self.assertEqual(len(self.calls),launches)
+        armed={'record':'/x.json','resume_at':'2099-01-01T00:00:00Z','state':'armed','cause':'capacity'}
+        with mock.patch('dispatch_replacement.advance',side_effect=wait), \
+             mock.patch('capacity_auto_resume.arm',return_value=armed):
+            waiting=self.start()
+        self.assertEqual((waiting['required_action'],waiting['parent_next']),('wait-for-auto-resume','end-turn'))
         self.assertEqual(len(self.calls),launches)
 
     def test_a_soft_allocation_gate_says_exactly_when_it_lifts(self):
@@ -984,10 +1062,11 @@ class WorkStartTest(unittest.TestCase):
         self.assertEqual((unknown['state'],unknown['reason']),('waiting-capacity','owner-capacity-wait'))
         self.assertNotIn('retry_at',unknown)                  # no reset time is invented
         self.assertIn('not at a usage limit',unknown['next_step'])
-        self.assertIn('after codex usage drops below the 85% gate',unknown['next_step'])
+        self.assertIn('looks again at the end of the wait',unknown['next_step'])
+        self.assertNotIn('run resume_command once',unknown['next_step'])
         known=W._capacity_pause({},{**gate,'retry_at':'2026-10-09T22:58:00Z'},'resume')
         self.assertEqual(known['retry_at'],'2026-10-09T22:58:00Z')
-        self.assertIn('After retry_at, when the last usage window at the gate resets',known['next_step'])
+        self.assertIn('looks again at the end of the wait',known['next_step'])
         self.assertIn('from the session that owns the route',known['next_step'])
 
     def test_frame_replacement_held_by_a_usage_limit_waits_instead_of_failing(self):
@@ -1035,8 +1114,11 @@ class WorkStartTest(unittest.TestCase):
         self.route["nodes"] = []
         with self._auto_resume():
             result = W.start_work(self.route, self.path, self.jobs, run=self._unstarted_run())
+        # A pause the runtime resumes itself, not a refusal for the parent to retry (2026-11-02).
         self.assertEqual((result["state"], result["reason"], result["required_action"]),
-                         ("needs-attention", "owner-launch-not-started", "wait-for-auto-resume"), result)
+                         ("waiting-capacity", "owner-launch-not-started", "wait-for-auto-resume"), result)
+        self.assertEqual(result["retry_at"], "2026-10-07T12:01:00Z")
+        self.assertIn("nothing to run now", result["next_step"])
         self.assertEqual(self.armed, ["owner-launch-not-started"])
         self.assertEqual(result["parent_next"], "end-turn")
         self.assertEqual(result["launch_reason"], "admission-busy")
@@ -1060,7 +1142,7 @@ class WorkStartTest(unittest.TestCase):
         with self._auto_resume():
             result = W.start_work(self.route, self.path, self.jobs, run=run)
         self.assertEqual((result["state"], result["reason"], result["required_action"]),
-                         ("needs-attention", "owner-launch-not-admitted", "wait-for-auto-resume"), result)
+                         ("waiting-capacity", "owner-launch-not-admitted", "wait-for-auto-resume"), result)
         self.assertEqual((self.armed, result["parent_next"]), (["owner-launch-not-admitted"], "end-turn"))
         self.assertEqual(result["launch_reason"], "admission-busy")
         self.assertEqual(result["recovery_command"], result["resume_command"])
@@ -1228,6 +1310,9 @@ class WorkStartTest(unittest.TestCase):
         self.assertEqual(len(self.calls),3)
 
     def test_an_owner_blocked_outside_any_gate_points_at_its_answer_not_a_new_route(self):
+        # The runtime already continued this owner once (`observed`): a second stop goes to a person.
+        second_stop = mock.patch('dispatch_replacement.created_as', return_value='observed')
+        second_stop.start(); self.addCleanup(second_stop.stop)
         owner=self._parked_owner_row()
         with mock.patch('dispatch_replacement.owner_parked_gate',return_value=None):
             result=self.start()
@@ -1238,7 +1323,21 @@ class WorkStartTest(unittest.TestCase):
             self.assertIn(token,result['next_step'])
         self.assertEqual(len(self.calls),3)   # nothing new launched while it waits
 
+    def test_blocked_owner_with_unreadable_report_and_log_waits_instead_of_asking_a_person(self):
+        """Hand-built shape: a BLOCKED owner row with no log; neither a continuation nor an answer wait."""
+        self._parked_owner_row()
+        with mock.patch('dispatch_replacement.owner_parked_gate', return_value=None):
+            result = self.start()
+        self.assertEqual((result['state'], result['reason']), ('needs-attention', 'owner-settlement-pending'), result)
+        self.assertEqual(result['next_action'], 'same-command')
+        self.assertTrue(result['retry_when'])
+        self.assertNotEqual(result.get('required_action'), 'answer-blocked-owner')
+        self.assertEqual(len(self.calls), 3)
+
     def test_format_only_owner_end_waits_for_correction_without_launching(self):
+        # The runtime already continued this owner once (`observed`): a second stop goes to a person.
+        second_stop = mock.patch('dispatch_replacement.created_as', return_value='observed')
+        second_stop.start(); self.addCleanup(second_stop.stop)
         owner = self._parked_owner_row()
         original = next(line for line in self.jobs.read_text().splitlines()
                         if 'attempt_id='+owner+',' in line)
@@ -1255,7 +1354,6 @@ class WorkStartTest(unittest.TestCase):
                          [('needs-attention', 'owner-blocked', 'answer-blocked-owner')] * 3)
         self.assertIn('correction_command', results[0])
         self.assertIn('--message-file', results[0]['next_step'])
-        self.assertIn('handoff-format error', results[0]['next_step'])
         self.assertIn('owner_log_file ' + str(Path(self.tmp.name) / 'owner.log'), results[0]['next_step'])
         self.assertEqual(results[0]['owner_log_file'], str(Path(self.tmp.name) / 'owner.log'))
         self.assertNotIn('owner_report says', results[0]['next_step'])
@@ -1831,6 +1929,24 @@ class WorkStartTest(unittest.TestCase):
 
 
 WF = load("work_start_workflow_fixture", W.ROOT / "utilities/workflow_supervisor.test.py")
+
+
+class U4FrameDecisionTest(unittest.TestCase):
+    def test_one_brief_never_opens_the_decision(self):
+        """C4-3: the decision reads both briefs and the intent, or nothing."""
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw); output = root / "out"
+            def put(node, name="direction-brief.md"):
+                (output / "shards" / node).mkdir(parents=True, exist_ok=True)
+                (output / "shards" / node / name).write_text(node + "\n")
+            put("frame", "intent.md")
+            put("frame")
+            self.assertIsNone(W._framed_facts(root, output))                    # only the first brief
+            put("frame-alternative")
+            rows, intent = W._framed_facts(root, output)
+            self.assertEqual([row["node"] for row in rows], ["frame", "frame-alternative"])
+            (output / "shards/frame/direction-brief.md").unlink()
+            self.assertIsNone(W._framed_facts(root, output))                    # only the alternative
 
 
 class FrameInterviewStepTest(WF.WorkflowFixture):
@@ -3668,6 +3784,9 @@ class NeverStartedReplacementNormalStartTest(unittest.TestCase):
         self.assertEqual(len(self.launches), launches)
 
     def test_normal_start_harvests_native_ack_then_reports_real_blocker_without_answer(self):
+        # The runtime already continued this owner once (`observed`): a second stop goes to a person.
+        second_stop = mock.patch('dispatch_replacement.created_as', return_value='observed')
+        second_stop.start(); self.addCleanup(second_stop.stop)
         owner = self._native_blocked_owner()
         self._ack_native_blocked_result(owner)
         launches = len(self.launches)
@@ -3831,6 +3950,9 @@ class NeverStartedReplacementNormalStartTest(unittest.TestCase):
         self.assertIsNone(self.replacement.source_reservation(self.jobs, owner_c))
 
     def test_started_blocked_successor_keeps_its_result_and_is_not_retried(self):
+        # The runtime already continued this owner once (`observed`): a second stop goes to a person.
+        second_stop = mock.patch('dispatch_replacement.created_as', return_value='observed')
+        second_stop.start(); self.addCleanup(second_stop.stop)
         owner_a = self._seed_initial_owner()
         self._finish_blocked(owner_a)
         self._store(owner_a, "approved correction for B", "input-a")
@@ -4781,6 +4903,9 @@ class CoupledBlockedReviewDispositionTest(CoupledReviewSelfDispositionTest):
             if path!=self.jobs:self.assertEqual(path.read_bytes(),raw)
 
     def test_format_only_replacement_waits_then_corrects_through_public_cli(self):
+        # The runtime already continued this owner once (`observed`): a second stop goes to a person.
+        second_stop = mock.patch('dispatch_replacement.created_as', return_value='observed')
+        second_stop.start(); self.addCleanup(second_stop.stop)
         import dispatch_supervisor_terminal as terminal
         import dispatch_replacement
         env={k:v for k,v in os.environ.items() if not k.startswith(("AGENT_","CODEX_","CLAUDE_","OPENCODE_"))}

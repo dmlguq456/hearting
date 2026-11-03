@@ -50,12 +50,41 @@ class ArmTest(unittest.TestCase):
                          ("claude", "att-dead", "allocation-usage-gate"))
 
     def test_what_arms_nothing(self):
-        for result in ({**PAUSE, "retry_at": None}, {**PAUSE, "reason": "launch-capacity-wait"},
-                       {**PAUSE, "state": "running"}):
+        for result in ({**PAUSE, "reason": "launch-capacity-wait"}, {**PAUSE, "state": "running"}):
             with self.subTest(result=result):
                 self.assertIsNone(self.arm(result))
-        self.assertIsNone(self.arm(env={C.CHAIN_ENV: str(C.MAX_CHAIN)}))  # bounded chain
         self.assertEqual(self.spawned, [])
+
+    CAP = RETRY_EPOCH - 3600 + C.MAX_SLEEP_SECONDS - C.SLACK_SECONDS
+
+    def test_unknown_reset_and_far_reset_arm_a_capacity_wait_to_the_cap(self):
+        paused = {**PAUSE, "source_attempt_id": "att-dead", "harness": "claude"}
+        for retry_at in (None, time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(RETRY_EPOCH + 8 * 24 * 3600))):
+            with self.subTest(retry_at=retry_at):
+                self.spawned.clear()
+                armed = self.arm({**paused, "retry_at": retry_at, "route_id": f"rt-{retry_at is None}"})
+                self.assertEqual((armed["state"], armed["cause"]), ("armed", "capacity"))
+                self.assertEqual(C._epoch(armed["resume_at"]), self.CAP)
+                record = json.loads(Path(armed["record"]).read_text())
+                self.assertEqual((record["cause"], record["retry_at"]), ("capacity", armed["resume_at"]))
+                self.assertEqual(len(self.spawned), 1)
+                again = self.arm({**paused, "retry_at": retry_at, "route_id": f"rt-{retry_at is None}"})
+                self.assertEqual(again["state"], "already-armed")   # one wait per route and source attempt
+                self.assertEqual(len(self.spawned), 1)
+
+    def test_chain_limit_keeps_a_capacity_wait_to_the_cap(self):
+        armed = self.arm({**PAUSE, "source_attempt_id": "att-dead"}, env={C.CHAIN_ENV: str(C.MAX_CHAIN)})
+        self.assertEqual((armed["state"], armed["cause"]), ("armed", "capacity"))
+        self.assertEqual(C._epoch(armed["resume_at"]), self.CAP)
+        self.assertEqual(json.loads(Path(armed["record"]).read_text())["chain"], C.MAX_CHAIN + 1)
+
+    def test_only_a_capacity_pause_waits_to_the_cap(self):
+        launch = {"state": "waiting-capacity", "reason": "launch-capacity-wait",
+                  "required_action": "report-capacity-wait", "route_id": "rt-b", "retry_at": None}
+        self.assertIsNone(self.arm(launch))
+        self.assertIsNone(self.arm({"state": "needs-attention", "reason": "owner-launch-not-started",
+                                    "required_action": "resume-later", "route_id": "rt-y"},
+                                   env={C.CHAIN_ENV: str(C.MAX_CHAIN)}))
 
 
     def test_a_launch_that_did_not_start_is_run_again_a_minute_later(self):
@@ -151,7 +180,9 @@ class RunTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
-        self.path = Path(self._tmp.name) / "r.json"
+        # The record sits where `arm` puts a reset-timed wait: reset-time key, not a fixed capped-wait key.
+        self.path = C.record_path(Path(self._tmp.name) / "jobs.log", PAUSE["route_id"], PAUSE["retry_at"])
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps({"state": "armed", "route_id": PAUSE["route_id"], "retry_at": PAUSE["retry_at"],
                                          "route_file": "/r/route.json", "jobs": str(Path(self._tmp.name) / "jobs.log")}))
         self.clock = [RETRY_EPOCH - 120]
@@ -261,9 +292,54 @@ class RunTest(unittest.TestCase):
                  mock.patch.object(Q, "usage_states", return_value={"claude": state}):
                 self.assertFalse(C._cleared(record))
         with mock.patch.object(Q, "usage_states", side_effect=AssertionError("asked")):
-            for other in ({**record, "cause": "answer"}, {**record, "harness": "codex"},
+            for other in ({**record, "cause": "answer"}, {**record, "harness": ""},
                           {**record, "usage_state": "allocation-usage-gate"}):
                 self.assertFalse(C._cleared(other))
+
+    def test_cleared_reads_record_harness(self):
+        import dispatch_capacity_evidence as Q
+        record = {"cause": "capacity", "harness": "codex", "jobs": "/j/jobs.log", "source_attempt_id": "att-dead",
+                  "usage_state": "2026-10-07T12:00:00Z"}
+        with mock.patch.object(Q, "attempt_model", return_value="gpt-x"), \
+             mock.patch.object(Q, "usage_states", return_value={"codex": "ok"}) as states:
+            self.assertTrue(C._cleared(record))
+        states.assert_called_once_with("/j/jobs.log", models={"codex": "gpt-x"}, recheck=True)
+        with mock.patch.object(Q, "attempt_model", return_value="gpt-x"), \
+             mock.patch.object(Q, "usage_states", return_value={}):   # a reader that cannot say `ok`
+            self.assertFalse(C._cleared(record))
+
+    def test_cap_wait_resumes_through_the_real_cleared_check(self):
+        import dispatch_capacity_evidence as Q
+        jobs = Path(self._tmp.name) / "jobs.log"
+        paused = {**PAUSE, "retry_at": None, "source_attempt_id": "att-dead", "harness": "codex"}
+        for ok in (True, False):
+            with self.subTest(usage_ok=ok):
+                clock = [RETRY_EPOCH - 3600]
+                armed = C.arm({**paused, "route_id": f"rt-{ok}"}, "/r/route.json", jobs, environ={},
+                              now=lambda: clock[0], spawn=lambda *a, **k: None)
+                path = Path(armed["record"])
+                record = json.loads(path.read_text())
+                clock[0] = C._epoch(record["retry_at"]) - 3 * C.RECHECK_SECONDS
+                starts, notices = [], []
+                done = SimpleNamespace(returncode=0, stdout=json.dumps({"state": "running"}) + "\n")
+                def sleep(seconds):
+                    clock[0] += seconds
+                with mock.patch.object(Q, "attempt_model", return_value="gpt-x"), \
+                     mock.patch.object(Q, "usage_states", return_value={"codex": "ok" if ok else "limited(later)"}), \
+                     mock.patch.object(C, "_notify", side_effect=lambda rec, rcp, capped=False: notices.append((rec, capped))):
+                    C.run(path, sleep=sleep, now=lambda: clock[0], cleared=C._cleared,
+                          call=lambda argv, **kw: starts.append(clock[0]) or done)
+                self.assertEqual(len(starts), 1)
+                self.assertFalse(path.exists())   # the name is free for a start that pauses again
+                moved = list(path.parent.glob(path.stem + ".*.json"))
+                self.assertEqual(len(moved), 1)
+                if ok:
+                    self.assertLess(starts[0], C._epoch(record["retry_at"]))
+                    self.assertTrue(json.loads(moved[0].read_text())["early"])
+                    self.assertFalse(notices[0][1])
+                else:
+                    self.assertGreaterEqual(starts[0], C._epoch(record["retry_at"]))   # only at the cap
+                    self.assertTrue(notices[0][1])
 
     def test_an_unresolved_source_model_waits_for_the_original_reset(self):
         import dispatch_capacity_evidence as Q
@@ -284,7 +360,36 @@ class RunTest(unittest.TestCase):
             self.clock[0] += seconds
             self.path.unlink(missing_ok=True)
         self.assertEqual(C.run(self.path, sleep=sleep, now=lambda: self.clock[0],
-                               call=lambda *a, **k: self.fail("ran after removal")), 0)
+                               call=lambda *a, **k: self.fail("ran after removal"),
+                               follow=lambda path: self.fail("offered a removed record")), 0)
+
+    def test_each_wait_step_offers_the_record_to_the_installed_release_before_the_resume(self):
+        events = []
+        done = SimpleNamespace(returncode=0, stdout="{}\n")
+
+        def sleep(seconds):
+            events.append("sleep")
+            self.clock[0] += seconds
+        with mock.patch.object(C, "_notify"):
+            C.run(self.path, sleep=sleep, now=lambda: self.clock[0],
+                  call=lambda argv, **kw: events.append("start") or done,
+                  follow=lambda path: events.append(("follow", path)))
+        steps = events.count("sleep")
+        self.assertGreater(steps, 1)
+        self.assertEqual(events, ["sleep", ("follow", self.path)] * steps + ["start"])
+
+    def test_a_steady_wait_reads_only_the_pointer_and_a_moved_one_hands_over_its_record(self):
+        import peer_obligations
+        with mock.patch("parent_next_directive.release_moved", return_value=False) as moved, \
+             mock.patch.object(peer_obligations, "follow_installed_release") as follow:
+            C.follow_installed_release(self.path)
+        moved.assert_called_once_with(C.ROOT)
+        follow.assert_not_called()
+        with mock.patch("parent_next_directive.release_moved", return_value=True), \
+             mock.patch.object(peer_obligations, "follow_installed_release",
+                               side_effect=OSError("fixture")) as follow:
+            C.follow_installed_release(self.path)
+        follow.assert_called_once_with(C.__file__, ["run", "--record", str(self.path)])
 
 
 class ReceiptAndNoticeTest(unittest.TestCase):
@@ -309,6 +414,10 @@ class ReceiptAndNoticeTest(unittest.TestCase):
         self.assertEqual((result["parent_next"], result["required_action"], result["parent_next_reason"]),
                          ("end-turn", "wait-for-auto-resume", "launch-auto-resume"))
         self.assertIn("did not start and nothing ran", result["next_step"])
+        # Reported as the pause it is, with its time, the same shape as a start-budget pause.
+        self.assertEqual((result["state"], result["retry_at"]), ("waiting-capacity", armed["resume_at"]))
+        with mock.patch.object(C, "arm", return_value=None):
+            self.assertEqual(work_start._arm_capacity_resume(dict(pause), "/r", "/j"), pause)   # unarmed: unchanged
 
     def test_a_start_budget_resume_receipt_ends_the_turn_instead_of_asking_for_a_report(self):
         import work_start
@@ -321,6 +430,19 @@ class ReceiptAndNoticeTest(unittest.TestCase):
         self.assertEqual((result["parent_next"], result["required_action"], result["parent_next_reason"]),
                          ("end-turn", "wait-for-auto-resume", "launch-capacity-auto-resume"))
         self.assertIn("worker start budget is full", result["next_step"])
+
+    def test_auto_resumed_start_reaching_needs_interview_is_in_notice(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            jobs = Path(tmp) / "jobs.log"
+            jobs.write_text("")
+            record = {"route_id": PAUSE["route_id"], "retry_at": PAUSE["retry_at"], "jobs": str(jobs)}
+            with mock.patch.dict("os.environ", {"CLAUDE_CODE_SESSION_ID": "sid-8"}, clear=True):
+                C._notify(record, {"state": "needs-interview", "required_action": "prepare-frame-question"})
+            import dispatch_session_sweep as sweep
+            claimed, _ = sweep.sweep_deliver(jobs.parent, "claude-parent-runtime", "sid-8")
+            text = sweep.delivery_context([(jobs.parent, claimed)])
+            self.assertIn("a question is waiting for the person", text)
+            self.assertIn("prepare-frame-question", text)
 
     def test_the_owning_session_gets_one_notice(self):
         with tempfile.TemporaryDirectory() as tmp:
