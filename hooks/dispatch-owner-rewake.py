@@ -406,22 +406,26 @@ def _session_owner_states(
     # One read context for the whole scan, and the row's own fields before
     # the lineage: `owns` otherwise re-read every handover snapshot and seat
     # ledger per row, ~20ms each, so a 1,994-row registry cost every Bash
-    # call ~40s of CPU (2026-10-28).
+    # call ~40s of CPU (2026-10-28). The scan is read-only, so it also resolves
+    # every row against one observation of the lineage directory, as the sweep
+    # does: without the pin each `owns` listed and stat'ed every session ledger
+    # again, ~1,600 rows x ~660 ledgers = ~8s of CPU per Bash call (2026-11-03).
     read_context = PeerReadContext()
     rows: list[tuple[str, float, str]] = []
-    for attempt_id, (stamp, status, metadata) in latest.items():
-        if status not in statuses:
-            continue
-        if any(metadata.get(key) != value for key, value in REGISTRY_DEPTH1_START.items()):
-            continue
-        if not _worker_type_is_depth1(metadata.get("worker_type")):
-            continue
-        if not seat_handover.owns(metadata, session, jobs, read_context=read_context):
-            continue
-        age = _row_age(stamp, now)
-        if age is None or age < -MAXIMUM_CLOCK_SKEW_SECONDS:
-            continue
-        rows.append((attempt_id, age, status))
+    with read_context.pinned_lineage():
+        for attempt_id, (stamp, status, metadata) in latest.items():
+            if status not in statuses:
+                continue
+            if any(metadata.get(key) != value for key, value in REGISTRY_DEPTH1_START.items()):
+                continue
+            if not _worker_type_is_depth1(metadata.get("worker_type")):
+                continue
+            if not seat_handover.owns(metadata, session, jobs, read_context=read_context):
+                continue
+            age = _row_age(stamp, now)
+            if age is None or age < -MAXIMUM_CLOCK_SKEW_SECONDS:
+                continue
+            rows.append((attempt_id, age, status))
     rows.sort(key=lambda row: -row[1])
     return rows
 
