@@ -1612,10 +1612,19 @@ class RealSubsessionAdvanceServices:
 
     @staticmethod
     def _caller_is_parent(request) -> bool:
-        """The caller is the registered parent attempt or its final launched replacement."""
+        """The caller is the registered parent attempt or its final launched replacement.
+
+        An unreadable seat lineage (``parent_attempt_succeeded``'s wait) still reads as
+        "not the parent" here: this runs inside the owner's supervisor, which a raised wait
+        would end, and the chain has no wait before registration to hand it to.
+        """
         import route_authority as RA
         caller = os.environ.get("AGENT_DISPATCH_ATTEMPT_ID")
-        return bool(caller) and RA.parent_attempt_succeeded(getattr(request, "jobs", None), request.parent_attempt_id, caller)
+        try:
+            return bool(caller) and RA.parent_attempt_succeeded(
+                getattr(request, "jobs", None), request.parent_attempt_id, caller)
+        except DC.DispatchContractError:
+            return False
 
     def _parent_slug(self, request):
         try:
