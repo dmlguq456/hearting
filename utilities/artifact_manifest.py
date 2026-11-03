@@ -20,6 +20,8 @@ from artifact_identity import is_well_formed, kind_of
 CONTRACT_VERSION = "artifact-cycle-manifest/v2"
 SCHEMA_VERSION = 2
 MANIFEST_KIND = "artifact.cycle"
+# The one value of an artifact row's optional `audience` key.
+USER_AUDIENCE = "user"
 
 _RFC3339_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?Z$")
 _DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -614,7 +616,9 @@ def _v_artifact_row(value: Any, path: str, violations: List[Violation]) -> None:
             "capability": _v_str,
             "title": _v_str,
         },
-        {},
+        # Optional reader hint (Cairn shows `user` rows by default and folds the
+        # rest as work records); rows sealed before it existed carry no key.
+        {"audience": _v_literal(USER_AUDIENCE)},
         violations,
     )
 

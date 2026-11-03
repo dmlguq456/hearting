@@ -423,6 +423,19 @@ class SharedRunnerWakeTest(unittest.TestCase):
             self.assertEqual(self.watch.main(argv), 0)
         request.assert_called_once()
 
+    def test_main_keeps_its_exact_arguments_to_start_again_on_the_installed_release(self):
+        import dispatch_batch_obligations as obligations
+        argv = ["--jobs", str(self.jobs), "--agent-home", "/unused", "--attempt-id", "att-x",
+                "--pid", "4242", "--pid-start", "1", "--interval", "0.5"]
+        seen = []
+        with mock.patch.object(obligations, "request_runner", return_value=False), \
+             mock.patch.object(self.watch, "watch",
+                               side_effect=lambda args: seen.append(args.release_argv) or 0), \
+             mock.patch.object(self.watch, "attempt_record", return_value=(None, {})), \
+             mock.patch("route_parent_close.row_requested", return_value=False):
+            self.assertEqual(self.watch.main(list(argv)), 0)
+        self.assertEqual(seen, [argv])
+
 
 class AttemptRecordIndexTest(unittest.TestCase):
     """The index lookup answers like the first-match text scan it replaced."""
@@ -557,6 +570,66 @@ class WatchLifetimeTest(unittest.TestCase):
              mock.patch.object(self.watch, "reconcile_exact_exit", return_value=0) as exited:
             self.assertEqual(self.watch.watch(self.args), 0)
         exited.assert_called_once_with(self.args)
+
+    def test_a_live_owner_keeps_the_watch_on_its_release_through_every_wait(self):
+        self.write("open")
+        self.args.release_argv = ["--jobs", str(self.jobs), "--attempt-id", "att-life"]
+        import peer_obligations
+        with mock.patch("parent_next_directive.release_moved", return_value=True), \
+             mock.patch.object(self.watch, "process_start", return_value="1"), \
+             mock.patch.object(self.watch.time, "sleep", side_effect=self.sleeper(5)), \
+             mock.patch.object(peer_obligations, "follow_installed_release") as follow:
+            with self.assertRaises(self.Stop):
+                self.watch.watch(self.args)
+            self.write("killed")
+            with self.assertRaises(self.Stop):
+                self.watch.watch(self.args)
+        follow.assert_not_called()
+
+    def test_only_an_ended_attempt_moves_and_an_unmoved_install_reads_nothing(self):
+        self.args.release_argv = ["--jobs", str(self.jobs), "--attempt-id", "att-life"]
+        quiescent = SimpleNamespace(process_state="quiescent")
+        live = SimpleNamespace(process_state="live")
+        import peer_obligations
+        for moved, owner, observed, expected in (
+                (False, None, quiescent, False),
+                (True, "1", quiescent, False),
+                (True, None, live, False),
+                (True, None, quiescent, True),
+                (True, None, None, True)):
+            with self.subTest(moved=moved, owner=owner, observed=observed), \
+                 mock.patch("parent_next_directive.release_moved", return_value=moved), \
+                 mock.patch.object(self.watch, "process_start", return_value=owner), \
+                 mock.patch.object(self.watch, "observed_owner_lifecycle",
+                                   return_value=(observed, "", {})) as lifecycle, \
+                 mock.patch.object(peer_obligations, "follow_installed_release") as follow:
+                self.watch.follow_installed_release(self.args)
+            if expected:
+                follow.assert_called_once_with(self.watch.__file__, self.args.release_argv)
+            else:
+                follow.assert_not_called()
+            if not moved:
+                lifecycle.assert_not_called()
+
+    def test_an_exited_owner_is_reconciled_without_moving_in_between(self):
+        self.write("open")
+        self.args.release_argv = ["--jobs", str(self.jobs), "--attempt-id", "att-life"]
+        quiescent = SimpleNamespace(process_state="quiescent")
+        import peer_obligations
+        with mock.patch.object(self.watch, "process_start", return_value=None), \
+             mock.patch.object(self.watch, "observed_owner_lifecycle",
+                               return_value=(quiescent, "", {})), \
+             mock.patch.object(peer_obligations, "follow_installed_release") as follow, \
+             mock.patch.object(self.watch, "reconcile_exact_exit", return_value=0) as exited:
+            self.assertEqual(self.watch.watch(self.args), 0)
+        follow.assert_not_called()
+        exited.assert_called_once_with(self.args)
+
+    def test_a_direct_call_without_its_original_arguments_stays(self):
+        import peer_obligations
+        with mock.patch.object(peer_obligations, "follow_installed_release") as follow:
+            self.watch.follow_installed_release(self.args)
+        follow.assert_not_called()
 
     def test_finish_recovery_reads_only_the_owner_and_its_children(self):
         self.jobs.write_text(

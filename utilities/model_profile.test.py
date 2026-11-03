@@ -221,13 +221,9 @@ class ModelProfileTest(unittest.TestCase):
 
     @staticmethod
     def _restricted(model, aliases):
-        """The predicate every launch surface actually uses: tokenize the id and test
-        alias membership (`dispatch-headless.py`, `stage-dispatch-fallback.py`,
-        `hooks/subagent-model-default.sh` all do exactly this). Exact string equality
-        would see `model/alias:...` but not `model/vendor-alias-5-1:...`, which the
-        wrapper still refuses at launch (review r2-1)."""
-        tokens = set(re.split(r"[^a-z0-9]+", model.lower()))
-        return any(alias.lower() in tokens for alias in aliases)
+        """The launch-surface decision itself: `model_config.restricted_model`, which
+        matches a hyphenated vendor id whole and a bare alias as one token."""
+        return model_config.restricted_model(model, aliases)
 
     def test_claude_shipped_default_is_the_user_profile_mapping(self):
         # 2026-09-09 user rule: the shipped default equals the user's runtime

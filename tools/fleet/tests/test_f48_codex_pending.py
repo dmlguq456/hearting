@@ -326,5 +326,65 @@ class CodexPendingTest(unittest.TestCase):
                     self.assertEqual(sess.interaction_state["source"], "codex-rollout")
 
 
+class OpenRolloutQuestionsTest(unittest.TestCase):
+    """The answer-wait producer reads the same rollout judgment for hook-less threads."""
+
+    SID = "01a19c56-0000-7000-8000-000000000001"
+    OTHER = "01a19c56-0000-7000-8000-000000000002"
+
+    def setUp(self):
+        codex._LIFECYCLE_CACHE.clear()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = os.path.join(self.tmp.name, "codex-home")
+        self.day = os.path.join(self.home, "sessions", "2026", "11", "02")
+        os.makedirs(self.day)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def rollout(self, sid, *, root=None, answered=False):
+        directory = root or self.day
+        os.makedirs(directory, exist_ok=True)
+        path = os.path.join(directory, "rollout-2026-11-02T00-00-00-%s.jsonl" % sid)
+        rows = [record({"type": "function_call", "name": "request_user_input", "call_id": "q1"})]
+        if answered:
+            rows.append(record({"type": "function_call_output", "call_id": "q1"}))
+        with open(path, "w", encoding="utf-8") as handle:
+            for row in rows:
+                handle.write(json.dumps(row) + "\n")
+        return os.path.realpath(path)
+
+    def test_pending_question_in_a_held_rollout_is_reported_once_per_session(self):
+        pending = self.rollout(self.SID)
+        answered = self.rollout(self.OTHER, answered=True)
+        foreign = self.rollout("01a19c56-0000-7000-8000-000000000003",
+                               root=os.path.join(self.tmp.name, "elsewhere", "sessions"))
+        with mock.patch.object(codex, "_open_rollout_paths",
+                               return_value=(True, {pending, answered, foreign})):
+            found = codex.open_rollout_questions(homes=[self.home])
+        self.assertTrue(found["complete"])
+        self.assertEqual(set(found["pending"]), {self.SID})
+        self.assertIsInstance(found["pending"][self.SID], float)
+
+    def test_ambiguous_session_and_unlistable_process_table_prove_nothing(self):
+        first = self.rollout(self.SID)
+        second = self.rollout(self.SID, root=os.path.join(self.home, "sessions", "2026", "11", "01"))
+        with mock.patch.object(codex, "_open_rollout_paths", return_value=(True, {first, second})):
+            self.assertEqual(codex.open_rollout_questions(homes=[self.home]),
+                             {"complete": True, "pending": {}})
+        with mock.patch.object(codex, "_open_rollout_paths", return_value=None):
+            self.assertIsNone(codex.open_rollout_questions(homes=[self.home]))
+        # A partial walk keeps what it saw but says so; the board marks it unknown.
+        with mock.patch.object(codex, "_open_rollout_paths", return_value=(False, {first})):
+            partial = codex.open_rollout_questions(homes=[self.home])
+        self.assertEqual((partial["complete"], set(partial["pending"])), (False, {self.SID}))
+
+    def test_open_rollout_sessions_keeps_its_contract(self):
+        path = self.rollout(self.SID)
+        with mock.patch.object(codex, "_open_rollout_paths", return_value=(False, {path})):
+            self.assertEqual(codex.open_rollout_sessions(),
+                             {"complete": False, "open": frozenset({self.SID})})
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -126,6 +126,9 @@ def pending_record_path(dispatch_root, storage_key: str, delivery_id: str) -> Pa
 # Atomic private files
 # ---------------------------------------------------------------------------
 
+_DIRECTORY_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+
+
 def _ensure_private_directory(path: Path) -> None:
     path = Path(path)
     try:
@@ -135,6 +138,79 @@ def _ensure_private_directory(path: Path) -> None:
     info = os.lstat(path)
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
         raise OSError("recipient-inbox-unsafe-directory")
+
+
+def _open_directory_beneath(anchor, path: Path, expected_identity) -> int:
+    """Open ``path`` only while ``anchor`` is still the directory we observed.
+
+    A runner that outlives its fixture must never recreate the dispatch root (or
+    a directory above the inbox) after that root was removed. Creation is
+    anchored to an open descriptor for the root, so a removed or replaced root
+    raises instead of being materialized again. The returned descriptor owns
+    the deepest directory and the caller closes it.
+    """
+    anchor = Path(anchor)
+    path = Path(path)
+    try:
+        relative = path.relative_to(anchor)
+    except ValueError:
+        raise OSError("recipient-inbox-state-root-mismatch") from None
+    try:
+        expected = (int(expected_identity[0]), int(expected_identity[1]))
+    except (TypeError, ValueError, IndexError):
+        raise OSError("recipient-inbox-state-root-identity-invalid") from None
+    try:
+        fd = os.open(anchor, _DIRECTORY_FLAGS)
+    except OSError as exc:
+        raise OSError("recipient-inbox-state-root-missing") from exc
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISDIR(info.st_mode)
+                or (info.st_dev, info.st_ino) != expected):
+            raise OSError("recipient-inbox-state-root-replaced")
+        for part in relative.parts:
+            if part in {"", "."}:
+                continue
+            if part == "..":
+                raise OSError("recipient-inbox-unsafe-directory")
+            try:
+                os.mkdir(part, 0o700, dir_fd=fd)
+            except FileExistsError:
+                pass
+            child = os.open(part, _DIRECTORY_FLAGS, dir_fd=fd)
+            os.close(fd)
+            fd = child
+            if not stat.S_ISDIR(os.fstat(fd).st_mode):
+                raise OSError("recipient-inbox-unsafe-directory")
+        return fd
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.close(fd)
+        raise
+
+
+def _atomic_write_at(directory_fd: int, name: str, data: bytes) -> None:
+    """Atomically replace one file inside an already-open directory."""
+    try:
+        if stat.S_ISLNK(os.stat(name, dir_fd=directory_fd,
+                                follow_symlinks=False).st_mode):
+            raise OSError("recipient-inbox-unsafe-file")
+    except FileNotFoundError:
+        pass
+    temporary = f".{name}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                 0o600, dir_fd=directory_fd)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, name, src_dir_fd=directory_fd,
+                   dst_dir_fd=directory_fd)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(temporary, dir_fd=directory_fd)
+        raise
 
 
 def _read_json(path: Path):
@@ -153,16 +229,27 @@ def _read_json(path: Path):
         return None
 
 
-def _atomic_write_json(path: Path, payload) -> None:
+def _atomic_write_json(path: Path, payload, *, root=None,
+                       expected_root_identity=None) -> None:
     path = Path(path)
+    data = (json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                       separators=(",", ":")) + "\n").encode("utf-8")
+    if expected_root_identity is not None:
+        # The runner half of the fixture-lifetime rule: never recreate (or
+        # write into a replacement of) a dispatch/fixture root it observed.
+        directory_fd = _open_directory_beneath(
+            root, path.parent, expected_root_identity)
+        try:
+            _atomic_write_at(directory_fd, path.name, data)
+        finally:
+            os.close(directory_fd)
+        return
     _ensure_private_directory(path.parent)
     try:
         if stat.S_ISLNK(os.lstat(path).st_mode):
             raise OSError("recipient-inbox-unsafe-file")
     except FileNotFoundError:
         pass
-    data = (json.dumps(payload, ensure_ascii=False, sort_keys=True,
-                       separators=(",", ":")) + "\n").encode("utf-8")
     tmp = path.parent / f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     try:
@@ -281,14 +368,17 @@ def read_inbox(dispatch_root, harness: str, session_id: str):
     return None if _invalid_inbox(payload) else payload
 
 
-def write_inbox(dispatch_root, harness: str, session_id: str, payload) -> None:
+def write_inbox(dispatch_root, harness: str, session_id: str, payload, *,
+                expected_root_identity=None) -> None:
     """Atomically replace one recipient's inbox; refuse to publish a broken one."""
     data = dict(payload) if isinstance(payload, dict) else {}
     data["schema"] = INBOX_SCHEMA_VERSION
     data.setdefault("observed_at_ns", time.time_ns())
     if _invalid_inbox(data):
         raise ValueError("recipient-inbox-invalid")
-    _atomic_write_json(inbox_path(dispatch_root, harness, session_id), data)
+    _atomic_write_json(inbox_path(dispatch_root, harness, session_id), data,
+                       root=dispatch_root,
+                       expected_root_identity=expected_root_identity)
 
 
 def _directory_identity(path: Path):
@@ -359,14 +449,16 @@ def read_lineage_rows(dispatch_root):
     return payload
 
 
-def write_lineage_rows(dispatch_root, payload) -> None:
+def write_lineage_rows(dispatch_root, payload, *, expected_root_identity=None) -> None:
     if (not isinstance(payload, dict) or not isinstance(payload.get("ledgers"), dict)
             or not isinstance(payload.get("directory"), str) or not payload["directory"]):
         raise ValueError("lineage-rows-invalid")
     data = dict(payload)
     data["schema"] = LINEAGE_ROWS_SCHEMA
     data.setdefault("generated_at", time.time())
-    _atomic_write_json(lineage_rows_path(dispatch_root), data)
+    _atomic_write_json(lineage_rows_path(dispatch_root), data,
+                       root=dispatch_root,
+                       expected_root_identity=expected_root_identity)
 
 
 def read_run_states(dispatch_root) -> dict:
@@ -380,7 +472,7 @@ def read_run_states(dispatch_root) -> dict:
     return payload if isinstance(payload.get("runs"), dict) else {}
 
 
-def write_run_states(dispatch_root, payload) -> None:
+def write_run_states(dispatch_root, payload, *, expected_root_identity=None) -> None:
     """Atomically publish the runner's public run states."""
     data = {"schema": RUN_STATES_SCHEMA, "generated_at": time.time(), "runs": {}}
     if isinstance(payload, dict):
@@ -389,7 +481,9 @@ def write_run_states(dispatch_root, payload) -> None:
             data["runs"] = dict(runs)
         if "generated_at" in payload:
             data["generated_at"] = payload["generated_at"]
-    _atomic_write_json(run_states_path(dispatch_root), data)
+    _atomic_write_json(run_states_path(dispatch_root), data,
+                       root=dispatch_root,
+                       expected_root_identity=expected_root_identity)
 
 
 def read_steward_relations(dispatch_root):
@@ -410,7 +504,8 @@ def read_steward_relations(dispatch_root):
     return relations
 
 
-def write_steward_relations(dispatch_root, relations) -> None:
+def write_steward_relations(dispatch_root, relations, *,
+                            expected_root_identity=None) -> None:
     """Atomically publish the resolved role relations for display readers."""
     if (not isinstance(relations, (list, tuple))
             or not all(isinstance(item, dict) for item in relations)):
@@ -419,4 +514,4 @@ def write_steward_relations(dispatch_root, relations) -> None:
         "schema": STEWARD_RELATIONS_SCHEMA,
         "generated_at": time.time(),
         "relations": [dict(item) for item in relations],
-    })
+    }, root=dispatch_root, expected_root_identity=expected_root_identity)
