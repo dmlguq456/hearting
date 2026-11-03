@@ -1003,6 +1003,45 @@ class CodexDispatchTerminalTest(unittest.TestCase):
         )
 
 
+class PrimaryWorktreeOnceTest(unittest.TestCase):
+    """HOOK-LATENCY: an OpenCode turn's status inspected 16 attempts and ran
+    `git worktree list` for each; 8 of 9 named one NAS repository (0.65 s each)."""
+
+    def test_one_listing_per_repository_and_a_failure_is_asked_again(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            main = Path(tmp) / "main"
+            env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+            def git(*args):
+                subprocess.run(["git", *args], check=True, env=env, capture_output=True)
+            git("init", "-q", str(main))
+            git("-C", str(main), "-c", "user.name=t", "-c", "user.email=t@e",
+                "commit", "-q", "--allow-empty", "-m", "base")
+            linked = [Path(tmp) / f"wt-{index}" for index in range(2)]
+            for index, path in enumerate(linked):
+                git("-C", str(main), "worktree", "add", "-q", "-b", f"b{index}", str(path))
+            listings = []
+            real_run = subprocess.run
+
+            def counted(command, *args, **kwargs):
+                if command[-3:] == ["worktree", "list", "--porcelain"]:
+                    listings.append(command[2])
+                return real_run(command, *args, **kwargs)
+
+            cache = getattr(terminal, "_PRIMARY_WORKTREES", {})
+            with mock.patch.dict(cache, clear=True), \
+                    mock.patch.object(terminal.subprocess, "run", side_effect=counted):
+                answers = [terminal._primary_worktree(path.resolve())
+                           for path in (*linked, linked[0], main)]
+                self.assertEqual(answers, [main.resolve()] * 4)
+                self.assertEqual(len(listings), 1, listings)
+                cache.clear()
+                with mock.patch.object(terminal.subprocess, "run",
+                                       side_effect=OSError("git unavailable")):
+                    self.assertIsNone(terminal._primary_worktree(linked[1].resolve()))
+                self.assertEqual(cache, {})
+                self.assertEqual(terminal._primary_worktree(linked[1].resolve()), main.resolve())
+
+
 class OpencodeTerminalRecognitionTest(unittest.TestCase):
     """Gap 1 (C2): codex_dispatch_terminal now recognizes the opencode
     step_finish/stop terminal via the shared opencode_terminal_boundary
