@@ -171,7 +171,15 @@ class TmuxPeerStewardTest(unittest.TestCase):
     def typed(self):
         return self.log.read_bytes()
 
+    def transcript(self):
+        """The session's own transcript with no background agents, so the booking clears."""
+        path = Path(os.environ["HOME"]) / ".claude" / "projects" / "proj" / f"{OLD}.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"type": "user", "sessionId": OLD}) + "\n")
+        return path
+
     def test_an_idle_claude_with_an_empty_box_is_cleared_once_and_the_new_session_is_seen(self):
+        self.transcript()
         self.start_claude()
         path = self.book()
         rc, line = self.steward("clear", self.address, "--request", str(path), "--nonce", "n0nce")
@@ -180,6 +188,14 @@ class TmuxPeerStewardTest(unittest.TestCase):
         self.assertIn(f"old_session={OLD}", line)
         self.assertIn(f"new_session={NEW}", line)
         self.assertEqual(self.typed(), b"\x1b[200~/clear\x1b[201~\r")
+
+    def test_without_its_transcript_the_tmux_pane_gets_compact_like_a_herdr_pane(self):
+        # Agents that may still run keep their window: the shared booking types /compact.
+        self.start_claude()
+        path = self.book()
+        rc, line = self.steward("clear", self.address, "--request", str(path), "--nonce", "n0nce")
+        self.assertIn("reason=compact-pending", line)
+        self.assertEqual(self.typed(), b"\x1b[200~/compact\x1b[201~\r")
 
     def test_a_draft_or_a_running_turn_is_never_typed_over(self):
         for status, draft, reason in (("idle", "half typed text", "reason=draft"),
