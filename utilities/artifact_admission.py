@@ -1254,6 +1254,7 @@ class _BulkStore:
         self.dir = _bulk_dir(root)
         self.real = os.path.realpath(str(self.dir))
         self._locator: Optional[Tuple[Optional[List[int]], _BulkLocator]] = None
+        self._derived = False  # the table in hand was derived from the cycle files, not read
         self._shards: Dict[str, Tuple[Optional[List[int]], Dict[str, Dict[str, Any]]]] = {}
 
     def _locator_path(self) -> Path:
@@ -1263,18 +1264,35 @@ class _BulkStore:
         return self.dir / "cycles" / "{0}.json".format(name)
 
     def locator(self, *, fresh: bool = False) -> _BulkLocator:
+        """The key table every lookup follows.  A table that is missing or does not parse is derived
+        from the cycle files it indexes (they are the rows; the table only finds them), so a lookup
+        never misses a row a cycle file holds; the next locked write stores the derived table."""
         path = self._locator_path()
         if self._locator is not None and not fresh:
             return self._locator[1]
         key = _file_key(path)
-        if self._locator is not None and key is not None and self._locator[0] == key:
+        if self._locator is not None and self._locator[0] == key and (key is not None or self._derived):
             return self._locator[1]
         try:
             locator = _BulkLocator.parse(path.read_bytes())
-        except FileNotFoundError:
-            locator = _BulkLocator.empty()
+            self._derived = False
+        except (FileNotFoundError, ValueError):
+            locator = _BulkLocator.full({name: self.keys_of(name) for name in self.names()})
+            self._derived = True
         self._locator = (key, locator)
         return locator
+
+    def keys_of(self, name: str) -> List[str]:
+        shard = self.shard(name)
+        return [key for section in _BULK_SECTIONS for key in shard[section]]
+
+    def uncovered(self) -> List[Tuple[str, str]]:
+        """(cycle file, key) pairs the key table in use does not name: lookups would miss them."""
+        locator = self.locator(fresh=True)
+        numbers = {name: number for number, name in enumerate(locator.names)}
+        entries = set(_BULK_ENTRY.iter_unpack(locator.data[locator.offset:]))
+        return [(name, key) for name in self.names() for key in self.keys_of(name)
+                if (_bulk_key_hash(key), numbers.get(name, -1)) not in entries]
 
     def shard(self, name: str, *, fresh: bool = False) -> Dict[str, Dict[str, Any]]:
         cached = self._shards.get(name)
@@ -1340,6 +1358,7 @@ class _BulkStore:
     def _write_locator(self, locator: _BulkLocator) -> None:
         key = _atomic_write_bytes(self._locator_path(), locator.data)
         self._locator = (key, locator)
+        self._derived = False
 
     def add(self, rows: Mapping[str, Mapping[str, Any]]) -> None:
         """Fold `rows` into the cycle files that own them, then name their keys in `keys.bin`."""
@@ -1366,7 +1385,10 @@ class _BulkStore:
                 wrote = True
         if wrote:
             _fsync_dir(self.dir / "cycles")
-        locator = self.locator(fresh=True).with_entries(pairs)
+        current = self.locator(fresh=True)
+        locator = current.with_entries(pairs)
+        if locator is None and self._derived:
+            locator = current  # a derived table is stored by the first write that has one in hand
         if locator is not None:
             self._write_locator(locator)
 
@@ -1555,14 +1577,16 @@ def _bulk_row_count(index: artifact_index.IndexDocument) -> int:
     return sum(len(getattr(index, name)) for name in _BULK_SECTIONS)
 
 
-def _bulk_write(root: Path, index: artifact_index.IndexDocument
+def _bulk_write(root: Path, index: artifact_index.IndexDocument, *, whole: bool = False
                 ) -> Optional[Tuple[artifact_index.IndexDocument, artifact_index.IndexDocument]]:
     """Write the moved rows of `index`; return (what `index.json` keeps, the whole view after
     the write), or None while `index.json` is written whole.
 
     Cycle files and `keys.bin` are written before `index.json`.  Turning the layout on writes
     only `format.json`: every row is still in `index.json` then, and moves out a few cycles per
-    write from this one on."""
+    write from this one on.  Only `whole` (rebuild) makes the cycle files hold exactly `index`;
+    any other document whose sections are plain rows (one read before the layout was turned on,
+    in the same locked section) is folded like the rows `index.json` holds."""
     store = _bulk_store(root)
     if store is None:
         if _bulk_row_count(index) < BULK_THRESHOLD_ROWS:
@@ -1576,9 +1600,11 @@ def _bulk_write(root: Path, index: artifact_index.IndexDocument
              "stable_prefixes": list(_BULK_STABLE_PREFIXES)}))
         index = _with_bulk(index, store)
     elif not _bulk_bound(index, store):
-        store.replace(_bulk_all_rows(index))
-        kept = _bulk_kept(index)
-        return kept, _with_bulk(kept, store)
+        if whole or any(isinstance(getattr(index, name), _BulkSection) for name in _BULK_SECTIONS):
+            store.replace(_bulk_all_rows(index))
+            kept = _bulk_kept(index)
+            return kept, _with_bulk(kept, store)
+        index = _with_bulk(index, store)
     store = index.stable_ids.store
     folded, stay = _bulk_fold(index, BULK_FOLD_ROWS)
     store.add(folded)
@@ -1586,9 +1612,10 @@ def _bulk_write(root: Path, index: artifact_index.IndexDocument
     return kept, _with_bulk(kept, store)
 
 
-def _write_index(root: Path, index: artifact_index.IndexDocument) -> None:
+def _write_index(root: Path, index: artifact_index.IndexDocument, *, whole: bool = False) -> None:
+    """`whole` (rebuild only): the index is exactly `index`, including rows it no longer has."""
     global _INDEX_GENERATION
-    split = _bulk_write(root, index)
+    split = _bulk_write(root, index, whole=whole)
     if split is not None:
         kept, index = split
         data = artifact_index.canonical_bytes(kept)
@@ -1813,7 +1840,7 @@ def rebuild_index(root: Path) -> artifact_index.IndexDocument:
             }
         ),
     )
-    _write_index(root, index)
+    _write_index(root, index, whole=True)
     return index
 
 
@@ -1833,6 +1860,10 @@ def verify_index(root: Path) -> artifact_manifest.ValidationReport:
             current_bytes = b""  # a hand-edited row that does not parse is drift too
         if current_bytes is not None and current_bytes != rebuilt_bytes:
             v = Violation("index-drift", "$", "current index bytes differ from rebuild")
+            return artifact_manifest.ValidationReport(ok=False, violations=(v,))
+        if store.uncovered():
+            # Lookups follow keys.bin: a row it does not name would be taken for absent.
+            v = Violation("index-drift", "$.index.bulk/keys.bin", "keys.bin does not name every cycle-file key")
             return artifact_manifest.ValidationReport(ok=False, violations=(v,))
         return artifact_manifest.ValidationReport(ok=True, violations=())
     try:

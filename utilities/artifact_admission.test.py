@@ -1183,6 +1183,66 @@ class TestCycleRowsBesideIndex(AdmissionContractBase):
         rebuilt, _keys = adm._compute_rebuilt_index(self.root)
         self.assertEqual(self._whole(), idx.canonical_bytes(rebuilt))
 
+    def test_a_missing_or_damaged_key_table_is_derived_and_stored_again(self):
+        doc, _ = self._admit_valid(key="k-table-1", content=b"one")
+        table = self._bulk() / "keys.bin"
+        for damage in ("missing", "truncated"):
+            with self.subTest(damage=damage):
+                if damage == "missing":
+                    table.unlink()
+                else:
+                    table.write_bytes(table.read_bytes()[:-3])
+                adm.clear_index_cache()
+                self.assertTrue(adm.verify_index(self.root).ok)
+                clash, content = _make_valid_document(self.alloc, self._identity(), content=b"x-" + damage.encode())
+                clash["events"][0]["event_id"] = doc["events"][0]["event_id"]
+                adm.clear_index_cache()
+                self._assert_rejected_and_unchanged(clash, self._stage_source(content), "k-clash-" + damage,
+                                                    expect_code="index-event-id-reused")
+                adm.clear_index_cache()
+                self._admit_valid(key="k-table-" + damage, content=b"fresh-" + damage.encode())
+                adm._BulkLocator.parse(table.read_bytes())  # stored again, whole
+                self.assertFalse(adm._BulkStore(self.root).uncovered())
+                self.assertTrue(adm.verify_index(self.root).ok)
+
+    def test_verify_reports_a_key_table_that_does_not_name_every_row(self):
+        self._admit_valid(key="k-stale-1", content=b"one")
+        table = self._bulk() / "keys.bin"
+        older = table.read_bytes()
+        self._admit_valid(key="k-stale-2", content=b"two")
+        table.write_bytes(older)  # an older table put back by hand: it parses, but misses rows
+        adm.clear_index_cache()
+        report = adm.verify_index(self.root)
+        self.assertFalse(report.ok)
+        self.assertIn("index-drift", [violation.code for violation in report.violations])
+        adm.rebuild_index(self.root)
+        self.assertTrue(adm.verify_index(self.root).ok)
+
+    def test_a_document_read_before_the_layout_turned_on_is_folded_not_replaced(self):
+        with mock.patch.object(adm, "BULK_THRESHOLD_ROWS", 10 ** 9):
+            for n in range(5):
+                self._admit_valid(key="k-early-%d" % n, content=b"e-%d" % n)
+        adm.clear_index_cache()
+        fd = adm._acquire_lock(self.root, 5)
+        try:
+            index = adm.load_index(self.root)  # plain rows: the layout is not on yet
+            with mock.patch.object(adm, "BULK_FOLD_ROWS", 1), \
+                    mock.patch.object(adm._BulkStore, "replace",
+                                      side_effect=AssertionError("every cycle file rewritten")):
+                adm._write_index(self.root, index)  # turns the layout on and folds one cycle
+                adm._write_index(self.root, index)  # the same locked section hands it in again
+        finally:
+            adm._release_lock(self.root, fd)
+        self.assertLessEqual(len(list((self._bulk() / "cycles").iterdir())), 2)
+        for cycle_id, sections in self._inline_cycles().items():
+            self.assertEqual(sections, {"stable_ids", "event_ids", "streams"}, cycle_id)
+        rebuilt, _keys = adm._compute_rebuilt_index(self.root)
+        self.assertEqual(self._whole(), idx.canonical_bytes(rebuilt))
+        with mock.patch.object(adm._BulkStore, "replace", wraps=adm._BulkStore.replace, autospec=True) as whole:
+            adm.rebuild_index(self.root)
+        self.assertEqual(whole.call_count, 1)  # rebuild is what replaces
+        self.assertTrue(adm.verify_index(self.root).ok)
+
     def test_receipt_reader_sees_moved_rows_read_only(self):
         doc, _ = self._admit_valid(key="k-receipt", content=b"r")
         before = self._root_fingerprint()
