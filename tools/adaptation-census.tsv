@@ -89,6 +89,7 @@ shared-utility-deferred	pane.py
 shared-utility-deferred	verification-background-lease.py
 shared-utility-deferred	work_start.py
 shared-utility-deferred	work_intent.py
+shared-utility-deferred	status_board.py
 shared-utility-deferred	start_receipt.py
 shared-utility-deferred	recipient_lifetime.py
 shared-utility-deferred	verification_runtime.py

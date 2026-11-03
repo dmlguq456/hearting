@@ -7109,6 +7109,12 @@ def close_route(route, route_file, commit=None, summary=None, publication=None,
             os.close(dfd)
     finally:
         os.unlink(temporary)
+    try:
+        # C-W4: the campaign's status page, when it keeps one, records this close (ARTIFACT_META).
+        import status_board
+        status_board.note_route_closed(route, outcome)
+    except Exception:  # noqa: BLE001 -- the page is optional; a close never waits on it
+        pass
     return outcome, True
 
 def review_independence_observation(route):
