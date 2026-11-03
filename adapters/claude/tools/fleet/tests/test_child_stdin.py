@@ -1,0 +1,1 @@
+../../../../../tools/fleet/tests/test_child_stdin.py

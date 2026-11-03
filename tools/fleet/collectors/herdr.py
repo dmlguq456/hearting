@@ -268,7 +268,7 @@ def list_agents(runner=subprocess.run, which=shutil.which):
         if endpoint != "default":
             argv.extend(("--session", endpoint))
         argv.extend(("agent", "list"))
-        proc = runner(argv, capture_output=True, text=True,
+        proc = runner(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True,
                       timeout=_TIMEOUT_S)
     except Exception:
         return None
@@ -364,7 +364,7 @@ def pane_evidence(panes, runner=subprocess.run, bindings=None, observation=None)
             argv.extend(("--session", endpoint))
         argv.extend(("pane", "process-info", "--pane", str(pane_id)))
         proc = runner(argv,
-                      capture_output=True, text=True, timeout=_TIMEOUT_S)
+                      stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=_TIMEOUT_S)
         if getattr(proc, "returncode", 1) != 0:
             raise RuntimeError("process-info exit %s" % proc.returncode)
         info = (json.loads(proc.stdout or "").get("result") or {}).get("process_info")

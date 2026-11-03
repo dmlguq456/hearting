@@ -120,7 +120,8 @@ def _worker(cwd, br):
         if _configured(cwd, br):
             result = subprocess.run(
                 ["git", "-C", cwd, "rev-list", "--left-right", "--count",
-                 "HEAD...@{upstream}"], capture_output=True, text=True, timeout=2,
+                 "HEAD...@{upstream}"], stdin=subprocess.DEVNULL, capture_output=True,
+                text=True, timeout=2,
                 env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
             fields = result.stdout.split()
             if result.returncode == 0 and len(fields) == 2 and all(x.isdigit() for x in fields):

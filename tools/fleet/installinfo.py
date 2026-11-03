@@ -87,7 +87,7 @@ def _git_version(root, runner):
     try:
         result = runner(
             ["git", "describe", "--tags", "--always", "--dirty"],
-            cwd=str(root), capture_output=True, text=True, timeout=2,
+            stdin=subprocess.DEVNULL, cwd=str(root), capture_output=True, text=True, timeout=2,
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -207,7 +207,7 @@ def _remote_release(root, runner, now, remote="origin"):
     try:
         result = runner(
             ["git", "ls-remote", "--tags", str(remote)],
-            cwd=str(root), capture_output=True, text=True, timeout=3,
+            stdin=subprocess.DEVNULL, cwd=str(root), capture_output=True, text=True, timeout=3,
         )
         if getattr(result, "returncode", 1) == 0:
             version = _parse_remote_tags(getattr(result, "stdout", ""), head)
@@ -233,7 +233,7 @@ def _git_dirty(root, runner, head, now):
     try:
         result = runner(
             ["git", "diff-index", "--quiet", "HEAD", "--"],
-            cwd=str(root), capture_output=True, text=True, timeout=2,
+            stdin=subprocess.DEVNULL, cwd=str(root), capture_output=True, text=True, timeout=2,
         )
         dirty = getattr(result, "returncode", 2) == 1
     except (OSError, subprocess.SubprocessError):
