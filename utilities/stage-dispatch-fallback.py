@@ -2407,7 +2407,7 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
     # ordinary standard+ depth-2 work goes through this wrapper, which had no
     # such check -- so the cap was unreachable on the path most dispatches take.
     # Reuse the already-loaded definitions rather than duplicating the cap.
-    # SD-153/SD-154: `admit_round` (budget + rule-8 auto-revision) is the one
+    # SD-153/SD-154: `admit_round` (budget + review-input auto-revision) is the one
     # admission decision every registered launch surface reads -- no surface
     # keeps its own `len(prior)+1 > max_round` comparison, or its own
     # auto-revision copy, any more.
