@@ -10,6 +10,8 @@ from typing import NamedTuple
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("capability_topology", ROOT/"tools/capability_topology.py")
 TOPO = importlib.util.module_from_spec(SPEC); SPEC.loader.exec_module(TOPO)
+UI_SPEC = importlib.util.spec_from_file_location("ui_text", ROOT/"tools/i18n/ui_text.py")
+UI_TEXT = importlib.util.module_from_spec(UI_SPEC); UI_SPEC.loader.exec_module(UI_TEXT)
 DEFAULTS_SPEC = importlib.util.spec_from_file_location("dispatch_defaults", ROOT/"utilities/dispatch-defaults.py")
 DEFAULTS = importlib.util.module_from_spec(DEFAULTS_SPEC); DEFAULTS_SPEC.loader.exec_module(DEFAULTS)
 VALID_AFFINITY = DEFAULTS.AFFINITY_VALUES | {"unspecified"}
@@ -3706,11 +3708,12 @@ def _spec_reads_recorded(paths, artifact_root):
     return read
 
 
-def _compose_spec_read_notice(route):
+def _compose_spec_read_notice(route, t=None):
     """One `[경로]` card line when compose found a shared spec it did not ask the caller to read."""
+    t = t or UI_TEXT.translator()
     source = ((route.get("tracked_gate_evidence") or {}).get("spec_read") or {}).get("source")
     if isinstance(source, str) and source.startswith(SPEC_READ_SHARED_PREFIX):
-        return "  공유 spec 있음 — 읽을 경로: " + source[len(SPEC_READ_SHARED_PREFIX):]
+        return "  " + t("route.spec.shared", path=source[len(SPEC_READ_SHARED_PREFIX):])
     return None
 
 
@@ -4880,26 +4883,27 @@ def compose_default_slug(task_text, *, capability=None, shape=None):
     return ARTIFACT_LOCATOR.slugify(stem + suffix)[0]
 
 
-def _compose_campaign_line(selection):
+def _compose_campaign_line(selection, t=None):
+    t = t or UI_TEXT.translator()
     mode = selection["mode"]
     if mode == "join":
-        text = f"캠페인 {selection['key']} (기존 합류)"
+        text = t("route.campaign.join", key=selection["key"])
     elif mode == "create":
-        text = f"캠페인 {selection['key']} (신규 생성)"
+        text = t("route.campaign.create", key=selection["key"])
     elif mode == "reopen":
-        text = f"캠페인 {selection['key']} (닫힌 캠페인 재개)"
+        text = t("route.campaign.reopen", key=selection["key"])
     elif mode == "blocked":
-        text = f"캠페인 {selection['key']} (begin 거부 예정: {selection['blocked_reason']})"
+        text = t("route.campaign.blocked", key=selection["key"], reason=selection["blocked_reason"])
     elif mode == "parent":
-        text = f"캠페인 parent {selection['parent_cycle_id']} 상속"
+        text = t("route.campaign.parent", parent=selection["parent_cycle_id"])
     elif mode == "unresolved":
-        text = f"캠페인 {selection['key']} (기존 여부 확인 불가: 캠페인 목록 읽기 실패)"
+        text = t("route.campaign.unresolved", key=selection["key"])
     else:
-        text = "캠페인 미배정 (_unassigned, degraded)"
+        text = t("route.campaign.unassigned")
     shown = ", ".join(selection["active_keys"][:6])
     if selection["active_count"] > 6:
         shown += " …"
-    return f"  {text} · 활성 캠페인 {selection['active_count']}개" + (f": {shown}" if shown else "")
+    return "  " + t("route.campaign.line", text=text, count=selection["active_count"]) + (f": {shown}" if shown else "")
 
 
 def route_start_approvals(route, registry=None):

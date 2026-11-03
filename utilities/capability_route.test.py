@@ -3,6 +3,9 @@ import base64, contextlib, copy, hashlib, importlib.util, io, json, os, re, shut
 from pathlib import Path
 from unittest import mock
 
+# The card screens stored below are Korean and UI text defaults to English, so this
+# suite declares the Korean operator language itself (tools/i18n/ui_text.py).
+os.environ["FLEET_NOW_LANG"]="Korean"
 P=Path(__file__).with_name("capability-route.py")
 S=importlib.util.spec_from_file_location("route",P); R=importlib.util.module_from_spec(S); S.loader.exec_module(R)
 GUARD_P=P.with_name("worker-route-guard.py")
