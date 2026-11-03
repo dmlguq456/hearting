@@ -276,16 +276,16 @@ class NVMLFallbackTest(unittest.TestCase):
                         self.assertEqual(gpu_leases.gpu_status_text(status), status["summary"])
                     with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "English"}):
                         english = gpu_leases.gpu_status_text(status)
-                    self.assertTrue(english.startswith("GPU status unavailable"), english)
-                    self.assertTrue(english.endswith(" · 2 running"), english)
-                    self.assertEqual(" · host reboot needed" in english, reboot)
+                    self.assertTrue(english.startswith("GPU unavailable"), english)
+                    self.assertTrue(english.endswith(" · runs on the GPU: 2"), english)
+                    self.assertEqual(" · reboot needed" in english, reboot)
                     self.assertTrue(status["summary"].startswith("GPU 상태 확인 불가"))
         host = self.probe()
         self.assertIn(" · driver mismatch (library 580.178 / module 580.173.02)",
                       self._english(gpu_leases.gpu_status_text, host["gpu_status"]))
         with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "English"}):
             with self.assertRaisesRegex(gpu_leases.GPUUnavailable,
-                                        r"^GPU status unavailable.* · 2 running · devices in use: GPU 0, GPU 1"
+                                        r"^GPU unavailable.* · runs on the GPU: 2 · devices in use: GPU 0, GPU 1"
                                         r" · cannot reserve a GPU for a new run$"):
                 gpu_leases.select(host, [], requested=None)
 

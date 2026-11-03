@@ -107,7 +107,7 @@
    "ko": " · 드라이버 불일치(라이브러리 {library} / 모듈 {module})"
   },
   "compute.gpu_unavailable": {
-   "en": "GPU status unavailable",
+   "en": "GPU unavailable",
    "ko": "GPU 상태 확인 불가"
   },
   "compute.gpu_unobserved": {
@@ -127,7 +127,7 @@
    "ko": " · 장치 점유 {devices}"
   },
   "compute.reboot_needed": {
-   "en": " · host reboot needed",
+   "en": " · reboot needed",
    "ko": " · 호스트 재부팅 필요"
   },
   "compute.reservation_unplaced": {
@@ -135,7 +135,7 @@
    "ko": "GPU 예약 · 장치 위치 모름: {lease}"
   },
   "compute.running": {
-   "en": " · {count} running",
+   "en": " · runs on the GPU: {count}",
    "ko": " · 실행 중 {count}개 확인"
   },
   "compute.unknown": {
