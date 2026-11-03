@@ -8921,24 +8921,39 @@ def _is_recoverable_locator_defect(exc: BaseException) -> bool:
 
 
 def _recovery_open_candidates(root: Path, cycle_id: Optional[str] = None) -> set:
-    """Before the admission lock: the open cycles the root sweep has work for, and ``cycle_id``.
+    """Before the admission lock: the open cycles the root sweep may have work for, and ``cycle_id``.
 
-    An open cycle whose folder is there with no `manifest.json` in it is one the sweep only
-    lists as open, so it is not read again under the lock; a folder gone, a manifest written
-    and not recorded, or a location that cannot be resolved is the sweep's, as before.  A cycle
-    that turns into one after this look is the next sweep's (the sweep is already best effort
-    for every cycle but the one being closed)."""
+    An open cycle sitting in the folder the published locator map names, with its own binding
+    and no `manifest.json`, is one the sweep only lists as open, so it is not read again under
+    the lock.  Everything else -- a folder gone or unpublished, a manifest written and not
+    recorded, a binding naming another cycle, and every open cycle of the campaign being closed
+    (whose locator defects the sweep raises) -- stays the sweep's, resolved there as before.
+    Only the map, an `lstat` and the small binding file are read here.  A cycle that turns into
+    one after this look is the next sweep's (the sweep is already best effort for every cycle
+    but the one being closed)."""
     wanted = {cycle_id} if cycle_id else set()
+    root = Path(root)
+    try:
+        published = artifact_locator._load_index(root) or {}
+    except Exception:  # noqa: BLE001 -- an unreadable map leaves every open cycle to the sweep
+        published = {}
+    target = read_cycle_record(root, cycle_id) if cycle_id else None
+    target_campaign = (target or {}).get("campaign_id")
     for record in list_cycle_records(root):
         if (record.get("state") != "open" or record.get("deleted_at")
                 or (record.get("relocation") or {}).get("artifact_root")):
             continue
-        try:
-            directory = cycle_dir(root, record["campaign_id"], record["cycle_id"], record)
-            if directory.is_dir() and not (directory / "manifest.json").is_file():
+        where = published.get(record.get("cycle_id"))
+        if record.get("campaign_id") != target_campaign and isinstance(where, str) and where:
+            folder = root / where
+            try:
+                quiet = (stat.S_ISDIR(os.lstat(str(folder)).st_mode)
+                         and not _path_entry_present(folder / "manifest.json")
+                         and _folder_cycle_id(folder) == record["cycle_id"])
+            except OSError:
+                quiet = False
+            if quiet:
                 continue
-        except Exception:  # noqa: BLE001 -- a locator defect is reported or raised by the locked sweep
-            pass
         wanted.add(record["cycle_id"])
     return wanted
 
