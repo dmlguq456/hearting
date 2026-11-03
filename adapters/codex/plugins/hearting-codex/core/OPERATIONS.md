@@ -1970,9 +1970,10 @@ longer matches its recorded evidence — is typed `blocked`, distinct from
 ordinary in-flight `pending`: the watch stops re-driving settlement for that
 one attempt (retrying cannot resolve it) while a distinct `closure-blocked`
 notice tells a human to inspect and recover it. A deterministic producer
-finalize refusal (the same recorded route lineage) is held the same way: when
-the route lineage or the installed runtime changes, a later join or finish
-invocation judges it again.
+finalize refusal (the same recorded route lineage, or for `output-invalid` the
+same named files) is held the same way: when the route lineage, those files or
+the installed runtime changes, a later join or finish invocation judges it
+again.
 
 **Visibility is a requirement, not a nicety.** Independently of capability,
 Fleet and the status surfaces expose the workflow, its current stage, its child

@@ -107,15 +107,18 @@ PROVEN_BLOCKED_GATE_REASONS = frozenset({
 })
 
 # A producer finalize refusal that more settling cannot change: the route
-# lineage it judged is recorded evidence, not in-flight work. Kept to these
-# detail prefixes so unreadable/transient causes (`route-unreadable`,
-# `route-lineage-unverified`, `output-invalid`, lock/busy) stay recoverable.
+# lineage it judged (and, for `output-invalid`, the files it names, which a
+# person fixes) is recorded evidence, not in-flight work. Kept to these detail
+# prefixes so unreadable/transient causes (`route-unreadable`,
+# `route-lineage-unverified`, lock/busy) stay recoverable.
 DETERMINISTIC_FINALIZE_REFUSALS = (
     "cycle-route-binding-mismatch", "route-hash-drift", "completion-route-hash-mismatch",
     "route-invalid", "route-artifact-root-mismatch", "completion-route-composite-mismatch",
+    "output-invalid",
 )
 DETERMINISTIC_FINALIZE_RETRY_WHEN = (
-    "The route lineage or the installed runtime changed; a later join or finish judges it again.")
+    "The route lineage, the files the refusal names, or the installed runtime changed; "
+    "a later join or finish judges it again.")
 
 
 def deterministic_finalize_refusal(reason, detail) -> bool:
