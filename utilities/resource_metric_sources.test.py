@@ -1123,6 +1123,31 @@ class MetricSourcesTest(unittest.TestCase):
         mixed = metrics.read_admission_sources([root], run_id=run_id, started_at=1, now=600)
         self.assertIn("admission-run-binding-ambiguous", mixed["warnings"])
 
+    def test_authorizing_run_named_only_in_shared_admission_is_not_bound_to_the_bundle(self):
+        # Before the fix the smoke run's lease inside shared_admission was read as a
+        # run identity, so an observer of the smoke run took another evaluation's
+        # admission samples (ami-leg2 raw-results/admission, 681 files) as its own.
+        root = self.root / "raw-results"
+        bundle = root / "admission"
+        bundle.mkdir(parents=True)
+        smoke = "smoke__config-bundle__8a9d8619aed3"
+        lease = {"host": "moving4", "pid": 2087782, "run_id": smoke,
+                 "started_at": 1792840758.0865579, "starttime": "121090704",
+                 "state": "S", "task": smoke}
+        for index in range(4):
+            (bundle / f"asr__dev-root__attempt-{index:02d}.json").write_text(json.dumps({
+                "admitted": index % 2 == 0, "snapshot": {"t": 100 + index},
+                "shared_admission": {"authorized_run_id": smoke, "leases": [lease]}}))
+
+        cursor = None
+        for now in (500, 560, 620):
+            result = metrics.read_admission_sources([root], run_id=smoke, started_at=1,
+                                                    now=now, cursor=cursor)
+            cursor = result["cursor"]
+            self.assertEqual([sample for sample in result["samples"]
+                              if sample["state"] in {"admitted", "denied"}], [])
+            self.assertNotEqual(result["coverage"], "observed")
+
     def test_admission_reader_observes_320_separate_decisions_across_bounded_pages(self):
         root = self.root / "320-separate-admission-files"
         bundle = root / "one-bundle"
