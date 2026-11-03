@@ -977,6 +977,7 @@ class ExperimentObservationTest(unittest.TestCase):
             self.assertEqual(public["rows"][0]["admission"]["denied_samples"], 2)
             self.assertIsNone(public["output_dir"])
 
+    @mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"})   # Korean notice words
     def test_independent_raw_counter_binding_persists_without_canonical_progress(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -1620,6 +1621,36 @@ class ExperimentObservationTest(unittest.TestCase):
                              ("claude", "sid-claude-2", "sid-codex"))
             with mock.patch.object(handover, "_readable_lineage_signature", side_effect=OSError("ledger")):
                 self.assertIsNone(_ordinary_notice_target(identity, "codex-native-queue"))
+    def test_notice_words_follow_the_declared_language(self):
+        run = {"run_id": "r1", "status": "succeeded", "exit_code": 0}
+        observation = {"summary": {"metric": "loss", "latest": {"value": 0.5, "epoch": 3},
+                                   "best": {"value": 0.4, "epoch": 2}, "trend": "악화",
+                                   "baseline_delta": None},
+                       "elapsed_seconds": 3720, "planned_seconds": None,
+                       "predicted_total_seconds": None}
+        texts = {}
+        for language in ("English", "Korean"):
+            with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": language}):
+                texts[language] = ("; ".join(progress._notice_texts(run, "final", observation, None, [])),
+                                   "; ".join(progress._notice_texts(run, "checkpoint", observation,
+                                                                    "/r/record.json", [{"format": "jsonl"}])))
+        final, checkpoint = texts["English"]
+        self.assertIn("public run record=no record path", final)
+        self.assertIn("latest=loss=0.5@3; best=loss=0.4@2; trend=worsening", final)
+        self.assertIn("actual=1h02m; planned=unknown", final)
+        self.assertIn("latest=loss=0.5@3; best=loss=0.4@2; baseline delta=no baseline; trend=worsening",
+                      checkpoint)
+        self.assertIn("ETA total unknown; planned unknown; elapsed 1h02m", checkpoint)
+        self.assertIn("source jsonl=no path", checkpoint)
+        final, checkpoint = texts["Korean"]
+        self.assertIn("public run record=기록 경로 없음", final)
+        self.assertIn("마지막=loss=0.5@3; 최고=loss=0.4@2; 추세=악화", final)
+        self.assertIn("실제=1h02m; 계획=미상", final)
+        self.assertIn("최근=loss=0.5@3; 최고=loss=0.4@2; 기준 delta=기준 없음; 추세=악화", checkpoint)
+        self.assertIn("ETA 총 미상; 계획 미상; 경과 1h02m", checkpoint)
+        self.assertIn("source jsonl=경로 없음", checkpoint)
+
+    @mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"})   # Korean notice words
     def test_terminal_observation_keeps_durable_live_checkpoint_and_adds_one_final_notice(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
