@@ -63,7 +63,7 @@ CYCLE_RELATIVE_TARGETS = [
      "5. Update $AGENT_ARTIFACT_OUTPUT_DIR/analysis_project/code/ for successful steps "
      "only when that directory already exists."),
     ("capabilities/code-report/references/procedure.md",
-     "git diff --stat -- $AGENT_ARTIFACT_OUTPUT_DIR/analysis_project/code/ CLAUDE.md"),
+     "git diff --stat -- $AGENT_ARTIFACT_OUTPUT_DIR/analysis_project/code/\n"),
     ("capabilities/draft-strategy/references/procedure.md",
      "- `--output <dir>`: `$AGENT_ARTIFACT_OUTPUT_DIR/documents/{date}_{name}/`"),
     ("capabilities/draft-refine/references/procedure.md",
@@ -150,6 +150,14 @@ class WordingTargetsTest(unittest.TestCase):
                 f"{rel_path}: target does not describe a standalone base or routed cycle output",
             )
             self.assertNotIn("<artifact-root>", fragment)
+
+    def test_the_report_stage_names_a_bootstrap_update_instead_of_editing_it(self):
+        # GA-A2-007: the report node's write scope is its report and analysis docs only.
+        content = _normalized((REPO_ROOT / "capabilities/code-report/references/procedure.md")
+                              .read_text(encoding="utf-8"))
+        self.assertIn("is source outside this stage's write scope", content)
+        self.assertNotIn("including CLAUDE.md", content)
+        self.assertNotIn("analysis_project/code/ CLAUDE.md", content)
 
     def test_a16_8_each_capability_entry_doc_describes_its_routed_cycle_lifecycle(self):
         for rel_path, fragments in CAPABILITY_CYCLE_CONTRACTS:
