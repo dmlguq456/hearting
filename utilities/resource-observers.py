@@ -14,6 +14,7 @@ import sys
 import time
 
 from resource_run_registry import proc_identity
+from detached_lifetime import bind as end_with_test
 
 
 def load_tool(name):
@@ -96,8 +97,8 @@ def ensure_watch(command, lock_path, *, environ=None, spawn=subprocess.Popen):
         env = dict(os.environ if environ is None else environ)
         env['AGENT_HOME'] = str(Path(__file__).resolve().parents[1])
         env['PYTHONDONTWRITEBYTECODE'] = '1'
-        proc = spawn(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                     stderr=subprocess.DEVNULL, env=env, start_new_session=True, close_fds=True)
+        proc = end_with_test(spawn(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, env=env, start_new_session=True, close_fds=True))
         return {'started': True, 'pid': getattr(proc, 'pid', None), 'legacy_retained': retained}
 
 

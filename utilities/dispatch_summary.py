@@ -35,6 +35,7 @@ if str(Path(__file__).resolve().parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from claude_project_dir import resolve_session_transcript  # noqa: E402
+from detached_lifetime import bind as end_with_test  # noqa: E402
 from dispatch_contract import (  # noqa: E402
     _current_observer_is_host_like,
     DispatchContractError,
@@ -790,6 +791,7 @@ def launch_summary_owner(
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
+    end_with_test(process)
     deadline = time.monotonic() + 2.0
     owner_identity: dict[str, str] = {}
     while time.monotonic() < deadline:

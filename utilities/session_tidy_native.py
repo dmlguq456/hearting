@@ -21,6 +21,7 @@ import time
 import unicodedata
 
 from pane_ownership import _caller_runtime, _process
+from detached_lifetime import bind as end_with_test
 
 
 def live(target):
@@ -193,6 +194,7 @@ def attachment(target):
         proc = subprocess.Popen([target["binary"], "attach", target["job"]],
                                 stdin=slave, stdout=slave, stderr=slave,
                                 env=env, cwd=target["home"], preexec_fn=terminal)
+        end_with_test(proc)
         os.close(slave); slave = -1
         yield master, proc
     finally:

@@ -45,6 +45,7 @@ sys.path.insert(0, str(ROOT / "utilities"))
 from hearting_gates import note_same_work_drift
 
 from dispatch_contract import success_note, verdict_pass  # noqa: E402
+from detached_lifetime import bind as end_with_test  # noqa: E402
 import workflow_state as WS  # noqa: E402
 import resource_run_registry as RR  # noqa: E402
 import resource_resume as RESOURCE_RESUME  # noqa: E402
@@ -1191,6 +1192,7 @@ def _start_successor(armed, successor, key):
             stdout=stdout, stderr=subprocess.STDOUT if stdout else None,
             start_new_session=True,
         )
+        end_with_test(proc)
     finally:
         if handle is not None:
             handle.close()

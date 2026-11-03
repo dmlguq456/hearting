@@ -84,6 +84,7 @@ if str(UTILITIES) not in sys.path:
     sys.path.insert(0, str(UTILITIES))
 
 import route_presence_gate as gate  # noqa: E402
+from detached_lifetime import bind as end_with_test  # noqa: E402
 
 SWITCH = "HEARTING_AUTO_RECORD"
 MARK = "auto-record"
@@ -181,9 +182,9 @@ def launch(phase: str, harness: str, payload, *, environ=None, popen=None) -> bo
         command = [sys.executable, str(Path(__file__).resolve()), phase, "--harness", harness,
                    "--session", sid, "--cwd", cwd, "--at", f"{time.time():.6f}"]
         spawn = subprocess.Popen if popen is None else popen
-        spawn(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        end_with_test(spawn(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
               stderr=subprocess.DEVNULL, close_fds=True, start_new_session=True,
-              cwd=str(ROOT), env=dict(env))
+              cwd=str(ROOT), env=dict(env)))
         return True
     except Exception:  # noqa: BLE001 -- a turn never depends on its record
         return False

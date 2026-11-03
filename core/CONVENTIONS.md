@@ -529,6 +529,19 @@ does not duplicate that rule list, only the obligation and its consequence.
   when this rule fires, but as a standing requirement) are declared in
   `tools/test-isolation.tsv`, never inferred silently.
 
+### §4.5. Detached Helpers Started by a Test
+
+A helper Hearting starts in its own session (an obligation runner, a watcher,
+a resource observer) outlives its caller by design. Started under a test, it
+ends with that test: each detaching spawn site passes its child to
+`utilities/detached_lifetime.py` `bind`, which finds the nearest test process
+among the caller's ancestors (a test file or `-m unittest`/`pytest`; a helper
+recorded under a test passes that test on). When that process ends, however it
+ends and whether or not it ran through `tools/run-tests.py`, a reaper kills the
+recorded children and their descendants. Outside a test `bind` records nothing,
+so production lifetimes are unchanged. A new detaching spawn site calls `bind`
+the same way.
+
 ## §5. Skill Output Convention — T1/T2/T3
 
 Every autopilot capability and `analyze-project` follows this artifact structure. Existing artifacts keep their legacy flat layout; new invocations use this convention.

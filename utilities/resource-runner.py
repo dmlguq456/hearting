@@ -4,6 +4,7 @@ import argparse, contextlib, fcntl, hashlib, importlib.util, json, os, re, selec
 from pathlib import Path
 import resource_resume as RESOURCE_RESUME
 import resource_run_evidence as RUN_EVIDENCE
+from detached_lifetime import bind as end_with_test
 import resource_execution_environment as RESOURCE_ENV
 from resource_progress import environment as progress_environment
 import gpu_leases
@@ -690,6 +691,7 @@ def start_watch(route_file, jobs, cwd, runtime):
                 "--ready-fd", str(ready_write)],
                 env={**os.environ, "AGENT_DISPATCH_JOBS": str(jobs)}, cwd=cwd,
                 pass_fds=(ready_write,), stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
+            end_with_test(watch)
         os.close(ready_write)
         ready_write = None
         if not select.select([ready_read], [], [], 5)[0] or os.read(ready_read, 32) != b"ready\n":
@@ -1017,8 +1019,8 @@ def start_verified(registry, args, route, route_file, placeholder, *, controller
         environment = gpu_payload_environment(environment, gpu_lease)
         try:
             with open(log, "ab", buffering=0) as output:
-                proc = subprocess.Popen(launch_argv, cwd=placeholder["cwd"], env=environment,
-                    pass_fds=(wait_read,), stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
+                proc = end_with_test(subprocess.Popen(launch_argv, cwd=placeholder["cwd"], env=environment,
+                    pass_fds=(wait_read,), stdout=output, stderr=subprocess.STDOUT, start_new_session=True))
         finally:
             os.close(wait_read)
         ident = launched_identity(proc)
@@ -1948,6 +1950,7 @@ def start_observer(registry, args, route, route_file, command):
                     'IFS= read -r launch <&"$AGENT_RESOURCE_LAUNCH_FD" || exit 125; ' + SENTINEL_SCRIPT,
                     "resource-observer", *command], cwd=row['cwd'], env=environment,
                     pass_fds=(wait_read,), stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
+                end_with_test(proc)
             finally:
                 os.close(wait_read)
             identity = launched_identity(proc)
@@ -2226,7 +2229,7 @@ def _main(argv=None, *, controller=None):
         environment = gpu_payload_environment(environment, gpu_lease)
         out=open(log,"ab",buffering=0)
         try:
-            proc=subprocess.Popen(launch_argv,cwd=cwd,env=environment,pass_fds=(wait_read,),stdout=out,stderr=subprocess.STDOUT,start_new_session=True)
+            proc=end_with_test(subprocess.Popen(launch_argv,cwd=cwd,env=environment,pass_fds=(wait_read,),stdout=out,stderr=subprocess.STDOUT,start_new_session=True))
         except Exception:
             out.close()
             os.close(wait_read); os.close(release)

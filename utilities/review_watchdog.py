@@ -20,6 +20,7 @@ import sys
 import time
 from typing import Mapping, Sequence
 
+from detached_lifetime import bind as end_with_test
 from dispatch_contract import (
     DispatchContractError,
     REVIEW_GOVERNED_LEASE_KIND,
@@ -382,6 +383,7 @@ def _run_watchdog(
             close_fds=True,
             env={**os.environ, "AGENT_DISPATCH_ATTEMPT_ID": attempt_id},
         )
+        end_with_test(child)
         # Only the fence may retain this close-on-exec writer. Keeping a
         # watchdog copy would hide a successful payload exec from the adapter.
         _close(failure_fd)
@@ -614,6 +616,7 @@ def launch_review_watchdog(
         for fd in (readiness_read, readiness_write, control_read, control_write):
             _close(fd)
         raise
+    end_with_test(proc)
     _close(readiness_write)
     _close(control_read)
     return ReviewWatchdogHandle(proc, readiness_read, control_write, budget, attempt_id, nonce)

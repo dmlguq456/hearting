@@ -58,6 +58,7 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 import session_tidy as st  # noqa: E402
+from detached_lifetime import bind as end_with_test  # noqa: E402
 
 SCHEMA = 1
 CLEAR_DEADLINE_SEC = 600.0
@@ -901,6 +902,7 @@ def _start_helper(seat_key: str, nonce: str) -> int:
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         close_fds=True, start_new_session=True, env=_helper_env(socket_path=socket_path),
         cwd=str(st.ensure_dir(st.state_root())))
+    end_with_test(proc)
     return proc.pid
 
 

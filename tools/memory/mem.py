@@ -45,6 +45,7 @@ if __name__ == "__main__" and not _CLI_NO_TOUCH and not (os.environ.get("PYTHONP
         os.environ["PYTHONPYCACHEPREFIX"] = sys.pycache_prefix = os.path.join(_state_root, "pycache")
 
 from claude_project_dir import encode_project_dir, encode_project_dir_component
+from detached_lifetime import bind as end_with_test
 import git_exchange_v2
 import migration_v2
 import protocol_v2
@@ -8186,13 +8187,13 @@ def _exchange_spawn(window):
     try:
         env = dict(os.environ)
         env["MEM_EXCHANGE_WORKER"] = "1"
-        subprocess.Popen(
+        end_with_test(subprocess.Popen(
             [sys.executable, str(Path(__file__).resolve()),
              "_exchange-worker", "--window", repr(float(window))],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL, close_fds=True,
             start_new_session=True, cwd=str(STORE), env=env,
-        )
+        ))
     except (OSError, ValueError):
         pass
 

@@ -38,6 +38,7 @@ _CODE_ROOT_FD = os.open(Path(__file__).resolve().parents[1],
 
 from hearting_gates import note_same_work_drift
 from session_identity import session_label
+from detached_lifetime import bind as end_with_test
 from route_identity import registered_node_identity
 from governor_identity import close_witness, create_witness
 from dispatch_attempt_policy import (decide_attempt, SUBSESSION_NOTE, SUCCESS_NOTES, committed_outcome,
@@ -12004,6 +12005,7 @@ def launch_orphan_watch(
         )
     except OSError as exc:
         raise DispatchContractError("orphan-watch-launch-failed", str(exc)) from exc
+    end_with_test(proc)
     return proc.pid
 
 
@@ -12105,6 +12107,7 @@ def launch_reap_watch(
         )
     except OSError as exc:
         raise DispatchContractError("reap-watch-launch-failed", str(exc)) from exc
+    end_with_test(proc)
     return proc.pid
 
 

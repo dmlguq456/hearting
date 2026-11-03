@@ -23,6 +23,11 @@ FEATURE = "default_mode_request_user_input"
 
 sys.path.insert(0, str(ROOT))
 from tools.fleet import session_registry  # noqa: E402
+try:  # ends a detached child with the test that started it; no-op outside tests
+    from detached_lifetime import bind as end_with_test
+except ImportError:  # loaded by path without utilities/ on sys.path
+    def end_with_test(child):
+        return child
 
 
 def _proc_start(pid: int) -> str | None:
@@ -435,6 +440,7 @@ def execute(args: argparse.Namespace) -> int:
             stderr=None,
             start_new_session=True,
         )
+        end_with_test(app_server)
         app_server_pid = app_server.pid
         try:
             session_registry.write(
@@ -480,6 +486,7 @@ def execute(args: argparse.Namespace) -> int:
             stderr=None,
             start_new_session=True,
         )
+        end_with_test(gateway)
         wait_socket(front, gateway, 20)
         wait_socket(control, gateway, 20)
         remote = f"unix://{front}"

@@ -12,6 +12,7 @@ import sys
 from typing import Mapping
 
 from codex_managed_dispatch import ManagedDispatchError, ManagedSidecar
+from detached_lifetime import bind as end_with_test
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -102,5 +103,6 @@ def launch_codex_queue_completion_sidecar(
     except OSError as exc:
         output.close()
         raise ManagedDispatchError("native-queue-sidecar-launch-failed") from exc
+    end_with_test(process)
     output.close()
     return ManagedSidecar(process.pid, batch_id, log_file)

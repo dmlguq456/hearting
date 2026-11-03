@@ -22,6 +22,7 @@ import tempfile
 import time
 from typing import Iterable
 
+from detached_lifetime import bind as end_with_test
 from dispatch_attempt_policy import (
     PaneObservation,
     RegisteredWorkObservation,
@@ -922,7 +923,7 @@ def request_obligation_recovery(*, lifecycle_root: str | Path | None = None) -> 
     else:
         child_env[STATE_ROOT_IDENTITY_ENV] = f"{identity[0]}:{identity[1]}"
     try:
-        subprocess.Popen(
+        end_with_test(subprocess.Popen(
             command,
             cwd=str(root),
             env=child_env,
@@ -931,7 +932,7 @@ def request_obligation_recovery(*, lifecycle_root: str | Path | None = None) -> 
             stderr=subprocess.DEVNULL,
             close_fds=True,
             start_new_session=True,
-        )
+        ))
         return True
     except (OSError, subprocess.SubprocessError):
         return False
@@ -3558,6 +3559,7 @@ def _ensure_runner(root, *, service_current=None, use_remembered=False,
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             close_fds=True, pass_fds=(fd,), start_new_session=True, env=child_env,
         )
+        end_with_test(process)
         _RUNNERS.append(process)
         return True
     except (OSError, subprocess.SubprocessError):

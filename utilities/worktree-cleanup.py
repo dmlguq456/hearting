@@ -25,6 +25,7 @@ import resource
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
+from detached_lifetime import bind as end_with_test
 from dispatch_contract import (
     DispatchContractError,
     dispatch_state_root,
@@ -205,6 +206,7 @@ def run(
                     stdout=output, stderr=errors,
                     start_new_session=True, env=child_env)
                 pid = process.pid
+            end_with_test(pid)
             if threading.current_thread() is threading.main_thread():
                 for signum in (signal.SIGTERM, signal.SIGHUP):
                     handlers[signum] = signal.signal(signum, interrupted)

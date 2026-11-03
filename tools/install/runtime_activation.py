@@ -36,6 +36,7 @@ if str(UTILITIES_ROOT) not in sys.path:
 import harness_manifest
 import dispatch_contract
 import model_config
+from detached_lifetime import bind as end_with_test
 import projector
 import retired_memory_state
 import safe_fs
@@ -4475,12 +4476,12 @@ def reconnect_peer_obligations(active_root: str | Path) -> bool:
     env = os.environ.copy()
     env["AGENT_HOME"] = str(root)
     try:
-        subprocess.Popen(
+        end_with_test(subprocess.Popen(
             [sys.executable, str(utility), "__ensure-obligations",
              "--lifecycle-root", str(root)], env=env,
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             close_fds=True, start_new_session=True,
-        )
+        ))
         return True
     except (OSError, subprocess.SubprocessError):
         return False
@@ -4493,10 +4494,10 @@ def reconnect_resource_observers(active_root: str | Path) -> bool:
     if not utility.is_file():
         return False
     try:
-        subprocess.Popen([sys.executable, str(utility)],
+        end_with_test(subprocess.Popen([sys.executable, str(utility)],
             env={**os.environ, "AGENT_HOME": str(root), "PYTHONDONTWRITEBYTECODE": "1"},
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            close_fds=True, start_new_session=True)
+            close_fds=True, start_new_session=True))
         return True
     except (OSError, subprocess.SubprocessError):
         return False

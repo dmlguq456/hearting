@@ -26,6 +26,11 @@ import sys
 import tempfile
 import time
 import uuid
+try:  # ends a detached child with the test that started it; no-op outside tests
+    from detached_lifetime import bind as end_with_test
+except ImportError:  # loaded by path without utilities/ on sys.path
+    def end_with_test(child):
+        return child
 
 ROOT = Path(__file__).resolve().parents[1]
 MAX_TIMEOUT = 900
@@ -464,6 +469,7 @@ class HerdrIntegrationLive:
                     stdout=subprocess.DEVNULL, stderr=errors,
                     start_new_session=True, close_fds=True,
                 )
+                end_with_test(self.server)
         except OSError as exc:
             self._append(self.commands_path, {"step": "herdr-server-start", "argv": _redact_argv(argv),
                                               "returncode": None, "stderr_reason": type(exc).__name__,

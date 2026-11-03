@@ -76,6 +76,7 @@ if str(HERE) not in sys.path:
 import session_tidy as st  # noqa: E402
 import tidy_decisions as td  # noqa: E402
 import tidy_transcripts as tt  # noqa: E402
+from detached_lifetime import bind as end_with_test  # noqa: E402
 
 SCHEMA = 1
 UNIT = "ops/session-tidy-memory"
@@ -356,6 +357,7 @@ def start_detached(qid: str) -> int:
         [sys.executable, str(Path(__file__).resolve()), "run", "--queue-id", qid],
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         close_fds=True, start_new_session=True, env=clean_env(), cwd=str(st.ensure_dir(st.state_root())))
+    end_with_test(proc)
     return proc.pid
 
 

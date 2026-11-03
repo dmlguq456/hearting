@@ -44,6 +44,7 @@ from dispatch_contract import (  # noqa: E402
     validate_dispatch_log_dir,
 )
 from governor_identity import IdentityCaptureError, create_witness  # noqa: E402
+from detached_lifetime import bind as end_with_test  # noqa: E402
 from dispatch_lifecycle import (  # noqa: E402
     FOREGROUND_NOTICE,
     FOREGROUND_SCOPED,
@@ -3859,6 +3860,7 @@ def main(argv: list[str] | None = None) -> int:
                     stderr=subprocess.PIPE,
                     start_new_session=True,
                 )
+                end_with_test(proc)
                 relay.add(proc)
                 processes.append((leg, token, proc))
             except OSError:
