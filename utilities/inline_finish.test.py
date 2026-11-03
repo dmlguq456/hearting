@@ -282,9 +282,12 @@ class PublicInlineFinishTest(unittest.TestCase):
             subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
             subprocess.run(["git", "-C", str(self.repo), "config", "user.email", "test@example.com"], check=True)
             subprocess.run(["git", "-C", str(self.repo), "config", "user.name", "Inline Finish Test"], check=True)
-            (self.repo / "README.md").write_text("base\n", encoding="utf-8")
-            subprocess.run(["git", "-C", str(self.repo), "add", "README.md"], check=True)
-            subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "base"], check=True)
+            # The sealed source has a parent, as a route started on a work branch does, so a
+            # test can rebase it onto a moved base.
+            for text in ("root\n", "base\n"):
+                (self.repo / "README.md").write_text(text, encoding="utf-8")
+                subprocess.run(["git", "-C", str(self.repo), "add", "README.md"], check=True)
+                subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", text.strip()], check=True)
         self.old_env = {key: os.environ.get(key) for key in (
             "AGENT_HOME", "AGENT_DISPATCH_JOBS", "AGENT_DISPATCH_DEPTH",
             "AGENT_DISPATCH_ATTEMPT_ID", "AGENT_ROUTE_FILE", "AGENT_ROUTE_ID",
@@ -1293,6 +1296,29 @@ class PublicInlineFinishTest(unittest.TestCase):
         refused = self.finish()
         self.assertNotEqual(refused.returncode, 0)
         self.assertIn("finish-commit-not-source-descendant", refused.stderr)
+
+    def test_a_result_rebased_onto_a_moved_base_finishes(self):
+        # Review asked for a rebase after the base under the route's branch moved: the sealed
+        # source commit is rewritten off every branch while the work it started is the same.
+        def git(*args):
+            return subprocess.run(["git", "-C", str(self.repo), *args],
+                                  check=True, capture_output=True, text=True).stdout.strip()
+        source = self.route["source_commit"]
+        branch = git("symbolic-ref", "--short", "HEAD")
+        git("checkout", "-q", "-b", "moved-base", source + "~1")
+        (self.repo / "UPSTREAM.md").write_text("the base moved on\n", encoding="utf-8")
+        git("add", "UPSTREAM.md")
+        git("commit", "-qm", "base moves on")
+        git("checkout", "-q", branch)
+        git("rebase", "-q", "--onto", "moved-base", source + "~1", branch)
+        rebased = git("rev-parse", "HEAD")
+        self.assertEqual(git("for-each-ref", "--contains", source, "refs/heads", "refs/remotes"), "")
+        finished = self.finish()
+        self.assertEqual(finished.returncode, 0, finished.stderr)
+        self.assertEqual(json.loads(finished.stdout)["commit"], rebased)
+        outcome = json.loads(CAP.outcome_path(self.route_file).read_text(encoding="utf-8"))
+        self.assertTrue(outcome["terminal_gate_proven"])
+        self.assertEqual(outcome["head_commit"], rebased)
 
     def test_active_review_lease_is_refused_before_intent(self):
         lease_path = artifact_producer._review_lease_path(self.root, self.cycle["cycle_id"], "att-review")

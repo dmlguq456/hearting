@@ -26,9 +26,9 @@
 > 명령, 경로, 설정 키와 식별자는 영문 원문을 기준으로 합니다.
 
 <p align="center">
-  <img src="docs/fleet.svg" alt="Fleet Explorer의 OVERVIEW: Claude Code, Codex, OpenCode의 세션 여덟 개를 네 프로젝트로 묶어 모델, 문맥 게이지, 지금 하는 일을 보여 준다. 답을 기다리는 세션 하나, 단계 줄이 보이는 열린 요청 둘, 왼쪽 아래에 호스트별 CPU와 GPU 사용량." width="100%">
+  <img src="docs/fleet.svg" alt="Fleet Explorer의 OVERVIEW: Claude Code, Codex, OpenCode의 세션 여덟 개를 네 프로젝트로 묶고, 프로젝트 줄마다 열린 요청, 답을 기다리는 질문, 최근 결과를 보여 준다. 세션마다 모델, 문맥 게이지, 지금 하는 일. 답을 기다리는 세션 하나, 단계 줄이 보이는 열린 요청 둘, 왼쪽 아래에 호스트별 CPU와 GPU 사용량." width="100%">
 </p>
-<p align="center"><sub>Fleet Explorer의 OVERVIEW: 세 하네스의 세션을 프로젝트별로 묶고, 답을 기다리는 세션 하나, 진행 중인 요청 둘, 호스트별 GPU 사용량을 보여 줍니다. 합성 데모 데이터로 그렸습니다(<a href="docs/fleet/overview.png">PNG</a>).</sub></p>
+<p align="center"><sub>Fleet Explorer의 OVERVIEW: 세 하네스의 세션을 프로젝트별로 묶고, 프로젝트마다 현황 한 줄, 답을 기다리는 세션 하나, 진행 중인 요청 둘, 호스트별 GPU 사용량을 보여 줍니다. 합성 데모 데이터로 그렸습니다(<a href="docs/fleet/overview.png">PNG</a>).</sub></p>
 
 ## 왜 하팅인가
 
@@ -58,6 +58,12 @@
 
 원하는 결과를 평소 말로 설명하면 됩니다. 외울 명령 이름이 없고, 출력은 대화
 언어를 따릅니다.
+
+요청 시작 때의 경로 카드처럼 하팅이 직접 찍는 고정 문구는 기본이 영어입니다.
+한국어로 보려면 한 번만 선언하세요.
+`${XDG_CONFIG_HOME:-~/.config}/hearting/fleet.json`에 `"title_language": "ko"`를
+두거나, `FLEET_NOW_LANG=Korean`을 설정하거나, Claude Code의 `language` 설정을
+한국어로 둡니다. 같은 선언이 Fleet 세션 제목의 언어도 정합니다.
 
 > “로그인 API를 구현하고 테스트한 뒤 변경 보고서까지 남겨줘.”
 
@@ -114,13 +120,13 @@ Claude Code, Codex, OpenCode 세션과 하팅이 그 세션들에서 분사한 �
 
 | 화면 | 알려 주는 것 |
 |---|---|
-| **OVERVIEW** | 프로젝트별로 묶은 모든 세션: 하네스, 모델과 effort, 짧은 제목, 남은 문맥, 지금 하는 일, 경과 시간. 도는 중·쉬는 중·답 대기가 서로 다른 표시로 보입니다. |
+| **OVERVIEW** | 프로젝트별로 묶은 모든 세션. 프로젝트 줄마다 그 프로젝트가 어디까지 왔는지 보입니다: 열린 요청, 사용자 답을 기다리는 질문, 남은 결정, 마지막 변화 시각. 세션마다 하네스, 모델과 effort, 짧은 제목, 남은 문맥, 지금 하는 일, 경과 시간. 도는 중·쉬는 중·답 대기가 서로 다른 표시로 보입니다. |
 | **ROUTES** | 요청마다 단계 줄 `plan › execute › test › report`와 그 아래에서 도는 작업자. |
-| **QUESTIONS** | 사용자의 답이나 승인을 기다리는 모든 에이전트, 오래된 순. 하네스가 답 경로를 주면 Fleet에서 바로 답하고, 아니면 해당 세션으로 안내합니다. |
+| **QUESTIONS** | 사용자의 답이나 승인을 기다리는 모든 에이전트: 어느 세션이, 어떤 종류의 질문을, 어느 요청에서, 언제부터 묻는지. 오래된 대기는 답하거나 일이 끝날 때까지 목록에 남고, 오래됐다고 빠지지 않습니다. 하네스가 답 경로를 주면 Fleet에서 바로 답하고, 아니면 해당 세션으로 안내합니다. |
 | **PEERS** | 어떤 세션이 어떤 세션을 지켜보거나 조정하는지, 마지막으로 주고받은 것. |
 | **HISTORY** | 터미널 자리마다 이전 세션들. 새 세션으로 이어진 일도 따라갈 수 있습니다. |
 | **RESOURCES** | 이 기계와 설정한 호스트의 CPU, 메모리, GPU별 사용량, 각 GPU 프로세스를 가진 세션. |
-| **MEMORY** | 오늘 공용 메모리에 저장된 것, 프로젝트별. |
+| **MEMORY** | 프로젝트마다 최근 결정, 단계별 남은 일, 공용 메모리에 마지막으로 저장된 기록. |
 | **MODELS · SYSTEM** | 각 예산이 어떤 실제 모델로 연결되는지, 설치된 하팅 릴리스. |
 
 ### 핵심 화면
@@ -128,7 +134,7 @@ Claude Code, Codex, OpenCode 세션과 하팅이 그 세션들에서 분사한 �
 <table>
   <tr>
     <td width="50%"><img src="docs/fleet/routes.png" alt="ROUTES: 열린 요청 둘. execute 단계의 코드 요청과 eval-asr 작업자가 도는 실험 요청, 작업자의 모델과 경과 시간."><br><sub><b>ROUTES</b> — 요청마다 단계 줄과 그 단계를 도는 작업자.</sub></td>
-    <td width="50%"><img src="docs/fleet/questions.png" alt="QUESTIONS: 7분째 기다리는 결정 하나와 답하는 법, 접힌 오래된 대기 하나, 오늘 답한 질문 셋."><br><sub><b>QUESTIONS</b> — 무엇이 답을 기다리는지, 어떻게 답하는지, 오늘 무엇에 답했는지.</sub></td>
+    <td width="50%"><img src="docs/fleet/questions.png" alt="QUESTIONS: Claude Code 세션이 7분째 기다리는 결정 하나와 언제부터인지, 답하는 법. 그 아래 Codex 세션의 오래된 승인 대기 하나. 오늘 답한 질문 셋."><br><sub><b>QUESTIONS</b> — 무엇이 답을 기다리는지, 언제부터인지, 어떻게 답하는지, 오늘 무엇에 답했는지.</sub></td>
   </tr>
   <tr>
     <td width="50%"><img src="docs/fleet/session.png" alt="세션 페이지: Claude Code 세션 하나의 상태, 문맥 게이지, 지금 하는 일, 그 세션의 요청, 조정하는 OpenCode 세션, 쓰고 있는 GPU."><br><sub><b>세션 페이지</b> — 한 세션의 상태, 문맥, 지금 하는 일, 요청, 연결된 세션, GPU.</sub></td>
@@ -177,21 +183,22 @@ fleet-monitor      # 이전 그룹·프로세스 화면
 
 - Explorer가 기본 `fleet` 화면입니다. 화면 배치와 키 조작은 v4.0 전에
   마무리하는 중입니다.
-- 일부 상태 단어와 활동 줄이 아직 한국어로만 나옵니다. 공통 번역표로 옮길
-  예정입니다.
+- Fleet 화면은 아직 공통 문구 모음에 들어가지 않았습니다. 한국어를 골라도
+  영어로 나오고, MEMORY 화면과 일부 상태 단어는 아직 한국어로만 나옵니다.
+  공통 문구 모음으로 옮길 예정입니다.
 
 ## 빠른 시작
 
 ### 시작 전에
 
 - **Linux 또는 macOS.** Windows(Git Bash)는 실험적입니다.
-- **Python 3.11 이상**과 그 Python용 PyYAML:
-  `python3 -m pip install --user pyyaml`
+- **Python 3.11 이상**(설치기가 확인)과 그 Python용 PyYAML:
+  `python3 -m pip install --user pyyaml` 또는 `python3-yaml` 같은 OS 패키지
 - **Git**, 그리고 `curl` 또는 `wget`.
 - **설치하고 로그인한 에이전트 CLI 하나 이상:** Claude Code, Codex, OpenCode 중
   하나. Claude Code 하나만으로도 됩니다.
 
-<!-- TODO(공개 준비 5단계): 시험한 OS × 하네스 표를 넣고 Python 최소 버전을 확정한다. -->
+<!-- TODO(공개 준비 5단계): 시험한 OS × 하네스 표를 넣는다. -->
 
 ### 설치
 
@@ -217,7 +224,10 @@ SHA-256을 확인합니다. 고른 하네스에 전체 기능 묶음을 바뀌�
 건드리지 않습니다. 이미 열린 셸의 `PATH`도 바꾸지 못하므로, `~/.local/bin`을
 `PATH`에 넣기 전까지는 위처럼 `~/.local/bin/...` 경로를 쓰세요.
 
-설치기가 작업자 기본 권한에 대한 안내를 한 줄 출력합니다. 첫 작업 전에
+`runtime doctor`는 PyYAML이나 herdr처럼 빠진 선택 요소가 있으면 그것과, 그것
+없이 안 되는 일을 알려 줍니다.
+
+설치기가 작업자 기본 권한에 대한 안내를 출력합니다. 첫 작업 전에
 [권한](#권한)을 읽어 주세요.
 
 ### 첫 작업
@@ -229,6 +239,11 @@ Git 프로젝트 안에서 에이전트 CLI를 열고 작은 일을 맡겨 보�
 다른 터미널에서 `fleet`를 열면 진행이 보입니다. 끝나면 바뀐 내용, 확인을 위해
 실행한 것, 못 한 일을 받습니다. 한 줄 수정보다 큰 일이면 계획, 근거, 보고서가
 프로젝트의 `.agent_reports/` 폴더에 남습니다.
+
+요청이 소스 코드를 바꾸면 하팅은 보통 프로젝트 옆의 별도 git worktree
+`<project>-wt/<name>`에서 자기 브랜치로 바꿉니다. 그래서 사용자의 폴더, 브랜치,
+커밋하지 않은 파일은 그대로입니다. 결과에는 변경이 있는 폴더와 브랜치, 커밋했는지가
+나옵니다.
 
 [빠른 시작 안내](QUICKSTART.ko.md)는 이 작업을 실측 시간과 함께 끝까지 따라가고,
 [자주 묻는 질문](FAQ.ko.md)은 `PATH`, Python 버전, 권한을 다룹니다.
@@ -290,8 +305,23 @@ headless:
   `workspace-write` 샌드박스 안에서 승인 질문 없이 돌고, OpenCode 작업자는
   사용자의 OpenCode 권한 설정에서 출발합니다.
 
-Claude Code를 설치하면 설치기가 이 기본값과 파일 경로를 한 줄로 알립니다.
+Claude Code를 설치하면 설치기가 이 기본값과 파일 경로를 짧게 알립니다.
 입력은 요구하지 않습니다.
+
+**Claude Code 사용자 규칙은 OpenCode에도 적용됩니다.** OpenCode에는 사용자
+전역 규칙 파일이 따로 없어서, `~/.claude/rules/`(또는
+`$CLAUDE_CONFIG_DIR/rules/`)에 규칙 파일이 있으면 하팅이 OpenCode의 전역
+`AGENTS.md`를 그 규칙 다음에 하팅 지침이 오는 파일로 씁니다. 처음 그렇게 하는
+설치나 업데이트가 이 사실을 알립니다. 특정 경로에만 적용되는 규칙은 빼고, 규칙
+파일은 읽기만 합니다. 그 결과 규칙 본문은 OpenCode가 쓰는 모델 제공자에게도
+전달됩니다. 끄려면 같은 `dispatch-defaults.yaml`에 아래 두 줄을 넣으세요. 다음
+설치, 업데이트, 또는 `hearting runtime refresh --runtime opencode`가 하팅 지침만
+있는 원래 상태로 되돌립니다.
+
+```yaml
+user_rules:
+  opencode: off
+```
 
 ## 산출물과 현황
 
@@ -403,7 +433,7 @@ git config core.hooksPath tools/git-hooks
 ```
 
 공통 동작은 `core/`, `capabilities/`, `roles/`에서 시작합니다. `adapters/` 아래
-세 어댑터는 그것을 동등하게 투영한 것이며, 유지보수 원칙은
+세 어댑터는 그것을 동등하게 투영한 것이며, 하팅의 목적과 유지보수 원칙은
 [AGENTS.md](AGENTS.md)에 있습니다. 공통 정의를 바꾼 뒤에는 생성물을 다시 만들고
 검사합니다.
 
@@ -424,7 +454,7 @@ python3 tools/generate.py --check
 
 | 목적 | 문서 |
 |---|---|
-| 유지보수 원칙 | [AGENTS.md](AGENTS.md) |
+| 목적과 유지보수 원칙 | [AGENTS.md](AGENTS.md) |
 | 첫 작업, 자주 묻는 질문, 기여 | [QUICKSTART.ko.md](QUICKSTART.ko.md), [FAQ.ko.md](FAQ.ko.md), [CONTRIBUTING.md](CONTRIBUTING.md) |
 | 전체 구조 한눈에 | [MANUAL.md](MANUAL.md) |
 | 설치와 하네스별 투영 | [INSTALL_LAYOUT.md](INSTALL_LAYOUT.md) |

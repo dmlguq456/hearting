@@ -2682,6 +2682,39 @@ class RecoveryTest(ProducerTestBase):
         self.assertEqual(recovered["producer"]["dropped"], [result["cycle_id"]])
         self.assertEqual(P.read_cycle_record(self.root, result["cycle_id"])["state"], "dropped")
 
+    def test_finalize_looks_at_the_roots_open_cycles_before_its_lock(self):
+        # W3 (2026-11-03): on the hearting root the sweep's look at every open cycle (143 of
+        # 1,864) held the admission lock for seconds in each finish; under the lock only the
+        # cycles that look found work for are read again, and the sweep still does that work.
+        self.activate()
+        gone_route, gone_file = self.route(slug="w3-gone")
+        gone = P.begin(self.root, route_file=gone_file, capability="autopilot-code",
+                       intensity="direct", campaign_key="w3-gone")
+        idle_route, idle_file = self.route(slug="w3-idle")
+        idle = P.begin(self.root, route_file=idle_file, capability="autopilot-code",
+                       intensity="direct", campaign_key="w3-idle")
+        route, route_file = self.route(slug="w3-closing")
+        result = P.begin(self.root, route_file=route_file, capability="autopilot-code",
+                         intensity="direct", campaign_key="w3-closing")
+        self.write_output(result)
+        self.close(route, route_file)
+        import shutil
+        shutil.rmtree(gone["cycle_dir"])
+        under_lock = []
+        real_listing = P.list_cycle_records
+
+        def listing(root, **kwargs):
+            if kwargs.get("route_ids") is None and adm.holds_lock(root):
+                under_lock.append("every-cycle-record")
+            return real_listing(root, **kwargs)
+
+        with mock.patch.object(P, "list_cycle_records", side_effect=listing):
+            P.finalize(self.root, cycle_id=result["cycle_id"])
+        self.assertEqual(under_lock, [])
+        self.assertEqual(P.read_cycle_record(self.root, result["cycle_id"])["state"], "sealed")
+        self.assertEqual(P.read_cycle_record(self.root, gone["cycle_id"])["state"], "dropped")
+        self.assertEqual(P.read_cycle_record(self.root, idle["cycle_id"])["state"], "open")
+
     def test_finalize_runs_recovery_first(self):
         result = self._sealing_crash()
         outcome = P.finalize(self.root, cycle_id=result["cycle_id"])
@@ -6152,6 +6185,50 @@ class RouteLaunchContextTest(ProducerTestBase):
         self.assertEqual(Path(env["AGENT_ARTIFACT_OUTPUT_DIR"]), Path(env["AGENT_ARTIFACT_CYCLE_DIR"]) / "artifacts")
 
 
+class FinalizeRefusalOfInvalidNamesTest(ProducerTestBase):
+    """W3 (2026-11-03): a controller retried one refused close 3,719 times, each try hashing the
+    open cycle's 64,272 files (1.7 GB) only to refuse it on one file name."""
+
+    def test_an_invalid_output_name_refuses_the_close_without_hashing(self):
+        self.activate()
+        _route, _route_file, result = self.begin()
+        self.write_output(result)
+        bad = self.write_output(result, rel="evidence/snapshot/<sid>.jsonl", data=b"row\n")
+        with mock.patch.object(P, "_stream_file_facts", wraps=P._stream_file_facts) as hashed:
+            with self.assertRaises(P.ProducerError) as caught:
+                P.finalize(self.root, cycle_id=result["cycle_id"], allow_open_route=True)
+        self.assertEqual(caught.exception.code, "output-invalid")
+        self.assertIn("<sid>.jsonl", caught.exception.detail)
+        self.assertEqual(hashed.call_count, 0)
+        self.assertEqual(P.read_cycle_record(self.root, result["cycle_id"])["state"], "open")
+        bad.rename(bad.with_name("sid.jsonl"))   # fixed by hand, the next close seals as before
+        P.finalize(self.root, cycle_id=result["cycle_id"], allow_open_route=True)
+        self.assertEqual(P.read_cycle_record(self.root, result["cycle_id"])["state"], "sealed")
+
+    # The name refusal keeps its place in the locked close: a refusal that comes before it there
+    # is still the one given when both apply (RV-ADMIT F1).
+
+    def test_a_live_review_lease_is_refused_before_an_invalid_name(self):
+        self.activate()
+        _route, _route_file, result = self.begin()
+        self.write_output(result)
+        self.write_output(result, rel="evidence/snapshot/<sid>.jsonl", data=b"row\n")
+        P.review_lease_acquire(self.root, cycle_id=result["cycle_id"], attempt_id="att-reviewer")
+        with self.assertRaises(P.ProducerError) as caught:
+            P.finalize(self.root, cycle_id=result["cycle_id"], allow_open_route=True)
+        self.assertEqual(caught.exception.code, "cycle-finalize-blocked-live-review")
+
+    def test_an_abandon_without_a_reason_is_refused_before_an_invalid_name(self):
+        self.activate()
+        _route, _route_file, result = self.begin()
+        self.write_output(result)
+        self.write_output(result, rel="evidence/snapshot/<sid>.jsonl", data=b"row\n")
+        with self.assertRaises(P.ProducerError) as caught:
+            P.finalize(self.root, cycle_id=result["cycle_id"], state="abandoned",
+                       abandon_reason="not-a-reason", allow_open_route=True)
+        self.assertEqual(caught.exception.code, "abandon-reason-required")
+
+
 _ADMISSION_HOLDER = """
 import fcntl, os, sys, time
 fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)
@@ -8403,6 +8480,18 @@ class _LineageForkFinalizeFixture(ProducerTestBase):
     def _manifest(self, sealed):
         return json.loads(Path(sealed["manifest_path"]).read_text(encoding="utf-8"))
 
+
+
+class SupersededRouteBeforeInvalidNameTest(_LineageForkFinalizeFixture):
+    def test_a_superseded_route_is_refused_before_an_invalid_name(self):
+        # RV-ADMIT F1: the deterministic lineage refusal is the one given, not `output-invalid`.
+        begin, unused, successor, started, record = self._handoff_cycle("w3-superseded-bad-name")
+        self.write_output(started, "plans/lineage/plan.md")
+        self.write_output(started, "evidence/snapshot/<sid>.jsonl", b"row\n")
+        binding = self._binding(record, begin)
+        with self.assertRaises(P.ProducerError) as caught:
+            P.finalize_exact_cycle(self.root, cycle_id=record["cycle_id"], expected_binding=binding)
+        self.assertEqual(caught.exception.code, "cycle-route-binding-mismatch:superseded-route")
 
 class LineageForkFinalizeReproductionTest(_LineageForkFinalizeFixture):
     """Base API only: the exact controller's own binding seals the successor it

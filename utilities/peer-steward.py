@@ -4819,6 +4819,55 @@ def _already_armed_line(watch_id, arm, paths):
     )
 
 
+def _record_own_watch_identity(watch_id, paths, server):
+    """Name this observer in its arm when its spawner never did.
+
+    A spawner (`watch`, or `_spawn_watch_observer` on reattach) records the
+    observer identity after the spawn, under the arm's claim lock. One killed
+    in between leaves an arm that names no observer or a previous one that has
+    exited, so nothing could wake or replace the observer holding the watch
+    lock. Under the same claim lock either that write already landed, or the
+    spawner is gone and this lock holder names itself. A live watcher other
+    than this process is never overwritten.
+    """
+    pid = os.getpid()
+    start = _proc_start_ticks(pid)
+    if not start:
+        # An empty start would make this live observer read as exited.
+        return _read_json(paths.arm)
+    own = {"pid": pid, "pid_start": start}
+
+    def needs_naming(arm):
+        if not isinstance(arm, dict) or arm.get("watch_id") != watch_id:
+            return False
+        recorded = arm.get("watcher") or {}
+        if {"pid": recorded.get("pid"), "pid_start": recorded.get("pid_start")} == own:
+            return False
+        return not _pid_identity_ok(recorded.get("pid"), recorded.get("pid_start"))
+
+    arm = _read_json(paths.arm)
+    if not needs_naming(arm):
+        return arm
+    claim = _watch_claim_path_for_arm(paths, arm, server)
+    if claim is None:
+        return arm
+    try:
+        claim_fd = _open_lock(claim)
+    except OSError:
+        return arm
+    try:
+        if not _acquire_bounded(claim_fd, _CLAIM_TIMEOUT_MS):
+            return _read_json(paths.arm) or arm
+        current = _read_json(paths.arm)
+        if not needs_naming(current) or paths.receipt.exists():
+            return current if isinstance(current, dict) else arm
+        updated = {**current, "watcher": own}
+        _write_json_atomic(paths.arm, updated)
+        return updated
+    finally:
+        os.close(claim_fd)
+
+
 def cmd_watch_run(args):
     """The detached watcher. Reached only by re-exec from `cmd_watch`."""
     root = _watch_root()
@@ -4887,6 +4936,9 @@ def cmd_watch_run(args):
         # The parent blocks SIGUSR1 across spawn, so a retirement arriving
         # before this handler exists stays pending and wakes us after install.
         signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGUSR1})
+        # Only after the wake handler exists: naming ourselves lets the runner
+        # signal this process.
+        arm = _record_own_watch_identity(args.watch_id, paths, server) or arm
 
         steward_seat = arm.get("steward_seat") or {}
         socket_path = herdr_observation.socket_path_for_endpoint(server)
@@ -5314,6 +5366,11 @@ def cmd_watch_run(args):
                                            "native_wait": wait_record, "observed_ts": _utc_now()}
                             _write_watch_observation(paths, observation)
                             awaiting_readiness = True
+                            if readiness.reason != "shared-readiness-revalidating":
+                                # No refresh was requested: the cached projection
+                                # predates this native result. Without a wake the
+                                # runner would read it only at its next backoff pass.
+                                _wake_shared_runner(peer_obligations.ObligationStore().root)
                     else:
                         state, agent = result_state, wait_record.get("agent") or expected_agent
                         break
@@ -6926,6 +6983,15 @@ def _watch_note_transition_lock_contention(root, watch_id, paths):
         pass
 
 
+def _wake_shared_runner(root):
+    """Ask the existing runner for a pass now; start one if none holds its lock."""
+    try:
+        shared_readiness.wake_runner(root)
+        peer_obligations.ensure_normal_runner(reconciliation_required=True)
+    except Exception:
+        pass
+
+
 def _watch_transition_readiness(target, native_state, arm, expected, server,
                                 watch_id, paths, *, authority_lock_held=False,
                                 deadline=None):
@@ -6963,12 +7029,8 @@ def _watch_transition_readiness(target, native_state, arm, expected, server,
             return SimpleNamespace(state="unknown",
                                    reason="shared-readiness-refresh-unavailable")
         _write_json_atomic(paths.observation, updated)
-        try:
-            shared_readiness.wake_runner(root)
-            peer_obligations.ensure_normal_runner(reconciliation_required=True)
-        except Exception:
-            # A missing response stays pending and reuses this exact request.
-            pass
+        # A missing response stays pending and reuses this exact request.
+        _wake_shared_runner(root)
         return SimpleNamespace(state="pending", reason="shared-readiness-revalidating")
 
     if (isinstance(request, dict) and request.get("identity") == identity

@@ -42,6 +42,9 @@
 #   headless:
 #     claude_permission_mode: bypass   # bypass | allowlist
 #     no_progress_minutes: 30          # launcher quiet window; 0 disables; clamps to 0..1440
+#   user_rules:                        # any schema: Claude user rules in OpenCode's AGENTS.md
+#     opencode: carry                  # carry|on|true|yes or off|false|no; absent = carry;
+#                                      # anything else reads as off with a warning
 #   worker_account:                     # optional schema v4 auth-source paths
 #     claude: ~/.claude-work           # Claude config directory
 #     codex: ~/.codex-work             # CODEX_HOME; auth.json only is selected
