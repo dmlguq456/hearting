@@ -106,6 +106,182 @@
    "en": "[Direction notice] The two review legs agreed on a direction and left nothing to ask, so work started without asking{option}. If anything needs fixing, let me know in your next message.",
    "ko": "[방향 통지] 두 갈래 검토가 같은 방향을 내고 물을 것을 남기지 않아 묻지 않고 시작했습니다{option}. 고칠 점이 있으면 다음 말로 알려 주세요."
   },
+  "fleet.install.after_dialog": {
+   "en": "after the open dialog or input finishes",
+   "ko": "확인 창·입력이 끝나면 넘어감"
+  },
+  "fleet.install.start_failed": {
+   "en": "could not start the new release ({error})",
+   "ko": "새 릴리스 실행 실패 ({error})"
+  },
+  "fleet.install.waiting": {
+   "en": "waiting to switch to {version}: {reason}",
+   "ko": "{version}로 넘어가기 대기: {reason}"
+  },
+  "fleet.loading": {
+   "en": "loading",
+   "ko": "불러오는 중"
+  },
+  "fleet.memory.collapse": {
+   "en": "▼ collapse",
+   "ko": "▼ 접기"
+  },
+  "fleet.memory.count_doing": {
+   "en": "in progress {count}",
+   "ko": "진행 중 {count}"
+  },
+  "fleet.memory.count_open": {
+   "en": "open on record {count}",
+   "ko": "기록상 열림 {count}"
+  },
+  "fleet.memory.count_waiting": {
+   "en": "to verify {count}",
+   "ko": "확인 대기 {count}"
+  },
+  "fleet.memory.db_last_good": {
+   "en": " · last good values",
+   "ko": " · 마지막으로 읽은 값"
+  },
+  "fleet.memory.db_state": {
+   "en": "memory DB {state}",
+   "ko": "메모리 DB {state}"
+  },
+  "fleet.memory.db_unknown": {
+   "en": " · decisions and to-dos unknown",
+   "ko": " · 결정·남은 일 모름"
+  },
+  "fleet.memory.decisions": {
+   "en": "decided",
+   "ko": "결정"
+  },
+  "fleet.memory.expand": {
+   "en": "▶ expand",
+   "ko": "▶ 펼치기"
+  },
+  "fleet.memory.last_change": {
+   "en": "last change {when}",
+   "ko": "마지막 변화 {when}"
+  },
+  "fleet.memory.no_projects": {
+   "en": "no project memory",
+   "ko": "프로젝트 기억 없음"
+  },
+  "fleet.memory.open_work": {
+   "en": "to do",
+   "ko": "남은 일"
+  },
+  "fleet.memory.recent": {
+   "en": "recent",
+   "ko": "최근"
+  },
+  "fleet.memory.short_doing": {
+   "en": "doing {count}",
+   "ko": "진행 {count}"
+  },
+  "fleet.memory.short_open": {
+   "en": "open {count}",
+   "ko": "열림 {count}"
+  },
+  "fleet.memory.short_waiting": {
+   "en": "verify {count}",
+   "ko": "대기 {count}"
+  },
+  "fleet.memory.stage_doing": {
+   "en": "in progress",
+   "ko": "진행 중"
+  },
+  "fleet.memory.stage_open": {
+   "en": "open",
+   "ko": "열림"
+  },
+  "fleet.memory.stage_waiting": {
+   "en": "to verify",
+   "ko": "확인 대기"
+  },
+  "fleet.memory.status": {
+   "en": "projects {projects} · decisions today {decisions} · in progress {doing}",
+   "ko": "프로젝트 {projects} · 오늘 결정 {decisions} · 진행 중 {doing}"
+  },
+  "fleet.memory.status_db": {
+   "en": "projects {projects} · memory DB {state}",
+   "ko": "프로젝트 {projects} · 메모리 DB {state}"
+  },
+  "fleet.models.tidy_shared": {
+   "en": "applies to all three harnesses · change it with Apply",
+   "ko": "세 하네스 공통 · 설정은 Apply로 변경"
+  },
+  "fleet.output.cleaned": {
+   "en": "source cleaned up",
+   "ko": "원천 정리됨"
+  },
+  "fleet.output.earlier_label": {
+   "en": "earlier {sid}",
+   "ko": "이전 {sid}"
+  },
+  "fleet.output.earlier_title": {
+   "en": "earlier conversation · {harness} {sid} · original output",
+   "ko": "이전 대화 · {harness} {sid} · 원래 출력"
+  },
+  "fleet.output.more_lines": {
+   "en": " (+{count} more)",
+   "ko": " (+{count}줄)"
+  },
+  "fleet.output.no_transcript_place": {
+   "en": "transcript location unknown",
+   "ko": "원문 위치 확인 불가"
+  },
+  "fleet.output.reset": {
+   "en": "source was truncated or replaced · read again from the start",
+   "ko": "원천이 잘리거나 교체되어 처음부터 다시 읽음"
+  },
+  "fleet.output.supervisor_only": {
+   "en": "only the supervisor's record remains · source cleaned up",
+   "ko": "감독 기록만 남음 · 원천 정리됨"
+  },
+  "fleet.output.unreadable": {
+   "en": "could not read",
+   "ko": "읽지 못함"
+  },
+  "fleet.output.unreadable_because": {
+   "en": "could not read · {reason}",
+   "ko": "읽지 못함 · {reason}"
+  },
+  "fleet.route.no_stage_record": {
+   "en": "could not read this route's stage record (no route record)",
+   "ko": "이 route의 stage 기록을 읽지 못했습니다 (route 기록 없음)"
+  },
+  "fleet.screen.recovered": {
+   "en": "screen output was blocked for {span}, now redrawn",
+   "ko": "화면 출력이 {span} 막혔다가 다시 그림"
+  },
+  "fleet.screen.stalled": {
+   "en": "screen output is blocked",
+   "ko": "화면 출력이 막혀 있음"
+  },
+  "fleet.span.hour": {
+   "en": "{count} hour",
+   "ko": "{count}시간"
+  },
+  "fleet.span.hours": {
+   "en": "{count} hours",
+   "ko": "{count}시간"
+  },
+  "fleet.span.minute": {
+   "en": "{count} minute",
+   "ko": "{count}분"
+  },
+  "fleet.span.minutes": {
+   "en": "{count} minutes",
+   "ko": "{count}분"
+  },
+  "fleet.span.second": {
+   "en": "{count} second",
+   "ko": "{count}초"
+  },
+  "fleet.span.seconds": {
+   "en": "{count} seconds",
+   "ko": "{count}초"
+  },
   "frame.note_truncated": {
    "en": "…(truncated)",
    "ko": "…(잘림)"

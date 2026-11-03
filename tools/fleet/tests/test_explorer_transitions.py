@@ -1,7 +1,9 @@
 """Pure r13 reducer contract checks."""
+import os
 import unittest
 import json
 from pathlib import Path
+from unittest import mock
 
 from tools.fleet.explorer.frame import draw
 from tools.fleet.explorer.input import ExplorerInput
@@ -10,6 +12,17 @@ from tools.fleet.explorer.view_model import load_fixture
 from tools.fleet.tests.test_explorer_peers import SEPARATOR, _arrow_glyph_delta, _card_boxes
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "explorer"
+# transitions.json holds frames captured from a Korean screen; screen words now come from
+# tools/i18n/messages.json, so the replay declares Korean to compare them cell for cell.
+_KOREAN = mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"})
+
+
+def setUpModule():
+    _KOREAN.start()
+
+
+def tearDownModule():
+    _KOREAN.stop()
 
 
 def _expected_nav(st):

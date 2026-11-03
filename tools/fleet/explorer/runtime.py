@@ -952,7 +952,8 @@ class ExplorerRuntime:
         from .grid import CellGrid
         grid = CellGrid(cols, rows)
         if rows > 0:
-            label = "불러오는 중"
+            from ..config import ui_text
+            label = ui_text("fleet.loading")
             x, y = max(0, (cols - len(label)) // 2), max(0, rows // 2)
             grid.put(max(0, x - 2), y, "⠏", "g_spin")    # turned at draw time, like a working mark
             grid.put(x, y, label, "dim")

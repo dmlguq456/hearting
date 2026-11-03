@@ -23,6 +23,8 @@ from tools.fleet.explorer.state import NavState, reduce
 from tools.fleet.explorer.view_model import load_fixture
 from tools.fleet.tests import test_explorer_transitions as T
 
+T._KOREAN.start()           # the same screen language the test replays the frames in
+
 FIXTURE_DIR = ROOT / "tools" / "fleet" / "tests" / "fixtures" / "explorer"
 check_only = "--check" in sys.argv
 

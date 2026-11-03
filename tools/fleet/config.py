@@ -2,6 +2,10 @@
 import json
 import os
 from pathlib import Path
+import time
+
+_UI_RECHECK_SEC = 5.0      # a changed language preference reaches the screen within this long
+_ui = {}                   # "module": tools/i18n/ui_text.py; "lang": (environment key, language, when)
 
 
 def config_path():
@@ -58,6 +62,40 @@ def declared_language():
     except (OSError, UnicodeError, ValueError):
         pass
     return ""
+
+
+def _ui_catalog():
+    """The shared catalog reader ``tools/i18n/ui_text.py``, loaded once per process."""
+    module = _ui.get("module")
+    if module is None:
+        import importlib.util
+        path = Path(__file__).resolve().parent.parent / "i18n" / "ui_text.py"
+        spec = importlib.util.spec_from_file_location("_hearting_fleet_ui_text", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _ui["module"] = module
+    return module
+
+
+def ui_language():
+    """``en`` or ``ko`` for screen text, from ``declared_language()``.
+
+    A paint asks for many strings, so the answer is kept for a few seconds instead of reading
+    the preference files for each one; a different environment (a test, another HOME) asks again.
+    """
+    key = tuple(os.environ.get(name) for name in
+                ("FLEET_NOW_LANG", "XDG_CONFIG_HOME", "CLAUDE_CONFIG_DIR", "HOME"))
+    now = time.monotonic()
+    held = _ui.get("lang")
+    if held is None or held[0] != key or now - held[2] >= _UI_RECHECK_SEC:
+        held = (key, _ui_catalog().normalize(declared_language()), now)
+        _ui["lang"] = held
+    return held[1]
+
+
+def ui_text(message, /, **fields):
+    """One screen string from ``tools/i18n/messages.json``: English unless Korean is declared."""
+    return _ui_catalog().text(message, ui_language(), **fields)
 
 
 def ensure(*, dry_run=False):
