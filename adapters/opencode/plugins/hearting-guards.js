@@ -427,7 +427,7 @@ function spawnTurnChangeRecord(phase, sid, cwd) {
   if (sessionInfoById.get(sid)?.parentID || v2SessionInfo.get(sid)?.parentID) return
   try {
     const child = spawn("python3", [turnChangeRecord, phase, "--harness", "opencode",
-      "--session", sid, "--cwd", cwd || root], {
+      "--session", sid, "--cwd", cwd || root, "--at", (Date.now() / 1000).toFixed(6)], {
       cwd: root,
       env: { ...process.env, AGENT_HOME: root },
       detached: true,

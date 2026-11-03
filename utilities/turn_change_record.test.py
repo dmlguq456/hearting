@@ -261,6 +261,58 @@ class TurnAttributionTest(Fixture):
         git(scratch_repo, "init", "-q")
         self.assertEqual(T.turn_start("claude", SID, str(scratch_repo), self.env)["state"], "no-work-tree")
 
+    def at(self, phase, when, sid=SID):
+        step = T.turn_start if phase == "start" else T.turn_end
+        return step("claude", sid, str(self.repo), self.env, now=when,
+                    recorder=self.recorder, appender=self.appender)
+
+    def test_a_next_start_that_runs_before_the_previous_end_keeps_both_turns(self):
+        # A prompt queued or injected right after Stop: turn N+1's start step runs before
+        # turn N's end step. Each step carries its hook's own event time.
+        t0 = time.time() - 60
+        self.assertEqual(self.at("start", t0)["state"], "baseline")
+        (self.repo / "greet.py").write_text('print("Hello")\n')      # turn N
+        self.assertEqual(self.at("start", t0 + 20)["state"], "baseline")  # N+1's start ran first
+        self.assertEqual(self.at("end", t0 + 10)["state"], "recorded")    # N's late end
+        self.assertEqual(self.calls[0]["sources"], [["greet.py"]])
+        self.assertIsNone(self.state()["turn_ended_at"])                   # N+1 is still open
+        (self.repo / "notes.txt").write_text("n+1\n")                     # turn N+1
+        self.assertEqual(self.at("end", t0 + 30)["state"], "appended")
+        self.assertEqual(self.appended, [[["notes.txt"]]])
+        self.assertNotIn("prior_turn", self.state())
+
+    def test_an_interrupted_turn_is_still_not_compared(self):
+        # No end event ever comes for an interrupted turn: its kept snapshot is dropped by
+        # the next turn's own end, and the edits between the turns are nobody's.
+        t0 = time.time() - 60
+        self.at("start", t0)
+        (self.repo / "README.md").write_text("interrupted, then the person's edit\n")
+        self.at("start", t0 + 20)
+        self.assertIn("prior_turn", self.state())
+        self.assertEqual(self.at("end", t0 + 30)["state"], "unchanged")
+        self.assertEqual(self.calls, [])
+        self.assertNotIn("prior_turn", self.state())
+
+    def test_a_late_end_without_a_kept_snapshot_leaves_the_open_turn(self):
+        t0 = time.time() - 60
+        self.at("start", t0 + 20)
+        self.assertEqual(self.at("end", t0 + 10)["state"], "late-end")
+        self.assertIsNone(self.state()["turn_ended_at"])
+        (self.repo / "greet.py").write_text('print("Hello")\n')
+        self.assertEqual(self.at("end", t0 + 30)["state"], "recorded")
+        self.assertEqual(self.calls[0]["sources"], [["greet.py"]])
+
+    def test_a_held_lock_is_never_pruned_by_its_age(self):
+        lock = T._state_lock(T.state_path(self.env, "claude", SID))
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        lock.touch()
+        old = time.time() - T.KEEP_SECONDS - 86400
+        os.utime(lock, (old, old))
+        with T._locked(lock, 0.0) as held:
+            self.assertTrue(held)
+            T._prune(lock.parent, time.time())
+            self.assertTrue(lock.exists())
+
     def test_a_work_tree_too_large_to_compare_is_not_walked_again(self):
         (self.repo / "a.txt").write_text("a\n")
         (self.repo / "b.txt").write_text("b\n")
@@ -572,7 +624,9 @@ class LaunchTest(unittest.TestCase):
         self.assertTrue(T.launch("end", "claude", payload, environ={"PATH": "/usr/bin"},
                                  popen=lambda argv, **kw: calls.append((argv, kw))))
         argv, options = calls[0]
-        self.assertEqual(argv[2:], ["end", "--harness", "claude", "--session", SID, "--cwd", "/work/greet"])
+        self.assertEqual(argv[2:9], ["end", "--harness", "claude", "--session", SID, "--cwd", "/work/greet"])
+        self.assertEqual(argv[9], "--at")
+        self.assertLess(abs(float(argv[10]) - time.time()), 60)
         self.assertTrue(options["start_new_session"])
         self.assertEqual(options["stdout"], subprocess.DEVNULL)
 
@@ -617,6 +671,20 @@ class ChildExemptionTest(Fixture):
                 os.environ.pop(key, None)
             T.main(["start", "--harness", "opencode", "--session", "oc-1", "--cwd", str(self.repo)])
         self.assertEqual(self.state("oc-1", "opencode")["entries"], {})
+
+    def test_the_child_step_dates_its_turn_by_the_hooks_event_time(self):
+        with mock.patch.dict(os.environ, self.env):
+            for key in ("AGENT_SESSION_ROLE", "CI", "AGENT_DISPATCH_REGISTERED_WORKER", "AGENT_DISPATCH_DEPTH",
+                        "AGENT_DISPATCH_CHILD", "OPENCODE_DISPATCH_SLUG", "HEARTING_AUTO_RECORD"):
+                os.environ.pop(key, None)
+            at = time.time() - 5
+            T.main(["start", "--harness", "opencode", "--session", "oc-2", "--cwd", str(self.repo),
+                    "--at", f"{at:.6f}"])
+            self.assertAlmostEqual(self.state("oc-2", "opencode")["turn_started_at"], at, places=3)
+            # A time from the future is not an event time: the step's own clock is used.
+            T.main(["start", "--harness", "opencode", "--session", "oc-3", "--cwd", str(self.repo),
+                    "--at", f"{time.time() + 3600:.6f}"])
+            self.assertLess(self.state("oc-3", "opencode")["turn_started_at"], time.time() + 1)
 
 
 class EndToEndTest(Fixture):
