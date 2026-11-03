@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import json
 import contextlib
+import fcntl
 import importlib.util
 import threading
 import os
@@ -64,6 +65,75 @@ class DispatchLogRetentionTest(unittest.TestCase):
 
     def sweep(self, *, at=None):
         return R.sweep(self.jobs, now_ns=self.now if at is None else at, force=True)
+
+    def completion_dir(self, route_id, evidence, *, age_days=8, extra=None):
+        directory = self.root / "completion" / route_id
+        directory.mkdir(parents=True)
+        for name in ("inline.json", "inline.1.json"):
+            (directory / name).write_text(json.dumps({
+                "schema_version": 2, "route_id": route_id, "node_id": "inline",
+                "completion_gate": "inline-complete",
+                "evidence": {"path": evidence, "sha256": "0" * 64}}), encoding="utf-8")
+        (directory / ".inline.completion.lock").write_bytes(b"")
+        if extra:
+            (directory / extra).write_text("{}", encoding="utf-8")
+        old = (self.now - age_days * DAY) / 1_000_000_000
+        for path in (*directory.iterdir(), directory):
+            os.utime(path, (old, old))
+        return directory
+
+    def test_completion_markers_of_a_removed_test_root_go_after_seven_quiet_days(self):
+        self.add_row("att-registered", self.log("registered.jsonl"), ended=self.now - DAY,
+                     route_id="rt-00000000000000aa")
+        gone = os.path.join(tempfile.gettempdir(), "tmpzz_gone0", "ev.txt")
+        self.assertFalse(os.path.lexists(os.path.dirname(gone)))
+        leaked = self.completion_dir("rt-00000000000000a1", gone)
+        kept = {
+            "registered": self.completion_dir("rt-00000000000000aa", gone),
+            "recent": self.completion_dir("rt-00000000000000a2", gone, age_days=3),
+            "present-evidence": self.completion_dir("rt-00000000000000a3", str(self.jobs)),
+            "agent-scratchpad": self.completion_dir(
+                "rt-00000000000000a4", os.path.join(tempfile.gettempdir(), "claude-0", "ev.md")),
+            "other-file": self.completion_dir("rt-00000000000000a5", gone, extra="notes.txt"),
+            "no-evidence": self.completion_dir("rt-00000000000000a6", ""),
+            # A row moved to the dispatch archive (#1183) still names its route.
+            "archived": self.completion_dir("rt-00000000000000a7", gone),
+        }
+        segment = self.root / "archive" / "registry-2026-10"
+        segment.mkdir(parents=True)
+        (segment / "rows.jsonl").write_text(json.dumps({
+            "raw": f"{stamp(self.now - 30 * DAY)}\tdone\t/repo\t/wt\tjob\t"
+                   "attempt_id=att-archived,route_id=rt-00000000000000a7"}) + "\n", encoding="utf-8")
+        result = self.sweep()
+        self.assertEqual((result["completion_removed"], result["completion_examined"]), (1, 8))
+        self.assertFalse(leaked.exists())
+        for why, directory in kept.items():
+            with self.subTest(why=why):
+                self.assertTrue(directory.exists())
+
+    def test_an_ended_attempts_quiet_launch_lock_goes_unless_it_is_held(self):
+        import hashlib
+        log = self.log("lock-owner.jsonl")
+        self.add_row("att-ended", log, ended=self.now - 2 * DAY)
+        self.add_row("att-held", log, ended=self.now - 2 * DAY)
+        self.add_row("att-live", log, status="open", ended=self.now - 2 * DAY)
+        locks = {}
+        for attempt in ("att-ended", "att-held", "att-live", "att-unregistered"):
+            key = hashlib.sha256(attempt.encode()).hexdigest()
+            path = self.root / f"jobs.log.launch.{key}.lock"
+            path.write_bytes(b"")
+            old = (self.now - 8 * DAY) / 1_000_000_000
+            os.utime(path, (old, old))
+            locks[attempt] = path
+        holder = os.open(locks["att-held"], os.O_RDWR)
+        self.addCleanup(os.close, holder)
+        fcntl.flock(holder, fcntl.LOCK_EX)
+        result = self.sweep()
+        self.assertEqual(result["launch_locks_removed"], 1)
+        self.assertFalse(locks["att-ended"].exists())
+        for attempt in ("att-held", "att-live", "att-unregistered"):
+            with self.subTest(attempt=attempt):
+                self.assertTrue(locks[attempt].exists())
 
     def test_only_verified_logs_older_than_fourteen_days_are_removed(self):
         old = self.log("old.jsonl")
