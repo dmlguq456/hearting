@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Checked recovery for a visible Codex main in a Herdr pane.
+"""Checked recovery for a visible Codex main in a Herdr or tmux pane.
 
-This utility deliberately has one host integration: Herdr's pane/agent API.
-It never searches for or falls back to tmux. ``--check`` only reads the current
-pane inventory; ``--start`` repeats that proof, opens a pane in the same Herdr
-workspace through the shared pane opener on the checked socket, leaves focus
-where it is, and asks Herdr to start the protected managed Codex launcher there.
+The pane id decides the host: a tmux pane id (``%N``) is the tmux server
+``$TMUX`` (or ``--tmux-socket``) names, anything else is Herdr's pane API on the
+checked Herdr socket. Neither falls back to the other. ``--check`` only reads
+the source pane; ``--start`` repeats that proof, opens a pane in the same Herdr
+workspace or tmux session through the shared pane opener, leaves focus where it
+is, and starts the protected managed Codex launcher there.
 """
 
 from __future__ import annotations
@@ -23,7 +24,8 @@ import sys
 from typing import Any, Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from terminal_surface import HerdrSurface, Near, open_pane  # noqa: E402
+from terminal_surface import (  # noqa: E402
+    HerdrSurface, Near, TmuxSurface, is_tmux_pane, open_pane, pane_runtime, tmux_socket)
 
 
 EXIT_INVALID = 64
@@ -74,6 +76,52 @@ def validate_herdr_socket(path: str | None = None) -> Path:
     if stat.S_IMODE(info.st_mode) & 0o077:
         raise RecoveryError("herdr-socket-mode-unsafe", str(socket_path))
     return socket_path.resolve(strict=True)
+
+
+def validate_tmux_socket(path: str | None = None) -> Path:
+    raw = path or tmux_socket() or ""
+    if not raw:
+        raise RecoveryError("tmux-socket-required", "$TMUX names no tmux server")
+    socket_path = Path(raw).expanduser()
+    try:
+        info = socket_path.lstat()
+        parent = socket_path.parent.stat()
+    except OSError as exc:
+        raise RecoveryError("tmux-socket-unavailable", str(exc)) from exc
+    if not stat.S_ISSOCK(info.st_mode):
+        raise RecoveryError("tmux-socket-not-socket", str(socket_path))
+    if info.st_uid != os.geteuid() or parent.st_uid != os.geteuid():
+        raise RecoveryError("tmux-socket-owner-mismatch", str(socket_path))
+    # tmux makes its socket group-readable inside an owner-only directory.
+    if stat.S_IMODE(info.st_mode) & 0o007 or stat.S_IMODE(parent.st_mode) & 0o022:
+        raise RecoveryError("tmux-socket-mode-unsafe", str(socket_path))
+    return socket_path.resolve(strict=True)
+
+
+def tmux_checked_pane(
+    pane_id: str, *, workspace: str | None = None, socket_path: str | None = None,
+    runner=_run, which=shutil.which,
+) -> tuple[dict[str, Any], TmuxSurface]:
+    """The source tmux pane's session, window and cwd on the checked server."""
+    if which("tmux") is None:
+        raise RecoveryError("tmux-not-found", "the checked recovery surface requires tmux")
+    surface = TmuxSurface(runner, socket=str(validate_tmux_socket(socket_path)))
+    found = surface._describe(pane_id, "#{session_id}", "#{window_id}", "#{pane_current_path}")
+    if not found:
+        raise RecoveryError("pane-not-found", f"expected one tmux pane {pane_id!r}")
+    session, window, cwd = found
+    if not session or not window:
+        raise RecoveryError("pane-location-missing", pane_id)
+    if not cwd:
+        raise RecoveryError("pane-cwd-missing", pane_id)
+    if workspace is not None:
+        expected = Path(workspace).expanduser().resolve()
+        observed = Path(cwd).expanduser().resolve()
+        if observed != expected:
+            raise RecoveryError("pane-cwd-mismatch", f"expected {expected}, observed {observed}")
+    runtime = pane_runtime(surface.process_info(pane_id))
+    return ({"pane_id": pane_id, "workspace_id": session, "tab_id": window, "cwd": cwd,
+             "agent": runtime[0] if runtime else None}, surface)
 
 
 def protected_launcher(state_path: Path) -> Path:
@@ -207,10 +255,47 @@ def checked_pane(
     return result
 
 
+def _start_tmux(args: argparse.Namespace, *, runner=_run, which=shutil.which) -> dict[str, Any]:
+    workspace = str(Path(args.workspace).expanduser().resolve())
+    source_pane, surface = tmux_checked_pane(
+        args.pane, workspace=workspace, socket_path=getattr(args, "tmux_socket", None),
+        runner=runner, which=which,
+    )
+    launcher = protected_launcher(Path(args.launcher_state).expanduser())
+    launched: dict[str, Any] = {}
+
+    def launch(target: str, created: bool) -> bool:
+        mine = target if created else ""
+        found = surface._describe(target, "#{session_id}", "#{pane_current_path}")
+        if not found or found[0] != source_pane["workspace_id"]:
+            raise RecoveryError("workspace-mismatch", "the new pane left the source session",
+                                created_pane=mine)
+        if created and (not found[1] or Path(found[1]).expanduser().resolve() != Path(workspace)):
+            raise RecoveryError("pane-cwd-mismatch", f"expected created pane cwd {workspace}",
+                                created_pane=mine)
+        if not surface.run(target, shlex.join([str(launcher), "--cd", workspace, *args.agent_args])):
+            raise RecoveryError("tmux-agent-start-failed", "tmux did not take the launch line",
+                                created_pane=mine)
+        launched.update(pane={"pane_id": target, "workspace_id": found[0], "cwd": found[1]})
+        return True
+
+    opened = open_pane(launch=launch, near=Near(surface, pane=args.pane), cwd=workspace)
+    if opened.pane is None:
+        note = opened.notes[0] if opened.notes else ""
+        reason = {"pane-split-failed": "tmux-pane-split-failed",
+                  "pane-tab-create-failed": "tmux-window-create-failed"}.get(
+                      note, "tmux-pane-layout-unavailable")
+        raise RecoveryError(reason, "tmux opened no pane for the recovery")
+    return {"status": "launch-requested", "surface": "tmux", "pane": launched["pane"],
+            "workspace": workspace, "placement": opened.placement, "notes": opened.notes}
+
+
 def start(args: argparse.Namespace, *, runner=_run, which=shutil.which) -> dict[str, Any]:
     # Re-read the source pane at the mutation boundary, then place the new pane
     # with the shared opener on this checked host. Focus stays where it is; the
     # result names the pane. Headless workers use a different path.
+    if is_tmux_pane(args.pane):
+        return _start_tmux(args, runner=runner, which=which)
     workspace = str(Path(args.workspace).expanduser().resolve())
     source_pane = checked_pane(
         args.pane, workspace=workspace, socket_path=args.socket,
@@ -276,6 +361,7 @@ def parser() -> argparse.ArgumentParser:
     mode.add_argument("--start", action="store_true")
     value.add_argument("--pane")
     value.add_argument("--socket", default=os.environ.get("HERDR_SOCKET_PATH", ""))
+    value.add_argument("--tmux-socket", default=tmux_socket() or "")
     value.add_argument("--workspace", default=os.getcwd())
     value.add_argument(
         "--launcher-state",
@@ -294,6 +380,9 @@ def main(argv: list[str] | None = None) -> int:
         harness, sid = session_from_env()
         args.pane = verified_pane(os.environ.get("HERDR_PANE_ID", ""), harness, sid,
                                   socket_path=args.socket)
+        if not args.pane and not os.environ.get("HERDR_PANE_ID") and os.environ.get("TMUX_PANE"):
+            args.pane = verified_pane(os.environ["TMUX_PANE"], harness, sid,
+                                      tmux=args.tmux_socket or None)
     if not args.pane:
         print(_json({"status": "blocked", "reason": "pane-id-required"}))
         return EXIT_INVALID
@@ -301,12 +390,11 @@ def main(argv: list[str] | None = None) -> int:
         args.agent_args = args.agent_args[1:]
     try:
         if args.check:
-            print(_json({
-                "status": "ready", "mode": "check",
-                "pane": checked_pane(
-                    args.pane, workspace=args.workspace, socket_path=args.socket,
-                ),
-            }))
+            pane = (tmux_checked_pane(args.pane, workspace=args.workspace,
+                                      socket_path=args.tmux_socket or None)[0]
+                    if is_tmux_pane(args.pane) else
+                    checked_pane(args.pane, workspace=args.workspace, socket_path=args.socket))
+            print(_json({"status": "ready", "mode": "check", "pane": pane}))
         else:
             print(_json(start(args)))
         return 0
