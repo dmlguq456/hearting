@@ -1177,7 +1177,7 @@ def _proc_start_ticks(pid):
 # The harness flag that puts a launched session in a chosen directory. `herdr agent
 # start` has none of its own — the agent it starts inherits the PANE's shell cwd — so
 # `--cwd` used to move nothing but this CLI process: a session started with
-# `--cwd <hearting>` came up in `SR_CorrNet`, the pane's own directory (measured
+# `--cwd <hearting>` came up in `SR_ModelA`, the pane's own directory (measured
 # 2026-09-10). Codex takes `-C/--cd`; Claude Code and OpenCode have no equivalent today,
 # so for those `--cwd` is REFUSED rather than silently ignored. Launching an agent
 # somewhere other than where the caller said is the failure this exists to prevent, and a

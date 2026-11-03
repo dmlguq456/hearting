@@ -894,7 +894,7 @@ class StartTest(_TmpRootMixin, unittest.TestCase):
     def test_cwd_reaches_the_agent_that_can_take_one(self):
         """`herdr agent start` has no cwd option, so the launched agent inherits the
         PANE's directory. `--cwd` used to be passed only to this CLI process: a session
-        started with `--cwd <hearting>` came up in `SR_CorrNet` (measured 2026-09-10)."""
+        started with `--cwd <hearting>` came up in `SR_ModelA` (measured 2026-09-10)."""
         with mock.patch.object(peer_steward.shutil, "which", return_value="/usr/bin/herdr"), \
              mock.patch.object(peer_steward.subprocess, "run",
                                 return_value=subprocess.CompletedProcess([], 0, stdout="", stderr="")) as run_mock:
@@ -933,7 +933,7 @@ class StartTest(_TmpRootMixin, unittest.TestCase):
 
     def test_shell_prompt_glyphs_and_past_prompt_are_distinct(self):
         screens = [
-            (" user@mgpu-a1  /home/example/NN_Zoo/BC_ResNet  ↱ main ± ", True),
+            (" user@mgpu-a1  /home/example/Project_Zoo/KWS_Net  ↱ main ± ", True),
             ("host ~/project $ ", True), ("#\n\n", True), ("% ", True), ("❯ ", True),
             ("host $\nrunning command\n", False),
             ("host \nDownloading 42%\n", False),
@@ -3530,7 +3530,7 @@ class WatcherReceiptTest(_WatchMixin, unittest.TestCase):
                "agent": {"harness": "codex", "session_id": "target-sid",
                          "name": "peer-a", "pane": "-"},
                "steward": {"harness": "claude", "session_id": "recipient-sid",
-                           "project": "SR_CorrNet"},
+                           "project": "SR_ModelA"},
                "watcher": {}}
         paths = peer_steward._watch_paths(watch_id, self.watch_root)
         paths.arm.write_text(json.dumps(arm), encoding="utf-8")

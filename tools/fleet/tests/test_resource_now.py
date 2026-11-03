@@ -157,11 +157,11 @@ class SnapshotMaintenanceTest(unittest.TestCase):
 
     def test_actual_snapshot_gc_is_plumbing_but_user_git_is_work(self):
         argv = ["git", "--git-dir", "/home/operator/.local/share/opencode/snapshot/project/worktree",
-                "--work-tree", "/work/BC_ResNet", "gc", "--prune=7.days"]
+                "--work-tree", "/work/KWS_Net", "gc", "--prune=7.days"]
         self.assertTrue(self.helper(argv))
         self.assertFalse(self.helper(argv, parent="bash"))
         self.assertFalse(self.helper(["git", "status"]))
-        self.assertFalse(self.helper(["git", "--git-dir", "/work/BC_ResNet/.git", "gc"]))
+        self.assertFalse(self.helper(["git", "--git-dir", "/work/KWS_Net/.git", "gc"]))
         self.assertFalse(self.helper(["git", "--git-dir", "/home/operator/.local/share/opencode/snapshot-other/x", "gc"]))
 
     def test_headless_harness_child_does_not_badge_depth_zero(self):

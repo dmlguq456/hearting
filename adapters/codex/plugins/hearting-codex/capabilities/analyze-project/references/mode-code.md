@@ -126,7 +126,7 @@ Check each item as ✅, ⚠️, or ❌ and add one autopilot-code cleanup recomm
 
 | Item | Status | Notes |
 |---|---|---|
-| Model folders | ✅ | model/TF_Restormer/, model/SR_Separator/ |
+| Model folders | ✅ | model/TF_Enhancer/, model/SR_Separator/ |
 | Config | ⚠️ | yaml and argparse mixed |
 | Train/eval separation | ❌ | one main.py |
 | Prefix pattern | ⚠️ | _ft01_ appears once; inconsistent elsewhere |
@@ -172,11 +172,11 @@ Provide automatic `--ref` suggestions for autopilot-lab. Extract one-line descri
 
 | Model | Domain | Core layers | Dataset | Metrics | Similarity |
 |---|---|---|---|---|---|
-| TF_Restormer | speech restoration / TF dual-path | TF dual-path attention, ConvFFN, LayerNorm+GLU | VCTK / URGENT | PESQ / LSD / SI-SNR / DNSMOS | itself |
-| SR_Separator | speech separation·CSS / TF dual-path | cross-channel attention, RMSNorm+SwiGLU | WSJ0-2mix / LibriCSS | SI-SNRi / SDRi (PIT) / PESQ | shares the complex-STFT front-end and TF dual-path blocks with TF_Restormer |
+| TF_Enhancer | speech restoration / TF dual-path | TF dual-path attention, ConvFFN, LayerNorm+GLU | VCTK / URGENT | PESQ / LSD / SI-SNR / DNSMOS | itself |
+| SR_Separator | speech separation·CSS / TF dual-path | cross-channel attention, RMSNorm+SwiGLU | WSJ0-2mix / LibriCSS | SI-SNRi / SDRi (PIT) / PESQ | shares the complex-STFT front-end and TF dual-path blocks with TF_Enhancer |
 
 ## Reference Suggestion Logic
-- speech restoration / enhancement → TF_Restormer
+- speech restoration / enhancement → TF_Enhancer
 - separation / CSS or correlation-based filtering → SR_Separator
 - prefer dataset and metric matches
 ```

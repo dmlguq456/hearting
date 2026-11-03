@@ -214,7 +214,7 @@ def session_id_for_address(address: object, *, config_dir: object = None) -> Opt
 
 
 def session_id_for_derived_name(name: object, *, home: object = None) -> Optional[str]:
-    """A Claude derived session name (``bc-resnet-15``) → that session's id, else ``None``.
+    """A Claude derived session name (``kws-net-15``) → that session's id, else ``None``.
 
     The inverse of the name the badge is read off. Older ledger rows carry a peer's name
     but no id, and a name and a badge for the same peer are two shapes for one relation —
