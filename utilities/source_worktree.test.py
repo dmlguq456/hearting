@@ -13,6 +13,10 @@ import tempfile
 import unittest
 from unittest import mock
 
+# The card screens these tests compare are Korean and UI text defaults to English,
+# so this suite declares the Korean operator language itself (tools/i18n/ui_text.py).
+os.environ["FLEET_NOW_LANG"] = "Korean"
+
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 sys.path.insert(0, str(HERE))

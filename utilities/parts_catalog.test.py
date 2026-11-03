@@ -19,6 +19,10 @@ import time
 import unittest
 from pathlib import Path
 
+# The card screens these tests compare are Korean and UI text defaults to English,
+# so this suite declares the Korean operator language itself (tools/i18n/ui_text.py).
+os.environ["FLEET_NOW_LANG"] = "Korean"
+
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
