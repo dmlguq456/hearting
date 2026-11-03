@@ -657,6 +657,56 @@ class ReleaseHeldByLiveProcessTest(unittest.TestCase):
             self.assertEqual(distribution._release_held_by_live_process(old),
                              (True, f"live-process:{linked.pid}:unsealed-projection"))
 
+    def test_an_update_keeps_where_current_pointed_before_it_moved_it(self):
+        # The update moves `current` right before it prunes, so every process
+        # started through it predates that move. Started after the move before
+        # it (remembered first), such a process can only hold that previous
+        # target or the new one (RV-BC-P4A R1).
+        import time
+        with tempfile.TemporaryDirectory() as tmp:
+            old, new, current = self._release_family(tmp)
+            mid = old.parent / "v-mid"
+            (mid / "utilities").mkdir(parents=True)
+            (mid / "utilities" / "runner.py").write_text(
+                "import sys\nsys.stdin.readline()\n", encoding="utf-8")
+            step = current.with_name("current.next")
+            step.symlink_to(mid, target_is_directory=True)
+            # destructive-ok: reason=rotate this test's temporary current pointer; boundary=current symlink under TemporaryDirectory
+            os.replace(step, current)
+            earlier = time.time() - 7200
+            os.utime(current, (earlier, earlier), follow_symlinks=False)
+            projected = self._started(
+                [sys.executable, str(current / "utilities" / "runner.py")], tmp)
+            with mock.patch.dict(distribution._PRIOR_POINTER_MOVES, clear=True):
+                distribution._remember_prior_pointer_move(current)
+                step.symlink_to(new, target_is_directory=True)
+                # destructive-ok: reason=rotate this test's temporary current pointer; boundary=current symlink under TemporaryDirectory
+                os.replace(step, current)
+                self.assertEqual(distribution._release_held_by_live_process(old), (False, ""))
+                held = (True, f"live-process:{projected.pid}:unsealed-projection")
+                self.assertEqual(distribution._release_held_by_live_process(mid), held)
+                distribution._PRIOR_POINTER_MOVES.clear()
+                # Without the remembered move the whole family stays held.
+                self.assertEqual(distribution._release_held_by_live_process(old), held)
+
+    def test_a_release_cairn_sync_names_is_an_external_pin(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp).resolve()
+            pinned, other = base / "releases" / "v3.29.2", base / "releases" / "v3.30.0"
+            for release in (pinned, other):
+                release.mkdir(parents=True)
+            config = base / "config" / "cairn-sync" / "config.json"
+            config.parent.mkdir(parents=True)
+            with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(base / "config")}):
+                self.assertEqual(distribution._release_external_pin(pinned), "")    # no file
+                config.write_text(json.dumps({"hearting_home": str(pinned), "schema": "x"}))
+                self.assertEqual(distribution._release_external_pin(pinned), "external-pin:cairn-sync")
+                self.assertEqual(distribution._release_external_pin(other), "")
+                config.write_text("{not json")
+                self.assertEqual(distribution._release_external_pin(pinned), "")
+                config.write_text(json.dumps(["not", "an", "object"]))
+                self.assertEqual(distribution._release_external_pin(pinned), "")
+
     def test_bytecode_of_a_removed_source_tree_goes_after_seven_quiet_days(self):
         import time
         with tempfile.TemporaryDirectory() as tmp:

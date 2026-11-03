@@ -3838,25 +3838,77 @@ def _process_started_at(entry: Path) -> float | None:
         return None
 
 
-def _projection_names_current_only(entry: Path, projections: list[str], family: str) -> bool:
-    """Whether a process can only load the release its `current` pointer names now.
+# The pointer's previous move, kept by this update before it moves `current`:
+# {pointer path: (previous move time, previous target)}.
+_PRIOR_POINTER_MOVES: dict[str, tuple[float, str]] = {}
 
-    Every projected argument goes through the family's own `current` pointer and
-    the process started after that pointer last moved (`os.replace` gives the
-    new link its own mtime): whatever it loaded, then or later, came from the
-    pointer's present target. A process older than the last move, or one using
-    any other link, keeps the whole family.
+
+def _remember_prior_pointer_move(pointer: Path) -> None:
+    """Keep when `current` last moved and where to, before this update moves it."""
+    try:
+        if os.path.islink(pointer):
+            _PRIOR_POINTER_MOVES[str(pointer)] = (os.lstat(pointer).st_mtime,
+                                                  os.path.realpath(pointer))
+    except OSError:
+        pass
+
+
+def _projection_targets(entry: Path, projections: list[str], family: str) -> set[str] | None:
+    """The releases a process started through `current` can have loaded, or None.
+
+    Every projected argument goes through the family's own `current` pointer
+    (`os.replace` gives a moved link its own mtime). A process that started
+    after the pointer's last move can only have loaded its present target. One
+    that started after the move before that, which this update remembered
+    before moving the pointer, can have loaded that previous target or the
+    present one. Anything older, or any other link, is None: the whole family.
     """
     pointer = Path(family.rstrip("/")).parent / "current"
     prefix = str(pointer) + "/"
     if not projections or not all(value.startswith(prefix) for value in projections):
-        return False
+        return None
     try:
         moved = os.lstat(pointer).st_mtime
+        target = os.path.realpath(pointer)
     except OSError:
-        return False
+        return None
     started = _process_started_at(entry)
-    return started is not None and started >= moved + _POINTER_ROTATION_MARGIN_SECONDS
+    if started is None:
+        return None
+    if started >= moved + _POINTER_ROTATION_MARGIN_SECONDS:
+        return {target}
+    prior = _PRIOR_POINTER_MOVES.get(str(pointer))
+    if prior is not None and prior[0] <= moved and started >= prior[0] + _POINTER_ROTATION_MARGIN_SECONDS:
+        return {target, prior[1]}
+    return None
+
+
+# Tools outside the harness that name one release on purpose, read only:
+# {tool: (config path under the config home, key holding a release path)}.
+_EXTERNAL_RELEASE_PINS = {
+    # Cairn's sync pins its Hearting code by design (Cairn RUNBOOK).
+    "cairn-sync": (("cairn-sync", "config.json"), "hearting_home"),
+}
+
+
+def _release_external_pin(candidate: Path) -> str:
+    """The external tool whose own config names this release, or "".
+
+    A missing, unreadable or malformed config is no pin; the file is never written.
+    """
+    config_home = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+    real = os.path.realpath(candidate)
+    for tool, (parts, key) in _EXTERNAL_RELEASE_PINS.items():
+        try:
+            value = json.loads(config_home.joinpath(*parts).read_text(encoding="utf-8")).get(key)
+        except (OSError, ValueError, AttributeError):
+            continue
+        if not isinstance(value, str) or not os.path.isabs(value):
+            continue
+        named = os.path.realpath(value)
+        if named == real or named.startswith(real.rstrip("/") + "/"):
+            return f"external-pin:{tool}"
+    return ""
 
 
 def _release_held_by_live_process(candidate: Path) -> tuple[bool, str]:
@@ -3982,10 +4034,12 @@ def _release_held_by_live_process(candidate: Path) -> tuple[bool, str]:
             projections = [value for value in arguments if value.startswith("/")
                            and os.path.realpath(value) != value
                            and os.path.realpath(value).startswith(family)]
-            if projections and not _projection_names_current_only(entry, projections, family):
-                return True, f"live-process:{entry.name}:unsealed-projection"
-            # Started through `current` after it last moved: it holds only that
-            # pointer's target, which the update keeps as the active release.
+            if projections:
+                targets = _projection_targets(entry, projections, family)
+                if targets is None or real in targets:
+                    return True, f"live-process:{entry.name}:unsealed-projection"
+            # Started through `current` after a known move: it holds only the
+            # targets that pointer has named since, not this candidate.
         if not readable:
             opaque += 1
     if opaque:
@@ -4366,6 +4420,9 @@ def _prune_release_under_writer_boundary(
             return False, why
         if _release_projection_referenced(candidate):
             return False, "runtime-activation-reference"
+        external = _release_external_pin(candidate)
+        if external:
+            return False, external
 
         # Merge helpers take `_registry_lock()` internally. Its same-thread
         # reentrancy reuses this boundary's exact descriptors; every other
@@ -5026,6 +5083,7 @@ def _install_or_update(
         launcher = launcher_path()
         previous_current_raw = _read_link(current)
         previous_current = _capture_leaf(current)
+        _remember_prior_pointer_move(current)
         if (
             (previous_current_raw is None and previous_current.kind != "missing")
             or (
