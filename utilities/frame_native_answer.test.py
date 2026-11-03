@@ -34,10 +34,12 @@ class AskedFromTest(unittest.TestCase):
             with self.subTest(harness):
                 self.assertEqual(N.asked_from(harness, payload), (f"s-{harness}", EXPECTED))
 
-    def test_a_picked_codex_option_wins_over_a_note_beside_it(self):
+    def test_a_picked_codex_option_wins_and_the_note_beside_it_is_kept(self):
         payload = {"tool_name": "request_user_input", "session_id": "s", "tool_input": {"questions": QUESTIONS[1:]},
                    "tool_response": json.dumps({"answers": {"scope": {"answers": ["둘 다", "user_note: 빨리"]}}})}
-        self.assertEqual(N.asked_from("codex", payload)[1][0]["answer"], "둘 다")
+        row = N.asked_from("codex", payload)[1][0]
+        self.assertEqual(row["answer"], "둘 다")
+        self.assertEqual(row["note"], "빨리")     # GA-A5-007: the words beside it are kept as its note
 
     def test_another_tool_or_harness_is_not_a_reply(self):
         self.assertEqual(N.asked_from("claude", {"tool_name": "Bash"}), ("", []))
