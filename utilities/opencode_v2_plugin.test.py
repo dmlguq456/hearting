@@ -1499,6 +1499,64 @@ try {
             self.assertEqual(recorded[0]["answers"], [["B"]])
             self.assertEqual(recorded[0]["args"]["questions"][0]["question"], "Which?")
 
+    def test_v2_worker_and_main_sessions_both_record_a_spec_read(self):
+        # GA-A5-013: the shared contract keeps the spec-read observation for every session;
+        # the V2 worker branch skipped it (main 1 record, worker 0).
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node is unavailable for the V2 plugin module contract")
+        with tempfile.TemporaryDirectory() as tmp:
+            home, project, harness = Path(tmp) / "home", Path(tmp) / "project", Path(tmp) / "harness"
+            for directory in (home, project, harness / "core", harness / "adapters" / "opencode" / "bin"):
+                directory.mkdir(parents=True)
+            (harness / "core" / "CORE.md").write_text("fixture\n")
+            seen = Path(tmp) / "preflight.log"
+            preflight = harness / "adapters" / "opencode" / "bin" / "preflight.sh"
+            preflight.write_text('#!/bin/sh\necho "$@" >> %s\n' % seen)
+            preflight.chmod(0o755)
+            script = r"""
+import { pathToFileURL } from "node:url"
+const plugin = (await import(pathToFileURL(process.env.PLUGIN_PATH))).default
+const hooks = new Map()
+const titles = { ses_worker: "hearting-worker-att-fixture", ses_main: "Main" }
+const ctx = {
+  location: { directory: process.env.TEMP_ROOT, project: { id: "fixture" } },
+  app: { log: async () => {} },
+  session: {
+    get: async ({ sessionID }) => ({ data: { id: sessionID, agent: "build", title: titles[sessionID],
+                                             parentID: null } }),
+    prompt: async () => ({ data: null }), context: async () => ({ data: [] }),
+    hook: async (name, fn) => hooks.set("session." + name, fn),
+  },
+  tool: { hook: async (name, fn) => hooks.set("tool." + name, fn) },
+  shell: { hook: async (name, fn) => hooks.set("shell." + name, fn) },
+  event: { subscribe: async function* ({ signal }) {
+    await new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true }))
+  } },
+  permission: { hook: async (name, fn) => hooks.set("permission." + name, fn) },
+}
+const cleanup = await plugin.setup(ctx)
+try {
+  await hooks.get("session.prompt")({ sessionID: "ses_worker", messageID: "msg_w", agent: "build",
+                                      prompt: { text: "worker prompt" } })
+  for (const sessionID of ["ses_worker", "ses_main"]) {
+    await hooks.get("tool.execute.after")({ tool: "read", sessionID, status: "completed",
+      input: { filePath: "/spec/" + sessionID + "/prd.md" }, result: { content: [{ type: "text", text: "x" }] } })
+  }
+} finally { await cleanup() }
+"""
+            env = {**BASE_ENV, "PLUGIN_PATH": str(ROOT / "adapters/opencode/plugins/hearting-guards.js"),
+                   "TEMP_ROOT": str(project), "HOME": str(home), "AGENT_HOME": str(harness),
+                   "PYTHONDONTWRITEBYTECODE": "1", "XDG_STATE_HOME": str(home / ".state"),
+                   "XDG_CONFIG_HOME": str(home / ".config"), "XDG_DATA_HOME": str(home / ".data"),
+                   "XDG_CACHE_HOME": str(home / ".cache")}
+            result = subprocess.run([node, "--input-type=module", "-e", script],
+                                    cwd=ROOT, env=env, text=True, capture_output=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            reads = [line for line in seen.read_text().splitlines() if line.startswith("read ")]
+            self.assertIn("read /spec/ses_worker/prd.md ses_worker", reads)
+            self.assertIn("read /spec/ses_main/prd.md ses_main", reads)
+
     def test_v2_registers_guards_and_worker_hooks_are_silent(self):
         node = shutil.which("node")
         if not node:

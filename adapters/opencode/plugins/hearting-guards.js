@@ -1211,6 +1211,13 @@ async function setupOpenCodeV2(ctx) {
         metadata: event.status === "error" ? { exit: 1 } : metadata }
       const originalText = output.output
       if (v2WorkerSessions.has(event.sessionID)) {
+        // A worker keeps only the shared contract's observations: the spec-read record
+        // (as the general hook below does for `read`) and the spec-sync nudge.
+        if (event.tool === "read" && event.status === "completed") {
+          const args = event.input || {}
+          const readFile = normalizeFile(ctx, args.filePath || args.path || args.file)
+          if (readFile) collectPreflight("read", [readFile, event.sessionID || "opencode-plugin"])
+        }
         await appendSpecSyncNudge(ctx, { tool: event.tool, sessionID: event.sessionID, args: event.input || {} }, output, root)
       } else {
         await hooks["tool.execute.after"]?.(
