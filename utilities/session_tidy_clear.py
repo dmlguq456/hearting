@@ -1437,7 +1437,13 @@ def _unchanged_since_card(req: dict, seat: "st.Seat") -> str:
     if observation is None:
         return "idle-card-observation-unavailable"
     card, sequence = observation
-    return _card_unchanged_reason(req, card, sequence)
+    reason = _card_unchanged_reason(req, card, sequence)
+    booked = int(req.get("prompt_seq", -1))
+    if (reason == "new-input" and req.get("clear_command") == "compact" and sequence > booked >= 0
+            and st.last_human_prompt_seq(seat) <= booked):
+        # Only task notifications arrived since the booking; /compact keeps their turns too.
+        reason = _card_unchanged_reason(req, card, booked)
+    return reason
 
 
 def _card_unchanged_reason(req: dict, card, sequence: int) -> str:

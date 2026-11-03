@@ -1126,6 +1126,8 @@ def mark_prompt_source(seat: Seat, harness: str, sid: str, sequence: int, source
         current["claim_id"] = claim_id[:96]
     else:
         current.pop("claim_id", None)
+    if source == "notification" and type(current.get("prior_human_seq")) is int:
+        current["last_human_seq"] = current["prior_human_seq"]
     atomic_write_json(path, current)
 
 
@@ -2700,10 +2702,27 @@ def bump_prompt_seq(seat: Seat, harness: str, sid: str, now: float) -> int:
     folds old ones. The source tag is filled immediately by the shared claim classifier.
     """
     seat = session_seat(seat, harness, sid)
+    previous = read_json(_prompt_seq_path(seat))
     seq = read_prompt_seq(seat) + 1
+    prior_human = last_human_prompt_seq(seat) if isinstance(previous, dict) else 0
     atomic_write_json(_prompt_seq_path(seat), {"schema": SCHEMA, "seq": seq, "at": now,
-                                              "harness": harness, "sid": sid, "source": "pending"})
+                                              "harness": harness, "sid": sid, "source": "pending",
+                                              "last_human_seq": seq, "prior_human_seq": prior_human})
     return seq
+
+
+def last_human_prompt_seq(seat: Seat) -> int:
+    """The newest prompt boundary that was not a runtime task notification (older files: the newest)."""
+    current = read_json(_prompt_seq_path(seat))
+    if not isinstance(current, dict):
+        return 0
+    value = current.get("last_human_seq", current.get("seq", 0))
+    return value if type(value) is int and value >= 0 else int(current.get("seq", 0) or 0)
+
+
+def is_task_notification(prompt_text: str) -> bool:
+    """A turn the runtime started for a finished background task (Claude ``<task-notification>``)."""
+    return isinstance(prompt_text, str) and prompt_text.lstrip().startswith("<task-notification>")
 
 
 def _current_request_origin(prompt_text: str, harness: str, sid: str) -> Optional[dict]:
@@ -3078,8 +3097,13 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
             return text
         if event == "prompt":
             sequence = bump_prompt_seq(seat, harness, sid, now)
-            request_origin = _current_request_origin(prompt_text, harness, sid)
-            if request_origin:
+            notification = is_task_notification(prompt_text)
+            request_origin = None if notification else _current_request_origin(prompt_text, harness, sid)
+            if notification:
+                # A finished background task reporting back is new content, not the person:
+                # it neither answers a wait nor rearms or cancels automatic tidy.
+                mark_prompt_source(seat, harness, sid, sequence, "notification")
+            elif request_origin:
                 record_prompt_origin(seat, harness, sid, sequence, request_origin)
             else:
                 # A physical user prompt closes this exact seat's marked wait.
@@ -3089,7 +3113,8 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
                     human_wait_state.close_signal(seat.key, sequence=sequence)
             with contextlib.suppress(BaseException):
                 import session_tidy_clear as clear
-                if not clear.observe_prompt_locked(seat, harness, sid, prompt_text, now, sequence):
+                if not notification and not clear.observe_prompt_locked(seat, harness, sid, prompt_text,
+                                                                        now, sequence):
                     clear.note_real_prompt_locked(seat, harness, sid, sequence, now)
         sessions = session_summary(seat)
         prior = sessions.get((harness, sid))

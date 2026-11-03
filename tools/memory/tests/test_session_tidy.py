@@ -5047,6 +5047,30 @@ class BackgroundAgentCompactTest(TidyCase):
         self.assertNotIn("clear_command", held)
         self.assertEqual(held["snapshot_state"], "ready")
 
+    def test_a_task_notification_is_not_human_input_and_keeps_a_compact_booking(self):
+        notice = "<task-notification>\n<task-id>a1</task-id>\n<status>completed</status>\n</task-notification>"
+        self.agent("a1")
+        seat, req = self.booked()
+        caller = self.logical_seat(seat, "claude", "sid-A")
+        with self.iso.patched_environ(self.extra):
+            path = clear.reservation_path(seat.key)
+            self.assertTrue(clear.mark_compact(seat.key, "claude", "sid-A"))
+            frontier = st.real_prompt_frontier(seat, "claude", "sid-A")
+            st.run_hook("claude", "prompt", "sid-A", cwd=str(self.cwd), prompt_text=notice)
+            self.assertEqual(st.read_prompt_seq(caller), req["prompt_seq"] + 1)       # new content
+            self.assertEqual(st.prompt_state(caller)["source"], "notification")
+            self.assertEqual(st.real_prompt_frontier(seat, "claude", "sid-A"), frontier)  # no rearm
+            held, why = clear.validate_request(path, req["nonce"])
+            self.assertEqual((why, held and held["status"]), ("", "reserved"))     # /compact keeps it
+            held = clear.read_reservation(seat.key)
+            held.pop("clear_command")
+            clear._write_reservation(held)
+            self.assertEqual(clear.validate_request(path, req["nonce"])[1], "new-input")  # a clear does not
+            held["clear_command"] = "compact"
+            clear._write_reservation(held)
+            st.run_hook("claude", "prompt", "sid-A", cwd=str(self.cwd), prompt_text="사람이 친 말")
+            self.assertEqual(clear.validate_request(path, req["nonce"])[1], "new-input")  # the person did
+
     def test_tidy_says_once_that_background_agents_make_it_a_compact(self):
         def tidy():
             args = SimpleNamespace(harness="claude", session_id="sid-A", cwd=str(self.cwd), file=None,
