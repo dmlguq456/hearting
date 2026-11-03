@@ -336,7 +336,8 @@
           {
             "type": "command",
             "command": "sh \"${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/run-hook.sh\" python3 herdr-session-projection.py",
-            "timeout": 5
+            "timeout": 30,
+            "async": true
           },
           {
             "type": "command",
