@@ -10092,6 +10092,101 @@ class CodexPromptGateAndPeerStatusTest(_TmpRootMixin, unittest.TestCase):
         self.assertEqual(self.rpc_calls, [])
 
 
+class UndeliveredWatchSweepReadsTest(_TmpRootMixin, unittest.TestCase):
+    """HOOK-LATENCY: the prompt sweep reads what can be this session's, not every watch.
+
+    Counted reads, not timing: a seat ledger read once per watch made the sweep
+    cost O(all watches of all sessions), so under load its one-second share
+    ran out and the fallback carrier showed nothing.
+    """
+
+    def setUp(self):
+        super().setUp()
+        import dispatch_seat_handover as handover
+        import session_tidy
+        self.handover, self.tidy = handover, session_tidy
+        self.primary = peer_steward.peer_message.peer_state_root()
+        self.root = peer_steward._watch_root()
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.sessions = session_tidy.state_root() / "sessions"
+        self.sessions.mkdir(parents=True, exist_ok=True)
+        identity = mock.patch.object(peer_steward, "_current_session_identity",
+                                     return_value=("me", "claude"))
+        identity.start()
+        self.addCleanup(identity.stop)
+
+    def _watch(self, watch_id, harness, sid, seat):
+        arm = {"watch_id": watch_id, "target": "target-" + watch_id, "server": "default",
+               "until": [], "agent": {"harness": "codex", "pane": "w1:p" + watch_id},
+               "armed_ts": "then", "deadline": None, "wake": "none",
+               "steward": {"harness": harness, "session_id": sid},
+               "steward_seat": {"kind": "pane", "key": seat},
+               "watcher": {"pid": 0, "pid_start": "0"}}
+        (self.root / f"{watch_id}.json").write_text(json.dumps(arm), encoding="utf-8")
+        (self.root / f"{watch_id}.receipt.json").write_text(json.dumps(
+            {"watch_id": watch_id, "target": arm["target"], "steward": arm["steward"]}),
+            encoding="utf-8")
+        return arm
+
+    def _hand_over(self, seat, arm, successor):
+        relation = self.handover._watch_reference_from_arm(arm["watch_id"], self.primary, arm)
+        relation.update(holder={"harness": "claude", "sid": successor},
+                        lineage=[{"from": arm["steward"]["session_id"], "to": successor,
+                                  "snapshot_id": "fixture-" + arm["watch_id"]}])
+        with (self.sessions / f"{seat}.jsonl").open("a", encoding="utf-8") as ledger:
+            ledger.write(json.dumps({
+                "ts": 1.0, "harness": "claude", "sid": successor, "event": "handover",
+                "from": arm["steward"]["session_id"], "seat_key": seat, "bindings": [],
+                "steward": {"schema": 1, "roles": [], "watches": [relation]}}) + "\n")
+
+    def _unrelated(self, start, count):
+        # Other harnesses, other same-harness sessions on two seats, and the
+        # predecessor's own watches it kept or gave to someone else.
+        for index in range(start, start + count):
+            kind = index % 4
+            if kind == 0:
+                self._watch(f"u{index}", "codex", f"codex-{index}", "seat-codex")
+            elif kind in {1, 2}:
+                self._watch(f"u{index}", "claude", f"other-{index}", f"seat-{kind}")
+            else:
+                arm = self._watch(f"u{index}", "claude", "pred", "seat-pred")
+                if index % 8 == 3:
+                    self._hand_over("seat-pred", arm, "someone-else")
+
+    def _counted_sweep(self):
+        reads = []
+        tidy_read, steward_read = self.tidy.read_bytes, peer_steward._read_json
+
+        def read_bytes(path):
+            reads.append(Path(path))
+            return tidy_read(path)
+
+        def read_json(path):
+            reads.append(Path(path))
+            return steward_read(path)
+
+        with mock.patch.object(self.tidy, "read_bytes", side_effect=read_bytes), \
+                mock.patch.object(peer_steward, "_read_json", side_effect=read_json):
+            rows = peer_steward.undelivered_watch_rows()
+        arms = sum(1 for path in self.root.glob("*.json")
+                   if not path.name.endswith((".receipt.json", ".ack.json", ".observation.json")))
+        ledgers = sum(1 for path in reads if path.suffix == ".jsonl")
+        watch_files = sum(1 for path in reads if path.parent == self.root)
+        # Listing the watches reads each arm once; that is the record the filter uses.
+        return sorted(row["watch_id"] for row in rows), ledgers, watch_files - arms
+
+    def test_reads_do_not_grow_with_other_sessions_watches(self):
+        self._watch("mine", "claude", "me", "seat-me")
+        self._hand_over("seat-pred", self._watch("inherited", "claude", "pred", "seat-pred"), "me")
+        self._unrelated(0, 40)
+        forty = self._counted_sweep()
+        self._unrelated(40, 40)
+        eighty = self._counted_sweep()
+        self.assertEqual(forty[0], ["inherited", "mine"])
+        self.assertEqual(eighty[0], ["inherited", "mine"])
+        self.assertEqual(forty[1:], eighty[1:], {"40": forty, "80": eighty})
+
+
 # --- clear (session-tidy auto-clear) ---------------------------------------------------
 
 RULE = "─" * 40
