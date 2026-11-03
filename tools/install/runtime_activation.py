@@ -43,6 +43,7 @@ import user_model_config
 import codex_tui_config
 import codex_override
 import herdr_integration
+import user_rules
 import manifest
 
 
@@ -629,6 +630,57 @@ def _opencode_v2_plugin_entry(entrypoint: Path, server: Path, dest: Path,
     return entry
 
 
+def _opencode_bootstrap_entry(bootstrap: Path, dest: Path) -> dict:
+    """The OpenCode bootstrap link, or a rendered copy led by the user's own rules.
+
+    OpenCode auto-loads only ``<config>/AGENTS.md``, so the user's rules from
+    Claude's user rule folder ride in front of the bootstrap as one marked block.
+    """
+    rules = user_rules.block(paths.runtime_home("claude"))
+    if not rules or not bootstrap.is_file():
+        return _entry(bootstrap, dest, "instructions")
+    try:
+        content = (rules + bootstrap.read_bytes()).decode("utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise ActivationError(f"cannot render OpenCode bootstrap with user rules: {exc}") from exc
+    entry = _entry(bootstrap, dest, "instructions", kind="render")
+    entry["content"] = content
+    entry["content_sha256"] = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    entry["mode"] = 0o600  # the user's rule files are commonly private
+    return entry
+
+
+def _keep_edited_opencode_bootstrap(previous: Optional[dict], scope: str):
+    """Copy a user's edit of the rendered OpenCode AGENTS.md aside so activation can rewrite it.
+
+    The file is Hearting's (its header says to edit the rules folder instead).
+    The edit is kept byte for byte beside it, and activation continues instead
+    of stopping on a collision. Returns the destination to rewrite and one line.
+    """
+    home = paths.runtime_home("opencode", scope)
+    dest = home / "AGENTS.md"
+    record = next((item for item in (previous or {}).get("owned_paths", [])
+                   if isinstance(item, dict) and item.get("dest") == str(dest)
+                   and item.get("kind") == "render"), None)
+    if record is None or dest.is_symlink() or not dest.is_file():
+        return None, []
+    data = dest.read_bytes()
+    if hashlib.sha256(data).hexdigest() == record.get("content_sha256"):
+        return None, []
+    kept = next((path for path in sorted(home.glob("AGENTS.md.edited-*"))
+                 if path.is_file() and not path.is_symlink() and path.read_bytes() == data), None)
+    if kept is None:
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        kept = home / f"AGENTS.md.edited-{stamp}"
+        suffix = 1
+        while kept.exists() or kept.is_symlink():
+            kept = home / f"AGENTS.md.edited-{stamp}-{suffix}"
+            suffix += 1
+        _atomic_bytes(kept, data)
+    return str(dest), [f"OpenCode AGENTS.md had edits; kept them in {kept} and rewrote the file "
+                       "(edit rules in Claude's user rule folder instead)"]
+
+
 def _kernel_agents(source_root: Path) -> set[str]:
     manifest_path = source_root / harness_manifest.MANIFEST_NAME
     if not manifest_path.is_file():
@@ -878,9 +930,10 @@ def _linked_entries(
                               home / "hooks/herdr-agent-state.sh", "hook_config", kind="copy"))
 
     elif runtime == "opencode":
+        entries.append(_entry(source_root, home / "hearting", "instructions"))
+        entries.append(_opencode_bootstrap_entry(
+            source_root / "adapters/opencode/AGENTS.md", home / "AGENTS.md"))
         fixed = [
-            (source_root, home / "hearting", "instructions"),
-            (source_root / "adapters/opencode/AGENTS.md", home / "AGENTS.md", "instructions"),
             (source_root / "core", home / "agent-core", "instructions"),
             (source_root / "capabilities", home / "agent-capabilities", "instructions"),
             (source_root / "roles", home / "agent-roles", "instructions"),
@@ -3197,8 +3250,10 @@ def _trusted_owned(
         else:
             trusted.discard(value)
             # Keep the renderer's existing collision behavior when a user-edited
-            # regular definition would be replaced by a shipped symlink.
+            # regular definition would be replaced by a shipped symlink. A link
+            # the user put in its place stays a preserved user change.
             if (item.get("kind") == "render" and desired_kind.get(value) == "symlink"
+                    and not dest.is_symlink()
                     and not (runtime == "opencode" and projector.opencode_guard_leaf(dest, home))):
                 continue
             user_changed[value] = item
@@ -3239,11 +3294,15 @@ def _apply_transaction(
     protected_paths: Sequence[Path] = (),
     commit_callback=None,
     transaction_snapshot: Optional[dict] = None,
+    rewrite_owned: Sequence[str] = (),
 ) -> List[dict]:
     state_dir = paths.harness_state_dir(runtime, scope)
     tx_root = state_dir / "transactions" / uuid.uuid4().hex
     backup_root = tx_root / "backup"
     owned, user_changed = _trusted_owned(runtime, previous, desired, scope)
+    for value in rewrite_owned:  # an edited Hearting file whose edit is already kept aside
+        owned.add(value)
+        user_changed.pop(value, None)
     legacy_transfer = (_opencode_legacy_guard_transfer(desired, owned, scope)
                        if runtime == "opencode" else None)
     desired_by_dest = {entry["dest"]: entry for entry in desired}
@@ -3372,7 +3431,7 @@ def _apply_transaction(
                         expected=current,
                     )
                     safe_fs.atomic_write_bytes(
-                        auth, item["content"].encode("utf-8"), 0o644,
+                        auth, item["content"].encode("utf-8"), item.get("mode", 0o644),
                         expected=current, create_parents=True,
                     )
                 except (OSError, safe_fs.SafetyError) as exc:
@@ -3970,6 +4029,17 @@ def activate(
     agent_report_lines.extend(dict.fromkeys(item["detail"] for item in desired
                                             if item.get("guard") and item.get("detail")))
     agent_report_lines.extend(_edited_render_lines(runtime, previous, desired))
+    rewrite_owned: List[str] = []
+    # Notices reach the person on every path, including release install/update.
+    notices: List[str] = []
+    if runtime == "opencode":
+        notices.extend(
+            f"OpenCode user rules: skipped {note}"
+            for note in user_rules.collect(paths.runtime_home("claude"))[1])
+        edited, kept_lines = _keep_edited_opencode_bootstrap(previous, scope)
+        rewrite_owned.extend([edited] if edited else [])
+        notices.extend(kept_lines)
+    agent_report_lines.extend(notices)
     digest = _projection_digest(desired)
     packaged_checksum = _bundle_checksum(active_root) if mode == "packaged" else None
     if mode == "packaged" and packaged_checksum is None:
@@ -4120,12 +4190,14 @@ def activate(
         protected_paths=_activation_protected_paths(runtime, scope),
         commit_callback=commit_state,
         transaction_snapshot=transaction_snapshot,
+        rewrite_owned=rewrite_owned,
     )
     retired_memory_state.retire()  # distiller-era state files, once; silent
     report = status(runtime, scope)
     report["preserved"] = list(report.get("user_changed", []))
     report["report_lines"] = (list(context_report_lines) + list(agent_report_lines)
                               + list(report.get("report_lines", [])))
+    report["notices"] = notices
     return report
 
 
