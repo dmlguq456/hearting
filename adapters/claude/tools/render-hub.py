@@ -1,1 +1,0 @@
-../../../tools/render-hub.py

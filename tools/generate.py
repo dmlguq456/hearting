@@ -24,7 +24,6 @@ GENERATORS = [
     ("bootstrap-dispatch", "tools/sync-bootstrap-dispatch.py"),
     ("skill-invocation-policy", "tools/sync-skill-invocation-policy.py"),
     ("manifest-and-catalogs", "tools/build-manifest.py"),
-    ("hub-page", "tools/render-hub.py"),
     ("landing-page", "tools/render-landing.py"),
     ("fleet-svg", "tools/render-fleet-svg.py"),
     ("claude-skill-metadata", "adapters/claude/bin/sync-native-metadata.py"),
