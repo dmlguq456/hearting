@@ -1387,6 +1387,61 @@ try {
                                     cwd=ROOT, env=env, text=True, capture_output=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_v2_shell_reaches_the_route_presence_gate(self):
+        # GA-A5-014: V2 calls its shell tool `shell`; a commit in a repository with no route
+        # is refused exactly as V1's `bash` is, and an ordinary command still passes.
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node is unavailable for the V2 plugin module contract")
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            project = Path(tmp) / "work" / "proj"
+            home.mkdir()
+            (project / "src").mkdir(parents=True)
+            (project / "src" / "engine.py").write_text("x = 1\n")
+            for argv in (["init", "-q"], ["add", "-A"],
+                         ["-c", "user.email=t@e", "-c", "user.name=t", "commit", "-q", "-m", "init"]):
+                subprocess.run(["git", *argv], cwd=project, check=True, capture_output=True)
+            (project / "src" / "engine.py").write_text("x = 2\n")       # a source change to commit
+            script = r"""
+import assert from "node:assert/strict"
+import { pathToFileURL } from "node:url"
+const plugin = (await import(pathToFileURL(process.env.PLUGIN_PATH))).default
+const hooks = new Map()
+const ctx = {
+  location: { directory: process.env.TEMP_ROOT, project: { id: "fixture" } },
+  app: { log: async () => {} },
+  session: {
+    get: async () => ({ data: { id: "ses_main", agent: "build", title: "Main", parentID: null } }),
+    prompt: async () => ({ data: null }), context: async () => ({ data: [] }),
+    hook: async (name, fn) => hooks.set("session." + name, fn),
+  },
+  tool: { hook: async (name, fn) => hooks.set("tool." + name, fn) },
+  shell: { hook: async (name, fn) => hooks.set("shell." + name, fn) },
+  event: { subscribe: async function* ({ signal }) {
+    await new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true }))
+  } },
+  permission: { hook: async (name, fn) => hooks.set("permission." + name, fn) },
+}
+const cleanup = await plugin.setup(ctx)
+const run = (command) => hooks.get("tool.execute.before")({ tool: "shell", sessionID: "ses_main",
+                                                             input: { command } })
+try {
+  await run("ls src")
+  await assert.rejects(run("git commit -am change"), /no route for/)
+} finally { await cleanup() }
+"""
+            env = {**BASE_ENV, "PLUGIN_PATH": str(ROOT / "adapters/opencode/plugins/hearting-guards.js"),
+                   "TEMP_ROOT": str(project), "HOME": str(home), "AGENT_HOME": str(ROOT),
+                   "PYTHONDONTWRITEBYTECODE": "1", "XDG_STATE_HOME": str(home / ".state"),
+                   "XDG_CONFIG_HOME": str(home / ".config"), "XDG_DATA_HOME": str(home / ".data"),
+                   "XDG_CACHE_HOME": str(home / ".cache"), "FLEET_ROUTE_CHAIN_DIR": str(home / "ledgers"),
+                   # The gate leaves the temp dir alone; keep the project outside the gate's.
+                   "TMPDIR": str(home)}
+            result = subprocess.run([node, "--input-type=module", "-e", script],
+                                    cwd=ROOT, env=env, text=True, capture_output=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_v2_registers_guards_and_worker_hooks_are_silent(self):
         node = shutil.which("node")
         if not node:
