@@ -281,6 +281,22 @@ class TurnAttributionTest(Fixture):
         self.assertEqual(self.appended, [[["notes.txt"]]])
         self.assertNotIn("prior_turn", self.state())
 
+    def test_two_starts_before_the_earlier_ends_keep_the_middle_turn(self):
+        # sN, sN+1, sN+2, then the three ends in order: N's snapshot was replaced by N+1's
+        # at sN+2, so N's late end leaves the kept snapshot for N+1's late end.
+        t0 = time.time() - 60
+        self.at("start", t0)
+        (self.repo / "greet.py").write_text('print("Hello")\n')         # turn N
+        self.at("start", t0 + 20)
+        (self.repo / "notes.txt").write_text("n+1\n")                    # turn N+1
+        self.at("start", t0 + 40)
+        self.assertEqual(self.at("end", t0 + 10)["state"], "late-end")   # N: its snapshot is gone
+        self.assertEqual(self.state()["prior_turn"]["turn_started_at"], t0 + 20)
+        self.assertEqual(self.at("end", t0 + 30)["state"], "recorded")   # N+1
+        self.assertEqual(self.calls[0]["sources"], [["notes.txt"]])
+        self.assertIsNone(self.state()["turn_ended_at"])                  # N+2 is still open
+        self.assertNotIn("prior_turn", self.state())
+
     def test_an_interrupted_turn_is_still_not_compared(self):
         # No end event ever comes for an interrupted turn: its kept snapshot is dropped by
         # the next turn's own end, and the edits between the turns are nobody's.
@@ -816,6 +832,59 @@ assert.deepEqual(turns.map((call) => call.args.slice(1, 6)),
   [["start", "--harness", "opencode", "--session", "oc-turn"],
    ["end", "--harness", "opencode", "--session", "oc-turn"]]);
 assert.ok(turns.every((call) => call.options.detached === true && call.args[7] === process.env.HOME));
+hooks.dispose?.({ silent: true });
+'''
+            env = {**os.environ, "PLUGIN_PATH": str(ROOT / "adapters/opencode/plugins/hearting-guards.js"),
+                   "HOME": raw, "XDG_CONFIG_HOME": str(Path(raw) / ".config"),
+                   "XDG_DATA_HOME": str(Path(raw) / ".data"), "XDG_STATE_HOME": str(Path(raw) / ".state"),
+                   "AGENT_HOME": str(ROOT), "PYTHONDONTWRITEBYTECODE": "1",
+                   "AGENT_SESSION_ROLE": "", "AGENT_DISPATCH_CHILD": "",
+                   "AGENT_DISPATCH_DEPTH": "", "OPENCODE_DISPATCH_SLUG": "",
+                   "FLEET_TITLE_REFRESH": "", "HERDR_PANE_ID": ""}
+            result = subprocess.run([node, "--input-type=module", "-e", script], cwd=ROOT,
+                                    env=env, text=True, capture_output=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_opencode_plugin_runs_an_older_step_again_without_the_event_time(self):
+        # An older turn_change_record.py rejects --at with exit 2: the same step runs once
+        # more without it. Any other exit, or an exit 2 of that retry, is left alone.
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node is unavailable")
+        with tempfile.TemporaryDirectory(prefix="opencode-turn-record-old-") as raw:
+            script = '''import assert from "node:assert/strict";
+import childProcess from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
+import { pathToFileURL } from "node:url";
+const turns = [];
+childProcess.spawnSync = () => ({ status: 0, stdout: "[]", stderr: "" });
+childProcess.spawn = (command, args, options = {}) => {
+  const handlers = {};
+  const call = { args, handlers };
+  if (String(args?.[0] || "").endsWith("turn_change_record.py")) turns.push(call);
+  return { on(event, handler) { handlers[event] = handler }, unref() {},
+    stdin: { on() {}, end() {} } };
+};
+syncBuiltinESMExports();
+const { AgentHarnessGuards } = await import(pathToFileURL(process.env.PLUGIN_PATH));
+const hooks = await AgentHarnessGuards({ directory: process.env.HOME, worktree: process.env.HOME,
+  client: {} }, { initialize: false });
+await hooks["chat.message"]({ sessionID: "oc-old", messageID: "m-1" },
+  { parts: [{ type: "text", text: "fix the typo" }] });
+await new Promise((resolve) => setTimeout(resolve, 50));
+assert.equal(turns.length, 1);
+assert.deepEqual(turns[0].args.slice(8, 9), ["--at"]);
+turns[0].handlers.exit(2);
+assert.equal(turns.length, 2);
+assert.deepEqual(turns[1].args.slice(1, 8),
+  ["start", "--harness", "opencode", "--session", "oc-old", "--cwd", process.env.HOME]);
+assert.equal(turns[1].args.length, 8);
+assert.equal(turns[1].handlers.exit, undefined);
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "oc-old" } } });
+await new Promise((resolve) => setTimeout(resolve, 50));
+assert.equal(turns.length, 3);
+turns[2].handlers.exit(0);
+assert.equal(turns.length, 3);
 hooks.dispose?.({ silent: true });
 '''
             env = {**os.environ, "PLUGIN_PATH": str(ROOT / "adapters/opencode/plugins/hearting-guards.js"),

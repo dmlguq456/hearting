@@ -892,12 +892,16 @@ def turn_end(harness: str, sid: str, cwd: str, env, *, now=None, recorder=None, 
             result["state"] = "no-start-snapshot"
             return
         began, top = state.get("turn_started_at"), state.get("top")
-        prior = state.pop("prior_turn", None)
+        prior = state.get("prior_turn")
         if isinstance(began, (int, float)) and now < began:
             # This end happened before the open turn began: the next turn's start step ran
             # first. The open turn is not this one's to close. This turn's own start
             # snapshot was kept; the newer turn's start snapshot stands in for its end.
             result["state"] = "late-end"
+            if (isinstance(prior, dict) and isinstance(prior.get("turn_started_at"), (int, float))
+                    and prior["turn_started_at"] > now):
+                return  # a later turn's kept snapshot: that turn's own late end still needs it
+            state.pop("prior_turn", None)
             if (isinstance(prior, dict) and isinstance(prior.get("turn_started_at"), (int, float))
                     and prior["turn_started_at"] <= now and prior.get("entries") is not None
                     and state.get("entries") is not None and prior.get("top") == top
@@ -908,6 +912,7 @@ def turn_end(harness: str, sid: str, cwd: str, env, *, now=None, recorder=None, 
                     queue(state, prior, {"head": state.get("head") or "", "entries": state["entries"]},
                           top, root, prior["turn_started_at"])
             return
+        state.pop("prior_turn", None)
         opened = (state.get("turn_ended_at") is None and isinstance(began, (int, float)) and top
                   and Path(top).is_dir())
         result["state"] = "no-start-snapshot"
