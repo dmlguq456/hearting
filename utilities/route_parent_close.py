@@ -226,6 +226,151 @@ def _owned_attempts(route, rows, owner):
         selected |= children
 
 
+# Stopping one attempt is Fleet's user kill (#675) run from `close`: the same typed
+# cancellation, so every reader already treats it as a committed cancellation that
+# neither retries nor advances.
+STOP_NOTE = "fleet-kill"
+STOP_EVIDENCE = {"failure_class": "cancelled", "classifier_source": "route-close-attempt-v1",
+                 "reconcile_reason": "user-terminated"}
+
+
+def _user_stopped(metadata):
+    return metadata.get("note") == STOP_NOTE and metadata.get("failure_class") == "cancelled"
+
+
+def _require_stopper(rows, aid, jobs):
+    """Only a parent stops one attempt: the session that answers for its depth-1
+    attempt (owner or frame leg), or that owner itself for one of its children.
+    An unreadable lineage waits for the same command (``require_owner``)."""
+    import route_authority as AUTH
+    caller = os.environ.get("AGENT_DISPATCH_ATTEMPT_ID")
+    if caller == aid:
+        raise ValueError("parent-close-requires-parent")
+    root, seen = rows[aid][1], set()
+    while root.get("dispatch_depth") != "1":
+        parent = root.get("parent_attempt_id")
+        if parent in seen or parent not in rows:
+            raise ValueError("parent-close-owner-not-owned")
+        seen.add(parent)
+        root = rows[parent][1]
+    if caller and caller == root.get("attempt_id"):
+        return
+    AUTH.require_owner(root, AUTH.default_parent_session_id(), jobs, "parent-close-owner-not-owned")
+
+
+def _known_resources(metadata, jobs, attempts):
+    """Every known resource run, preserved exactly as route close preserves it; None when unread."""
+    route = {"route_id": metadata.get("route_id") or metadata.get("owner_route_id"),
+             "route_hash": metadata.get("route_hash") or metadata.get("owner_route_hash"), "nodes": []}
+    path = Path(metadata.get("route_file") or metadata.get("owner_route_file") or os.devnull)
+    try:
+        return known_resources(route, path, jobs, set(attempts))
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+
+
+def _drain_attempt(metadata, resources, grace, kill_wait):
+    """TERM, then KILL after the grace, the attempt's own exact processes; True once none is left."""
+    deadline, sent = time.monotonic() + grace + kill_wait, set()
+    while True:
+        try:
+            processes, observed = _agent_processes(metadata, resources)
+        except OSError:
+            processes, observed = [], False
+        if observed and not processes:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        escalated = time.monotonic() >= deadline - kill_wait
+        for pid, start in processes:
+            if (pid, start, escalated) not in sent:
+                _signal(pid, start, signal.SIGKILL if escalated else signal.SIGTERM)
+                sent.add((pid, start, escalated))
+        time.sleep(0.02)
+
+
+def _stop(jobs, rows, aid, grace, kill_wait):
+    """Stop ``aid`` and its registered descendants; nothing outside them changes."""
+    _require_stopper(rows, aid, jobs)
+    attempts = _owned_attempts(None, rows, aid)
+    pending, stopped = [], []
+    # Children first: a stopped parent never leaves a running child behind it.
+    for current in sorted(attempts - {aid}) + [aid]:
+        fields, meta = rows[current]
+        if fields[1] not in OPEN and not _user_stopped(meta):
+            continue  # its own committed result stands
+        resources = _known_resources(meta, jobs, attempts)
+        observed = resources is not None and _agent_processes(meta, resources)[1]
+        if not observed:
+            # Unknown process evidence grants neither a signal nor a cancellation.
+            pending.append(current)
+            continue
+        if fields[1] in OPEN:
+            # Committed before any signal, so a late result or launch cannot replace it. Only
+            # the same open row closes: a result committed first, a route close that owns the
+            # row, or a changed process identity leaves it untouched.
+            identity = ("pid", "pid_start", "launch_claimed")
+            closed = DC.close_attempt_row_if(
+                jobs, current, STOP_NOTE,
+                lambda fresh, meta=meta: all(DC.parse_registry_metadata(fresh[5]).get(key, "")
+                                             == meta.get(key, "") for key in identity),
+                evidence=dict(STOP_EVIDENCE))
+            if closed:
+                from dispatch_completion_join import materialize_after_terminal_close
+                materialize_after_terminal_close(jobs, current)
+            else:
+                fresh = _rows(jobs, {current}).get(current)
+                if fresh and fresh[0][1] in OPEN:
+                    pending.append(current)  # a route close owns it, or its process changed
+                    continue
+                if not (fresh and _user_stopped(fresh[1])):
+                    continue  # a result committed first stands
+        stopped.append(current)
+        if not _drain_attempt(meta, resources, grace, kill_wait):
+            pending.append(current)
+    return stopped, pending
+
+
+def stop_attempt(attempt_id, *, jobs=None, grace=0.3, kill_wait=0.5):
+    """`close` naming one attempt that is not a route owner: stop exactly that attempt.
+
+    Its route, owner and siblings keep running; its parent receives the cancelled
+    result like any other child result. None for an owner, whose stop is the
+    route close. Repeating the same close finishes a stop left pending.
+    """
+    jobs = jobs_path(jobs)
+    rows = _rows(jobs)
+    if attempt_id not in rows or rows[attempt_id][1].get("worker_type") == "owner":
+        return None
+    stopped, pending = _stop(jobs, rows, attempt_id, grace, kill_wait)
+    fields, meta = _rows(jobs, {attempt_id})[attempt_id]
+    return {"attempt_id": attempt_id, "route_id": meta.get("route_id"), "route_node": meta.get("route_node"),
+            "state": "termination-pending" if pending else "cancelled" if _user_stopped(meta) else "terminal",
+            "status": fields[1], "note": meta.get("note", ""), "stopped_attempts": stopped,
+            "pending_attempts": pending}
+
+
+def stop_route_legs(route, *, jobs=None, grace=0.3, kill_wait=0.5):
+    """Route close of a route whose running work is its frame legs: stop those legs first."""
+    jobs = jobs_path(jobs)
+    if not jobs.exists():
+        return None
+    rows = _rows(jobs)
+    legs = [aid for aid, (fields, meta) in rows.items()
+            if meta.get("worker_type") == "frame" and meta.get("dispatch_depth") == "1"
+            and (meta.get("route_id"), meta.get("route_hash")) == (route["route_id"], route["route_hash"])
+            and (fields[1] in OPEN or _user_stopped(meta))]
+    if not legs:
+        return None
+    stopped, pending = [], []
+    for aid in legs:
+        done, waiting = _stop(jobs, rows, aid, grace, kill_wait)
+        stopped += done
+        pending += waiting
+    return {"state": "termination-pending" if pending else "cancelled", "reason": STOP_NOTE,
+            "route_id": route["route_id"], "stopped_attempts": stopped, "pending_attempts": pending}
+
+
 def request(route, path, *, jobs=None, stop_resources=False, summary=None, commit=None):
     """Serialize the intent with PASS and actual launch claims; no signal here."""
     jobs, path = jobs_path(jobs), Path(path)

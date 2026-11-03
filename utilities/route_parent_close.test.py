@@ -2135,6 +2135,103 @@ class ParentCloseTest(unittest.TestCase):
         self.assertEqual(worker.wait(timeout=2), -signal.SIGTERM)
         self.assertEqual(CLOSE._rows(self.jobs)[self.aid("att-worker")][1]["failure_class"], "pass")
 
+    def frame_leg(self, name, process, *, node="frame"):
+        aid = self.aid(name)
+        meta = {"attempt_schema_version": "2", "dispatch_depth": "1", "transport": "headless",
+                "execution_surface": "registered-headless", "fallback_hop": "same-harness-headless",
+                "registered_worker": "1", "attempt_id": aid, "harness": "codex", "worker_type": "frame",
+                "unit": "plan/frame", "parent_sid": "fixture-parent", "route_id": self.route["route_id"],
+                "route_hash": self.route["route_hash"], "route_file": str(self.path), "route_node": node,
+                "launch_claimed": "1", "launch_started": "1", **DC.process_launch_identity(process.pid)}
+        DC.validate_attempt_metadata(meta)
+        with self.jobs.open("a") as handle:
+            handle.write("\t".join(["2026-10-08T00:00:00Z", "open", str(self.base), str(self.base), aid,
+                                    ",".join(k + "=" + str(v) for k, v in meta.items())]) + "\n")
+        return meta
+
+    def assert_user_stopped(self, name):
+        fields, meta = CLOSE._rows(self.jobs)[self.aid(name)]
+        self.assertEqual((fields[1], meta.get("note"), meta.get("failure_class")),
+                         ("done", "fleet-kill", "cancelled"))
+        self.assertEqual(POLICY.committed_outcome(fields[1], meta), "cancelled")
+        return meta
+
+    def test_close_naming_one_stage_stops_only_that_attempt(self):
+        # 9b5fba: a running worker the parent no longer wants stops alone; the owner, its other
+        # worker and the route keep running, and nothing is recorded against the route.
+        owner = self.process("att-owner")
+        self.row("att-owner", process=owner)
+        target, other = self.process("att-stage-a"), self.process("att-stage-b")
+        self.row("att-stage-a", parent="att-owner", process=target, route_file=str(self.path))
+        self.row("att-stage-b", parent="att-owner", process=other, route_file=str(self.path))
+        command = [sys.executable, str(HERE / "capability-route.py"), "close", "--route", self.aid("att-stage-a")]
+        result = subprocess.run(command, capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        receipt = json.loads(result.stdout)
+        self.assertEqual((receipt["state"], receipt["stopped_attempts"], receipt["pending_attempts"]),
+                         ("cancelled", [self.aid("att-stage-a")], []), receipt)
+        target.wait(timeout=5)
+        self.assert_user_stopped("att-stage-a")
+        self.assertIsNone(owner.poll())
+        self.assertIsNone(other.poll())
+        rows = CLOSE._rows(self.jobs)
+        self.assertEqual({rows[self.aid(n)][0][1] for n in ("att-owner", "att-stage-b")}, {"open"})
+        self.assertIsNone(CLOSE.intent(self.route, self.jobs))
+        self.assertFalse(self.path.with_suffix(".outcome.json").exists())
+        # The same close again reports the settled stop and signals nothing else.
+        again = subprocess.run(command, capture_output=True, text=True, timeout=60)
+        self.assertEqual(json.loads(again.stdout)["state"], "cancelled", again.stderr)
+        self.assertIsNone(owner.poll())
+
+    def test_stopping_one_attempt_needs_its_parent(self):
+        owner = self.process("att-owner")
+        self.row("att-owner", process=owner)
+        target = self.process("att-stage")
+        self.row("att-stage", parent="att-owner", process=target)
+        with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "another-session"}):
+            with self.assertRaisesRegex(ValueError, "parent-close-owner-not-owned"):
+                CLOSE.stop_attempt(self.aid("att-stage"), jobs=self.jobs)
+        with mock.patch.dict(os.environ, {"AGENT_DISPATCH_ATTEMPT_ID": self.aid("att-stage")}):
+            with self.assertRaisesRegex(ValueError, "parent-close-requires-parent"):
+                CLOSE.stop_attempt(self.aid("att-stage"), jobs=self.jobs)
+        self.assertIsNone(target.poll())
+        self.assertEqual(CLOSE._rows(self.jobs)[self.aid("att-stage")][0][1], "open")
+        # The owner itself may stop its own child; an owner is never stopped this way.
+        self.assertIsNone(CLOSE.stop_attempt(self.aid("att-owner"), jobs=self.jobs))
+        with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "another-session",
+                                          "AGENT_DISPATCH_ATTEMPT_ID": self.aid("att-owner")}):
+            self.assertEqual(CLOSE.stop_attempt(self.aid("att-stage"), jobs=self.jobs)["state"], "cancelled")
+        self.assertIsNone(owner.poll())
+
+    def test_closing_a_frame_route_stops_its_running_legs_and_none_is_replaced(self):
+        # 3c32b1: the record used to close while the frame leg kept running to its end.
+        import route_authority as AUTH
+        first, second = self.process("att-frame"), self.process("att-frame-alt")
+        self.frame_leg("att-frame", first)
+        self.frame_leg("att-frame-alt", second, node="frame-alternative")
+        command = [sys.executable, str(HERE / "capability-route.py"), "close", "--route", str(self.path)]
+        result = subprocess.run(command, capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        first.wait(timeout=5)
+        second.wait(timeout=5)
+        self.assertIn("stopped_attempts=", result.stderr)
+        self.assertTrue(self.path.with_suffix(".outcome.json").exists())
+        for name in ("att-frame", "att-frame-alt"):
+            meta = self.assert_user_stopped(name)
+            self.assertIsNone(AUTH._replacement_kind("done", meta, jobs=self.jobs))
+
+    def test_naming_one_frame_leg_stops_only_that_leg(self):
+        first, second = self.process("att-frame"), self.process("att-frame-alt")
+        self.frame_leg("att-frame", first)
+        self.frame_leg("att-frame-alt", second, node="frame-alternative")
+        result = CLOSE.stop_attempt(self.aid("att-frame"), jobs=self.jobs)
+        self.assertEqual(result["state"], "cancelled", result)
+        first.wait(timeout=5)
+        self.assert_user_stopped("att-frame")
+        self.assertIsNone(second.poll())
+        self.assertEqual(CLOSE._rows(self.jobs)[self.aid("att-frame-alt")][0][1], "open")
+        self.assertFalse(self.path.with_suffix(".outcome.json").exists())
+
     def test_unreadable_seat_lineage_waits_instead_of_refusing_or_skipping_the_owner(self):
         # Whether this session holds the live owner is unknown: neither "not owned" nor a close
         # that skips the owner. The same close is the way on; nothing is signalled meanwhile.

@@ -1652,6 +1652,13 @@ Fleet's explicit user kill (`note=fleet-kill`, `failure_class=cancelled`)
 is likewise a committed cancellation. Once its process, owner and cleanup
 obligations settle, it no longer blocks pane completion or retirement as an
 unknown result. It grants neither automatic retry nor successful route advance.
+The same `close --route <attempt id>` naming one attempt that is not its
+route's owner (a stage or review worker, or one frame leg) stops that attempt
+alone with this cancellation: the same parent authority, the row committed
+before any signal, then TERM/KILL of its own processes and registered
+descendants. Its route, owner and every other attempt keep running, and its
+parent receives the cancelled result like any other child result. Closing a
+route also stops its running frame legs before the record closes.
 Already-terminal owned attempts settle through the same terminal cleanup gate
 as the runtime join and reconcile, preserving their committed result,
 completion marker, and delivery evidence.

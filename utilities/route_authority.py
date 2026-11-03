@@ -157,6 +157,8 @@ def _replacement_kind(status, meta, *, jobs=None, lines=None):
     if (meta.get('parent_close_requested') == '1' or
             jobs is not None and route_parent_close.row_requested(meta, jobs)):
         return None
+    if committed_outcome(status, meta) == 'cancelled':
+        return None  # an intentional stop (route close, a user kill) is never replaced
     if meta.get('worker_type') == 'owner' and DR.never_started(status, meta):
         # The launch fence is the execution boundary. A reservation may carry a
         # claim, but its absence of launch_started means it has no worker result.

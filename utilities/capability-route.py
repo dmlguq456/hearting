@@ -12723,6 +12723,7 @@ def _close_route_argument(a):
     if route and not artifact_producer._ROUTE_ID_RE.fullmatch(str(route)) and not Path(route).exists():
         found=attempt_route_file(route,getattr(a,"jobs",None))
         if found is not None:
+            a.named_attempt=str(route)
             return str(found)
     if route and (not artifact_producer._ROUTE_ID_RE.fullmatch(str(route)) or Path(route).exists()):
         return route
@@ -13545,6 +13546,14 @@ def main():
     else:
         if a.command=="close":
             a.route=_close_route_argument(a)
+            if getattr(a,"named_attempt",None):
+                # An attempt that is not its route's owner (a stage worker, one frame leg) is
+                # stopped alone; its route, owner and every other attempt keep running.
+                import route_parent_close
+                stopped=route_parent_close.stop_attempt(a.named_attempt)
+                if stopped is not None:
+                    print(json.dumps(stopped,sort_keys=True))
+                    return
         if a.command=="complete" and getattr(a, "inline", False) and not getattr(a, "route", None):
             try:
                 from owner_route_binding import default_owner_route_file
@@ -13622,6 +13631,13 @@ def main():
             # An unproven terminal gate is recorded and warned about below, never refused:
             # the refusal was bypassed almost every time it fired.
             import route_parent_close
+            # Running frame legs are this route's work too: they stop before the record closes.
+            legs=route_parent_close.stop_route_legs(route)
+            if legs and legs["state"]!="cancelled":
+                print(json.dumps(legs,sort_keys=True))
+                return
+            if legs:
+                print("stopped_attempts="+",".join(legs["stopped_attempts"]),file=sys.stderr)
             outcome=route_parent_close.close(route, a.route, stop_resources=a.stop_resources,
                                             summary=a.summary, commit=a.commit)
             if outcome is None:
