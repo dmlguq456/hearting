@@ -9,8 +9,13 @@ import os
 from pathlib import Path
 import socket
 import shlex
+import shutil
 import subprocess
+import sys
+import time
 import tempfile
+import io
+import contextlib
 import unittest
 from unittest import mock
 
@@ -287,6 +292,96 @@ class InteractiveMainRecoveryTest(unittest.TestCase):
                 RECOVERY.start(self.args(), runner=host, which=lambda _: "/usr/bin/herdr")
         self.assertEqual(raised.exception.reason, "herdr-agent-start-failed")
         self.assertEqual(raised.exception.created_pane, "w-1:p-2")
+
+
+
+@unittest.skipUnless(shutil.which("tmux"), "tmux is not installed")
+class TmuxRecoveryTest(unittest.TestCase):
+    """The same checked recovery on a private tmux server named by its socket."""
+
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.workspace = self.root / "project"
+        self.workspace.mkdir()
+        self.socket = self.root / "r.sock"
+        saved = dict(os.environ)
+        self.addCleanup(lambda: (os.environ.clear(), os.environ.update(saved)))
+        for key in ("TMUX", "TMUX_PANE", "HERDR_PANE_ID", "HERDR_SOCKET_PATH", "AGENT_HERDR_SESSION"):
+            os.environ.pop(key, None)
+        os.environ["AGENT_PEER_LEDGER_ROOT"] = str(self.root / "ledger")
+        self.env = dict(os.environ, SHELL="/bin/sh")
+        started = self.tmux("-f", "/dev/null", "new-session", "-d", "-s", "r1", "-x", "200", "-y", "60",
+                            "-c", str(self.workspace), "sh")
+        if started.returncode:
+            self.fail(f"isolated tmux server did not start: {started.stderr.strip()}")
+        self.addCleanup(lambda: subprocess.run(["tmux", "-S", str(self.socket), "kill-server"],
+                                               capture_output=True, env=self.env, timeout=10, check=False))
+        self.pane = self.tmux("display-message", "-p", "-t", "r1", "#{pane_id}").stdout.strip()
+        self.argv_file = self.root / "launched.txt"
+        launcher = self.root / "codex"
+        launcher.write_text("#!/bin/sh\n# stands in for codex-launcher.py\n"
+                            f"printf '%s\\n' \"$@\" > {shlex.quote(str(self.argv_file))}\nexec sleep 600\n")
+        launcher.chmod(0o700)
+        self.state = self.root / "codex-launcher.json"
+        self.state.write_text(json.dumps({"schema": 2, "phase": "installed", "ingress_path": str(launcher),
+                                          "ingress_sha256": hashlib.sha256(launcher.read_bytes()).hexdigest()}))
+        self.state.chmod(0o600)
+
+    def tmux(self, *args):
+        return subprocess.run(["tmux", "-S", str(self.socket), *args], capture_output=True, text=True,
+                              env=self.env, timeout=10, check=False)
+
+    def main(self, *argv):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = RECOVERY.main([*argv, "--tmux-socket", str(self.socket)])
+        return rc, json.loads(out.getvalue())
+
+    def test_check_then_start_opens_one_unfocused_pane_and_runs_the_protected_launcher(self) -> None:
+        session = self.tmux("display-message", "-p", "-t", self.pane, "#{session_id}").stdout.strip()
+        window = self.tmux("display-message", "-p", "-t", self.pane, "#{window_id}").stdout.strip()
+        rc, checked = self.main("--check", "--pane", self.pane, "--workspace", str(self.workspace))
+        self.assertEqual(rc, 0, checked)
+        self.assertEqual(checked["pane"], {"pane_id": self.pane, "workspace_id": session, "tab_id": window,
+                                           "cwd": str(self.workspace.resolve()), "agent": None})
+        rc, started = self.main("--start", "--pane", self.pane, "--workspace", str(self.workspace),
+                                "--launcher-state", str(self.state))
+        self.assertEqual(rc, 0, started)
+        self.assertEqual((started["status"], started["surface"], started["placement"]),
+                         ("launch-requested", "tmux", "split"))
+        created = started["pane"]["pane_id"]
+        self.assertNotEqual(created, self.pane)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not self.argv_file.exists():
+            time.sleep(.05)
+        self.assertEqual(self.argv_file.read_text().splitlines(), ["--cd", str(self.workspace.resolve())])
+        active = self.tmux("display-message", "-p", "-t", "r1", "#{pane_id}").stdout.strip()
+        self.assertEqual(active, self.pane)
+
+    def test_a_synchronized_window_runs_no_launcher_line(self) -> None:
+        self.tmux("set-option", "-w", "-t", self.pane, "synchronize-panes", "on")
+        rc, result = self.main("--start", "--pane", self.pane, "--workspace", str(self.workspace),
+                               "--launcher-state", str(self.state))
+        self.assertEqual((rc, result["reason"]), (RECOVERY.EXIT_UNAVAILABLE, "tmux-agent-start-failed"))
+        time.sleep(.3)
+        self.assertFalse(self.argv_file.exists())
+        typed = self.tmux("capture-pane", "-p", "-t", self.pane).stdout
+        self.assertNotIn("launched.txt", typed)
+
+    def test_a_pane_in_another_directory_or_an_unsafe_socket_opens_nothing(self) -> None:
+        other = self.root / "other"
+        other.mkdir()
+        rc, result = self.main("--start", "--pane", self.pane, "--workspace", str(other),
+                               "--launcher-state", str(self.state))
+        self.assertEqual((rc, result["reason"]), (RECOVERY.EXIT_UNAVAILABLE, "pane-cwd-mismatch"))
+        os.chmod(self.socket, 0o666)
+        rc, result = self.main("--check", "--pane", self.pane, "--workspace", str(self.workspace))
+        self.assertEqual((rc, result["reason"]), (RECOVERY.EXIT_UNAVAILABLE, "tmux-socket-mode-unsafe"))
+        panes = self.tmux("list-panes", "-a", "-F", "#{pane_id}").stdout.split()
+        self.assertEqual(panes, [self.pane])
+        self.assertFalse(self.argv_file.exists())
 
 
 if __name__ == "__main__":
