@@ -36,6 +36,36 @@ class WorkerRouteGuardTest(unittest.TestCase):
    self.assertEqual(node["id"],"execute")
    self.assertEqual(git["branch"],"guard-fixture")
    self.assertRaisesRegex(G.WorkerRouteError,"observed-outside-sealed-node",G.validate_route_contract,path,"execute",self.route_worktree,self.route_worktree,"autopilot-code","strong","reports/**")
+ def test_launch_tuple_absent_fails_closed_at_launch(self):
+  for case in ("absent",):
+   with self.subTest(case=case), tempfile.TemporaryDirectory() as td:
+    route=self.route()
+    if case=="absent":
+     route.pop("launch_compatibility_tuple")
+     expected="launch-compatibility-tuple-required"
+    self.reseal(route); path=Path(td)/"route.json"; path.write_text(json.dumps(route))
+    # Plain material/spec callers remain compatible with legacy route records.
+    if case=="absent":
+     # This no-phase read is only the legacy material/spec compatibility
+     # check; launch refusal below must exercise the actual start boundary.
+     _,node,_=G.validate_route_contract(path,"execute",self.route_worktree,self.route_worktree)
+     self.assertEqual(node["id"],"execute")
+    with self.assertRaises(G.WorkerRouteError) as ctx:
+     # Keep incompatible and absent tuple cases on the same real launch path.
+     G.validate_route_contract(path,"execute",self.route_worktree,self.route_worktree,launch_phase="start")
+    self.assertEqual(ctx.exception.reason,expected)
+ def test_non_dict_runtime_root_preserves_typed_refusal(self):
+  for runtime in (7,[],None):
+   with self.subTest(runtime=runtime), tempfile.TemporaryDirectory() as td:
+    route=self.route(); route["launch_compatibility_tuple"]["runtime_root"]=runtime
+    self.reseal(route); path=Path(td)/"route.json"; path.write_text(json.dumps(route))
+    with self.assertRaises(G.WorkerRouteError) as caught:
+     G.validate_route_contract(path,"execute",self.route_worktree,self.route_worktree,launch_phase="start")
+    self.assertEqual(caught.exception.reason,"launch-runtime-root-mismatch")
+    detail=json.loads(str(caught.exception))
+    self.assertIn("runtime_root",detail["mismatches"])
+    self.assertIn("hearting/current",detail["recovery"])
+    self.assertIn("AGENT_HOME=",detail["recovery"])
  def test_guard_accepts_subset_and_notation_of_sealed_scope(self):
   # N05: the sealed scope names the generic and the component spec path; a re-check that passes one
   # of them, or writes them with another separator, is the same approved work.

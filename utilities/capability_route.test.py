@@ -4897,6 +4897,33 @@ class TestValidationBasis(unittest.TestCase):
   # A hand-edited composed recipe with a malformed `compose` digests, never crashes.
   for compose in ("x",["autopilot-ship"],None):
    R.TOPO.capability_registry_digest(registry,"autopilot-code",[{"compose":compose}])
+ def test_non_dict_runtime_root_keeps_typed_launch_refusal(self):
+  roots=(7,[],None)
+  with tempfile.TemporaryDirectory() as tmp:
+   fixed_cwd=Path(tmp)/"cwd"; fixed_root=Path(tmp)/"artifacts"
+   fixed_cwd.mkdir(); fixed_root.mkdir()
+   original=R.compile_route(**self.args(cwd=fixed_cwd,artifact_root=fixed_root))
+   env=os.environ.copy(); env["AGENT_HOME"]=self._tmp_home.name
+   env.pop("AGENT_DISPATCH_JOBS",None)
+   expected=str(Path(env.get("XDG_DATA_HOME",str(Path.home()/".local/share")))/"hearting/current")
+   for runtime in roots:
+    with self.subTest(runtime=runtime):
+     route=json.loads(json.dumps(original))
+     route["launch_compatibility_tuple"]["runtime_root"]=runtime
+     route=self._reseal(route)
+     R.verify_route(route,fixed_cwd)
+     compatible,mismatches=R.revalidate_launch_compatibility(route)
+     self.assertFalse(compatible); self.assertIn("runtime_root",mismatches)
+     route_path=Path(tmp)/"route.json"; route_path.write_text(json.dumps(route))
+     result=subprocess.run(
+      [sys.executable,str(P),"verify","--route",str(route_path),"--cwd",str(fixed_cwd),
+       "--launch-phase","start"],capture_output=True,text=True,cwd=str(R.ROOT),env=env,
+     )
+     self.assertEqual(result.returncode,64,result.stderr)
+     self.assertIn("launch-runtime-root-mismatch",result.stderr)
+     self.assertIn("registered=0 started=0 child_spawned=0",result.stderr)
+     self.assertIn(expected,result.stderr)
+     self.assertNotIn("Traceback",result.stderr)
  def test_legacy_route_without_basis_keeps_stale_wording(self):
   route=R.compile_route(**self.args())
   legacy=json.loads(json.dumps(route)); legacy.pop("validation_basis")

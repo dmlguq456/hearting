@@ -201,6 +201,33 @@ class LegacyRouteCompatibilityTest(unittest.TestCase):
             self._manifest(route,nodes)
         self.assertEqual(self.jobs.read_text(),'')
 
+    def test_historical_unit_view_is_scoped(self):
+        import contextvars
+        topo=R.TOPO
+        self.assertEqual(topo._unit_frontmatter('editorial/report')['role'],'deep editor')
+        _,_,route=self.fixture('standard')
+        with mock.patch.object(topo,'_validate_recipe',side_effect=RuntimeError('validator failure')):
+            with self.assertRaisesRegex(RuntimeError,'validator failure'): R.verify_route(route)
+        self.assertEqual(topo._unit_frontmatter('editorial/report')['role'],'deep editor')
+        observed=[]; real=topo._validate_recipe
+        def inspect(*args,**kwargs):
+            observed.append(topo._unit_frontmatter('editorial/report')['role'])
+            return real(*args,**kwargs)
+        _,_,route=self.fixture('standard')
+        with mock.patch.object(topo,'_validate_recipe',side_effect=inspect): R.verify_route(route)
+        self.assertEqual(observed,['fast writer'])
+        self.assertEqual(topo._unit_frontmatter('editorial/report')['role'],'deep editor')
+        fields={'editorial/report':dict(topo._unit_frontmatter('editorial/report'),role='fast writer')}
+        independent=contextvars.Context()
+        with topo._unit_contract_view(fields):
+            returned=topo._unit_frontmatter('editorial/report'); returned['role']='changed'
+            self.assertEqual(topo._unit_frontmatter('editorial/report')['role'],'fast writer')
+            self.assertEqual(independent.run(topo._unit_frontmatter,'editorial/report')['role'],'deep editor')
+            with topo._unit_contract_view({'editorial/report':dict(returned,role='nested')}):
+                self.assertEqual(topo._unit_frontmatter('editorial/report')['role'],'nested')
+            self.assertEqual(topo._unit_frontmatter('editorial/report')['role'],'fast writer')
+        self.assertEqual(topo._unit_frontmatter('editorial/report')['role'],'deep editor')
+
     def test_snapshot_files_match_their_content_addressed_names(self):
         for digest in (R.SD160_REGISTRY_DIGEST, R.SD160_UNIT_CATALOG_DIGEST):
             path=R._sd160_snapshot_path(digest)
