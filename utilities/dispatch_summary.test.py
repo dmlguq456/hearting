@@ -659,6 +659,38 @@ class DispatchSummaryTest(unittest.TestCase):
         self.assertFalse(state["final_refresh_started"])
         self.assertIsNone(titles.read(S.summary_sid(attempt), harness="claude"))
 
+    def test_supervisor_never_recreates_a_removed_owner_state_directory(self):
+        # A fixture's temporary state home can be removed while its detached
+        # supervisor still follows the attempt. The supervisor's later state
+        # writes used to recreate the owner tree mid-removal (Errno 39 on CI).
+        import shutil
+        attempt = "att-owner-root-removed"
+        log = Path(self.tmp.name) / f"owner.{attempt}.codex.jsonl"
+        log.write_text("", encoding="utf-8")
+        child = subprocess.Popen(["sleep", "0.2"], start_new_session=True)
+        start = S.process_observation(child.pid)[1]
+        owner_dir = S.owner_state_path("codex", attempt).parent
+        real_proc_live = S._proc_live
+        removed = []
+
+        def remove_owner_root_once(pid, pid_start):
+            if not removed:
+                self.assertTrue(S.owner_state_path("codex", attempt).is_file())
+                shutil.rmtree(S.owner_root())
+                removed.append(True)
+            return real_proc_live(pid, pid_start)
+
+        with mock.patch.object(S, "_proc_live", side_effect=remove_owner_root_once), \
+                mock.patch.object(S, "_refresh", return_value=False):
+            self.assertEqual(S.supervise(
+                attempt_id=attempt, harness="codex", transcript=log,
+                target_pid=child.pid, target_start=start, poll=0.02,
+                initial_delay=0, final_grace=0.1, log_quiet=0.01), 0)
+        child.wait(timeout=2)
+        self.assertEqual(removed, [True])
+        self.assertFalse(owner_dir.exists())
+        self.assertFalse(S.owner_root().exists())
+
     def test_duplicate_supervisor_announcements_are_invalid(self):
         log = Path(self.tmp.name) / "owner.att-duplicate.claude.jsonl"
         event = self._announce("11111111-2222-3333-4444-555555555555", "/wt")

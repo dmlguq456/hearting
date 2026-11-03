@@ -1166,7 +1166,7 @@ class AdapterV11Test(unittest.TestCase):
  def test_detached_selection_is_promoted_before_launch_without_failure_exposure(self):
   for harness in ("codex","claude"):
    for repetition in range(4):
-    with self.subTest(harness=harness,repetition=repetition), tempfile.TemporaryDirectory() as td:
+    with self.subTest(harness=harness,repetition=repetition), self.reaped_tempdir() as td:
      root=Path(td); repo,art=self.fixture(root); jobs=root/"jobs.log"; logs=root/"logs"; fakebin=root/"bin"; fakebin.mkdir()
      fake=fakebin/harness; fake.write_text("#!/bin/sh\n[ \"$1\" = app-server ] && exit 69\nexit 0\n",encoding="utf-8"); fake.chmod(0o755)
      self.seed_parent(jobs,repo,harness=harness)
@@ -1215,7 +1215,7 @@ class AdapterV11Test(unittest.TestCase):
      self.assertIn("\topen\t",row)
  def test_opencode_depth_one_uses_same_prelaunch_lifecycle_promotion(self):
   for repetition in range(3):
-   with self.subTest(repetition=repetition), tempfile.TemporaryDirectory() as td:
+   with self.subTest(repetition=repetition), self.reaped_tempdir() as td:
     root=Path(td); repo,art=self.fixture(root); jobs=root/"jobs.log"; logs=root/"logs"; fakebin=root/"bin"; fakebin.mkdir()
     fake=fakebin/"opencode"; fake.write_text(fake_shell("opencode","exit 0\n"),encoding="utf-8"); fake.chmod(0o755)
     wrapper=self.load_wrapper("opencode")
@@ -1409,8 +1409,25 @@ class AdapterV11Test(unittest.TestCase):
   self.concurrent_codex_start()
  def test_duplicate_codex_start_after_launch_metadata_launches_exactly_one_child(self):
   self.concurrent_codex_start(after_launch=True)
- def concurrent_codex_start(self,after_launch=False):
+ @contextlib.contextmanager
+ def reaped_tempdir(self):
+  """A fixture root removed only after the helpers its detached launch left.
+
+  A detached launch leaves dispatch_summary supervise and dispatch-reap-watch
+  running past the test body; they write owner state and registry rows into
+  this root after the child exits. Stop them before the directory goes, or a
+  late write races its removal (Errno 39 on CI).
+  """
   with tempfile.TemporaryDirectory() as td:
+   try:
+    yield td
+   finally:
+    fixture_processes.reap(td)
+ def concurrent_codex_start(self,after_launch=False):
+  with self.reaped_tempdir() as td:
+   self._concurrent_codex_start_in(td,after_launch)
+
+ def _concurrent_codex_start_in(self,td,after_launch):
    root=Path(td); repo,art=self.fixture(root); jobs=root/"jobs.log"; logs=root/"logs"
    fakebin=root/"bin"; fakebin.mkdir(); count=root/"child-count"
    fake=fakebin/"codex"
@@ -1467,7 +1484,7 @@ class AdapterV11Test(unittest.TestCase):
  def test_all_wrappers_report_override_rejected_for_transient_scope(self):
   # W-1
   for harness in ("codex","claude"):
-   with self.subTest(harness=harness), tempfile.TemporaryDirectory() as td:
+   with self.subTest(harness=harness), self.reaped_tempdir() as td:
     root=Path(td); repo,art=self.fixture(root); jobs=root/"jobs.log"; logs=root/"logs"; fakebin=root/"bin"; fakebin.mkdir()
     fake=fakebin/harness; fake.write_text("#!/bin/sh\nexit 0\n",encoding="utf-8"); fake.chmod(0o755)
     self.seed_parent(jobs,repo,harness=harness)
@@ -1503,7 +1520,7 @@ class AdapterV11Test(unittest.TestCase):
  def test_all_wrappers_report_override_absent_without_override_env(self):
   # W-2
   for harness in ("codex","claude"):
-   with self.subTest(harness=harness), tempfile.TemporaryDirectory() as td:
+   with self.subTest(harness=harness), self.reaped_tempdir() as td:
     root=Path(td); repo,art=self.fixture(root); jobs=root/"jobs.log"; logs=root/"logs"; fakebin=root/"bin"; fakebin.mkdir()
     fake=fakebin/harness; fake.write_text("#!/bin/sh\nexit 0\n",encoding="utf-8"); fake.chmod(0o755)
     self.seed_parent(jobs,repo,harness=harness)
@@ -1539,7 +1556,7 @@ class AdapterV11Test(unittest.TestCase):
   # deterministic post-exit launch_outcome (never left unverified), so the
   # checked post-exit-receipt fallback is not poisoned by an incomplete row.
   for harness in ("codex","claude","opencode"):
-   with self.subTest(harness=harness), tempfile.TemporaryDirectory() as td:
+   with self.subTest(harness=harness), self.reaped_tempdir() as td:
     root=Path(td); repo,art=self.fixture(root); jobs=root/"jobs.log"; logs=root/"logs"
     fakebin=root/"bin"; fakebin.mkdir()
     fake=fakebin/harness
@@ -1619,7 +1636,7 @@ class AdapterV11Test(unittest.TestCase):
   # launch_outcome=never-launched -- never the reaped-and-proved-empty
   # claim -- even though the process group is provably empty after kill.
   for harness in ("codex","claude","opencode"):
-   with self.subTest(harness=harness), tempfile.TemporaryDirectory() as td:
+   with self.subTest(harness=harness), self.reaped_tempdir() as td:
     root=Path(td); repo,art=self.fixture(root); jobs=root/"jobs.log"; logs=root/"logs"
     fakebin=root/"bin"; fakebin.mkdir()
     fake=fakebin/harness

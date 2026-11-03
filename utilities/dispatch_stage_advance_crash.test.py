@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """A-16: the five stage-advance crash windows replay to <= 1 successor attempt.
 
-Mirrors `dispatch_recovery_crash.test.py:129
-test_at9_all_crash_boundaries_replay_to_one_blocked_retry` -- inject a raise at
-each of `coordinate_stage_advance`'s five named checkpoints, verify the
+Inject a raise at each of `coordinate_stage_advance`'s five named checkpoints, verify the
 already-committed record survives, then replay without injection and assert
 the total successor-start count across BOTH runs never exceeds one, and that
 replay returns the identical `stage_advance_id`.

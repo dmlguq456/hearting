@@ -48,6 +48,8 @@ from dispatch_pending_delivery import LEGACY_NOTICE_ID_RE
 
 IDLE_SECONDS = 3600
 DUE_SECONDS = 300
+# While the last pass left due homes behind, the next pass may start sooner.
+BACKLOG_DUE_SECONDS = 60
 EXAMINE_LIMIT = 128
 REMOVE_LIMIT = 16
 EXAMINE_BUDGET_SECONDS = 10
@@ -2826,7 +2828,9 @@ def _sweep(jobs: Path, now_ns: int, force: bool, started: float) -> dict:
             if not admitted:
                 return {"skipped": "busy"}
             state = _load_state(layout)
-            if not force and now_ns - state["last_pass_ns"] < DUE_SECONDS * 10**9 and state["last_pass_ns"] <= now_ns:
+            last = state.get("last_result")
+            gap = BACKLOG_DUE_SECONDS if isinstance(last, dict) and last.get("more") else DUE_SECONDS
+            if not force and now_ns - state["last_pass_ns"] < gap * 10**9 and state["last_pass_ns"] <= now_ns:
                 return {"skipped": "not-due"}
             # The delivery-record prune runs under the retention lock and DUE
             # gate (they are its cadence), before any delivery index is built,
@@ -2938,6 +2942,14 @@ def _run_pass(jobs: Path, root: Path, layout: _Layout, state: dict, now_ns: int,
                 idle_from = max(start, verdict.activity_ns, mark, ident[3])
                 if now_ns - idle_from >= IDLE_SECONDS * 10**9:
                     due.append((key, ident[:3], verdict, start, binding))
+                    # Each detach re-reads the registry, so removal is the slow
+                    # step. Once the removal budget is full, stop examining:
+                    # the cursor stays on the last candidate and the next pass
+                    # starts there, rather than skipping a whole cycle of due
+                    # homes this pass could not remove anyway.
+                    if len(due) >= budget:
+                        result["more"] = 1
+                        break
                 else:
                     _count(result["kept"], "within-window")
         finally:
@@ -2946,6 +2958,7 @@ def _run_pass(jobs: Path, root: Path, layout: _Layout, state: dict, now_ns: int,
         for key, ident, verdict, start, binding in due:
             if budget <= 0 or time.monotonic() > deadline:
                 _count(result["kept"], "deferred")
+                result["more"] = 1
                 continue
             budget -= 1
             outcome = _detach(ctx, key, ident, verdict.attempt, verdict.raw, start,
