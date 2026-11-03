@@ -245,6 +245,26 @@
   "route.tier.inline": {
    "en": "current-session (tier not recorded)",
    "ko": "current-session(등급 미기록)"
+  },
+  "tidy.say.accepted": {
+   "en": "The card and memory tidy are accepted. The window-clear result will be reported in one line on your next input.",
+   "ko": "카드와 기억 정리 접수를 마쳤습니다. 창 비우기 결과는 다음 입력 때 한 줄로 알려 드립니다."
+  },
+  "tidy.say.clear_and_continue": {
+   "en": "When the input box is empty, this window will be cleared and a new session will receive the card and continue. Typing before then keeps the window.",
+   "ko": "입력창이 비어 있으면 곧 이 창을 비우고, 새 세션이 카드를 받아 이어서 진행합니다. 그 전에 입력하시면 비우지 않습니다."
+  },
+  "tidy.say.clear_soon": {
+   "en": "When the input box is empty, this window will be cleared shortly. Typing before then keeps the window.",
+   "ko": "입력창이 비어 있으면 곧 이 창을 비웁니다. 그 전에 입력하시면 비우지 않습니다."
+  },
+  "tidy.say.window_kept": {
+   "en": "This window stays as it is. You can now {command} or close it.",
+   "ko": "이 창은 그대로 둡니다. 이제 {command} 하거나 닫아도 됩니다."
+  },
+  "tidy.say.you_can_now": {
+   "en": "You can now {command} or close it.",
+   "ko": "이제 {command} 하거나 닫아도 됩니다."
   }
  }
 }

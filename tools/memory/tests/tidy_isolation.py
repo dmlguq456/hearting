@@ -199,6 +199,8 @@ class IsolatedEnv:
             # Same pin as tools/memory/test-isolation.sh: no detached exchange worker is
             # spawned by a write or read made inside a test.
             "MEM_EXCHANGE_AUTO": "0",
+            # UI text defaults to English; the tidy suites' stored lines are Korean.
+            "FLEET_NOW_LANG": "Korean",
         }
         path = _safe_path(os.environ.get("PATH", ""))
         env["PATH"] = path or "/usr/local/bin:/usr/bin:/bin"

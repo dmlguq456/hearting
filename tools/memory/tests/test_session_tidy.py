@@ -25,6 +25,11 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
+# The say= lines these tests compare are Korean and UI text defaults to English, so the
+# in-process calls declare the Korean operator language (subprocesses get it from
+# tidy_isolation).
+os.environ["FLEET_NOW_LANG"] = "Korean"
+
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
 sys.path.insert(0, str(HERE))
@@ -4089,6 +4094,24 @@ class TidyOneCallTest(TidyCase):
         self.assertEqual(line("clear=skipped reason=new-input", harness="opencode"), "이제 /new 하거나 닫아도 됩니다.")
         self.assertEqual(line("clear=skipped reason=new-input", harness="codex"), "이제 /clear 하거나 닫아도 됩니다.")
         self.assertIn("다음 입력", line("clear=pending reason=x"))
+
+    def test_report_line_is_english_unless_korean_is_declared(self):
+        line = st.tidy_report_line
+        with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "English"}):
+            self.assertEqual(line("clear=scheduled", origin="idle"),
+                             "When the input box is empty, this window will be cleared shortly. "
+                             "Typing before then keeps the window.")
+            self.assertIn("a new session will receive the card", line("clear=scheduled"))
+            self.assertEqual(line("clear=skipped reason=new-input", harness="codex"),
+                             "You can now /clear or close it.")
+            self.assertEqual(line("clear=manual hint=/new", harness="opencode"),
+                             "You can now /new or close it.")
+            self.assertEqual(line("clear=off", harness="opencode"),
+                             "This window stays as it is. You can now /new or close it.")
+            self.assertIn("next input", line("clear=pending reason=x"))
+        with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"}):
+            self.assertEqual(line("clear=off", harness="opencode"),
+                             "이 창은 그대로 둡니다. 이제 /new 하거나 닫아도 됩니다.")
 
     def test_the_automatic_requests_ask_for_one_marked_reply(self):
         self.assertEqual(st.CARD_FIELDS, (
