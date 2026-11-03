@@ -568,6 +568,13 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
     # process launch directories. Do not change those matching inputs mid-pass.
     from .. import session_cwd
     session_cwd.project(sessions)
+    # Claude ids and directories exist only now: join their clear/compact predecessors on
+    # the pane the herdr pass matched, before any join that keys on session id.
+    try:
+        from . import herdr as _herdr_aliases
+        _herdr_aliases.join_deferred_pane_aliases(sessions)
+    except Exception:
+        pass
     # Exact Fleet-owned decision/approval waits are additive enrichment. Run
     # after harness identity resolution and before the single liveness verdict.
     try:
