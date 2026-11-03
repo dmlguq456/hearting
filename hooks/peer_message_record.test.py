@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Unit tests for hooks/peer-message-record.py (SD-122)."""
+import contextlib
 import fcntl
 import hashlib
 import importlib.util
@@ -785,7 +786,9 @@ class SweepTest(_BaseTest):
             "    if argv[1] == 'error': raise RuntimeError('fixture ACK failure')",
             "    return 0",
         ]) + "\n", encoding="utf-8")
+        # The ACK phase is bounded from hook spawn; this call stands for a fresh hook.
         with mock.patch.object(hook, "_PEER_STEWARD_PY", stub), \
+                mock.patch.object(hook, "_STARTED", time.monotonic()), \
                 mock.patch.dict(os.environ, self.env, clear=True):
             hook.ack_rows({"session_id": self.session},
                           [{"watch_id": watch_id} for watch_id in ("exit", "error", "later")])
@@ -954,6 +957,184 @@ class F100cHelperProcessGuardTest(_BaseTest):
         self._run("prompt", {"session_id": "sid-child", "cwd": "/tmp/proj",
                              "prompt": "x (peer-from: claude sid-a hearting-46)"})
         self.assertEqual(len(self._all_records()), 1)
+
+
+class BoundedPromptPathTest(_BaseTest):
+    """A slow store or a blocked settle costs the prompt a bounded time, and a
+    message the prompt did not reach still arrives once, on a later boundary.
+
+    No assertion depends on how fast this machine is: slowness is injected as
+    clock time, and the bounds checked are orders of magnitude apart from what
+    an unbounded hook would take."""
+
+    _seed_message = NativeContextReceiptTest._seed_message
+    _ROOMY_BUDGET_S = 600.0  # a later prompt on an idle disk, however loaded the test host is
+
+    def _hook(self):
+        spec = importlib.util.spec_from_file_location("bounded_prompt_hook", _HOOK)
+        hook = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(hook)
+        return hook
+
+    def _prompt_in_process(self, hook, sid, *, budget=None, patch_module=None):
+        """One `prompt` run as a fresh hook process would make it, timed from start."""
+        out = io.StringIO()
+        payload = json.dumps({"session_id": sid, "cwd": str(self.tmp_root), "prompt": "next"})
+        with mock.patch.dict(os.environ, self.env, clear=True), \
+                mock.patch.object(sys, "argv", [str(_HOOK), "prompt"]), \
+                mock.patch.object(sys, "stdin", io.StringIO(payload)), \
+                contextlib.redirect_stdout(out), contextlib.ExitStack() as stack:
+            if budget is not None:
+                stack.enter_context(mock.patch.object(hook, "_HOOK_BUDGET_S", budget))
+            mod = hook._peer_message_module()
+            if patch_module is not None:
+                patch_module(stack, mod)
+            hook._STARTED = time.monotonic()
+            hook.main()
+            elapsed = time.monotonic() - hook._STARTED
+        return out.getvalue(), elapsed
+
+    def _later_prompt(self, sid):
+        return self._prompt_in_process(self._hook(), sid, budget=self._ROOMY_BUDGET_S)[0]
+
+    def _state(self, ref):
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            row = peer_message._read_pending(ref)
+        return row["state"], row.get("receipt")
+
+    def _context(self, output):
+        return json.loads(output)["hookSpecificOutput"]["additionalContext"]
+
+    def test_a_spent_budget_defers_the_message_and_the_next_prompt_delivers_it_once(self):
+        sid = "sid-bounded-prompt"
+        text, ref = self._seed_message(recipient_sid=sid)
+        before = self._state(ref)
+        output, _elapsed = self._prompt_in_process(self._hook(), sid, budget=0.0)
+        # Nothing was read, claimed or shown: the row is exactly as it was.
+        self.assertEqual(output, "")
+        self.assertEqual(self._state(ref), before)
+        self.assertEqual(self._context(self._later_prompt(sid)), text)
+        self.assertEqual(self._state(ref)[0], "received")
+        self.assertEqual(self._later_prompt(sid), "")
+
+    def test_a_slow_store_reads_nothing_past_the_budget_and_still_delivers_once(self):
+        sid = "sid-slow-store"
+        text, ref = self._seed_message(recipient_sid=sid)
+        for index in range(12):
+            self._seed_message(recipient_sid=f"sid-elsewhere-{index}",
+                               body=f"[steer] another session's message {index}")
+        real_monotonic = time.monotonic
+        lag = [0.0]
+        reads = []
+        hook = self._hook()
+
+        def clock():
+            return real_monotonic() + lag[0]
+
+        def slow_store(stack, mod):
+            original = mod._raw_pending_row
+
+            def read(path):
+                reads.append(clock())
+                lag[0] += 2.0  # every row read waits two seconds on a saturated disk
+                return original(path)
+            stack.enter_context(mock.patch.object(mod, "_raw_pending_row", read))
+            stack.enter_context(mock.patch("time.monotonic", clock))
+
+        output, _elapsed = self._prompt_in_process(hook, sid, patch_module=slow_store)
+        deadline = hook._STARTED + hook._HOOK_BUDGET_S
+        # 13 rows x 2 s would be 26 s; no read starts once the budget is spent.
+        self.assertTrue(all(started < deadline for started in reads), reads)
+        self.assertLessEqual(len(reads), 2)
+        shown = [output] if output else []
+        if self._state(ref)[0] != "received":
+            # Not reached in time: untouched, and the next prompt delivers it.
+            shown.append(self._later_prompt(sid))
+        self.assertEqual(self._state(ref)[0], "received")
+        self.assertEqual([self._context(item) for item in shown], [text])
+        self.assertEqual(self._later_prompt(sid), "")
+
+    def test_a_nearly_spent_budget_claims_one_row_and_leaves_the_rest_pending(self):
+        sid = "sid-late-claims"
+        seeded = {self._seed_message(recipient_sid=sid, body=f"[steer] late body {index}")[1]
+                  for index in range(3)}
+        recipient = {"harness": "claude", "session_id": sid}
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, self.env, clear=True), \
+                mock.patch.object(peer_message, "_LATE_CLAIM_WINDOW_S", 1e9):
+            # Inside the late window each claim is settled after the flush, so only one.
+            peer_message.emit_peer_context(recipient, "UserPromptSubmit", stream=out,
+                                           native_delivery=True,
+                                           deadline=time.monotonic() + self._ROOMY_BUDGET_S)
+        self.assertEqual(self._context(out.getvalue()).count("late body"), 1)
+        received = {ref for ref in seeded if self._state(ref)[0] == "received"}
+        self.assertEqual(len(received), 1)
+        # The other two keep their state and the next ordinary boundary takes them.
+        self.assertEqual(self._context(self._later_prompt(sid)).count("late body"), 2)
+        self.assertEqual({ref for ref in seeded if self._state(ref)[0] == "received"}, seeded)
+
+    def test_a_blocked_ack_never_keeps_the_hook_after_its_flush(self):
+        """The 10 s loss: rows are marked received right after the flush, so a hook
+        still settling at the harness timeout loses what it showed. An ACK waiting
+        on a seat lock must therefore be cut off, never awaited."""
+        sid = "sid-blocked-ack"
+        text, ref = self._seed_message(recipient_sid=sid)
+        entered = self.tmp_root / "ack-entered"
+        stub = self.tmp_root / "blocking-steward.py"
+        stub.write_text("\n".join([
+            "import time",
+            "def undelivered_watch_rows(deadline=None):",
+            "    return [{'watch_id': 'w-blocked', 'receipt_state': 'idle',",
+            "             'agent': {'harness': 'claude', 'session_id': 'peer'}}]",
+            "def main(argv):",
+            f"    open({str(entered)!r}, 'w').close()",
+            "    time.sleep(120)  # a seat lock some other process holds",
+        ]) + "\n", encoding="utf-8")
+        hook = self._hook()
+        with mock.patch.object(hook, "_PEER_STEWARD_PY", stub), \
+                mock.patch.object(hook, "_ACK_END_S", 1.0):
+            output, elapsed = self._prompt_in_process(hook, sid, budget=self._ROOMY_BUDGET_S)
+        context = self._context(output)
+        self.assertIn(text, context)
+        self.assertIn("watch_id=w-blocked", context)
+        self.assertEqual(self._state(ref)[0], "received")
+        self.assertTrue(entered.exists(), "the ACK never started")
+        # Unbounded, this waits the full 120 s; bounded, about one second.
+        self.assertLess(elapsed, 30.0)
+
+    def test_a_flushed_script_run_exits_before_the_harness_would_cancel_it(self):
+        """Past `_EXIT_AFTER_FLUSH_S` a run whose output is out ends even inside a
+        blocked lock wait, so the harness keeps the context it was given."""
+        lock = self.tmp_root / "held.lock"
+        holder = subprocess.Popen(
+            [sys.executable, "-c",
+             "import fcntl, os, sys, time\n"
+             f"fd = os.open({str(lock)!r}, os.O_RDWR | os.O_CREAT)\n"
+             "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+             "print('held', flush=True)\n"
+             "time.sleep(120)\n"],
+            stdout=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: (holder.kill(), holder.wait(timeout=5), holder.stdout.close()))
+        self.assertEqual(holder.stdout.readline().strip(), "held")
+        script = "\n".join([
+            "import fcntl, importlib.util, os, sys, time",
+            f"spec = importlib.util.spec_from_file_location('guard_hook', {str(_HOOK)!r})",
+            "hook = importlib.util.module_from_spec(spec); spec.loader.exec_module(hook)",
+            "hook._STARTED = time.monotonic(); hook._EXIT_AFTER_FLUSH_S = 0.3",
+            "out = hook._FlushMark(sys.stdout)",
+            "hook._exit_after_flush(out)",
+            "time.sleep(0.8)  # the guard's time passes before the flush: it must wait",
+            "out.write('{\"shown\": true}\\n'); out.flush()",
+            f"fd = os.open({str(lock)!r}, os.O_RDWR)",
+            "fcntl.flock(fd, fcntl.LOCK_EX)  # blocks until the holder lets go",
+            "print('settled after the lock', flush=True)",
+        ])
+        started = time.monotonic()
+        proc = subprocess.run([sys.executable, "-c", script], capture_output=True,
+                              text=True, env=self.env, timeout=60)
+        self.assertLess(time.monotonic() - started, 30.0)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout, '{"shown": true}\n')
 
 
 if __name__ == "__main__":
