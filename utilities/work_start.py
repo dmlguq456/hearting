@@ -1238,7 +1238,7 @@ def _automatic_direction(route, rows, output):
         summary = summary[:FI.MAX_OPTION_MEANS_CHARS - 1].rstrip() + "…"
     question = {"id": FI.ROUTE_QUESTION_ID, "topic": "진행 방향", "kind": "yes-no",
                 "question": "두 갈래 검토가 같은 진행 방향을 냈습니다. 이대로 시작할까요?",
-                "options": [{"label": "진행", "means": summary or "두 갈래가 함께 낸 방향대로 시작합니다",
+                "options": [{"label": "진행", "means": summary or work_intent.ui_translator()("direction.default_means"),
                              FI.PROPOSAL_MARK: rows[0]["node"]},
                             {"label": "보류", "means": "시작하지 않고 방향을 다시 봅니다"}],
                 "recommended": 0, "why": "두 갈래가 같은 결론이고 사람이 고를 질문을 남기지 않았습니다"}
@@ -1266,8 +1266,8 @@ def _automatic_direction_notice_text(interview, answers) -> str:
         option = str(interview["questions"][0]["options"][0].get("means") or "")
     except (KeyError, IndexError, TypeError, AttributeError):
         option = ""
-    return ("[방향 통지] 두 갈래 검토가 같은 방향을 내고 물을 것을 남기지 않아 묻지 않고 시작했습니다"
-            + (f": {option}" if option else "") + ". 고칠 점이 있으면 다음 말로 알려 주세요.")
+    import work_intent
+    return work_intent.ui_translator()("direction.notice", option=f": {option}" if option else "")
 
 
 def _automatic_direction_notice(output) -> str:
