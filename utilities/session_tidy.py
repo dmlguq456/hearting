@@ -3388,6 +3388,7 @@ def _run_compact_after(harness: str, sid: str, summary: str, *, cwd: str, transc
     record_error = ""
     preserve_idle = False
     compact_request_in_progress = False
+    tidy_compact = False
     expected_booking_nonce: Optional[str] = None
     inherit_continue_off = False
     try:
@@ -3432,13 +3433,26 @@ def _run_compact_after(harness: str, sid: str, summary: str, *, cwd: str, transc
             compact_request_in_progress = bool(same_session and held.get("origin") == "compact"
                                                and held.get("status") == "reserved"
                                                and (held.get("compact") or {}).get("card_request_required"))
+            # The /compact a tidy booking typed (background agents kept the window): its
+            # memory tidy is the booking's queue item and its card is the booked one.
+            claim = (held or {}).get("clear_claim") if isinstance((held or {}).get("clear_claim"), dict) else {}
+            tidy_compact = bool(same_session and claim.get("command") == "compact"
+                                and claim.get("state") in ("sending", "sent")
+                                and held.get("status") in ("reserved", "cleared", "unverified")
+                                and not held.get("compact_event")
+                                and now >= float(claim.get("at", 0) or 0))
+            if tidy_compact:
+                held["compact_event"] = {"identity": context["identity"], "at": now,
+                                         "operation_id": str(held.get("operation_id") or ""),
+                                         "queue_id": str(held.get("queue_id") or "")}
+                clear._write_reservation(held)
             if not ledger_event:
                 compacting = not (prior and now - prior["last_compact_at"] < COMPACT_DEDUPE_SEC)
                 record_event(seat, harness, sid, "compact", source="compact",
                              transcript=context["transcript"] or (prior or {}).get("transcript", ""),
                              cwd=cwd, now=now, bump_epoch=compacting,
                              compact_identity=context["identity"], compact_context=context)
-            if not preserve_idle and not compact_request_in_progress and not codex_auto \
+            if not preserve_idle and not compact_request_in_progress and not codex_auto and not tidy_compact \
                     and body and not card_duplicate and not newer_card and seat.kind in COMPACT_CARD_SEAT_KINDS:
                 try:
                     card = write_card(seat, harness, sid, body, cwd=cwd, now=now,
@@ -3485,6 +3499,8 @@ def _run_compact_after(harness: str, sid: str, summary: str, *, cwd: str, transc
         except BaseException as exc:  # noqa: BLE001 - the ledger event lets an ordinary hook retry
             return f"booking=pending reason=queue-write-{type(exc).__name__}"
 
+    if tidy_compact:
+        return "booking=skipped reason=tidy-compact"
     if preserve_idle:
         return "booking=skipped reason=idle-origin-preserved"
     if compact_request_in_progress and not (ledger_event and
@@ -3855,6 +3871,14 @@ def cmd_tidy(args) -> int:
         print(handoff_line)
     origin = str((idle_context or {}).get("origin") or "")
     print("say=" + tidy_report_line(line, handoff=handoff, origin=origin, harness=caller[1]))
+    if caller[1] == "claude" and "clear=scheduled" in line.split():
+        compact = False
+        with contextlib.suppress(BaseException):
+            import session_tidy_clear as clear
+            compact = clear.background_agents_running("claude", caller[2], caller[0]) \
+                and clear.mark_compact(caller[0].key, "claude", caller[2])
+        if compact:
+            print("say=" + _ui_translator()("tidy.say.compact_for_agents"))
     return code
 
 

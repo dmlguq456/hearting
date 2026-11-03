@@ -350,6 +350,10 @@
    "en": "When the input box is empty, this window will be cleared shortly. Typing before then keeps the window.",
    "ko": "입력창이 비어 있으면 곧 이 창을 비웁니다. 그 전에 입력하시면 비우지 않습니다."
   },
+  "tidy.say.compact_for_agents": {
+   "en": "Background agents are still running, so this window is tidied with /compact",
+   "ko": "백그라운드 에이전트가 있어 /compact로 정리"
+  },
   "tidy.say.window_kept": {
    "en": "This window stays as it is. You can now {command} or close it.",
    "ko": "이 창은 그대로 둡니다. 이제 {command} 하거나 닫아도 됩니다."

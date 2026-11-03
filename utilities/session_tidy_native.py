@@ -317,7 +317,9 @@ def command(req, request_path, nonce, *, continuing, screen_ready):
                     continue
                 if continuing: clear.release_unsent_continue(claim)
                 return result("skipped", why)
-            text = clear.followup_text(req) if continuing else "/clear"
+            compacting = not continuing and (claim.get("clear_claim") or {}).get("command") == "compact"
+            text = clear.followup_text(req) if continuing else (
+                clear.COMPACT_COMMAND if compacting else "/clear")
             # A single write includes Enter; partial/failed writes are never retried.
             data = (text + "\r").encode()
             try:
@@ -325,6 +327,9 @@ def command(req, request_path, nonce, *, continuing, screen_ready):
             except OSError:
                 return result("unverified", "partial-send")
             if written != len(data): return result("unverified", "partial-send")
+            if compacting:
+                # The session id stays; the helper waits (bounded) for the compaction evidence.
+                return result("unverified", "compact-pending")
             deadline = time.monotonic() + 20
             while time.monotonic() < deadline:
                 record = live(target)

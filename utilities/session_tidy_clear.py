@@ -66,6 +66,11 @@ OBSERVE_WAIT_SEC = 20.0
 STEWARD_TIMEOUT_SEC = 180.0
 # The built-in command that starts a fresh conversation in each harness.
 CLEAR_COMMAND = {"claude": "/clear", "codex": "/clear", "opencode": "/new"}
+# Typed instead of the clear while a Claude window still has native background agents:
+# compaction keeps the session, its agents and their results (see background_agents_running).
+COMPACT_COMMAND = "/compact"
+COMPACT_CONFIRM_SEC = 900.0          # compaction of ~950k tokens took 145 s (measured 2026-11-03)
+_TASK_ID = re.compile(rb"<task-id>([0-9A-Za-z_-]{1,80})</task-id>")
 # No-trailer body used by the exact-native attachment or the sealed pending-ref carrier.
 CONTINUE_TEXT = "이어서해"
 STATUS_ONLY_TEXT = "현재 카드 기준 현황만 짧게 표시하고 새 작업은 시작하지 말고 다음 입력을 기다리세요."
@@ -1119,12 +1124,149 @@ def _refresh_compact_card(req: dict, observation: dict) -> None:
         return
 
 
+def _claude_transcript(seat: Optional["st.Seat"], sid: str):
+    """The session's own transcript: the path its hooks recorded, else the runtime's projects."""
+    import tidy_transcripts as transcripts
+    hint = ""
+    if seat is not None:
+        with contextlib.suppress(Exception):
+            hint = str((st.session_summary(st.session_seat(seat, "claude", sid)).get(("claude", sid)) or {})
+                       .get("transcript") or "")
+    return transcripts.locate_transcript("claude", sid, hint or None)
+
+
+def background_agents_running(harness: str, sid: str, seat: Optional["st.Seat"] = None) -> bool:
+    """Whether this Claude session may still have unfinished native background agents.
+
+    Claude keeps one ``subagents/agent-<id>.meta.json`` per Agent-tool launch beside the
+    session transcript. A background launch is over when its record says ``finished`` or
+    its completion notification (``<task-id>`` of that agent) reached the main transcript
+    or the launching agent's transcript. An unreadable record counts as running, so the
+    window is compacted rather than cleared; a session with no transcript at all has no
+    agent record and keeps the clear. Codex and OpenCode subagents run inside the parent's
+    turn, so an idle window of theirs has none.
+    """
+    if harness != "claude" or not sid:
+        return False
+    try:
+        main = _claude_transcript(seat, sid)
+    except Exception:  # noqa: BLE001 - undecidable: keep the agents
+        return True
+    if main is None:
+        return False
+    if main.suffix != ".jsonl":
+        return True
+    folder = main.with_suffix("") / "subagents"
+    try:
+        names = sorted(entry.name for entry in os.scandir(folder)
+                       if entry.name.startswith("agent-") and entry.name.endswith(".meta.json"))
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    pending = {}
+    for name in names:
+        try:
+            meta = json.loads((folder / name).read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError, UnicodeError):
+            return True
+        if not isinstance(meta, dict):
+            return True
+        if meta.get("requestShape") not in (None, "background") or meta.get("finished") is True:
+            continue
+        pending[name[len("agent-"):-len(".meta.json")]] = str(meta.get("parentAgentId") or "")
+    if not pending:
+        return False
+    reported = set()
+    sources = {main, *(folder / f"agent-{parent}.jsonl" for parent in pending.values() if parent)}
+    for source in sources:
+        try:
+            data = source.read_bytes()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return True
+        reported.update(found.decode("ascii") for found in _TASK_ID.findall(data))
+    return any(agent not in reported for agent in pending)
+
+
+def _compact_mode(req: dict) -> bool:
+    """Whether this booking's one window command is /compact (Claude with background agents)."""
+    if req.get("harness") != "claude":
+        return False
+    if req.get("clear_command") == "compact":
+        return True
+    seat = st.seat_from_dict(req["seat"]) if isinstance(req.get("seat"), dict) else None
+    return background_agents_running("claude", str(req.get("sid") or ""), seat)
+
+
+def mark_compact(seat_key: str, harness: str, sid: str, nonce: str = "") -> bool:
+    """Make this reserved, unclaimed Claude booking type /compact; it never goes back to the clear.
+
+    The same session continues after /compact, so a handover snapshot not taken yet is not
+    needed. Returns True when the booking now says compact."""
+    if harness != "claude":
+        return False
+    try:
+        with st.seat_lock(seat_key, wait=1.0):
+            req = read_reservation(seat_key)
+            if (not req or req.get("status") != "reserved" or (nonce and req.get("nonce") != nonce)
+                    or (req.get("harness"), req.get("sid")) != (harness, sid) or req.get("clear_claim")):
+                return False
+            if req.get("clear_command") == "compact" and req.get("snapshot_state") != "pending":
+                return True
+            req["clear_command"] = "compact"
+            if req.get("snapshot_state") == "pending":
+                req["snapshot_state"] = "not-applicable"
+            _write_reservation(req)
+            return True
+    except (OSError, TimeoutError, st.StateError):
+        return False     # the snapshot is taken as usual; the claim still types /compact
+
+
+def compact_confirmed(req: dict) -> bool:
+    """The booked session compacted after the /compact claim: a ``compact_boundary`` row after
+    the transcript end seen at the claim, or this session's PostCompact ledger row since then."""
+    claim = req.get("clear_claim") if isinstance(req.get("clear_claim"), dict) else {}
+    harness, sid = str(req.get("harness") or ""), str(req.get("sid") or "")
+    if claim.get("command") != "compact" or not sid:
+        return False
+    source, offset = str(claim.get("transcript") or ""), claim.get("offset")
+    if source and type(offset) is int and offset >= 0:
+        with contextlib.suppress(OSError):
+            with open(source, "rb") as handle:
+                handle.seek(offset)
+                for line in handle:
+                    if b'"compact_boundary"' not in line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except ValueError:
+                        continue
+                    if (isinstance(row, dict) and row.get("type") == "system"
+                            and row.get("subtype") == "compact_boundary"
+                            and row.get("sessionId") in (None, sid)):
+                        return True
+    try:
+        seat = _booked_seat(req, str((req.get("seat") or {}).get("key") or ""))
+        since = float(claim.get("at", 0) or 0)
+        return any(row.get("event") == "compact" and row.get("harness") == harness and row.get("sid") == sid
+                   and float(row.get("ts", 0) or 0) >= since for row in st._read_ledger_lines(seat))
+    except (OSError, ValueError, TypeError, st.StateError):
+        return False
+
+
 def _prepare_handover_snapshot(req: dict) -> bool:
     """Take the dispatch snapshot after durable queueing, outside the short hook's lock."""
     seat = st.session_seat(st.seat_from_dict(req["seat"]),
                            str(req.get("harness") or ""), str(req.get("sid") or ""))
     if seat.kind not in ("pane", "native"):
         return True
+    if _compact_mode(req) and mark_compact(seat.key, str(req.get("harness") or ""),
+                                           str(req.get("sid") or ""), str(req.get("nonce") or "")):
+        return True    # /compact keeps this session: there is no successor to hand over to
     import dispatch_seat_handover as handover
     try:
         bindings = handover.collect_snapshot_bindings(str(req.get("harness") or ""), str(req.get("sid") or ""))
@@ -1410,12 +1552,22 @@ def claim_clear(path, nonce: Optional[str] = None):
     req, seat, reason = _booking_at(Path(path))
     if req is None:
         return None, reason
+    compact = _compact_mode(req)     # read outside the lock: only the runtime's own files
+    transcript, offset = "", None
+    if compact:
+        with contextlib.suppress(Exception):
+            found = _claude_transcript(seat, str(req.get("sid") or ""))
+            if found is not None:
+                transcript, offset = str(found), found.stat().st_size
     with st.seat_lock(seat.key):
         req, reason = validate_request(path, nonce)
         if req is None:
             return None, reason
         claim = {"state": "sending", "nonce": req["nonce"], "token": secrets.token_hex(12),
                  "at": st.now_epoch()}
+        if compact or req.get("clear_command") == "compact":
+            claim.update(command="compact", transcript=transcript, offset=offset)
+            req["clear_command"] = "compact"
         req["clear_claim"] = claim
         _write_reservation(req)
         return {**req, "clear_claim": claim}, ""
@@ -2186,6 +2338,20 @@ def run_helper(seat_key: str, nonce: str, *, wait: Optional[Callable[[str, int],
     if outcome == "true":
         _finish(seat_key, nonce, "cleared", observed=verdict.get("new_session", ""))
         return _continue(seat_key, nonce, continuer, sleep=sleep)
+    held = read_reservation(seat_key) or {}
+    if outcome == "unverified" and (held.get("clear_claim") or {}).get("command") == "compact":
+        # /compact was typed once; the same session shows it ends (it takes minutes).
+        deadline = time.monotonic() + _tunable("COMPACT_CONFIRM", COMPACT_CONFIRM_SEC)
+        while True:
+            held = read_reservation(seat_key)
+            if not held or held.get("nonce") != nonce or held.get("status") != "reserved":
+                return "superseded"
+            if compact_confirmed(held):
+                _finish(seat_key, nonce, "cleared", observed=str(held.get("sid") or ""))
+                return _continue(seat_key, nonce, continuer, sleep=sleep)
+            if time.monotonic() >= deadline:
+                return "unverified" if _finish(seat_key, nonce, "unverified", reason) else "superseded"
+            sleep(COMPACT_POLL_SEC)
     if outcome == "unverified":
         # The clear was written once and never repeated; allow the new conversation's
         # start hook a short bounded window to show up before calling it unconfirmed.

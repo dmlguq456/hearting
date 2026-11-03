@@ -10183,6 +10183,25 @@ class ClearTest(_TmpRootMixin, unittest.TestCase):
         self.assertEqual(prompts, [["herdr", "agent", "prompt", "w1:pX", "/clear"]])   # no trailer, no wait
         self.assertEqual([c for c in world.calls if c[:3] == ["herdr", "agent", "send-keys"]], [])
 
+    def test_background_agents_get_one_compact_and_the_helper_waits_for_its_evidence(self):
+        self.book()
+        transcript = Path(os.environ["HOME"]) / ".claude" / "projects" / "-proj" / "sid-A.jsonl"
+        transcript.parent.mkdir(parents=True)
+        transcript.write_text(json.dumps({"type": "user", "sessionId": "sid-A"}) + "\n", encoding="utf-8")
+        agents = transcript.with_suffix("") / "subagents"
+        agents.mkdir(parents=True)
+        (agents / "agent-a1.meta.json").write_text(json.dumps({"requestShape": "background"}), encoding="utf-8")
+        world = _ClearWorld(screens=[CLAUDE_EMPTY])
+        rc, line = self.clear_cmd(world)
+        self.assertEqual(rc, 5, line)
+        self.assertIn("cleared=unverified", line)
+        self.assertIn("reason=compact-pending", line)
+        prompts = [c for c in world.calls if c[:3] == ["herdr", "agent", "prompt"]]
+        self.assertEqual(prompts, [["herdr", "agent", "prompt", "w1:pX", "/compact"]])
+        claim = self.clear.read_reservation(self.seat.key)["clear_claim"]
+        self.assertEqual((claim["command"], claim["transcript"], claim["offset"]),
+                         ("compact", str(transcript), transcript.stat().st_size))
+
     def test_a_compact_booking_types_only_after_the_turn_ended_and_only_once(self):
         st, clear = self.st, self.clear
         transcript = self.tmp_root / "sid-A.jsonl"
