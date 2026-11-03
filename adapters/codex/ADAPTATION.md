@@ -27,7 +27,9 @@ main; durable detail is artifact-only and the terminal handoff is three lines.
 All new headless types, including session-tidy support, use the shared profile
 projector's role home. Hearting's global main `AGENTS.md` is replaced with the
 small attach template. This is controlled global input, distinct from native
-project instructions, which remain. User credentials/config/hooks stay linked;
+project instructions, which remain. Codex reads one global file, so when the
+user keeps an `AGENTS.override.md` the worker home gets a read-only copy of the
+user's own text followed by the attach template instead of the main bootstrap. User credentials/config/hooks stay linked;
 launch overrides disable apps, MCP servers, custom agents, native collaboration
 and enabled plugins, and disable discovered system skills by documented path.
 The assigned contract remains in the prompt. Native or managed input outside
@@ -649,8 +651,7 @@ cache roots, where V2 keeps its native database and service state. No broader
 runtime home is opened. This keeps adapter write guards functional and lets a
 checked Codex→Claude worker initialize Bash without making the rest of either
 runtime home writable.
-Broker v1/v2 records remain readable for migration, and `preflight.sh broker`
-retains only diagnostic `status` and idempotent `stop` during the drain release.
+The resident launch broker and its `preflight.sh broker` surface are gone.
 
 Foreground-scoped dispatch-depth-2 Codex workers reuse the already checked outer
 `workspace-write` boundary and run the inner CLI with its mount sandbox disabled;
@@ -768,7 +769,7 @@ Session and prompt bridges retain `hookSpecificOutput.additionalContext` for opt
 - **Runtime support:** the existing Stop hook receives the exact thread id and reads only the latest `last_token_usage.input_tokens` from that thread's rollout. If the Stop payload omits a transcript path, the bounded rollout finder must resolve the exact thread.
 - **Adapter realization:** the shared idle observer records a durable due time and requests a card from the same verified main pane once. It does not fabricate a remote-V2 compact summary. The card/enqueue receipt is required before clear, and the successor receives status-only guidance.
 
-- **Cache evidence:** the local config names `gpt-6.1-sol` but leaves `model_provider` unset and provides no request-level cache settings. The provider/cache lifetime is therefore unknown; no OpenAI API retention claim is applied to the Codex account path.
+- **Cache evidence:** the local config names the configured deep model (`CFG_TIER_DEEP_MODEL`) but leaves `model_provider` unset and provides no request-level cache settings. The provider/cache lifetime is therefore unknown; no OpenAI API retention claim is applied to the Codex account path.
 
 ## Parent authority and peer transport
 

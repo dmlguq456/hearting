@@ -7,10 +7,9 @@ every eligibility predicate are pure functions of `(route, completed, started,
 rows, phase)`; all side effects live behind `StageAdvanceServices`. This module
 never runs `git`, never merges, never pushes, and never authors brief prose.
 
-Modelled directly on `utilities/dispatch-recovery.py:789 coordinate_recovery`
-and its injected-services + named-checkpoint transaction shape (`_atomic_json`,
-`_commit_phase`, `_checkpoint`) so that A-16's five crash windows are a unit
-cost rather than requiring a real process kill.
+Built on an injected-services + named-checkpoint transaction shape
+(`_atomic_json`, `_commit_phase`, `_checkpoint`) so that A-16's five crash
+windows are a unit cost rather than requiring a real process kill.
 """
 
 from __future__ import annotations
@@ -216,8 +215,7 @@ def _canonical_bytes(payload: object) -> bytes:
 
 def _atomic_json(path: Path, payload: dict) -> None:
     """Same tempfile+fsync+os.replace shape as
-    `dispatch_completion_join.py`'s supervisor-state writer and
-    `dispatch-recovery.py:_atomic_json`."""
+    `dispatch_completion_join.py`'s supervisor-state writer."""
 
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))

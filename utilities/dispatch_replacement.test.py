@@ -5247,7 +5247,7 @@ class ClosedNativeFrameCapacityRecoveryTest(unittest.TestCase):
         self.peer = {key: value for key, value in self.meta.items()
                      if key not in {"replacement_input_digest", "launch_outcome"}}
         self.peer.update(attempt_id="att-peer", route_node="frame-alternative", harness="codex",
-                         model="gpt-6.1-sol", note="completed-marker", failure_class="pass",
+                         model="codex-model-deep", note="completed-marker", failure_class="pass",
                          log_file=str(self.root / "peer.att-peer.codex.jsonl"))
         self.write(self.peer, append=True)
 
@@ -5264,9 +5264,9 @@ class ClosedNativeFrameCapacityRecoveryTest(unittest.TestCase):
         args.route_node = "frame"
         args.model_role = "deep maker"
         args.model_profile = "top"
-        args.model = "gpt-6.1-sol"
+        args.model = "codex-model-deep"
         args.resolved_model_settings = {"profile": "top", "role": "deep maker",
-                                       "model": "gpt-6.1-sol", "effort": "high"}
+                                       "model": "codex-model-deep", "effort": "high"}
         args.replacement_input_argv = list(history["argv"])
         args.launch_lifecycle = (history.get("applied_permissions") or {}).get("launch_lifecycle", "detached")
         digest_field = R.seal_launch_input(args, "codex", history["task"])
@@ -5278,7 +5278,7 @@ class ClosedNativeFrameCapacityRecoveryTest(unittest.TestCase):
         })
         metadata = {**source, "attempt_id": record["replacement_attempt_id"],
                     "automatic_retry_of": "att-source", "harness": "codex",
-                    "model": "gpt-6.1-sol", "model_role": "deep maker", "model_profile": "top",
+                    "model": "codex-model-deep", "model_role": "deep maker", "model_profile": "top",
                     "note": "", "failure_class": "", "launch_outcome": "",
                     **D.parse_registry_metadata(digest_field)}
         return history, candidate, metadata

@@ -156,7 +156,9 @@ def _repo_key(event):
     the same `project_of` grouping key the board's own cwd-project cards use) or a literal
     `project` field. Current writers emit `cwd`; `project` remains a tolerant compatibility
     field. Historical rows without either field degrade to no grouping (honest omission, F-3)
-    rather than guessing."""
+    rather than guessing. Grouping runs over the whole journal tail and each repo keeps its
+    latest RECENT_LIMIT rows; that replaced the 2026-07-16 today-only rule on 2026-11-02
+    (사용자 결정)."""
     cwd = event.get("cwd")
     if isinstance(cwd, str) and cwd:
         try:
@@ -189,8 +191,12 @@ def _durable_over(soft_ceiling=DOCTOR_DURABLE_SOFT_CEILING):
         return []
 
 
-_BACKLOG_RECORD_LIMIT = 512
-_BACKLOG_TYPES = frozenset(("backlog", "task", "todo", "obligation"))
+DECISIONS_PER_PROJECT = 3
+OPEN_PER_PROJECT = 200
+# Records that may be open work: the obligation and backlog types, a ``backlog`` tag, or a
+# ``[marker]`` headline (the explorer reads the marker). Everything else is not read.
+_OPEN_TYPES = ("unresolved-obligation", "backlog", "task", "todo", "obligation")
+_project_cache = {}
 
 
 def _json_strings(value, limit=80):
@@ -208,20 +214,41 @@ def _json_strings(value, limit=80):
 
 
 def _repo_label(origin):
-    if not isinstance(origin, str) or not origin:
-        return "·"
+    """The project name of a ``cwd_origin``; encoded (``id:``/``root:``/``-…``) origins have none."""
+    if not isinstance(origin, str) or not origin or origin.startswith(("id:", "root:", "-")):
+        return None
     if origin.startswith("git:"):
-        return origin.rsplit("/", 1)[-1] or "·"
-    if origin.startswith("-"):
-        return "·"                         # encoded cwd values are not display labels
-    return origin.rstrip("/").rsplit("/", 1)[-1] or "·"
+        return origin.rsplit("/", 1)[-1] or None
+    return origin.rstrip("/").rsplit("/", 1)[-1] or None
 
 
-def _read_backlog_records(limit=_BACKLOG_RECORD_LIMIT):
-    """Read explicit backlog metadata from memory.db without opening record bodies."""
+def _db_stamp(path):
+    stamp = []
+    for name in (path, path.with_name(path.name + "-wal")):
+        try:
+            info = name.stat()
+        except OSError:
+            stamp.append(None)
+        else:
+            stamp.append((info.st_mtime_ns, info.st_size))
+    return tuple(stamp)
+
+
+def _read_project_memory(today, journal_ids=(), decisions=DECISIONS_PER_PROJECT,
+                         open_limit=OPEN_PER_PROJECT):
+    """Per project, the newest decisions and the possibly-open records, headline only.
+
+    One read-only query ranks records within each (origin, kind) so every project keeps its
+    own newest rows; record bodies are never selected. ``headlines`` maps the given journal
+    ids to their stored headline. The result is reused while the database files are unchanged.
+    """
     path = _db_path()
     if not path.is_file():
         return {"state": "unavailable", "by_repo": {}, "record_count": None}
+    key = (str(path), _db_stamp(path), today, tuple(journal_ids), decisions, open_limit)
+    cached = _project_cache.get("value")
+    if cached is not None and _project_cache.get("key") == key:
+        return dict(cached)
     try:
         con = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=1.0)
         try:
@@ -231,65 +258,91 @@ def _read_backlog_records(limit=_BACKLOG_RECORD_LIMIT):
             if "records" not in tables:
                 return {"state": "unavailable", "by_repo": {}, "record_count": None}
             columns = {row[1] for row in con.execute("PRAGMA table_info(records)").fetchall()}
-            metadata_contract = {"id", "tier", "scope", "cwd_origin", "type", "source", "tags",
-                                 "links", "artifact_refs", "status", "canonical_id"}
-            if not metadata_contract.issubset(columns):
+            if not {"id", "scope", "cwd_origin", "type", "headline", "updated"}.issubset(columns):
                 return {"state": "incomplete", "by_repo": {}, "record_count": None}
-            fields = ("id", "tier", "scope", "type", "cwd_origin", "source", "tags", "links",
-                      "artifact_refs", "status", "canonical_id", "superseded_by", "updated",
-                      "headline", "delivery_state", "injection_flag")
+            fields = ("id", "canonical_id", "cwd_origin", "type", "tags", "links", "artifact_refs",
+                      "headline", "updated", "created")
             select = ", ".join(name if name in columns else f"NULL AS {name}" for name in fields)
             where = ["scope='project'"]
             if "status" in columns:
                 where.append("status='active'")
             if "injection_flag" in columns:
                 where.append("(injection_flag IS NULL OR injection_flag=0)")
-            order = " ORDER BY updated DESC, id" if "updated" in columns else " ORDER BY id"
+            types = ", ".join("?" for _ in _OPEN_TYPES)
+            tags = "tags LIKE '%backlog%' OR " if "tags" in columns else ""
+            where.append(f"(type='decision' OR type IN ({types}) OR {tags}headline LIKE '[%')")
             rows = con.execute(
-                f"SELECT {select} FROM records WHERE {' AND '.join(where)}{order} LIMIT ?",
-                (max(1, min(int(limit), _BACKLOG_RECORD_LIMIT)),),
+                f"SELECT {', '.join(fields)}, kind, total, today_count FROM ("
+                f" SELECT *, ROW_NUMBER() OVER (PARTITION BY cwd_origin, kind"
+                f"   ORDER BY updated DESC, seq DESC) AS rank,"
+                f"  COUNT(*) OVER (PARTITION BY cwd_origin, kind) AS total,"
+                f"  SUM(CASE WHEN created >= ? THEN 1 ELSE 0 END)"
+                f"   OVER (PARTITION BY cwd_origin, kind) AS today_count"
+                f" FROM (SELECT {select}, rowid AS seq,"
+                f"  CASE WHEN type='decision' THEN 'decision' ELSE 'open' END AS kind"
+                f"  FROM records WHERE {' AND '.join(where)}))"
+                f" WHERE rank <= CASE kind WHEN 'decision' THEN ? ELSE ? END"
+                f" ORDER BY cwd_origin, kind, rank",
+                (today, *_OPEN_TYPES, max(0, int(decisions)), max(1, int(open_limit))),
             ).fetchall()
+            ids = [str(item) for item in journal_ids if item][:256]
+            headlines = dict(con.execute(
+                f"SELECT id, headline FROM records WHERE id IN ({', '.join('?' for _ in ids)})",
+                ids).fetchall()) if ids else {}
         finally:
             con.close()
     except (sqlite3.Error, OSError, ValueError, TypeError):
         return {"state": "failed", "by_repo": {}, "record_count": None}
 
-    by_repo, seen = {}, set()
+    by_repo, seen, limited = {}, set(), False
     for values in rows:
-        (rid, tier, scope, rtype, origin, source, tags_raw, links_raw, refs_raw, status,
-         canonical, superseded_by, updated, headline, delivery, _injection) = values
-        tags = _json_strings(tags_raw)
-        if not any(tag.casefold() == "backlog" for tag in tags) and str(rtype or "").casefold() not in _BACKLOG_TYPES:
-            continue
+        (rid, canonical, origin, rtype, tags_raw, links_raw, refs_raw, headline, updated,
+         _created, kind, total, today_count) = values
+        repo = _repo_label(origin)
         canonical = canonical or rid
-        if not rid or canonical in seen:
+        if repo is None or not rid or canonical in seen:
             continue
         seen.add(canonical)
-        repo = _repo_label(origin)
-        record = {
-            "id": str(rid)[:256], "canonical_id": str(canonical)[:256],
-            "repo": repo, "cwd_origin": str(origin or "")[:512],
-            "tier": str(tier or "")[:32], "type": str(rtype or "")[:80],
-            "source": str(source or "")[:240], "tags": tags,
-            "links": _json_strings(links_raw, 256),
-            "artifact_refs": _json_strings(refs_raw, 512),
-            "headline": str(headline or "")[:240], "updated": str(updated or "")[:40],
-            "status": str(status or "unknown")[:32],
-            "superseded_by": str(superseded_by or "")[:256],
-            "delivery_state": str(delivery or "unknown")[:32],
-        }
-        by_repo.setdefault(repo, []).append(record)
-    count = sum(len(records) for records in by_repo.values())
-    return {"state": "success", "by_repo": by_repo, "record_count": count,
-            "limited": len(rows) >= max(1, min(int(limit), _BACKLOG_RECORD_LIMIT))}
+        entry = by_repo.setdefault(repo, {"decisions": [], "decisions_today": 0, "open": [],
+                                          "limited": False, "updated": ""})
+        record = {"id": str(rid)[:256], "type": str(rtype or "")[:80],
+                  "headline": str(headline or "")[:240], "updated": str(updated or "")[:40]}
+        if kind == "decision":
+            entry["decisions"].append(record)
+            if origin not in entry.setdefault("_origins", set()):   # once per merged origin
+                entry["_origins"].add(origin)
+                entry["decisions_today"] += int(today_count or 0)
+        else:
+            record.update(tags=_json_strings(tags_raw), links=_json_strings(links_raw, 256),
+                          artifact_refs=_json_strings(refs_raw, 512))
+            entry["open"].append(record)
+            if int(total or 0) > int(open_limit):
+                entry["limited"] = limited = True
+        entry["updated"] = max(entry["updated"], record["updated"])
+    for entry in by_repo.values():
+        entry.pop("_origins", None)
+        # Origins that share a project name merge; the newest rows win across them.
+        entry["decisions"].sort(key=lambda item: item["updated"], reverse=True)
+        del entry["decisions"][max(0, int(decisions)):]
+        entry["open"].sort(key=lambda item: item["updated"], reverse=True)
+    result = {"state": "success", "by_repo": by_repo, "limited": limited,
+              "record_count": sum(len(e["decisions"]) + len(e["open"]) for e in by_repo.values()),
+              "headlines": {str(rid): str(text)[:240] for rid, text in headlines.items() if text}}
+    _project_cache.update(key=key, value=result)
+    return dict(result)
 
 
 def collect(now=None, *, include_summary=True, include_backlog=False):
     """Return an additive `memory` dict (fleet.py --json / render.py consume it), or None
     when neither the journal nor the graveyard exists (F-19 not wired up yet — panel omitted).
 
-    ``include_summary=False`` reads the write journal. ``include_backlog=True`` adds bounded,
-    read-only DB metadata for the Explorer; the default collector surface stays journal-only.
+    ``include_summary=False`` reads the write journal. ``include_backlog=True`` adds the
+    Explorer's read-only per-project DB summary (newest decisions, possibly-open records) and
+    the stored headline of each journal row; the default collector surface stays journal-only.
+
+    ``by_repo`` is the latest RECENT_LIMIT journal rows per project, not today's rows: the
+    2026-11-02 사용자 결정 replaced the 2026-07-16 today-only display rule. ``today`` keeps
+    its name and its midnight boundary; only the per-repo display group widened.
     """
     now = now or datetime.datetime.now()
     midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -300,20 +353,28 @@ def collect(now=None, *, include_summary=True, include_backlog=False):
                ("ts", "action", "tier", "type", "actor", "sid", "snippet", "id", "cwd", "project", "scope")}
               for e in events[-RECENT_LIMIT:][::-1]]
     by_repo = {}
-    for e in today_events:
+    for e in events:
         rk = _repo_key(e)
         if rk:
             by_repo.setdefault(rk, []).append({key: e.get(key) for key in
                 ("ts", "action", "tier", "type", "actor", "sid", "snippet", "id", "cwd", "project", "scope")})
     for rows in by_repo.values():
         rows.sort(key=lambda e: e.get("ts") or "", reverse=True)
+        del rows[RECENT_LIMIT:]
     # Renderers only consume journal/project events. Keep the default aggregate API
     # for structured consumers without touching its DB, graveyard or curator in this mode.
     if not include_summary:
         if not include_backlog:
             return {"journal_available": journal_ok, "recent": recent,
                     "by_repo": by_repo} if journal_ok else None
-        database = _read_backlog_records()
+        journal_ids = sorted({str(row["id"]) for rows in by_repo.values() for row in rows
+                              if row.get("id")})
+        database = _read_project_memory(now.date().isoformat(), journal_ids)
+        headlines = database.pop("headlines", None) or {}
+        for rows in by_repo.values():
+            for row in rows:
+                if row.get("id") in headlines:
+                    row["headline"] = headlines[row["id"]]
         return {"journal_available": journal_ok, "recent": recent,
                 "by_repo": by_repo, "database": database}
     graveyard, graveyard_ok = _read_jsonl_tail(_graveyard_path())

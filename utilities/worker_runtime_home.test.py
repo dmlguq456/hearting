@@ -138,6 +138,7 @@ class WorkerHomes(unittest.TestCase):
         root = self.base / 'packaged-root'
         files = (
             'tools/profile/build-home.py',
+            'tools/install/codex_override.py',
             'utilities/dispatch-defaults.py',
             'utilities/dispatch_allocation.py',
             'utilities/claude_credential_recovery.py',
@@ -412,6 +413,66 @@ class WorkerHomes(unittest.TestCase):
             self.assertIn('mcp_servers={"external"={"command"="true","enabled"=false}}', args)
             self.assertTrue(any('test-skill' in arg for arg in args))
         self.assertEqual(before, {p.name: p.read_bytes() for p in self.source.iterdir() if p.is_file()})
+
+    def test_codex_worker_reads_the_user_override_text_with_its_own_bootstrap(self):
+        form = worker_runtime_home._builder._codex_override_format()
+        user = '# 외부 소통은 읽기 전용\n\n# 기존 Hearting bootstrap 유지\nread ~/.codex/AGENTS.md\n'.encode()
+        override = self.source / 'AGENTS.override.md'
+        override.write_bytes(form.compose(user, b'MAIN-SESSION-BOOTSTRAP\n'))
+        before = override.read_bytes()
+        self.env['CODEX_HOME'] = str(self.source)
+        for typ in ('owner', 'review'):
+            home = Path(prepare_worker_home(ROOT, 'codex', typ, typ, env=self.env)['CODEX_HOME'])
+            copied = (home / 'AGENTS.override.md')
+            data = copied.read_bytes()
+            self.assertFalse(copied.is_symlink())
+            self.assertEqual(copied.stat().st_mode & 0o777, 0o400)
+            self.assertTrue(data.startswith(user))
+            self.assertIn((home / 'AGENTS.md').read_bytes(), data)
+            self.assertNotIn(b'MAIN-SESSION-BOOTSTRAP', data)
+            self.assertEqual(form.user_text(data), user)
+        self.assertEqual(override.read_bytes(), before)
+
+        override.write_text('  \n')
+        home = Path(prepare_worker_home(ROOT, 'codex', 'owner', 'owner', env=self.env)['CODEX_HOME'])
+        self.assertFalse((home / 'AGENTS.override.md').exists())
+        override.unlink()
+        nested = Path(prepare_worker_home(ROOT, 'codex', 'stage', 'stage', env=self.env)['CODEX_HOME'])
+        self.assertFalse((nested / 'AGENTS.override.md').exists())
+
+    def test_nested_codex_worker_keeps_the_user_text_from_its_parent_home(self):
+        user = b'# read-only external communications\n'
+        (self.source / 'AGENTS.override.md').write_bytes(user)
+        self.env['CODEX_HOME'] = str(self.source)
+        parent = prepare_worker_home(ROOT, 'codex', 'owner', 'owner', env=self.env)
+        child = prepare_worker_home(ROOT, 'codex', 'stage', 'child',
+                                    env={**self.env, 'CODEX_HOME': parent['CODEX_HOME']})
+        data = (Path(child['CODEX_HOME']) / 'AGENTS.override.md').read_bytes()
+        self.assertTrue(data.startswith(user))
+        self.assertEqual(data.count(b'hearting:codex-bootstrap'), 2)
+
+    def test_claude_worker_reads_copies_of_the_user_rules(self):
+        (self.source / 'rules/team').mkdir(parents=True)
+        (self.source / 'rules/external-communications-read-only.md').write_text('메일은 읽기만 한다.\n')
+        (self.source / 'rules/team/style.md').write_text('style\n')
+        (self.source / 'rules/notes.txt').write_text('not a rule\n')
+        before = {p: p.read_bytes() for p in (self.source / 'rules').rglob('*') if p.is_file()}
+        self.env['CLAUDE_CONFIG_DIR'] = str(self.source)
+        home = Path(prepare_worker_home(ROOT, 'claude', 'stage', 'rules', env=self.env)['CLAUDE_CONFIG_DIR'])
+        rules = home / 'rules'
+        self.assertFalse(rules.is_symlink())
+        copied = sorted(str(p.relative_to(rules)) for p in rules.rglob('*') if p.is_file())
+        self.assertEqual(copied, ['external-communications-read-only.md', 'team/style.md'])
+        rule = rules / 'external-communications-read-only.md'
+        self.assertFalse(rule.is_symlink())
+        self.assertEqual(rule.read_text(), '메일은 읽기만 한다.\n')
+        self.assertEqual(rule.stat().st_mode & 0o777, 0o400)
+        self.assertEqual(before, {p: p.read_bytes() for p in (self.source / 'rules').rglob('*') if p.is_file()})
+
+        (self.source / 'rules/team/style.md').unlink()
+        prepare_worker_home(ROOT, 'claude', 'stage', 'rules', env=self.env)
+        self.assertEqual(sorted(str(p.relative_to(rules)) for p in rules.rglob('*') if p.is_file()),
+                         ['external-communications-read-only.md'])
 
     def test_codex_owner_retains_native_policy_without_main_agent_catalog(self):
         (self.source / 'agents').mkdir()

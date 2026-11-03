@@ -7166,7 +7166,7 @@ def ensure_launch_broker(
 
     The callable remains for one compatibility release so an overlooked caller
     fails closed with a stable reason instead of silently resurrecting the
-    resident broker. Diagnostic ``status``/``stop`` remain in dispatch-broker.py.
+    resident broker.
     """
 
     if (

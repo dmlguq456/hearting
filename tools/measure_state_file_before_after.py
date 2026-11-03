@@ -607,7 +607,7 @@ def _host() -> dict:
     except OSError:
         pass
     try:
-        st = os.statvfs("/home/nas/user/Uihyeop/personal/hearting/.agent_runtime")
+        st = os.statvfs(str(ROOT / ".agent_runtime"))
         info["fs_blocks_free"] = st.f_bavail * st.f_frsize
     except OSError:
         pass

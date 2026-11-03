@@ -1806,6 +1806,11 @@ def reconcile(rows, args):
             record["dispatch_logs"] = sweep(args.jobs)
         except Exception as exc:  # noqa: BLE001 -- independent best-effort pass
             record["dispatch_logs"] = {"error": type(exc).__name__}
+        try:
+            from reusable_runtime_retention import sweep
+            record["reusable_runtimes"] = sweep(args.jobs)
+        except Exception as exc:  # noqa: BLE001 -- independent best-effort pass
+            record["reusable_runtimes"] = {"error": type(exc).__name__}
     else:
         # Dry-run surface for the SD-111 §(7) v67 retention prune: the plan
         # counts only (the `dispatch_pending_delivery.py prune` CLI prints the

@@ -40,6 +40,20 @@ class ExplorerOrderTests(unittest.TestCase):
         self.assertEqual(result["session_order"],
                          {"b": ["sid:b2", "sid:b1"], "a": ["sid:a1", "sid:a2"]})
 
+    def test_a_new_steward_leads_but_a_placed_one_keeps_its_saved_slot(self):
+        saved = {"repos": ["a"], "sessions": {"a": ["sid:a1", "sid:placed"]}}
+        sessions = [
+            {"repo_id": "a", "order_key": "sid:a1"},
+            {"repo_id": "a", "order_key": "sid:placed", "steward": True},
+            {"repo_id": "a", "order_key": "sid:new"},
+            {"repo_id": "a", "order_key": "sid:steward", "steward": True},
+        ]
+        result = order.reconcile_order(saved, [{"id": "a"}], sessions)
+        self.assertEqual(result["session_order"],
+                         {"a": ["sid:steward", "sid:a1", "sid:placed", "sid:new"]})
+        self.assertEqual([row["order_key"] for row in result["sessions"]],
+                         ["sid:steward", "sid:a1", "sid:placed", "sid:new"])
+
     def test_tree_press_without_motion_remains_a_click(self):
         frame = CellFrame((), (Hit(4, 0, 32, ("scope", "repo:a")),), 40, 20)
         pressed, effects = reduce(NavState(), {"type": "mouse", "phase": "press", "x": 2, "y": 4,

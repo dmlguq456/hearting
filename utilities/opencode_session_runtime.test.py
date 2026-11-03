@@ -127,17 +127,17 @@ class NativeSessionTest(unittest.TestCase):
                           "sys.exit(1)\n" % incident)
         native.chmod(0o755)
         self.args.opencode_command = str(native)
-        self.args.model = "openai/gpt-6.1-sol"
+        self.args.model = "openai/model-x"
         with unittest.mock.patch.dict(os.environ, {"OPENCODE_RUNTIME_VERSION": "2.0.32",
                                                    "OPENCODE_DB": str(db)}):
             result, code = runtime.run_turn(self.args, "question", emit=self.events.append)
-            evidence = runtime.opencode_runtime.model_availability("openai/gpt-6.1-sol")
+            evidence = runtime.opencode_runtime.model_availability("openai/model-x")
         self.assertEqual(code, 1)
         self.assertEqual(result["error"], incident)  # no status is synthesized
         cache = json.loads((self.root / "state/agent-fleet/usage/opencode.json").read_text())
         recorded = {row["model"]: (row["state"], row["reason"])
                     for row in cache["providers"].values() if row["provider"] == "openai"}
-        self.assertEqual(recorded, {"gpt-6.1-sol": ("unavailable", "authentication-rejected"),
+        self.assertEqual(recorded, {"model-x": ("unavailable", "authentication-rejected"),
                                     "*": ("unavailable", "authentication-rejected")})
         self.assertNotIn("openai-access", json.dumps(cache))
         self.assertEqual((evidence["state"], evidence["automatic_eligible"]),

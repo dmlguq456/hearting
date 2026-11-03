@@ -351,10 +351,17 @@ decision rather than an accidental leak.
 ### 6.1. Active Context Budget
 
 Progressive disclosure applies to runtime bootstraps and discovery metadata,
-not only Skill bodies. The bootstrap is a router: source order, hard invariants,
-and runtime entrypoints stay resident; detailed lifecycle explanations,
-examples, and edge cases live in adapter README/ADAPTATION documents or command
-help loaded on demand.
+not only Skill bodies. The bootstrap is a router: purpose, judgment criteria,
+where to look, and the runtime entrypoint stay resident, and the agent follows
+the next action the runtime prints (`parent_next`, `required_action`,
+`next_step`). Procedure detail — receipts, resume and correction commands,
+peer messaging, command surfaces, tool checks, examples, and edge cases —
+lives in core sections, adapter README/ADAPTATION documents, or command help
+loaded on demand, and no bootstrap asks for a core document to be read before
+the task needs it. The shared body is one portable source,
+`core/fragments/bootstrap-body.md`, projected byte for byte into each adapter
+bootstrap by `tools/sync-bootstrap-dispatch.py`; an adapter adds only its
+harness-root resolution and runtime notes around it.
 
 - Each always-loaded adapter bootstrap is at most `16,384` UTF-8 bytes.
 - Each active Skill metadata discovery surface is at most `7,000` characters,
@@ -814,7 +821,7 @@ a standard+ stage ranks checked direct-headless candidates through its sealed qu
 
 ### 8.3. Direct headless launch under SD-61~63
 
-dispatch contract v3 has no resident launch broker, request spool, broker heartbeat, broker lease, or broker fencing identity. A standard+ dispatch-depth-1 conductor invokes the checked adapter wrapper directly for every same- or cross-harness dispatch-depth-2 attempt. The selected checked tuple's parent harness, transport, and sandbox must equal the actual launching wrapper identity exported in `AGENT_DISPATCH_CURRENT_*`; a missing partial identity or mismatch fails before child wrapper invocation. The canonical registry first records the stable attempt as `launch_claimed=0`. The checked wrapper then spawns a parent-death-safe pre-exec fence while holding the registry lock and atomically publishes the complete PID/start/namespace/leader-PGID identity together with the only `launch_claimed=1` transition. The fence records `launch_started=1` under the same exact row immediately before payload `exec`; a launcher lost before spawn leaves a retryable registered row, and a dead fence that never recorded start may be reset only after exact process-group quiescence. A duplicate or already-started claim never creates another child. A Codex dispatch-depth-1 capability owner running with `workspace-write` receives `sandbox_workspace_write.network_access=true`, `AGENT_NESTED_HEADLESS_NETWORK=1`, and a dispatch-state writable `CODEX_HOME`; that home links existing auth/config read-only and keeps mutable nested session state inside the owner sandbox. Dispatch-depth-2 workers do not inherit the network widening. Contract-v1/v2 route and broker state are read-only migration inputs. The broker utility may expose diagnostic `status` and idempotent `stop` for one compatibility release, but production dispatch never calls `ensure`, `request`, or `serve`.
+dispatch contract v3 has no resident launch broker, request spool, broker heartbeat, broker lease, or broker fencing identity. A standard+ dispatch-depth-1 conductor invokes the checked adapter wrapper directly for every same- or cross-harness dispatch-depth-2 attempt. The selected checked tuple's parent harness, transport, and sandbox must equal the actual launching wrapper identity exported in `AGENT_DISPATCH_CURRENT_*`; a missing partial identity or mismatch fails before child wrapper invocation. The canonical registry first records the stable attempt as `launch_claimed=0`. The checked wrapper then spawns a parent-death-safe pre-exec fence while holding the registry lock and atomically publishes the complete PID/start/namespace/leader-PGID identity together with the only `launch_claimed=1` transition. The fence records `launch_started=1` under the same exact row immediately before payload `exec`; a launcher lost before spawn leaves a retryable registered row, and a dead fence that never recorded start may be reset only after exact process-group quiescence. A duplicate or already-started claim never creates another child. A Codex dispatch-depth-1 capability owner running with `workspace-write` receives `sandbox_workspace_write.network_access=true`, `AGENT_NESTED_HEADLESS_NETWORK=1`, and a dispatch-state writable `CODEX_HOME`; that home links existing auth/config read-only and keeps mutable nested session state inside the owner sandbox. Dispatch-depth-2 workers do not inherit the network widening. Contract-v1/v2 route and broker state are read-only migration inputs. The broker utility is removed; production dispatch never launches through a broker.
 
 ### 8.4. Namespace-safe launch lifecycle under SD-72
 

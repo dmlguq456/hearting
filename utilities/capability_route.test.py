@@ -10134,10 +10134,14 @@ class RouteChainWriterTest(ComposeRouteTest):
    route=self.compose(artifact_root=tmp)
   with mock.patch.dict(os.environ,{"CLAUDE_CODE_SESSION_ID":"sid-starter"}):
    R._record_route_chain(route,str(Path(tmp)/"r.json"),"start")
-   R._record_route_chain(route,str(Path(tmp)/"r.json"),"start")
+   err=io.StringIO()
+   with contextlib.redirect_stderr(err):
+    R._record_route_chain(route,str(Path(tmp)/"r.json"),"start")
    lines=self.RC.read_tail("claude","sid-starter")
    self.assertEqual(len(lines),1)
    self.assertEqual(lines[0]["event"],"start")
+   # A repeated start is a normal continuation: no `written=0 reason=` line that reads as a refusal.
+   self.assertEqual(err.getvalue().strip(),"route_chain_already_recorded=1")
  def test_depth1_non_continuation_event_writes_nothing(self):
   with mock.patch.dict(os.environ,{"AGENT_DISPATCH_DEPTH":"1",
                                    "AGENT_DISPATCH_PARENT_SESSION_ID":"sid-parent",
@@ -10781,6 +10785,77 @@ class ProducerRevisionAdmissionTest(unittest.TestCase):
    with mock.patch.object(R,"gate_currency",return_value=SimpleNamespace(state="current",reason="")), \
         self.assertRaisesRegex(ValueError,"producer-revision-basis-unverified"):
     R.producer_revision_admission(route,route["nodes"][:2],jobs)
+
+
+class RouteOrAttemptArgumentTest(unittest.TestCase):
+ """Route commands take the route id, the route file or a registry attempt id alike.
+
+ Two weeks of sessions spent ~300 calls on CLI-shape errors: `status --route`, `correct` with a
+ route only, an attempt id where a route was asked (R2 manual-steps, 2026-11-02)."""
+ def setUp(self):
+  tmp=tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+  self.tmp=Path(tmp.name); self.root=self.tmp/"reports"; self.rid="rt-"+"a"*16
+  self.route_file=self._route(self.rid)
+  self.jobs=self.tmp/"jobs.log"
+  owner=f"worker_type=owner,owner_route_id={self.rid},owner_route_file={self.route_file},harness=claude"
+  stage=f"worker_type=stage,route_id={self.rid},route_file={self.route_file},route_node=test"
+  self.jobs.write_text(
+   f"t1\topen\t/r\t/w\towner\t{owner},attempt_id=att-owner-1\n"
+   f"t2\tdone\t/r\t/w\towner\t{owner},attempt_id=att-owner-1,note=dead-capacity\n"
+   f"t3\topen\t/r\t/w\tstage\t{stage},attempt_id=att-stage-1\n"
+   f"t4\topen\t/r\t/w\towner\t{owner},attempt_id=att-owner-2\n"
+   "t5\topen\t/r\t/w\tother\tworker_type=owner,owner_route_id=rt-"+"c"*16+",attempt_id=att-other\n",encoding="utf-8")
+ def _route(self,rid):
+  path=R.canonical_route_path(self.root,rid); path.parent.mkdir(parents=True,exist_ok=True)
+  path.write_text(json.dumps({"route_id":rid,"nodes":[],"artifact_root":str(self.root),
+                              "capability":"autopilot-code"}),encoding="utf-8")
+  return path
+ def test_an_attempt_id_names_its_route_wherever_a_route_is_asked(self):
+  from types import SimpleNamespace
+  for attempt in ("att-owner-1","att-owner-2","att-stage-1"):
+   self.assertEqual(R.resolve_route_argument(attempt,self.jobs),self.route_file)
+   self.assertEqual(R._close_route_argument(SimpleNamespace(route=attempt,jobs=self.jobs,artifact_root=None,
+                                                            command="close")),str(self.route_file))
+  self.assertEqual(R.resolve_route_argument(str(self.route_file),self.jobs),self.route_file)   # a file stays a file
+  self.assertEqual(R.resolve_route_argument("att-unknown",self.jobs),Path("att-unknown"))       # unchanged refusal path
+ def test_correct_reaches_a_routes_newest_owner_and_keeps_an_attempt_as_given(self):
+  with mock.patch.object(R,"_compose_artifact_root",return_value=str(self.root)):
+   self.assertEqual(R._correct_attempt_argument(self.rid,self.jobs),"att-owner-2")
+   self.assertEqual(R._correct_attempt_argument(str(self.route_file),self.jobs),"att-owner-2")
+   self.assertEqual(R._correct_attempt_argument("att-owner-1",self.jobs),"att-owner-1")
+   lonely=self._route("rt-"+"b"*16)
+   with self.assertRaisesRegex(ValueError,"route-owner-unregistered:rt-"+"b"*16):
+    R._correct_attempt_argument(str(lonely),self.jobs)
+ def test_status_takes_a_route_or_an_attempt_in_every_spelling(self):
+  env={**os.environ,"AGENT_ARTIFACT_ROOT":str(self.root)}
+  for env_key in ("AGENT_DISPATCH_ATTEMPT_ID","AGENT_DISPATCH_JOBS"): env.pop(env_key,None)
+  def status(*argv):
+   result=subprocess.run([sys.executable,str(P),"status",*argv,"--jobs",str(self.jobs)],
+                         capture_output=True,text=True,cwd=str(self.tmp),env=env)
+   self.assertEqual(result.returncode,0,result.stderr)
+   return json.loads(result.stdout)
+  for argv in ((self.rid,),("--route",self.rid),("--route-id",self.rid),("--attempt-id","att-stage-1"),
+               ("att-owner-1",),(str(self.route_file),)):
+   rows=status(*argv)
+   self.assertEqual([row["route_id"] for row in rows],[self.rid],argv)
+   self.assertEqual([(a["attempt_id"],a["status"]) for a in rows[0]["attempts"]],
+                    [("att-owner-1","done"),("att-stage-1","open"),("att-owner-2","open")],argv)
+   self.assertIn("start --route "+self.rid,rows[0]["resume_command"])
+  self.assertEqual(rows[0]["attempts"][0]["note"],"dead-capacity")
+  # Without a target the listing is the same as before: every route, no attempt read.
+  every=status("--artifact-root",str(self.root))
+  self.assertEqual([row["route_id"] for row in every],[self.rid])
+  self.assertNotIn("attempts",every[0])
+ def test_correct_without_an_owner_named_points_at_the_flag_instead_of_a_usage_error(self):
+  env={key:value for key,value in os.environ.items()
+       if not key.startswith(("CLAUDE_CODE_SESSION","CODEX_THREAD","CODEX_SESSION","OPENCODE_SESSION",
+                              "AGENT_DISPATCH_","FLEET_ROUTE_CHAIN"))}
+  env["FLEET_ROUTE_CHAIN_DIR"]=str(self.tmp/"chain")
+  result=subprocess.run([sys.executable,str(P),"correct","--jobs",str(self.jobs)],
+                        capture_output=True,text=True,cwd=str(self.tmp),env=env)
+  self.assertEqual(result.returncode,0,result.stderr)
+  self.assertEqual(json.loads(result.stdout)["state"],"no-open-route")
+  self.assertNotIn("usage:",result.stderr)
 
 
 if __name__=="__main__": unittest.main()

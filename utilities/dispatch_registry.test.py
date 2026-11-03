@@ -1696,56 +1696,6 @@ class RegistryTest(RegistryFixtureTestCase):
   self.assertEqual(applied["decisions"][0]["reason"],"attempt-descendant-live")
   self.assertIn("\topen\t",self.jobs.read_text())
 
- def test_manual_closure_recovery_gate_rejects_and_automatic_admits(self):
-  # R-8 / R-9: manual closure is not SD-106-recovery-eligible; automatic is.
-  recovery_spec=importlib.util.spec_from_file_location(
-   "dispatch_recovery_r8r9",ROOT/"utilities/dispatch-recovery.py")
-  recovery=importlib.util.module_from_spec(recovery_spec)
-  sys.modules[recovery_spec.name]=recovery
-  recovery_spec.loader.exec_module(recovery)
-
-  manual_module=self.load_registry_module("r8_manual")
-  manual_attempt="att-r8-manual"
-  self.jobs.write_text(self.cancellation_row(manual_attempt))
-  empty=D.ProcessGroupObservation("empty")
-  with mock.patch.object(manual_module,"attempt_tagged_descendants",return_value=empty), \
-       mock.patch.object(manual_module,"_marker_backed_repair",return_value=False), \
-       mock.patch.object(manual_module,"inspect_terminal_attempt",return_value={"state":"absent"}), \
-       mock.patch.object(D,"process_group_observation",return_value=empty), \
-       mock.patch.object(D,"attempt_tagged_descendants",return_value=empty), \
-       mock.patch.object(D,"attempt_scan_namespace_authority",return_value=False), \
-       mock.patch.object(manual_module,"namespace_gone",return_value="extinct"), \
-       mock.patch.object(D,"observer_namespace_extinct",return_value="extinct"), \
-       contextlib.redirect_stdout(io.StringIO()):
-   manual_module.cancel_receiptless_namespace(
-    manual_module.read_rows(self.jobs),self.cancellation_args(manual_attempt))
-  manual_fields=self.jobs.read_text().strip().split("\t",5)
-  manual_meta=D.parse_registry_metadata(manual_fields[5])
-  manual_snapshot=recovery.AttemptSnapshot(
-   status=manual_fields[1],repo=manual_fields[2],worktree=manual_fields[3],
-   slug=manual_fields[4],metadata=manual_meta,row_digest="")
-  self.assertIsNone(recovery._cancellation_evidence(manual_snapshot))
-
-  automatic_module=self.load_registry_module("r9_automatic")
-  automatic_attempt="att-r9-automatic"
-  self.jobs.write_text(self.cancellation_row(automatic_attempt))
-  with mock.patch.object(automatic_module,"attempt_tagged_descendants",return_value=empty), \
-       mock.patch.object(automatic_module,"inspect_terminal_attempt",return_value={"state":"absent"}), \
-       mock.patch.object(D,"process_group_observation",return_value=empty), \
-       mock.patch.object(D,"attempt_tagged_descendants",return_value=empty), \
-       mock.patch.object(D,"attempt_scan_namespace_authority",return_value=False), \
-       mock.patch.object(automatic_module,"namespace_gone",return_value="extinct"), \
-       mock.patch.object(D,"observer_namespace_extinct",return_value="extinct"), \
-       contextlib.redirect_stdout(io.StringIO()):
-   automatic_module.automatic_cancel_receiptless(
-    automatic_module.read_rows(self.jobs),self.cancellation_args(automatic_attempt))
-  automatic_fields=self.jobs.read_text().strip().split("\t",5)
-  automatic_meta=D.parse_registry_metadata(automatic_fields[5])
-  automatic_snapshot=recovery.AttemptSnapshot(
-   status=automatic_fields[1],repo=automatic_fields[2],worktree=automatic_fields[3],
-   slug=automatic_fields[4],metadata=automatic_meta,row_digest="")
-  self.assertIsNotNone(recovery._cancellation_evidence(automatic_snapshot))
-
  def test_automatic_cancel_receiptless_is_idempotent_across_two_runs(self):
   # R-10
   module=self.load_registry_module("r10_idempotent")

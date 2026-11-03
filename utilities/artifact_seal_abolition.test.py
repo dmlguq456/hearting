@@ -2368,9 +2368,6 @@ class B2TriggerTest(B1RefreshBase):
             self.assertEqual(explicit["status"], "emitted")
 
 
-TASLP_ROOT = Path("/home/nas/user/Uihyeop/IIPLab/projects/2025-12_TASLP_SR-CorrNet/.agent_reports")
-TASLP_MANUSCRIPT = "cyc_8513b910a82937ab87404e5d0677c7ce"
-TASLP_CHEATSHEET = "cyc_a33b829c03c2d972fd59271e3de169fd"
 RFC3339 = r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$"
 
 
@@ -2435,13 +2432,6 @@ class C1ChangesBase(B1RefreshBase):
                 digest.update(path.relative_to(top).as_posix().encode())
                 digest.update(path.read_bytes())
         return digest.hexdigest()
-
-    def taslp_copy(self):
-        if not TASLP_ROOT.is_dir():
-            self.skipTest("the TASLP root is not on this host")
-        target = Path(self._tmp.name) / "taslp-copy"
-        shutil.copytree(TASLP_ROOT, target, symlinks=True)
-        return target
 
 
 class C1MarkTest(C1ChangesBase):
@@ -2543,36 +2533,6 @@ class C1MarkTest(C1ChangesBase):
         self.assertEqual(summary["dispositions"], {"superseded": 1, "discarded": 1})
         self.assertTrue(summary["all_set_aside"])
 
-    def test_c1_taslp_copy_discard_clear_preserves_payload(self):
-        copy = self.taslp_copy()
-        record_path = copy / ".runtime/artifact-producer/v1/cycles" / (TASLP_MANUSCRIPT + ".json")
-        campaigns = copy / "campaigns"
-        payload = self.tree_digest(campaigns)
-        before = json.loads(record_path.read_text())
-        # These rehearse a mark on a copy of the live root. Once its owner has applied
-        # the mark to the root itself, the copy already holds it and nothing is left to replay.
-        if "disposition" in before:
-            self.skipTest("the TASLP manuscript already has a disposition")
-        reason = ("user instruction: set this manuscript aside; the new draft lives in "
-                  "campaigns/2026-09-30_tasl-sr-corrnet-revision-r1/2026-10-01_strategy-derived-cheatsheet")
-        marked = P.cycle_mark(copy, TASLP_MANUSCRIPT, discard=True, reason=reason)
-        self.assertEqual(marked["status"], "marked", marked)
-        record = json.loads(record_path.read_text())
-        self.assertEqual(record["disposition"]["kind"], "discarded")
-        self.assertEqual(record["disposition"]["reason"], reason)
-        self.assertEqual({k: v for k, v in record.items() if k not in {"disposition", "control_record_digest"}},
-                         {k: v for k, v in before.items() if k != "control_record_digest"})
-        self.assertEqual(self.tree_digest(campaigns), payload)  # no file or manifest of any cycle moved
-        self.assertEqual(len(self.lines(field="disposition")), 1)
-        P.cycle_mark(copy, TASLP_MANUSCRIPT, clear=True)
-        self.assertEqual({k: v for k, v in json.loads(record_path.read_text()).items() if k != "control_record_digest"},
-                         {k: v for k, v in before.items() if k != "control_record_digest"})
-        self.assertEqual(self.tree_digest(campaigns), payload)
-        self.assertEqual(len(self.lines(field="disposition")), 2)
-        # The real root was only read.
-        self.assertNotIn("disposition", json.loads(
-            (TASLP_ROOT / ".runtime/artifact-producer/v1/cycles" / (TASLP_MANUSCRIPT + ".json")).read_text()))
-
     # -- the fourth mode: which document stands for the cycle ----------------
     def roles(self, result):
         document = self.manifest(result)
@@ -2656,27 +2616,6 @@ class C1MarkTest(C1ChangesBase):
         self.assertEqual(artifact_index.to_payload(rebuilt)["cycles"], artifact_index.to_payload(incremental)["cycles"])
         self.assertEqual(artifact_index.to_payload(rebuilt)["manifests"], artifact_index.to_payload(incremental)["manifests"])
         self.assertEqual(self.roles(result)[wanted], "primary")
-
-    def test_c1_taslp_copy_primary_redesignation(self):
-        copy = self.taslp_copy()
-        wanted = "artifacts/reviews/refine/revision_cheatsheet.md"
-        manifest_path = next((copy / "campaigns").glob("*/2026-10-01_strategy-derived-cheatsheet/manifest.json"))
-        before = json.loads(manifest_path.read_text())
-        by_id = {row["artifact_id"]: row for row in before["artifacts"]}
-        old = next(r["locator"]["path"] for r in before["artifact_revisions"] if by_id[r["artifact_id"]]["role"] == "primary")
-        if old == wanted:
-            self.skipTest("the TASLP cheatsheet already has this primary")
-        out = P.cycle_mark(copy, TASLP_CHEATSHEET, primary=wanted, reason="redesignated by the owner")
-        self.assertEqual(out["status"], "marked", out)
-        after = json.loads(manifest_path.read_text())
-        by_id = {row["artifact_id"]: row for row in after["artifacts"]}
-        primaries = [r["locator"]["path"] for r in after["artifact_revisions"] if by_id[r["artifact_id"]]["role"] == "primary"]
-        self.assertEqual(primaries, [wanted])
-        self.assertNotEqual(old, wanted)
-        self.assertEqual(after["artifact_revisions"], before["artifact_revisions"])
-        self.assertEqual(len(after["events"]), len(before["events"]))
-        self.assertEqual(len(self.lines(field="primary")), 1)
-        self.assertEqual(json.loads((TASLP_ROOT / "campaigns" / manifest_path.relative_to(copy / "campaigns")).read_text()), before)
 
 
 class C1MoveTest(C1ChangesBase):
@@ -3611,10 +3550,6 @@ class D1LegacyConsumersTest(C1ChangesBase):
         self.assertFalse(hasattr(L, "decide_cycle_start_or_resume"))
         # The default it described lives in the producer: changed material input makes a child cycle.
         self.assertTrue(hasattr(P, "cycle_route_admission"))
-
-    def test_d1_batch_digest_guard_stays(self):
-        recovery = Path(__file__).with_name("dispatch-recovery.py").read_text(encoding="utf-8")
-        self.assertIn('raise RecoveryError("recovery-source-manifest-digest-mismatch")', recovery)
 
 
 class Gap2LocksTest(C1ChangesBase):

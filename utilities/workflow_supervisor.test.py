@@ -16,6 +16,7 @@ import io
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -150,6 +151,36 @@ class WorkflowFixture(unittest.TestCase):
                 os.environ[key] = value
 
     # -- fixtures -------------------------------------------------------------
+    @contextlib.contextmanager
+    def nested_base(self, *, retain=False):
+        """A nested fixture root removed only after its own detached writers.
+
+        A nested TemporaryDirectory is deleted while a writer the fixture
+        started may still hold it as its state root (Errno 39 on CI). Reap by
+        both the raw and the resolved path -- a producer records the resolved
+        state root -- before the directory goes away. `retain=True` registers
+        one reap+cleanup now, so cleanups a test body adds later (retiring its
+        owner leases) run first, as `retained_subfixture()` documents.
+        """
+        directory = tempfile.TemporaryDirectory(dir=self.base)
+        nested = Path(directory.name)
+
+        def reap_and_remove():
+            for marker in {str(nested), os.path.realpath(nested)}:
+                fixture_processes.reap(marker)
+            directory.cleanup()
+
+        if retain:
+            self.addCleanup(reap_and_remove)
+            with mock.patch.object(self, "base", nested):
+                yield nested
+            return
+        try:
+            with mock.patch.object(self, "base", nested):
+                yield nested
+        finally:
+            reap_and_remove()
+
     def write_route(self, nodes, route_id="rt-fixture0000000", route_hash="sha256:fixture"):
         route = {
             "schema_version": 2, "route_id": route_id, "route_hash": route_hash,
@@ -5139,6 +5170,265 @@ class TestComputePollObservationBoundary(WorkflowFixture):
         bad.write_text("foreign")
         with self.assertRaises((SUP.SupervisorError, OSError, ValueError)):
             self.arm(path, registry, extra=["--artifact-base", str(bad)])
+
+
+WRITER_SCRIPT = """
+import os, sys, time
+from pathlib import Path
+root = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(os.environ["FIXTURE_WRITER_ROOT"])
+while True:
+    active = root / "peer-steward" / "obligations" / "active"
+    active.mkdir(parents=True, exist_ok=True)
+    (active / (str(os.getpid()) + ".json")).write_text("tick")
+    time.sleep(0.01)
+"""
+
+
+class NestedFixtureWriterTest(WorkflowFixture):
+    """d4: a fixture's nested base outlives only the writers it started."""
+
+    def _spawn_writer(self, root, *, marker="argv"):
+        args = [sys.executable, "-c", WRITER_SCRIPT]
+        env = dict(os.environ)
+        if marker == "argv":
+            args.append(str(root))
+            env.pop("FIXTURE_WRITER_ROOT", None)
+        else:
+            env["FIXTURE_WRITER_ROOT"] = str(root)
+        return subprocess.Popen(
+            args, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True)
+
+    def _await_marked(self, marker):
+        # Bounded start-of-process observation only: the assertion is about the
+        # process disappearing, never about waiting for a race to clear.
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            found = fixture_processes.marked_processes(marker)
+            if found:
+                return found
+            time.sleep(0.01)
+        self.fail(f"writer never carried its fixture marker {marker}")
+
+    def test_nested_base_reaps_an_argv_marked_writer_before_removing_the_root(self):
+        with self.nested_base() as nested:
+            process = self._spawn_writer(nested, marker="argv")
+            self.assertIn(process.pid, self._await_marked(str(nested)))
+        process.wait(timeout=5)
+        self.assertFalse(nested.exists())
+        self.assertEqual(fixture_processes.marked_processes(str(nested)), {})
+
+    def test_nested_base_reaps_an_environment_marked_writer(self):
+        with self.nested_base() as nested:
+            process = self._spawn_writer(nested, marker="environ")
+            self.assertIn(process.pid, self._await_marked(str(nested)))
+        process.wait(timeout=5)
+        self.assertFalse(nested.exists())
+        self.assertEqual(fixture_processes.marked_processes(str(nested)), {})
+
+    def test_nested_base_reaps_the_real_obligation_runner_argv(self):
+        import peer_obligations as PO
+        with self.nested_base() as nested:
+            store = PO.ObligationStore(nested)
+            self.assertTrue(store.ensure_directory())
+            lock = os.open(store.root / PO.RUNNER_LOCK_NAME, os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                process = subprocess.Popen(
+                    [sys.executable, str(ROOT / "utilities" / "peer-steward.py"),
+                     "__obligation-runner", "--lock-fd", str(lock),
+                     "--state-root", str(nested)],
+                    pass_fds=(lock,), stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    start_new_session=True, env=dict(os.environ))
+            finally:
+                os.close(lock)
+            self.assertIn(process.pid, self._await_marked(str(nested)))
+            self.assertIn(str(nested), " ".join(process.args))
+        process.wait(timeout=5)
+        self.assertFalse(nested.exists())
+        self.assertEqual(fixture_processes.marked_processes(str(nested)), {})
+
+    def test_ensure_obligations_request_carries_the_nested_root_in_the_environment(self):
+        import peer_obligations as PO
+        with self.nested_base() as nested:
+            state_root = nested / "dispatch"
+            state_root.mkdir()
+            with mock.patch.dict(os.environ, {"HARNESS_STATE_ROOT": str(nested)}), \
+                    mock.patch.object(PO, "peer_state_root", return_value=state_root), \
+                    mock.patch.object(PO.subprocess, "Popen") as popen:
+                self.assertTrue(PO.request_obligation_recovery())
+            argv = popen.call_args.args[0]
+            child_env = popen.call_args.kwargs["env"]
+            self.assertNotIn(str(nested), argv)
+            self.assertEqual(child_env["HARNESS_STATE_ROOT"], str(nested))
+            self.assertEqual(os.path.realpath(child_env["HARNESS_STATE_ROOT"]),
+                             os.path.realpath(nested))
+            info = os.stat(state_root)
+            self.assertEqual(child_env[PO.STATE_ROOT_IDENTITY_ENV],
+                             f"{info.st_dev}:{info.st_ino}")
+            self.assertTrue(popen.call_args.kwargs["start_new_session"])
+
+    def _start_obligation_runner(self, root):
+        import peer_obligations as PO
+        store = PO.ObligationStore(root)
+        self.assertTrue(store.ensure_directory())
+        lock = os.open(store.root / PO.RUNNER_LOCK_NAME,
+                       os.O_RDWR | os.O_CREAT, 0o600)
+        stderr = open(Path(root).parent / "runner-stderr.log", "wb")
+        process = subprocess.Popen(
+            [sys.executable, str(ROOT / "utilities" / "peer-steward.py"),
+             "__obligation-runner", "--lock-fd", str(lock),
+             "--state-root", str(root)],
+            pass_fds=(lock,), stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=stderr,
+            start_new_session=True, env=dict(os.environ))
+        stderr.close()
+        os.close(lock)
+        return process
+
+    def _await_path(self, path, *, process=None, timeout=30):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if path.exists():
+                return
+            if process is not None and process.poll() is not None:
+                self.fail(f"runner exited ({process.returncode}) before writing {path}")
+            time.sleep(0.01)
+        self.fail(f"timed out waiting for {path}")
+
+    def test_runner_exits_without_recreating_the_state_root_it_lost(self):
+        """G1/G2: the real runner stops when its state root disappears.
+
+        The root is renamed, not rmtree'd: an atomic rename makes "the path is
+        gone" deterministic while the runner is alive, without racing the
+        fixture deletion itself. Every later write must find no root, and the
+        runner must exit on its own lock check.
+        """
+        with self.nested_base() as nested:
+            root = nested / "state"
+            root.mkdir()
+            removed = nested / "state-gone"
+            process = None
+            try:
+                process = self._start_obligation_runner(root)
+                # One full maintenance pass is past every inbox/obligation/
+                # runner-duties write before the root disappears.
+                self._await_path(
+                    root / "peer-steward" / "runner-duties" / "inbox-prefill.json",
+                    process=process)
+                os.rename(root, removed)
+                process.wait(timeout=20)
+            finally:
+                if process is not None and process.poll() is None:
+                    process.terminate()
+                    process.wait(timeout=5)
+                fixture_processes.reap(str(root))
+            self.assertEqual(
+                process.returncode, 0,
+                (nested / "runner-stderr.log").read_text(errors="replace"))
+            self.assertFalse(root.exists())
+            self.assertFalse((root / "recipient-inbox").exists())
+            self.assertFalse((root / "peer-steward" / "obligations").exists())
+            self.assertFalse((root / "peer-steward" / "runner-duties").exists())
+
+    def test_maintenance_pass_refuses_a_vanished_state_root(self):
+        import peer_obligations as PO
+        steward = _load("peer_steward_gap_maintenance", "utilities/peer-steward.py")
+        with self.nested_base() as nested:
+            root = nested / "state"
+            root.mkdir()
+            store = PO.ObligationStore(root)
+            self.assertTrue(store.ensure_directory())
+            self.assertTrue(store._state_root_identity_is_current())
+            shutil.rmtree(root)
+            self.assertEqual(steward._runner_maintenance_pass(store), {})
+            self.assertFalse(root.exists())
+
+    def test_unprotected_inbox_write_recreates_the_root_and_the_guard_refuses(self):
+        """Falsifier: the pre-fix writer recreated the vanished root."""
+        import dispatch_recipient_inbox as inbox
+        with self.nested_base() as nested:
+            root = nested / "state"
+            root.mkdir()
+            info = os.stat(root)
+            identity = (info.st_dev, info.st_ino)
+            shutil.rmtree(root)
+            inbox.write_steward_relations(root, [])
+            self.assertTrue(
+                (root / "recipient-inbox" / "steward-relations.json").is_file())
+            shutil.rmtree(root)
+            with self.assertRaises(OSError):
+                inbox.write_steward_relations(
+                    root, [], expected_root_identity=identity)
+            self.assertFalse(root.exists())
+
+    def _run_ensure_obligations(self, nested, *, identity=None):
+        import peer_obligations as PO
+        env = dict(os.environ)
+        env["HARNESS_STATE_ROOT"] = str(nested)
+        env.pop("AGENT_PEER_LEDGER_ROOT", None)
+        if identity is None:
+            env.pop(PO.STATE_ROOT_IDENTITY_ENV, None)
+        else:
+            env[PO.STATE_ROOT_IDENTITY_ENV] = identity
+        return subprocess.run(
+            [sys.executable, str(ROOT / "utilities" / "peer-steward.py"),
+             "__ensure-obligations"],
+            cwd=str(ROOT), env=env, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+
+    def test_ensure_obligations_does_not_recreate_a_root_observed_before_it_started(self):
+        """G1/G2: a detached writer that starts after removal creates nothing."""
+        with self.nested_base() as nested:
+            state_root = nested / "dispatch"
+            state_root.mkdir()
+            info = os.stat(state_root)
+            identity = f"{info.st_dev}:{info.st_ino}"
+            shutil.rmtree(state_root)
+            guarded = self._run_ensure_obligations(nested, identity=identity)
+            self.assertEqual(guarded.returncode, 0, guarded.stderr)
+            self.assertFalse(state_root.exists())
+            # Falsifier: without the producer's observation the lifecycle
+            # creation path still materializes the root (the pre-fix behaviour).
+            unguarded = self._run_ensure_obligations(nested)
+            try:
+                self.assertEqual(unguarded.returncode, 0, unguarded.stderr)
+                self.assertTrue(state_root.is_dir())
+            finally:
+                fixture_processes.reap(str(state_root))
+
+    def test_retained_nested_base_retires_leases_before_reaping(self):
+        order = []
+        captured = {}
+
+        def check_order():
+            captured["process"].wait(timeout=5)
+            self.assertEqual(order, ["lease"])
+            self.assertFalse(Path(captured["path"]).exists())
+            self.assertEqual(fixture_processes.marked_processes(captured["path"]), {})
+
+        self.addCleanup(check_order)          # registered first -> runs last
+        with self.nested_base(retain=True) as nested:
+            captured["path"] = str(nested)
+            self.addCleanup(lambda: order.append("lease"))
+            captured["process"] = self._spawn_writer(nested, marker="argv")
+            self._await_marked(str(nested))
+        # retain=True defers removal to the test's cleanups, after the lease.
+        self.assertTrue(nested.exists())
+
+    def test_without_reap_a_live_writer_outlives_the_directory_removal(self):
+        nested = Path(tempfile.mkdtemp(dir=self.base))
+        try:
+            process = self._spawn_writer(nested, marker="argv")
+            self._await_marked(str(nested))
+            with contextlib.suppress(OSError):
+                shutil.rmtree(nested)        # the old order: remove without reaping
+            self.assertTrue(fixture_processes.marked_processes(str(nested)))
+        finally:
+            for marker in {str(nested), os.path.realpath(nested)}:
+                fixture_processes.reap(marker)
+            process.wait(timeout=5)
+            shutil.rmtree(nested, ignore_errors=True)
 
 
 if __name__ == "__main__":

@@ -52,6 +52,101 @@ fail_msg() {
   fail=1
 }
 
+TAB=$(printf '\t')
+NL='
+'
+
+# Per-path symlink and ignore questions used to cost one process each: about
+# 8,000 of the ~14,500 processes a guard run started, and the negative suite
+# runs the guard seven times. link_tool answers the same questions for a whole
+# list in one process:
+#   link_tool ignored   stdin: paths, one per line. stdout: the ones
+#                       `git check-ignore -q <path>` reports ignored, in order.
+#   link_tool collapse  stdin: "<link>\t<expected target>\t<canonical>" rows.
+#                       stdout: one "<verdict>\t<link>\t<expected>\t<canonical>
+#                       \t<detail>" row per input row, in order. The verdict is
+#                       target when `readlink <link>` is not the expected
+#                       target (detail: that target); resolve when
+#                       `readlink -f <link>` is empty or differs from
+#                       `readlink -f <canonical>` (detail: the link's
+#                       resolution); ok otherwise. A canonical of - skips the
+#                       resolution check.
+# Both run the same commands as the per-path form (`git check-ignore`,
+# `readlink -f`) over the whole list, and fall back to one call per path only
+# when the batched call fails, so batching never changes a verdict. Paths must
+# not contain a tab or a newline (the per-path loops split on them as well).
+LINK_TOOL_PY='
+import os, subprocess, sys
+
+def run(argv, data=None):
+    return subprocess.run(argv, input=data, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+
+def ignored(paths):
+    if not paths:
+        return []
+    batch = run(["git", "check-ignore", "-z", "--stdin"], b"".join(os.fsencode(p) + b"\0" for p in paths))
+    if batch.returncode in (0, 1):
+        hits = {os.fsdecode(p) for p in batch.stdout.split(b"\0") if p}
+        return [p for p in paths if p in hits]
+    return [p for p in paths if run(["git", "check-ignore", "-q", p]).returncode == 0]
+
+def resolve(paths):
+    out = []
+    for start in range(0, len(paths), 512):
+        chunk = paths[start:start + 512]
+        batch = run(["readlink", "-f", *chunk])
+        lines = batch.stdout.split(b"\n")
+        if batch.returncode == 0 and len(lines) == len(chunk) + 1 and lines[-1] == b"":
+            out.extend(os.fsdecode(line) for line in lines[:-1])
+        else:
+            out.extend(os.fsdecode(run(["readlink", "-f", p]).stdout.rstrip(b"\n")) for p in chunk)
+    return out
+
+def literal(path):
+    try:
+        return os.readlink(path)
+    except OSError:
+        return ""
+
+def collapse(rows):
+    targets = [literal(link) for link, _expected, _canonical in rows]
+    checked = [i for i, (_link, expected, canonical) in enumerate(rows)
+               if targets[i] == expected and canonical != "-"]
+    resolved = resolve([p for i in checked for p in (rows[i][0], rows[i][2])])
+    found = {}
+    for k, i in enumerate(checked):
+        got, want = resolved[2 * k], resolved[2 * k + 1]
+        found[i] = ("ok", "") if got and got == want else ("resolve", got)
+    for i, (link, expected, canonical) in enumerate(rows):
+        verdict = ("target", targets[i]) if targets[i] != expected else found.get(i, ("ok", ""))
+        yield (verdict[0], link, expected, canonical, verdict[1])
+
+lines = [os.fsdecode(line) for line in sys.stdin.buffer.read().split(b"\n") if line]
+if sys.argv[1] == "ignored":
+    rows = ((p,) for p in ignored(lines))
+else:
+    rows = collapse([tuple((line.split("\t") + ["", "", ""])[:3]) for line in lines])
+sys.stdout.buffer.write(b"".join(os.fsencode("\t".join(row)) + b"\n" for row in rows))
+'
+link_tool() {
+  python3 -c "$LINK_TOOL_PY" "$1"
+}
+
+# The canonical collapse target of adapters/claude/<layer>/<name>: three ../
+# plus one more per directory level in <name>, then <layer>/<name>. Sets
+# collapse_target without starting a process.
+set_collapse_target() {
+  _ct_prefix=../../../
+  _ct_rest=$2
+  while :; do
+    case "$_ct_rest" in
+      */*) _ct_prefix="../$_ct_prefix"; _ct_rest=${_ct_rest#*/} ;;
+      *) break ;;
+    esac
+  done
+  collapse_target="$_ct_prefix$1/$2"
+}
+
 CLAUDE_NATIVE_SURFACE_PATTERN='adapters/claude|claude_setting|settings\.json|statusline\.sh|CLAUDE\.md|CLAUDE_HOME|agent-modes|allowedTools|(^|[^[:alnum:]_/.-])skills/|/\.claude/'
 NON_CODEX_DESIGN_SURFACE_PATTERN='Design MCP|mcp__design__|tools/design-mcp|<agent-home>/tools/design-mcp|getConsoleLogs|eval_js|preview\(\{ path \}\)'
 
@@ -312,9 +407,15 @@ check_claude_adapter_concrete_surfaces() {
   links=$(find adapters/claude -type l -print 2>/dev/null || true)
   # Ignore gitignored local installs. Canonical collapsed symlinks under shared
   # layers are valid at any depth when their relative targets resolve correctly.
-  links=$(printf '%s\n' "$links" | while IFS= read -r l; do
+  ignored=$(printf '%s\n' "$links" | link_tool ignored) || {
+    fail_msg "could not query git ignore rules for adapters/claude symlinks"
+    return
+  }
+  rows=""
+  concrete=""
+  while IFS= read -r l; do
     [ -n "$l" ] || continue
-    git check-ignore -q "$l" 2>/dev/null && continue
+    case "$NL$ignored$NL" in *"$NL$l$NL"*) continue ;; esac
     # Whole-layer collapse: the utilities domain is one dir-level symlink.
     if [ "$l" = "adapters/claude/utilities" ] \
       && [ "$(readlink "$l")" = "../../utilities" ]; then
@@ -325,21 +426,36 @@ check_claude_adapter_concrete_surfaces() {
     sub=${rel#*/}
     case "$layer" in
       hooks|tools|utilities|loops|scaffolds)
-        # Derive the relative depth from adapters/claude/<layer>/<sub>.
-        _slashes=$(printf '%s' "$sub" | tr -cd '/' | wc -c)
-        _up=$((3 + _slashes))
-        _prefix=""; _i=0
-        while [ "$_i" -lt "$_up" ]; do _prefix="../$_prefix"; _i=$((_i + 1)); done
-        _want="${_prefix}${layer}/${sub}"
-        if [ "$(readlink "$l")" = "$_want" ] \
-          && [ -n "$(readlink -f "$l" 2>/dev/null)" ] \
-          && [ "$(readlink -f "$l" 2>/dev/null)" = "$(readlink -f "$layer/$sub" 2>/dev/null)" ]; then
-          continue
-        fi
+        # A collapse must name adapters/claude/<layer>/<sub>'s canonical path
+        # and resolve to the same file.
+        set_collapse_target "$layer" "$sub"
+        rows="$rows$l$TAB$collapse_target$TAB$layer/$sub$NL"
+        continue
         ;;
     esac
-    printf '%s\n' "$l"
-  done)
+    concrete="$concrete$l$NL"
+  done <<EOF
+$links
+EOF
+  verdicts=$(printf '%s' "$rows" | link_tool collapse) || {
+    fail_msg "could not verify adapters/claude symlink collapses"
+    return
+  }
+  while IFS="$TAB" read -r verdict l _rest; do
+    case "$verdict" in
+      ''|ok) ;;
+      *) concrete="$concrete$l$NL" ;;
+    esac
+  done <<EOF
+$verdicts
+EOF
+  # Report in discovery order, as one list.
+  links=$(while IFS= read -r l; do
+    case "$NL$concrete" in *"$NL$l$NL"*) printf '%s\n' "$l" ;; esac
+  done <<EOF
+$links
+EOF
+)
   if [ -n "$links" ]; then
     fail_msg "adapters/claude symlinks must be canonical collapses (../../../<layer>/<name>) or adapter-owned concrete files:"
     printf '%s\n' "$links"
@@ -418,16 +534,55 @@ is_census_deferred() {
   return 1
 }
 
+# The exemption rows, read once per run (the guard never edits the file):
+# "<path>\t<class>\t<baseline>" for each non-comment line, baseline - when
+# field 4 is empty. A lookup is then a string match, not one awk per file.
+if [ -f "$EXEMPTIONS_FILE" ]; then
+  EXEMPTIONS_PRESENT=1
+  EXEMPTION_ROWS=$(awk -F'\t' '$0 !~ /^[[:space:]]*#/ { print $1 "\t" $2 "\t" ($4 == "" ? "-" : $4) }' "$EXEMPTIONS_FILE")
+else
+  EXEMPTIONS_PRESENT=0
+  EXEMPTION_ROWS=""
+fi
+
+# Set exemption_row_class and exemption_row_baseline from the first row for an
+# adapter path: empty class and baseline when no row names it, and - as the
+# baseline when the exemptions file is missing.
+lookup_exemption() {
+  exemption_row_class=""
+  exemption_row_baseline=""
+  if [ "$EXEMPTIONS_PRESENT" != 1 ]; then
+    exemption_row_baseline="-"
+    return 0
+  fi
+  case "$NL$EXEMPTION_ROWS$NL" in
+    *"$NL$1$TAB"*) ;;
+    *) return 0 ;;
+  esac
+  while IFS= read -r _ex_row; do
+    case "$_ex_row" in
+      "$1$TAB"*)
+        _ex_rest=${_ex_row#"$1$TAB"}
+        exemption_row_class=${_ex_rest%%"$TAB"*}
+        exemption_row_baseline=${_ex_rest#*"$TAB"}
+        return 0
+        ;;
+    esac
+  done <<EOF
+$EXEMPTION_ROWS
+EOF
+}
+
 # Return wrapper, delta, or empty for an adapter path.
 exemption_class() {
-  [ -f "$EXEMPTIONS_FILE" ] || { printf ''; return; }
-  awk -F'\t' -v p="$1" '$0 !~ /^[[:space:]]*#/ && $1 == p { print $2; exit }' "$EXEMPTIONS_FILE"
+  lookup_exemption "$1"
+  printf '%s' "$exemption_row_class"
 }
 
 # Return a delta's canonical baseline hash, or '-'.
 exemption_baseline() {
-  [ -f "$EXEMPTIONS_FILE" ] || { printf '-'; return; }
-  awk -F'\t' -v p="$1" '$0 !~ /^[[:space:]]*#/ && $1 == p { print ($4 == "" ? "-" : $4); exit }' "$EXEMPTIONS_FILE"
+  lookup_exemption "$1"
+  printf '%s' "$exemption_row_baseline"
 }
 
 # Raw-byte SHA-256 with sha256sum-to-shasum fallback.
@@ -441,6 +596,32 @@ file_sha256() {
   fi
 }
 
+# The collapse checks assert_shared_adapter_class queued, reported with the
+# messages it gave when it checked each link on its own: a target that is not
+# the canonical path, or a link that does not resolve to the canonical file.
+SHARED_LINK_ROWS=""
+flush_shared_adapter_links() {
+  [ -n "$SHARED_LINK_ROWS" ] || return 0
+  _fl_rows=$SHARED_LINK_ROWS
+  SHARED_LINK_ROWS=""
+  _fl_verdicts=$(printf '%s' "$_fl_rows" | link_tool collapse) || {
+    fail_msg "could not verify the adapters/claude shared-layer collapses"
+    return 0
+  }
+  while IFS="$TAB" read -r _fl_verdict _fl_adapter _fl_expected _fl_canonical _fl_detail; do
+    case "$_fl_verdict" in
+      target)
+        fail_msg "$_fl_adapter collapses to $_fl_detail; expected $_fl_expected (canonical)"
+        ;;
+      resolve)
+        fail_msg "$_fl_adapter does not resolve to canonical $_fl_canonical (resolved: ${_fl_detail:-missing})"
+        ;;
+    esac
+  done <<EOF
+$_fl_verdicts
+EOF
+}
+
 # Assert one shared file's three-class contract from layer and relative path.
 assert_shared_adapter_class() {
   _layer=$1
@@ -448,30 +629,20 @@ assert_shared_adapter_class() {
   _canonical="$_layer/$_name"
   _adapter="adapters/claude/$_layer/$_name"
   # Derive the relative target depth from the adapter path.
-  _slashes=$(printf '%s' "$_name" | tr -cd '/' | wc -c)
-  _up=$((3 + _slashes))
-  _prefix=""
-  _i=0
-  while [ "$_i" -lt "$_up" ]; do _prefix="../$_prefix"; _i=$((_i + 1)); done
-  _expected_target="${_prefix}${_layer}/${_name}"
-  _class=$(exemption_class "$_adapter")
+  set_collapse_target "$_layer" "$_name"
+  _expected_target=$collapse_target
+  lookup_exemption "$_adapter"
+  _class=$exemption_row_class
 
   if [ -L "$_adapter" ]; then
     if [ -n "$_class" ]; then
       fail_msg "$_adapter is a symlink but declared '$_class' in $EXEMPTIONS_FILE; exemptions (wrapper/delta) must stay concrete"
       return
     fi
-    _target=$(readlink "$_adapter")
-    if [ "$_target" != "$_expected_target" ]; then
-      fail_msg "$_adapter collapses to $_target; expected $_expected_target (canonical)"
-      return
-    fi
-    # Confirm that the runtime projection physically resolves to canonical.
-    _resolved=$(readlink -f "$_adapter" 2>/dev/null || true)
-    _want=$(readlink -f "$_canonical" 2>/dev/null || true)
-    if [ -z "$_resolved" ] || [ "$_resolved" != "$_want" ]; then
-      fail_msg "$_adapter does not resolve to canonical $_canonical (resolved: ${_resolved:-missing})"
-    fi
+    # Its target must be the canonical path, and the runtime projection must
+    # physically resolve to canonical: flush_shared_adapter_links checks every
+    # queued link in one process before the verdict.
+    SHARED_LINK_ROWS="$SHARED_LINK_ROWS$_adapter$TAB$_expected_target$TAB$_canonical$NL"
     return
   fi
 
@@ -845,7 +1016,7 @@ check_codex_bin_wrappers() {
   if ! grep -Fq 'native Skills, native Agents, and native Modes' adapters/codex/README.md \
     || ! grep -Fq 'native Skills, native Agents, and native Modes' adapters/codex/ADAPTATION.md \
     || ! grep -Fq 'headless --check <worktree>' adapters/codex/README.md \
-    || ! grep -Fq 'headless [--check] [--require-hook-trust]' adapters/codex/AGENTS.md \
+    || ! grep -Fq 'headless [--check] [--require-hook-trust]' adapters/codex/README.md \
     || ! grep -Fq 'Use `dispatch --dry-run|--register|--start`' adapters/codex/ADAPTATION.md \
     || ! grep -Fq 'native Codex records `codex-native-queue`' adapters/codex/README.md \
     || ! grep -Fq 'actual parent runtime, not the child' adapters/codex/ADAPTATION.md \
@@ -891,7 +1062,7 @@ check_codex_bin_wrappers() {
     || ! grep -Fq 'portable_model_role=deep editor' /tmp/codex-role-report.out \
     || ! grep -Fq 'role <portable-role|role-profile|pipeline-stage>' adapters/codex/bin/preflight.sh \
     || ! grep -Fq 'role <portable-role|role-profile|pipeline-stage>' adapters/codex/README.md \
-    || ! grep -Fq 'role <portable-role|role-profile|pipeline-stage>' adapters/codex/AGENTS.md; then
+    || ! grep -Fq 'role <portable-role|role-profile|pipeline-stage>' adapters/codex/README.md; then
     fail_msg "adapters/codex/bin/role-map.sh must map pipeline-stage aliases to portable roles with unit-catalog guidance (no retired team profiles)"
   fi
   if adapters/codex/bin/role-map.sh 'plan team' >/tmp/codex-role-retired.out 2>/tmp/codex-role-retired.err; then
@@ -913,15 +1084,15 @@ check_codex_bin_wrappers() {
   done
 
   for p in 'preflight.sh prompt-signal' 'preflight.sh token-budget' 'preflight.sh memory' 'preflight.sh recall' 'preflight.sh briefing' 'preflight.sh worklog' 'preflight.sh ui-info' 'preflight.sh tui-config' 'preflight.sh subagent-info' 'preflight.sh loop-info' 'preflight.sh qa-policy'; do
-    if ! grep -Fq "$p" adapters/codex/AGENTS.md; then
-      fail_msg "adapters/codex/AGENTS.md must document manual Codex lifecycle wrapper $p"
+    if ! grep -Fq "$p" adapters/codex/README.md; then
+      fail_msg "adapters/codex/README.md must document manual Codex lifecycle wrapper $p"
     fi
   done
 
-  if ! grep -Fq 'Keep Codex `/statusline` responsible for model, context, token, limit, and session footer fields.' adapters/codex/AGENTS.md \
+  if ! grep -Fq 'Keep Codex `/statusline` responsible for model, context, token, limit, and session footer fields.' adapters/codex/README.md \
     || ! grep -Fq 'This does not replace Codex `/statusline` for model/context/token/session fields' adapters/codex/README.md \
     || ! grep -Fq 'Codex has its own `/statusline` configuration for the TUI footer.' adapters/codex/ADAPTATION.md \
-    || ! grep -Fq 'preflight.sh ui-info' adapters/codex/AGENTS.md \
+    || ! grep -Fq 'preflight.sh ui-info' adapters/codex/README.md \
     || ! grep -Fq 'preflight.sh ui-info' adapters/codex/README.md \
     || ! grep -Fq 'preflight.sh ui-info' adapters/codex/ADAPTATION.md \
     || ! grep -Fq 'statusline_custom_dynamic_fields=unsupported' adapters/codex/bin/preflight.sh \
@@ -939,22 +1110,22 @@ check_codex_bin_wrappers() {
     || ! grep -Fq 'codex status distinguishes tracked dirty, untracked files, and sibling worktrees' hooks/portable-guards.test.sh \
     || ! grep -Fq 'tracked-dirty vs untracked counts' adapters/codex/README.md \
     || ! grep -Fq 'tracked-dirty vs untracked counts' adapters/codex/ADAPTATION.md \
-    || ! grep -Fq 'git dirty/worktree/dead-branch risks' adapters/codex/AGENTS.md \
+    || ! grep -Fq 'git dirty/worktree/dead-branch risks' adapters/codex/README.md \
     || ! grep -Fq 'git dirty/worktree/dead-branch risk fields' adapters/codex/README.md \
     || ! grep -Fq 'git dirty/worktree/dead-branch risk fields' adapters/codex/ADAPTATION.md \
-    || ! grep -Fq 'preflight.sh subagent-info --check' adapters/codex/AGENTS.md \
+    || ! grep -Fq 'preflight.sh subagent-info --check' adapters/codex/README.md \
     || ! grep -Fq 'preflight.sh subagent-info --check' adapters/codex/README.md \
     || ! grep -Fq 'preflight.sh subagent-info --check' adapters/codex/ADAPTATION.md \
     || ! grep -Fq 'do not duplicate Codex-native footer' adapters/codex/ADAPTATION.md; then
     fail_msg "Codex docs must keep /statusline native and reserve preflight.sh status for harness-specific signals"
   fi
 
-  if ! grep -Fq 'codex_setting/codex-modes' adapters/codex/AGENTS.md; then
-    fail_msg "adapters/codex/AGENTS.md must document the Codex native mode projection"
+  if ! grep -Fq 'codex_setting/codex-modes' adapters/codex/README.md; then
+    fail_msg "adapters/codex/README.md must document the Codex native mode projection"
   fi
 
-  if ! grep -Fq 'codex_setting/codex-hooks' adapters/codex/AGENTS.md; then
-    fail_msg "adapters/codex/AGENTS.md must document the Codex native hook projection"
+  if ! grep -Fq 'codex_setting/codex-hooks' adapters/codex/README.md; then
+    fail_msg "adapters/codex/README.md must document the Codex native hook projection"
   fi
 
 
@@ -1035,14 +1206,14 @@ check_codex_bin_wrappers() {
     || ! grep -Fq 'token-budget)' adapters/codex/bin/preflight.sh \
     || ! grep -Fq 'Token pressure is orthogonal to intensity' core/CONVENTIONS.md \
     || ! grep -Fq '**Token-pressure non-interference:**' core/OPERATIONS.md \
-    || ! grep -Fq 'normal, unknown, repeated-band, and validated-native states' adapters/codex/AGENTS.md \
+    || ! grep -Fq 'normal, unknown, repeated-band, and validated-native states' adapters/codex/README.md \
     || ! grep -Fq 'runtime-owned `$CODEX_HOME/config.toml`' adapters/codex/README.md \
     || ! grep -Fq 'AGENT_TOKEN_BUDGET_NATIVE_VALIDATED=1' adapters/codex/ADAPTATION.md \
     || grep -Fq 'import fcntl' utilities/token-budget.py \
     || ! grep -Fq 'class TransitionLock' utilities/token-budget.py \
     || ! grep -Fq 'class DirectoryLock' tools/fleet/token_accounting.py \
     || ! grep -Fq 'eligible_for_user_review' tools/fleet/token_experiment.py \
-    || ! grep -Fq 'Phase 2 automatic accounting' adapters/opencode/AGENTS.md; then
+    || ! grep -Fq 'Phase 2 automatic accounting' adapters/opencode/README.md; then
     fail_msg "token-budget projection must preserve portable orthogonality, bounded accounting, isolated evaluation, and native-config boundaries"
   fi
   for p in utilities/token-budget.py adapters/codex/hooks/userprompt-lifecycle.py adapters/codex/bin/preflight.sh adapters/codex/hooks/hooks.json; do
@@ -1126,7 +1297,7 @@ check_codex_bin_wrappers() {
     || ! grep -Fq 'dispatch_contract="preflight.sh dispatch --capability autopilot-code --capability-mode <mode> [--worker-mode <family/mode>] --qa <level> --intensity <level> --dispatch-depth 1|2 [--parent <slug>]"' adapters/codex/bin/capability-map.sh; then
     fail_msg "Codex autopilot-code capability-info must expose the portable pipeline/artifact/role/dispatch contracts"
   fi
-  if ! grep -Fq 'capability-info` and `route` print the portable pipeline contract (`code-plan>code-execute>code-test>code-report` for `standard+`)' adapters/codex/AGENTS.md \
+  if ! grep -Fq 'capability-info` and `route` print the portable pipeline contract (`code-plan>code-execute>code-test>code-report` for `standard+`)' adapters/codex/README.md \
     || ! grep -Fq 'autopilot-code pipeline' adapters/codex/README.md \
     || ! grep -Fq 'stage_graph_contract=core/CONVENTIONS.md#pipeline-intensity-stage-graph-and-assurance' adapters/codex/README.md \
     || ! grep -Fq 'plan_policy=direct=no-plan;quick=registered-headless-dispatch-depth-1-one-shot-micro-plan+plan-check-lite;standard+=durable-plan' adapters/codex/README.md \
@@ -1136,7 +1307,7 @@ check_codex_bin_wrappers() {
   if ! grep -Fq 'qa-policy <quick|light|standard|thorough|adversarial> [code|research|doc|general]' adapters/codex/bin/preflight.sh \
     || ! grep -Fq 'runtime_surface=codex-qa-policy' adapters/codex/bin/preflight.sh \
     || ! grep -Fq 'independent_delegation_policy=claim-only-if-separate-codex-agent-headless-or-external-pass-ran' adapters/codex/bin/preflight.sh \
-    || ! grep -Fq 'preflight.sh qa-policy <level> [code|research|doc|general]' adapters/codex/AGENTS.md \
+    || ! grep -Fq 'preflight.sh qa-policy <level> [code|research|doc|general]' adapters/codex/README.md \
     || ! grep -Fq 'QA policy mapping' adapters/codex/README.md; then
     fail_msg "Codex adapter must expose QA level policy mapping as a runtime preflight contract"
   fi
@@ -1148,32 +1319,32 @@ check_codex_bin_wrappers() {
     fail_msg "Codex runtime-facing visual harness output must use legacy/adapter-specific wording, not Claude implementation names"
   fi
 
-  if ! grep -Fq 'preflight.sh visual-harness' adapters/codex/AGENTS.md; then
-    fail_msg "adapters/codex/AGENTS.md must document the Codex visual harness tool-contract"
+  if ! grep -Fq 'preflight.sh visual-harness' adapters/codex/README.md; then
+    fail_msg "adapters/codex/README.md must document the Codex visual harness tool-contract"
   fi
-  if ! grep -Fq 'preflight.sh browser-fetch --check <url>' adapters/codex/AGENTS.md; then
-    fail_msg "adapters/codex/AGENTS.md must document the Codex material browser-fetch tool-contract"
+  if ! grep -Fq 'preflight.sh browser-fetch --check <url>' adapters/codex/README.md; then
+    fail_msg "adapters/codex/README.md must document the Codex material browser-fetch tool-contract"
   fi
-  if ! grep -Fq 'preflight.sh data-script --check <script.py>' adapters/codex/AGENTS.md; then
-    fail_msg "adapters/codex/AGENTS.md must document the Codex material data-script tool-contract"
+  if ! grep -Fq 'preflight.sh data-script --check <script.py>' adapters/codex/README.md; then
+    fail_msg "adapters/codex/README.md must document the Codex material data-script tool-contract"
   fi
-  if ! grep -Fq 'preflight.sh figure-gen --check <script.py>' adapters/codex/AGENTS.md; then
-    fail_msg "adapters/codex/AGENTS.md must document the Codex material figure-gen tool-contract"
+  if ! grep -Fq 'preflight.sh figure-gen --check <script.py>' adapters/codex/README.md; then
+    fail_msg "adapters/codex/README.md must document the Codex material figure-gen tool-contract"
   fi
-  if ! grep -Fq 'figure-gen --verify-report <manifest.json> <report.md>' adapters/codex/AGENTS.md; then
-    fail_msg "adapters/codex/AGENTS.md must document fail-closed report figure QA"
+  if ! grep -Fq 'figure-gen --verify-report <manifest.json> <report.md>' adapters/codex/README.md; then
+    fail_msg "adapters/codex/README.md must document fail-closed report figure QA"
   fi
-  if ! grep -Fq 'preflight.sh pdf-extract --check <file.pdf>' adapters/codex/AGENTS.md; then
-    fail_msg "adapters/codex/AGENTS.md must document the Codex material PDF extract tool-contract"
+  if ! grep -Fq 'preflight.sh pdf-extract --check <file.pdf>' adapters/codex/README.md; then
+    fail_msg "adapters/codex/README.md must document the Codex material PDF extract tool-contract"
   fi
-  if ! grep -Fq 'preflight.sh web-image-search --check <query>' adapters/codex/AGENTS.md; then
-    fail_msg "adapters/codex/AGENTS.md must document the Codex material web image search tool-contract"
+  if ! grep -Fq 'preflight.sh web-image-search --check <query>' adapters/codex/README.md; then
+    fail_msg "adapters/codex/README.md must document the Codex material web image search tool-contract"
   fi
-  if ! grep -Fq 'preflight.sh verification-runner --timeout <seconds> -- <command>' adapters/codex/AGENTS.md; then
-    fail_msg "adapters/codex/AGENTS.md must document the Codex QA verification-runner tool-contract"
+  if ! grep -Fq 'preflight.sh verification-runner --timeout <seconds> -- <command>' adapters/codex/README.md; then
+    fail_msg "adapters/codex/README.md must document the Codex QA verification-runner tool-contract"
   fi
-  if ! grep -Fq 'preflight.sh claim-verify --check <claim>' adapters/codex/AGENTS.md; then
-    fail_msg "adapters/codex/AGENTS.md must document the Codex research claim-verify tool-contract"
+  if ! grep -Fq 'preflight.sh claim-verify --check <claim>' adapters/codex/README.md; then
+    fail_msg "adapters/codex/README.md must document the Codex research claim-verify tool-contract"
   fi
   if ! grep -Fq 'tool_contract_check' adapters/codex/README.md \
     || ! grep -Fq 'fallback=reference-only' adapters/codex/README.md \
@@ -1205,11 +1376,11 @@ check_codex_bin_wrappers() {
   fi
   if ! grep -Fq 'loop-info <oncall|note|study|drill|runtime-watch>' adapters/codex/README.md \
     || ! grep -Fq 'preflight.sh loop-info <loop>' adapters/codex/ADAPTATION.md \
-    || ! grep -Fq 'Arbitrary detached shell output' adapters/codex/AGENTS.md \
-    || ! grep -Fq 'The interactive launcher and managed gateway are retired.' adapters/codex/AGENTS.md \
-    || ! grep -Fq 'Interactive completion uses Codex' adapters/codex/AGENTS.md \
-    || ! grep -Fq '`CODEX_THREAD_ID`' adapters/codex/AGENTS.md \
-    || ! grep -Fq 'ambiguous sends may repeat.' adapters/codex/AGENTS.md; then
+    || ! grep -Fq 'Arbitrary detached shell output' adapters/codex/README.md \
+    || ! grep -Fq 'The interactive launcher and managed gateway are retired.' adapters/codex/README.md \
+    || ! grep -Fq 'Interactive completion uses Codex' adapters/codex/README.md \
+    || ! grep -Fq '`CODEX_THREAD_ID`' adapters/codex/README.md \
+    || ! grep -Fq 'ambiguous sends may repeat.' adapters/codex/README.md; then
     fail_msg "Codex docs must document loop-info support/fallback contracts"
   fi
 
@@ -1293,7 +1464,7 @@ check_codex_utility_projection() {
   fi
   for f in utilities/*; do
     [ -f "$f" ] || continue
-    bn=$(basename "$f")
+    bn=${f##*/}
     # Test files are DERIVED-deferred: no *.test.* file has ever been (or may be)
     # projected into an adapter utilities dir, so the projected/deferred census
     # holds no real decision for them. Hand-listing each new test recreated the
@@ -1438,7 +1609,7 @@ check_codex_tool_projection() {
   fi
   for f in tools/*; do
     [ -e "$f" ] || continue
-    bn=$(basename "$f")
+    bn=${f##*/}
     case " $TOOL_PROJECTED $TOOL_DEFERRED " in
       *" $bn "*) ;;
       *) fail_msg "no projection decision for tools/$bn (must be classified projected or deferred)" ;;
@@ -1836,7 +2007,7 @@ check_codex_native_mode_projection() {
   # catalog files; underscore-prefixed shared/law/notes fragments have no projection.
   for f in roles/units/*/*.md; do
     [ -f "$f" ] || continue
-    case "$(basename "$f")" in _*) continue ;; esac
+    case "${f##*/}" in _*) continue ;; esac
     case "$f" in roles/units/_shared/*) continue ;; esac
     rel=${f#roles/units/}
     mode=${rel%.md}
@@ -2120,7 +2291,7 @@ check_opencode_bin_wrappers() {
   if ! grep -Fq 'preflight.sh qa-policy <quick|light|standard|thorough|adversarial> [code|research|doc|general]' adapters/opencode/bin/preflight.sh \
     || ! grep -Fq 'runtime_surface=opencode-qa-policy' adapters/opencode/bin/preflight.sh \
     || ! grep -Fq 'stage_graph_selector=explicit-graph-or-intensity-default' adapters/opencode/bin/preflight.sh \
-    || ! grep -Fq 'preflight.sh qa-policy <level> [code|research|doc|general]' adapters/opencode/AGENTS.md \
+    || ! grep -Fq 'preflight.sh qa-policy <level> [code|research|doc|general]' adapters/opencode/README.md \
     || ! grep -Fq 'QA policy mapping' adapters/opencode/README.md \
     || ! grep -Fq 'QA policy mapping' adapters/opencode/ADAPTATION.md; then
     fail_msg "OpenCode adapter must expose QA level policy mapping as a runtime preflight contract"
@@ -2151,19 +2322,19 @@ check_opencode_bin_wrappers() {
   done
 
   for p in 'preflight.sh memory' 'preflight.sh recall' 'preflight.sh briefing' 'preflight.sh worklog'; do
-    if ! grep -Fq "$p" adapters/opencode/AGENTS.md; then
-      fail_msg "adapters/opencode/AGENTS.md must document manual OpenCode lifecycle wrapper $p"
+    if ! grep -Fq "$p" adapters/opencode/README.md; then
+      fail_msg "adapters/opencode/README.md must document manual OpenCode lifecycle wrapper $p"
     fi
   done
 
-  if ! grep -Fq 'opencode_setting/opencode-plugins' adapters/opencode/AGENTS.md; then
-    fail_msg "adapters/opencode/AGENTS.md must document the OpenCode native plugin projection"
+  if ! grep -Fq 'opencode_setting/opencode-plugins' adapters/opencode/README.md; then
+    fail_msg "adapters/opencode/README.md must document the OpenCode native plugin projection"
   fi
 
-  if ! grep -Fq 'opencode_setting/opencode-agents' adapters/opencode/AGENTS.md \
-    || ! grep -Fq 'opencode_setting/opencode-commands' adapters/opencode/AGENTS.md \
-    || ! grep -Fq 'opencode_setting/opencode-skills' adapters/opencode/AGENTS.md; then
-    fail_msg "adapters/opencode/AGENTS.md must document OpenCode native surface projections"
+  if ! grep -Fq 'opencode_setting/opencode-agents' adapters/opencode/README.md \
+    || ! grep -Fq 'opencode_setting/opencode-commands' adapters/opencode/README.md \
+    || ! grep -Fq 'opencode_setting/opencode-skills' adapters/opencode/README.md; then
+    fail_msg "adapters/opencode/README.md must document OpenCode native surface projections"
   fi
 
   if ! grep -Fq 'named `tool_contract`, `tool_contract_check`, `runtime_surface`, and `fallback`' adapters/opencode/AGENTS.md; then
@@ -2211,32 +2382,32 @@ check_opencode_bin_wrappers() {
     fail_msg "OpenCode runtime-facing visual harness output must use legacy/adapter-specific wording, not Claude implementation names"
   fi
 
-  if ! grep -Fq 'preflight.sh visual-harness' adapters/opencode/AGENTS.md; then
-    fail_msg "adapters/opencode/AGENTS.md must document the OpenCode visual harness tool-contract"
+  if ! grep -Fq 'preflight.sh visual-harness' adapters/opencode/README.md; then
+    fail_msg "adapters/opencode/README.md must document the OpenCode visual harness tool-contract"
   fi
-  if ! grep -Fq 'preflight.sh browser-fetch --check <url>' adapters/opencode/AGENTS.md; then
-    fail_msg "adapters/opencode/AGENTS.md must document the OpenCode material browser-fetch tool-contract"
+  if ! grep -Fq 'preflight.sh browser-fetch --check <url>' adapters/opencode/README.md; then
+    fail_msg "adapters/opencode/README.md must document the OpenCode material browser-fetch tool-contract"
   fi
-  if ! grep -Fq 'preflight.sh data-script --check <script.py>' adapters/opencode/AGENTS.md; then
-    fail_msg "adapters/opencode/AGENTS.md must document the OpenCode material data-script tool-contract"
+  if ! grep -Fq 'preflight.sh data-script --check <script.py>' adapters/opencode/README.md; then
+    fail_msg "adapters/opencode/README.md must document the OpenCode material data-script tool-contract"
   fi
-  if ! grep -Fq 'preflight.sh figure-gen --check <script.py>' adapters/opencode/AGENTS.md; then
-    fail_msg "adapters/opencode/AGENTS.md must document the OpenCode material figure-gen tool-contract"
+  if ! grep -Fq 'preflight.sh figure-gen --check <script.py>' adapters/opencode/README.md; then
+    fail_msg "adapters/opencode/README.md must document the OpenCode material figure-gen tool-contract"
   fi
-  if ! grep -Fq 'figure-gen --verify-report <manifest.json> <report.md>' adapters/opencode/AGENTS.md; then
-    fail_msg "adapters/opencode/AGENTS.md must document fail-closed report figure QA"
+  if ! grep -Fq 'figure-gen --verify-report <manifest.json> <report.md>' adapters/opencode/README.md; then
+    fail_msg "adapters/opencode/README.md must document fail-closed report figure QA"
   fi
-  if ! grep -Fq 'preflight.sh pdf-extract --check <file.pdf>' adapters/opencode/AGENTS.md; then
-    fail_msg "adapters/opencode/AGENTS.md must document the OpenCode material PDF extract tool-contract"
+  if ! grep -Fq 'preflight.sh pdf-extract --check <file.pdf>' adapters/opencode/README.md; then
+    fail_msg "adapters/opencode/README.md must document the OpenCode material PDF extract tool-contract"
   fi
-  if ! grep -Fq 'preflight.sh web-image-search --check <query>' adapters/opencode/AGENTS.md; then
-    fail_msg "adapters/opencode/AGENTS.md must document the OpenCode material web image search tool-contract"
+  if ! grep -Fq 'preflight.sh web-image-search --check <query>' adapters/opencode/README.md; then
+    fail_msg "adapters/opencode/README.md must document the OpenCode material web image search tool-contract"
   fi
-  if ! grep -Fq 'preflight.sh verification-runner --timeout <seconds> -- <command>' adapters/opencode/AGENTS.md; then
-    fail_msg "adapters/opencode/AGENTS.md must document the OpenCode QA verification-runner tool-contract"
+  if ! grep -Fq 'preflight.sh verification-runner --timeout <seconds> -- <command>' adapters/opencode/README.md; then
+    fail_msg "adapters/opencode/README.md must document the OpenCode QA verification-runner tool-contract"
   fi
-  if ! grep -Fq 'preflight.sh claim-verify --check <claim>' adapters/opencode/AGENTS.md; then
-    fail_msg "adapters/opencode/AGENTS.md must document the OpenCode research claim-verify tool-contract"
+  if ! grep -Fq 'preflight.sh claim-verify --check <claim>' adapters/opencode/README.md; then
+    fail_msg "adapters/opencode/README.md must document the OpenCode research claim-verify tool-contract"
   fi
   if ! grep -Fq 'tool_contract_check' adapters/opencode/README.md \
     || ! grep -Fq 'fallback=reference-only' adapters/opencode/README.md \
@@ -2332,7 +2503,7 @@ check_opencode_utility_projection() {
   fi
   for f in utilities/*; do
     [ -f "$f" ] || continue
-    bn=$(basename "$f")
+    bn=${f##*/}
     # Test files are DERIVED-deferred: no *.test.* file has ever been (or may be)
     # projected into an adapter utilities dir, so the projected/deferred census
     # holds no real decision for them. Hand-listing each new test recreated the
@@ -2469,7 +2640,7 @@ check_opencode_tool_projection() {
   fi
   for f in tools/*; do
     [ -e "$f" ] || continue
-    bn=$(basename "$f")
+    bn=${f##*/}
     case " $TOOL_PROJECTED $TOOL_DEFERRED " in
       *" $bn "*) ;;
       *) fail_msg "no projection decision for tools/$bn (must be classified projected or deferred)" ;;
@@ -2913,8 +3084,17 @@ check_claude_drill_runner_projection() {
 # second edit site that drifts silently (fleet/loops/scaffolds all did).
 check_claude_collapsed_domain() {
   domain=$1
-  for p in $(find "$domain" -mindepth 1 -print); do
-    git check-ignore -q "$p" 2>/dev/null && continue
+  paths=$(find "$domain" -mindepth 1 -print)
+  # One ignore query and one link check for the whole domain; same word
+  # splitting as the loop below.
+  # shellcheck disable=SC2086
+  ignored=$(printf '%s\n' $paths | link_tool ignored) || {
+    fail_msg "could not query git ignore rules for $domain"
+    return
+  }
+  rows=""
+  for p in $paths; do
+    case "$NL$ignored$NL" in *"$NL$p$NL"*) continue ;; esac
     rel=${p#$domain/}
     adapter_p=adapters/claude/$domain/$rel
     case "$rel" in
@@ -2939,12 +3119,23 @@ check_claude_collapsed_domain() {
         fail_msg "$adapter_p must be a file symlink to canonical $p, not a concrete copy"
         continue
       fi
-      expected=$(python3 -c 'import os,sys;print(os.path.relpath(sys.argv[1],os.path.dirname(sys.argv[2])))' "$p" "$adapter_p")
-      if [ "$(readlink "$adapter_p")" != "$expected" ]; then
-        fail_msg "$adapter_p points to $(readlink "$adapter_p"); expected $expected"
-      fi
+      # find prints normalized paths, so this is os.path.relpath(p, the
+      # link's directory).
+      set_collapse_target "$domain" "$rel"
+      rows="$rows$adapter_p$TAB$collapse_target$TAB-$NL"
     fi
   done
+  verdicts=$(printf '%s' "$rows" | link_tool collapse) || {
+    fail_msg "could not verify the adapters/claude/$domain collapses"
+    return
+  }
+  while IFS="$TAB" read -r verdict adapter_p expected _canonical target; do
+    case "$verdict" in
+      target) fail_msg "$adapter_p points to $target; expected $expected" ;;
+    esac
+  done <<EOF
+$verdicts
+EOF
 }
 
 check_claude_scaffold_projection() {
@@ -3199,7 +3390,7 @@ check_adaptation_inventory_native_surfaces() {
   fi
   if ! grep -Fq 'install-runtime-projection.sh' adapters/codex/README.md \
     || ! grep -Fq 'check-runtime-projection.sh' adapters/codex/README.md \
-    || ! grep -Fq 'install-runtime-projection.sh' adapters/codex/AGENTS.md \
+    || ! grep -Fq 'install-runtime-projection.sh' adapters/codex/README.md \
     || ! grep -Fq 'preflight.sh doctor --runtime' adapters/codex/bin/preflight.sh \
     || ! grep -Fq 'preflight.sh doctor [--runtime|--runtime-strict]' adapters/codex/bin/preflight.sh \
     || ! grep -Fq 'runtime-projection [--require-hook-trust]' adapters/codex/bin/preflight.sh \
@@ -3232,11 +3423,11 @@ check_adaptation_inventory_native_surfaces() {
     || ! grep -Fq 'check=hook-trust:review-needed' adapters/codex/README.md \
     || ! grep -Fq 'authoritative App Server `hooks/list`' adapters/codex/README.md \
     || ! grep -Fq 'authoritative App Server `hooks/list`' adapters/codex/ADAPTATION.md \
-    || ! grep -Fq 'does not force Stop/PreToolUse trust' adapters/codex/AGENTS.md \
+    || ! grep -Fq 'does not force Stop/PreToolUse trust' adapters/codex/README.md \
     || ! grep -Fq 'doctor --runtime-strict' adapters/codex/README.md \
-    || ! grep -Fq 'runtime-projection --require-hook-trust' adapters/codex/AGENTS.md \
+    || ! grep -Fq 'runtime-projection --require-hook-trust' adapters/codex/README.md \
     || ! grep -Fq 'check=hook-trust:review-needed' adapters/codex/ADAPTATION.md; then
-    fail_msg "adapters/codex/README.md and adapters/codex/AGENTS.md must document the Codex runtime projection installer/checker"
+    fail_msg "adapters/codex/README.md must document the Codex runtime projection installer/checker"
   fi
   if ! grep -Fq 'permissionrequest-lifecycle.py' adapters/codex/bin/preflight.sh \
     || ! grep -Fq 'check-runtime-projection.sh' adapters/codex/bin/preflight.sh \
@@ -3248,9 +3439,9 @@ check_adaptation_inventory_native_surfaces() {
     || ! grep -Fq 'status_line = ["thread-title", "git-branch", "context-used", "model-with-reasoning", "five-hour-limit", "weekly-limit", "thread-id"]' adapters/codex/config/tui-statusline.toml \
     || ! grep -Fq 'status_line_use_colors = true' adapters/codex/config/tui-statusline.toml \
     || ! grep -Fq 'codex_setting/codex-config/tui-statusline.toml' adapters/codex/README.md \
-    || ! grep -Fq 'codex_setting/codex-config/tui-statusline.toml' adapters/codex/AGENTS.md \
+    || ! grep -Fq 'codex_setting/codex-config/tui-statusline.toml' adapters/codex/README.md \
     || ! grep -Fq 'preflight.sh tui-config' adapters/codex/README.md \
-    || ! grep -Fq 'preflight.sh tui-config' adapters/codex/AGENTS.md \
+    || ! grep -Fq 'preflight.sh tui-config' adapters/codex/README.md \
     || ! grep -Fq 'preflight.sh tui-config' core/ADAPTATION_INVENTORY.md \
     || ! grep -Fq 'statusline_fragment=codex_setting/codex-config/tui-statusline.toml' adapters/codex/bin/preflight.sh \
     || ! grep -Fq 'managed_keys=status_line,status_line_use_colors' adapters/codex/bin/apply-tui-config.sh \
@@ -3382,7 +3573,7 @@ check_codex_mode_map() {
 
   for f in roles/units/*/*.md; do
     [ -f "$f" ] || continue
-    case "$(basename "$f")" in _*) continue ;; esac
+    case "${f##*/}" in _*) continue ;; esac
     case "$f" in roles/units/_shared/*) continue ;; esac
     rel=${f#roles/units/}
     rel=${rel%.md}
@@ -3918,6 +4109,7 @@ check_language_neutrality_contract
 check_fleet_depth2_liveness_regression
 check_legacy_root_links
 warn_concrete_runtime_terms
+flush_shared_adapter_links
 
 if [ "$fail" -eq 0 ]; then
   say "OK: adaptation boundary checks passed"

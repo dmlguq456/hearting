@@ -1035,8 +1035,11 @@ class WorkStartTest(unittest.TestCase):
         self.route["nodes"] = []
         with self._auto_resume():
             result = W.start_work(self.route, self.path, self.jobs, run=self._unstarted_run())
+        # A pause the runtime resumes itself, not a refusal for the parent to retry (2026-11-02).
         self.assertEqual((result["state"], result["reason"], result["required_action"]),
-                         ("needs-attention", "owner-launch-not-started", "wait-for-auto-resume"), result)
+                         ("waiting-capacity", "owner-launch-not-started", "wait-for-auto-resume"), result)
+        self.assertEqual(result["retry_at"], "2026-10-07T12:01:00Z")
+        self.assertIn("nothing to run now", result["next_step"])
         self.assertEqual(self.armed, ["owner-launch-not-started"])
         self.assertEqual(result["parent_next"], "end-turn")
         self.assertEqual(result["launch_reason"], "admission-busy")
@@ -1060,7 +1063,7 @@ class WorkStartTest(unittest.TestCase):
         with self._auto_resume():
             result = W.start_work(self.route, self.path, self.jobs, run=run)
         self.assertEqual((result["state"], result["reason"], result["required_action"]),
-                         ("needs-attention", "owner-launch-not-admitted", "wait-for-auto-resume"), result)
+                         ("waiting-capacity", "owner-launch-not-admitted", "wait-for-auto-resume"), result)
         self.assertEqual((self.armed, result["parent_next"]), (["owner-launch-not-admitted"], "end-turn"))
         self.assertEqual(result["launch_reason"], "admission-busy")
         self.assertEqual(result["recovery_command"], result["resume_command"])

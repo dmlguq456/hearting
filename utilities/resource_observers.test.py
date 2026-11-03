@@ -42,7 +42,7 @@ class ObserverTest(FIX.WorkflowFixture):
 
     @contextlib.contextmanager
     def subfixture(self):
-        with tempfile.TemporaryDirectory(dir=self.base) as directory, mock.patch.object(self, 'base', Path(directory)):
+        with self.nested_base():
             yield
 
     def fixture(self):

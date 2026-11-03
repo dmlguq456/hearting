@@ -31,6 +31,8 @@ from dispatch_retention import (
 RETENTION_NS = 14 * 86400 * 1_000_000_000
 MAX_LOG_BYTES = 2 * 1024 * 1024 * 1024
 DUE_SECONDS = 300
+# While the last pass left removable files behind, the next pass may start sooner.
+BACKLOG_DUE_SECONDS = 60
 EXAMINE_LIMIT = 64
 MAX_DIRECTORY_ENTRIES = 50000
 MAX_PASS_SECONDS = 10
@@ -299,8 +301,11 @@ def sweep(jobs, *, now_ns=None, force=False):
                 if not locked:
                     return {"skipped": "busy"}
                 state = _read_state(layout)
+                last = state.get("last_result")
+                gap = (BACKLOG_DUE_SECONDS if isinstance(last, dict) and last.get("more")
+                       else DUE_SECONDS)
                 if (not force and state["last_pass_ns"] <= now_ns
-                        and now_ns - state["last_pass_ns"] < DUE_SECONDS * 1_000_000_000):
+                        and now_ns - state["last_pass_ns"] < gap * 1_000_000_000):
                     return {"skipped": "not-due"}
                 return _pass(jobs, root, layout, state, now_ns, started)
     except FileNotFoundError:
@@ -384,18 +389,20 @@ def _pass(jobs, root, layout, state, now_ns, started):
     cursor = state.get("cursor", "")
     after = [name for name in ordered if name > cursor]
     selected_names = (after + [name for name in ordered if name <= cursor])[:EXAMINE_LIMIT]
-    if selected_names:
-        state["cursor"] = selected_names[-1]
 
     protected_names = set()
     eligible = []
     unknown_bytes = 0
     reasons = {}
+    examined_names = []
+    removable = 0
+    over_limit = total_bytes > MAX_LOG_BYTES
     ctx = _Context(jobs, root, layout, snapshot, now_ns)
     with process_table_scan_scope():
         for name in selected_names:
-            if time.monotonic() - started > MAX_PASS_SECONDS:
+            if examined_names and time.monotonic() - started > MAX_PASS_SECONDS:
                 break
+            examined_names.append(name)
             expected_stamp = stamps.get(name)
             if expected_stamp is None:
                 protected_names.add(name)
@@ -437,12 +444,23 @@ def _pass(jobs, root, layout, state, now_ns, started):
                     break
                 terminal_values.append(settled)
             if all_eligible and terminal_values:
-                eligible.append((name, max(terminal_values), expected_stamp, rows,
+                settled = max(terminal_values)
+                eligible.append((name, settled, expected_stamp, rows,
                                  candidate_kinds[name]))
+                # Removal re-reads the registry per file, so it is the slow
+                # step. Once enough removable files are in hand, stop
+                # examining and spend the pass on removing them; the cursor
+                # stays on the last examined name.
+                if over_limit or now_ns - settled >= RETENTION_NS:
+                    removable += 1
+                    if removable >= REMOVE_LIMIT:
+                        break
             else:
                 protected_names.add(name)
 
-    selected_set = set(selected_names)
+    if examined_names:
+        state["cursor"] = examined_names[-1]
+    selected_set = set(examined_names)
     known_names = set(candidate_rows)
     unknown_names.update(set(stamps) - known_names)
     unknown_names.update(known_names - selected_set)
@@ -463,8 +481,11 @@ def _pass(jobs, root, layout, state, now_ns, started):
     removed = 0
     removed_bytes = 0
     deferred = 0
+    # Examining and removing each get their own time budget, so a long
+    # examination cannot leave eligible files undeleted.
+    removal_started = time.monotonic()
     for name, settled, expected_stamp, rows, candidate_kind in selected:
-        if removed >= REMOVE_LIMIT or time.monotonic() - started > MAX_PASS_SECONDS:
+        if removed >= REMOVE_LIMIT or time.monotonic() - removal_started > MAX_PASS_SECONDS:
             deferred += 1
             continue
         if not _fresh_eligible(jobs, root, layout, name, rows, expected_stamp,
@@ -481,7 +502,7 @@ def _pass(jobs, root, layout, state, now_ns, started):
             unknown_names.add(name)
             deferred += 1
     result = {
-        "examined": len(selected_names), "eligible": len(eligible), "eligible_bytes": eligible_bytes,
+        "examined": len(examined_names), "eligible": len(eligible), "eligible_bytes": eligible_bytes,
         "removed": removed, "removed_bytes": removed_bytes, "deferred": deferred,
         "total_bytes": total_bytes, "protected_bytes": protected_bytes,
         "unknown_bytes": unknown_bytes,
@@ -489,6 +510,7 @@ def _pass(jobs, root, layout, state, now_ns, started):
         "quarantine_pending_bytes": recovery["pending_bytes"],
         "over_limit_bytes": max(0, total_bytes - removed_bytes - MAX_LOG_BYTES),
         "kept_reasons": reasons,
+        "more": int(removed >= REMOVE_LIMIT or deferred > 0),
         "elapsed_ms": int((time.monotonic() - started) * 1000),
     }
     state.update(last_pass_ns=now_ns, last_result=result)

@@ -9,10 +9,7 @@
 # *.test.py/*.test.sh utilities defer automatically. The short projected lists stay in the
 # script beside the checks that verify each projected link.
 list	name
-shared-utility-deferred	artifact-knowledge-feed.py
 shared-utility-deferred	artifact-quiescence.py
-shared-utility-deferred	artifact-relocation-live.py
-shared-utility-deferred	artifact-relocation.py
 shared-utility-deferred	artifact_campaign.py
 shared-utility-deferred	artifact_cycle_titles.py
 shared-utility-deferred	artifact_locator_amendment.py
@@ -66,6 +63,7 @@ shared-utility-deferred	pane_ownership.py
 shared-utility-deferred	gpu_execution_sandbox.py
 shared-utility-deferred	prd_readability.py
 shared-utility-deferred	prior-art.py
+shared-utility-deferred	questions.py
 shared-utility-deferred	recovery_evidence.py
 shared-utility-deferred	recovery_history.py
 shared-utility-deferred	report_verification_projection.py
@@ -150,7 +148,6 @@ utility-deferred	gpu_leases.py
 utility-deferred	dispatch-artifact-root.test.py
 utility-deferred	dispatch-attempt-ready.py
 utility-deferred	dispatch-batch.py
-utility-deferred	dispatch-broker.py
 utility-deferred	dispatch-concurrency.test.sh
 utility-deferred	dispatch-liveness.sh
 utility-deferred	dispatch-liveness.test.sh
@@ -160,7 +157,6 @@ utility-deferred	dispatch-orphan-watch.py
 utility-deferred	dispatch-owner.py
 utility-deferred	dispatch-progress.py
 utility-deferred	dispatch-reap-watch.py
-utility-deferred	dispatch-recovery.py
 utility-deferred	dispatch-registry.py
 utility-deferred	dispatch-route.test.sh
 utility-deferred	dispatch-state-root.sh
@@ -170,7 +166,6 @@ utility-deferred	dispatch_adapters_v11.test.py
 utility-deferred	dispatch_batch_obligations.py
 utility-deferred	dispatch_allocation.py
 utility-deferred	dispatch_allocation_receipt.py
-utility-deferred	dispatch_broker.test.py
 utility-deferred	dispatch_budget_record.py
 utility-deferred	dispatch_codex_nocommit_fixture.test.py
 utility-deferred	dispatch_completion_join.py
@@ -301,6 +296,7 @@ utility-deferred	worker-state-ledger.py
 utility-deferred	worker_bootstrap.test.py
 utility-deferred	worker_runtime_home.py
 utility-deferred	worker_dispatch_prompt.test.py
+utility-deferred	reusable_runtime_retention.py
 utility-deferred	worker_home_retention.py
 utility-deferred	worker_route_guard.test.py
 utility-deferred	workflow-supervisor.py

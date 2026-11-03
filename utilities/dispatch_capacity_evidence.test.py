@@ -13,8 +13,15 @@ import unittest
 from unittest import mock
 
 import dispatch_capacity_evidence as Q
+from model_config import parse_config, shipped_path
 
 ROOT = Path(__file__).resolve().parents[1]
+
+# The shipped probe aliases are adapter configuration, not a test constant: a model
+# rename must not require editing this suite. Read the same file the product reads,
+# but through the config parser directly so the assertion cannot become circular.
+PROBE = dict(part.split(":", 1) for part in
+             parse_config(shipped_path("claude"))["CFG_CAPACITY_PROBE_MODELS"].split())
 
 
 _STATE_TMP = None
@@ -100,18 +107,18 @@ class QuotaEvidenceTests(unittest.TestCase):
         held = state([
             {"model": "opencode-go/model", "state": "unavailable"},
             {"model": "opencode/beam-free", "state": "unavailable"},
-            {"model": "openai/gpt-6.1-sol", "state": "unavailable"},
+            {"model": "openai/model-x", "state": "unavailable"},
         ])
         self.assertTrue(held.startswith("limited(provider-model-unavailable:"), held)
         self.assertIn("opencode-go-unavailable", held)
         # Go is probed before placement, so its unknown stays automatic.
         self.assertIsNone(state([
             {"model": "opencode-go/model", "state": "unknown"},
-            {"model": "openai/gpt-6.1-sol", "state": "unavailable"},
+            {"model": "openai/model-x", "state": "unavailable"},
         ]))
         self.assertIsNone(state([
             {"model": "opencode-go/model", "state": "unavailable"},
-            {"model": "openai/gpt-6.1-sol", "state": "usable"},
+            {"model": "openai/model-x", "state": "usable"},
         ]))
 
     def test_opencode_unverified_provider_is_left_out_without_a_pause(self):
@@ -119,9 +126,9 @@ class QuotaEvidenceTests(unittest.TestCase):
         OpenCode with no evidence at all, and automatic placement chose it."""
         import model_profile
         import opencode_runtime
-        selected = {"model": "openai/gpt-6.1-sol", "budget": "xhigh"}
+        selected = {"model": "openai/model-x", "budget": "xhigh"}
         candidates = [
-            {"model": "openai/gpt-6.1-sol", "state": "unknown",
+            {"model": "openai/model-x", "state": "unknown",
              "reason": "provider-model-unverified"},
             {"model": "opencode-go/model", "state": "unavailable",
              "reason": "subscription-missing"},
@@ -932,7 +939,7 @@ class ClaudeLimitRecheckTests(unittest.TestCase):
         self.assertEqual(len(self.probes()), 1)
         self.assertEqual(self.probes()[0][:len(Q.PROBE_ARGS)], list(Q.PROBE_ARGS))
         # An all-model window is answered by Haiku, regardless of the worker profile.
-        self.assertEqual(self.probes()[0][-2:], ["--model", "haiku"])
+        self.assertEqual(self.probes()[0][-2:], ["--model", PROBE["all"]])
         self.assertEqual(self.state(now + 60), "ok")  # every reader honors the stored answer
         self.assertIsNone(Q.harness_hold(self.jobs, "claude", now=now + 60, env=self.env, recheck=True))
         self.assertEqual(len(self.probes()), 1)  # an answer that lifts the limit needs no new probe
@@ -941,7 +948,7 @@ class ClaudeLimitRecheckTests(unittest.TestCase):
         now = self.OBSERVED + 600
         opus = {"claude": "claude-opus-4-6"}
         self.assertEqual(Q.usage_states(self.jobs, models=opus, now=now, env=self.env, recheck=True)["claude"], "ok")
-        self.assertEqual(self.probes()[0][-2:], ["--model", "haiku"])  # not the Opus the launch asked for
+        self.assertEqual(self.probes()[0][-2:], ["--model", PROBE["all"]])  # not the Opus the launch asked for
         # A reader that asks about no model (gauges, Fleet, usage-check without a profile) sees the lift too.
         self.assertEqual(self.state(now + 60), "ok")
         self.native(now + 30, "att-five-hour", "five_hour", self.OBSERVED + 4 * 3600)
@@ -1023,7 +1030,7 @@ class ClaudeLimitRecheckTests(unittest.TestCase):
         now = self.OBSERVED + 600
         before = self.state(now)
         scope = Q._login_scope(self.env)
-        model = "haiku"
+        model = PROBE["all"]
         for damaged in ({"at": now, "ok": False, "reset_epoch": "soon"}, {"at": now, "ok": False, "reset_epoch": 1e300},
                         {"at": now, "ok": False, "reset_epoch": now + 99999, "ok_at": "then"},
                         {"at": "now", "ok": True}, {"at": now, "ok": "yes"}, "not a dict"):
@@ -1050,7 +1057,7 @@ class ClaudeLimitRecheckTests(unittest.TestCase):
         self.assertEqual(self.state(now + 60), "ok")
         # The answer belongs to "unscoped": once an account resolves it is not that account's.
         scoped = json.loads(Q._probe_path(self.jobs).read_text())["probes"]
-        self.assertEqual(list(scoped), [f"{Q.UNSCOPED}:haiku"])
+        self.assertEqual(list(scoped), [f"{Q.UNSCOPED}:{PROBE['all']}"])
         (self.home / ".claude.json").write_text(json.dumps(
             {"oauthAccount": {"accountUuid": "account-b", "organizationUuid": "org-a"}}))
         self.assertTrue(self.state(now + 120).startswith("limited("))
@@ -1084,8 +1091,8 @@ class ClaudeLimitRecheckTests(unittest.TestCase):
                        lambda: Q.harness_hold(self.jobs, "claude", now=later + 1, env=self.env)["until_epoch"]):
             self.assertEqual(reader(), five_reset)  # never the week the first probe lifted
         stored = json.loads(Q._probe_path(self.jobs).read_text())["probes"]
-        self.assertIn(now, [a["at"] for a in stored[f"{Q._login_scope(self.env)}:haiku"]["answers"] if a["ok"]])  # the answer kept beside the rejection
-        self.assertEqual([argv[-1] for argv in self.probes()], ["haiku", "haiku"])
+        self.assertIn(now, [a["at"] for a in stored[f"{Q._login_scope(self.env)}:{PROBE['all']}"]["answers"] if a["ok"]])  # the answer kept beside the rejection
+        self.assertEqual([argv[-1] for argv in self.probes()], [PROBE["all"], PROBE["all"]])
         # The rejection's reset passes: nothing holds, and the old week does not come back.
         self.assertEqual(self.state(five_reset + 1), "ok")
         self.assertEqual(Q.active_limits(self.jobs, now=five_reset + 1, env=self.env), {})
@@ -1096,9 +1103,9 @@ class ClaudeLimitRecheckTests(unittest.TestCase):
         self.native(self.OBSERVED, "att-opus-week", "seven_day_opus", self.OBSERVED + 86400)
         opus, now = {"claude": "claude-opus-4-6"}, self.OBSERVED + 600
         self.assertIn("claude", Q.active_limits(self.jobs, models=opus, now=now, env=self.env, recheck=True))
-        self.assertEqual(self.probes()[-1][-2:], ["--model", "haiku"])  # the all-model window first
+        self.assertEqual(self.probes()[-1][-2:], ["--model", PROBE["all"]])  # the all-model window first
         self.assertEqual(Q.active_limits(self.jobs, models=opus, now=now + 1, env=self.env, recheck=True), {})
-        self.assertEqual([argv[-1] for argv in self.probes()], ["haiku", "opus"])
+        self.assertEqual([argv[-1] for argv in self.probes()], [PROBE["all"], PROBE["opus"]])
 
     def test_a_limit_observed_after_a_passing_probe_holds_again(self):
         now = self.OBSERVED + 600
@@ -1140,7 +1147,7 @@ class ClaudeLimitRecheckTests(unittest.TestCase):
         self.assertEqual(self.probes(), [])  # the Sonnet family was never limited
         self.assertIn("claude", Q.active_limits(self.jobs, models=opus, now=now, env=self.env))
         self.assertNotIn("claude", Q.active_limits(self.jobs, models=opus, now=now, env=self.env, recheck=True))
-        self.assertEqual(self.probes()[0][-2:], ["--model", "opus"])
+        self.assertEqual(self.probes()[0][-2:], ["--model", PROBE["opus"]])
 
     def test_a_rejection_on_one_family_does_not_hold_another(self):
         self.env.update(FAKE_PROBE_MODE="rejected", FAKE_PROBE_WINDOW="seven_day_opus")
@@ -1192,7 +1199,7 @@ class ClaudeLimitRecheckTests(unittest.TestCase):
     def test_all_model_probe_ignores_the_configured_mini_model(self):
         with mock.patch.object(Q, "_limit_models", return_value={"claude": "claude-opus-4-6"}):
             self.assertEqual(self.state(self.OBSERVED + 600, recheck=True), "ok")
-        self.assertEqual(self.probes()[0][-2:], ["--model", "haiku"])
+        self.assertEqual(self.probes()[0][-2:], ["--model", PROBE["all"]])
 
     def test_family_windows_select_the_limited_family_alias(self):
         for family in ("opus", "sonnet"):
@@ -1203,7 +1210,7 @@ class ClaudeLimitRecheckTests(unittest.TestCase):
                 self.native(self.OBSERVED, f"att-{family}", f"seven_day_{family}", self.PROBE_RESET, model=model)
                 self.assertEqual(Q.active_limits(self.jobs, models={"claude": model},
                                                 now=self.OBSERVED + 600, env=self.env, recheck=True), {})
-                self.assertEqual(self.probes()[-1][-2:], ["--model", family])
+                self.assertEqual(self.probes()[-1][-2:], ["--model", PROBE[family]])
 
     def test_auto_resume_needs_the_source_model_to_clear_a_family_hold(self):
         import capacity_auto_resume as resume
@@ -1217,7 +1224,7 @@ class ClaudeLimitRecheckTests(unittest.TestCase):
             self.assertFalse(resume._cleared({**record, "source_attempt_id": "att-missing"}))
             self.assertEqual(self.probes(), [])
             self.assertTrue(resume._cleared({**record, "source_attempt_id": "att-held-opus"}))
-        self.assertEqual([a[-1] for a in self.probes()], ["opus"])
+        self.assertEqual([a[-1] for a in self.probes()], [PROBE["opus"]])
 
     def test_later_rejection_does_not_discard_another_windows_rejection(self):
         now = self.OBSERVED + 600
