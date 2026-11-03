@@ -211,6 +211,25 @@ def controlled_metadata_scope(metadata):
   jobs=Path(td)/"jobs.log";jobs.write_text(attempt_row(metadata)+"\n")
   with controlled_process_scope(jobs):yield
 
+class RegistrationParseTest(unittest.TestCase):
+ def test_the_literal_attempt_check_agrees_with_the_parsed_identity(self):
+  for pipe,attempt,expected in (("attempt_id=att-a1,x=1","att-a1",True),
+                                ("attempt_id=att-a10","att-a1",False),
+                                ("parent_attempt_id=att-a1,attempt_id=att-b","att-a1",False),
+                                ("note=attempt_id=att-a1,attempt_id=att-b","att-a1",False),
+                                ("attempt_id=att-b,attempt_id=att-a1","att-a1",True),
+                                ("attempt_id=,x=1","",True),("x=1","",False)):
+   self.assertEqual(D.row_has_attempt(pipe,attempt),expected,(pipe,attempt))
+   self.assertEqual(D.row_has_attempt(pipe,attempt),D.parse_registry_metadata(pipe).get("attempt_id")==attempt)
+ def test_one_parse_per_row_text_stays_aligned_with_every_read(self):
+  parsed=D._RegistryParse(); row="t\topen\tr\tw\ts\tattempt_id=att-a1"
+  first=parsed.rows([row,"malformed"]); later=parsed.rows(["new\tdone\tr\tw\ts\tattempt_id=att-b",row])
+  self.assertIsNone(first[1]); self.assertIs(later[1],first[0])
+  self.assertEqual(later[0][1]["attempt_id"],"att-b"); self.assertEqual(first[0][0][1],"open")
+  with mock.patch.object(D,"parse_registry_metadata",side_effect=AssertionError("parsed again")):
+   self.assertIs(parsed.rows([row])[0],first[0])
+
+
 class FrameLaunchGateTest(unittest.TestCase):
  def test_launch_degradation_uses_existing_writer_and_write_failure_is_harmless(self):
   with tempfile.TemporaryDirectory() as td:
