@@ -2487,7 +2487,9 @@ class CarrierFixtureCleanupBoundaryTest(unittest.TestCase):
         writer = (
             "import os,time\n"
             "d=os.environ['FIXTURE_DIR']\n"
-            "open(os.path.join(d,'writer-ready'),'w').write(str(os.getpid()))\n"
+            # Publish the ready file whole: setUp reads it as soon as it exists.
+            "f=open(os.path.join(d,'writer-ready.tmp'),'w'); f.write(str(os.getpid())); f.close()\n"
+            "os.replace(os.path.join(d,'writer-ready.tmp'),os.path.join(d,'writer-ready'))\n"
             "i=0\n"
             "while True:\n"
             "    i+=1; open(os.path.join(d,'writer-%d'%i),'w').close(); time.sleep(0.005)\n"
@@ -4577,7 +4579,16 @@ print(json.dumps({'code': code, 'stdout': out.getvalue(), 'stderr': err.getvalue
                     path.write_bytes(original)
                     if successor == "session-C":
                         self._adopt_c()
-                with mock.patch.object(rewake.time, "sleep", side_effect=recover):
+                # Only the carrier's own wait recovers the lineage. Patching the
+                # shared time.sleep also caught subprocess's internal polling
+                # while a slow readiness child ran, counting a second wait.
+                class CarrierTime:
+                    sleep = staticmethod(recover)
+
+                    def __getattr__(self, name):
+                        return getattr(time, name)
+
+                with mock.patch.object(rewake, "time", CarrierTime()):
                     code, output, error, observation = self._carrier("session-B", claim)
                 self.assertEqual(len(waits), 1)
                 self.assertEqual(code, 2 if successor == "session-B" else 0)
