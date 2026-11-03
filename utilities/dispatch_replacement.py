@@ -1480,8 +1480,8 @@ def accept_terminal_delivery_duty(jobs, aid):
     """
     jobs = Path(jobs)
     try:
-        rows = _rows(jobs.read_text().splitlines())
-    except (OSError, DC.DispatchContractError):
+        rows = _rows(registry_text(jobs))
+    except (OSError, UnicodeError, DC.DispatchContractError):
         return None
     row = rows.get(aid)
     if row is None or not row[1].get('delivery_intent'):
