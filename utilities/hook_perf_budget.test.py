@@ -30,14 +30,19 @@ Count assertions (every case, including the Python hooks a prompt, a tool call
 and a turn end start for Claude and Codex): per record kind, opens and listings
 at scale 2 stay within +2 of scale 1; one run opens ``jobs.log`` at most 16
 times and lists the sessions lineage at most 20 times; total stat calls at scale
-2 stay within 1.2x of scale 1. Counts do not depend on machine load, so a hook
-that re-reads a growing record whole, or re-scans it per row, fails here even
-when a fast machine hides the time. The cases that grow today are listed in
-``KNOWN_GROWTH`` with their cause; that table is a ratchet: a listed case must
-still break exactly its listed rules (a fix fails the test until its entry is
-removed), every other case passes every rule, and the ceilings bind all cases.
-Every check is unit-tested against over-budget samples so the gate cannot pass
-vacuously.
+2 stay within 1.2x of scale 1. A hook that re-reads a growing record whole, or
+re-scans it per row, fails here even when a fast machine hides the time.
+
+Counts must not depend on machine load, so the shim lifts every hook time
+budget that could cut a scan short (``LIFTED_BUDGETS`` and the peer module's
+scan deadlines; each lift is asserted), and both scales must have audited the
+same processes: a child killed by a timeout is a failed measurement, never a
+fix. The cases that grow today are listed in ``KNOWN_GROWTH`` with their cause;
+that table is a ratchet: a listed case must still break exactly its listed
+rules (a fix fails the test until its entry is removed) and may grow at most
+2.2x (a per-row walk still fails), every other case passes every rule, and the
+ceilings bind all cases. Every check is unit-tested against over-budget samples
+so the gate cannot pass vacuously.
 """
 from __future__ import annotations
 
@@ -139,51 +144,71 @@ USER_PATH_CASES = (
     ("codex-stop", CODEX_HOOKS / "stop-lifecycle.py", "Stop", ()),
 )
 GROWTH_RULES = ("growth", "stats")
+# A listed case may keep its recorded linear growth, never more: scale 2 doubles
+# the unrelated state, so per kind and for stat calls it stays within 2.2x of
+# scale 1 (or +KIND_SLACK). A per-row walk over a record (rows x records) grows
+# ~4x and fails, even in a listed case.
+LISTED_GROWTH_RATIO = 2.2
+# Hook time budgets the audit shim lifts (multiplied by 10**6 when the hook's
+# main() starts), so a scan is never cut short by machine speed: the peer
+# context budget (Claude prompt/post-tool, Codex post-tool), its watch-sweep
+# share and exit guard, and the Stop header's idle-receive retry window. The
+# peer module's own scans (`_pending_rows`, `undelivered_watch_rows`) also run
+# without a deadline, which covers the Codex prompt's literal 2.5 s.
+LIFTED_BUDGETS = ("_HOOK_BUDGET_S", "_SWEEP_SHARE_S", "_EXIT_AFTER_FLUSH_S", "_PEER_BUDGET_S",
+                  "RETRY_BUDGET_NS")
 
+# Measured against main (7f22a46ac, after #1186) on 2026-11-04.
 _LINEAGE_WALKS = (
-    "utilities/dispatch_seat_handover.py:379 - a notice-delivering prompt observes the "
-    "lineage 16 times (10 fresh effect-boundary signatures via :1571/:1607, 6 graph loads "
-    "at :252/:263), each lstat'ing every ledger: 12.2k -> 22.7k stat calls - removed by the "
-    "follow-up that lets the sweep's effect boundaries share one lineage observation")
+    "utilities/dispatch_seat_handover.py:379 - a notice-delivering prompt lists the lineage "
+    "16 times: 10 fresh effect-boundary signatures (:379, through _pass_lineage_graph at "
+    ":1635) and 3 compact graph loads that list it twice each (:253, :264); every listing "
+    "lstats every ledger, so stat calls go 12.9k -> 23.5k - removed by the follow-up that "
+    "lets the sweep's effect boundaries share one lineage observation")
 _REWAKE = (
     "hooks/dispatch-owner-rewake.py:413 - the registry scan's PeerReadContext has no "
-    "compact_lineage, so utilities/dispatch_seat_handover.py:196-197 reads every handover "
+    "compact_lineage, so utilities/dispatch_seat_handover.py:197-198 reads every handover "
     "snapshot and ledger on every {event} (660 -> 1,320 ledger opens), and "
-    "utilities/dispatch_seat_handover.py:603 resolves the jobs path again for every registry "
-    "row (14.7k -> 29.2k stat calls) - removed by the rewake compact_lineage follow-up")
+    "utilities/dispatch_seat_handover.py:668 resolves the jobs path again for every registry "
+    "row (:1643, through owns at hooks/dispatch-owner-rewake.py:423), so stat calls double "
+    "with the owner rows - removed by the rewake compact_lineage follow-up")
 _PEER_SCAN = (
-    "utilities/peer-message.py:3746 - emit_peer_context passes sender=recipient, which turns "
-    "the recipient index off (:1716), so {caller} opens every peer row (8,060 -> 16,050) and "
-    "resolves every transfer root again per open row (:151) - removed by the peer index "
-    "routing fix in review on #1186's branch")
+    "utilities/peer-message.py:3855 - emit_peer_context scans with sender=recipient, which "
+    "turns the recipient index off (:1766), so {caller} opens every peer row (7,500 -> "
+    "15,000) - removed by the follow-up that routes this read through the recipient index")
 # Cases that grow with unrelated state today, with the rule(s) each breaks and
 # the evidence. This is a ratchet, not an allowance: an entry must still break
 # exactly its listed rules (a fix that makes one pass fails the test until the
-# entry is narrowed or deleted), every other case must pass every rule, and the
-# absolute ceilings hold for every case, listed or not.
+# entry is narrowed or deleted) and grow at most LISTED_GROWTH_RATIO; every
+# other case must pass every rule; the absolute ceilings hold for every case.
 KNOWN_GROWTH = {
     "prompt-two": (("stats",), _LINEAGE_WALKS),
     "prompt-stale": (("stats",), _LINEAGE_WALKS),
     "prompt-runner": (("stats",), _LINEAGE_WALKS),
     "rewake-bash": (("growth", "stats"), _REWAKE.format(event="Bash call")),
     "rewake-stop": (("growth", "stats"), _REWAKE.format(event="Stop")),
-    "peer-post-tool": (("growth", "stats"), _PEER_SCAN.format(
-        caller="every Claude PostToolUse (hooks/peer-message-record.py:301)")),
-    "codex-post-tool": (("growth", "stats"), _PEER_SCAN.format(
+    "peer-post-tool": (("growth",), _PEER_SCAN.format(
+        caller="every Claude PostToolUse (hooks/peer-message-record.py:441)")),
+    "peer-prompt": (("growth",), _PEER_SCAN.format(
+        caller="every Claude prompt (hooks/peer-message-record.py:477)")),
+    "codex-post-tool": (("growth",), _PEER_SCAN.format(
         caller="every Codex PostToolUse "
-               "(adapters/codex/hooks/posttooluse-interaction-clear.py:59)")),
-    "peer-prompt": (("growth", "stats"), _PEER_SCAN.format(
-        caller="every Claude prompt (hooks/peer-message-record.py:328)") + "; and "
-        "utilities/peer-steward.py:6083 - the prompt's `status --undelivered` child "
-        "(hooks/peer-message-record.py:235) scans every peer row a second time in "
-        "_peer_status_rows (16,120 -> 32,100 opens in total) - removed by the follow-up "
-        "that gives that status scan the same index"),
+               "(adapters/codex/hooks/posttooluse-interaction-clear.py:65)")),
     "codex-prompt": (("growth", "stats"), (
         "adapters/codex/hooks/herdr_session_projection.py:58 - the Codex projection does not "
         "ask for published steward relations, so is_steward (tools/fleet/herdr_projection.py:358 "
         "-> :267) resolves live relations and a legacy steward marker makes "
-        "utilities/dispatch_seat_handover.py:875-877 read every ledger (710 -> 1,378 opens, "
-        "5.8k -> 7.8k stat calls) - removed by the Codex projection relations follow-up")),
+        "utilities/dispatch_seat_handover.py:939-941 list and read every ledger (710 -> 1,378 "
+        "opens, 5.8k -> 7.8k stat calls) - removed by the Codex projection relations follow-up")),
+}
+# The peer-module scans each case reaches; a renamed scan function would run
+# with its 2.5 s deadline again, so the lift itself is asserted.
+REQUIRED_MODULE_LIFTS = {
+    "peer-post-tool": ("peer-message.py:_pending_rows",),
+    "codex-post-tool": ("peer-message.py:_pending_rows",),
+    "codex-prompt": ("peer-message.py:_pending_rows",),
+    "peer-prompt": ("peer-message.py:_pending_rows", "peer-steward.py:undelivered_watch_rows"),
+    "stop": ("peer-message.py:_pending_rows", "peer-steward.py:undelivered_watch_rows"),
 }
 
 
@@ -262,17 +287,57 @@ def check_counts(name: str, run1: dict, run2: dict) -> None:
     check_scale_stats(name, run1["stats"], run2["stats"])
 
 
+def check_growth_ratio(name: str, run1: dict, run2: dict,
+                       ratio: float = LISTED_GROWTH_RATIO) -> None:
+    """Per kind (opens, listings) and for stat calls, scale 2 stays within ``ratio`` x scale 1."""
+    over = []
+    kinds1, kinds2 = run1["kinds"], run2["kinds"]
+    for kind in sorted(set(kinds1) | set(kinds2)):
+        for field in ("opens", "listings"):
+            before = int(kinds1.get(kind, {}).get(field, 0))
+            after = int(kinds2.get(kind, {}).get(field, 0))
+            if after > max(before * ratio, before + KIND_SLACK):
+                over.append(f"{kind} {field} {before} -> {after}")
+    if run2["stats"] > run1["stats"] * ratio:
+        over.append(f"stat calls {run1['stats']} -> {run2['stats']}")
+    if over:
+        raise AssertionError(
+            f"{name} grew faster than the unrelated state (more than {ratio}x), beyond its "
+            "recorded KNOWN_GROWTH: " + "; ".join(over))
+
+
+def check_lifts(name: str, hook: Path, run: dict, required: tuple = ()) -> None:
+    """Every budget the hook script names ran lifted; else its counts follow machine speed."""
+    source = Path(hook).read_text(encoding="utf-8")
+    expected = [f"__main__:{budget}" for budget in LIFTED_BUDGETS if budget in source]
+    missing = [item for item in (*expected, *required) if item not in run.get("lifted", ())]
+    if missing:
+        raise AssertionError(
+            f"{name}: the shim did not lift {', '.join(missing)} (renamed, or no longer read "
+            "in main()?); its counts would depend on machine speed")
+
+
 def check_ratchet(name: str, run1: dict, run2: dict, known: dict | None = None) -> None:
     """``check_counts`` with the KNOWN_GROWTH ratchet.
 
-    The ceilings hold for every case. A case outside the table passes every
-    rule; a case in it breaks exactly the rules it lists, so a fix that makes
-    one pass, or a listed hook that starts breaking another rule, fails here.
+    Both scales must have audited the same processes (a killed or skipped
+    child is a failed measurement, never a fix). The ceilings hold for every
+    case. A case outside the table passes every rule; a case in it breaks
+    exactly the rules it lists and grows at most LISTED_GROWTH_RATIO, so a fix
+    that makes one pass, a listed hook that starts breaking another rule, or
+    one that starts walking per row fails here.
     """
     known = KNOWN_GROWTH if known is None else known
+    if run1.get("processes") != run2.get("processes"):
+        raise AssertionError(
+            f"{name}: measurement failed, not fixed: {run1.get('processes')} audited processes "
+            f"at scale 1 but {run2.get('processes')} at scale 2 (a child was killed, timed out "
+            "or skipped, so its counts are missing)")
     check_kind_ceilings(f"{name} (scale 1)", run1["kinds"])
     check_kind_ceilings(f"{name} (scale 2)", run2["kinds"])
     expected, evidence = known.get(name, ((), ""))
+    if expected:
+        check_growth_ratio(name, run1, run2)
     checks = {
         "growth": lambda: check_kind_growth(name, run1["kinds"], run2["kinds"]),
         "stats": lambda: check_scale_stats(name, run1["stats"], run2["stats"]),
@@ -319,7 +384,7 @@ if _LOG:
     if _SID != str(os.getsid(0)):
         _LOG = None
 _STATE = {"opens": [], "bytes": 0, "stop_path": False, "stats": 0, "listings": {},
-          "kinds": {}, "detached": 0}
+          "kinds": {}, "detached": 0, "lifted": []}
 _FD_KIND = {}
 _TRANSCRIPT = os.environ.get("HOOK_PERF_TRANSCRIPT") or None
 _real_open = builtins.open
@@ -567,6 +632,61 @@ if os.environ.get("HOOK_PERF_ALLOW_REPORT") == "1":
     except Exception:
         pass
 
+# A hook's time budget (a peer scan stops 2.5 s after spawn) would make what it
+# reads depend on machine speed, and a cut-short scan would read as "fixed".
+# Lift every budget a measured hook takes, so each scan runs to its end:
+# * the peer module's scans run without a deadline, whoever passes one;
+# * a hook script's budget constants are multiplied by 10**6 when its main()
+#   starts (the hook reads them there). The trace function that does this is
+#   installed only when the script names one, and removes itself at once.
+# Every lift is recorded, so the test can tell a renamed budget from a lifted one.
+_UNBOUNDED = {"peer-message.py": ("_pending_rows",),
+              "peer-steward.py": ("undelivered_watch_rows",)}
+_BUDGETS = [name for name in os.environ.get("HOOK_PERF_LIFT_BUDGETS", "").split(",") if name]
+if _LOG and _BUDGETS:
+    import importlib._bootstrap_external as _external
+
+    _real_exec_module = _external._LoaderBasics.exec_module
+
+    def _unbounded(function):
+        def call(*args, **kwargs):
+            if kwargs.get("deadline") is not None:
+                kwargs["deadline"] = None
+            return function(*args, **kwargs)
+        call.__wrapped__ = function
+        return call
+
+    def _exec_module(self, module):
+        _real_exec_module(self, module)
+        filename = os.path.basename(getattr(module, "__file__", None) or "")
+        for name in _UNBOUNDED.get(filename, ()):
+            function = getattr(module, name, None)
+            if callable(function):
+                label = f"{filename}:{name}"
+                setattr(module, name, _unbounded(function))
+                if label not in _STATE["lifted"]:
+                    _STATE["lifted"].append(label)
+
+    _external._LoaderBasics.exec_module = _exec_module
+
+    try:
+        with _real_open(sys.argv[0], "r", encoding="utf-8") as _handle:
+            _SOURCE = _handle.read()
+    except (OSError, IndexError, ValueError, TypeError):
+        _SOURCE = ""
+    _NAMED = [name for name in _BUDGETS if name in _SOURCE]
+    if _NAMED:
+        def _lift_at_main(frame, event, arg):
+            if frame.f_code.co_name == "main" and frame.f_globals.get("__name__") == "__main__":
+                sys.settrace(None)
+                for name in _NAMED:
+                    if isinstance(frame.f_globals.get(name), (int, float)):
+                        frame.f_globals[name] *= 10 ** 6
+                        _STATE["lifted"].append("__main__:" + name)
+            return None
+
+        sys.settrace(_lift_at_main)
+
 
 @atexit.register
 def _flush():
@@ -583,7 +703,7 @@ def _flush():
                 "pid": os.getpid(), "stats": _STATE["stats"],
                 "listings": sum(_STATE["listings"].values()),
                 "listings_by_path": dict(busiest), "kinds": _STATE["kinds"],
-                "detached": _STATE["detached"],
+                "detached": _STATE["detached"], "lifted": _STATE["lifted"],
             }, sort_keys=True) + "\n")
     except OSError:
         pass
@@ -728,6 +848,7 @@ class FixtureCase:
             "HOOK_PERF_ALLOW_REPORT": "1",
             "HOOK_PERF_TRANSCRIPT": self.fixture["transcript"],
             "HOOK_PERF_SUPPRESS_DETACHED": "1",
+            "HOOK_PERF_LIFT_BUDGETS": ",".join(LIFTED_BUDGETS),
             "HERDR_PANE_ID": "wPerf:p1",
             "AGENT_DISPATCH_CHILD": "1",
         })
@@ -784,6 +905,7 @@ class FixtureCase:
                 "listings": sum(int(row.get("listings", 0)) for row in summaries),
                 "listings_by_path": listings_by_path,
                 "detached": sum(int(row.get("detached", 0)) for row in summaries),
+                "lifted": sorted({item for row in summaries for item in row.get("lifted", ())}),
                 "processes": len(summaries)}
 
     # -- cases ------------------------------------------------------------
@@ -858,6 +980,8 @@ def _summarize(name: str, samples: list[dict]) -> dict:
         "listings_by_path": busiest.get("listings_by_path", {}),
         "detached": int(_median([sample.get("detached", 0) for sample in samples])),
         "processes": int(_median([sample.get("processes", 0) for sample in samples])),
+        "lifted": sorted(set.intersection(*(set(sample.get("lifted", ())) for sample in samples))
+                         if samples else ()),
         "seconds": _median([sample["seconds"] for sample in samples]),
         "opens": int(_median([sample["opens"] for sample in samples])),
         "bytes": int(_median([sample["bytes"] for sample in samples])),
@@ -951,6 +1075,7 @@ class RatchetTest(unittest.TestCase):
         cases = set(PROMPT_CASES) | {case for case, *_ in USER_PATH_CASES}
         self.assertEqual(len(cases), len(PROMPT_CASES) + len(USER_PATH_CASES), "duplicate case")
         self.assertLessEqual(set(KNOWN_GROWTH), cases, "an entry names no measured case")
+        self.assertLessEqual(set(REQUIRED_MODULE_LIFTS), cases, "a lift names no measured case")
         for case, (rules, evidence) in KNOWN_GROWTH.items():
             self.assertTrue(rules, case)
             self.assertLessEqual(set(rules), set(GROWTH_RULES), case)
@@ -977,6 +1102,36 @@ class RatchetTest(unittest.TestCase):
             check_ratchet("case", self.BASE, self.GROWN, {})
         with self.assertRaises(AssertionError):
             check_ratchet("case", self.BASE, self.STAT_ONLY, {})
+
+    def test_a_listed_case_cannot_grow_faster_than_the_state(self):
+        known = {"case": (("growth", "stats"), "a.py:1 - walks - fix")}
+        # A per-row ledger reopen in the rewake scan: rows x ledgers, ~4x.
+        per_row = {"kinds": {"sessions-dir": {"opens": 4_224_000, "listings": 4}},
+                   "stats": 4_000_000}
+        base = {"kinds": {"sessions-dir": {"opens": 1_056_000, "listings": 4}},
+                "stats": 1_000_000}
+        with self.assertRaisesRegex(AssertionError, "faster than the unrelated state"):
+            check_ratchet("case", base, per_row, known)
+        with self.assertRaisesRegex(AssertionError, "faster than the unrelated state"):
+            check_ratchet("case", self.BASE, dict(self.GROWN, stats=2201), known)
+        check_ratchet("case", self.BASE, dict(self.GROWN, stats=2200), known)
+
+    def test_a_lost_child_is_a_failed_measurement(self):
+        known = {"case": (("growth", "stats"), "a.py:1 - walks - fix")}
+        with self.assertRaisesRegex(AssertionError, "measurement failed, not fixed"):
+            check_ratchet("case", dict(self.BASE, processes=2),
+                          dict(self.BASE, processes=1), known)
+        with self.assertRaisesRegex(AssertionError, "measurement failed"):
+            check_ratchet("case", dict(self.BASE, processes=1),
+                          dict(self.BASE, processes=2), {})
+
+    def test_a_hook_budget_must_run_lifted(self):
+        with tempfile.TemporaryDirectory(prefix="hook-lift-") as tmp:
+            hook = Path(tmp) / "hook.py"
+            hook.write_text("_HOOK_BUDGET_S = 2.5\n", encoding="utf-8")
+            with self.assertRaisesRegex(AssertionError, "did not lift __main__:_HOOK_BUDGET_S"):
+                check_lifts("case", hook, {"lifted": []})
+            check_lifts("case", hook, {"lifted": ["__main__:_HOOK_BUDGET_S"]})
 
     def test_ceilings_bind_listed_cases_too(self):
         known = {"case": (("growth", "stats"), "a.py:1 - walks - fix")}
@@ -1050,6 +1205,51 @@ subprocess.Popen([sys.executable, "-c", "open(sys.argv[1], 'w')", str(root / "de
             self.assertEqual(summary["listings_by_path"][str(sessions)], 4)
             self.assertEqual(summary["detached"], 1)
             self.assertFalse((base / "detached").exists(), "a detached child really ran")
+
+
+class AuditShimLiftTest(unittest.TestCase):
+    """The shim lifts a hook's budget constant and the peer module's scan deadline."""
+
+    _HOOK = r"""
+import importlib.util, json, sys, time
+_HOOK_BUDGET_S = 2.5
+_UNRELATED_S = 2.5
+
+
+def main():
+    spec = importlib.util.spec_from_file_location("_peer", sys.argv[1])
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    print(json.dumps({"budget": _HOOK_BUDGET_S, "unrelated": _UNRELATED_S,
+                      "deadline": module._pending_rows(deadline=time.monotonic() + 2.5)}))
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+    def test_budget_constant_and_scan_deadline_are_lifted(self):
+        with tempfile.TemporaryDirectory(prefix="hook-lift-") as tmp:
+            base = Path(tmp)
+            (base / "shim").mkdir()
+            (base / "shim" / "sitecustomize.py").write_text(_SHIM, encoding="utf-8")
+            (base / "hook.py").write_text(self._HOOK, encoding="utf-8")
+            (base / "peer-message.py").write_text(
+                "def _pending_rows(*, deadline=None):\n    return deadline\n", encoding="utf-8")
+            log = base / "audit.jsonl"
+            env = {key: value for key, value in os.environ.items()
+                   if not key.startswith("HOOK_PERF_")}
+            env.update({"PYTHONPATH": str(base / "shim"), "HOOK_PERF_AUDIT_LOG": str(log),
+                        "HOOK_PERF_LIFT_BUDGETS": ",".join(LIFTED_BUDGETS)})
+            done = subprocess.run([sys.executable, str(base / "hook.py"),
+                                   str(base / "peer-message.py")],
+                                  env=env, check=True, timeout=60, capture_output=True, text=True)
+            value = json.loads(done.stdout)
+            self.assertEqual(value, {"budget": 2.5e6, "unrelated": 2.5, "deadline": None})
+            summary = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()
+                       if json.loads(line).get("event") == "summary"][-1]
+            self.assertEqual(sorted(summary["lifted"]),
+                             ["__main__:_HOOK_BUDGET_S", "peer-message.py:_pending_rows"])
 
 
 class AuditShimScopeTest(unittest.TestCase):
@@ -1187,6 +1387,11 @@ class HookPerfBudgetTest(unittest.TestCase):
         # unrelated state and nothing re-reads the registry or re-lists the
         # lineage per row.
         for case_name, run1, run2 in rows:
+            hook = STOP_HOOK if case_name == "stop" else PROMPT_HOOK
+            with self.subTest(case=case_name, rule="budgets"):
+                required = REQUIRED_MODULE_LIFTS.get(case_name, ())
+                check_lifts(case_name, hook, run1, required)
+                check_lifts(case_name, hook, run2, required)
             with self.subTest(case=case_name, rule="counts"):
                 check_ratchet(case_name, run1, run2)
 
@@ -1237,11 +1442,17 @@ class HookPerfBudgetTest(unittest.TestCase):
         print("")
         print(_count_table(rows))
         print("")
+        hooks = {case_name: hook for case_name, hook, _event, _argv in USER_PATH_CASES}
         for case_name, run1, run2 in rows:
             with self.subTest(case=case_name, rule="exit"):
                 for run in (run1, run2):
                     self.assertEqual(run["returncodes"], [0], f"{case_name}: {run['stderr']}")
-                    self.assertGreater(run["processes"], 0, f"{case_name}: audit shim saw no process")
+                    self.assertGreater(run["processes"], 0,
+                                       f"{case_name}: audit shim saw no process")
+            with self.subTest(case=case_name, rule="budgets"):
+                required = REQUIRED_MODULE_LIFTS.get(case_name, ())
+                check_lifts(case_name, hooks[case_name], run1, required)
+                check_lifts(case_name, hooks[case_name], run2, required)
             with self.subTest(case=case_name, rule="counts"):
                 check_ratchet(case_name, run1, run2)
 

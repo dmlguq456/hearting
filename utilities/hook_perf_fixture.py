@@ -736,8 +736,8 @@ def self_check(fixture: dict) -> dict:
     # The asyncRewake scan's rows, judged by the hook's own constants: enough
     # unrelated claimed-and-started depth-1 rows (open and done), and none
     # bound to the target, which therefore has no owner to wait for.
-    rewake = _load_by_path("_hook_perf_owner_rewake",
-                           Path(__file__).resolve().parents[1] / "hooks" / "dispatch-owner-rewake.py")
+    hooks = Path(__file__).resolve().parents[1] / "hooks"
+    rewake = _load_by_path("_hook_perf_owner_rewake", hooks / "dispatch-owner-rewake.py")
     latest = {}
     with jobs.open("r", encoding="utf-8") as handle:
         for line in handle:
