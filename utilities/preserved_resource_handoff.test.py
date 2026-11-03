@@ -1138,7 +1138,7 @@ class PreservedResourceHandoffReplayTest(unittest.TestCase):
             observed.append(True)
             return {"state": "quiescent", "reason": "fixture-remote-empty"}
         with mock.patch.object(RR, "compute_execution_observation", side_effect=quiescent), \
-                mock.patch("review_input.preview_request_nodes", return_value=frozenset()), \
+                mock.patch("review_input.preview_request_admission", return_value=None), \
                 mock.patch("subprocess.check_output", return_value=str(self.base)):
             self.assertTrue(SUP.admit_owner_successor_start(
                 dict(self.r1), "run-verify", str(self.jobs), REPLACEMENT, E9_THREAD))

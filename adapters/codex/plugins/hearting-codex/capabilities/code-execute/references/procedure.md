@@ -43,7 +43,7 @@ Use the checklist as the sole orchestration tracker. Keep plan files immutable d
 - Read the checklist before every step and execute steps in dependency order.
 - Implement each step within this node's sealed `dev/*` unit with concrete file and change instructions.
 - Record each step in the declared `dev_logs/` location, such as `step_01_model_py.md`.
-- Run the focused checks named by the plan for each step. The selected sibling review node owns implementation review.
+- Run the focused checks named by the plan for each step. Add or repeat a check only when its result could change the step's verdict or an open risk; do not rerun a passed check on unchanged code. The selected sibling review node owns implementation review.
 - Your verdict covers your steps and the checks your environment can run; the leg's wider verification belongs to `code-test` and the owner. A focused check that ran and failed is a step failure, not a handed-over check. A check this environment cannot run (sandbox, network, host or hardware limits) does not fail its step: write `handed-over: <command> (reason: ...)` in the step log, finish the step, and leave the check to `code-test` (the owner when no test stage follows).
 - After a successful step, mark it `[x]`.
 - Continue until every processable step has a terminal checklist mark.

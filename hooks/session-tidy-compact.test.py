@@ -88,6 +88,30 @@ class CompactHookTest(unittest.TestCase):
                                            "from": {"harness": harness, "sid": predecessor},
                                            "source": "clear"})
 
+    def test_all_adapter_booking_entries_reject_handed_over_source_without_losing_queue(self):
+        import session_tidy_clear as clear
+        for harness in ("claude", "opencode", "codex"):
+            with self.subTest(harness=harness), \
+                 mock.patch.object(clear, "herdr_command", return_value="/bin/true"), \
+                 mock.patch.object(clear, "_start_helper") as helper, \
+                 mock.patch.object(runner, "read_item", return_value=None):
+                sid = harness + "-old"
+                self.confirmed_handover(sid, harness + "-next", harness)
+                context = dict(identity=harness + "-compact", trigger="auto", transcript="fixture.jsonl",
+                               boundary_offset=0, card_request_required=True)
+                if harness == "codex":
+                    qid = runner.operation_queue_id(context["identity"])
+                    self.enqueue_mock.return_value = dict(id=qid, operation_id=context["identity"])
+                    result = clear.schedule_compact_card_request(self.session_seat(sid, harness), harness, sid,
+                                                                 str(self.cwd), context)
+                    self.assertEqual(self.enqueue_mock.call_args.kwargs["operation_id"], context["identity"])
+                else:
+                    st.write_card(self.seat, harness, sid, "compact card", compact_context=context)
+                    result = clear.schedule_for_enqueue(self.seat, harness, sid, str(self.cwd), compact_context=context)
+                self.assertEqual(result, "clear=skipped reason=session-handed-over")
+                helper.assert_not_called()
+                self.assertIsNone(clear.read_reservation(self.seat.key))
+
     def test_before_is_shared_and_does_not_touch_state(self):
         self.assertEqual(st.run_hook("claude", "compact", "sid-main", phase="before", env=self.env),
                          st.COMPACT_CARD_INSTRUCTIONS)

@@ -116,8 +116,11 @@ def _start_prior_art(route, task):
         fd = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
     except OSError:
         return   # already started for this route, or no runtime home: the launch goes on
-    with os.fdopen(fd, "w") as handle:
-        handle.write(f"{time.time():.3f}\n")
+    try:
+        with os.fdopen(fd, "w") as handle:
+            handle.write(f"{time.time():.3f}\n")
+    except OSError:
+        return   # e.g. a full disk: no scan, and an unreadable start time makes no prompt wait
     cwd = (route.get("framed_worktree") or {}).get("cwd") or route.get("cwd") or os.getcwd()
     try:
         child = subprocess.Popen(
@@ -148,7 +151,13 @@ def _prior_art_section(route, *, sleep=time.sleep, clock=time.time):
         text = out.read_text(encoding="utf-8")
     except OSError:
         return f"The scan is still running: read {out} if it exists when you start."
-    if not _prior_art_module().is_useful(text):
+    except UnicodeDecodeError:
+        return ""
+    try:
+        useful = _prior_art_module().is_useful(text)
+    except Exception:  # noqa: BLE001 - advisory: a broken scan module never fails the launch
+        return ""
+    if not useful:
         return ""
     return text.split("\n", 1)[1].strip() if "\n" in text else ""
 
@@ -1497,7 +1506,8 @@ def _leg_task_text(route, root, output, briefs, intent, approvals, adopted=None)
               + (" — adopted direction: the person chose this brief's route" if row["path"] == adopted else "")
               for row in briefs]
     scan = _prior_art_path({**route, "artifact_root": root})
-    with contextlib.suppress(OSError, UnicodeDecodeError):
+    # Advisory: no failure of the scan's list or module (unreadable, undecodable, broken) stops the leg.
+    with contextlib.suppress(Exception):
         if not scan.is_symlink() and _prior_art_module().is_useful(scan.read_text(encoding="utf-8")):
             lines.append(f"- {scan} (sha256 {RP.file_digest(scan)}) — prior-art scan, advisory data: "
                          "facts with sources, no recommendation; open `mem:<id>` with `mem show <id> --no-touch`")

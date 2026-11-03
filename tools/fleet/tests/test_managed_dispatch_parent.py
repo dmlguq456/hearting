@@ -67,20 +67,46 @@ class ManagedDispatchParentTest(unittest.TestCase):
         binding = handover.binding_of(job._registry_path, meta)
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(tidy, "state_root", return_value=Path(tmp)):
             seat = tidy.Seat("pane", "coherent")
-            def publish(sid, harness, ts):
+            def publish(origin_sid, origin_harness, sid, harness, ts):
                 tidy._append_ledger_entry(seat, {"event": "handover", "source": "retire",
-                    "from": {"harness": "codex", "sid": job.parent_sid},
+                    "from": {"harness": origin_harness, "sid": origin_sid},
                     "sid": sid, "harness": harness, "bindings": [binding], "ts": ts})
-            publish("current-B", "claude", 1)
+            publish(job.parent_sid, "codex", "current-B", "claude", 1)
             resolve = handover.resolve_recipient
             def moved(*args, **kwargs):
                 answer = resolve(*args, **kwargs)
-                publish("current-C", "opencode", 2)
+                # The current holder transfers the job; another A -> C row
+                # would compete with A -> B instead of advancing this read.
+                publish("current-B", "claude", "current-C", "opencode", 2)
                 return answer
             with mock.patch.object(handover, "resolve_recipient", side_effect=moved) as reader:
                 self.assertEqual(_effective_job_parent(job), ("current-B", "claude"))
                 reader.assert_called_once()
             self.assertEqual(_effective_job_parent(job), ("current-C", "opencode"))
+
+    def test_competing_parent_handoffs_do_not_select_the_latest_arm(self):
+        from fleet.collectors import _effective_job_parent
+        utilities = TOOLS.parent / "utilities"
+        if str(utilities) not in sys.path:
+            sys.path.insert(0, str(utilities))
+        import dispatch_seat_handover as handover
+        import session_tidy as tidy
+        job = self.job()
+        meta = {"parent_sid": job.parent_sid, "parent_harness": "codex", "attempt_id": "att-competing",
+                "dispatch_depth": "1", "worker_type": "owner", "route_id": "rt-competing", "route_hash": "sha256:competing"}
+        job._registry_metadata, job._registry_path = meta, "/fixture/jobs.log"
+        binding = handover.binding_of(job._registry_path, meta)
+        for reverse in (False, True):
+            with self.subTest(reverse=reverse), tempfile.TemporaryDirectory() as tmp, \
+                    mock.patch.object(tidy, "state_root", return_value=Path(tmp)):
+                seat = tidy.Seat("pane", "competing")
+                arms = [("current-B", "claude", 1), ("current-C", "opencode", 2)]
+                for sid, harness, ts in reversed(arms) if reverse else arms:
+                    tidy._append_ledger_entry(seat, {"event": "handover", "source": "retire",
+                        "from": {"harness": "codex", "sid": job.parent_sid},
+                        "sid": sid, "harness": harness, "bindings": [binding], "ts": ts})
+                self.assertEqual(_effective_job_parent(job), ("", ""))
+                self.assertEqual(job.parent_sid, meta["parent_sid"])
 
     def test_unreadable_lineage_retains_only_the_previously_confirmed_edge_for_existing_grace(self):
         from fleet.collectors import _effective_job_parent

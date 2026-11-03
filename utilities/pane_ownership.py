@@ -36,6 +36,16 @@ _CODEX_LOCATION_MENU = (
     "usecurrentgitworktree", "keepusingthecurrentworkingdirectory", "createnewgitworktree",
 )
 _CODEX_FOOTER_HINT = ("?forshortcuts",)
+# A narrow pane drops "? for shortcuts" first and keeps "<key> for agents" at
+# the start of the help row. The key label follows Codex's KeyBinding display
+# (modifiers such as "alt+", then an arrow, a named key or one character), so
+# transcript text such as "Waiting for agents" is not a help row.
+_CODEX_KEY_LABEL = (r"(?:(?:ctrl|shift|alt)\+|[⌃⇧⌥⌘^])*"
+                    r"(?:[←→↑↓]|f\d{1,2}|enter|space|tab|esc|pgup|pgdn|home|end|[a-z0-9])")
+_CODEX_COMPACT_FOOTER_HINT_RE = re.compile(
+    _CODEX_KEY_LABEL + r"(?: " + _CODEX_KEY_LABEL + r")? for agents(?![0-9A-Za-z])")
+# A thread-id the TUI clipped at the right edge of the status line.
+_CLIPPED_THREAD_ID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f-]{0,27}…")
 _WORKER_ENV = ("AGENT_DISPATCH_CHILD", "AGENT_DISPATCH_DEPTH", "OPENCODE_DISPATCH_SLUG",
                "FLEET_TITLE_REFRESH", "MEM_DISTILL")
 
@@ -56,16 +66,34 @@ def _codex_current_footer(lines):
     flat = "".join("".join(tail).split()).lower()
     if any(token in flat for token in _CODEX_LOCATION_MENU):
         return "invalid", ""
-    if not tail or not any(token in "".join(tail[-1].lower().split())
-                           for token in _CODEX_FOOTER_HINT):
-        return "none", ""
+    hint_row = "".join(tail[-1].lower().split()) if tail else ""
+    if not any(token in hint_row for token in _CODEX_FOOTER_HINT):
+        # The compact hint counts only in the exact status/help-row layout.
+        if len(tail) != 2 or not _CODEX_COMPACT_FOOTER_HINT_RE.match(tail[-1]):
+            return "none", ""
     if len(tail) != 2:
         return "invalid", ""
-    last_field = tail[0].rsplit("·", 1)[-1].strip()
-    match = _THREAD_ID_RE.fullmatch(last_field)
+    fields = tail[0].split("·")
+    first_field, last_field = fields[0].strip(), fields[-1].strip()
+    # Hearting puts thread-id first so a narrow pane clips telemetry, not the
+    # UUID; installs not yet refreshed still show it last.
+    first = _THREAD_ID_RE.fullmatch(first_field)
+    last = _THREAD_ID_RE.fullmatch(last_field)
+    if first and last:
+        # Two different complete UUIDs: no layout says which one is the thread.
+        session_id = first.group(0) if first.group(0) == last.group(0) else ""
+    elif last:
+        session_id = last.group(0)
+    elif first and _CLIPPED_THREAD_ID_RE.fullmatch(last_field):
+        # A clipped trailing UUID is the former layout's thread-id: the first
+        # field is identity only when it is that same UUID (an unnamed thread
+        # draws thread-title as its id), never a title or project in front of it.
+        session_id = first.group(0) if first.group(0).startswith(last_field[:-1]) else ""
+    else:
+        session_id = first.group(0) if first else ""
     # Clipping or a status line without thread-id supplies no identity. It
     # cannot contradict an independently proved daemon/process-native ID.
-    return ("current", match.group(0)) if match else ("none", "")
+    return ("current", session_id) if session_id else ("none", "")
 
 
 class _CodexFooterThreads(set):
@@ -79,9 +107,11 @@ class _CodexFooterThreads(set):
 def codex_footer_threads(lines, *, current_id_only=False):
     """Return thread UUIDs from the visible Codex footer.
 
-    Current identity is the whole UUID in the last native footer field, after a
-    composer/status/help-row layout. A hidden footer or a conversation-location
-    menu is unknown. Broad discovery remains available to non-ownership readers.
+    Current identity is the whole UUID in the first native footer field (the
+    current Hearting order) or the last one (installs before that order), after a
+    composer/status/help-row layout. A hidden footer, a clipped trailing UUID or
+    a conversation-location menu is unknown. Broad discovery remains available
+    to non-ownership readers.
     """
     if not isinstance(lines, (list, tuple)):
         return set()

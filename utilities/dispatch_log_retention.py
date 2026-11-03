@@ -36,6 +36,8 @@ BACKLOG_DUE_SECONDS = 60
 EXAMINE_LIMIT = 64
 MAX_DIRECTORY_ENTRIES = 50000
 MAX_PASS_SECONDS = 10
+# Per-pass removal batch. While the directory is over MAX_LOG_BYTES it does not
+# apply: the removal time budget (MAX_PASS_SECONDS) alone bounds the pass.
 REMOVE_LIMIT = 16
 STATE_NAME = "dispatch-log-retention.json"
 LOCK_NAME = "dispatch-log-retention.lock"
@@ -146,6 +148,23 @@ def _write_state(layout, state):
         raise
 
 
+# The log-directory check depends only on (jobs, root), not on the row being
+# bound, so a pass makes it once instead of once per registry row. It is
+# dropped when the pass ends; nothing is carried to a later pass.
+_LOG_DIR_CHECKED: dict = {}
+
+
+def _log_dir_is_canonical(jobs: Path, root: Path):
+    key = (str(jobs), str(root))
+    if key not in _LOG_DIR_CHECKED:
+        logs = root / "logs"
+        try:
+            _LOG_DIR_CHECKED[key] = validate_dispatch_log_dir(jobs, logs) == logs
+        except (DispatchContractError, OSError, ValueError):
+            _LOG_DIR_CHECKED[key] = False
+    return _LOG_DIR_CHECKED[key]
+
+
 def _bound_name(jobs: Path, root: Path, log_file: str):
     if not isinstance(log_file, str) or not os.path.isabs(log_file):
         return None
@@ -153,11 +172,9 @@ def _bound_name(jobs: Path, root: Path, log_file: str):
         return None
     path = Path(log_file)
     logs = root / "logs"
-    try:
-        validated = validate_dispatch_log_dir(jobs, logs)
-    except (DispatchContractError, OSError, ValueError):
+    if not _log_dir_is_canonical(jobs, root):
         return None
-    if (validated != logs or path.parent != logs or path.name in ("", ".", "..",
+    if (path.parent != logs or path.name in ("", ".", "..",
             "dispatch-session-sweep.log", "dispatch-pending-delivery.log")
             or ".segment." in path.name or path.name.endswith(".lock")):
         return None
@@ -231,15 +248,36 @@ def _unlink_if_same(layout, name, expected):
     return unlink_same_file(layout.logs_fd, name, expected, _stamp)
 
 
+def _current_snapshot(jobs, held_ctx):
+    """The registry as it is now: the pass's own read while jobs.log is unchanged.
+
+    ``_Snapshot`` records the file's identity, size and timestamps. If they are
+    still exactly those, no row was appended or rewritten since, so the parsed
+    rows are what a new read would return. Otherwise read it again. The
+    in-lock comparison below holds either way.
+    """
+    from worker_home_retention import _Snapshot
+
+    held = held_ctx.snapshot
+    try:
+        info = os.stat(jobs, follow_symlinks=False)
+        if (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns,
+                info.st_ctime_ns) == held.registry_snapshot:
+            return held
+    except OSError:
+        pass
+    return _Snapshot(jobs)
+
+
 @contextlib.contextmanager
 def _fresh_eligible(jobs, root, layout, candidate_name, expected_rows,
                     expected_stamp, now_ns, candidate_kind, prepared, deadline, expected_settled):
     from dispatch_contract import process_table_scan_scope
-    from worker_home_retention import _Context, _Snapshot, _declared_index
+    from worker_home_retention import _Context, _declared_index
 
     body_entered = False
     try:
-        snapshot = _Snapshot(jobs)
+        snapshot = _current_snapshot(jobs, prepared)
         if candidate_kind == "log":
             log_file = str(root / "logs" / candidate_name)
             if log_file in snapshot.unknown_log_refs:
@@ -396,6 +434,8 @@ def sweep(jobs, *, now_ns=None, force=False):
         return {"skipped": "io-error", "error": type(exc).__name__}
     except Exception as exc:  # noqa: BLE001
         return {"skipped": "error", "error": type(exc).__name__}
+    finally:
+        _LOG_DIR_CHECKED.clear()
 
 
 def _pass(jobs, root, layout, state, now_ns, started):
@@ -550,10 +590,11 @@ def _pass(jobs, root, layout, state, now_ns, started):
                 eligible.append((name, settled, expected_stamp, rows,
                                  candidate_kinds[name]))
                 # Removal re-reads the registry per file, so it is the slow
-                # step. Once enough removable files are in hand, stop
-                # examining and spend the pass on removing them; the cursor
-                # stays on the last examined name.
-                if over_limit or now_ns - settled >= RETENTION_NS:
+                # step. Within the limit, once a batch of expired files is in
+                # hand, stop examining and spend the pass on removing them; the
+                # cursor stays on the last examined name. Over the limit there
+                # is no batch: the examine and removal time budgets bound it.
+                if not over_limit and now_ns - settled >= RETENTION_NS:
                     removable += 1
                     if removable >= REMOVE_LIMIT:
                         break
@@ -587,7 +628,8 @@ def _pass(jobs, root, layout, state, now_ns, started):
     # examination cannot leave eligible files undeleted.
     removal_started = time.monotonic()
     for name, settled, expected_stamp, rows, candidate_kind in selected:
-        if removed >= REMOVE_LIMIT or time.monotonic() - removal_started > MAX_PASS_SECONDS:
+        if ((removed >= REMOVE_LIMIT and not over_limit)
+                or time.monotonic() - removal_started > MAX_PASS_SECONDS):
             deferred += 1
             continue
         with _fresh_eligible(jobs, root, layout, name, rows, expected_stamp,
@@ -607,6 +649,7 @@ def _pass(jobs, root, layout, state, now_ns, started):
                 protected_names.add(name)
                 unknown_names.add(name)
                 deferred += 1
+    over_limit_bytes = max(0, total_bytes - removed_bytes - MAX_LOG_BYTES)
     result = {
         "examined": len(examined_names), "eligible": len(eligible), "eligible_bytes": eligible_bytes,
         "removed": removed, "removed_bytes": removed_bytes, "deferred": deferred + discovery_deferred,
@@ -614,9 +657,13 @@ def _pass(jobs, root, layout, state, now_ns, started):
         "unknown_bytes": unknown_bytes,
         "quarantine_pending_files": recovery["pending_files"],
         "quarantine_pending_bytes": recovery["pending_bytes"],
-        "over_limit_bytes": max(0, total_bytes - removed_bytes - MAX_LOG_BYTES),
+        "over_limit_bytes": over_limit_bytes,
         "kept_reasons": reasons,
-        "more": int(removed >= REMOVE_LIMIT or deferred > 0),
+        # Still over the limit after removing something: more is likely
+        # reachable, so come back at the short interval. A pass that removed
+        # nothing (bytes held by protected logs) waits the normal interval.
+        "more": int(removed >= REMOVE_LIMIT or deferred > 0
+                    or (removed > 0 and over_limit_bytes > 0)),
         "elapsed_ms": int((time.monotonic() - started) * 1000),
     }
     if ctx.observation is not None:

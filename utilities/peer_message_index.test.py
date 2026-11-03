@@ -17,6 +17,7 @@ every live agent. These tests pin:
   `read_markers`, no `_projection_sessions`, and reaches the idle callback.
 """
 import contextlib
+import fcntl
 import importlib.util
 import io
 import json
@@ -25,6 +26,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -399,6 +401,127 @@ class CallSitePinTest(IndexTestCase):
             peer_message.retry_receiver_idle(claude, permission=True)
             loaded.assert_called_once()
             self.assertEqual(loaded.return_value.receiver_idle.call_args.args[0], claude)
+
+
+class BoundedScanTest(IndexTestCase):
+    """What a hook boundary may read: rows naming its endpoints, until its deadline."""
+
+    def _validated(self, call):
+        seen = []
+        original = peer_message._read_pending
+
+        def counting(ref, **kwargs):
+            seen.append(ref)
+            return original(ref, **kwargs)
+
+        with mock.patch.object(peer_message, "_read_pending", side_effect=counting):
+            rows = list(call())
+        return rows, seen
+
+    def test_a_passed_deadline_reads_nothing_and_publishes_no_index(self):
+        _text, ref = self.pending()
+        self.received_history(20)
+        with _OpenMeter() as meter:
+            rows = list(peer_message._pending_rows(
+                recipient=self.recipient, deadline=time.monotonic() - 1))
+        self.assertEqual(rows, [])
+        self.assertLess(meter.calls, 5, meter.calls)
+        self.assertFalse(self.index_path().exists())
+        # The row is untouched, so the next unbounded read still finds it.
+        self.assertEqual([row["ref"] for row in peer_message.pending_messages(self.recipient)],
+                         [ref])
+
+    def test_filtered_scan_validates_only_rows_naming_an_endpoint(self):
+        _text, mine = self.pending("mine")
+        _text, sent = self.pending("sent", sender=self.recipient, recipient=self.other)
+        foreign = [self.pending(f"foreign {index}", sender=self.other,
+                                recipient={"harness": "claude", "session_id": f"far-{index}"})[1]
+                   for index in range(5)]
+        rows, validated = self._validated(lambda: peer_message._pending_rows(
+            recipient=self.recipient, sender=self.recipient))
+        self.assertEqual(sorted(row["ref"] for row in rows), sorted([mine, sent]))
+        self.assertEqual(sorted(validated), sorted([mine, sent]))
+        self.assertTrue(set(foreign).isdisjoint(validated))
+
+    def test_ref_scan_returns_only_rows_carrying_the_ref(self):
+        _text, other = self.pending("plain")
+        _text, watched = peer_message.prepare_peer_message(
+            "[peer-steward] watch_id=abc123 state=idle", self.sender, self.recipient,
+            defer=True, refs=["peer-watch:abc123"])
+        rows, validated = self._validated(
+            lambda: peer_message._pending_rows(ref="peer-watch:abc123"))
+        self.assertEqual([row["ref"] for row in rows], [watched])
+        self.assertNotIn(other, validated)
+
+    def test_a_write_whose_index_update_never_ran_is_never_hidden(self):
+        """RV-BC-1186: a row created without its index update (a writer that
+        skipped it, an older release, a crash) must not be certified away by
+        the next transition update, which used to republish the current names."""
+        _text, first = self.pending("first")
+        self.assertEqual([row["ref"] for row in peer_message.pending_messages(self.recipient)],
+                         [first])
+        self.assertTrue(self.index_path().exists())
+        with mock.patch.object(peer_message, "_update_recipient_index"):
+            _text, second = self.pending("second")
+        row = peer_message._read_pending(first)
+        with peer_message.pending_lock(first):
+            peer_message._save_pending(dict(row, receipt="later-transition"))
+        self.assertEqual(sorted(row["ref"] for row in peer_message.pending_messages(self.recipient)),
+                         sorted([first, second]))
+
+    def test_a_row_rebound_to_this_recipient_retires_its_index(self):
+        _text, mine = self.pending("mine")
+        _text, moved = self.pending("moved", recipient=self.other)
+        self.assertEqual([row["ref"] for row in peer_message.pending_messages(self.recipient)],
+                         [mine])
+        self.assertTrue(self.index_path().exists())
+        row = peer_message._read_pending(moved)
+        with mock.patch.object(peer_message, "pending_delivery_recipient",
+                               return_value=dict(self.recipient)):
+            with peer_message.pending_lock(moved):
+                peer_message._save_pending(dict(row, receipt="rebound"))
+        self.assertFalse(self.index_path().exists())
+
+    def test_the_update_waits_for_the_index_lock_like_every_installed_release(self):
+        _text, first = self.pending()
+        peer_message.pending_messages(self.recipient)
+        path = self.index_path()
+        lock = path.with_name(path.name + ".lock")
+        fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        waited = []
+        original = fcntl.flock
+
+        def observed(handle, operation):
+            waited.append(operation)
+            if handle != fd and operation == fcntl.LOCK_EX:
+                os.close(fd)  # the other writer finishes while this one waits
+            return original(handle, operation)
+
+        with mock.patch.object(peer_message.fcntl, "flock", side_effect=observed):
+            row = peer_message._read_pending(first)
+            with peer_message.pending_lock(first):
+                peer_message._save_pending(dict(row, receipt="after-wait"))
+        self.assertIn(fcntl.LOCK_EX, waited)
+
+    def test_a_held_index_lock_skips_the_publish_instead_of_waiting(self):
+        _text, ref = self.pending()
+        path = self.index_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lock = path.with_name(path.name + ".lock")
+        fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            started = time.monotonic()
+            rows = peer_message.pending_messages(self.recipient)
+            self.assertLess(time.monotonic() - started, 2.0)
+            self.assertEqual([row["ref"] for row in rows], [ref])
+            self.assertFalse(path.exists())
+        finally:
+            os.close(fd)
+        # Once the lock is free the same read publishes it.
+        peer_message.pending_messages(self.recipient)
+        self.assertTrue(path.exists())
 
 
 class StopHeaderTest(IndexTestCase):

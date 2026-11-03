@@ -347,6 +347,65 @@ class PrdReadabilityTest(unittest.TestCase):
         many = doc(body=["## 1. Common", "", "① 1600e12", ROUTE, REVISION, CYCLE, ATTEMPT, UUID, "w1:p15"])
         self.assertTrue(RD.stderr_line(RD.check_text(many)).count(", …") == 1)
 
+    def test_u20_body_prose_rules(self):
+        cases = {
+            "version-mention": ("v188에서 바꿈.", "이 규칙은 v12부터 적용한다.", "(v177 개정) 경계를 넓힌다.",
+                                "v203까지는 두 단계였다.", "Changed in v12: the gate is gone.", "## 4.5 [v14 개정] 관제"),
+            "supersede-narrative": ("이전에는 수동이었으나 지금은 자동이다.", "이 절은 superseded by §4.", "옛 경로는 폐기됐다.",
+                                    "현재 정본은 §82다.", "아래는 이력이다."),
+            "user-quote": ("사용자 원문: \"빨리 해줘\"", "사용자: \"하네스랑 구분되게\"", "사용자 확정 3건을 따른다.",
+                           "트리거 = on-demand", "The user said it twice."),
+        }
+        for rule, texts in cases.items():
+            for text in texts:
+                with self.subTest(rule=rule, text=text):
+                    self.assertEqual(body_rules(text), [{rule}])
+
+    def test_u21_prose_rules_skip_names_code_tables_and_the_summary(self):
+        clean = ("BC-ResNet v2에서 학습한다.", "LibriMix v1부터 쓴다.", "Python 3.11 이상.", "하팅(v2.152.0 이후)은 지원한다.",
+                 "제품은 노션을 대체한다.", "`related|precedes|supersedes` 관계와 `superseded` 상태.",
+                 "repair 프로토콜을 v2로 넓힌다.", "도메인 트리거: 파일 읽기.", "| model | v12부터 개정 |",
+                 "`v12부터` 예시와 ⟨v3 개정⟩ 태그.")
+        report = RD.check_text(doc(body=["## 1. Common", "", *clean]))
+        self.assertEqual(rules(report), {"version-tag": 1})
+        summary = RD.check_text(doc(["- v12부터 바뀐 사용자 원문 " + "x" * 700]))
+        self.assertNotIn("version-mention", rules(summary))
+        self.assertNotIn("user-quote", rules(summary))
+        self.assertNotIn("long-line", rules(summary))
+        fenced = RD.check_text(doc(body=["## 1. Common", TICKS, "v12부터 사용자 원문 " + "y" * 700, TICKS]))
+        self.assertEqual(fenced["counts"]["total"], 0)
+        self.assertEqual(RD.check_text(doc(title="# v12부터 바뀐 제목"))["counts"]["total"], 0)
+
+    def test_u22_long_body_line(self):
+        limit = RD.LIMITS["body_line_chars"]
+        self.assertEqual(limit, 600)
+        self.assertEqual(body_rules("가" * limit), [set()])
+        self.assertEqual(body_rules("가" * (limit + 1)), [{"long-line"}])
+        self.assertEqual(body_rules("| " + "a" * limit + " |"), [set()])
+        hit = [v for v in RD.check_text(doc(body=["## 1. A", "", "b" * 700]))["violations"] if v["rule"] == "long-line"]
+        self.assertTrue(hit[0]["excerpt"].startswith("700 chars > 600: "))
+
+    def test_u23_prose_rules_follow_the_base_and_stay_warnings(self):
+        base = doc(body=["## 1. A", "v12부터 쓴다.", "keep"])
+        post = doc(body=["## 1. A", "v12부터 쓴다.", "사용자 원문: \"새 줄\"", "keep"])
+        report = RD.check_text(post, base)
+        self.assertEqual({v["rule"]: v["age"] for v in report["violations"]},
+                         {"version-mention": "existing", "user-quote": "new"})
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "prd.md"
+            path.write_text(post, encoding="utf-8")
+            result = subprocess.run([sys.executable, str(ROOT / "utilities/prd_readability.py"), "check", str(path)],
+                                    capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("user-quote", result.stdout)
+
+    def test_u24_authoring_guide_names_every_body_rule(self):
+        text = (ROOT / "capabilities/autopilot-spec/references/prd-authoring.md").read_text(encoding="utf-8")
+        for name in ("version-mention", "supersede-narrative", "user-quote", "long-line"):
+            with self.subTest(rule=name):
+                self.assertIn(f"`{name}`", text)
+        self.assertIn(f"{RD.LIMITS['body_line_chars']} characters", text)
+
     def test_summary_items_helper(self):
         items = RD.summary_items(["## Head", "- one", "  more", "- two", "", "para a", "para b", "1. three"])
         self.assertEqual(items, [(1, "one more"), (3, "two"), (5, "para a para b"), (7, "three")])

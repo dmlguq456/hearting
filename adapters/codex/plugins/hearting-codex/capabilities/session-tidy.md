@@ -33,7 +33,7 @@ operations that require its exact physical binding.
 
 Claude Code, Codex, and OpenCode give the interactive main session a non-blocking notice based on the latest request's input usage: strictly above 500,000 tokens recommends `/session-tidy`, and strictly above 700,000 asks for tidying now. Each threshold is emitted once per native session ID; a jump across both emits the urgent notice once and consumes both. Compaction does not reset these notices. Owners, workers, auxiliary/reviewer sessions, and subagents are excluded. These notices do not change the runtime's compaction policy.
 
-Runtime compaction counts as a session tidy invocation by the main session. Its card and compact record use the same exact native identity across pane/project fallback, restart and pane movement; the session's card generation is not reset when its physical seat cannot be resolved. A missing or ambiguous native identity never borrows another session's card. Each completed summary may be saved to that session's logical card and queues memory tidying; a call with no exact native identity may use the shared project fallback only for its existing queue behavior. Preserve memory tidying under the existing stable operation ID in the durable queue before any card request or clear booking. Queue acceptance is independent of card-request delivery, booking expiry, cancellation, or clear eligibility; retries and normal hook reconciliation reuse that same queue item. Keep its source card generation unchanged. A card can authorize clear only through an exact recorded acceptance relation for its physical seat, harness, session, claim, operation, queue item, arrival and newly written card.
+Runtime compaction counts as a session tidy invocation by the main session. Its card and compact record use the same exact native identity across pane/project fallback, restart and pane movement; the session's card generation is not reset when its physical seat cannot be resolved. A missing or ambiguous native identity never borrows another session's card. Each completed summary may be saved to that session's logical card and queues memory tidying; a call with no exact native identity may use the shared project fallback only for its existing queue behavior. Preserve memory tidying under the existing stable operation ID in the durable queue before any card request or clear booking. Once the common lineage confirms a successor, the old source must not create another clear, compact card request, or idle booking, even after resume in another pane. Ambiguous or unreadable lineage cannot authorize a new booking. Memory queue acceptance and resumption remain independent of this decision. Queue acceptance is independent of card-request delivery, booking expiry, cancellation, or clear eligibility; retries and normal hook reconciliation reuse that same queue item. Keep its source card generation unchanged. A card can authorize clear only through an exact recorded acceptance relation for its physical seat, harness, session, claim, operation, queue item, arrival and newly written card.
 
 A nonempty automatic Claude or OpenCode summary saved to its own verified seat may use the existing tidy booking. For Codex remote-V2, an explicitly automatic compaction may use that same booking only after the exact main turn is confirmed complete: the bounded helper then sends one claim-bound request through the verified Codex pane, and the main session writes its real card and enqueues the matching operation. No empty or fabricated remote-V2 summary is used. Claude/OpenCode compact bookings and Codex card-request bookings wait for transcript turn-end evidence; idle alone is insufficient, and a compact booking may wait up to three hours. A matching card and durable queue receipt are required before handover snapshot and clear. Compact-origin clear keeps the existing continue behavior. Manual or unknown compaction, failed card persistence, a project fallback/outside-herdr seat, workers or sub-sessions, a changed session/input/card, or an uncertain card-request send never trigger automatic clear. Codex uses the verified pane transport; this does not add native attachment support. Never block or delay compaction to complete tidying. Worker sessions are excluded.
 
@@ -81,11 +81,19 @@ message containing `/clear` is never evidence that the conversation cleared.
 
 Confirmed tidy succession and same-seat handover edges form one lineage for
 both previous-conversation display and pending-result delivery. A resume that
-moves panes remains connected by its recorded session id; a fork or incomplete
-lineage does not grant a successor. Open records stored under a predecessor's
+moves panes remains connected by its recorded session id. A fork leaves its
+source and ancestors unresolved; independent descendants retain their own
+confirmed suffix and directly started jobs. Reverse discovery stops before an
+unresolved origin. A merge, self-loop, or cycle invalidates its whole connected
+component. Incomplete observation cannot grant authority. Open records stored under a predecessor's
 session key may be delivered to the unique confirmed same-harness chain end,
 while storage, delivery id, claim, and acknowledgement stay under the original
 key. An explicit registered-job binding to another recipient takes precedence.
+A unique exact job binding retains that authority across a fork; conflicting
+bindings on different arms remain unresolved regardless of row order or age.
+Serial exact handoffs retain their existing authority. Storage enumeration never
+substitutes for the current per-record recipient judgment. Derived recipient inboxes from the
+previous authority semantics are rebuilt through normal reconciliation.
 Only tidy-created succession and handover rows are lineage edges; manual
 `/clear`, chronological neighbors, pane aliases, and card text do not create
 edges. Unclear liveness or lineage remains unresolved. Existing activation,

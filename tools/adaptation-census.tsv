@@ -313,10 +313,7 @@ tool-deferred	adaptation-exemptions.tsv
 tool-deferred	adaptation-guard.test.sh
 tool-deferred	answer-wait-audit.py
 tool-deferred	argparse_abbrev_guard.test.py
-tool-deferred	artifact-delta-census.py
-tool-deferred	artifact-producer-canary.py
 tool-deferred	artifact-w8-handoff.py
-tool-deferred	artifact_delta_census.test.py
 tool-deferred	artifact_w8_handoff.test.py
 tool-deferred	browser-acceptance
 tool-deferred	build-manifest.py
@@ -369,7 +366,6 @@ tool-deferred	opencode-text-request.test.py
 tool-deferred	profile
 tool-deferred	release
 tool-deferred	render-fleet-svg.py
-tool-deferred	render-hub.py
 tool-deferred	render-landing.py
 tool-deferred	report-bundle.py
 tool-deferred	report-manifest-verify.py

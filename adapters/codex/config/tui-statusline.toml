@@ -8,13 +8,16 @@
 # other user/session state.
 #
 # Apply this fragment with `adapters/codex/bin/preflight.sh tui-config`, or
-# add `"thread-id"` last in the existing status_line array manually.
+# put `"thread-id"` first in the existing status_line array manually.
 
 # `thread-id` exposes Codex's full current Thread.id to the normal foreground
-# observer. Keep it last so the full UUID remains visible after optional
-# telemetry and title fields. The pane header remains the shared human-facing
-# session label; `thread-title` remains available as a separate title.
+# observer. Keep it first: Codex clips an overflowing footer from the right, so
+# a narrow pane drops trailing telemetry and title fields, not the UUID. The
+# merge moves it there in an existing list and keeps every other item's order;
+# the former default (thread-id last) becomes this order on the next refresh.
+# The pane header remains the shared human-facing session label;
+# `thread-title` remains available as a separate title.
 
 [tui]
-status_line = ["thread-title", "git-branch", "context-used", "model-with-reasoning", "five-hour-limit", "weekly-limit", "thread-id"]
+status_line = ["thread-id", "thread-title", "git-branch", "context-used", "model-with-reasoning", "five-hour-limit", "weekly-limit"]
 status_line_use_colors = true

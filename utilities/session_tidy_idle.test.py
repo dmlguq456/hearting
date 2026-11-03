@@ -61,6 +61,16 @@ class IdleObserverTests(unittest.TestCase):
             payload["provider"] = provider
         return idle.observe_payload("claude", payload, now=now)
 
+    def test_handed_over_source_idle_never_creates_a_booking_or_helper(self):
+        with self.iso.patched_environ(self.extra), \
+             mock.patch.object(clear, "_start_helper") as helper:
+            seat = st.resolve_seat("claude", str(self.cwd), sid="sid-A")
+            st._append_ledger_entry(seat, dict(event="succession", source="tidy-clear", harness="claude",
+                                              sid="sid-B", ts=1, **{"from": "sid-A"}))
+            self.assertEqual(self.observe_claude(), "booking=skipped reason=session-handed-over")
+            self.assertIsNone(clear.read_reservation(seat.key))
+            helper.assert_not_called()
+
     def test_stop_payload_uses_exact_turn_and_duplicate_does_not_extend_due_time(self):
         with self.iso.patched_environ(self.extra), \
              mock.patch.object(clear, "herdr_command", return_value=str(self.iso.root / "fake-herdr")), \

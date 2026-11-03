@@ -440,6 +440,102 @@ class ResourceRegistryTest(unittest.TestCase):
                 child.wait()
         self.assertEqual(registry.classify_identity(row), ("exited", None, "process-absent"))
 
+    def _zombie_child(self):
+        """A killed ``sleep`` child this test has not reaped, with its live identity."""
+        child = subprocess.Popen(["/bin/sleep", "30"])
+        self.addCleanup(lambda: (child.kill(), child.wait()) if child.returncode is None else None)
+        deadline = time.monotonic() + 10
+        identity = registry.proc_identity(child.pid)
+        while identity is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+            identity = registry.proc_identity(child.pid)
+        self.assertIsNotNone(identity)
+        os.kill(child.pid, signal.SIGKILL)
+        stat = Path(f"/proc/{child.pid}/stat")
+        while (stat.read_text().rsplit(") ", 1)[1].split()[0] != "Z"
+               and time.monotonic() < deadline):
+            time.sleep(0.01)
+        self.assertEqual(stat.read_text().rsplit(") ", 1)[1].split()[0], "Z")
+        return child, {key: identity[key] for key in registry.IDENTITY_KEYS}
+
+    def test_controller_gone_zombie_is_exited_like_a_detached_wrapper(self):
+        # The controller died, so the kernel handed its wrapper to an adopter (this
+        # test process) that has not reaped it yet. The controller can no longer
+        # collect it; the sentinel it wrote is the exit proof.
+        child, row = self._zombie_child()
+        namespace = os.readlink("/proc/self/ns/pid")
+        dead = subprocess.Popen(["/bin/true"])
+        dead.wait()
+        gone = {**registry.proc_identity(os.getpid()), "pid": dead.pid, "pid_namespace": namespace}
+        supervised = {**row, "process_group": child.pid, "pid_namespace": namespace,
+                      "resource_policy": "supervised-owner", "launch_state": "started",
+                      "owner_wait": {"launch_scope": "codex-owner-controller"},
+                      "launch_controller": gone}
+        self.assertEqual(registry.classify_identity(supervised),
+                         ("exited", None, "process-exited-unreaped"))
+        # Still the recorded controller's own child: only that controller collects it.
+        own = {**supervised, "launch_controller": {**gone, "pid": os.getpid(), "starttime": "0"}}
+        self.assertEqual(registry.classify_identity(own),
+                         ("stale", None, "process-identity-unreadable"))
+        for controller in ({"pid": True}, {"command_hash": "x"}, "opaque"):
+            with self.subTest(controller=controller):
+                self.assertEqual(registry.classify_identity({**row, "launch_controller": controller}),
+                                 ("stale", None, "process-identity-unreadable"))
+
+    def test_live_process_whose_leader_thread_exited_stays_stale(self):
+        # Only the main thread called pthread_exit: the leader reads as a zombie with
+        # no cmdline while another thread of the process keeps running.
+        code = ("import ctypes, sys, threading, time\n"
+                "threading.Thread(target=time.sleep, args=(60,)).start()\n"
+                "sys.stdout.write('ready\\n'); sys.stdout.flush(); sys.stdin.readline()\n"
+                "ctypes.CDLL(None).pthread_exit(None)\n")
+        child = subprocess.Popen([sys.executable, "-c", code], stdin=subprocess.PIPE,
+                                 stdout=subprocess.PIPE, text=True)
+        self.addCleanup(child.stdout.close)
+        self.addCleanup(child.stdin.close)
+        self.addCleanup(lambda: (child.kill(), child.wait()) if child.returncode is None else None)
+        self.assertEqual(child.stdout.readline().strip(), "ready")
+        identity = registry.proc_identity(child.pid)
+        self.assertIsNotNone(identity)
+        row = {key: identity[key] for key in registry.IDENTITY_KEYS}
+        child.stdin.write("go\n")
+        child.stdin.flush()
+        stat = Path(f"/proc/{child.pid}/stat")
+        deadline = time.monotonic() + 10
+        fields = stat.read_text().rsplit(") ", 1)[1].split()
+        while fields[0] != "Z" and time.monotonic() < deadline:
+            time.sleep(0.01)
+            fields = stat.read_text().rsplit(") ", 1)[1].split()
+        self.assertEqual((fields[0], int(fields[17]) > 1), ("Z", True))
+        self.assertIsNone(child.poll())
+        for extra in ({}, {"launch_controller": {"pid": os.getppid()}}):
+            with self.subTest(extra=extra):
+                self.assertEqual(registry.classify_identity({**row, **extra}),
+                                 ("stale", None, "process-identity-unreadable"))
+
+    def test_exiting_flag_without_zombie_state_is_exited_only_single_threaded(self):
+        # PF_EXITING (0x4) set while the state is not yet Z: past exit_mm, cmdline empty.
+        pid = 999999999
+        row = {"pid": pid, "starttime": "42", "command_hash": "a" * 64}
+
+        def stat(state="D", flags=0x4, threads=1, start="42", parent=1):
+            fields = [state, str(parent), str(pid)] + ["0"] * 16 + [start]
+            fields[6], fields[17] = str(flags), str(threads)
+            return f"{pid} (wrapper) " + " ".join(fields)
+
+        cases = (({}, "exited"), ({"state": "R", "flags": 0x4 | 0x40}, "exited"),
+                 ({"flags": 0x40}, "stale"), ({"threads": 2}, "stale"),
+                 ({"start": "43"}, "stale"))
+        for change, expected in cases:
+            with self.subTest(change=change), \
+                    mock.patch.object(Path, "read_text", return_value=stat(**change)):
+                self.assertEqual(registry.classify_identity(row, lambda _pid: None)[0], expected)
+        controlled = {**row, "launch_controller": {"pid": 7}}
+        with mock.patch.object(Path, "read_text", return_value=stat(parent=7)):
+            self.assertEqual(registry.classify_identity(controlled, lambda _pid: None)[0], "stale")
+        with mock.patch.object(Path, "read_text", return_value=stat(parent=1)):
+            self.assertEqual(registry.classify_identity(controlled, lambda _pid: None)[0], "exited")
+
     def test_owned_zombie_requires_exact_kernel_and_controller_identity(self):
         pid = 999999999
         parent = registry.proc_identity(os.getpid())
@@ -466,15 +562,19 @@ class ResourceRegistryTest(unittest.TestCase):
                            {"launch_controller": {**parent, "command_hash": "foreign", "pid_namespace": namespace}}):
                 with self.subTest(change=change):
                     self.assertEqual(registry.classify_identity({**row, **change}, reader)[0], "stale")
-            for index, value in ((0, "S"), (1, str(os.getpid() + 1)), (2, str(pid + 1)), (19, "43")):
+            # A zombie whose kernel parent is no longer the controller is not its to
+            # collect: the adopter reaps it, so it is exited like a detached wrapper.
+            for index, value, expected in ((0, "S", "stale"), (1, str(os.getpid() + 1), "exited"),
+                                           (2, str(pid + 1), "stale"), (19, "43", "stale")):
                 altered = list(fields); altered[index] = value
                 with self.subTest(field=index), mock.patch.object(Path, "read_text",
                         return_value=f"{pid} (wrapper) " + " ".join(altered)):
-                    self.assertEqual(registry.classify_identity(row, reader)[0], "stale")
+                    self.assertEqual(registry.classify_identity(row, reader)[0], expected)
             for method in ("read_text", "read_bytes"):
                 with self.subTest(error=method), mock.patch.object(Path, method, side_effect=PermissionError()):
                     self.assertEqual(registry.classify_identity(row, reader)[0], "stale")
-            with mock.patch.object(Path, "read_text", side_effect=[raw, raw.replace("42", "43")]):
+            reused = raw.replace(" 42", " 43")
+            with mock.patch.object(Path, "read_text", side_effect=[raw, reused, reused]):
                 self.assertEqual(registry.classify_identity(row, reader)[0], "stale")
             with mock.patch.object(Path, "read_text", return_value="malformed"):
                 self.assertEqual(registry.classify_identity(row, reader)[0], "stale")

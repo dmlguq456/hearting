@@ -865,16 +865,19 @@ tidy at its existing project seat and pane hooks silent, without new user input
 or runtime-state migration.
 
 For native Codex callbacks in a shared service, exactly one `thread-id` is the
-last `[tui].status_line` item, and the complete UUID in the last visible native
-footer field provides the current `Thread.id`; `sessionId` remains its tree
-root. A UUID in an earlier field, title, transcript, or arbitrary screen text
-is not current identity. A missing, clipped, wrapped, partial, ambiguous, or
-hidden last field stays unknown. Two fresh samples share stable foreground
-PID/start/TTY and one unique endpoint/pane, also used for reporting, number
-lookup and title. Managed apply preserves every other custom footer item and
-its order. Callback or environment SID, cwd, title, inherited pane and shared
-ancestry alone remain hints; registered workers have no foreground pane
-ownership.
+first `[tui].status_line` item (installs not yet refreshed keep it last), and
+the complete UUID in the first or last visible native footer field provides the
+current `Thread.id`; `sessionId` remains its tree root. A UUID in a middle
+field, title, transcript, or arbitrary screen text is not current identity. A
+missing, clipped, wrapped, partial, ambiguous, or hidden identity field stays
+unknown, as do two different complete UUIDs at the two ends; a clipped
+trailing UUID voids a first field it is not a prefix of. Fleet keeps a TUI
+row on its own thread while the footer shows one of its subagents. Two fresh
+samples share stable foreground PID/start/TTY and one unique endpoint/pane, also
+used for reporting, number lookup and title. Managed apply preserves every other
+custom footer item and its order. Callback or environment SID, cwd, title,
+inherited pane and shared ancestry alone remain hints; registered workers have
+no foreground pane ownership.
 
 For an unproven background caller, default `peer-steward start` locates the
 inherited pane's workspace by its live foreground directory in the caller's
@@ -1248,7 +1251,7 @@ A legacy hash collision is diagnostic
      OpenCode `session.idle` do not prove merge/push completion and must never
      perform destructive cleanup. They may expose diagnostics only.
 4. **Shared artifacts:** route writes to shared artifact-root files through the §5.8 lock. `plans/<slug>/` remains path-separated and noncontending.
-5. **Context:** when coordination records pressure the main context, propose a session-tidy handoff card under the global continuity rule. Runtime compaction also invokes main-session tidy as described in [`capabilities/session-tidy.md`](../capabilities/session-tidy.md). A nonempty automatic Claude/OpenCode summary saved to its own verified herdr seat can use the existing snapshot/clear/continue booking after transcript evidence confirms the compacted turn ended (up to three hours). An explicitly automatic Codex remote-V2 event can join after its exact turn ends; the helper asks that main session for a real card through the verified pane and waits for matching card/enqueue evidence. Manual/unknown events, workers/sub-sessions, unsupported seats, changed input/target/card and uncertain sends stay queue-only. Compaction stays non-blocking.
+5. **Context:** when coordination records pressure the main context, propose a session-tidy handoff card under the global continuity rule. Runtime compaction also invokes main-session tidy as described in [`capabilities/session-tidy.md`](../capabilities/session-tidy.md). A nonempty automatic Claude/OpenCode summary saved to its own verified herdr seat can use the existing snapshot/clear/continue booking after transcript evidence confirms the compacted turn ended (up to three hours). An explicitly automatic Codex remote-V2 event can join after its exact turn ends; the helper asks that main session for a real card through the verified pane and waits for matching card/enqueue evidence. Manual/unknown events, workers/sub-sessions, unsupported seats, changed input/target/card and uncertain sends stay queue-only. A confirmed successor prevents another clear booking from the old session, including cross-pane resume, while its memory queue continues. Fork ambiguity blocks its source and ancestors, not independent descendants; unbound ancestor jobs stay unresolved. Unique explicit job handoffs remain valid, competing branch bindings are unresolved, and merges/cycles still invalidate their component. Compaction stays non-blocking.
 
 **SD-91 current Codex override:** the projected Codex Stop bridge silently reads
 only enough payload to clear one exact interaction marker. It reads no registry,
@@ -2548,6 +2551,10 @@ session is an ordinary dispatch depth 0 session, like the peers it addresses. Th
 carries no launch, gate, write, or approval authority over the session it addresses — its
 peer messages are advisory context between two already-running sessions, and the
 append-only ledger below is the only record of them (SD-122 §13.37.2-(1)).
+
+Keep work in this session's route by default; start another interactive session
+(`peer-steward start`) only for long work that needs its own human answers or
+recovery, because each one adds a seat, a model context, and supervision.
 
 | Question | Existing identifier |
 |---|---|

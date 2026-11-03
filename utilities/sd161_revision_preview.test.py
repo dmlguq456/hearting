@@ -42,36 +42,18 @@ class RevisionPreviewTest(FIX.CompletionMarkerTest):
         evidence.write_text('input B\n')
         return route,node,evidence,owner,attempt
 
-    def test_preview_producer_complete_proof_leaves_no_lock_or_marker(self):
-        route,node=self._a_sd154_10_fixture('preview-producer.json')
-        (R.completion_dir(route['route_id'],jobs=self.jobs)/'.plan.completion.lock').unlink(missing_ok=True)
-        with mock.patch.dict(os.environ,self.base_env(),clear=True):
-            before=self.snapshot()
-            opts=dict(basis='review-findings',answers=('att-plancheck-1',),
-                      author_attempt_id='att-owner-preview',jobs=self.jobs)
-            preview=R.preview_revision(route,'plan',self.base/'plan.md',**opts)
-            self.assertEqual(before,self.snapshot())
-            written=R.publish_revision_locked(route,'plan',self.base/'plan.md',**opts)
-            for result in (preview,written):
-                result['marker']['revision'].pop('recorded_at')
-            self.assertEqual(preview,written)
-
     def test_preview_producer_cycle_scope_refuses_like_writer(self):
         import artifact_producer as P
         route,node=self._a_sd154_10_fixture('preview-cycle.json')
         with mock.patch.dict(os.environ,self.base_env(),clear=True):
             P.begin(self.artifact,route_file=self.base/'preview-cycle.json',
                     capability=route['capability'],intensity=route['effective_intensity'],require_cycle=True)
-            errors=[]
-            for action in (R.preview_revision,R.publish_revision_locked):
-                with self.assertRaisesRegex(ValueError,'artifact-outside-bound-cycle') as raised:
-                    action(route,'plan',self.base/'plan.md',basis='review-findings',
-                           answers=('att-plancheck-1',),author_attempt_id='att-owner-preview',jobs=self.jobs)
-                errors.append(str(raised.exception))
-            self.assertEqual(errors[0],errors[1])
+            with self.assertRaisesRegex(ValueError,'artifact-outside-bound-cycle'):
+                R.publish_revision_locked(route,'plan',self.base/'plan.md',basis='review-findings',
+                       answers=('att-plancheck-1',),author_attempt_id='att-owner-preview',jobs=self.jobs)
             before=self.snapshot()
             admission=N.admit_round(route,node,self.jobs,owner_attempt_id='att-owner-preview',record_auto_revisions=False)
-            self.assertEqual(admission.planned_revision_nodes,frozenset())
+            self.assertEqual(admission.auto_revisions,())
             self.assertEqual(before,self.snapshot())
 
     def test_preview_self_input_cap_plus_one_and_writer_agree_without_mutation(self):
@@ -174,8 +156,6 @@ class RevisionPreviewTest(FIX.CompletionMarkerTest):
             plan=next(n for n in route['nodes'] if n['id']=='plan')
             currency=FIX.D.gate_currency(route,plan,directory/'plan.json')
             self.assertEqual(currency.reason,'revision-predecessor-link-invalid')
-            with self.assertRaisesRegex(ValueError,'revision-predecessor-link-invalid'):
-                R.preview_revision(route,'plan',evidence,**opts)
             self.assertEqual(before,self.snapshot())
             markers_before={p.name:p.read_bytes() for p in directory.glob('*.json')}
             with self.assertRaisesRegex(ValueError,'revision-predecessor-link-invalid'):
@@ -186,13 +166,12 @@ class RevisionPreviewTest(FIX.CompletionMarkerTest):
             before=self.snapshot()
             admission=N.admit_round(route,node,self.jobs,
                 owner_attempt_id='att-owner-preview',record_auto_revisions=False)
-            self.assertEqual(admission.planned_revision_nodes,frozenset())
+            self.assertEqual(admission.auto_revisions,())
             gate_reasons=[]
             for action in ('dry-run','start'):
                 with self.assertRaises(FIX.D.DispatchContractError) as raised:
                     FIX.D.completion_marker_gate(str(self.base/'preview-broken-link.json'),
-                        node['id'],action,self.agent_home,self.jobs,
-                        planned_revision_nodes=admission.planned_revision_nodes)
+                        node['id'],action,self.agent_home,self.jobs)
                 gate_reasons.append(raised.exception.reason)
             self.assertEqual(gate_reasons,['completion-marker-integrity-broken']*2)
             self.assertEqual(before,self.snapshot())
