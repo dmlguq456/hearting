@@ -837,6 +837,8 @@ def _write_cycle_record(root: Path, record: Dict[str, Any], *, exclusive: bool) 
 
     directory_record_index.published(path, record, kind="cycle-routes",
                                      classify=directory_record_index.cycle_keys)
+    for _seen_at, quiet in _QUIET_HISTORY.values():
+        quiet.discard(record["cycle_id"])
 
 
 def _write_cycle_binding(directory: Path, campaign_id: str, cycle_id: str,
@@ -11180,6 +11182,9 @@ def deliver_pending_history(root: Path, *, wait: float = 0.0) -> int:
         root = Path(root).resolve()
         if _history_module() is None:
             return 0
+        seen = _QUIET_HISTORY.get(str(root))
+        # Records the observation this start just made saw with no waiting line are not opened again.
+        quiet = seen[1] if seen is not None and time.monotonic() - seen[0] <= _QUIET_HISTORY_SECONDS else set()
         waiting: List[Tuple[str, str]] = []
         for kind, directory in (("cycle", producer_dir(root) / "cycles"),
                                 ("campaign", producer_dir(root) / CAMPAIGN_RUNTIME_DIR)):
@@ -11188,7 +11193,7 @@ def deliver_pending_history(root: Path, *, wait: float = 0.0) -> int:
             except OSError:
                 continue
             for name in names:
-                if not name.endswith(".json"):
+                if not name.endswith(".json") or (kind == "cycle" and name[:-5] in quiet):
                     continue
                 try:
                     if b'"history_pending"' in (directory / name).read_bytes():
@@ -11376,6 +11381,15 @@ def _observe_control_changes(root: Path, cycle_id: str, *, now: Optional[float] 
 CONTROL_MEMO_NAME = "control-observation-memo.json"
 _CONTROL_MEMO_SETTLE_NS = 2_000_000_000
 
+# The cycles whose record the last root observation of this process saw with no waiting history
+# line (read then, or quiet and remembered so in the memo's optional `history_pending`, which an
+# older release neither writes nor reads).  `deliver_pending_history` in the same start need not
+# open those records again.  A record this process writes since leaves the set; a line another
+# process leaves after the look waits for the next trigger, as one left just after a delivery
+# always did (§45 D-125).
+_QUIET_HISTORY: Dict[str, Tuple[float, Set[str]]] = {}
+_QUIET_HISTORY_SECONDS = 300.0
+
 
 def _control_file_key(path: Path) -> Optional[List[int]]:
     try:
@@ -11440,9 +11454,12 @@ def _observe_root_controls(root: Path, scan: _LayoutScan, *, now: Optional[float
         return source.get("started_on") or ""
 
     remembered: Dict[str, Any] = {}
+    no_history: Set[str] = set()
     for position, cycle_id in enumerate(sorted(scan.cycles, key=lambda cid: (started(cid), cid))):
         if cycle_id in quiet and position != 0:
             remembered[cycle_id] = quiet[cycle_id]
+            if quiet[cycle_id].get("history_pending") is False:
+                no_history.add(cycle_id)
             continue
         if cycle_id not in stored:
             load(cycle_id)
@@ -11450,10 +11467,15 @@ def _observe_root_controls(root: Path, scan: _LayoutScan, *, now: Optional[float
         calm = _observe_control_changes(root, cycle_id, now=now, directory=folder,
                                         locator_cache=position == 0, record=records[cycle_id],
                                         stored=stored[cycle_id])
+        waiting = bool(stored[cycle_id].get("history_pending")) if isinstance(stored[cycle_id], dict) else None
+        if calm and waiting is False:
+            no_history.add(cycle_id)
         if (calm and stored[cycle_id] is not None and keys[cycle_id] is not None
                 and _control_keys_settled(keys[cycle_id], look_ns)):
             remembered[cycle_id] = {"dir": _cycle_rel(root, folder), "keys": keys[cycle_id],
-                                    "started_on": stored[cycle_id].get("started_on")}
+                                    "started_on": stored[cycle_id].get("started_on"),
+                                    "history_pending": waiting}
+    _QUIET_HISTORY[str(root)] = (time.monotonic(), no_history)
     if remembered != memo:
         _write_control_memo(root, remembered)
 
