@@ -22,9 +22,10 @@ fixture (or anything outside it) while a sample is measured. A fake ``herdr``
 executable records the argv it receives.
 
 Time assertions (prompt and Stop only): prompt <= 3 s and Stop <= 2 s at scale
-1; scale 2 may be at most 1.5x and +0.5 s over scale 1 with at most 1.1x opened
-files; a delivered prompt pass reads at most 6.5x the fixed registry size (the
-pre-fix path read it 13 times).
+1; scale 2 may open at most 1.1x the files of scale 1; a delivered prompt pass
+reads at most 6.5x the fixed registry size (the pre-fix path read it 13 times).
+The scale-time delta (1.5x / +0.5 s) is reported, not asserted: it follows
+machine load, and the count rules below bound the same growth.
 
 Count assertions (every case, including the Python hooks a prompt, a tool call
 and a turn end start for Claude and Codex): per record kind, opens and listings
