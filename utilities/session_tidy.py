@@ -541,6 +541,12 @@ def seat_from_dict(data: dict) -> Seat:
     return seat
 
 
+def terminal_tmux_pane(env) -> str:
+    """``$TMUX_PANE`` of a process started inside tmux (with ``$TMUX``); a hint, never proof."""
+    from terminal_surface import caller_tmux_pane
+    return caller_tmux_pane(env)[0]
+
+
 def seat_for_project(harness: str, project_key: str) -> Seat:
     return Seat("project", _digest("project", harness, project_key), "", harness, project_key)
 
@@ -769,7 +775,8 @@ def resolve_seat(harness: Optional[str], cwd=None, env=None, sid: Optional[str] 
     thread id of its own; see ``pane_ownership.codex_caller_binding``)."""
     env = os.environ if env is None else env
     live_caller = env is os.environ
-    pane = ((env.get("HERDR_PANE_ID") or "").strip()
+    # Outside Herdr, the caller's tmux pane is the hint; the same live proof decides.
+    pane = ((env.get("HERDR_PANE_ID") or terminal_tmux_pane(env)).strip()
             if live_caller or harness != "codex" else "")
     server = env.get("AGENT_HERDR_SESSION") if live_caller else None
     socket_value = env.get("HERDR_SOCKET_PATH", "") if live_caller else ""
