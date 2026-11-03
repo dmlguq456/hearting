@@ -1090,7 +1090,10 @@ def parent_attempt_succeeded(jobs, recorded, actual) -> bool:
     The one answer for "is this the recorded parent attempt, as the replacement
     lineage reads it". A claim-only or intermediate successor does not qualify
     (``effective_attempts`` projects only launched hops), and an unreadable
-    lineage is "not proven", which stays the existing refusal.
+    replacement lineage is "not proven", which stays the existing refusal.
+    A hop registered by a /clear successor is followed through the seat lineage;
+    when that cannot be read the answer is unknown, and the recipient judgment's
+    wait (``require_known``, naming the record and the cause) is raised as it came.
     """
     if recorded == actual:
         return True
@@ -1100,7 +1103,11 @@ def parent_attempt_succeeded(jobs, recorded, actual) -> bool:
     from dispatch_replacement import effective_attempts
     try:
         effective, mapping = effective_attempts(jobs, {recorded})
-    except (OSError, ValueError, DC.DispatchContractError):
+    except DC.DispatchContractError as exc:
+        if exc.reason == LINEAGE_UNREADABLE_WAIT.reason:
+            raise
+        return False
+    except (OSError, ValueError):
         return False
     return bool(mapping) and effective == {actual}
 

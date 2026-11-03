@@ -1976,14 +1976,15 @@ class ReplacementTest(unittest.TestCase):
         with self.assertRaises(D.DispatchContractError) as caught:R.admission(self.jobs,spawned,second)
         self.assertEqual(caught.exception.reason,'retry-already-claimed')
 
-    def _sr_child_retry(self):
+    def _sr_child_retry(self, **successor_changes):
         # Real owner rows bind through owner_route_*, not the child's route_id.
         self.meta.update(worker_type='owner', route_id='', route_hash='', route_node='',
                          owner_route_file=str(self.path), owner_route_id='rt-test',
                          owner_route_hash='sha256:test')
         self._owner()
         owner=R._rows(self.jobs.read_text().splitlines())['att-source'][1]
-        successor=self._successor(self.claim(), owner, status='open', launch_started='1')
+        successor=self._successor(self.claim(), owner, status='open', launch_started='1',
+                                  **successor_changes)
         child={
             'attempt_schema_version':'2', 'dispatch_depth':'2', 'transport':'headless',
             'execution_surface':'registered-headless', 'registered_worker':'1',
@@ -2032,6 +2033,62 @@ class ReplacementTest(unittest.TestCase):
         self._sr_retry_admission({**candidate, 'parent_attempt_id':final['attempt_id']})
         with self.assertRaises(D.DispatchContractError):
             self._sr_retry_admission(candidate)  # An intermediate owner is no longer current.
+
+    def _sr_child_retry_after_clear(self):
+        """The owner's replacement was registered by its /clear successor (another parent session)."""
+        child, candidate, successor=self._sr_child_retry(parent_sid='successor', parent_harness='claude')
+        self.assertEqual(successor['parent_sid'], 'successor')
+        self.handover()
+        return child, candidate, successor
+
+    def _unreadable_seat_lineage(self):
+        import dispatch_seat_handover as H
+        return mock.patch.object(H,'_readable_lineage_signature',side_effect=OSError('lineage-directory-changed'))
+
+    def assert_lineage_wait(self, caught):
+        self.assertEqual((caught.exception.reason,caught.exception.next_action),('handover-unreadable','same-command'))
+        self.assertIn('att-source', str(caught.exception))  # names the record whose lineage could not be read
+
+    def test_parent_attempt_answer_after_a_clear_waits_while_the_seat_lineage_cannot_be_read(self):
+        # RV-1151 L2: following the owner's replacement registered by the /clear successor needs the
+        # seat lineage; unreadable is unknown (the recipient wait), not "not the parent attempt".
+        _, _, successor=self._sr_child_retry_after_clear()
+        self.assertTrue(R.route_authority.parent_attempt_succeeded(self.jobs,'att-source',successor['attempt_id']))
+        with self._unreadable_seat_lineage(), self.assertRaises(D.DispatchContractError) as caught:
+            R.route_authority.parent_attempt_succeeded(self.jobs,'att-source',successor['attempt_id'])
+        self.assert_lineage_wait(caught)
+        self.assertFalse(R.route_authority.parent_attempt_succeeded(self.jobs,'att-source','att-unrelated'))
+        self.assertFalse(R.route_authority.parent_attempt_succeeded(self.root/'missing-jobs.log','att-source',successor['attempt_id']))
+
+    def test_sr_child_retry_after_a_clear_waits_instead_of_binding_mismatch(self):
+        # dispatch_contract._retry_parent_matches: registering the child's retry under the
+        # successor-registered owner waits while the seat lineage cannot be read.
+        _, candidate, _=self._sr_child_retry_after_clear()
+        with self._unreadable_seat_lineage(), self.assertRaises(D.DispatchContractError) as caught:
+            self._sr_retry_admission(candidate)
+        self.assert_lineage_wait(caught)
+        self._sr_retry_admission(candidate)
+        with self.assertRaises(D.DispatchContractError) as refused:
+            self._sr_retry_admission({**candidate,'parent_attempt_id':'att-unrelated'})
+        self.assertEqual(refused.exception.reason,'retry-predecessor-binding-mismatch')
+
+    def test_depth2_replacement_parent_after_a_clear_waits_instead_of_identity_refusal(self):
+        # route_authority.require_replacement_parent (depth 2) and replacement_parent_matches:
+        # the caller is the successor-registered owner replacement.
+        child, candidate, successor=self._sr_child_retry_after_clear()
+        rows=R._rows(self.jobs.read_text().splitlines())
+        with mock.patch.dict(os.environ,{'AGENT_DISPATCH_ATTEMPT_ID':successor['attempt_id']}), \
+                self._unreadable_seat_lineage(), self.assertRaises(D.DispatchContractError) as caught:
+            R.route_authority.require_replacement_parent(self.jobs,rows,child,current_session=lambda: '')
+        self.assert_lineage_wait(caught)
+        with self._unreadable_seat_lineage(), self.assertRaises(D.DispatchContractError) as caught:
+            R.route_authority.replacement_parent_matches(child,candidate,self.jobs)
+        self.assert_lineage_wait(caught)
+        self.assertTrue(R.route_authority.replacement_parent_matches(child,candidate,self.jobs))
+        with mock.patch.dict(os.environ,{'AGENT_DISPATCH_ATTEMPT_ID':'att-unrelated'}), \
+                self.assertRaises(D.DispatchContractError) as refused:
+            R.route_authority.require_replacement_parent(self.jobs,rows,child,current_session=lambda: '')
+        self.assertEqual(refused.exception.reason,'replacement-parent-identity-unproven')
 
     def test_sr_child_retry_rejects_foreign_route_node_parent_and_non_owner(self):
         child, candidate, successor=self._sr_child_retry()
