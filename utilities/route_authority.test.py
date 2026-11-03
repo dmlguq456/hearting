@@ -228,6 +228,66 @@ class Case1ParentSessionTest(unittest.TestCase):
                 row = HANDOVER.record_locked(seat, "codex", "third", "start", "clear", 4)
             self.assertEqual((row["from"], row["sid"]), ("successor", "third"))
 
+    def test_another_session_appending_its_ledger_does_not_hide_a_handover(self):
+        # Cairn v216: the replacement launch read the lineage while other sessions appended
+        # to their own ledgers; the confirmed successor must still own the attempt.
+        import session_tidy as tidy
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            jobs = root / "jobs.log"
+            binding = HANDOVER.binding_of(jobs, self.OWNER)
+            with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(root / "state")}):
+                self._record_handover(binding, "codex-sid", "codex-sid-after-clear",
+                                      "codex", "case-append", 1, "clear")
+                busy = tidy._ledger_path(tidy.Seat("pane", "busy-seat", "w2:busy"))
+                busy.write_text(json.dumps({"ts": 1, "harness": "claude", "sid": "busy",
+                                            "event": "prompt"}) + "\n")
+                read_bytes = tidy.read_bytes
+
+                def appended(path):
+                    # Every ledger grows between the lineage stat and its read.
+                    if Path(path).suffix == ".jsonl":
+                        with Path(path).open("a") as handle:
+                            handle.write(json.dumps({"ts": 9, "harness": "claude", "sid": "late",
+                                                     "event": "prompt"}) + "\n")
+                    return read_bytes(path)
+
+                with mock.patch.object(tidy, "read_bytes", appended):
+                    graph = HANDOVER.lineage_graph()
+                    self.assertTrue(RA.owns(self.OWNER, "codex-sid-after-clear", jobs))
+                    self.assertFalse(RA.owns(self.OWNER, "codex-sid", jobs))
+                # The observation is the bytes its stat saw: rows appended after it are not in it.
+                sids = {row.get("sid") for rows in graph.ledger_rows.values() for row in rows}
+                self.assertIn("busy", sids)
+                self.assertNotIn("late", sids)
+
+    def test_a_replaced_or_shrunk_ledger_during_the_read_is_still_unavailable(self):
+        import session_tidy as tidy
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            jobs = root / "jobs.log"
+            binding = HANDOVER.binding_of(jobs, self.OWNER)
+            with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(root / "state")}):
+                self._record_handover(binding, "codex-sid", "codex-sid-after-clear",
+                                      "codex", "case-replace", 1, "clear")
+                read_bytes = tidy.read_bytes
+                for change in ("replace", "shrink"):
+                    def changed(path, change=change):
+                        if Path(path).suffix != ".jsonl":
+                            return read_bytes(path)
+                        raw = Path(path).read_bytes()
+                        if change == "replace":
+                            tidy.atomic_write(Path(path), raw + b"\n")
+                        else:
+                            with Path(path).open("r+b") as handle:
+                                handle.truncate(len(raw) - 1)
+                        return read_bytes(path)
+
+                    with mock.patch.object(tidy, "read_bytes", changed), \
+                            self.assertRaises(OSError) as caught:
+                        HANDOVER.lineage_graph()
+                    self.assertEqual(str(caught.exception), "lineage-ledger-unavailable", change)
+
     def test_unreadable_handover_waits_without_registered_parent_authority(self):
         jobs = Path("/tmp/registered-parent-unreadable-jobs")
         with mock.patch.object(HANDOVER, "_readable_lineage_signature", side_effect=OSError("unreadable")):

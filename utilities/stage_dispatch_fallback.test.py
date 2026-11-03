@@ -96,6 +96,26 @@ class FallbackTest(unittest.TestCase):
    self.assertEqual(self.degradation_rows(path)[-1]["candidate_outcomes"],rows)
    self.assertEqual(self.degradation_rows(path)[-1]["last_direct_failure"],"interrupted:exit-130")
 
+ def test_producing_stage_launch_carries_its_previous_round_context(self):
+  import worker_bootstrap
+  context="\n\n## Previous round (runtime record)\n- Findings to close: fixture\n"
+  with self.dispatch_env():
+   path=self.route(same_status="supported")
+   os.environ.pop("AGENT_DISPATCH_RETRY_BRIEF",None)
+   seen,carried=[],[]
+   def previous(route,node_id,jobs):
+    seen.append(node_id)
+    return context
+   def wrapper(args,command,**_policy):
+    carried.append(F.direct_env().get("AGENT_DISPATCH_RETRY_BRIEF"))
+    return SimpleNamespace(returncode=130,stdout="worker_failure=interrupted\n",stderr="")
+   with mock.patch.object(worker_bootstrap,"prior_round_context",side_effect=previous), \
+        mock.patch.object(F,"run_wrapper",side_effect=wrapper), contextlib.redirect_stdout(io.StringIO()):
+    self.run_inline(path)
+  self.assertEqual(seen,["plan"])
+  self.assertTrue(carried)
+  self.assertEqual(set(carried),{context})
+
  def test_direct_timeout_with_registered_attempt_remains_unknown(self):
   with self.dispatch_env():
    path=self.route(same_status="supported")
@@ -1470,9 +1490,10 @@ class FallbackTest(unittest.TestCase):
    prompt=self.art/"closure-task.md"
    prompt.write_text(f"Check corrected HEAD {new_head}, only x, against {prior_input}.\n")
    prompt_bytes=prompt.read_bytes()
-   commands=[];spawn_claims=[]
+   commands=[];spawn_claims=[];briefs=[]
    def wrapper(_args,command,**_policy):
     commands.append(command)
+    briefs.append(F.direct_env().get("AGENT_DISPATCH_RETRY_BRIEF",""))
     aid=self.arg(command,"--attempt-id")
     metadata={"attempt_schema_version":"2","dispatch_depth":"2","transport":"headless",
      "execution_surface":"registered-headless","registered_worker":"1","fallback_hop":"same-harness-headless",
@@ -1499,11 +1520,13 @@ class FallbackTest(unittest.TestCase):
                                route,node,{"child_harness":"codex"},1,3)
    self.assertEqual(ids,[expected]*3)
    self.assertTrue(all("--automatic-retry-of" not in command for command in commands))
-   for command in commands:
+   # The round block rides the retry brief, once, beside the owner's untouched request.
+   for command,brief in zip(commands,briefs):
     task=Path(self.arg(command,"--prompt-file")).read_text()
     self.assertIn(new_head,task);self.assertIn(str(prior_input),task)
-    self.assertIn("Round protocol (round 3",task)
-    self.assertIn("dead-route-completion-rejected",task);self.assertIn("dead-worker-fail",task)
+    self.assertNotIn("Round protocol",task)
+    self.assertEqual(brief.count("Round protocol (round 3"),1)
+    self.assertIn("dead-route-completion-rejected",brief);self.assertIn("dead-worker-fail",brief)
     self.assertEqual(self.arg(command,"--write-scope"),";".join(node["write_scope"]))
    self.assertEqual(prior_input.read_bytes(),original_input);self.assertEqual(prompt.read_bytes(),prompt_bytes)
    self.assertEqual(spawn_claims,[expected])
@@ -1811,15 +1834,21 @@ class FallbackTest(unittest.TestCase):
       code,output=self.closure_action(path,"start")
      self.assertNotEqual(code,0,output);self.assertIn("reason="+reason,output)
      self.assertEqual(self.jobs.read_bytes(),before)
- def test_review_round_cap_correction_round_attaches_protocol_block_to_prompt_file(self):
+ def test_review_round_cap_correction_round_carries_protocol_block_with_prompt_file(self):
+  self._round_block_carrier(with_prompt_file=True)
+
+ def test_review_round_cap_correction_round_carries_protocol_block_without_prompt_file(self):
+  self._round_block_carrier(with_prompt_file=False)
+
+ def _round_block_carrier(self,*,with_prompt_file):
   # Plan-correction B2 (third surface): unlike dispatch-node.py (which builds
   # its own prompt) and dispatch-batch.py (which gets the block for free by
   # re-invoking dispatch-node.py for the actual leg -- see the comment beside
   # this call site in stage-dispatch-fallback.py), THIS wrapper calls the
   # adapter directly, so it must attach the identical
-  # `DISPATCH_NODE.round_protocol_block` output itself. Proves the wiring
-  # (the `--prompt-file` rewrite), not just the shared function (already
-  # unit-tested by review_round_cap.test.py::RoundProtocolParityTest).
+  # `DISPATCH_NODE.round_protocol_block` output itself. It rides the retry
+  # brief every adapter renders and seals, so an owner that writes no
+  # `--prompt-file` no longer loses it.
   with self.dispatch_env():
    path=self.route(same_status="supported")
    route=json.loads(path.read_text())
@@ -1831,23 +1860,37 @@ class FallbackTest(unittest.TestCase):
    prompt_file.write_text("BASE PROMPT TEXT\n",encoding="utf-8")
    argv=["stage-dispatch-fallback.py","--route",str(path),"--node","plan-check","--slug","fallback-plan-check",
          "--parent","owner","--capability-mode","dev","--worker-mode","qa/plan-review",
-         "--model-role","fast reviewer","--jobs",str(self.jobs),
-         "--prompt-file",str(prompt_file),"--dry-run"]
-   with self.prior_process_observation({"att-plan-check-round-1"}),mock.patch.object(sys,"argv",argv):
+         "--model-role","fast reviewer","--jobs",str(self.jobs),"--dry-run"]
+   if with_prompt_file:
+    argv+=["--prompt-file",str(prompt_file)]
+   os.environ.pop("AGENT_DISPATCH_RETRY_BRIEF",None)
+   import dispatch_replacement
+   original_instructions=dispatch_replacement.recovery_instructions
+   rendered=[]
+   def instructions(wrapper_args):
+    # The dry-run wrapper runs in this process and consumes the carrier.
+    rendered.append((os.environ.get("AGENT_DISPATCH_RETRY_BRIEF"),original_instructions(wrapper_args)))
+    return rendered[-1][1]
+   with self.prior_process_observation({"att-plan-check-round-1"}),mock.patch.object(sys,"argv",argv), \
+        mock.patch.object(dispatch_replacement,"recovery_instructions",side_effect=instructions):
     observation=F.LAUNCH_TUPLE.ReportOnlyObservation()
     code=F._dispatch(observation)
+   self.assertEqual(len(rendered),1,rendered)
+   carried,prompt_tail=rendered[0]
    node=next(n for n in route["nodes"] if n["id"]=="plan-check")
    round_rows=F.DISPATCH_NODE.prior_round_attempts(
     self.jobs,route["route_id"],"plan-check",
     route=route if node.get("kind")=="review-worker" else None)
-   budget=F.DISPATCH_NODE.admit_round(route,node,self.jobs,owner_attempt_id="att-fallback-parent").budget
+   admission=F.DISPATCH_NODE.admit_round(route,node,self.jobs,owner_attempt_id="att-fallback-parent")
    expected_block=F.DISPATCH_NODE.round_protocol_block(
-    budget,round_rows,F.worker_type_for_kind(node["kind"]),node["id"])
-  self.assertEqual(code,0)
-  self.assertNotEqual(expected_block,"")
-  augmented=sorted(Path(self.jobs).parent.glob("round-protocol-plan-check-*.md"))
-  self.assertEqual(len(augmented),1,augmented)
-  self.assertEqual(augmented[0].read_text(encoding="utf-8"),"BASE PROMPT TEXT\n"+expected_block)
+    admission.budget,round_rows,F.worker_type_for_kind(node["kind"]),node["id"],jobs=self.jobs,
+    current_manifest=admission.source_subject_manifest if admission.source_subject_digest else None)
+   self.assertEqual(code,0)
+   self.assertNotEqual(expected_block,"")
+   self.assertEqual(carried,expected_block)
+   self.assertTrue(prompt_tail.startswith("\n\n## Batch leg / retry brief\n"+expected_block),prompt_tail)
+   self.assertEqual(prompt_file.read_text(encoding="utf-8"),"BASE PROMPT TEXT\n")
+   self.assertEqual(sorted(Path(self.jobs).parent.glob("round-protocol-plan-check-*.md")),[])
 
  def _producer_revision_entry(self,surface):
   with self.dispatch_env():
@@ -2981,6 +3024,88 @@ class FallbackTest(unittest.TestCase):
                 out.getvalue())
   # a fallback launch on another harness does not carry the handed-over reason
   self.assertIn(f"allocation_handed_over_affinity={head}\nallocation_affinity_source=-\n",out.getvalue())
+ def test_a_repeated_environment_failure_asks_for_the_same_unsandboxed_placement(self):
+  # D1 seam 3: a producing stage that failed twice on its environment moves place, not model,
+  # through the same ordering rule the handed-over checks use, under its own reason.
+  node={**self._pinned_balanced_node(),"harness_affinity":"codex","unit":"dev/backend"}
+  route=self._pinned_balanced_route(pin=None)
+  with mock.patch.object(F,"_usage_states",return_value={
+      "claude":"ok","codex":"ok","opencode":"ok"}), \
+      mock.patch.object(F.CAPACITY,"capacity_scores",return_value={
+       "claude":60,"codex":90,"opencode":70}):
+   _hops,plain=F.ordered_fallback_hops(route,node,self.jobs)
+   _hops,moved=F.ordered_fallback_hops(route,node,self.jobs,prefer_unsandboxed="repeat-environment-failure")
+   _hops,both=F.ordered_fallback_hops(route,node,self.jobs,handed_over=1,
+                                      prefer_unsandboxed="repeat-environment-failure")
+  self.assertEqual((plain["rank"][0],plain["affinity_source"]),("codex",None))
+  self.assertTrue(F.unsandboxed_harness(moved["rank"][0]),moved["rank"])
+  self.assertEqual(moved["affinity_source"],"repeat-environment-failure")
+  self.assertEqual(both["affinity_source"],"handed-over-checks")
+
+ def _repeat_launch(self,escalation,wrapper,patches=()):
+  out=io.StringIO()
+  with self.dispatch_env():
+   path=self.route(same_status="supported")
+   route=json.loads(path.read_text())
+   plan=next(n for n in route["nodes"] if n["id"]=="plan")
+   escalation=escalation(plan["model_profile"]) if callable(escalation) else escalation
+   with mock.patch("model_profile.repeat_escalation",return_value=escalation) as decide, \
+        mock.patch.object(F,"run_wrapper",side_effect=wrapper), contextlib.ExitStack() as stack, \
+        contextlib.redirect_stdout(out):
+    for patch in patches:stack.enter_context(patch)
+    code,_=self.run_inline(path)
+  decide.assert_called_once()
+  self.assertEqual(decide.call_args.args[1],"plan")
+  return code,out.getvalue(),route
+
+ def test_a_repeated_failure_launches_the_next_profile_and_says_so(self):
+  commands=[]
+  def wrapper(args,command,**_policy):
+   commands.append(command)
+   return SimpleNamespace(returncode=130,stdout="worker_failure=interrupted\n",stderr="")
+  def escalation(sealed):
+   up="deep" if sealed!="deep" else "light"
+   return {"kind":"profile","from":sealed,"to":up,"launch_profile":up,"streak":2,"class":"other",
+           "attempts":["att-a","att-b"]}
+  import dispatch_capacity_evidence as CE
+  usage=mock.patch.object(F,"_usage_states",wraps=F._usage_states)
+  limits=mock.patch.object(CE,"active_limits",wraps=CE.active_limits)
+  with usage as usage_states,limits as active:
+   _code,out,route=self._repeat_launch(escalation,wrapper)
+  sealed=next(n for n in route["nodes"] if n["id"]=="plan")["model_profile"]
+  up="deep" if sealed!="deep" else "light"
+  self.assertTrue(commands)
+  self.assertEqual(commands[0][commands[0].index("--model-profile")+1],up)
+  self.assertIn("repeat_failure_streak=2\nrepeat_failure_class=other\n"
+                f"repeat_escalation=profile:{sealed}->{up}\n",out)
+  # The usage gates judge the profile the launch runs at, not the seal.
+  self.assertTrue(usage_states.call_args_list)
+  self.assertTrue(all(call.args[1]==up for call in usage_states.call_args_list))
+  profiles=[call.kwargs.get("profile") for call in active.call_args_list if "profile" in call.kwargs]
+  self.assertTrue(profiles and all(profile==up for profile in profiles),profiles)
+
+ def test_an_owner_inline_repeat_under_a_worker_pin_keeps_the_chain(self):
+  hops=[{"ordinal":1,"fallback_hop":"same-harness-headless","candidates":[{"child_harness":"codex"}]},
+        {"ordinal":2,"fallback_hop":"inline","reason_enum":"runtime-unavailable"}]
+  self.assertEqual(F.owner_inline_hops(hops),[{**hops[1],"reason_enum":"repeat-failure"}])
+  pinned=[hops[0],{**hops[1],"_worker_pin_skip":"codex"}]
+  out=io.StringIO()
+  with contextlib.redirect_stdout(out):
+   self.assertEqual(F.owner_inline_hops(pinned),pinned)
+  self.assertEqual(out.getvalue(),"repeat_escalation_owner_inline=unavailable-chain-kept\n")
+
+ def test_a_repeat_past_the_last_profile_takes_the_existing_inline_hop(self):
+  escalation=lambda sealed:{"kind":"owner-inline","from":sealed,"launch_profile":sealed,"streak":4,
+                            "class":"scope","attempts":["a","b","c","d"]}
+  code,out,route=self._repeat_launch(escalation,AssertionError("no worker for an owner-inline repeat"))
+  plan=next(n for n in route["nodes"] if n["id"]=="plan")
+  if not any(hop.get("fallback_hop")=="inline" for hop in plan["fallback_hops"]):
+   self.skipTest("the fixture chain has no inline hop")
+  self.assertEqual(code,79,out)
+  self.assertIn("selected_hop=inline\n",out)
+  self.assertIn("reason=repeat-failure\n",out)
+  self.assertIn("repeat_escalation=owner-inline\n",out)
+
  def test_handed_over_checks_on_a_quality_peer_review_pick_an_unsandboxed_peer(self):
   # RV-1029: a review-worker qa/test node (lab independent-verify, ship post-deploy-verify) under a
   # claude owner with quality peers {claude, codex}. The quality-peer protection binds first, and

@@ -9,7 +9,6 @@ and who creates it. Nothing here writes: seeding stays with each module's
 
 from __future__ import annotations
 
-import claude_settings_config
 import compute_hosts_config
 import fleet_config
 import herdr_integration
@@ -111,13 +110,6 @@ SURFACES = (
         "seeded_by": "user (optional JSON; never created by install)",
         "when_absent": "the built-in idle policy applies",
         "validate": _session_tidy_policy,
-    },
-    {
-        "id": "claude-settings.defaultMode",
-        "title": "Claude settings.json permissions.defaultMode",
-        "seeded_by": "user (the managed install never writes permissions; a dev `harness install` copies the template once)",
-        "when_absent": "Claude Code's own default applies",
-        "validate": claude_settings_config.validate,
     },
 ) + tuple(
     {
