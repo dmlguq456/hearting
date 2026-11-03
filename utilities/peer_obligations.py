@@ -3907,7 +3907,7 @@ def bound_work_for_pane(pane: str, harness: str, session_id: str, *,
                                     == expected_revision):
                             delivery_state = (delivery.get("state") if delivery.get("state") in {
                                 "pending", "claimed", "queued", "unverified", "sent-ambiguous",
-                                "acked"} else "unknown")
+                                "acked", "rejected", "expired"} else "unknown")
                     except (OSError, ValueError, KeyError, TypeError, RuntimeError):
                         pass
         result.append(RegisteredWorkObservation(

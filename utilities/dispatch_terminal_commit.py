@@ -350,7 +350,8 @@ def last_owner_refusal(request: TerminalCommitRequest, *, observer=None) -> Opti
                 if (reason == "output-invalid"
                         or (reason == "producer-finalize-failed" and detail.startswith("output-invalid:"))):
                     remediation = ("Correct the reported locator, add an existing self-exclusion marker to that exact "
-                                   "payload directory, or move it outside the cycle; the controller retries closure automatically.")
+                                   "payload directory, or move it outside the cycle; the next completion join judges closure again "
+                                   "and the same files give the same result.")
                 evidence = record.get("evidence")
                 if not (isinstance(evidence, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", evidence)):
                     evidence = None  # an old or foreign value is no evidence; the record still counts
@@ -2206,7 +2207,6 @@ def _owner_completion_state_scoped(jobs, status, metadata, *, selected_registry_
             elif facts["checkpoint"] == "owner-envelope-sealed":
                 _, publication, goal_pending = _observe_settled_transaction(
                     request, state, selected_registry_rows=selected_registry_rows)
-                facts["settlement_verified"] = True
                 facts["publication_pending"] = publication is not None and publication["status"] == "pending"
                 facts["goal_pending"] = goal_pending
         else:

@@ -9,6 +9,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import concurrent.futures
 import unittest
 import unittest.mock
@@ -1296,11 +1297,22 @@ class PublicInlineFinishTest(unittest.TestCase):
     def test_active_review_lease_is_refused_before_intent(self):
         lease_path = artifact_producer._review_lease_path(self.root, self.cycle["cycle_id"], "att-review")
         lease_path.parent.mkdir(parents=True, exist_ok=True)
+        # A holder that cannot be observed still blocks the write, but it is reported as unobservable.
         lease_path.write_text("{}\n", encoding="utf-8")
         refused = self.finish()
         self.assertNotEqual(refused.returncode, 0)
-        self.assertIn("finish-active-review-lease", refused.stderr)
+        self.assertIn("finish-review-lease-unobservable", refused.stderr)
+        self.assertNotIn("finish-active-review-lease", refused.stderr)
         self.assertFalse((self.root / ".runtime/inline-finish/v1" / self.route["route_id"] / "finish.json").exists())
+        # A holder observed running (this process: exact pid, start and group) is reported live.
+        now = time.time()
+        lease_path.write_text(json.dumps({
+            "deadline": artifact_producer._rfc3339(now + 300), "released_at": None, "pid": os.getpid(),
+            "pid_start": artifact_producer.process_start_ticks(os.getpid()),
+            "pgid": os.getpgid(os.getpid())}), encoding="utf-8")
+        live = self.finish()
+        self.assertNotEqual(live.returncode, 0)
+        self.assertIn("finish-active-review-lease", live.stderr)
         lease_path.unlink()
         resumed = self.finish()
         self.assertEqual(resumed.returncode, 0, resumed.stderr)

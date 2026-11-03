@@ -1016,6 +1016,33 @@ class RouteStaleOpenMirrorTest(unittest.TestCase):
                 self.assertEqual(self.ROUTE_ID in paused, expected)
                 self.assertEqual(bool(route_authority.answerable_owner_end("done", meta)), expected)
 
+    def test_installer_mirror_matches_route_authority(self):
+        """Hand-built runtime-end shapes (SR rt-aad5, A39, A42); the installer copy and the runtime agree."""
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "utilities"))
+        import route_authority
+        owner = {"worker_type": "owner", "owner_route_id": self.ROUTE_ID, "launch_started": "1",
+                 "supervisor_lease": "flock-v1", "supervisor_lease_file": "/tmp/lease"}
+        rows = [
+            ({**owner, "note": "dead-runtime-exit", "failure_class": "runtime"}, True),
+            ({**owner, "note": "dead-runtime-error"}, True),
+            ({**owner, "note": "dead-protocol", "failure_class": "protocol",
+              "terminal_event": "dispatch.supervisor.error", "reconcile_reason": "terminal-event-missing"}, True),
+            ({**owner, "note": "dead-protocol", "failure_class": "protocol",
+              "terminal_event": "dispatch.supervisor.error", "reconcile_reason": "a-reason-no-harness-named-yet"}, True),
+            ({**owner, "note": "dead-protocol", "failure_class": "protocol",
+              "terminal_event": "dispatch.supervisor.done"}, False),
+            ({**owner, "note": "dead-protocol", "failure_class": "protocol",
+              "terminal_event": "dispatch.supervisor.error", "launch_started": "0"}, False),
+            ({**owner, "note": "dead-protocol", "failure_class": "protocol",
+              "terminal_event": "dispatch.supervisor.error", "supervisor_lease": ""}, False),
+        ]
+        for meta, expected in rows:
+            line = "\t".join(["date", "done", "repo", "worktree", "att-1",
+                              ",".join(f"{k}={v}" for k, v in meta.items())])
+            with self.subTest(meta=meta):
+                self.assertEqual(self.ROUTE_ID in distribution._route_registry_index(line)["paused"], expected)
+                self.assertEqual(route_authority.runtime_owner_can_resume("done", meta), expected)
+
     def test_the_status_vocabulary_is_an_allowlist(self):
         # Round 1 (blocking 2): written first as a denylist of live states, so a
         # status word this reader does not know -- a partially written field, a
