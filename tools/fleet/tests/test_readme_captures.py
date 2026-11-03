@@ -126,10 +126,10 @@ class PublishedFiles(unittest.TestCase):
         self.assertEqual(gif.read_bytes()[:6], b"GIF89a")
         self.assertLess(gif.stat().st_size, GIF_LIMIT)
 
-    def test_real_project_name_is_gone_from_public_pages(self):
+    def test_no_private_path_or_address_on_public_pages(self):
         for relative in ("docs/fleet.svg", "docs/index.html", "tools/render-landing.py"):
             text = (ROOT / relative).read_text(encoding="utf-8")
-            self.assertIsNone(re.search("corrnet", text, re.I), relative)
+            self.assertIsNone(PRIVATE.search(text), relative)
 
 
 if __name__ == "__main__":
