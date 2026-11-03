@@ -1068,7 +1068,9 @@ completion gate and no human gate remains open.** An intermediate stage that
 succeeded — a training run that reached its last epoch, a green CI check, a
 worker that returned `PASS` — is stage evidence, never workflow completion. No
 acting agent, dispatch-depth-1 owner, supervisor, or runtime lifecycle hook may
-declare completion from an intermediate success.
+declare completion from an intermediate success. Receiving an experiment result
+is not interpreting it: the owner or supervisor that receives it interprets it
+before proposing another run (`capabilities/autopilot-lab.md`).
 
 Committed success and remaining cleanup are separate facts. A marker does not
 make a live descendant quiescent: the execution boundary retains cleanup,

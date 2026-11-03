@@ -84,14 +84,21 @@ When the assignment is why evaluation results look the way they do (a metric gap
 a field sample that fails, a regression between checkpoints):
 
 1. Read `raw-results/**` and `summary-stats.json`, plus any field samples or
-   reproduction conditions the assignment names.
-2. State each hypothesis with the evidence for and against it.
-3. Give the conditions under which the result reproduces.
-4. Give a verdict per hypothesis (supported, refuted, open).
-5. Name the one experiment that would falsify the leading hypothesis.
+   reproduction conditions the assignment names, against the person's primary
+   comparison (for example the unprocessed input, not only an internal control).
+2. Split the aggregate by condition so offsetting gains and losses show, and open
+   the worst representative cases in the existing outputs.
+3. State each hypothesis with the evidence for and against it; keep observed facts
+   apart from hypotheses.
+4. Give the conditions under which the result reproduces.
+5. Give a verdict per hypothesis (supported, refuted, open).
+6. Name the smallest experiment that would falsify the leading hypothesis; a new
+   tuning or training run qualifies only when the evidence points to it. Label a
+   diagnostic oracle (a re-scored or re-assembled output) as such, never as an
+   improvement.
 
-Write `reviews/diagnosis.md` in that order (hypotheses, reproduction conditions,
-verdict, falsifying experiment).
+Write `reviews/diagnosis.md` in that order (comparison and per-condition breakdown,
+hypotheses, reproduction conditions, verdict, falsifying experiment).
 
 ## Smoke check
 
