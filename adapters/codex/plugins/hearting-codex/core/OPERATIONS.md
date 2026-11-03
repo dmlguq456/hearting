@@ -2845,6 +2845,18 @@ on cmux. If desired, register the command in the terminal's key settings;
 detached key commands may lack the caller's terminal context. Hearting does
 not register keys or change user configuration.
 
+Supervision keeps one tab per supervisor: a peer start from the supervisor's
+pane opens the supervised session inside that tab, and `pane tidy` puts the
+`⚑` pane at the top left. Fleet shows the arrangement without changing it. The
+WHERE cell of a session's main row names its pane: Herdr `<workspace>:<tab>·<pane>`
+from the pane observation Fleet already reads, or tmux
+`<session>:<window>.<pane>` from one `list-panes` on the server `$TMUX` names
+(tmux's default server otherwise), matched by the runtime's controlling
+terminal; other rows keep the `herdr`/`tmux`/`tty` word. A `⚑` pane that is not
+the top-left pane of its tab leads that cell with `↖`; the Herdr tab geometry
+behind it is one `pane layout` read per such tab at most every 30 s, in the
+background. Fleet only reads here: it moves, resizes or focuses no pane.
+
 Same-seat succession uses `peer-steward.py start <name> --kind <harness>`,
 which with no `--pane` or `--beside` uses the calling pane (`HERDR_PANE_ID`)
 as its placement reference, in the Git primary checkout (the calling cwd outside

@@ -531,6 +531,88 @@ def pid_in_panes(pid, shells, fg, max_depth=6, ppid_of=None):
     return False
 
 
+_CORNER_TTL_S = 30.0
+_CORNER_LIMIT = 64
+_CORNER_LOCK = threading.Lock()
+_CORNERS = OrderedDict()   # (endpoint, tab id) -> {"at", "value", "future"}
+
+
+def _terminal_surface():
+    _observation_module()  # puts utilities/ on the path
+    import terminal_surface
+    return terminal_surface
+
+
+def location(pane):
+    """``wB:tZ·pA6`` — a Herdr pane row's tab and pane, or None (display only)."""
+    if not isinstance(pane, dict):
+        return None
+    pane_id, tab_id, workspace = pane.get("pane_id"), pane.get("tab_id"), pane.get("workspace_id")
+    if not all(isinstance(value, str) and value for value in (pane_id, tab_id, workspace)):
+        return None
+    prefix = workspace + ":"
+    if not (pane_id.startswith(prefix) and tab_id.startswith(prefix)):
+        return None
+    return "%s·%s" % (tab_id, pane_id[len(prefix):])
+
+
+def _read_corner(endpoint, pane, marks):
+    surface = _terminal_surface()
+
+    def bounded(argv):
+        return subprocess.run(argv, capture_output=True, text=True, timeout=1.0,
+                              stdin=subprocess.DEVNULL, check=False)
+    herdr = surface.HerdrSurface(runner=bounded, session=None if endpoint == "default" else endpoint)
+    layout = herdr.layout(pane)
+    return surface.supervisor_corner(layout, marks) if layout else None
+
+
+def tab_corner(endpoint, tab, pane, marks, *, reader=None):
+    """The last ``(supervisor pane, top_left)`` read for ``tab``; never waits.
+
+    One ``pane layout`` read per tab at most every 30 s runs in the background; the
+    tick that starts it shows the previous answer (None at first).
+    """
+    key, now = (endpoint, tab), time.monotonic()
+    with _CORNER_LOCK:
+        entry = _CORNERS.get(key)
+        if entry is not None and entry["future"] is not None and entry["future"].done():
+            try:
+                entry["value"] = entry["future"].result()
+            except Exception:
+                entry["value"] = None
+            entry["future"], entry["at"] = None, now
+        if entry is None or (entry["future"] is None and now - entry["at"] >= _CORNER_TTL_S):
+            if entry is None:
+                entry = _CORNERS[key] = {"at": now, "value": None, "future": None}
+                while len(_CORNERS) > _CORNER_LIMIT:
+                    _CORNERS.popitem(last=False)
+            read = reader or _read_corner
+            entry["future"] = background_read(lambda: read(endpoint, pane, dict(marks)))
+            entry["at"] = now
+        return entry["value"]
+
+
+def _mark_corners(sessions, rows, pane_of):
+    """Set ``pane_corner`` on the ``⚑`` pane of every tab Fleet shows a session in."""
+    endpoint = _observation_module().endpoint_name()
+    tabs = {}
+    for row in rows.values():
+        tabs.setdefault(row.get("tab_id"), []).append(row)
+    surface = _terminal_surface()
+    by_pane = {pane: s for s, pane in pane_of}
+    for tab, members in tabs.items():
+        if not isinstance(tab, str) or not any(row.get("pane_id") in by_pane for row in members):
+            continue
+        marks = {row["pane_id"]: (row.get("display_agent"), row.get("title")) for row in members}
+        if not any(surface._SUPERVISOR.match(str(text or "")) for headers in marks.values()
+                   for text in headers):
+            continue
+        found = tab_corner(endpoint, tab, members[0]["pane_id"], marks)
+        if found and found[0] in by_pane:
+            by_pane[found[0]].pane_corner = bool(found[1])
+
+
 def attached_index(agents):
     """``{(harness, session_id): agent}`` over the listed agents."""
     out = {}
@@ -663,6 +745,9 @@ def enrich(sessions, agents=None, lineage=None, panes=None, pids=None, pane_bind
     = pre-fetched pane list / ``pane_pids()`` result (``None`` → probe once here);
     ``lineage`` = ``pid -> provenance`` callable used only when herdr is absent."""
     for session in sessions:
+        if getattr(session, "multiplexer", None) == "herdr":
+            session.pane_location = session.multiplexer = session.pane_corner = None
+    for session in sessions:
         session._gpu_session_aliases = []
         session._herdr_name = None
         session._pane_session_claim = None
@@ -751,6 +836,9 @@ def enrich(sessions, agents=None, lineage=None, panes=None, pids=None, pane_bind
                                                or getattr(other, "shell_job_observation", None))
     if companions:
         sessions[:] = [s for s in sessions if id(s) not in companions]
+    pane_rows = {row["pane_id"]: row for row in panes or ()
+                 if isinstance(row, dict) and isinstance(row.get("pane_id"), str)}
+    pane_of = []
     for s in sessions:
         if not _eligible(s):
             continue
@@ -776,6 +864,10 @@ def enrich(sessions, agents=None, lineage=None, panes=None, pids=None, pane_bind
             matching_panes = {pane} if pane else set()
         if len(matching_panes) == 1:
             pane = next(iter(matching_panes))
+            where = location(pane_rows.get(pane))
+            if where and s.herdr_attached is True:
+                s.pane_location, s.multiplexer = where, "herdr"
+                pane_of.append((s, pane))
             names = {agent.get("name") for agent in agents
                      if isinstance(agent, dict) and agent.get("pane_id") == pane
                      and agent.get("agent") == harness
@@ -793,4 +885,9 @@ def enrich(sessions, agents=None, lineage=None, panes=None, pids=None, pane_bind
     last_error = "; ".join(errors) if errors else None
     if not probe_ok and not last_error:
         last_error = _observation_error() or "pane 조회 불가"
+    if pane_of:
+        try:
+            _mark_corners(sessions, pane_rows, pane_of)
+        except Exception:
+            pass  # The corner hint is optional display; it never changes attachment.
     return {"complete": probe_ok, "last_error": last_error}

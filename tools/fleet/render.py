@@ -5223,6 +5223,8 @@ def _orphan_resource_groups(resources, drawn_jobs, display_snapshot=None):
 # `stale`/`dead` still never reach here — F-13 omits the whole row (both callers return []).
 _CTX_ON_TEXT = "herdr"
 _CTX_OFF_TEXT = "tty"
+_CTX_TMUX_TEXT = "tmux"
+_CTX_CORNER_MARK = "↖"             # aedd50: a `⚑` pane that is not its tab's top-left pane
 _CTX_CHIP_W = 7                     # F-55's slot: plain literal, evaluated before `_dw` exists.
 _CTX_LABEL_W = _CTX_CHIP_W + 1      # + one trailing space = the F-55 slot width, unchanged.
 _CONTEXT_VALUE_W = 4
@@ -5299,7 +5301,7 @@ def _exec_detail_segs(entity):
     return []
 
 
-def _context_lead_chip(entity, dim=False, degrade=False):
+def _context_lead_chip(entity, dim=False, degrade=False, room=None):
     """F-100b lead cell → segments of exactly `_CTX_LABEL_W` cells (or none).
 
     `degrade=True` (the F-55b threshold: chip + track + value cannot share the row) drops
@@ -5307,15 +5309,39 @@ def _context_lead_chip(entity, dim=False, degrade=False):
     measurement that must not shrink (F-52b), so the chip is what yields, whole.
     A dispatch/muted row passes `dim=True`: workers are never herdr panes, and the
     caller flattens every key to dim anyway.
+
+    aedd50: a MAIN row passes its wider lead `room`; there the word becomes the pane's
+    location (`wB:tZ·pA6`, tmux `main:1.2`, head clipped to fit) and a `⚑` pane that is
+    not its tab's top-left pane leads with `↖`. Other rows keep the word.
     """
     if degrade:
         return []
     attached = getattr(entity, "herdr_attached", None)
-    if attached is True:
-        return [(_CTX_ON_TEXT.ljust(_CTX_CHIP_W) + " ", "dim" if dim else "herdr_on")]
+    plex = getattr(entity, "multiplexer", None)
+    if attached is True or plex == "tmux":
+        word = _CTX_TMUX_TEXT if plex == "tmux" else _CTX_ON_TEXT
+        key = "dim" if dim else "herdr_on"
+        where = getattr(entity, "pane_location", None)
+        corner = getattr(entity, "pane_corner", None) is False
+        width = (room or 0) - 1 - (_dw(_CTX_CORNER_MARK) if corner else 0)
+        if isinstance(where, str) and where and width >= _CTX_CHIP_W:
+            text = where if _dw(where) <= width else "…" + _clip_tail_w(where, width - _dw("…"))
+            lead = [(_CTX_CORNER_MARK, "dim" if dim else "lvl_y")] if corner else []
+            return lead + [(text + " ", key)]
+        return [(word.ljust(_CTX_CHIP_W) + " ", key)]
     if attached is False:
         return [(_CTX_OFF_TEXT.ljust(_CTX_CHIP_W) + " ", "dim")]
     return [(" " * _CTX_LABEL_W, None)]
+
+
+def _clip_tail_w(text, width):
+    """The last cells of ``text`` that fit ``width`` display cells."""
+    out = ""
+    for char in reversed(str(text)):
+        if _dw(char + out) > width:
+            break
+        out = char + out
+    return out
 
 
 def _resource_command_label(command):
@@ -5537,7 +5563,8 @@ def _context_detail_row(entity, depth=0, term_width=None, dim=False,
     degrade = (lead_width + track + _CONTEXT_VALUE_W) > available
     if degrade and term_width:
         indent = " " * min(_dw(indent), max(0, term_width - track - _CONTEXT_VALUE_W))
-    segs = [(indent, None)] + _context_lead_chip(entity, dim=dim, degrade=degrade)
+    segs = [(indent, None)] + _context_lead_chip(
+        entity, dim=dim, degrade=degrade, room=lead_width if main_detail else None)
     if main_detail and not degrade:
         # MAIN, OWNER and FRAME gauges share the fixed model-column anchor;
         # the WHERE word sits at the shared detail inset, without moving NOW.
@@ -10093,10 +10120,14 @@ def _build_unbounded_lines(sessions, jobs, section, narrow, malformed, layout="w
                 _seen_glyphs.add("tag")                       # F-100a
             if getattr(s, "steward", False):
                 _seen_glyphs.add("steward")                   # F-100c
-            if getattr(s, "herdr_attached", None) is True:
+            if getattr(s, "multiplexer", None) == "tmux":
+                _seen_glyphs.add("tmux")                      # aedd50
+            elif getattr(s, "herdr_attached", None) is True:
                 _seen_glyphs.add("herdr")                     # F-100b
             elif getattr(s, "herdr_attached", None) is False:
                 _seen_glyphs.add("tty")
+            if getattr(s, "pane_corner", None) is False:
+                _seen_glyphs.add("corner")                    # aedd50
             if nested_n:
                 _seen_glyphs.add("child")
             if getattr(s, "subagents", None):
@@ -10300,6 +10331,10 @@ def _build_unbounded_lines(sessions, jobs, section, narrow, malformed, layout="w
         legend += [("[", "dim"), ('id', "tag_steward"), ("]", "dim"), (' steward   ', "dim")]  # F-100c
     if "herdr" in _seen_glyphs:
         legend += [(_CTX_ON_TEXT, "herdr_on"), (' pane   ', "dim")]                  # F-100b
+    if "tmux" in _seen_glyphs:
+        legend += [(_CTX_TMUX_TEXT, "herdr_on"), (' pane   ', "dim")]               # aedd50
+    if "corner" in _seen_glyphs:
+        legend += [(_CTX_CORNER_MARK, "lvl_y"), (' ⚑ not top-left: pane tidy   ', "dim")]
     if "tty" in _seen_glyphs:
         legend += [(_CTX_OFF_TEXT, "dim"), (' plain terminal   ', "dim")]
     if "child" in _seen_glyphs:

@@ -175,6 +175,27 @@ def _tidy_order(layout, caller):
     return [first] + [p for p in ids if p != first]
 
 
+def supervisor_corner(layout, marks):
+    """``(pane, top_left)`` for a tab's supervisor, as ``pane tidy`` would order it.
+
+    ``marks`` maps a pane id to its headers (display agent, title). The supervisor is
+    the first pane in reading order whose header carries ``⚑``; ``top_left`` says
+    whether it already is the top-left pane. None when no pane is marked or the
+    geometry does not read as a tiling. Read only.
+    """
+    try:
+        panes = _reading(layout)
+    except _TidyError:
+        return None
+    for pane in panes:
+        headers = marks.get(pane["pane_id"]) or ()
+        if isinstance(headers, str):
+            headers = (headers,)
+        if any(_SUPERVISOR.match(str(text or "")) for text in headers):
+            return pane["pane_id"], pane["pane_id"] == panes[0]["pane_id"]
+    return None
+
+
 def _shell_record(info):
     from pane_ownership import _process
     record = _process(info.get("shell_pid")) if isinstance(info, dict) else None
