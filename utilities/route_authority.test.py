@@ -261,6 +261,62 @@ class Case1ParentSessionTest(unittest.TestCase):
                 self.assertIn("busy", sids)
                 self.assertNotIn("late", sids)
 
+    def test_published_rows_and_the_compact_reader_keep_only_the_bytes_their_stat_saw(self):
+        # RV-1142 L3: the other two readers of the same rule. Published rows carry the stat's
+        # generation and no row appended after it; the compact reader re-reads a ledger that
+        # changed since publication and also takes only the bytes its own stat saw.
+        import dispatch_recipient_inbox as inbox
+        import session_tidy as tidy
+        from peer_read_context import PeerReadContext
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            jobs = root / "dispatch" / "jobs.log"
+            binding = HANDOVER.binding_of(jobs, self.OWNER)
+            with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(root / "state"),
+                                              "AGENT_DISPATCH_JOBS": str(jobs)}):
+                self._record_handover(binding, "codex-sid", "codex-sid-after-clear",
+                                      "codex", "case-compact", 1, "clear")
+                busy = tidy._ledger_path(tidy.Seat("pane", "busy-seat", "w2:busy"))
+                busy.write_text(json.dumps({"ts": 1, "harness": "claude", "sid": "busy",
+                                            "event": "prompt"}) + "\n")
+                directory = busy.parent
+                seen = {name: list(generation)
+                        for name, *generation in HANDOVER._lineage_signature(directory)[1]}
+                read_bytes = tidy.read_bytes
+
+                def appending(sid):
+                    def read(path):
+                        if Path(path).suffix == ".jsonl":
+                            with Path(path).open("a") as handle:
+                                handle.write(json.dumps({"ts": 9, "harness": "claude", "sid": sid,
+                                                         "event": "prompt"}) + "\n")
+                        return read_bytes(path)
+                    return read
+
+                with mock.patch.object(tidy, "read_bytes", appending("late")):
+                    payload = HANDOVER.build_lineage_rows_payload()
+                self.assertEqual(set(payload["ledgers"]), {Path(name).stem for name in seen})
+                for key, entry in payload["ledgers"].items():
+                    self.assertEqual(entry["generation"], seen[key + ".jsonl"])
+                    self.assertNotIn("late", {row.get("sid") for _index, row in entry["rows"]})
+                inbox.write_lineage_rows(inbox.dispatch_inbox_root(), payload)
+                built = []
+
+                def compact(*args, **kwargs):
+                    built.append(original(*args, **kwargs))
+                    return built[-1]
+
+                original = HANDOVER._build_compact_lineage_graph
+                with mock.patch.object(tidy, "read_bytes", appending("later")), \
+                        mock.patch.object(HANDOVER, "_build_compact_lineage_graph", side_effect=compact):
+                    graph = HANDOVER.lineage_graph(read_context=PeerReadContext(compact_lineage=True))
+                self.assertEqual(len(built), 1)
+                self.assertIs(built[0], graph)
+                sids = {row.get("sid") for rows in graph.ledger_rows.values() for row in rows}
+                self.assertTrue({"busy", "late"} <= sids, sids)
+                self.assertNotIn("later", sids)
+                self.assertTrue(RA.owns(self.OWNER, "codex-sid-after-clear", jobs))
+
     def test_a_replaced_or_shrunk_ledger_during_the_read_is_still_unavailable(self):
         import session_tidy as tidy
         with tempfile.TemporaryDirectory() as td:

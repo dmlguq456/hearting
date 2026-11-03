@@ -1822,7 +1822,9 @@ def _workflow_owner_person_context(base, metadata, jobs):
             metadata, jobs, read_context=read_context)
         owns = route_authority.owns(metadata, session_id, jobs, read_context=read_context)
     except Exception:
-        return False
+        return None  # the lineage could not be read: unknown, not another parent
+    if owns is None:
+        return None
     return bool(owns and harness == effective_harness == owner.get("harness")
                 and session_id == effective_session == owner.get("session_id"))
 
@@ -1913,10 +1915,13 @@ def _workflow_owner_snapshot(base, *, expected_native_ref=None):
                       "owner_binding": binding}
         if expected_native_ref is not None and expected_native_ref != native_ref:
             return None, "workflow-owner-binding-changed"
-        if not _workflow_owner_person_context(base, metadata, jobs):
+        person = _workflow_owner_person_context(base, metadata, jobs)
+        if not person:
+            # Unknown (None) is the lineage that cannot be read now, not another parent.
             return {"jobs": jobs, "item": item, "native_ref": native_ref,
                     "observed": None, "support": False,
-                    "reason": "owner-correction-native-parent-context-required"}, None
+                    "reason": ("owner-correction-lineage-unverified" if person is None
+                               else "owner-correction-native-parent-context-required")}, None
         lineage = _workflow_owner_lineage(jobs, native_ref)
         if not lineage:
             return {"jobs": jobs, "item": item, "native_ref": native_ref,

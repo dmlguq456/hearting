@@ -420,7 +420,8 @@ def _session_owner_states(
                 continue
             if not _worker_type_is_depth1(metadata.get("worker_type")):
                 continue
-            if not seat_handover.owns(metadata, session, jobs, read_context=read_context):
+            # Unknown (an unreadable lineage) is not this session's row yet: the next call looks again.
+            if seat_handover.owns(metadata, session, jobs, read_context=read_context) is not True:
                 continue
             age = _row_age(stamp, now)
             if age is None or age < -MAXIMUM_CLOCK_SKEW_SECONDS:
@@ -629,8 +630,11 @@ def _reclaim_refusal(existing: dict[str, Any], jobs: Path, session: str) -> str 
     if existing.get("session_id") != session and not handed:
         return "foreign-session"
     metadata = _row_metadata(jobs, existing.get("attempt_id"))
-    if metadata is not None and not seat_handover.owns(metadata, session, jobs):
+    owned = None if metadata is None else seat_handover.owns(metadata, session, jobs)
+    if owned is False:
         return "foreign-session"       # the arming session handed the owner on and no longer answers for it
+    if metadata is not None and owned is None:
+        return "handover-unreadable"   # unknown, not another session: the next call looks again
     arms = existing.get("arms")
     if not isinstance(arms, int):
         return "unreadable"
@@ -940,11 +944,18 @@ def replacement_authority(launch: Launch, claim: ArmClaim, jobs: Path, aid: str,
     """The native incarnation and held arm grant this carrier its exact scope."""
     trusted = _trusted_jobs()
     held = _read_arm(claim.path)
+    if not (trusted is not None and Path(jobs).resolve() == trusted.resolve() == launch.jobs.resolve()
+            and aid == launch.attempt_id == claim.attempt_id
+            and claim.session_id == launch.session_id):
+        return False
+    owned = seat_handover.owns(metadata, launch.session_id, jobs)
+    if owned is None:
+        # Unknown is neither this carrier's authority nor a refusal: the replacement
+        # waits for the same command once the lineage reads (LOOP §4).
+        from route_authority import require_known
+        require_known(owned, metadata, jobs)
     return bool(
-        trusted is not None and Path(jobs).resolve() == trusted.resolve() == launch.jobs.resolve()
-        and aid == launch.attempt_id == claim.attempt_id
-        and claim.session_id == launch.session_id
-        and seat_handover.owns(metadata, launch.session_id, jobs)
+        owned
         and held and held.get("holder") == list(claim.holder)
         and held.get("state") == "waiting" and held.get("attempt_id") == aid
         and held.get("session_id") == launch.session_id

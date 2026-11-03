@@ -641,6 +641,23 @@ class RegisteredOwnerInputTest(unittest.TestCase):
         self.assertEqual(I.inspect(self.jobs, self.attempt)['requests'][0]['state'], 'queued')
         self.assertEqual(len(list((self.root/'pending-delivery').glob('*/*.json'))), 1)
 
+    def test_an_unreadable_lineage_keeps_the_correction_queued_without_naming_another_parent(self):
+        # RV-OWNS-TRI: unknown is neither the parent nor "awaiting" another one.
+        self.jobs.write_text(self.jobs.read_text().rstrip() +
+            ",parent_sid=01a0971c-b5b2-7a62-ab10-0dfb6d2b4e79,"
+            "parent_completion_delivery=codex-managed-gateway,managed_sealed_batch_id=batch-test\n")
+        I.initialize_owner_input(self.jobs, self.attempt, 'codex-active-turn')
+        I.OwnerInput(self.jobs, self.attempt, 'thread-1', 'codex-active-turn', self.events.append)
+        import route_authority
+        import dispatch_completion_join as join
+        with mock.patch.object(I, 'supervisor_lease_is_held', return_value=False), \
+             mock.patch.object(join, 'settle_finished_attempt'), \
+             mock.patch.object(route_authority, 'owns', return_value=None):
+            receipt = I.submit(self.jobs, self.attempt, 'keep until the lineage reads', 'lineage-unknown')
+        self.assertEqual(receipt['consumer_recovery'], 'not-started:handover-unreadable')
+        self.assertNotIn('restore this same owner', receipt.get('next_step', ''))
+        self.assertEqual(I.inspect(self.jobs, self.attempt)['requests'][0]['state'], 'queued')
+
     def test_consumer_that_never_attached_leaves_an_unresolved_undelivered_input(self):
         I.initialize_owner_input(self.jobs, self.attempt, 'codex-active-turn')
         I.submit(self.jobs, self.attempt, 'never delivered', 'early')

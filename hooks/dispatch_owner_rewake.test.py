@@ -126,6 +126,28 @@ class ReplacementCarrierTest(unittest.TestCase):
                 held["state"] = "waiting"
                 native.return_value = False
                 self.assertFalse(rewake.replacement_authority(launch, claim, jobs, "att-old", metadata))
+                # RV-OWNS-TRI: an unreadable lineage is neither authority nor a refusal; the
+                # replacement waits for the same command.
+                native.return_value = True
+                with mock.patch.object(rewake.seat_handover, "owns", return_value=None), \
+                        self.assertRaises(rewake.DispatchContractError) as waiting:
+                    rewake.replacement_authority(launch, claim, jobs, "att-old", metadata)
+                self.assertEqual((waiting.exception.reason, waiting.exception.next_action),
+                                 ("handover-unreadable", "same-command"))
+
+    def test_an_unreadable_lineage_is_not_reported_as_another_session(self):
+        with tempfile.TemporaryDirectory() as directory:
+            jobs = Path(directory) / "jobs.log"
+            jobs.write_text("")
+            existing = {"schema": rewake.ARM_SCHEMA, "attempt_id": "att-old", "session_id": "sid",
+                        "holder": ["1", "2", "ns"], "state": "waiting", "arms": 1}
+            metadata = {**rewake.REGISTRY_DEPTH1_START, "parent_sid": "sid", "worker_type": "owner"}
+            with mock.patch.object(rewake, "_row_metadata", return_value=metadata), \
+                    mock.patch.object(rewake.seat_handover, "owns", return_value=None):
+                self.assertEqual(rewake._reclaim_refusal(existing, jobs, "sid"), "handover-unreadable")
+            with mock.patch.object(rewake, "_row_metadata", return_value=metadata), \
+                    mock.patch.object(rewake.seat_handover, "owns", return_value=False):
+                self.assertEqual(rewake._reclaim_refusal(existing, jobs, "sid"), "foreign-session")
 
     def test_restarted_carrier_follows_same_registered_successor(self):
         import dispatch_replacement as replacement

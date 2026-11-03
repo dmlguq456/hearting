@@ -132,12 +132,9 @@ def _observed_ledger_bytes(path: Path, file_generation) -> bytes:
     a replaced, shrunk or unreadable ledger still is."""
     expected = tuple(file_generation)
     raw = _st().read_bytes(path)
-    if raw is not None and len(raw) >= expected[4]:
-        current = _lineage_generation(path.lstat())
-        if current == expected and len(raw) == expected[4]:
-            return raw
-        if _appended_since(expected, current):
-            return raw[:expected[4]]
+    if (raw is not None and len(raw) >= expected[4]
+            and _appended_since(expected, _lineage_generation(path.lstat()))):
+        return raw[:expected[4]]
     raise OSError("lineage-ledger-unavailable")
 
 
@@ -147,8 +144,7 @@ def _observation_holds(observed, current) -> bool:
     (location, files, generation), (now_location, now_files, now_generation) = observed, current
     if location != now_location or generation != now_generation or len(files) != len(now_files):
         return False
-    return all(old[0] == new[0] and (tuple(old[1:]) == tuple(new[1:])
-                                     or _appended_since(old[1:], new[1:]))
+    return all(old[0] == new[0] and _appended_since(old[1:], new[1:])
                for old, new in zip(files, now_files))
 
 
@@ -371,7 +367,8 @@ def _pass_lineage_graph(read_context=None) -> LineageGraph:
     """Resolve read-only records from this pass; effects observe without it.
 
     Detect writer changes during a pass, but do not reopen every ledger for
-    every record. Normal lineage_graph observations always read current bytes.
+    every record. A normal lineage_graph observation reads each ledger's bytes as of
+    that ledger's own stat.
     """
     if read_context is None:
         return lineage_graph()
@@ -2695,7 +2692,8 @@ def resume_line(seat, harness: str, sid: str) -> str:
                     continue
                 # A finished attempt is shown only while its notice is owed and its route is
                 # still open: a closed route has nothing to resume, whatever record lingers.
-                if not owns(meta, sid, jobs) or (status == "done" and not (
+                # An unreadable lineage (unknown) is not shown as this session's work yet.
+                if owns(meta, sid, jobs) is not True or (status == "done" and not (
                         _delivery_open(jobs, meta) and _route_open(jobs, meta))):
                     continue
                 shown.setdefault((jobs, route_identity(meta)[0]), meta.get("route_file", ""))

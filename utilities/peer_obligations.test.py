@@ -2342,6 +2342,21 @@ class ObligationStoreTest(unittest.TestCase):
             self.assertEqual([(w.attempt_id, w.pane_relation) for w in work], [("att-exec", "executor")])
             self.assertEqual(closure.call_count, 1)
 
+    def test_a_parent_row_whose_lineage_cannot_be_read_makes_the_bindings_unknown(self):
+        # RV-OWNS-TRI: unknown is neither this session's work nor "no work": readiness waits.
+        from dispatch_contract import ObservedAttemptLiveness
+        import dispatch_seat_handover
+        jobs = self.root / "jobs.log"
+        jobs.write_text(
+            "now\topen\trepo\t-\texec\tattempt_id=att-exec,harness=codex,parent_sid=other\n"
+            "now\topen\trepo\t-\tchild\tattempt_id=att-child,parent_sid=sid,parent_harness=codex\n")
+        with mock.patch("dispatch_contract.observed_attempt_liveness", return_value=
+                        ObservedAttemptLiveness("alive", "fixture", "live", "fixture")), \
+                mock.patch.object(dispatch_seat_handover, "owns", return_value=None):
+            work, state = obligations.bound_work_for_pane(
+                "pane", "codex", "sid", jobs=jobs, execution_attempt_ids=("att-exec",))
+        self.assertEqual((work, state), ((), "unknown"))
+
     def test_foreground_tag_read_is_birth_checked_and_does_not_use_parent_tag(self):
         with mock.patch("dispatch_contract._runtime_ancestry_proc_stat", return_value={"start": 7}), \
              mock.patch.object(Path, "read_bytes", return_value=b"AGENT_DISPATCH_ATTEMPT_ID=att-own\0"):
