@@ -406,6 +406,7 @@ harness install codex
 | hooks | `codex_setting/codex-hooks` → `hooks.json` | Adapter-owned hook bridge; executes only `type:"command"` entries |
 | Herdr SessionStart reporter | managed regular copy at `$CODEX_HOME/herdr-agent-state.sh` (fallback `~/.codex/herdr-agent-state.sh`) | Matches Herdr's native consumer path; `hooks.json` registers one SessionStart call and the manifest tracks this same asset |
 | `config.toml` | not copied; narrow managed leaves | Runtime-owned config remains intact; activation owns recorded Codex hook `trusted_hash` leaves and statusline/identity fragments, with conditional restoration. |
+| `AGENTS.override.md` | user-owned; one managed block, only when the file already has text | Codex reads only the first non-empty of `AGENTS.override.md` and `AGENTS.md` in `$CODEX_HOME`, so a user override hides the linked bootstrap. Activation appends the bootstrap below the user's text between `hearting:codex-bootstrap` begin/end markers; update replaces only that block and uninstall removes only it. A missing or empty override is never created or edited; a symlinked one is reported and left alone. |
 
 - **Runtime activation:** both linked and packaged modes use Codex-native
   skills, agents, modes, and hooks. Existing harness plugin enable entries are

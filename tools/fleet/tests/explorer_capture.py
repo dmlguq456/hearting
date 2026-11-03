@@ -3,7 +3,7 @@
 
     python3 tools/fleet/tests/explorer_capture.py --cols 140 --rows 45 --out DIR \
         [--view ROUTES] [--scope session:a7] [--usage] [--fold ropen:ROUTES=rt-…] [--demo]
-        [--bundle JSON | --view-model JSON]
+        [--readme-demo] [--bundle JSON | --view-model JSON]
 
 The default reads this host the way ``fleet --explorer --once`` does (collectors, compute hosts,
 memory). ``--demo`` uses the hermetic demo rows the end-to-end test uses instead. Each run writes
@@ -31,6 +31,10 @@ FONTS = {
     "symbols": "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",     # braille spinner, arrows
     "symbols-bold": "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
 }
+
+
+# Glyphs the capture fonts lack, drawn as the nearest one they have (``⎿`` is only in CJK fonts).
+GLYPH_FALLBACK = {"\u23bf": "\u2514"}
 
 
 def host_snapshot(render):
@@ -62,6 +66,18 @@ def demo_snapshot(render):
     snapshot, hosts = explorer_fixture.demo_snapshot()
     render.set_compute_hosts(hosts)
     return snapshot
+
+
+def readme_snapshot(render):
+    from tools.fleet.tests import readme_demo
+    snapshot, hosts = readme_demo.snapshot()
+    render.set_compute_hosts(hosts)
+    return snapshot
+
+
+def readme_demo_now():
+    from tools.fleet.tests import readme_demo
+    return readme_demo.NOW
 
 
 def palette(render):
@@ -119,6 +135,7 @@ def draw_png(render, frame, path):
                 unknown.add(key)
             fg, bg, bold = cell_style(render, hues, tints, key, tint)
             canvas.rectangle([x * CELL_W, y * CELL_H, (x + width) * CELL_W - 1, (y + 1) * CELL_H - 1], fill=bg)
+            glyph = GLYPH_FALLBACK.get(glyph, glyph)
             if glyph.strip():
                 family = ("wide" if width == 2 else "symbols" if "\u2800" <= glyph <= "\u28ff"
                           else "latin") + ("-bold" if bold else "")
@@ -140,10 +157,13 @@ def main(argv=None):
     parser.add_argument("--usage", action="store_true", help="draw the usage block open")
     parser.add_argument("--fold", action="append", default=[], metavar="KEY=VALUE")
     parser.add_argument("--demo", action="store_true", help="the hermetic demo rows, not this host")
+    parser.add_argument("--readme-demo", action="store_true",
+                        help="the English, neutral rows the README captures use (implies --demo)")
     parser.add_argument("--bundle", type=Path, help="replay a recorded snapshot/detail JSON bundle")
     parser.add_argument("--view-model", type=Path, help="draw a scrubbed typed view-model fixture")
     args = parser.parse_args(argv)
 
+    args.demo = args.demo or args.readme_demo
     out = args.out.resolve()
     if out == ROOT or ROOT in out.parents:
         parser.error("--out must be outside the repository (captures are evidence, not source)")
@@ -170,14 +190,16 @@ def main(argv=None):
         frame = draw(build_view_model(snapshot, accepted_detail=detail, now=time.time()),
                      state, args.cols, args.rows, beat=1)
     else:
-        snapshot = demo_snapshot(render) if args.demo else host_snapshot(render)
-        frame = render._explorer_compose(snapshot, args.cols, args.rows, state, now=time.time())
+        snapshot = (readme_snapshot(render) if args.readme_demo
+                    else demo_snapshot(render) if args.demo else host_snapshot(render))
+        now = readme_demo_now() if args.readme_demo else time.time()
+        frame = render._explorer_compose(snapshot, args.cols, args.rows, state, now=now)
         if not args.demo:                       # the reads the live view would do for this screen
             detail = render.explorer_read_detail(snapshot, state)
             frame = render._explorer_compose(snapshot, args.cols, args.rows, state, detail, now=time.time())
 
     label = (args.scope.replace(":", "-") if args.scope != "-" else args.view.lower()) + (
-        "-usage" if args.usage else "") + ("-demo" if args.demo else "") + ("-recorded" if args.bundle else "")
+        "-usage" if args.usage else "") + ("-readme" if args.readme_demo else "-demo" if args.demo else "") + ("-recorded" if args.bundle else "")
     stem = out / f"explorer-{label}-{args.cols}x{args.rows}"
     stem.with_suffix(".txt").write_text("\n".join(row.rstrip() for row in frame.text_rows()) + "\n",
                                         encoding="utf-8")

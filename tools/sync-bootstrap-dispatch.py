@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Project the shared bootstrap paragraphs into the three adapter bootstraps.
+"""Project the shared bootstrap body into the three adapter bootstraps.
 
-Each `core/fragments/bootstrap-*.md` file is the one source for its block.
-Each bootstrap holds it, byte for byte, between its BEGIN/END markers;
-everything outside the markers stays adapter-owned. `--check` reports
-a stale copy without writing.
+`core/fragments/bootstrap-body.md` is the one source for the purpose,
+judgment, start/follow/finish, where-to-look, and response text every
+bootstrap carries. Each bootstrap holds it, byte for byte, between its
+BEGIN/END markers; everything outside the markers (harness-root resolution
+and runtime notes) stays adapter-owned. `--check` reports a stale copy
+without writing.
 """
 
 from __future__ import annotations
@@ -16,9 +18,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 TARGETS = ("adapters/claude/CLAUDE.md", "adapters/codex/AGENTS.md", "adapters/opencode/AGENTS.md")
 BLOCKS = (
-    ("core/fragments/bootstrap-compute-hosts.md", "tools/sync-bootstrap-dispatch.py"),
-    ("core/fragments/bootstrap-dispatch.md", "tools/sync-bootstrap-dispatch.py"),
-    ("core/fragments/bootstrap-continuation.md", "tools/sync-bootstrap-dispatch.py"),
+    ("core/fragments/bootstrap-body.md", "tools/sync-bootstrap-dispatch.py"),
 )
 
 

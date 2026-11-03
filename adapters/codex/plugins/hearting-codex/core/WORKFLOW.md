@@ -273,7 +273,9 @@ atomic, reversible direct source change, use
 the isolated worktree first. If the source change was already made in place,
 `compose --shape direct` records its route without preparing a worktree.
 Otherwise use `compose --start --prompt-file <task>` with no `--shape`; the
-frame chooses the capability, stages, and solo or staged shape.
+frame chooses the capability, stages, and solo or staged shape, judging each
+leg's optional `size` (`one-change`, `one-pass`, `multi-stage`) first; an
+omitted shape follows it.
 
 | Main decision | Command | Result |
 |---|---|---|
@@ -910,10 +912,13 @@ completion and close steps below keep working for recovery consoles:
 ```text
 python3 utilities/capability-route.py close --route <route.json> [--commit <sha>] [--summary <line>]
 python3 utilities/capability-route.py status [--artifact-root <dir>] --open-only
+python3 utilities/capability-route.py status <route id | route file | attempt id>
 ```
 
 `status` defaults the artifact root from the cwd, and each open row carries its
-`resume_command`. That command names a canonical route by its ID
+`resume_command`. Given one route or attempt, it reports that route and its
+registry attempts. `start`, `finish`, `close`, `correct` and `status` each take a
+route id, route file or attempt id. That command names a canonical route by its ID
 (`start --route rt-<16 hex>`); `start` finds the record under the cwd's artifact
 root, `AGENT_ARTIFACT_ROOT`, the jobs registry or a session's route-chain ledger,
 and still takes a route file. A `start` without `--route` continues this session's newest

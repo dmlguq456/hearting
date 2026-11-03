@@ -105,6 +105,13 @@ import os
 import sys
 
 _LOG = os.environ.get("HOOK_PERF_AUDIT_LOG")
+# The audit covers the measured hook and the children it waits for, all in the hook's
+# session. A detached daemon it starts (its own session) is not the hook's work and can
+# outlive the fixture; its exit-time write would recreate the removed fixture directory.
+if _LOG:
+    _SID = os.environ.setdefault("HOOK_PERF_AUDIT_SID", str(os.getsid(0)))
+    if _SID != str(os.getsid(0)):
+        _LOG = None
 _STATE = {"opens": [], "bytes": 0, "stop_path": False}
 _real_open = builtins.open
 _real_io_open = io.open
@@ -482,6 +489,34 @@ class BudgetGateTest(unittest.TestCase):
         check_scale_time("prompt", 1.0, 1.4)
         check_scale_opens(100, 110)
         check_read_budget("prompt", 65_000, 10_000)
+
+
+class AuditShimScopeTest(unittest.TestCase):
+    """The audit log belongs to the measured hook's session, not to daemons it detaches."""
+
+    def _run(self, start_new_session: bool) -> list[dict]:
+        with tempfile.TemporaryDirectory(prefix="hook-shim-") as tmp:
+            base = Path(tmp)
+            (base / "shim").mkdir()
+            (base / "shim" / "sitecustomize.py").write_text(_SHIM, encoding="utf-8")
+            log = base / "audit.jsonl"
+            child = ("import subprocess, sys; subprocess.run([sys.executable, '-c', "
+                     "\"open('/dev/null').close()\"], start_new_session=%r, check=True)" % start_new_session)
+            env = {key: value for key, value in os.environ.items()
+                   if not key.startswith("HOOK_PERF_")}
+            env.update({"PYTHONPATH": str(base / "shim"), "HOOK_PERF_AUDIT_LOG": str(log)})
+            subprocess.run([sys.executable, "-c", child], env=env, check=True, timeout=60)
+            return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+
+    def test_a_detached_child_writes_no_audit(self):
+        rows = self._run(start_new_session=True)
+        self.assertEqual(sum(row.get("event") == "summary" for row in rows), 1)
+        self.assertNotIn("/dev/null", {row.get("path") for row in rows})
+
+    def test_a_child_in_the_hook_session_is_still_audited(self):
+        rows = self._run(start_new_session=False)
+        self.assertEqual(sum(row.get("event") == "summary" for row in rows), 2)
+        self.assertIn("/dev/null", {row.get("path") for row in rows})
 
 
 class HookPerfBudgetTest(unittest.TestCase):
