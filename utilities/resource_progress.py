@@ -1366,7 +1366,37 @@ def _notice_targets(run):
     return list(result.values())
 
 
+def _ui_translator():
+    """The shared UI-text catalog (English by default, Korean when declared).
+
+    An observer never stops over its words: without a readable catalog a notice names its fields.
+    """
+    try:
+        import importlib.util
+        path = Path(__file__).resolve().parents[1] / "tools" / "i18n" / "ui_text.py"
+        spec = importlib.util.spec_from_file_location("ui_text", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.translator()
+    except Exception:  # noqa: BLE001 -- a missing or broken catalog must not end the observation
+        return _plain_text
+
+
+def _plain_text(message, /, **fields):
+    if fields:
+        return "; ".join(f"{name}={value}" for name, value in fields.items())
+    return message.rsplit(".", 1)[-1].replace("_", " ")
+
+
+# ``summary.trend`` is stored (registry rows, observation state) and read by other releases in
+# these Korean words; only the notice text names them in the reader's language.
+_TREND_TEXT = {"개선": "resource.trend.improving", "정체": "resource.trend.flat",
+               "악화": "resource.trend.worsening", "불안정": "resource.trend.unstable",
+               "판정 불가": "resource.trend.undetermined"}
+
+
 def _notice_texts(run, event_kind, observation, record_path, sources):
+    t = _ui_translator()
     summary = observation.get("summary") or {}
     admission = observation.get("admission") if isinstance(observation.get("admission"), dict) else {}
     stagnation = observation.get("stagnation") if isinstance(observation.get("stagnation"), dict) else {}
@@ -1390,8 +1420,10 @@ def _notice_texts(run, event_kind, observation, record_path, sources):
         if rendered:
             return ",".join(rendered)
         return (f"{metric}={fallback['value']}@{fallback['epoch']}"
-                if isinstance(fallback, dict) and metric else "지표 없음")
-    record = str(record_path) if record_path else "기록 경로 없음"
+                if isinstance(fallback, dict) and metric else t("resource.no_metrics"))
+    record = str(record_path) if record_path else t("resource.no_record_path")
+    trend = summary.get("trend") or "판정 불가"
+    trend = t(_TREND_TEXT[trend]) if trend in _TREND_TEXT else trend
     run_line = f"run={run.get('run_id') or 'unknown'}"
     if run.get("row_id"):
         run_line += f" row={run['row_id']}"
@@ -1425,19 +1457,26 @@ def _notice_texts(run, event_kind, observation, record_path, sources):
     if stagnation.get("state") == "stagnant":
         anchor = ("last actual increase" if stagnation.get("since") == "last-increase"
                   else "first comparable observation")
-        entries.append(f"no observed increase for {_duration(stagnation.get('seconds_since_anchor'))} since {anchor}")
+        entries.append(f"no observed increase for {_duration(stagnation.get('seconds_since_anchor'), t)} since {anchor}")
     elif stagnation.get("state") == "unknown":
         entries.append("progress stagnation=unknown")
     if event_kind == "final":
         entries.append(f"status={run.get('status') or 'unknown'}; exit={run.get('exit_code')}")
-        entries.append(f"마지막={points('latest_metrics', latest)}; 최고={points('best_metrics', best)}; 추세={summary.get('trend') or '판정 불가'}")
-        entries.append(f"실제={_duration(observation.get('elapsed_seconds'))}; 계획={_duration(observation.get('planned_seconds'))}")
+        entries.append(t("resource.final_metrics", latest=points("latest_metrics", latest),
+                         best=points("best_metrics", best), trend=trend))
+        entries.append(t("resource.final_time", actual=_duration(observation.get("elapsed_seconds"), t),
+                         plan=_duration(observation.get("planned_seconds"), t)))
         if observation.get("attention"):
             entries.append("attention=" + ",".join(item.get("kind", "unknown") for item in observation["attention"][:3]))
     else:
-        entries.append(f"최근={points('latest_metrics', latest)}; 최고={points('best_metrics', best)}; 기준 delta={summary.get('baseline_delta') if summary.get('baseline_delta') is not None else '기준 없음'}; 추세={summary.get('trend') or '판정 불가'}")
+        delta = summary.get("baseline_delta")
+        entries.append(t("resource.checkpoint_metrics", latest=points("latest_metrics", latest),
+                         best=points("best_metrics", best),
+                         delta=delta if delta is not None else t("resource.no_baseline"), trend=trend))
         eta = observation.get("predicted_total_seconds")
-        entries.append(f"ETA 총 {_duration(eta)}; 계획 {_duration(observation.get('planned_seconds'))}; 경과 {_duration(observation.get('elapsed_seconds'))}")
+        entries.append(t("resource.eta", total=_duration(eta, t),
+                         plan=_duration(observation.get("planned_seconds"), t),
+                         elapsed=_duration(observation.get("elapsed_seconds"), t)))
         if observation.get("attention"):
             entries.append("attention=" + ",".join(item.get("kind", "unknown") for item in observation["attention"][:3]))
     source_lines = []
@@ -1445,7 +1484,7 @@ def _notice_texts(run, event_kind, observation, record_path, sources):
         path = source.get("path")
         if isinstance(path, list):
             path = path[0] if path else None
-        source_lines.append(f"source {source.get('format') or 'unknown'}={path or '경로 없음'}")
+        source_lines.append(f"source {source.get('format') or 'unknown'}={path or t('resource.no_path')}")
     if not source_lines:
         source_lines.append("source metrics unavailable")
     entries.extend(source_lines)
@@ -1469,9 +1508,9 @@ def _notice_texts(run, event_kind, observation, record_path, sources):
     return output
 
 
-def _duration(value):
+def _duration(value, t=None):
     if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(float(value)):
-        return "미상"
+        return (t or _ui_translator())("resource.unknown_duration")
     seconds = max(0, int(value))
     hours, remainder = divmod(seconds, 3600)
     minutes = remainder // 60

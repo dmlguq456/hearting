@@ -202,6 +202,62 @@
    "en": "…(truncated)",
    "ko": "…(잘림)"
   },
+  "resource.checkpoint_metrics": {
+   "en": "latest={latest}; best={best}; baseline delta={delta}; trend={trend}",
+   "ko": "최근={latest}; 최고={best}; 기준 delta={delta}; 추세={trend}"
+  },
+  "resource.eta": {
+   "en": "estimated total time {total}; planned {plan}; elapsed {elapsed}",
+   "ko": "ETA 총 {total}; 계획 {plan}; 경과 {elapsed}"
+  },
+  "resource.final_metrics": {
+   "en": "latest={latest}; best={best}; trend={trend}",
+   "ko": "마지막={latest}; 최고={best}; 추세={trend}"
+  },
+  "resource.final_time": {
+   "en": "actual={actual}; planned={plan}",
+   "ko": "실제={actual}; 계획={plan}"
+  },
+  "resource.no_baseline": {
+   "en": "no baseline",
+   "ko": "기준 없음"
+  },
+  "resource.no_metrics": {
+   "en": "no metrics",
+   "ko": "지표 없음"
+  },
+  "resource.no_path": {
+   "en": "no path",
+   "ko": "경로 없음"
+  },
+  "resource.no_record_path": {
+   "en": "no record path",
+   "ko": "기록 경로 없음"
+  },
+  "resource.trend.flat": {
+   "en": "flat",
+   "ko": "정체"
+  },
+  "resource.trend.improving": {
+   "en": "improving",
+   "ko": "개선"
+  },
+  "resource.trend.undetermined": {
+   "en": "undetermined",
+   "ko": "판정 불가"
+  },
+  "resource.trend.unstable": {
+   "en": "unstable",
+   "ko": "불안정"
+  },
+  "resource.trend.worsening": {
+   "en": "worsening",
+   "ko": "악화"
+  },
+  "resource.unknown_duration": {
+   "en": "unknown",
+   "ko": "미상"
+  },
   "route.a.depends_on_work": {
    "en": "unconfirmed (depends on the work)",
    "ko": "미확인 (작업 의미에 따름)"
