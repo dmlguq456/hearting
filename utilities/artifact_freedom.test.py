@@ -217,6 +217,86 @@ class ArtifactFreedomTest(FX.ProducerTestBase):
         P.deliver_pending_history(self.root)
         self.assertEqual(len(self.control_events(later, "manifest.json")), 1)
 
+    def test_history_delivery_does_not_reopen_records_the_look_just_saw_quiet(self):
+        cycles = [self.finished(), self.finished("second", "second")]
+        paths = {item["cycle_id"]: P.cycle_record_path(self.root, item["cycle_id"]) for item in cycles}
+        real = Path.read_bytes
+        opened = []
+
+        def deliver():
+            opened.clear()
+            with mock.patch.object(Path, "read_bytes", autospec=True,
+                                   side_effect=lambda path: opened.append(Path(path)) or real(path)):
+                return P.deliver_pending_history(self.root)
+
+        with mock.patch.object(P, "_CONTROL_MEMO_SETTLE_NS", -1):
+            P.reconcile_root(self.root)
+            vouched = json.loads((P.producer_dir(self.root) / P.HISTORY_QUIET_NAME).read_text())["records"]
+            self.assertEqual(set(vouched), set(paths))
+            deliver()
+            self.assertFalse(set(paths.values()) & set(opened))
+            P.reconcile_root(self.root)  # both quiet now: the memo answers
+            deliver()
+            self.assertFalse(set(paths.values()) & set(opened))
+            # A record this process writes after the look is opened again.
+            later = cycles[1]["cycle_id"]
+            P._write_cycle_record(self.root, P.read_cycle_record(self.root, later), exclusive=False)
+            deliver()
+            self.assertIn(paths[later], opened)
+            # A line another writer left before the next look is found by that look.
+            P.reconcile_root(self.root)
+            record = json.loads(paths[later].read_text())
+            record["history_pending"] = [{"kind": "test"}]
+            paths[later].write_text(json.dumps(record))
+            P.reconcile_root(self.root)
+            deliver()
+            self.assertIn(paths[later], opened)
+        # Without a look in this process every record is read, as before.
+        P._QUIET_HISTORY.clear()
+        deliver()
+        self.assertTrue(set(paths.values()) <= set(opened))
+
+    def test_quiet_records_are_read_once_per_identity_whoever_rewrites_the_memo(self):
+        cycles = [self.finished(), self.finished("second", "second"), self.finished("third", "third")]
+        paths = {P.cycle_record_path(self.root, item["cycle_id"]) for item in cycles}
+        memo = P.producer_dir(self.root) / P.CONTROL_MEMO_NAME
+        vouched = P.producer_dir(self.root) / P.HISTORY_QUIET_NAME
+        real_bytes, real_json = Path.read_bytes, P._read_json
+        opened = []
+
+        def counted(action):
+            opened.clear()
+            with mock.patch.object(Path, "read_bytes", autospec=True,
+                                   side_effect=lambda path: opened.append(Path(path)) or real_bytes(path)), \
+                    mock.patch.object(P, "_read_json", side_effect=lambda path: opened.append(Path(path))
+                                      or real_json(path)):
+                action()
+            return set(opened) & paths
+
+        def next_start():
+            P._QUIET_HISTORY.clear()  # a new process
+            looked = counted(lambda: P.reconcile_root(self.root))
+            return looked, counted(lambda: P.deliver_pending_history(self.root))
+
+        with mock.patch.object(P, "_CONTROL_MEMO_SETTLE_NS", -1):
+            P.reconcile_root(self.root)  # the memo knows every cycle now
+            vouched.unlink()  # the first start after an install: nothing vouched yet
+            looked, delivered = next_start()
+            self.assertEqual(looked, paths)  # each quiet record is read once, for its identity
+            self.assertFalse(delivered)
+            looked, delivered = next_start()
+            self.assertEqual(len(looked), 1)  # only the earliest cycle, which is always observed
+            self.assertFalse(delivered)
+            # An older release rewrites the memo whole; what vouches for the records is not in it.
+            memo.write_text(json.dumps(json.loads(memo.read_text())))
+            looked, delivered = next_start()
+            self.assertEqual(len(looked), 1)
+            self.assertFalse(delivered)
+            # An observation older than the window answers nothing: every record is read.
+            seen_at, quiet = P._QUIET_HISTORY[str(self.root.resolve())]
+            P._QUIET_HISTORY[str(self.root.resolve())] = (seen_at - P._QUIET_HISTORY_SECONDS - 1, quiet)
+            self.assertEqual(counted(lambda: P.deliver_pending_history(self.root)), paths)
+
     def test_begin_retry_looks_again_when_the_hand_change_look_was_skipped(self):
         # The look's own lock wait can run out (skipped); the cycle must not begin before it finished.
         first = self.finished()
