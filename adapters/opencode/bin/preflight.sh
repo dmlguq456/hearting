@@ -331,7 +331,7 @@ case "$cmd" in
   prompt-signal)
     cwd=${2:-$PWD}
     sid=${3:-opencode}
-    status=$(AGENT_ADAPTER=opencode "$ROOT/utilities/harness-status.sh" "$cwd" "$sid")
+    status=$(AGENT_ADAPTER=opencode "$ROOT/utilities/harness-status.sh" --signal "$cwd" "$sid")
     artifact_root_kind=$(printf '%s\n' "$status" | awk -F= '$1=="artifact_root_kind"{print $2; exit}')
     git_operation=$(printf '%s\n' "$status" | awk -F= '$1=="git_operation"{print $2; exit}')
     headless_open_jobs=$(printf '%s\n' "$status" | awk -F= '$1=="headless_open_jobs"{print $2; exit}')

@@ -4,12 +4,16 @@ set -eu
 
 usage() {
   cat <<'EOF'
-usage: harness-status.sh [cwd] [session-id]
+usage: harness-status.sh [--signal] [cwd] [session-id]
 
 Prints machine-readable harness-specific status signals. This is not a
 replacement for runtime-native status UI; adapters use it to expose the
 workflow, artifact, notes, and git-risk signals that native footers usually do
 not cover.
+
+--signal prints only what the per-prompt signal reads (git, artifact root and
+the open-row count). Process evidence, the orphaned-conductor scan and
+resource-run counts are computed when the full status is asked for.
 EOF
 }
 
@@ -18,6 +22,11 @@ if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
   exit 0
 fi
 
+facts=all
+if [ "${1:-}" = "--signal" ]; then
+  facts=signal
+  shift
+fi
 cwd=${1:-$PWD}
 sid=${2:-agent-status}
 adapter=${AGENT_ADAPTER:-portable}
@@ -102,6 +111,16 @@ jobs_log=${AGENT_DISPATCH_JOBS:-${state_root:+$state_root/jobs.log}}
 # ready un-started successor), and the F-59 resource-run counts below.
 # Read-only; it changes no row and runs no work.
 resource_counts=""
+if [ "$facts" = signal ]; then
+  # The per-prompt signal reads only the open-row count: one pass, no Python.
+  if [ -n "$jobs_log" ] && [ -f "$jobs_log" ]; then
+    awk -F '\t' 'NF==6 && $2=="open"{c++; slugs=slugs sep $5; sep=","}
+      END{print "headless_open_jobs=" c+0; if (slugs != "") print "headless_open_slugs=" slugs}' "$jobs_log"
+  else
+    printf 'headless_open_jobs=0\n'
+  fi
+  exit 0
+fi
 if [ -n "$jobs_log" ] && [ -f "$jobs_log" ]; then
   if registry_facts=$(python3 "$self_dir/dispatch-registry.py" status-snapshot --jobs "$jobs_log" --agent-home "$status_home" 2>/dev/null); then
     printf '%s\n' "$registry_facts" | grep -v '^resource_count_' || true
