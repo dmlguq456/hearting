@@ -687,7 +687,8 @@ def expire_pending_for_dead_recipient(
 
 def reconcile_pending_delivery(jobs: Path, *, max_rows: int | None = None,
                                time_budget_s: float | None = None,
-                               start_after: str | None = None) -> dict[str, int]:
+                               start_after: str | None = None,
+                               registry_start: int | None = None) -> dict[str, int]:
     """SD-111 P2 trigger 2 + the single declared expiry actor (§2-b-2/§2-c).
 
     Meant to run on the same bounded cadence as ``dispatch-registry.py
@@ -729,6 +730,17 @@ def reconcile_pending_delivery(jobs: Path, *, max_rows: int | None = None,
     partial ``rows_by_attempt`` is not a valid authority view and must not
     materialize or expire anything. Retention pruning still runs because it
     reads the records alone.
+
+    The per-row materialize backstops are the expensive part of the registry
+    pass, so a bounded pass resumes them: ``registry_start`` is the row index
+    to continue from, and a pass cut off by its budget returns the next index
+    as ``registry_cursor``. The authority view is still parsed from every row
+    on every pass. A pass that resumes the record walk (``start_after``) skips
+    the backstops, which finished earlier in the same cycle. Without the
+    resume a pass that could not reach the last row restarted at row 0
+    forever: on a 10k-row registry the runner re-read the same ~150 rows on
+    every pass and never reached the record walk or the duties after it
+    (2026-11-03).
     """
 
     try:
@@ -741,6 +753,11 @@ def reconcile_pending_delivery(jobs: Path, *, max_rows: int | None = None,
     except (TypeError, ValueError):
         deadline = None
     start_after = start_after if isinstance(start_after, str) and start_after else None
+    try:
+        registry_start = (None if registry_start is None or isinstance(registry_start, bool)
+                          else max(0, int(registry_start)))
+    except (TypeError, ValueError):
+        registry_start = None
 
     def out_of_budget():
         return deadline is not None and time.monotonic() >= deadline
@@ -751,24 +768,37 @@ def reconcile_pending_delivery(jobs: Path, *, max_rows: int | None = None,
               "pruned_records": 0, "pruned_locks": 0, "prune_skipped": 0}
     counters = {"rows_read": 0, "records_read": 0, "budget_exhausted": 0}
     registry_complete = True
+    registry_cursor = None
     try:
         lines = registry_lines(jobs)
     except OSError:
         lines = []
     rows_by_attempt: dict[str, dict[str, str]] = {}
+    parsed: list[dict[str, str] | None] = []
     for line in lines:
-        if out_of_budget():
-            counters["budget_exhausted"] = 1
-            registry_complete = False
-            break
-        counters["rows_read"] += 1
         fields = line.split("\t")
         if len(fields) != 6:
+            parsed.append(None)
             continue
         metadata = parse_registry_metadata(fields[5])
         attempt_id = metadata.get("attempt_id", "")
         if attempt_id:
             rows_by_attempt[attempt_id] = metadata
+        parsed.append(metadata)
+    # The backstops ran to the last row earlier in this cycle when the record
+    # walk is being resumed; otherwise continue them where the last pass stopped.
+    first = len(parsed) if start_after is not None else min(registry_start or 0, len(parsed))
+    for index in range(first, len(parsed)):
+        if out_of_budget():
+            counters["budget_exhausted"] = 1
+            registry_complete = False
+            registry_cursor = index
+            break
+        counters["rows_read"] += 1
+        metadata = parsed[index]
+        if metadata is None:
+            continue
+        attempt_id = metadata.get("attempt_id", "")
         if attempt_id and metadata.get("worker_type") == "owner":
             from dispatch_owner_input import materialize_unresolved
             materialize_unresolved(jobs, attempt_id)
@@ -845,6 +875,7 @@ def reconcile_pending_delivery(jobs: Path, *, max_rows: int | None = None,
     if bounded:
         result.update(counters)
         result["cursor"] = cursor
+        result["registry_cursor"] = registry_cursor
     elif start_after is not None:
         result["cursor"] = cursor
     return result

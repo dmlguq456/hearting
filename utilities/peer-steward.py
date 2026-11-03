@@ -9748,6 +9748,8 @@ INBOX_PREFILL_DUE_SECONDS = 15 * 60
 LINEAGE_ROWS_DUE_SECONDS = 15 * 60
 PEER_INDEX_DUE_SECONDS = 15 * 60
 PEER_INDEX_TIME_BUDGET_S = 1.0
+# The prune's share of one maintenance pass; its cursor carries the rest.
+PEER_HISTORY_TIME_BUDGET_S = 1.0
 RUN_STATES_DUE_SECONDS = 30.0
 STEWARD_RELATIONS_DUE_SECONDS = 60.0
 NOTICE_BATCH_LIMIT = 8
@@ -10460,41 +10462,19 @@ def _runner_maintenance_pass(store):
             root, deadline_ns=deadline_ns, expected_root_identity=identity)
     except (OSError, ValueError, TypeError, RuntimeError):
         pass
-    try:
-        state = peer_obligations.read_runner_duty_state(root, "reconcile")
-        if (peer_obligations.runner_duty_due(state, RECONCILE_DUE_SECONDS)
-                and time.monotonic_ns() < deadline_ns):
-            import dispatch_completion_join as join
-            jobs = root / "jobs.log"
-            remaining = max(0.0, (deadline_ns - time.monotonic_ns()) / 1_000_000_000)
-            cursor = state.get("cursor")
-            counts = join.reconcile_pending_delivery(
-                jobs, max_rows=RECONCILE_MAX_ROWS,
-                time_budget_s=min(RECONCILE_TIME_BUDGET_S, remaining),
-                start_after=cursor if isinstance(cursor, str) else None)
-            result["reconcile"] = counts
-            complete = not counts.get("budget_exhausted") and counts.get("cursor") is None
-            peer_obligations.write_runner_duty_state(
-                root, "reconcile", {
-                    # An unfinished walk is due on the next pass, not in six hours:
-                    # the first 2,575-record backlog then clears within hours.
-                    "last_pass_ns": time.time_ns() if complete else 0,
-                    "cursor": counts.get("cursor"),
-                    "rows_read": counts.get("rows_read", 0),
-                    "records_read": counts.get("records_read", 0),
-                    "pruned_records": counts.get("pruned_records", 0),
-                    "expired": counts.get("expired", 0),
-                    "budget_exhausted": counts.get("budget_exhausted", 0)},
-                expected_root_identity=identity)
-    except (OSError, ValueError, RuntimeError):
-        pass
+    # The peer history prune and the recipient index are what every prompt
+    # and Stop hook reads; they run before the registry reconcile, each with
+    # its own share of the budget, so a reconcile backlog cannot keep them
+    # from ever running (2026-11-03: neither had run once and the pending
+    # history held 4,138 received rows past the 7-day window).
     try:
         state = peer_obligations.read_runner_duty_state(root, "peer-history")
         if (peer_obligations.runner_duty_due(state, RECONCILE_DUE_SECONDS)
                 and time.monotonic_ns() < deadline_ns):
             cursor = state.get("cursor")
             counts = _prune_received_peer_history(
-                deadline_ns=deadline_ns,
+                deadline_ns=min(deadline_ns, time.monotonic_ns()
+                                + int(PEER_HISTORY_TIME_BUDGET_S * 1_000_000_000)),
                 start_after=cursor if isinstance(cursor, str) else None)
             result["peer_history"] = counts
             peer_obligations.write_runner_duty_state(
@@ -10509,6 +10489,40 @@ def _runner_maintenance_pass(store):
         result["peer_index"] = _publish_peer_indexes(
             root, deadline_ns=deadline_ns, expected_root_identity=identity)
     except (OSError, ValueError, TypeError, RuntimeError):
+        pass
+    try:
+        state = peer_obligations.read_runner_duty_state(root, "reconcile")
+        if (peer_obligations.runner_duty_due(state, RECONCILE_DUE_SECONDS)
+                and time.monotonic_ns() < deadline_ns):
+            import dispatch_completion_join as join
+            jobs = root / "jobs.log"
+            remaining = max(0.0, (deadline_ns - time.monotonic_ns()) / 1_000_000_000)
+            cursor = state.get("cursor")
+            registry_cursor = state.get("registry_cursor")
+            counts = join.reconcile_pending_delivery(
+                jobs, max_rows=RECONCILE_MAX_ROWS,
+                time_budget_s=min(RECONCILE_TIME_BUDGET_S, remaining),
+                start_after=cursor if isinstance(cursor, str) else None,
+                registry_start=(registry_cursor if isinstance(registry_cursor, int)
+                                and not isinstance(registry_cursor, bool) else None))
+            result["reconcile"] = counts
+            complete = (not counts.get("budget_exhausted") and counts.get("cursor") is None
+                        and counts.get("registry_cursor") is None)
+            peer_obligations.write_runner_duty_state(
+                root, "reconcile", {
+                    # An unfinished walk is due on the next pass, not in six hours,
+                    # and resumes where it stopped: the first 2,575-record backlog
+                    # then clears within hours.
+                    "last_pass_ns": time.time_ns() if complete else 0,
+                    "cursor": counts.get("cursor"),
+                    "registry_cursor": counts.get("registry_cursor"),
+                    "rows_read": counts.get("rows_read", 0),
+                    "records_read": counts.get("records_read", 0),
+                    "pruned_records": counts.get("pruned_records", 0),
+                    "expired": counts.get("expired", 0),
+                    "budget_exhausted": counts.get("budget_exhausted", 0)},
+                expected_root_identity=identity)
+    except (OSError, ValueError, RuntimeError):
         pass
     try:
         state = peer_obligations.read_runner_duty_state(root, "retire")
