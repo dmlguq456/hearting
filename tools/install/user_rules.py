@@ -7,8 +7,9 @@ rules live in Claude's user rule folder (``$CLAUDE_CONFIG_DIR/rules``, default
 OpenCode ``AGENTS.md`` as the rules block followed by the bootstrap; without
 rules the file stays the plain bootstrap link. The block holds each rule's text
 byte for byte. Rules scoped to paths by front matter are left out, because
-OpenCode would apply them everywhere. Standard library only, so worker homes
-can load this file by path.
+OpenCode would apply them everywhere, and a file that is not UTF-8 text is
+skipped and reported. Standard library only, so worker homes can load this
+file by path.
 """
 
 from __future__ import annotations
@@ -19,46 +20,44 @@ from pathlib import Path
 
 BEGIN = b"<!-- hearting:user-rules begin"
 END = b"<!-- hearting:user-rules end -->"
-_SCOPED = re.compile(rb"\A---\r?\n(?:(?!---\r?\n).*\r?\n)*?paths\s*:", re.M)
+# The header names no path, so the bytes do not depend on which config dir ran.
+HEADER = (BEGIN + b" (Hearting writes this whole file: the user's own rules from Claude's"
+          b" user rule folder, $CLAUDE_CONFIG_DIR/rules or ~/.claude/rules, then the"
+          b" Hearting bootstrap. Edit the rules there; install and update rewrite this"
+          b" file and uninstall removes it.) -->\n")
+_SCOPED = re.compile(rb"\A(?:\xef\xbb\xbf)?---\r?\n(?:(?!---\r?\n).*\r?\n)*?paths\s*:", re.M)
 
 
-def rule_files(claude_home: Path) -> list[tuple[str, bytes]]:
-    """Unscoped ``*.md`` rules under ``claude_home/rules``, sorted by relative path."""
+def collect(claude_home: Path) -> tuple[list[tuple[str, bytes]], list[str]]:
+    """Unscoped UTF-8 ``*.md`` rules under ``claude_home/rules`` and skip notes."""
     root = Path(claude_home) / "rules"
-    found = []
+    found, skipped = [], []
     if not root.is_dir():
-        return found
+        return found, skipped
     for directory, _dirs, names in os.walk(root):
         for name in names:
             path = Path(directory) / name
             if not name.endswith(".md") or not path.is_file():
                 continue
+            relative = path.relative_to(root).as_posix()
             try:
                 data = path.read_bytes()
-            except OSError:
+                data.decode("utf-8")
+            except UnicodeDecodeError:
+                skipped.append(f"{relative} is not UTF-8 text")
+                continue
+            except OSError as exc:
+                skipped.append(f"{relative} is unreadable ({type(exc).__name__})")
                 continue
             if data.strip() and not _SCOPED.match(data):
-                found.append((path.relative_to(root).as_posix(), data))
-    return sorted(found)
+                found.append((relative, data))
+    return sorted(found), sorted(skipped)
 
 
 def block(claude_home: Path) -> bytes:
     """The marked rules block, or empty bytes when there is no rule to carry."""
-    rules = rule_files(claude_home)
+    rules = collect(claude_home)[0]
     if not rules:
         return b""
-    begin = (BEGIN + b" (the user's own rules from " + str(Path(claude_home) / "rules").encode()
-             + b"; managed by Hearting: install and update refresh this block, uninstall removes it) -->\n")
     body = b"\n".join(data if data.endswith(b"\n") else data + b"\n" for _name, data in rules)
-    return begin + body + END + b"\n\n"
-
-
-def strip(data: bytes) -> bytes:
-    """``data`` without a leading rules block; other input is returned unchanged."""
-    if not data.startswith(BEGIN):
-        return data
-    end = data.find(END)
-    if end < 0:
-        return data
-    rest = data[end + len(END):]
-    return rest[2:] if rest.startswith(b"\n\n") else rest.lstrip(b"\n")
+    return HEADER + body + END + b"\n\n"

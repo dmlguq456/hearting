@@ -35,21 +35,32 @@ class UserRulesBlockTest(unittest.TestCase):
         self.write("z-external.md", RULE)
         self.write("team/a-style.md", b"style without a final newline")
         self.write("scoped.md", b"---\ndescription: api\npaths:\n  - src/api/**\n---\nonly for the api\n")
+        self.write("bom-scoped.md", b"\xef\xbb\xbf---\npaths: src/**\n---\nalso scoped\n")
         self.write("front.md", b"---\ndescription: everywhere\n---\nkept\n")
         block = user_rules.block(self.claude)
-        self.assertTrue(block.startswith(user_rules.BEGIN))
-        self.assertIn(str(self.claude / "rules").encode(), block.splitlines()[0])
+        self.assertTrue(block.startswith(user_rules.HEADER))
         self.assertTrue(block.endswith(user_rules.END + b"\n\n"))
-        body = block[block.index(b"\n") + 1:block.index(user_rules.END)]
+        body = block[len(user_rules.HEADER):block.index(user_rules.END)]
         self.assertEqual(body, b"---\ndescription: everywhere\n---\nkept\n\n"
                                b"style without a final newline\n\n" + RULE)
         self.assertNotIn(b"only for the api", block)
+        self.assertNotIn(b"also scoped", block)
 
-    def test_strip_returns_the_bootstrap_exactly(self):
+    def test_header_names_no_path_so_bytes_match_across_config_dirs(self):
         self.write("external.md", RULE)
-        bootstrap = b"# AGENTS.md - OpenCode Adapter Bootstrap\n\nbody\n"
-        self.assertEqual(user_rules.strip(user_rules.block(self.claude) + bootstrap), bootstrap)
-        self.assertEqual(user_rules.strip(bootstrap), bootstrap)
+        other = self.claude.parent / "elsewhere"
+        (other / "rules").mkdir(parents=True)
+        (other / "rules/external.md").write_bytes(RULE)
+        self.assertEqual(user_rules.block(self.claude), user_rules.block(other))
+        self.assertNotIn(str(self.claude).encode(), user_rules.HEADER)
+
+    def test_a_file_that_is_not_utf8_is_skipped_with_a_note(self):
+        self.write("external.md", RULE)
+        self.write("legacy.md", "한글 규칙\n".encode("cp949"))
+        rules, skipped = user_rules.collect(self.claude)
+        self.assertEqual([name for name, _data in rules], ["external.md"])
+        self.assertEqual(skipped, ["legacy.md is not UTF-8 text"])
+        self.assertEqual(user_rules.block(self.claude).count(RULE), 1)
 
 
 if __name__ == "__main__":
