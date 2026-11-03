@@ -57,7 +57,7 @@ An explicit request to skip validation for this pass is also honored, whether it
 
 Regex-scan each `new_text` for claims that require grounding:
 
-- model names in camel case, hyphenated form, or acronym form, such as `FRCRN`, `TF-Locoformer`, `MP-SENet`, and `IF-CorrNet`
+- model names in camel case, hyphenated form, or acronym form, such as `FRCRN`, `TF-Locoformer`, `MP-SENet`, and `IF-Separator`
 - venue tags such as `IS 2024`, `T-ASLP 2023`, `ICASSP 2025`, `Interspeech`, `NeurIPS`, and `ICML`
 - year-plus-author forms such as `Luo 2017` and `[Wang et al., 2024]`
 - task categories such as denoising, dereverberation, general restoration, universal SE, BWE, and GSR

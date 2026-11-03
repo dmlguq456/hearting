@@ -374,13 +374,13 @@ class CensusHeaderTests(unittest.TestCase):
                              (" idle", "dim"), ("  ● 0", "blocked"), (" answer needed", "dim"),
                              ("   ", "branch_s")]}
         version, freshness = "v3.50.3-20-gad247e2b6", "02:38"
-        vm = ExplorerViewModel(hosts=[{"mark": "⌂", "name": "moving4"}], census=census,
+        vm = ExplorerViewModel(hosts=[{"mark": "⌂", "name": "gpu-a"}], census=census,
                                system={"install": {"version": version},
                                        "usage_api": {"freshness": freshness}})
         frame, trace = ef.trace_draw(draw, vm, NavState(view="OVERVIEW", scope="-"), 120, 45)
         row = frame.text_rows()[0]
 
-        self.assertTrue(row.startswith(" hosts ⌂ moving4 1/1"), row)
+        self.assertTrue(row.startswith(" hosts ⌂ gpu-a 1/1"), row)
         self.assertTrue(row.rstrip().endswith(
             "⠏ 0 working  ● 0 idle  ● 0 answer needed   hearting " + version +
             " · unmanaged  " + freshness), row)
@@ -403,14 +403,14 @@ class CensusHeaderTests(unittest.TestCase):
         self.assertTrue(row.rstrip().endswith(freshness), row)
         self.assertEqual(ef.frame_violations(frame, trace, 80, 45), [])
 
-    def test_18_session_moving4_header_keeps_identity_counts_version_and_clock_in_80_cells(self):
+    def test_18_session_gpu_a_header_keeps_identity_counts_version_and_clock_in_80_cells(self):
         from tools.fleet.explorer.frame import draw
         from tools.fleet.explorer.grid import cell_width
         from tools.fleet.explorer.state import NavState
 
-        hosts = [{"mark": "⌂", "name": "moving4"},
-                 {"mark": "◇", "name": "cnn"}, {"mark": "◇", "name": "xavier"},
-                 {"mark": "◇", "name": "larynx"}, {"mark": "◇", "name": "mpwav"}]
+        hosts = [{"mark": "⌂", "name": "gpu-a"},
+                 {"mark": "◇", "name": "cnn"}, {"mark": "◇", "name": "gpu-b"},
+                 {"mark": "◇", "name": "gpu-legacy"}, {"mark": "◇", "name": "gpu-c"}]
         states = ["working"] * 15 + ["idle"] * 2 + ["blocked"]
         version, freshness = "v3.50.3-20-gad247e2b6", "02:38"
         vm = self._header_vm(session_states=states, hosts=hosts, version=version, freshness=freshness)
@@ -418,7 +418,7 @@ class CensusHeaderTests(unittest.TestCase):
         row = frame.text_rows()[0]
 
         self.assertEqual(len(states), 18)
-        self.assertTrue(row.startswith("⌂ moving4 +4"), row)
+        self.assertTrue(row.startswith("⌂ gpu-a +4"), row)
         for fragment in ("⠏ 15", "● 2", "● 1", version, "hearting " + version + " · unmanaged", freshness):
             self.assertIn(fragment, row)
         self.assertTrue(row.rstrip().endswith(freshness), row)
@@ -449,12 +449,12 @@ class CensusHeaderTests(unittest.TestCase):
 
         version = "v" + "x" * 100
         vm = self._header_vm(session_states=["working"] * 15 + ["idle"] * 2 + ["blocked"],
-                             hosts=[{"mark": "⌂", "name": "moving4"}],
+                             hosts=[{"mark": "⌂", "name": "gpu-a"}],
                              version=version, freshness="02:38")
         frame, trace = ef.trace_draw(draw, vm, NavState(view="OVERVIEW", scope="-"), 80, 45)
         row = frame.text_rows()[0]
 
-        self.assertIn("⌂ moving4", row)
+        self.assertIn("⌂ gpu-a", row)
         self.assertIn("hearting", row)
         self.assertIn("unmanaged", row)
         self.assertIn("…", row)
@@ -471,8 +471,8 @@ class CensusHeaderTests(unittest.TestCase):
 
         host_name = "trainer-west-gpu-node-01"
         hosts = [{"mark": "⌂", "name": host_name}, {"mark": "◇", "name": "cnn"},
-                 {"mark": "◇", "name": "xavier"}, {"mark": "◇", "name": "larynx"},
-                 {"mark": "◇", "name": "mpwav"}]
+                 {"mark": "◇", "name": "gpu-b"}, {"mark": "◇", "name": "gpu-legacy"},
+                 {"mark": "◇", "name": "gpu-c"}]
         version, freshness = "v3.50.3-20-gad247e2b6", "02:38"
         vm = self._header_vm(session_states=["working"] * 15 + ["idle"] * 2 + ["blocked"],
                              hosts=hosts, version=version, freshness=freshness)
@@ -603,8 +603,8 @@ class CensusHeaderTests(unittest.TestCase):
 
         version, freshness = "v3.50.3-20-gad247e2界6", "02:38"
         hosts = [{"mark": "⌂", "name": "moving界4"}, {"mark": "◇", "name": "cnn"},
-                 {"mark": "◇", "name": "xavier"}, {"mark": "◇", "name": "larynx"},
-                 {"mark": "◇", "name": "mpwav"}]
+                 {"mark": "◇", "name": "gpu-b"}, {"mark": "◇", "name": "gpu-legacy"},
+                 {"mark": "◇", "name": "gpu-c"}]
         vm = self._header_vm(session_states=["working"] * 15 + ["idle"] * 2 + ["blocked"],
                              hosts=hosts, version=version, freshness=freshness)
         frame, trace = ef.trace_draw(draw, vm, NavState(view="OVERVIEW", scope="-"), 80, 45)

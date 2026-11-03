@@ -20,15 +20,15 @@ _HANDLE = importlib.import_module(live.__name__.rsplit(".", 2)[0] + ".session_ha
 _HERDR = {
     ("claude", "9922f71a-2d7c-4e6f-aaa9-606f83f1ffc3"): ("39", "/home/example/cairn"),
     ("opencode", "ses_e88c7e169ffeY6FnJb6wuNZ0LA"):
-        ("c4", "/home/example/NN_Zoo/BC_ResNet-wt/mac-demo-simple-ui-20261026"),
+        ("c4", "/home/example/Project_Zoo/BC_ResNet-wt/mac-demo-simple-ui-20261026"),
     ("opencode", "ses_e89e9575cffec0fhda7G0B6IpZ"):
-        ("ae", "/home/example/NN_Zoo/SR_CorrNet_SD-wt/csi-booth-ui-20261026"),
+        ("ae", "/home/example/Project_Zoo/SR_ModelA_SD-wt/csi-booth-ui-20261026"),
     ("opencode", "ses_e876e14aaffe3VGJH5fjDwLL8E"): ("cc", "/home/example/hearting"),
 }
 
 # The measured pair: the OpenCode process Fleet saw without a native session id, and Cairn.
 _OPENCODE = {"harness": "opencode", "pid": 2099088, "proc_start": "138584073", "session_id": None,
-             "cwd": "/home/example/NN_Zoo/BC_ResNet-wt/mac-demo-simple-ui-20261026"}
+             "cwd": "/home/example/Project_Zoo/BC_ResNet-wt/mac-demo-simple-ui-20261026"}
 _CLAUDE = {"harness": "claude", "pid": 2100610, "proc_start": "138585008",
            "session_id": "9922f71a-2d7c-4e6f-aaa9-606f83f1ffc3", "session_tag": "39",
            "cwd": "/home/example/cairn"}

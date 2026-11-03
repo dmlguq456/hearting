@@ -19,7 +19,7 @@ from fleet.collectors import compute_hosts  # noqa: E402
 from fleet.model import DispatchJob, ResourceJob, Session, fmt_min  # noqa: E402
 
 
-SR_CWD = "/home/example/NN_Zoo/SR_CorrNet_DSC"
+SR_CWD = "/home/example/Project_Zoo/SR_ModelA_DSC"
 M6_COMMAND = ("/home/example/env/bin/python run.py --engine_mode train "
               "--config _m6_lx3nx4.yaml --gpuid 0")
 SESSION_ID = "01a0e597-1111-2222-3333-444455556666"
@@ -75,7 +75,7 @@ class UnregisteredGpuRowTest(UnregisteredGpuTestBase):
 
     def test_unregistered_process_renders_in_its_project_card(self):
         text = self.lines(_snapshot((0, [_process()])))
-        header = next(i for i, line in enumerate(text) if "SR_CorrNet_DSC/" in line)
+        header = next(i for i, line in enumerate(text) if "SR_ModelA_DSC/" in line)
         row = next(i for i, line in enumerate(text) if "GPU mgpu-a1:0" in line)
         self.assertGreater(row, header)
         for token in ("M6 train", "19 GB", fmt_min(4500), "unregistered"):
@@ -188,9 +188,9 @@ class UnregisteredGpuRowTest(UnregisteredGpuTestBase):
         # plus a long script path with no --run-id/--name/--config identifier.
         # Path prefixes must not hide the script, even in the narrower row.
         entry = compute_hosts.unregistered_gpu(_snapshot((0, [_process(
-            command="/home/example/NN_Zoo/TF-Rehancer_artifacts/envs/"
+            command="/home/example/Project_Zoo/TF-Rehancer_artifacts/envs/"
                      "private_cnn_cu128_20261006/bin/python "
-                     "/home/example/NN_Zoo/TF-Rehancer_artifacts/envs/"
+                     "/home/example/Project_Zoo/TF-Rehancer_artifacts/envs/"
                      "private_cnn_train.py",
             used_memory_mib=4915, elapsed_s=8 * 3600 + 47 * 60,
         )])))[0]
@@ -279,7 +279,7 @@ class UnregisteredGpuRowTest(UnregisteredGpuTestBase):
         self.assertEqual(render._gpu_strip_keys([mem], gpu_resources), set())
         text = self.lines(snapshot, [mem])
         self.assertEqual(sum(line.count("● GPU") for line in text), 1)
-        header = next(i for i, line in enumerate(text) if "SR_CorrNet_DSC/" in line)
+        header = next(i for i, line in enumerate(text) if "SR_ModelA_DSC/" in line)
         row = next(i for i, line in enumerate(text) if "● GPU mgpu-a1:0" in line)
         self.assertGreater(row, header)
 
@@ -454,7 +454,7 @@ class UnregisteredGpuJsonTest(unittest.TestCase):
         self.assertNotIn("unregistered_gpu", bare)
         (entry,) = payload["unregistered_gpu"]
         self.assertEqual(entry["pid"], 600)
-        self.assertEqual(entry["project"], "SR_CorrNet_DSC")
+        self.assertEqual(entry["project"], "SR_ModelA_DSC")
         self.assertEqual(entry["used_memory_mib"], 19208)
         self.assertEqual(entry["gpu_indexes"], [0])
         self.assertEqual(entry["cwd"], SR_CWD)
