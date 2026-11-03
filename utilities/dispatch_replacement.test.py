@@ -2444,6 +2444,36 @@ class ReplacementTest(unittest.TestCase):
         self.assertEqual(PD.read(self.root, 'parent', old_intermediate['delivery_id'])['state'], 'acked')
         self.assertEqual(delivered[0]['state'], 'claimed')
 
+    def test_an_opencode_parent_gets_the_death_notice_instead_of_a_silent_reservation(self):
+        """C-#1153: the OpenCode turn carrier delivers notices but launches nothing, so
+        a reservation at the terminal commit only deferred the notice and left the
+        parent with nothing until a person ran `start`."""
+        import dispatch_completion_join as JOIN
+        import dispatch_pending_delivery as PD
+
+        self.meta.update(parent_sid='parent', parent_attempt_id='att-parent',
+                         parent_completion_delivery='opencode-turn')
+        (R._directory(self.jobs)/'inputs/att-source.json').unlink()
+        self.meta.update(D.parse_registry_metadata(R.seal_launch_input(self.args,'codex','the raw task')))
+        self.write(self.meta, status='open')
+        self.assertTrue(D.close_attempt_row(self.jobs, 'att-source', 'dead-exact-pid',
+                                            evidence={'failure_class':'contract'}))
+        path=JOIN.materialize_after_terminal_close(self.jobs, 'att-source')
+        self.assertEqual(R.recovery_delivery_state(self.jobs, 'att-source'), 'none')
+        original=PD.read(self.root, 'parent', path.stem)
+        claimed=PD.claim(self.root, 'parent', original['delivery_id'],
+                         claim_owner='fixture', lease_seconds=30, jobs=self.jobs)
+        self.assertEqual(claimed['state'], 'claimed')
+        # The parent's `start` still reserves and launches the same replacement.
+        record=R.claim(self.jobs, 'att-source')
+        self.assertEqual(record['original_attempt_id'], 'att-source')
+        for carrier, expected in (('claude-parent-runtime', True), ('codex-native-queue', True),
+                                  ('opencode-turn', False), ('session-resume-supervised', True),
+                                  ('', True)):
+            with self.subTest(carrier=carrier):
+                self.assertIs(R._parent_carrier_replaces(
+                    {'parent_completion_delivery': carrier}), expected)
+
     def test_terminal_delivery_is_deferred_before_successor_registration(self):
         import dispatch_completion_join as JOIN
         import dispatch_pending_delivery as PD
