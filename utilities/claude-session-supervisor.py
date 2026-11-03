@@ -936,6 +936,29 @@ def resolved_turn_transport(args: argparse.Namespace) -> str:
     return "resume-process" if args.claude_command else "stream-json"
 
 
+_TURN_USAGE_KEYS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")
+
+
+def turn_token_usage(args, turn_ordinal: int, transport: str, result: Any) -> dict[str, Any] | None:
+    """One turn's token counts for the attempt log, or None.
+
+    Only a `resume-process` turn is one process whose `result` usage covers exactly
+    that turn, so the turns add up to the session; a long-lived stream's result is
+    not proven to, and is left out (its session total reads as unknown). Counters
+    only -- no text leaves the turn."""
+    if transport != "resume-process" or not isinstance(result, dict):
+        return None
+    usage = result.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    counts = {key: usage[key] for key in _TURN_USAGE_KEYS
+              if isinstance(usage.get(key), int) and not isinstance(usage.get(key), bool) and usage[key] >= 0}
+    if not counts:
+        return None
+    return {"type": "dispatch.supervisor.token_usage", "parent_attempt_id": args.parent_attempt_id,
+            "turn_ordinal": turn_ordinal, "token_usage": {"turn": counts}}
+
+
 def classify_runtime_result(args, result, process_exit):
     runtime = getattr(args, "runtime_harness", "claude")
     if runtime == "claude":
@@ -1500,6 +1523,9 @@ def main(argv: list[str] | None = None) -> int:
                 stream_session=stream_session,
                 **turn_kwargs,
             )
+            usage_row = turn_token_usage(args, turn_ordinal, turn_transport, result)
+            if usage_row is not None:
+                emit(usage_row)
             if process_rc == 0:
                 control.started(str(turn_ordinal))
                 control.completed(str(turn_ordinal))
