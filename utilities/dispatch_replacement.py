@@ -1127,12 +1127,11 @@ def _check_record(record, family, source=None):
     return record
 
 
-def legacy_budget_exhausted(jobs, lines, source, *, route=None, include_family=False):
+def legacy_budget_exhausted(jobs, lines, source, *, route=None):
     """Read SD106 and SD157 consumption from the caller's jobs-lock snapshot.
 
-    Do not move this check ahead of SD106's exact existing-recovery-id replay.
-    SD157 permits its own by-source reservation to resume; SD106 calls with
-    include_family=True and must not consume even that reservation again.
+    SD157 permits its own by-source reservation to resume. The SD106 caller that
+    also counted the family reservation itself went with its writer (#1170).
     No registry, route, or index is written and no second jobs lock is taken.
     """
     rows = _rows(lines)
@@ -1183,25 +1182,17 @@ def legacy_budget_exhausted(jobs, lines, source, *, route=None, include_family=F
         legacy = (meta.get('retry_ordinal') == '1'
                   or meta.get('recovery_exhausted') == '1'
                   or (meta.get('start_permitted') == '0' and meta.get('recovery_id'))
-                  or attention is not None or bool(include_family and meta.get('automatic_retry_of')
-                                                    and not meta.get('replacement_family_id')))
+                  or attention is not None)
         family_hint = (reservation or {}).get('family_id')
-        if (family_hint and not include_family and other != aid
+        if (family_hint and other != aid
                 and _read(_record_path(jobs, family_hint)) is None):
             index_error = DC.DispatchContractError('replacement-claim-pending')
-        if family_hint and _is_capacity_record(_read(_record_path(jobs, family_hint))):
-            if include_family and other == aid:
-                return True  # SD106 must not add a second successor to a resumed source.
-            family_hint = None
         # SD157's own reservation is a replay, not a second consumption.
         # Its own SD106 exhaustion, however, is always a veto.
         # Automatic transport succession has no cumulative family budget.
-        # SD106 cancellation recovery cannot add a successor to a reserved source.
-        family_consumes = bool(family_hint) and include_family
-        if (legacy or family_consumes or index_error or other in reference_ids
+        if (legacy or index_error or other in reference_ids
                 or meta.get('automatic_retry_of') == aid):
-            candidates.append((fields, meta, bool(legacy), family_hint,
-                               family_consumes, index_error))
+            candidates.append((fields, meta, bool(legacy), index_error))
     if not candidates and not references:
         # Preserve legacy route-less first-claim callers: no consumption
         # evidence means no reason to require a historical route here.
@@ -1227,28 +1218,15 @@ def legacy_budget_exhausted(jobs, lines, source, *, route=None, include_family=F
         route = historical_route(source)
     if route is None:
         # An exact predecessor reference cannot be waved away as unrelated.
-        if references or any(meta.get('attempt_id') == aid and
-                             (legacy or family_consumes or error)
-                             for _, meta, legacy, _, family_consumes, error in candidates):
+        if references or any(meta.get('attempt_id') == aid and (legacy or error)
+                             for _, meta, legacy, error in candidates):
             raise DC.DispatchContractError('replacement-legacy-budget-link-unproven')
         return False
     logical = _logical_key(route, source)
-    family = _digest(logical)
     lineage = {r['route_id']: r for r in verified_route_lineage(route)}
-    if include_family:
-        record = _read(_record_path(jobs, family))
-        if record is not None:
-            _check_record(record, family)
-            return True
 
-    for _, prior, legacy, family_hint, family_consumes, index_error in candidates:
+    for _, prior, legacy, index_error in candidates:
         other = prior.get('attempt_id')
-        # A checked by-source index is already a durable exact family binding;
-        # no family record or original-row annotation need exist yet.
-        if family_consumes and family_hint == family:
-            if index_error:
-                raise DC.DispatchContractError('replacement-legacy-budget-link-unproven') from index_error
-            return True
         prior_id = prior.get('owner_route_id') or prior.get('route_id')
         prior_hash = prior.get('owner_route_hash') or prior.get('route_hash')
         previous = lineage.get(prior_id)
@@ -1283,9 +1261,7 @@ def legacy_budget_exhausted(jobs, lines, source, *, route=None, include_family=F
         # From here on the prior row belongs to this exact logical family.
         if index_error:
             raise DC.DispatchContractError('replacement-legacy-budget-link-unproven') from index_error
-        if family_consumes and family_hint != family:
-            raise DC.DispatchContractError('replacement-legacy-budget-link-unproven')
-        if legacy or family_consumes:
+        if legacy:
             return True
     if references:
         raise DC.DispatchContractError('replacement-legacy-budget-link-unproven')
