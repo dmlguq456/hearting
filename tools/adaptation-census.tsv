@@ -9,10 +9,7 @@
 # *.test.py/*.test.sh utilities defer automatically. The short projected lists stay in the
 # script beside the checks that verify each projected link.
 list	name
-shared-utility-deferred	artifact-knowledge-feed.py
 shared-utility-deferred	artifact-quiescence.py
-shared-utility-deferred	artifact-relocation-live.py
-shared-utility-deferred	artifact-relocation.py
 shared-utility-deferred	artifact_campaign.py
 shared-utility-deferred	artifact_cycle_titles.py
 shared-utility-deferred	artifact_locator_amendment.py
@@ -65,6 +62,8 @@ shared-utility-deferred	owner_write_advisory.py
 shared-utility-deferred	pane_ownership.py
 shared-utility-deferred	gpu_execution_sandbox.py
 shared-utility-deferred	prd_readability.py
+shared-utility-deferred	prior-art.py
+shared-utility-deferred	questions.py
 shared-utility-deferred	recovery_evidence.py
 shared-utility-deferred	recovery_history.py
 shared-utility-deferred	report_verification_projection.py
@@ -360,6 +359,7 @@ tool-deferred	lab-config-provenance.py
 tool-deferred	lab_config_provenance.test.py
 tool-deferred	ledger_invariant.test.py
 tool-deferred	measure_hook_before_after.py
+tool-deferred	measure_state_file_before_after.py
 tool-deferred	migration-manifest.py
 tool-deferred	migration_manifest.test.py
 tool-deferred	native-skill-discovery.test.py

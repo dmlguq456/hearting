@@ -129,6 +129,37 @@ def attempt_status(jobs: Path, attempt_id: str) -> str | None:
     return attempt_record(jobs, attempt_id)[0]
 
 
+def follow_installed_release(args) -> None:
+    """Once its attempt runs nothing, hand this watch to the installed release (same PID).
+
+    A watch can outlive its attempt while a close or a recovery settles, and
+    nothing else would ever move it off the release that started it. While the
+    exact owner, or any process of its attempt, is still live, the attempt runs
+    its own release's code and the watch stays with it, so one release's code
+    settles the attempt (OPERATIONS §5.9a). It is called only before a wait,
+    where nothing is half done: the registry row and the exact owner identity
+    are the watch's only inputs, so the new code starts this same watch again
+    from them. Without its original arguments (a direct call) or when nothing
+    moved, the watch continues here.
+    """
+    argv = getattr(args, "release_argv", None)
+    if argv is None:
+        return
+    try:
+        from parent_next_directive import release_moved
+        if not release_moved(Path(__file__).resolve().parents[1]):
+            return
+        if process_start(args.pid) == args.pid_start:
+            return
+        observed, _phase, _metadata = observed_owner_lifecycle(args)
+        if observed is not None and observed.process_state != "quiescent":
+            return
+        import peer_obligations
+        peer_obligations.follow_installed_release(__file__, argv)
+    except Exception:  # noqa: BLE001 -- a failed move keeps watching with this code
+        pass
+
+
 def _run_registry(operation: str, args) -> subprocess.CompletedProcess:
     command = [
         sys.executable,
@@ -261,6 +292,8 @@ def recover_waiting_continuation(args) -> bool | None:
         _status, current = attempt_record(args.jobs, args.attempt_id)
         if _status not in OPEN | {"done"} or route_parent_close.row_requested(current, args.jobs):
             return None
+        # Nothing is closed or started before this wait ends.
+        follow_installed_release(args)
         time.sleep(args.interval)
     _status, current = attempt_record(args.jobs, args.attempt_id)
     if _status not in OPEN | {"done"} or route_parent_close.row_requested(current, args.jobs):
@@ -362,6 +395,7 @@ def watch(args) -> int:
             if result and result.get("state") == "cancelled":
                 _remove_supervisor_state(args)
                 return 0
+            follow_installed_release(args)
             time.sleep(args.interval)
             continue
         if status not in OPEN:
@@ -419,7 +453,10 @@ def main(argv=None) -> int:
     parser.add_argument("--pid", type=int, required=True)
     parser.add_argument("--pid-start", required=True)
     parser.add_argument("--interval", type=float, default=2.0)
-    args = parser.parse_args(argv)
+    release_argv = list(sys.argv[1:] if argv is None else argv)
+    args = parser.parse_args(release_argv)
+    # The same arguments start this watch again on the installed release.
+    args.release_argv = release_argv
     if args.pid <= 0 or args.interval <= 0:
         parser.error("--pid and --interval must be positive")
     args.jobs = args.jobs.resolve()
@@ -438,11 +475,14 @@ def main(argv=None) -> int:
             if route_parent_close.row_requested(metadata, args.jobs):
                 closing = route_parent_close.recover_attempt(args.jobs, metadata)
                 if not closing or closing.get("state") != "cancelled":
+                    follow_installed_release(args)
                     time.sleep(args.interval)
                     continue
             return result
         except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
             print(f"orphan-recovery-retained attempt_id={args.attempt_id} reason={exc}", file=sys.stderr, flush=True)
+            # A retained recovery is retried from the registry; newer code may settle it.
+            follow_installed_release(args)
             time.sleep(max(args.interval, 30.0))
 
 

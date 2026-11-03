@@ -23,6 +23,27 @@ events when no persistent transcript exists. Task, run, Bash call, full session,
 and source generation remain bound; task-set snapshots alone do not create rows,
 and native completion remains separate from process liveness.
 
+## Session Notes
+
+The always-loaded `adapters/claude/CLAUDE.md` keeps purpose, judgment, where
+to look, and the instruction to follow the next action the runtime prints.
+Detail it used to carry lives here and in the core sections it names.
+
+- Claude hooks realize portable invariants for workflow signals, spec-read
+  observations, memory, and design checks. Main-session memory lifecycle does
+  not run for workers. Session end never owns destructive worktree cleanup.
+- Use `statusline.sh` only for runtime status.
+- Repo-root `skills/` is the canonical Skill authoring tree;
+  `tools/sync-entry-skill-layer.py` projects it into `adapters/claude/skills/`
+  (generated — do not hand-edit the projection). Claude-native hooks, commands,
+  settings, and kernel helper agents live under `adapters/claude/`; behavior
+  personas live in the portable unit catalog `roles/units/`.
+- Harness utilities run as `hearting run <utility>`; a checkout-relative call
+  is for dev activation only (`AGENT_HOME` is that checkout itself).
+- Peer-session steering, `peer-steward.py watch`/`wait`/`start`/`prompt`, and
+  what `prompted=queued` versus an exact native receipt means are in
+  `core/OPERATIONS.md §5.14`.
+
 ## Worker bootstrap boundary
 
 Headless dispatch injects the portable kernel and one worker-type fragment.

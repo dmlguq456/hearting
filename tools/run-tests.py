@@ -385,6 +385,8 @@ def build_isolated_env(tmpdir: Path, repo_root: Path = ROOT) -> dict[str, str]:
     env["HEARTING_WORKFLOW_GROUP_REVIEW"] = "off"
     # ...nor the background campaign display-title job.
     env["HEARTING_CAMPAIGN_TITLE_AUTO"] = "off"
+    # ...nor the framed route's advisory prior-art scan, which calls a real model.
+    env["HEARTING_PRIOR_ART"] = "off"
     # Same for the memory exchange: no detached worker races the temp-dir cleanup;
     # the scheduler's own suite turns it back on.
     env["MEM_EXCHANGE_AUTO"] = "0"

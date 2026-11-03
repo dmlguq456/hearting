@@ -276,6 +276,29 @@ class ExtractionTest(unittest.TestCase):
         self.assertNotIn("budget", proposal["legs"][0])
         self.assertEqual(notes, ["ignored:note", "ignored:done_when", "ignored:legs[0]:budget"])
 
+    def test_size_chooses_an_omitted_shape_and_a_different_shape_is_kept_and_shown(self):
+        for size, shape in RP.SIZE_SHAPE.items():
+            with self.subTest(size=size):
+                proposal, _, notes = RP.parse_proposal_with_notes(
+                    brief([{"capability": "autopilot-code", "size": size, "why": "fits the work"}]))
+                self.assertEqual((proposal["legs"][0]["shape"], proposal["legs"][0]["size"]), (shape, size))
+                self.assertEqual(notes, [])
+        kept, _, notes = RP.parse_proposal_with_notes(brief([{**CODE_STAGED, "size": "one-pass"}]))
+        self.assertEqual((kept["legs"][0]["shape"], kept["legs"][0]["size"]), ("staged", "one-pass"))
+        self.assertEqual(notes, ["kept:legs[0].shape:staged-for-size-one-pass"])
+        odd, _, notes = RP.parse_proposal_with_notes(brief([{**DIRECT, "size": "huge"}]))
+        self.assertNotIn("size", odd["legs"][0])
+        self.assertEqual(notes, ["ignored:legs[0].size"])
+        self.assertEqual(self.reason(brief([{"capability": "autopilot-code", "size": "huge"}])),
+                         "schema-invalid:legs[0].shape")
+        self.assertEqual(self.reason(brief([{"capability": "autopilot-code", "size": "one-pass",
+                                             "graph": ["plan", "execute"]}])),
+                         "schema-invalid:legs[0].graph-only-staged")
+        # The size is shown to the person, not compared: an interview copy without it is the same route.
+        bare = {"legs": [{key: value for key, value in kept["legs"][0].items() if key != "size"}]}
+        self.assertTrue(RP.same_proposal(kept, bare))
+        self.assertNotIn("size", self.parse(brief([DIRECT]))["legs"][0])
+
     def test_cwd_is_optional_and_an_interview_cannot_silently_change_the_worktree(self):
         one = self.parse(brief([{**DIRECT, "cwd": "/existing/worktree one"}]))
         two = self.parse(brief([{**DIRECT, "cwd": "/existing/worktree two"}]))
