@@ -360,6 +360,16 @@ class TmuxRecoveryTest(unittest.TestCase):
         active = self.tmux("display-message", "-p", "-t", "r1", "#{pane_id}").stdout.strip()
         self.assertEqual(active, self.pane)
 
+    def test_a_synchronized_window_runs_no_launcher_line(self) -> None:
+        self.tmux("set-option", "-w", "-t", self.pane, "synchronize-panes", "on")
+        rc, result = self.main("--start", "--pane", self.pane, "--workspace", str(self.workspace),
+                               "--launcher-state", str(self.state))
+        self.assertEqual((rc, result["reason"]), (RECOVERY.EXIT_UNAVAILABLE, "tmux-agent-start-failed"))
+        time.sleep(.3)
+        self.assertFalse(self.argv_file.exists())
+        typed = self.tmux("capture-pane", "-p", "-t", self.pane).stdout
+        self.assertNotIn("launched.txt", typed)
+
     def test_a_pane_in_another_directory_or_an_unsafe_socket_opens_nothing(self) -> None:
         other = self.root / "other"
         other.mkdir()

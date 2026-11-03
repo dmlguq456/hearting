@@ -822,6 +822,24 @@ def _tmux_surface(target):
     return terminal_surface.pane_surface(target)
 
 
+def _tmux_input_refusal(target):
+    """For a tmux pane: why typed input must not reach it now (a tmux mode, synchronized
+    panes, input off), else None. Herdr targets are unaffected."""
+    tmux = _tmux_surface(target)
+    return tmux.input_refusal(target) if tmux is not None else None
+
+
+_TMUX_INPUT_WAIT = frozenset({"pane-in-mode", "pane-synchronized", "pane-input-off", "pane-state-unknown"})
+
+
+def _tmux_target_address(target):
+    """A bare tmux pane id names a pane on this caller's server: carry that server with it."""
+    if not terminal_surface.is_tmux_pane(target) or terminal_surface.tmux_address(target)[1]:
+        return target
+    tmux = _tmux_surface(target)
+    return (tmux.address(target) if tmux is not None else None) or target
+
+
 def _surface_missing(target):
     """The terminal that would answer for ``target`` is not installed."""
     if terminal_surface.is_tmux_pane(target):
@@ -981,7 +999,7 @@ def _mark_observed(to_harness, to_session_id, to_name, from_identity=None, *, pa
 
 
 def cmd_wait(args):
-    target = args.target
+    target = args.target = _tmux_target_address(args.target)
     # S6: one record at wait start, append-only, never updated on return. F-100c: the
     # target is resolved through herdr first so the record carries an exact session id
     # (Fleet joins sent/recv and the `←` subtitle on it), the name being only a label.
@@ -6688,6 +6706,9 @@ def _native_idle_prompt_guard(target, harness, expected_sid, expected_pane,
         return "foreground-unverified", None
     if expected_foreground is not None and proof != expected_foreground:
         return "target-process-changed", None
+    refusal = _tmux_input_refusal(expected_pane)
+    if refusal:
+        return refusal, None
     lines = _read_screen(expected_pane)
     if lines is None:
         return "screen-unavailable", None
@@ -6748,6 +6769,9 @@ def _sidless_idle_prompt_guard(target, expected_harness, expected_pane,
     if expected_foreground is not None and not peer_message.first_input_process_matches(
             expected_foreground, proof):
         return "target-process-changed", None
+    refusal = _tmux_input_refusal(expected_pane)
+    if refusal:
+        return refusal, None
     lines = _read_screen(expected_pane)
     if lines is None:
         return "screen-unavailable", None
@@ -11364,6 +11388,7 @@ def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_bind
     if not body.strip():
         print("prompted=false reason=empty-body")
         return 1
+    args.target = _tmux_target_address(args.target)
 
     body = body.rstrip("\n")
     if producer_binding is not None and sender is not None:
@@ -11943,6 +11968,9 @@ def _clear_look(target, req):
         return "form-open", agent, None
     if state not in ("idle", "done"):
         return f"not-idle-{state}", agent, None
+    refusal = _tmux_input_refusal(target)
+    if refusal:
+        return refusal, agent, None
     lines = _read_screen(target)
     if lines is None:
         return "screen-unknown", agent, None
@@ -12231,7 +12259,7 @@ def cmd_idle_card_request(args):
     if not reason and not exact_session(agent):
         reason = "target-changed"
     if reason:
-        queued = reason in {"draft", "draft-unknown", "form-open", "screen-unknown"} \
+        queued = reason in {"draft", "draft-unknown", "form-open", "screen-unknown", *_TMUX_INPUT_WAIT} \
             or reason.startswith("not-idle-")
         return finish("queued" if queued else _look_outcome(reason), reason)
     req, why = clear.validate_idle_request(path, args.nonce)
@@ -12241,7 +12269,7 @@ def cmd_idle_card_request(args):
     if not reason and not exact_session(agent):
         reason = "target-changed"
     if reason:
-        queued = reason in {"draft", "draft-unknown", "form-open", "screen-unknown"} \
+        queued = reason in {"draft", "draft-unknown", "form-open", "screen-unknown", *_TMUX_INPUT_WAIT} \
             or reason.startswith("not-idle-")
         return finish("queued" if queued else _look_outcome(reason), reason)
     claim, why = clear.claim_idle_card_request(path, args.nonce)
@@ -12252,7 +12280,7 @@ def cmd_idle_card_request(args):
         reason = "target-changed"
     if reason:
         clear.release_unsent_idle_request(claim)
-        queued = reason in {"draft", "draft-unknown", "form-open", "screen-unknown"} \
+        queued = reason in {"draft", "draft-unknown", "form-open", "screen-unknown", *_TMUX_INPUT_WAIT} \
             or reason.startswith("not-idle-")
         return finish("queued" if queued else _look_outcome(reason), reason)
     checked, why = clear.validate_idle_request(path, args.nonce, _sending_claim=claim.get("idle_request"))

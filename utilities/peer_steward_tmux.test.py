@@ -122,20 +122,25 @@ class TmuxPeerStewardTest(unittest.TestCase):
         runner.start()
         self.addCleanup(runner.stop)
 
-    def tmux(self, *args):
-        return subprocess.run(["tmux", "-S", str(self.socket), *args], capture_output=True, text=True,
-                              env=self.env, timeout=10, check=False)
+    def tmux(self, *args, socket=None):
+        return subprocess.run(["tmux", "-S", str(socket or self.socket), *args], capture_output=True,
+                              text=True, env=self.env, timeout=10, check=False)
 
-    def start_claude(self, status="idle", draft="", *extra):
+    @property
+    def address(self):
+        return f"{self.pane}@{os.path.realpath(self.socket)}"
+
+    def start_claude(self, status="idle", draft="", *extra, socket=None, log=None, sid=OLD):
+        socket, log = socket or self.socket, log or self.log
         line = shlex.join(["exec", "-a", "claude", sys.executable, str(self.root / "claude.py"),
-                           str(self.log), OLD, status, NEW, draft or "", *extra])
-        self.tmux("send-keys", "-t", self.pane, "-l", "bash -c " + shlex.quote(line))
-        self.tmux("send-keys", "-t", self.pane, "Enter")
-        surface = peer_steward.terminal_surface.TmuxSurface(socket=str(self.socket))
+                           str(log), sid, status, NEW, draft or "", *extra])
+        self.tmux("send-keys", "-t", self.pane, "-l", "bash -c " + shlex.quote(line), socket=socket)
+        self.tmux("send-keys", "-t", self.pane, "Enter", socket=socket)
+        surface = peer_steward.terminal_surface.TmuxSurface(socket=str(socket))
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             agent = (surface.agent(self.pane) or {}).get("result", {}).get("agent") or {}
-            if (agent.get("agent_session") or {}).get("value") == OLD and "footer" in (
+            if (agent.get("agent_session") or {}).get("value") == sid and "footer" in (
                     surface.read_visible(self.pane) or ""):
                 return agent["pid"]
             time.sleep(.05)
@@ -144,13 +149,13 @@ class TmuxPeerStewardTest(unittest.TestCase):
     def book(self):
         import session_tidy as st
         import session_tidy_clear as clear
-        seat = st.Seat("pane", st._digest("pane", self.pane), self.pane, "claude", "")
+        seat = st.Seat("pane", st._digest("pane", self.address), self.address, "claude", "")
         now = time.time()
         with st.seat_lock(seat.key):
             card = st.write_card(seat, "claude", OLD, "card body", prompt_seq=0)
             clear._write_reservation({
                 "schema": 1, "nonce": "n0nce", "status": "reserved", "created": now, "deadline": now + 600,
-                "seat": {"kind": "pane", "key": seat.key, "pane": self.pane, "harness": "claude",
+                "seat": {"kind": "pane", "key": seat.key, "pane": self.address, "harness": "claude",
                          "project_key": ""},
                 "harness": "claude", "sid": OLD, "cwd": str(self.root),
                 "card_generation": card["generation"], "prompt_seq": 0})
@@ -169,7 +174,7 @@ class TmuxPeerStewardTest(unittest.TestCase):
     def test_an_idle_claude_with_an_empty_box_is_cleared_once_and_the_new_session_is_seen(self):
         self.start_claude()
         path = self.book()
-        rc, line = self.steward("clear", self.pane, "--request", str(path), "--nonce", "n0nce")
+        rc, line = self.steward("clear", self.address, "--request", str(path), "--nonce", "n0nce")
         self.assertEqual(rc, 0, line)
         self.assertIn("cleared=true", line)
         self.assertIn(f"old_session={OLD}", line)
@@ -185,7 +190,7 @@ class TmuxPeerStewardTest(unittest.TestCase):
                 self.log.write_bytes(b"")
                 self.start_claude(status=status, draft=draft)
                 path = self.book()
-                rc, line = self.steward("clear", self.pane, "--request", str(path), "--nonce", "n0nce")
+                rc, line = self.steward("clear", self.address, "--request", str(path), "--nonce", "n0nce")
                 self.assertNotEqual(rc, 0, line)
                 self.assertIn(reason, line)
                 self.assertEqual(self.typed(), b"")
@@ -196,7 +201,7 @@ class TmuxPeerStewardTest(unittest.TestCase):
         record = json.loads(path.read_text())
         record["sid"] = "11111111-2222-4333-8444-555555555555"
         path.write_text(json.dumps(record))
-        rc, line = self.steward("clear", self.pane, "--request", str(path), "--nonce", "n0nce")
+        rc, line = self.steward("clear", self.address, "--request", str(path), "--nonce", "n0nce")
         self.assertNotEqual(rc, 0, line)
         self.assertEqual(self.typed(), b"")
 
@@ -215,6 +220,59 @@ class TmuxPeerStewardTest(unittest.TestCase):
         rc, line = self.steward("prompt", self.pane, "hello from a peer")
         self.assertIn("prompted=queued", line)
         self.assertEqual(self.typed(), b"")
+
+    def test_a_pane_in_copy_mode_is_neither_prompted_nor_cleared(self):
+        self.start_claude()
+        self.tmux("copy-mode", "-t", self.pane)
+        rc, line = self.steward("prompt", self.pane, "first line\nsecond line")
+        self.assertIn("prompted=queued", line)
+        self.assertIn("reason=pane-in-mode", line)
+        path = self.book()
+        rc, line = self.steward("clear", self.address, "--request", str(path), "--nonce", "n0nce")
+        self.assertIn("cleared=skipped", line)
+        self.assertIn("reason=pane-in-mode", line)
+        self.assertEqual(self.typed(), b"")
+        self.assertEqual(self.tmux("display-message", "-p", "-t", self.pane, "#{pane_in_mode}").stdout.strip(), "1")
+
+    def test_a_synchronized_window_gives_neither_pane_any_input(self):
+        self.start_claude()
+        neighbour_log = self.root / "neighbour.log"
+        neighbour_log.touch()
+        line = shlex.join([sys.executable, str(self.root / "claude.py"), str(neighbour_log),
+                           "00000000-0000-4000-8000-000000000000", "idle", NEW, ""])
+        self.tmux("split-window", "-d", "-t", self.pane, line)
+        self.tmux("set-option", "-w", "-t", self.pane, "synchronize-panes", "on")
+        rc, line = self.steward("prompt", self.pane, "hello from a peer")
+        self.assertIn("reason=pane-synchronized", line)
+        path = self.book()
+        rc, line = self.steward("clear", self.address, "--request", str(path), "--nonce", "n0nce")
+        self.assertIn("reason=pane-synchronized", line)
+        self.assertEqual(self.typed(), b"")
+        self.assertEqual(neighbour_log.read_bytes(), b"")
+
+    def test_a_bare_pane_id_is_this_servers_pane_and_an_address_names_its_server(self):
+        other = self.root / "u.sock"
+        started = self.tmux("-f", "/dev/null", "new-session", "-d", "-s", "p2", "-x", "160", "-y", "40", "sh",
+                            socket=other)
+        self.assertEqual(started.returncode, 0, started.stderr)
+        self.addCleanup(lambda: subprocess.run(["tmux", "-S", str(other), "kill-server"],
+                                               capture_output=True, env=self.env, timeout=10, check=False))
+        self.assertEqual(self.tmux("display-message", "-p", "-t", "p2", "#{pane_id}", socket=other).stdout.strip(),
+                         self.pane)
+        other_log = self.root / "other.log"
+        other_log.touch()
+        self.start_claude()
+        self.start_claude(socket=other, log=other_log, sid="2b2b2b2b-3c3c-4d4d-8e8e-5f5f5f5f5f5f")
+        rc, line = self.steward("prompt", self.pane, "to this server")
+        self.assertIn(f"target={self.address}", line)
+        rc, line = self.steward("prompt", f"{self.pane}@{os.path.realpath(other)}", "to the other server")
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not other_log.read_bytes():
+            time.sleep(.05)
+        self.assertIn(b"to this server", self.typed())
+        self.assertNotIn(b"to the other server", self.typed())
+        self.assertIn(b"to the other server", other_log.read_bytes())
+        self.assertNotIn(b"to this server", other_log.read_bytes())
 
     def test_the_clear_helper_waits_for_the_runtime_turn_record_on_tmux(self):
         import session_tidy_clear as clear
@@ -244,7 +302,7 @@ class TmuxPeerStewardTest(unittest.TestCase):
             "seat = st.resolve_seat('claude', os.getcwd(), os.environ, sid)\n"
             "Path(out).write_text(json.dumps([seat.kind, seat.pane, seat.key]))\n")
         import session_tidy as st
-        self.assertEqual(seat, ["pane", self.pane, st._digest("pane", self.pane)])
+        self.assertEqual(seat, ["pane", self.address, st._digest("pane", self.address)])
         # The same hint in another process proves no pane: it stays the project seat.
         os.environ["TMUX_PANE"] = self.pane
         self.assertEqual(st.resolve_seat("claude", str(self.root), os.environ, OLD).kind, "project")

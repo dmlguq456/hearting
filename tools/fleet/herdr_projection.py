@@ -809,12 +809,14 @@ def _project_tmux(harness, session_id, pane, *, worker=None, observation=None,
     command = _metadata_command("tmux", harness, session_id, pane, display_relations=display_relations)
     header = command[command.index("--title") + 1] if "--title" in command else ""
     ok = False
-    if header:
-        try:
-            from terminal_surface import TmuxSurface, tmux_socket
-            ok = TmuxSurface(socket=tmux_socket()).annotate(pane, header, {"title": header})
-        except Exception:
-            ok = False
+    try:
+        from terminal_surface import pane_surface
+        surface = pane_surface(pane)
+        # One tmux pane id per server: name the pane as every other reader does.
+        pane = (surface.address(pane) if surface is not None else None) or pane
+        ok = bool(header and surface is not None and surface.annotate(pane, header, {"title": header}))
+    except Exception:
+        ok = False
     _assign_observed_tag(harness, session_id, pane)
     if observation is not None:
         observation["metadata_report"] = "exit0" if ok else "nonzero"
