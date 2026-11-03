@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -19,6 +21,11 @@ class UserRulesBlockTest(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory(prefix="user-rules-")
         self.addCleanup(temporary.cleanup)
         self.claude = Path(temporary.name) / ".claude"
+        # Never read the real user's switch: an absent override file means on.
+        switch = mock.patch.dict(os.environ, {
+            "DISPATCH_DEFAULTS_CONFIG": str(Path(temporary.name) / "no-defaults.yaml")})
+        switch.start()
+        self.addCleanup(switch.stop)
 
     def write(self, relative: str, data: bytes) -> None:
         path = self.claude / "rules" / relative
@@ -77,6 +84,11 @@ class UserRulesSwitchTest(unittest.TestCase):
             self.assertEqual(user_rules.block(claude, environ), b"")
             switch.write_text("schema_version: 4\nuser_rules:\n  opencode: carry\n")
             self.assertEqual(user_rules.block(claude, environ).count(RULE), 1)
+            switch.write_text("schema_version: 4\nuser_rules:\n  opencode: on\n")
+            self.assertTrue(user_rules.carry_enabled(environ))
+            switch.write_text("schema_version: 4\nuser_rules: opencode: off\n")
+            self.assertFalse(user_rules.carry_enabled(environ))
+            self.assertEqual(user_rules.switch_path(environ), str(switch))
 
 
 if __name__ == "__main__":

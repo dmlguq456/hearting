@@ -401,22 +401,24 @@ class DispatchDefaultsV4Tests(unittest.TestCase):
     missing these blocks entirely) must keep validating and the accessors
     must keep returning their defaults."""
 
+    V3_TEXT = (
+        "schema_version: 3\n"
+        "harnesses:\n  enabled: [claude, codex, opencode]\n"
+        "profiles:\n"
+        "  deep:\n    primary: [claude, codex]\n    relief: []\n"
+        "    last_resort: [opencode]\n    promote_relief_below: 0\n"
+        "  balanced-deep:\n    primary: [claude, codex]\n    relief: []\n"
+        "    last_resort: [opencode]\n    promote_relief_below: 0\n"
+        "  light:\n    primary: [claude, codex]\n    relief: [opencode]\n"
+        "    last_resort: []\n    promote_relief_below: 35\n"
+        "  mini:\n    primary: [claude, codex]\n    relief: [opencode]\n"
+        "    last_resort: []\n    promote_relief_below: 35\n"
+        "allocation:\n  strategy: capacity-aware\n  window: 30\n"
+        "capabilities:\n"
+    )
+
     def v3_config(self):
-        return D.parse_yaml_subset(
-            "schema_version: 3\n"
-            "harnesses:\n  enabled: [claude, codex, opencode]\n"
-            "profiles:\n"
-            "  deep:\n    primary: [claude, codex]\n    relief: []\n"
-            "    last_resort: [opencode]\n    promote_relief_below: 0\n"
-            "  balanced-deep:\n    primary: [claude, codex]\n    relief: []\n"
-            "    last_resort: [opencode]\n    promote_relief_below: 0\n"
-            "  light:\n    primary: [claude, codex]\n    relief: [opencode]\n"
-            "    last_resort: []\n    promote_relief_below: 35\n"
-            "  mini:\n    primary: [claude, codex]\n    relief: [opencode]\n"
-            "    last_resort: []\n    promote_relief_below: 35\n"
-            "allocation:\n  strategy: capacity-aware\n  window: 30\n"
-            "capabilities:\n"
-        )
+        return D.parse_yaml_subset(self.V3_TEXT)
 
     def v4_config(self):
         config = self.v3_config()
@@ -443,34 +445,76 @@ class DispatchDefaultsV4Tests(unittest.TestCase):
         errors = D.validate(config, self.capmap)
         self.assertTrue(any("steward requires schema_version 4" in e for e in errors), errors)
 
-    def test_user_rules_switch_defaults_to_carry_and_only_carry_keeps_it_on(self):
-        config = self.v4_config()
-        self.assertEqual(D.validate(config, self.capmap), [])
-        self.assertEqual(D.query_user_rules_opencode(config), "carry")
-        for value, expected, valid in (("carry", "carry", True), ("off", "off", True),
-                                       (False, "off", True), ("of", "off", False)):
-            with self.subTest(value=value):
-                config["user_rules"] = {"opencode": value}
+    # (text appended to a v3 file, expected mode, a warning expected)
+    USER_RULES_TABLE = (
+        ("", "carry", False),
+        ("user_rules:\n", "carry", False),
+        ("user_rules:\n  opencode: carry\n", "carry", False),
+        ("user_rules:\n  opencode: Carry\n", "carry", False),
+        ("user_rules:\n  opencode: on\n", "carry", False),
+        ("user_rules:\n  opencode: true\n", "carry", False),
+        ("user_rules:\n  opencode: True\n", "carry", False),
+        ("user_rules:\n  opencode: yes\n", "carry", False),
+        ("user_rules:\n  opencode: off\n", "off", False),
+        ("user_rules:\n  opencode: OFF\n", "off", False),
+        ("user_rules:\n  opencode: 'off'\n", "off", False),
+        ("user_rules:\n  opencode: false\n", "off", False),
+        ("user_rules:\n  opencode: no\n", "off", False),
+        ("user_rules:\n  opencode: off  # stop\n", "off", False),
+        ("user_rules:\n  opencode: of\n", "off", True),
+        ("user_rules:\n  opencode: 0\n", "off", True),
+        ("user_rules:\n  opencode:\n", "off", True),
+        ("user_rules:\n  opencode: off\n  claude: off\n", "off", True),
+        ("user_rules: opencode: off\n", "off", True),     # the one-liner the old notice showed
+        ("user_rules: {opencode: off}\n", "off", True),
+        ("user_rules: off\n", "off", True),
+        ("user_rules: true\n", "carry", True),
+        ("user_rules.opencode: off\n", "off", True),
+        ("user_rules.opencode: on\n", "carry", True),
+    )
+
+    def test_user_rules_values_share_one_table_and_never_invalidate_routing(self):
+        for text, expected, warns in self.USER_RULES_TABLE:
+            with self.subTest(text=text):
+                config = D.parse_yaml_subset(self.V3_TEXT + text)
                 self.assertEqual(D.query_user_rules_opencode(config), expected)
-                errors = D.validate(config, self.capmap)
-                self.assertEqual(errors == [], valid, errors)
-        config["user_rules"] = {"claude": "off"}
-        self.assertTrue(any("unknown user_rules key" in e for e in D.validate(config, self.capmap)))
-        config = self.v3_config()  # install seeds v3 files; the switch needs no migration
-        config["user_rules"] = {"opencode": "off"}
-        self.assertEqual(D.validate(config, self.capmap), [])
-        self.assertEqual(D.query_user_rules_opencode(config), "off")
+                self.assertEqual(D.validate(config, self.capmap), [])
+                mode, warnings = D.user_rules_opencode(config)
+                self.assertEqual(mode, expected)
+                self.assertEqual(bool(warnings), warns, warnings)
+                self.assertEqual(any(w.startswith("user_rules") for w in D.policy_warnings(config)),
+                                 warns)
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "dispatch-defaults.yaml"
+            path.write_text(Path(D.SHIPPED_CONFIG_PATH).read_text() + "user_rules: opencode: off\n")
+            config, warnings = D.load_validated(str(path), D.default_topology_path())
+            self.assertTrue(D.query_owners(config))  # routing still loads
+            self.assertTrue(any(w.startswith("user_rules") for w in warnings), warnings)
+            self.assertEqual(D.load_user_rules_opencode(str(path)), "off")
 
     def test_user_rules_switch_reads_only_its_own_key(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "dispatch-defaults.yaml"
             path.write_text("schema_version: 4\nunknown_section: 1\nuser_rules:\n  opencode: off\n")
             self.assertEqual(D.load_user_rules_opencode(str(path)), "off")
-            path.write_text("schema_version: 4\n odd: indentation\n")  # unparseable file
+            # A parse error elsewhere keeps an off switch off.
+            broken = ("schema_version: 4\nheadless:\n   no_progress_minutes: 30\n"
+                      "user_rules:\n  opencode: off\n")
+            path.write_text(broken)
             with self.assertRaises(D.DefaultsConfigError):
-                D.parse_yaml_subset(path.read_text())
+                D.parse_yaml_subset(broken)
+            self.assertEqual(D.load_user_rules_opencode(str(path)), "off")
+            path.write_text("schema_version: 4\n odd: indentation\nuser_rules: off\n")
+            self.assertEqual(D.load_user_rules_opencode(str(path)), "off")
+            path.write_text("schema_version: 4\n odd: indentation\n")
             self.assertEqual(D.load_user_rules_opencode(str(path)), "carry")
             self.assertEqual(D.load_user_rules_opencode(str(Path(temporary) / "absent.yaml")), "carry")
+
+    def test_user_config_path_follows_the_override(self):
+        self.assertEqual(D.user_config_path({"DISPATCH_DEFAULTS_CONFIG": "/x/defaults.yaml"}),
+                         "/x/defaults.yaml")
+        self.assertEqual(D.user_config_path({"XDG_CONFIG_HOME": "/cfg"}),
+                         "/cfg/hearting/dispatch-defaults.yaml")
 
     def test_v4_config_validates_and_still_answers_v3_shaped_queries(self):
         config = self.v4_config()

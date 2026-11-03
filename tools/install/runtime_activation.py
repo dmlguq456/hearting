@@ -650,23 +650,32 @@ def _opencode_bootstrap_entry(bootstrap: Path, dest: Path) -> dict:
     return entry
 
 
-def _opencode_carry_notices(desired: List[dict], previous: Optional[dict], scope: str) -> List[str]:
-    """Say when the user-rules carry starts or stops, and which rule files it skipped."""
-    dest = str(paths.runtime_home("opencode", scope) / "AGENTS.md")
-    switch = paths.hearting_config_dir() / "dispatch-defaults.yaml"
-    wanted = next((item.get("kind") for item in desired if item["dest"] == dest), None)
+def _opencode_carry_notices(previous: Optional[dict], scope: str,
+                            skipped: List[str]) -> List[str]:
+    """After activation: say when the carry started or stopped, and newly skipped rule files.
+
+    Start and stop follow what AGENTS.md actually is now, so a link the user put
+    there never reads as carried. A skipped file is named once, not every run.
+    """
+    dest = paths.runtime_home("opencode", scope) / "AGENTS.md"
+    switch = user_rules.switch_path()
     prior = next((item.get("kind") for item in (previous or {}).get("owned_paths", [])
-                  if isinstance(item, dict) and item.get("dest") == dest), None)
-    notices = []
-    if user_rules.carry_enabled():
-        notices.extend(f"OpenCode user rules: skipped {note}"
-                       for note in user_rules.collect(paths.runtime_home("claude"))[1])
-        if wanted == "render" and prior != "render":
-            notices.append("OpenCode AGENTS.md now starts with your Claude user rules; to stop, "
-                           f"set user_rules: opencode: off in {switch}")
-    elif prior == "render" and wanted != "render":
-        notices.append(f"OpenCode AGENTS.md no longer carries your Claude user rules "
-                       f"(user_rules: opencode: off in {switch})")
+                  if isinstance(item, dict) and item.get("dest") == str(dest)), None)
+    try:
+        carried = (not dest.is_symlink() and dest.is_file()
+                   and dest.read_bytes().startswith(user_rules.BEGIN))
+    except OSError:
+        carried = False
+    managed = (previous or {}).get("managed_config")
+    reported = managed.get("opencode_user_rules_skipped") if isinstance(managed, dict) else None
+    reported = reported if isinstance(reported, list) else []
+    notices = [f"OpenCode user rules: skipped {note}" for note in skipped if note not in reported]
+    if carried and prior != "render":
+        notices.append("OpenCode AGENTS.md now starts with your Claude user rules; to stop, put "
+                       f"`opencode: off` on its own line under a `user_rules:` line in {switch}")
+    elif not carried and prior == "render":
+        notices.append("OpenCode AGENTS.md no longer carries your Claude user rules "
+                       f"(the `opencode` value under `user_rules:` in {switch} is not an on value)")
     return notices
 
 
@@ -4050,14 +4059,13 @@ def activate(
                                             if item.get("guard") and item.get("detail")))
     agent_report_lines.extend(_edited_render_lines(runtime, previous, desired))
     rewrite_owned: List[str] = []
-    # Notices reach the person on every path, including release install/update.
-    notices: List[str] = []
+    kept_lines: List[str] = []
+    skipped_rules: List[str] = []
     if runtime == "opencode":
-        notices.extend(_opencode_carry_notices(desired, previous, scope))
+        if user_rules.carry_enabled():
+            skipped_rules = user_rules.collect(paths.runtime_home("claude"))[1]
         edited, kept_lines = _keep_edited_opencode_bootstrap(previous, scope)
         rewrite_owned.extend([edited] if edited else [])
-        notices.extend(kept_lines)
-    agent_report_lines.extend(notices)
     digest = _projection_digest(desired)
     packaged_checksum = _bundle_checksum(active_root) if mode == "packaged" else None
     if mode == "packaged" and packaged_checksum is None:
@@ -4192,6 +4200,8 @@ def activate(
                 "codex_hook_trust": local_hook_trust_record or (
                     previous_managed.get("codex_hook_trust") if isinstance(previous_managed, dict) else None
                 ),
+                # Rule files already named in a notice; a later run names only new ones.
+                "opencode_user_rules_skipped": skipped_rules,
             },
             "replaced_installer_symlink_targets": replaced_installer_symlink_targets,
             "activated_at": _utc_now(),
@@ -4211,9 +4221,13 @@ def activate(
         rewrite_owned=rewrite_owned,
     )
     retired_memory_state.retire()  # distiller-era state files, once; silent
+    # Notices reach the person on every path, including release install/update.
+    notices = list(kept_lines)
+    if runtime == "opencode":
+        notices.extend(_opencode_carry_notices(previous, scope, skipped_rules))
     report = status(runtime, scope)
     report["preserved"] = list(report.get("user_changed", []))
-    report["report_lines"] = (list(context_report_lines) + list(agent_report_lines)
+    report["report_lines"] = (list(context_report_lines) + list(agent_report_lines) + notices
                               + list(report.get("report_lines", [])))
     report["notices"] = notices
     return report

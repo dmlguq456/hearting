@@ -569,8 +569,13 @@ def _worker_account_selection(harness, env):
         config_path, defaults.default_topology_path())
     account = defaults.query_worker_account(config, harness)
     configured = config.get('worker_account')
-    pin_config = (str(Path(config_path).resolve(strict=False))
-                  if isinstance(configured, dict) and configured else None)
+    # A v1 OpenCode worker masks XDG_CONFIG_HOME, so a nested worker would fall
+    # back to the shipped defaults and miss the user's file (account selection
+    # and the user_rules switch). Pin any user file for OpenCode workers.
+    user_file = (os.path.realpath(config_path)
+                 != os.path.realpath(defaults.SHIPPED_CONFIG_PATH))
+    pin = (isinstance(configured, dict) and configured) or (harness == 'opencode' and user_file)
+    pin_config = str(Path(config_path).resolve(strict=False)) if pin else None
     return account, pin_config
 
 
@@ -686,7 +691,8 @@ def build_worker_home(agent_home, harness, worker_type, identity, *, env=None, d
     )
     if defaults_config is not None:
         # OpenCode's worker XDG_CONFIG_HOME is private. Carry the existing
-        # config path so nested workers read the same account selection.
+        # config path so nested workers read the same account selection and
+        # user_rules switch.
         values['DISPATCH_DEFAULTS_CONFIG'] = defaults_config
     if harness == 'codex':
         model_config_home = env.get('CODEX_HOME') or Path(home_env) / '.codex'

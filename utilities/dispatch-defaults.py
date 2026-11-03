@@ -6,8 +6,9 @@ mappings, comments) — no PyYAML/yq dependency. Validates against the
 canonical topology node ids in capabilities/topologies.json and exposes
 affinity/owner/allocation/quality-band queries.  Schemas v1/v2 remain readable;
 schema v3 adds user-local enabled harnesses and per-profile quality bands;
-schema v4 adds confirmation/steward policy, optional `worker_account` auth-source paths,
-and the `user_rules` switch for carrying Claude user rules into OpenCode.
+schema v4 adds confirmation/steward policy and optional `worker_account` auth-source paths.
+Every schema also accepts the `user_rules` switch for carrying Claude user rules
+into OpenCode; its problems are warnings, never errors.
 """
 import copy
 import json
@@ -33,10 +34,15 @@ TOP_LEVEL_KEYS = {
     "worker_account", "user_rules",
 }
 # Whether activation carries the user's unscoped Claude user rules
-# ($CLAUDE_CONFIG_DIR/rules) into OpenCode's global AGENTS.md. Absent means
-# `carry`; any other present value stops it (see query_user_rules_opencode).
+# ($CLAUDE_CONFIG_DIR/rules) into OpenCode's global AGENTS.md. One value table
+# serves the reader and the validator (user_rules_opencode): absent or an on
+# value carries, an off value stops, anything else stops with a warning. A
+# problem here is never a validation error: this switch must not stop routing
+# or worker-home creation.
 USER_RULES_KEYS = {"opencode"}
-USER_RULES_OPENCODE_MODES = ("carry", "off")
+USER_RULES_ON = ("carry", "on", "true", "yes")
+USER_RULES_OFF = ("off", "false", "no")
+USER_RULES_DOTTED = "user_rules.opencode"
 DEFAULT_USER_RULES_OPENCODE = "carry"
 # PRD §13.53.2: the operator kill switch for the SD-120/121 terminal fast
 # path. `auto` lets the sealed runtime-capability census decide (the default,
@@ -282,7 +288,7 @@ def validate(config, capmap):
     if not isinstance(config, dict):
         return ["config root must be a mapping"]
 
-    unknown_top = sorted(set(config) - TOP_LEVEL_KEYS)
+    unknown_top = sorted(set(config) - TOP_LEVEL_KEYS - {USER_RULES_DOTTED})
     for key in unknown_top:
         errors.append(f"unknown top-level key: {key!r}")
 
@@ -461,19 +467,7 @@ def validate(config, capmap):
     confirmation = config.get("confirmation")
     steward = config.get("steward")
     runtime = config.get("runtime")
-    user_rules = config.get("user_rules")
-    # Independent of the dispatch schema: install seeds v3 files, and turning
-    # the carry off must not require a schema migration.
-    if user_rules is not None:
-        if not isinstance(user_rules, dict):
-            errors.append("user_rules must be a mapping")
-        else:
-            for key in sorted(set(user_rules) - USER_RULES_KEYS):
-                errors.append(f"unknown user_rules key: {key!r}")
-            mode = user_rules.get("opencode", DEFAULT_USER_RULES_OPENCODE)
-            if mode not in USER_RULES_OPENCODE_MODES and mode is not False:
-                errors.append(
-                    f"user_rules.opencode must be one of {list(USER_RULES_OPENCODE_MODES)}")
+    # `user_rules` is valid in every schema and only ever warns (policy_warnings).
     if version == 4:
         if confirmation is not None:
             if not isinstance(confirmation, dict):
@@ -603,7 +597,7 @@ def policy_warnings(config):
     while claude or codex is enabled: an OpenCode-only user has no
     recommendation left to break.
     """
-    warnings = []
+    warnings = list(user_rules_opencode(config)[1])
     headless = config.get("headless")
     if isinstance(headless, dict) and "no_progress_minutes" in headless:
         _minutes, warning = normalize_no_progress_minutes(headless["no_progress_minutes"])
@@ -1037,33 +1031,114 @@ def load_steward_policy(config_path=None, topology_path=None):
     return query_steward_policy(config), []
 
 
-def query_user_rules_opencode(config):
-    """`carry` unless `user_rules.opencode` is present with another value.
+_ABSENT = object()
 
-    Total and never raises: a present value that is not exactly `carry`
-    (including `off`, `false`, or a typo) stops the carry, so an attempt to
-    turn it off never leaves the rules flowing. The validator reports typos.
+
+def _user_rules_mode(value, where):
+    if value is True:
+        return "carry", []
+    if value is False:
+        return "off", []
+    if isinstance(value, str):
+        word = value.strip().lower()
+        if word in USER_RULES_ON:
+            return "carry", []
+        if word in USER_RULES_OFF:
+            return "off", []
+    return "off", [f"{where}: {value!r} is not an on value (carry, on, true, yes) or an "
+                   "off value (off, false, no); reading it as off"]
+
+
+def user_rules_opencode(config):
+    """`(mode, warnings)` for the OpenCode user-rules switch. Total; never raises.
+
+    The expected form is `user_rules:` with `opencode: <value>` nested under it.
+    A one-line `user_rules: <value>` or a dotted `user_rules.opencode: <value>`
+    key is read through the same table with a warning, so a reasonable attempt
+    gets what it meant and an unreadable one never leaves the rules flowing.
     """
-    section = config.get("user_rules") if isinstance(config, dict) else None
-    if isinstance(section, dict) and "opencode" in section:
-        value = section.get("opencode")
-        if isinstance(value, str) and value.strip().lower() == DEFAULT_USER_RULES_OPENCODE:
-            return DEFAULT_USER_RULES_OPENCODE
-        return "off"
-    return DEFAULT_USER_RULES_OPENCODE
+    if not isinstance(config, dict):
+        return DEFAULT_USER_RULES_OPENCODE, []
+    section = config.get("user_rules", _ABSENT)
+    dotted = config.get(USER_RULES_DOTTED, _ABSENT)
+    warnings = []
+    value, where = _ABSENT, "user_rules.opencode"
+    if isinstance(section, dict):
+        for key in sorted(set(section) - USER_RULES_KEYS):
+            warnings.append(f"user_rules: unknown key {key!r} ignored")
+        value = section.get("opencode", _ABSENT)
+    elif section is not _ABSENT:
+        value, where = section, "user_rules"
+        warnings.append("user_rules: expected `opencode: <value>` on its own line under "
+                        "`user_rules:`; reading the one-line value")
+    if value is _ABSENT and dotted is not _ABSENT:
+        value = dotted
+        warnings.append("user_rules.opencode: put `opencode: <value>` on its own line under "
+                        "`user_rules:`; reading the dotted key")
+    if value is _ABSENT:
+        return DEFAULT_USER_RULES_OPENCODE, warnings
+    mode, problems = _user_rules_mode(value, where)
+    return mode, warnings + problems
+
+
+def query_user_rules_opencode(config):
+    """`carry` or `off`; see user_rules_opencode for the value table."""
+    return user_rules_opencode(config)[0]
+
+
+def _scan_user_rules(text):
+    """Only the switch's own lines, for a file the full parser rejects."""
+    found, section = {}, None
+    for raw in text.splitlines():
+        line = _strip_comment(raw).rstrip()
+        if not line.strip():
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        key, colon, value = line.strip().partition(":")
+        key, value = key.strip(), value.strip()
+        if not colon:
+            continue
+        if indent == 0:
+            section = None
+            if key == "user_rules":
+                if value:
+                    found["user_rules"] = _scalar(value)
+                else:
+                    section = found["user_rules"] = {}
+            elif key == USER_RULES_DOTTED:
+                found[key] = _scalar(value)
+        elif section is not None and key == "opencode":
+            section["opencode"] = _scalar(value) if value else {}
+    return found
+
+
+def user_config_path(environ=None):
+    """The user-owned file a person edits: the override, else the XDG path even if absent."""
+    environment = os.environ if environ is None else environ
+    override = environment.get("DISPATCH_DEFAULTS_CONFIG")
+    if override:
+        return override
+    config_home = environment.get("XDG_CONFIG_HOME") or os.path.join(
+        environment.get("HOME") or os.path.expanduser("~"), ".config")
+    return os.path.join(config_home, "hearting", "dispatch-defaults.yaml")
 
 
 def load_user_rules_opencode(config_path=None):
     """Read only this switch; a problem elsewhere in the file does not flip it.
 
-    An unreadable or unparseable file keeps the shipped default; the
-    dispatch-defaults validator and `harness config status` report the file.
+    A file the full parser rejects is scanned line by line for the switch, so
+    an off value stays off. An unreadable file keeps the shipped default.
     """
     try:
         with open(config_path or default_config_path(), encoding="utf-8") as handle:
-            return query_user_rules_opencode(parse_yaml_subset(handle.read()))
-    except (DefaultsConfigError, OSError, UnicodeError):
+            text = handle.read()
+    except (OSError, UnicodeError):
         return DEFAULT_USER_RULES_OPENCODE
+    try:
+        config = parse_yaml_subset(text)
+    except DefaultsConfigError:
+        config = _scan_user_rules(text)
+    return query_user_rules_opencode(config)
 
 
 def query_steward_child_permission_mode(config):
