@@ -4,7 +4,11 @@ import argparse, contextlib, fcntl, hashlib, importlib.util, json, os, re, selec
 from pathlib import Path
 import resource_resume as RESOURCE_RESUME
 import resource_run_evidence as RUN_EVIDENCE
-from detached_lifetime import bind as end_with_test
+try:  # ends a detached child with the test that started it; no-op outside tests
+    from detached_lifetime import bind as end_with_test
+except ImportError:  # a partial tree without it (e.g. a fixture release): no record
+    def end_with_test(child):
+        return child
 import resource_execution_environment as RESOURCE_ENV
 from resource_progress import environment as progress_environment
 import gpu_leases

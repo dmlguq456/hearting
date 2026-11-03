@@ -45,7 +45,11 @@ import dispatch_completion_join as completion_join
 import dispatch_pending_delivery as pending_delivery
 import dispatch_session_sweep
 import dispatch_supervision
-from detached_lifetime import bind as end_with_test
+try:  # ends a detached child with the test that started it; no-op outside tests
+    from detached_lifetime import bind as end_with_test
+except ImportError:  # a partial tree without it (e.g. a fixture release): no record
+    def end_with_test(child):
+        return child
 
 
 class ReplayBlocked(RuntimeError):

@@ -25,7 +25,7 @@ import urllib.parse
 import urllib.request
 try:  # ends a detached child with the test that started it; no-op outside tests
     from detached_lifetime import bind as end_with_test
-except ImportError:  # loaded by path without utilities/ on sys.path
+except ImportError:  # a partial tree without it (e.g. a fixture release): no record
     def end_with_test(child):
         return child
 

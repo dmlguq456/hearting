@@ -35,7 +35,11 @@ if str(Path(__file__).resolve().parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from claude_project_dir import resolve_session_transcript  # noqa: E402
-from detached_lifetime import bind as end_with_test  # noqa: E402
+try:  # ends a detached child with the test that started it; no-op outside tests
+    from detached_lifetime import bind as end_with_test  # noqa: E402
+except ImportError:  # a partial tree without it (e.g. a fixture release): no record
+    def end_with_test(child):
+        return child
 from dispatch_contract import (  # noqa: E402
     _current_observer_is_host_like,
     DispatchContractError,

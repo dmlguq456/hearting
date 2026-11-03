@@ -91,11 +91,22 @@ FAKE_TEST = textwrap.dedent("""\
 
     if mode in ("spawner-exits", "chain"):
         pid = start_from_a_cli(token + ("-chain" if mode == "chain" else "-cli"))
+    elif mode == "fork-worker":
+        # A forked worker of the test (same command line) starts the helper and exits.
+        read_end, write_end = os.pipe()
+        worker = os.fork()
+        if worker == 0:
+            os.close(read_end)
+            os.write(write_end, str(start_here(token + "-forked")).encode())
+            os._exit(0)
+        os.close(write_end)
+        pid = int(os.read(read_end, 64))
+        os.waitpid(worker, 0)
     else:
         pid = start_here(token + "-helper")
     with open(out, "w") as fh:
         fh.write("%d %s" % (pid, ticks(pid)))
-    if mode == "spawner-exits":
+    if mode in ("spawner-exits", "fork-worker"):
         time.sleep(0.5)
         with open(out + ".alive", "w") as fh:
             fh.write("1" if os.path.exists("/proc/%d" % pid) else "0")
@@ -258,6 +269,14 @@ class DetachedLifetimeTest(unittest.TestCase):
         helper = self.remember(out)
         self.assertEqual(Path(str(out) + ".alive").read_text(), "1",
                          "the helper must keep running while its test runs")
+        self.wait_until(lambda: self.gone(helper),
+                        f"helper {helper[0]} outlived the test that started it")
+
+    def test_a_helper_started_by_a_forked_worker_of_the_test_lives_until_the_test_ends(self):
+        out = self.run_fake_test("fork-worker")
+        helper = self.remember(out)
+        self.assertEqual(Path(str(out) + ".alive").read_text(), "1",
+                         "a fork of the test is not the test: its exit must not end the helper")
         self.wait_until(lambda: self.gone(helper),
                         f"helper {helper[0]} outlived the test that started it")
 

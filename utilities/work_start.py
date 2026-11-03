@@ -37,7 +37,11 @@ from execution_access import ExecutionAccessError, prepare_task_request
 import owner_write_advisory as OWNER_WRITE_ADVISORY
 import route_plan as RP
 import resource_resume as RESOURCE_RESUME
-from detached_lifetime import bind as end_with_test
+try:  # ends a detached child with the test that started it; no-op outside tests
+    from detached_lifetime import bind as end_with_test
+except ImportError:  # a partial tree without it (e.g. a fixture release): no record
+    def end_with_test(child):
+        return child
 
 ROOT = Path(__file__).resolve().parents[1]
 _ROUTE_MODULE = None

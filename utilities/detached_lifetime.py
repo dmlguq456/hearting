@@ -14,7 +14,8 @@ cleanup ran.
 So each detaching spawn site passes the child it just started to :func:`bind`. ``bind``
 looks for the nearest *test process* among the caller and its ancestors: an interpreter
 running a test file (``*.test.py``, ``test_*.py``, ``*_test.py``, ``*.test.sh``,
-``*.test.js`` ...) or ``-m unittest`` / ``pytest``. Outside a test there is none and
+``*.test.js`` ...) or ``-m unittest`` / ``pytest``; of a test and its forks (which run
+the same command) the outermost is the test. Outside a test there is none and
 ``bind`` returns after reading a few ``/proc`` entries, so production lifetimes do not
 change. Under a test it records the child under that test process and makes sure one
 small reaper waits for the test process to end. However the test ends (normally, by an
@@ -209,7 +210,15 @@ def test_anchor(pid: int | None = None) -> tuple[int, str] | None:
         info = _stat(pid)
         if info is None:
             return None
-        if is_test_command(_argv(pid)):
+        argv = _argv(pid)
+        if is_test_command(argv):
+            # A fork of the test (multiprocessing "fork", os.fork) runs the very same
+            # command; the test is the outermost of them, not the worker that ends first.
+            while info[1] > 1 and _argv(info[1]) == argv:
+                parent = _stat(info[1])
+                if parent is None:
+                    break
+                pid, info = info[1], parent
             return pid, info[3]
         if record is not None:
             try:

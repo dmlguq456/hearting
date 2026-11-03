@@ -38,7 +38,11 @@ sys.path.insert(0, str(UTILITIES))
 sys.path.insert(0, str(INSTALL_TOOLS))
 
 import codex_tui_config  # noqa: E402
-from detached_lifetime import bind as end_with_test  # noqa: E402
+try:  # ends a detached child with the test that started it; no-op outside tests
+    from detached_lifetime import bind as end_with_test  # noqa: E402
+except ImportError:  # a partial tree without it (e.g. a fixture release): no record
+    def end_with_test(child):
+        return child
 
 VERSION_RE = re.compile(r"codex-cli\s+(\d+\.\d+\.\d+(?:[-+][^\s]+)?)", re.I)
 SID_RE = re.compile(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$", re.I)

@@ -58,7 +58,11 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 import session_tidy as st  # noqa: E402
-from detached_lifetime import bind as end_with_test  # noqa: E402
+try:  # ends a detached child with the test that started it; no-op outside tests
+    from detached_lifetime import bind as end_with_test  # noqa: E402
+except ImportError:  # a partial tree without it (e.g. a fixture release): no record
+    def end_with_test(child):
+        return child
 
 SCHEMA = 1
 CLEAR_DEADLINE_SEC = 600.0
