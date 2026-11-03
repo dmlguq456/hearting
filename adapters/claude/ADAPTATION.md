@@ -371,6 +371,15 @@ is a self-contained copy without `utilities/` or `capability-route.py`, so a
 session there could never satisfy the gate. `HEARTING_ROUTE_GATE=off` (for
 example in `settings.json` `env`) turns the gate off.
 
+## Automatic Change Record (2026-11-03)
+
+`settings.json` `UserPromptSubmit` runs `hooks/turn-change-record.py start` and
+`Stop` runs `hooks/turn-change-record.py end`; both start the detached shared
+step `utilities/turn_change_record.py` with the payload `session_id` and `cwd`
+and return silently (`core/HOOKS.md`). Claude runs no `Stop` after a user
+interrupt, so an interrupted turn is not compared. The native plugin channel
+does not carry it, for the gate's reason above.
+
 ## Model Mapping
 
 Claude Code maps portable roles as follows:

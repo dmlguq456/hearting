@@ -287,7 +287,9 @@ def _first_frame_attempt(route, jobs):
 
     A leg that already ended is still the first leg: its harness is the one the other leg must
     avoid. It counts only once its cleanup is settled, so leg two never starts over an unsettled
-    failure; a leg that is neither live, completed nor settled is reported as not yet placed."""
+    failure; a leg that is neither live, completed nor settled is reported as not yet placed.
+    `start` launches leg two as soon as leg one's row is registered, so this holds at the moment
+    of selection: a leg one that fails after it is continued by the replacement controller."""
     try:
         lines = Path(jobs).read_text().splitlines()
     except OSError as exc:

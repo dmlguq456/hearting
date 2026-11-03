@@ -1481,6 +1481,39 @@ class WorkStartTest(unittest.TestCase):
         self.assertEqual(result["state"], "completed", result)
         self.assertEqual(len(self.calls), 3)
 
+    def test_unreadable_seat_lineage_waits_for_the_same_start_without_a_launch(self):
+        # Whether another session holds the live attempts is unknown while the seat lineage cannot
+        # be read: the same start is the way on, not "recover the parent", and nothing launches.
+        import dispatch_seat_handover as handover
+        self.start()
+        before = len(self.calls)
+        W.default_parent_session_id.return_value = "successor"
+        with mock.patch.object(handover, "_readable_lineage_signature",
+                               side_effect=OSError("lineage-directory-changed")):
+            waiting = self.start()
+        self.assertEqual((waiting["state"], waiting["reason"], waiting.get("next_action")),
+                         ("needs-attention", "handover-unreadable", "same-command"), waiting)
+        self.assertEqual(waiting["next_step"], waiting["retry_when"])
+        self.assertEqual(len(self.calls), before)
+        self.assertEqual(self.start()["reason"], "work-parent-recovery-required")  # a readable other holder
+
+    def test_pin_handoff_preparation_waits_while_the_seat_lineage_cannot_be_read(self):
+        import dispatch_seat_handover as handover
+        self.start(); self.ready = self.released = True; created = self.start()
+        outcome = {"state": "cancelled", "summary": W.PIN_HANDOFF_SUMMARY,
+                   "owner_attempt_id": created["owner_attempt_id"]}
+        with mock.patch.object(handover, "_readable_lineage_signature",
+                               side_effect=OSError("lineage-directory-changed")):
+            waiting = W.pin_handoff_continuation(self.route, self.path, self.jobs, outcome)
+        self.assertEqual((waiting["handoff_reason"], waiting.get("next_action")),
+                         ("handover-unreadable", "same-command"), waiting)
+        self.assertTrue(waiting["retry_when"])
+        self.assertIn(" start ", waiting["recovery_command"])
+        self.assertNotIn("successor_route", waiting)
+        W.default_parent_session_id.return_value = "stranger"
+        self.assertEqual(W.pin_handoff_continuation(self.route, self.path, self.jobs, outcome)["handoff_reason"],
+                         "work-parent-recovery-required")
+
     def test_same_seat_successor_resumes_a_live_attempt_without_a_new_launch(self):
         # After a /clear the registered parent_sid stays the old session; the seat handover
         # lets the new session at the same pane reuse the live attempt instead of being refused.
@@ -4027,6 +4060,39 @@ class NeverStartedReplacementNormalStartTest(unittest.TestCase):
         self.assertEqual(len(self.launches), 1)
         self.assertIn("continue the host runs", self.delivered_prompts[replacement])
 
+    def test_unreadable_lineage_during_the_claim_parent_check_waits_for_the_same_command(self):
+        # RV-1142 #1147 R1: the successor of a /clear handover starts once while the seat lineage
+        # cannot be read during the claim-time parent check. That is a wait for the same command,
+        # not an identity refusal: nothing launches and no identity notice is left for the parent.
+        import dispatch_seat_handover as handover
+        import dispatch_supervision
+        import route_authority
+        owner = self._seed_initial_owner()
+        self._finish_blocked(owner)
+        self._store(owner, "continue the host runs", "input-unreadable")
+        self._handover(owner, "successor")
+        W.default_parent_session_id.return_value = "successor"
+        check = route_authority.require_replacement_parent
+
+        def unreadable(*args, **kwargs):
+            with mock.patch.object(handover, "_readable_lineage_signature",
+                                   side_effect=OSError("lineage-directory-changed")):
+                return check(*args, **kwargs)
+
+        with mock.patch.object(route_authority, "require_replacement_parent", unreadable), \
+                mock.patch.object(dispatch_supervision, "handover_identity_refusal",
+                                  side_effect=AssertionError("identity notice")) as notice:
+            result = self._cli_start()
+        self.assertEqual((result.get("reason"), result.get("next_action")),
+                         ("handover-unreadable", "same-command"), result)
+        self.assertTrue(result.get("retry_when"), result)
+        self.assertEqual(self.launches, [])
+        notice.assert_not_called()
+        # Once the lineage reads again, the same command launches the replacement.
+        again = self._cli_start()
+        self.assertEqual(again.get("state"), "running", again)
+        self.assertEqual(len(self.launches), 1)
+
     def test_off_chair_start_retains_correction_without_launching(self):
         owner_a, owner_b, owner_c, _ = self._build_unstarted_chain()
         self._store(owner_b, "off-chair retained correction", "input-off-chair")
@@ -5233,6 +5299,50 @@ class D5PublicOwnerStartTest(unittest.TestCase):
                         self.assertEqual(Path(launched[0][0]).parts[-3],'claude')
                         self.assertEqual(usage.call_args.args[1],'deep')
                         self.assertNotIn('headless-main-session-only-model',result['launches'][0]['receipt'])
+
+
+class RegistrationReportingLaunchTest(unittest.TestCase):
+    """The default launcher reports the wrapper's registration line while the launch is still running."""
+
+    def _launch(self, lines_before, lines_after=b""):
+        with tempfile.TemporaryDirectory() as tmp:
+            gate = Path(tmp) / "registered"
+            script = ("import pathlib, sys, time\n"
+                      f"sys.stdout.buffer.write({lines_before!r}); sys.stdout.flush()\n"
+                      "print('a diagnostic', file=sys.stderr, flush=True)\n"
+                      "gate, deadline = pathlib.Path(sys.argv[1]), time.time() + 20\n"
+                      "while not gate.exists() and time.time() < deadline:\n"
+                      "    time.sleep(0.05)\n"
+                      f"sys.stdout.buffer.write({lines_after!r})\n"
+                      "print('check=ok' if gate.exists() else 'check=registration-reported-late')\n")
+            reported = []
+
+            def on_registered():
+                reported.append("att-x")
+                gate.write_text("")
+
+            done = W._run_reporting_registration([sys.executable, "-c", script, str(gate)], "att-x", on_registered)
+        return reported, done
+
+    def test_the_registration_is_reported_before_the_launch_ends_and_the_receipt_is_whole(self):
+        reported, done = self._launch(b"status=eligible\nattempt_registered=att-other\nattempt_registered=att-x\n")
+        self.assertEqual(reported, ["att-x"])   # once, and only for this attempt's line
+        self.assertEqual(done.returncode, 0)
+        self.assertEqual(done.stdout, "status=eligible\nattempt_registered=att-other\n"
+                                      "attempt_registered=att-x\ncheck=ok\n")
+        self.assertEqual(done.stderr, "a diagnostic\n")
+
+    def test_an_undecodable_byte_never_stops_the_running_launch(self):
+        reported, done = self._launch(b"note=\xff\xfe\nattempt_registered=att-x\n", b"tail=\xff\n")
+        self.assertEqual((reported, done.returncode), (["att-x"], 0))
+        self.assertTrue(done.stdout.endswith("check=ok\n"), done.stdout)   # it ran to its end
+        self.assertIn("\ufffd", done.stdout)
+
+    def test_without_a_registration_line_it_is_the_ordinary_run(self):
+        done = W._run_reporting_registration(
+            [sys.executable, "-c", "import sys; print('check=failed'); sys.exit(65)"],
+            "att-x", lambda: self.fail("no registration was printed"))
+        self.assertEqual((done.returncode, done.stdout, done.stderr), (65, "check=failed\n", ""))
 
 if __name__ == "__main__":
     unittest.main()

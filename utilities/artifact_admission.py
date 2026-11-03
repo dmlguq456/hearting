@@ -1073,7 +1073,7 @@ def _known_idempotency_keys(root: Path) -> Tuple[Dict[str, str], Dict[str, str]]
     amendment, or a hand rename D-89 tolerates) still carries its
     ``cycle.cycle_id`` in the sealed manifest, so the key survives a rebuild
     and an exact retry stays a no-op.  Matching by path alone silently fell
-    back to `manifest_id` after every rename (TF-Rehancer 2026-09-15, three
+    back to `manifest_id` after every rename (Project-C 2026-09-15, three
     `fallback_idempotency_keys`).  The path map remains for manifests whose
     cycle id is absent.
     """

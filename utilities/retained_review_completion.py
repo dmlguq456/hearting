@@ -106,8 +106,7 @@ def _actor(route, jobs, rows, parent_id):
         authority.review_owner_authority(route, jobs, parent_id)
         return {"owner_attempt_id": parent_id, "attempt_id": caller}
     sid = authority.caller_identity()[1]
-    if not authority.owns(owner, sid, jobs):
-        _fail("actor-not-current-parent")
+    authority.require_owner(owner, sid, jobs, "retained-review-actor-not-current-parent")
     return {"owner_attempt_id": parent_id, "session_id": sid}
 
 

@@ -133,7 +133,7 @@ def date_part(timestamp: str) -> str:
 def strip_leading_date(slug: str) -> str:
     """Drop a date a freshly named slug carries, since the locator adds one.
 
-    Measured on BC_ResNet 2026-09-10: six campaign locators read
+    Measured on KWS_Net 2026-09-10: six campaign locators read
     ``2026-09-10_2026-09-10-r5-streaming-window-sim``, and one read
     ``2026-09-09_2026-09-10-r4-...`` where the two dates disagreed, so the
     name said one day while the sort order said another.

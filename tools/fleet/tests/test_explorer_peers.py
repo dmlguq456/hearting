@@ -403,12 +403,12 @@ def _fleet_mesh(dst="d4", owners=True, clear=False):
                  "state": "idle", "repo": "hearting", "steward": steward,
                  "context": 40, "window": 1.0}
                 for index, (tag, steward) in enumerate(hearting)]
-    sessions.append({"tag": "a7", "harness": "claude", "title": "SR CorrNet eval",
-                     "state": "idle", "repo": "SR_CorrNet_SD", "context": 30, "window": 1.0})
+    sessions.append({"tag": "a7", "harness": "claude", "title": "SR ModelA eval",
+                     "state": "idle", "repo": "SR_ModelA_SD", "context": 30, "window": 1.0})
     values["sessions"] = sessions
     values["peer_nodes"] = [
         ["hearting", [["50", "e2"], ["1f", "79"], ["8b"], ["d5"], ["d4"], ["d7"]]],
-        ["SR_CorrNet_SD", [["a7"]]],
+        ["SR_ModelA_SD", [["a7"]]],
     ]
     links = [[["50", "claude"], ["e2", "claude"], "steer", "1m ago", "n"],
              [["e2", "claude"], ["50", "claude"], "steer", "2m ago", "n"],

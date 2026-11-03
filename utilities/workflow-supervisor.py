@@ -9,7 +9,7 @@ declared next stage may start yet.
 Advance requires four independent proofs about the predecessor — exact process
 identity, a terminal result, a sentinel or typed terminal handoff, and the declared
 output artifacts — and it is claimed exactly once through the filesystem. Anything
-missing is a refusal, not an assumption: the 2026-08-04 BC_ResNet_tf run finished
+missing is a refusal, not an assumption: the 2026-08-04 KWS_Net_tf run finished
 training and nothing owned what came next, so "the process is gone" must never be
 read as "the stage succeeded".
 

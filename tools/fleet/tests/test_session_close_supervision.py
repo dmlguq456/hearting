@@ -376,8 +376,8 @@ class HeartingNamedTest(CloseSupervisionBase):
         self.assertEqual(self.supervision()["counted"], 1)
 
 
-class SrCorrnetTest(CloseSupervisionBase):
-    """SR_CorrNet_SD: stale tap SIDs of one live Claude process fill the limit of 2."""
+class SrModelaTest(CloseSupervisionBase):
+    """SR_ModelA_SD: stale tap SIDs of one live Claude process fill the limit of 2."""
 
     N = sid("39d9cea4")
     CHAIN = [sid(label) for label in ("aa7f0edc", "bea4b18a", "4e8e77bf", "1cc8159c")]

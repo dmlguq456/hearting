@@ -132,7 +132,7 @@ def _r14_narrow_header_record(working=0, idle=0, blocked=0, version="v3.50.3-20-
     record["validated_header_hosts"] = [
         {"mark": "⌂", "name": "mgpu-a1"}, {"mark": "◇", "name": "cnn"},
         {"mark": "◇", "name": "xgpu-b"}, {"mark": "◇", "name": "lgpu-c"},
-        {"mark": "◇", "name": "mpwav"},
+        {"mark": "◇", "name": "gpu-c"},
     ]
     record["reference_edge"][0] = True
     record["reference_overflow_mask"]["version"] = REFERENCE_MASK_VERSION
@@ -172,8 +172,8 @@ def _r14_wide_header_record(working=0, idle=0, blocked=0, version="v3.50.3-20-ga
     width = 168
     hosts = [{"mark": "⌂", "name": "mgpu-a1"}, {"mark": "◇", "name": "cnn"},
              {"mark": "◇", "name": "xgpu-b"}, {"mark": "◇", "name": "lgpu-c"},
-             {"mark": "◇", "name": "mpwav"}]
-    host = " hosts ⌂ mgpu-a1  ◇ cnn  ◇ xgpu-b  ◇ lgpu-c  ◇ mpwav 5/5"
+             {"mark": "◇", "name": "gpu-c"}]
+    host = " hosts ⌂ mgpu-a1  ◇ cnn  ◇ xgpu-b  ◇ lgpu-c  ◇ gpu-c 5/5"
     old_census = (f"⠏ {working} working  ● {idle} idle  ● {blocked} answer needed   hearting "
                   f"{version}  {clock}")
     new_census = (f"⠏ {working} working  ● {idle} idle  ● {blocked} answer needed   hearting "
@@ -190,7 +190,7 @@ def _r14_wide_header_record(working=0, idle=0, blocked=0, version="v3.50.3-20-ga
                   ("◇ ", "dim"), ("cnn", "loc_repo"), ("  ", "branch_s"),
                   ("◇ ", "dim"), ("xgpu-b", "loc_repo"), ("  ", "branch_s"),
                   ("◇ ", "dim"), ("lgpu-c", "loc_repo"), ("  ", "branch_s"),
-                  ("◇ ", "dim"), ("mpwav", "loc_repo"), (" 5/5", "dim")]
+                  ("◇ ", "dim"), ("gpu-c", "loc_repo"), (" 5/5", "dim")]
     base_census = [(f"⠏ {working}", "g_spin"), (" working", "dim"),
                    (f"  ● {idle}", "g_work_off"), (" idle", "dim"),
                    (f"  ● {blocked}", "g_blocked"), (" answer needed", "dim"),
@@ -694,8 +694,8 @@ class ClassificationTests(unittest.TestCase):
     def test_answered_repo_count_difference_requires_the_same_explicit_repo(self):
         record = _record(width=140, cells=[(7, 40, "6", "dim", "20", "dim")])
         record["state"] = "QUESTIONS"
-        record["reference_rows"][7] = " " * 33 + " ── ANSWERED TODAY  SR_CorrNet 6 · 32 decision records in all projects"
-        record["fleet2_rows"][7] = " " * 33 + " ── ANSWERED TODAY  SR_CorrNet 20 · 32 decision records in all projects"
+        record["reference_rows"][7] = " " * 33 + " ── ANSWERED TODAY  SR_ModelA 6 · 32 decision records in all projects"
+        record["fleet2_rows"][7] = " " * 33 + " ── ANSWERED TODAY  SR_ModelA 20 · 32 decision records in all projects"
 
         entry = classify([record])["entries"][0]
 

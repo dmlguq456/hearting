@@ -7254,6 +7254,25 @@ class HistoricalReviewSelfDispositionTest(InlineStageCompletionRecipeTest):
      self.replay(actor=actor)
     self.assertEqual(before,{p:p.read_bytes() for p in self.base.rglob('*') if p.is_file()})
 
+ def test_unreadable_seat_lineage_waits_for_the_parent_without_publication(self):
+  # The parent path: whether this session still answers for the owner is unknown, so the
+  # disposition waits for the same command instead of "actor unproven", and publishes nothing.
+  import dispatch_seat_handover as handover
+  import route_authority
+  self.historical_fixture()
+  before={p:p.read_bytes() for p in self.base.rglob('*') if p.is_file()}
+  with mock.patch.object(route_authority,"caller_identity",return_value=("codex","parent")), \
+       mock.patch.object(handover,"_readable_lineage_signature",side_effect=OSError("lineage-directory-changed")), \
+       self.assertRaises(D.DispatchContractError) as waiting:
+   self.replay(actor="")
+  self.assertEqual((waiting.exception.reason,waiting.exception.next_action),("handover-unreadable","same-command"))
+  self.assertEqual(before,{p:p.read_bytes() for p in self.base.rglob('*') if p.is_file()})
+  # RV-1151 L3: a readable different holder is still refused with the existing reason.
+  with mock.patch.object(route_authority,"caller_identity",return_value=("codex","another-session")), \
+       self.assertRaisesRegex(ValueError,"review-self-disposition-actor-unproven"):
+   self.replay(actor="")
+  self.assertEqual(before,{p:p.read_bytes() for p in self.base.rglob('*') if p.is_file()})
+
  def test_crash_retry_preserves_commit_boundary_and_origin(self):
   for boundary in ("history","canonical","pointer"):
    with self.subTest(boundary=boundary):
@@ -7820,7 +7839,7 @@ class ComposeRouteTest(TestRoute):
   R.verify_route(route,R.ROOT)
 
  def test_strong_research_extension_runs_after_the_appended_owner_close(self):
-  # SR_CorrNet_SD: claim-verify was no longer terminal once owner-close followed its group.
+  # SR_ModelA_SD: claim-verify was no longer terminal once owner-close followed its group.
   for intensity in ("strong","thorough"):
    with self.subTest(intensity=intensity):
     route=self.compose(capability="autopilot-research",capability_mode="market",intensity=intensity,
@@ -10156,7 +10175,7 @@ class RouteChainWriterTest(ComposeRouteTest):
    self.skipTest(str(exc))
  def test_compose_records_codex_ledger_in_claude_started_daemon_env(self):
   # A Codex thread served by the shared daemon that a Claude tool shell started: its tool
-  # commands carry the thread id AND the starter's Claude session id (the SR_CorrNet incident).
+  # commands carry the thread id AND the starter's Claude session id (the SR_ModelA incident).
   env=self._tool_shell_env("claude","codex","01a0f6a2-785d-7503-bb78-368d1a1eaab1")
   with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
     os.environ,{**env,"AGENT_DISPATCH_ATTEMPT_ID":"","AGENT_HOME":str(R.ROOT)}):

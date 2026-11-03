@@ -33,11 +33,11 @@ New checkpoints live at `$AGENT_RUNTIME_DIR/experiments/<slug>/runs/<run>/ckpt/`
 the artifact-side `run.json` keeps compatible `ckpt_path` plus optional
 `ckpt_sha256` and `ckpt_byte_size` after the file exists.
 
-When project convention keeps variants beside each model, as with TF_Restormer, use:
+When project convention keeps variants beside each model, as with TF_Enhancer, use:
 
 ```text
 model/
-├── TF_Restormer/
+├── TF_Enhancer/
 │   ├── model.py
 │   ├── config.yaml
 │   ├── _ft01_lr_sweep.py
@@ -68,7 +68,7 @@ slug: <slug>
 date: <date>
 mode: setup                    # setup | eval
 parent: <slug or null>         # Lineage for fine-tuning or reevaluation; run.json.parent is machine-readable SoT
-ref: model/TF_Restormer        # Reference model; null for parent-based runs
+ref: model/TF_Enhancer        # Reference model; null for parent-based runs
 qa_level: light
 phases:                        # setup: spec/scaffold/run; eval: eval/summary
   spec: done
@@ -114,9 +114,9 @@ The Korean user prompts below are intentional multilingual request fixtures and 
 
 ```text
 사용자: lr 1e-3 → 3e-4 비교                           [setup mode]
-→ S0: read the last five RUNLOG rows and recommend TF_Restormer from similar_models
+→ S0: read the last five RUNLOG rows and recommend TF_Enhancer from similar_models
 → S1: draft the spec from the prior 28.4 validation baseline, then confirm
-→ S2: development/new-lib creates model/TF_Restormer/_ft01_lr_3e-4.yaml, changing config only
+→ S2: development/new-lib creates model/TF_Enhancer/_ft01_lr_3e-4.yaml, changing config only
 → S3: run the included start-approved full-run part, or provide its command for a later compose; append a pending RUNLOG row
 
 [The user trains on the cluster.]
@@ -130,7 +130,7 @@ The Korean user prompts below are intentional multilingual request fixtures and 
 ### Example 2 — MDTA ablation
 
 ```text
-사용자: TF_Restormer 에서 MDTA 빼고 비교
+사용자: TF_Enhancer 에서 MDTA 빼고 비교
 → S0: cite the best config from the previous lr_sweep
 → S1: specify _ft02_no_mdta
 → S2: replace only MDTA with standard PyTorch MHA; introduce no new layer

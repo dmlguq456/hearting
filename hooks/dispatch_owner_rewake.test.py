@@ -1853,6 +1853,63 @@ class CarrierOneClaimGateTest(unittest.TestCase):
             code = rewake.main()
         return code, stdout.getvalue(), stderr.getvalue()
 
+    def handed_to(self, successor):
+        resolver = lambda meta, jobs=None: successor if meta.get("parent_sid") == "session-1" else meta.get("parent_sid")
+        @contextlib.contextmanager
+        def answers():
+            def result(question, **kwargs):
+                meta = kwargs.get("metadata") or {}
+                current = resolver(meta)
+                return rewake.seat_handover.RecipientResolution(current, "claude", "confirmed",
+                    meta.get("parent_sid", ""), "claude")
+            with mock.patch.object(rewake.seat_handover, "effective_parent", side_effect=resolver), \
+                 mock.patch.object(rewake.seat_handover, "resolve_recipient", side_effect=result):
+                yield
+        return (answers(), mock.patch.object(rewake.seat_handover, "owns",
+            side_effect=lambda meta, session, jobs=None, **kw: meta.get("parent_sid") == session or resolver(meta, jobs) == session))
+
+    def test_successor_seat_claims_the_registered_parent_record(self):
+        """After a session-tidy handover the successor carrier (session-2) claims the
+        pending record the owner row registered under its launch parent (session-1)."""
+        self._open_row(ancestry=self.ANCESTRY)
+        record_path = self._close_and_materialize()
+        metadata = rewake._row_metadata(self.jobs, "att-owner-1")
+        self.assertEqual((metadata["parent_sid"], metadata["delivery_intent"]), ("session-1", "1"))
+        effective, owns = self.handed_to("session-2")
+        with effective, owns, mock.patch.object(
+                rewake, "runtime_ancestry_binding", return_value=self.ANCESTRY):
+            claim = rewake.claim_arm(self.jobs, "att-owner-1", "session-2", fresh=True)
+            self.assertIsInstance(claim, rewake.ArmClaim)
+            launch = rewake.Launch("att-owner-1", self.jobs, "session-2", armed="automatic-replacement")
+            win = rewake._carrier_one_claim(launch, metadata, arm=claim)
+        self.assertIsInstance(win, rewake.ClaimWin)
+        self.assertEqual((win.recipient_key, win.delivery_id),
+                         ("session-1", metadata["delivery_id"]))
+        self.assertEqual(json.loads(record_path.read_text())["state"], "claimed")
+
+    def test_successor_carrier_wakes_the_current_seat_for_the_registered_record(self):
+        """The successor window's own carrier pass (arm re-taken by session-2 + the real
+        carrier run) claims the record registered under the launch parent and wakes session-2."""
+        self._open_row(ancestry=self.ANCESTRY)
+        record_path = self._close_and_materialize()
+        effective, owns = self.handed_to("session-2")
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with effective, owns, mock.patch.object(
+                rewake, "runtime_ancestry_binding", return_value=self.ANCESTRY), \
+                mock.patch.object(rewake, "wait_for_attempt",
+                                  return_value=("ready", "terminal-quiescent")), \
+                mock.patch.object(rewake.sys, "stdout", stdout), \
+                mock.patch.object(rewake.sys, "stderr", stderr):
+            claim = rewake.claim_arm(self.jobs, "att-owner-1", "session-2", fresh=True)
+            self.assertIsInstance(claim, rewake.ArmClaim)
+            launch = rewake.Launch("att-owner-1", self.jobs, "session-2", armed="registry-rearm")
+            code = rewake._run_carrier_once(launch, claim, self.payload(), {},
+                                            {"launch": launch, "claim": claim},
+                                            time.monotonic() + 60)
+        self.assertEqual(code, 2)   # the one exit that wakes an idle Claude session
+        self.assertIn("Hearting dispatch", stdout.getvalue())
+        self.assertEqual(json.loads(record_path.read_text())["state"], "sent-ambiguous")
+
     def test_lost_carrier_completion_reaches_existing_runner_without_user_prompt(self):
         self._check_lost_carrier_completion()
 
@@ -2478,6 +2535,344 @@ class CarrierOneClaimGateTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("state=timeout", stdout)
         self.assertEqual(rewake._read_arm(rewake.arm_path(self.jobs, "att-owner-1"))["state"], "lapsed")
+
+
+class RuntimeDeathSuccessorTest(CarrierOneClaimGateTest):
+    """d1/d2: the owner's supervisor dies after its resource stage finished. The parent's
+    bound carrier launches a successor from the recorded reuse, without a person's `start`,
+    and the current seat (session-2) is woken with the successor's completion."""
+
+    NODE = "execute"
+
+    def setUp(self) -> None:
+        super().setUp()
+        from types import SimpleNamespace
+        import dispatch_replacement as replacement
+        self.replacement = replacement
+        self.route = {"route_id": "rt-runtime", "route_hash": "sha256:runtime",
+                      "artifact_root": str(self.root / "artifacts"), "cwd": str(self.root),
+                      "capability": "autopilot-code",
+                      "nodes": [{"id": self.NODE, "worker_type": "stage"}]}
+        self.route_path = self.root / "route.json"
+        self.route_path.write_text(json.dumps(self.route), encoding="utf-8")
+        self.reuse = {"completed": [{"node": self.NODE, "attempt_id": "att-resource"}],
+                      "invalidated": [], "cycle_id": "cyc-fixture", "producer_id": "prod-fixture",
+                      "gate_releases": []}
+        self.launches, self.finished = [], {}
+        self.second_end = False
+        self.launch_session = "session-2"   # the successor carrier is what launches now
+        self.enterContext(mock.patch.object(replacement, "_route",
+                                            return_value=(self.route_path, self.route)))
+        self.enterContext(mock.patch.object(replacement, "_logical_key",
+            side_effect=lambda route, meta: {"root_route_id": route["route_id"], "node": "owner"}))
+        self.enterContext(mock.patch.object(replacement, "_reuse_snapshot",
+                                            side_effect=lambda *a, **k: self.reuse))
+        self.enterContext(mock.patch.object(D, "attempt_process_quiescence",
+            return_value=SimpleNamespace(state="quiescent", reason="process-absent")))
+        self.enterContext(mock.patch.object(D, "resolve_attempt_cleanup",
+                                            return_value={"settled": True}))
+        self.enterContext(mock.patch("dispatch_capacity_evidence.harness_hold", return_value=None))
+        self.enterContext(mock.patch("dispatch_replacement_batch.command", return_value=None))
+        self.enterContext(mock.patch("artifact_producer.prepare_route_artifact_env", return_value={}))
+        # The one fake seam the plan allows: the launcher `run`. `follow_replacement`
+        # calls `advance_batch` without a `run`, so the fixture supplies it here.
+        real_advance = replacement.advance
+        def advance_with_fixture_launcher(*args, **kwargs):
+            kwargs["run"] = self._launcher
+            return real_advance(*args, **kwargs)
+        self.enterContext(mock.patch.object(replacement, "advance",
+                                            side_effect=advance_with_fixture_launcher))
+
+    def _write_runtime_owner(self, *, status="done"):
+        """The owner row a dead supervisor leaves: no result, runtime columns recorded.
+
+        `status="open"` writes the same row while its supervisor is still alive, so
+        the real terminal-close writer can stamp the delivery intent itself.
+        """
+        from types import SimpleNamespace
+        log = self.root / "att-owner-1.log"
+        log.write_text("the supervisor's runtime exited without a result\n", encoding="utf-8")
+        meta = {
+            "attempt_schema_version": "2", "dispatch_depth": "1", "transport": "headless",
+            "execution_surface": "registered-headless", "registered_worker": "1",
+            "fallback_hop": "same-harness-headless", "launch_claimed": "1", "launch_started": "1",
+            "parent_completion_delivery": "claude-parent-runtime", "parent_sid": "session-1",
+            "attempt_id": "att-owner-1", "worker_type": "owner", "harness": "claude",
+            "route_id": self.route["route_id"], "route_hash": self.route["route_hash"],
+            "route_node": "owner", "route_file": str(self.route_path),
+            "supervisor_lease": "flock-v1",
+            "supervisor_lease_file": str(D.supervisor_lease_path(self.jobs, "att-owner-1")),
+            "log_file": str(log),
+            "parent_runtime_pid": self.ANCESTRY[0],
+            "parent_runtime_pid_start": self.ANCESTRY[1],
+            "parent_runtime_ns": self.ANCESTRY[2],
+        }
+        if status != "open":
+            meta.update({"note": "dead-runtime-exit", "failure_class": "runtime",
+                         "terminal_event": "dispatch.supervisor.error"})
+        args = SimpleNamespace(attempt_id="att-owner-1", jobs_path=self.jobs, worktree=str(self.root),
+                               route_id=self.route["route_id"], route_node="owner",
+                               replacement_input_argv=["--start", "--attempt-id", "att-owner-1",
+                                                       "--prompt-text", "the raw task"])
+        meta.update(D.parse_registry_metadata(
+            self.replacement.seal_launch_input(args, "claude", "the raw task")))
+        stamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        pipe = ",".join(f"{key}={value}" for key, value in meta.items())
+        self.jobs.write_text(
+            f"{stamp}\t{status}\t{self.root}\t{self.root}\tsource\t{pipe}\n", encoding="utf-8")
+
+    def _supervisor_death(self):
+        """The incident's writer chain: the terminal close stamps the delivery intent,
+        `materialize_after_terminal_close` accepts the replacement duty and then writes
+        the pending record in the old seat's (session-1) store."""
+        self.assertTrue(D.close_attempt_row(
+            self.jobs, "att-owner-1", "dead-runtime-exit",
+            evidence={"failure_class": "runtime",
+                      "terminal_event": "dispatch.supervisor.error"}))
+        path = JOIN.materialize_after_terminal_close(self.jobs, "att-owner-1")
+        self.assertIsNotNone(path)
+        return path
+
+    def _launcher(self, command, **kwargs):
+        """The one fake seam: the launcher registers the replacement row the adapter would."""
+        from types import SimpleNamespace
+        self.launches.append(command)
+        argv = command[2:]
+        def value(flag):
+            return argv[argv.index(flag) + 1]
+        aid, prior = value("--attempt-id"), value("--automatic-retry-of")
+        source = self.replacement._rows(self.jobs.read_text().splitlines())[prior][1]
+        task = Path(value("--prompt-file")).read_text(encoding="utf-8")
+        args = SimpleNamespace(attempt_id=aid, jobs_path=self.jobs, worktree=value("--worktree"),
+                               route_id=self.route["route_id"], route_node=source.get("route_node", "owner"),
+                               replacement_input_argv=list(argv))
+        terminal = {"note", "failure_class", "terminal_event", "launch_outcome", "replacement_input_digest",
+                    "replacement_family_id", "replacement_attempt_id", "replacement_claim_digest",
+                    "replacement_original_attempt_id", "replacement_ordinal", "automatic_retry_of",
+                    "log_file", "cleanup_receipt_digest",
+                    # A new launch builds its own row: the source's delivery intent
+                    # describes the source completion, never the successor.
+                    "delivery_intent", "delivery_id", "delivery_recipient_kind",
+                    "delivery_recipient_digest", "delivery_receipt_digest",
+                    "delivery_row_revision", "delivery_intent_at_ns", "delivery_receipt_b64"}
+        meta = {key: val for key, val in source.items() if key not in terminal}
+        meta.update(attempt_id=aid, automatic_retry_of=prior, launch_claimed="1",
+                    log_file=str(self.root / (aid + ".log")))
+        # `bind_runtime_parent`: the running session overrides a synthetic
+        # `--parent-session-id`, so a launch by the successor binds session-2.
+        meta["parent_sid"] = self.launch_session
+        meta["parent_harness"] = "claude"
+        meta.update(D.parse_registry_metadata(self.replacement.seal_launch_input(args, "claude", task)))
+        stamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        pipe = ",".join(f"{key}={val}" for key, val in meta.items())
+        row = f"{stamp}\topen\t{self.root}\t{self.root}\tsource\t{pipe}"
+        with self.replacement._locked(self.jobs) as lines:
+            row, _ = self.replacement.replacement_row(self.jobs, lines, row)
+            with self.jobs.open("a", encoding="utf-8") as handle:
+                handle.write(row + "\n")
+        return subprocess.CompletedProcess(
+            command, 0, "registered=1 started=1 child_spawned=1\n", "")
+
+    def _finish(self, aid, *, note="completed-marker", failure_class="pass", terminal_event=""):
+        self.assertTrue(D.close_attempt_row(self.jobs, aid, note))
+        rows, chosen = [], None
+        for line in self.jobs.read_text().splitlines():
+            fields = line.split("\t")
+            if len(fields) == 6 and D.row_has_attempt(fields[5], aid):
+                meta = {**D.parse_registry_metadata(fields[5]),
+                        "failure_class": failure_class, "terminal_event": terminal_event}
+                fields[5] = ",".join(f"{key}={val}" for key, val in meta.items())
+                line = "\t".join(fields)
+                chosen = fields
+            rows.append(line)
+        self.jobs.write_text("\n".join(rows) + "\n", encoding="utf-8")
+        path = JOIN.materialize_pending_delivery(self.jobs, chosen)
+        self.assertIsNotNone(path)
+        self.finished[aid] = path
+        return path
+
+    def _die_runtime(self, aid, *, note="dead-runtime-exit"):
+        """A supervisor death: terminal runtime columns, no delivery intent (not a completion)."""
+        rows, chosen = [], None
+        for line in self.jobs.read_text().splitlines():
+            fields = line.split("\t")
+            if len(fields) == 6 and D.row_has_attempt(fields[5], aid):
+                fields[1] = "done"
+                meta = {**D.parse_registry_metadata(fields[5]), "note": note,
+                        "failure_class": "runtime", "terminal_event": "dispatch.supervisor.error",
+                        "launch_started": "1"}
+                meta.pop("delivery_intent", None)
+                meta.pop("delivery_id", None)
+                fields[5] = ",".join(f"{key}={val}" for key, val in meta.items())
+                line = "\t".join(fields)
+                chosen = fields
+            rows.append(line)
+        self.jobs.write_text("\n".join(rows) + "\n", encoding="utf-8")
+        return chosen
+
+    def _wait(self, launch, readiness, *, deadline, **kwargs):
+        if launch.attempt_id == "att-owner-1":
+            return ("ready", "terminal-quiescent")
+        if launch.attempt_id not in self.finished and self.second_end:
+            self._die_runtime(launch.attempt_id)
+        elif launch.attempt_id not in self.finished:
+            self._finish(launch.attempt_id)
+        return ("ready", "terminal-quiescent")
+
+    def _carrier(self):
+        effective, owns = self.handed_to("session-2")
+        observation = {}
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with effective, owns, mock.patch.object(
+                rewake, "runtime_ancestry_binding", return_value=self.ANCESTRY), \
+                mock.patch.object(rewake, "wait_for_attempt", side_effect=self._wait), \
+                mock.patch.object(rewake.sys, "stdout", stdout), \
+                mock.patch.object(rewake.sys, "stderr", stderr):
+            claim = rewake.claim_arm(self.jobs, "att-owner-1", "session-2", fresh=True)
+            self.assertIsInstance(claim, rewake.ArmClaim)
+            launch = rewake.Launch("att-owner-1", self.jobs, "session-2", armed="automatic-replacement")
+            holder = {"launch": launch, "claim": claim}
+            code = rewake._run_carrier_once(launch, claim, self.payload(), observation, holder,
+                                            time.monotonic() + 120)
+        return code, observation, stdout.getvalue(), stderr.getvalue(), holder
+
+    def _record(self):
+        index = self.replacement.source_reservation(self.jobs, "att-owner-1")
+        return self.replacement._check_record(
+            self.replacement._read(self.replacement._record_path(self.jobs, index["family_id"])),
+            index["family_id"])
+
+    def test_park_resource_exit_and_supervisor_death_continue_without_a_person_start(self):
+        self._write_runtime_owner()
+        code, observation, stdout, _stderr, holder = self._carrier()
+        record = self._record()
+        # (i) one launch, from the bound carrier, with no person's `start`.
+        self.assertEqual(len(self.launches), 1, observation)
+        self.assertIn("--automatic-retry-of", self.launches[0])
+        self.assertEqual(self.launches[0][self.launches[0].index("--automatic-retry-of") + 1],
+                         "att-owner-1")
+        self.assertEqual(record["proof"]["death_kind"], "runtime")
+        # (ii) the claim inherits the finished resource stage and never reruns it.
+        self.assertEqual([row["node"] for row in record["reuse"]["completed"]], [self.NODE])
+        text = self.replacement.recovery_instructions(self._instructions(record))
+        self.assertIn(f"Reuse the existing cycle cyc-fixture and completion evidence for: {self.NODE}", text)
+        self.assertIn("Continue only unfinished work. Do not rerun completed nodes", text)
+        # (iii) the carrier follows the successor arm and wakes the current seat.
+        self.assertEqual(code, 2, observation)
+        self.assertIn("Hearting dispatch", stdout)
+        self.assertEqual(holder["launch"].attempt_id, record["replacement_attempt_id"])
+        self.assertEqual(holder["claim"].session_id, "session-2")
+        finished = json.loads(self.finished[record["replacement_attempt_id"]].read_text())
+        self.assertEqual(finished["state"], "sent-ambiguous")
+
+    def test_second_same_runtime_end_alerts_the_current_seat_without_a_launch(self):
+        self._write_runtime_owner()
+        self.second_end = True
+        code, observation, stdout, _stderr, holder = self._carrier()
+        record = self._record()
+        # d2: the second death on the same observed columns launches nobody and says so.
+        self.assertEqual((code, len(self.launches)), (2, 1), observation)
+        self.assertIn("Automatic replacement exhausted", stdout)
+        self.assertEqual(holder["launch"].attempt_id, record["replacement_attempt_id"])
+        # An explicit `start` still replaces without a count cutoff.
+        successor = record["replacement_attempt_id"]
+        result = self.replacement.advance(self.jobs, successor, authority_check=lambda *a: True,
+                                          resume_capacity=True, run=self._launcher)
+        self.assertEqual(result["state"], "running", result)
+        self.assertEqual(len(self.launches), 2)
+
+    def test_the_accepted_terminal_claim_still_launches_and_wakes_the_current_seat(self):
+        """d1 (gap session): the incident's own terminal writer accepted the replacement
+        duty and materialized the old seat's notice before the successor carrier ran.
+        That accepted claim must not degrade the carrier into a silent
+        `completion-claim-unavailable` exit: it launches exactly one successor without a
+        person's `start`, and the successor's PASS wakes the current seat."""
+        self._write_runtime_owner(status="open")
+        record_path = self._supervisor_death()
+        metadata = rewake._row_metadata(self.jobs, "att-owner-1")
+        # (i) the accepted claim is durable before any carrier runs, and no
+        # successor row has been registered by anyone yet.
+        self.assertEqual(self.replacement.recovery_delivery_state(self.jobs, "att-owner-1"),
+                         "accepted")
+        pending = rewake.pending_delivery.read(self.root, "session-1", metadata["delivery_id"])
+        self.assertEqual((pending["state"], pending["attempts"]), ("pending", 0))
+        record = self._record()
+        self.assertNotIn(record["replacement_attempt_id"],
+                         self.replacement._rows(self.jobs.read_text().splitlines()))
+        code, observation, stdout, _stderr, holder = self._carrier()
+        # (ii) one launch from the bound carrier, no person's `start`.
+        self.assertEqual(len(self.launches), 1, observation)
+        self.assertEqual(self.launches[0][self.launches[0].index("--automatic-retry-of") + 1],
+                         "att-owner-1")
+        self.assertEqual(record["proof"]["death_kind"], "runtime")
+        # (iii) the successor's PASS wakes session-2 (exit 2), and the deferred
+        # old-seat record stays deferred, not claimed by this carrier.
+        self.assertEqual(code, 2, observation)
+        self.assertIn("Hearting dispatch", stdout)
+        self.assertEqual(holder["launch"].attempt_id, record["replacement_attempt_id"])
+        self.assertEqual(holder["claim"].session_id, "session-2")
+        finished = json.loads(self.finished[record["replacement_attempt_id"]].read_text())
+        self.assertEqual(finished["state"], "sent-ambiguous")
+        self.assertEqual(json.loads(record_path.read_text())["state"], "pending")
+
+    def test_a_deferred_claim_that_did_not_launch_reaches_the_current_seat(self):
+        """d2 (gap session): when the bound carrier's launch refuses non-conclusively the
+        accepted claim's delivery is deferred. The carrier must not exit 0 silently: it
+        announces the reserved-but-unlaunched replacement to the current seat, and it
+        never claims, acks or expires the deferred record."""
+        self._write_runtime_owner(status="open")
+        record_path = self._supervisor_death()
+        metadata = rewake._row_metadata(self.jobs, "att-owner-1")
+        record = self._record()
+        with mock.patch.object(rewake, "replacement_authority", return_value=False):
+            code, observation, stdout, _stderr, holder = self._carrier()
+        self.assertEqual(len(self.launches), 0, observation)
+        self.assertEqual(code, 2, observation)
+        self.assertIn(
+            "Runtime fact: a replacement is reserved for this owner and was not launched; "
+            "`start` on the route continues it.", stdout)
+        self.assertEqual(holder["claim"].session_id, "session-2")
+        pending = rewake.pending_delivery.read(self.root, "session-1", metadata["delivery_id"])
+        self.assertEqual((pending["state"], pending["attempts"], pending.get("claim_owner")),
+                         ("pending", 0, None))
+        self.assertEqual(json.loads(record_path.read_text())["state"], "pending")
+        self.assertEqual(self.replacement.recovery_delivery_state(self.jobs, "att-owner-1"),
+                         "accepted")
+
+    def test_a_deferred_claim_whose_successor_already_launched_keeps_the_silent_exit(self):
+        """Existing behavior kept: once the reserved successor crossed the launch fence,
+        the ordinary follow path owns the continuation, so the deferred record still
+        exits silently instead of announcing a reservation that is already launched."""
+        self._write_runtime_owner(status="open")
+        self._supervisor_death()
+        record = self._record()
+        # The exact ordinary launch the bound carrier would perform.
+        effective, owns = self.handed_to("session-2")
+        with effective, owns:
+            launched = self.replacement.advance(self.jobs, "att-owner-1",
+                                                authority_check=lambda *args: True)
+        self.assertEqual(launched["state"], "running", launched)
+        self.assertEqual(len(self.launches), 1)
+        wins = []
+        real_claim = rewake._carrier_one_claim
+
+        def record_claim(*args, **kwargs):
+            win = real_claim(*args, **kwargs)
+            wins.append(win)
+            return win
+
+        with mock.patch.object(rewake, "follow_replacement", return_value=None), \
+                mock.patch.object(rewake, "_carrier_one_claim", side_effect=record_claim):
+            code, observation, stdout, _stderr, _holder = self._carrier()
+        self.assertTrue(any(isinstance(win, rewake.ClaimDeferred) for win in wins), wins)
+        self.assertEqual((code, stdout, len(self.launches)), (0, "", 1))
+        self.assertEqual(observation["reason"], "completion-claim-unavailable")
+        self.assertEqual(record["replacement_attempt_id"], launched["attempt_id"])
+
+    def _instructions(self, record):
+        from types import SimpleNamespace
+        return SimpleNamespace(automatic_retry_of="att-owner-1", worker_type="owner",
+                               jobs_path=self.jobs, attempt_id=record["replacement_attempt_id"])
 
 
 class CarrierFixtureCleanupBoundaryTest(unittest.TestCase):
