@@ -475,6 +475,17 @@ class WorkerHomes(unittest.TestCase):
         self.assertEqual(sorted(str(p.relative_to(rules)) for p in rules.rglob('*') if p.is_file()),
                          ['external-communications-read-only.md'])
 
+        # A linked folder of shared rules is copied too, as Claude reads it; a loop once.
+        shared = self.base / 'shared-rules'
+        shared.mkdir()
+        (shared / 'shared.md').write_text('shared\n')
+        (shared / 'back').symlink_to(shared, target_is_directory=True)
+        (self.source / 'rules/shared').symlink_to(shared, target_is_directory=True)
+        prepare_worker_home(ROOT, 'claude', 'stage', 'rules', env=self.env)
+        self.assertEqual(sorted(str(p.relative_to(rules)) for p in rules.rglob('*') if p.is_file()),
+                         ['external-communications-read-only.md', 'shared/shared.md'])
+        self.assertFalse((rules / 'shared').is_symlink())
+
     def test_codex_owner_retains_native_policy_without_main_agent_catalog(self):
         (self.source / 'agents').mkdir()
         helper = self.source / 'agents/general-purpose.toml'

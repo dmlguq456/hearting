@@ -684,7 +684,9 @@ def _keep_edited_opencode_bootstrap(previous: Optional[dict], scope: str):
 
     The file is Hearting's (its header says to edit the rules folder instead).
     The edit is kept byte for byte beside it, and activation continues instead
-    of stopping on a collision. Returns the destination to rewrite and one line.
+    of stopping on a collision. Returns ``{destination: digest of the kept
+    bytes}`` (the transaction rewrites it only while it still holds them) and
+    one line.
     """
     home = paths.runtime_home("opencode", scope)
     dest = home / "AGENTS.md"
@@ -692,10 +694,11 @@ def _keep_edited_opencode_bootstrap(previous: Optional[dict], scope: str):
                    if isinstance(item, dict) and item.get("dest") == str(dest)
                    and item.get("kind") == "render"), None)
     if record is None or dest.is_symlink() or not dest.is_file():
-        return None, []
+        return {}, []
     data = dest.read_bytes()
-    if hashlib.sha256(data).hexdigest() == record.get("content_sha256"):
-        return None, []
+    digest = hashlib.sha256(data).hexdigest()
+    if digest == record.get("content_sha256"):
+        return {}, []
     kept = next((path for path in sorted(home.glob("AGENTS.md.edited-*"))
                  if path.is_file() and not path.is_symlink() and path.read_bytes() == data), None)
     if kept is None:
@@ -706,8 +709,8 @@ def _keep_edited_opencode_bootstrap(previous: Optional[dict], scope: str):
             kept = home / f"AGENTS.md.edited-{stamp}-{suffix}"
             suffix += 1
         _atomic_bytes(kept, data)
-    return str(dest), [f"OpenCode AGENTS.md had edits; kept them in {kept} and rewrote the file "
-                       "(edit rules in Claude's user rule folder instead)"]
+    return {str(dest): digest}, [f"OpenCode AGENTS.md had edits; kept them in {kept} and rewrote the file "
+                                 "(edit rules in Claude's user rule folder instead)"]
 
 
 def _kernel_agents(source_root: Path) -> set[str]:
@@ -3323,12 +3326,13 @@ def _apply_transaction(
     protected_paths: Sequence[Path] = (),
     commit_callback=None,
     transaction_snapshot: Optional[dict] = None,
-    rewrite_owned: Sequence[str] = (),
+    rewrite_owned: Optional[Dict[str, str]] = None,
 ) -> List[dict]:
     state_dir = paths.harness_state_dir(runtime, scope)
     tx_root = state_dir / "transactions" / uuid.uuid4().hex
     backup_root = tx_root / "backup"
     owned, user_changed = _trusted_owned(runtime, previous, desired, scope)
+    rewrite_owned = dict(rewrite_owned or {})
     for value in rewrite_owned:  # an edited Hearting file whose edit is already kept aside
         owned.add(value)
         user_changed.pop(value, None)
@@ -3413,6 +3417,12 @@ def _apply_transaction(
             if record["state"] == "moved":
                 Path(record["backup"]).parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(dest), record["backup"])
+                if key in rewrite_owned and _bytes_sha256(Path(record["backup"])) != rewrite_owned[key]:
+                    # Edited again after its earlier edit was kept aside: the backup
+                    # is discarded on commit, so stop and let rollback put it back.
+                    raise ActivationError(
+                        f"concurrent-successor: {dest} changed while its edit was being kept; "
+                        "rerun to keep the newer edit too")
 
         _write_journal(journal_path, runtime, "applying", snapshots)
 
@@ -4058,14 +4068,14 @@ def activate(
     agent_report_lines.extend(dict.fromkeys(item["detail"] for item in desired
                                             if item.get("guard") and item.get("detail")))
     agent_report_lines.extend(_edited_render_lines(runtime, previous, desired))
-    rewrite_owned: List[str] = []
+    rewrite_owned: Dict[str, str] = {}
     kept_lines: List[str] = []
     skipped_rules: List[str] = []
     if runtime == "opencode":
         if user_rules.carry_enabled():
             skipped_rules = user_rules.collect(paths.runtime_home("claude"))[1]
         edited, kept_lines = _keep_edited_opencode_bootstrap(previous, scope)
-        rewrite_owned.extend([edited] if edited else [])
+        rewrite_owned.update(edited)
     digest = _projection_digest(desired)
     packaged_checksum = _bundle_checksum(active_root) if mode == "packaged" else None
     if mode == "packaged" and packaged_checksum is None:
