@@ -19,7 +19,8 @@ if [ "${AGENT_SESSION_ROLE:-}" = worker ] \
 fi
 
 HOOK_DIR="$HOOK_DIR" AGENT_HOME="$AGENT_HOME" python3 -c '
-import json, os, sys
+import json, os, sys, time
+started = time.monotonic()
 try:
     payload = json.load(sys.stdin)
 except Exception:
@@ -49,11 +50,14 @@ def emit(context):
     contexts.append(context)
 try:
     import session_tidy
+    # An older session_tidy (a worktree pinned to its release) has no budget.
+    budget = getattr(session_tidy, "HUMAN_NOTICE_BUDGET_SECONDS", None)
     session_tidy.run_hook(
         "claude", event, sid, source=text("source"),
         transcript=text("transcript_path"), cwd=text("cwd") or os.getcwd(), emit=emit,
         emit_human=human.append, deferred=deferred,
-        prompt_text=text("prompt"))
+        prompt_text=text("prompt"),
+        **({"human_deadline": started + budget} if budget is not None else {}))
 except Exception:
     pass
 notice = ""
