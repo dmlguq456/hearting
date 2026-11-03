@@ -253,16 +253,27 @@ def follow_installed_release(path: Path) -> None:
         pass
 
 
-def _route_closed(record: dict) -> bool:
-    """Whether the waited route's own outcome record names this route as closed."""
+def _route_finished(record: dict) -> bool:
+    """Whether the waited route closed as finished work that `start` has nothing to say about.
+
+    Only a closure whose terminal gate is proven, with no inline finish
+    pending, not closed automatically and not a framed route (whose `start`
+    still settles its decision) qualifies. Every other closure, and anything
+    unreadable, keeps the existing `start`, which reports what it finds.
+    """
     try:
         route_file = Path(record["route_file"])
-        outcome = json.loads(route_file.with_name(route_file.stem + ".outcome.json")
-                             .read_text(encoding="utf-8"))
-    except (KeyError, TypeError, OSError, ValueError):
+        route = json.loads(route_file.read_text(encoding="utf-8"))
+        if not isinstance(route, dict) or route.get("route_id") != record.get("route_id"):
+            return False
+        from dispatch_notice_state import closed_outcome
+        import route_plan
+        closed = closed_outcome(route_file, route)
+    except Exception:  # noqa: BLE001 -- unknown keeps the existing start
         return False
-    return isinstance(outcome, dict) and bool(record.get("route_id")) \
-        and outcome.get("route_id") == record.get("route_id")
+    return bool(isinstance(closed, dict) and closed.get("terminal_gate_proven") is True
+                and not closed.get("autoclose") and not closed.get("finish_pending")
+                and not route_plan.is_framed_route(route))
 
 
 def run(path: Path, *, sleep=time.sleep, now=time.time, call=subprocess.run, cleared=_cleared,
@@ -289,10 +300,9 @@ def run(path: Path, *, sleep=time.sleep, now=time.time, call=subprocess.run, cle
     record = json.loads(path.read_text(encoding="utf-8"))
     if record.get("state") != "armed":
         return 0
-    if _route_closed(record):
-        # The route closed while this wait slept (finished, cancelled, or
-        # continued and closed by another path): nothing is left to resume
-        # and nobody is waiting for a notice.
+    if _route_finished(record):
+        # The route finished while this wait slept (continued and closed by
+        # another path): nothing is left to resume and nothing to report.
         record.update(state="route-closed",
                       settled_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
         _write(path, record)

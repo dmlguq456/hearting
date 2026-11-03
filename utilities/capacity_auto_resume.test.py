@@ -264,29 +264,42 @@ class RunTest(unittest.TestCase):
         self.assertEqual(C.run(self.path, sleep=self.sleep, now=lambda: self.clock[0],
                                call=lambda *a, **k: self.fail("resumed twice")), 0)
 
-    def test_a_route_that_closed_during_the_wait_is_not_started_again(self):
+    def test_only_a_proven_finished_route_ends_the_wait_without_start(self):
         # Four of five Codex waits armed on 10-29 named routes that were
-        # continued and closed by other paths the same day.
+        # continued and closed by other paths the same day. A closure `start`
+        # would still report (unproven, finish pending, closed automatically,
+        # a framed decision to settle) keeps the start and its notice.
         route = Path(self._tmp.name) / "routes" / "rt-closed.json"
         route.parent.mkdir()
-        route.write_text("{}")
+        route_doc = {"route_id": PAUSE["route_id"], "route_hash": "sha256:route"}
+        route.write_text(json.dumps(route_doc))
         record = json.loads(self.path.read_text())
-        self.path.write_text(json.dumps({**record, "route_file": str(route)}))
         outcome = route.with_name("rt-closed.outcome.json")
-        outcome.write_text(json.dumps({"route_id": "rt-other"}))
-        calls = []
+        base = {"route_id": PAUSE["route_id"], "route_hash": "sha256:route"}
         done = SimpleNamespace(returncode=0, stdout="{}\n")
-        with mock.patch.object(C, "_notify") as notify:
+        for closure, started in (({**base, "route_id": "rt-other"}, True),
+                                 (base, True),
+                                 ({**base, "terminal_gate_proven": True, "autoclose": True}, True),
+                                 ({**base, "terminal_gate_proven": False}, True),
+                                 ({**base, "terminal_gate_proven": True}, False)):
+            with self.subTest(closure=closure):
+                self.path.write_text(json.dumps({**record, "route_file": str(route)}))
+                outcome.write_text(json.dumps(closure))
+                calls = []
+                with mock.patch.object(C, "_notify") as notify:
+                    C.run(self.path, sleep=self.sleep, now=lambda: self.clock[0],
+                          call=lambda argv, **kw: calls.append(argv) or done)
+                self.assertEqual((len(calls), notify.call_count), (1, 1) if started else (0, 0))
+                self.assertEqual(json.loads(self.path.read_text())["state"],
+                                 "resumed" if started else "route-closed")
+        # A framed route still lets `start` settle its decision.
+        self.path.write_text(json.dumps({**record, "route_file": str(route)}))
+        with mock.patch("route_plan.is_framed_route", return_value=True), \
+                mock.patch.object(C, "_notify"):
+            calls = []
             C.run(self.path, sleep=self.sleep, now=lambda: self.clock[0],
                   call=lambda argv, **kw: calls.append(argv) or done)
-        self.assertEqual(len(calls), 1)          # another route's outcome is not this closure
-        self.path.write_text(json.dumps({**record, "route_file": str(route)}))
-        outcome.write_text(json.dumps({"route_id": PAUSE["route_id"], "state": "cancelled"}))
-        with mock.patch.object(C, "_notify") as notify:
-            self.assertEqual(C.run(self.path, sleep=self.sleep, now=lambda: self.clock[0],
-                                   call=lambda *a, **k: self.fail("closed route started")), 0)
-        notify.assert_not_called()
-        self.assertEqual(json.loads(self.path.read_text())["state"], "route-closed")
+        self.assertEqual(len(calls), 1)
 
     def test_the_resume_runs_the_installed_release_not_the_arming_one(self):
         done = SimpleNamespace(returncode=0, stdout="{}\n")
