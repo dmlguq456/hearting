@@ -868,6 +868,17 @@ print(json.dumps(result))
             self.assertEqual(duty["id"], duty_id)
             second_runner = obligations._RUNNERS[-1]
         self._wait_for(self.submissions)
+        # The fixture send records the submission inside the runner's queue
+        # call; the runner then publishes the delivery as queued in a short
+        # pending-row section. A receiver never blocks on that lock (it is
+        # deferred to its next callback), so receive once the delivery is
+        # published, as the recipient would.
+        deadline = time.monotonic() + 10
+        with mock.patch.dict(os.environ, second_env, clear=True):
+            while (peer_message._read_pending(ref) or {}).get("state") != "queued":
+                if time.monotonic() >= deadline:
+                    self.fail("the runner did not publish its queued delivery")
+                time.sleep(0.01)
         second_marker = [json.loads(line) for line in self.markers.read_text().splitlines()][-1]
         self.assertEqual(second_marker["release"], "B")
         self.assertEqual(second_marker["service_current"], str(self.current))

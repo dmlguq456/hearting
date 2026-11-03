@@ -349,8 +349,9 @@ def _route_chain():
     return route_chain
 
 
-def _ledger_routes(chain, identities) -> dict[str, set[str]]:
-    """Canonical artifact root -> the route ids the ledgers name for it."""
+def _ledger_routes(chain, identities, own_only: bool = False) -> dict[str, set[str]]:
+    """Canonical artifact root -> the route ids the ledgers name for it; ``own_only`` leaves
+    out lines marked ``automatic`` (an automatic change record, not the session's own route)."""
     routes: dict[str, set[str]] = {}
     for harness, session_id in identities:
         try:
@@ -368,6 +369,8 @@ def _ledger_routes(chain, identities) -> dict[str, set[str]]:
             except ValueError:
                 continue
             root = record.get("artifact_root") if isinstance(record, dict) else None
+            if own_only and record.get("automatic"):
+                continue
             if isinstance(root, str) and root:
                 route_id = record.get("route_id")
                 routes.setdefault(os.path.realpath(root), set()).update(
@@ -387,14 +390,14 @@ def _identities(chain, harness: str, session_id: str, env) -> list[tuple[str, st
     return found
 
 
-def held_routes(harness: str, session_id: str, env):
+def held_routes(harness: str, session_id: str, env, own_only: bool = False):
     """Canonical artifact root -> route ids this session's route-chain ledger names, or
     None when the session has no identity to look up."""
     chain = _route_chain()
     identities = _identities(chain, harness, session_id, env)
     if not identities:
         return None
-    return _ledger_routes(chain, identities)
+    return _ledger_routes(chain, identities, own_only)
 
 
 def held_roots(harness: str, session_id: str, env):
