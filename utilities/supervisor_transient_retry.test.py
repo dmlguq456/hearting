@@ -1,5 +1,6 @@
 """Regressions for the registered-supervisor transient retry seam."""
 import importlib.util
+import inspect
 import os
 from pathlib import Path
 import sys
@@ -105,6 +106,76 @@ class TransientRetryTest(unittest.TestCase):
         rate = self.supervisor.codex_turn_failure_terminal({
             "codex_error_info": {"kind": "responseTooManyFailedAttempts", "http_status": 429}})
         self.assertEqual((usage.failure_class, rate.failure_class), ("capacity", "capacity"))
+
+    def test_real_app_server_work_resets_retry_chain_on_same_thread(self):
+        class FakeAppServer:
+            def __init__(self):
+                self.requests = []
+                self.turn = 0
+                self.event_index = 0
+
+            def request(self, method, params):
+                self.requests.append((method, params))
+                self.turn += 1
+                self.event_index = 0
+                return {"turn": {"id": f"turn-{self.turn}"}}
+
+            def next_event(self):
+                turn_id = f"turn-{self.turn}"
+                if self.turn == 1:
+                    if self.event_index == 0:
+                        self.event_index += 1
+                        return {"method": "item/completed", "params": {
+                            "threadId": "thread-real", "turnId": turn_id,
+                            "item": {"type": "commandExecution", "id": "cmd-real",
+                                     "status": "completed", "exitCode": 0}}}
+                    return {"method": "turn/completed", "params": {"turn": {
+                        "id": turn_id, "status": "failed",
+                        "error": {"codexErrorInfo": "serverOverloaded"}}}}
+                if self.event_index == 0:
+                    self.event_index += 1
+                    return {"method": "item/completed", "params": {
+                        "threadId": "thread-real", "turnId": turn_id,
+                        "item": {"type": "agentMessage", "id": "msg-real",
+                                 "text": "finished"}}}
+                return {"method": "turn/completed", "params": {"turn": {
+                    "id": turn_id, "status": "completed"}}}
+
+        clock = SimpleNamespace(now=10.0, sleeps=[])
+        server = FakeAppServer()
+        events = []
+        args = SimpleNamespace(
+            worktree="/fixture", sandbox="workspace-write", approval="never",
+            network_access=False, writable_root=[], model=None, reasoning=None,
+            native_permission_profile=None, owner_input=None, parent_attempt_id="att-owner",
+        )
+
+        def sleep(seconds):
+            clock.sleeps.append(seconds)
+            clock.now += seconds
+
+        run_kwargs = {}
+        parameters = inspect.signature(self.supervisor.run_turn).parameters
+        if "clock" in parameters and "sleep" in parameters:
+            run_kwargs.update(clock=lambda: clock.now, sleep=sleep)
+        with mock.patch.object(self.supervisor, "apply_owner_runtime_permissions", create=True), \
+             mock.patch.object(self.supervisor, "emit", side_effect=events.append):
+            try:
+                result = self.supervisor.run_turn(
+                    server, thread_id="thread-real", prompt="continue", args=args,
+                    **run_kwargs)
+            except self.supervisor.TurnFailed:
+                result = None
+
+        starts = [params for method, params in server.requests if method == "turn/start"]
+        self.assertEqual(len(starts), 2)
+        self.assertEqual([params["threadId"] for params in starts],
+                         ["thread-real", "thread-real"])
+        self.assertIn("completed real work", starts[1]["input"][0]["text"])
+        waits = [event for event in events
+                 if event.get("type") == "dispatch.supervisor.transient-wait.started"]
+        self.assertEqual([event["ordinal"] for event in waits], [1])
+        self.assertEqual(result[0], "finished")
 
 
 if __name__ == "__main__":
