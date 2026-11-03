@@ -2370,6 +2370,18 @@ class ParentCloseTest(unittest.TestCase):
         self.frame_leg("att-frame-alt", second, node="frame-alternative")
         result = CLOSE.stop_attempt(self.aid("att-frame"), jobs=self.jobs)
         self.assertEqual(result["state"], "cancelled", result)
+        # The close CLI explains that its next start relaunches it -- never as next_step.
+        self.assertEqual(result["worker_type"], "frame")
+        sys.path.insert(0, str(HERE.parent / "tools" / "i18n"))
+        import ui_text
+        for lang in ("en", "ko"):
+            self.assertIn("close", ui_text.text("route.close.stopped_leg_next", lang))
+        explained = CLOSE.explain_stop(dict(result), ui_text.translator("en"))
+        self.assertIn("runs again the next time this route starts", explained["explanation"])
+        self.assertNotIn("next_step", explained)
+        for other in ({**result, "state": "terminal"}, {**result, "state": "termination-pending"},
+                      {**result, "worker_type": "stage"}):
+            self.assertNotIn("explanation", CLOSE.explain_stop(dict(other), ui_text.translator("en")))
         first.wait(timeout=5)
         self.assert_user_stopped("att-frame")
         self.assertIsNone(second.poll())
@@ -2390,6 +2402,18 @@ class ParentCloseTest(unittest.TestCase):
                          ("handover-unreadable", "same-command"))
         self.assertIsNone(owner.poll())
         self.assertIsNone(CLOSE.intent(self.route, self.jobs))
+        self.assertEqual(self.close()["state"], "cancelled")
+
+    def test_a_dispatched_worker_does_not_close_a_live_owners_route(self):
+        # RV-BC-1179 🟡5: a worker inherits its parent's session id; that must not let it
+        # close another route's live owner. The parent session still closes it.
+        owner = self.process("att-owner")
+        self.row("att-owner", process=owner)
+        with mock.patch.dict(os.environ, {"AGENT_DISPATCH_CHILD": "1",
+                                          "AGENT_DISPATCH_ATTEMPT_ID": "att-sibling-worker"}):
+            with self.assertRaisesRegex(ValueError, "parent-close-requires-parent"):
+                self.close()
+        self.assertIsNone(owner.poll())
         self.assertEqual(self.close()["state"], "cancelled")
 
     def test_an_unrelated_owner_with_a_diverged_lineage_does_not_hold_this_close(self):

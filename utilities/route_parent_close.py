@@ -209,6 +209,11 @@ def _owner(route, path, jobs, rows):
     aid, fields, meta = active[0]
     if aid == os.environ.get("AGENT_DISPATCH_ATTEMPT_ID"):
         raise ValueError("parent-close-requires-parent")
+    if os.environ.get("AGENT_DISPATCH_CHILD") == "1":
+        # A dispatched worker is no session: it inherits its parent's session id,
+        # which would let it close another route's live owner. Only the parent
+        # closes a live owner's route, as for a one-attempt stop (_require_stopper).
+        raise ValueError("parent-close-requires-parent")
     AUTH.require_owner(meta, AUTH.default_parent_session_id(), jobs, "parent-close-owner-not-owned")
     OWNER._owner_row_proof(fields, meta, route=route, environ={})
     return aid, False
@@ -380,10 +385,21 @@ def stop_attempt(attempt_id, *, jobs=None, grace=0.3, kill_wait=0.5):
     pending += [aid for aid, _open in unknown]
     fields, meta = _rows(jobs, {attempt_id})[attempt_id]
     return {"attempt_id": attempt_id, "route_id": meta.get("route_id"), "route_node": meta.get("route_node"),
-            "route_closed": False,
+            "route_closed": False, "worker_type": meta.get("worker_type", ""),
             "state": "termination-pending" if pending else "cancelled" if _user_stopped(meta) else "terminal",
             "status": fields[1], "note": meta.get("note", ""), "stopped_attempts": stopped,
             "pending_attempts": pending}
+
+
+def explain_stop(receipt, translate):
+    """Add the relaunch fact to a receipt of a frame leg that is actually stopped.
+
+    It is an explanation, never ``next_step``: a main session follows ``next_step``
+    first, and nothing is to be done now. A terminal or still-pending stop gets nothing.
+    """
+    if receipt.get("worker_type") == "frame" and receipt.get("state") == "cancelled":
+        receipt["explanation"] = translate("route.close.stopped_leg_next")
+    return receipt
 
 
 def stop_route_legs(route, *, jobs=None, grace=0.3, kill_wait=0.5):
