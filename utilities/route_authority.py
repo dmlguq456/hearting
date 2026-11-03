@@ -913,9 +913,14 @@ def decide_continuation(route=None, *, action, jobs=None, owner_attempt_id=None,
         budget_kinds_for_streak = budget_kinds if source_aware else kinds
         budget_rows_for_progress = budget_rows if source_aware else rows
         streak = 0
-        for kind in reversed(budget_kinds_for_streak):
+        import route_parent_close
+        for kind, (_status, row_meta) in zip(reversed(budget_kinds_for_streak),
+                                             reversed(budget_rows_for_progress)):
             if kind != "verdict-less":
                 break
+            if (row_meta.get("note") == route_parent_close.STOP_NOTE
+                    and row_meta.get("failure_class") == "cancelled"):
+                continue  # a person's stop is not a round that produced nothing
             streak += 1
         counted = blocked_progress(route, budget_rows_for_progress, worker_type=worker_type) if (
             streak >= _ROUND.VERDICTLESS_BOUND and route.get("route_plan") is not None) else streak

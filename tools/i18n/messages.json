@@ -218,6 +218,10 @@
    "en": "Start approval {approval} ({part})",
    "ko": "시작 승인 {approval} ({part})"
   },
+  "route.close.stopped_leg_next": {
+   "en": "The stopped leg runs again the next time this route starts, including a start --wait the runtime asks for and the continuation after a wake. To end it, close the route.",
+   "ko": "멈춘 갈래는 이 route가 다음에 start될 때 다시 뜹니다. 런타임이 시킨 start --wait와 깨어난 뒤 이어 가기도 포함됩니다. 끝내려면 route를 close하세요."
+  },
   "route.error.not_git_worker": {
    "en": "Not a git repository: source-mutating worker route; run git init and start again, or continue in this session with --shape direct",
    "ko": "git 저장소 아님: source-mutating worker route; git init 후 다시 시작하거나, 이 세션에서 --shape direct로 진행"
