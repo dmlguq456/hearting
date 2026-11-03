@@ -393,7 +393,7 @@ def _launch_root_identity(kind, path, *, resolver_identity=None):
     if key not in _LAUNCH_ROOT_IDENTITY_CACHE:
         if resolver_identity is None:
             # A mutable project cwd is compared by first-parent HEAD lineage,
-            # never by installer dirty-content hashes. On 2026-09-27 home-os
+            # never by installer dirty-content hashes. On 2026-09-27 home-app
             # had >100k untracked runtime files under a tracked directory;
             # hashing them here exhausted the pre-claim fence's 60s budget.
             # A cwd without HEAD has no lineage to compare and reads
@@ -4154,7 +4154,7 @@ def compose_route(*, capability, capability_mode, shape, graph, slug, cwd, artif
     artifact_root = str(Path(artifact_root).resolve())
     # The campaign is the agent's proposal for the work stream (CONVENTIONS
     # "Campaign or cycle").  A route sealed without one silently landed in the
-    # root's degraded `_unassigned` container (TF-Rehancer 2026-09-15: nine
+    # root's degraded `_unassigned` container (Project-C 2026-09-15: nine
     # routes, zero keys), so compose demands the proposal, shows the streams
     # that already exist, and accepts only an explicit opt-out.
     if unassigned and (campaign_key is not None or parent_cycle_id is not None):
@@ -5162,7 +5162,7 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
     slug_fields={}
     if slug is not None:
         # A caller-typed leading date is dropped once, here at the origin: every
-        # locator built from this slug prefixes the record's own date, so BC_ResNet
+        # locator built from this slug prefixes the record's own date, so KWS_Net
         # 2026-09-10 accumulated names like `2026-09-10_2026-09-10-r5-...` and one
         # `2026-09-09_2026-09-10-r4-...` whose two dates disagreed. Migration
         # naming does not pass through here and keeps both dates by design.

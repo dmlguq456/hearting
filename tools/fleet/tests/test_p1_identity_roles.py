@@ -52,7 +52,7 @@ class NativeBackgroundChainTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:
             f = FakeClaudeProc(temporary)
             sid = "7a47c285-2f29-4d37-ab20-8411e48c9d70"
-            project = str(Path(temporary) / "SR_CorrNet_SD")
+            project = str(Path(temporary) / "SR_ModelA_SD")
             Path(project).mkdir()
             (Path(project) / ".git").mkdir()
             executable = "/opt/claude/versions/8.7.6"
@@ -102,7 +102,7 @@ class NativeBackgroundChainTest(unittest.TestCase):
                 self.assertIsNone(row.session_tag)
                 shown, keys = _session_records({"sessions": rows}, 0, model.project_of)
                 self.assertEqual([(r["tag"], r["repo"], r["repo_id"]) for r in shown],
-                                 [("?1", "SR_CorrNet_SD", "SR_CorrNet_SD")])
+                                 [("?1", "SR_ModelA_SD", "SR_ModelA_SD")])
                 self.assertEqual(keys["?1"]["sid"], sid)
                 for selected in ({"claude"}, iter(["claude"])):
                     filtered = procscan.scan(harness_filter=selected)

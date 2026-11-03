@@ -989,16 +989,16 @@ class RootSlugTests(unittest.TestCase):
         self.assertEqual(W._default_root_slug(root), "hearting")
 
     def test_legacy_claude_reports_root_slugs_from_the_repo_directory(self):
-        root = self.base / "SR_CorrNet_DSC" / ".claude_reports"
+        root = self.base / "SR_ModelA_DSC" / ".claude_reports"
         root.mkdir(parents=True)
-        self.assertEqual(W._default_root_slug(root), "sr-corrnet-dsc")
+        self.assertEqual(W._default_root_slug(root), "sr-modela-dsc")
 
     def test_symlinked_repo_slugs_from_its_realpath(self):
-        real = self.base / "BC_ResNet"
+        real = self.base / "KWS_Net"
         (real / ".agent_reports").mkdir(parents=True)
-        link = self.base / "BC_ResNet_tf"
+        link = self.base / "KWS_Net_tf"
         link.symlink_to(real, target_is_directory=True)
-        self.assertEqual(W._default_root_slug(link / ".agent_reports"), "bc-resnet")
+        self.assertEqual(W._default_root_slug(link / ".agent_reports"), "kws-net")
 
     def test_a_slug_that_cannot_fill_the_cycle_key_field_is_refused(self):
         long_name = "x" * 65
@@ -1025,9 +1025,9 @@ class RootSlugTests(unittest.TestCase):
 
     def test_every_roster_repo_yields_a_valid_cycle_key_field(self):
         # D-79: `<root-slug>`는 roster에서 결정론적으로 유도한 소문자 slug
-        for name in ("BC_ResNet", "Stream_Diar_Baselines", "SR_CorrNet", "SR_CorrNet_DSC",
-                     "SR_CorrNet_SD", "TF_Restormer_release", "TTS_Baselines", "cairn",
-                     "home-os", "hearting"):
+        for name in ("KWS_Net", "Stream_Diar_Baselines", "SR_ModelA", "SR_ModelA_DSC",
+                     "SR_ModelA_SD", "TF_Enhancer_release", "TTS_Baselines", "cairn",
+                     "home-app", "hearting"):
             root = self.base / name / ".agent_reports"
             root.mkdir(parents=True)
             slug = W._default_root_slug(root)

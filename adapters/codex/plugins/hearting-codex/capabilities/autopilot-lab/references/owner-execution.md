@@ -116,7 +116,7 @@ Read the parent's `summary.md`, `STORY.md`, config, and checkpoint path. Use set
 
 ### `--ref <path>`
 
-Select a reference implementation such as `model/TF_Restormer`. When omitted, consult `similar_models.md`. A parent checkpoint takes precedence over a reference baseline.
+Select a reference implementation such as `model/TF_Enhancer`. When omitted, consult `similar_models.md`. A parent checkpoint takes precedence over a reference baseline.
 
 ### `--intensity`
 
