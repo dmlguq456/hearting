@@ -853,14 +853,24 @@ def _start(route, path, jobs, node, harness, run, on_claim=None):
             }
         if prepared is not None:
             command += ["--execution-access-file", str(prepared)]
+    # When this launch began, was claimed and returned (epoch seconds): the start receipt keeps
+    # the per-leg timing that no other record holds.
+    started, claimed = time.time(), []
+
+    def reported():
+        claimed.append(time.time())
+        on_claim()
+
     if on_claim is None:
         result = run(command, text=True, capture_output=True, check=False)
     elif run is subprocess.run:
-        result = _run_reporting_claim(command, attempt_id(route, node), on_claim)
+        result = _run_reporting_claim(command, attempt_id(route, node), reported)
     else:   # an injected launcher may report the claim itself, or simply return when done
-        result = run(command, text=True, capture_output=True, check=False, on_claim=on_claim)
+        result = run(command, text=True, capture_output=True, check=False, on_claim=reported)
     receipt = {"attempt_id": attempt_id(route, node), "exit_code": result.returncode,
-               "receipt": result.stdout, "diagnostic": result.stderr}
+               "receipt": result.stdout, "diagnostic": result.stderr,
+               "started_at": round(started, 1), "ended_at": round(time.time(), 1),
+               **({"claimed_at": round(claimed[0], 1)} if claimed else {})}
     if access_diagnostic:
         receipt["execution_access_diagnostic"] = access_diagnostic
     return receipt

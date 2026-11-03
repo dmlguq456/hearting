@@ -1161,6 +1161,12 @@ class FramedStartTest(FramedBase):
         self.assertEqual(nodes, FRAME_IDS)
         self.assertEqual([launch["attempt_id"] for launch in result["launches"]],
                          [W.attempt_id(self.route, node) for node in FRAME_IDS])
+        first, second = result["launches"]
+        # the start receipt keeps when each launch began, was claimed and returned
+        self.assertLessEqual(first["started_at"], first["claimed_at"])
+        self.assertLessEqual(first["claimed_at"], second["started_at"])
+        self.assertLessEqual(second["started_at"], first["ended_at"])
+        self.assertNotIn("claimed_at", second)   # the last leg reports no claim to anyone
         self.assertEqual(sorted(result["frame_attempts"]),
                          sorted(W.attempt_id(self.route, node) for node in FRAME_IDS))
 
