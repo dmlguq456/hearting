@@ -2078,5 +2078,126 @@ class ExpiryTest(IsolatedRootMixin, unittest.TestCase):
         self.assertEqual(first["expiry_reason"], second["expiry_reason"])
 
 
+
+class G03ReferencesTest(IsolatedRootMixin, unittest.TestCase):
+    def create(self, **overrides):
+        return CreateTest._create(self, **overrides)
+
+    def test_g03_record_directories_only_correct_wrong_modes(self):
+        kwargs, record = self.create()
+        path = PD.record_path(self.root, kwargs["recipient_key"], record["delivery_id"])
+        directories = (path.parent, path.parent.parent)
+        before = [d.stat() for d in directories]
+        self.create()
+        self.assertEqual([s.st_ctime_ns for s in before], [d.stat().st_ctime_ns for d in directories])
+        for directory in directories:
+            os.chmod(directory, 0o750)
+            wrong = directory.stat()
+            self.create()
+            corrected = directory.stat()
+            self.assertEqual(stat.S_IMODE(corrected.st_mode), PD.DIR_MODE)
+            self.assertEqual((wrong.st_dev, wrong.st_ino), (corrected.st_dev, corrected.st_ino))
+            self.assertNotEqual(wrong.st_ctime_ns, corrected.st_ctime_ns)
+
+    def test_g03_record_directory_mode_correction_is_no_follow_and_identity_bound(self):
+        kwargs, record = self.create()
+        path = PD.record_path(self.root, kwargs["recipient_key"], record["delivery_id"])
+        group = path.parent
+        old = self.root / "original-group"
+        group.rename(old)
+        group.symlink_to(old, target_is_directory=True)
+        os.chmod(old, 0o750)
+        with self.assertRaises(PD.PendingDeliveryError):
+            self.create()
+        self.assertEqual(stat.S_IMODE(old.stat().st_mode), 0o750)
+        group.unlink(); old.rename(group)
+        os.chmod(group, 0o750)
+        real_stat, replaced = PD.os.stat, []
+        def replace_before_named_stat(name, *args, **kwargs):
+            if Path(name) == group and kwargs.get("follow_symlinks") is False and not replaced:
+                group.rename(old); group.mkdir(mode=0o750); replaced.append(True)
+            return real_stat(name, *args, **kwargs)
+        with unittest.mock.patch.object(PD.os, "stat", replace_before_named_stat):
+            with self.assertRaises(PD.PendingDeliveryError):
+                self.create()
+        self.assertEqual(replaced, [True])
+        self.assertEqual(stat.S_IMODE(old.stat().st_mode), 0o750)
+        self.assertEqual(stat.S_IMODE(group.stat().st_mode), 0o750)
+
+    def test_g03_common_notice_and_malformed_relationships(self):
+        _, record = self.create()
+        self.assertEqual(PD.record_references(record), AR.record_attempts(record))
+        for ids, parent in (([], ""), (["notice-" + "a" * 32], "notice-" + "b" * 32),
+                            (["notice-" + "a" * 32], "-")):
+            with self.subTest(ids=ids, parent=parent):
+                notice = dict({k: record[k] for k in PD.REQUIRED_FIELDS}, receipt={"kind": "notice"}, route_node="notice",
+                              row_revisions={}, attempt_ids=ids, parent_attempt_id=parent)
+                notice.pop("claim_authority")  # legacy lazy upgrade uses returned envelope
+                self.assertEqual(PD.record_references(notice), frozenset())
+        for overrides in ({"attempt_ids": ["bad"]}, {"parent_attempt_id": ""},
+                          {"attempt_ids": "att-wrong-shape"}, {"extra": "not-schema"}):
+            with self.assertRaises(PD.PendingDeliveryError):
+                PD.record_references(dict(record, **overrides))
+        # One decision with record_attempt_identities: a parent that is not an
+        # attempt id names no worker HOME, like the depth-1 "-" parent.
+        broken = dict(record, parent_attempt_id="broken")
+        self.assertEqual(PD.record_references(broken), frozenset(PD.record_attempt_identities(broken)))
+        self.assertEqual(PD.record_references(broken), frozenset(record["attempt_ids"]))
+        for location in ({"group": "b" * 64}, {"group": "not-a-digest"},
+                         {"delivery_id": "delivery-" + "b" * 32}, {"delivery_id": "elsewhere"}):
+            with self.assertRaises(PD.PendingDeliveryError) as raised:
+                PD.record_references(record, **location)
+            self.assertEqual(raised.exception.detail, "record-path-mismatch")
+        self.assertEqual(PD.record_references(record, group=record["recipient_digest"],
+                                              delivery_id=record["delivery_id"]),
+                         frozenset(PD.record_attempt_identities(record)))
+
+    def test_g03_writer_tokens_change_on_ack_prune_not_read_or_noop(self):
+        kwargs, record = self.create()
+        attempt = kwargs["attempt_ids"][0]
+        token = PD.reference_token(self.root, attempt)
+        self.assertIsNotNone(token)
+        with AR.admission(self.root, [attempt]):
+            self.assertEqual(PD.reference_token(self.root, attempt), token)
+        PD.create(**kwargs)
+        self.assertEqual(PD.reference_token(self.root, attempt), token)
+        PD.claim(self.root, kwargs["recipient_key"], record["delivery_id"], claim_owner="g03", lease_seconds=30)
+        claimed = PD.reference_token(self.root, attempt)
+        self.assertNotEqual(claimed, token)
+        PD.ack(self.root, kwargs["recipient_key"], record["delivery_id"], acked_by="g03")
+        acked = PD.reference_token(self.root, attempt)
+        self.assertNotEqual(acked, claimed)
+        path = PD.record_path(self.root, kwargs["recipient_key"], record["delivery_id"])
+        old = time.time() - 8 * 86400
+        os.utime(path, (old, old))
+        result = PD.prune(self.root, apply=True)
+        self.assertEqual(result["pruned_records"], 1, result)
+        self.assertNotEqual(PD.reference_token(self.root, attempt), acked)
+
+    def test_g03_failed_record_write_invalidates_before_publication(self):
+        kwargs, record = self.create()
+        attempt = kwargs["attempt_ids"][0]
+        before = PD.reference_token(self.root, attempt)
+        path = PD.record_path(self.root, kwargs["recipient_key"], record["delivery_id"])
+        real_write = PD._atomic_write_json
+        def fail_record(target, value):
+            if target == path:
+                raise OSError("fixture publication interruption")
+            return real_write(target, value)
+        with unittest.mock.patch.object(PD, "_atomic_write_json", fail_record):
+            with self.assertRaises(OSError):
+                PD.claim(self.root, kwargs["recipient_key"], record["delivery_id"], claim_owner="g03", lease_seconds=30)
+        self.assertNotEqual(PD.reference_token(self.root, attempt), before)
+        self.assertEqual(PD._read_unlocked(path)["state"], "pending")
+        lock = AR.lock_path(self.root, attempt)
+        lock.write_bytes(b"delivery-change-v1:torn")
+        self.assertIsNone(PD.reference_token(self.root, attempt))
+        with AR.admission(self.root, [attempt]):
+            repaired = PD.reference_token(self.root, attempt, initialize=True)
+        self.assertNotEqual(repaired, before)
+        lock.unlink()
+        self.assertIsNone(PD.reference_token(self.root, attempt))
+
+
 if __name__ == "__main__":
     unittest.main()

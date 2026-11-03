@@ -494,8 +494,8 @@ of every post-exit reaper and in a `reconcile --apply` that is not scoped to one
 most every five minutes (every minute while the last pass left due homes behind),
 examines at most 128 homes (a fair cursor) and stops once 16 are due, and removes at
 most 16 destructively touched homes, including partial leftovers of an interrupted removal.
-The same pass first prunes pending-delivery records, before it judges any home, so the
-index those judgments read stays under its record cap: terminal
+The same pass first prunes pending-delivery records, before it judges any home, so
+those judgments read fewer records: terminal
 (`acked`/`expired`/`rejected`) records unchanged for seven days are removed oldest
 first after a `stat` pre-filter, at most 512 records and three seconds per pass; open
 records, recent terminal records and tombstones stay untouched. The prune uses
@@ -510,7 +510,26 @@ from the best completion estimate: the terminal row timestamp or, when later, th
 regular log file mtime. Only when that timestamp cannot be parsed does the clock
 start at the first pass that proves every protection below. Uncertain prepared
 evidence defers without restarting an established clock, while freshly observed
-renewed protection restarts it. Later activity (a Fleet
+renewed protection restarts it. Delivery discovery reads at most 4,096 records per
+pass (tombstones, locks and other entries cost only pass time) and resumes a bounded
+candidate cohort from its saved directory position; an unfinished read remains
+deferred (`delivery-read-deferred`), not unknown, until observation completes.
+Recipient groups are read in name order, so only a replaced store restarts the
+read; a new group or a candidate whose related attempts changed does not, and such
+a candidate alone waits for its next observation. Where libc lacks `getdents64`
+(macOS, glibc before 2.30) a sorted listing gives the same resumable positions. A
+reference token that cannot be read or written (for example on a full disk)
+defers only its candidate. An unreadable, malformed or misplaced record is
+unknown, with its cause (such as `record-unreadable`) counted under
+`unknown_causes`; a ledger anomaly makes only identity-less homes unknown. The saved
+position carries one filesystem-clock mark taken before the first group was read;
+the final candidate admission looks once for records published after that mark
+and rereads only those, so the number of recipient groups does not limit it.
+Only a complete, fresh candidate observation permits retirement. Open or
+unattributable evidence stays protected; terminal activity extends only the
+related attempt, parent, child, successor or verified legacy HOME binding.
+Normal and legacy notices use the delivery admission's same relation rule.
+Later activity (a Fleet
 view, a route outcome, a resolved delivery, a recovery record, a supervisor update,
 or a write to the home) extends it, including activity arriving before detach. A home is
 kept while: its row is not terminal; any open row references the attempt; a
@@ -546,7 +565,11 @@ fail-closed categories. Shared `homes/codex`,
 `<slug>.<profile>` and `destination=` homes are not enumerated. Detaching is one
 rename into `homes/worker-retention/retiring/` under a nonblocking registry lock
 and a reader-mark lock. Evidence is prepared outside the registry lock; its
-freshness and the full idle clock are checked before rename. Per-detach freshness
+freshness and the full idle clock are checked before rename. Sorted reference
+admission excludes related publication through the journal and rename; writer
+change tokens invalidate prepared observations without becoming absence evidence.
+Saved progress contains only the bounded cohort, directory position/generation
+and protection/activity summaries, not a copy of delivery history. Per-detach freshness
 covers candidate-relevant evidence; out-of-protocol late writes into unrelated
 historical delivery groups are caught by the next pass's discovery. Available,
 compatible mount identities are proved before detachment. Complete malformed
@@ -590,8 +613,10 @@ replaced, or otherwise uncertain evidence keeps the bytes. Eligible logs age
 from the latest verified terminal/settlement time: retain at least 14 days,
 then retire the oldest eligible logs as needed to approach 2 GiB. Protected
 and unknown bytes take precedence, so totals above 2 GiB are expected when
-needed. The bounded pass reuses one evidence snapshot, rechecks identity
-immediately before unlink, and resumes on the next normal cadence after
+needed. The bounded pass shares the resumable candidate delivery observation with
+HOME retention, rechecks identity and settlement immediately before removal, and
+holds all bound attempt/child/successor reference admissions through quarantine
+and unlink. It resumes on the next normal cadence after
 interruption; examining and removing have separate time budgets, and the next
 pass may start after one minute while removable files remain. It runs beside the existing post-exit reaper and selector-free
 `reconcile --apply`; exact-attempt transactions remain scoped to their attempt.

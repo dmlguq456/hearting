@@ -231,56 +231,138 @@ def _unlink_if_same(layout, name, expected):
     return unlink_same_file(layout.logs_fd, name, expected, _stamp)
 
 
+@contextlib.contextmanager
 def _fresh_eligible(jobs, root, layout, candidate_name, expected_rows,
-                    expected_stamp, now_ns, candidate_kind):
+                    expected_stamp, now_ns, candidate_kind, prepared, deadline, expected_settled):
     from dispatch_contract import process_table_scan_scope
     from worker_home_retention import _Context, _Snapshot, _declared_index
 
+    body_entered = False
     try:
         snapshot = _Snapshot(jobs)
         if candidate_kind == "log":
             log_file = str(root / "logs" / candidate_name)
             if log_file in snapshot.unknown_log_refs:
-                return False
+                yield False
+                return
             current_refs = snapshot.log_refs.get(log_file, {})
             if set(current_refs) != set(expected_rows):
-                return False
+                yield False
+                return
         else:
             if candidate_name in _unknown_prompt_names(jobs, root, snapshot.unknown_log_refs):
-                return False
+                yield False
+                return
             current_refs = {}
             for attempt, row in snapshot.rows.items():
                 if _prompt_name_for_row(jobs, root, attempt, row) == candidate_name:
                     current_refs[attempt] = row
             if set(current_refs) != set(expected_rows):
-                return False
+                yield False
+                return
         for attempt, old in expected_rows.items():
             current = snapshot.rows.get(attempt)
             current_ref = current_refs.get(attempt)
             if (current is None or current_ref is None or current.raw != old.raw
                     or current_ref.raw != old.raw):
-                return False
+                yield False
+                return
             if candidate_kind == "log" and current.meta.get("log_file") != log_file:
-                return False
+                yield False
+                return
             if (candidate_kind == "prompt"
                     and _prompt_name_for_row(jobs, root, attempt, current) != candidate_name):
-                return False
+                yield False
+                return
         ctx = _Context(jobs, root, layout, snapshot, now_ns)
         ctx.by_key = _declared_index(snapshot, root, ctx.workers_real)
+        ctx.delivery_subject_id = candidate_name
+        ctx.observation = prepared.observation
+        ctx.delivery = prepared.delivery
+        ctx.delivery_records = prepared.delivery_records
+        ctx.discovery_stamps = prepared.discovery_stamps
+        ctx.group_stamps = prepared.group_stamps
+        ctx.delivery_groups = prepared.delivery_groups
+        from worker_home_retention import (_DEPENDENCIES, _fresh, _registry_lock_until, _admission_scan,
+                                           _late_delivery_change, _late_candidate_delivery_change)
+        watched = {}
         with process_table_scan_scope():
             for attempt in expected_rows:
-                verdict = _log_protection(ctx, attempt, probe_processes=True)
+                evidence = _DEPENDENCIES.set(watched)
+                try:
+                    verdict = _log_protection(ctx, attempt, probe_processes=True)
+                finally:
+                    _DEPENDENCIES.reset(evidence)
                 if verdict.kind != "eligible":
-                    return False
+                    yield False
+                    return
                 row = snapshot.rows[attempt]
                 terminal = _terminal_ns(row.fields[0])
-                if terminal is None or max(terminal, verdict.activity_ns) > now_ns:
-                    return False
+                if (terminal is None or max(terminal, verdict.activity_ns) > now_ns
+                        or max(terminal, verdict.activity_ns) > expected_settled):
+                    yield False
+                    return
         current_stat = os.stat(candidate_name, dir_fd=layout.logs_fd, follow_symlinks=False)
-        return (_stamp(current_stat) == expected_stamp and stat.S_ISREG(current_stat.st_mode)
-                and current_stat.st_nlink == 1 and current_stat.st_uid == os.geteuid())
+        if not (_stamp(current_stat) == expected_stamp and stat.S_ISREG(current_stat.st_mode)
+                and current_stat.st_nlink == 1 and current_stat.st_uid == os.geteuid()):
+            yield False
+            return
+        import dispatch_attempt_reference as reference
+        from worker_home_retention import _candidate_related_attempts
+        related = set()
+        for attempt in expected_rows:
+            related.update(_candidate_related_attempts(root, snapshot, attempt))
+        representative = next(iter(expected_rows))
+        early = _late_delivery_change(ctx, representative, deadline)
+        if early is None:
+            early = _late_candidate_delivery_change(ctx, representative, deadline)
+        if early is not None:
+            if early == "deferred":
+                prepared.admission_reason = "delivery-refresh-budget"
+            yield False
+            return
+        baseline = ctx.candidate_delivery_baseline
+        registry_stamp = os.stat(jobs, follow_symlinks=False)
+        registry = lambda st: (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+        if registry(registry_stamp) != snapshot.registry_snapshot:
+            yield False
+            return
+        # The actual quarantine/unlink executes inside this yield. Process
+        # census and broad discovery above never run while jobs.log.lock is held.
+        with _registry_lock_until(jobs, deadline) as admitted:
+            if admitted is False:
+                yield False
+                return
+            with reference.admission(root, related, blocking=False) as admitted:
+                if not admitted or not _fresh(watched) or registry(os.stat(jobs)) != snapshot.registry_snapshot:
+                    yield False
+                    return
+                from worker_home_retention import _lease_state
+                from dispatch_summary import home_consumer_evidence
+                for row in expected_rows.values():
+                    if (_lease_state(jobs, row.meta) in ("held", "unknown")
+                            or home_consumer_evidence(row.meta)[0] in ("live", "unknown")):
+                        yield False
+                        return
+                ctx.candidate_delivery_baseline = baseline
+                # The reference admission is held through the unlink: look once
+                # for what was published since the refresh above.
+                ctx.admission_scan = _admission_scan(ctx, deadline)
+                late = (ctx.admission_scan if ctx.admission_scan is not None
+                        else _late_candidate_delivery_change(ctx, representative, deadline))
+                if late is not None:
+                    if late == "deferred":
+                        prepared.admission_reason = "delivery-reread-budget"
+                    yield False
+                    return
+                current_stat = os.stat(candidate_name, dir_fd=layout.logs_fd, follow_symlinks=False)
+                body_entered = True
+                yield _stamp(current_stat) == expected_stamp
     except Exception:  # noqa: BLE001 -- unreadable evidence keeps the bytes
-        return False
+        if body_entered:
+            raise
+        yield False
+        return
 
 
 def sweep(jobs, *, now_ns=None, force=False):
@@ -398,6 +480,23 @@ def _pass(jobs, root, layout, state, now_ns, started):
     removable = 0
     over_limit = total_bytes > MAX_LOG_BYTES
     ctx = _Context(jobs, root, layout, snapshot, now_ns)
+    from worker_home_retention import _candidate_related_attempts
+    saved = state.get("delivery_observation")
+    if isinstance(saved, dict) and saved.get("started") and not saved.get("complete"):
+        pending = {s for s in saved.get("subjects", []) if isinstance(s, str)}
+        selected_names = list(dict.fromkeys(
+            [name for name in ordered if name in pending] + selected_names))[:EXAMINE_LIMIT]
+    subjects = []
+    for name in selected_names:
+        related = set()
+        for attempt in candidate_rows[name]:
+            related.update(_candidate_related_attempts(root, snapshot, attempt))
+        subjects.append({"id": name, "related": sorted(related), "binding": None})
+    ctx.configure_delivery(state, subjects, started + MAX_PASS_SECONDS, state_budget=12288)
+    if ctx.observation is not None:
+        cohort = {s["id"] for s in ctx.observation.subjects}
+        selected_names = [name for name in selected_names if name in cohort]
+    discovery_deferred = 0
     with process_table_scan_scope():
         for name in selected_names:
             if examined_names and time.monotonic() - started > MAX_PASS_SECONDS:
@@ -415,6 +514,7 @@ def _pass(jobs, root, layout, state, now_ns, started):
                 unknown_names.add(name)
                 continue
             rows = candidate_rows[name]
+            ctx.delivery_subject_id = name
             if len(rows) == 0:
                 protected_names.add(name)
                 continue
@@ -429,6 +529,8 @@ def _pass(jobs, root, layout, state, now_ns, started):
                 if verdict.kind != "eligible":
                     reasons[verdict.reason or verdict.kind] = reasons.get(verdict.reason or verdict.kind, 0) + 1
                     all_eligible = False
+                    if verdict.kind == "deferred":
+                        discovery_deferred += 1
                     if verdict.kind == "unknown":
                         unknown_names.add(name)
                     break
@@ -488,22 +590,26 @@ def _pass(jobs, root, layout, state, now_ns, started):
         if removed >= REMOVE_LIMIT or time.monotonic() - removal_started > MAX_PASS_SECONDS:
             deferred += 1
             continue
-        if not _fresh_eligible(jobs, root, layout, name, rows, expected_stamp,
-                               now_ns, candidate_kind):
-            protected_names.add(name)
-            unknown_names.add(name)
-            deferred += 1
-            continue
-        if _unlink_if_same(layout, name, expected_stamp):
-            removed += 1
-            removed_bytes += expected_stamp[4]
-        else:
-            protected_names.add(name)
-            unknown_names.add(name)
-            deferred += 1
+        with _fresh_eligible(jobs, root, layout, name, rows, expected_stamp,
+                             now_ns, candidate_kind, ctx, removal_started + MAX_PASS_SECONDS, settled) as admitted:
+            if not admitted:
+                protected_names.add(name)
+                unknown_names.add(name)
+                deferred += 1
+                if ctx.admission_reason:
+                    reasons[ctx.admission_reason] = reasons.get(ctx.admission_reason, 0) + 1
+                    ctx.admission_reason = None
+                continue
+            if _unlink_if_same(layout, name, expected_stamp):
+                removed += 1
+                removed_bytes += expected_stamp[4]
+            else:
+                protected_names.add(name)
+                unknown_names.add(name)
+                deferred += 1
     result = {
         "examined": len(examined_names), "eligible": len(eligible), "eligible_bytes": eligible_bytes,
-        "removed": removed, "removed_bytes": removed_bytes, "deferred": deferred,
+        "removed": removed, "removed_bytes": removed_bytes, "deferred": deferred + discovery_deferred,
         "total_bytes": total_bytes, "protected_bytes": protected_bytes,
         "unknown_bytes": unknown_bytes,
         "quarantine_pending_files": recovery["pending_files"],
@@ -513,6 +619,12 @@ def _pass(jobs, root, layout, state, now_ns, started):
         "more": int(removed >= REMOVE_LIMIT or deferred > 0),
         "elapsed_ms": int((time.monotonic() - started) * 1000),
     }
+    if ctx.observation is not None:
+        ctx.observation.checkpoint()
+        result.update(delivery_reads=ctx.observation.reads, delivery_entries=ctx.observation.visits,
+                      delivery_metadata=ctx.observation.metadata)
+        if len(json.dumps(ctx.observation.data).encode()) > 12288:
+            state.pop("delivery_observation", None)
     state.update(last_pass_ns=now_ns, last_result=result)
     _write_state(layout, state)
     return result
