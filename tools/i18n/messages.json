@@ -98,6 +98,50 @@
    "en": "Checks / remaining: the report's format differs, so no machine summary — read the report itself",
    "ko": "검증·남은 것: 보고서 형식이 달라 기계 요약 안 함 — 보고서 본문을 그대로 볼 것"
   },
+  "compute.device_access": {
+   "en": "device access observed",
+   "ko": "장치 접근 확인"
+  },
+  "compute.driver_mismatch": {
+   "en": " · driver mismatch (library {library} / module {module})",
+   "ko": " · 드라이버 불일치(라이브러리 {library} / 모듈 {module})"
+  },
+  "compute.gpu_unavailable": {
+   "en": "GPU status unavailable",
+   "ko": "GPU 상태 확인 불가"
+  },
+  "compute.gpu_unobserved": {
+   "en": "GPU {index}: utilization and VRAM unknown",
+   "ko": "GPU {index}: 사용률·VRAM 모름"
+  },
+  "compute.gpu_unobserved_named": {
+   "en": "GPU {index} {name}: utilization and VRAM unknown",
+   "ko": "GPU {index} {name}: 사용률·VRAM 모름"
+  },
+  "compute.no_new_run": {
+   "en": " · cannot reserve a GPU for a new run",
+   "ko": " · 새 GPU 실행 예약 불가"
+  },
+  "compute.occupied": {
+   "en": " · devices in use: {devices}",
+   "ko": " · 장치 점유 {devices}"
+  },
+  "compute.reboot_needed": {
+   "en": " · host reboot needed",
+   "ko": " · 호스트 재부팅 필요"
+  },
+  "compute.reservation_unplaced": {
+   "en": "GPU reservation · device location unknown: {lease}",
+   "ko": "GPU 예약 · 장치 위치 모름: {lease}"
+  },
+  "compute.running": {
+   "en": " · {count} running",
+   "ko": " · 실행 중 {count}개 확인"
+  },
+  "compute.unknown": {
+   "en": "unknown",
+   "ko": "모름"
+  },
   "conversation.cannot_read": {
    "en": "cannot be read",
    "ko": "읽을 수 없습니다"

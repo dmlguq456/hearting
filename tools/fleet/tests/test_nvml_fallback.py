@@ -233,6 +233,7 @@ class NVMLFallbackTest(unittest.TestCase):
         self.assertEqual(snapshot["hosts"][0]["gpu_status"]["running_count"], 2)
         self.assertEqual([g["index"] for g in snapshot["hosts"][0]["gpus"]], [0, 1])
 
+    @mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"})
     def test_admission_refuses_unknown_measurement_even_with_share(self):
         host = self.probe()
         with mock.patch.object(CH, "probe_host", return_value=host):
@@ -244,6 +245,7 @@ class NVMLFallbackTest(unittest.TestCase):
                     gpu_leases.select(observation, [], requested=requested, share=share)
         self.assertEqual(gpu_leases.select(host, [], requested=""), [])
 
+    @mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"})
     def test_probe_human_output_uses_summary_and_keeps_raw_error_in_json(self):
         host = self.probe()
         from types import SimpleNamespace
@@ -262,6 +264,35 @@ class NVMLFallbackTest(unittest.TestCase):
                 self.assertIn("GPU 상태 확인 불가", output.getvalue())
                 self.assertIn("모름", output.getvalue())
                 self.assertIn("fix.yaml", output.getvalue())
+
+    def test_status_line_reads_in_the_declared_language_and_the_payload_stays(self):
+        for reboot in (True, False):
+            if not reboot:
+                (self.root / "var/run/reboot-required").unlink()
+            for error in (None, "GPU read failed"):
+                status = (self.probe(error) if error else self.probe())["gpu_status"]
+                with self.subTest(reboot=reboot, error=error):
+                    with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"}):
+                        self.assertEqual(gpu_leases.gpu_status_text(status), status["summary"])
+                    with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "English"}):
+                        english = gpu_leases.gpu_status_text(status)
+                    self.assertTrue(english.startswith("GPU status unavailable"), english)
+                    self.assertTrue(english.endswith(" · 2 running"), english)
+                    self.assertEqual(" · host reboot needed" in english, reboot)
+                    self.assertTrue(status["summary"].startswith("GPU 상태 확인 불가"))
+        host = self.probe()
+        self.assertIn(" · driver mismatch (library 580.178 / module 580.173.02)",
+                      self._english(gpu_leases.gpu_status_text, host["gpu_status"]))
+        with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "English"}):
+            with self.assertRaisesRegex(gpu_leases.GPUUnavailable,
+                                        r"^GPU status unavailable.* · 2 running · devices in use: GPU 0, GPU 1"
+                                        r" · cannot reserve a GPU for a new run$"):
+                gpu_leases.select(host, [], requested=None)
+
+    @staticmethod
+    def _english(function, *args):
+        with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "English"}):
+            return function(*args)
 
     def test_empty_query_error_cannot_allow_share_on_an_unmeasured_gpu(self):
         host = self.probe("  \n")
