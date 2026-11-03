@@ -3103,6 +3103,29 @@ class CompletionWatchTest(unittest.TestCase):
             unmapped = module._observe_compute_experiment(meta, self.run_dir, 7200)
         self.assertIsNone(unmapped["metric_root"])
 
+        def reason(run_id):
+            record = resource_progress.read_public_run_record(self.root / "artifacts", run_id)
+            return record["output_dir_state"], record["output_dir_reason"], record["output_dir"]
+        # A declared folder the observer cannot map is not reported as undeclared.
+        self.assertEqual(reason("unmapped-remote-run"), ("unknown", "remote-unmapped", None))
+        variants = {
+            # the namespace source is not mounted where the observer runs
+            "unmounted-source-run": {"output_dir": target + "/experiment",
+                                     "path_namespace": {target: str(self.root / "absent-mount")}},
+            # a remote host without a namespace, outside the shared run root
+            "plain-remote-run": {"output_dir": "/host-only/private/output", "path_namespace": None},
+            # no declaration at all stays not-declared
+            "undeclared-remote-run": {"output_dir": None, "path_namespace": None},
+        }
+        for run_id, change in variants.items():
+            variant = {**meta, **change, "run_id": run_id}
+            with mock.patch.object(resource_progress, "_observation_state_path",
+                                   return_value=state.with_name(run_id + ".json")):
+                module._observe_compute_experiment(variant, self.run_dir, 7200)
+        self.assertEqual(reason("unmounted-source-run"), ("unknown", "remote-unmapped", None))
+        self.assertEqual(reason("plain-remote-run"), ("unknown", "remote-unmapped", None))
+        self.assertEqual(reason("undeclared-remote-run"), ("unknown", "not-declared", None))
+
     def test_a_run_a_worker_starts_in_a_route_tells_the_routes_parent_session(self):
         module = load_module()
         jobs = self.root / "jobs.log"
