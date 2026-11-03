@@ -2817,10 +2817,10 @@ def _clear_text(entries, now):
     return when.strftime("%H:%M") + (f" · {minutes}m ago" if minutes < 60 else "")
 
 
-def _seat_view(tag, repo, harness, sid, entries, now, now_text=None):
+def _seat_view(tag, repo, harness, sid, entries, now, now_text=None, ended=False):
     """``(seat record, generation records, cards or None)`` of one session's seat history."""
     from .nav import generation_chain
-    chain = generation_chain(entries, harness, sid)
+    chain = generation_chain(entries, harness, sid, ended=ended)
     full = any("lines" in card for entry in entries for card in (entry.get("cards") or ()))
     generations, marks, card_rows, prior_rows = [], [], [], []
     latest_title = ""
@@ -2868,18 +2868,19 @@ def _ended_seat_rows(ended, seat_rows, session_index, now, resolver):
     tag_by_sid = {known: tag for tag, info in session_index.items()
                   for known in (*info.get("ids", ()), info.get("sid")) if known}
     generation_count = {seat[0]: seat[2] for seat in seat_rows}
+    items = [item for item in ended or ()
+             if isinstance(item, Mapping) and item.get("entries") and item.get("sid")]
+    shown = _short_ids([str(item["sid"]) for item in items])
     rows, generations, cards = [], {}, {}
-    for item in ended or ():
-        if not isinstance(item, Mapping) or not item.get("entries"):
-            continue
-        harness, sid = _text(item.get("harness")) or "·", str(item.get("sid") or "")
-        key = "~" + sid[:8]
+    for item in items:
+        harness, sid = _text(item.get("harness")) or "·", str(item["sid"])
+        key = "~" + harness + ":" + sid             # the whole id: short prefixes repeat
         seat, gens, card_block = _seat_view(key, _repo_of(resolver, _text(item.get("cwd"))),
-                                            harness, sid, list(item["entries"]), now)
+                                            harness, sid, list(item["entries"]), now, ended=True)
         successor = item.get("successor") or ()
         tag = tag_by_sid.get(successor[1]) if len(successor) == 2 else None
         count = generation_count.get(tag)
-        seat.append({"ended": True, "sid": sid[:8], "harness": harness,
+        seat.append({"ended": True, "sid": shown[sid], "harness": harness,
                      "at": _ended_text(_num(item.get("ended_at")), now),
                      "successor": tag, "gen": count - 1 if count else None})
         rows.append(seat)
@@ -2887,6 +2888,21 @@ def _ended_seat_rows(ended, seat_rows, session_index, now, resolver):
         if card_block is not None:
             cards[key] = card_block
     return rows, generations, cards
+
+
+def _short_ids(sids, width=8):
+    """Display ids: the first ``width`` characters, longer only where two would read the same.
+
+    OpenCode ids share their ``ses_`` start and Codex ids a time-ordered prefix, so the cut
+    grows per id until it is unique among the ids shown together.
+    """
+    shown = {}
+    for sid in sids:
+        cut = width
+        while cut < len(sid) and any(other != sid and other[:cut] == sid[:cut] for other in sids):
+            cut += 1
+        shown[sid] = sid[:cut]
+    return shown
 
 
 def _ended_text(epoch, now):

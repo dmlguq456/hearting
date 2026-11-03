@@ -63,18 +63,21 @@ class EndedSeatReaderTest(unittest.TestCase):
                    ("claude", "pred-of-ended", "ended-main")),
             unresolved=frozenset())
         self.shown = {("claude", "live-new"), ("claude", "live-old"), ("claude", "live-other")}
-        self.registry = [(0, ["2033-05-18T00:00:00Z", "open", "/repo/wt", "/repo", "worker"],
-                          {"log_file": self.log, "harness": "claude"})]
+        self.registry = os.path.join(temp.name, "jobs.log")
+        with open(self.registry, "w", encoding="utf-8") as stream:
+            stream.write("2033-05-18T00:00:00Z\topen\t/repo/wt\t/repo\tworker\t"
+                         "harness=claude,log_file=%s\n" % self.log)
+        self.addCleanup(focus._REGISTRY_TAILS.pop, self.registry, None)
 
-    def read(self, registry=None):
+    def read(self, broken=False):
         handover = focus.utility("dispatch_seat_handover")
-        rows = self.registry if registry is None else registry
+        tail = (mock.patch.object(focus, "_registry_attempt_logs", side_effect=PermissionError("no"))
+                if broken else mock.patch.object(focus, "_REGISTRY_TAILS", {}))
         with mock.patch.object(handover, "_pass_lineage_graph", return_value=self.graph), \
              mock.patch.object(focus, "_seat_entries",
                                side_effect=lambda _m, _seat, _h, sid, **_k: _entries(sid, sid)), \
-             mock.patch.object(dispatch, "_candidate_jobs_paths", return_value=["jobs.log"]), \
-             mock.patch.object(dispatch, "parsed_registry_rows",
-                               side_effect=rows if callable(rows) else lambda _path: rows):
+             mock.patch.object(dispatch, "_candidate_jobs_paths", return_value=[self.registry]), \
+             tail:
             return focus.read_ended_seats(self.shown, now=NOW)
 
     def test_ended_main_seats_only_newest_first(self):
@@ -82,11 +85,40 @@ class EndedSeatReaderTest(unittest.TestCase):
         self.assertEqual(found, [("ended-main", None), ("handed", ("claude", "live-other"))])
 
     def test_an_unreadable_registry_hides_nothing(self):
-        def broken(_path):
-            raise OSError("registry unreadable")
-        found = [item["sid"] for item in self.read(registry=broken)]
+        found = [item["sid"] for item in self.read(broken=True)]
         self.assertIn("ended-worker", found)
         self.assertIn("ended-main", found)
+
+
+class RegistryTailTest(unittest.TestCase):
+    def test_the_registry_is_read_only_where_it_grew(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        path = os.path.join(temp.name, "jobs.log")
+        row = "2033-05-18T00:00:%02dZ\topen\t/repo/wt\t/repo\tslug\tharness=claude,log_file=/logs/%s.jsonl\n"
+        with open(path, "w") as stream:
+            stream.write(row % (1, "one"))
+        focus._REGISTRY_TAILS.pop(path, None)
+        self.addCleanup(focus._REGISTRY_TAILS.pop, path, None)
+        self.assertEqual(focus._registry_attempt_logs(path), {"/repo/wt": [
+            ("2033-05-18T00:00:01Z", "/logs/one.jsonl")]})
+        first = focus._REGISTRY_TAILS[path]["offset"]
+        with open(path, "a") as stream:
+            stream.write(row % (2, "two") + "2033-05-18T00:00:03Z\topen\t/repo/wt")   # a half row
+        reads = []
+        real_open = open
+
+        def counted(file, mode="r", *args, **kwargs):
+            if file == path:
+                reads.append(mode)
+            return real_open(file, mode, *args, **kwargs)
+
+        with mock.patch("builtins.open", side_effect=counted):
+            logs = focus._registry_attempt_logs(path)
+            focus._registry_attempt_logs(path)              # nothing new: no read at all
+        self.assertEqual([log for _ts, log in logs["/repo/wt"]], ["/logs/one.jsonl", "/logs/two.jsonl"])
+        self.assertEqual(len(reads), 2, "the half row is read again once it is complete")
+        self.assertGreater(focus._REGISTRY_TAILS[path]["offset"], first)
 
 
 class EndedSeatHistoryTest(unittest.TestCase):
@@ -118,7 +150,10 @@ class EndedSeatHistoryTest(unittest.TestCase):
 
     def test_history_shows_ended_seats_after_live_ones(self):
         seat_rows, grid = self.view()
-        self.assertEqual([seat[0] for seat in seat_rows], ["34", "50", "~ab12cd34", "~ef56ab78"])
+        self.assertEqual([seat[0] for seat in seat_rows],
+                         ["34", "50", "~claude:ab12cd34-ended", "~claude:ef56ab78-handed"])
+        self.assertEqual(seat_rows[2][2], 1, "an ended seat has no running `now` generation")
+        self.assertEqual(seat_rows[0][2], 2, "a live seat keeps its `now` generation")
         lines = ["".join(str(cell[0] or "") for cell in row) for row in grid.cells]
         live_row = next(i for i, line in enumerate(lines) if "[50]" in line)
         handed = next(i for i, line in enumerate(lines) if "ef56ab78" in line)
@@ -137,6 +172,17 @@ class EndedSeatHistoryTest(unittest.TestCase):
         self.assertIn("hb_claude", live_keys)
         self.assertNotIn("hb_claude", keys, "an ended seat recedes like a finished route")
         self.assertIn(recede_key("hb_claude"), keys)
+
+    def test_ended_seat_ids_never_collide(self):
+        """OpenCode ids share ``ses_``, Codex ids a time-ordered prefix: keys are whole ids, and the
+        shown id grows only where two would read the same."""
+        ended = tuple({"harness": "opencode", "sid": sid, "cwd": "/home/x/hearting",
+                       "ended_at": NOW - 3600, "successor": None, "entries": _entries(sid, sid)}
+                      for sid in ("ses_eacd1111aaaa", "ses_eacd2222bbbb", "ses_ffff0000cccc"))
+        rows, _generations, _cards = live._ended_seat_rows(ended, [], {}, NOW, lambda _cwd: "x")
+        self.assertEqual(len({seat[0] for seat in rows}), 3)
+        self.assertEqual([live.ended_seat(seat)["sid"] for seat in rows],
+                         ["ses_eacd1", "ses_eacd2", "ses_ffff"])
 
     def test_without_ended_seats_history_keeps_its_columns(self):
         rows = [{"tag": "34", "harness": "claude", "repo": "hearting", "repo_id": "hearting",

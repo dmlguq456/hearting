@@ -453,34 +453,75 @@ _SESSION_ANNOUNCED = re.compile(rb'"(?:session_id|thread_id|sessionID)"\s*:\s*"(
 _ATTEMPT_SESSIONS = {}                     # log path -> the native session id its head announced
 
 
+_REGISTRY_TAIL_BYTES = 32 << 20             # a week of registry rows, read once per process
+_REGISTRY_TAILS = {}                       # registry path -> rows read so far (appended bytes only)
+
+
+def _registry_attempt_logs(path):
+    """``{cwd: [(started, log)]}`` of a registry, reading only bytes appended since last time.
+
+    The registry is append-only: the first read takes its last ``_REGISTRY_TAIL_BYTES``, later
+    reads take what was appended. A replaced or truncated file starts over.
+    """
+    info = os.stat(path)
+    state = _REGISTRY_TAILS.get(path)
+    if (state is None or state["identity"] != (info.st_dev, info.st_ino)
+            or info.st_size < state["offset"]):
+        state = {"identity": (info.st_dev, info.st_ino),
+                 "offset": max(0, info.st_size - _REGISTRY_TAIL_BYTES),
+                 "partial": info.st_size > _REGISTRY_TAIL_BYTES, "logs": {}}
+        _REGISTRY_TAILS[path] = state
+    if info.st_size > state["offset"]:
+        with open(path, "rb") as stream:
+            stream.seek(state["offset"])
+            data = stream.read(info.st_size - state["offset"])
+        complete = data[:data.rfind(b"\n") + 1]
+        state["offset"] += len(complete)
+        lines = complete.splitlines()
+        if state.pop("partial", False) and lines:
+            lines = lines[1:]               # the tail started inside a row
+        for line in lines:
+            fields = line.split(b"\t", 5)
+            if len(fields) < 6 or b"log_file=" not in fields[5]:
+                continue
+            log = fields[5].split(b"log_file=", 1)[1].split(b",", 1)[0].split(b"|", 1)[0].strip()
+            if log:
+                state["logs"].setdefault(fields[2].decode("utf-8", "replace"), []).append(
+                    (fields[0].decode("ascii", "replace"), log.decode("utf-8", "replace")))
+    return state["logs"]
+
+
 def _attempt_sessions(cwds, since):
     """Native session ids that dispatch-registered attempts in ``cwds`` announced, or None.
 
     An attempt's own session id is not a registry field; its log announces it in the first
-    records. Only attempts started in the same directories after ``since`` are read, and a
-    found id is remembered per log. ``None`` means the registry could not be read.
+    records. Only attempts started in the same directories after ``since`` are read, a found
+    id is remembered per log, and the registry is read only where it grew. ``None`` means the
+    registry could not be read.
     """
     try:
         from ..collectors import dispatch
         found = set()
         for path in dispatch._candidate_jobs_paths():
-            for _order, fields, metadata in dispatch.parsed_registry_rows(path):
-                if len(fields) < 3 or fields[2] not in cwds or str(fields[0]) < since:
-                    continue
-                log = metadata.get("log_file")
-                if not log:
-                    continue
-                if log not in _ATTEMPT_SESSIONS:
-                    try:
-                        with open(log, "rb") as stream:
-                            head = stream.read(16384)
-                    except OSError:
+            try:
+                logs = _registry_attempt_logs(path)
+            except FileNotFoundError:
+                continue
+            for cwd in cwds:
+                for started, log in logs.get(cwd, ()):
+                    if started < since:
                         continue
-                    match = _SESSION_ANNOUNCED.search(head)
-                    if not match:
-                        continue
-                    _ATTEMPT_SESSIONS[log] = match.group(1).decode("ascii")
-                found.add(_ATTEMPT_SESSIONS[log])
+                    if log not in _ATTEMPT_SESSIONS:
+                        try:
+                            with open(log, "rb") as stream:
+                                head = stream.read(16384)
+                        except OSError:
+                            continue
+                        match = _SESSION_ANNOUNCED.search(head)
+                        if not match:
+                            continue
+                        _ATTEMPT_SESSIONS[log] = match.group(1).decode("ascii")
+                    found.add(_ATTEMPT_SESSIONS[log])
         return found
     except Exception:
         return None
