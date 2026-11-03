@@ -74,8 +74,11 @@ separate; `compaction` only says what this file left out.
   observer cannot map to a visible folder: outside the host's `path_namespace` and
   the shared run root, or through a namespace source this observer does not mount).
   A run without a declaration is filled only from its exact evidence: the
-  hash-bound `--request` or the `--config` output keys. Without such evidence it
-  stays `unknown`/`not-declared`; no folder is guessed.
+  observation metadata's `path`, the hash-bound `--request` or the `--config`
+  output keys. Without such evidence it stays `unknown`/`not-declared`; no folder
+  is guessed. A missing explicitly bound folder reads `declared-unresolved` first;
+  otherwise a node that declares no training output reads `none` ahead of
+  `remote-unmapped` and the discovery reasons.
 
 An in-flight process kept alive across a policy change records an optional
 `existing_run_exception` object with a fixed shape:

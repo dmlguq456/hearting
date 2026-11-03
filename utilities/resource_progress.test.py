@@ -2146,6 +2146,18 @@ class ExperimentObservationTest(unittest.TestCase):
             self.assertEqual(observe(name, **run), expected, name)
             if expected[2] is None:
                 self.assertIsNone(progress.discover_output_root(run), name)
+        # A node that declares no training output stays `none` even when compute-hosts
+        # had to drop a declared folder; the unmapped reason never changes that state.
+        route = base / "route.json"
+        route.write_text(json.dumps({"nodes": [
+            {"id": "eval-run", "kind": "resource-runner", "outputs": ["eval-report"]},
+            {"id": "full-run", "kind": "resource-runner", "outputs": ["logs/**"]}]}))
+        self.assertEqual(observe("eval-unmapped", node="eval-run", route=str(route),
+                                 output_dir_unmapped=True)[:2],
+                         ("none", "node-declares-no-training-output"))
+        self.assertEqual(observe("train-unmapped", node="full-run", route=str(route),
+                                 output_dir_unmapped=True)[:2],
+                         ("unknown", "remote-unmapped"))
 
     def test_compacted_record_feeds_resource_wait_note_and_runner_observation(self):
         import dispatch_resource_wait

@@ -435,9 +435,6 @@ def _public_output_state(run, output_dir, *, binding_given, discovered_reason=No
         return "present", None
     if binding_given:
         return "unknown", "declared-unresolved"
-    if isinstance(run, dict) and run.get("output_dir_unmapped") is True:
-        # The run declared a folder on its host that this observer cannot map.
-        return "unknown", "remote-unmapped"
     try:
         route = run.get("route") or run.get("route_file") if isinstance(run, dict) else None
         node_id = (run.get("node") or run.get("route_node")) if isinstance(run, dict) else None
@@ -457,6 +454,10 @@ def _public_output_state(run, output_dir, *, binding_given, discovered_reason=No
                         break
     except (OSError, ValueError, TypeError, AttributeError):
         pass
+    # A node without a training output stays `none` above; only then does a folder
+    # the run declared on its host but this observer cannot map read as unmapped.
+    if isinstance(run, dict) and run.get("output_dir_unmapped") is True:
+        return "unknown", "remote-unmapped"
     if discovered_reason in ("declared-unresolved", "remote-unmapped"):
         return "unknown", discovered_reason
     return "unknown", "not-declared"
