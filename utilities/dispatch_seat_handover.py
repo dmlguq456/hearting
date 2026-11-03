@@ -631,6 +631,24 @@ def _chain_end(graph: LineageGraph, harness: str, sid: str, *, traversed=None) -
     return current, "successor" if moved else "self"
 
 
+def seat_chain_contains(harness: str, origin: str, sid: str, *, read_context=None) -> bool:
+    """Whether ``sid`` is ``origin`` or a confirmed successor on its same-harness chain.
+
+    A fork, cycle or unreadable observation answers False, so a caller keeps its
+    current disposition rather than reading an ambiguous seat as the same one."""
+    if not origin or not sid:
+        return False
+    if sid == origin:
+        return True
+    traversed = set()
+    try:
+        _end, state = _chain_end(_pass_lineage_graph(read_context), harness, origin,
+                                 traversed=traversed)
+    except (OSError, ValueError, TypeError):
+        return False
+    return state != "unresolved" and any(target == sid for _h, _o, target in traversed)
+
+
 class LineageAttempts(frozenset):
     """Legacy set-compatible attempt scope with separate route-free notice access."""
     lineage_notice = True
