@@ -485,19 +485,24 @@ def cost_line(cost, t) -> str:
     """Elapsed time and session tokens, each `unknown` when not observed; never a share of a plan.
 
     `cost` holds `elapsed_seconds`, `tokens` (the sum over the sessions that reported one),
-    `sessions` (attempts counted) and `unknown` (how many of them reported none)."""
+    `sessions` (attempts counted), `unknown` (how many reported none) and `partial` (how many
+    reported only some of their turns, which makes the sum a lower bound)."""
     cost = cost if isinstance(cost, dict) else {}
+    count = lambda key, default=0: cost.get(key) if isinstance(cost.get(key), int) else default
     elapsed = _elapsed_text(cost.get("elapsed_seconds")) or t("completion.cost_unknown")
-    sessions = cost.get("sessions") if isinstance(cost.get("sessions"), int) else 0
-    unknown = cost.get("unknown") if isinstance(cost.get("unknown"), int) else sessions
+    sessions = count("sessions")
+    unknown, partial = count("unknown", sessions), count("partial")
     tokens = cost.get("tokens")
     if not isinstance(tokens, int) or isinstance(tokens, bool) or sessions <= unknown:
-        words = t("completion.cost_tokens_unknown")
-    elif unknown:
-        words = t("completion.cost_tokens_partial", tokens=f"{tokens:,}", known=sessions - unknown,
-                  sessions=sessions, unknown=unknown)
-    else:
-        words = t("completion.cost_tokens", tokens=f"{tokens:,}", sessions=sessions)
+        return t("completion.cost", elapsed=elapsed, tokens=t("completion.cost_tokens_unknown"))
+    detail = [t("completion.cost_detail_all", sessions=sessions) if not unknown
+              else t("completion.cost_detail_some", known=sessions - unknown, sessions=sessions)]
+    if unknown:
+        detail.append(t("completion.cost_detail_unknown", count=unknown))
+    if partial:
+        detail.append(t("completion.cost_detail_partial", count=partial))
+    words = t("completion.cost_tokens_at_least" if partial else "completion.cost_tokens",
+              tokens=f"{tokens:,}", detail=", ".join(detail))
     return t("completion.cost", elapsed=elapsed, tokens=words)
 
 

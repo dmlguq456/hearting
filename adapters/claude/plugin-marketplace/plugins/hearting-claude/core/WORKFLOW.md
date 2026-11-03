@@ -899,7 +899,8 @@ envelope: the intent (§0.4) with the person's words, the result (one leg of a
 plan says a later leg remains), one cost line (time from the route's first
 registered attempt to the seal, and the session tokens its owner, workers and
 retries wrote into their own attempt logs, summed; a session that wrote none is
-counted as `unknown`; the line shows token counts, not a share of a plan), what
+counted as `unknown`, and one whose started turn or step left no count makes
+the total `at least`; the line shows token counts, not a share of a plan), what
 changed, what was checked, what stayed
 unverified or remains, nodes closed without an independent review, and the
 artifact path, in the shared UI-text catalog's language (English by default,

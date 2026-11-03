@@ -456,8 +456,10 @@ class CompletionCostLineTest(unittest.TestCase):
         # A supervised Claude owner: one token row per resume-process turn.
         self.attempt("att-owner", "claude", start, [
             {"type": "dispatch.supervisor.session", "session_id": "s-owner", "cwd": "/w"},
+            {"type": "dispatch.supervisor.turn-started", "turn_ordinal": 1},
             {"type": "dispatch.supervisor.token_usage", "token_usage": {"turn": {"input_tokens": 10,
              "cache_read_input_tokens": 1000, "output_tokens": 90}}},
+            {"type": "dispatch.supervisor.turn-started", "turn_ordinal": 2},
             {"type": "dispatch.supervisor.token_usage", "token_usage": {"turn": {"input_tokens": 5,
              "cache_creation_input_tokens": 200, "output_tokens": 95}}},
             {"type": "result", "usage": {"input_tokens": 5, "output_tokens": 95}}])        # the last turn again
@@ -474,6 +476,7 @@ class CompletionCostLineTest(unittest.TestCase):
              "token_usage": {"last": {"total_tokens": 9}, "total": {"total_tokens": 1500}}}], parent="att-owner")
         # An OpenCode worker: each finished step is one request.
         self.attempt("att-opencode", "opencode", "2026-11-04T01:04:00.000000Z", [
+            {"type": "step_start", "sessionID": "ses_a", "part": {}},
             {"type": "step_finish", "sessionID": "ses_a", "part": {"tokens": {"input": 10, "output": 5,
              "reasoning": 1, "cache": {"read": 100, "write": 0}}}},
             {"type": "step_finish", "sessionID": "ses_a", "part": {"tokens": {"input": 4, "output": 2,
@@ -481,7 +484,7 @@ class CompletionCostLineTest(unittest.TestCase):
         start_epoch = WI_epoch(start)
         cost = self.cost(start_epoch + 3725)
         self.assertEqual(cost["sessions"], 4)
-        self.assertEqual(cost["unknown"], 0)
+        self.assertEqual((cost["unknown"], cost["partial"]), (0, 0))
         self.assertEqual(cost["tokens"], 1400 + 455 + 1500 + 232)
         self.assertEqual(cost["elapsed_seconds"], 3725)
         line = WI.cost_line(cost, WI.ui_translator())
@@ -498,12 +501,35 @@ class CompletionCostLineTest(unittest.TestCase):
         self.assertEqual((cost["sessions"], cost["unknown"], cost["tokens"]), (2, 1, 10))
         t = WI.ui_translator()
         self.assertEqual(WI.cost_line(cost, t),
-                         "Cost: 45s elapsed · 10 session tokens from 1 of 2 sessions (1 unknown)")
+                         "Cost: 45s elapsed · 10 session tokens (1 of 2 sessions, 1 unknown)")
         self.assertEqual(WI.cost_line({"elapsed_seconds": None, "tokens": None, "sessions": 0, "unknown": 0}, t),
                          "Cost: unknown elapsed · session tokens unknown")
         declared_language(self, "ko")
         self.assertEqual(WI.cost_line(cost, WI.ui_translator()),
                          "비용: 걸린 시간 45s · 세션 토큰 10 (세션 2개 중 1개, 1개 unknown)")
+
+    def test_a_turn_or_step_that_never_reported_makes_the_sum_a_lower_bound(self):
+        # A resume-process turn that timed out leaves no token row; an OpenCode step that
+        # started never finished. The sum is then `at least`, never a settled figure.
+        self.attempt("att-owner", "claude", "2026-11-04T01:00:00.000000Z", [
+            {"type": "dispatch.supervisor.session", "session_id": "s-owner", "cwd": "/w"},
+            {"type": "dispatch.supervisor.turn-started", "turn_ordinal": 1},
+            {"type": "dispatch.supervisor.token_usage", "token_usage": {"turn": {"input_tokens": 100}}},
+            {"type": "dispatch.supervisor.turn-started", "turn_ordinal": 2}])        # timed out
+        self.attempt("att-opencode", "opencode", "2026-11-04T01:01:00.000000Z", [
+            {"type": "step_start", "sessionID": "ses_a", "part": {}},
+            {"type": "step_finish", "sessionID": "ses_a", "part": {"tokens": {"input": 7}}},
+            {"type": "step_start", "sessionID": "ses_a", "part": {}}], parent="att-owner")
+        self.attempt("att-claude", "claude", "2026-11-04T01:02:00.000000Z", [
+            {"type": "assistant", "message": {"usage": {"input_tokens": 1}}}], parent="att-owner")   # killed
+        cost = self.cost(WI_epoch("2026-11-04T01:00:30.000000Z"))
+        self.assertEqual((cost["sessions"], cost["unknown"], cost["partial"], cost["tokens"]), (3, 1, 2, 107))
+        self.assertEqual(WI.cost_line(cost, WI.ui_translator()),
+                         "Cost: 30s elapsed · at least 107 session tokens "
+                         "(2 of 3 sessions, 1 unknown, 2 counted in part)")
+        declared_language(self, "ko")
+        self.assertEqual(WI.cost_line(cost, WI.ui_translator()),
+                         "비용: 걸린 시간 30s · 세션 토큰 최소 107 (세션 3개 중 2개, 1개 unknown, 2개 일부만)")
 
     def test_the_sealed_summary_carries_the_line_and_an_unreadable_registry_says_unknown(self):
         import dispatch_terminal_commit as DTC

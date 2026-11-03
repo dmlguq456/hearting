@@ -568,8 +568,10 @@ def _completion_cost(request, route, *, now=None) -> dict[str, Any]:
     Elapsed runs from the first registry row of those attempts to this seal. Tokens are
     the counts each session wrote into its exact attempt log -- the rows Fleet reads,
     through the same shared path check (`attempt_view.session_tokens`); an attempt whose
-    log reports none is counted as unknown, never estimated."""
-    cost: dict[str, Any] = {"elapsed_seconds": None, "tokens": None, "sessions": 0, "unknown": 0}
+    log reports none is counted as unknown, never estimated; one whose started turn or step
+    never reported counts as `partial`, and the total is then a lower bound."""
+    cost: dict[str, Any] = {"elapsed_seconds": None, "tokens": None, "sessions": 0, "unknown": 0,
+                            "partial": 0}
     try:
         from dispatch_registry_cache import registry_view
         records = registry_view(Path(request.jobs)).completion_related(
@@ -599,13 +601,14 @@ def _completion_cost(request, route, *, now=None) -> dict[str, Any]:
     for metadata in latest.values():
         cost["sessions"] += 1
         try:
-            tokens = session_tokens(metadata, request.jobs) if session_tokens else None
+            tokens, complete = session_tokens(metadata, request.jobs) if session_tokens else (None, False)
         except Exception:  # noqa: BLE001
-            tokens = None
+            tokens, complete = None, False
         if tokens is None:
             cost["unknown"] += 1
         else:
             total = (total or 0) + tokens
+            cost["partial"] += 0 if complete else 1
     cost["tokens"] = total
     return cost
 

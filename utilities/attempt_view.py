@@ -546,7 +546,8 @@ def _within(root, path):
 
 SESSION_TOKEN_READ_LIMIT = 64 * 1024 * 1024
 _USAGE_KEYS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")
-_TOKEN_MARKS = (b'"usage"', b'"token_usage"', b'"step_finish"', b'"dispatch.supervisor.session"',
+_TOKEN_MARKS = (b'"usage"', b'"token_usage"', b'"step_finish"', b'"step_start"',
+                b'"dispatch.supervisor.session"', b'"dispatch.supervisor.turn-started"',
                 b'"thread.started"')
 
 
@@ -563,24 +564,27 @@ def _usage_total(usage):
 
 
 def _summed_session_tokens(path, harness):
-    """One whole read of an attempt log for its session's token total; None when unknown.
+    """One whole read of an attempt log: `(tokens, complete)`, or `(None, False)` when unknown.
 
     The rows are the ones Fleet's attempt parsers read (`tools/fleet/collectors/dispatch.py`):
     Codex's `dispatch.supervisor.token_usage` thread total (the newest is the running total);
     a supervised owner's per-turn `dispatch.supervisor.token_usage` rows (added up); a
     `claude -p` stream's last `result` usage (already a running total); an `opencode run`
-    stream's `step_finish` tokens (one model request each, added up). A supervised log
-    without per-turn rows, a log naming more than one session or thread, or one too large
-    to read is unknown -- never estimated.
+    stream's `step_finish` tokens (one model request each, added up). A sum is `complete`
+    only when every started turn (or step) reported its counts: a turn that timed out, or
+    a step that never finished, leaves the sum a lower bound. A supervised log without
+    per-turn rows, a log naming more than one session or thread, or one too large to read
+    is unknown -- never estimated.
     """
     try:
         if os.stat(path).st_size > SESSION_TOKEN_READ_LIMIT:
-            return None
+            return None, False
         stream = open(path, "rb")
     except OSError:
-        return None
+        return None, False
     supervised = False
     codex_total = turns = steps = last_result = None
+    turns_started = turn_rows = steps_started = steps_finished = 0
     sessions = set()
     with stream:
         for raw in stream:
@@ -594,7 +598,11 @@ def _summed_session_tokens(path, harness):
                 continue
             kind = row.get("type")
             usage = row.get("token_usage") if isinstance(row.get("token_usage"), dict) else {}
-            if kind == "dispatch.supervisor.session":
+            if kind == "dispatch.supervisor.turn-started":
+                turns_started += 1
+            elif kind == "step_start":
+                steps_started += 1
+            elif kind == "dispatch.supervisor.session":
                 supervised = True
                 if row.get("session_id"):
                     sessions.add(str(row["session_id"]))
@@ -610,9 +618,11 @@ def _summed_session_tokens(path, harness):
                 turn = _usage_total(usage.get("turn"))
                 if turn is not None:
                     turns = (turns or 0) + turn
+                    turn_rows += 1
             elif kind == "result":
                 last_result = _usage_total(row.get("usage"))
             elif kind == "step_finish":
+                steps_finished += 1
                 part = row.get("part") if isinstance(row.get("part"), dict) else {}
                 tokens = part.get("tokens") if isinstance(part.get("tokens"), dict) else {}
                 cache = tokens.get("cache") if isinstance(tokens.get("cache"), dict) else {}
@@ -623,28 +633,31 @@ def _summed_session_tokens(path, harness):
                 if row.get("sessionID"):
                     sessions.add(str(row["sessionID"]))
     if len(sessions) > 1:
-        return None
+        return None, False
     if harness == "codex":
-        return codex_total
+        return codex_total, codex_total is not None
     if supervised:
-        return turns
-    return last_result if last_result is not None else steps
+        return turns, turns is not None and turn_rows >= turns_started
+    if last_result is not None:
+        return last_result, True
+    return steps, steps is not None and steps_finished >= steps_started
 
 
 def session_tokens(metadata, jobs_path=None):
-    """Tokens one registered attempt's session used, from its exact owned log; None when unknown.
+    """`(tokens, complete)` one registered attempt's session wrote into its exact owned log.
 
-    The completion summary's cost line adds these up over a route's attempts. A share of a
-    subscription is never derived from them."""
+    `(None, False)` is unknown; `complete` False with a number is a lower bound (a turn or
+    step that started never reported). The completion summary's cost line adds these up over
+    a route's attempts. A share of a subscription is never derived from them."""
     if not hasattr(metadata, "get"):
-        return None
+        return None, False
     class Job: pass
     job = Job(); job.harness = metadata.get("harness"); job.attempt_id = metadata.get("attempt_id")
     job._log_file = metadata.get("log_file") or metadata.get("log")
     job._registry_path = str(jobs_path) if jobs_path else None
     job.artifact_root = metadata.get("artifact_root"); job._launch_home = metadata.get("launch_home")
     path = owned_attempt_log_path(job)
-    return _summed_session_tokens(path, job.harness) if path else None
+    return _summed_session_tokens(path, job.harness) if path else (None, False)
 
 
 def _metadata(line):
