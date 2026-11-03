@@ -5,11 +5,9 @@ from __future__ import annotations
 
 import argparse
 import base64
-import contextlib
 from datetime import datetime, timezone
 import hashlib
 import importlib.util
-import io
 import json
 import os
 from pathlib import Path
@@ -52,9 +50,7 @@ from dispatch_contract import (ARTIFACT_PROOF_RECEIPT,
                                observed_attempt_liveness,
                                post_exit_receipt_reason,
                                process_namespace_identity,
-                               recovery_id,
                                dispatch_state_roots,
-                               claim_recovery_retry,
                                reconcile_local_registry, resolve_agent_home,
                                resolve_dispatch_state_root,
                                resolve_parent_extinction,
@@ -66,7 +62,6 @@ from dispatch_contract import (ARTIFACT_PROOF_RECEIPT,
                                tagged_residue_receipt,
                                ROUTE_IDENTITY_METADATA_KEYS,
                                validate_attempt_metadata)  # noqa: E402
-from dispatch_continuation_budget import resolve_continuation_budget  # noqa: E402
 from owner_route_binding import (  # noqa: E402
     ROUTE as owner_route_verifier,
     OwnerRouteBinding,
@@ -2261,199 +2256,6 @@ def automatic_cancel_receiptless(rows, args):
     return 0
 
 
-def _close_exact_dead(rows, args):
-    """Run the join's own ``reconcile --only-exact-dead --apply`` for one attempt.
-
-    Same classification, lock-held revalidation and close as the runtime join,
-    so a row whose death is exact (for example ``dead-namespace-absent``) closes
-    the same way here. Returns whether the row closed; any failure is "not
-    closed" and leaves the receiptless path to run as before.
-    """
-
-    exact_args = argparse.Namespace(**{
-        **vars(args), "only_exact_dead": True, "apply": True, "audit": None,
-        "integration_ref": getattr(args, "integration_ref", None),
-    })
-    stream = io.StringIO()
-    try:
-        with contextlib.redirect_stdout(stream):
-            reconcile(rows, exact_args)
-        record = json.loads(stream.getvalue())
-    except (DispatchContractError, JoinContractError, OSError, ValueError):
-        return False
-    closed = bool(isinstance(record, dict) and record.get("closed"))
-    if closed:
-        # As the join does after its exact close: settle the post-exit proof now.
-        resolve_attempt_cleanup(args.jobs, args.attempt, apply=True)
-    return closed
-
-
-def recover_receiptless(rows, args):
-    """Seal and claim one recovery retry; registration and spawn stay external."""
-
-    try:
-        route = json.loads(args.route_file.read_text(encoding="utf-8"))
-        launch = route.get("launch_compatibility_tuple")
-        jobs_binding = (
-            (launch.get("jobs_path") or {}).get("path")
-            if isinstance(launch, dict)
-            else None
-        )
-    except (OSError, ValueError):
-        jobs_binding = None
-    if not isinstance(jobs_binding, str) or not jobs_binding:
-        print(json.dumps({
-            "apply": args.apply,
-            "attempted": 0,
-            "claimed": 0,
-            "spawned": 0,
-            "reason": "recovery-route-jobs-binding-missing",
-        }, sort_keys=True))
-        return 0
-    if Path(jobs_binding).resolve(strict=False) != args.jobs.resolve(strict=False):
-        print(json.dumps({
-            "apply": args.apply,
-            "attempted": 0,
-            "claimed": 0,
-            "spawned": 0,
-            "reason": "recovery-route-jobs-mismatch",
-        }, sort_keys=True))
-        return 0
-
-    selected = [row for row in rows if matches(row, args)]
-    if len(selected) != 1:
-        print(json.dumps({
-            "apply": args.apply,
-            "attempted": len(selected),
-            "claimed": 0,
-            "spawned": 0,
-            "reason": "attempt-row-not-unique",
-        }, sort_keys=True))
-        return 0
-    row = selected[0]
-    metadata = row["meta"]
-    existing_recovery = bool(
-        metadata.get("recovery_id")
-        and (
-            metadata.get("retry_ordinal") == "1"
-            or metadata.get("note") == "receipt-unavailable-retry-exhausted"
-        )
-    )
-    already_cancelled = bool(
-        row["status"] == "done"
-        and metadata.get("classifier_source") == AUTOMATIC_RECEIPTLESS_CLASSIFIER
-        and metadata.get("cancellation_receipt_digest")
-        and (
-            metadata.get("failure_class") == "cancelled"
-            or existing_recovery
-        )
-    )
-    cancellation = None
-    if (not already_cancelled and args.apply and row["status"] in OPEN
-            and row.get("attempt_contract_status") == "current"
-            and _close_exact_dead(rows, args)):
-        # An exact death closes first, exactly as the runtime join closes it.
-        # Its retry is the runtime's own replacement (SD-157, death_kind=silent);
-        # the receipt-unavailable claim below needs a cancellation receipt this
-        # row never gets, and claiming would spend the one replacement on a
-        # retry nothing launches.
-        print(json.dumps({
-            "apply": True,
-            "attempted": 1,
-            "claimed": 0,
-            "spawned": 0,
-            "reason": "exact-death-closed",
-        }, sort_keys=True))
-        return 0
-    if not already_cancelled:
-        cancellation = _automatic_receiptless_result(rows, args)
-        if not cancellation["closed"]:
-            decision = cancellation["decisions"][0]
-            print(json.dumps({
-                "apply": args.apply,
-                "attempted": 1,
-                "claimed": 0,
-                "spawned": 0,
-                "reason": decision["reason"],
-                "derived_gate": decision["derived_gate"],
-                "retry_launch": 0,
-                "cancellation": cancellation,
-            }, sort_keys=True))
-            return 0
-        rows = read_rows(args.jobs)
-        row = next(
-            item for item in rows
-            if item["meta"].get("attempt_id") == args.attempt
-        )
-        metadata = row["meta"]
-    if not args.apply:
-        print(json.dumps({
-            "apply": False,
-            "attempted": 1,
-            "claimed": 0,
-            "spawned": 0,
-            "reason": "apply-required-for-recovery-claim",
-        }, sort_keys=True))
-        return 0
-
-    source_route_id = metadata.get("route_id", "")
-    source_route_hash = metadata.get("route_hash", "")
-    node_or_group_leg = (
-        metadata.get("route_node") or metadata.get("batch_route_node") or ""
-    )
-    cancellation_digest = metadata.get("cancellation_receipt_digest", "")
-    recovery_identity = recovery_id(
-        source_route_id=source_route_id,
-        source_route_hash=source_route_hash,
-        node_or_group_leg=node_or_group_leg,
-        original_attempt_id=args.attempt,
-        cancellation_receipt_digest=cancellation_digest,
-    )
-    budget = resolve_continuation_budget(
-        route_file=args.route_file,
-        route_id=source_route_id,
-        route_hash=source_route_hash,
-        expected_cwd=row["worktree"],
-    )
-    remaining = budget.retry_slots
-    try:
-        # The recovery helper owns and rechecks the jobs.log.lock fence; this
-        # CLI must not treat its outer reads as the terminal-claim guard.
-        claim = claim_recovery_retry(
-            args.jobs,
-            recovery_id=recovery_identity,
-            source_route_id=source_route_id,
-            source_route_hash=source_route_hash,
-            node_or_group_leg=node_or_group_leg,
-            original_attempt_id=args.attempt,
-            remaining_cascade=remaining,
-        )
-    except DispatchContractError as exc:
-        print(json.dumps({
-            "apply": True,
-            "attempted": 1,
-            "claimed": 0,
-            "spawned": 0,
-            "reason": exc.reason,
-            "recovery_id": recovery_identity,
-        }, sort_keys=True))
-        return 0
-    print(json.dumps({
-        "apply": True,
-        "attempted": 1,
-        "claimed": int(claim.state == "claimed"),
-        "spawned": 0,
-        "reason": claim.reason,
-        "recovery_id": claim.recovery_id,
-        "retry_ordinal": claim.retry_ordinal,
-        "retry_attempt_id": claim.retry_attempt_id or None,
-        "start_permitted": claim.start_permitted,
-        "remaining_cascade": remaining,
-        "budget_source": budget.source,
-    }, sort_keys=True))
-    return 0
-
-
 _CASCADE_TERMINAL_CATEGORIES = {
     "terminal-handoff",
     "terminal-heartbeat",
@@ -3112,10 +2914,7 @@ def main(argv):
     p.add_argument("--automatic-cancel-receiptless", action="store_true")
     p.add_argument("--only-exact-dead", action="store_true",
                    help="settle only the selected attempt's exact death; never apply cleanup eligibility")
-    p.add_argument("--recover-receiptless", action="store_true",
-                   help="exact retry recovery; requires --attempt and --route-file")
     p.add_argument("--seal-artifact-proof-receipt", action="store_true")
-    p.add_argument("--route-file", type=Path)
     p.add_argument("--agent-home", type=Path); p.add_argument("--now", type=float, default=time.time(), help=argparse.SUPPRESS)
     p.add_argument("--pid", type=int); p.add_argument("--pid-start"); p.add_argument("--pid-scope")
     p.add_argument("--pid-observer-ns", help=argparse.SUPPRESS)
@@ -3130,8 +2929,7 @@ def main(argv):
         args.operation != "reconcile" or not args.attempt
         or any((args.session, args.route, args.node, args.job, args.all,
                 args.global_jobs, args.local_jobs, args.cancel_receiptless_namespace,
-                args.automatic_cancel_receiptless, args.recover_receiptless,
-                args.seal_artifact_proof_receipt))
+                args.automatic_cancel_receiptless, args.seal_artifact_proof_receipt))
     ):
         print("check=failed\nreason=exact-attempt-death-required"); return 64
     from dispatch_terminal_commit import require_current_cleanup
@@ -3221,7 +3019,6 @@ def main(argv):
         args.only_exact_dead,
         args.cancel_receiptless_namespace,
         args.automatic_cancel_receiptless,
-        args.recover_receiptless,
         args.seal_artifact_proof_receipt,
     ))
     if recovery_modes > 1:
@@ -3244,15 +3041,6 @@ def main(argv):
         or any((args.session, args.route, args.node, args.job, args.all))
     ):
         print("check=failed\nreason=exact-attempt-automatic-cancel-required"); return 64
-    if args.recover_receiptless and (
-        args.operation != "reconcile"
-        or not args.attempt
-        or not args.route_file
-        or any((args.session, args.route, args.node, args.job, args.all))
-    ):
-        print("check=failed\nreason=exact-attempt-recovery-required\n"
-              "required=reconcile --recover-receiptless --attempt <attempt-id> --route-file <route.json>"
-              " (no --session/--route/--node/--job/--all)"); return 64
     rows = read_rows(args.jobs)
     if args.operation == "current":
         return emit_current(rows, args)
@@ -3270,8 +3058,6 @@ def main(argv):
         return cancel_receiptless_namespace(rows, args)
     if args.automatic_cancel_receiptless:
         return automatic_cancel_receiptless(rows, args)
-    if args.recover_receiptless:
-        return recover_receiptless(rows, args)
     if args.seal_artifact_proof_receipt:
         return seal_artifact_proof_receipt(rows, args)
     return reconcile(rows, args)

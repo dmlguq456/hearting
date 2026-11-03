@@ -863,53 +863,11 @@ if _KNOWN_DELIVERY_RECIPIENT_KINDS != frozenset(RECIPIENT_KINDS):
     )
 
 
-def _recovery_identity_digest(identity: dict[str, str]) -> str:
-    if any(not value for value in identity.values()):
-        raise DispatchContractError("recovery-identity-incomplete")
-    encoded = json.dumps(
-        identity,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return "rec-" + hashlib.sha256(encoded).hexdigest()
-
-
-def recovery_id(
-    *,
-    source_route_id: str,
-    source_route_hash: str,
-    node_or_group_leg: str,
-    original_attempt_id: str,
-    cancellation_receipt_digest: str,
-) -> str:
-    """Return the stable identity for one receipt-unavailable recovery."""
-
-    return _recovery_identity_digest(
-        {
-            "source_route_id": source_route_id,
-            "source_route_hash": source_route_hash,
-            "node_or_group_leg": node_or_group_leg,
-            "original_attempt_id": original_attempt_id,
-            "cancellation_receipt_digest": cancellation_receipt_digest,
-        }
-    )
-
-
 @dataclass(frozen=True)
 class RegistrySelection:
     path: Path
     source: str
     inherited: bool
-
-
-@dataclass(frozen=True)
-class BrokerSelection:
-    root: Path
-    instance_id: str
-    pid: int
-    start_ticks: str
-    jobs: Path
 
 
 @dataclass(frozen=True)
@@ -1017,19 +975,6 @@ class QuiescenceProof:
     namespace_authority: bool
     binding_digest: str
     portable_receipt_digest: str = ""
-
-
-@dataclass(frozen=True)
-class RecoveryRetryClaim:
-    """Durable one-retry admission result for one recovery identity."""
-
-    recovery_id: str
-    original_attempt_id: str
-    retry_ordinal: int
-    retry_attempt_id: str
-    state: str
-    reason: str
-    start_permitted: bool
 
 
 @dataclass(frozen=True)
@@ -7153,34 +7098,6 @@ def legacy_read_window_may_close(
     )
 
 
-def ensure_launch_broker(
-    agent_home: Path,
-    jobs: Path,
-    *,
-    dispatch_depth: int,
-    action: str,
-    intensity: str,
-    environ: dict[str, str] | os._Environ[str] | None = None,
-) -> BrokerSelection | None:
-    """Reject production launch-broker creation after dispatch contract v3.
-
-    The callable remains for one compatibility release so an overlooked caller
-    fails closed with a stable reason instead of silently resurrecting the
-    resident broker.
-    """
-
-    if (
-        action != "start"
-        or dispatch_depth != 1
-        or intensity not in {"standard", "strong", "thorough", "adversarial"}
-    ):
-        return None
-    raise DispatchContractError(
-        "launch-broker-retired",
-        "dispatch contract v3 launches checked headless adapters directly from the conductor",
-    )
-
-
 def validate_nested_eligibility(
     *,
     dispatch_depth: int,
@@ -10210,191 +10127,15 @@ def seal_cancellation_quiescence_receipt(
 
 
 def _stable_recovery_attempt_id(recovery_identity: str) -> str:
+    """The retry attempt id an SD-106 recovery claim recorded (read for existing rows)."""
     encoded = f"{recovery_identity}\0retry_ordinal=1".encode("utf-8")
     return "att-retry-" + hashlib.sha256(encoded).hexdigest()[:32]
-
-
-def _existing_recovery_claim(
-    metadata: dict[str, str], original_attempt_id: str
-) -> RecoveryRetryClaim:
-    recovery_identity = metadata.get("recovery_id", "")
-    if metadata.get("attempt_id") != original_attempt_id:
-        raise DispatchContractError("recovery-claim-original-attempt-mismatch")
-    if metadata.get("recovery_exhausted") == "1" or metadata.get("note") == "receipt-unavailable-retry-exhausted":
-        retry_attempt_id = metadata.get("retry_attempt_id", "")
-        retry_ordinal = 1 if metadata.get("retry_ordinal") == "1" else 0
-        return RecoveryRetryClaim(
-            recovery_identity,
-            original_attempt_id,
-            retry_ordinal,
-            retry_attempt_id,
-            "exhausted",
-            "receipt-unavailable-retry-exhausted",
-            False,
-        )
-    retry_attempt_id = metadata.get("retry_attempt_id", "")
-    if metadata.get("retry_ordinal") != "1" or not retry_attempt_id:
-        raise DispatchContractError("recovery-claim-incomplete")
-    return RecoveryRetryClaim(
-        recovery_identity,
-        original_attempt_id,
-        1,
-        retry_attempt_id,
-        "claimed",
-        "recovery-retry-claimed",
-        True,
-    )
-
-
-def claim_recovery_retry(
-    jobs: Path,
-    *,
-    recovery_id: str,
-    source_route_id: str,
-    source_route_hash: str,
-    node_or_group_leg: str,
-    original_attempt_id: str,
-    remaining_cascade: int,
-) -> RecoveryRetryClaim:
-    """CAS one stable retry claim, or seal its permanent exhausted terminal."""
-
-    if (
-        not recovery_id
-        or not source_route_id
-        or not source_route_hash
-        or not node_or_group_leg
-        or not original_attempt_id
-        or type(remaining_cascade) is not int
-    ):
-        raise DispatchContractError("recovery-claim-identity-incomplete")
-    ensure_global_registry_writable(jobs)
-    with Path(f"{jobs}.lock").open("a", encoding="utf-8") as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        ensure_terminal_claim_absent(jobs, source_route_id, original_attempt_id)
-        lines = jobs.read_text(encoding="utf-8", errors="replace").splitlines()
-        rows: list[tuple[int, list[str], dict[str, str]]] = []
-        existing: list[dict[str, str]] = []
-        for index, line in enumerate(lines):
-            fields = line.split("\t")
-            if len(fields) != 6:
-                continue
-            metadata = parse_registry_metadata(fields[5])
-            if metadata.get("attempt_id") == original_attempt_id:
-                rows.append((index, fields, metadata))
-            if metadata.get("recovery_id") == recovery_id:
-                existing.append(metadata)
-
-        if existing:
-            if len(existing) != 1:
-                raise DispatchContractError("recovery-claim-not-unique")
-            return _existing_recovery_claim(existing[0], original_attempt_id)
-        if len(rows) != 1:
-            raise DispatchContractError(
-                "attempt-row-not-unique",
-                f"attempt_id={original_attempt_id} rows={len(rows)}",
-            )
-        index, fields, metadata = rows[0]
-        validate_attempt_metadata(metadata)
-        from dispatch_replacement import source_reservation
-        if (source_reservation(jobs, original_attempt_id) or metadata.get("replacement_family_id")
-                or metadata.get("automatic_retry_of")):
-            raise DispatchContractError("automatic-replacement-exhausted", original_attempt_id)
-        if metadata.get("recovery_id"):
-            raise DispatchContractError("recovery-claim-conflict")
-        from dispatch_replacement import legacy_budget_exhausted
-        if legacy_budget_exhausted(jobs, lines, metadata, include_family=True):
-            raise DispatchContractError("automatic-replacement-exhausted", original_attempt_id)
-        if (
-            metadata.get("cancellation_quiescence_receipt")
-            != ATTEMPT_CANCELLATION_QUIESCENCE_RECEIPT
-            or metadata.get("quiescence_pgid_proof") != GROUP_REAP_PROOF
-            or metadata.get("quiescence_descendant_proof")
-            != ATTEMPT_DESCENDANT_PROOF
-            or not re.fullmatch(
-                r"sha256:[0-9a-f]{64}",
-                metadata.get("cancellation_receipt_digest", ""),
-            )
-        ):
-            raise DispatchContractError("cancellation-quiescence-receipt-required")
-        expected_recovery_id = _recovery_identity_digest(
-            {
-                "source_route_id": source_route_id,
-                "source_route_hash": source_route_hash,
-                "node_or_group_leg": node_or_group_leg,
-                "original_attempt_id": original_attempt_id,
-                "cancellation_receipt_digest":
-                    metadata["cancellation_receipt_digest"],
-            }
-        )
-        if recovery_id != expected_recovery_id:
-            raise DispatchContractError("recovery-claim-identity-mismatch")
-        if (
-            metadata.get("route_id") != source_route_id
-            or metadata.get("route_hash") != source_route_hash
-        ):
-            raise DispatchContractError("recovery-claim-source-route-mismatch")
-
-        route_claims = {
-            claim_metadata.get("recovery_id", "")
-            for line in lines
-            if len((claim_fields := line.split("\t"))) == 6
-            and (claim_metadata := parse_registry_metadata(claim_fields[5])).get(
-                "route_id"
-            ) == source_route_id
-            and claim_metadata.get("retry_ordinal") == "1"
-            and claim_metadata.get("recovery_id")
-            and claim_metadata.get("recovery_id") != recovery_id
-        }
-        effective_remaining = max(0, remaining_cascade - len(route_claims))
-        claimed_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        if effective_remaining < 1:
-            _write_recovery_attention(jobs, original_attempt_id, recovery_id,
-                                      "receipt-unavailable-retry-exhausted")
-            fields[5] = _updated_attempt_metadata(
-                fields[5],
-                {"recovery_id": recovery_id, "retry_claimed_at": claimed_at,
-                 "recovery_exhausted": "1", "start_permitted": "0",
-                 "recovery_exhaustion_reason": "receipt-unavailable-retry-exhausted"},
-            )
-            result = RecoveryRetryClaim(
-                recovery_id,
-                original_attempt_id,
-                0,
-                "",
-                "exhausted",
-                "receipt-unavailable-retry-exhausted",
-                False,
-            )
-        else:
-            retry_attempt_id = _stable_recovery_attempt_id(recovery_id)
-            fields[5] = _updated_attempt_metadata(
-                fields[5],
-                {
-                    "recovery_id": recovery_id,
-                    "retry_ordinal": "1",
-                    "retry_attempt_id": retry_attempt_id,
-                    "retry_claimed_at": claimed_at,
-                },
-            )
-            result = RecoveryRetryClaim(
-                recovery_id,
-                original_attempt_id,
-                1,
-                retry_attempt_id,
-                "claimed",
-                "recovery-retry-claimed",
-                True,
-            )
-        lines[index] = "\t".join(fields)
-        _atomic_registry_replace(jobs, lines)
-        return result
 
 
 @dataclass(frozen=True)
 class StageAdvanceRegistryClaim:
     """SD-110 claim result: no predecessor identity in `claim_key`
-    (`§13.32.1-(3)C`) -- distinct from `RecoveryRetryClaim`, which mutates an
-    EXISTING attempt row. A stage-advance successor has no row yet, so this
+    (`§13.32.1-(3)C`). A stage-advance successor has no row yet, so this
     claim lives in its own CAS store under the same canonical registry lock."""
 
     stage_advance_id: str
@@ -10575,68 +10316,6 @@ def claim_subsession_advance(
         successor_attempt_id=successor_attempt_id,
         replayed=False,
     )
-
-
-def _write_recovery_attention(jobs, attempt_id, recovery_id, reason):
-    from dispatch_replacement import _once, _read
-    path = Path(jobs).parent / "recovery-attention" / (hashlib.sha256(recovery_id.encode()).hexdigest()+".json")
-    # First durable write: death after this point must not restore the budget.
-    from dispatch_replacement import _id
-    _once(Path(jobs).parent / "recovery-attention" / "by-source" / (_id(attempt_id)+".json"),
-          {"original_attempt_id": attempt_id, "recovery_id": recovery_id})
-    old = _read(path)
-    if old is not None:
-        if old.get("original_attempt_id") != attempt_id or old.get("recovery_id") != recovery_id:
-            raise DispatchContractError("recovery-attention-conflict")
-        return
-    _once(path, {"schema": "recovery-attention-v1", "original_attempt_id": attempt_id,
-                 "recovery_id": recovery_id, "state": "needs-attention", "reason": reason})
-
-
-def seal_recovery_blocked(
-    jobs: Path,
-    *,
-    original_attempt_id: str,
-    recovery_id: str,
-    reason: str = "receipt-unavailable-retry-exhausted",
-) -> bool:
-    """Seal one recovery as a canonical permanent no-start terminal."""
-
-    if not original_attempt_id or not recovery_id:
-        raise DispatchContractError("recovery-block-identity-incomplete")
-    ensure_global_registry_writable(jobs)
-    with Path(f"{jobs}.lock").open("a", encoding="utf-8") as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        lines = jobs.read_text(encoding="utf-8", errors="replace").splitlines()
-        matches: list[tuple[int, list[str], dict[str, str]]] = []
-        for index, line in enumerate(lines):
-            fields = line.split("\t")
-            if len(fields) != 6:
-                continue
-            metadata = parse_registry_metadata(fields[5])
-            if metadata.get("attempt_id") == original_attempt_id:
-                matches.append((index, fields, metadata))
-        if len(matches) != 1:
-            raise DispatchContractError(
-                "attempt-row-not-unique",
-                f"attempt_id={original_attempt_id} rows={len(matches)}",
-            )
-        index, fields, metadata = matches[0]
-        validate_attempt_metadata(metadata)
-        if metadata.get("recovery_id") not in {None, "", recovery_id}:
-            raise DispatchContractError("recovery-block-identity-conflict")
-        if metadata.get("recovery_exhausted") == "1" and metadata.get("start_permitted") == "0":
-            return False
-        _write_recovery_attention(jobs, original_attempt_id, recovery_id, reason)
-        fields[5] = _updated_attempt_metadata(
-            fields[5],
-            {"recovery_id": recovery_id, "recovery_exhausted": "1",
-             "recovery_exhaustion_reason": reason or "receipt-unavailable-retry-exhausted",
-             "start_permitted": "0"},
-        )
-        lines[index] = "\t".join(fields)
-        _atomic_registry_replace(jobs, lines)
-        return True
 
 
 _MARKER_BOUND_PROCESS_KEYS = (

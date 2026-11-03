@@ -1300,17 +1300,10 @@ class RegistryTest(RegistryFixtureTestCase):
   return f"2026-08-25T00:00:00Z\topen\t/r\t/w\texecute\t{pipe}\n"
 
  def cancellation_args(self,attempt,apply=True):
-  route_file=self.base/"route.json"
-  route_file.write_text(json.dumps({
-   "route_id":"rt-recovery","route_hash":"sha256:"+"4"*64,
-   "launch_compatibility_tuple":{
-    "jobs_path":{"path":str(self.jobs.resolve())},
-   },
-  }))
   return types.SimpleNamespace(
    session=None,route=None,node=None,attempt=attempt,job=None,all=False,
    apply=apply,jobs=self.jobs,agent_home=self.base,now=time.time(),
-   cancellation_wait=0.0,route_file=route_file,
+   cancellation_wait=0.0,
   )
 
  def test_automatic_cancel_unproven_is_blocked_without_any_mutation(self):
@@ -1423,93 +1416,6 @@ class RegistryTest(RegistryFixtureTestCase):
   self.assertNotIn("failure_class=blocked",text)
   self.assertNotIn("dead-missing-result",text)
   self.assertNotIn("verdict=PASS",text)
-
- def test_recover_receiptless_claims_once_and_never_spawns(self):
-  module=self.load_registry_module("automatic_recovery")
-  attempt="att-automatic-recovery"
-  self.jobs.write_text(self.cancellation_row(attempt))
-  empty=D.ProcessGroupObservation("empty")
-  args=self.cancellation_args(attempt)
-  with mock.patch.object(module,"attempt_tagged_descendants",return_value=empty), \
-       mock.patch.object(D,"process_group_observation",return_value=empty), \
-       mock.patch.object(D,"attempt_tagged_descendants",return_value=empty), \
-       mock.patch.object(D,"attempt_scan_namespace_authority",return_value=True), \
-       mock.patch.object(module,"namespace_gone",return_value="extinct"), \
-       contextlib.redirect_stdout(io.StringIO()):
-   module.automatic_cancel_receiptless(module.read_rows(self.jobs),args)
-  budget=types.SimpleNamespace(retry_slots=1,source="bound-route")
-  outputs=[]
-  with mock.patch.object(module,"resolve_continuation_budget",return_value=budget):
-   for _ in range(2):
-    stream=io.StringIO()
-    with contextlib.redirect_stdout(stream):
-     module.recover_receiptless(module.read_rows(self.jobs),args)
-    outputs.append(json.loads(stream.getvalue()))
-  self.assertEqual(outputs[0]["claimed"],1)
-  self.assertEqual(outputs[0]["spawned"],0)
-  self.assertEqual(outputs[1]["retry_attempt_id"],outputs[0]["retry_attempt_id"])
-  metadata=D.parse_registry_metadata(self.jobs.read_text().strip().split("\t",5)[5])
-  self.assertEqual(metadata["retry_ordinal"],"1")
-  self.assertEqual(metadata["failure_class"],"cancelled")
-
- def test_recover_receiptless_exhaustion_replays_without_recancelling(self):
-  module=self.load_registry_module("automatic_recovery_exhausted")
-  attempt="att-automatic-exhausted"
-  self.jobs.write_text(self.cancellation_row(attempt))
-  empty=D.ProcessGroupObservation("empty")
-  args=self.cancellation_args(attempt)
-  with mock.patch.object(module,"attempt_tagged_descendants",return_value=empty), \
-       mock.patch.object(D,"process_group_observation",return_value=empty), \
-       mock.patch.object(D,"attempt_tagged_descendants",return_value=empty), \
-       mock.patch.object(D,"attempt_scan_namespace_authority",return_value=True), \
-       mock.patch.object(module,"namespace_gone",return_value="extinct"), \
-       contextlib.redirect_stdout(io.StringIO()):
-   module.automatic_cancel_receiptless(module.read_rows(self.jobs),args)
-  original=self.jobs.read_text().strip().split("\t",5)
-  original_meta=D.parse_registry_metadata(original[5])
-  budget=types.SimpleNamespace(retry_slots=0,source="bound-route")
-  outputs=[]
-  with mock.patch.object(module,"resolve_continuation_budget",return_value=budget), \
-       mock.patch.object(module,"_automatic_receiptless_result") as recancel:
-   for _ in range(2):
-    stream=io.StringIO()
-    with contextlib.redirect_stdout(stream):
-     module.recover_receiptless(module.read_rows(self.jobs),args)
-    outputs.append(json.loads(stream.getvalue()))
-  recancel.assert_not_called()
-  self.assertEqual(outputs[0]["reason"],"receipt-unavailable-retry-exhausted")
-  self.assertEqual(outputs[1]["recovery_id"],outputs[0]["recovery_id"])
-  metadata=D.parse_registry_metadata(self.jobs.read_text().strip().split("\t",5)[5])
-  self.assertEqual(metadata["failure_class"],original_meta["failure_class"])
-  self.assertEqual(metadata["note"],original_meta["note"])
-  self.assertEqual(self.jobs.read_text().strip().split("\t",5)[1],original[1])
-  self.assertEqual(metadata["recovery_exhausted"],"1")
-  self.assertEqual(metadata["start_permitted"],"0")
-  attention_path=self.jobs.parent/"recovery-attention"/(hashlib.sha256(outputs[0]["recovery_id"].encode()).hexdigest()+".json")
-  attention=json.loads(attention_path.read_text())
-  self.assertEqual(attention["original_attempt_id"],attempt)
-  self.assertEqual(attention["state"],"needs-attention")
-  self.assertEqual(attention["reason"],"receipt-unavailable-retry-exhausted")
-  self.assertNotIn("retry_attempt_id",metadata)
-
- def test_recover_receiptless_rejects_jobs_not_sealed_by_route(self):
-  module=self.load_registry_module("automatic_recovery_wrong_jobs")
-  attempt="att-automatic-wrong-jobs"
-  self.jobs.write_text(self.cancellation_row(attempt))
-  args=self.cancellation_args(attempt)
-  args.route_file.write_text(json.dumps({
-   "route_id":"rt-recovery","route_hash":"sha256:"+"4"*64,
-   "launch_compatibility_tuple":{
-    "jobs_path":{"path":str(self.base/"another-jobs.log")},
-   },
-  }))
-  before=self.jobs.read_bytes();stream=io.StringIO()
-  with contextlib.redirect_stdout(stream):
-   module.recover_receiptless(module.read_rows(self.jobs),args)
-  result=json.loads(stream.getvalue())
-  self.assertEqual(result["reason"],"recovery-route-jobs-mismatch")
-  self.assertEqual(result["claimed"],0)
-  self.assertEqual(self.jobs.read_bytes(),before)
 
  def test_receiptless_cancel_refuses_fresh_exact_heartbeat(self):
   # Declares the namespace explicitly extinct so eligibility reaches the
@@ -1818,46 +1724,6 @@ class RegistryTest(RegistryFixtureTestCase):
                            return_value=D.ProcessQuiescence("unverifiable","process-namespace-unverifiable")):
      self.assertEqual(module._receiptless_namespace_cancel_reason(
       row,self.cancellation_args(attempt)),reason)
-
- def test_recover_receiptless_closes_an_exact_death_first(self):
-  module=self.load_registry_module("recover_exact_dead_first")
-  attempt="att-recover-exact-dead"
-  self.jobs.write_text(self.extinct_row(attempt))
-  budget=types.SimpleNamespace(retry_slots=1,source="bound-route")
-  stream=io.StringIO()
-  with self.extinct_namespace(), \
-       mock.patch.object(module,"resolve_continuation_budget",return_value=budget), \
-       mock.patch.object(module,"_automatic_receiptless_result") as receiptless, \
-       contextlib.redirect_stdout(stream):
-   module.recover_receiptless(module.read_rows(self.jobs),self.cancellation_args(attempt))
-  receiptless.assert_not_called()
-  result=json.loads(stream.getvalue())
-  fields=self.jobs.read_text().strip().split("\t",5)
-  metadata=D.parse_registry_metadata(fields[5])
-  self.assertEqual((fields[1],metadata["note"]),("done","dead-namespace-absent"))
-  # No receipt-unavailable claim: the runtime's SD-157 replacement
-  # (death_kind=silent) is this row's one retry, and its budget stays unspent.
-  self.assertEqual(result,{"apply":True,"attempted":1,"claimed":0,"spawned":0,
-                           "reason":"exact-death-closed"})
-  self.assertNotIn("recovery_id",metadata)
-  sys.path.insert(0,str(ROOT/"utilities"))
-  import dispatch_replacement as R
-  self.assertEqual(R.death_kind(fields,metadata),"silent")
-
- def test_recover_receiptless_keeps_the_receiptless_path_when_death_is_not_exact(self):
-  module=self.load_registry_module("recover_not_exact")
-  attempt="att-recover-not-exact"
-  self.jobs.write_text(self.extinct_row(attempt))
-  before=self.jobs.read_bytes()
-  stream=io.StringIO()
-  with self.extinct_namespace("unverifiable"), \
-       mock.patch.object(module,"namespace_gone",return_value="unverifiable"), \
-       contextlib.redirect_stdout(stream):
-   module.recover_receiptless(module.read_rows(self.jobs),self.cancellation_args(attempt))
-  result=json.loads(stream.getvalue())
-  self.assertEqual(result["reason"],"namespace-observation-unavailable",result)
-  self.assertEqual(result["claimed"],0)
-  self.assertEqual(self.jobs.read_bytes(),before)
 
  def test_cli_closes_a_really_extinct_namespace_and_leaves_a_live_one(self):
   # Namespace existence uses real procfs; actor scans use the common fixture.
@@ -2742,15 +2608,6 @@ class DetachedResidueDrainReconcileTest(RegistryFixtureTestCase):
   self.assertFalse(decision["category"].startswith("residue-drain"))
   self.assertEqual(decision["residue"],{"state":"residue-live","live_pids":[4242]})
   self.assertEqual(self.jobs.read_bytes(),before)
-
- def test_recovery_usage_error_names_the_route_file_requirement(self):
-  out=io.StringIO()
-  with contextlib.redirect_stdout(out):
-   code=self.registry.main(["dispatch-registry.py","reconcile","--jobs",str(self.jobs),
-                            "--attempt",self.attempt,"--recover-receiptless"])
-  self.assertEqual(code,64)
-  self.assertIn("reason=exact-attempt-recovery-required",out.getvalue())
-  self.assertIn("--route-file",out.getvalue())
 
 
 class MixedRegistryTest(RegistryFixtureTestCase):
