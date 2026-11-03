@@ -444,6 +444,74 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
         self.assertIn('"verification_pass":false',turns[1][1])
         self.assertIn("not a model child",turns[1][1])
         self.assertNotIn("registration-required",turns[1][1])
+    def test_progress_carrying_resource_settlements_do_not_spend_the_continuation_budget(self):
+        # Phase F d6 (F-1): `--max-continuations 2` makes ordinary=2 with the
+        # one reserved terminal-handoff turn. Under the old gross accounting
+        # the second settled resource delivery was refused and the owner died
+        # with `continuation-limit-exceeded` (exit 70); a result-carrying
+        # continuation must not spend that budget at all.
+        import dispatch_resource_wait as RESOURCE
+        from types import SimpleNamespace
+        module = supervisor
+        self.jobs.write_text(owner_row(self.lease))
+        route_value = seal_route({"schema_version":2,"cwd":str(self.base),
+            "nodes":[{"id":"full-run","kind":"resource-runner","continuation":{"kind":"supervised"}},
+                     {"id":"verify"}]})
+        route_path = self.base / "resource-series-route.json"
+        route_path.write_text(json.dumps(route_value))
+        route_args = ["--route-file",str(route_path),"--route-id",route_value["route_id"],
+                      "--route-hash",route_value["route_hash"],"--max-continuations","2"]
+        resource_count = 5  # old limit (ordinary+reserved=3) + 2 settled results
+        runs = [{"run_id":f"series-resource-{index}","pid":600+index,"starttime":"201",
+                 "command":["approved"],"node":"full-run","status":"running",
+                 "sentinel":"/fixture-exit"} for index in range(resource_count)]
+        keys = [RESOURCE.resource_key(run) for run in runs]
+        stage = {"state":"STAGE_SUCCEEDED"}
+        def remaining_runs():
+            state = join.read_supervisor_phase_state(self.state, PARENT)
+            delivered = set(((state.resource or {}).get("delivered") or [])) if state else set()
+            return [run for run, key in zip(runs, keys) if key not in delivered]
+        def context(*_):
+            outstanding = remaining_runs()
+            if not outstanding:
+                return None
+            run = outstanding[0]
+            sup = SimpleNamespace(poll_once=mock.Mock(),read_resource_watches=lambda *_: [{"node":"full-run"}],
+                resource_evidence=lambda _: {"terminal":True,"quiescent":True,"succeeded":True,"liveness":"exited","exit_code":0},
+                artifact_evidence=lambda _: {"checked":True,"missing":[]},runner=lambda:SimpleNamespace(read_sentinel=lambda _:0))
+            return (sup,route_value,SimpleNamespace(state=lambda:{"nodes":{"full-run":stage}}),
+                    [({"node":"full-run","successors":["verify"]},run)])
+        turns = []
+        def turn(*a,**k):
+            prompt = a[2]
+            turns.append(prompt)
+            text = ("runtime_wait: registered-children" if len(turns)<=resource_count
+                    else "artifact: -\nverdict: PASS\nblocker: none")
+            return {"type":"result","subtype":"success","is_error":False,"result":text},0
+        events = []
+        with mock.patch.object(RESOURCE,"context",side_effect=context), \
+             mock.patch.object(RESOURCE.RESUME,"supervisor_alive",return_value=True), \
+             mock.patch.object(module,"run_turn",side_effect=turn), \
+             mock.patch.object(module,"reconcile",return_value=True), \
+             mock.patch.object(sys,"stdin",io.StringIO("initial assignment")), \
+             mock.patch.object(module,"emit",side_effect=events.append), \
+             mock.patch.object(module,"resolved_turn_transport",return_value="resume-process"):
+            rc = module.main(self.command()[2:]+route_args)
+        errors = [event for event in events if event.get("type") == "dispatch.supervisor.error"]
+        self.assertEqual(rc,0,errors)
+        self.assertEqual(errors,[])
+        self.assertEqual(len(turns),resource_count+1)
+        resource_prompts = [prompt for prompt in turns if prompt.startswith("Runtime resource receipt")]
+        self.assertEqual(len(resource_prompts),resource_count)
+        for run in runs:
+            self.assertTrue(any(run["run_id"] in prompt for prompt in resource_prompts),run["run_id"])
+        import dispatch_budget_record as BR
+        reservations = [row for row in BR.read_rows(self.base,PARENT)
+                        if row.get("record_kind") == "reservation"]
+        self.assertEqual(len(reservations),resource_count,reservations)
+        self.assertEqual({row["class"] for row in reservations},{"gross"})
+        self.assertEqual({row["gross_remaining"] for row in reservations},{2})
+
     def test_resource_phase_restart_resumes_exact_native_session(self):
         self.jobs.write_text(owner_row(self.lease))
         join = supervisor.RESOURCE_WAIT.JOIN
@@ -2206,9 +2274,12 @@ class ContinuationTripartiteBudgetTest(unittest.TestCase):
         import dispatch_budget_record as BR
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            ledger = B.ContinuationLedger(B.ContinuationBudget(1, "test", reserved=0))
+            # Phase F: a progress-carrying ordinary admit no longer exhausts
+            # anything, so the boundary that still refuses is the no-progress
+            # stall counter (one stall token here).
+            ledger = B.ContinuationLedger(SimpleNamespace(ordinary=1, stall=1, reserved=0))
             kwargs = dict(parent_attempt_id=PARENT, route_id="rt-budget", route_hash="hash",
-                          purpose="ordinary", stalled=False)
+                          purpose="ordinary", stalled=True)
             first, _ = module._admit_continuation(ledger, root, ordinal=0, **kwargs)
             second, _ = module._admit_continuation(ledger, root, ordinal=1, **kwargs)
             self.assertTrue(first.admitted)
@@ -2260,14 +2331,16 @@ class BudgetWarningDeliveryTest(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.state_root = Path(self.temp.name)
 
-    def test_admit_returns_notice_only_on_the_crossing_turn(self):
-        # ordinary=5, reserved=1(default) -> gross_remaining after each
-        # ordinary admit is 4, 3, 2, 1. threshold=3 -> gross_remaining first
-        # reads <= 3 right after the *second* admit, and only there.
-        budget = supervisor_budget_module().ContinuationBudget(limit=5, source="test")
+    def test_admit_returns_notice_when_the_configured_budget_starts_at_the_threshold(self):
+        # Phase F: a progress admit no longer lowers `gross_remaining`, so an
+        # ordinary budget above the threshold never crosses it. The warning
+        # still fires exactly once when the effective budget itself starts at
+        # or below the threshold (an explicit small `--max-continuations`),
+        # and the crossing turn is still the only one that carries a notice.
+        budget = supervisor_budget_module().ContinuationBudget(limit=3, source="test")
         ledger = supervisor_budget_module().ContinuationLedger(budget)
         notices = []
-        for ordinal in range(4):
+        for ordinal in range(3):
             verdict, notice = supervisor._admit_continuation(
                 ledger, self.state_root, parent_attempt_id="att-p",
                 route_id="rt-x", route_hash="sha256:" + "a" * 64,
@@ -2276,9 +2349,9 @@ class BudgetWarningDeliveryTest(unittest.TestCase):
             )
             self.assertTrue(verdict.admitted)
             notices.append(notice)
-        self.assertEqual(["", notices[1], "", ""], notices)
-        self.assertTrue(notices[1])
-        self.assertIn("remaining=", notices[1])
+        self.assertEqual(["", ""], notices[1:])
+        self.assertTrue(notices[0])
+        self.assertIn("remaining=3", notices[0])
 
     def test_no_notice_before_threshold_is_crossed(self):
         budget = supervisor_budget_module().ContinuationBudget(limit=10, source="test")
@@ -2340,7 +2413,10 @@ class TerminalHandoffCleanupTurnBoundaryTest(unittest.TestCase):
     def test_exactly_one_cleanup_turn_then_second_cleanup_is_refused(self):
         with tempfile.TemporaryDirectory() as home:
             state_root = Path(home)
-            budget = supervisor_budget_module().ContinuationBudget(limit=3, source="test")
+            # Phase F: progress admits cannot be refused, so the refusal that
+            # appends the colliding `purpose="ordinary"` reservation row is
+            # the no-progress stall branch (class "stall", same purpose).
+            budget = SimpleNamespace(ordinary=3, stall=0, reserved=1)
             ledger = supervisor_budget_module().ContinuationLedger(budget)
             terminal_handoff_issued = [False]
             common = dict(
@@ -2355,15 +2431,15 @@ class TerminalHandoffCleanupTurnBoundaryTest(unittest.TestCase):
                 ledger, state_root, ordinal=1, purpose="ordinary", stalled=False, **common,
             )
             self.assertTrue(verdict.admitted)
-            self.assertEqual(1, ledger.gross_remaining)
+            self.assertEqual(3, ledger.gross_remaining)
             self.assertEqual(1, ledger.reserved_remaining)
 
-            # Refused at the gross==reserved boundary. This still appends a
+            # Refused at the exhausted stall boundary. This still appends a
             # `purpose="ordinary"` reservation row at ordinal=2 even though
             # the ledger refuses the admit -- that append is the collision
             # source the fix must tolerate.
             verdict, _ = supervisor._admit_continuation(
-                ledger, state_root, ordinal=2, purpose="ordinary", stalled=False, **common,
+                ledger, state_root, ordinal=2, purpose="ordinary", stalled=True, **common,
             )
             self.assertFalse(verdict.admitted)
 

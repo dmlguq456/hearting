@@ -1483,9 +1483,11 @@ reuse uses the existing `continuation` compiler rather than a fresh recipe.
 Newly compiled owner continuation budgets use one finite workload formula that
 accounts for declared nodes, unique retry boundaries, the review-round cap and
 terminal nodes. The separate workload floor applies only to newly derived
-budgets; valid older sealed budgets remain valid. The reserved continuation is
-for terminal handoff after ordinary work is exhausted and does not itself
-guarantee an unfinished report node.
+budgets; valid older sealed budgets remain valid. A continuation that delivers
+a new result (a settled resource, a finished child, a replaced outbox) does not
+spend the ordinary budget -- the finite budget stops no-progress repetition
+only. The reserved continuation is for terminal handoff after ordinary work is
+exhausted and does not itself guarantee an unfinished report node.
 
 ### §5.10b. Frame — Launch, Join, Interview
 

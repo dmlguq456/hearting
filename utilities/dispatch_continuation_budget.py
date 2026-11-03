@@ -201,7 +201,13 @@ class AdmitVerdict:
 class ContinuationLedger:
     """Pure state machine (SD-116 §13.34.4-(2)): zero file access. The three
     remainders never go negative via clamping -- every admit that would push
-    one below zero is refused instead (D47-4)."""
+    one below zero is refused instead (D47-4).
+
+    Phase F (user correction input-dcb5f9b6…): `gross` is the derived workload
+    record and the ceiling's name, not a spend axis for real progress. Only
+    the `stall` counter (no-progress repetition) and the one `reserved`
+    terminal-handoff turn are ever decremented; an ordinary admit carrying a
+    new result is admitted without spending either."""
 
     def __init__(self, budget: ContinuationBudget) -> None:
         self._gross_remaining = budget.ordinary
@@ -275,11 +281,15 @@ class ContinuationLedger:
         # `stall_remaining` gates only the two no-progress patterns (identical
         # redelivery, runtime-wait-without-started-child) routed through the
         # `stalled=True` branch above -- it never blocks a real-progress
-        # gross spend, per §13.34.4-(2) "이 두 계열은 gross ceiling을 소비하지
+        # gross admit, per §13.34.4-(2) "이 두 계열은 gross ceiling을 소비하지
         # 않는다" (the inverse holds too: gross spends don't borrow from stall).
-        if self._gross_remaining > self._reserved_remaining:
-            self._gross_remaining -= 1
-            return self._verdict(admitted=True, purpose=purpose, charged="gross", refusal="")
-        return self._verdict(
-            admitted=False, purpose=purpose, charged="", refusal="continuation-admission-refused",
-        )
+        #
+        # Phase F: and the inverse of the old gross equation holds as well --
+        # a `stalled=False` ordinary admit carries a new result (a settled
+        # resource outbox, a finished child's completion receipt, a replaced
+        # outbox), which is progress, not repetition. It is admitted without
+        # decrementing gross and without hitting the reserve boundary: the
+        # finite budget stops no-progress repetition only. `charged="gross"`
+        # names the admit axis from the existing CLASSES vocabulary (no new
+        # record class); it does not imply a spend here.
+        return self._verdict(admitted=True, purpose=purpose, charged="gross", refusal="")
