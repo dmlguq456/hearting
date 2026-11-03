@@ -104,9 +104,10 @@ shared catalog in English and Korean. It is English unless you declare Korean
 once: `"title_language": "ko"` in
 `${XDG_CONFIG_HOME:-~/.config}/hearting/fleet.json`, `FLEET_NOW_LANG=Korean`,
 or Korean as Claude Code's `language` setting. The same declaration sets the
-language of Fleet's session titles and NOW lines. Fleet's screens are not in
-the catalog yet: they stay English, and the MEMORY screen and a few status
-words are still Korean-only. Moving them is planned.
+language of Fleet's session titles and NOW lines. Not everything is in the
+catalog yet: Fleet's screens stay English, and the MEMORY screen, a few status
+words, the summary written when a request finishes, and the one-line
+direction notice are still Korean-only. Moving them is planned.
 
 ## Why can progress be unknown? Can I read the original output?
 
