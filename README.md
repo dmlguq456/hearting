@@ -58,13 +58,12 @@ Describe the outcome in your own words. There are no command names to learn,
 and output follows the language of your conversation.
 
 The fixed text Hearting prints itself, such as the route card at the start of
-a request, is English by default. For Korean, declare it once: set
+a request, the one-line direction notice, and the summary at its end, is
+English by default. For Korean, declare it once: set
 `"title_language": "ko"` in
 `${XDG_CONFIG_HOME:-~/.config}/hearting/fleet.json`, set
 `FLEET_NOW_LANG=Korean`, or set Claude Code's `language` setting to Korean.
-The same declaration sets the language of Fleet's session titles. Two newer
-messages, the summary written when a request finishes and the one-line
-direction notice, are not in the catalog yet and print in Korean.
+The same declaration sets the language of Fleet's session titles.
 
 > “Implement and test the login API, then leave a change report.”
 
