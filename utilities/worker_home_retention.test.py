@@ -205,23 +205,44 @@ print(json.dumps({'state':v['state']}),flush=True)
             raise AssertionError(f"normal writer exit {child.returncode}: {stdout} {stderr}")
 
 
+def child_line(child, deadline):
+    """One stdout line from a fixture child; "" at EOF, None at the deadline.
+
+    Read the pipe a byte at a time. select() only sees the OS pipe, so a
+    buffered readline() can pull a second line that already arrived into the
+    file object's buffer, and the next select() then waits out the deadline
+    although the line is there (a busy runner reads both writer lines at once).
+    """
+    fd = child.stdout.fileno()
+    data = b""
+    while True:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return None
+        if not select.select([fd], [], [], min(1.0, left))[0]:
+            continue
+        byte = os.read(fd, 1)
+        if not byte or byte == b"\n":
+            return data.decode("utf-8", "replace")
+        data += byte
+
+
 def wait_for_reference_attempt(child):
-    if not select.select([child.stdout], [], [], 10)[0]:
+    line = child_line(child, time.monotonic() + 10)
+    if line is None:
         raise AssertionError("normal writer did not reach reference admission")
-    if child.stdout.readline().strip() != "reference-attempt":
+    if line.strip() != "reference-attempt":
         raise AssertionError("normal writer failed before reference admission")
 
 
 def wait_for_record_admitted(child):
     deadline = time.monotonic() + 10
-    while time.monotonic() < deadline:
-        if not select.select([child.stdout], [], [], 1)[0]:
-            continue
-        line = child.stdout.readline().strip()
-        if line == "record-admitted":
-            return
-        if not line:
+    while True:
+        line = child_line(child, deadline)
+        if line is None or not line.strip():
             break
+        if line.strip() == "record-admitted":
+            return
     raise AssertionError("normal writer did not hold inside its record admission")
 
 
@@ -5958,6 +5979,22 @@ print(json.dumps(r._directory_page(Path(sys.argv[2]),int(sys.argv[3]),3,time.mon
                 self.assertLess(len(json.dumps(saved)), 4096)
         finally:
             case.doCleanups()
+
+    def test_writer_lines_written_together_are_both_seen(self):
+        """The fixture reads a writer's progress lines even when one pipe read
+        returns both; a buffered readline() used to hide the second line and the
+        wait then failed after ten seconds (CI run 41571381252)."""
+        code = ("import sys; print('reference-attempt'); print('record-admitted', flush=True); "
+                "sys.stdin.readline()")
+        child = subprocess.Popen([sys.executable, "-c", code], stdin=subprocess.PIPE,
+                                 stdout=subprocess.PIPE, text=True)
+        try:
+            started = time.monotonic()
+            wait_for_record_admitted(child)
+            self.assertLess(time.monotonic() - started, 5)
+        finally:
+            child.stdin.write("\n"); child.stdin.flush()
+            child.communicate(timeout=10)
 
     # --- RV-1079 review fixes ---------------------------------------------------
     def test_rv1079_related_change_or_new_group_does_not_restart_the_cohort(self):
