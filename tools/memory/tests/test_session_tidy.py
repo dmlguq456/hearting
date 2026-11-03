@@ -25,6 +25,11 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
+# The say= lines these tests compare are Korean and UI text defaults to English, so the
+# in-process calls declare the Korean operator language (subprocesses get it from
+# tidy_isolation).
+os.environ["FLEET_NOW_LANG"] = "Korean"
+
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
 sys.path.insert(0, str(HERE))
