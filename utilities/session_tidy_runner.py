@@ -1054,8 +1054,15 @@ def publish_memory(item: dict, batch: str, run_dir: Path, bundle: Optional[Bundl
                               source_generation=item.get("card_generation"))
 
 
+def _undo_cut(line: str) -> tuple:
+    """``(text, " — <undo hint>")``: the apply summary ends with the undo command in either language."""
+    at = line.rfind("mem tidy-undo")
+    cut = line.rfind(" — ", 0, at) if at >= 0 else -1
+    return (line[:cut], line[cut:]) if cut >= 0 else (line, "")
+
+
 def failure_line(reason: str, batch: str = "", applied: tuple = (0, 0)) -> str:
-    reason = " ".join(str(reason).split(" — 되돌리기")[0].split())[:80]
+    reason = " ".join(_undo_cut(str(reason))[0].split())[:80]
     done, unconfirmed = applied
     if batch and (done or unconfirmed):
         # Something may have landed: say so and keep the undo command; never claim memory is untouched.
@@ -1070,8 +1077,8 @@ def _with_coverage(line: str, note: str) -> str:
     """Put the coverage note before the undo command so a cut never takes the undo away."""
     if not note:
         return line
-    head, sep, undo = line.partition(" — 되돌리기")
-    return f"{head} · {note}{sep}{undo}"
+    head, undo = _undo_cut(line)
+    return f"{head} · {note}{undo}"
 
 
 def process_item(item: dict) -> None:
