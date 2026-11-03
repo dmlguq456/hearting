@@ -498,8 +498,14 @@ renewed protection restarts it. Delivery discovery reads at most 4,096 records p
 pass (tombstones, locks and other entries cost only pass time) and resumes a bounded
 candidate cohort from its saved directory position; an unfinished read remains
 deferred (`delivery-read-deferred`), not unknown, until observation completes.
-An unreadable, malformed or misplaced record is unknown, with its cause (such as
-`record-unreadable`) counted under `unknown_causes`. The saved
+Recipient groups are read in name order, so only a replaced store restarts the
+read; a new group or a candidate whose related attempts changed does not, and such
+a candidate alone waits for its next observation. Where libc lacks `getdents64`
+(macOS, glibc before 2.30) a sorted listing gives the same resumable positions. A
+reference token that cannot be read or written (for example on a full disk)
+defers only its candidate. An unreadable, malformed or misplaced record is
+unknown, with its cause (such as `record-unreadable`) counted under
+`unknown_causes`; a ledger anomaly makes only identity-less homes unknown. The saved
 position carries one filesystem-clock mark taken before the first group was read;
 the final candidate admission looks once for records published after that mark
 and rereads only those, so the number of recipient groups does not limit it.

@@ -30,6 +30,7 @@ component cannot redirect them, and no symlink is ever followed.
 
 from __future__ import annotations
 
+import bisect
 import contextlib
 import contextvars
 import ctypes
@@ -971,9 +972,57 @@ def _worker_home_read_matches(layout: _Layout, home: int, requested: Path, trans
             and (current.st_dev, current.st_ino) == (info.st_dev, info.st_ino))
 
 
-def _directory_page(path: Path, cookie: int, limit: int, deadline: float):
-    """One bounded Linux directory read; d_off is an opaque restart cookie.
+_GETDENTS: list = []
 
+
+def _getdents64():
+    """libc's getdents64, or None where it is missing (macOS, glibc < 2.30)."""
+    if not _GETDENTS:
+        try:
+            function = ctypes.CDLL(None, use_errno=True).getdents64
+            function.argtypes = (ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t)
+            function.restype = ctypes.c_ssize_t
+        except (AttributeError, OSError):
+            function = None
+        _GETDENTS.append(function)
+    return _GETDENTS[0]
+
+
+def _listing_mode() -> str:
+    """What a saved directory cookie means; a saved observation is only resumed in the same mode."""
+    return "getdents64" if _getdents64() is not None else "sorted"
+
+
+def _sorted_page(fd: int, path, before, cookie: int, limit: int):
+    """Portable page: the cookie is a 1-based index into the sorted names.
+
+    It stays valid while the directory's stamp is unchanged, and a changed
+    directory restarts at 0 (the caller's generation check), as with d_off.
+    """
+    found = []
+    with os.scandir(fd) as listing:
+        for entry in listing:
+            try:
+                dtype = (10 if entry.is_symlink() else 4 if entry.is_dir(follow_symlinks=False)
+                         else 8 if entry.is_file(follow_symlinks=False) else 0)
+            except OSError:
+                dtype = 0
+            found.append((entry.name, dtype))
+    found.sort()
+    if not 0 <= cookie <= len(found):
+        raise _Unreadable("directory-cookie-invalid")
+    entries = [(name, index + 1, dtype)
+               for index, (name, dtype) in enumerate(found[cookie:cookie + limit], cookie)]
+    if (_stamp_from_stat(os.fstat(fd)) != before or _stamp(path) != before):
+        raise _Unreadable("directory-changed")
+    return entries, not entries, before
+
+
+def _directory_page(path: Path, cookie: int, limit: int, deadline: float):
+    """One bounded directory read; the cookie is an opaque restart position.
+
+    Linux uses getdents64 (d_off is the cookie). Where libc has no getdents64
+    (macOS, glibc < 2.30) a sorted listing gives index cookies instead.
     Reopen on every page (and process). Never use scandir's read-ahead offset.
     No guessed syscall numbers or portable/NFS resume claim is made here.
     """
@@ -987,13 +1036,9 @@ def _directory_page(path: Path, cookie: int, limit: int, deadline: float):
         before = _stamp_from_stat(os.fstat(fd))
         if before[3] != os.geteuid():
             raise _Unreadable("directory-owner")
-        libc = ctypes.CDLL(None, use_errno=True)
-        try:
-            getdents = libc.getdents64
-        except AttributeError as exc:
-            raise _Unreadable("directory-cookie-unsupported") from exc
-        getdents.argtypes = (ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t)
-        getdents.restype = ctypes.c_ssize_t
+        getdents = _getdents64()
+        if getdents is None:
+            return _sorted_page(fd, path, before, cookie, limit)
         if cookie:
             os.lseek(fd, cookie, os.SEEK_SET)
         buf = ctypes.create_string_buffer(8192)
@@ -1025,21 +1070,38 @@ def _generation(stamp):
 
 
 def _reference_fingerprint(root, identities, *, initialize=False, deadline=None):
-    from dispatch_pending_delivery import reference_token
+    """The candidate's reference tokens, or None (busy, deadline, or they cannot
+    be read or created, e.g. on a full disk): None defers only this candidate."""
+    from dispatch_pending_delivery import PendingDeliveryError, reference_token
     values = []
-    scope = (contextlib.nullcontext(True) if set(identities).issubset(attempt_reference.held_attempts())
-             else attempt_reference.admission(root, identities, blocking=False))
-    with scope as admitted:
-        if not admitted:
-            return None
-        for identity in sorted(identities):
-            if deadline is not None and time.monotonic() >= deadline:
+    try:
+        scope = (contextlib.nullcontext(True) if set(identities).issubset(attempt_reference.held_attempts())
+                 else attempt_reference.admission(root, identities, blocking=False))
+        with scope as admitted:
+            if not admitted:
                 return None
-            value = reference_token(root, identity, initialize=initialize)
-            if value is None:
-                return None
-            values.append((identity, value))
+            for identity in sorted(identities):
+                if deadline is not None and time.monotonic() >= deadline:
+                    return None
+                value = reference_token(root, identity, initialize=initialize)
+                if value is None:
+                    return None
+                values.append((identity, value))
+    except (OSError, attempt_reference.AttemptReferenceError, PendingDeliveryError):
+        return None
     return _generation(values)
+
+
+def _cohort_identity(root, subjects):
+    """A subject's related attempts are not part of it: when they change, the
+    subject's reference token changes and only that subject is deferred."""
+    return _generation((str(root), _listing_mode(),
+                        [{k: v for k, v in s.items() if k != "related"} for s in subjects]))
+
+
+def _directory_identity(path):
+    stamp = _stamp(path)
+    return None if stamp is None else [stamp[0], stamp[1], stamp[3]]
 
 
 class _DeliveryObservation:
@@ -1056,7 +1118,7 @@ class _DeliveryObservation:
         self.advanced = False
         # Subjects whose recorded evidence moved after their verdict was read.
         self.fresh_related: set[str] = set()
-        self.identity = _generation((str(ctx.root), subjects))
+        self.identity = _cohort_identity(ctx.root, subjects)
         self.tokens = {}
         for subject in subjects:
             refs = subject["related"]
@@ -1073,8 +1135,10 @@ class _DeliveryObservation:
             "schema": 1, "identity": self.identity, "complete": False, "started": False,
             # One filesystem-clock reading taken before the first group is read.
             "mark": time.time_ns(),
-            "position": {"root_cookie": 0, "group": "", "cookie": 0,
-                         "root_generation": _generation(_stamp(ctx.root / "pending-delivery")),
+            # Recipient groups are walked in name order: `root_done` is the last
+            # finished group, `cookie` the position inside the current `group`.
+            "position": {"root_done": "", "group": "", "cookie": 0,
+                         "root_generation": _generation(_directory_identity(ctx.root / "pending-delivery")),
                          "generation": "", "inventory": 0},
             # "unknown" holds the first cause that left the read incomplete.
             "results": {s["id"]: {"token": self.tokens[s["id"]], "open": False,
@@ -1084,8 +1148,9 @@ class _DeliveryObservation:
             pos = self.data["position"]
             mark = self.data.get("mark")
             if (type(mark) is not int or mark <= 0 or mark > time.time_ns() + MARK_SLACK_NS
-                    or any(type(pos.get(key)) is not int or not -(1 << 63) <= pos[key] < (1 << 63)
-                    for key in ("root_cookie", "cookie"))
+                    or type(pos.get("cookie")) is not int or not -(1 << 63) <= pos["cookie"] < (1 << 63)
+                    or not isinstance(pos.get("root_done"), str)
+                    or (pos["root_done"] and SHA256_RE.fullmatch(pos["root_done"]) is None)
                     or type(pos.get("inventory")) is not int or pos["inventory"] < 0
                     or not isinstance(pos.get("root_generation"), str)
                     or SHA256_RE.fullmatch(pos["root_generation"]) is None
@@ -1123,7 +1188,7 @@ class _DeliveryObservation:
                     (dispatch_summary._state_root() / harness, "provider")])
 
     def _view_token(self, *, initialize=False):
-        from dispatch_pending_delivery import _change_token
+        from dispatch_pending_delivery import PendingDeliveryError, _change_token
         path = self.ctx.root / "homes/worker-retention/view.lock"
         try:
             if initialize:
@@ -1134,7 +1199,7 @@ class _DeliveryObservation:
                     return _generation(value or _change_token(path, advance=True))
             value = _change_token(path)
             return _generation(value) if value else None
-        except (OSError, AttributeError):
+        except (OSError, AttributeError, PendingDeliveryError):
             return None
 
     def _match(self, subject, identity):
@@ -1147,9 +1212,13 @@ class _DeliveryObservation:
         from worker_runtime_home import _builder
         return _builder.worker_home_key(source, harness, worker_type, identity) == key
 
-    def _unknown(self, cause):
+    def _unknown(self, cause, *, legacy_only=False):
         # The first cause is kept; it is reported, never used as evidence.
-        for result in self.data["results"].values():
+        # Ledger inventories are read only for identity-less (legacy) subjects.
+        for subject in self.subjects:
+            if legacy_only and not subject.get("legacy"):
+                continue
+            result = self.data["results"][subject["id"]]
             result["unknown"] = result["unknown"] or cause
 
     def _record(self, path, dir_fd=None, *, flag=False):
@@ -1218,8 +1287,10 @@ class _DeliveryObservation:
 
         def visit(group_fd, group, name, stamp):
             path = base / group / name
-            self.ctx.discovery_stamps[path] = stamp
             self._record(path, group_fd, flag=True)
+            # Only a record that was read is known; a rejected one stays new for
+            # every later candidate in this pass.
+            self.ctx.discovery_stamps[path] = stamp
             return None
 
         try:
@@ -1241,8 +1312,38 @@ class _DeliveryObservation:
             ids = {s["id"] for s in self.subjects}
             self.data["results"] = {k: v for k, v in self.data["results"].items() if k in ids}
             self.data["subjects"] = [s["id"] for s in self.subjects]
-            self.identity = self.data["identity"] = _generation((str(self.ctx.root), self.subjects))
+            self.identity = self.data["identity"] = _cohort_identity(self.ctx.root, self.subjects)
         return True
+
+    def _groups(self, base):
+        """Recipient-group names in name order, listed whole for this pass.
+
+        None at the deadline. A store that changes between pages is listed again.
+        """
+        cookie, names, before = 0, [], _stamp(base)
+        while time.monotonic() < self.deadline:
+            self.metadata += 1
+            try:
+                entries, eof, observed = _directory_page(base, cookie, DELIVERY_READ_BUDGET, self.deadline)
+            except _Unreadable as exc:
+                if str(exc) != "directory-changed":
+                    raise
+                entries, eof, observed = [], False, object()
+            if observed != before:
+                cookie, names, before = 0, [], _stamp(base)
+                continue
+            if eof:
+                return sorted(names)
+            for name, next_cookie, dtype in entries:
+                self.visits += 1
+                if name in (".", ".."):
+                    pass
+                elif not SHA256_RE.fullmatch(name) or dtype not in (0, 4):
+                    self._unknown("group-untrusted")
+                else:
+                    names.append(name)
+                cookie = next_cookie
+        return None
 
     def advance(self):
         if self.advanced:
@@ -1252,15 +1353,19 @@ class _DeliveryObservation:
         pos = self.data["position"]
         base = self.ctx.root / "pending-delivery"
         from dispatch_pending_delivery import PendingDeliveryError
-        # Membership mutation invalidates only the unfinished traversal. Strong
-        # protections already found remain until a new complete cold scan.
-        generation = _generation(_stamp(base))
-        if generation != pos["root_generation"]:
-            pos.update(root_cookie=0, cookie=0, group="", generation="", root_generation=generation, delivery_done=False)
+        # Only a replaced store restarts the traversal. Groups are walked in name
+        # order, so a group added later cannot shift the position, and its
+        # records are newer than the mark, where refresh and the final look
+        # read them. Strong protections already found remain until a new
+        # complete cold scan.
+        root = _generation(_directory_identity(base))
+        if root != pos["root_generation"]:
+            pos.update(root_done="", cookie=0, group="", generation="", root_generation=root, delivery_done=False)
             # The traversal starts over, so every group is read after this reading.
             self.data["mark"] = time.time_ns()
         self.ctx.discovery_stamps[base] = _stamp(base)
         kind = "groups"
+        groups = None
         try:
             # Only record reads spend the budget; every other entry costs time.
             while time.monotonic() < self.deadline:
@@ -1269,8 +1374,22 @@ class _DeliveryObservation:
                         self.data["complete"] = True
                         break
                     directory, kind = self.inventories[pos["inventory"]]
+                elif pos["group"]:
+                    directory, kind = base / pos["group"], "delivery"
                 else:
-                    directory, kind = (base / pos["group"], "delivery") if pos["group"] else (base, "groups")
+                    kind = "groups"
+                    if groups is None:
+                        groups = self._groups(base)
+                        if groups is None:
+                            return
+                    index = bisect.bisect_right(groups, pos["root_done"])
+                    if index < len(groups):
+                        pos.update(group=groups[index], cookie=0, generation="")
+                    else:
+                        pos.update(delivery_done=True, cookie=0, generation="")
+                    if not self._bound_state():
+                        return
+                    continue
                 before = _stamp(directory)
                 self.metadata += 1
                 generation = _generation(before)
@@ -1284,7 +1403,7 @@ class _DeliveryObservation:
                 if kind == "delivery":
                     self.ctx.group_stamps[directory] = before
                     self.ctx.delivery_groups.add(directory.name)
-                elif kind not in ("groups",):
+                else:
                     self.ctx.legacy_dirs[directory] = before
                 for name, cookie, dtype in entries:
                     if time.monotonic() >= self.deadline:
@@ -1297,16 +1416,11 @@ class _DeliveryObservation:
                     self.visits += 1
                     if name not in (".", ".."):
                         path = directory / name
-                        if kind == "groups":
-                            if not SHA256_RE.fullmatch(name) or dtype not in (0, 4):
-                                self._unknown("group-untrusted")
-                            else:
-                                pos.update(root_cookie=cookie, group=name, cookie=0, generation="")
-                                break
-                        elif kind == "delivery":
+                        if kind == "delivery":
                             if name.endswith(".json"):
-                                self.ctx.discovery_stamps[path] = _stamp(path)
+                                stamp = _stamp(path)
                                 self._record(path)
+                                self.ctx.discovery_stamps[path] = stamp
                         else:
                             identity = None
                             if kind == "provider" and name.startswith(".lock-dispatch-"):
@@ -1316,41 +1430,40 @@ class _DeliveryObservation:
                             elif kind == "supervisor" and name.endswith(".lease"):
                                 identity = name[:-6]
                             if identity is not None:
-                                info = os.stat(path, follow_symlinks=False)
-                                if (not ATTEMPT_RE.fullmatch(identity) or info.st_uid != os.geteuid()
+                                try:
+                                    info = os.stat(path, follow_symlinks=False)
+                                except FileNotFoundError:
+                                    info = None  # removed since the listing: nothing to match
+                                if info is None:
+                                    pass
+                                elif (not ATTEMPT_RE.fullmatch(identity) or info.st_uid != os.geteuid()
                                         or (not stat.S_ISDIR(info.st_mode) if kind == "provider"
                                             else not stat.S_ISREG(info.st_mode))):
-                                    self._unknown("ledger-entry-untrusted")
+                                    self._unknown("ledger-entry-untrusted", legacy_only=True)
                                 else:
                                     for subject in self.subjects:
                                         if self._match(subject, identity):
                                             result = self.data["results"][subject["id"]]
                                             result["matches"] = sorted(set(result["matches"]) | {identity})
                     pos["cookie"] = cookie
-                else:
-                    if not self._bound_state():
-                        return
-                    if eof:
-                        if kind == "groups":
-                            pos.update(delivery_done=True, cookie=0, generation="")
-                        elif kind == "delivery":
-                            pos.update(group="", cookie=pos["root_cookie"], generation="")
-                        else:
-                            pos.update(inventory=pos["inventory"] + 1, cookie=0, generation="")
-                    continue
-                # A root entry selected a recipient group; enter it next.
                 if not self._bound_state():
                     return
+                if eof:
+                    if kind == "delivery":
+                        pos.update(root_done=pos["group"], group="", cookie=0, generation="")
+                    else:
+                        pos.update(inventory=pos["inventory"] + 1, cookie=0, generation="")
             self._bound_state()
-            if _stamp(base) != self.ctx.discovery_stamps[base]:
+            if _generation(_directory_identity(base)) != pos["root_generation"]:
                 self.data["complete"] = False
         except (OSError, _Unreadable, ValueError, TypeError, PendingDeliveryError) as exc:
-            if str(exc) in ("directory-changed", "directory-cookie-unsupported", "directory-cookie-unavailable"):
+            if str(exc) in ("directory-changed", "directory-cookie-unavailable"):
                 return
             text = str(exc) if isinstance(exc, _Unreadable) else ""
             place = {"groups": "store", "delivery": "group"}.get(kind, "ledger")
             self._unknown(text if text.startswith("record-")
-                          else place + ("-untrusted" if text == "directory-owner" else "-unreadable"))
+                          else place + ("-untrusted" if text == "directory-owner" else "-unreadable"),
+                          legacy_only=place == "ledger")
             self.data["complete"] = True
 
     def result(self, subject_id):

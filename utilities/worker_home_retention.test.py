@@ -4893,6 +4893,9 @@ class G03(Fixture):
                         case.doCleanups()
 
     def test_g03_membership_inode_and_mode_changes_still_invalidate_resume(self):
+        """A replaced store or a changed in-progress group is read again; a group
+        added later or a mode correction does not restart the traversal, and a
+        record naming the HOME still protects it (its writer moved the token)."""
         for mutation in ("new-group", "new-record", "root-inode", "group-inode", "mode-correction"):
             with self.subTest(mutation=mutation):
                 case = Fixture(); case.setUp()
@@ -4906,25 +4909,32 @@ class G03(Fixture):
                         at = case.now + 2 * RETENTION_NS
                         first = R.sweep(case.jobs, now_ns=at)
                         self.assertGreater(first["deferred"], 0)
+                        # Groups are walked in name order; the last one is still in progress.
+                        current = case.state()["delivery_observation"]["position"]["group"]
+                        in_progress = next(key for key in recipients if P.recipient_digest(key) == current)
                         if mutation == "new-group":
                             case.publish_delivery("delivery-" + "e" * 32, "g03-added-group", ["att-g03-generation"], "-")
                         elif mutation == "new-record":
-                            case.publish_delivery("delivery-" + "e" * 32, recipients[2], ["att-g03-generation"], "-")
+                            case.publish_delivery("delivery-" + "e" * 32, in_progress, ["att-g03-generation"], "-")
                         elif mutation == "root-inode":
                             base.rename(case.root / "old-deliveries")
                             for group in history.paths:
                                 group.mkdir(parents=True)
                         elif mutation == "group-inode":
-                            group = history.paths[2]
+                            group = base / current
                             group.rename(case.root / "old-group"); group.mkdir()
                         else:
                             os.chmod(base, 0o750)
                             case.publish_delivery("delivery-" + "f" * 32, recipients[2], ["att-unrelated"], "-")
                             self.assertEqual(__import__("stat").S_IMODE(base.stat().st_mode), 0o700)
                         second = R.sweep(case.jobs, now_ns=at + 301 * 10**9)
-                        # Stable no-op cadence above reads <32 on this pass.
-                        # A genuine changed generation must reread its directory.
-                        self.assertGreater(second["delivery_reads"], 1300, second)
+                        self.assertEqual(second["unknown"], {}, second)
+                        if mutation in ("new-group", "mode-correction"):
+                            # Stable no-op cadence: the traversal resumes, no reread.
+                            self.assertLess(second["delivery_reads"], 32, second)
+                        else:
+                            # A genuine changed generation must reread its directory.
+                            self.assertGreater(second["delivery_reads"], 1300, second)
                         if mutation in ("new-group", "new-record"):
                             self.assertEqual(second["removed"], 0, second)
                             self.assertTrue(home.exists())
@@ -4940,6 +4950,8 @@ class G03(Fixture):
                     free = case.add("att-g03-mutation-free", harness="codex")
                     related = case.add("att-g03-mutation-related", harness="codex")
                     recipients = ["g03-mutation-a", "g03-mutation-b", "g03-mutation-c"]
+                    # Groups are read in name order: mutate one the first pass finished.
+                    recipients.sort(key=P.recipient_digest)
                     with VirtualDeliveries(case.root, case.now - 3 * RETENTION_NS,
                             groups=3, recipient_keys=recipients):
                         delivery = "delivery-" + "f" * 32
@@ -5361,7 +5373,8 @@ print(json.dumps(r._directory_page(Path(sys.argv[2]),int(sys.argv[3]),3,time.mon
                 if result["removed"]:
                     break
             self.assertEqual(result["removed"], 3, result)
-            self.assertEqual(sum(counts), 32769 * 2)
+            # Each group once, plus the group names listed again by later passes.
+            self.assertGreaterEqual(sum(counts), 32769 * 2)
             self.assertTrue(all(not home.exists() for home in homes))
             print(json.dumps({"g03_recipient_groups": 32769, "entries_by_pass": counts,
                               "durable_bytes": len(json.dumps(self.state()["delivery_observation"]))}))
@@ -5731,14 +5744,11 @@ print(json.dumps(r._directory_page(Path(sys.argv[2]),int(sys.argv[3]),3,time.mon
                         pass
                     result = R.sweep(case.jobs, now_ns=at + i * 301 * 10**9)
                     self.assertEqual(result["unknown"], {}, result)
-                    self.assertTrue(free.exists() and opened.exists() and parent.exists(), result)
-                for i in range(3, 7):
-                    result = R.sweep(case.jobs, now_ns=at + i * 301 * 10**9)
-                    self.assertEqual(result["unknown"], {}, result)
-                    if not free.exists():
-                        break
+                    self.assertTrue(opened.exists() and parent.exists(), result)
+                # The old writer re-modes the store on every publication. That moves
+                # its ctime but replaces nothing, so the read is not restarted and the
+                # unrelated HOME is retired while the writer is still active.
                 self.assertFalse(free.exists(), result)
-                self.assertLessEqual(i, 6)
         finally:
             case.doCleanups()
 
@@ -5948,6 +5958,127 @@ print(json.dumps(r._directory_page(Path(sys.argv[2]),int(sys.argv[3]),3,time.mon
                 self.assertLess(len(json.dumps(saved)), 4096)
         finally:
             case.doCleanups()
+
+    # --- RV-1079 review fixes ---------------------------------------------------
+    def test_rv1079_related_change_or_new_group_does_not_restart_the_cohort(self):
+        """M1: a cohort that spans passes keeps its progress when one member's related
+        attempts change (a child ends) or a recipient group is added. That member alone
+        waits for a fresh token; the others are judged in the next pass."""
+        for change in ("child", "new-group"):
+            with self.subTest(change=change):
+                case = Fixture(); case.setUp()
+                try:
+                    free = case.add("att-m1-free", harness="codex")
+                    owner = case.add("att-m1-owner", "running", harness="codex")
+                    with VirtualDeliveries(case.root, case.now - 3 * RETENTION_NS, groups=3):
+                        at = case.now + 2 * RETENTION_NS
+                        first = R.sweep(case.jobs, now_ns=at)
+                        self.assertGreater(first["deferred"], 0, first)
+                        identity = case.state()["delivery_observation"]["identity"]
+                        if change == "child":
+                            case.row("att-m1-child", "done", parent_attempt_id="att-m1-owner",
+                                     delivery_intent="1")
+                        else:
+                            case.publish_delivery("delivery-" + "e" * 32, "rv1079-new-group",
+                                                  ["att-m1-other"], "-")
+                        second = R.sweep(case.jobs, now_ns=at + 301 * 10**9)
+                        self.assertEqual(case.state()["delivery_observation"]["identity"], identity)
+                        self.assertLess(second["delivery_reads"], 32, second)
+                        self.assertEqual(second["unknown"], {}, second)
+                        self.assertEqual(second["removed"], 1, second)
+                        self.assertFalse(free.exists())
+                        self.assertTrue(owner.exists())
+                finally:
+                    case.doCleanups()
+
+    def test_rv1079_a_token_that_cannot_be_written_defers_only_its_home(self):
+        """M2: a full disk while a HOME's reference token is first written keeps that
+        HOME (deferred); the pass still runs, judges and removes the others."""
+        import errno
+        early = self.add("att-m2-early", harness="codex")
+        self.sweep(0)  # writes the early HOME's token and starts its clock
+        late = self.add("att-m2-late", harness="codex")
+        real = P._change_token
+
+        def full(path, *, advance=False):
+            if advance:
+                raise OSError(errno.ENOSPC, "No space left on device")
+            return real(path, advance=advance)
+
+        with mock.patch.object(P, "_change_token", full):
+            result = self.sweep(8 / 7)
+        self.assertNotIn("skipped", result)
+        self.assertEqual(result["removed"], 1, result)
+        self.assertEqual(self.kept(result, "delivery-read-deferred"), 1, result)
+        self.assertFalse(early.exists())
+        self.assertTrue(late.exists())
+        self.assertEqual(self.sweep(9 / 7)["unknown"], {})
+
+    def test_rv1079_without_getdents64_a_sorted_listing_resumes_and_judges(self):
+        """M3: where libc has no getdents64 (macOS, glibc < 2.30) the observation
+        still resumes across passes and decides, instead of deferring forever."""
+        free = self.add("att-m3-free", harness="codex")
+        opened = self.add("att-m3-open", harness="codex")
+        for index in range(7):
+            self.publish_delivery(f"delivery-{index + 1:032x}", f"rv1079-m3-{index % 2}",
+                                  [f"att-m3-history-{index}"], "-")
+        self.publish_delivery("delivery-" + "e" * 32, "rv1079-m3-1", ["att-m3-open"], "-")
+        time.sleep(0.05)  # the records are older than the (patched) clock slack
+        at = self.now + 2 * RETENTION_NS
+        with mock.patch.object(R, "_getdents64", lambda: None), \
+                mock.patch.object(R, "DELIVERY_READ_BUDGET", 3), \
+                mock.patch.object(R, "MARK_SLACK_NS", 5 * 10**6):
+            self.assertEqual(R._listing_mode(), "sorted")
+            passes = []
+            for i in range(8):
+                result = R.sweep(self.jobs, now_ns=at + i * 301 * 10**9)
+                passes.append(result)
+                self.assertEqual(result["unknown"], {}, result)
+                self.assertLessEqual(result["delivery_reads"], 3, result)
+                if not free.exists():
+                    break
+        self.assertGreater(passes[0]["deferred"], 0, passes)
+        self.assertFalse(free.exists(), passes)
+        self.assertTrue(opened.exists())
+        self.assertEqual(self.kept(passes[-1], "delivery-open"), 1, passes[-1])
+
+    def test_rv1079_a_rejected_late_record_stays_new_for_the_next_candidate(self):
+        """S1: a record published after the observation mark that cannot be read keeps
+        every candidate whose late check meets it, not only the first one."""
+        homes = [self.add(f"att-s1-{name}", harness="codex") for name in ("a", "b")]
+        for index in range(40):  # more than 32 files: the mark-based late check runs
+            self.publish_delivery(f"delivery-{index + 1:032x}", "rv1079-s1",
+                                  [f"att-s1-history-{index}"], "-")
+        group = P.record_directory(self.root, "rv1079-s1")
+        real, written = R._late_candidate_delivery_change, []
+
+        def late(ctx, attempt, deadline, binding=None):
+            if not written:
+                # An old or foreign writer: no token moves, the body cannot be read.
+                (group / ("delivery-" + "d" * 32 + ".json")).write_text("{")
+                written.append(True)
+            return real(ctx, attempt, deadline, binding)
+
+        with mock.patch.object(R, "_late_candidate_delivery_change", late):
+            result = R.sweep(self.jobs, now_ns=self.now + 2 * RETENTION_NS)
+        self.assertEqual(written, [True])
+        self.assertEqual(result["removed"], 0, result)
+        self.assertEqual(self.kept(result, "late-evidence-unreadable"), 2, result)
+        self.assertTrue(all(home.exists() for home in homes))
+
+    def test_rv1079_a_ledger_anomaly_keeps_only_identity_less_homes(self):
+        """S2: an unexpected ledger file keeps the identity-less HOMEs that need the
+        ledger; HOMEs with an exact identity in the same cohort are still judged."""
+        free = self.add("att-s2-free")
+        legacy = self.add_unmapped_legacy("att-s2-legacy")
+        ledger = self.root / "supervisor-state"
+        ledger.mkdir(exist_ok=True)
+        (ledger / "not-an-attempt.json").write_text("{}")
+        result = self.expire()
+        self.assertEqual(result["removed"], 1, result)
+        self.assertFalse(free.exists())
+        self.assertTrue(legacy.exists())
+        self.assertNotIn("delivery-index-unknown", result["unknown"], result)
 
 
 if __name__ == "__main__":
