@@ -24,6 +24,7 @@ import sys
 import tarfile
 import tempfile
 import threading
+import time
 import unicodedata
 import urllib.error
 import urllib.parse
@@ -3821,6 +3822,43 @@ def _interpreted_script(arguments: list[str]) -> str | None:
     return None
 
 
+# A process must start this long after the release pointer last moved before
+# its start time, rather than the pointer's history, names what it can load.
+_POINTER_ROTATION_MARGIN_SECONDS = 60.0
+
+
+def _process_started_at(entry: Path) -> float | None:
+    """Wall-clock start of one /proc entry, or None when it cannot be read."""
+    try:
+        fields = (entry / "stat").read_text(encoding="ascii").rsplit(") ", 1)[1].split()
+        with open("/proc/stat", encoding="ascii") as handle:
+            boot = next(int(line.split()[1]) for line in handle if line.startswith("btime "))
+        return boot + int(fields[19]) / os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError, IndexError, StopIteration):
+        return None
+
+
+def _projection_names_current_only(entry: Path, projections: list[str], family: str) -> bool:
+    """Whether a process can only load the release its `current` pointer names now.
+
+    Every projected argument goes through the family's own `current` pointer and
+    the process started after that pointer last moved (`os.replace` gives the
+    new link its own mtime): whatever it loaded, then or later, came from the
+    pointer's present target. A process older than the last move, or one using
+    any other link, keeps the whole family.
+    """
+    pointer = Path(family.rstrip("/")).parent / "current"
+    prefix = str(pointer) + "/"
+    if not projections or not all(value.startswith(prefix) for value in projections):
+        return False
+    try:
+        moved = os.lstat(pointer).st_mtime
+    except OSError:
+        return False
+    started = _process_started_at(entry)
+    return started is not None and started >= moved + _POINTER_ROTATION_MARGIN_SECONDS
+
+
 def _release_held_by_live_process(candidate: Path) -> tuple[bool, str]:
     """Is any live process running out of this release right now?
 
@@ -3940,13 +3978,14 @@ def _release_held_by_live_process(candidate: Path) -> tuple[bool, str]:
                     and os.path.isdir(link)):
                 release_reference = True
         if not release_reference and candidate.parent.name == "releases":
-            for value in arguments:
-                # Only actual absolute argv paths, never arbitrary command text.
-                if not value.startswith("/"):
-                    continue
-                resolved = os.path.realpath(value)
-                if resolved != value and resolved.startswith(family):
-                    return True, f"live-process:{entry.name}:unsealed-projection"
+            # Only actual absolute argv paths, never arbitrary command text.
+            projections = [value for value in arguments if value.startswith("/")
+                           and os.path.realpath(value) != value
+                           and os.path.realpath(value).startswith(family)]
+            if projections and not _projection_names_current_only(entry, projections, family):
+                return True, f"live-process:{entry.name}:unsealed-projection"
+            # Started through `current` after it last moved: it holds only that
+            # pointer's target, which the update keeps as the active release.
         if not readable:
             opaque += 1
     if opaque:
@@ -4810,6 +4849,74 @@ def _cleanup_releases(keep: set[Path], *, force_prune_unproven: bool = False) ->
     )
 
 
+# Bytecode whose source directory is gone is left this long untouched before it
+# goes (the user's seven-day unused rule for disk cleanup).
+_ORPHAN_PYCACHE_QUIET_SECONDS = 7 * 24 * 3600
+# Deep enough for removed worktrees (/home/<…>/<repo>-wt/<name> is 7 parts) and
+# test roots; deeper per-module gaps inside a live tree are not worth the stats.
+_ORPHAN_PYCACHE_DEPTH = 9
+
+
+def _changed_since(path: Path, threshold: float) -> bool:
+    """Whether anything under ``path`` changed at or after ``threshold``."""
+    for root, directories, files in os.walk(path):
+        for name in (*directories, *files):
+            try:
+                if os.lstat(os.path.join(root, name)).st_mtime >= threshold:
+                    return True
+            except OSError:
+                continue
+    try:
+        return os.lstat(path).st_mtime >= threshold
+    except OSError:
+        return False
+
+
+# destructive-ok: reason=remove bytecode whose source directory no longer exists after seven quiet days; boundary=non-release subtrees of state_root/pycache, symlinks never followed
+def _cleanup_orphan_source_pycache(*, now: float | None = None) -> list[Path]:
+    """Remove shared-prefix bytecode of source trees that no longer exist.
+
+    Python reads a prefixed `.pyc` only beside its existing source, so a cache
+    tree whose source directory is gone (a test's temporary root, a removed
+    worktree) is never read again; until now nothing removed it. Release caches
+    keep their own pin rules above. Returns what was removed.
+    """
+    base = state_root() / "pycache"
+    if not base.is_dir() or base.is_symlink() or not _safe_pycache_path(base):
+        return []
+    release_base = _release_pycache_base()
+    threshold = (time.time() if now is None else now) - _ORPHAN_PYCACHE_QUIET_SECONDS
+    removed = []
+    pending = [(base, 0)]
+    while pending:
+        cache, depth = pending.pop()
+        try:
+            entries = [entry for entry in os.scandir(cache)
+                       if entry.is_dir(follow_symlinks=False)]
+        except OSError:
+            continue
+        for entry in entries:
+            path = Path(entry.path)
+            if release_base is not None and path == release_base:
+                continue
+            source = Path("/").joinpath(*path.relative_to(base).parts)
+            if os.path.lexists(source) or (
+                    release_base is not None and release_base.is_relative_to(path)):
+                if depth + 1 < _ORPHAN_PYCACHE_DEPTH:
+                    pending.append((path, depth + 1))
+                continue
+            if _changed_since(path, threshold):
+                continue
+            try:
+                shutil.rmtree(path)
+            except OSError as exc:
+                print(f"harness release: could not remove orphan pycache {path}: {exc}",
+                      file=sys.stderr)
+                continue
+            removed.append(path)
+    return removed
+
+
 # destructive-ok: reason=rollback or discard one managed release staging transaction; boundary=version target staging root and state leaf selected by this invocation
 def _install_or_update(
     *,
@@ -5111,6 +5218,7 @@ def _install_or_update(
                     file=sys.stderr,
                 )
         _cleanup_releases(keep, force_prune_unproven=force_prune_unproven)
+        _cleanup_orphan_source_pycache()
         # M1-M6: migrate whatever legacy dispatch state just landed under the
         # newly-activated release into the stable root and, once verified,
         # promote it (M4). Unlike M0 above, a migration-internal failure here
