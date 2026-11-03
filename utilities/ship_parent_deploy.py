@@ -115,8 +115,7 @@ def context(jobs, attempt, *, owner_prepare=False):
 
 def parent(meta, jobs):
     harness, sid = authority.caller_identity()
-    if not sid or not authority.owns(meta, sid, Path(jobs)):
-        raise ValueError("parent-deploy-actual-parent-required")
+    authority.require_owner(meta, sid, Path(jobs), "parent-deploy-actual-parent-required")
     if sid == meta.get("parent_sid") and meta.get("parent_harness") not in (None, "", harness):
         raise ValueError("parent-deploy-parent-harness-mismatch")
     if (os.environ.get("AGENT_DISPATCH_CHILD") == "1"
@@ -496,9 +495,9 @@ def validate_completion(route, jobs, evidence):
     executor = result.get("executor", {})
     owner = exact_attempt_row(Path(jobs), result.get("owner_attempt_id", "")).metadata
     if (executor.get("enforcement") != "explicit-parent-host-action"
-            or executor.get("namespace", {}).get("lifecycle_selector_source") != "host-like"
-            or not authority.owns(owner, executor.get("session_id"), Path(jobs))):
+            or executor.get("namespace", {}).get("lifecycle_selector_source") != "host-like"):
         raise ValueError("parent-deploy-executor-unverified")
+    authority.require_owner(owner, executor.get("session_id"), Path(jobs), "parent-deploy-executor-unverified")
     node = next(n for n in route["nodes"] if n["id"] == value["node_id"])
     if result.get("reviews") != reviews(route, node, jobs, value):
         raise ValueError("parent-deploy-review-evidence-drift")
