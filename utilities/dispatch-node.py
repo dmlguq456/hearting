@@ -1164,7 +1164,24 @@ def main():
  if a.attempt_id: argv += ["--attempt-id",a.attempt_id]
  argv += ["--model-role",node.get("role","fast implementer")]
  if node.get("model_profile"):
-  argv += ["--model-profile",node["model_profile"]]
+  # A producing stage that failed the same way twice runs one profile up
+  # (model_profile.repeat_escalation); the route guard re-derives the same.
+  # Sub-sessions too: a gap retry that keeps failing the same way climbs the
+  # same ladder. Place and owner hand-off belong to the owner's stage start;
+  # here they are reported, and the launch runs at the shared launch profile.
+  escalated=None
+  if original_task is None and not REVIEW_ROUND_CAP.is_round_capped_node(node):
+   try:
+    from model_profile import repeat_escalation
+    escalation=repeat_escalation(route,node["id"],registry.path)
+   except Exception:
+    escalation=None
+   if escalation:
+    print(f"repeat_escalation={escalation['kind']}")
+    if escalation["launch_profile"]!=node["model_profile"]:
+     escalated=escalation["launch_profile"]
+     print(f"repeat_escalation_profile={node['model_profile']}->{escalated}")
+  argv += ["--model-profile",escalated or node["model_profile"]]
  if a.pair_model_profile:
   argv += ["--pair-model-profile",a.pair_model_profile]
  argv += strip_leading_separator(a.adapter_args)

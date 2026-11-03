@@ -3024,6 +3024,88 @@ class FallbackTest(unittest.TestCase):
                 out.getvalue())
   # a fallback launch on another harness does not carry the handed-over reason
   self.assertIn(f"allocation_handed_over_affinity={head}\nallocation_affinity_source=-\n",out.getvalue())
+ def test_a_repeated_environment_failure_asks_for_the_same_unsandboxed_placement(self):
+  # D1 seam 3: a producing stage that failed twice on its environment moves place, not model,
+  # through the same ordering rule the handed-over checks use, under its own reason.
+  node={**self._pinned_balanced_node(),"harness_affinity":"codex","unit":"dev/backend"}
+  route=self._pinned_balanced_route(pin=None)
+  with mock.patch.object(F,"_usage_states",return_value={
+      "claude":"ok","codex":"ok","opencode":"ok"}), \
+      mock.patch.object(F.CAPACITY,"capacity_scores",return_value={
+       "claude":60,"codex":90,"opencode":70}):
+   _hops,plain=F.ordered_fallback_hops(route,node,self.jobs)
+   _hops,moved=F.ordered_fallback_hops(route,node,self.jobs,prefer_unsandboxed="repeat-environment-failure")
+   _hops,both=F.ordered_fallback_hops(route,node,self.jobs,handed_over=1,
+                                      prefer_unsandboxed="repeat-environment-failure")
+  self.assertEqual((plain["rank"][0],plain["affinity_source"]),("codex",None))
+  self.assertTrue(F.unsandboxed_harness(moved["rank"][0]),moved["rank"])
+  self.assertEqual(moved["affinity_source"],"repeat-environment-failure")
+  self.assertEqual(both["affinity_source"],"handed-over-checks")
+
+ def _repeat_launch(self,escalation,wrapper,patches=()):
+  out=io.StringIO()
+  with self.dispatch_env():
+   path=self.route(same_status="supported")
+   route=json.loads(path.read_text())
+   plan=next(n for n in route["nodes"] if n["id"]=="plan")
+   escalation=escalation(plan["model_profile"]) if callable(escalation) else escalation
+   with mock.patch("model_profile.repeat_escalation",return_value=escalation) as decide, \
+        mock.patch.object(F,"run_wrapper",side_effect=wrapper), contextlib.ExitStack() as stack, \
+        contextlib.redirect_stdout(out):
+    for patch in patches:stack.enter_context(patch)
+    code,_=self.run_inline(path)
+  decide.assert_called_once()
+  self.assertEqual(decide.call_args.args[1],"plan")
+  return code,out.getvalue(),route
+
+ def test_a_repeated_failure_launches_the_next_profile_and_says_so(self):
+  commands=[]
+  def wrapper(args,command,**_policy):
+   commands.append(command)
+   return SimpleNamespace(returncode=130,stdout="worker_failure=interrupted\n",stderr="")
+  def escalation(sealed):
+   up="deep" if sealed!="deep" else "light"
+   return {"kind":"profile","from":sealed,"to":up,"launch_profile":up,"streak":2,"class":"other",
+           "attempts":["att-a","att-b"]}
+  import dispatch_capacity_evidence as CE
+  usage=mock.patch.object(F,"_usage_states",wraps=F._usage_states)
+  limits=mock.patch.object(CE,"active_limits",wraps=CE.active_limits)
+  with usage as usage_states,limits as active:
+   _code,out,route=self._repeat_launch(escalation,wrapper)
+  sealed=next(n for n in route["nodes"] if n["id"]=="plan")["model_profile"]
+  up="deep" if sealed!="deep" else "light"
+  self.assertTrue(commands)
+  self.assertEqual(commands[0][commands[0].index("--model-profile")+1],up)
+  self.assertIn("repeat_failure_streak=2\nrepeat_failure_class=other\n"
+                f"repeat_escalation=profile:{sealed}->{up}\n",out)
+  # The usage gates judge the profile the launch runs at, not the seal.
+  self.assertTrue(usage_states.call_args_list)
+  self.assertTrue(all(call.args[1]==up for call in usage_states.call_args_list))
+  profiles=[call.kwargs.get("profile") for call in active.call_args_list if "profile" in call.kwargs]
+  self.assertTrue(profiles and all(profile==up for profile in profiles),profiles)
+
+ def test_an_owner_inline_repeat_under_a_worker_pin_keeps_the_chain(self):
+  hops=[{"ordinal":1,"fallback_hop":"same-harness-headless","candidates":[{"child_harness":"codex"}]},
+        {"ordinal":2,"fallback_hop":"inline","reason_enum":"runtime-unavailable"}]
+  self.assertEqual(F.owner_inline_hops(hops),[{**hops[1],"reason_enum":"repeat-failure"}])
+  pinned=[hops[0],{**hops[1],"_worker_pin_skip":"codex"}]
+  out=io.StringIO()
+  with contextlib.redirect_stdout(out):
+   self.assertEqual(F.owner_inline_hops(pinned),pinned)
+  self.assertEqual(out.getvalue(),"repeat_escalation_owner_inline=unavailable-chain-kept\n")
+
+ def test_a_repeat_past_the_last_profile_takes_the_existing_inline_hop(self):
+  escalation=lambda sealed:{"kind":"owner-inline","from":sealed,"launch_profile":sealed,"streak":4,
+                            "class":"scope","attempts":["a","b","c","d"]}
+  code,out,route=self._repeat_launch(escalation,AssertionError("no worker for an owner-inline repeat"))
+  plan=next(n for n in route["nodes"] if n["id"]=="plan")
+  if not any(hop.get("fallback_hop")=="inline" for hop in plan["fallback_hops"]):
+   self.skipTest("the fixture chain has no inline hop")
+  self.assertEqual(code,79,out)
+  self.assertIn("selected_hop=inline\n",out)
+  self.assertIn("reason=repeat-failure\n",out)
+  self.assertIn("repeat_escalation=owner-inline\n",out)
+
  def test_handed_over_checks_on_a_quality_peer_review_pick_an_unsandboxed_peer(self):
   # RV-1029: a review-worker qa/test node (lab independent-verify, ship post-deploy-verify) under a
   # claude owner with quality peers {claude, codex}. The quality-peer protection binds first, and
