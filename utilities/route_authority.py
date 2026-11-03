@@ -1016,8 +1016,9 @@ def owns(meta, session, jobs, *, read_context=None) -> bool:
     """Only the session that answers for the attempt now (``effective_parent``).
 
     That is the registered parent before a confirmed handover and the end of its
-    lineage after one. Unreadable handover state retains the existing
-    registered-parent fallback.
+    lineage after one. Unreadable handover state owns nothing here (False); a caller
+    that must tell waiting from refusing resolves the holder once and applies
+    ``recipient_continuation`` to it, as ``require_recovery_binding`` does.
     """
     if not session:
         return False
@@ -1745,13 +1746,32 @@ def require_recovery_binding(record, source, candidate, jobs):
     The caller has already read and digest-checked the claim and original input.
     The record's current route was resolved through the registered owner lineage,
     rather than through candidate-supplied ancestor IDs.
+
+    When a depth-1 candidate names another parent session, who answers for the source
+    now is observed once and returned, so the caller judges that same observation again
+    instead of reading the lineage a second time; otherwise None.
     """
     route_key = "owner_route_id" if source.get("owner_route_id") else "route_id"
     hash_key = "owner_route_hash" if source.get("owner_route_id") else "route_hash"
     if (candidate.get(route_key) != record["route_id"]
             or candidate.get(hash_key) != record["route_hash"]
-            or not replacement_parent_matches(source, candidate, jobs)
             or any(candidate.get(key) != source.get(key) for key in RECOVERY_SCOPE_KEYS)):
+        raise _contract_error("replacement-launch-binding-mismatch", source.get("attempt_id", ""))
+    holder = None
+    if source.get("dispatch_depth") == "1" and candidate.get("parent_sid") != source.get("parent_sid"):
+        # An unreadable lineage is the existing recipient judgment's wait for the same
+        # command, never a verdict that the candidate is not the parent (LOOP §4).
+        from dispatch_seat_handover import recipient_continuation, resolve_recipient
+        holder = resolve_recipient("job-holder", metadata=source, jobs=jobs)
+        if holder.state == "unreadable":
+            require_continuation(recipient_continuation(holder))
+        parent_matches = (parent_attempt_succeeded(jobs, source.get("parent_attempt_id"),
+                                                   candidate.get("parent_attempt_id"))
+                          and bool(candidate.get("parent_sid"))
+                          and holder.session_id == candidate.get("parent_sid"))
+    else:
+        parent_matches = replacement_parent_matches(source, candidate, jobs)
+    if not parent_matches:
         raise _contract_error("replacement-launch-binding-mismatch", source.get("attempt_id", ""))
     if source.get("session_chain_id"):
         from dispatch_replacement_subsession import SCOPE_KEYS
@@ -1765,6 +1785,7 @@ def require_recovery_binding(record, source, candidate, jobs):
                 or successor.get("source") != {
                     "attempt_id": source["attempt_id"], "binding_digest": source["review_input_digest"]}):
             raise _contract_error("reviewed-evidence-replacement-mismatch")
+    return holder
 
 
 def recovery_node_task(record, source, history, *, attempt_id, route, node, harness, parent, jobs):

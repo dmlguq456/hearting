@@ -2324,13 +2324,14 @@ def _validate_launch(jobs, lines, metadata, *, owned_launch=None):
     if (not record or record.get('original_attempt_id') != prior
             or record.get('replacement_attempt_id') != metadata.get('attempt_id')):
         raise DC.DispatchContractError('automatic-replacement-exhausted', prior)
-    route_authority.require_recovery_binding(record, source, metadata, jobs)
+    holder = route_authority.require_recovery_binding(record, source, metadata, jobs)
     _, source, replay = validate_claim_source(jobs, lines, record, owned_launch=owned_launch)
     candidate = launch_input(jobs, metadata['attempt_id'], metadata)
     parent_values = {}
     if source.get('dispatch_depth') == '1':
         from dispatch_seat_handover import resolve_recipient, recipient_continuation
-        current = resolve_recipient("job-holder", metadata=source, jobs=jobs)
+        # The holder the binding check observed is judged again, not read again.
+        current = holder if holder is not None else resolve_recipient("job-holder", metadata=source, jobs=jobs)
         route_authority.require_continuation(recipient_continuation(current, metadata['parent_sid']))
     if source.get('dispatch_depth') == '1' and metadata.get('parent_sid') != source.get('parent_sid'):
         parent_values = {'parent_session_id': metadata['parent_sid'],
