@@ -1101,7 +1101,16 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--join-timeout", type=float, default=3600.0)
     value.add_argument("--max-join-reparks", type=int, default=6, help="Compatibility input; join deadlines no longer terminate owned work")
     value.add_argument("--max-identical-redeliveries", type=int, default=2, help="Compatibility input; delivery no longer requires model bookkeeping commands")
-    value.add_argument("--max-continuations", type=positive_continuation_limit)
+    value.add_argument(
+        "--max-continuations",
+        type=positive_continuation_limit,
+        help=(
+            "Compatibility input: records the derived ordinary continuation "
+            "budget. A continuation that carries a new result is not bounded "
+            "by it (Phase F); only no-progress repetition is bounded, by the "
+            "stall counter."
+        ),
+    )
     value.add_argument(
         "--continuation-warning-threshold", type=int, default=3,
         help="SD-116 (b): emit a typed budget-warning notice once gross_remaining falls to or below this many turns.",
@@ -1694,9 +1703,13 @@ def main(argv: list[str] | None = None) -> int:
                 continuations += 1
                 continue
             if park_attempts:
-                # Cheap, non-mutating fail-fast: this round's real admission
-                # (and its single budget spend) is committed once, at the R2
-                # sealed site below, once the post-join purpose is knowable.
+                # Cheap, non-mutating fail-fast for a budget whose ordinary
+                # amount is already at the reserve boundary. Phase F: a
+                # progress continuation never spends gross, so on the derived
+                # and default budgets this guard is never reached; the real
+                # admission (and its single stall/reserve spend) is committed
+                # once, at the R2 sealed site below, once the post-join
+                # purpose is knowable.
                 if not (ledger.gross_remaining > ledger.reserved_remaining):
                     next_prompt = _seal_terminal_handoff_or_raise(
                         ledger, budget_state_root, args=args,
@@ -1807,7 +1820,10 @@ def main(argv: list[str] | None = None) -> int:
                 # SD-116 R2: terminal-handoff is sealed here and only here --
                 # zero open/running route-bound children AND the ordinary
                 # gross budget is already down to the reserve boundary
-                # (D47-4).
+                # (D47-4). Phase F: a progress continuation no longer spends
+                # gross, so this purpose is not selected on a derived/default
+                # budget (ordinary > reserved); it remains the configured
+                # boundary case.
                 open_or_running = sum(1 for row in current_rows if row.status in {"open", "running"})
                 gross_exhausted = ledger.gross_remaining <= ledger.reserved_remaining
                 consumption_purpose = (

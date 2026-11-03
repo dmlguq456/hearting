@@ -173,7 +173,9 @@ def _replacement_kind(status, meta, *, jobs=None, lines=None):
     if (meta.get('worker_type') == 'owner' and status == 'done' and capacity_row):
         return 'capacity'
     if meta.get('worker_type') == 'owner' and status == 'done' and _runtime_ended(meta):
-        return 'runtime'  # the owner's runtime ended under it; only an explicit `start` replaces it
+        # The owner's runtime ended under it: an explicit `start` or the parent's bound
+        # carrier replaces it; a supervisor tick does not.
+        return 'runtime'
     if jobs is not None and meta.get('worker_type') == 'frame' and status == 'done' and capacity_row:
         if DR._same_role_successful_frame_peer_harness(jobs, meta, lines=lines):
             # The ordinary route selector may replay this missing leg at the
@@ -189,8 +191,9 @@ def _replacement_kind(status, meta, *, jobs=None, lines=None):
     if (meta.get('worker_type') == 'frame' and status == 'done' and meta.get('launch_started') == '1'
             and not capacity_row and not readable_result(meta) and not verdict_pass(meta)):
         # A launched frame leg that ended with no result of its own is replaced
-        # like a dead owner runtime (explicit start only). A readable FAIL/BLOCKED
-        # is a result, not a death; the claim's terminal check keeps any result.
+        # like a dead owner runtime (explicit start or the parent's bound carrier).
+        # A readable FAIL/BLOCKED is a result, not a death; the claim's terminal
+        # check keeps any result.
         return 'runtime'
     return None
 
@@ -598,7 +601,10 @@ def decide_continuation(route=None, *, action, jobs=None, owner_attempt_id=None,
         if not facts.get("resume_capacity") and not _replacement_in_flight(jobs, facts["registry_rows"], metadata):
             if kind == "capacity":
                 return ContinuationDecision(False, "capacity", "replacement-capacity-wait", "arm-capacity-resume")
-            if kind in {"runtime", "unlaunched", "corrected", "observed"}:
+            if kind in {"runtime", "unlaunched", "corrected", "observed"} and not (
+                    kind == "runtime" and facts.get("bound_carrier")):
+                # An explicit `start` (resume_capacity) or the parent's bound carrier
+                # launches a runtime end; a supervisor tick waits for one of them.
                 return ContinuationDecision(False, "not-applicable", next_action="observe")
         return ContinuationDecision(True, "launch", next_action="start")
     if action == "replacement-result":
