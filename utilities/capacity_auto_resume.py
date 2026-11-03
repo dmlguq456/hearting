@@ -253,6 +253,18 @@ def follow_installed_release(path: Path) -> None:
         pass
 
 
+def _route_closed(record: dict) -> bool:
+    """Whether the waited route's own outcome record names this route as closed."""
+    try:
+        route_file = Path(record["route_file"])
+        outcome = json.loads(route_file.with_name(route_file.stem + ".outcome.json")
+                             .read_text(encoding="utf-8"))
+    except (KeyError, TypeError, OSError, ValueError):
+        return False
+    return isinstance(outcome, dict) and bool(record.get("route_id")) \
+        and outcome.get("route_id") == record.get("route_id")
+
+
 def run(path: Path, *, sleep=time.sleep, now=time.time, call=subprocess.run, cleared=_cleared,
         follow=follow_installed_release) -> int:
     record = json.loads(path.read_text(encoding="utf-8"))
@@ -276,6 +288,14 @@ def run(path: Path, *, sleep=time.sleep, now=time.time, call=subprocess.run, cle
                 break
     record = json.loads(path.read_text(encoding="utf-8"))
     if record.get("state") != "armed":
+        return 0
+    if _route_closed(record):
+        # The route closed while this wait slept (finished, cancelled, or
+        # continued and closed by another path): nothing is left to resume
+        # and nobody is waiting for a notice.
+        record.update(state="route-closed",
+                      settled_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        _write(path, record)
         return 0
     capped = (record.get("cause") in {"capacity", "launch-capacity"}
               and path != record_path(Path(record["jobs"]), record.get("route_id") or "", record["retry_at"]))
