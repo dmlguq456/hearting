@@ -4521,6 +4521,36 @@ class ReplacementTest(unittest.TestCase):
         self.assertEqual(sealed.read_bytes(), before_bytes)
 
 
+class RowsMemoTest(unittest.TestCase):
+    """The rows memo answers like a fresh parse without keeping a split copy of each line."""
+
+    LINES = ("t\tdone\t/r\t/w\tslug-a\tattempt_id=att-a,harness=codex",
+             "malformed row",
+             "t\topen\t/r\t/w\tslug-b\tattempt_id=att-b,parent_attempt_id=att-a",
+             "t\tdone\t/r\t/w\tslug-c\tnote=no-attempt")
+
+    def test_rows_match_a_fresh_parse_and_callers_get_copies(self):
+        expected = {aid: (list(fields), dict(meta))
+                    for aid, (fields, meta) in R._parse_rows(self.LINES).items()}
+        first = R._rows(list(self.LINES))
+        self.assertEqual(first, expected)
+        first["att-a"][0][1] = "changed"
+        first["att-a"][1]["harness"] = "changed"
+        self.assertEqual(R._rows(self.LINES), expected)
+        key, cached = R._ROWS_MEMO
+        self.assertEqual(key, self.LINES)
+        self.assertEqual({aid: index for aid, (index, _meta) in cached.items()},
+                         {"att-a": 0, "att-b": 2})
+
+    def test_a_changed_registry_is_parsed_again_and_duplicates_stay_ambiguous(self):
+        R._rows(self.LINES)
+        changed = self.LINES[:2] + ("t\tdone\t/r\t/w\tslug-b\tattempt_id=att-b",)
+        self.assertEqual(R._rows(changed)["att-b"][0][1], "done")
+        with self.assertRaises(D.DispatchContractError) as raised:
+            R._rows(changed + (self.LINES[0],))
+        self.assertEqual(raised.exception.reason, "replacement-attempt-ambiguous")
+
+
 class ReplacementLaunchSafetyTest(unittest.TestCase):
     """Real claim/reuse/input and fenced child at the two launch commits.
 

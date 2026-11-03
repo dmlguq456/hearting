@@ -1236,11 +1236,86 @@ def resolve_parent_extinction(
 
 
 _REGISTRY_METADATA_CACHE_SIZE = 32768
+# Row text the parse cache may keep, about one live registry: a full scan still
+# hits on its second pass, but a resident observer no longer keeps the rows of
+# every older registry generation it ever read (32768 rows of ~5 KB text plus
+# their parsed pairs were ~0.9 GB per process).
+_REGISTRY_METADATA_CACHE_BYTES = 64 * 1024 * 1024
+# Values this short repeat across rows (flags, harness and status words, small
+# numbers). They are shared through a table owned by the cache, never through
+# sys.intern, whose strings are never freed.
+_REGISTRY_METADATA_SHARED_VALUE_CHARS = 32
+_REGISTRY_METADATA_SHARED_MAX = 1 << 16
 
 
-@functools.lru_cache(maxsize=_REGISTRY_METADATA_CACHE_SIZE)
-def _registry_metadata_items(pipe: str) -> tuple[tuple[str, str], ...]:
-    return tuple(dict(part.split("=", 1) for part in pipe.split(",") if "=" in part).items())
+class _RegistryCacheInfo(NamedTuple):
+    hits: int
+    misses: int
+    maxsize: int
+    currsize: int
+
+
+class _RegistryMetadataCache:
+    """Row-text keyed metadata parse bounded by row count and by row text bytes.
+
+    Same results and ``cache_info``/``cache_clear`` surface as the
+    ``functools.lru_cache`` it replaces. Field names and short values are
+    shared, which roughly halves the memory a cached row costs.
+    """
+
+    def __init__(self, maxsize: int, maxbytes: int):
+        import threading
+        from collections import OrderedDict
+        self.maxsize, self.maxbytes = maxsize, maxbytes
+        self._entries: OrderedDict = OrderedDict()
+        self._bytes = 0
+        self._shared: dict[str, str] = {}
+        self._hits = self._misses = 0
+        self._lock = threading.Lock()
+
+    def _share(self, value: str) -> str:
+        shared = self._shared.get(value)
+        if shared is None:
+            if len(self._shared) >= _REGISTRY_METADATA_SHARED_MAX:
+                self._shared.clear()
+            shared = self._shared[value] = value
+        return shared
+
+    def __call__(self, pipe: str) -> tuple[tuple[str, str], ...]:
+        with self._lock:
+            items = self._entries.get(pipe)
+            if items is not None:
+                self._entries.move_to_end(pipe)
+                self._hits += 1
+                return items
+            self._misses += 1
+            parsed = dict(part.split("=", 1) for part in pipe.split(",") if "=" in part)
+            items = tuple(
+                (self._share(key),
+                 self._share(value) if len(value) <= _REGISTRY_METADATA_SHARED_VALUE_CHARS else value)
+                for key, value in parsed.items())
+            self._entries[pipe] = items
+            self._bytes += len(pipe)
+            while self._entries and (len(self._entries) > self.maxsize
+                                     or self._bytes > self.maxbytes):
+                oldest, _items = self._entries.popitem(last=False)
+                self._bytes -= len(oldest)
+            return items
+
+    def cache_info(self) -> _RegistryCacheInfo:
+        with self._lock:
+            return _RegistryCacheInfo(self._hits, self._misses, self.maxsize, len(self._entries))
+
+    def cache_clear(self) -> None:
+        with self._lock:
+            self._entries.clear()
+            self._shared.clear()
+            self._bytes = 0
+            self._hits = self._misses = 0
+
+
+_registry_metadata_items = _RegistryMetadataCache(
+    _REGISTRY_METADATA_CACHE_SIZE, _REGISTRY_METADATA_CACHE_BYTES)
 
 
 def parse_registry_metadata(pipe: str) -> dict[str, str]:
