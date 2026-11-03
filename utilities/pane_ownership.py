@@ -285,16 +285,20 @@ def _runtime(pid):
     return "", False
 
 
-def codex_caller_binding(session_id, *, pid=None, environ=None, executable=None):
+def codex_caller_binding(session_id, *, pid=None, environ=None, executable=None, from_hook=False):
     """Return the one proved TUI binding for an interactive Codex daemon caller.
 
     Inherited Herdr values are intentionally ignored. The runtime's own thread
-    id selects the binding; workers, service identities and ambiguous panes
-    fail closed.
+    id selects the binding: a tool command carries its thread's
+    ``CODEX_THREAD_ID``, which must name ``session_id``. A hook the daemon runs
+    has none (measured 2026-09-25); only for a hook (``from_hook``) does the
+    thread id the runtime handed it select the binding. Workers, service
+    identities and ambiguous panes fail closed.
     """
     env = os.environ if environ is None else environ
+    thread = env.get("CODEX_THREAD_ID") or ""
     if (not _THREAD_ID_RE.fullmatch(session_id or "")
-            or env.get("CODEX_THREAD_ID") != session_id):
+            or (thread != session_id and (thread or not from_hook))):
         return None
     caller_pid = os.getpid() if pid is None else int(pid)
     if _registered_worker(caller_pid):
