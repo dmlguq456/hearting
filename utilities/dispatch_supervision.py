@@ -1322,15 +1322,16 @@ def _completion_refusal_notice(receipt: dict, *, notice_context=None) -> str:
                 + " "+NEW_CLOSURE_WORDING+" Read-only diagnosis: " + command)
     reason = refusal.get("reason")
     raw_detail = refusal.get("detail", "")
-    if _held_finalize_diagnosis(diagnosis):
+    nested_output_invalid = reason == "producer-finalize-failed" and isinstance(raw_detail, str) \
+        and raw_detail.startswith("output-invalid:")
+    held = _held_finalize_diagnosis(diagnosis)
+    if held and not nested_output_invalid:
         # A deterministic route-lineage refusal recorded with durable evidence
         # at the route-closed checkpoint is recorded evidence, not in-flight
         # work: the same settle would produce the same answer.
         return ("This refusal is not retried automatically on the same evidence; a later join or "
                 "finish judges it again only after the route lineage or the installed runtime changes. "
                 "Read-only diagnosis: " + command)
-    nested_output_invalid = reason == "producer-finalize-failed" and isinstance(raw_detail, str) \
-        and raw_detail.startswith("output-invalid:")
     if reason != "output-invalid" and not nested_output_invalid:
         safe_reason = reason if isinstance(reason, str) and re.fullmatch(r"[a-z0-9-]{1,80}", reason) else "closure-refused"
         return (f"The last recorded closure refusal is {safe_reason}. The existing controller retries when possible; "
@@ -1350,8 +1351,11 @@ def _completion_refusal_notice(receipt: dict, *, notice_context=None) -> str:
     safe_remediation = (remediation if isinstance(remediation, str) and "\n" not in remediation and "\r" not in remediation
                         else "Correct the locator, mark its exact payload directory for self-exclusion, or move it outside the cycle.")
     cause = "producer-finalize-failed (output-invalid)" if nested_output_invalid else "output-invalid"
+    retry = ("It is not judged again while those files stay as they are; once one is renamed, moved or "
+             "its directory is marked, the next completion join judges closure again."
+             if held else NEW_CLOSURE_WORDING)
     return (f"The last recorded closure refusal is {cause}: {safe_detail}. Record: {safe_path}. "
-            f"{safe_remediation} {NEW_CLOSURE_WORDING} Read-only diagnosis: {command}")
+            f"{safe_remediation} {retry} Read-only diagnosis: {command}")
 
 
 def _cleanup_only_result(receipt: dict) -> dict | None:
@@ -1549,6 +1553,12 @@ def render_text(receipt: dict, *, continued: dict | None = None, notice_context=
         command = (f"python3 {shlex.quote(str(utility))} inspect --jobs {shlex.quote(receipt['job_registry'])} "
                    f"--attempt {shlex.quote(receipt['owner_attempt_id'])}")
         if _held_finalize_refusal(receipt, notice_context):
+            refusal = _exact_notice_diagnosis(receipt, notice_context).get("last_refusal") or {}
+            if str(refusal.get("detail") or "").startswith("output-invalid:"):
+                # Held on the files it names: the files and their fix are the recovery path.
+                return ("The owner result remains PASS, but its own workflow/route closure holds a deterministic "
+                        "producer finalize refusal. "
+                        + _completion_refusal_notice(receipt, notice_context=notice_context))
             # The held cause is a recorded route-lineage refusal: re-dispatching
             # the same node or repairing a marker is not its recovery path.
             return ("The owner result remains PASS, but its own workflow/route closure holds a deterministic "

@@ -107,15 +107,18 @@ PROVEN_BLOCKED_GATE_REASONS = frozenset({
 })
 
 # A producer finalize refusal that more settling cannot change: the route
-# lineage it judged is recorded evidence, not in-flight work. Kept to these
-# detail prefixes so unreadable/transient causes (`route-unreadable`,
-# `route-lineage-unverified`, `output-invalid`, lock/busy) stay recoverable.
+# lineage it judged (and, for `output-invalid`, the files it names, which a
+# person fixes) is recorded evidence, not in-flight work. Kept to these detail
+# prefixes so unreadable/transient causes (`route-unreadable`,
+# `route-lineage-unverified`, lock/busy) stay recoverable.
 DETERMINISTIC_FINALIZE_REFUSALS = (
     "cycle-route-binding-mismatch", "route-hash-drift", "completion-route-hash-mismatch",
     "route-invalid", "route-artifact-root-mismatch", "completion-route-composite-mismatch",
+    "output-invalid",
 )
 DETERMINISTIC_FINALIZE_RETRY_WHEN = (
-    "The route lineage or the installed runtime changed; a later join or finish judges it again.")
+    "The route lineage, the files the refusal names, or the installed runtime changed; "
+    "a later join or finish judges it again.")
 
 
 def deterministic_finalize_refusal(reason, detail) -> bool:
@@ -892,11 +895,16 @@ def decide_continuation(route=None, *, action, jobs=None, owner_attempt_id=None,
             any(last_id in (r.get("supersedes") or ()) for r in budget_revisions)))
         if closure:
             state = "admit"
-        # Attempt history does not establish a prior judgment. A crash,
-        # capacity death, or invalid envelope may advance the lineage's round
-        # number, but until a substantive verdict exists for this subject the
-        # next admitted pass is still a full first review.
-        round_kind = "closure-check" if closure else "correction" if verdicts else "first"
+        # The verdict budget stays with the content subject, but the round kind
+        # follows the node lineage: a correction always changes the reviewed
+        # content, so a review whose lineage ends in a blocking verdict checks
+        # that 🔴 list and the delta instead of auditing the new subject from
+        # scratch. A list the owner already disposed (owner-closure) is not
+        # open, and attempt history alone (crash, capacity death, invalid
+        # envelope) never establishes a prior judgment.
+        lineage_closure = bool(source_aware and not verdicts and node.get("kind") == "review-worker"
+                               and _ROUND.open_blocking_verdict(rows, worker_type) is not None)
+        round_kind = "closure-check" if closure or lineage_closure else "correction" if verdicts else "first"
         budget = _ROUND.RoundBudget(len(verdicts), counted, budget_kinds_for_streak.count("verdict-less"), cap, state,
             len(rows) + 1, len(rows) + 1 if rows else 0,
             round_kind,
@@ -2898,6 +2906,13 @@ def retry_predecessor(prior_rows, *, jobs=None, task=None):
     return ""
 
 
+def unmet_progress(previous, current) -> bool:
+    """Whether a BLOCKED round progressed: its unmet `done_when` items are a strict subset of the
+    previous round's. Unknown items on either side are no progress. `blocked_progress` and the
+    repeat-failure count (`worker_bootstrap.repeat_failure`) read this one rule."""
+    return previous is not None and current is not None and current < previous
+
+
 def _blocked_round_items(route, metadata):
     """The unmet `done_when` ids a BLOCKED round left, from the items file beside its artifact;
     None when that round's items cannot be judged (no plan items, no readable file, or a file
@@ -2943,7 +2958,7 @@ def blocked_progress(route, rows, *, worker_type="test") -> int:
     streak, previous = 0, None
     for metadata in tail:
         current = _blocked_round_items(route, metadata) if route.get("route_plan") is not None else None
-        streak = 1 if previous is not None and current is not None and current < previous else streak + 1
+        streak = 1 if unmet_progress(previous, current) else streak + 1
         previous = current
     return streak
 

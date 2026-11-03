@@ -2249,7 +2249,9 @@ class DeterministicFinalizeRefusalTest(unittest.TestCase):
                        "completion-route-hash-mismatch: rt-b",
                        "completion-route-composite-mismatch: cyc-a",
                        "route-invalid: stale or modified route hash",
-                       "route-artifact-root-mismatch"):
+                       "route-artifact-root-mismatch",
+                       # A file name a person has to fix: the same files give the same refusal.
+                       "output-invalid: locator-invalid-component:artifacts/a|b"):
             with self.subTest(detail=detail):
                 decision = RA.decide_continuation(
                     action="terminal-result",
@@ -2262,8 +2264,7 @@ class DeterministicFinalizeRefusalTest(unittest.TestCase):
                 self.assertEqual(decision.detail, detail)
 
     def test_transient_finalize_causes_stay_recoverable(self):
-        for detail in ("output-invalid: locator-invalid-component:artifacts/a|b",
-                       "route-unreadable: /root/.runtime/routes/rt-a.json",
+        for detail in ("route-unreadable: /root/.runtime/routes/rt-a.json",
                        "route-lineage-unverified: cycle:rt-a",
                        "admission-busy: lock-timeout"):
             with self.subTest(detail=detail):

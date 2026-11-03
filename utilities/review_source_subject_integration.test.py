@@ -879,7 +879,9 @@ class SourceSubjectIntegrationTest(unittest.TestCase):
                           b_admission.budget.round_kind), ("admit", 0, "first"))
         new_source_prompt = DISPATCH_NODE.round_protocol_block(
             b_admission.budget, prior_rows, "review", self.review_node["id"])
-        self.assertIn("full independent review", new_source_prompt)
+        # The lineage's latest verdict passed, so changed content is new work:
+        # an independent first review, not a closure check.
+        self.assertIn("independent first review", new_source_prompt)
         self.assertIn("Earlier findings are context only", new_source_prompt)
         _bmeta, b1 = self.complete_review("att-review-B1")
         self.assertEqual(self.currency(b1).state, "current")
@@ -934,6 +936,45 @@ class SourceSubjectIntegrationTest(unittest.TestCase):
                     **SUBJECT.read_binding(self.jobs, self._row_metadata("att-review-B2")),
                 }, owner_override=True,
             )
+
+    def test_corrected_source_after_blocking_review_is_a_closure_check_with_exact_materials(self):
+        import base64
+
+        self.current_smoke_markers("A1")
+        review_file = self.artifact_root / "round_1.md"
+        review_file.write_text("🔴 engine value is wrong\n", encoding="utf-8")
+        encoded = base64.urlsafe_b64encode(str(review_file).encode("utf-8")).decode("ascii").rstrip("=")
+        self.prepare_review("att-review-A-blocked", note="completed-review-blocking",
+                            extra={"failure_class": "fail", "review_artifact_b64": encoded})
+        # The correction changes the reviewed source, which used to restart a
+        # full first review on the new subject.
+        (self.repo / "engine.py").write_text("value = 'B'\n", encoding="utf-8")
+        self.current_smoke_markers("B1")
+        admission = self.admission()
+        self.assertEqual((admission.budget.state, admission.budget.verdict_rounds,
+                          admission.budget.round_kind), ("admit", 0, "closure-check"))
+        rows = DISPATCH_NODE.prior_round_attempts(
+            self.jobs, self.route["route_id"], self.review_node["id"], route=self.route)
+        block = DISPATCH_NODE.round_protocol_block(
+            admission.budget, rows, "review", self.review_node["id"],
+            jobs=self.jobs, current_manifest=admission.source_subject_manifest)
+        self.assertIn("This is a correction round", block)
+        self.assertIn(f"Prior blocking review (att-review-A-blocked): `{review_file}`", block)
+        self.assertRegex(block, r"Delta since that review \(reviewed at `[0-9a-f]{12}`\): `engine.py`\n")
+        self.assertNotIn("independent first review", block)
+        # Without the runtime records the block still renders, naming no path.
+        bare = DISPATCH_NODE.round_protocol_block(admission.budget, rows, "review", self.review_node["id"])
+        self.assertNotIn("Delta since that review", bare)
+
+        # The closure check on B blocks again; the next correction is still
+        # admitted inside its own subject budget as a closure check.
+        self.prepare_review("att-review-B-blocked", note="completed-review-blocking",
+                            extra={"failure_class": "fail"})
+        (self.repo / "engine.py").write_text("value = 'C'\n", encoding="utf-8")
+        self.current_smoke_markers("C1")
+        again = self.admission()
+        self.assertEqual((again.budget.state, again.budget.verdict_rounds, again.budget.round_kind),
+                         ("admit", 0, "closure-check"))
 
     def _row_metadata(self, attempt_id):
         for line in self.jobs.read_text(encoding="utf-8").splitlines():

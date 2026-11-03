@@ -378,6 +378,26 @@ def last_verdict_blocking(rows, worker_type):
     return _last_round_blocking_verdict(verdicts[-1:], worker_type)
 
 
+def open_blocking_verdict(rows, worker_type):
+    """The latest verdict row of a lineage when it still holds an open 🔴 list, else None.
+
+    A blocking verdict the owner already closed in place (owner-closure,
+    `owner_closure_shape == "registered-review"`) is disposed: its findings
+    were ruled on, so a later round does not treat them as open. The closure
+    check, a producing stage's next-round context and the repeat-failure
+    count all read this one judgment. Rows are `(status, metadata)` pairs.
+    """
+    for status, metadata in reversed(list(rows)):
+        if classify_round_row(status, metadata,
+                              worker_type=metadata.get("worker_type") or worker_type) != "verdict":
+            continue
+        if not _last_round_blocking_verdict([(status, metadata)], worker_type):
+            return None
+        from dispatch_contract import owner_closure_shape
+        return None if owner_closure_shape(metadata) else metadata
+    return None
+
+
 def gate_unmet(rows, worker_type):
     """True when the node's latest settled round left its gate unmet: a blocking
     verdict, or a worker's own BLOCKED (no judgment reached, items left), with no
