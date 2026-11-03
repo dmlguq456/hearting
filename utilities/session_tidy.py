@@ -2783,7 +2783,9 @@ _RUNTIME_BLOCK = re.compile(
     r"<(task-notification|subagent_notification|agent-message|system-reminder)\b[^>]*>.*?</\1>", re.S)
 _PEER_FRAMING = (
     re.compile(r"^\s*Another Claude session sent a message[^\n:]*:"),
-    re.compile(r'That "other Claude session" is an agent working inside this same session\b.*?(?:\n\s*\n|\Z)', re.S),
+    # The fixed one-line paragraph, up to its fixed last sentence and no further.
+    re.compile(r'That "other Claude session" is an agent working inside this same session\b'
+               r"[^\n]*?that's permission laundering\."),
 )
 # Prompt sources that are not the person: they answer no wait, rearm no idle tidy and keep
 # ``last_human_seq`` where it was.
