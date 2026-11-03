@@ -194,6 +194,8 @@ def resolve_continuation_budget(
 class AdmitVerdict:
     admitted: bool
     purpose: str
+    # What this admit spent: "stall", "reserved", "none" (an ordinary admit that
+    # carries progress), or "" on a refusal. In memory only; never persisted.
     charged: str
     refusal: str
     gross_remaining: int
@@ -292,7 +294,8 @@ class ContinuationLedger:
         # resource outbox, a finished child's completion receipt, a replaced
         # outbox), which is progress, not repetition. It is admitted without
         # decrementing gross and without hitting the reserve boundary: the
-        # finite budget stops no-progress repetition only. `charged="gross"`
-        # names the admit axis from the existing CLASSES vocabulary (no new
-        # record class); it does not imply a spend here.
-        return self._verdict(admitted=True, purpose=purpose, charged="gross", refusal="")
+        # finite budget stops no-progress repetition only, so this admit
+        # charges nothing (`charged="none"`). The persisted reservation row
+        # keeps `class="gross"` (dispatch_budget_record.CLASSES): that names
+        # the ordinary axis, and older releases re-admit inherited rows by it.
+        return self._verdict(admitted=True, purpose=purpose, charged="none", refusal="")
