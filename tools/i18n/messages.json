@@ -782,6 +782,34 @@
    "en": "current-session (tier not recorded)",
    "ko": "current-session(등급 미기록)"
   },
+  "tidy.ago.day": {
+   "en": "{count} day ago",
+   "ko": "{count}일 전"
+  },
+  "tidy.ago.days": {
+   "en": "{count} days ago",
+   "ko": "{count}일 전"
+  },
+  "tidy.ago.hour": {
+   "en": "{count} hour ago",
+   "ko": "{count}시간 전"
+  },
+  "tidy.ago.hours": {
+   "en": "{count} hours ago",
+   "ko": "{count}시간 전"
+  },
+  "tidy.ago.minute": {
+   "en": "{count} minute ago",
+   "ko": "{count}분 전"
+  },
+  "tidy.ago.minutes": {
+   "en": "{count} minutes ago",
+   "ko": "{count}분 전"
+  },
+  "tidy.ago.now": {
+   "en": "just now",
+   "ko": "방금"
+  },
   "tidy.apply.added": {
    "en": "added {count}",
    "ko": "추가 {count}"
@@ -829,6 +857,94 @@
   "tidy.apply.updated": {
    "en": "updated {count}",
    "ko": "갱신 {count}"
+  },
+  "tidy.card.cut": {
+   "en": "…(rest omitted)",
+   "ko": "…(이하 생략)"
+  },
+  "tidy.card.first_reply": {
+   "en": "[First reply] At the very start of the first reply that continues from this card, before any tool call, show once a summary of about five lines in the user's language under three headings: what was being done · what remains · what comes next; then continue. If the user gives another instruction before saying to continue, skip the summary and follow only that instruction. In the summary, give each item's source description and distinguishing condition first, then its original number. Before the first real work, reread the card's {fields} and the PRD section they point to. Keep unfinished and interrupted states with their next action, and do not guess identifiers whose meaning is not confirmed.",
+   "ko": "[첫 답] 이 카드로 이어받은 첫 답 맨 앞에, 도구 호출 전에, 사용자의 언어로 '하던 일 · 남은 일 · 다음 할 일' 세 머리말을 써서 5줄 안팎 요약을 한 번 보여 준 뒤 이어서 하세요. 사용자가 이어서하기 대신 다른 지시를 먼저 주면 요약을 생략하고 그 지시만 따르세요. 요약에는 대상의 원천 설명과 구별 조건을 먼저 쓰고 원래 번호를 덧붙이세요. 첫 실작업 전에 카드의 {fields}와 그 칸이 가리키는 PRD 절을 다시 읽으세요. 미완료·중단 상태와 다음 행동을 유지하고, 뜻이 확인되지 않은 식별자는 추측하지 마세요."
+  },
+  "tidy.card.full_card": {
+   "en": "Full card: {path}",
+   "ko": "카드 전문: {path}"
+  },
+  "tidy.card.path_omitted": {
+   "en": "path omitted",
+   "ko": "경로 생략"
+  },
+  "tidy.card.prefix": {
+   "en": "[Session card] Work card handed on in this seat — written {stamp} ({ago})",
+   "ko": "[세션 카드] 같은 자리에서 이어받는 작업 카드 — 작성 {stamp} ({ago})"
+  },
+  "tidy.card.previous": {
+   "en": "Earlier conversation: {harness} {sid} · transcript {detail}",
+   "ko": "이전 대화: {harness} {sid} · 원문 {detail}"
+  },
+  "tidy.card.transcript_none": {
+   "en": "none",
+   "ko": "없음"
+  },
+  "tidy.card.transcript_unreadable": {
+   "en": "unreadable",
+   "ko": "읽기 불가"
+  },
+  "tidy.compact.after": {
+   "en": "[Conversation after the compaction]",
+   "ko": "[압축 뒤 이어진 대화]"
+  },
+  "tidy.compact.caution": {
+   "en": "Recent conversation this summary did not see may exist. Check before you continue.",
+   "ko": "이 요약이 보지 못한 최근 대화가 있을 수 있습니다. 이어서 진행하기 전에 확인하세요."
+  },
+  "tidy.compact.last_reply": {
+   "en": "Last reply before the compaction ({when}): {line}",
+   "ko": "압축 직전 마지막 답 ({when}): {line}"
+  },
+  "tidy.compact.no_source": {
+   "en": "The original conversation record's path is not known.",
+   "ko": "원본 대화 기록 경로를 확인할 수 없습니다."
+  },
+  "tidy.compact.no_time": {
+   "en": "time unknown",
+   "ko": "시각 미상"
+  },
+  "tidy.compact.partial": {
+   "en": "[Only part of the recent conversation was kept; check the original record.]",
+   "ko": "[최근 대화의 일부만 보존됨; 원본 기록을 확인하세요.]"
+  },
+  "tidy.compact.preserved": {
+   "en": "[Conversation kept as is after the summary]",
+   "ko": "[요약 뒤 그대로 남은 대화]"
+  },
+  "tidy.compact.reply_first": {
+   "en": "Give the last reply above and the conversation kept after the summary priority over what the summary says was not yet delivered or finished.",
+   "ko": "위 마지막 답과 요약 뒤 그대로 남은 대화를 요약의 미전달·미완료 서술보다 우선하세요."
+  },
+  "tidy.compact.source": {
+   "en": "Original conversation record: {source}",
+   "ko": "원본 대화 기록: {source}"
+  },
+  "tidy.history.available": {
+   "en": "transcript available",
+   "ko": "원문 있음"
+  },
+  "tidy.history.missing": {
+   "en": "no transcript",
+   "ko": "원문 없음"
+  },
+  "tidy.history.open": {
+   "en": "Open the earlier conversation: {action} · {harness} {sid} · {availability}",
+   "ko": "이전 대화 열기: {action} · {harness} {sid} · {availability}"
+  },
+  "tidy.history.unreadable": {
+   "en": "transcript unreadable",
+   "ko": "원문 읽기 불가"
+  },
+  "tidy.notice.result": {
+   "en": "[Tidy result] {text}",
+   "ko": "[정리 결과] {text}"
   },
   "tidy.say.accepted": {
    "en": "The card and memory tidy are accepted. The window-clear result will be reported in one line on your next input.",

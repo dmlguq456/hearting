@@ -7708,5 +7708,42 @@ class CardExactIdentityTest(TidyCase):
 
 
 
+class CardWordLanguage(unittest.TestCase):
+    """Injected card words read tools/i18n/messages.json: English unless Korean is declared."""
+
+    def test_korean_first_reply_guidance_is_the_constant(self):
+        with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"}):
+            guidance = st._ui_translator()("tidy.card.first_reply", fields="·".join(st.CARD_FIXED_FIELDS))
+        self.assertEqual(guidance, st.CARD_FIRST_REPLY_GUIDANCE)
+
+    def test_card_injection_and_compact_body_in_english(self):
+        previous = {"harness": "claude", "sid": "a" * 36,
+                    "transcript": {"path": "/" + "x" * 400, "status": "available"}}
+        card = {"author": {"harness": "claude", "sid": "b" * 36}, "authored_at_epoch": 10,
+                "body": "body " * 1200}
+        with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "English"}):
+            text = st.build_card_injection(card, Path("/card.json"), 10 + 3 * 3600, 1600,
+                                           previous_transcript=previous)
+            ago = [st._ago(value) for value in (30, 95, 7200, 3 * 86400)]
+            body = st._compact_body({"summary": "S", "recent_post": "R", "recent_partial": True,
+                                     "last_reply": {"first_line": "done", "timestamp": "bad"}})
+        self.assertTrue(text.startswith("[Session card] Work card handed on in this seat — written "), text)
+        self.assertIn("(3 hours ago)", text)
+        self.assertIn("[First reply] At the very start of the first reply", text)
+        self.assertIn("Full card: /card.json", text)
+        self.assertIn("…(rest omitted)", text)
+        self.assertIn("Earlier conversation: claude aaaaaaaa · transcript path omitted", text)
+        self.assertIsNone(re.search(r"[가-힣]", text.replace("·".join(st.CARD_FIXED_FIELDS), "")), text)
+        self.assertLessEqual(len(text.encode("utf-8")), 1600)
+        self.assertEqual(ago, ["just now", "1 minute ago", "2 hours ago", "3 days ago"])
+        self.assertTrue(body.startswith("Last reply before the compaction (bad): done\n\n"), body)
+        for words in ("Recent conversation this summary did not see may exist.",
+                      "The original conversation record's path is not known.",
+                      "[Conversation after the compaction]",
+                      "[Only part of the recent conversation was kept; check the original record.]"):
+            self.assertIn(words, body)
+        self.assertIsNone(re.search(r"[가-힣]", body), body)
+
+
 if __name__ == "__main__":
     unittest.main()
