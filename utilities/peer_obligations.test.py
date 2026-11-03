@@ -3865,6 +3865,16 @@ class ReleaseSuccessorBindingTest(unittest.TestCase):
         self.assertEqual(self._binding_from(self.old), str(self.pointer))
         self.assertEqual(self._binding_from(self.old, agent_home=False), str(self.pointer))
 
+    def test_a_helper_started_under_the_current_pointer_still_moves(self):
+        # RV-1027#2: AGENT_HOME=<data>/current resolves to the new release after an
+        # install, which made the helper read it as another install and stay put.
+        self.assertEqual(self._binding_from(self.old, agent_home=self.pointer), str(self.pointer))
+        # Another install's pointer is still not this install.
+        other = self.base / "other-data"
+        (other / "releases").mkdir(parents=True)
+        (other / "current").symlink_to(self.new)
+        self.assertIsNone(self._binding_from(self.old, agent_home=other / "current"))
+
     def test_the_installed_release_is_never_moved_again(self):
         self.assertIsNone(self._binding_from(self.new))
 
