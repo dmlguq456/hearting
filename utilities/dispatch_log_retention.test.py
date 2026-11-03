@@ -294,6 +294,50 @@ class DispatchLogRetentionTest(unittest.TestCase):
         self.assertEqual(second["removed"], 4)
         self.assertFalse(any(path.exists() for path in paths))
 
+    def test_over_the_limit_a_pass_removes_past_the_batch_and_skips_protected_logs(self):
+        count = R.REMOVE_LIMIT + 8
+        paths = []
+        for index in range(count):
+            path = self.log(f"pressure-{index:03d}.jsonl", b"p" * 8)
+            self.add_row(f"att-pressure-{index:03d}", path, ended=self.now - (index + 1) * 3600 * 1_000_000_000)
+            paths.append(path)
+        held = self.log("pressure-held.jsonl", b"h" * 8)
+        self.add_row("att-pressure-held", held, status="open", ended=self.now - 3600 * 1_000_000_000)
+
+        with mock.patch.object(R, "MAX_LOG_BYTES", 8):
+            result = self.sweep()
+
+        self.assertEqual(result["removed"], count)
+        self.assertGreater(count, R.REMOVE_LIMIT)
+        self.assertFalse(any(path.exists() for path in paths))
+        self.assertTrue(held.exists())
+        self.assertEqual(result["over_limit_bytes"], 0)
+
+    def test_over_the_limit_only_the_removal_time_budget_ends_a_pass(self):
+        count = R.REMOVE_LIMIT + 8
+        paths = []
+        for index in range(count):
+            path = self.log(f"slow-{index:03d}.jsonl", b"s" * 8)
+            self.add_row(f"att-slow-{index:03d}", path, ended=self.now - (index + 1) * 3600 * 1_000_000_000)
+            paths.append(path)
+        unlink = R._unlink_if_same
+
+        def slow_unlink(layout, name, expected):
+            time.sleep(0.12)
+            return unlink(layout, name, expected)
+
+        with mock.patch.object(R, "MAX_LOG_BYTES", 8), \
+                mock.patch.object(R, "MAX_PASS_SECONDS", 1), \
+                mock.patch.object(R, "_unlink_if_same", slow_unlink):
+            result = self.sweep()
+
+        # The 1 s budget, not the 16-file batch, stopped the pass.
+        self.assertGreater(result["removed"], 0)
+        self.assertLess(result["removed"], R.REMOVE_LIMIT)
+        self.assertGreater(result["deferred"], 0)
+        self.assertEqual(result["more"], 1)
+        self.assertEqual(sum(path.exists() for path in paths), count - result["removed"])
+
     def test_files_still_inside_retention_do_not_end_examination_early(self):
         recent = []
         for index in range(R.REMOVE_LIMIT + 2):

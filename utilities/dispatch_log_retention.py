@@ -36,6 +36,8 @@ BACKLOG_DUE_SECONDS = 60
 EXAMINE_LIMIT = 64
 MAX_DIRECTORY_ENTRIES = 50000
 MAX_PASS_SECONDS = 10
+# Per-pass removal batch. While the directory is over MAX_LOG_BYTES it does not
+# apply: the removal time budget (MAX_PASS_SECONDS) alone bounds the pass.
 REMOVE_LIMIT = 16
 STATE_NAME = "dispatch-log-retention.json"
 LOCK_NAME = "dispatch-log-retention.lock"
@@ -588,10 +590,11 @@ def _pass(jobs, root, layout, state, now_ns, started):
                 eligible.append((name, settled, expected_stamp, rows,
                                  candidate_kinds[name]))
                 # Removal re-reads the registry per file, so it is the slow
-                # step. Once enough removable files are in hand, stop
-                # examining and spend the pass on removing them; the cursor
-                # stays on the last examined name.
-                if over_limit or now_ns - settled >= RETENTION_NS:
+                # step. Within the limit, once a batch of expired files is in
+                # hand, stop examining and spend the pass on removing them; the
+                # cursor stays on the last examined name. Over the limit there
+                # is no batch: the examine and removal time budgets bound it.
+                if not over_limit and now_ns - settled >= RETENTION_NS:
                     removable += 1
                     if removable >= REMOVE_LIMIT:
                         break
@@ -625,7 +628,8 @@ def _pass(jobs, root, layout, state, now_ns, started):
     # examination cannot leave eligible files undeleted.
     removal_started = time.monotonic()
     for name, settled, expected_stamp, rows, candidate_kind in selected:
-        if removed >= REMOVE_LIMIT or time.monotonic() - removal_started > MAX_PASS_SECONDS:
+        if ((removed >= REMOVE_LIMIT and not over_limit)
+                or time.monotonic() - removal_started > MAX_PASS_SECONDS):
             deferred += 1
             continue
         with _fresh_eligible(jobs, root, layout, name, rows, expected_stamp,
