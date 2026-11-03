@@ -4369,6 +4369,46 @@ class TestHarnessResourceEvidence(WorkflowFixture):
         self.assertTrue(resolved.is_file())
         self.assertFalse((self.base / "run.json").exists())
 
+    def test_a_row_changed_during_the_settle_is_a_not_yet_settled_look(self):
+        # RV-1055: another writer changing the row between this read and the
+        # settle raised `resource-reservation-changed` out of every caller.
+        route, path = self.two_stage_route(route_id="rt-settle-race")
+        registry = self.resource_registry(exit_code=0)
+        self.arm(path, registry, extra=["--artifact-base", str(self.base)])
+        armed = SUP.read_armed(SUP.ledger_for(route))["run"]
+        real_settle = SUP.runner().settle
+
+        def concurrent_writer(registry_path, run_id, row, **kwargs):
+            data = json.loads(Path(registry_path).read_text(encoding="utf-8"))
+            data["runs"][run_id]["observed_by"] = "another-observer"
+            Path(registry_path).write_text(json.dumps(data), encoding="utf-8")
+            return real_settle(registry_path, run_id, row, **kwargs)
+
+        with mock.patch.object(SUP.runner(), "settle", side_effect=concurrent_writer):
+            raced = SUP.resource_evidence(armed)
+        current = json.loads(registry.read_text(encoding="utf-8"))["runs"]["fixture-run"]
+        self.assertEqual((raced["terminal"], raced["reason"]),
+                         (False, "resource-reservation-changed"))
+        self.assertEqual(raced["resource_sha256"], SUP.RESOURCE_RESUME.row_digest(current))
+        settled = SUP.resource_evidence(armed)
+        self.assertTrue(settled["terminal"], settled)
+        self.assertTrue(settled["succeeded"], settled)
+
+        route, path = self.two_stage_route(route_id="rt-settle-vanished")
+        registry = self.resource_registry(exit_code=0)
+        self.arm(path, registry, extra=["--artifact-base", str(self.base)])
+        armed = SUP.read_armed(SUP.ledger_for(route))["run"]
+
+        def concurrent_removal(registry_path, run_id, row, **kwargs):
+            data = json.loads(Path(registry_path).read_text(encoding="utf-8"))
+            del data["runs"][run_id]
+            Path(registry_path).write_text(json.dumps(data), encoding="utf-8")
+            return real_settle(registry_path, run_id, row, **kwargs)
+
+        with mock.patch.object(SUP.runner(), "settle", side_effect=concurrent_removal):
+            self.assertEqual(SUP.resource_evidence(armed),
+                             {"terminal": False, "reason": "resource-run-absent"})
+
     def test_owner_fields_added_to_runtime_document_preserve_exact_bytes(self):
         route, path = self.two_stage_route()
         registry = self.resource_registry(exit_code=0)
