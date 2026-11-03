@@ -10753,6 +10753,28 @@ def _runner_maintenance_pass(store):
                 expected_root_identity=identity)
     except (OSError, ValueError, RuntimeError):
         pass
+    try:
+        # The post-exit retention passes (worker homes, attempt logs, reusable runtimes,
+        # the registry archive) otherwise run only when a dispatch's reap watch ends; with
+        # nothing dispatched they never would. Each keeps its own due gate; they may take
+        # longer than this pass's budget, so they run in their own short-lived process.
+        state = peer_obligations.read_runner_duty_state(root, "retention")
+        jobs = root / "jobs.log"
+        from dispatch_contract import stable_state_root
+        canonical = root == stable_state_root(os.environ).resolve()   # never a fixture's own root
+        if (canonical and jobs.is_file()
+                and peer_obligations.runner_duty_due(state, MAINTENANCE_DUE_SECONDS)):
+            child = subprocess.Popen(
+                [sys.executable, str(Path(__file__).resolve().parent / "dispatch_registry_archive.py"),
+                 "retention", "--jobs", str(jobs)],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                start_new_session=True, close_fds=True, cwd=str(root))
+            result["retention"] = {"started": child.pid}
+            peer_obligations.write_runner_duty_state(
+                root, "retention", {"last_pass_ns": time.time_ns(), "pid": child.pid},
+                expected_root_identity=identity)
+    except (OSError, ValueError, RuntimeError):
+        pass
     return result
 
 

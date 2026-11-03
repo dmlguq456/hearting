@@ -630,7 +630,10 @@ closed segments. Their active inode and authoritative receipts/ACK records are
 not removed by this policy.
 
 **Dispatch registry archive.** The same post-exit tail, at most every six
-hours, moves settled history out of the live `jobs.log`: a group of rows that
+hours, moves settled history out of the live `jobs.log`. Because a tail runs
+only when a dispatch ends, the peer obligation runner's six-hour maintenance
+pass also starts these post-exit retention passes (homes, logs, reusable
+runtimes, archive) in a short-lived process. A group of rows that
 share an attempt or route id moves only as a whole, when every row ended (the
 last write of its attempt log, else its registration) at least 14 days ago,
 belongs to a route closed at least 14 days ago, owes no parent delivery, has no
