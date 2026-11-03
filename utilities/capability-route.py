@@ -5045,7 +5045,7 @@ def compose_decision_lines(route, non_git_decision=None, t=None):
 
 
 def compose_card(route, plan=None, plan_source=None, *, owner_harness=None, route_plan_unreadable=False,
-                 campaign_selection=None, include_decisions=True, non_git_decision=None):
+                 campaign_selection=None, include_decisions=True, non_git_decision=None, intent_original=None):
     """One-line `[경로]` notice the acting session pastes instead of a card."""
     shape = route.get("selection", {}).get("shape") or shape_for_intensity(route["effective_intensity"])
     ids = [node["id"] for node in route["nodes"]]
@@ -5060,6 +5060,9 @@ def compose_card(route, plan=None, plan_source=None, *, owner_harness=None, rout
         + _compose_campaign_line(campaign_selection if campaign_selection is not None
                                  else compose_campaign_selection(route), t)
     )
+    import work_intent
+    for line in work_intent.card_lines(route, original=intent_original, t=t):
+        card += "\n" + line
     observed = compose_observations(route, t)
     if include_decisions:
         card += "\n" + "\n".join(compose_decision_lines(route, non_git_decision, t))
@@ -12664,6 +12667,11 @@ def _emit_compiled_route(a,route,artifact_root,output=None):
     else:
         output_path=expected_output
     write_once(output_path,route)
+    try:  # the person's words, once and beside the route: never part of its identity (WORKFLOW §0.4)
+        import work_intent
+        work_intent.seal_original(route)
+    except Exception:  # noqa: BLE001 -- optional record; the route stands without it
+        pass
     retired=retire_stale_closure(output_path)
     if retired is not None:
         print(f"route_closure_retired={retired}",file=sys.stderr)
@@ -13203,9 +13211,13 @@ def main():
         # original choice instead of calling the newly-created stream a join.
         _campaign_for_card = compose_campaign_selection(route)
         if a.explain:
+            import work_intent
             print(compose_card(route, _plan_for_card, _plan_source_for_card, owner_harness=owner_pin,
                                route_plan_unreadable=route_plan_unreadable,
-                               campaign_selection=_campaign_for_card),file=sys.stderr)
+                               campaign_selection=_campaign_for_card,
+                               intent_original=(None if route.get("route_plan") else
+                                                work_intent.original_excerpt(route.get("cwd")) or None)),
+                  file=sys.stderr)
             print("route_file_written=0 explain=1",file=sys.stderr)
             print(json.dumps({"route_id":route["route_id"],"capability":route["capability"],
                               "effective_intensity":route["effective_intensity"],"shape":shape,

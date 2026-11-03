@@ -365,7 +365,9 @@ def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
         understanding, brief = "", {field: "" for field in FI.BRIEF_FIELDS}
         try:
             # A draft from the request and the anchor frame's brief; the owner rewrites it for the person.
-            understanding = FI.understanding_draft((route.get("work_request") or {}).get("text") or "")
+            import work_intent
+            understanding = (work_intent.draft((route.get("work_request") or {}).get("text") or "")
+                             .get("intent") or "")[:FI.MAX_UNDERSTANDING_CHARS]
             output = prepare_route_artifact_env(Path(path), start=False, jobs=Path(jobs)).get("AGENT_ARTIFACT_OUTPUT_DIR")
             if output:
                 brief = FI.brief_draft((Path(output) / "shards/frame/direction-brief.md").read_text(encoding="utf-8"))

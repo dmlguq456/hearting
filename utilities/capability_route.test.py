@@ -8164,7 +8164,7 @@ class ComposeRouteTest(TestRoute):
  def test_work_request_is_sealed_and_cannot_be_replaced_at_resume(self):
   request={"text":"Run the accepted commands, including exit 7.","owner_harness":"opencode"}
   route=self.compose(work_request=request,profile="light")
-  self.assertEqual(route["work_request"],request)
+  self.assertEqual(route["work_request"],request)   # the person's words stay outside the route identity
   R.verify_route(route,R.ROOT)
   changed=self.compose(work_request={**request,"text":"Only run the passing command."},profile="light")
   self.assertNotEqual(route["route_id"],changed["route_id"])
