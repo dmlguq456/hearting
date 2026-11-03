@@ -1980,6 +1980,25 @@ class WatcherIdentityTest(unittest.TestCase):
                 peer_steward._record_own_watch_identity(watch_id, paths, "default")
             self.assertEqual(json.loads(paths.arm.read_text())["watcher"], {})
 
+    def test_observer_never_overwrites_a_live_watcher_or_a_settled_watch(self):
+        watch_id = "0123456789abcdef"
+        other = subprocess.Popen(["/bin/sleep", "60"], stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(other.wait)
+        self.addCleanup(other.kill)
+        live = {"pid": other.pid, "pid_start": peer_steward._proc_start_ticks(other.pid)}
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = peer_steward._watch_paths(watch_id, Path(tmp))
+            for watcher, settled in ((live, False), ({}, True)):
+                with self.subTest(watcher=watcher, settled=settled):
+                    arm = {"watch_id": watch_id, "target": "peer-a",
+                           "steward": {"session_id": "steward-1"}, "watcher": watcher}
+                    paths.arm.write_text(json.dumps(arm), encoding="utf-8")
+                    if settled:
+                        paths.receipt.write_text("{}", encoding="utf-8")
+                    peer_steward._record_own_watch_identity(watch_id, paths, "default")
+                    self.assertEqual(json.loads(paths.arm.read_text())["watcher"], watcher)
+
 
 class WatchArmTest(_WatchMixin, unittest.TestCase):
     """A56-1."""
@@ -4545,6 +4564,25 @@ class NativeResultRunnerWakeTest(_WatchMixin, unittest.TestCase):
         ready, _, _ = select.select([wake_fd], [], [], 10)
         self.assertEqual(ready, [wake_fd], "the runner was not woken for the native result")
 
+        # At most once per observer: later wake-ups re-read the same cached
+        # projection without waking the runner again.
+        with contextlib.suppress(BlockingIOError):
+            while os.read(wake_fd, 4096):
+                pass
+        watcher = arm["watcher"]
+        for _attempt in range(3):
+            before = observation_path.stat().st_mtime_ns
+            os.kill(watcher["pid"], signal.SIGUSR1)
+            deadline = time.monotonic() + 10
+            while (observation_path.stat().st_mtime_ns == before
+                   and time.monotonic() < deadline):
+                time.sleep(0.02)
+            self.assertNotEqual(observation_path.stat().st_mtime_ns, before,
+                                "the observer did not handle its wake-up")
+        self.assertTrue(peer_steward._pid_identity_ok(watcher["pid"], watcher["pid_start"]))
+        ready, _, _ = select.select([wake_fd], [], [], 0.5)
+        self.assertEqual(ready, [], "a later wake-up woke the runner again")
+
 
 class KillFixtureTest(_WatchMixin, unittest.TestCase):
     """A56-7 — the smallest falsifying test for the whole direction."""
@@ -4595,11 +4633,11 @@ class KillFixtureTest(_WatchMixin, unittest.TestCase):
         receipt = self._wait_for_receipt(arm["watch_id"])
         self.assertEqual(receipt["state"], "idle")
 
-    def _run_killed_after_spawn(self, argv):
-        """Run one peer-steward command that dies right after spawning its observer.
+    def _run_spawner(self, argv, after_spawn):
+        """Run one peer-steward command with `after_spawn` right after its observer spawn.
 
         Spawners record the observer identity in the arm only after the spawn;
-        this stops the spawner in exactly that gap.
+        `after_spawn` (source using `process`) acts in exactly that gap.
         """
         source = (
             "import importlib.util, os, signal, subprocess, sys\n"
@@ -4612,13 +4650,16 @@ class KillFixtureTest(_WatchMixin, unittest.TestCase):
             "def popen(command, *args, **kwargs):\n"
             "    process = real_popen(command, *args, **kwargs)\n"
             "    if '__watch-run' in command:\n"
-            "        os.kill(os.getpid(), signal.SIGKILL)\n"
+            f"        {after_spawn}\n"
             "    return process\n"
             "subprocess.Popen = popen\n"
             f"sys.exit(module.main({list(argv)!r}))\n"
         )
-        spawner = subprocess.run([sys.executable, "-c", source], env=self._env("held"),
-                                 capture_output=True, text=True, timeout=60)
+        return subprocess.run([sys.executable, "-c", source], env=self._env("held"),
+                              capture_output=True, text=True, timeout=60)
+
+    def _run_killed_after_spawn(self, argv):
+        spawner = self._run_spawner(argv, "os.kill(os.getpid(), signal.SIGKILL)")
         self.assertEqual(spawner.returncode, -signal.SIGKILL, spawner.stdout + spawner.stderr)
 
     def _wait_for_named_observer(self, arm_path):
@@ -4633,6 +4674,19 @@ class KillFixtureTest(_WatchMixin, unittest.TestCase):
         self.assertTrue(peer_steward._alive(arm, self.watch_root), arm)
         return arm
 
+    def _armed_with_dead_observer(self):
+        """A watch whose first observer started its native wait and was killed."""
+        armed = self._fields(self._run("watch", "peer-a", env=self._env("held")).stdout)
+        self._wait_for_lock(armed["watch_id"])
+        self._wait_for_wait_calls(1)
+        os.kill(int(armed["pid"]), signal.SIGKILL)
+        deadline = time.monotonic() + 10
+        while (peer_steward._pid_identity_ok(int(armed["pid"]), armed["pid_start"])
+               and time.monotonic() < deadline):
+            time.sleep(0.02)
+        self.assertFalse(peer_steward._pid_identity_ok(int(armed["pid"]), armed["pid_start"]))
+        return armed
+
     def test_watcher_names_itself_when_its_caller_dies_right_after_the_spawn(self):
         self._run_killed_after_spawn(["watch", "peer-a"])
         arms = self._arm_records()
@@ -4646,26 +4700,64 @@ class KillFixtureTest(_WatchMixin, unittest.TestCase):
 
     def test_reattached_watcher_names_itself_when_its_spawner_dies_right_after_the_spawn(self):
         # Here the arm still names the previous observer, which has exited.
-        armed = self._fields(self._run("watch", "peer-a", env=self._env("held")).stdout)
-        self._wait_for_lock(armed["watch_id"])
-        self._wait_for_wait_calls(1)
-        os.kill(int(armed["pid"]), signal.SIGKILL)
-        deadline = time.monotonic() + 10
-        while (peer_steward._pid_identity_ok(int(armed["pid"]), armed["pid_start"])
-               and time.monotonic() < deadline):
-            time.sleep(0.02)
-        self.assertFalse(peer_steward._pid_identity_ok(int(armed["pid"]), armed["pid_start"]))
-
+        armed = self._armed_with_dead_observer()
         self._run_killed_after_spawn(["rearm", armed["watch_id"]])
         arm = self._wait_for_named_observer(self.watch_root / f"{armed['watch_id']}.json")
         self.assertNotEqual(arm["watcher"]["pid"], int(armed["pid"]))
         self.assertEqual(len(self._wait_calls()), 1,
                          "the reattached observer adopts the one native wait")
+        # The generation was recorded before the spawn, so a later release
+        # takeover still recognises this observer's exact argv.
+        self.assertEqual((arm["observer_generation"], arm["rearm_count"]), (2, 1))
+        cmdline = Path(f"/proc/{arm['watcher']['pid']}/cmdline").read_bytes()
+        live = cmdline.decode().rstrip("\0").split("\0")[2:]
+        duty, index = [], 0
+        while index < len(live):
+            if live[index] in {"--lock-fd", "--service-current"}:
+                index += 2
+                continue
+            duty.append(live[index])
+            index += 1
+        self.assertIn(duty, peer_steward._watch_observer_takeover_argvs(armed["watch_id"], arm))
 
         self._release()
         receipt = self._wait_for_receipt(armed["watch_id"])
         self.assertEqual(receipt["state"], "idle")
         self.assertEqual(receipt["watcher"], arm["watcher"])
+
+    def test_reattached_watcher_survives_a_wake_sent_right_after_its_spawn(self):
+        # The first spawn holds SIGUSR1 blocked across the spawn so an early
+        # wake waits for the handler; a reattach spawn must do the same.
+        armed = self._armed_with_dead_observer()
+        spawner = self._run_spawner(["rearm", armed["watch_id"]],
+                                    "os.kill(process.pid, signal.SIGUSR1)")
+        self.assertEqual(spawner.returncode, 0, spawner.stdout + spawner.stderr)
+        watcher = json.loads(
+            (self.watch_root / f"{armed['watch_id']}.json").read_text())["watcher"]
+        self.assertNotEqual(watcher["pid"], int(armed["pid"]))
+        usr1 = 1 << (signal.SIGUSR1 - 1)
+
+        def signal_mask(field):
+            for line in Path(f"/proc/{watcher['pid']}/status").read_text().splitlines():
+                if line.startswith(field + ":"):
+                    return int(line.split()[1], 16)
+            return 0
+
+        # Wait until its handler is installed and the signal unblocked, i.e.
+        # until the early wake has been delivered one way or the other.
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            try:
+                if signal_mask("SigCgt") & usr1 and not signal_mask("SigBlk") & usr1:
+                    break
+            except OSError:
+                break
+            time.sleep(0.02)
+        self.assertTrue(peer_steward._pid_identity_ok(watcher["pid"], watcher["pid_start"]),
+                        "the early wake killed the reattached observer")
+        self._release()
+        receipt = self._wait_for_receipt(armed["watch_id"])
+        self.assertEqual(receipt["state"], "idle")
 
     def test_wait_by_contrast_loses_its_herdr_child(self):
         # The regression proof: the identical fixture against (9) `wait`.
