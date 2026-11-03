@@ -114,12 +114,15 @@ class ProfileAppendTest(unittest.TestCase):
         self.assertEqual(self.mem("profile-append", "no-such-aspect", "x", check=False).returncode, 2)
         self.assertEqual(self.mem("profile-append", "06_collaboration_style", "  ", check=False).returncode, 2)
 
-    def _profile_read_only(self):
+    def _profile_read_only(self, expected="먼저 방향을 짧게 확인한다."):
         """Run `mem profile` as a Codex worker sandbox sees it: the store and
         state are unwritable and the identity directory chmod fails with EROFS."""
+        if os.geteuid() == 0:
+            self.skipTest("permission bits do not stop root from writing")
         paths = [self.store, *self.store.iterdir(), self.root / "state",
                  *(self.root / "state").rglob("*")]
         modes = {path: path.stat().st_mode & 0o777 for path in paths}
+        listing = sorted(p.name for p in self.store.iterdir())
         shim = (
             "import errno, os, runpy, sys\n"
             "def chmod(path, *a, **k):\n"
@@ -140,20 +143,49 @@ class ProfileAppendTest(unittest.TestCase):
             for path in reversed(paths):
                 path.chmod(modes[path])
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("먼저 방향을 짧게 확인한다.", result.stdout)
+        self.assertIn(expected, result.stdout)
         self.assertEqual(unchanged, {path: 0o555 if path.is_dir() else 0o444 for path in paths})
+        self.assertEqual(sorted(p.name for p in self.store.iterdir()), listing)
 
     def test_profile_reads_a_checkpointed_read_only_store(self):
         self.assertFalse(Path(f"{self.store / 'memory.db'}-wal").exists())
         self._profile_read_only()
 
     def test_profile_reads_a_live_read_only_store(self):
-        # Another process holds the store open, so -wal and -shm exist (the usual case).
+        # Another process holds the store open (the usual case), so a commit stays
+        # in -wal: the read-only reader must see it through the existing -shm.
         holder = sqlite3.connect(self.store / "memory.db")
         self.addCleanup(holder.close)
         holder.execute("SELECT COUNT(*) FROM records").fetchone()
-        self.assertTrue(Path(f"{self.store / 'memory.db'}-shm").exists())
-        self._profile_read_only()
+        self.mem("profile-append", "06_collaboration_style", "아직 체크포인트 전인 메모.")
+        self.assertGreater(Path(f"{self.store / 'memory.db'}-wal").stat().st_size, 0)
+        self._profile_read_only(expected="아직 체크포인트 전인 메모.")
+
+    def test_profile_rereads_when_the_store_changes_under_an_immutable_read(self):
+        # A host writer may start while a sandboxed reader reads the WAL-less file
+        # as immutable; that read must not count, and the choice is made again.
+        probe = (
+            "import importlib.util, sys\n"
+            "spec = importlib.util.spec_from_file_location('mem_probe', sys.argv[1])\n"
+            "mem = importlib.util.module_from_spec(spec); spec.loader.exec_module(mem)\n"
+            "states = iter([(1, 1, 1), (2, 2, 2), (3, 3, 3), (3, 3, 3)])\n"
+            "calls = []\n"
+            "mem._profile_store_state = lambda db: calls.append(db) or next(states)\n"
+            "real = mem.sqlite3.connect\n"
+            "def connect(target, *a, **k):\n"
+            "    if 'immutable=1' not in str(target):\n"
+            "        raise mem.sqlite3.OperationalError('attempt to write a readonly database')\n"
+            "    return real(target, *a, **k)\n"
+            "mem.sqlite3.connect = connect\n"
+            "rows = mem._profile_rows(\"SELECT COUNT(*) FROM records WHERE type='profile'\")\n"
+            "print(len(calls), rows[0][0])\n"
+        )
+        result = subprocess.run([sys.executable, "-c", probe, str(MEM)], cwd=self.project,
+                                env=self.env(), text=True, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, timeout=120)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # first attempt: before (1,1,1) != after (2,2,2) -> retry; second: (3,3,3) == (3,3,3)
+        self.assertEqual(result.stdout.split(), ["4", "1"])
 
     def _profile_id(self):
         shown = self.mem("recall", "기존 메모 하나.", "--full").stdout

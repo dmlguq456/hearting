@@ -3838,34 +3838,71 @@ def export_profile(apply=False):
 
 
 # ---------- profile (read-only) ----------
-def _profile_read_con():
-    """A read-only connection when the store is already current, else ``get_con()``.
+def _profile_store_state(db):
+    """``(inode, size, mtime_ns)`` of the main file, or ``None`` once a ``-wal`` exists."""
+    if Path(f"{db}-wal").exists():
+        return None
+    info = db.stat()
+    return (info.st_ino, info.st_size, info.st_mtime_ns)
+
+
+def _profile_rows(sql):
+    """Rows of one read-only ``sql`` on a current store, else through ``get_con()``.
 
     Units have workers read profiles at work start. A Codex worker sees the store
     and ~/.local/state read-only, where ``get_con()`` fails on its identity chmod
     and its read-write open; a current store needs neither to be read. With no
     ``-wal`` file every commit is in the main file, so an unwritable directory
-    (no ``-shm`` can be made) is read as immutable.
+    (no ``-shm`` can be made) is read as immutable, and the read counts only if
+    the file and its missing ``-wal`` are unchanged afterwards (a host writer may
+    start meanwhile); otherwise the whole choice is made once more.
     """
-    if DB.is_file():
-        queries = ["?mode=ro"]
-        if not Path(f"{DB}-wal").exists():
-            queries.append("?mode=ro&immutable=1")
+    for _attempt in range(2):
+        if not DB.is_file():
+            break
+        db = DB.resolve()
+        try:
+            before = _profile_store_state(db)
+        except OSError:
+            break
+        queries = ["?mode=ro"] + (["?mode=ro&immutable=1"] if before else [])
+        retry = False
         for query in queries:
             con = None
             try:
-                con = sqlite3.connect(DB.resolve().as_uri() + query, uri=True, timeout=1)
-                current = con.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
-                if current:
-                    con.execute("PRAGMA query_only=ON")
-                    return con
+                con = sqlite3.connect(db.as_uri() + query, uri=True, timeout=1)
+                if con.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION:
+                    con.close()
+                    return _profile_rows_migrated(sql)  # an older store needs migration
+                con.execute("PRAGMA query_only=ON")
+                rows = con.execute(sql).fetchall()
             except sqlite3.Error:
-                current = True  # unreadable this way; try the next way
-            if con is not None:
-                con.close()
-            if not current:
-                break  # an older store needs get_con()'s migration
-    return get_con()
+                if query.endswith("immutable=1"):
+                    retry = True  # the file changed under the immutable read
+                continue
+            finally:
+                if con is not None:
+                    con.close()
+            if query.endswith("immutable=1"):
+                try:
+                    unchanged = _profile_store_state(db) == before
+                except OSError:
+                    unchanged = False
+                if not unchanged:
+                    retry = True
+                    break
+            return rows
+        if not retry:
+            break
+    return _profile_rows_migrated(sql)
+
+
+def _profile_rows_migrated(sql):
+    con = get_con()
+    try:
+        return con.execute(sql).fetchall()
+    finally:
+        con.close()
 
 
 def _lookup_profile_aspect(aspect):
@@ -3876,13 +3913,7 @@ def _lookup_profile_aspect(aspect):
     """
     # Query rowid explicitly because db_iter_records selects only RECORD_COLS.
     cols = ", ".join(RECORD_COLS)
-    con = _profile_read_con()
-    try:
-        rows_raw = con.execute(
-            f"SELECT rowid, {cols} FROM records WHERE type='profile'"
-        ).fetchall()
-    finally:
-        con.close()
+    rows_raw = _profile_rows(f"SELECT rowid, {cols} FROM records WHERE type='profile'")
 
     # Convert to (rowid, metadata, body) tuples.
     rows = []
