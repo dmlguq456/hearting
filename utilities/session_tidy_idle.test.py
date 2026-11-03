@@ -683,13 +683,41 @@ class IdleObserverTests(unittest.TestCase):
         # when the child environment is passed explicitly.
         with self.iso.patched_environ(self.extra):
             self.assertTrue(idle.launch_observer("claude", payload, environ=env, popen=spawn))
-        self.assertEqual(json.loads(captured["payload"]), payload)
+        sent = json.loads(captured["payload"])
+        self.assertEqual((sent.pop("_seat") or {}).get("pane"), self.pane)   # this hook's own proof
+        self.assertEqual(sent, payload)
         self.assertTrue(captured["kwargs"]["start_new_session"])
         self.assertIn(captured["kwargs"]["stdin"], captured["kwargs"]["pass_fds"])
         self.assertEqual(captured["kwargs"]["env"]["HERDR_PANE_ID"], self.pane)
         self.assertEqual(captured["kwargs"]["env"]["HERDR_SOCKET_PATH"], env["HERDR_SOCKET_PATH"])
         self.assertNotIn("AGENT_SESSION_ROLE", captured["kwargs"]["env"])
         self.assertNotIn("AGENT_ARTIFACT_PRODUCER_ID", captured["kwargs"]["env"])
+
+    def test_a_detached_observer_books_on_the_seat_its_hook_proved(self):
+        # The Stop hook exits right after the launch, so the observer's parent is init
+        # and it cannot prove any seat itself (2026-11-03: no idle booking ever recorded).
+        with self.iso.patched_environ(self.extra):
+            seat = st.resolve_seat("claude", str(self.cwd), sid="sid-A")
+        self.assertEqual(seat.kind, "pane")
+        proof = {**seat.as_dict(), "session": {"harness": "claude", "sid": "sid-A"}}
+        payload = {"hook_event_name": "Stop", "session_id": "sid-A", "cwd": str(self.cwd),
+                   "transcript_path": self.transcript("sid-A", 200000), "turn_id": "turn-A"}
+        orphan = {key: value for key, value in self.extra.items() if key != "HERDR_PANE_ID"}
+        with self.iso.patched_environ(orphan), \
+                mock.patch.object(pane_ownership, "verified_pane", return_value=""), \
+                mock.patch.object(clear, "herdr_command", return_value=str(self.iso.root / "fake-herdr")), \
+                mock.patch.object(clear, "_start_helper",
+                                  side_effect=lambda key, nonce: self.started.append(nonce) or 12345):
+            self.assertEqual(idle.observe_payload("claude", payload, now=1000),
+                             "booking=skipped reason=exact-pane-unavailable")
+            other = {**proof, "session": {"harness": "claude", "sid": "sid-B"}}
+            self.assertEqual(idle.observe_payload("claude", {**payload, "_seat": other}, now=1000),
+                             "booking=skipped reason=exact-pane-unavailable")
+            self.assertEqual(idle.observe_payload("claude", {**payload, "_seat": proof}, now=1000),
+                             "booking=scheduled")
+            booked = clear.read_reservation(seat.key)
+        self.assertEqual((booked["origin"], booked["seat"]["pane"], booked["sid"]), ("idle", self.pane, "sid-A"))
+        self.assertEqual(len(self.started), 1)
 
     def test_detached_launcher_excludes_worker_owner_auxiliary_and_reviewer(self):
         spawn = mock.Mock()

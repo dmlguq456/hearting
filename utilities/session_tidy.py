@@ -772,11 +772,17 @@ def resolve_seat(harness: Optional[str], cwd=None, env=None, sid: Optional[str] 
     server = env.get("AGENT_HERDR_SESSION") if live_caller else None
     socket_value = env.get("HERDR_SOCKET_PATH", "") if live_caller else ""
     endpoint_unproven = bool(harness == "codex" and server and not socket_value)
+    steps: dict = {}
     if live_caller and harness == "codex" and sid:
         from pane_ownership import _caller_runtime, codex_caller_binding
         caller, service = _caller_runtime(os.getpid(), "codex")
+        thread = env.get("CODEX_THREAD_ID") or ""
+        steps = {"caller": "codex" if caller is not None else "none", "service": bool(service),
+                 "thread_env": "absent" if not thread else ("same" if thread == sid else "other"),
+                 "pane_hint": bool(pane), "binding": "not-tried"}
         if caller is not None and service:
             binding = codex_caller_binding(sid, environ=env)
+            steps["binding"] = "found" if binding else "none"
             if binding:
                 return session_seat(pane_seat_from_binding(binding), harness or "codex", sid)
             # A shared daemon's inherited pane values belong to no caller.
@@ -790,8 +796,11 @@ def resolve_seat(harness: Optional[str], cwd=None, env=None, sid: Optional[str] 
     socket_path = (env.get("HERDR_SOCKET_PATH", "")
                    if live_caller and harness == "codex" else None)
     if (live_caller or harness != "codex") and not endpoint_unproven:
+        hint = pane
         pane = verified_pane(pane, harness, sid, executable=_herdr_executable(),
                              server=server, socket_path=socket_path)
+        if steps:
+            steps.update(pane_hint=steps["pane_hint"] or bool(hint), verified_pane=pane or "")
     if pane:
         endpoint = _endpoint_scope(env if live_caller else {})
         key = _digest("pane", endpoint, pane) if endpoint else _digest("pane", pane)
@@ -804,8 +813,27 @@ def resolve_seat(harness: Optional[str], cwd=None, env=None, sid: Optional[str] 
                                  harness=harness or "", native=native), harness or "", sid or "")
     if not project:
         return Seat("project", "", harness=harness or "", sid=sid or "")
+    if steps:
+        _note_seat_fallback("codex", str(sid), steps)
     found = seat_for_project(harness or "unknown", project_key_for(cwd))
     return session_seat(found, harness or "", sid or "")
+
+
+def _note_seat_fallback(harness: str, sid: str, steps: dict) -> None:
+    """Keep one record per session whose own hook fell back to the project seat: the step
+    values that decided it (caller runtime, service, thread id in the environment, binding,
+    verified pane), rewritten only when they change."""
+    with contextlib.suppress(BaseException):
+        key = _native_session_key(harness, sid)
+        if not key:
+            return
+        path = state_root() / "seat-fallback" / f"{key}.json"
+        record = {"schema": 1, "harness": harness, "sid": sid, **steps}
+        held = read_json(path)
+        if isinstance(held, dict) and {k: v for k, v in held.items() if k != "at"} == record:
+            return
+        ensure_dir(path.parent)
+        atomic_write_json(path, {**record, "at": now_epoch()})
 
 
 # ---------------------------------------------------------------------------

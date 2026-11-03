@@ -202,6 +202,22 @@ def _tokens_and_provider(harness: str, payload: dict, sid: str, transcript: str)
         model or _walk(payload, "model", "model_id", "modelID")
 
 
+def _proven_seat(harness: str, sid: str, fields):
+    """The exact pane/native seat the launching hook proved for this session, else None."""
+    if not isinstance(fields, dict):
+        return None
+    session = fields.get("session") if isinstance(fields.get("session"), dict) else {}
+    if (session.get("harness"), session.get("sid")) != (harness, sid) \
+            or fields.get("kind") not in ("pane", "native"):
+        return None
+    try:
+        import session_tidy as tidy
+        seat = tidy.seat_from_dict(fields)
+    except Exception:  # noqa: BLE001 - an unreadable proof is no proof
+        return None
+    return seat if seat.key and (seat.pane or seat.native) else None
+
+
 def observe_payload(harness: str, payload: dict, *, now: float | None = None,
                     lock_wait: float | None = None) -> str:
     """Accept one actual Stop/session.idle payload; unknown usage never books a clear."""
@@ -222,12 +238,13 @@ def observe_payload(harness: str, payload: dict, *, now: float | None = None,
     if is_worker() or os.environ.get("AGENT_SESSION_ROLE", "").lower() in {
             "owner", "worker", "auxiliary", "reviewer"}:
         return "booking=skipped reason=worker"
+    proven = _proven_seat(harness, sid, payload.get("_seat"))
     # This observation is independent of idle usage/compact booking. A lock
     # contention or unknown usage never prevents the marked wait from appearing.
     try:
         import human_wait_state
         import session_tidy as tidy
-        seat = tidy.resolve_seat(harness, cwd, os.environ, sid)
+        seat = proven or tidy.resolve_seat(harness, cwd, os.environ, sid)
         current_sequence = tidy.read_prompt_seq(seat)
         expected_sequence = payload.get("_answer_wait_prompt_seq",
                                        os.environ.get("HEARTING_ANSWER_WAIT_PROMPT_SEQ", current_sequence))
@@ -294,7 +311,8 @@ def observe_payload(harness: str, payload: dict, *, now: float | None = None,
     from session_tidy_clear import observe_idle_event
     try:
         return observe_idle_event(harness, sid, cwd, event_id=event_id, provider=provider,
-                                  model=model, tokens=tokens, now=now, lock_wait=lock_wait)
+                                  model=model, tokens=tokens, now=now, lock_wait=lock_wait,
+                                  proven_seat=proven)
     except (BlockingIOError, TimeoutError):
         return "booking=skipped reason=seat-busy"
 
@@ -314,6 +332,10 @@ def launch_observer(harness: str, payload: dict, *, environ=None, popen=None) ->
         sid = _walk(payload, "session_id", "sessionID", "thread_id", "threadID")
         cwd = _walk(payload, "cwd", "working_directory", "workingDirectory") or os.getcwd()
         seat = tidy.resolve_seat(harness, cwd, environ, sid)
+        if seat.kind in ("pane", "native") and sid:
+            # The observer is detached: once this hook exits it has no runtime
+            # ancestor left to prove a seat with, so it takes this hook's proof.
+            payload = {**payload, "_seat": {**seat.as_dict(), "session": {"harness": harness, "sid": sid}}}
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         if len(body) > 48 * 1024:
             return False
