@@ -1130,14 +1130,16 @@ def _lineage_rows(route, jobs) -> dict[str, list[tuple[str, dict]]]:
         pass
     rows: dict[str, list[tuple[str, dict]]] = {}
     try:
+        # The shared registry view (one cached generation, appends read as a
+        # suffix) instead of a private full read of jobs.log per launch.
+        from dispatch_registry_cache import registry_view
         path = Path(jobs).resolve()
-        info = path.stat()
-        key = (str(path), info.st_ino, info.st_mtime_ns, info.st_ctime_ns, info.st_size,
-               frozenset(map(str, identities)))
+        view = registry_view(path)
+        key = (str(path), view.signature, frozenset(map(str, identities)))
         if key in _LINEAGE_CACHE:
             return _LINEAGE_CACHE[key]
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except (OSError, TypeError):
+        lines = view.lines
+    except (OSError, TypeError, ValueError):
         return rows
     for index, line in enumerate(lines):
         fields = line.split("\t")
@@ -1224,9 +1226,10 @@ def attempt_changes(route, meta) -> list[str]:
         return result.stdout.decode("utf-8", "replace") if result.returncode == 0 else None
 
     lines = []
-    log = git("log", "--format=%h %s", f"{head}..HEAD")
-    commits = [line[:160] for line in (log or "").splitlines() if line.strip()]
-    if log is not None:
+    from dispatch_replacement import commits_after
+    observed = commits_after(worktree, head)
+    commits = [f"{commit[:12]} {subject}" for commit, subject in observed or ()]
+    if observed is not None:
         shown = "; ".join(commits[:_PRIOR_ROUND_LIMITS["commits"]]) or "none"
         more = len(commits) - _PRIOR_ROUND_LIMITS["commits"]
         lines.append(f"commits since `{head[:12]}`: {shown}" + (f" (+{more} more)" if more > 0 else ""))

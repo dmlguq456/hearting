@@ -720,8 +720,17 @@ def same_proposal(left, right, resolved=None) -> bool:
     leg or, given `resolved` (that proposal's compiled legs, `facts["legs"]`, shown as `legs` in
     route_proposal_review), the leg its compile resolved it to -- never a per-key blend of the
     two. The copy's approval questions are the interview's own and are not compared."""
+    def normalized(leg, index):
+        # An interview copy may name a leg as its brief wrote it (a size without
+        # its shape); compare what that leg means, as the proposal was normalized.
+        try:
+            return _normal_leg(leg, index)
+        except (ProposalError, AttributeError, KeyError, TypeError, ValueError):
+            return leg
+
     try:
         own, copy = left["legs"], right["legs"]
+        copy = [normalized(leg, index) for index, leg in enumerate(copy)]
         shown = own if resolved is None else resolved
         key_values = lambda leg: [leg.get(key) for key in _LEG_KEYS]
         return (len(own) == len(copy) == len(shown)
