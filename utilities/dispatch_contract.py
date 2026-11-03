@@ -589,9 +589,12 @@ def resolve_agent_home(runtime_pointer: str | Path | None = None) -> Path:
     ]
     if runtime_pointer is not None:
         candidates.append(str(runtime_pointer))
+    # The managed-release pointer honours XDG_DATA_HOME exactly as agent-home.sh does
+    # (`${XDG_DATA_HOME:-$HOME/.local/share}`), so the shell and Python hooks agree (GA-A5-015).
+    data_home = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
     candidates.extend(
         [
-            str(Path.home() / ".local" / "share" / "hearting" / "current"),
+            str(Path(data_home) / "hearting" / "current"),
             str(Path.home() / "hearting"),
             str(Path.home() / "agent_setting"),
         ]
