@@ -1,8 +1,11 @@
 """SD-123 A50-9: compare the Claude template's declared `defaultMode` against
 the user's `~/.claude/settings.json`.
 
-The default-mode comparator is read-only. A narrow upgrade migration also
-removes retired harness hook registrations while preserving user settings.
+The default-mode comparator is read-only. The managed install merges only
+hooks, statusLine, env and autoMemoryEnabled into the user's file and never
+writes `permissions`, so an unset `defaultMode` is Claude Code's own default,
+not drift. A narrow upgrade migration also removes retired harness hook
+registrations while preserving user settings.
 """
 
 from __future__ import annotations
@@ -36,7 +39,7 @@ def validate() -> dict:
     if not user.is_file():
         return {
             "status": "absent", "ok": True, "path": str(user),
-            "detail": "not seeded yet — `harness install` seeds it once",
+            "detail": "no settings.json yet: Claude Code's own default applies",
         }
     try:
         user_mode = _default_mode(user)
@@ -51,6 +54,12 @@ def validate() -> dict:
         return {
             "status": "invalid", "ok": False, "path": str(user),
             "detail": f"template unreadable or malformed: {exc}",
+        }
+    if user_mode is None:
+        return {
+            "status": "valid", "ok": True, "path": str(user),
+            "detail": "defaultMode not set: Claude Code's own default applies "
+                      "(Hearting does not write permissions; its background workers set their own mode)",
         }
     if user_mode == template_mode:
         return {

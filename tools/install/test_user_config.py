@@ -48,6 +48,28 @@ class ClaudeSettingsConfigTests(unittest.TestCase):
             self.assertIn("auto", result["detail"])
             self.assertIn("bypassPermissions", result["detail"])
 
+    def test_unset_default_mode_after_managed_install_is_valid_not_drift(self):
+        # The managed install merges hooks/statusLine/env/autoMemoryEnabled and never
+        # writes permissions, so a fresh install has no defaultMode at all.
+        with tempfile.TemporaryDirectory() as tmp:
+            template = Path(tmp) / "template" / "settings.json"
+            user = Path(tmp) / "claude-home" / "settings.json"
+            self._write(template, "auto")
+            user.parent.mkdir(parents=True, exist_ok=True)
+            user.write_text(json.dumps({"hooks": {}, "autoMemoryEnabled": False}), encoding="utf-8")
+            with mock.patch.object(claude_settings_config, "template_path", return_value=template), \
+                 mock.patch.object(claude_settings_config, "user_path", return_value=user):
+                result = claude_settings_config.validate()
+                import user_config
+                rows = user_config.status(["claude-settings.defaultMode"])
+            self.assertEqual(result["status"], "valid")
+            self.assertTrue(result["ok"])
+            self.assertIn("not set", result["detail"])
+            self.assertEqual(rows[0]["status"], "valid")
+            rendered = user_config.lines(rows)
+            self.assertTrue(rendered[0].startswith("✓ claude-settings.defaultMode"), rendered)
+            self.assertNotIn("drift", "\n".join(rendered))
+
     def test_user_file_absent_is_absent_and_ok(self):
         with tempfile.TemporaryDirectory() as tmp:
             template = Path(tmp) / "template" / "settings.json"

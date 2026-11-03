@@ -61,6 +61,36 @@ def repo_status(value):
             and type(value.get("stale", False)) is bool)
 
 
+def project_memory_shape(value):
+    """Validate the MEMORY tab's per-project record (``system.project_memory``)."""
+    from tools.fleet.explorer.live import OPEN_STAGES
+    seq = lambda item: isinstance(item, (list, tuple))
+    text = lambda item: item is None or isinstance(item, str)
+    count = lambda item: item is None or type(item) is int
+    if not isinstance(value, dict) or set(value) != {"state", "stale", "decisions_today", "doing",
+                                                      "order", "projects"}:
+        return False
+    if not (isinstance(value["state"], str) and type(value["stale"]) is bool
+            and count(value["decisions_today"]) and count(value["doing"])
+            and seq(value["order"]) and all(isinstance(name, str) for name in value["order"])
+            and isinstance(value["projects"], dict) and set(value["projects"]) == set(value["order"])):
+        return False
+    for project in value["projects"].values():
+        if not isinstance(project, dict) or set(project) != {"last", "decisions", "open", "limited", "counts"}:
+            return False
+        if not (text(project["last"]) and type(project["limited"]) is bool
+                and isinstance(project["counts"], dict) and set(project["counts"]) == set(OPEN_STAGES)
+                and all(type(number) is int for number in project["counts"].values())):
+            return False
+        if not all(seq(row) and len(row) == 2 and all(text(item) for item in row)
+                   for row in project["decisions"]):
+            return False
+        if not all(seq(row) and len(row) == 4 and row[0] in OPEN_STAGES and all(text(item) for item in row)
+                   for row in project["open"]):
+            return False
+    return True
+
+
 def bucket(value):
     if value is None:
         return "none"
@@ -108,6 +138,10 @@ def conform(live, samples, path, problems):
             if path == "system.gpu_processes[]" and key == "session_tag":
                 if live[key] is not None and not isinstance(live[key], str):
                     problems.append(f"{path}.session_tag: expected optional string")
+                continue
+            if path == "system" and key == "project_memory":           # MEMORY tab field contract
+                if not project_memory_shape(live[key]):
+                    problems.append("system.project_memory: invalid per-project memory shape")
                 continue
             if path == "system" and key in ("gpu_process_summary", "unregistered_gpu_summary"):
                 if not isinstance(live[key], dict) or set(live[key]) - {"count", "unregistered", "owner", "remaining"}:

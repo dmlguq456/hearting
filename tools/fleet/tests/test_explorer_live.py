@@ -161,7 +161,7 @@ class ConfigFields(unittest.TestCase):
         self.assertIsNone(missing.memory)
         self.assertIsInstance(ExplorerViewModel.from_mapping(missing), ExplorerViewModel)
 
-    def test_memory_lifecycle_is_summary_only_and_records_are_deduplicated(self):
+    def test_memory_lifecycle_rows_are_dropped_and_records_are_deduplicated(self):
         memory = {"recent": [], "by_repo": {"memory-store": [
             {"id": "a", "ts": "2026-10-24T08:00:00+09:00", "action": "tidy-add",
              "type": "note", "project": "actual-project", "snippet": "2026-10-24 [aa](claude sid): useful"},
@@ -176,7 +176,8 @@ class ConfigFields(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         local = datetime.fromisoformat("2026-10-24T08:00:00+09:00").astimezone().strftime("%H:%M")
         self.assertEqual(tuple(rows[0]), (local, "saved", "note", "useful"))
-        self.assertEqual(vm.system["memory_summary"]["expired"], 1)
+        self.assertEqual(vm.system["project_memory"]["order"], ("actual-project",))
+        self.assertNotIn("memory_summary", vm.system)
 
     def test_first_tick_process_row_is_kept_and_gpu_processes_use_renderer_record_shape(self):
         snapshot = {"sessions": [{"harness": "codex", "pid": 44, "proc_start": 100,
@@ -345,6 +346,16 @@ class SourceBackedRecords(unittest.TestCase):
                    "session_identity_evidence": {"pane": "w1:p2"}}
         self.assertEqual(self.vm([session]).sessions[0]["pane"], "w1:p2")
 
+    def test_a_steward_leads_its_repository_whatever_the_natural_order(self):
+        def session(tag, mtime, steward=False, cwd="/synthetic/repo"):
+            return {"harness": "claude", "session_id": "sid-" + tag, "session_tag": tag, "cwd": cwd,
+                    "liveness": "idle", "mtime": mtime, "steward": steward}
+        rows = [session("aa", 30), session("bb", 20), session("st", 10, steward=True)]
+        self.assertEqual([row["tag"] for row in self.vm(rows).sessions], ["st", "aa", "bb"])
+        ordered = self.vm(rows, session_order=["sid-aa", "sid-bb", "sid-st"]).sessions
+        self.assertEqual([row["tag"] for row in ordered], ["st", "aa", "bb"])
+        self.assertTrue(ordered[0]["steward"])
+
     def test_a_waiting_session_reads_answer_needed_not_the_raw_kind(self):
         session = {"harness": "codex", "session_id": "sid-a", "session_tag": "aa", "cwd": "/synthetic/repo",
                    "liveness": "blocked", "interaction_state": {"kind": "decision"}}
@@ -435,37 +446,92 @@ class CountWords(unittest.TestCase):
         self.assertEqual(count_word(3, "harness", "harnesses"), "3 harnesses")
 
 
-class BacklogAndCurrentTaskProjection(unittest.TestCase):
-    def test_backlog_progress_uses_explicit_tags_exact_route_links_and_success(self):
-        from tools.fleet.explorer.live import _memory_backlog
+class ProjectMemoryAndCurrentTaskProjection(unittest.TestCase):
+    @staticmethod
+    def open_record(rid, headline, rtype="project", updated="2026-10-30", **extra):
+        return {"id": rid, "type": rtype, "headline": headline, "updated": updated,
+                "tags": (), "links": (), "artifact_refs": (), **extra}
 
-        records = [
-            {"id": "todo", "canonical_id": "todo", "type": "project", "status": "active",
-             "tags": ("backlog",), "headline": "unlinked task", "links": (), "artifact_refs": ()},
-            {"id": "doing", "canonical_id": "doing", "type": "project", "status": "active",
-             "tags": ("backlog",), "headline": "current task", "links": ("rt-current",),
-             "artifact_refs": ()},
-            {"id": "done", "canonical_id": "done", "type": "project", "status": "active",
-             "tags": ("backlog",), "headline": "settled task", "links": (),
-             "artifact_refs": ("artifact/rt-settled/report.md",)},
-            {"id": "failed", "canonical_id": "failed", "type": "project", "status": "active",
-             "tags": ("backlog",), "headline": "failed task", "links": ("rt-failed",),
-             "artifact_refs": ()},
-            {"id": "note", "canonical_id": "note", "type": "fact", "status": "active",
-             "tags": (), "headline": "not backlog", "links": (), "artifact_refs": ()},
-            {"id": "superseded", "canonical_id": "superseded", "type": "project",
-             "status": "superseded", "tags": ("backlog",), "headline": "old", "links": ()},
-        ]
-        routes = [
-            {"id": "rt-current", "state": "working", "outcome": None, "stages": []},
-            {"id": "rt-settled", "state": "done", "outcome": "success", "stages": []},
-            {"id": "rt-failed", "state": "done", "outcome": "failed", "stages": []},
-        ]
-        backlog = _memory_backlog({"memory": {"database": {
-            "state": "success", "by_repo": {"repo": records}, "limited": False}}}, routes)
-        progress = {row["id"]: row["progress"] for row in backlog["by_repo"]["repo"]}
-        self.assertEqual(progress, {"todo": "TODO", "doing": "DOING", "done": "DONE",
-                                    "failed": "TODO"})
+    def test_open_stage_reads_the_headline_marker_and_exact_route_links(self):
+        from tools.fleet.explorer.live import _open_stage
+
+        routes = [{"id": "rt-current", "state": "working", "outcome": None, "stages": []},
+                  {"id": "rt-settled", "state": "done", "outcome": "success", "stages": []},
+                  {"id": "rt-failed", "state": "done", "outcome": "failed", "stages": []}]
+        cases = {
+            "[진행 중·79 담당] marked doing": "doing",
+            "[수리 진행] repair under way": "doing",
+            "[설치 완료·실사용 미확인] installed": "waiting",
+            "[부분 설치] partly installed": "waiting",
+            "[백로그·결함] backlog defect": "open",
+            "[미해결] unresolved": "open",
+            "[해결 확인] resolved": None,
+            "[0c] a session tag is no work marker": None,
+            "plain project fact": None,
+        }
+        for headline, expected in cases.items():
+            with self.subTest(headline=headline):
+                self.assertEqual(_open_stage(self.open_record("r", headline), routes), expected)
+        obligation = self.open_record("o", "no marker", rtype="unresolved-obligation")
+        self.assertEqual(_open_stage(obligation, routes), "open")       # never assumed in progress
+        tagged = self.open_record("t", "tagged", tags=('"backlog"]',))   # tolerant tag decoding
+        self.assertEqual(_open_stage(tagged, routes), "open")
+        for link, expected in (("rt-current", "doing"), ("rt-settled", "waiting"), ("rt-failed", "open")):
+            with self.subTest(link=link):
+                linked = self.open_record("l", "linked", rtype="backlog", links=(link,))
+                self.assertEqual(_open_stage(linked, routes), expected)
+        resolved = self.open_record("x", "[해결 확인] done", rtype="unresolved-obligation")
+        self.assertIsNone(_open_stage(resolved, routes))
+
+    def test_project_memory_groups_decisions_open_work_and_last_change_per_project(self):
+        from tools.fleet.explorer.live import _journal_groups, _project_memory
+
+        memory = {
+            "by_repo": {"journal-only": [{"id": "j1", "ts": "2026-11-02T09:00:00", "action": "add",
+                                          "type": "note", "snippet": "journal row"}],
+                        "busy": [{"id": "j2", "ts": "2026-11-02T08:00:00", "action": "add",
+                                  "type": "decision", "snippet": "body text",
+                                  "headline": "busy headline"}]},
+            "database": {"state": "success", "by_repo": {
+                "busy": {"updated": "2026-11-02", "decisions_today": 2, "decisions": [
+                    {"id": "d1", "headline": "결정: 첫 결정 → 예", "updated": "2026-11-02"},
+                    {"id": "d2", "headline": "[e4] 2026-11-01 둘째 결정", "updated": "2026-11-01"}],
+                    "open": [self.open_record("o1", "older open", rtype="backlog", updated="2026-10-01"),
+                             self.open_record("o2", "[진행 중] doing", updated="2026-09-01"),
+                             self.open_record("o3", "newer open", rtype="unresolved-obligation",
+                                              updated="2026-10-20"),
+                             self.open_record("o4", "[해결 확인] closed", updated="2026-10-21")]},
+                "quiet": {"updated": "2026-08-10", "decisions_today": 0, "open": [], "decisions": [
+                    {"id": "q1", "headline": "quiet decision", "updated": "2026-08-10"}]},
+                "live": {"updated": "2026-07-01", "decisions_today": 0, "open": [], "decisions": []}}}}
+        snapshot = {"memory": memory}
+        journal = _journal_groups(snapshot, datetime(2026, 11, 2, 12, 0).timestamp())
+        result = _project_memory(snapshot, [], [{"repo_id": "live"}], journal)
+        self.assertEqual(result["order"], ["live", "journal-only", "busy", "quiet"])
+        busy = result["projects"]["busy"]
+        self.assertEqual(busy["decisions"], [["11-02", "첫 결정 → 예"], ["11-01", "둘째 결정"]])
+        self.assertEqual([item[:3] for item in busy["open"]],
+                         [["doing", "09-01", "[진행 중] doing"], ["open", "10-01", "older open"],
+                          ["open", "10-20", "newer open"]])
+        self.assertEqual(busy["counts"], {"doing": 1, "waiting": 0, "open": 2})
+        self.assertEqual(busy["last"], "08:00")
+        self.assertEqual(result["projects"]["quiet"]["last"], "08-10")
+        self.assertEqual(result["projects"]["journal-only"]["decisions"], [])
+        self.assertEqual((result["decisions_today"], result["doing"]), (2, 1))
+        self.assertEqual(journal["busy"][0][1][3], "busy headline")
+
+    def test_project_memory_without_a_database_keeps_counts_unknown_or_marks_last_good(self):
+        from tools.fleet.explorer.live import _project_memory
+
+        unknown = _project_memory({"memory": {"by_repo": {}}}, [], [], {})
+        self.assertEqual((unknown["state"], unknown["decisions_today"], unknown["doing"]),
+                         ("unknown", None, None))
+        failed = _project_memory({"memory": {"database": {
+            "state": "failed", "last_good": True, "by_repo": {},
+            "last_good_by_repo": {"repo": {"updated": "2026-10-01", "decisions": [], "open": [
+                self.open_record("t", "last good task", rtype="backlog")]}}}}}, [], [], {})
+        self.assertEqual((failed["state"], failed["stale"]), ("failed", True))
+        self.assertEqual(failed["projects"]["repo"]["open"][0][2], "last good task")
 
     def test_current_task_summary_uses_the_exact_focused_session_and_stage_states(self):
         from types import SimpleNamespace
@@ -488,36 +554,71 @@ class BacklogAndCurrentTaskProjection(unittest.TestCase):
         self.assertIn("plan", summary["done"])
         self.assertTrue(any("attempt-" in value for value in summary["doing"]))
 
-    def test_memory_backlog_display_keeps_unavailable_unknown_and_body_free(self):
+    @staticmethod
+    def memory_vm(project_memory, memory=None):
+        from tools.fleet.explorer.view_model import ExplorerViewModel
+        return ExplorerViewModel.from_mapping({"memory": memory, "system": {"project_memory": project_memory}})
+
+    def test_memory_page_marks_an_unread_database_and_shows_last_good(self):
+        from tools.fleet.explorer.frame import draw
+        from tools.fleet.explorer.state import NavState
+
+        unavailable = self.memory_vm({"state": "unavailable", "stale": False, "decisions_today": None,
+                                      "doing": None, "order": ["repo"], "projects": {}},
+                                     memory=[["repo", [["09:00", "saved", "note", "journal row"]]]])
+        text = "\n".join(draw(unavailable, NavState(view="MEMORY"), 140, 45).text_rows())
+        self.assertIn("메모리 DB unavailable · 결정·남은 일 모름", text)
+        self.assertIn("journal row", text)
+        self.assertIn("프로젝트 1 · 메모리 DB unavailable", text)
+        self.assertNotIn("진행 중 0", text)
+
+        stale = self.memory_vm({"state": "failed", "stale": True, "decisions_today": 0, "doing": 0,
+                                "order": ["repo"], "projects": {"repo": {
+                                    "last": "10-01", "decisions": [], "limited": False,
+                                    "open": [["open", "10-01", "last good task", "t"]],
+                                    "counts": {"doing": 0, "waiting": 0, "open": 1}}}})
+        stale_text = "\n".join(draw(stale, NavState(view="MEMORY"), 140, 45).text_rows())
+        self.assertIn("메모리 DB failed · 마지막으로 읽은 값", stale_text)
+        self.assertIn("기록상 열림 1", stale_text)
+        self.assertIn("last good task", stale_text)
+
+    def test_memory_page_cards_fold_open_work_per_project(self):
         from tools.fleet.explorer.frame import draw
         from tools.fleet.explorer.state import NavState, reduce
-        from tools.fleet.explorer.view_model import ExplorerViewModel
 
-        unavailable = ExplorerViewModel.from_mapping({
-            "system": {"memory_backlog": {"state": "unavailable", "by_repo": {}}}})
-        text = "\n".join(draw(unavailable, NavState(view="MEMORY"), 140, 45).text_rows())
-        self.assertIn("database unavailable · count unknown", text)
-        self.assertNotIn("TODO 0", text)
-
-        stale = ExplorerViewModel.from_mapping({
-            "system": {"memory_backlog": {"state": "failed", "stale": True,
-                                           "by_repo": {"repo": [{"id": "task-1",
-                                                                   "title": "last good task",
-                                                                   "progress": "TODO"}]}}}})
-        stale_state = NavState(view="MEMORY")
-        stale_frame = draw(stale, stale_state, 140, 45)
-        stale_hit = next(hit for hit in stale_frame.hits
-                         if hit.action == ("fold", "memory:backlog", "repo"))
-        stale_state, _ = reduce(stale_state, {"type": "click", "action": stale_hit.action}, stale_frame)
-        stale_text = "\n".join(draw(stale, stale_state, 140, 45).text_rows())
-        self.assertIn("database failed · showing last good", stale_text)
-        self.assertIn("TODO 1", stale_text)
-        self.assertIn("last good task", stale_text)
+        items = [["doing", "10-26", "doing task", "a"], ["waiting", "10-27", "waiting task", "b"],
+                 ["open", "10-30", "open task", "c"]]
+        vm = self.memory_vm({"state": "success", "stale": False, "decisions_today": 1, "doing": 1,
+                             "order": ["repo"], "projects": {"repo": {
+                                 "last": "21:36", "decisions": [["11-02", "the decision"]],
+                                 "open": items, "limited": True,
+                                 "counts": {"doing": 1, "waiting": 1, "open": 1}}}},
+                            memory=[["repo", [["21:36", "saved", "note", "recent change"]]]])
+        state = NavState(view="MEMORY")
+        frame = draw(vm, state, 140, 45)
+        text = "\n".join(frame.text_rows())
+        for expected in ("repo/", "마지막 변화 21:36", "결정", "the decision", "남은 일",
+                         "진행 중 1 · 확인 대기 1 · 기록상 열림 1+", "▶ 펼치기", "doing task",
+                         "최근", "recent change", "프로젝트 1 · 오늘 결정 1 · 진행 중 1"):
+            self.assertIn(expected, text)
+        self.assertNotIn("open task", text)
+        hit = next(item for item in frame.hits if item.action == ("fold", "memory:open", "repo"))
+        state, _ = reduce(state, {"type": "click", "action": hit.action}, frame)
+        expanded = "\n".join(draw(vm, state, 140, 45).text_rows())
+        for expected in ("▼ 접기", "확인 대기  waiting task", "열림  open task"):
+            self.assertIn(expected, expanded)
+        from tools.fleet.tests.parity_matrix import own_trace_defects
+        for width, counts in ((80, "진행 1 · 대기 1 · 열림 1+"),
+                              (100, "진행 중 1 · 확인 대기 1 · 기록상 열림 1+")):
+            with self.subTest(width=width):
+                narrow, defects = own_trace_defects(vm, state, width)
+                self.assertEqual(defects, [])
+                self.assertIn(counts, "\n".join(narrow.text_rows()))
 
     def test_peer_count_stays_unknown_or_marks_last_good_after_empty_unhealthy_source(self):
         from tools.fleet.explorer.frame import draw
         from tools.fleet.explorer.live import build_view_model
-        from tools.fleet.explorer.state import NavState, reduce
+        from tools.fleet.explorer.state import NavState
         from tools.fleet.explorer.view_model import ExplorerViewModel
 
         unknown = build_view_model({"sessions": [], "resources": [],
@@ -533,19 +634,6 @@ class BacklogAndCurrentTaskProjection(unittest.TestCase):
         })
         stale_text = "\n".join(draw(stale, NavState(view="PEERS"), 140, 45).text_rows())
         self.assertIn("1 link · last good · observation unknown", stale_text)
-
-        vm = ExplorerViewModel.from_mapping({
-            "system": {"memory_backlog": {"state": "success", "limited": False,
-                                           "by_repo": {"repo": [{"id": "task-1", "title": "Fix repo click",
-                                                                   "progress": "TODO"}]}}}})
-        state = NavState(view="MEMORY")
-        frame = draw(vm, state, 140, 45)
-        self.assertNotIn("Fix repo click", "\n".join(frame.text_rows()))
-        hit = next(item for item in frame.hits if item.action == ("fold", "memory:backlog", "repo"))
-        state, _ = reduce(state, {"type": "click", "action": hit.action}, frame)
-        expanded = "\n".join(draw(vm, state, 140, 45).text_rows())
-        self.assertIn("Fix repo click", expanded)
-        self.assertIn("task-1", expanded)
 
 
 class ParallelRouteProjection(unittest.TestCase):
