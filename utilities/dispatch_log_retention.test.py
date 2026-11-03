@@ -331,12 +331,89 @@ class DispatchLogRetentionTest(unittest.TestCase):
                 mock.patch.object(R, "_unlink_if_same", slow_unlink):
             result = self.sweep()
 
-        # The 1 s budget, not the 16-file batch, stopped the pass.
+        # Guards the removal time budget now that the 16-file cap no longer
+        # applies over the limit: the 1 s budget alone still ends the pass.
+        # (It also passes on the old 16-file cap, so it does not pin the change.)
         self.assertGreater(result["removed"], 0)
         self.assertLess(result["removed"], R.REMOVE_LIMIT)
         self.assertGreater(result["deferred"], 0)
         self.assertEqual(result["more"], 1)
         self.assertEqual(sum(path.exists() for path in paths), count - result["removed"])
+
+    def _pressure_logs(self, count):
+        """Unexpired logs, all removable over the limit; the last candidate is index 0."""
+        paths = []
+        for index in range(count):
+            path = self.log(f"guard-{index:03d}.jsonl", b"g" * 8)
+            self.add_row(f"att-guard-{index:03d}", path, ended=self.now - (index + 1) * 3600 * 1_000_000_000)
+            paths.append(path)
+        return paths
+
+    def _sweep_after_removal(self, nth, change, *, snapshot_always_reused=False):
+        unlink = R._unlink_if_same
+        seen = []
+
+        def hook(layout, name, expected):
+            done = unlink(layout, name, expected)
+            seen.append(name)
+            if len(seen) == nth:
+                change()
+            return done
+
+        patches = [mock.patch.object(R, "MAX_LOG_BYTES", 1), mock.patch.object(R, "_unlink_if_same", hook)]
+        if snapshot_always_reused:
+            patches.append(mock.patch.object(R, "_current_snapshot", lambda jobs, held: held.snapshot))
+        with contextlib.ExitStack() as stack:
+            for patch in patches:
+                stack.enter_context(patch)
+            return self.sweep()
+
+    def _append_open_row(self, attempt, path):
+        def change():
+            with open(self.jobs, "a", encoding="utf-8") as handle:
+                handle.write(f"{stamp(self.now)}\topen\t/repo\t/wt\tjob\tattempt_id={attempt},harness=claude,"
+                             f"worker_type=stage,launch_outcome=never-launched,log_file={path}\n")
+        return change
+
+    def test_an_open_row_appended_past_the_old_batch_size_keeps_that_log(self):
+        count = R.REMOVE_LIMIT + 6
+        paths = self._pressure_logs(count)
+        change = self._append_open_row("att-guard-000", paths[0])
+
+        result = self._sweep_after_removal(R.REMOVE_LIMIT + 1, change)
+
+        self.assertTrue(paths[0].exists())
+        self.assertEqual(result["removed"], count - 1)
+        self.assertFalse(any(path.exists() for path in paths[1:]))
+
+    def test_a_same_size_registry_rewrite_during_the_pass_keeps_that_log(self):
+        paths = self._pressure_logs(4)
+
+        def change():
+            replacement = self.root / "jobs.log.rewrite"
+            text = self.jobs.read_text(encoding="utf-8")
+            marker = "att-guard-000"
+            row = next(line for line in text.splitlines() if marker in line)
+            replacement.write_text(text.replace(row, row.replace("\tdone\t", "\topen\t")), encoding="utf-8")
+            self.assertEqual(replacement.stat().st_size, self.jobs.stat().st_size)
+            os.replace(replacement, self.jobs)
+
+        result = self._sweep_after_removal(1, change)
+
+        self.assertTrue(paths[0].exists())
+        self.assertEqual(result["removed"], 3)
+
+    def test_the_registry_stamp_comparison_alone_keeps_a_log_when_the_snapshot_is_always_reused(self):
+        count = R.REMOVE_LIMIT + 6
+        paths = self._pressure_logs(count)
+        change = self._append_open_row("att-guard-000", paths[0])
+
+        result = self._sweep_after_removal(R.REMOVE_LIMIT + 1, change, snapshot_always_reused=True)
+
+        # A stale snapshot never refreshes, so every candidate after the append is
+        # kept (fail closed); none is removed on the stale reading.
+        self.assertTrue(paths[0].exists())
+        self.assertEqual(result["removed"], R.REMOVE_LIMIT + 1)
 
     def test_files_still_inside_retention_do_not_end_examination_early(self):
         recent = []
