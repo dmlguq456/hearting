@@ -21,7 +21,12 @@ def _extra_lines(session, questions):
     gpus = session.get("gpu") or ()
     if len(gpus) > 1:
         lines.append((f"GPU ×{len(gpus)}", "dim"))
-    question = next((item for item in questions if str(item.get("tag")) == tag), None)
+    # A live question record's `tag` is the question id; its session is `session_tag`
+    # (only a legacy fixture row keyed the session by `tag`). An older wait is folded
+    # away everywhere else, so it does not raise the card's line either.
+    question = next((item for item in questions if not item.get("older")
+                     and str(item.get("session_tag") if "session_tag" in item
+                             else item.get("tag")) == tag), None)
     if question is not None or session.get("ask"):
         wait = str((question or {}).get("wait") or "")
         lines.append(("answer needed" + (f" · {wait}" if wait else ""), "blocked"))

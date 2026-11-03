@@ -590,6 +590,22 @@ class InstalledRuntimeTargetsTest(unittest.TestCase):
         legacy_checks.assert_not_called()
         self.assertFalse(any(check["id"].startswith("opencode.") for check in result["checks"]))
 
+    def test_doctor_names_what_is_off_without_herdr_in_one_optional_line(self):
+        args = installer.build_parser().parse_args(["runtime", "doctor", "--runtime", "claude"])
+        report = {"ok": True, "status": "ok", "freshness": "fresh", "next_action": "none"}
+        skew = {"ok": True, "surfaces": [], "compared": [], "skewed": []}
+        real_which = shutil.which
+        for herdr, expected in ((None, 1), ("/usr/bin/herdr", 0)):
+            which = lambda name, _herdr=herdr: _herdr if name == "herdr" else real_which(name)
+            # installer and host_probes share the one `shutil` module.
+            with mock.patch.object(runtime_activation, "doctor", return_value=dict(report)), \
+                 mock.patch.object(runtime_activation, "surface_skew", return_value=skew), \
+                 mock.patch.object(installer.shutil, "which", side_effect=which):
+                result = installer.cmd_runtime(args)
+            optional = [line for line in result["lines"] if line.startswith("optional: herdr")]
+            self.assertEqual(len(optional), expected)
+            self.assertEqual(result["exit"], installer.EXIT_OK)
+
     def test_runtime_all_names_the_activated_runtimes(self):
         self._activate("claude")
         self._activate("codex")

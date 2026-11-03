@@ -22,13 +22,21 @@ python3 tools/release/first-journey.py run --source checkout --profile claude-on
 Without a dedicated measurement login, `run` uses the login you already have
 for each harness (`~/.claude/.credentials.json`, `~/.codex/auth.json`, or
 `opencode auth export --standalone`; the harness's own `CLAUDE_CONFIG_DIR`,
-`CODEX_HOME`, and `XDG_DATA_HOME` are honored). The credential is copied only
-into the private auth root (mode 0600), never printed or exported, and removed
-when `run` ends. If a task refreshed a file-based login, the refreshed copy is
-written back to the original file so it keeps working; an OpenCode V2 refresh
-is not written back. Account percentages are shared with every other session
-using that login, so judge cost from the session token counts. `login` stays
-available for a separate measurement account and takes precedence when present.
+`CODEX_HOME`, and `XDG_DATA_HOME` are honored). For each harness, under one lock,
+the credential is copied into the private auth root (mode 0600, next to a
+`.seeded` marker), used in the isolated world, handed back to the original file
+if the task refreshed it and the original is still the copied value, and
+deleted. A copy left by a killed run is recognised by its marker and dropped at
+the next run. Credentials are never printed or exported, and a kept failure
+world has its credential files removed. If a refreshed login cannot be handed
+back (the original changed meanwhile, or OpenCode V2, where `auth import` keeps
+existing entries), `run` says `login-writeback-failed` on stderr and in the
+report: sign in to that harness again. OpenCode V2 leaves out OAuth entries that
+expire within an hour so a refresh is unlikely. OpenCode starts on your
+last-used model only for such a seeded login. Account percentages are shared
+with every other session using that login, so judge cost from the session token
+counts. `login` stays available for a separate measurement account and takes
+precedence when present (it clears any stale marker).
 
 Login is performed in an isolated environment and retains only the selected
 harness credential under `/tmp/hearting-measure-auth-UID`. OpenCode V1 keeps
@@ -58,7 +66,8 @@ HOME separation, so its report marks filesystem protection and d3 unproven.
 On Linux the bwrap world is the safety boundary, so the harness's own approval
 prompts (which a headless run cannot answer) are switched off there
 (`--dangerously-skip-permissions`, `--dangerously-bypass-approvals-and-sandbox`,
-`--auto`); other platforms keep them on. OpenCode starts on the model the user
+`--auto`); other platforms keep them on. With approvals off the only boundary is
+the filesystem world; the network is not unshared. OpenCode starts on the model the user
 used last (`state/opencode/model.json`), because its own default can point at a
 stale login.
 

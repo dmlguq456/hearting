@@ -1344,7 +1344,7 @@ class NativeClaudeStorage(unittest.TestCase):
                 '--tmpfs', '/tmp', '--bind', str(root), sandbox_root,
                 '--ro-bind', str(root / 'hosts'), '/etc/hosts',
                 '--ro-bind', str(root / 'resolv.conf'), '/etc/resolv.conf',
-                '--tmpfs', '/home/Uihyeop/.claude',
+                '--tmpfs', '/home/example/.claude',
                 '--setenv', 'PATH', '/usr/bin:/bin',
                 '--setenv', 'HOME', sandbox_root,
                 '--chdir', sandbox_root,

@@ -65,6 +65,11 @@ budget. Preserve known FAIL and BLOCKED results; rerun only a check affected by
 a fix or newly relevant delta, and leave required evidence BLOCKED when it
 cannot be established.
 
+Checks an earlier stage recorded as `handed-over:` lines (its environment could
+not run them) are part of this target; the assignment lists them. Run each; one
+this environment cannot run either stays BLOCKED with the same line, and the
+owner runs it.
+
 
 ## Artifact Ownership
 
