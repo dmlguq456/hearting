@@ -429,7 +429,7 @@ _SKELETON_IDENTITY = ("schema_version", "run_id", "observer_of", "campaign_id", 
 _SKELETON_STRING_LIMIT = 600
 
 
-def _public_output_state(run, output_dir, *, binding_given):
+def _public_output_state(run, output_dir, *, binding_given, discovered_reason=None):
     """Tell present/none/unknown apart; never invents an output folder."""
     if isinstance(output_dir, str) and output_dir:
         return "present", None
@@ -454,6 +454,12 @@ def _public_output_state(run, output_dir, *, binding_given):
                         break
     except (OSError, ValueError, TypeError, AttributeError):
         pass
+    # A node without a training output stays `none` above; only then does a folder
+    # the run declared on its host but this observer cannot map read as unmapped.
+    if isinstance(run, dict) and run.get("output_dir_unmapped") is True:
+        return "unknown", "remote-unmapped"
+    if discovered_reason in ("declared-unresolved", "remote-unmapped"):
+        return "unknown", discovered_reason
     return "unknown", "not-declared"
 
 
@@ -1560,7 +1566,10 @@ def observe_experiment(run, registry, now, *, root=None, row_key=None,
     run_id = run.get("run_id")
     if not isinstance(run_id, str) or not run_id:
         return {"available": False, "warnings": ["run-id-unknown"]}
-    root_value = root or run.get("output_dir") or discover_output_root(run)
+    root_value = root or run.get("output_dir")
+    discovered_reason = None
+    if not root_value:
+        root_value, discovered_reason = discover_output_binding(run)
     metric_root = None
     if isinstance(root_value, str) and root_value:
         try:
@@ -1891,7 +1900,8 @@ def observe_experiment(run, registry, now, *, root=None, row_key=None,
             record["rows"] = [row_entry]
             record["output_dir"] = str(metric_root) if metric_root is not None else None
             record["output_dir_state"], record["output_dir_reason"] = _public_output_state(
-                run, record["output_dir"], binding_given=bool(root_value) and metric_root is None)
+                run, record["output_dir"], binding_given=bool(root_value) and metric_root is None,
+                discovered_reason=discovered_reason)
             record_path = write_public_run_record(artifact_root, run_id, record)
             if record_path:
                 next_state["last_public_write_at"] = float(now)
@@ -2277,75 +2287,116 @@ def _config_argument(argv):
 
 
 def _request_output(run):
-    """A launch's hash-bound request may name the output directly (C1, 2026-10-25)."""
+    """A launch's hash-bound request may name the output directly (C1, 2026-10-25).
+
+    Returns (folder, reason) like `discover_output_binding`; (None, None) means the
+    request is absent or unproven, so discovery continues with the config reference.
+    """
     argv = run.get("command")
     if not isinstance(argv, list):
-        return None
+        return None, None
     def argument(name):
         values = [argv[i + 1] for i, value in enumerate(argv[:-1]) if value == name]
         values += [value[len(name) + 1:] for value in argv if value.startswith(name + '=')]
         return values[0] if len(values) == 1 else None
     reference, expected = argument('--request'), argument('--request-sha256')
     if not reference or not expected:
-        return None
+        return None, None
     try:
         path = Path(reference)
         if not path.is_absolute():
             path = Path(run['cwd']) / path
+        if _namespace_source_missing(path, run.get('path_namespace')):
+            return None, "remote-unmapped"
         path, mapped = _reverse_namespace_path(path, run.get('path_namespace'))
         if run.get('path_namespace') and not mapped:
-            return None
+            return None, None
         raw, _ = _read_unrooted(path)
         if hashlib.sha256(raw).hexdigest() != _hash(expected):
-            return None
+            return None, None
         request = _json(raw)
         if not isinstance(request, dict):
-            return None
+            return None, None
         values = {value for key in ('output', 'output_dir', 'output_folder', 'save_dir')
                   if isinstance((value := request.get(key)), str) and value}
         if len(values) != 1:
-            return None
+            return None, None
         value = next(iter(values))
         # Reuse the existing namespace, link and directory checks.
-        return discover_output_root({**run, 'observation': {'path': value}, 'command': []})
+        return discover_output_binding({**run, 'observation': {'path': value}, 'command': []})
     except (OSError, ValueError, TypeError, KeyError, RuntimeError):
-        return None
+        return None, None
+
+
+def _namespace_source_missing(path, namespace):
+    """A run-side path maps through a namespace source this observer does not mount."""
+    if not isinstance(namespace, dict):
+        return False
+    for target, source in namespace.items():
+        try:
+            Path(path).relative_to(Path(target))
+        except (ValueError, TypeError):
+            continue
+        try:
+            return not Path(source).is_dir()
+        except (OSError, TypeError, ValueError):
+            return True
+    return False
 
 
 def discover_output_root(run):
     """Resolve only explicit output-directory keys in an exact run config."""
+    return discover_output_binding(run)[0]
+
+
+def discover_output_binding(run):
+    """Return (folder, reason) from the run's explicit output binding evidence.
+
+    `folder` is an existing directory and `reason` is None, or `folder` is None and
+    `reason` is `not-declared` (no output binding evidence), `declared-unresolved`
+    (a named folder is not an existing directory here) or `remote-unmapped` (a named
+    path cannot be mapped from the run's host to this observer). Nothing is guessed.
+    """
     if not isinstance(run, dict):
-        return None
+        return None, "not-declared"
     override = run.get("observation")
     namespace = run.get("path_namespace")
     raw_run_root = run.get("run_root")
+    override_unmapped = False
     if isinstance(override, dict) and isinstance(override.get("path"), str):
-        candidate = Path(override["path"])
-        candidate, mapped = _reverse_namespace_path(candidate, namespace)
+        declared = Path(override["path"])
+        candidate, mapped = _reverse_namespace_path(declared, namespace)
         shared = False
         if raw_run_root:
             shared_root, _ = _reverse_namespace_path(Path(raw_run_root), namespace)
             try: shared = candidate.is_relative_to(shared_root)
             except ValueError: shared = False
         if candidate.is_absolute() and (mapped or not namespace or shared) and not _path_has_symlink(candidate):
+            if mapped and _namespace_source_missing(declared, namespace):
+                return None, "remote-unmapped"
             try:
                 resolved = candidate.resolve(strict=True)
-                return str(resolved) if resolved.is_dir() else None
+                return (str(resolved), None) if resolved.is_dir() else (None, "declared-unresolved")
             except (OSError, RuntimeError, ValueError):
-                return None
+                return None, "declared-unresolved"
+        override_unmapped = candidate.is_absolute() and bool(namespace) and not (mapped or shared)
     command = run.get("command")
-    request_output = _request_output(run)
+    request_output, request_reason = _request_output(run)
     if request_output:
-        return request_output
+        return request_output, None
+    fallback = request_reason or ("remote-unmapped" if override_unmapped else "not-declared")
     cwd = run.get("cwd")
     reference = _config_argument(command) if isinstance(command, list) else None
     if not reference or not isinstance(cwd, str) or not cwd:
-        return None
+        return None, fallback
     try:
         raw_cwd = Path(cwd)
+        config_ref = Path(reference)
+        if (_namespace_source_missing(raw_cwd, namespace) or config_ref.is_absolute()
+                and _namespace_source_missing(config_ref, namespace)):
+            return None, "remote-unmapped"
         mapped_cwd, _cwd_mapped = _reverse_namespace_path(raw_cwd, namespace)
         base = mapped_cwd.resolve(strict=True)
-        config_ref = Path(reference)
         if config_ref.is_absolute():
             config_ref, _config_mapped = _reverse_namespace_path(config_ref, namespace)
             reference = str(config_ref)
@@ -2355,17 +2406,17 @@ def discover_output_root(run):
         expected = run.get("config_sha256")
         digest = hashlib.sha256(raw).hexdigest()
         if expected and digest != _hash(expected):
-            return None
+            return None, fallback
         if config_path.suffix.lower() in {".yaml", ".yml"}:
             try:
                 import yaml
                 config = yaml.safe_load(raw)
             except (ImportError, ValueError, TypeError):
-                return None
+                return None, fallback
         else:
             config = _json(raw)
         if not isinstance(config, dict):
-            return None
+            return None, fallback
         training = config.get("training") if isinstance(config.get("training"), dict) else {}
         candidates = []
         for value in (config.get("output_dir"), config.get("output_folder"),
@@ -2374,11 +2425,13 @@ def discover_output_root(run):
                 continue
             if not isinstance(value, str) or not value or len(value) > 4096 \
                     or any(ord(char) < 32 for char in value):
-                return None
+                return None, fallback
             raw_path = Path(value)
             candidate = raw_path if raw_path.is_absolute() else base / raw_path
             mapped = False
             if raw_path.is_absolute():
+                if _namespace_source_missing(raw_path, namespace):
+                    return None, "remote-unmapped"
                 candidate, mapped = _reverse_namespace_path(candidate, namespace)
                 if namespace and not mapped:
                     shared_root = None
@@ -2387,18 +2440,19 @@ def discover_output_root(run):
                     try: shared = shared_root is not None and candidate.is_relative_to(shared_root)
                     except ValueError: shared = False
                     if not shared:
-                        return None
+                        return None, "remote-unmapped"
             if _path_has_symlink(candidate):
-                return None
+                return None, "declared-unresolved"
             candidates.append(candidate)
-        unique = {str(path.resolve(strict=True)) for path in candidates}
+        unique = {str(path.resolve(strict=False)) for path in candidates}
         if len(unique) != 1:
-            return None
+            # No key, or keys naming different folders: no single binding.
+            return None, fallback
         output = Path(next(iter(unique)))
-        return str(output) if output.is_dir() else None
+        return (str(output), None) if output.is_dir() else (None, "declared-unresolved")
     except (OSError, ValueError, TypeError, KeyError, RuntimeError,
             subprocess.SubprocessError, OverflowError):
-        return None
+        return None, fallback
 
 
 def _declared_plan(run):
