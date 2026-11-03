@@ -68,9 +68,14 @@ separate; `compaction` only says what this file left out.
   `output_dir_reason` attached when it is not `present`. `present`: `output_dir` is
   an existing folder. `none` (`node-declares-no-training-output`): the sealed
   resource node declares no training output flow, e.g. `eval-run`. `unknown`:
-  `output_dir` is null, with reason `not-declared` (no output binding evidence)
-  or `declared-unresolved` (a bound path is not currently an existing folder).
-  Runs that never declared an output folder stay `unknown`; they are not filled in.
+  `output_dir` is null, with reason `not-declared` (no output binding evidence),
+  `declared-unresolved` (a bound path is not currently an existing folder) or
+  `remote-unmapped` (the run declared or referenced a path on its host that the
+  observer cannot map to a visible folder: outside the host's `path_namespace` and
+  the shared run root, or through a namespace source this observer does not mount).
+  A run without a declaration is filled only from its exact evidence: the
+  hash-bound `--request` or the `--config` output keys. Without such evidence it
+  stays `unknown`/`not-declared`; no folder is guessed.
 
 An in-flight process kept alive across a policy change records an optional
 `existing_run_exception` object with a fixed shape:

@@ -3111,6 +3111,7 @@ def _observe_compute_experiment(meta, run_dir, now, *, final=False):
         except (OSError, subprocess.SubprocessError):
             pass
     output_dir = meta.get("output_dir") or resource.get("output_dir")
+    declared_output = isinstance(output_dir, str) and bool(output_dir)
     mapping = meta.get("path_namespace")
     if isinstance(output_dir, str) and isinstance(mapping, dict):
         mapped = []
@@ -3121,8 +3122,12 @@ def _observe_compute_experiment(meta, run_dir, now, *, final=False):
                     relative = candidate.relative_to(Path(target))
                 except (ValueError, TypeError):
                     continue
-                mapped.append(Path(source) / relative)
-        output_dir = str(mapped[0]) if len(mapped) == 1 else None
+                mapped.append((Path(source), Path(source) / relative))
+        try:
+            visible = len(mapped) == 1 and mapped[0][0].is_dir()
+        except OSError:
+            visible = False
+        output_dir = str(mapped[0][1]) if visible else None
     elif (isinstance(output_dir, str) and meta.get("host_is_local") is False
           and isinstance(meta.get("run_root"), str)):
         try:
@@ -3130,6 +3135,8 @@ def _observe_compute_experiment(meta, run_dir, now, *, final=False):
                 output_dir = None
         except (OSError, TypeError, ValueError):
             output_dir = None
+    # A declared folder this observer cannot map is told apart from an undeclared one.
+    output_dir_unmapped = declared_output and output_dir is None
     try:
         started = datetime.datetime.fromisoformat(str(meta.get("started_at"))).timestamp()
     except (TypeError, ValueError, OverflowError):
@@ -3145,7 +3152,8 @@ def _observe_compute_experiment(meta, run_dir, now, *, final=False):
         "cycle_id": resource.get("cycle_id") or meta.get("cycle_id"),
         "route_id": route.get("route_id") or route_doc.get("route_id"),
         "node": resource.get("node"), "host": meta.get("host"),
-        "output_dir": output_dir, "artifact_root": artifact_root,
+        "output_dir": output_dir, "output_dir_unmapped": output_dir_unmapped,
+        "artifact_root": artifact_root,
         "route": route_file, "jobs": resource.get("jobs"),
         "command": meta.get("command"), "cwd": meta.get("cwd"),
         "config_sha256": ((resource.get("contract") or {}).get("sealed") or {}).get("config_sha256"),

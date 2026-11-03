@@ -2086,6 +2086,67 @@ class ExperimentObservationTest(unittest.TestCase):
         kept = progress.read_public_run_record(artifact, "case-e")
         self.assertEqual((kept["output_dir_state"], kept["output_dir"]), ("present", str(output)))
 
+    def test_output_dir_reason_tells_remote_unmapped_from_not_declared(self):
+        base = Path(self.tmp.name) / "d2-remote"
+        project = base / "nas" / "project"
+        (project / "configs").mkdir(parents=True)
+        output = project / "out"
+        output.mkdir()
+        mapping = {"/host-ns": str(base / "nas")}
+        unmounted = {"/host-ns": str(base / "not-mounted-here")}
+
+        def config(name, value):
+            path = project / "configs" / name
+            path.write_text(json.dumps({"output_dir": value}))
+            return ["python", "train.py", "--config", "configs/" + name]
+
+        def observe(name, **run):
+            artifact = base / name
+            run = {"run_id": name, "artifact_root": str(artifact), "node": "full-run",
+                   "route_id": "r", "started_at": 0, **run}
+            with mock.patch.object(progress, "_observation_state_path",
+                                   return_value=base / (name + ".state")):
+                progress.observe_experiment(run, base / "registry.json", 60,
+                    row_key="run", started_at=0, notify_events=False)
+            record = progress.read_public_run_record(artifact, name)
+            return record["output_dir_state"], record["output_dir_reason"], record["output_dir"]
+
+        remote = {"cwd": "/host-ns/project", "run_root": "/host-ns/runs"}
+        (project / "other").mkdir()
+        (project / "configs" / "both.json").write_text(
+            json.dumps({"output_dir": "out", "save_dir": "other"}))
+        conflict = ["python", "train.py", "--config", "configs/both.json"]
+        cases = {
+            # nothing declared and no exact config/request evidence
+            "plain": ({}, ("unknown", "not-declared", None)),
+            # compute-hosts dropped a declared folder it could not map
+            "declared-unmapped": ({"output_dir_unmapped": True},
+                                  ("unknown", "remote-unmapped", None)),
+            # exact config evidence fills the folder through the host mapping
+            "config-mapped": ({**remote, "path_namespace": mapping,
+                               "command": config("mapped.json", "/host-ns/project/out")},
+                              ("present", None, str(output))),
+            # config names a host-only path outside the mapping and the shared run root
+            "config-host-only": ({**remote, "path_namespace": mapping,
+                                  "command": config("host.json", "/scratch/private/out")},
+                                 ("unknown", "remote-unmapped", None)),
+            # the namespace source is not mounted where this observer runs
+            "source-not-mounted": ({**remote, "path_namespace": unmounted,
+                                    "command": config("mapped.json", "/host-ns/project/out")},
+                                   ("unknown", "remote-unmapped", None)),
+            # config evidence names a folder that does not exist yet
+            "config-missing": ({"cwd": str(project),
+                                "command": config("missing.json", "not-yet")},
+                               ("unknown", "declared-unresolved", None)),
+            # two keys naming different folders are no single binding
+            "config-conflict": ({"cwd": str(project), "command": conflict},
+                                ("unknown", "not-declared", None)),
+        }
+        for name, (run, expected) in cases.items():
+            self.assertEqual(observe(name, **run), expected, name)
+            if expected[2] is None:
+                self.assertIsNone(progress.discover_output_root(run), name)
+
     def test_compacted_record_feeds_resource_wait_note_and_runner_observation(self):
         import dispatch_resource_wait
         base = Path(self.tmp.name) / "d3notes"
