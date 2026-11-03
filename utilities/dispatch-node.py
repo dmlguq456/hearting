@@ -997,7 +997,7 @@ def main():
   a.subsession_purpose=subsession_purpose(registry.path,route,node,a.session_chain_id,a.subsession_purpose)
  prior_rounds=prior_round_attempts(registry.path,route["route_id"],node["id"],exclude_slug=a.slug,exclude_attempt=a.attempt_id,
                                   route=route if node.get("kind")=="review-worker" else None) if not a.subsession_id and original_task is None else []
- # SD-153/SD-154: `admit_round` (budget + rule-8 auto-revision) is the one
+ # SD-153/SD-154: `admit_round` (budget + review-input auto-revision) is the one
  # admission decision every registered launch surface (this main(),
  # dispatch-batch.py, stage-dispatch-fallback.py) reads -- no surface keeps
  # its own `len(prior)+1 > max_round` comparison, or its own auto-revision
