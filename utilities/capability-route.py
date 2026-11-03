@@ -7264,6 +7264,7 @@ def route_status(artifact_root, *, diagnostics=None, open_only=False, only=None)
                  "source_commit":raw.get("source_commit"),"closed":target.is_file(),
                  "location":location,"drift":location != "canonical",
                  "read_only":location in _LEGACY_LOCATIONS}
+            finish_state=None
             try:
                 import inline_finish
                 finish_state=inline_finish.pending_state(Path(raw.get("artifact_root", "")), raw.get("route_id", ""))
@@ -7281,6 +7282,11 @@ def route_status(artifact_root, *, diagnostics=None, open_only=False, only=None)
                 try: closure=json.loads(target.read_text(encoding="utf-8"))
                 except (OSError,json.JSONDecodeError,UnicodeDecodeError): closure={}
                 row["closed_at"]=closure.get("closed_at"); row["head_commit"]=closure.get("head_commit")
+                if (finish_state and finish_state.get("updates")
+                        and finish_state.get("inline_finish_id")==closure.get("inline_finish_id")):
+                    # Review fixes recorded after the finish: the close keeps the finish's commit.
+                    row["head_commit"]=inline_finish.recorded_head(finish_state)[0]
+                    row["finish_updates"]=finish_state["updates"]
                 row["stale_closure"]=closure.get("route_hash")!=raw.get("route_hash")
                 row["registry_current"]=closure.get("registry_current",True)
                 if (raw.get("route_plan") is not None and closure.get("terminal_gate_proven") is True
