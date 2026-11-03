@@ -8722,6 +8722,24 @@ def completion_superseded(currency: GateCurrency, *, answered: bool = False) -> 
     return answered and currency.state in ANSWERED_CURRENCY_STATES
 
 
+# The one `resource-stage-not-current` reason that is an observation, not an unknown: the
+# readable ledger shows the supervised stage has not settled as succeeded (or its success was
+# retracted). A settled stage whose proof does not match, and records that could not be read,
+# keep `completion-marker-missing`.
+RESOURCE_STAGE_UNSETTLED = "resource-stage-unsettled"
+
+
+def resource_stage_unsettled(currency: GateCurrency) -> bool:
+    """Whether a marker stands beside a resource stage observed not to have settled as succeeded.
+
+    Such a marker is not the stage's result. The launch gate reads it as missing, as it reads every
+    not-current resource marker, and a replacement owner continues that stage. Nothing else is read
+    this way: a proof mismatch or an unreadable record stays unknown and keeps its refusal.
+    """
+    return (currency.state == "resource-stage-not-current"
+            and currency.reason == RESOURCE_STAGE_UNSETTLED)
+
+
 def _completion_instant(marker: Mapping[str, object]):
     # An unreadable, timezone-less or otherwise unorderable value cannot be placed against
     # another completion, so it is no instant (never a reason to call a result older).
@@ -8874,15 +8892,17 @@ def _resource_stage_marker_current(route, node, marker, marker_path, jobs):
         raw = marker_path.read_bytes()
         marker_sha = hashlib.sha256(raw).hexdigest()
         marker_sequence = marker.get("sequence")
+        stage = state.get("nodes", {}).get(node["id"], {})
+        settled = stage.get("state") == "STAGE_SUCCEEDED"
         for entry in ledger.journal():
             evidence = entry.get("evidence") or {}
             if (entry.get("actor") == "resource-false-success-reconciliation"
                     and evidence.get("marker_sha256") == marker_sha
                     and evidence.get("marker_sequence") == marker_sequence):
-                return GateCurrency("resource-stage-not-current", "completion-marker-missing")
-        stage = state.get("nodes", {}).get(node["id"], {})
-        if stage.get("state") != "STAGE_SUCCEEDED":
-            return GateCurrency("resource-stage-not-current", "completion-marker-missing")
+                return GateCurrency("resource-stage-not-current",
+                                    "completion-marker-missing" if settled else RESOURCE_STAGE_UNSETTLED)
+        if not settled:
+            return GateCurrency("resource-stage-not-current", RESOURCE_STAGE_UNSETTLED)
         resource_identity = marker.get("resource_execution_identity")
         if resource_identity is None:
             return None

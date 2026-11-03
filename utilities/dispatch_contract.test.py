@@ -7873,8 +7873,32 @@ class ResourceStageMarkerSuccessorTest(unittest.TestCase):
         currency = D._resource_stage_marker_current(
             self.route, self.route["nodes"][0], hand, self.marker_path, str(self.jobs))
         self.assertEqual((currency.state, currency.reason),
-                         ("resource-stage-not-current", "completion-marker-missing"))
+                         ("resource-stage-not-current", "resource-stage-unsettled"))
+        self.assertTrue(D.resource_stage_unsettled(currency))
         self.assertFalse(D.completion_superseded(currency))
+
+    def test_settled_stage_with_a_mismatched_proof_or_unreadable_records_is_unknown_not_unsettled(self):
+        node = self.route["nodes"][0]
+        # Settled, but the admitting owner is not this route's current one.
+        mismatched = self.current({**self.evidence, "owner_attempt_id": "att-outsider"},
+                                  self.holder(True), self.binding(self.source_id, self.source_hash))
+        self.assertEqual((mismatched.state, mismatched.reason),
+                         ("resource-stage-not-current", "completion-marker-missing"))
+        self.assertFalse(D.resource_stage_unsettled(mismatched))
+        # The run registry cannot be read.
+        registry = self.registry.read_bytes()
+        self.registry.unlink()
+        unreadable = D._resource_stage_marker_current(
+            self.route, node, self.marker_doc, self.marker_path, str(self.jobs))
+        self.assertEqual(unreadable.reason, "completion-marker-missing")
+        self.assertFalse(D.resource_stage_unsettled(unreadable))
+        self.registry.write_bytes(registry)
+        # The journal cannot be read.
+        self.ledger.journal_path.write_text("not json\n", encoding="utf-8")
+        corrupt = D._resource_stage_marker_current(
+            self.route, node, self.marker_doc, self.marker_path, str(self.jobs))
+        self.assertEqual(corrupt.reason, "completion-marker-missing")
+        self.assertFalse(D.resource_stage_unsettled(corrupt))
 
 
 class RegistryLineageWriterTest(unittest.TestCase):

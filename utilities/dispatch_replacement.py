@@ -1753,6 +1753,13 @@ def _completion_unproven(route, node, marker, currency):
     error.completion = {'completion_node': node_id, 'completion_currency': currency.state,
                         'completion_reason': currency.reason,
                         **({'completion_evidence': evidence} if evidence else {})}
+    if currency.state == 'resource-stage-not-current':
+        # An unsettled stage is continued, never refused; this one settled but its proof did not
+        # match, or its records could not be read. `revise` refuses such a marker, so it is not offered.
+        error.next_step = (f"Completed node {node_id} reads {currency.state} ({currency.reason}): its "
+                           "settled run's proof did not match or its run records could not be read. "
+                           "Inspect that node's run records and completion marker, then resume.")
+        return error
     action = DC.route_state_next_action(currency.reason, node_id, route.get('route_id'), node,
                                         evidence=evidence or None)
     judged = (f"Completed node {node_id} reads {currency.state} ({currency.reason}); "
@@ -1851,8 +1858,12 @@ def _answered_fail_verdicts(route, markers, basis, reference):
 
 
 ANSWERED_FAIL_REOPEN = 'corrected-fail-verdict'
-# `DC.gate_currency` state of a supervised resource stage that has not settled as succeeded.
-UNFINISHED_RESOURCE_STAGE = 'resource-stage-not-current'
+
+
+def _unsettled_resource_row(row):
+    """A reuse row whose marker stood beside a resource stage observed unsettled (`DC.resource_stage_unsettled`)."""
+    return DC.resource_stage_unsettled(DC.GateCurrency(str(row.get('currency') or ''),
+                                                       str(row.get('currency_reason') or '')))
 
 
 def _reuse_snapshot(jobs, route, lines, *, proof=None, pinned=None):
@@ -1899,10 +1910,11 @@ def _reuse_snapshot(jobs, route, lines, *, proof=None, pinned=None):
         # approved fix answered, is not reused; its node is reopened.
         superseded = DC.completion_superseded(currency)
         reopened = str(node['id']) in answered and DC.completion_superseded(currency, answered=True)
-        # A resource stage whose runs have not settled as succeeded is unfinished, whatever
+        # A resource stage observed not to have settled as succeeded is unfinished, whatever
         # marker a hand `complete` wrote beside it: the launch gate already reads that marker
         # as missing. The replacement continues the same stage; it is neither reused nor refused.
-        unfinished = currency.state == UNFINISHED_RESOURCE_STAGE
+        # A settled stage whose proof does not match, or an unreadable record, stays refused.
+        unfinished = DC.resource_stage_unsettled(currency)
         if (currency.state != 'current' and not superseded and not merge_unobservable
                 and not gates_off_edit and not reopened and not unfinished):
             raise _completion_unproven(route, node, marker, currency)
@@ -2026,8 +2038,11 @@ def _reuse_preserved(previous, current):
         return False
 
     def reobserved_invalidation(row):
+        # A resource stage unsettled at claim may record STAGE_SUCCEEDED before launch for the
+        # marker its settlement wrote first; that same marker has now passed as current.
         return ((row.get('currency') == 'completion-evidence-unreadable'
                  and row.get('currency_reason') == 'review-source-index-unmerged')
+                or _unsettled_resource_row(row)
                 or (bool(row.get('depends_on_invalid'))
                     and all(parent in now for parent in row.get('depends_on_invalid') or ())))
 
@@ -2057,7 +2072,8 @@ def _reuse_preserved(previous, current):
         # An answered FAIL verdict is reopened on its exact pinned marker whatever
         # evidence change it shows; _reuse_snapshot already refused integrity breaks.
         return (row.get('reopened') == ANSWERED_FAIL_REOPEN
-                or (row.get('currency') in {'current', 'superseded', UNFINISHED_RESOURCE_STAGE})
+                or (row.get('currency') in {'current', 'superseded'})
+                or _unsettled_resource_row(row)
                 or (row.get('currency') == 'completion-evidence-unreadable'
                     and row.get('currency_reason') == 'review-source-index-unmerged'))
 
@@ -3182,9 +3198,9 @@ def recovery_instructions(args):
         raise DC.DispatchContractError('replacement-reuse-evidence-drift')
     completed = ', '.join(str(row['node']) for row in current_reuse['completed']) or '(none)'
     invalidated = ', '.join(str(row['node']) for row in current_reuse.get('invalidated', [])
-                            if row.get('currency') != UNFINISHED_RESOURCE_STAGE)
+                            if not _unsettled_resource_row(row))
     unfinished = ', '.join(str(row['node']) for row in current_reuse.get('invalidated', [])
-                           if row.get('currency') == UNFINISHED_RESOURCE_STAGE)
+                           if _unsettled_resource_row(row))
     pending = ', '.join(str(node) for node in current_reuse.get('pending', [])) or '(none)'
     source_fields, source = _rows(lines)[prior]
     kind = death_kind(source_fields, source, jobs=jobs, lines=lines)
