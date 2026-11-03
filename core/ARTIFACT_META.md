@@ -172,10 +172,15 @@ shows.
   under the decisions heading, and take the first bullet under the next heading. A
   section that records decisions already made (`## 사용자 결정 기록`, `## Decision log`)
   is not counted. The file's modification time is when the status last changed.
-- **Refresh.** Whoever runs the work edits it when the state changes. Route closure
-  (`capability-route finish`) and a PR merge are the two events an automatic refresh
-  would attach to; none is installed, and nothing checks freshness. Fleet shows the age
-  in front of a document older than three days.
+- **Refresh.** Whoever runs the work edits it when the state changes. A route's proven
+  close (`capability-route finish`, or an owner's runtime close) also refreshes the
+  campaign's page when one exists (`utilities/status_board.py`): it sets the `갱신`/`Updated` stamp
+  and puts one line first under `## 최근 마감` / `## Recently closed` (at most five:
+  when, the route's intent, the route id and any PR link in the close summary). The
+  one line, `## 결정 필요` and `## 다음` stay the person's; a page is never created and a
+  failure leaves it as it was. A PR merge has no Hearting event, so nothing refreshes
+  on it, and nothing checks freshness. Fleet shows the age in front of a document older
+  than three days.
 
 ## Internal files (no reader duty)
 
