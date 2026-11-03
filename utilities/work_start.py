@@ -670,6 +670,21 @@ def _rows(jobs):
     return rows
 
 
+def _restore_archived_route(jobs, route_id):
+    """Put a closed route's archived rows back before its replay reads the registry.
+
+    Settled rows of routes closed long ago move to the dispatch archive; every check of a
+    replay (the owner row, its completion proof, a framed decision's legs) reads the live
+    registry, so they come back first. A route any live row still names was never moved."""
+    try:
+        if f"={route_id}".encode() in Path(jobs).read_bytes():
+            return
+        from dispatch_registry_archive import restore
+        restore(jobs, route_id)
+    except OSError:
+        pass   # an unreadable registry or a busy lock: the replay reports what it finds
+
+
 def _current_parent_session_id():
     """The calling native session owns delivery, never a witnessed sibling."""
     return default_parent_session_id()
@@ -2104,6 +2119,7 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
                 "next_step": "This route was closed automatically after it sat unused; run parent_next_command "
                              "to compose the same work again."}
     if closed:
+        _restore_archived_route(jobs, route["route_id"])
         if closed.get("finish_pending"):
             return {**result, "state": "needs-attention", "reason": "finish-pending",
                     "required_action": "resume-inline-finish", "outcome": closed}

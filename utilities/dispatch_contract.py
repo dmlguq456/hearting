@@ -5563,6 +5563,18 @@ def _launch_dependencies(lines, fields, callbacks=(), reads=None, parsed=None):
     return tuple(_launch_row_value(rows[index][0]) for index in sorted(selected))
 
 
+def _dependencies_kept(jobs, prepared, fresh) -> bool:
+    """The rows a launch's preparation pinned are unchanged under the lock.
+
+    Settled rows the registry archive moved out meanwhile are byte-exact in the archive
+    and change none of their facts, so their absence is not a change (a launch without a
+    route pins every row of its worktree, old settled ones included)."""
+    if prepared == fresh:
+        return True
+    from dispatch_registry_archive import moved_only
+    return moved_only(jobs, prepared, fresh)
+
+
 def _launch_cancellation_routes(jobs, lines, metadata, parsed=None):
     """Resolve foreign/adopted owner routes outside every global lock."""
     routes = {}
@@ -5724,8 +5736,8 @@ def _commit_launch_preparation(jobs, fresh, prepared, *, parent_binding, preclai
         fresh, metadata["attempt_id"], reason=f"attempt-{phase}-row-not-unique")
     _launch_local_fences(jobs, current_meta, routes)
     if (_launch_row_value(current_fields) != _launch_row_value(fields)
-            or _launch_dependencies(fresh, fields, (preclaim,), reads)
-            != _launch_dependencies(lines, fields, (preclaim,), reads)):
+            or not _dependencies_kept(jobs, _launch_dependencies(lines, fields, (preclaim,), reads),
+                                      _launch_dependencies(fresh, fields, (preclaim,), reads))):
         raise DispatchContractError(f"attempt-{phase}-identity-changed", metadata["attempt_id"])
     if parent_binding is not None:
         # A parent can exit while we wait for jobs.lock even when its row is
@@ -11249,8 +11261,9 @@ def _commit_attempt_row(
                     return False
         def pin_preparation():
             callbacks = (mutation_precheck, preclaim if launch else None)
-            if (_launch_dependencies(lines, row_fields, callbacks, prepared_reads, parsed)
-                    != _launch_dependencies(prepared_lines, row_fields, callbacks, prepared_reads, parsed)):
+            if not _dependencies_kept(
+                    jobs, _launch_dependencies(prepared_lines, row_fields, callbacks, prepared_reads, parsed),
+                    _launch_dependencies(lines, row_fields, callbacks, prepared_reads, parsed)):
                 raise DispatchContractError("attempt-registration-dependency-changed", attempt_id)
 
         automatic_replacement = prepared_replacement
@@ -12374,13 +12387,17 @@ def reconcile_local_registry(global_jobs: Path, local_jobs: Path) -> tuple[int, 
     if not local_jobs.is_file():
         return 0, 0
     local_lines = local_jobs.read_text(encoding="utf-8").splitlines()
+    # A row the registry archive moved is still registered; it is never copied back in.
+    from dispatch_registry_archive import archived_rows
+    archived = {identity for raw in archived_rows(global_jobs)
+                if (identity := _row_identity(raw.split("\t"))) is not None}
     lock_path = Path(f"{global_jobs}.lock")
     reconciled = 0
     malformed = 0
     with lock_path.open("a", encoding="utf-8") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         global_lines = global_jobs.read_text(encoding="utf-8").splitlines()
-        identities = {
+        identities = archived | {
             identity for line in global_lines
             if (identity := _row_identity(line.split("\t"))) is not None
         }
