@@ -1392,7 +1392,7 @@ class ComputeHostsTest(unittest.TestCase):
         # C-W7: run from an agent pane, this fixture used to attribute its run to
         # that session's real route and leave a runner notifying the real pane.
         with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "live-session-c-w7",
-                                          "HERDR_PANE_ID": "wB:pAX"}):
+                                          "HERDR_PANE_ID": "fixture-pane-not-real"}):
             self.tearDown()
             self.setUp()
         result = self.run_tool("run", "here", "--name", "ok", "--", "bash", "-c", "exit 0")
