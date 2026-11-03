@@ -681,6 +681,13 @@ class ProjectMemoryAndCurrentTaskProjection(unittest.TestCase):
 class ScreenWordLanguage(unittest.TestCase):
     """Route-page and seat words read the shared catalog: English unless Korean is declared."""
 
+    def test_a_missing_catalog_never_blocks_a_screen(self):
+        from tools.fleet import config
+        from tools.fleet.explorer.runtime import ExplorerRuntime
+        with mock.patch.object(config, "_ui_catalog", side_effect=FileNotFoundError("gone")):
+            self.assertEqual(config.ui_text("fleet.memory.count_doing", count=3), "count doing 3")
+            self.assertIn("loading", ExplorerRuntime().loading_frame(40, 10).text_rows()[5])
+
     def test_earlier_rounds_note(self):
         from tools.fleet.explorer.live import _node_detail
         node = {"id": "execute", "state": "active", "route_attempt_round": 3}

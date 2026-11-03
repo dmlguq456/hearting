@@ -94,8 +94,15 @@ def ui_language():
 
 
 def ui_text(message, /, **fields):
-    """One screen string from ``tools/i18n/messages.json``: English unless Korean is declared."""
-    return _ui_catalog().text(message, ui_language(), **fields)
+    """One screen string from ``tools/i18n/messages.json``: English unless Korean is declared.
+
+    A screen never fails over its words: without a readable catalog the string names its fields.
+    """
+    try:
+        return _ui_catalog().text(message, ui_language(), **fields)
+    except Exception:  # noqa: BLE001 -- a missing or broken catalog never blocks a screen
+        return " ".join([message.rsplit(".", 1)[-1].replace("_", " ")]
+                        + [str(value) for value in fields.values()])
 
 
 def ensure(*, dry_run=False):
