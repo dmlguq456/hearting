@@ -48,7 +48,7 @@ Reinitialize all aspects after initial setup or a long gap.
 Resume at QA and pause once before Phase 5 for user memos.
 
 ```text
-/analyze-user coding_convention --source ~/path/to/NN_Zoo --source ~/path/to/other_repo
+/analyze-user coding_convention --source ~/path/to/my_repo --source ~/path/to/other_repo
 ```
 
 Analyze coding conventions from user-supplied repositories. Recursively discover model, train, config, and notebook patterns; never hardcode a source path.
