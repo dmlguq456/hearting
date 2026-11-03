@@ -10499,9 +10499,11 @@ def _runner_maintenance_pass(store):
             remaining = max(0.0, (deadline_ns - time.monotonic_ns()) / 1_000_000_000)
             cursor = state.get("cursor")
             registry_cursor = state.get("registry_cursor")
+            # At most half of what is left, so the duties after it (retire,
+            # inbox prefill) also run while a reconcile cycle spans many passes.
             counts = join.reconcile_pending_delivery(
                 jobs, max_rows=RECONCILE_MAX_ROWS,
-                time_budget_s=min(RECONCILE_TIME_BUDGET_S, remaining),
+                time_budget_s=min(RECONCILE_TIME_BUDGET_S, remaining / 2),
                 start_after=cursor if isinstance(cursor, str) else None,
                 registry_start=(registry_cursor if isinstance(registry_cursor, int)
                                 and not isinstance(registry_cursor, bool) else None))

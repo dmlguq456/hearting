@@ -524,6 +524,33 @@ class ReconcileDutyTest(IsolatedCase):
         self.assertEqual(records, 2, "the record walk is reached once the backstops finish")
         self.assertLessEqual(passes, 4)
 
+    def test_backstops_that_end_with_the_budget_continue_at_the_records(self):
+        # Review of #1193: backstops that reach the last row just as the budget
+        # runs out left both cursors empty, so the next pass restarted at row 0.
+        self._owner_rows(10)
+        self._open_records(2)
+        clock = [0.0]
+        seen = []
+
+        def backstop(_jobs, attempt):
+            seen.append(attempt)
+            clock[0] += 1.0
+
+        import dispatch_owner_input
+        with mock.patch.object(join.time, "monotonic", side_effect=lambda: clock[0]), \
+                mock.patch.object(dispatch_owner_input, "materialize_unresolved",
+                                  side_effect=backstop):
+            first = join.reconcile_pending_delivery(self.jobs, max_rows=500, time_budget_s=10.0)
+            self.assertEqual((first["records_read"], first["budget_exhausted"]), (0, 1))
+            self.assertEqual(first["registry_cursor"], 10)
+            second = join.reconcile_pending_delivery(
+                self.jobs, max_rows=500, time_budget_s=10.0, start_after=first["cursor"],
+                registry_start=first["registry_cursor"])
+        self.assertEqual(len(seen), 10, "no backstop runs twice in one cycle")
+        self.assertEqual(second["records_read"], 2)
+        self.assertIsNone(second["cursor"])
+        self.assertIsNone(second["registry_cursor"])
+
     def test_a_reconcile_backlog_does_not_starve_the_peer_history_and_index(self):
         def exhausting(_jobs, *, time_budget_s=None, **_kwargs):
             time.sleep(time_budget_s or 0)

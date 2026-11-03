@@ -726,16 +726,17 @@ def reconcile_pending_delivery(jobs: Path, *, max_rows: int | None = None,
     end the returned ``cursor`` is ``None``, otherwise it is the last processed
     relative path.
 
-    A bounded registry pass that stops early never reaches the record loop: a
-    partial ``rows_by_attempt`` is not a valid authority view and must not
-    materialize or expire anything. Retention pruning still runs because it
-    reads the records alone.
+    A bounded pass whose backstops stop early does not reach the record loop
+    in that pass; the record loop starts once the backstops have reached the
+    last row. Retention pruning still runs because it reads the records alone.
 
     The per-row materialize backstops are the expensive part of the registry
     pass, so a bounded pass resumes them: ``registry_start`` is the row index
     to continue from, and a pass cut off by its budget returns the next index
-    as ``registry_cursor``. The authority view is still parsed from every row
-    on every pass. A pass that resumes the record walk (``start_after``) skips
+    as ``registry_cursor``. Once they reach the last row, ``registry_cursor``
+    is the row count until the record walk finishes, so the next pass goes on
+    with the records. The authority view is still parsed from every row on
+    every pass. A pass that resumes the record walk (``start_after``) skips
     the backstops, which finished earlier in the same cycle. Without the
     resume a pass that could not reach the last row restarted at row 0
     forever: on a 10k-row registry the runner re-read the same ~150 rows on
@@ -808,6 +809,12 @@ def reconcile_pending_delivery(jobs: Path, *, max_rows: int | None = None,
                     and materialize_after_terminal_close(jobs, attempt_id) is not None:
                 result["materialized"] += 1
 
+    if registry_complete and start_after is None:
+        # The backstops reached the last row in this pass. If the record walk
+        # below cannot finish too, the next pass must start at the records,
+        # not at row 0 again: a walk whose backstops end just as the budget
+        # does would otherwise restart forever.
+        registry_cursor = len(parsed)
     cursor = start_after
     walk_finished = False
     pending_root = root / "pending-delivery"
@@ -872,6 +879,7 @@ def reconcile_pending_delivery(jobs: Path, *, max_rows: int | None = None,
         pass
     if walk_finished:
         cursor = None
+        registry_cursor = None
     if bounded:
         result.update(counters)
         result["cursor"] = cursor
