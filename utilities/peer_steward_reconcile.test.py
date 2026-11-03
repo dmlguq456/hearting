@@ -483,6 +483,94 @@ class ReconcileDutyTest(IsolatedCase):
         self.assertIsNone(state["cursor"])
         self.assertGreater(state["last_pass_ns"], 0)
 
+    def _owner_rows(self, count):
+        rows = []
+        for index in range(count):
+            meta = ",".join(f"{key}={value}" for key, value in (
+                ("attempt_id", f"att-backlog-{index:04d}"), ("worker_type", "owner"),
+                ("dispatch_depth", "1"), ("attempt_schema_version", "2")))
+            rows.append(f"2026-11-03T00:00:{index % 60:02d}Z\tdone\t0\t-\tbacklog-{index}\t{meta}")
+        self.jobs.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+    def test_bounded_registry_backstops_resume_instead_of_restarting(self):
+        # 2026-11-03: a pass that could not reach the last registry row restarted
+        # at row 0, so the runner re-read the same ~150 rows on every pass and
+        # never reached the record walk or the duties after it.
+        self._owner_rows(10)
+        self._open_records(2)
+        clock = [0.0]
+        seen = []
+
+        def backstop(_jobs, attempt):
+            seen.append(attempt)
+            clock[0] += 1.0     # each backstop costs one fake second
+
+        import dispatch_owner_input
+        with mock.patch.object(join.time, "monotonic", side_effect=lambda: clock[0]), \
+                mock.patch.object(dispatch_owner_input, "materialize_unresolved",
+                                  side_effect=backstop):
+            passes, cursor, registry_cursor, records = 0, None, None, 0
+            while passes < 10:
+                passes += 1
+                result = join.reconcile_pending_delivery(
+                    self.jobs, max_rows=500, time_budget_s=3.5,
+                    start_after=cursor, registry_start=registry_cursor)
+                cursor, registry_cursor = result["cursor"], result["registry_cursor"]
+                records += result["records_read"]
+                if not result["budget_exhausted"] and cursor is None and registry_cursor is None:
+                    break
+        self.assertEqual(seen, [f"att-backlog-{index:04d}" for index in range(10)],
+                         "every row's backstop runs once per cycle, in order")
+        self.assertEqual(records, 2, "the record walk is reached once the backstops finish")
+        self.assertLessEqual(passes, 4)
+
+    def test_backstops_that_end_with_the_budget_continue_at_the_records(self):
+        # Review of #1193: backstops that reach the last row just as the budget
+        # runs out left both cursors empty, so the next pass restarted at row 0.
+        self._owner_rows(10)
+        self._open_records(2)
+        clock = [0.0]
+        seen = []
+
+        def backstop(_jobs, attempt):
+            seen.append(attempt)
+            clock[0] += 1.0
+
+        import dispatch_owner_input
+        with mock.patch.object(join.time, "monotonic", side_effect=lambda: clock[0]), \
+                mock.patch.object(dispatch_owner_input, "materialize_unresolved",
+                                  side_effect=backstop):
+            first = join.reconcile_pending_delivery(self.jobs, max_rows=500, time_budget_s=10.0)
+            self.assertEqual((first["records_read"], first["budget_exhausted"]), (0, 1))
+            self.assertEqual(first["registry_cursor"], 10)
+            second = join.reconcile_pending_delivery(
+                self.jobs, max_rows=500, time_budget_s=10.0, start_after=first["cursor"],
+                registry_start=first["registry_cursor"])
+        self.assertEqual(len(seen), 10, "no backstop runs twice in one cycle")
+        self.assertEqual(second["records_read"], 2)
+        self.assertIsNone(second["cursor"])
+        self.assertIsNone(second["registry_cursor"])
+
+    def test_a_reconcile_backlog_does_not_starve_the_peer_history_and_index(self):
+        def exhausting(_jobs, *, time_budget_s=None, **_kwargs):
+            time.sleep(time_budget_s or 0)
+            return {"materialized": 0, "expired": 0, "skipped": 0, "pruned_records": 0,
+                    "pruned_locks": 0, "prune_skipped": 0, "rows_read": 1,
+                    "records_read": 0, "budget_exhausted": 1, "cursor": None,
+                    "registry_cursor": 1}
+
+        # 2026-11-03: the reconcile ran first and spent the whole shared budget on
+        # every pass, so the prune and the index publisher never ran once.
+        with mock.patch.object(peer_steward, "MAINTENANCE_TIME_BUDGET_S", 1.5), \
+                mock.patch.object(join, "reconcile_pending_delivery", side_effect=exhausting):
+            result = peer_steward._runner_maintenance_pass(self.store)
+        self.assertIn("peer_history", result)
+        self.assertNotEqual(result["peer_index"].get("deferred"), True, result)
+        self.assertTrue(peer_obligations.read_runner_duty_state(self.root, "peer-history"))
+        self.assertTrue(peer_obligations.read_runner_duty_state(self.root, "peer-index"))
+        self.assertEqual(peer_obligations.read_runner_duty_state(
+            self.root, "reconcile")["registry_cursor"], 1)
+
     def test_a_quiet_pass_reads_no_registry(self):
         now_ns = time.time_ns()
         for duty in ("reconcile", "peer-history", "peer-index", "retire",
