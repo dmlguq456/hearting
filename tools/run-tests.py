@@ -1183,6 +1183,31 @@ def _process_carries_marker(base: Path, marker: bytes) -> tuple[bool, bool]:
     return False, readable
 
 
+# Commands of the fixture processes a suite left running, reaped at its end, keyed
+# by the suite's temp root. A suite that starts detached helpers without stopping
+# them keeps them burning CPU for the rest of its run; the summary names it.
+_REAPED_COMMANDS: dict[str, list[str]] = {}
+_REAPED_SUMMARY: list[str] = []
+_REAPED_LOCK = threading.Lock()
+
+
+def _process_command_name(pid: int) -> str:
+    """The script or program a process runs, by base name; "?" when unreadable."""
+    try:
+        argv = (Path("/proc") / str(pid) / "cmdline").read_bytes().split(b"\0")
+    except OSError:
+        return "?"
+    argv = [os.fsdecode(part) for part in argv if part]
+    if not argv:
+        return "?"
+    program = os.path.basename(argv[0])
+    if re.fullmatch(r"python[0-9.]*|(ba|da)?sh|node", program):
+        script = next((part for part in argv[1:] if not part.startswith("-")), "")
+        if script and argv[argv.index(script) - 1] not in ("-c", "-m"):
+            return os.path.basename(script)
+    return program
+
+
 def reap_suite_tmp_processes(tmp_root: Path, *, timeout: float = 5.0) -> list[int] | None:
     """Reap marked or previously observed processes without broad UID vetoes.
 
@@ -1243,7 +1268,10 @@ def reap_suite_tmp_processes(tmp_root: Path, *, timeout: float = 5.0) -> list[in
                     continue
                 # Kill only the process carrying this marker or its observed
                 # PID/start identity. A shared process group may have bystanders.
+                name = _process_command_name(pid)
                 os.kill(pid, signal.SIGKILL)
+                with _REAPED_LOCK:
+                    _REAPED_COMMANDS.setdefault(root_key, []).append(name)
                 newly_killed[pid] = ticks
                 unresolved.pop(pid, None)
             except ProcessLookupError:
@@ -1381,6 +1409,12 @@ def finalize_suite_attempt(
             f"suite-fixture-process-state-error: root={tmp_root} detail={exc}",
             file=sys.stderr,
         )
+    with _REAPED_LOCK:
+        reaped = _REAPED_COMMANDS.pop(str(tmp_root), [])
+        if reaped and result is not None:
+            _REAPED_SUMMARY.append(
+                f"fixture-processes-reaped: {result.relpath} count={len(reaped)} "
+                f"commands={','.join(sorted(set(reaped)))}")
     output_error = None
     output_error_reason = "child-stderr-unreadable"
     try:
@@ -2675,6 +2709,10 @@ def _run_main(argv: list[str]) -> int:
     xpass_nonfatal: list[str] = []
     report_rows: list[dict[str, str]] = []
     verdict_counts: dict[str, int] = {}
+    # One summary line per test name that failed and then passed, so a log grep
+    # across CI runs counts how often each test flakes (a suite row keeps only
+    # the names, folded into one detail field).
+    flaky_names: list[str] = []
 
     isolation_sensitive: dict[str, bool] = {}
     for result in all_results:
@@ -2794,6 +2832,8 @@ def _run_main(argv: list[str]) -> int:
                 else "FLAKY-KNOWN-FAIL"
             )
             verdicts = [Verdict(result.relpath, "-", verdict, detail=detail)]
+            if verdict == "FLAKY-PASS":
+                flaky_names.extend(_flaky_name_lines(result.relpath, attempt_results))
         elif result.relpath in unlisted_retried and len(attempt_results) > 1:
             retries = attempt_results[1:]
             if any(attempt.passed for attempt in retries):
@@ -2806,6 +2846,7 @@ def _run_main(argv: list[str]) -> int:
                 if failing_ids:
                     detail += f"; failing={','.join(failing_ids)}"
                 verdicts = [Verdict(result.relpath, "-", "FLAKY-PASS", detail=detail)]
+                flaky_names.extend(_flaky_name_lines(result.relpath, attempt_results))
             else:
                 verdicts = classify_result(retries[-1], baseline, today, run_fingerprint)
         else:
@@ -2997,6 +3038,11 @@ def _run_main(argv: list[str]) -> int:
     for profile in ISOLATION_PROFILES:
         print(f"profile[{profile}]={len(suites_by_profile[profile])}")
 
+    for line in flaky_names:
+        print(line)
+    with _REAPED_LOCK:
+        for line in sorted(_REAPED_SUMMARY):
+            print(line)
     if xpass_nonfatal:
         print(f"XPASS-NONFATAL={len(xpass_nonfatal)}")
         for item in xpass_nonfatal:
@@ -3011,6 +3057,21 @@ def _run_main(argv: list[str]) -> int:
     if args.report_only:
         return 0
     return 1 if hard_failures else 0
+
+
+def _flaky_name_lines(relpath: str, attempts) -> list[str]:
+    """`flaky-pass: <suite>::<test> failed=<n>/<attempts>`, one per failing test name.
+
+    A suite whose failing attempts named no test gets one `<suite>::-` line.
+    """
+    counts: dict[str, int] = {}
+    for attempt in attempts:
+        if attempt.passed:
+            continue
+        for test_id in (attempt.failing_test_ids or ["-"]):
+            counts[test_id] = counts.get(test_id, 0) + 1
+    return [f"flaky-pass: {relpath}::{test_id} failed={count}/{len(attempts)}"
+            for test_id, count in sorted(counts.items())]
 
 
 def main(argv: list[str]) -> int:

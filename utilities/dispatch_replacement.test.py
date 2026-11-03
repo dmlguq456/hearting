@@ -37,6 +37,10 @@ HEADLESS_MODEL_REFUSAL = (
 
 _STATE_TMP = None
 _STATE_OLD = None
+_spec = importlib.util.spec_from_file_location(
+    "replacement_fixture_processes", Path(__file__).resolve().parents[1] / "tools/fixture_processes.py")
+fixture_processes = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(fixture_processes)
 
 
 def setUpModule():
@@ -53,12 +57,17 @@ def tearDownModule():
         os.environ.pop("FLEET_USAGE_STATE_DIR", None)
     else:
         os.environ["FLEET_USAGE_STATE_DIR"] = _STATE_OLD
+    # A replacement start can leave human_wait_state.py's detached cache refresh
+    # running with this module's state root; stop it before the root goes.
+    fixture_processes.reap(_STATE_TMP.name)
     _STATE_TMP.cleanup()
 
 
 class ReplacementTest(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
+        # Cleanups run LIFO: detached helpers started under this root stop first.
+        self.addCleanup(fixture_processes.reap, self.tmp.name)
         self.root=Path(self.tmp.name);self.jobs=self.root/'jobs.log';self.jobs.touch()
         seat_state=mock.patch('session_tidy.state_root',return_value=self.root/'seat-state')
         seat_state.start();self.addCleanup(seat_state.stop)

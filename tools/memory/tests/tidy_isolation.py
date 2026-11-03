@@ -288,6 +288,9 @@ class IsolatedEnv:
 
     def cleanup(self) -> None:
         _pop_confinement(getattr(self, "_confinement_token", None))
+        # A tidy run started real detached helpers here (human_wait_state.py's
+        # cache refresh, 14 left per suite run): stop them before the root goes.
+        _fixture_processes().reap(str(self.root))
         shutil.rmtree(self.root, ignore_errors=True)
 
     def __enter__(self) -> "IsolatedEnv":
@@ -304,6 +307,16 @@ def _under(path: Path, root: Path) -> bool:
         resolved = path.absolute()
     root = root.resolve() if root.exists() else root
     return resolved == root or root in resolved.parents
+
+
+def _fixture_processes():
+    """tools/fixture_processes.py, loaded by path so sys.path stays as the suite set it."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "tidy_fixture_processes", Path(__file__).resolve().parents[2] / "fixture_processes.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def isolated_env(**kwargs) -> IsolatedEnv:

@@ -4245,9 +4245,44 @@ class Bounds(Fixture):
                     homes = [fixture.add(f"att-scale-{kind}-{n}") for n in range(3)]
                     fixture.sweep(0)
                     discovery, preparation, dependencies, holds = [], [], [], []
+                    held_dependencies, under_lock = [], []
+                    active = [False]
                     original_index, original_detach = R._delivery_index, R._detach
                     original_fresh, original_lock = R._fresh, R._registry_lock
+                    # The hold is bounded by what runs under jobs.log.lock, not by a
+                    # clock (0.25 s flaked at 0.398 s on a loaded runner): no pass that
+                    # prepares or discovers history runs while it is held, the
+                    # candidate's own rechecks there name a bounded set, and the final
+                    # admission takes at most one stat-capped look at the recipient
+                    # groups per hold.
+                    history_passes = {name: getattr(R, name) for name in (
+                        "_Snapshot", "_declared_index", "_candidate_recipient_groups",
+                        "_late_delivery_change", "_prepare_candidate_delivery_baseline")}
+                    held_related, held_looks = [], []
+                    def outside(name, fn):
+                        def checked(*args, **kwargs):
+                            if active[0]:
+                                under_lock.append(name)
+                            return fn(*args, **kwargs)
+                        return checked
+                    original_fingerprint = R._reference_fingerprint
+                    original_group_change = R._late_candidate_group_change
+                    def fingerprint(root, identities, **kwargs):
+                        if active[0]:
+                            held_related.append(len(identities))
+                        return original_fingerprint(root, identities, **kwargs)
+                    def group_change(baseline, related, *args, **kwargs):
+                        if active[0]:
+                            held_related.append(len(related))
+                        return original_group_change(baseline, related, *args, **kwargs)
+                    original_scan = R._scan_published
+                    def scan(*args, stat_limit=None, **kwargs):
+                        if active[0]:
+                            held_looks[-1].append(stat_limit)
+                        return original_scan(*args, stat_limit=stat_limit, **kwargs)
                     def indexed(*args, **kwargs):
+                        if active[0]:
+                            under_lock.append("_delivery_index")
                         start = time.monotonic()
                         try:
                             return original_index(*args, **kwargs)
@@ -4261,19 +4296,30 @@ class Bounds(Fixture):
                             preparation.append(time.monotonic() - start)
                     def fresh(watched):
                         dependencies.append(len(watched))
+                        if active[0]:
+                            held_dependencies.append(len(watched))
                         return original_fresh(watched)
                     @contextlib.contextmanager
                     def locked(jobs):
                         with original_lock(jobs) as admitted:
+                            active[0] = True
+                            held_looks.append([])
                             start = time.monotonic()
                             try:
                                 yield admitted
                             finally:
                                 holds.append(time.monotonic() - start)
-                    with mock.patch.object(R, "_delivery_index", indexed), \
-                            mock.patch.object(R, "_detach", detached), \
-                            mock.patch.object(R, "_fresh", fresh), \
-                            mock.patch.object(R, "_registry_lock", locked):
+                                active[0] = False
+                    with contextlib.ExitStack() as patches:
+                        for name, fn in history_passes.items():
+                            patches.enter_context(mock.patch.object(R, name, outside(name, fn)))
+                        patches.enter_context(mock.patch.object(R, "_delivery_index", indexed))
+                        patches.enter_context(mock.patch.object(R, "_reference_fingerprint", fingerprint))
+                        patches.enter_context(mock.patch.object(R, "_late_candidate_group_change", group_change))
+                        patches.enter_context(mock.patch.object(R, "_scan_published", scan))
+                        patches.enter_context(mock.patch.object(R, "_detach", detached))
+                        patches.enter_context(mock.patch.object(R, "_fresh", fresh))
+                        patches.enter_context(mock.patch.object(R, "_registry_lock", locked))
                         for invocation in range(40):
                             result = R.sweep(fixture.jobs, now_ns=fixture.now + int(8 / 7 * RETENTION_NS)
                                              + invocation * 301 * 10**9)
@@ -4284,7 +4330,14 @@ class Bounds(Fixture):
                     self.assertEqual(len(preparation), 3)
                     self.assertEqual(len(holds), 6)
                     self.assertLess(max(dependencies), 512)
-                    self.assertLess(max(holds), 0.25)
+                    self.assertEqual(under_lock, [], (kind, under_lock))
+                    self.assertTrue(held_dependencies, kind)
+                    self.assertLess(max(held_dependencies), 512)
+                    self.assertLess(max(held_related, default=0), 512)
+                    self.assertEqual(sum(map(len, held_looks)), 3, held_looks)
+                    self.assertTrue(all(len(looks) <= 1 for looks in held_looks), held_looks)
+                    self.assertTrue(all(limit is not None for looks in held_looks for limit in looks),
+                                    held_looks)
                     self.assertLess(max(preparation), 3.0)
                     print(json.dumps({"history": kind, "entries_per_history": count,
                                       "discovery_s": discovery, "preparation_s": preparation,
@@ -4714,8 +4767,8 @@ print("writes=300", flush=True)
             result = self.sweep((8) / 7)
         self.assertEqual(result["removed"], 1)
         self.assertFalse(home.exists())
+        # The outside() checks above are the bound on the hold; no wall clock.
         self.assertEqual(len(held), 2)
-        self.assertTrue(all(duration < 0.25 for duration in held), held)
 
     def test_complete_blank_and_malformed_registry_lines_do_not_poison_pass(self):
         home = self.add("att-noisy")
