@@ -96,9 +96,16 @@ class DispatchLogRetentionTest(unittest.TestCase):
                 "rt-00000000000000a4", os.path.join(tempfile.gettempdir(), "claude-0", "ev.md")),
             "other-file": self.completion_dir("rt-00000000000000a5", gone, extra="notes.txt"),
             "no-evidence": self.completion_dir("rt-00000000000000a6", ""),
+            # A row moved to the dispatch archive (#1183) still names its route.
+            "archived": self.completion_dir("rt-00000000000000a7", gone),
         }
+        segment = self.root / "archive" / "registry-2026-10"
+        segment.mkdir(parents=True)
+        (segment / "rows.jsonl").write_text(json.dumps({
+            "raw": f"{stamp(self.now - 30 * DAY)}\tdone\t/repo\t/wt\tjob\t"
+                   "attempt_id=att-archived,route_id=rt-00000000000000a7"}) + "\n", encoding="utf-8")
         result = self.sweep()
-        self.assertEqual((result["completion_removed"], result["completion_examined"]), (1, 7))
+        self.assertEqual((result["completion_removed"], result["completion_examined"]), (1, 8))
         self.assertFalse(leaked.exists())
         for why, directory in kept.items():
             with self.subTest(why=why):

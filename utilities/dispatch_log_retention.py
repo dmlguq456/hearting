@@ -499,22 +499,36 @@ def _retire_leftovers(jobs, root, snapshot, state, now_ns):
     if not isinstance(cursor, str):
         cursor = ""
     ordered = [name for name in names if name > cursor] + [name for name in names if name <= cursor]
+    candidates = []
     for name in ordered[:LEFTOVER_EXAMINE_LIMIT]:
         if time.monotonic() - started > LEFTOVER_PASS_SECONDS:
             break
         state["leftover_cursor"] = name
         result["completion_examined"] += 1
-        if name in referenced:
-            continue
-        path = str(completion / name)
-        if not _fixture_completion_dir(path, threshold_ns):
-            continue
+        if name not in referenced and _fixture_completion_dir(str(completion / name), threshold_ns):
+            candidates.append(name)
+    if candidates:
+        # Settled history moved to the dispatch archive still names its routes.
         try:
-            # destructive-ok: reason=remove completion markers whose only evidence was a deleted temporary root, unreferenced by the registry and untouched for seven days; boundary=one rt-<16 hex> directory directly under the state root's completion directory
-            shutil.rmtree(path)
-            result["completion_removed"] += 1
-        except OSError:
-            continue
+            from dispatch_registry_archive import archived_rows
+            archived = set()
+            for raw in archived_rows(jobs, needles=candidates):
+                archived.update(_ROUTE_ID_RE.findall(raw))
+        except Exception:  # noqa: BLE001 -- an unreadable archive keeps everything
+            candidates = []
+            archived = set()
+        for name in candidates:
+            if name in archived:
+                continue
+            path = str(completion / name)
+            if not _fixture_completion_dir(path, threshold_ns):
+                continue
+            try:
+                # destructive-ok: reason=remove completion markers whose only evidence was a deleted temporary root, unreferenced by the live or archived registry and untouched for seven days; boundary=one rt-<16 hex> directory directly under the state root's completion directory
+                shutil.rmtree(path)
+                result["completion_removed"] += 1
+            except OSError:
+                continue
     try:
         lock_names = [name for name in os.listdir(root) if _LAUNCH_LOCK_RE.fullmatch(name)]
     except OSError:

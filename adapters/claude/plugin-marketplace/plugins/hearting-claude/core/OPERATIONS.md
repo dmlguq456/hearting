@@ -621,7 +621,7 @@ interruption; examining and removing have separate time budgets, and the next
 pass may start after one minute while removable files remain. It runs beside the existing post-exit reaper and selector-free
 `reconcile --apply`; exact-attempt transactions remain scoped to their attempt.
 The same pass retires two state-root leftovers untouched for seven days: a
-route's completion markers when the registry names no row of that route and
+route's completion markers when neither the registry nor its archive names that route and
 every marker's evidence lay in a removed default `mkdtemp()` root (a test
 fixture), and an ended attempt's per-attempt launch lock while holding it.
 The append-only session-sweep and pending-delivery observation logs rotate at
