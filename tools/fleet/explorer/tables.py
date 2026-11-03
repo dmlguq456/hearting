@@ -604,6 +604,8 @@ def _draw_route_line(grid, x0, x1, y, route, tag=True, repo=True, steward=False,
         repo_w = min(repo_w, max(0, min(room // 2, room - 24)))
     own = room - (repo_w + GAP if repo_w else 0) >= 8 + GAP + 12 + GAP + 12
     state = "working" if route.get("activity") == "running" else route.get("state")
+    if route.get("owner_waits"):
+        state = "idle"                    # the owner waits on its worker; the worker line spins
     marker, marker_key = {"working": ("⠏", "g_spin"), "dead": ("✕", "g_dead"),
                           "blocked": ("●", "g_blocked"), "done": ("✓", "grp_live"),
                           "stale": ("◌", "dim")}.get(state, ("●", "g_work_off"))
@@ -932,6 +934,8 @@ def draw_routes(grid, vm, state, x=34, y=3):
                 grid.fill(x - 1, right, y + 1, " ", tint=236)
                 grid.put(x, y, "▶", "soft")
             status = route.get("state") if route.get("activity") != "running" else "running"
+            if route.get("owner_waits"):
+                status = "idle"           # the owner waits on its worker; the worker line spins
             marker, key = {"running": ("⠏", "g_spin"), "working": ("⠏", "g_spin"),
                            "blocked": ("●", "g_blocked"), "dead": ("✕", "g_dead"),
                            "done": ("✓", "done"), "idle": ("●", "g_work_off"),

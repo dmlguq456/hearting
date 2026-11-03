@@ -15,6 +15,7 @@ import time
 
 from .view_model import ExplorerViewModel
 from ..display import codex_credits
+from ..model import exec_child_is_wait
 
 HARNESSES = ("claude", "codex", "opencode")
 _SEG_DIM = "dim"
@@ -1026,6 +1027,14 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
                        or owner_live in ("working", "idle", "blocked")
                        and total and done != total and (active is not None or not failed))
         running = current and (active is not None or state == "working" or run_children or worker_contexts)
+        # 3cffaf: while a live worker holds the stage, the route row shows the owner's own
+        # state. An owner that is idle, or whose running call is only a wait, has delegated
+        # and is waiting; one doing its own work still reads as running.
+        owner_self = owner_live if owner is not None else owner_state
+        owner_raw = owner if owner is not None else (session_index.get(owner_tag) or {}).get("session")
+        owner_waits = bool(running and (worker_contexts or run_children) and (
+            owner_self == "idle"
+            or owner_self == "working" and exec_child_is_wait(_get(owner_raw, "exec_child"))))
         route = {
             "id": rid, "repo": repo, "session_tag": owner_tag, "title": title, "state": state,
             "outcome": _text(_get(result, "result", "status")),
@@ -1041,7 +1050,7 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
             "worker_stage_key": None, "worker_step_key": None,
             "owner_context": None, "owner_gauge": list(owner_gauge),
             "worker_contexts": worker_contexts, "subworker": None,
-            "current": current,
+            "current": current, "owner_waits": owner_waits,
         }
         if worker_context_index is not None:
             route["worker_context_index"] = worker_context_index
