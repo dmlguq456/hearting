@@ -594,7 +594,8 @@ def _await_tui_and_project(session_id: str, report_session: bool, *,
                     _report("codex", session_id, pane, report_session,
                             session_seq=session_seq, session_start_source=session_start_source,
                             resume_argv=resume_argv,
-                            _proof=lambda: _codex_tui_endpoint(session_id) == endpoint)
+                            _proof=lambda: _codex_tui_endpoint(session_id) == endpoint,
+                            display_relations=True)
                 return
             time.sleep(2)
     finally:
@@ -912,8 +913,11 @@ def main(argv=None) -> int:
     lifecycle = {}
     if args.seq is not None or args.session_start_source is not None:
         lifecycle = dict(session_seq=args.seq, session_start_source=args.session_start_source)
+    # This CLI only refreshes a pane header (the OpenCode publisher, the
+    # deferred Codex report): display relations, as the hooks use.
     project(args.harness, args.session_id, pane_id=args.pane,
-            report_session=not args.no_report_session, observation=observation, **lifecycle)
+            report_session=not args.no_report_session, observation=observation,
+            display_relations=True, **lifecycle)
     if observation is not None:
         print(json.dumps(observation, separators=(",", ":")))
     return 0
