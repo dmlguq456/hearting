@@ -22,7 +22,7 @@ import signal
 import subprocess
 import sys
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -830,7 +830,10 @@ def append_job(jobs: Path, args: argparse.Namespace, *, harness: str, runtime_sa
         # The row is in the registry now, before the spawn, launch fence and early-death watch.
         # A reader that needs only the row (a framed start launching its second leg, which reads
         # the first leg's harness and model) goes on from this line instead of the whole receipt.
-        print(f"attempt_claimed={args.attempt_id}", flush=True)
+        # The line is only a notice: a reader that is gone must not stop this launch before its
+        # spawn, so a failed write is ignored and the reader falls back to the whole receipt.
+        with suppress(OSError, ValueError):
+            print(f"attempt_registered={args.attempt_id}", flush=True)
     return claimed
 
 

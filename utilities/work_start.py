@@ -10,6 +10,7 @@ import contextlib
 import fcntl
 import hashlib
 import json
+import locale
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -787,12 +788,15 @@ def _harvest_unread_blocked_owner(route, jobs, run):
     return {"ok": True, "attempt_id": aid, "status": "exact-result-consumed"}
 
 
-def _run_reporting_claim(command, attempt, on_claim):
-    """`subprocess.run(command, text=True, capture_output=True)` that also calls `on_claim` as soon as
-    the launcher's receipt says this attempt's registry row is claimed (`attempt_claimed=<attempt>`),
-    while the launch itself goes on (spawn, launch fence, early-death watch)."""
-    marker = f"attempt_claimed={attempt}"
-    with subprocess.Popen(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
+def _run_reporting_registration(command, attempt, on_registered):
+    """`subprocess.run(command, text=True, capture_output=True)` that also calls `on_registered` as soon
+    as the launcher's receipt says this attempt's registry row is written (`attempt_registered=<attempt>`),
+    while the launch itself goes on (spawn, launch fence, early-death watch).
+
+    The output is read as bytes and decoded once the launch has ended, as `subprocess.run` does, so an
+    undecodable byte can never stop a running launch; here it is replaced instead of raised."""
+    marker = f"attempt_registered={attempt}".encode()
+    with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
         errors = []
         drain = threading.Thread(target=lambda: errors.append(process.stderr.read()), daemon=True)
         drain.start()
@@ -800,18 +804,21 @@ def _run_reporting_claim(command, attempt, on_claim):
         try:
             for line in process.stdout:
                 lines.append(line)
-                if line.rstrip("\n") == marker:
-                    on_claim()
+                if line.rstrip(b"\n") == marker:
+                    on_registered()
             process.wait()
         except BaseException:
             process.kill()   # what `subprocess.run` does when its caller is interrupted
             raise
         finally:
             drain.join()
-    return subprocess.CompletedProcess(command, process.returncode, "".join(lines), "".join(errors))
+    encoding = locale.getpreferredencoding(False)
+    return subprocess.CompletedProcess(command, process.returncode,
+                                       b"".join(lines).decode(encoding, errors="replace"),
+                                       b"".join(errors).decode(encoding, errors="replace"))
 
 
-def _start(route, path, jobs, node, harness, run, on_claim=None):
+def _start(route, path, jobs, node, harness, run, on_registered=None):
     command = [sys.executable, str(ROOT / "utilities/dispatch-owner.py"), "--start",
                "--route-evidence", str(path), "--jobs", str(jobs),
                "--slug", route["slug"] + "-" + node,
@@ -853,24 +860,24 @@ def _start(route, path, jobs, node, harness, run, on_claim=None):
             }
         if prepared is not None:
             command += ["--execution-access-file", str(prepared)]
-    # When this launch began, was claimed and returned (epoch seconds): the start receipt keeps
-    # the per-leg timing that no other record holds.
-    started, claimed = time.time(), []
+    # When this launch began, had its row registered and returned (epoch seconds): the start
+    # receipt keeps the per-leg timing that no other record holds.
+    started, registered = time.time(), []
 
     def reported():
-        claimed.append(time.time())
-        on_claim()
+        registered.append(time.time())
+        on_registered()
 
-    if on_claim is None:
+    if on_registered is None:
         result = run(command, text=True, capture_output=True, check=False)
     elif run is subprocess.run:
-        result = _run_reporting_claim(command, attempt_id(route, node), reported)
-    else:   # an injected launcher may report the claim itself, or simply return when done
-        result = run(command, text=True, capture_output=True, check=False, on_claim=reported)
+        result = _run_reporting_registration(command, attempt_id(route, node), reported)
+    else:   # an injected launcher may report the registration itself, or simply return when done
+        result = run(command, text=True, capture_output=True, check=False, on_registered=reported)
     receipt = {"attempt_id": attempt_id(route, node), "exit_code": result.returncode,
                "receipt": result.stdout, "diagnostic": result.stderr,
                "started_at": round(started, 1), "ended_at": round(time.time(), 1),
-               **({"claimed_at": round(claimed[0], 1)} if claimed else {})}
+               **({"registered_at": round(registered[0], 1)} if registered else {})}
     if access_diagnostic:
         receipt["execution_access_diagnostic"] = access_diagnostic
     return receipt
@@ -957,7 +964,7 @@ def _capacity_refusal(launch):
     }
 
 
-def _launch_admitted(route, path, jobs, node, harness, run, result, *, wait, sleep, clock, on_claim=None):
+def _launch_admitted(route, path, jobs, node, harness, run, result, *, wait, sleep, clock, on_registered=None):
     """Start one node, retrying a capacity refusal exactly once inside one wait.
 
     A registered row is the sole authority that a launch was admitted (plan
@@ -967,7 +974,7 @@ def _launch_admitted(route, path, jobs, node, harness, run, result, *, wait, sle
     retry so a capacity-freeing event another resume already used never
     causes a duplicate launch.
     """
-    launch = _start(route, path, jobs, node, harness, run, on_claim)
+    launch = _start(route, path, jobs, node, harness, run, on_registered)
     result["launches"].append(launch)
     rows = _rows(jobs)
     aid = launch["attempt_id"]
@@ -982,7 +989,7 @@ def _launch_admitted(route, path, jobs, node, harness, run, result, *, wait, sle
     rows = _rows(jobs)
     if aid in rows:
         return rows, None
-    launch = _start(route, path, jobs, node, harness, run, on_claim)
+    launch = _start(route, path, jobs, node, harness, run, on_registered)
     result["launches"].append(launch)
     rows = _rows(jobs)
     if aid in rows:
@@ -990,33 +997,33 @@ def _launch_admitted(route, path, jobs, node, harness, run, result, *, wait, sle
     return rows, _capacity_refusal(launch) or refusal
 
 
-def _launch_until_claimed(route, path, jobs, node, run, result, *, wait, sleep, clock):
-    """`_launch_admitted` for a frame leg that another leg follows, returning once this leg's row is claimed.
+def _launch_until_registered(route, path, jobs, node, run, result, *, wait, sleep, clock):
+    """`_launch_admitted` for a frame leg that another leg follows, returning once this leg's row is registered.
 
     The following leg reads only this leg's registered row (its harness and model, to pick another), so it
     need not wait while this launch spawns its worker, passes the launch fence and watches for an early
     death. That rest goes on in a thread; `_finish_launch` waits for it and puts its receipt back in order.
-    A launch that ends without a claim (refused, failed, deferred) comes back finished, exactly as
+    A launch that ends without registering (refused, failed, deferred) comes back finished, exactly as
     `_launch_admitted` would return it. Returns `(rows, refusal, tail)`; `tail` is None when finished.
     """
     own = {"launches": [], **{key: result[key] for key in ("capacity_waited_seconds",) if key in result}}
-    claimed, box = threading.Event(), {}
+    registered, box = threading.Event(), {}
 
     def launch():
         try:
             box["value"] = _launch_admitted(route, path, jobs, node, None, run, own, wait=wait,
-                                            sleep=sleep, clock=clock, on_claim=claimed.set)
+                                            sleep=sleep, clock=clock, on_registered=registered.set)
         except BaseException as exc:  # noqa: BLE001 - re-raised in the caller's thread
             box["error"] = exc
         finally:
-            claimed.set()
+            registered.set()
 
     thread = threading.Thread(target=launch, name=f"frame-launch-{node}")
     thread.start()
-    claimed.wait()
+    registered.wait()
     tail = {"thread": thread, "box": box, "own": own, "position": len(result["launches"])}
     if "capacity_waited_seconds" in own:
-        # A capacity wait comes before the claim; the following launch must not wait again.
+        # A capacity wait comes before the registration; the following launch must not wait again.
         result["capacity_waited_seconds"] = own["capacity_waited_seconds"]
     if box or not thread.is_alive():
         rows, refusal = _finish_launch(tail, result)
@@ -1024,16 +1031,23 @@ def _launch_until_claimed(route, path, jobs, node, run, result, *, wait, sleep, 
     return _rows(jobs), None, tail
 
 
-def _finish_launch(tail, result):
-    """Wait for a claimed launch's rest; its receipt goes back where the launch began."""
+def _finish_launch(tail, result, *, in_flight=None):
+    """Wait for a registered launch's rest; its receipt goes back where the launch began.
+
+    With `in_flight` (an exception the caller is already raising), that exception stays the one
+    reported: the launch's own error is attached to it as a note instead of replacing it."""
     tail["thread"].join()
     position, own = tail["position"], tail["own"]
     result["launches"][position:position] = own["launches"]
     if "capacity_waited_seconds" in own:
         result["capacity_waited_seconds"] = max(own["capacity_waited_seconds"],
                                                 result.get("capacity_waited_seconds", 0))
-    if "error" in tail["box"]:
-        raise tail["box"]["error"]
+    error = tail["box"].get("error")
+    if error is not None:
+        if in_flight is None:
+            raise error
+        in_flight.add_note(f"the first frame leg's launch also failed: {error!r}")
+        return None
     return tail["box"]["value"]
 
 
@@ -2212,7 +2226,7 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
         if any(aid not in rows for aid in slots):
             # Advisory and detached; the first leg's prompt waits for it at most PRIOR_ART_WAIT_SECONDS.
             _start_prior_art(route, request["text"])
-        tail = None
+        tail, in_flight = None, None
         try:
             for index, (node, aid) in enumerate(zip(frames, slots)):
                 if aid not in rows:
@@ -2222,8 +2236,8 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
                     # The selector rechecks live usage inside the sealed pool for
                     # each frame, just as it does for an automatic owner.
                     if tail is None and any(later not in rows for later in slots[index + 1:]):
-                        rows, refusal, tail = _launch_until_claimed(route, path, jobs, node["id"], run, result,
-                                                                    wait=wait, sleep=sleep, clock=clock)
+                        rows, refusal, tail = _launch_until_registered(route, path, jobs, node["id"], run, result,
+                                                                       wait=wait, sleep=sleep, clock=clock)
                     else:
                         rows, refusal = _launch_admitted(route, path, jobs, node["id"], None, run, result,
                                                           wait=wait, sleep=sleep, clock=clock)
@@ -2259,9 +2273,12 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
                 attempts.add(aid)
                 result["frame_attempts"] = sorted(attempts)
                 result.update(_wait_fields(attempts, rows, resume))
+        except BaseException as exc:
+            in_flight = exc   # this one is reported; a failure of the first leg's rest is only noted on it
+            raise
         finally:
             if tail is not None:
-                _finish_launch(tail, result)
+                _finish_launch(tail, result, in_flight=in_flight)
         joined = _timed_join(
             result, clock, jobs=jobs, expected_attempts=attempts,
             timeout=_wait_budget(result) if wait else 0, recover=True, observe_only=not wait)
