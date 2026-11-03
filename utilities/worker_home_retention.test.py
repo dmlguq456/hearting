@@ -631,6 +631,66 @@ class Fixture(unittest.TestCase):
             yield fired
 
 
+class HomeReferenceRelevanceReuseTest(Fixture):
+    """HL-11: a Codex prompt that attached N completion notices asked this 4N
+    times (claim, submission fence, send, ACK), and an attempt outside the
+    registry tail re-read every worker HOME manifest each time (2,277 live).
+    Counted reads; a fake settle margin instead of waiting."""
+
+    def setUp(self):
+        super().setUp()
+        for name in ("_REFERENCE_TAILS", "_REFERENCE_HOMES"):
+            cache = getattr(R, name, None)
+            if cache is not None:
+                self.enterContext(mock.patch.dict(cache, clear=True))
+        # Every listing here counts as older than one timestamp tick.
+        self.enterContext(mock.patch.object(R, "_REFERENCE_SETTLED_NS", -(10 ** 18), create=True))
+
+    def _home(self, attempt, worker_type="stage"):
+        home = self.home_path(attempt, worker_type=worker_type)
+        home.mkdir(mode=0o700)
+        (home / "worker-home.json").write_text(json.dumps(
+            {"schema": 1, "source": SOURCE, "harness": "claude", "worker_type": worker_type}))
+        return home
+
+    def _ask(self, *attempt_sets):
+        reads = []
+        real = R._read_json
+
+        def counted(path, *args, **kwargs):
+            if path == "worker-home.json":
+                reads.append(path)
+            return real(path, *args, **kwargs)
+
+        with mock.patch.object(R, "_read_json", side_effect=counted):
+            answers = [R.home_reference_relevant(self.root, attempts) for attempts in attempt_sets]
+        return answers, len(reads)
+
+    def test_one_home_listing_serves_every_question_while_the_directory_is_unchanged(self):
+        for index in range(20):
+            self._home(f"att-{index:032x}")
+        asked = [[f"att-{0xfeed00 + notice:032x}"] for notice in range(4) for _lock in range(4)]
+        answers, reads = self._ask(*asked)
+        self.assertEqual(answers, [False] * 16)
+        # Base: 16 questions x 20 manifests.
+        self.assertEqual(reads, 20)
+
+    def test_a_new_home_or_a_new_registry_row_is_seen_by_the_next_question(self):
+        known = "att-" + "a" * 32
+        later = "att-" + "b" * 32
+        self._home(known)
+        self.assertEqual(self._ask([known], [later]), ([True, False], 1))
+        self._home(later)  # the directory changed: listed again
+        self.assertEqual(self._ask([later]), ([True], 2))
+        self.row(later)  # registered in the tail: no HOME question at all
+        self.assertEqual(self._ask([later], [later]), ([False, False], 0))
+
+    def test_a_listing_taken_right_after_a_change_is_not_kept(self):
+        self._home("att-" + "c" * 32)
+        with mock.patch.object(R, "_REFERENCE_SETTLED_NS", 10 ** 15, create=True):
+            self.assertEqual(self._ask(["att-" + "d" * 32], ["att-" + "d" * 32])[1], 2)
+
+
 class Expiry(Fixture):
     def test_terminal_claude_prunes_cache_but_resolves_transcript(self):
         from claude_project_dir import encode_project_dir, resolve_session_transcript

@@ -761,47 +761,70 @@ def home_view_admission(jobs, *, blocking: bool = True):
         yield acquired
 
 
-def home_reference_relevant(root, attempt_ids) -> bool | None:
-    """Whether an incoming attempt reference can name an existing worker HOME.
+# Every record lock asks this before admission (claim, submission fence, send,
+# ACK: four times per notice), and one Codex prompt that attaches several
+# notices asked the same questions again each time: a 4 MiB registry tail and,
+# for an attempt outside it, every worker HOME manifest (2,277 on the live
+# machine). Both answers stay valid while the registry file and the
+# worker-home directory keep their identity, so a process keeps each one for
+# exactly that. A HOME's key names its attempt, so a listing whose directory
+# did not change cannot gain or lose one; a listing taken within a timestamp
+# tick of the directory's last change is not kept.
+_REFERENCE_TAILS: dict[tuple, frozenset] = {}
+_REFERENCE_HOMES: dict[tuple, tuple] = {}
+_REFERENCE_SETTLED_NS = 2_000_000_000
 
-    This bounded path lookup runs before delivery record admission. Returning
-    ``None`` means the relation could not be ruled out safely.
-    """
-    attempts = tuple(item for item in attempt_ids if ATTEMPT_RE.fullmatch(item or ""))
-    if not attempts:
-        return False
-    jobs = Path(root).resolve() / "jobs.log"
+
+def _registry_tail_attempts(jobs: Path):
+    """Attempt ids of the last 4 MiB of rows, or None when that cannot be read."""
     try:
         fd = os.open(jobs, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
     except OSError:
-        fd = None
-    if fd is not None:
-        try:
-            before = os.fstat(fd)
-            if stat.S_ISREG(before.st_mode) and before.st_uid == os.geteuid():
-                offset = max(0, before.st_size - 4 * 1024 * 1024)
-                raw = os.pread(fd, before.st_size - offset, offset)
-                after = os.fstat(fd)
-                if (len(raw) == before.st_size - offset
-                        and (before.st_dev, before.st_ino, before.st_size) ==
-                            (after.st_dev, after.st_ino, after.st_size)):
-                    if offset:
-                        boundary = raw.find(b"\n")
-                        raw = raw[boundary + 1:] if boundary >= 0 else b""
-                    found = set()
-                    for line in raw.splitlines():
-                        fields = line.decode("utf-8", "replace").split("\t")
-                        if len(fields) != 6:
-                            continue
-                        match = ATTEMPT_ID_RE.search(fields[5])
-                        if match:
-                            found.add(match.group(1))
-                    if set(attempts).issubset(found):
-                        return False
-        except OSError:
-            pass
-        finally:
-            os.close(fd)
+        return None
+    try:
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode) or before.st_uid != os.geteuid():
+            return None
+        key = (str(jobs), before.st_dev, before.st_ino, before.st_size,
+               before.st_mtime_ns, before.st_ctime_ns)
+        if key in _REFERENCE_TAILS:
+            return _REFERENCE_TAILS[key]
+        offset = max(0, before.st_size - 4 * 1024 * 1024)
+        raw = os.pread(fd, before.st_size - offset, offset)
+        after = os.fstat(fd)
+        if (len(raw) != before.st_size - offset
+                or (before.st_dev, before.st_ino, before.st_size) !=
+                    (after.st_dev, after.st_ino, after.st_size)):
+            return None
+        if offset:
+            boundary = raw.find(b"\n")
+            raw = raw[boundary + 1:] if boundary >= 0 else b""
+        found = set()
+        for line in raw.splitlines():
+            fields = line.decode("utf-8", "replace").split("\t")
+            if len(fields) != 6:
+                continue
+            match = ATTEMPT_ID_RE.search(fields[5])
+            if match:
+                found.add(match.group(1))
+        found = frozenset(found)
+        if (after.st_mtime_ns, after.st_ctime_ns) == (before.st_mtime_ns, before.st_ctime_ns):
+            if len(_REFERENCE_TAILS) >= 8:
+                _REFERENCE_TAILS.clear()
+            _REFERENCE_TAILS[key] = found
+        return found
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
+def _home_manifests(root):
+    """Every worker HOME as ``(key, source, harness, worker_type, identity)``.
+
+    ``False`` when there is no worker-home directory, ``None`` when a HOME
+    could not be read or judged safely (the caller then cannot rule one out).
+    """
     directory_fds = []
     try:
         root_fd = _open_dir(str(Path(root).resolve()), None)
@@ -819,6 +842,12 @@ def home_reference_relevant(root, attempt_ids) -> bool | None:
             os.close(fd)
         return None
     try:
+        listed = os.fstat(workers_fd)
+        key = (str(Path(root).resolve()), listed.st_dev, listed.st_ino, listed.st_mtime_ns,
+               listed.st_ctime_ns, listed.st_size, listed.st_nlink)
+        if key in _REFERENCE_HOMES:
+            return _REFERENCE_HOMES[key]
+        started_ns = time.time_ns()
         with os.scandir(workers_fd) as listing:
             entries = []
             for entry in listing:
@@ -826,7 +855,7 @@ def home_reference_relevant(root, attempt_ids) -> bool | None:
                     return None
                 if KEY_RE.fullmatch(entry.name) and entry.is_dir(follow_symlinks=False):
                     entries.append(entry.name)
-        from worker_runtime_home import _builder
+        manifests = []
         for name in entries:
             try:
                 home = os.open(name, _DIR_FLAGS, dir_fd=workers_fd)
@@ -858,21 +887,52 @@ def home_reference_relevant(root, attempt_ids) -> bool | None:
                     return None
                 if identity is not None and not ATTEMPT_RE.fullmatch(identity):
                     return None
-                for attempt in attempts:
-                    if identity is not None and identity != attempt:
-                        continue
-                    if _builder.worker_home_key(source, harness, worker_type, attempt) == name:
-                        return True
+                manifests.append((name, source, harness, worker_type, identity))
             except _Unreadable:
                 return None
             finally:
                 os.close(home)
-        return False
+        manifests = tuple(manifests)
+        settled = started_ns - max(listed.st_mtime_ns, listed.st_ctime_ns) >= _REFERENCE_SETTLED_NS
+        if settled and _stat_key(os.fstat(workers_fd)) == _stat_key(listed):
+            if len(_REFERENCE_HOMES) >= 8:
+                _REFERENCE_HOMES.clear()
+            _REFERENCE_HOMES[key] = manifests
+        return manifests
     except OSError:
         return None
     finally:
         for fd in reversed(directory_fds):
             os.close(fd)
+
+
+def _stat_key(info):
+    return (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns, info.st_size, info.st_nlink)
+
+
+def home_reference_relevant(root, attempt_ids) -> bool | None:
+    """Whether an incoming attempt reference can name an existing worker HOME.
+
+    This bounded path lookup runs before delivery record admission. Returning
+    ``None`` means the relation could not be ruled out safely.
+    """
+    attempts = tuple(item for item in attempt_ids if ATTEMPT_RE.fullmatch(item or ""))
+    if not attempts:
+        return False
+    found = _registry_tail_attempts(Path(root).resolve() / "jobs.log")
+    if found is not None and set(attempts).issubset(found):
+        return False
+    manifests = _home_manifests(root)
+    if manifests is False or manifests is None:
+        return manifests
+    from worker_runtime_home import _builder
+    for name, source, harness, worker_type, identity in manifests:
+        for attempt in attempts:
+            if identity is not None and identity != attempt:
+                continue
+            if _builder.worker_home_key(source, harness, worker_type, attempt) == name:
+                return True
+    return False
 
 
 @contextlib.contextmanager
