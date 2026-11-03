@@ -8249,8 +8249,32 @@ class ComposeRouteTest(TestRoute):
   self.assertNotIn("campaign_key",old); self.assertNotIn("parent_cycle_id",old)
   self.assertIs(old["campaign_unassigned"],True)
   R.verify_route(old,R.ROOT)
-  # A keyless proposal is refused, not silently degraded; the refusal names the escape hatch.
-  with self.assertRaisesRegex(ValueError,"compose-campaign-key-required.*--unassigned"): self.compose(unassigned=False)
+  # A keyless proposal is never silently degraded: a root with no stream yet opens one named
+  # after the folder (W6-E); a root that has one refuses and names the escape hatch.
+  with tempfile.TemporaryDirectory() as tmp:
+   project=Path(tmp)/"My Project_2"; project.mkdir()
+   first=self.compose(artifact_root=str(project/".agent_reports"),unassigned=False)
+   self.assertEqual(first["campaign_key"],"my-project-2"); self.assertNotIn("campaign_unassigned",first)
+   camp=project/".agent_reports"/"campaigns"/"2026-11-04_my-project-2"; camp.mkdir(parents=True)
+   def stream(state):
+    (camp/"campaign.json").write_text(json.dumps({"campaign_id":"camp_"+"4"*32,"key":"my-project-2","title":"t","goal":"g","state":state,"cycles":[],"created_on":"2026-11-04T00:00:00Z"}))
+   stream("active")
+   with self.assertRaisesRegex(ValueError,"compose-campaign-key-required.*--unassigned"):
+    self.compose(artifact_root=str(project/".agent_reports"),unassigned=False)
+   # One that cannot be joined keeps the refusal that lists the streams; no stream is opened.
+   stream("abandoned")
+   with self.assertRaisesRegex(ValueError,"compose-campaign-key-required.*--unassigned"):
+    self.compose(artifact_root=str(project/".agent_reports"),unassigned=False)
+   # The rule on the fold's states: none or closed (reopens, as `--campaign-key <folder>` would)
+   # opens the folder's stream; any active stream, or one that cannot be joined, refuses.
+   reports=str(project/".agent_reports")
+   for rows,expected in (([], "my-project-2"),
+                         ([{"key":"my-project-2","state":"satisfied","campaign_id":"camp_"+"4"*32}], "my-project-2"),
+                         ([{"key":"my-project-2","state":"abandoned"}], None),
+                         ([{"key":"my-project-2","state":"satisfied"},{"key":"my-project-2","state":"satisfied"}], None),
+                         ([{"key":"other","state":"active"}], None), (None, None)):
+    with self.subTest(rows=rows), mock.patch.object(R,"compose_campaign_summaries",return_value=rows):
+     self.assertEqual(R.first_campaign_key(reports,R.ROOT),expected)
   with self.assertRaisesRegex(ValueError,"compose-campaign-selection-conflict"): self.compose(campaign_key="tts-v6-release",unassigned=True)
   by_parent=self.compose(parent_cycle_id="cyc_"+"b"*32)
   self.assertNotIn("campaign_unassigned",by_parent); self.assertEqual(R.compose_campaign_selection(by_parent)["mode"],"parent")
@@ -8284,9 +8308,13 @@ class ComposeRouteTest(TestRoute):
    self.assertIn("캠페인 미배정",R.compose_card(self.compose(artifact_root=tmp)))
    receipt=R.compose_receipt(joined,Path(tmp)/"route.json")
    self.assertEqual(receipt["campaign"]["mode"],"join")
-   # A root with no campaigns yet still demands the proposal and shows an empty list.
-   with self.assertRaisesRegex(ValueError,"active: none"):
-    self.compose(artifact_root=str(root/"fresh"),unassigned=False)
+   # A root with no active stream yet opens one named after the folder instead of refusing
+   # (W6-E): a closed or superseded stream alone leaves nothing to choose from.
+   fresh=self.compose(artifact_root=str(root/"fresh"),unassigned=False)
+   self.assertEqual(fresh["campaign_key"],R.first_campaign_key(str(root/"fresh"),R.ROOT))
+   self.assertEqual(R.compose_campaign_selection(fresh)["mode"],"create")
+   self.assertEqual(R.first_campaign_key(str(root/"fresh"),str(root/"Some.Repo")),"some-repo")
+   self.assertIsNone(R.first_campaign_key(tmp,R.ROOT))   # tts-v6-release is active
    # A failed campaign scan is reported as unavailable, never as "no campaigns" / "create".
    import artifact_producer
    with mock.patch.object(artifact_producer,"list_campaign_summaries",side_effect=OSError("scan failed")):

@@ -253,8 +253,9 @@ class FramedRouteCompileTest(FramedBase):
         self.assertEqual(route["selection_pins"]["frame"], {"harness": "claude", "model": None, "effort": None})
         R.verify_route(route, R.ROOT)
         self.assertEqual(self.compose(campaign_key=None, unassigned=True)["campaign_unassigned"], True)
-        with self.assertRaisesRegex(ValueError, "compose-campaign-key-required"):
-            self.compose(campaign_key=None)
+        # A root with no active stream opens one named after the folder (W6-E).
+        self.assertEqual(self.compose(campaign_key=None)["campaign_key"],
+                         R.first_campaign_key(self.root, R.ROOT))
         with self.assertRaisesRegex(ValueError, "compose-campaign-selection-conflict"):
             self.compose(campaign_key="k", unassigned=True)
         self.assertEqual(self.compose(campaign_key=None, parent_cycle_id="cyc_" + "a" * 32)["parent_cycle_id"],
