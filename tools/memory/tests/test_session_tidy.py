@@ -1210,14 +1210,19 @@ class NativeSessionContinuityTest(unittest.TestCase):
         transcript = self.iso.root / "rollout.jsonl"
         transcript.write_text("fixture transcript", encoding="utf-8")
         with mock.patch.object(runner, "start_detached", return_value=42199):
-            for sid, inherited, no_herdr in ((self.A, None, True), (self.B, self.A, False)):
+            # A: a daemon hook carries no thread id, so the runtime's own thread id binds A's
+            # pane, but no herdr is reachable to book through. B: the inherited id names
+            # another thread, so B is refused and stays queue-only.
+            for sid, inherited, no_herdr, expected in (
+                    (self.A, None, True, "booking=skipped reason=compact-ineligible"),
+                    (self.B, self.A, False, "booking=queue-only")):
                 with self.iso.patched_environ(self.environment(inherited, no_herdr=no_herdr)):
                     result = st.run_hook(
                         "codex", "compact", sid, phase="after", compact_summary="",
                         compact_context={"trigger": "auto", "turn_id": f"turn-{sid}",
                                          "event_id": f"event-{sid}"},
                         transcript=str(transcript), cwd=str(self.cwd), env=os.environ, now=5000)
-                self.assertTrue(result.startswith("booking=queue-only"), result)
+                self.assertTrue(result.startswith(expected), result)
             with self.iso.patched_environ(self.environment(None)):
                 items = runner.list_items()
         by_sid = {item["sid"]: item for item in items}

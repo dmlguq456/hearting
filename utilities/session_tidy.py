@@ -763,8 +763,10 @@ def codex_pane_for_session(sid: str, cwd: str = "", source: str = "") -> str:
 
 
 def resolve_seat(harness: Optional[str], cwd=None, env=None, sid: Optional[str] = None,
-                 source: str = "", *, project: bool = True) -> Seat:
-    """The pane, native or project seat; ``project=False`` skips the project key (an empty one)."""
+                 source: str = "", *, project: bool = True, hook: bool = False) -> Seat:
+    """The pane, native or project seat; ``project=False`` skips the project key (an empty one).
+    ``hook``: the caller is the runtime's own hook for ``sid`` (a Codex daemon hook carries no
+    thread id of its own; see ``pane_ownership.codex_caller_binding``)."""
     env = os.environ if env is None else env
     live_caller = env is os.environ
     pane = ((env.get("HERDR_PANE_ID") or "").strip()
@@ -772,11 +774,17 @@ def resolve_seat(harness: Optional[str], cwd=None, env=None, sid: Optional[str] 
     server = env.get("AGENT_HERDR_SESSION") if live_caller else None
     socket_value = env.get("HERDR_SOCKET_PATH", "") if live_caller else ""
     endpoint_unproven = bool(harness == "codex" and server and not socket_value)
+    steps: dict = {}
     if live_caller and harness == "codex" and sid:
         from pane_ownership import _caller_runtime, codex_caller_binding
         caller, service = _caller_runtime(os.getpid(), "codex")
+        thread = env.get("CODEX_THREAD_ID") or ""
+        steps = {"caller": "codex" if caller is not None else "none", "service": bool(service),
+                 "thread_env": "absent" if not thread else ("same" if thread == sid else "other"),
+                 "pane_hint": bool(pane), "binding": "not-tried"}
         if caller is not None and service:
-            binding = codex_caller_binding(sid, environ=env)
+            binding = codex_caller_binding(sid, environ=env, from_hook=hook)
+            steps["binding"] = "found" if binding else "none"
             if binding:
                 return session_seat(pane_seat_from_binding(binding), harness or "codex", sid)
             # A shared daemon's inherited pane values belong to no caller.
@@ -790,8 +798,11 @@ def resolve_seat(harness: Optional[str], cwd=None, env=None, sid: Optional[str] 
     socket_path = (env.get("HERDR_SOCKET_PATH", "")
                    if live_caller and harness == "codex" else None)
     if (live_caller or harness != "codex") and not endpoint_unproven:
+        hint = pane
         pane = verified_pane(pane, harness, sid, executable=_herdr_executable(),
                              server=server, socket_path=socket_path)
+        if steps:
+            steps.update(pane_hint=steps["pane_hint"] or bool(hint), verified_pane=pane or "")
     if pane:
         endpoint = _endpoint_scope(env if live_caller else {})
         key = _digest("pane", endpoint, pane) if endpoint else _digest("pane", pane)
@@ -804,8 +815,27 @@ def resolve_seat(harness: Optional[str], cwd=None, env=None, sid: Optional[str] 
                                  harness=harness or "", native=native), harness or "", sid or "")
     if not project:
         return Seat("project", "", harness=harness or "", sid=sid or "")
+    if hook and steps.get("caller") == "codex":
+        _note_seat_fallback("codex", str(sid), steps)
     found = seat_for_project(harness or "unknown", project_key_for(cwd))
     return session_seat(found, harness or "", sid or "")
+
+
+def _note_seat_fallback(harness: str, sid: str, steps: dict) -> None:
+    """Keep one record per session whose own hook fell back to the project seat: the step
+    values that decided it (caller runtime, service, thread id in the environment, binding,
+    verified pane), rewritten only when they change."""
+    with contextlib.suppress(BaseException):
+        key = _native_session_key(harness, sid)
+        if not key:
+            return
+        path = state_root() / "seat-fallback" / f"{key}.json"
+        record = {"schema": 1, "harness": harness, "sid": sid, **steps}
+        held = read_json(path)
+        if isinstance(held, dict) and {k: v for k, v in held.items() if k != "at"} == record:
+            return
+        ensure_dir(path.parent)
+        atomic_write_json(path, {**record, "at": now_epoch()})
 
 
 # ---------------------------------------------------------------------------
@@ -3014,7 +3044,7 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
                                     compact_context=compact_context or {}, env=env, now=now)
         return booked
     now = now_epoch() if now is None else now
-    seat = session_seat(resolve_seat(harness, cwd or None, env, sid, source), harness, sid)
+    seat = session_seat(resolve_seat(harness, cwd or None, env, sid, source, hook=True), harness, sid)
     if human_only:
         if event == "start" and emit_human:
             with contextlib.suppress(BaseException):
@@ -3382,7 +3412,7 @@ def _run_compact_after(harness: str, sid: str, summary: str, *, cwd: str, transc
     """Record one compact event and preserve its card → queue → clear progress."""
     now = now_epoch() if now is None else now
     started = time.monotonic()
-    seat = session_seat(resolve_seat(harness, cwd or None, env, sid, "compact"), harness, sid)
+    seat = session_seat(resolve_seat(harness, cwd or None, env, sid, "compact", hook=True), harness, sid)
     prior_hint = (session_summary(seat).get((harness, sid)) or {}).get("transcript", "")
     transcript = transcript or prior_hint
     context = dict(compact_context or {})
@@ -3609,12 +3639,15 @@ def _run_compact_after(harness: str, sid: str, summary: str, *, cwd: str, transc
 
 def reconcile_compact_frontier(harness: str, sid: str, cwd: str = "", *, env=None,
                                now: Optional[float] = None,
-                               lock_wait: Optional[float] = None) -> str:
-    """Resume one automatic compact event from its seat ledger/card and stable queue identity."""
+                               lock_wait: Optional[float] = None,
+                               seat: Optional[Seat] = None) -> str:
+    """Resume one automatic compact event from its seat ledger/card and stable queue identity.
+    ``seat`` is a seat the calling hook already proved for this session."""
     env = os.environ if env is None else env
     if is_worker(env) or harness not in HARNESSES or not sid:
         return ""
-    seat = resolve_seat(harness, cwd or None, env, sid, "compact")
+    seat = (session_seat(seat, harness, sid) if seat is not None
+            else resolve_seat(harness, cwd or None, env, sid, "compact", hook=True))
     events = [row for row in _read_ledger_lines(seat)
               if row.get("event") == "compact" and row.get("harness") == harness
               and row.get("sid") == sid and row.get("compact_identity")]
@@ -3943,14 +3976,18 @@ def reply_card_body(reply: str, nonce: str) -> Optional[str]:
     return body if sanitize_body(body) else None
 
 
-def accept_reply_card(harness: str, sid: str, cwd: str, reply: str) -> str:
+def accept_reply_card(harness: str, sid: str, cwd: str, reply: str, *,
+                      seat: Optional[Seat] = None) -> str:
     """At turn end, an automatic idle/compact tidy request answered with a complete marked card
-    becomes that card and the same enqueue ``tidy`` runs; anything else changes nothing."""
+    becomes that card and the same enqueue ``tidy`` runs; anything else changes nothing.
+    ``seat`` is the exact seat the turn-end hook proved for this session (its observer runs
+    detached and cannot prove one itself)."""
     if is_worker():
         return "reply-card=none reason=worker"
     if not reply or "[[session-tidy card " not in reply:
         return "reply-card=none"
-    caller = resolve_caller(harness, sid, cwd)
+    caller = ((session_seat(seat, harness, sid), harness, sid) if seat is not None and sid
+              else resolve_caller(harness, sid, cwd))
     if caller is None:
         return "reply-card=none reason=no-seat"
     seat, harness, sid = caller

@@ -296,7 +296,7 @@ def _booking_lock(seat: "st.Seat", *, wait: Optional[float] = None):
 
 def observe_idle_event(harness: str, sid: str, cwd: str, *, event_id: str, provider: str = "",
                        model: str = "", tokens: int, now: Optional[float] = None,
-                       lock_wait: Optional[float] = None) -> str:
+                       lock_wait: Optional[float] = None, proven_seat=None) -> str:
     """Durably book one token-qualified idle window for an exact main session turn."""
     import hashlib
     import session_tidy as st
@@ -319,6 +319,9 @@ def observe_idle_event(harness: str, sid: str, cwd: str, *, event_id: str, provi
     seat = st.resolve_seat(harness, cwd or None, sid=sid)
     # Idle automation requires a transport whose exact session and empty input
     # can be checked by peer-steward at send time.
+    if proven_seat is not None and seat.kind == "project":
+        # The detached observer has no runtime ancestor left; its launching hook proved this seat.
+        seat = st.session_seat(proven_seat, harness, sid)
     if not ((seat.kind == "pane" and seat.pane)
             or (harness == "claude" and seat.kind == "native" and seat.native)):
         return "booking=skipped reason=exact-pane-unavailable"
