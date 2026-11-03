@@ -610,7 +610,7 @@ def draw_chrome(grid: CellGrid, vm, state, beat=1):
             status = f"{install.get('version', '·')} · {waiting} pending"
             no_recipient = delivery.get("no_recipient")
             if isinstance(no_recipient, int) and not isinstance(no_recipient, bool):
-                status += f" · no session to take it {no_recipient}"
+                status += f" · 받을 세션 없음 {no_recipient}"
         else:
             status = ""
         grid.fill(0, width, height - 1, " ")
