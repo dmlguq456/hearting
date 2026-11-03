@@ -356,7 +356,7 @@ def _draw_overview_tail(grid, vm, state, x, use, right, y, route_rows, repos, he
 
 
 def route_counts(routes):
-    """``(open, no_response, stopped)``: a route nothing of which runs (응답 없음) is not open."""
+    """``(open, no_response, stopped)``: a route nothing of which runs (no response) is not open."""
     states = [str(route.get("state") or "") for route in routes]
     return (sum(1 for state in states if state not in ("done", "stale")),
             states.count("stale"), states.count("dead"))
@@ -372,7 +372,7 @@ def _draw_overview_routes_rule(grid, vm, state, x, use, right, y, route_rows):
     count_key = ("g_work" if lit else "g_work_off") if open_routes else "dim"
     count_x = grid.put(label_x, y, "  ", "dim", limit=right)
     count_end = grid.put(count_x, y, f"{open_routes} open", count_key, limit=right)
-    meta = ((f" · 응답 없음 {no_response}" if no_response else "") +
+    meta = ((f" · no response {no_response}" if no_response else "") +
             (f" · {stopped} stopped leg{'s' if stopped != 1 else ''}" if stopped else ""))
     meta_end = grid.put(count_end, y, meta, "dim", limit=right) if meta else count_end
     grid.put(meta_end, y, " ", "branch_s")
@@ -571,7 +571,7 @@ def _draw_route_line(grid, x0, x1, y, route, tag=True, repo=True, steward=False,
 def _draw_route_progress(grid, x, end, y, route):
     if route.get("state") == "stale" and x < end:
         # Still marked in flight, but nothing of it runs: said in words before its stages.
-        x = grid.put(x, y, "응답 없음 ", "lvl_y", limit=end)
+        x = grid.put(x, y, "no response ", "lvl_y", limit=end)
     if route.get("capability") == "frame" and route.get("shape") == "framed":
         legs = tuple(route.get("legs") or ())
         # The route's own leg is appended after every earlier leg, so the last frame leg is
@@ -1034,20 +1034,20 @@ def draw_routes(grid, vm, state, x=34, y=3):
 
 
 
-_OLDER_NOTE = "자동으로 닫지 않음 · 답하거나 작업이 끝나야 빠짐"
+_OLDER_NOTE = "not closed automatically · leaves when answered or the work ends"
 # What each wait asks, in plain words, from its source alone: the shared cache is body-free and a
 # list row never carries the question text (that is read only for the selected row).
-_QUESTION_ABOUT = {"S1-approval": "권한 승인 요청", "S1-question": "질문 창 답변",
-                   "S3": "막힌 작업에 지시 필요", "S4": "[답변 필요] 표지 질문"}
+_QUESTION_ABOUT = {"S1-approval": "permission approval", "S1-question": "question window answer",
+                   "S3": "blocked work needs direction", "S4": "marked question"}
 
 
 def question_about(question):
-    """``frame 계획 검토`` / ``막힌 작업에 지시 필요`` …: a body-free one-line summary of a wait."""
+    """``frame plan review`` / ``blocked work needs direction`` …: a body-free one-line summary of a wait."""
     source, node = question.get("source"), question.get("node")
     if source == "S2":
         if node == "frame-review":
-            return "frame 계획 검토"
-        return f"{node} 관문 확인" if node else "route 사람 관문"
+            return "frame plan review"
+        return f"{node} gate check" if node else "route human gate"
     return _QUESTION_ABOUT.get(source) or question.get("kind") or "·"
 
 
@@ -1056,9 +1056,9 @@ def _question_line(question):
     parts = []
     owner_state = question.get("owner_state")
     if owner_state == "none":
-        parts.append(("받을 세션 없음 · ", "lvl_y"))
+        parts.append(("no session to take it · ", "lvl_y"))
     elif owner_state == "successor":
-        parts.append(("이어받음 · ", "dim"))
+        parts.append(("taken over · ", "dim"))
     parts.append((str(question_about(question)), "soft"))
     if question.get("route_title") or question.get("route_id"):
         parts.append((" · " + str(question.get("route_title") or question.get("route_id")), "dim"))
@@ -1080,14 +1080,14 @@ def _question_detail(question):
     owner_sid = question.get("owner_sid")
     if owner_state == "successor":
         registered = question.get("registered")
-        lines.append(("owner:", f"[{session_tag or '··'}] 이어받음"
-                      + (f" · 원래 {registered}" if registered else ""), "soft"))
+        lines.append(("owner:", f"[{session_tag or '··'}] taken over"
+                      + (f" · originally {registered}" if registered else ""), "soft"))
     elif owner_state == "none":
-        lines.append(("owner:", "받을 세션 없음 · 원래 세션 종료"
+        lines.append(("owner:", "no session to take it · original session ended"
                       + (f" ({owner_sid})" if owner_sid else ""), "lvl_y"))
     elif not session_tag:
-        lines.append(("owner:", f"세션 {owner_sid} · Fleet 목록에 없음" if owner_sid
-                      else "누가 받을지 기록 없음", "dim"))
+        lines.append(("owner:", f"session {owner_sid} · not in the Fleet list" if owner_sid
+                      else "no record of who takes it", "dim"))
     return tuple(lines)
 
 

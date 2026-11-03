@@ -910,7 +910,7 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
         else:
             state = "idle"
         # The route reader's own verdict that a route still marked in flight has nothing of it
-        # running (``route.route_liveness``): shown as 응답 없음, never as working, never closed.
+        # running (``route.route_liveness``): shown as no response, never as working, never closed.
         no_response = state in ("working", "idle") and _text(view.get("liveness")) == "unknown"
         if no_response:
             state = "stale"
@@ -930,7 +930,7 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
         progress = f"{done}/{total}" if total else None
         worker_node, state_text = shown_node, None
         if no_response:
-            state_text = "실행 중인 작업 없음"
+            state_text = "no work running"
         if state == "dead" and shown_node is not None and _stage_state(shown_node) == "todo":
             earlier = [n for n in view_nodes if _stage_state(n) in ("done", "failed")]
             if earlier:                            # the owner ended between stages: its last worker
@@ -1268,7 +1268,7 @@ def _question_records(snapshot, session_rows, session_index, now, routes=(), res
         registered_tag = tag_by_sid.get(registered_sid) if registered_sid else None
         # The original asker by its own tag; within the same seat (a cleared session) by its id.
         registered = (f"[{registered_tag}]" if registered_tag and (not session or registered_tag != session["tag"])
-                      else f"세션 {registered_sid[:8]}" if registered_sid else None)
+                      else f"session {registered_sid[:8]}" if registered_sid else None)
         record = {
             "id": ident, "tag": tag, "h": session["harness"] if session else harness,
             "m": session.get("model") if session else None,

@@ -105,7 +105,7 @@ class EachRow(unittest.TestCase):
         self.assertNotIn(PRIVATE, text)
         self.assertIn("[b6]", text)
         self.assertIn("claude (opus·xhigh)", text)
-        self.assertIn("frame 계획 검토 · v4 jobslog readers", text)
+        self.assertIn("frame plan review · v4 jobslog readers", text)
         self.assertIn("route:    v4 jobslog readers · rt-454aff269a3d2452", text)
         self.assertRegex(text, r"since:    \d\d:\d\d · waiting 26m")
         self.assertIn("QUESTION", text)
@@ -114,19 +114,19 @@ class EachRow(unittest.TestCase):
     def test_successor_and_ownerless_waits_say_who_can_answer(self):
         questions, summary, vm = _board()
         by_id = {item["id"]: item for item in questions}
-        self.assertEqual(by_id["S3:att-successor"]["registered"], "세션 sid-old")
+        self.assertEqual(by_id["S3:att-successor"]["registered"], "session sid-old")
         ownerless = by_id["S3:att-ownerless"]
         self.assertEqual((ownerless["marker"], ownerless["project"], ownerless["owner_sid"]),
                          ("◌", "hearting", "01a186b9"))
         self.assertEqual(summary["ownerless"], 1)
         text = "\n".join(_text(vm, NavState(view="QUESTIONS", title="QUESTIONS")))
-        self.assertIn("older waits 2 (받을 세션 없음 1)", text)
-        self.assertIn("이어받음 · 막힌 작업에 지시 필요", text)
-        self.assertIn("owner:    [34] 이어받음 · 원래 세션 sid-old", text)
+        self.assertIn("older waits 2 (no session to take it 1)", text)
+        self.assertIn("taken over · blocked work needs direction", text)
+        self.assertIn("owner:    [34] taken over · originally session sid-old", text)
         self.assertIn("◌ [··]", text)
-        self.assertIn("받을 세션 없음 · 막힌 작업에 지시 필요", text)
-        self.assertIn("받을 세션 없음 · 원래 세션 종료 (01a186b9)", text)
-        self.assertIn("owner:    세션 sid-gone · Fleet 목록에 없음", text)
+        self.assertIn("no session to take it · blocked work needs direction", text)
+        self.assertIn("no session to take it · original session ended (01a186b9)", text)
+        self.assertIn("owner:    session sid-gone · not in the Fleet list", text)
 
 
     def test_a_successor_in_another_seat_names_the_original_seat(self):
@@ -145,9 +145,9 @@ class OlderWaits(unittest.TestCase):
         frame = draw(vm, state, 168, 60, beat=1)
         rows = frame.text_rows()
         heading = next(y for y, row in enumerate(rows) if "OLDER WAITS · 2" in row)
-        self.assertIn("자동으로 닫지 않음", rows[heading])
+        self.assertIn("not closed automatically", rows[heading])
         self.assertIn("[ hide ]", rows[heading])
-        older = next(y for y, row in enumerate(rows) if "run-authorization 관문 확인" in row)
+        older = next(y for y, row in enumerate(rows) if "run-authorization gate check" in row)
         self.assertGreater(older, heading)
         age_x = rows[older].index("27d 0h")
         self.assertEqual(frame.cells[older][age_x][1], "g_idle")      # lvl_y: the yellow age
@@ -178,14 +178,14 @@ class NoResponseRoutes(unittest.TestCase):
         self.assertEqual(self._routes(None)[0]["state"], "working")
         routes = self._routes("unknown")
         self.assertEqual(routes[0]["state"], "stale")
-        self.assertEqual(routes[0]["worker"][2][0][0], "실행 중인 작업 없음")
+        self.assertEqual(routes[0]["worker"][2][0][0], "no work running")
         vm = ExplorerViewModel.from_mapping({"routes": routes, "sessions": [], "repos": [],
                                              "system": {}})
         table = _text(vm, NavState(view="ROUTES", title="ROUTES"), 140)
-        self.assertIn("응답 없음", "\n".join(table))
-        self.assertIn("0 open · 응답 없음 1 · 0 stopped legs", table[-1])
+        self.assertIn("no response", "\n".join(table))
+        self.assertIn("0 open · no response 1 · 0 stopped legs", table[-1])
         overview = _text(vm, NavState(), 140)
-        self.assertIn("0 routes · 응답 없음 1", overview[-1])
+        self.assertIn("0 routes · no response 1", overview[-1])
 
 
 if __name__ == "__main__":

@@ -102,13 +102,13 @@ def answer_wait_count(vm):
 
 
 def older_waits_text(waits):
-    """`` · older waits 6 (받을 세션 없음 1)``: folded waits stay counted, never dropped."""
+    """`` · older waits 6 (no session to take it 1)``: folded waits stay counted, never dropped."""
     if waits.get("state") != "complete":
         return ""
     older, ownerless = waits.get("older"), waits.get("ownerless")
     if not isinstance(older, int) or isinstance(older, bool) or older <= 0:
         return ""
-    note = (f" (받을 세션 없음 {ownerless})"
+    note = (f" (no session to take it {ownerless})"
             if isinstance(ownerless, int) and not isinstance(ownerless, bool) and ownerless > 0 else "")
     return f" · older waits {older}{note}"
 
@@ -550,12 +550,12 @@ def draw_chrome(grid: CellGrid, vm, state, beat=1):
             open_routes, no_response, _stopped = route_counts(routes)
             status = (f"{count_word(len(sessions), 'session')} · "
                       f"{count_word(open_routes, 'route')} · "
-                      + (f"응답 없음 {no_response} · " if no_response else "")
+                      + (f"no response {no_response} · " if no_response else "")
                       + (count_word(current, 'question') if current is not None else "? questions"))
         elif state.view == "ROUTES":
             open_routes, no_response, stopped = route_counts(routes)
             status = (f"{open_routes} open · "
-                      + (f"응답 없음 {no_response} · " if no_response else "")
+                      + (f"no response {no_response} · " if no_response else "")
                       + count_word(stopped, 'stopped leg'))
         elif state.view == "QUESTIONS":
             total = (system.get("answered_total") if isinstance(system, Mapping) else None)
@@ -610,7 +610,7 @@ def draw_chrome(grid: CellGrid, vm, state, beat=1):
             status = f"{install.get('version', '·')} · {waiting} pending"
             no_recipient = delivery.get("no_recipient")
             if isinstance(no_recipient, int) and not isinstance(no_recipient, bool):
-                status += f" · 받을 세션 없음 {no_recipient}"
+                status += f" · no session to take it {no_recipient}"
         else:
             status = ""
         grid.fill(0, width, height - 1, " ")
