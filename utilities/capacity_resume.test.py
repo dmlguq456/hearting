@@ -437,14 +437,17 @@ class CapacityResumeTest(unittest.TestCase):
         self.assertEqual(result["state"], "running", result)
         self.assertEqual(self.rows()[self.replacement_id(second)][1]["automatic_retry_of"], second)
 
-    def test_a_crashed_owner_is_replaced_once_only_by_an_explicit_start(self):
+    def test_a_crashed_owner_is_replaced_by_the_bound_carrier_not_a_tick(self):
         # rt-6c92471ab05995bf: the owner's process exited 70 before any result.
         self.reseed(note="dead-runtime-exit", failure_class="runtime")
         self.statuses["att-owner"] = dict(verdict="FAIL", completion_proven=False, marker=None, marker_digest=None)
-        tick = R.advance(self.jobs, "att-owner", run=self.launcher, authority_check=lambda *a: True)
+        # A supervisor tick (no bound controller) keeps the start-only path.
+        tick = R.advance(self.jobs, "att-owner", run=self.launcher)
         self.assertEqual(tick["state"], "not-applicable")
         self.assertEqual(self.calls, [])
-        self.start()
+        # The parent's bound completion carrier launches it without a person's `start`.
+        result = R.advance(self.jobs, "att-owner", run=self.launcher, authority_check=lambda *a: True)
+        self.assertEqual(result["state"], "running", result)
         self.assertEqual(len(self.calls), 1)
         self.assertEqual(self.rows()[self.replacement_id()][1]["automatic_retry_of"], "att-owner")
 
@@ -471,10 +474,9 @@ class CapacityResumeTest(unittest.TestCase):
 
     def test_provider_errors_have_no_cumulative_replacement_cutoff(self):
         self._provider_error_owner()
-        # a supervisor/rewake tick never launches it
-        self.assertEqual(R.advance(self.jobs, "att-owner", run=self.launcher,
-                                   authority_check=lambda *a: True)["state"], "not-applicable")
-        R.advance_batch(self.jobs, {"att-owner"}, authority_check=lambda *a: True, run=self.launcher)
+        # a supervisor tick never launches it (the bound carrier path is covered elsewhere)
+        self.assertEqual(R.advance(self.jobs, "att-owner", run=self.launcher)["state"], "not-applicable")
+        R.advance_batch(self.jobs, {"att-owner"}, run=self.launcher)
         self.assertEqual((self.calls, self.claims()), ([], []))
         # one explicit start replaces it once
         result = self.start()

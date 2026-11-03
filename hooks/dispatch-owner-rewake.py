@@ -1258,6 +1258,33 @@ class ClaimHeld:
     the record stays pending and this carrier keeps waiting."""
 
 
+@dataclass(frozen=True)
+class ClaimDeferred:
+    """The delivery is deferred behind an accepted replacement claim
+    (``replacement-defer``). Nothing was claimed, acked or expired: the record
+    stays pending, and the caller decides whether the deferral is already
+    visible through a launched successor or must be announced."""
+
+
+def _reserved_successor_launched(launch: Launch, metadata: dict[str, str]) -> bool:
+    """Whether the accepted claim behind a deferred delivery already launched.
+
+    The source row's own binding names the exact reserved successor; only a
+    registered row past the launch fence counts as a launch. Anything unreadable
+    stays ``False`` so the caller announces instead of assuming a launch."""
+    try:
+        from dispatch_replacement import source_binding
+
+        binding = source_binding(launch.jobs, metadata)
+        if not binding or not binding[1]:
+            return False
+        row = current_attempt_row(launch.jobs, binding[1])
+    except (DispatchContractError, JoinContractError, OSError, ValueError,
+            KeyError, TypeError):
+        return False
+    return bool(row is not None and row.metadata.get("launch_claimed") == "1")
+
+
 def _delivery_owing_row(launch: Launch) -> dict[str, str] | None:
     """Return the row's metadata only when it is a genuine delivery-owing
     terminal completion (`done` + `delivery_intent` stamped, §4.3.1) -- the
@@ -1276,11 +1303,12 @@ def _delivery_owing_row(launch: Launch) -> dict[str, str] | None:
     return row.metadata
 
 
-def _carrier_one_claim(launch: Launch, metadata: dict[str, str], *, arm=None) -> ClaimWin | ClaimHeld | None:
+def _carrier_one_claim(launch: Launch, metadata: dict[str, str], *, arm=None) -> ClaimWin | ClaimHeld | ClaimDeferred | None:
     """P3 claim gate. Never creates a record (§4.4 -- carrier 1 only claims
     what trigger 1/2 already materialized); returns the winning claim, a
-    ``ClaimHeld`` while the record's sibling success batch is incomplete, or
-    ``None`` on any other refusal -- claim lost, record already acked/claimed,
+    ``ClaimHeld`` while the record's sibling success batch is incomplete, a
+    ``ClaimDeferred`` when an accepted replacement claim defers the delivery,
+    or ``None`` on any other refusal -- claim lost, record already acked/claimed,
     record not yet materialized, or the incarnation binding does not match.
     Every ``None`` path is a silent, zero-notice exit-0 per SD-97 (no
     re-delivery). A ready batch is claimed whole, so one carrier wakes the
@@ -1317,6 +1345,8 @@ def _carrier_one_claim_locked(launch, metadata):
     except pending_delivery.PendingDeliveryError as exc:
         if exc.detail == "batch-hold" or exc.reason == "pending-delivery-retry-deferred":
             return ClaimHeld()
+        if exc.detail == "replacement-defer":
+            return ClaimDeferred()
         return None
     from dispatch_notice_state import keep_claim
     kept = [
@@ -1930,6 +1960,22 @@ def _run_carrier_once(launch, claim, payload, observation, holder, deadline) -> 
         while win is None and time.monotonic() < until and _record_missing(launch, owing):
             time.sleep(max(0.0, min(step, until - time.monotonic())))
             win = _carrier_one_claim(launch, owing, arm=claim)
+    if isinstance(win, ClaimDeferred):
+        # The accepted claim defers this delivery, and this carrier is the only
+        # bound wake the owner has. A reserved successor that never launched must
+        # not leave the seat with no notice at all; the deferred record itself is
+        # left pending (never claimed, acked or expired). A successor already past
+        # the launch fence keeps the ordinary silent exit: the follow path owns
+        # its completion.
+        observation["reason"] = "completion-claim-unavailable"
+        if _reserved_successor_launched(launch, owing):
+            return _ended(claim, 0, terminal=True)
+        message += (
+            " Runtime fact: a replacement is reserved for this owner and was not launched;"
+            " `start` on the route continues it."
+        )
+        return _emit_with_gates(launch, claim, state, message, block=False,
+                                owner_closed=wait_state == "ready")
     if not isinstance(win, ClaimWin):
         # Another carrier holds (or already acked) the durable record: the
         # completion is delivered by it, so this attempt is finished here --

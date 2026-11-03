@@ -2262,6 +2262,50 @@ class U4FrameRuntimeKindTest(unittest.TestCase):
             "done", {**self.FRAME, "note": "dead-capacity", "failure_class": "capacity"}), "runtime")
 
 
+class U4RuntimeBoundCarrierTest(unittest.TestCase):
+    """A runtime end is launched by the parent's bound carrier; a supervisor tick keeps
+    the old `start`-only path (SD-157 ③)."""
+
+    OWNER = {"attempt_id": "att-owner", "worker_type": "owner", "launch_started": "1",
+             "note": "dead-runtime-exit", "failure_class": "runtime",
+             "terminal_event": "dispatch.supervisor.error"}
+    FRAME = {"attempt_id": "att-frame", "worker_type": "frame", "launch_started": "1",
+             "note": "dead-launch-exit-1", "failure_class": "launch", "route_node": "frame"}
+
+    def _progress(self, metadata, **facts):
+        return RA.decide_continuation(action="replacement-progress", status="done", metadata=metadata,
+            facts={"kind": "runtime", "resume_capacity": False, "registry_rows": {}, **facts})
+
+    def test_a_bound_carrier_launches_a_runtime_owner_end(self):
+        bound = self._progress(self.OWNER, bound_carrier=True)
+        self.assertEqual((bound.allowed, bound.state, bound.next_action), (True, "launch", "start"))
+        for facts in ({"bound_carrier": False}, {}):
+            with self.subTest(facts=facts):
+                tick = self._progress(self.OWNER, **facts)
+                self.assertEqual((tick.allowed, tick.state, tick.next_action),
+                                 (False, "not-applicable", "observe"))
+
+    def test_a_bound_carrier_launches_a_resultless_frame_end(self):
+        bound = self._progress(self.FRAME, bound_carrier=True)
+        self.assertEqual((bound.allowed, bound.state), (True, "launch"))
+        self.assertEqual(self._progress(self.FRAME).state, "not-applicable")
+
+    def test_only_the_runtime_kind_takes_the_bound_carrier_branch(self):
+        for kind in ("unlaunched", "corrected", "observed"):
+            with self.subTest(kind=kind):
+                choice = RA.decide_continuation(action="replacement-progress", status="done",
+                    metadata={"attempt_id": "att-other", "worker_type": "owner"},
+                    facts={"kind": kind, "bound_carrier": True, "resume_capacity": False,
+                           "registry_rows": {}})
+                self.assertEqual((choice.state, choice.next_action), ("not-applicable", "observe"))
+        capacity = RA.decide_continuation(action="replacement-progress", status="done",
+            metadata={"attempt_id": "att-cap", "worker_type": "owner"},
+            facts={"kind": "capacity", "bound_carrier": True, "resume_capacity": False,
+                   "registry_rows": {}})
+        self.assertEqual((capacity.reason, capacity.next_action),
+                         ("replacement-capacity-wait", "arm-capacity-resume"))
+
+
 class U4CapacityNextActionTest(unittest.TestCase):
     def test_replacement_capacity_wait_names_auto_resume(self):
         choice = RA.decide_continuation(action="replacement-progress", status="done",
