@@ -10,11 +10,15 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import secrets
+import shutil
 import stat
+import tempfile
 import time
 
 from dispatch_contract import (
@@ -403,6 +407,174 @@ def _fresh_eligible(jobs, root, layout, candidate_name, expected_rows,
         return
 
 
+# State-root leftovers the same pass retires once nothing touched them for a
+# week (the user's unused rule): completion markers that only a deleted test
+# root ever pointed at, and per-attempt launch locks of ended attempts.
+LEFTOVER_QUIET_NS = 7 * 86400 * 1_000_000_000
+LEFTOVER_EXAMINE_LIMIT = 512
+LEFTOVER_PASS_SECONDS = 2
+_ROUTE_DIR_RE = re.compile(r"rt-[0-9a-f]{16}")
+_ROUTE_ID_RE = re.compile(r"rt-[0-9a-f]{16}")
+_LAUNCH_LOCK_RE = re.compile(r"jobs\.log\.launch\.([0-9a-f]{64})\.lock")
+# The name `tempfile.mkdtemp()` gives by default: a test fixture's root, never a
+# person's or an agent's working directory (agents use their own scratchpads).
+_MKDTEMP_NAME_RE = re.compile(r"tmp[a-z0-9_]{8}")
+
+
+def _temporary_roots() -> tuple[str, ...]:
+    roots = {os.path.realpath(tempfile.gettempdir()), "/tmp", "/var/tmp"}
+    return tuple(sorted((root.rstrip("/") + "/" for root in roots), key=len, reverse=True))
+
+
+def _gone_temporary_root(value) -> bool:
+    """Whether a path lies in a removed default `mkdtemp()` directory of a temp root."""
+    if not isinstance(value, str) or not value.startswith("/"):
+        return False
+    for root in _temporary_roots():
+        if value.startswith(root):
+            first = value[len(root):].split("/", 1)[0]
+            return bool(_MKDTEMP_NAME_RE.fullmatch(first)) and not os.path.lexists(root + first)
+    return False
+
+
+def _fixture_completion_dir(path: str, threshold_ns: int) -> bool:
+    """A route's completion markers that only a deleted temporary root ever named.
+
+    Every entry is a marker naming this route whose evidence lies in a removed
+    temporary root, or that marker's lock; nothing changed since the threshold.
+    Anything else (another file kind, a subdirectory, an unreadable marker, a
+    marker without evidence) keeps the directory.
+    """
+    route_id = os.path.basename(path)
+    markers = 0
+    try:
+        info = os.lstat(path)
+        if not stat.S_ISDIR(info.st_mode) or info.st_mtime_ns >= threshold_ns:
+            return False
+        with os.scandir(path) as listing:
+            entries = list(listing)
+    except OSError:
+        return False
+    for entry in entries:
+        try:
+            entry_info = entry.stat(follow_symlinks=False)
+        except OSError:
+            return False
+        if not stat.S_ISREG(entry_info.st_mode) or entry_info.st_mtime_ns >= threshold_ns:
+            return False
+        if entry.name.startswith(".") and entry.name.endswith(".lock"):
+            continue
+        if not entry.name.endswith(".json") or entry_info.st_size > 1 << 20:
+            return False
+        try:
+            with open(entry.path, "rb") as handle:
+                marker = json.loads(handle.read().decode("utf-8"))
+        except (OSError, UnicodeError, ValueError):
+            return False
+        evidence = marker.get("evidence") if isinstance(marker, dict) else None
+        if (not isinstance(evidence, dict) or marker.get("route_id") != route_id
+                or not _gone_temporary_root(evidence.get("path"))):
+            return False
+        markers += 1
+    return markers > 0
+
+
+def _retire_leftovers(jobs, root, snapshot, state, now_ns):
+    """Retire unreferenced state-root leftovers within a small budget of this pass."""
+    started = time.monotonic()
+    threshold_ns = now_ns - LEFTOVER_QUIET_NS
+    result = {"completion_examined": 0, "completion_removed": 0, "launch_locks_removed": 0}
+    referenced = set()
+    ended = set()
+    for attempt, row in snapshot.rows.items():
+        referenced.update(_ROUTE_ID_RE.findall(row.raw))
+        if row.status not in ("open", "running"):
+            ended.add(hashlib.sha256(attempt.encode("utf-8")).hexdigest())
+    completion = root / "completion"
+    try:
+        names = sorted(name for name in os.listdir(completion) if _ROUTE_DIR_RE.fullmatch(name))
+    except OSError:
+        names = []
+    cursor = state.get("leftover_cursor", "")
+    if not isinstance(cursor, str):
+        cursor = ""
+    ordered = [name for name in names if name > cursor] + [name for name in names if name <= cursor]
+    candidates = []
+    for name in ordered[:LEFTOVER_EXAMINE_LIMIT]:
+        if time.monotonic() - started > LEFTOVER_PASS_SECONDS:
+            break
+        state["leftover_cursor"] = name
+        result["completion_examined"] += 1
+        if name not in referenced and _fixture_completion_dir(str(completion / name), threshold_ns):
+            candidates.append(name)
+    if candidates:
+        # Settled history moved to the dispatch archive still names its routes.
+        try:
+            from dispatch_registry_archive import archived_rows
+            archived = set()
+            for raw in archived_rows(jobs, needles=candidates):
+                archived.update(_ROUTE_ID_RE.findall(raw))
+        except Exception:  # noqa: BLE001 -- an unreadable archive keeps everything
+            candidates = []
+            archived = set()
+        for name in candidates:
+            if name in archived:
+                continue
+            path = str(completion / name)
+            if not _fixture_completion_dir(path, threshold_ns):
+                continue
+            try:
+                # destructive-ok: reason=remove completion markers whose only evidence was a deleted temporary root, unreferenced by the live or archived registry and untouched for seven days; boundary=one rt-<16 hex> directory directly under the state root's completion directory
+                shutil.rmtree(path)
+                result["completion_removed"] += 1
+            except OSError:
+                continue
+    try:
+        lock_names = [name for name in os.listdir(root) if _LAUNCH_LOCK_RE.fullmatch(name)]
+    except OSError:
+        lock_names = []
+    for name in lock_names:
+        if time.monotonic() - started > LEFTOVER_PASS_SECONDS:
+            break
+        if _LAUNCH_LOCK_RE.fullmatch(name).group(1) not in ended:
+            continue
+        if _retire_launch_lock(root / name, threshold_ns):
+            result["launch_locks_removed"] += 1
+    return result
+
+
+def _retire_launch_lock(path: Path, threshold_ns: int) -> bool:
+    """Unlink one ended attempt's quiet launch lock while holding it, never another."""
+    try:
+        before = os.lstat(path)
+    except OSError:
+        return False
+    if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size != 0
+            or before.st_uid != os.geteuid() or before.st_mtime_ns >= threshold_ns):
+        return False
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        return False
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return False
+        held = os.fstat(fd)
+        current = os.lstat(path)
+        if ((held.st_dev, held.st_ino) != (before.st_dev, before.st_ino)
+                or (current.st_dev, current.st_ino) != (held.st_dev, held.st_ino)):
+            return False
+        # destructive-ok: reason=unlink the launch lock of an ended attempt while holding it; boundary=one jobs.log.launch.<sha256>.lock directly under the dispatch state root
+        os.unlink(path)
+        return True
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+
+
 def sweep(jobs, *, now_ns=None, force=False):
     """Run one best-effort pass; unknown evidence and failures always keep files."""
     started = time.monotonic()
@@ -673,6 +845,10 @@ def _pass(jobs, root, layout, state, now_ns, started):
                     or (removed > 0 and over_limit_bytes > 0)),
         "elapsed_ms": int((time.monotonic() - started) * 1000),
     }
+    try:
+        result.update(_retire_leftovers(jobs, root, snapshot, state, now_ns))
+    except Exception:  # noqa: BLE001 -- leftovers never change the log pass
+        pass
     if ctx.observation is not None:
         ctx.observation.checkpoint()
         result.update(delivery_reads=ctx.observation.reads, delivery_entries=ctx.observation.visits,
