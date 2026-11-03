@@ -143,21 +143,40 @@ def _herdr_env(socket_path):
     return env
 
 
-def _read_codex_footer_threads(pane, *, executable=None, socket_path=None):
+def _tmux_surface(pane, tmux=None):
+    """The tmux server of a tmux pane address (its own, else ``tmux``, else ``$TMUX``), else None."""
+    from terminal_surface import is_tmux_pane, pane_surface
+    return pane_surface(pane, tmux=tmux) if is_tmux_pane(pane) else None
+
+
+def _pane_reader(pane, executable):
+    """Herdr's executable for a Herdr pane; a tmux pane is read through tmux."""
+    from terminal_surface import is_tmux_pane
+    if is_tmux_pane(pane):
+        return "tmux" if shutil.which("tmux") else None
+    return executable or shutil.which("herdr")
+
+
+def _read_codex_footer_threads(pane, *, executable=None, socket_path=None, tmux=None):
     """Read one pane's visible screen and parse only its native Codex footer."""
-    executable = executable or shutil.which("herdr")
+    surface = _tmux_surface(pane, tmux)
+    executable = "tmux" if surface else executable or shutil.which("herdr")
     if not executable:
         return None
     env = _herdr_env(socket_path)
     try:
-        result = subprocess.run(
-            [executable, "agent", "read", str(pane), "--source", "visible", "--format", "ansi"],
-            capture_output=True, text=True, errors="replace", stdin=subprocess.DEVNULL,
-            timeout=0.5, check=False, env=env,
-        )
-        if result.returncode or len(result.stdout.encode("utf-8")) > 131072:
+        if surface is not None:
+            stdout = surface.read_visible(str(pane), ansi=True)
+        else:
+            result = subprocess.run(
+                [executable, "agent", "read", str(pane), "--source", "visible", "--format", "ansi"],
+                capture_output=True, text=True, errors="replace", stdin=subprocess.DEVNULL,
+                timeout=0.5, check=False, env=env,
+            )
+            stdout = None if result.returncode else result.stdout
+        if stdout is None or len(stdout.encode("utf-8")) > 131072:
             return None
-        visible = _ANSI_ESCAPE_RE.sub("", result.stdout).replace("\r", "")
+        visible = _ANSI_ESCAPE_RE.sub("", stdout).replace("\r", "")
         state, session_id = _codex_current_footer(visible.splitlines())
         return _CodexFooterThreads({session_id} if state == "current" else set(), state=state)
     except (OSError, subprocess.SubprocessError, UnicodeError):
@@ -361,7 +380,13 @@ def _native_session(pid, harness, *, codex_observation=None):
     return ""
 
 
-def _pane_process_info(pane, *, executable, server=None, socket_path=None):
+def _pane_process_info(pane, *, executable, server=None, socket_path=None, tmux=None):
+    surface = _tmux_surface(pane, tmux)
+    if surface is not None:
+        return surface.process_info(str(pane))
+    from terminal_surface import is_tmux_pane
+    if is_tmux_pane(pane):
+        return None
     env = _herdr_env(socket_path)
     command = [executable, *(["--session", server] if server else []),
                "pane", "process-info", "--pane", str(pane)]
@@ -374,24 +399,26 @@ def _pane_process_info(pane, *, executable, server=None, socket_path=None):
 
 
 def _footer_proves_current_thread(pane, session_id, pid, process_record, group, *,
-                                  executable, server=None, socket_path=None):
+                                  executable, server=None, socket_path=None, tmux=None):
     """Use two fresh native footer reads to prove the pane's current selection."""
     if not _THREAD_ID_RE.fullmatch(session_id or "") or _registered_worker(pid):
         return False
     if _process(pid) != process_record:
         return False
-    first = _read_codex_footer_threads(pane, executable=executable, socket_path=socket_path)
+    first = _read_codex_footer_threads(pane, executable=executable, socket_path=socket_path,
+                                       tmux=tmux)
     if first != {session_id}:
         return False
     time.sleep(0.04)
     if _process(pid) != process_record:
         return False
-    second = _read_codex_footer_threads(pane, executable=executable, socket_path=socket_path)
+    second = _read_codex_footer_threads(pane, executable=executable, socket_path=socket_path,
+                                        tmux=tmux)
     if second != {session_id} or _process(pid) != process_record:
         return False
     try:
         latest = _pane_process_info(pane, executable=executable, server=server,
-                                    socket_path=socket_path)
+                                    socket_path=socket_path, tmux=tmux)
         latest_group = int((latest or {}).get("foreground_process_group_id") or 0)
         latest_pids = {int(item.get("pid")) for item in (latest or {}).get("foreground_processes") or []
                        if isinstance(item, dict) and str(item.get("pid", "")).isdigit()}
@@ -426,7 +453,7 @@ def _codex_info_has_foreground(info, pane, pid, group):
 
 def _resolve_codex_pane_selection(pane, pid, process_record, group, process_sid, *,
                                   executable, server=None, socket_path=None,
-                                  codex_observation=None):
+                                  codex_observation=None, tmux=None):
     """Resolve selection from stable footer proof or exact process-native proof."""
     if (not pane or _registered_worker(pid)
             or (process_sid and not _THREAD_ID_RE.fullmatch(str(process_sid)))):
@@ -438,7 +465,8 @@ def _resolve_codex_pane_selection(pane, pid, process_record, group, process_sid,
     if kind != "codex" or service:
         return ""
 
-    footer = _read_codex_footer_threads(pane, executable=executable, socket_path=socket_path)
+    footer = _read_codex_footer_threads(pane, executable=executable, socket_path=socket_path,
+                                        tmux=tmux)
     if isinstance(footer, set) and footer:
         if len(footer) != 1:
             return ""
@@ -447,7 +475,7 @@ def _resolve_codex_pane_selection(pane, pid, process_record, group, process_sid,
             return ""
         if not _footer_proves_current_thread(
                 pane, selected, pid, process_record, group,
-                executable=executable, server=server, socket_path=socket_path):
+                executable=executable, server=server, socket_path=socket_path, tmux=tmux):
             return ""
         current = _process(pid)
         kind, service = _runtime(pid)
@@ -468,7 +496,7 @@ def _resolve_codex_pane_selection(pane, pid, process_record, group, process_sid,
         return ""
     try:
         latest = _pane_process_info(pane, executable=executable, server=server,
-                                    socket_path=socket_path)
+                                    socket_path=socket_path, tmux=tmux)
     except (OSError, subprocess.SubprocessError, ValueError, TypeError, AttributeError):
         return ""
     if not _codex_info_has_foreground(latest, pane, pid, group):
@@ -482,17 +510,17 @@ def _resolve_codex_pane_selection(pane, pid, process_record, group, process_sid,
 
 
 def current_codex_thread(pane, pid=None, *, executable=None, server=None, socket_path=None,
-                         process_info=None, codex_observation=None):
+                         process_info=None, codex_observation=None, tmux=None):
     """Return the native thread proved current in this pane's foreground Codex TUI."""
     if not pane:
         return ""
-    executable = executable or shutil.which("herdr")
+    executable = _pane_reader(pane, executable)
     if not executable or pid is not None and _registered_worker(pid):
         return ""
     try:
         info = (process_info if isinstance(process_info, dict) else
                 _pane_process_info(pane, executable=executable, server=server,
-                                   socket_path=socket_path))
+                                   socket_path=socket_path, tmux=tmux))
         group = int((info or {}).get("foreground_process_group_id") or 0)
         foreground_pids = {int(item.get("pid"))
                            for item in (info or {}).get("foreground_processes") or []
@@ -514,7 +542,8 @@ def current_codex_thread(pane, pid=None, *, executable=None, server=None, socket
         native_sid = _native_session(candidate, "codex", codex_observation=codex_observation)
         selected = _resolve_codex_pane_selection(
             pane, candidate, record, group, native_sid, executable=executable,
-            server=server, socket_path=socket_path, codex_observation=codex_observation)
+            server=server, socket_path=socket_path, codex_observation=codex_observation,
+            tmux=tmux)
         if selected:
             current_ids.add(selected)
     return next(iter(current_ids)) if len(current_ids) == 1 else ""
@@ -537,8 +566,9 @@ def current_codex_thread_for_caller(pane, *, executable=None, server=None, socke
 
 
 def _loader_verified_pane(pane, session_id, owner_pid, owner_start, *,
-                          executable, server=None, socket_path=None, codex_observation=None):
-    """Confirm a caller-selected thread's exact loader PID in a herdr pane."""
+                          executable, server=None, socket_path=None, codex_observation=None,
+                          tmux=None):
+    """Confirm a caller-selected thread's exact loader PID in a Herdr or tmux pane."""
     if not _THREAD_ID_RE.fullmatch(session_id or "") or _registered_worker(owner_pid):
         return ""
     record = _process(owner_pid)
@@ -548,7 +578,7 @@ def _loader_verified_pane(pane, session_id, owner_pid, owner_start, *,
         return ""
     try:
         info = _pane_process_info(pane, executable=executable, server=server,
-                                  socket_path=socket_path)
+                                  socket_path=socket_path, tmux=tmux)
         group = int((info or {}).get("foreground_process_group_id") or 0)
         foreground_pids = {int(item.get("pid"))
                            for item in (info or {}).get("foreground_processes") or []
@@ -560,7 +590,7 @@ def _loader_verified_pane(pane, session_id, owner_pid, owner_start, *,
     process_sid = _native_session(owner_pid, "codex", codex_observation=codex_observation)
     selected = _resolve_codex_pane_selection(
         pane, owner_pid, record, group, process_sid, executable=executable,
-        server=server, socket_path=socket_path, codex_observation=codex_observation)
+        server=server, socket_path=socket_path, codex_observation=codex_observation, tmux=tmux)
     return pane if selected == session_id else ""
 
 
@@ -570,9 +600,11 @@ def codex_tui_process_bindings(session_id, *, pane_hint=None, executable=None,
     if not _THREAD_ID_RE.fullmatch(session_id or ""):
         return []
     from fleet.collectors import procscan
+    from terminal_surface import caller_tmux_pane, same_tmux_pane
 
     executable = executable or shutil.which("herdr")
-    if not executable:
+    tmux_found = shutil.which("tmux")
+    if not executable and not tmux_found:
         return []
     try:
         process_ids = [int(item) for item in os.listdir("/proc") if item.isdigit()]
@@ -592,22 +624,33 @@ def codex_tui_process_bindings(session_id, *, pane_hint=None, executable=None,
             # leave reach it, inside _loader_verified_pane.
             owner_env = procscan.read_environ(owner_pid)
             pane = str(owner_env.get("HERDR_PANE_ID") or "").strip()
-            if not pane or pane_hint and pane != pane_hint:
+            tmux = None
+            if not pane:
+                # A TUI outside Herdr is bound through the tmux server it was started in.
+                pane, tmux = caller_tmux_pane(owner_env)
+                if not tmux_found:
+                    continue
+            elif not executable:
+                continue
+            if not pane or pane_hint and pane != pane_hint and not (
+                    tmux and same_tmux_pane(pane, pane_hint)):
                 continue
             # The endpoint travels with the pane. An empty value is an explicit
             # default-endpoint binding, never permission to inherit another socket.
-            socket_path = str(owner_env.get("HERDR_SOCKET_PATH") or "")
-            if owner_env.get("AGENT_HERDR_SESSION") and not socket_path:
+            socket_path = "" if tmux else str(owner_env.get("HERDR_SOCKET_PATH") or "")
+            if not tmux and owner_env.get("AGENT_HERDR_SESSION") and not socket_path:
                 continue  # a named server without its socket path cannot be carried safely
             if _loader_verified_pane(
-                    pane, session_id, owner_pid, record[5], executable=executable,
-                    socket_path=socket_path, codex_observation=codex_observation):
+                    pane, session_id, owner_pid, record[5], executable=executable or "tmux",
+                    socket_path=socket_path, codex_observation=codex_observation, tmux=tmux):
                 binding = (owner_pid, str(record[5]), pane, socket_path)
                 candidates[binding] = {
                     "pid": owner_pid, "pid_start": str(record[5]),
                     "session_id": session_id, "pane": pane,
                     "socket_path": socket_path,
                 }
+                if tmux:
+                    candidates[binding]["tmux"] = tmux
         except Exception:
             continue
     return [candidates[key] for key in sorted(candidates)]
@@ -662,7 +705,7 @@ def _same_socket_endpoint(owner_socket, requested_socket, server):
 
 
 def verified_pane(pane, harness, sid=None, *, pid=None, executable=None, server=None,
-                  socket_path=None, codex_observation=None):
+                  socket_path=None, codex_observation=None, tmux=None):
     """Return the hinted pane only with a live physical or exact session binding.
 
     Tools and hooks may have pipes for stdio; their nearest runtime must be the
@@ -672,11 +715,12 @@ def verified_pane(pane, harness, sid=None, *, pid=None, executable=None, server=
     footer is a confirmation and rejects a conflicting thread; CODEX_THREAD_ID
     identifies shared-daemon callers, whose pane is resolved through the TUI PID.
     PID/start and foreground tty/group are re-read before accepting either path.
+    A tmux pane id (``%N``) is read through that tmux server with the same proof.
     """
     if harness not in {"claude", "codex", "opencode"} or (not pane and harness != "codex"):
         return ""
-    executable = executable or shutil.which("herdr")
-    if not executable:
+    executable = _pane_reader(pane, executable)
+    if not executable and not (harness == "codex" and not pane and shutil.which("tmux")):
         return ""
     if harness == "codex":
         try:
@@ -704,7 +748,7 @@ def verified_pane(pane, harness, sid=None, *, pid=None, executable=None, server=
             return ""
     try:
         info = _pane_process_info(pane, executable=executable,
-                                  server=server, socket_path=socket_path)
+                                  server=server, socket_path=socket_path, tmux=tmux)
         if not info:
             return ""
         group = int(info.get("foreground_process_group_id") or 0)
@@ -751,7 +795,8 @@ def verified_pane(pane, harness, sid=None, *, pid=None, executable=None, server=
                                    and words[1:] == [b"attach", job])
                     if attached_bg:
                         latest = _pane_process_info(pane, executable=executable,
-                                                    server=server, socket_path=socket_path)
+                                                    server=server, socket_path=socket_path,
+                                                    tmux=tmux)
                         latest_pids = {int(item.get("pid")) for item in (latest or {}).get("foreground_processes") or []
                                        if isinstance(item, dict) and str(item.get("pid", "")).isdigit()}
                         attached_bg = bool(int((latest or {}).get("foreground_process_group_id") or 0) == group
@@ -763,7 +808,7 @@ def verified_pane(pane, harness, sid=None, *, pid=None, executable=None, server=
                 sid and codex_current
                 and _footer_proves_current_thread(
                     pane, sid, foreground[0], foreground, group, executable=executable,
-                    server=server, socket_path=socket_path))
+                    server=server, socket_path=socket_path, tmux=tmux))
             binding = (footer_exact if codex_current else physical or exact or attached_bg)
             if (binding
                     and _process(foreground[0]) == foreground and _process(own[0]) == own):
