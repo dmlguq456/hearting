@@ -53,16 +53,19 @@ this itself; it receives no caller mode signal.
 ## Round Protocol
 
 Applicable command results must cover the reviewed paths, inputs, dependencies,
-and execution conditions. A new source subject still requires an ordinary independent judgment,
+and execution conditions. A new source subject still requires its own independent judgment
+(the closure check below after a blocking verdict, otherwise a first review),
 and reusing command evidence never substitutes for that judgment or makes a
 historical PASS current.
 
 For implementation reviews, the runtime binds the reviewed source content at
-registration and verifies it at launch. A different content subject starts an
-ordinary independent review with its own verdict budget. Assess the changed
-source and its interactions using applicable prior findings and verification;
-this is not a full audit of unchanged material or a restart of command checks.
-Do not treat the new subject as a same-source closure check.
+registration and verifies it at launch. A different content subject gets its
+own verdict budget, but the round kind follows the node lineage: while the
+lineage's latest verdict is blocking, the review of corrected content is the
+closure check below, and the delta is the change since that verdict. Otherwise
+assess the changed source and its interactions using applicable prior findings
+and verification; this is not a full audit of unchanged material or a restart
+of command checks.
 Returning to earlier content reuses that subject's existing budget. Reports,
 marker sequence, timestamps, staging alone, and identical-content commits do
 not create a new subject. A PASS remains attached to the content it reviewed
@@ -93,10 +96,10 @@ gate must converge, not peel one layer per pass.
   gap that was visible and unreported in an earlier round you could have raised.
 - **A verdict-less prior attempt is history only.** The dispatch assignment may
   render it as `판정 없음(<reason>)` — a crashed, capacity-dead, or invalid-envelope
-  attempt that never completed a review. If no substantive verdict exists for the
-  current review subject, make the first independent judgment of its changes and
+  attempt that never completed a review. If the node lineage has no substantive
+  verdict, make the first independent judgment of the current subject's changes and
   interactions, using applicable existing evidence; there is no prior 🔴 list
-  to close. If a substantive verdict exists for this subject, read the nearest one
+  to close. If a substantive verdict exists in the lineage, read the nearest one
   as the prior round even when verdict-less attempts follow it, and use the closure
   questions for that finding set plus the delta.
 

@@ -46,7 +46,7 @@ class LocatorAmendmentTests(unittest.TestCase):
         metadata = META_TESTS.AmendmentTests.package(self)
         A.apply(metadata, expected_package_digest=A.package_digest(metadata))
         self.old_campaign = self.campaign_dir
-        self.new_campaign = self.root / "campaigns" / "2026-09-13_ifcorrnet-icassp-resubmission"
+        self.new_campaign = self.root / "campaigns" / "2026-09-13_ifmodela-icassp-resubmission"
         self.requests = {
             self.CYCLES[0]: {"locator": "2026-09-13_v1-resubmission-diagnosis", "title": "v1 · 재제출 진단"},
             self.CYCLES[1]: {"locator": "2026-09-13_v2-review-mapping-diagnosis", "title": "v2 · 심사 의견·Mapping 추가 진단"},
@@ -118,7 +118,7 @@ class LocatorAmendmentTests(unittest.TestCase):
     def test_root_without_title_repair_sidecar_and_unmoved_cycle_still_amends(self) -> None:
         """A fresh root never ran the fleet title repair (no display-title v2
         sidecar), and a cycle whose locator is already right only needs its
-        title; neither is a refusal (TF-Rehancer replay, 2026-09-15)."""
+        title; neither is a refusal (Project-C replay, 2026-09-15)."""
         (self.root / A.DISPLAY_TITLES_REL).unlink()
         kept_locator = "2026-09-13_cycle-2"
         self.requests[self.CYCLES[1]] = {"locator": kept_locator, "title": "v2 · 제목만 바뀜"}

@@ -122,7 +122,7 @@ class RuleTest(unittest.TestCase):
         ctx = self._ctx()
         self.assertEqual(
             CT._reject_code("2026-08-10_ax_command_phase_c1 — legacy support residue", ctx, set()), "generic")
-        self.assertEqual(CT._reject_code("legacy support residue (sr-corrnet)", ctx, set()), "generic")
+        self.assertEqual(CT._reject_code("legacy support residue (sr-modela)", ctx, set()), "generic")
         # A title merely containing the word "report" or "요약" (not equal to one
         # of the exact-match extra entries) is still accepted.
         self.assertIsNone(CT._reject_code("quarterly progress report addendum", ctx, set()))

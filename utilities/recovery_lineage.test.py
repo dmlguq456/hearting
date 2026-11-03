@@ -360,7 +360,8 @@ GROUPS = (
     ("stage_dispatch_fallback.test.py", (
         "FallbackTest.test_registry_prevents_explicitly_classified_tuple_retry",
         "FallbackTest.test_registry_worker_deaths_do_not_spend_a_launch_tuple",
-        "FallbackTest.test_review_round_cap_correction_round_attaches_protocol_block_to_prompt_file")),
+        "FallbackTest.test_review_round_cap_correction_round_carries_protocol_block_with_prompt_file",
+        "FallbackTest.test_review_round_cap_correction_round_carries_protocol_block_without_prompt_file")),
     ("../tools/fleet/tests/test_f28_route.py", ("OrphanConductorAnnotationTest",)),
 )
 

@@ -144,6 +144,10 @@ def validate_route_contract(route_path: str | Path, node_id: str, cwd: str | Pat
                         transition = None
                     if transition and transition["from"] == expected and transition["to"] == observed:
                         continue
+                if reason == "route-node-model-profile-mismatch" and jobs:
+                    from model_profile import escalated_profile_verified
+                    if escalated_profile_verified(route, node_id, jobs, sealed=expected, profile=observed):
+                        continue
                 raise _fail(reason, f"expected={expected} observed={observed}", rid)
     if route["tracking"] == "tracked":
         gate = route["tracked_gate_evidence"]

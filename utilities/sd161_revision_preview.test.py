@@ -86,7 +86,8 @@ class RevisionPreviewTest(FIX.CompletionMarkerTest):
             self.assertEqual(admission.auto_revisions,())
             self.assertEqual(admission.budget.state,'admit')
             # The legacy raw-row cap+1 contract still holds. Content-aware
-            # admission also proves the changed B input starts its own budget.
+            # admission also proves the changed B input starts its own budget,
+            # reviewed as a closure check of the lineage's blocking verdict.
             rows=N.prior_round_attempts(self.jobs,route['route_id'],node['id'],route=route)
             legacy=R.REVIEW_ROUND_CAP.round_budget(route,node,
                 [(cols[1],meta) for cols,meta in rows],
@@ -94,7 +95,7 @@ class RevisionPreviewTest(FIX.CompletionMarkerTest):
             self.assertEqual(legacy.round_kind,'closure-check')
             self.assertEqual(legacy.verdict_rounds,2)
             self.assertEqual(legacy.state,'admit')
-            self.assertEqual(admission.budget.round_kind,'first')
+            self.assertEqual(admission.budget.round_kind,'closure-check')
             self.assertEqual(admission.budget.verdict_rounds,0)
             self.assertEqual(admission.reviewed_input['path'],str(evidence))
             self.assertEqual(before,self.snapshot())

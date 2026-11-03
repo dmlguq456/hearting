@@ -200,7 +200,7 @@ def _protected_files(root: Path, campaign_dir: Path, campaign_json: Path,
     # Sort by the recorded posix string: `Path` ordering compares components,
     # so `shards/retrieval/…` sorted before `shards/retrieval-alternative/…`
     # while the validator's string order puts them the other way round, and a
-    # real root (TF-Rehancer 2026-09-15) was refused as not canonical.
+    # real root (Project-C 2026-09-15) was refused as not canonical.
     for path in sorted(paths, key=lambda item: item.relative_to(root).as_posix()):
         raw = _read_bytes(path)
         assert raw is not None

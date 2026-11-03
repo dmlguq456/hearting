@@ -256,35 +256,35 @@ class PaneOwnershipTest(unittest.TestCase):
         self.foreground(foreground)
         self.assertNotEqual(po._process(foreground.pid)[3], po._process(unrelated.pid)[3])
         env = {"HERDR_PANE_ID": "wB:p3N", "XDG_STATE_HOME": str(self.root / "state")}
-        with mock.patch.dict(os.environ, env), mock.patch.object(st, "project_key_for", return_value="home-os"), \
+        with mock.patch.dict(os.environ, env), mock.patch.object(st, "project_key_for", return_value="home-app"), \
                 mock.patch.object(st, "_herdr_executable", return_value=str(self.herdr)), \
                 mock.patch.object(po.os, "getpid", return_value=unrelated.pid):
-            seat = st.resolve_seat("claude", str(self.root), sid="home-os-sid")
+            seat = st.resolve_seat("claude", str(self.root), sid="home-app-sid")
             # Before the fix resolve_seat returned this pane solely from HERDR_PANE_ID.
             self.assertEqual(seat.kind, "project")
             pane_seat = st.Seat("pane", st._digest("pane", "wB:p3N"), "wB:p3N", "claude", "")
             st.write_card(pane_seat, "claude", "supervisor-sid", "감독 카드", cwd=str(self.root))
             previous = st.read_latest_card(pane_seat)
-            st.write_card(seat, "claude", "home-os-sid", "home-os 카드", cwd=str(self.root))
+            st.write_card(seat, "claude", "home-app-sid", "home-app 카드", cwd=str(self.root))
             self.assertEqual(st.read_latest_card(pane_seat), previous)
-            self.assertEqual(st.read_latest_card(seat)["body"], "home-os 카드")
+            self.assertEqual(st.read_latest_card(seat)["body"], "home-app 카드")
             consumed = st._consumed_path(pane_seat)
             before = consumed.read_bytes() if consumed.exists() else None
-            self.assertEqual(st.run_hook("claude", "start", "home-os-successor",
+            self.assertEqual(st.run_hook("claude", "start", "home-app-successor",
                                          cwd=str(self.root), env=env), "")
-            successor = st.session_seat(seat, "claude", "home-os-successor")
+            successor = st.session_seat(seat, "claude", "home-app-successor")
             now = st.now_epoch()
             with st.session_state_lock(successor):
-                st.record_event(successor, "claude", "home-os-successor", "start",
+                st.record_event(successor, "claude", "home-app-successor", "start",
                                 source="clear", cwd=str(self.root), now=now)
                 st._append_ledger_entry(successor, {
-                    "ts": now + 0.001, "harness": "claude", "sid": "home-os-successor",
-                    "event": "handover", "from": {"harness": "claude", "sid": "home-os-sid"},
+                    "ts": now + 0.001, "harness": "claude", "sid": "home-app-successor",
+                    "event": "handover", "from": {"harness": "claude", "sid": "home-app-sid"},
                     "source": "clear",
                 })
-            injected = st.run_hook("claude", "start", "home-os-successor",
+            injected = st.run_hook("claude", "start", "home-app-successor",
                                    cwd=str(self.root), env=env)
-            self.assertIn("home-os 카드", injected)
+            self.assertIn("home-app 카드", injected)
             self.assertNotIn("감독 카드", injected)
             self.assertEqual(consumed.read_bytes() if consumed.exists() else None, before)
 
@@ -549,14 +549,14 @@ class PaneOwnershipTest(unittest.TestCase):
 
     def test_pane_hook_and_peer_use_the_same_refusal(self):
         from fleet import herdr_projection as hp
-        with mock.patch.object(hp, "runtime_identity", return_value=("claude", "home-os-sid")), \
+        with mock.patch.object(hp, "runtime_identity", return_value=("claude", "home-app-sid")), \
                 mock.patch.object(po, "verified_pane", return_value=""), \
                 mock.patch.dict(os.environ, {"HERDR_PANE_ID": "wB:p3N"}):
-            self.assertFalse(hp.may_report("claude", "home-os-sid", worker=False))
+            self.assertFalse(hp.may_report("claude", "home-app-sid", worker=False))
             spec = importlib.util.spec_from_file_location("pane_test_steward", ROOT / "utilities/peer-steward.py")
             peer = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(peer)
-            with mock.patch.object(peer, "_current_session_identity", return_value=("home-os-sid", "claude")):
+            with mock.patch.object(peer, "_current_session_identity", return_value=("home-app-sid", "claude")):
                 self.assertEqual(peer._caller_pane(), "")
 
     def test_fake_inherited_codex_thread_and_registered_worker_cannot_report(self):
@@ -578,14 +578,14 @@ class PaneOwnershipTest(unittest.TestCase):
         foreground, unrelated = self.runtime(), self.runtime()
         self.foreground(foreground)
         env = {"HERDR_PANE_ID": "wB:p3N", "XDG_STATE_HOME": str(self.root / "state")}
-        with mock.patch.dict(os.environ, env), mock.patch.object(st, "project_key_for", return_value="home-os"), \
+        with mock.patch.dict(os.environ, env), mock.patch.object(st, "project_key_for", return_value="home-app"), \
                 mock.patch.object(st, "_herdr_executable", return_value=str(self.herdr)), \
                 mock.patch.object(po.os, "getpid", return_value=unrelated.pid), \
                 mock.patch.object(handover, "handover_rows") as rows, \
                 mock.patch.object(handover, "current_bindings") as bindings:
-            self.assertIsNone(handover.pane_seat(env, "claude", "home-os-sid"))
-            self.assertEqual(handover.storage_recipients("home-os-sid", env, "claude"), [("home-os-sid", None)])
-            self.assertIsNone(handover.record_retire_handover("supervisor-sid", "claude", "home-os-sid", "claude", env=env))
+            self.assertIsNone(handover.pane_seat(env, "claude", "home-app-sid"))
+            self.assertEqual(handover.storage_recipients("home-app-sid", env, "claude"), [("home-app-sid", None)])
+            self.assertIsNone(handover.record_retire_handover("supervisor-sid", "claude", "home-app-sid", "claude", env=env))
             rows.assert_not_called()
             bindings.assert_not_called()
 
@@ -614,7 +614,7 @@ class PaneOwnershipTest(unittest.TestCase):
         recovery = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(recovery)
         with mock.patch.dict(os.environ, {"HERDR_PANE_ID": "wB:p3N"}), \
-                mock.patch.object(st, "session_from_env", return_value=("claude", "home-os-sid")), \
+                mock.patch.object(st, "session_from_env", return_value=("claude", "home-app-sid")), \
                 mock.patch.object(po.shutil, "which", return_value=str(self.herdr)), \
                 mock.patch.object(po.os, "getpid", return_value=unrelated.pid), \
                 contextlib.redirect_stdout(io.StringIO()) as output:

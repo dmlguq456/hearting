@@ -33,7 +33,7 @@ class AmendmentTests(unittest.TestCase):
         self.campaign_dir = self.root / "campaigns" / "2026-09-13_unassigned"
         self.campaign = {
             "schema_version": 1, "contract": "artifact-producer/v1", "campaign_id": self.CAMPAIGN_ID,
-            "key": "_unassigned", "goal": "Work stream not proposed", "title": "IF-CorrNet ICASSP 재제출 준비",
+            "key": "_unassigned", "goal": "Work stream not proposed", "title": "IF-ModelA ICASSP 재제출 준비",
             "state": "active", "degraded": True, "degraded_reason": "campaign-unassigned",
             "cycles": list(self.CYCLES), "locator": self.campaign_dir.name,
         }
@@ -87,7 +87,7 @@ class AmendmentTests(unittest.TestCase):
         self.temp.cleanup()
 
     def package(self) -> dict:
-        return A.prepare(self.root, campaign_id=self.CAMPAIGN_ID, key="ifcorrnet-icassp-resubmission",
+        return A.prepare(self.root, campaign_id=self.CAMPAIGN_ID, key="ifmodela-icassp-resubmission",
                          goal="ICASSP 재제출 원고를 진단한다.", cycle_titles=self.titles)
 
     def protected_snapshot(self, package: dict) -> dict[str, bytes]:
@@ -101,7 +101,7 @@ class AmendmentTests(unittest.TestCase):
         self.assertEqual(A.verify(package)["status"], "verified")
         campaign = json.loads((self.campaign_dir / "campaign.json").read_text())
         expected = dict(self.campaign)
-        expected.update(key="ifcorrnet-icassp-resubmission", goal="ICASSP 재제출 원고를 진단한다.")
+        expected.update(key="ifmodela-icassp-resubmission", goal="ICASSP 재제출 원고를 진단한다.")
         expected.pop("degraded")
         expected.pop("degraded_reason")
         self.assertEqual(campaign, expected)
@@ -127,7 +127,7 @@ class AmendmentTests(unittest.TestCase):
             A.apply(package, expected_package_digest=A.package_digest(package))
         self.assertFalse((self.root / A.CAMPAIGN_METADATA_REL).exists())
         other = self.root / "campaigns" / "other" / "campaign.json"
-        write_json(other, {"campaign_id": "camp_" + "a" * 32, "key": "ifcorrnet-icassp-resubmission"})
+        write_json(other, {"campaign_id": "camp_" + "a" * 32, "key": "ifmodela-icassp-resubmission"})
         write_json(self.campaign_dir / "campaign.json", self.campaign)
         with self.assertRaisesRegex(A.AmendmentError, "campaign-key-collision"):
             self.package()

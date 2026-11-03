@@ -2,7 +2,7 @@
 """Acceptance suite for the portable tracked-workflow continuation contract.
 
 Every test here maps to one clause of `core/WORKFLOW.md §0.6` / `OPERATIONS §5.12`,
-and the BC_ResNet_tf cases are the regression pilot: a run that finished training
+and the KWS_Net_tf cases are the regression pilot: a run that finished training
 while nothing owned evaluation must now either be refused at compile or carried
 forward by the supervisor.
 """
@@ -297,7 +297,7 @@ class WorkflowFixture(unittest.TestCase):
 
     def arm_external(self, route_path, registry, *, node="run", extra=()):
         """Arm a supervised watch with no way to start the successor -- the exact
-        BC_ResNet_tf shape: another checked surface is declared to own the start, and
+        KWS_Net_tf shape: another checked surface is declared to own the start, and
         nothing actually starts it."""
         SUP.main([
             "arm", "--route", str(route_path), "--node", node,
@@ -1755,7 +1755,7 @@ class TestResourceLifecycle(WorkflowFixture):
             SUP.inherit_resource_watch(conflict_route, conflict_ledger, armed, holder)
 
 # ---------------------------------------------------------------------------
-# F. the graph contract itself, and the BC_ResNet_tf regression
+# F. the graph contract itself, and the KWS_Net_tf regression
 # ---------------------------------------------------------------------------
 class TestGraphContract(unittest.TestCase):
     def setUp(self):
@@ -1782,7 +1782,7 @@ class TestGraphContract(unittest.TestCase):
                                   self.registry["continuation_kinds"],
                                   (recipe["capability"], node["id"]))
 
-    def test_bc_resnet_shape_is_refused_at_registry_validation(self):
+    def test_kws_net_shape_is_refused_at_registry_validation(self):
         """The original lab-setup graph — training as the last node — no longer compiles."""
         broken = copy.deepcopy(self.registry)
         recipe = next(r for r in broken["recipes"]
@@ -2011,7 +2011,7 @@ class TestCapabilityIntegration(WorkflowFixture):
 
 
     def test_lab_setup_run_advances_to_verification_exactly_once(self):
-        """BC_ResNet_tf pilot: the finished training run now carries itself forward.
+        """KWS_Net_tf pilot: the finished training run now carries itself forward.
 
         The 2026-08-04 failure was that training and its hard-negative loop finished and
         nothing owned what came next. On the real `autopilot-lab --mode setup` graph the
@@ -2334,7 +2334,7 @@ class TestSurveyLedgerRoot(unittest.TestCase):
 
 class TestSurvey(WorkflowFixture):
     def test_survey_ranks_exited_unclaimed_external_watch_as_abandoned(self):
-        # The exact BC_ResNet_tf shape: a fresh supervised watch, exact exited resource
+        # The exact KWS_Net_tf shape: a fresh supervised watch, exact exited resource
         # predecessor, `successor_external: true`, no claim, no successor progress, and
         # an unproven terminal gate.
         route, path = self.two_stage_route()

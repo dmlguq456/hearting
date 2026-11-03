@@ -2135,6 +2135,43 @@ class ParentCloseTest(unittest.TestCase):
         self.assertEqual(worker.wait(timeout=2), -signal.SIGTERM)
         self.assertEqual(CLOSE._rows(self.jobs)[self.aid("att-worker")][1]["failure_class"], "pass")
 
+    def test_unreadable_seat_lineage_waits_instead_of_refusing_or_skipping_the_owner(self):
+        # Whether this session holds the live owner is unknown: neither "not owned" nor a close
+        # that skips the owner. The same close is the way on; nothing is signalled meanwhile.
+        import dispatch_seat_handover as handover
+        owner = self.process("att-owner")
+        self.row("att-owner", process=owner)
+        with mock.patch.object(handover, "_readable_lineage_signature",
+                               side_effect=OSError("lineage-directory-changed")):
+            with self.assertRaises(DC.DispatchContractError) as waiting:
+                self.close()
+        self.assertEqual((waiting.exception.reason, waiting.exception.next_action),
+                         ("handover-unreadable", "same-command"))
+        self.assertIsNone(owner.poll())
+        self.assertIsNone(CLOSE.intent(self.route, self.jobs))
+        self.assertEqual(self.close()["state"], "cancelled")
+
+    def test_an_unrelated_owner_with_a_diverged_lineage_does_not_hold_this_close(self):
+        # RV-1151 M1: another route's live owner in the same folder whose parent lineage forked
+        # (unknown for as long as the fork stays) is skipped as before; this route still closes.
+        import route_authority as AUTH
+        import session_tidy as tidy
+        owner = self.process("att-owner")
+        self.row("att-owner", process=owner)
+        other = self.process("att-other")
+        other_meta = self.row("att-other", process=other, parent_sid="forked-parent", parent_harness="codex",
+                              owner_route_id="rt-0123456789abcdef", owner_route_hash="sha256:" + "1" * 64,
+                              owner_route_file=str(self.base / "other-route.json"))
+        for n, target in enumerate(("fork-a", "fork-b")):
+            ledger = tidy._ledger_path(tidy.Seat("pane", f"fork-seat-{n}", f"w9:pF{n}"))
+            ledger.parent.mkdir(parents=True, exist_ok=True)
+            ledger.write_text(json.dumps({"event": "handover", "source": "clear", "from": "forked-parent",
+                                          "sid": target, "harness": "codex", "ts": time.time()}) + "\n")
+        self.assertIsNone(AUTH.owns(other_meta, "fixture-parent", self.jobs))
+        self.assertEqual(self.close()["state"], "cancelled")
+        self.assertIsNotNone(owner.poll())
+        self.assertIsNone(other.poll())
+
     def test_confirmed_handover_refuses_old_parent_close_and_allows_successor(self):
         import dispatch_seat_handover as handover
         import session_tidy as tidy

@@ -1124,6 +1124,24 @@ class ParentBindingLineageTest(unittest.TestCase):
         result, _ = self.run_as("att-owner-0001", final="att-owner-0001")
         self.assertEqual(result["verdict"], "register-ok")
 
+    def test_an_unreadable_seat_lineage_stays_a_refusal_inside_the_supervisor(self):
+        # Kept as is (RV-1151 L2 follow-up): parent_attempt_succeeded now raises the recipient
+        # wait, but this check runs inside the owner's supervisor, which a raised wait would end,
+        # and the chain has no wait before registration. The existing refusal stays; nothing runs.
+        import dispatch_contract
+        import dispatch_replacement
+        import route_authority
+        try:
+            route_authority.require_known(None)
+        except dispatch_contract.DispatchContractError as exc:
+            wait = exc
+        with mock.patch.dict(os.environ, {"AGENT_DISPATCH_ATTEMPT_ID": "att-owner-0002"}), \
+                mock.patch.object(dispatch_replacement, "effective_attempts", side_effect=wait), \
+                mock.patch.object(self.services._chain, "run_checked") as run:
+            result = self.services._run(self.request, "register")
+        self.assertEqual(result["reason"], "subsession-advance-parent-binding-invalid")
+        run.assert_not_called()
+
     def test_successor_register_refuses_unrelated_or_intermediate_owner(self):
         for caller, final in (("att-unrelated", "att-owner-0002"), ("att-owner-0002", "att-owner-0003"), ("", "att-owner-0002")):
             with self.subTest(caller=caller, final=final):

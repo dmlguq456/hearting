@@ -165,9 +165,12 @@ def resolve_continuation_budget(
     if len(node_ids) != len(nodes) or len(set(node_ids)) != len(node_ids):
         return ContinuationBudget(COMPATIBILITY_FLOOR, "compatibility-floor")
     retry_ids = [item for item in boundaries if isinstance(item, str) and item]
-    if len(retry_ids) != len(boundaries) or not set(retry_ids).issubset(node_ids):
+    if len(retry_ids) != len(boundaries):
         return ContinuationBudget(COMPATIBILITY_FLOOR, "compatibility-floor")
-    retry_slots = len(set(retry_ids))
+    # A continuation route keeps its source graph's boundaries while declaring only the
+    # nodes still to run; a boundary on a node this route does not declare gives it no
+    # retry slot, so count the declared ones instead of dropping to the floor.
+    retry_slots = len(set(retry_ids) & set(node_ids))
     import review_round_cap
     sealed_budget = route.get("continuation_budget")
     cap = sealed_budget.get("review_round_cap") if isinstance(sealed_budget, dict) else None
@@ -201,7 +204,13 @@ class AdmitVerdict:
 class ContinuationLedger:
     """Pure state machine (SD-116 §13.34.4-(2)): zero file access. The three
     remainders never go negative via clamping -- every admit that would push
-    one below zero is refused instead (D47-4)."""
+    one below zero is refused instead (D47-4).
+
+    Phase F (user correction input-dcb5f9b6…): `gross` is the derived workload
+    record and the ceiling's name, not a spend axis for real progress. Only
+    the `stall` counter (no-progress repetition) and the one `reserved`
+    terminal-handoff turn are ever decremented; an ordinary admit carrying a
+    new result is admitted without spending either."""
 
     def __init__(self, budget: ContinuationBudget) -> None:
         self._gross_remaining = budget.ordinary
@@ -275,11 +284,15 @@ class ContinuationLedger:
         # `stall_remaining` gates only the two no-progress patterns (identical
         # redelivery, runtime-wait-without-started-child) routed through the
         # `stalled=True` branch above -- it never blocks a real-progress
-        # gross spend, per §13.34.4-(2) "이 두 계열은 gross ceiling을 소비하지
+        # gross admit, per §13.34.4-(2) "이 두 계열은 gross ceiling을 소비하지
         # 않는다" (the inverse holds too: gross spends don't borrow from stall).
-        if self._gross_remaining > self._reserved_remaining:
-            self._gross_remaining -= 1
-            return self._verdict(admitted=True, purpose=purpose, charged="gross", refusal="")
-        return self._verdict(
-            admitted=False, purpose=purpose, charged="", refusal="continuation-admission-refused",
-        )
+        #
+        # Phase F: and the inverse of the old gross equation holds as well --
+        # a `stalled=False` ordinary admit carries a new result (a settled
+        # resource outbox, a finished child's completion receipt, a replaced
+        # outbox), which is progress, not repetition. It is admitted without
+        # decrementing gross and without hitting the reserve boundary: the
+        # finite budget stops no-progress repetition only. `charged="gross"`
+        # names the admit axis from the existing CLASSES vocabulary (no new
+        # record class); it does not imply a spend here.
+        return self._verdict(admitted=True, purpose=purpose, charged="gross", refusal="")

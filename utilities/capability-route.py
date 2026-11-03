@@ -393,7 +393,7 @@ def _launch_root_identity(kind, path, *, resolver_identity=None):
     if key not in _LAUNCH_ROOT_IDENTITY_CACHE:
         if resolver_identity is None:
             # A mutable project cwd is compared by first-parent HEAD lineage,
-            # never by installer dirty-content hashes. On 2026-09-27 home-os
+            # never by installer dirty-content hashes. On 2026-09-27 home-app
             # had >100k untracked runtime files under a tracked directory;
             # hashing them here exhausted the pre-claim fence's 60s budget.
             # A cwd without HEAD has no lineage to compare and reads
@@ -3886,8 +3886,9 @@ def _change_pins(route, jobs, values):
     pins, warnings = _filter_top_pins(_parse_selection_pins(values))
     harness, session = RA.caller_identity()
     owner = RA.current_route_owner(route, jobs, _rows(jobs))
-    if owner and not RA.owns(owner, session, jobs):
-        raise ValueError("start-pin-parent-only: only this route's parent session moves its pins")
+    if owner:
+        RA.require_owner(owner, session, jobs, "start-pin-parent-only",
+                         "start-pin-parent-only: only this route's parent session moves its pins")
     targets = [target for target in RA.PIN_CHANGE_TARGETS if target in pins]
     probed = {target: _pin_change_probe(route, jobs, target, pins[target]["harness"], harness)
               for target in targets}
@@ -3922,8 +3923,12 @@ def _record_access_change(route, jobs):
         return None
     harness, session = RA.caller_identity()
     owner = RA.current_route_owner(route, jobs, _rows(jobs))
-    if owner and not RA.owns(owner, session, jobs):
-        return {"changed": False, "reason": "access-change-parent-only"}
+    if owner:
+        try:
+            RA.require_owner(owner, session, jobs, "access-change-parent-only")
+        except DispatchContractError as exc:  # not recorded; an unreadable lineage waits for the same start
+            return {"changed": False, "reason": exc.reason,
+                    **{key: getattr(exc, key) for key in ("next_action", "retry_when") if getattr(exc, key, None)}}
     try:
         context = AccessContext.build(worktree=str(route.get("cwd") or ""),
                                       artifact_root=str(route.get("artifact_root") or ""),
@@ -4154,7 +4159,7 @@ def compose_route(*, capability, capability_mode, shape, graph, slug, cwd, artif
     artifact_root = str(Path(artifact_root).resolve())
     # The campaign is the agent's proposal for the work stream (CONVENTIONS
     # "Campaign or cycle").  A route sealed without one silently landed in the
-    # root's degraded `_unassigned` container (TF-Rehancer 2026-09-15: nine
+    # root's degraded `_unassigned` container (Project-C 2026-09-15: nine
     # routes, zero keys), so compose demands the proposal, shows the streams
     # that already exist, and accepts only an explicit opt-out.
     if unassigned and (campaign_key is not None or parent_cycle_id is not None):
@@ -5162,7 +5167,7 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
     slug_fields={}
     if slug is not None:
         # A caller-typed leading date is dropped once, here at the origin: every
-        # locator built from this slug prefixes the record's own date, so BC_ResNet
+        # locator built from this slug prefixes the record's own date, so KWS_Net
         # 2026-09-10 accumulated names like `2026-09-10_2026-09-10-r5-...` and one
         # `2026-09-09_2026-09-10-r4-...` whose two dates disagreed. Migration
         # naming does not pass through here and keeps both dates by design.
@@ -7612,8 +7617,9 @@ def _review_self_disposition_actor(route, jobs, metadata):
     else:
         owner = _find_attempt_row_metadata(Path(jobs), actor) if actor else None
         sid = ROUTE_AUTHORITY.caller_identity()[1]
-        if not owner or not ROUTE_AUTHORITY.owns(owner, sid, jobs):
+        if not owner:
             raise ValueError("review-self-disposition-actor-unproven")
+        ROUTE_AUTHORITY.require_owner(owner, sid, jobs, "review-self-disposition-actor-unproven")
         # The actual parent can settle this existing judgment while its current
         # owner waits for an answer. This is ordinary parent authority, not
         # permission to impersonate or revive that stopped owner.
@@ -13806,7 +13812,12 @@ if __name__=="__main__":
     try: main()
     # OSError too: completion walks a worker-supplied tree, and a refusal there
     # must be a typed line, never a traceback (review S-a).
-    except (ValueError,OSError,TOPO.TopologyError,DEFAULTS.DefaultsConfigError) as exc: print(f"capability-route: {exc}",file=sys.stderr); raise SystemExit(64)
+    except (ValueError,OSError,TOPO.TopologyError,DEFAULTS.DefaultsConfigError) as exc:
+        print(f"capability-route: {exc}",file=sys.stderr)
+        if getattr(exc,"next_action",None)=="same-command" and getattr(exc,"retry_when",""):
+            # A typed wait, not a refusal: the same command is the way on.
+            print(f"capability-route: next_action=same-command retry_when={exc.retry_when}",file=sys.stderr)
+        raise SystemExit(64)
     except Exception as exc:
         # A producer refusal (e.g. cutover-inactive) is a typed line too, never a traceback.
         import artifact_producer

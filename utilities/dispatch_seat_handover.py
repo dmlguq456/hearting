@@ -113,6 +113,44 @@ def _lineage_signature(directory: Path):
     return location, tuple(files), generation
 
 
+def _appended_since(observed, current) -> bool:
+    """Whether a ledger only grew since ``observed``: the same file and mode, no fewer bytes.
+
+    Seat ledgers are append-only (`O_APPEND`) and are only ever replaced whole (a rename),
+    so their first ``observed`` size bytes are still exactly what that observation saw.
+    A second replace can reuse the inode number (ext4 does), so this check alone does not
+    see a replacement: the directory-generation check every reader makes catches it.
+    """
+    observed, current = tuple(observed), tuple(current)
+    return ((observed[0], observed[1], observed[5]) == (current[0], current[1], current[5])
+            and current[4] >= observed[4])
+
+
+def _observed_ledger_bytes(path: Path, file_generation) -> bytes:
+    """The ledger bytes its stat observed. Another session appending meanwhile is not a fault;
+    a replaced, shrunk or unreadable ledger still is."""
+    expected = tuple(file_generation)
+    raw = _st().read_bytes(path)
+    if raw is not None and len(raw) >= expected[4]:
+        current = _lineage_generation(path.lstat())
+        if current == expected and len(raw) == expected[4]:
+            return raw
+        if _appended_since(expected, current):
+            return raw[:expected[4]]
+    raise OSError("lineage-ledger-unavailable")
+
+
+def _observation_holds(observed, current) -> bool:
+    """Whether a later stat still describes what ``observed`` read: the same directory and
+    ledgers, each unchanged or only appended to."""
+    (location, files, generation), (now_location, now_files, now_generation) = observed, current
+    if location != now_location or generation != now_generation or len(files) != len(now_files):
+        return False
+    return all(old[0] == new[0] and (tuple(old[1:]) == tuple(new[1:])
+                                     or _appended_since(old[1:], new[1:]))
+               for old, new in zip(files, now_files))
+
+
 def _snapshot_signature():
     """Stat-only identity of every handover snapshot the validator reads."""
     try:
@@ -138,11 +176,7 @@ def _readable_lineage_signature(directory: Path):
     location, files, generation = _lineage_signature(directory)
     observed, contents = [], {}
     for filename, *file_generation in files:
-        path = directory / filename
-        raw = _st().read_bytes(path)
-        if (raw is None or len(raw) != file_generation[4]
-                or _lineage_generation(path.lstat()) != tuple(file_generation)):
-            raise OSError("lineage-ledger-unavailable")
+        raw = _observed_ledger_bytes(directory / filename, file_generation)
         observed.append((filename, *file_generation, hashlib.sha256(raw).hexdigest()))
         contents[filename] = raw
     if generation is not None and _lineage_generation(directory.stat()) != generation:
@@ -170,7 +204,7 @@ def _build_lineage_graph(read_context=None) -> LineageGraph:
             graph = _build_lineage_graph_uncached(signature, contents)
             # A replacement while the parser was reading must not publish a
             # graph under the earlier observation's identity.
-            if _lineage_signature(directory) != metadata:
+            if not _observation_holds(metadata, _lineage_signature(directory)):
                 raise OSError("lineage-observation-changed")
             _LINEAGE_GRAPH_CACHE.clear()
             _LINEAGE_GRAPH_CACHE[signature] = graph
@@ -225,13 +259,8 @@ def _build_compact_lineage_graph(directory: Path, read_context=None):
         if reusable is not None:
             compact_rows[filename] = reusable
             continue
-        path = directory / filename
-        raw = _st().read_bytes(path)
-        if (raw is None or len(raw) != file_generation[4]
-                or _lineage_generation(path.lstat()) != tuple(file_generation)):
-            raise OSError("lineage-ledger-unavailable")
-        contents[filename] = raw
-    if _lineage_signature(directory) != (location, files, generation):
+        contents[filename] = _observed_ledger_bytes(directory / filename, file_generation)
+    if not _observation_holds((location, files, generation), _lineage_signature(directory)):
         raise OSError("lineage-observation-changed")
     graph = _build_lineage_graph_uncached((location, files, generation), contents,
                                           compact_rows=compact_rows)
@@ -295,11 +324,7 @@ def build_lineage_rows_payload(directory=None) -> dict:
     ledgers, skipped = {}, []
     for filename, *file_generation in files:
         ledger_key = Path(filename).stem
-        path = directory / filename
-        raw = st.read_bytes(path)
-        if (raw is None or len(raw) != file_generation[4]
-                or _lineage_generation(path.lstat()) != tuple(file_generation)):
-            raise OSError("lineage-ledger-unavailable")
+        raw = _observed_ledger_bytes(directory / filename, file_generation)
         rows = st._read_ledger_lines(st.Seat("pane", ledger_key), raw=raw)
         if not getattr(rows, "usable", True):
             # No entry means the effect path re-reads this ledger and fails
@@ -311,7 +336,7 @@ def build_lineage_rows_payload(directory=None) -> dict:
             "generation": list(file_generation),
             "rows": [[index, dict(rows[index])] for index in sorted(keep)],
         }
-    if _lineage_signature(directory) != (location, files, generation):
+    if not _observation_holds((location, files, generation), _lineage_signature(directory)):
         raise OSError("lineage-observation-changed")
     # The effect path may skip re-reading unchanged snapshots only when the
     # runner validated exactly these incarnations in this same publication.
@@ -1498,10 +1523,9 @@ class RecipientResolution(NamedTuple):
 
 
 def recipient_continuation(result, actor=None):
-    from route_authority import ContinuationDecision
+    from route_authority import ContinuationDecision, lineage_unreadable_wait
     if result.state == "unreadable":
-        return ContinuationDecision(False, "wait", "handover-unreadable", "same-command",
-                                    "The existing controller observes the same lineage again.")
+        return lineage_unreadable_wait({"parent_sid": result.registered_session}, cause=result.reason)
     if actor is not None and result.session_id != actor:
         return ContinuationDecision(False, "protected", "work-parent-recovery-required", "report")
     return ContinuationDecision(True, "continue")
@@ -1806,9 +1830,21 @@ def _own_seat(session: str):
         return None
 
 
-def owns(meta: dict, session: str, jobs=None, *, read_context=None) -> bool:
-    """Whether this exact session is the shared reader's confirmed current holder."""
-    return bool(session) and effective_parent(meta, jobs, read_context=read_context) == session
+def owns(meta: dict, session: str, jobs=None, *, read_context=None) -> Optional[bool]:
+    """Whether this exact session is the shared reader's confirmed current holder.
+
+    Three answers: True, False (another session holds it, or no session was named), and
+    None when the lineage cannot be read. A registered parent always has a holder while the
+    lineage reads (itself or its successor), so no holder for one is that unknown. Unknown
+    is neither owner nor not-owner: a caller that refuses on False maps it through
+    ``route_authority.require_owner`` to the recipient judgment's wait (LOOP §4).
+    """
+    if not session:
+        return False
+    holder = effective_parent(meta, jobs, read_context=read_context)
+    if holder:
+        return holder == session
+    return None if meta.get("parent_sid") else False
 
 
 class RecipientScopes(list):

@@ -182,7 +182,7 @@ settlement records downstream consumption afterward.
 `compute-hosts run` resolves the selected devices to host GPU indices and sets `CUDA_VISIBLE_DEVICES` to those indices (for example `0`), so owner scaffolds must not require that value to be a GPU UUID. Explicit `CUDA_VISIBLE_DEVICES=` or `CUDA_VISIBLE_DEVICES=-1` selects CPU-only execution without GPU admission.
 
 This replaced a graph whose last node was the training process itself. On
-2026-08-04 the BC_ResNet_tf run finished training and its hard-negative loop, the
+2026-08-04 the KWS_Net_tf run finished training and its hard-negative loop, the
 wrapper contained no evaluation stage, the resource runner had no completion
 callback, and the session ended with no follow-up mechanism registered. See
 `core/WORKFLOW.md §0.6` and `core/OPERATIONS.md §5.12`.
@@ -359,7 +359,7 @@ separable stage inline requires the recorded reason in the experiment
 
 ## Config Lifecycle and Provenance
 
-The 2026-08-03 BC_ResNet_tf pilot accumulated configs without distinguishing
+The 2026-08-03 KWS_Net_tf pilot accumulated configs without distinguishing
 adopted, rejected, and historical reproduction settings. The prior SR_Separator
 case hid configs in gitignored or per-run directories without a stable snapshot
 or hash. These incidents motivate the following contract.
