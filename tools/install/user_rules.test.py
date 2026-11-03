@@ -63,5 +63,21 @@ class UserRulesBlockTest(unittest.TestCase):
         self.assertEqual(user_rules.block(self.claude).count(RULE), 1)
 
 
+class UserRulesSwitchTest(unittest.TestCase):
+    def test_off_in_the_user_defaults_renders_nothing(self):
+        with tempfile.TemporaryDirectory(prefix="user-rules-switch-") as temporary:
+            claude = Path(temporary) / ".claude"
+            (claude / "rules").mkdir(parents=True)
+            (claude / "rules/external.md").write_bytes(RULE)
+            switch = Path(temporary) / "dispatch-defaults.yaml"
+            environ = {"DISPATCH_DEFAULTS_CONFIG": str(switch)}
+            self.assertTrue(user_rules.block(claude, environ))  # file absent: on
+            switch.write_text("schema_version: 4\nuser_rules:\n  opencode: off\n")
+            self.assertFalse(user_rules.carry_enabled(environ))
+            self.assertEqual(user_rules.block(claude, environ), b"")
+            switch.write_text("schema_version: 4\nuser_rules:\n  opencode: carry\n")
+            self.assertEqual(user_rules.block(claude, environ).count(RULE), 1)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

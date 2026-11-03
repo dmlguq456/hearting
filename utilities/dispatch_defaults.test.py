@@ -443,6 +443,35 @@ class DispatchDefaultsV4Tests(unittest.TestCase):
         errors = D.validate(config, self.capmap)
         self.assertTrue(any("steward requires schema_version 4" in e for e in errors), errors)
 
+    def test_user_rules_switch_defaults_to_carry_and_only_carry_keeps_it_on(self):
+        config = self.v4_config()
+        self.assertEqual(D.validate(config, self.capmap), [])
+        self.assertEqual(D.query_user_rules_opencode(config), "carry")
+        for value, expected, valid in (("carry", "carry", True), ("off", "off", True),
+                                       (False, "off", True), ("of", "off", False)):
+            with self.subTest(value=value):
+                config["user_rules"] = {"opencode": value}
+                self.assertEqual(D.query_user_rules_opencode(config), expected)
+                errors = D.validate(config, self.capmap)
+                self.assertEqual(errors == [], valid, errors)
+        config["user_rules"] = {"claude": "off"}
+        self.assertTrue(any("unknown user_rules key" in e for e in D.validate(config, self.capmap)))
+        config = self.v3_config()  # install seeds v3 files; the switch needs no migration
+        config["user_rules"] = {"opencode": "off"}
+        self.assertEqual(D.validate(config, self.capmap), [])
+        self.assertEqual(D.query_user_rules_opencode(config), "off")
+
+    def test_user_rules_switch_reads_only_its_own_key(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "dispatch-defaults.yaml"
+            path.write_text("schema_version: 4\nunknown_section: 1\nuser_rules:\n  opencode: off\n")
+            self.assertEqual(D.load_user_rules_opencode(str(path)), "off")
+            path.write_text("schema_version: 4\n odd: indentation\n")  # unparseable file
+            with self.assertRaises(D.DefaultsConfigError):
+                D.parse_yaml_subset(path.read_text())
+            self.assertEqual(D.load_user_rules_opencode(str(path)), "carry")
+            self.assertEqual(D.load_user_rules_opencode(str(Path(temporary) / "absent.yaml")), "carry")
+
     def test_v4_config_validates_and_still_answers_v3_shaped_queries(self):
         config = self.v4_config()
         self.assertEqual(D.validate(config, self.capmap), [])

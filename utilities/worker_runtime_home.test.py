@@ -1119,6 +1119,16 @@ class WorkerHomes(unittest.TestCase):
                          ['/user/own.md'])
         self.assertEqual((claude / 'rules/external.md').read_bytes(), rule)
 
+        switch = self.base / 'dispatch-defaults.yaml'
+        switch.write_text((ROOT / 'profiles/dispatch-defaults.yaml').read_text()
+                          + '\nuser_rules:\n  opencode: off\n')
+        off_env = {**self.env, 'DISPATCH_DEFAULTS_CONFIG': str(switch)}
+        prepare_worker_home(ROOT, 'opencode', 'stage', 'rules', env=off_env)
+        self.assertFalse(target.exists())
+        self.assertEqual(json.loads((home / 'opencode.json').read_text())['instructions'], ['/user/own.md'])
+        prepare_worker_home(ROOT, 'opencode', 'stage', 'rules', env=self.env)
+        self.assertEqual(target.read_bytes().count(rule), 1)
+
         (claude / 'rules/external.md').write_text('  \n')
         prepare_worker_home(ROOT, 'opencode', 'stage', 'rules', env=self.env)
         self.assertFalse(target.exists())

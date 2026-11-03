@@ -8,12 +8,15 @@ OpenCode ``AGENTS.md`` as the rules block followed by the bootstrap; without
 rules the file stays the plain bootstrap link. The block holds each rule's text
 byte for byte. Rules scoped to paths by front matter are left out, because
 OpenCode would apply them everywhere, and a file that is not UTF-8 text is
-skipped and reported. Standard library only, so worker homes can load this
-file by path.
+skipped and reported. The carry is on unless the user sets
+``user_rules: opencode: off`` in ``~/.config/hearting/dispatch-defaults.yaml``;
+off renders nothing, so activation returns the plain link. Standard library
+only, so worker homes can load this file by path.
 """
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import re
 from pathlib import Path
@@ -24,7 +27,8 @@ END = b"<!-- hearting:user-rules end -->"
 HEADER = (BEGIN + b" (Hearting writes this whole file: the user's own rules from Claude's"
           b" user rule folder, $CLAUDE_CONFIG_DIR/rules or ~/.claude/rules, then the"
           b" Hearting bootstrap. Edit the rules there; install and update rewrite this"
-          b" file and uninstall removes it.) -->\n")
+          b" file and uninstall removes it. To stop carrying them, set user_rules:"
+          b" opencode: off in ~/.config/hearting/dispatch-defaults.yaml.) -->\n")
 _SCOPED = re.compile(rb"\A(?:\xef\xbb\xbf)?---\r?\n(?:(?!---\r?\n).*\r?\n)*?paths\s*:", re.M)
 
 
@@ -54,8 +58,19 @@ def collect(claude_home: Path) -> tuple[list[tuple[str, bytes]], list[str]]:
     return sorted(found), sorted(skipped)
 
 
-def block(claude_home: Path) -> bytes:
+def carry_enabled(environ=None) -> bool:
+    """The user's ``user_rules.opencode`` switch; absent means on."""
+    path = Path(__file__).resolve().parents[2] / "utilities" / "dispatch-defaults.py"
+    spec = importlib.util.spec_from_file_location("hearting_user_rules_defaults", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.load_user_rules_opencode(module.default_config_path(environ)) == "carry"
+
+
+def block(claude_home: Path, environ=None) -> bytes:
     """The marked rules block, or empty bytes when there is no rule to carry."""
+    if not carry_enabled(environ):
+        return b""
     rules = collect(claude_home)[0]
     if not rules:
         return b""

@@ -650,6 +650,26 @@ def _opencode_bootstrap_entry(bootstrap: Path, dest: Path) -> dict:
     return entry
 
 
+def _opencode_carry_notices(desired: List[dict], previous: Optional[dict], scope: str) -> List[str]:
+    """Say when the user-rules carry starts or stops, and which rule files it skipped."""
+    dest = str(paths.runtime_home("opencode", scope) / "AGENTS.md")
+    switch = paths.hearting_config_dir() / "dispatch-defaults.yaml"
+    wanted = next((item.get("kind") for item in desired if item["dest"] == dest), None)
+    prior = next((item.get("kind") for item in (previous or {}).get("owned_paths", [])
+                  if isinstance(item, dict) and item.get("dest") == dest), None)
+    notices = []
+    if user_rules.carry_enabled():
+        notices.extend(f"OpenCode user rules: skipped {note}"
+                       for note in user_rules.collect(paths.runtime_home("claude"))[1])
+        if wanted == "render" and prior != "render":
+            notices.append("OpenCode AGENTS.md now starts with your Claude user rules; to stop, "
+                           f"set user_rules: opencode: off in {switch}")
+    elif prior == "render" and wanted != "render":
+        notices.append(f"OpenCode AGENTS.md no longer carries your Claude user rules "
+                       f"(user_rules: opencode: off in {switch})")
+    return notices
+
+
 def _keep_edited_opencode_bootstrap(previous: Optional[dict], scope: str):
     """Copy a user's edit of the rendered OpenCode AGENTS.md aside so activation can rewrite it.
 
@@ -4033,9 +4053,7 @@ def activate(
     # Notices reach the person on every path, including release install/update.
     notices: List[str] = []
     if runtime == "opencode":
-        notices.extend(
-            f"OpenCode user rules: skipped {note}"
-            for note in user_rules.collect(paths.runtime_home("claude"))[1])
+        notices.extend(_opencode_carry_notices(desired, previous, scope))
         edited, kept_lines = _keep_edited_opencode_bootstrap(previous, scope)
         rewrite_owned.extend([edited] if edited else [])
         notices.extend(kept_lines)

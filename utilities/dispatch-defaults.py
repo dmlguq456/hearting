@@ -6,7 +6,8 @@ mappings, comments) — no PyYAML/yq dependency. Validates against the
 canonical topology node ids in capabilities/topologies.json and exposes
 affinity/owner/allocation/quality-band queries.  Schemas v1/v2 remain readable;
 schema v3 adds user-local enabled harnesses and per-profile quality bands;
-schema v4 adds confirmation/steward policy and optional `worker_account` auth-source paths.
+schema v4 adds confirmation/steward policy, optional `worker_account` auth-source paths,
+and the `user_rules` switch for carrying Claude user rules into OpenCode.
 """
 import copy
 import json
@@ -29,8 +30,14 @@ DEFAULT_USAGE_GATE_USED_PERCENT = 90
 TOP_LEVEL_KEYS = {
     "schema_version", "depth1_owner", "opencode", "allocation", "capabilities",
     "harnesses", "profiles", "headless", "confirmation", "steward", "runtime",
-    "worker_account",
+    "worker_account", "user_rules",
 }
+# Whether activation carries the user's unscoped Claude user rules
+# ($CLAUDE_CONFIG_DIR/rules) into OpenCode's global AGENTS.md. Absent means
+# `carry`; any other present value stops it (see query_user_rules_opencode).
+USER_RULES_KEYS = {"opencode"}
+USER_RULES_OPENCODE_MODES = ("carry", "off")
+DEFAULT_USER_RULES_OPENCODE = "carry"
 # PRD §13.53.2: the operator kill switch for the SD-120/121 terminal fast
 # path. `auto` lets the sealed runtime-capability census decide (the default,
 # and the only value that can ever open the gate); `off` keeps every route on
@@ -454,6 +461,19 @@ def validate(config, capmap):
     confirmation = config.get("confirmation")
     steward = config.get("steward")
     runtime = config.get("runtime")
+    user_rules = config.get("user_rules")
+    # Independent of the dispatch schema: install seeds v3 files, and turning
+    # the carry off must not require a schema migration.
+    if user_rules is not None:
+        if not isinstance(user_rules, dict):
+            errors.append("user_rules must be a mapping")
+        else:
+            for key in sorted(set(user_rules) - USER_RULES_KEYS):
+                errors.append(f"unknown user_rules key: {key!r}")
+            mode = user_rules.get("opencode", DEFAULT_USER_RULES_OPENCODE)
+            if mode not in USER_RULES_OPENCODE_MODES and mode is not False:
+                errors.append(
+                    f"user_rules.opencode must be one of {list(USER_RULES_OPENCODE_MODES)}")
     if version == 4:
         if confirmation is not None:
             if not isinstance(confirmation, dict):
@@ -1015,6 +1035,35 @@ def load_steward_policy(config_path=None, topology_path=None):
     except (DefaultsConfigError, OSError, json.JSONDecodeError) as exc:
         return query_steward_policy({}), [f"steward-settings-unreadable: {exc}"]
     return query_steward_policy(config), []
+
+
+def query_user_rules_opencode(config):
+    """`carry` unless `user_rules.opencode` is present with another value.
+
+    Total and never raises: a present value that is not exactly `carry`
+    (including `off`, `false`, or a typo) stops the carry, so an attempt to
+    turn it off never leaves the rules flowing. The validator reports typos.
+    """
+    section = config.get("user_rules") if isinstance(config, dict) else None
+    if isinstance(section, dict) and "opencode" in section:
+        value = section.get("opencode")
+        if isinstance(value, str) and value.strip().lower() == DEFAULT_USER_RULES_OPENCODE:
+            return DEFAULT_USER_RULES_OPENCODE
+        return "off"
+    return DEFAULT_USER_RULES_OPENCODE
+
+
+def load_user_rules_opencode(config_path=None):
+    """Read only this switch; a problem elsewhere in the file does not flip it.
+
+    An unreadable or unparseable file keeps the shipped default; the
+    dispatch-defaults validator and `harness config status` report the file.
+    """
+    try:
+        with open(config_path or default_config_path(), encoding="utf-8") as handle:
+            return query_user_rules_opencode(parse_yaml_subset(handle.read()))
+    except (DefaultsConfigError, OSError, UnicodeError):
+        return DEFAULT_USER_RULES_OPENCODE
 
 
 def query_steward_child_permission_mode(config):
