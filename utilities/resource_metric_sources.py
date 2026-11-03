@@ -685,6 +685,13 @@ def _admission_delivery_envelope(value):
     return {"delivered", "error", "evidence", "message"}.issubset(value)
 
 
+# Subtrees that describe other runs or host state, never this sample's own run:
+# GPU snapshots, the evaluations ahead in the queue, and a shared admission's
+# authorizing run (its `leases[]` carry that run's run_id/pid/started_at).
+_ADMISSION_FOREIGN_KEYS = frozenset({"snapshot", "first_snapshot",
+                                     "preceding_evaluation_leases", "shared_admission"})
+
+
 def _admission_objects(value, *, max_nodes=4096, max_depth=16):
     pending = [(value, 0)]
     visited = 0
@@ -697,8 +704,7 @@ def _admission_objects(value, *, max_nodes=4096, max_depth=16):
             yield current
             if depth < max_depth:
                 pending.extend((child, depth + 1) for key, child in current.items()
-                               if key not in {"snapshot", "first_snapshot",
-                                              "preceding_evaluation_leases"})
+                               if key not in _ADMISSION_FOREIGN_KEYS)
         elif isinstance(current, list) and depth < max_depth:
             pending.extend((child, depth + 1) for child in reversed(current[:max_nodes]))
 
