@@ -18,17 +18,17 @@ sys.path.insert(0, str(ROOT))
 
 from claude_project_dir import encode_project_dir, resolve_session_transcript  # noqa: E402
 
-# A real directory Claude Code 2.1.280 created (206 characters): the 200-char
-# cut plus `-` + base36(|java hash|) of the original cwd.
+# A directory name of the shape Claude Code 2.1.280 creates (206 characters): the
+# 200-char cut plus `-` + base36(|java hash|) of the original cwd.
 LONG_CWD = (
-    "/home/ywh/embedding_/.agent_reports/campaigns/2026-09-17_sm-relative-scoring/"
+    "/home/user/example_project/.agent_reports/campaigns/2026-09-17_sm-relative-scoring/"
     "2026-09-18_sm-relative-veto-v2-product-replay/artifacts/experiments/"
     "2026-09-18_sm_relative_veto_v2_product_replay/raw-results"
 )
 LONG_NAME = (
-    "-home-ywh-embedding---agent-reports-campaigns-2026-09-17-sm-relative-scoring-"
-    "2026-09-18-sm-relative-veto-v2-product-replay-artifacts-experiments-"
-    "2026-09-18-sm-relative-veto-v2-product-replay-raw-resul-vcjxv"
+    "-home-user-example-project--agent-reports-campaigns-2026-09-17-sm-relati"
+    "ve-scoring-2026-09-18-sm-relative-veto-v2-product-replay-artifacts-exper"
+    "iments-2026-09-18-sm-relative-veto-v2-product-replay-raw-iz38a"
 )
 
 # Directories whose names the old `/`, `.`, `_` rule encoded differently from
