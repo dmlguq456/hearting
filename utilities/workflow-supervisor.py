@@ -4136,6 +4136,14 @@ def cmd_release(args):
             assert_release_authority(actor_kind, resolution, gates[args.gate], args.gate)
             answers = {**answers, "actor_kind": actor_kind}
         answered_interview = interview_of_gate(ledger, args.gate) if answers else None
+        if args.gate == "frame-review" and args.decision == "proceed" and answers:
+            import work_intent
+            crossed = work_intent.supervisor_crossing(route, answered_interview, answers)
+            if crossed:
+                raise SupervisorError(
+                    "gate-release-authority-refused: the chosen direction crosses the intent's 안 할 것 ("
+                    + "; ".join(crossed) + "); only the person can choose it -- present the registered "
+                    "question to the person")
         binding_evidence = selected_release_journal_evidence(
             route, args.gate, args.decision, node_id, binding)
         if args.decision == "proceed":

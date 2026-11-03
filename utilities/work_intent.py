@@ -508,3 +508,100 @@ def sealed_summary(metadata, attempt_id: str) -> str:
     if not text.startswith(SUMMARY_HEAD) or "\n\n" in text or any(m in text for m in _CARRIER_MARKERS):
         return ""
     return text
+
+
+# ---------------------------------------------------------------------------
+# A direction that crosses the intent's "not doing" is the person's to choose
+# ---------------------------------------------------------------------------
+
+_PARTICLES = ("으로", "에서", "에게", "까지", "부터", "하고", "이나", "을", "를", "은", "는", "이", "가", "의",
+              "에", "로", "도", "만", "와", "과")
+_STOPWORDS = frozenset(("하지", "않기", "않음", "않는다", "말기", "금지", "없이", "추가", "새로", "새로운",
+                        "the", "and", "any", "not", "new", "add", "adding", "without", "don't", "never"))
+# A proposal names parts in English; a "not doing" line is often Korean. Whole words only.
+_SYNONYMS = {"deploy": "배포", "push": "푸시", "merge": "병합", "delete": "삭제", "release": "릴리스",
+             "publish": "출판", "migration": "마이그레이션", "install": "설치"}
+# A clause that says the work keeps away from something, or leaves it to someone else, names it
+# without doing it ("새 게이트를 추가하지 않는다", "병합·설치는 79에게 인계").
+_KEEPS_AWAY = re.compile(r"않|없|아닌|아니|금지|유지|보존|인계|넘기|넘김|넘긴|넘길|넘겨|맡기|맡김|맡긴|맡겨|그대로"
+                         r"|부모|메인 세션"
+                         r"|\b(?:without|no|not|never|keep|keeps|kept|unchanged|leave|leaves|hand(?:s|ed)?\s*(?:off|over)"
+                         r"|handoff|handover|parent|main session)\b|n't\b", re.I)
+# Clauses end at `;`, a sentence end or a parenthesis; `·`, `,`, `/` and "and" join one clause's list.
+_CLAUSE = re.compile(r";|\.(?:\s|$)|(?<=[다요])\s|[()（）]")
+_ITEM_PARTS = re.compile(r"\s*[·,/、，]\s*")
+
+
+def _content_words(text: str) -> list[str]:
+    words = []
+    for raw in re.findall(r"[0-9A-Za-z가-힣_-]+", (text or "").lower()):
+        word = raw.strip("_-")
+        if not word.isascii():
+            for particle in _PARTICLES:
+                if len(word) > len(particle) + 1 and word.endswith(particle):
+                    word = word[:-len(particle)]
+                    break
+        if word in _STOPWORDS:
+            continue
+        if len(word) >= 2:
+            words.append(word)
+    return words
+
+
+def _direction_words(proposal) -> set[str]:
+    """The words a proposal uses to say what it will do: its summary and each leg's parts.
+
+    `why`, `done_when`, `verify`, `parallel`, `cwd` and the JSON keys are left out -- that is
+    where a frame restates the limits it keeps -- and so is any clause that keeps away from
+    something or hands it to someone else."""
+    texts = [str(proposal.get("summary") or "")]
+    for leg in proposal.get("legs") or []:
+        if not isinstance(leg, dict):
+            continue
+        texts += [str(leg.get(key) or "") for key in ("capability", "mode")]
+        for key in ("graph", "extra_stages"):
+            for part in leg.get(key) or []:
+                texts.append(json.dumps(part, ensure_ascii=False) if isinstance(part, dict) else str(part))
+    words: set[str] = set()
+    for text in texts:
+        for clause in _CLAUSE.split(text):
+            if clause and not _KEEPS_AWAY.search(clause):
+                words.update(_content_words(clause))
+    words.update(korean for english, korean in _SYNONYMS.items() if english in words)
+    return words
+
+
+def crossed_not_doing(not_doing, proposal) -> list[str]:
+    """The `안 할 것` items a proposal says it will do; [] when none or unreadable.
+
+    An item is split on `·`, `,` and `/`; it is crossed when every word of one of its parts is a
+    word of the proposal's direction (`_direction_words`). Mechanical: a different word for the
+    same act passes, and the `[방향 통지]` summary is what lets the person correct that."""
+    if not isinstance(proposal, dict):
+        return []
+    words = _direction_words(proposal)
+    crossed = []
+    for item in not_doing or []:
+        for part in _ITEM_PARTS.split(item):
+            needed = _content_words(part)
+            if needed and all(word in words for word in needed):
+                crossed.append(item)
+                break
+    return crossed
+
+
+def supervisor_crossing(route, interview, answers) -> list[str]:
+    """The `안 할 것` items a non-person answer would cross by choosing its route proposal.
+
+    A supervisor answer (and the runtime's automatic agreement, which uses that authority) may not
+    choose such a direction; the person answers that question. A person's own answer is never
+    limited here."""
+    import frame_interview
+    if not isinstance(answers, dict) or answers.get("actor_kind") == "user":
+        return []
+    choice = frame_interview.route_choice(interview, answers)
+    if not choice or choice.get("state") != "selected":
+        return []
+    request = route.get("work_request") if isinstance(route, dict) else None
+    not_doing = draft(request.get("text") or "").get("not_doing") if isinstance(request, dict) else None
+    return crossed_not_doing(not_doing, choice.get("proposal"))

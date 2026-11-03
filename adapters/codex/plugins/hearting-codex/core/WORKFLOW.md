@@ -751,8 +751,21 @@ behalf (including adopting a recommendation). The answer template keeps
 `supervisor_answers_template` already carries `actor_kind: supervisor`. Unmarked answers
 remain unknown, and registered workers cannot claim either release authority.
 A supervisor answer releases frame-review with its source preserved in intent;
-person-only start approvals keep their existing gates. This meaning is shared
+person-only start approvals keep their existing gates. A direction that crosses
+the intent's `안 할 것` (§0.4: the chosen proposal's summary or parts say they do
+one of its items, apart from clauses that keep away from it or hand it over) is
+the person's to choose: a supervisor answer choosing it is not recorded and the
+same registered question goes to the person. This meaning is shared
 by Claude, Codex and OpenCode.
+
+When there is nothing to choose — both frame legs return valid, equal
+proposals, no start approval is in scope, and neither brief's section 7 lists a
+question only the user can answer — the runtime records that interview itself as
+the depth-0 session's on-behalf answer (`supervisor`, basis
+`automatic-agreement`), releases frame-review through the same commands, and
+the first leg's start receipt (each repeat too) carries a one-line `[방향 통지]`
+the session shows in its reply; nothing waits. A hand-written answer cannot
+carry that basis. Every other case asks as below.
 
 The interview proceeds in this order:
 
