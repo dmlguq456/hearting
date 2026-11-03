@@ -2321,6 +2321,49 @@ class ClaudeHookGroupIdentityTest(unittest.TestCase):
             # The kept hook stays tuned and only the missing one comes back.
             self.assertEqual(groups, [trimmed, {"matcher": "*", "hooks": [self.NUDGE]}])
 
+    def test_shipped_stop_projection_runs_in_the_background_and_a_tuned_copy_stays(self):
+        # The Stop pane-header projection prints nothing, so Stop never waits on
+        # it (HOOK-LATENCY 7-2: 112 Stop cancels at its old 5 s limit). An
+        # untuned install takes the new values on upgrade; a tuned one keeps its own.
+        shipped_path = Path(__file__).resolve().parents[2] / "adapters/claude/settings.json"
+        shipped = json.loads(shipped_path.read_text(encoding="utf-8"))
+
+        def stop_projection(hooks):
+            return [{key: hook.get(key) for key in ("timeout", "async")}
+                    for group in hooks.get("Stop", []) for hook in group.get("hooks", [])
+                    if hook.get("command", "").endswith("python3 herdr-session-projection.py")]
+
+        self.assertEqual(stop_projection(shipped["hooks"]), [{"timeout": 30, "async": True}])
+        sync_old = json.loads(json.dumps(shipped))
+        for group in sync_old["hooks"]["Stop"]:
+            for hook in group["hooks"]:
+                if hook["command"].endswith("python3 herdr-session-projection.py"):
+                    hook.pop("async")
+                    hook["timeout"] = 5
+        for tuned_timeout, expected in ((None, {"timeout": 30, "async": True}),
+                                        (12, {"timeout": 12, "async": None})):
+            with self.subTest(tuned=tuned_timeout), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                releases = {}
+                for name, data in (("old", sync_old), ("new", shipped)):
+                    (root / name / "adapters/claude").mkdir(parents=True)
+                    (root / name / "adapters/claude/settings.json").write_text(
+                        json.dumps(data), encoding="utf-8")
+                    releases[name] = root / name
+                user = json.loads(json.dumps({"hooks": sync_old["hooks"]}))
+                if tuned_timeout is not None:
+                    for group in user["hooks"]["Stop"]:
+                        for hook in group["hooks"]:
+                            if hook["command"].endswith("python3 herdr-session-projection.py"):
+                                hook["timeout"] = tuned_timeout
+                config = root / "settings.json"
+                config.write_text(json.dumps(user), encoding="utf-8")
+
+                self._merge(config, releases["new"], releases["old"])
+
+                merged = json.loads(config.read_text(encoding="utf-8"))["hooks"]
+                self.assertEqual(stop_projection(merged), [expected])
+
     def test_uninstall_removes_tuned_and_trimmed_copies_but_not_user_hooks(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
