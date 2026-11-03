@@ -23,9 +23,9 @@ lower-cost workers carry it out in small checked steps, and Fleet shows every se
 </p>
 
 <p align="center">
-  <img src="docs/fleet.svg" alt="Fleet's Explorer OVERVIEW: eight sessions in four projects across Claude Code, Codex, and OpenCode, grouped by project with model, context gauge, and what each is doing now; one session waiting for an answer, two open routes with their stage lines, and per-host CPU and GPU use at the bottom left." width="100%">
+  <img src="docs/fleet.svg" alt="Fleet's Explorer OVERVIEW: eight sessions in four projects across Claude Code, Codex, and OpenCode, grouped by project, each project's line showing its open routes, waiting answers, and latest result; every session with its model, context gauge, and what it is doing now; one session waiting for an answer, two open routes with their stage lines, and per-host CPU and GPU use at the bottom left." width="100%">
 </p>
-<p align="center"><sub>Fleet's Explorer, OVERVIEW: sessions from all three runtimes grouped by project, one waiting for your answer, two requests mid-flight, and GPU use per host. Drawn from synthetic demo data (<a href="docs/fleet/overview.png">PNG</a>).</sub></p>
+<p align="center"><sub>Fleet's Explorer, OVERVIEW: sessions from all three runtimes grouped by project, each project's status on its own line, one session waiting for your answer, two requests mid-flight, and GPU use per host. Drawn from synthetic demo data (<a href="docs/fleet/overview.png">PNG</a>).</sub></p>
 
 ## Why Hearting
 
@@ -56,6 +56,13 @@ when the agent contributes little on its own.
 
 Describe the outcome in your own words. There are no command names to learn,
 and output follows the language of your conversation.
+
+The fixed text Hearting prints itself, such as the route card at the start of
+a request, is English by default. For Korean, declare it once: set
+`"title_language": "ko"` in
+`${XDG_CONFIG_HOME:-~/.config}/hearting/fleet.json`, set
+`FLEET_NOW_LANG=Korean`, or set Claude Code's `language` setting to Korean.
+The same declaration sets the language of Fleet's session titles.
 
 > “Implement and test the login API, then leave a change report.”
 
@@ -114,13 +121,13 @@ working, idle, or waiting for you. Below it, one screen per question:
 
 | Screen | What it tells you |
 |---|---|
-| **OVERVIEW** | Every session, grouped by project: runtime, model and effort, a short title, context left, what it is doing now, and for how long. Working, idle, and waiting-for-you have different marks. |
+| **OVERVIEW** | Every session, grouped by project. Each project's line says where it stands: open requests, questions waiting for you, what is left to decide, and when it last changed. Each session shows runtime, model and effort, a short title, context left, what it is doing now, and for how long. Working, idle, and waiting-for-you have different marks. |
 | **ROUTES** | Each request's stage line — `plan › execute › test › report` — with the workers running under it. |
-| **QUESTIONS** | Every agent waiting for your answer or approval, oldest first. Answer from Fleet when the runtime offers a reply path; otherwise Fleet points you to the session. |
+| **QUESTIONS** | Every agent waiting for your answer or approval: which session asks, what kind of question, for which request, and since when. Older waits stay listed until you answer or the work ends; nothing is dropped for its age. Answer from Fleet when the runtime offers a reply path; otherwise Fleet points you to the session. |
 | **PEERS** | Which sessions watch or steer which, and their last exchange. |
 | **HISTORY** | Earlier sessions of each terminal seat, so work that continued in a new session stays traceable. |
 | **RESOURCES** | CPU, memory, and per-GPU use on this machine and any configured hosts, with the session that owns each GPU process. |
-| **MEMORY** | What was saved to shared memory today, by project. |
+| **MEMORY** | For each project: its newest decisions, open work by stage, and the latest records saved to shared memory. |
 | **MODELS · SYSTEM** | Which real model each budget maps to, and the installed Hearting release. |
 
 ### Key screens
@@ -128,7 +135,7 @@ working, idle, or waiting for you. Below it, one screen per question:
 <table>
   <tr>
     <td width="50%"><img src="docs/fleet/routes.png" alt="ROUTES: two open requests, a code route in its execute stage and a lab route running its eval-asr worker, each with the worker's model and elapsed time."><br><sub><b>ROUTES</b> — each request's stage line and the worker running it.</sub></td>
-    <td width="50%"><img src="docs/fleet/questions.png" alt="QUESTIONS: one decision waiting seven minutes with how to answer it, one older wait folded, and three questions answered today."><br><sub><b>QUESTIONS</b> — what is waiting for you, how to answer it, and what you answered today.</sub></td>
+    <td width="50%"><img src="docs/fleet/questions.png" alt="QUESTIONS: one decision a Claude Code session has been waiting on for seven minutes, with since when and how to answer it; one older approval wait from a Codex session listed under it; and three questions answered today."><br><sub><b>QUESTIONS</b> — what is waiting for you, since when, how to answer it, and what you answered today.</sub></td>
   </tr>
   <tr>
     <td width="50%"><img src="docs/fleet/session.png" alt="A session page: one Claude Code session's state, context gauge, and current activity, its route, the OpenCode session it steers, and the GPU it holds."><br><sub><b>Session page</b> — one session's state, context, current activity, route, peers, and GPU.</sub></td>
@@ -176,21 +183,23 @@ Bash. Session titles follow your language; set `title_language` in
 
 - The Explorer is the default `fleet` screen; its layout and keyboard handling
   are still being finished for v4.0.
-- A few status words and activity lines are still Korean-only; moving them to
-  a shared translation table is planned.
+- Fleet's screens are not in the shared text catalog yet: they stay English
+  when you choose Korean, and the MEMORY screen and a few status words are
+  still Korean-only. Moving them to the catalog is planned.
 
 ## Quick start
 
 ### Before you start
 
 - **Linux or macOS.** Windows (Git Bash) is experimental.
-- **Python 3.11+** with PyYAML for that Python:
-  `python3 -m pip install --user pyyaml`
+- **Python 3.11+** (the installer checks) with PyYAML for that Python:
+  `python3 -m pip install --user pyyaml`, or your OS package such as
+  `python3-yaml`
 - **Git**, and `curl` or `wget`.
 - **At least one agent CLI, installed and signed in:** Claude Code, Codex, or
   OpenCode. Claude Code alone is enough.
 
-<!-- TODO(public-readiness stage 5): add the tested OS × runtime matrix and confirm the minimum Python version. -->
+<!-- TODO(public-readiness stage 5): add the tested OS × runtime matrix. -->
 
 ### Install
 
@@ -217,6 +226,9 @@ credentials, sessions, logs, databases, or shell startup files, and it cannot
 change the `PATH` of a shell that is already open: use the `~/.local/bin/...`
 paths until that directory is on your `PATH`.
 
+`runtime doctor` also names an optional piece that is missing, such as PyYAML
+or herdr, and what does not work without it.
+
 Read [Permissions](#permissions) before your first task.
 
 ### First task
@@ -229,6 +241,12 @@ Run `fleet` in a second terminal to watch it. When it finishes you get the
 change, what was run to check it, and anything left undone. For anything
 beyond a one-line fix, the plan, evidence, and report stay in the project's
 `.agent_reports/` folder.
+
+When a request changes source code, Hearting usually makes the change in a
+separate git worktree beside your project, `<project>-wt/<name>`, on its own
+branch, so your folder, branch, and uncommitted files stay as they were. The
+result then names the folder and branch that hold the change and whether it is
+committed.
 
 <!-- TODO(public-readiness stages 1 and 6): link QUICKSTART.md with the demo repository, expected patch, and measured time. -->
 
@@ -290,6 +308,21 @@ headless:
   from your own OpenCode permission configuration.
 
 <!-- TODO(public-readiness stage 2): once the installer prints this default and the file path, say so here. -->
+
+**Your Claude Code user rules also apply in OpenCode.** OpenCode has no
+user-level rule file of its own, so when `~/.claude/rules/` (or
+`$CLAUDE_CONFIG_DIR/rules/`) holds rule files, Hearting writes OpenCode's
+global `AGENTS.md` as those rules followed by its own instructions, and the
+install or update that starts it says so. Rules limited to certain paths are
+left out, and the rule files are only read. The rule text then also reaches
+the model provider your OpenCode uses. To stop it, add these two lines to the
+same `dispatch-defaults.yaml`; the next install, update, or
+`hearting runtime refresh --runtime opencode` puts the plain instructions back:
+
+```yaml
+user_rules:
+  opencode: off
+```
 
 ## Artifacts and status
 
@@ -405,7 +438,7 @@ git config core.hooksPath tools/git-hooks
 
 Shared behavior starts in `core/`, `capabilities/`, and `roles/`; the three
 adapters under `adapters/` are equal projections of it, and
-[AGENTS.md](AGENTS.md) holds the maintenance principles. After
+[AGENTS.md](AGENTS.md) holds Hearting's purpose and maintenance principles. After
 changing a shared definition, refresh and check every generated projection:
 
 ```bash
@@ -425,7 +458,7 @@ suites from a clean checkout; `--mode linked` exists only for live debugging.
 
 | Purpose | Document |
 |---|---|
-| Maintenance principles | [AGENTS.md](AGENTS.md) |
+| Purpose and maintenance principles | [AGENTS.md](AGENTS.md) |
 | How the parts fit together | [MANUAL.md](MANUAL.md) |
 | Installation and runtime projections | [INSTALL_LAYOUT.md](INSTALL_LAYOUT.md) |
 | Releases and versioning | [RELEASE_POLICY.md](RELEASE_POLICY.md) |
