@@ -65,7 +65,8 @@ let contextPolicyRuntimeVersion = null
 let contextPolicyRequestedWindow = null
 const frameNativeAnswer = path.join(root, "utilities", "frame_native_answer.py")
 const startReceipt = path.join(root, "utilities", "start_receipt.py")
-const routeGateTools = new Set(["write", "edit", "multiedit", "patch", "apply_patch", "bash"])
+// V2 names its shell tool `shell` (V1: `bash`); both reach the gate's one shell branch.
+const routeGateTools = new Set(["write", "edit", "multiedit", "patch", "apply_patch", "bash", "shell"])
 const designPattern = /(designs?\/|\/design\/|spec\/design|preview\.html$|slides?\.html$|03_components|scaffolds\/)/
 const promptBySession = new Map()
 const turnBySession = new Map()
