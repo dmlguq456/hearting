@@ -317,6 +317,91 @@ class BatchClaimContinuationTest(IsolatedCase):
                          "rejected")
 
 
+class RunnerPassLineageReadTest(IsolatedCase):
+    """One runner pass observes lineage a fixed number of times, whatever the open notice count.
+
+    Per-notice lineage observations (a directory walk, or a read and hash of every
+    ledger) made the live runner use 34-86% CPU with jobs.log unchanged
+    (2026-11-04). Counts, not timings. The per-member transport check stays fresh by
+    design and is counted apart.
+    """
+
+    @contextlib.contextmanager
+    def counting(self):
+        import dispatch_recipient_receipt as receipt
+        import dispatch_seat_handover as handover
+        counts = {"lineage_signature": 0, "readable_lineage_signature": 0}
+        transport = []
+        real_stat = handover._lineage_signature
+        real_readable = handover._readable_lineage_signature
+        real_send_current = receipt.claimed_send_current
+
+        def stat(directory):
+            if not transport:
+                counts["lineage_signature"] += 1
+            return real_stat(directory)
+
+        def readable(directory):
+            if not transport:
+                counts["readable_lineage_signature"] += 1
+            return real_readable(directory)
+
+        def send_current(*args, **kwargs):
+            transport.append(True)
+            try:
+                return real_send_current(*args, **kwargs)
+            finally:
+                transport.pop()
+
+        handover._LINEAGE_GRAPH_CACHE.clear()
+        with mock.patch.object(handover, "_lineage_signature", new=stat), \
+             mock.patch.object(handover, "_readable_lineage_signature", new=readable), \
+             mock.patch.object(receipt, "claimed_send_current", new=send_current):
+            yield counts
+
+    def open_notices(self, storage, total):
+        for index in range(len(self.duties_for(storage)), total):
+            _notice("claude", storage, key=f"open-{storage}-{index}", subject="progress",
+                    text="routine progress", jobs=self.jobs)
+
+    def duties_for(self, storage):
+        return [duty for duty in self.duties()
+                if duty["intent"]["identity"].get("storage_sid") == storage]
+
+    def test_discovery_lineage_reads_do_not_grow_with_open_notices(self):
+        from peer_read_context import PeerReadContext
+        self.edge("A", "B")
+        observed = []
+        for total in (3, 12):
+            self.open_notices("A", total)
+            with self.counting() as counts:
+                self.assertTrue(peer_steward._discover_session_notice_duties(
+                    self.store, read_context=PeerReadContext(registry_append_only=True)))
+            observed.append(counts)
+        self.assertEqual(len(self.duties()), 12)
+        self.assertEqual(observed[0], observed[1])
+
+    def test_resume_lineage_reads_do_not_grow_with_notice_duties(self):
+        from peer_read_context import PeerReadContext
+        observed = []
+        for total in (3, 12):
+            storage, recipient = f"A{total}", f"B{total}"
+            self.edge(storage, recipient)
+            self.open_notices(storage, total)
+            duties = self.duties_for(storage)
+            self.assertEqual(len(duties), total)
+            sent = []
+            with self.transport(recipient, sent=sent), self.counting() as counts:
+                peer_steward._resume_session_notice_obligations(
+                    duties, self.store, read_context=PeerReadContext(registry_append_only=True))
+            # The effect group really handed min(total, batch limit) records over.
+            self.assertEqual(len(sent), 1)
+            self.assertEqual(sent[0]["body"].count("routine progress"),
+                             min(total, peer_steward.NOTICE_BATCH_LIMIT))
+            observed.append(counts)
+        self.assertEqual(observed[0], observed[1])
+
+
 class AttentionRetirementTest(IsolatedCase):
     OWNER = ("att-owner\tdone\t/fixture/repo\t/fixture/wt\towner\t"
              "attempt_id=att-owner,dispatch_depth=1,parent_sid=parent-test,"
