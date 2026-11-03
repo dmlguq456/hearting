@@ -35,6 +35,15 @@ need capabilities/autopilot-lab.md    'Eval execution topology'  'autopilot-lab 
 need capabilities/autopilot-lab.md    '## Routing Boundary'      'autopilot-lab Routing Boundary 존재'
 need capabilities/autopilot-lab.md    'report/logs/'              'autopilot-lab original-log bundle contract 존재'
 need capabilities/autopilot-lab.md    "script-src 'none'"        'autopilot-lab scriptless consumer contract 존재'
+# GH#846: a received result is interpreted (primary comparison, per-condition
+# gains/losses, worst cases, smallest cause check) before another tuning run.
+need capabilities/autopilot-lab.md    'Interpret a result before the next run' 'lab result interpretation before the next run (#846)'
+need capabilities/autopilot-lab.md    'Another tuning or training run is not the' 'lab: another tuning or training run is not the default (#846)'
+need capabilities/autopilot-lab.md    'diagnostic oracle is not an improvement' 'lab: diagnostic oracle is not an improvement (#846)'
+need capabilities/autopilot-lab/references/eval-procedure.md 'primary comparison' 'eval E3-1 preview starts from the primary comparison (#846)'
+need capabilities/autopilot-lab/references/eval-procedure.md 'per-condition gains and losses' 'eval E3-1 preview splits gains and losses by condition (#846)'
+need roles/units/qa/ml-debug.md       'offsetting gains and losses' 'ml-debug result diagnosis splits the aggregate by condition (#846)'
+need core/WORKFLOW.md                 'Receiving an experiment result' 'WORKFLOW §0.6 receiving a result is not interpreting it (#846)'
 need capabilities/autopilot-refine.md '## Routing Boundary'      'autopilot-refine Routing Boundary 존재'
 need capabilities/autopilot-refine.md 'autopilot-lab'            'autopilot-refine → lab primary 위임 절'
 need capabilities/autopilot-spec.md   'never substitutes'        'autopilot-spec spec-sync 비대체 절'

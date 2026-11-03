@@ -66,7 +66,7 @@ inference may publish `write_progress(done, "item", total=n)` for an earlier ETA
 
 ### E3 — Analysis, report, and completion
 
-**E3-1. Draft the result** when the user asks to organize results or the main agent observes eval completion. Use a localized one-screen preview with experiment, attempted change, best/final/delta metrics, sibling ablation table, parent delta, two or three observations, inline figure paths, and one next candidate. Ask whether to save, revise, or stop.
+**E3-1. Draft the result** when the user asks to organize results or the main agent observes eval completion. Use a localized one-screen preview with experiment, attempted change, best/final/delta metrics against the person's primary comparison (for example the unprocessed input, not only an internal control), sibling ablation table, parent delta, per-condition gains and losses, the worst representative cases read from existing outputs with facts kept apart from hypotheses, inline figure paths, and one next candidate: the smallest check of the leading cause, not a new tuning or training run by default. Ask whether to save, revise, or stop.
 
 **E3-2. Optional plotting on user request.** For `결과 plot 그려줘` or `ablation 표 정리`, dispatch the `material/figure-gen` unit with `metrics.jsonl`, the project's figure conventions from memory or existing plots, and output paths under `figures/`.
 
