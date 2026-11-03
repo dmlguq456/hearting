@@ -12716,8 +12716,9 @@ def _emit_compiled_route(a,route,artifact_root,output=None):
 
 def _close_route_argument(a):
     """`close`/`finish --route` take a route file, an `rt-...` id or a registry attempt id; an id is
-    looked up under the artifact root, an attempt by its registry row. Without one, `finish` takes
-    this session's latest route there."""
+    looked up under the artifact root, an attempt by its registry row. `close` remembers a named
+    attempt: one that is not its route's owner is stopped alone and the route stays open. Without
+    one, `finish` takes this session's latest route there."""
     import artifact_producer
     route=a.route
     if route and not artifact_producer._ROUTE_ID_RE.fullmatch(str(route)) and not Path(route).exists():
@@ -12990,7 +12991,9 @@ def main():
     rv.add_argument("--author-attempt-id",help="the recording attempt; default AGENT_DISPATCH_ATTEMPT_ID")
     rv.add_argument("--recorded-by",default="owner")
     rv.add_argument("--output")
-    cl=sub.add_parser("close"); cl.add_argument("--route",required=True,help="route file path or route id (rt-...)")
+    cl=sub.add_parser("close"); cl.add_argument("--route",required=True,help="route file path or route id (rt-...); "
+                                                 "an attempt id that is not its route's owner stops that attempt "
+                                                 "alone and leaves the route open")
     cl.add_argument("--artifact-root",default=None,
                     help="for a route id: default AGENT_ARTIFACT_ROOT, else utilities/artifact-root.sh for the current directory")
     cl.add_argument("--commit",help="result commit; defaults to HEAD in the route cwd")

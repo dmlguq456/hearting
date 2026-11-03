@@ -158,7 +158,10 @@ def _replacement_kind(status, meta, *, jobs=None, lines=None):
             jobs is not None and route_parent_close.row_requested(meta, jobs)):
         return None
     if committed_outcome(status, meta) == 'cancelled':
-        return None  # an intentional stop (route close, a user kill) is never replaced
+        # An intentional stop is never replaced on its own. A launched frame leg the person
+        # stopped alone (close or Fleet) is relaunched only by that person's next `start`.
+        return (DR.STOPPED if meta.get('worker_type') == 'frame' and meta.get('launch_started') == '1'
+                and meta.get('note') == route_parent_close.STOP_NOTE else None)
     if meta.get('worker_type') == 'owner' and DR.never_started(status, meta):
         # The launch fence is the execution boundary. A reservation may carry a
         # claim, but its absence of launch_started means it has no worker result.
@@ -626,17 +629,18 @@ def decide_continuation(route=None, *, action, jobs=None, owner_attempt_id=None,
         if not facts.get("resume_capacity") and not _replacement_in_flight(jobs, facts["registry_rows"], metadata):
             if kind == "capacity":
                 return ContinuationDecision(False, "capacity", "replacement-capacity-wait", "arm-capacity-resume")
-            if kind in {"runtime", "unlaunched", "corrected", "observed"} and not (
+            if kind in {"runtime", "unlaunched", "corrected", "observed", "stopped"} and not (
                     kind == "runtime" and facts.get("bound_carrier")):
                 # An explicit `start` (resume_capacity) or the parent's bound carrier
-                # launches a runtime end; a supervisor tick waits for one of them.
+                # launches a runtime end; a supervisor tick waits for one of them. A stop
+                # waits for the explicit `start` alone.
                 return ContinuationDecision(False, "not-applicable", next_action="observe")
         return ContinuationDecision(True, "launch", next_action="start")
     if action == "replacement-result":
         terminal, kind = facts["terminal"], facts["kind"]
         absent = terminal.get("state") == "absent" or (terminal.get("state") == "invalid" and
-            terminal.get("failure_class") == ("capacity" if kind == "frame-capacity" else kind)
-            and kind in {"capacity", "frame-capacity", "runtime"})
+            terminal.get("failure_class") == {"frame-capacity": "capacity", "stopped": "runtime"}.get(kind, kind)
+            and kind in {"capacity", "frame-capacity", "runtime", "stopped"})
         return ContinuationDecision(absent, "continue" if absent else "protected",
             "" if absent else "replacement-result-settlement-required", "start" if absent else "settle")
     if action == "owner-start":

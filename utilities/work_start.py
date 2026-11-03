@@ -1154,11 +1154,16 @@ def _outcome(jobs, aid):
             "recovery_command": completion_harvest_command(aid, action, jobs=str(jobs),
                 surface=str(ROOT / "adapters/codex/bin/preflight.sh"))}
     row = _rows(jobs).get(aid)
-    if row and _never_started(*row):
-        # No log or result exists to harvest; the way on is to start the same work again.
+    import route_parent_close
+    stopped = bool(row and route_parent_close._user_stopped(row[1]))
+    if row and (_never_started(*row) or stopped):
+        # No log or result exists to harvest (or the person stopped it): the way on is to
+        # start the same work again, which relaunches a stopped frame leg.
         route_file = row[1].get("owner_route_file") or row[1].get("route_file")
         if route_file:
             result["recovery_command"] = resume_command(route_file, jobs, agent_home=ROOT)
+        if stopped:
+            result.update(required_action="start", stopped=True)
     if action == "advance-completed":
         if row and row[1].get("workflow_completion") == "runtime-v1":
             from dispatch_terminal_commit import completed_owner_handoff, completed_owner_publication

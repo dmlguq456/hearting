@@ -42,7 +42,11 @@ def _target(jobs, attempt):
         error = InputError("correction-target-not-owner")
         if meta.get("worker_type") == "frame":
             # A frame leg has no owner to receive a correction; the runtime continues the leg.
-            error.retry_when = "A frame leg is continued by the runtime; run resume_command."
+            error.retry_when = ("A frame leg is continued by the runtime; run resume_command. "
+                                "`capability-route close --route <this attempt id>` stops it alone.")
+        else:
+            error.retry_when = ("A correction reaches a route owner; `capability-route close --route "
+                                "<this attempt id>` stops this attempt alone.")
         raise error
     keys = ("attempt_id", "harness", "owner_route_id", "owner_route_hash",
             "route_id", "route_hash", "parent_sid", "supervisor_lease_nonce")

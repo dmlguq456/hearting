@@ -49,7 +49,10 @@ CORRECTED = 'corrected'
 # declared gate holds it: the runtime carries its original result and report to a replacement owner
 # as observations, never as an answer. It is a pause of its own family, taken once per owner.
 OBSERVED = 'observed'
-PAUSE_KINDS = frozenset({'capacity', 'unlaunched', CORRECTED, OBSERVED})
+# A frame leg the person stopped alone: relaunched only by the person's next explicit `start`
+# of its route, never by a carrier or tick, in a family of its own like the other pauses.
+STOPPED = 'stopped'
+PAUSE_KINDS = frozenset({'capacity', 'unlaunched', CORRECTED, OBSERVED, STOPPED})
 FRAME_TRANSITION = {'from': 'top', 'to': 'deep', 'reason': 'capacity', 'ordinal': 1, 'origin': 'frame-rule'}
 CONTINUATION_WAIT_NOTE = (
     'This route has already used its one automatic continuation. If you raise a human gate later, '
