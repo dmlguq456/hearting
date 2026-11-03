@@ -38,7 +38,12 @@ The body below the summary block holds only the current contract.
 - **Sentences.** Conclusion first, one fact per sentence. Use plain numbers and letters, never circled or otherwise enclosed digits, letters, or small roman numerals.
 - **Headings (recommended).** Top-level sections use one form, `## N. Title`. Do not mark a heading as partially superseded — rewrite the section instead.
 
-`utilities/spec-transaction.py` checks the mechanical part of these rules whenever a transaction changes `prd.md`. It emits one `readability` event with counts per rule, split into lines new in this revision and lines carried over, prints one stderr line when anything is found, and never changes the exit code. `python3 "$AGENT_HOME/utilities/prd_readability.py" check <prd.md> [--base <previous prd.md>]` shows the same report before writing.
+`utilities/spec-transaction.py` checks the mechanical part of these rules whenever a transaction changes `prd.md`. It emits one `readability` event with counts per rule, split into lines new in this revision and lines carried over, prints one stderr line when anything is found, and never changes the exit code. `python3 "$AGENT_HOME/utilities/prd_readability.py" check <prd.md> [--base <previous prd.md>]` shows the same report before writing. Body lines outside fences and code spans also warn on:
+
+- `version-mention` — revision narration without the tag, such as `v12부터`, `v188에서 바꿈`, `(v177 개정)`; a name with a version (`BC-ResNet v2`), a dotted release, or a table row is not matched.
+- `supersede-narrative` — replacement history, such as `이전에는 … 였으나`, `폐기됐다`, `현재 정본은`, `superseded by`.
+- `user-quote` — quoted user wording or triggers, such as `사용자 원문`, `사용자: "…"`, `사용자 확정 N건`, `트리거 =`.
+- `long-line` — a non-table line longer than 600 characters.
 
 ### Current-Contract Rewrite
 
