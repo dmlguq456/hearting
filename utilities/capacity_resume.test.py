@@ -50,7 +50,7 @@ class CapacityResumeTest(unittest.TestCase):
                 mock.patch.object(W, "default_parent_session_id", return_value="parent"),
                 # These fixtures drive start synchronously; a pause must not leave a detached timer.
                 mock.patch("capacity_auto_resume.arm", return_value=None),
-                mock.patch.dict(os.environ, {"AGENT_CODEX_MANAGED_GATEWAY": "0", "HEARTING_GATES": "off"}),
+                mock.patch.dict(os.environ, {"AGENT_CODEX_MANAGED_GATEWAY": "0"}),
                 mock.patch.object(W, "join_selected_attempts", side_effect=self.observe),
                 mock.patch.object(W, "current_delivery_state", side_effect=self.delivery),
                 mock.patch.object(R, "_route", return_value=(self.path, self.route)),
@@ -338,10 +338,9 @@ class CapacityResumeTest(unittest.TestCase):
         self.assertIn(result["reason"], {"replacement-input-tuple-mismatch", "replacement-argv-mismatch"})
         self.assertFalse([a for a, (_, m) in self.rows().items() if m.get("automatic_retry_of")])
 
-    def test_gates_on_a_release_drift_alone_still_replaces(self):
+    def test_a_release_drift_alone_still_replaces(self):
         self._drift_setup()
-        with mock.patch.dict(os.environ, {"HEARTING_GATES": "on"}):
-            result = self.start()
+        result = self.start()
         self.assertEqual(result["state"], "running", result)
         self.assertEqual(len(self.calls), 1)
         self.assertEqual(len(self.claims()), 1)

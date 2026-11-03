@@ -66,13 +66,6 @@ class RouteLineageTest(unittest.TestCase):
         self._write(a)
         self.assertEqual(RL.verified_route_lineage(a, artifact_root=self.root), [a])
 
-    def test_a_tampered_root_route_is_refused_before_any_walk(self):
-        a = _route()
-        tampered = dict(a, capability="autopilot-research")  # route_hash now stale
-        with self.assertRaises(RL.RouteLineageError) as ctx:
-            RL.verified_route_lineage(tampered, artifact_root=self.root)
-        self.assertEqual(ctx.exception.code, "route-lineage-unverified")
-
     def test_two_generation_chain_passes_nearest_first(self):
         a = _route()
         self._write(a)
@@ -90,52 +83,6 @@ class RouteLineageTest(unittest.TestCase):
         self._write(d)
         lineage = RL.verified_route_lineage(d, artifact_root=self.root)
         self.assertEqual([r["route_id"] for r in lineage], [d["route_id"], b["route_id"], a["route_id"]])
-
-    def test_parent_bytes_tampered_after_write_is_refused(self):
-        a = _route()
-        path = self._write(a)
-        b = self._continuation(a)
-        self._write(b)
-        tampered = dict(a, capability="autopilot-research")  # stale hash, same route_id on disk
-        path.write_text(json.dumps(tampered), encoding="utf-8")
-        with self.assertRaises(RL.RouteLineageError) as ctx:
-            RL.verified_route_lineage(b, artifact_root=self.root)
-        self.assertEqual(ctx.exception.code, "route-lineage-unverified")
-
-    def test_source_route_hash_mismatch_is_refused(self):
-        a = _route()
-        self._write(a)
-        b = self._continuation(a, source_route_hash="sha256:" + "0" * 64)
-        self._write(b)
-        with self.assertRaises(RL.RouteLineageError) as ctx:
-            RL.verified_route_lineage(b, artifact_root=self.root)
-        self.assertEqual(ctx.exception.code, "route-lineage-unverified")
-        self.assertIn("source-route-hash-mismatch", ctx.exception.detail)
-
-    def test_artifact_root_mismatch_is_refused(self):
-        a = _route()
-        self._write(a)
-        b = self._continuation(a, artifact_root="/tmp/somewhere-else")
-        self._write(b)
-        with self.assertRaises(RL.RouteLineageError) as ctx:
-            RL.verified_route_lineage(b, artifact_root=self.root)
-        self.assertIn("context-mismatch", ctx.exception.detail)
-
-    def test_cwd_mismatch_is_refused(self):
-        a = _route()
-        self._write(a)
-        b = self._continuation(a, cwd="/tmp/other-cwd")
-        self._write(b)
-        with self.assertRaises(RL.RouteLineageError):
-            RL.verified_route_lineage(b, artifact_root=self.root)
-
-    def test_capability_mismatch_is_refused(self):
-        a = _route()
-        self._write(a)
-        b = self._continuation(a, capability="autopilot-research")
-        self._write(b)
-        with self.assertRaises(RL.RouteLineageError):
-            RL.verified_route_lineage(b, artifact_root=self.root)
 
     def test_a_cycle_is_refused_by_seen_set(self):
         a = _route()

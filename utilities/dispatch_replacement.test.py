@@ -2598,7 +2598,7 @@ class ReplacementTest(unittest.TestCase):
         self._successor(record,self.meta|{'worker_type':'owner'},'open')
         hold={'until_epoch':4102444800,'label':'2100-01-01T00:00:00Z'}
         with mock.patch('dispatch_capacity_evidence.harness_hold',return_value=hold), \
-             mock.patch.dict(os.environ,{'HEARTING_GATES':'on'}), mock.patch.object(R,'ROOT',self.root/'newer-release'):
+             mock.patch.object(R,'ROOT',self.root/'newer-release'):
             result=R.advance(self.jobs,'att-source',authority_check=lambda *_:True)
         self.assertEqual(result.get('state'),'running',result)
         self.assertEqual(result['attempt_id'],record['replacement_attempt_id'])
@@ -3055,6 +3055,57 @@ class ReplacementTest(unittest.TestCase):
                          'do not ask for it again', '<owner-corrections>'):
             self.assertIn(expected, text)
         self.assertNotIn('You replace exact-dead attempt', text)
+
+    def test_answered_blocked_owner_continues_a_resource_stage_its_failed_run_left_unsettled(self):
+        # Cairn v216: the last host run failed, the stage stayed RUNNING, the owner wrote a
+        # hand marker and ended BLOCKED; the person's answer continues that same stage.
+        import artifact_producer
+        self.route['nodes'] = [
+            {'id': 'host-run', 'kind': 'resource-runner', 'depends_on': [],
+             'outputs': ['parts/host-run/run.json', 'parts/host-run/logs/**'],
+             'continuation': {'kind': 'supervised'}},
+            {'id': 'impl-review', 'kind': 'review-worker', 'depends_on': ['host-run']}]
+        directory = D._route_module().completion_dir('rt-test', jobs=self.jobs)
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / 'host-run.json').write_text(json.dumps(
+            {'route_id': 'rt-test', 'route_hash': 'sha256:test', 'node_id': 'host-run',
+             'attempt_id': None, 'registered_worker': False, 'sequence': 1,
+             'evidence': {'path': str(self.root / 'run.json'), 'sha256': 'fixture'}}), encoding='utf-8')
+        currency = [D.GateCurrency('resource-stage-not-current', 'completion-marker-missing')]
+        self.reuse.stop()
+        stack = contextlib.ExitStack()
+        self.addCleanup(stack.close)
+        stack.enter_context(mock.patch.object(D, 'gate_currency', side_effect=lambda *a, **k: currency[0]))
+        stack.enter_context(mock.patch.object(D, 'completion_attempt_readiness',
+                                              return_value=SimpleNamespace(state='ready')))
+        stack.enter_context(mock.patch.object(R, '_gate_snapshot', return_value=[]))
+        stack.enter_context(mock.patch.object(artifact_producer, 'route_cycle_for', return_value={
+            'cycle_id': 'cyc-test', 'producer_id': 'prod-test'}))
+        stack.enter_context(mock.patch.object(artifact_producer, 'cycle_route_admission',
+                                              return_value=SimpleNamespace(allow=True)))
+        self._blocked_owner()
+        answer = 'Record the timeout as an environment FAIL and continue the host runs.'
+        self.assertTrue(self._answer(text=answer)['retained'])
+        # A settled stage whose proof does not match is unknown: no claim, no launch, no reopening.
+        refused, commands = self._launch()
+        self.assertEqual((len(commands), refused['reason']), (0, 'replacement-completion-unproven'), refused)
+        self.assertNotIn('not settled', refused.get('next_step', ''))
+        self.assertFalse((R._directory(self.jobs) / 'claims').exists())
+        # The stage observed RUNNING after its failed run: the answer continues it.
+        currency[0] = D.GateCurrency('resource-stage-not-current', D.RESOURCE_STAGE_UNSETTLED)
+        result, commands = self._launch()
+        self.assertEqual((len(commands), result['reason']), (1, 'replacement-launch-pending'), result)
+        reuse = result['record']['reuse']
+        self.assertEqual(([row['node'] for row in reuse['invalidated']], reuse['pending']),
+                         (['host-run'], ['host-run', 'impl-review']))
+        text = R.recovery_instructions(SimpleNamespace(automatic_retry_of='att-source', worker_type='owner',
+                                       jobs_path=self.jobs, attempt_id=result['record']['replacement_attempt_id']))
+        for expected in ('ended BLOCKED and a person has answered it', answer,
+                         'Continue these resource stages from their existing run records; their runs have '
+                         'not settled as succeeded, so the marker beside each is not their result: host-run.',
+                         'Unfinished route stages: host-run, impl-review.'):
+            self.assertIn(expected, text)
+        self.assertNotIn('former result is historical', text)
 
     def test_format_only_contract_end_keeps_contract_proof_and_carries_answer(self):
         meta = self._blocked_owner()
@@ -4149,17 +4200,15 @@ class ReplacementTest(unittest.TestCase):
         old={**replay,'launch_home':'/releases/v-old','resolved':{'model':'m1','permission_mode':'default'}}
         R._check_tuple(old,old)
         newer={**old,'launch_home':replay['launch_home'],'resolved':{'model':'m2','permission_mode':'default'}}
-        with mock.patch.dict(os.environ,{'HEARTING_GATES':'off'}):
-            R._check_tuple(newer,old)
-            with self.assertRaises(D.DispatchContractError) as caught:
-                R._check_tuple({**newer,'resolved':{'model':'m2','permission_mode':'config'}},old)
-            self.assertEqual((caught.exception.reason,caught.exception.detail),('replacement-input-tuple-mismatch','resolved'))
-            with self.assertRaises(D.DispatchContractError):R._check_tuple({**newer,'harness':'claude'},old)
+        R._check_tuple(newer,old)
+        with self.assertRaises(D.DispatchContractError) as caught:
+            R._check_tuple({**newer,'resolved':{'model':'m2','permission_mode':'config'}},old)
+        self.assertEqual((caught.exception.reason,caught.exception.detail),('replacement-input-tuple-mismatch','resolved'))
+        with self.assertRaises(D.DispatchContractError):R._check_tuple({**newer,'harness':'claude'},old)
         # The release is where the launch ran, not the work: no refusal with the gates on either.
-        with mock.patch.dict(os.environ,{'HEARTING_GATES':'on'}):
-            R._check_tuple(newer,old)
-            with self.assertRaises(D.DispatchContractError):
-                R._check_tuple({**newer,'resolved':{'model':'m2','permission_mode':'config'}},old)
+        R._check_tuple(newer,old)
+        with self.assertRaises(D.DispatchContractError):
+            R._check_tuple({**newer,'resolved':{'model':'m2','permission_mode':'config'}},old)
         same_release=dict(old,resolved={'model':'m3','permission_mode':'default'})
         with self.assertRaises(D.DispatchContractError):R._check_tuple(same_release,old)
         # A key the older release never sealed (runtime_dir, added later) follows the
@@ -4252,24 +4301,23 @@ class ReplacementTest(unittest.TestCase):
         sealed=launch(v1,v1)
         import route_authority
         self.assertTrue(route_authority.same_sealed_work(sealed,launch(share/'current',v1)))
-        with mock.patch.dict(os.environ,{'HEARTING_GATES':'on'}):
-            R._check_tuple(launch(share/'current',v1),sealed)
-            # BC r2: sealed through the pointer at v1; the pointer and the replacement are at v2 now.
-            (share/'current').unlink();(share/'current').symlink_to(v2)
-            R._check_tuple(launch(v2,v2),launch(share/'current',v1))
-            R._check_tuple(launch(share/'current',v2),launch(share/'current',v1))
-            # Another harness tree, such as a development checkout, is not the same release root.
-            for changed in (launch(self.root/'dev',v1),launch(share/'current',v1,'Bash(git push *)'),
-                            {**launch(share/'current',v1),'applied_permissions':{'claude':{'mode':'bypass',
-                             'allowed_tools':[f'Bash(python3 {v1}/utilities/capability-route.py *)',
-                                              f'Edit(//{self.root}/other/**)']}}}):
-                with self.assertRaises(D.DispatchContractError) as caught:
-                    R._check_tuple(changed,sealed)
-                self.assertEqual(caught.exception.reason, 'replacement-input-tuple-mismatch')
-                self.assertIn('axis=adapter-permission', caught.exception.detail)
-                self.assertIn('predecessor=', caught.exception.detail)
-                self.assertIn('candidate=', caught.exception.detail)
-                self.assertIn('child_spawned=0', caught.exception.detail)
+        R._check_tuple(launch(share/'current',v1),sealed)
+        # BC r2: sealed through the pointer at v1; the pointer and the replacement are at v2 now.
+        (share/'current').unlink();(share/'current').symlink_to(v2)
+        R._check_tuple(launch(v2,v2),launch(share/'current',v1))
+        R._check_tuple(launch(share/'current',v2),launch(share/'current',v1))
+        # Another harness tree, such as a development checkout, is not the same release root.
+        for changed in (launch(self.root/'dev',v1),launch(share/'current',v1,'Bash(git push *)'),
+                        {**launch(share/'current',v1),'applied_permissions':{'claude':{'mode':'bypass',
+                         'allowed_tools':[f'Bash(python3 {v1}/utilities/capability-route.py *)',
+                                          f'Edit(//{self.root}/other/**)']}}}):
+            with self.assertRaises(D.DispatchContractError) as caught:
+                R._check_tuple(changed,sealed)
+            self.assertEqual(caught.exception.reason, 'replacement-input-tuple-mismatch')
+            self.assertIn('axis=adapter-permission', caught.exception.detail)
+            self.assertIn('predecessor=', caught.exception.detail)
+            self.assertIn('candidate=', caught.exception.detail)
+            self.assertIn('child_spawned=0', caught.exception.detail)
 
     def test_historical_read_axis_mismatch_is_detailed_on_normal_and_never_started_reentry(self):
         import route_authority
@@ -4793,30 +4841,8 @@ class ReplacementReuseCurrencyTest(unittest.TestCase):
             self.addCleanup(case.tearDown)
             return case
 
-        formal = fixture()
-        formal_env = {**formal.base_env(), "HEARTING_GATES": "on"}
-        with mock.patch.dict(os.environ, formal_env, clear=True):
-            route, _route_path, evidence, marker_path = formal._gates_off_cycle_route(
-                "replacement-formal-auto.json")
-            jobs = Path(route["launch_compatibility_tuple"]["jobs_path"]["path"])
-            jobs.parent.mkdir(parents=True, exist_ok=True)
-            plan_check = next(node for node in route["nodes"] if node["id"] == "plan-check")
-            pipe = ("capability=autopilot-code,attempt_schema_version=2,registered_worker=1,"
-                    f"route_id={route['route_id']},route_node=plan-check,worker_type=review,"
-                    "note=completed-review-blocking,attempt_id=att-replacement-formal-pc")
-            with jobs.open("a", encoding="utf-8") as handle:
-                handle.write(f"2026-10-25T00:00:00Z\tdone\t{formal.repo}\t{formal.repo}\tpc\t{pipe}\n")
-            evidence.write_text("formal runtime-auto evidence\n", encoding="utf-8")
-            admission = completion_tests.DISPATCH_NODE.admit_round(
-                route, plan_check, jobs, owner_attempt_id="att-replacement-formal-owner")
-            self.assertEqual(len(admission.auto_revisions), 1)
-            self.assertEqual(admission.auto_revisions[0]["revision"]["recorded_by"], "runtime-auto")
-            snapshot = R._reuse_snapshot(jobs, route, jobs.read_text().splitlines())
-            self.assertIn("plan", {row["node"] for row in snapshot["completed"]})
-            self.assertEqual(json.loads(marker_path.read_text())["sequence"], 2)
-
         gates_off = fixture()
-        gates_off_env = {**gates_off.base_env(), "HEARTING_GATES": "off"}
+        gates_off_env = {**gates_off.base_env()}
         with mock.patch.dict(os.environ, gates_off_env, clear=True):
             route, route_path, evidence, marker_path = gates_off._gates_off_cycle_route(
                 "replacement-gates-off-auto.json")
@@ -4868,6 +4894,59 @@ class ReplacementReuseCurrencyTest(unittest.TestCase):
         self.assertEqual(current["pending"], ["impl-review", "test", "report"])
         self.assertTrue(R._reuse_preserved(self.previous_snapshot(), current))
 
+    def test_unfinished_resource_stage_is_continued_not_refused(self):
+        # A marker beside a resource stage observed not to have settled as succeeded is not
+        # its result: the replacement continues that stage and what follows it.
+        states = {node["id"]: ("current", "completion-marker-verified")
+                  for node in self.route["nodes"]}
+        states["impl-review"] = ("resource-stage-not-current", D.RESOURCE_STAGE_UNSETTLED)
+        current = self.snapshot(states)
+        self.assertEqual({row["node"] for row in current["completed"]}, {"plan", "independent-verify"})
+        invalid = {row["node"]: row for row in current["invalidated"]}
+        self.assertEqual(set(invalid), {"impl-review", "test", "report"})
+        self.assertEqual((invalid["impl-review"]["currency"], invalid["impl-review"]["currency_reason"]),
+                         ("resource-stage-not-current", "resource-stage-unsettled"))
+        self.assertEqual(invalid["test"]["depends_on_invalid"], ["impl-review"])
+        self.assertEqual(current["pending"], ["impl-review", "test", "report"])
+        self.assertTrue(R._reuse_preserved(current, current))
+        # Settled at claim, found unsettled before launch: the same successor continues it.
+        self.assertTrue(R._reuse_preserved(self.previous_snapshot(), current))
+        # Unsettled at claim; before launch the stage records STAGE_SUCCEEDED for the identity
+        # marker its settlement already wrote: the same successor reuses that marker.
+        settled = self.snapshot({node["id"]: ("current", "completion-marker-verified")
+                                 for node in self.route["nodes"]})
+        self.assertIn("impl-review", {row["node"] for row in settled["completed"]})
+        self.assertTrue(R._reuse_preserved(current, settled))
+        # Unproven evidence elsewhere keeps its refusal.
+        states["plan"] = ("integrity-broken:history-conflict", "completion-marker-history-conflict")
+        with self.assertRaises(D.DispatchContractError) as broken:
+            self.snapshot(states)
+        self.assertEqual((broken.exception.reason, broken.exception.detail),
+                         ("replacement-completion-unproven", "plan"))
+
+    def test_settled_resource_stage_with_unproven_or_unreadable_records_is_not_reopened(self):
+        # The same `resource-stage-not-current` state without the unsettled observation is
+        # unknown: a settled stage whose proof does not match, or records that could not be read.
+        states = {node["id"]: ("current", "completion-marker-verified")
+                  for node in self.route["nodes"]}
+        states["impl-review"] = ("resource-stage-not-current", "completion-marker-missing")
+        with self.assertRaises(D.DispatchContractError) as refused:
+            self.snapshot(states)
+        error = refused.exception
+        self.assertEqual((error.reason, error.detail), ("replacement-completion-unproven", "impl-review"))
+        self.assertEqual(error.completion["completion_reason"], "completion-marker-missing")
+        self.assertNotIn("not settled", error.next_step)
+        self.assertNotIn("revise", error.next_step)
+        self.assertIn("missing or malformed", error.next_step)
+        # Records that exist but cannot be read right now follow the unobservable rule: retry.
+        states["impl-review"] = ("resource-stage-not-current", D.RESOURCE_STAGE_UNOBSERVABLE)
+        with self.assertRaises(D.DispatchContractError) as waiting:
+            self.snapshot(states)
+        error = waiting.exception
+        self.assertEqual((error.reason, error.detail), ("replacement-completion-unobservable", "impl-review"))
+        self.assertEqual(error.next_action, "same-command")
+        self.assertIn("can be read again", error.retry_when)
+
     def test_claim_to_launch_drift_shrinks_the_same_successors_reuse_projection(self):
         settled = {node["id"]: ("current", "completion-marker-verified")
                    for node in self.route["nodes"]}
@@ -4891,30 +4970,9 @@ class ReplacementReuseCurrencyTest(unittest.TestCase):
             self.snapshot(states, readiness="unsettled")
         self.assertEqual(unsettled.exception.reason, "replacement-completion-unsettled")
 
-    def test_unproven_refusal_carries_the_node_judgement_and_its_supported_action(self):
-        import shlex
-        evidence = str(self.root / "spec dir" / "eval-spec.md")
-        marker = {**self.markers["impl-review"], "evidence": {"path": evidence, "sha256": "old"}}
-        (self.completion / "impl-review.json").write_text(json.dumps(marker), encoding="utf-8")
+    def test_broken_and_unsettled_completion_refusals_keep_their_next_step(self):
         states = {node["id"]: ("current", "completion-marker-verified")
                   for node in self.route["nodes"]}
-        states["impl-review"] = ("revised-unrecorded", "completion-evidence-revised-unrecorded")
-        with mock.patch.dict(os.environ, {"HEARTING_GATES": "on"}, clear=False):
-            with self.assertRaises(D.DispatchContractError) as revised:
-                self.snapshot(states)
-        error = revised.exception
-        self.assertEqual((error.reason, error.detail), ("replacement-completion-unproven", "impl-review"))
-        self.assertEqual(error.completion, {
-            "completion_node": "impl-review", "completion_currency": "revised-unrecorded",
-            "completion_reason": "completion-evidence-revised-unrecorded",
-            "completion_evidence": evidence})
-        self.assertIn("capability-route.py revise --route rt-reuse --node impl-review "
-                      f"--evidence {shlex.quote(evidence)} ", error.next_step)
-        self.assertIn("cannot change that", error.next_step)
-        for argument in ("--reason", "--direction", "--answers", "--author-attempt-id"):
-            self.assertIn(argument, error.next_step)
-        self.assertFalse(getattr(error, "retry_when", ""))
-
         states["impl-review"] = ("integrity-broken:history-conflict", "completion-marker-history-conflict")
         with self.assertRaises(D.DispatchContractError) as broken:
             self.snapshot(states)
@@ -4927,27 +4985,21 @@ class ReplacementReuseCurrencyTest(unittest.TestCase):
             self.snapshot(states, readiness="unsettled")
         self.assertFalse(hasattr(unsettled.exception, "next_step"))
 
-    def test_gates_off_revised_unrecorded_evidence_is_reusable_but_gates_on_refuses(self):
+    def test_revised_unrecorded_evidence_is_reusable(self):
         states = {node["id"]: ("current", "completion-marker-verified")
                   for node in self.route["nodes"]}
         states["impl-review"] = ("revised-unrecorded", "completion-evidence-revised-unrecorded")
-        with mock.patch.dict(os.environ, {"HEARTING_GATES": "off"}, clear=False):
-            snapshot = self.snapshot(states)
+        snapshot = self.snapshot(states)
         self.assertIn("impl-review", {row["node"] for row in snapshot["completed"]})
         self.assertNotIn("impl-review", {row["node"] for row in snapshot["invalidated"]})
-        with mock.patch.dict(os.environ, {"HEARTING_GATES": "on"}, clear=False):
-            with self.assertRaises(D.DispatchContractError) as refused:
-                self.snapshot(states)
-        self.assertEqual(refused.exception.reason, "replacement-completion-unproven")
 
     def test_unchanged_gates_off_descendant_of_a_stale_result_keeps_claim_reuse(self):
         states = {node["id"]: ("current", "completion-marker-verified")
                   for node in self.route["nodes"]}
         states["impl-review"] = ("superseded", "completion-review-source-stale")
         states["test"] = ("revised-unrecorded", "completion-evidence-revised-unrecorded")
-        with mock.patch.dict(os.environ, {"HEARTING_GATES": "off"}, clear=False):
-            claim_reuse = self.snapshot(states)
-            launch_reuse = self.snapshot(states)
+        claim_reuse = self.snapshot(states)
+        launch_reuse = self.snapshot(states)
         invalid = {row["node"]: row for row in launch_reuse["invalidated"]}
         self.assertEqual(invalid["test"]["currency"], "revised-unrecorded")
         self.assertTrue(R._reuse_preserved(claim_reuse, launch_reuse))
@@ -5140,11 +5192,8 @@ class AnsweredFailVerdictReuseTest(unittest.TestCase):
         claim_reuse = self.snapshot()
         for state in (("revised-unrecorded", "completion-evidence-revised-unrecorded"),
                       ("completion-evidence-unreadable", "review-source-subject-changed")):
-            with self.subTest(state=state[0]), mock.patch.dict(os.environ, {"HEARTING_GATES": "on"}):
+            with self.subTest(state=state[0]):
                 self.states = {"inspect": state}
-                with self.assertRaises(D.DispatchContractError) as refused:
-                    self.snapshot()
-                self.assertEqual(refused.exception.reason, "replacement-completion-unproven")
                 reopened = self.snapshot(self.fail_proof(), claim_reuse)
                 rows = {row["node"]: row for row in reopened["invalidated"]}
                 self.assertEqual(rows["inspect"]["currency"], state[0])
@@ -6008,7 +6057,7 @@ class FrameCapacityFlow:
         # operator's home, artifact root and canonical registry.
         env = mock.patch.dict(os.environ, {
             'AGENT_HOME': str(R.ROOT), 'AGENT_DISPATCH_JOBS': str(fx.jobs),
-            'AGENT_ARTIFACT_ROOT': str(fx.root), 'HEARTING_GATES': 'on',
+            'AGENT_ARTIFACT_ROOT': str(fx.root),
         })
         env.start(); fx.addCleanup(env.stop)
         subprocess.run(['git', 'init', '-q', '--initial-branch=frame-fixture', str(fx.root)], check=True)

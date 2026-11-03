@@ -136,6 +136,45 @@ class LifecycleTest(unittest.TestCase):
                 if child.poll() is None:
                     L._bounded_group_stop(child, start or "", poll_interval=0.01)
 
+    def test_unobserved_time_before_a_known_sample_never_counts_as_quiet(self):
+        import foreground_activity as FA
+        window = 0.2
+        samples = []
+        stalled_end = []
+
+        class StalledFirstObservation:
+            def __init__(self, *_args):
+                pass
+
+            def sample(self):
+                samples.append(time.monotonic())
+                if len(samples) == 1:
+                    # A /proc scan stalls on a loaded host and still cannot
+                    # judge the child; nothing about that time is known.
+                    time.sleep(0.3)
+                    stalled_end.append(time.monotonic())
+                    return FA.ActivityObservation(True, True, ("observation-uncertain",))
+                return FA.ActivityObservation(False, False, ())
+
+        with tempfile.TemporaryDirectory() as td:
+            child = subprocess.Popen(
+                ["/bin/sh", "-c", "sleep 10"], start_new_session=True,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            start = L.process_start_ticks(child.pid)
+            context = FA.ForegroundActivityContext(window, "sh", Path(td) / "attempt.log", {})
+            try:
+                with mock.patch.object(FA, "ForegroundActivityMonitor", StalledFirstObservation):
+                    outcome = L.wait_foreground(child, 5, poll_interval=0.01,
+                                                activity_context=context)
+                self.assertEqual(outcome.failure, "no-progress")
+                # The confirming sample comes a full window after the first
+                # known one, never a window after the stalled unknown one.
+                self.assertGreaterEqual(samples[-1] - stalled_end[0], window)
+            finally:
+                if child.poll() is None:
+                    L._bounded_group_stop(child, start or "", poll_interval=0.01)
+
     def test_log_and_tool_cpu_activity_survive_multiple_windows(self):
         from foreground_activity import ForegroundActivityContext
         with tempfile.TemporaryDirectory() as td:

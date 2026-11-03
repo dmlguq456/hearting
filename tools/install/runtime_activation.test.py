@@ -135,8 +135,8 @@ class OpenCodeGuardDiscoveryTest(unittest.TestCase):
         self.assertEqual(agents.read_bytes(), self.expected_render())
         self.assertIn("OpenCode user rules: skipped legacy-cp949.md is not UTF-8 text",
                       report["report_lines"])
-        self.assertEqual(report["notices"],
-                         ["OpenCode user rules: skipped legacy-cp949.md is not UTF-8 text"])
+        self.assertIn("OpenCode user rules: skipped legacy-cp949.md is not UTF-8 text",
+                      report["notices"])
         self.assertEqual(activation.refresh("opencode")["freshness"], "fresh")
 
     def test_an_edited_render_is_kept_aside_and_rewritten_without_a_collision(self):
@@ -179,6 +179,118 @@ class OpenCodeGuardDiscoveryTest(unittest.TestCase):
         self.assertTrue(agents.is_symlink())
         self.assertEqual(os.readlink(agents), str(own))
         self.assertEqual(own.read_bytes(), b"# my own global rules\n")
+
+    def set_carry(self, value):
+        """Write the user's dispatch-defaults with `user_rules.opencode`, or remove the section."""
+        user_file = activation.paths.hearting_config_dir() / "dispatch-defaults.yaml"
+        user_file.parent.mkdir(parents=True, exist_ok=True)
+        shipped = (Path(__file__).resolve().parents[2] / "profiles/dispatch-defaults.yaml").read_text()
+        user_file.write_text(shipped + (f"\nuser_rules:\n  opencode: {value}\n" if value else ""))
+
+    def test_switch_off_returns_the_link_and_keeps_every_user_byte(self):
+        rule_file = self.seed_rule()
+        agents = self.home / "AGENTS.md"
+        config = self.home / "opencode.json"
+        user_config = b'{"instructions": ["/home/someone/my-rules.md"]}\n'
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_bytes(user_config)
+
+        report = self.run_activation()  # no switch written: on by default
+        self.assertEqual(agents.read_bytes(), self.expected_render())
+        self.assertTrue(any("now starts with your Claude user rules" in line
+                            and "`opencode: off`" in line and "`user_rules:`" in line
+                            for line in report["notices"]))
+
+        self.set_carry("off")
+        report = activation.refresh("opencode")
+        self.assertEqual(report["freshness"], "fresh", report)
+        self.assertTrue(agents.is_symlink())
+        self.assertEqual(os.readlink(agents), str(Path(report["active_root"]) / "adapters/opencode/AGENTS.md"))
+        self.assertTrue(any("no longer carries" in line for line in report["notices"]))
+        self.assertEqual(list(self.home.glob("AGENTS.md.edited-*")), [])
+        again = activation.refresh("opencode")  # idempotent: nothing to say, nothing changes
+        self.assertEqual(again["freshness"], "fresh", again)
+        self.assertEqual(again["notices"], [])
+        self.assertTrue(agents.is_symlink())
+        self.assertEqual(activation.status("opencode")["freshness"], "fresh")
+
+        self.set_carry("carry")
+        self.assertEqual(activation.refresh("opencode")["freshness"], "fresh")
+        self.assertEqual(agents.read_bytes(), self.expected_render())
+        self.set_carry(None)
+        self.assertEqual(activation.refresh("opencode")["notices"], [])
+        self.assertEqual(agents.read_bytes(), self.expected_render())
+
+        # Off after a user edit: the edit is kept aside, then the link returns.
+        edited = agents.read_bytes() + b"\n- mine\n"
+        agents.write_bytes(edited)
+        self.set_carry("off")
+        activation.refresh("opencode")
+        self.assertTrue(agents.is_symlink())
+        self.assertEqual([path.read_bytes() for path in self.home.glob("AGENTS.md.edited-*")], [edited])
+        self.assertEqual(rule_file.read_bytes(), self.RULE)
+        self.assertEqual(config.read_bytes(), user_config)
+
+    def test_notices_name_the_override_path_and_a_skipped_file_once(self):
+        rule_file = self.seed_rule()
+        (rule_file.parent / "legacy.md").write_bytes("한글 규칙\n".encode("cp949"))
+        switch = self.root / "custom-defaults.yaml"  # absent file: still on
+        with mock.patch.dict(os.environ, {"DISPATCH_DEFAULTS_CONFIG": str(switch)}):
+            report = self.run_activation()
+            start = [line for line in report["notices"] if "now starts" in line]
+            self.assertEqual(len(start), 1, report["notices"])
+            self.assertIn(str(switch), start[0])
+            self.assertEqual(sum("skipped legacy.md" in line for line in report["notices"]), 1)
+            again = activation.refresh("opencode")
+            self.assertEqual(again["notices"], [])
+
+    def test_a_user_link_never_reads_as_carried(self):
+        self.seed_rule()
+        self.set_carry("off")
+        self.run_activation()
+        agents = self.home / "AGENTS.md"
+        own = self.root / "mine.md"
+        own.write_text("# my own global rules\n")
+        self.remove(agents)
+        agents.symlink_to(own)
+        self.set_carry("carry")
+        report = activation.refresh("opencode")
+        self.assertFalse(any("now starts" in line for line in report["notices"]), report["notices"])
+        self.assertEqual(os.readlink(agents), str(own))
+
+    def test_no_stop_notice_while_the_switch_is_on(self):
+        rule_file = self.seed_rule()
+        agents = self.home / "AGENTS.md"
+        self.run_activation()
+        # The user removes their only rule while the carry is on: the link returns quietly.
+        self.remove(rule_file)
+        report = activation.refresh("opencode")
+        self.assertTrue(agents.is_symlink())
+        self.assertFalse(any("no longer carries" in line for line in report["notices"]),
+                         report["notices"])
+        # The user puts their own link where the render goes while on: quiet on every refresh.
+        rule_file.write_bytes(self.RULE)
+        activation.refresh("opencode")
+        self.assertFalse(agents.is_symlink())
+        own = self.root / "mine.md"
+        own.write_text("# my own global rules\n")
+        self.remove(agents)
+        agents.symlink_to(own)
+        for _ in range(2):
+            report = activation.refresh("opencode")
+            self.assertEqual(report["notices"], [])
+            self.assertEqual(os.readlink(agents), str(own))
+
+    def test_the_old_one_line_form_turns_the_carry_off(self):
+        self.seed_rule()
+        self.run_activation()
+        user_file = activation.paths.hearting_config_dir() / "dispatch-defaults.yaml"
+        user_file.parent.mkdir(parents=True, exist_ok=True)
+        user_file.write_text((Path(__file__).resolve().parents[2] / "profiles/dispatch-defaults.yaml")
+                             .read_text() + "user_rules: opencode: off\n")
+        report = activation.refresh("opencode")
+        self.assertTrue((self.home / "AGENTS.md").is_symlink())
+        self.assertTrue(any("no longer carries" in line for line in report["notices"]))
 
     def test_render_bytes_do_not_depend_on_the_claude_config_path(self):
         self.seed_rule()

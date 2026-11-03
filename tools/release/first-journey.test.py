@@ -73,6 +73,14 @@ class JourneyTests(unittest.TestCase):
                    "**Scope:** greet.py\n**Done:** focused test passes\n\n→ Proceed / Revise: <what is wrong> / Stop")
         self.assertEqual(fj.card_answer(korean), "진행")
         self.assertEqual(fj.card_answer(english), "Proceed")
+        intent = ("[의도 확인]\n\n원문: \"오타 고쳐 줘\"\n의도: 출력 오타 수정\n범위: greet.py\n안 할 것: 없음\n"
+                  "완료: 집중 시험 통과\n"
+                  "경로: autopilot-code · direct — 작은 수정\n\n→ 진행 / 수정: <틀린 부분> / 중단")
+        intent_en = ("**[Intent check]**\n\n**Your words:** \"fix the typo\"\n**Intent:** Fix the typo\n"
+                     "**Not doing:** nothing else\n**Done:** focused test passes\n**Route:** autopilot-code · direct\n\n"
+                     "→ Proceed / Revise: <what is wrong> / Stop")
+        self.assertEqual(fj.card_answer(intent), "진행")
+        self.assertEqual(fj.card_answer(intent_en), "Proceed")
         self.assertIsNone(fj.card_answer("Should I proceed with the fix?"))
         self.assertIsNone(fj.card_answer("Task: fix\nScope: greet\n→ Proceed / Stop"))
 

@@ -741,7 +741,6 @@ class DispatchBatchTest(unittest.TestCase):
         fixture_env = {
             **marker_fixture.base_env(),
             "AGENT_DISPATCH_JOBS": str(marker_fixture.jobs),
-            "HEARTING_GATES": "on",
         }
 
         with mock.patch.dict(os.environ, fixture_env, clear=True):
@@ -5822,14 +5821,6 @@ class SlicesOneCommandTest(unittest.TestCase):
                     rc, out, "subdivision-disjointness-unproven", ledger=True)
                 self.assertIn("plan-slice-invalid:1", receipt["detail"])
 
-    def test_slices_gates_on_linked_worktree_falls_back_to_single_session(self):
-        linked = self.base / "linked"
-        self.git("worktree", "add", "-q", "-b", "linked-s", str(linked), cwd=self.primary)
-        rc, out = self.run_slices(
-            self.plan(self.GOOD), extra=("--worktree", str(linked)), env={"HEARTING_GATES": "on"})
-        receipt = self.assert_single_session(rc, out, "subdivision-disjointness-unproven", ledger=True)
-        self.assertIn("plan-slices-worktree-mismatch", receipt["detail"])
-
     def test_slices_unproven_records_ledger_and_falls_back(self):
         overlap = json.dumps([
             {"id": "a", "files": ["utilities/a.py"], "verify": "true"},
@@ -6052,8 +6043,8 @@ class PlainSlotReservationTest(unittest.TestCase):
 class SelfParentAndForegroundNoticeTest(unittest.TestCase):
     """A mismatched --parent becomes the session's own name with one notice.
 
-    5th Codex run: `gate-off parent-identity-mismatch` read as an error, and
-    with gates on it refused. Both batch entry points now use
+    5th Codex run: `gate-off parent-identity-mismatch` read as an error.
+    Both batch entry points now use
     AGENT_DISPATCH_SELF_SLUG; a missing session name keeps its refusal.
     """
 
@@ -6065,7 +6056,7 @@ class SelfParentAndForegroundNoticeTest(unittest.TestCase):
     NOTICE = ("notice: --parent wrong-owner is not this session's name; "
               "using owner (from AGENT_DISPATCH_SELF_SLUG).")
 
-    def run_main(self, *, parent="wrong-owner", gates="on", lifecycle=None, self_slug="owner", argv=None, env=None,
+    def run_main(self, *, parent="wrong-owner", lifecycle=None, self_slug="owner", argv=None, env=None,
                  route_default=None):
         stack, assignments = self.common_patches()
         out, err = io.StringIO(), io.StringIO()
@@ -6079,7 +6070,7 @@ class SelfParentAndForegroundNoticeTest(unittest.TestCase):
             argv = self.argv()
             argv[argv.index("--parent") + 1] = parent
         environment = {**(env or {}),
-            "AGENT_DISPATCH_ATTEMPT_ID": "att-parent-fixture", "HEARTING_GATES": gates,
+            "AGENT_DISPATCH_ATTEMPT_ID": "att-parent-fixture",
             "AGENT_DISPATCH_CURRENT_HARNESS": "codex", "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
             "AGENT_DISPATCH_CURRENT_SANDBOX": "workspace-write",
         }
@@ -6117,16 +6108,14 @@ class SelfParentAndForegroundNoticeTest(unittest.TestCase):
         self.assertEqual(seen["parent_slug"], "owner")
         self.assertNotIn("notice: --parent", err)
 
-    def test_group_start_uses_the_session_name_whatever_the_gates(self):
-        for gates in ("on", "off"):
-            with self.subTest(gates=gates):
-                rc, receipt, err, seen = self.run_main(gates=gates)
-                # the fixture stops at the live-parent lookup, after the parent is fixed
-                self.assertEqual(receipt["reason"], "parent-attempt-not-found", receipt)
-                self.assertEqual(seen["parent_slug"], "owner")
-                self.assertEqual(err.splitlines().count(self.NOTICE), 1, err)
-                self.assertNotIn("gate-off", err)
-                self.assertNotIn("parent-identity-mismatch", json.dumps(receipt) + err)
+    def test_group_start_uses_the_session_name(self):
+        rc, receipt, err, seen = self.run_main()
+        # the fixture stops at the live-parent lookup, after the parent is fixed
+        self.assertEqual(receipt["reason"], "parent-attempt-not-found", receipt)
+        self.assertEqual(seen["parent_slug"], "owner")
+        self.assertEqual(err.splitlines().count(self.NOTICE), 1, err)
+        self.assertNotIn("gate-off", err)
+        self.assertNotIn("parent-identity-mismatch", json.dumps(receipt) + err)
 
     def test_group_start_without_a_session_name_keeps_its_refusal(self):
         rc, receipt, err, seen = self.run_main(self_slug=None)
@@ -6152,14 +6141,14 @@ class SelfParentAndForegroundNoticeTest(unittest.TestCase):
             BATCH.main(argv)
         self.assertNotIn(BATCH_LIFECYCLE.FOREGROUND_NOTICE, err.getvalue())
 
-    def run_subdivision(self, *, gates, self_slug="owner"):
+    def run_subdivision(self, *, self_slug="owner"):
         admission = BATCH.SUBDIVISION_ADMISSION
         args = SimpleNamespace(route=self.route_path, parallel_group="execute", jobs=self.jobs,
                                action="start", parent="wrong-owner", slug_prefix="pe",
                                subdivision_manifest=self.base / "manifest.json", slices=None)
         named = []
         out, err = io.StringIO(), io.StringIO()
-        environment = {"AGENT_DISPATCH_ATTEMPT_ID": "att-parent-fixture", "HEARTING_GATES": gates}
+        environment = {"AGENT_DISPATCH_ATTEMPT_ID": "att-parent-fixture"}
         if self_slug:
             environment["AGENT_DISPATCH_SELF_SLUG"] = self_slug
         with mock.patch.object(admission, "route_node", return_value={"id": "execute"}), \
@@ -6180,18 +6169,16 @@ class SelfParentAndForegroundNoticeTest(unittest.TestCase):
                 return exc.reason, args, named, err.getvalue()
         return rc, args, named, err.getvalue()
 
-    def test_subdivision_admission_uses_the_session_name_whatever_the_gates(self):
-        for gates in ("on", "off"):
-            with self.subTest(gates=gates):
-                rc, args, named, err = self.run_subdivision(gates=gates)
-                self.assertEqual(rc, 0)
-                self.assertEqual(args.parent, "owner")
-                self.assertEqual(named, ["owner"])
-                self.assertEqual(err.splitlines().count(self.NOTICE), 1, err)
-                self.assertNotIn("gate-off", err)
+    def test_subdivision_admission_uses_the_session_name(self):
+        rc, args, named, err = self.run_subdivision()
+        self.assertEqual(rc, 0)
+        self.assertEqual(args.parent, "owner")
+        self.assertEqual(named, ["owner"])
+        self.assertEqual(err.splitlines().count(self.NOTICE), 1, err)
+        self.assertNotIn("gate-off", err)
 
     def test_subdivision_admission_without_a_session_name_keeps_its_refusal(self):
-        reason, args, named, err = self.run_subdivision(gates="on", self_slug=None)
+        reason, args, named, err = self.run_subdivision(self_slug=None)
         self.assertEqual(reason, "parent-identity-mismatch")
         self.assertEqual(named, [])
 

@@ -277,14 +277,6 @@ class ProducerBindingTests(unittest.TestCase):
         (directory/"run.1.json").write_text(json.dumps(marker))
         self.assertEqual(ROUTE.owner_terminal_prerequisites(route,terminal,self.jobs),{})
         self.assertEqual(self.jobs.read_text(),"")
-        # Use a different-size payload so stat-based digest caches cannot turn
-        # this same-test rewrite into a false unchanged-content observation.
-        evidence.write_text('{"exit_code":10}')
-        # This test targets the checked gate-on classification while preserving
-        # the user's runtime gate-off behavior tested by the default call above.
-        with mock.patch.object(T.dispatch_contract, "gates_on", return_value=True):
-            self.assertEqual(ROUTE.owner_terminal_prerequisites(route,terminal,self.jobs),
-                             {"run":"completion-evidence-revised-unrecorded"})
 
     def test_route_children_consumes_exact_owner_and_inline_gate_proofs(self):
         route = {"route_id": "rt-gate-proof", "route_hash": "sha256:" + "a" * 64,
