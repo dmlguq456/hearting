@@ -4822,15 +4822,31 @@ def _already_armed_line(watch_id, arm, paths):
 def _record_own_watch_identity(watch_id, paths, server):
     """Name this observer in its arm when its spawner never did.
 
-    `cmd_watch` records the observer identity after the spawn, under the arm's
-    claim lock. A caller killed in between leaves an arm that names no
-    observer, so nothing could wake or replace the one holding the watch lock.
-    Under the same claim lock either that write already landed, or the
-    spawner is gone and this lock holder names itself.
+    A spawner (`watch`, or `_spawn_watch_observer` on reattach) records the
+    observer identity after the spawn, under the arm's claim lock. One killed
+    in between leaves an arm that names no observer or a previous one that has
+    exited, so nothing could wake or replace the observer holding the watch
+    lock. Under the same claim lock either that write already landed, or the
+    spawner is gone and this lock holder names itself. A live watcher other
+    than this process is never overwritten.
     """
+    pid = os.getpid()
+    start = _proc_start_ticks(pid)
+    if not start:
+        # An empty start would make this live observer read as exited.
+        return _read_json(paths.arm)
+    own = {"pid": pid, "pid_start": start}
+
+    def needs_naming(arm):
+        if not isinstance(arm, dict) or arm.get("watch_id") != watch_id:
+            return False
+        recorded = arm.get("watcher") or {}
+        if {"pid": recorded.get("pid"), "pid_start": recorded.get("pid_start")} == own:
+            return False
+        return not _pid_identity_ok(recorded.get("pid"), recorded.get("pid_start"))
+
     arm = _read_json(paths.arm)
-    if (not isinstance(arm, dict) or arm.get("watch_id") != watch_id
-            or (arm.get("watcher") or {}).get("pid")):
+    if not needs_naming(arm):
         return arm
     claim = _watch_claim_path_for_arm(paths, arm, server)
     if claim is None:
@@ -4843,12 +4859,9 @@ def _record_own_watch_identity(watch_id, paths, server):
         if not _acquire_bounded(claim_fd, _CLAIM_TIMEOUT_MS):
             return _read_json(paths.arm) or arm
         current = _read_json(paths.arm)
-        if (not isinstance(current, dict) or current.get("watch_id") != watch_id
-                or (current.get("watcher") or {}).get("pid") or paths.receipt.exists()):
+        if not needs_naming(current) or paths.receipt.exists():
             return current if isinstance(current, dict) else arm
-        pid = os.getpid()
-        updated = {**current,
-                   "watcher": {"pid": pid, "pid_start": process_start_ticks(pid) or ""}}
+        updated = {**current, "watcher": own}
         _write_json_atomic(paths.arm, updated)
         return updated
     finally:
