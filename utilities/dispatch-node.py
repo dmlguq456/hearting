@@ -356,18 +356,16 @@ ROUND_CAPPED_NODE_IDS = REVIEW_ROUND_CAP.ROUND_CAPPED_NODE_IDS
 
 @dataclass(frozen=True)
 class RoundAdmission:
- """The shared admission decision for a launch surface: budget AND SD-154
- auto-revision.
+ """The shared admission decision for a launch surface: the round budget.
 
- `auto_revisions` contains every revision marker this call recorded (13.59.3
- rule 8). A read-only preview leaves that tuple empty and reports eligible
- nodes in `planned_revision_nodes`; the budget still accounts for them.
- `prior_attempt_ids` is that same census, so batch input/identity consumers
- can distinguish the admitted next round without a second history query.
+ `auto_revisions` holds the review-input revision this call recorded for a
+ corrected reviewed input; a read-only preview leaves it empty and the budget
+ still accounts for the candidate. `prior_attempt_ids` is the round census,
+ so batch input/identity consumers can distinguish the admitted next round
+ without a second history query.
  """
  budget: object
  auto_revisions: tuple = ()
- planned_revision_nodes: frozenset[str] = frozenset()
  reviewed_input: object = None
  prior_attempt_ids: frozenset[str] = frozenset()
  gate_unmet: bool = False
@@ -382,55 +380,6 @@ class RoundAdmission:
  source_subject_manifest: tuple = ()
 
 
-def _auto_record_revisions(route, node, jobs, rows, *, owner_attempt_id, record=True):
- """SD-154 rule 8: before admitting D's next round, auto-record or preview a revision
- on each upstream N that is `revised-unrecorded` when D's last round was a
- blocking FAIL that basis-verifies against N. Never launches anything --
- only `publish_revision_locked` writes, under its own node lock.
- """
- if not REVIEW_ROUND_CAP.is_round_capped_node(node) or not rows or not owner_attempt_id:
-  return ()
- last_status, last_meta = rows[-1]
- worker_type = node.get("worker_type") or ("review" if node.get("kind") == "review-worker" else "test")
- last_kind = REVIEW_ROUND_CAP.classify_round_row(
-  last_status, last_meta, worker_type=last_meta.get("worker_type") or worker_type,
- )
- if last_kind != "verdict":
-  return ()
- last_blocking = REVIEW_ROUND_CAP.last_verdict_blocking([(last_status, last_meta)], worker_type)
- last_attempt = last_meta.get("attempt_id")
- if not last_blocking or not last_attempt:
-  return ()
- recorded = []
- directory = ROUTE.completion_dir(route["route_id"], jobs=jobs)
- for dep in node.get("depends_on", []):
-  dep_node = next((n for n in route.get("nodes", []) if n.get("id") == dep), None)
-  if dep_node is None:
-   continue
-  marker_path = directory / f"{dep}.json"
-  if not marker_path.is_file():
-   continue
-  currency = ROUTE.gate_currency(route, dep_node, marker_path, jobs=jobs)
-  if currency.state != "revised-unrecorded":
-   continue  # condition (1): only a revised-but-unrecorded upstream qualifies.
-  try:
-   marker = json.loads(marker_path.read_text(encoding="utf-8"))
-   evidence_path = Path(str((marker.get("evidence") or {}).get("path", "")))
-  except (OSError, ValueError):
-   continue
-  try:
-   publish_or_preview = ROUTE.publish_revision_locked if record else ROUTE.preview_revision
-   result = publish_or_preview(
-    route, dep, evidence_path, basis="review-findings",
-    answers=(last_attempt,), author_attempt_id=owner_attempt_id,
-    recorded_by="runtime-auto", jobs=jobs,
-   )
-  except ValueError:
-   continue  # Both paths apply the same complete revision proof.
-  recorded.append(result["marker"])
- return tuple(recorded)
-
-
 def admit_round(route, node, jobs, *, owner_attempt_id=None, exclude_slug=None, exclude_attempt=None,
                 reviewed_evidence=None, record_auto_revisions=True):
  """The one admission decision every registered launch surface reads.
@@ -438,11 +387,10 @@ def admit_round(route, node, jobs, *, owner_attempt_id=None, exclude_slug=None, 
  Replaces the three separate `len(prior)+1 > max_round` comparisons that
  used to live in dispatch-node.py, dispatch-batch.py and
  stage-dispatch-fallback.py with a single call over the same row census
- (`prior_round_attempts`) and the shared `RoundBudget` derivation. Also runs
- SD-154 rule 8's auto-revision (idempotent: a second call over the same
- state finds each upstream already `current`, not `revised-unrecorded`, and
- records nothing more) before deriving the budget, so a closure-check that
- rule 8 just unlocked is visible in the SAME call's `budget.round_kind`.
+ (`prior_round_attempts`) and the shared `RoundBudget` derivation. A
+ corrected reviewed input is recorded (or, read-only, previewed) as a
+ review-input revision before deriving the budget, so the closure-check it
+ unlocks is visible in the SAME call's `budget.round_kind`.
  """
  from review_source_subject import has_review_subject
  source_bound = has_review_subject(route, node, jobs)
@@ -469,10 +417,7 @@ def admit_round(route, node, jobs, *, owner_attempt_id=None, exclude_slug=None, 
     classified_rows = source_rows
    except SourceSubjectError as exc:
     raise DispatchNodeError(exc.reason, detail=exc.detail) from exc
- auto_revisions = _auto_record_revisions(
-  route, node, jobs, classified_rows, owner_attempt_id=owner_attempt_id,
-  record=record_auto_revisions,
- )
+ auto_revisions = ()
  from review_input import is_review_node, is_spec_review_node, has_plan_producer, read_binding, resolve_input
  if (reviewed_evidence and is_review_node(node) and not has_plan_producer(route,node)
      and not is_spec_review_node(node)):
@@ -491,15 +436,12 @@ def admit_round(route, node, jobs, *, owner_attempt_id=None, exclude_slug=None, 
         answers=[previous["attempt_id"]],author_attempt_id=owner_attempt_id,
         recorded_by="dispatch-auto",jobs=jobs)
     auto_revisions=(*auto_revisions,result["input_revision"])
- producer_preview = next((item for item in auto_revisions
-                          if item.get("node_id")=="plan" and item.get("stage_authority")=="revision"),None)
- input_options = {"producer_preview": producer_preview} if not record_auto_revisions and producer_preview else {}
  reviewed_input = None
  if is_review_node(node):
   try:
-   reviewed_input = resolve_input(route,node,jobs,reviewed_evidence,**input_options)
+   reviewed_input = resolve_input(route,node,jobs,reviewed_evidence)
   except DispatchContractError:
-   if reviewed_evidence or producer_preview or route.get("ancestor_plan_refresh"):
+   if reviewed_evidence or route.get("ancestor_plan_refresh"):
     raise
    # An unresolved legacy input keeps its node budget. The existing completion
    # and launch gates retain their exact producer/integrity refusal.
@@ -516,11 +458,6 @@ def admit_round(route, node, jobs, *, owner_attempt_id=None, exclude_slug=None, 
   except SourceSubjectError as exc:
    raise DispatchNodeError(exc.reason, detail=exc.detail) from exc
  dependency_revisions = ROUTE._dependency_revisions(route, node, jobs, reviewed_input=reviewed_input or {})
- dependency_ids = set(node.get("depends_on", ()))
- dependency_revisions.extend(
-  revision.get("revision", {}) for revision in auto_revisions
-  if revision.get("node_id") in dependency_ids
- )
  # A pure self-input preview has no on-disk history yet. Only its exact
  # candidate input, proved by the same writer checks, may unlock cap+1.
  if not record_auto_revisions and reviewed_input:
@@ -546,9 +483,6 @@ def admit_round(route, node, jobs, *, owner_attempt_id=None, exclude_slug=None, 
  return RoundAdmission(
   budget=budget,
   auto_revisions=auto_revisions if record_auto_revisions else (),
-  planned_revision_nodes=frozenset(
-   str(item["node_id"]) for item in auto_revisions if item.get("node_id") in dependency_ids
-  ),
   reviewed_input=reviewed_input,
   prior_attempt_ids=frozenset(meta["attempt_id"] for _cols,meta in rows if meta.get("attempt_id")),
   gate_unmet=unmet,

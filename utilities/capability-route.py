@@ -9065,23 +9065,6 @@ def restore_consumed_tombstones(route, *, jobs):
     return {"restored": restored, "errors": errors}
 
 
-def preview_revision(route, node_id, evidence, *, basis, answers=(), direction=None,
-                     reason=None, author_attempt_id, recorded_by="owner", jobs=None):
-    """The complete writer proof, without lock creation or marker publication."""
-    _, input_only = _revision_target(route, node_id, basis)
-    if input_only:
-        result = preview_review_input_revision(
-            route, node_id, evidence, answers=answers, author_attempt_id=author_attempt_id,
-            recorded_by=recorded_by, jobs=jobs,
-        )
-        return {**result, "kept": []}
-    marker, tombstones, kept = _producer_revision_plan(
-        route, node_id, evidence, basis=basis, answers=answers, direction=direction,
-        reason=reason, author_attempt_id=author_attempt_id, recorded_by=recorded_by, jobs=jobs,
-    )
-    return {"marker": marker, "tombstoned": list(tombstones), "kept": list(kept)}
-
-
 def publish_revision_locked(route, node_id, evidence, *, basis, answers=(), direction=None,
                             reason=None, author_attempt_id, recorded_by="owner", jobs=None):
     """Publish the shared producer proof and downstream tombstones under one lock."""

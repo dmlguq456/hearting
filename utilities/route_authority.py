@@ -3498,7 +3498,7 @@ def completion_gate(args, action: str, agent_home, jobs, *, gate, before=()):
     preview-gate recovery detail attached; None admits the launch."""
     from dispatch_contract import (DispatchContractError, PRELAUNCH_PROCESS_BLOCK_REASONS,
                                    recover_preview_gate_after_refusal)
-    from review_input import preview_request_nodes
+    from review_input import preview_request_admission
     try:
         for check in before:
             check()
@@ -3513,8 +3513,9 @@ def completion_gate(args, action: str, agent_home, jobs, *, gate, before=()):
             proof = _saved_resource_output_preview(args, jobs)
             if isinstance(proof, dict) and proof.get("resource_node"):
                 saved_resource_admissions = {proof["resource_node"]: proof}
-        gate_args = {"attempt_id": args.attempt_id,
-                     "planned_revision_nodes": preview_request_nodes(args, jobs)}
+        # A dry-run's round admission still refuses an unadmitted review input.
+        preview_request_admission(args, jobs)
+        gate_args = {"attempt_id": args.attempt_id}
         if saved_resource_admissions is not None:
             gate_args["saved_resource_admissions"] = saved_resource_admissions
         gate(args.route_file, args.route_node, action, agent_home, jobs, **gate_args)

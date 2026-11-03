@@ -295,7 +295,6 @@ class ReviewInputTest(unittest.TestCase):
         revision = {'input_binding_digest': self.meta[R.KEY], 'answers': ['att-review'], 'evidence': candidate}
         module = node_module.ROUTE
         with mock.patch.object(node_module, 'prior_round_attempts', return_value=[(['now','done'], previous)]), \
-                mock.patch.object(node_module, '_auto_record_revisions', return_value=()), \
                 mock.patch.object(module, 'review_lineage_routes', return_value=[self.route]), \
                 mock.patch.object(module, '_review_input_revision_records', return_value=[revision]), \
                 mock.patch.object(module, 'publish_review_input_revision', return_value={'input_revision':revision}):
@@ -315,7 +314,6 @@ class ReviewInputTest(unittest.TestCase):
         (self.root/'review-input-revisions').mkdir()
         patches = (mock.patch.object(R, '_dispatch_node_module', return_value=node_module),
                    mock.patch.object(node_module, 'prior_round_attempts', return_value=[(['now','done'], previous)]),
-                   mock.patch.object(node_module, '_auto_record_revisions', return_value=()),
                    mock.patch.object(module, 'review_lineage_routes', return_value=[self.route]),
                    mock.patch.object(module, 'preview_review_input_revision', return_value={'input_revision':revision}),
                    mock.patch.object(module, '_review_input_revision_records', return_value=[revision]))
@@ -421,8 +419,7 @@ class ReviewInputTest(unittest.TestCase):
                 mock.patch.object(DC, 'completion_marker_is_current', return_value=False), \
                 mock.patch.object(DC, 'gate_currency', return_value=unrecorded):
             self.assert_reason('completion-evidence-revised-unrecorded', DC.completion_marker_gate,
-                               str(route_file), 'plan-check', 'start', agent_home, self.jobs,
-                               planned_revision_nodes=frozenset({'plan'}))
+                               str(route_file), 'plan-check', 'start', agent_home, self.jobs)
 
     def test_three_wrapper_mains_seal_input_and_refuse_missing_or_drifted_input(self):
         # Exercise actual parser -> main -> append_job -> common claim wiring.

@@ -1176,7 +1176,6 @@ class CompletionMarkerTest(unittest.TestCase):
             with self.assertRaises(D.DispatchContractError) as caught:
                 D.completion_marker_gate(
                     str(route_path), "plan-check", "dry-run", self.agent_home, self.jobs,
-                    planned_revision_nodes=admission.planned_revision_nodes,
                 )
         self.assertEqual(caught.exception.reason, "prior-attempt-unverifiable")
         self.assertIn("process-identity-missing", caught.exception.detail)
@@ -3814,14 +3813,9 @@ class RevisionConsumerProofTest(unittest.TestCase):
                 mock.patch.object(ROUTE, "revision_basis_verdict", return_value={"basis": "user-direction"}), \
                 mock.patch.object(artifact_producer, "require_cycle_output", return_value=object()), \
                 mock.patch.object(review_source_subject, "marker_subject", return_value=None):
-            preview = ROUTE.preview_revision(
-                self.route, "upstream", self.evidence, basis="user-direction", direction="fixture",
-                author_attempt_id="att-author")
             published = ROUTE.publish_revision_locked(
                 self.route, "upstream", self.evidence, basis="user-direction", direction="fixture",
                 author_attempt_id="att-author")
-        self.assertEqual(preview["tombstoned"], [])
-        self.assertEqual(preview["kept"], ["downstream", "leaf"])
         self.assertEqual(published["tombstoned"], [])
         self.assertEqual(published["kept"], ["downstream", "leaf"])
         self.assertEqual(json.loads((self.directory / "downstream.json").read_text())["sequence"], 1)
