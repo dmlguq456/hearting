@@ -148,9 +148,9 @@ last_completed_stage: verify
 ## Examples
 
 ```text
-/autopilot-apply "apply the tfrestormer camera-ready cheatsheet" --source latex/main.tex
+/autopilot-apply "apply the tfenhancer camera-ready cheatsheet" --source latex/main.tex
 /autopilot-apply "apply the ICML rebuttal mutations" --source paper/main.tex --isolation worktree
-/autopilot-apply "tfrestormer cheatsheet" --from verify
+/autopilot-apply "tfenhancer cheatsheet" --from verify
 ```
 
 ## When Not to Use

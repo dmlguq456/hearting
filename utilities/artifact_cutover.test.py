@@ -352,7 +352,7 @@ class CutoverTest(unittest.TestCase):
 
     def test_migrate_delta_skips_invalid_locator_components(self):
         # Non-ASCII filenames cannot be D-6 locators; they must stay legacy at
-        # copy time instead of wedging the later seal (SR_CorrNet_DSC 2026-09-02).
+        # copy time instead of wedging the later seal (SR_ModelA_DSC 2026-09-02).
         self.w("plans/2026-01-03_c/핵심요약보고서.html", "korean-named\n")
         self.w("analysis_project/doc/검증결과.md", "korean snapshot\n")
         rows = self.rows.read_text() + json.dumps(

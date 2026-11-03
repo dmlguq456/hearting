@@ -96,7 +96,7 @@ def disposition(row):
 # `campaign.cycles` but keeps its record (state `abandoned` or `no-lineage`)
 # so the sealed abandon reason stays auditable.  Such a record is detached,
 # not a member: counting it against `campaign.cycles` reported a permanent
-# `campaign-membership-drift` (TF-Rehancer root, 2026-09-15, three abandoned
+# `campaign-membership-drift` (Project-C root, 2026-09-15, three abandoned
 # records with no directory).  Writer and verifier both read this set.
 DETACHED_STATES = frozenset({"abandoned", "no-lineage"})
 

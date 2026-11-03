@@ -38,9 +38,12 @@ class ContinuationLedgerInheritanceTest(unittest.TestCase):
             next_ordinal, handoff = D.inherit_continuation_ledger(ledger, root, owner)
             self.assertEqual(next_ordinal, 2)
             self.assertTrue(handoff)
+            # Phase F: replaying the progress-carrying `gross` reservation no
+            # longer draws down the gross remainder; the stall row and the
+            # reserved terminal-handoff row still replay their own spend.
             self.assertEqual((ledger.gross_remaining, ledger.stall_remaining,
                               ledger.reserved_remaining),
-                             (budget.ordinary - 1, budget.stall - 1, budget.reserved - 1))
+                             (budget.ordinary, budget.stall - 1, budget.reserved - 1))
             self.assertEqual(BR._ledger_path(root, owner).read_bytes(), before)
 
 

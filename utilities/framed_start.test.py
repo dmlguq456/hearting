@@ -1987,13 +1987,52 @@ class AutomaticDirectionNoticeTest(StartBase):
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):
             first = self.settle()
-        self.assertTrue(first["direction_notice"].startswith("[방향 통지]"))
+        self.assertTrue(first["direction_notice"].startswith("[방향 통지]"))   # this suite declares Korean
         self.assertIn("Do the work", first["direction_notice"])
         self.assertTrue(first["next_step"].startswith(W.DIRECTION_NOTICE_STEP))
         self.assertIn(first["direction_notice"], stderr.getvalue())
         self.assertEqual(len(self.leg_routes()), 1)                     # the leg really started
         replay = self.settle()
         self.assertEqual(replay["direction_notice"], first["direction_notice"])
+
+    def declare(self, language):
+        """The operator's language on an isolated preference path; None is no declaration (English)."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        env = {"HOME": tmp.name, "XDG_CONFIG_HOME": tmp.name + "/xdg", "CLAUDE_CONFIG_DIR": tmp.name + "/claude"}
+        patcher = mock.patch.dict(os.environ, env)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        os.environ.pop("FLEET_NOW_LANG", None)
+        if language:
+            os.environ["FLEET_NOW_LANG"] = language
+
+    def test_the_notice_is_english_by_default_and_korean_when_declared(self):
+        self.recorded()
+        self.declare(None)
+        english = W._automatic_direction_notice_text(self.interview, self.answers)
+        self.assertEqual(english, "[Direction notice] The two review legs agreed on a direction and left nothing "
+                                  "to ask, so work started without asking: Do the work. If anything needs fixing, "
+                                  "let me know in your next message.")
+        self.assertIsNone(re.search(r"[\uac00-\ud7a3]", english))
+        self.declare("ko")
+        self.assertEqual(W._automatic_direction_notice_text(self.interview, self.answers),
+                         "[방향 통지] 두 갈래 검토가 같은 방향을 내고 물을 것을 남기지 않아 묻지 않고 시작했습니다"
+                         ": Do the work. 고칠 점이 있으면 다음 말로 알려 주세요.")
+
+    def test_a_proposal_without_a_summary_uses_the_catalog_wording_for_the_direction(self):
+        for language, means in ((None, "Start in the direction both legs agreed on"),
+                                ("ko", "두 갈래가 함께 낸 방향대로 시작합니다")):
+            with self.subTest(language=language):
+                self.declare(language)
+                self.set_briefs(full_brief([DIRECT]), full_brief([DIRECT]))
+                root, record, output = W._framed_cycle(self.route)
+                rows = W._proposal_rows(self.route, self.jobs, root, record, output)
+                for row in rows:
+                    row["proposal"] = {**row["proposal"], "summary": ""}
+                interview, answers = W._automatic_direction(self.route, rows, output)
+                self.assertEqual(interview["questions"][0]["options"][0]["means"], means)
+                self.assertIn(means, W._automatic_direction_notice_text(interview, answers))
 
     def test_a_persons_answer_starts_the_leg_without_a_notice(self):
         self.recorded(actor_kind="user", basis=None)

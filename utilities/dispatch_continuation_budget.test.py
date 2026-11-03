@@ -40,6 +40,27 @@ class ContinuationBudgetTest(unittest.TestCase):
         self.assertEqual(8, budget.declared_nodes)
         self.assertEqual(7, budget.retry_slots)
 
+    def test_continuation_route_counts_only_its_declared_retry_boundaries(self):
+        # Shape of a continuation route (cairn v216): the source graph's boundaries
+        # stay, while only the remaining nodes are declared.
+        with tempfile.TemporaryDirectory() as raw:
+            route = Path(raw) / "route.json"
+            value = self.seal({
+                "schema_version": 2,
+                "nodes": [{"id": node} for node in ("host-run", "impl-review", "test", "report")],
+                "resume_retry_boundaries": [
+                    "plan", "plan-check", "execute", "host-run", "impl-review", "test", "report"],
+            })
+            route.write_text(json.dumps(value), encoding="utf-8")
+            budget = MODULE.resolve_continuation_budget(
+                route_file=route, route_id=value["route_id"], route_hash=value["route_hash"],
+            )
+        self.assertEqual("bound-route", budget.source)
+        self.assertEqual(4, budget.declared_nodes)
+        self.assertEqual(4, budget.retry_slots)
+        self.assertEqual(MODULE.derive_workload_ordinary(
+            declared_nodes=4, retry_slots=4, review_round_cap=2, terminal_nodes=1), budget.ordinary)
+
     def test_unbound_or_mismatched_route_keeps_finite_floor(self):
         with tempfile.TemporaryDirectory() as raw:
             route = Path(raw) / "route.json"
@@ -78,18 +99,33 @@ class AdmissionGateTest(unittest.TestCase):
         budget = types.SimpleNamespace(ordinary=ordinary, reserved=reserved, stall=stall)
         return MODULE.ContinuationLedger(budget)
 
-    def test_admit_equation_and_false_predicate_yields_zero_start_with_typed_refusal(self):
-        ledger = self._ledger(ordinary=1, reserved=1, stall=1)
-        # gross_remaining(1) is not > terminal_reserve(1) -> ordinary refused.
-        verdict = ledger.admit(purpose="ordinary", stalled=False, reservation_ok=True)
+    def test_false_reservation_predicate_yields_typed_refusal_and_zero_start(self):
+        ledger = self._ledger(ordinary=3, reserved=1, stall=2)
+        verdict = ledger.admit(purpose="ordinary", stalled=False, reservation_ok=False)
         self.assertFalse(verdict.admitted)
-        self.assertTrue(verdict.refusal)
-        self.assertEqual(verdict.gross_remaining, 1)
+        self.assertEqual(verdict.refusal, "continuation-budget-unavailable")
+        self.assertEqual(ledger.gross_remaining, 3)
 
-        ledger2 = self._ledger(ordinary=3, reserved=1, stall=2)
-        verdict2 = ledger2.admit(purpose="ordinary", stalled=False, reservation_ok=False)
-        self.assertFalse(verdict2.admitted)
-        self.assertEqual(verdict2.refusal, "continuation-budget-unavailable")
+    def test_progress_carrying_ordinary_admits_never_spend_or_exhaust_the_budget(self):
+        # Phase F (F-1): `ordinary=2` is the old "small explicit budget" shape.
+        # An ordinary admit carrying a real result (`stalled=False`) is not
+        # repetition, so it must neither spend gross nor stop at the reserve
+        # boundary -- `ordinary+3` of them are all admitted and the remainders
+        # are unchanged. Before F-2 the third admit (indeed the second, for
+        # `ordinary=2, reserved=1`) is `continuation-admission-refused`.
+        ledger = self._ledger(ordinary=2, reserved=1, stall=2)
+        for index in range(2 + 3):
+            verdict = ledger.admit(purpose="ordinary", stalled=False, reservation_ok=True)
+            self.assertTrue(verdict.admitted, (index, verdict))
+            self.assertEqual(verdict.charged, "gross")
+            self.assertEqual(verdict.gross_remaining, 2)
+            self.assertEqual(verdict.refusal, "")
+        self.assertEqual(ledger.gross_remaining, 2)
+        self.assertEqual(ledger.reserved_remaining, 1)
+        # The one reserved terminal-handoff turn is still spendable afterwards.
+        terminal = ledger.admit(purpose="terminal-handoff", stalled=False, reservation_ok=True)
+        self.assertTrue(terminal.admitted)
+        self.assertEqual(terminal.charged, "reserved")
 
     def test_exhausted_stall_counter_does_not_block_a_real_progress_gross_admit(self):
         # §13.34.4-(2) declares three separate remainders, not one equation
@@ -113,7 +149,9 @@ class AdmissionGateTest(unittest.TestCase):
         verdict = ledger.admit(purpose="ordinary", stalled=False, reservation_ok=True)
         self.assertTrue(verdict.admitted)
         self.assertEqual(verdict.charged, "gross")
-        self.assertEqual(ledger.gross_remaining, 2)
+        # Phase F: the admit is charged to the gross axis by name, but real
+        # progress no longer spends it.
+        self.assertEqual(ledger.gross_remaining, 3)
         self.assertEqual(ledger.stall_remaining, 0)
 
     def test_exhausted_stall_counter_still_refuses_a_stalled_admit(self):
@@ -128,19 +166,27 @@ class AdmissionGateTest(unittest.TestCase):
         self.assertEqual(verdict.refusal, "continuation-admission-refused")
         self.assertEqual(ledger.gross_remaining, 3)
 
-    def test_remainders_stay_non_negative_and_reserve_boundary_admits_terminal_handoff_only(self):
-        ledger = self._ledger(ordinary=2, reserved=1, stall=5)
-        first = ledger.admit(purpose="ordinary", stalled=False, reservation_ok=True)
-        self.assertTrue(first.admitted)
-        self.assertEqual(ledger.gross_remaining, 1)
-        # gross_remaining(1) == terminal_reserve(1): ordinary is refused now.
-        second = ledger.admit(purpose="ordinary", stalled=False, reservation_ok=True)
-        self.assertFalse(second.admitted)
+    def test_remainders_stay_non_negative_and_the_reserve_handoff_is_spent_once(self):
+        # Phase F: the old gross==reserve refusal for a progress admit is
+        # gone. The non-negative invariant now shows on the stall counter and
+        # on the one reserved terminal-handoff turn.
+        ledger = self._ledger(ordinary=2, reserved=1, stall=2)
+        for _ in range(5):
+            progress = ledger.admit(purpose="ordinary", stalled=False, reservation_ok=True)
+            self.assertTrue(progress.admitted)
+        self.assertEqual(ledger.gross_remaining, 2)
+        self.assertTrue(ledger.admit(purpose="ordinary", stalled=True, reservation_ok=True).admitted)
+        self.assertTrue(ledger.admit(purpose="ordinary", stalled=True, reservation_ok=True).admitted)
+        stalled = ledger.admit(purpose="ordinary", stalled=True, reservation_ok=True)
+        self.assertFalse(stalled.admitted)
+        self.assertEqual(stalled.refusal, "continuation-admission-refused")
+        self.assertEqual(ledger.stall_remaining, 0)
         self.assertGreaterEqual(ledger.gross_remaining, 0)
         terminal = ledger.admit(purpose="terminal-handoff", stalled=False, reservation_ok=True)
         self.assertTrue(terminal.admitted)
         self.assertEqual(terminal.charged, "reserved")
         self.assertGreaterEqual(ledger.reserved_remaining, 0)
+        self.assertFalse(ledger.admit(purpose="terminal-handoff", stalled=False, reservation_ok=True).admitted)
 
     def test_broken_route_binding_floor_path_keeps_reserved_remaining_at_least_one(self):
         budget = MODULE.resolve_continuation_budget(route_file=None, route_id="", route_hash="")

@@ -82,15 +82,15 @@ The Korean request strings below are quoted multilingual examples. They are not 
 → spec/가사관리/prd.md
 ```
 
-### Example 2 — Organize TF-Restormer research code (`research` + `cli`)
+### Example 2 — Organize TF-Enhancer research code (`research` + `cli`)
 
 ```
-/autopilot-spec "TF-Restormer 정돈·재현성 준비"
+/autopilot-spec "TF-Enhancer 정돈·재현성 준비"
 → auto mode infers research + cli from configs/, argparse, and ipynb signals
 → Common PRD: module structure, dependencies, license
 → PRD [research]: entry points, configs, reproduction commands, expected metrics
 → PRD [cli]: train.py / eval.py commands and options
-→ spec/TF-Restormer/prd.md (no code generation; autopilot-code organizes code from this spec)
+→ spec/TF-Enhancer/prd.md (no code generation; autopilot-code organizes code from this spec)
 ```
 
 ### Example 3 — npm library (`library` + `cli`)

@@ -2804,6 +2804,31 @@ class ReplacementTest(unittest.TestCase):
         ended = self._die(successor, **columns)
         return ended
 
+    def _bound_launch(self, aid='att-source'):
+        """A bound parent carrier's advance (rewake/Codex): no explicit `start`."""
+        commands = []
+        with mock.patch('dispatch_capacity_evidence.harness_hold', return_value=None), \
+                mock.patch('dispatch_replacement_batch.command', return_value=None):
+            result = R.advance(self.jobs, aid, authority_check=lambda *_: True,
+                               run=lambda command, **kw: commands.append(command)
+                               or SimpleNamespace(returncode=0, stdout='', stderr=''))
+        return result, commands
+
+    def test_bound_carrier_launches_a_runtime_owner_successor(self):
+        """A runtime end is launched by the parent's bound carrier without a person's `start`."""
+        self._runtime_end(reconcile_reason='resource-outbox-binding-changed')
+        result, commands = self._bound_launch()
+        self.assertEqual((result['reason'], len(commands)), ('replacement-launch-pending', 1))
+        self.assertEqual(result['record']['proof']['death_kind'], 'runtime')
+        self.assertEqual(result['record']['proof']['note'], 'dead-runtime-exit')
+
+    def test_a_supervisor_tick_does_not_launch_a_runtime_end(self):
+        self._runtime_end()
+        result = R.advance(self.jobs, 'att-source',
+                           run=lambda *a, **k: self.fail('a supervisor tick launched'))
+        self.assertEqual(result, {'state': 'not-applicable'})
+        self.assertFalse((R._directory(self.jobs) / 'claims').exists())
+
     def test_repeated_same_runtime_owner_death_stops_at_budget(self):
         ended = self._second_runtime_end('owner', note='dead-protocol')   # note differs; columns do not
         with mock.patch('codex_dispatch_terminal.inspect_terminal_attempt',
@@ -2819,16 +2844,34 @@ class ReplacementTest(unittest.TestCase):
                         return_value={'state': 'absent', 'failure_class': ''}):
             self.assertEqual(R.claim(self.jobs, ended['attempt_id'])['proof']['death_kind'], 'runtime')
 
-    def test_owner_transport_death_keeps_its_no_cutoff_policy(self):
-        """SD-157: an owner's `dead-runtime-*` death is replaced every time; only newly opened ends are budgeted."""
+    def test_owner_transport_death_keeps_its_no_cutoff_policy_for_an_explicit_start(self):
+        """SD-157: an explicit `start` replaces an owner's `dead-runtime-*` death every time."""
         ended = self._second_runtime_end('owner')   # same columns, note dead-runtime-exit
         with mock.patch('codex_dispatch_terminal.inspect_terminal_attempt',
                         return_value={'state': 'absent', 'failure_class': ''}):
-            second = R.claim(self.jobs, ended['attempt_id'])
+            second = R.claim(self.jobs, ended['attempt_id'], resume_capacity=True)
         self.assertEqual(second['proof']['death_kind'], 'runtime')
 
+    def test_the_same_runtime_owner_death_stops_an_automatic_replacement_at_the_budget(self):
+        """The bound carrier's automatic path replaces an observed column once; a repeat is a budget
+        fact reported to the current seat, not another launch."""
+        ended = self._second_runtime_end('owner')   # same columns, note dead-runtime-exit
+        with mock.patch('codex_dispatch_terminal.inspect_terminal_attempt',
+                        return_value={'state': 'absent', 'failure_class': ''}):
+            with self.assertRaises(D.DispatchContractError) as caught:
+                R.claim(self.jobs, ended['attempt_id'])
+        self.assertEqual(caught.exception.reason, 'automatic-replacement-exhausted')
+        with mock.patch('dispatch_capacity_evidence.harness_hold', return_value=None), \
+                mock.patch('dispatch_replacement_batch.command', return_value=None):
+            result = R.advance(self.jobs, ended['attempt_id'], authority_check=lambda *_: True,
+                               run=lambda *a, **k: self.fail('an exhausted carrier launched'))
+        self.assertEqual((result['state'], result['reason']),
+                         ('needs-attention', 'automatic-replacement-exhausted'))
+        self.assertEqual(result['source_attempt_id'], ended['attempt_id'])
+
     def test_changed_harness_or_failure_class_replaces_again(self):
-        for change in ({'failure_class': 'protocol'}, {'terminal_event': 'dispatch.supervisor.other'}):
+        for change in ({'failure_class': 'protocol'}, {'terminal_event': 'dispatch.supervisor.other'},
+                       {'harness': 'claude'}):
             with self.subTest(change=change):
                 self.tearDown_case()
                 ended = self._second_runtime_end('owner', **change)
@@ -2917,6 +2960,9 @@ class ReplacementTest(unittest.TestCase):
                 self.assertIn(report, text)
                 self.assertIn('no person has answered', text)
                 self.assertIn('observe again whether that refusal still holds', text)
+                self.assertIn('Runtime fact: this is the one continuation made without a person', text)
+                self.assertNotRegex(text, r'\bend BLOCKED\b')
+                self.assertNotIn('name that question', text)
                 for forbidden in ('a person approved', 'Treat it as given', 'a person has answered it',
                                   'received an answer'):
                     self.assertNotIn(forbidden, text)
@@ -2934,6 +2980,9 @@ class ReplacementTest(unittest.TestCase):
         text = R.recovery_instructions(SimpleNamespace(automatic_retry_of='att-source', worker_type='owner',
             jobs_path=self.jobs, attempt_id=result['record']['replacement_attempt_id']))
         self.assertIn('handoff-format error and no person has answered', text)
+        self.assertIn('Runtime fact: this is the one continuation made without a person', text)
+        self.assertNotRegex(text, r'\bend BLOCKED\b')
+        self.assertNotIn('name that question', text)
 
     def test_observed_continuation_keeps_original_owner_verdict(self):
         meta = self._observed_owner()
@@ -3015,6 +3064,9 @@ class ReplacementTest(unittest.TestCase):
         self.assertIn('original PASS result stays as it is', text)
         self.assertIn('completion-marker-absent', text)
         self.assertIn('completed stages are not rerun', text)
+        self.assertIn('Runtime fact: this is the one continuation made without a person', text)
+        self.assertNotRegex(text, r'\bend BLOCKED\b')
+        self.assertNotIn('name that question', text)
         for forbidden in ('a person approved', 'Treat it as given', 'received an answer'):
             self.assertNotIn(forbidden, text)
         # E2-N06: the runtime wrote no PASS and left the original row exactly as it was.
@@ -3208,7 +3260,7 @@ class ReplacementTest(unittest.TestCase):
                           launch_started='1', supervisor_lease='flock-v1',
                           supervisor_lease_file=str(D.supervisor_lease_path(self.jobs, successor['attempt_id'])))
                 before = self.jobs.read_bytes()
-                tick = R.advance(self.jobs, successor['attempt_id'], authority_check=lambda *_: True)
+                tick = R.advance(self.jobs, successor['attempt_id'])
                 self.assertNotEqual(tick.get('state'), 'started')
                 self.assertEqual(self.jobs.read_bytes(), before)
                 self.assertTrue(self._answer(successor['attempt_id'], text='정전 뒤 남은 평가만 이어가세요.')['retained'])
