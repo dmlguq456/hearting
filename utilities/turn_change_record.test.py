@@ -87,7 +87,8 @@ class Fixture(unittest.TestCase):
         return {"ok": True}
 
     def start(self, sid=SID, harness="claude"):
-        return T.turn_start(harness, sid, str(self.repo), self.env)
+        return T.turn_start(harness, sid, str(self.repo), self.env,
+                            recorder=self.recorder, appender=self.appender)
 
     def end(self, sid=SID, harness="claude"):
         return T.turn_end(harness, sid, str(self.repo), self.env,
@@ -96,12 +97,21 @@ class Fixture(unittest.TestCase):
     def state(self, sid=SID, harness="claude"):
         return json.loads(T.state_path(self.env, harness, sid).read_text())
 
-    def ledger_line(self, harness="claude", sid=SID, route_id="rt-own"):
+    def ledger_line(self, harness="claude", sid=SID, route_id="rt-own", automatic=False):
         directory = self.ledgers / harness
         directory.mkdir(parents=True, exist_ok=True)
+        line = {"v": 1, "event": "compose", "harness": harness, "session_id": sid,
+                "route_id": route_id, "artifact_root": str(self.root)}
         with open(directory / f"{sid}.jsonl", "a") as stream:
-            stream.write(json.dumps({"v": 1, "event": "compose", "harness": harness, "session_id": sid,
-                                     "route_id": route_id, "artifact_root": str(self.root)}) + "\n")
+            stream.write(json.dumps({**line, "automatic": True} if automatic else line) + "\n")
+
+    def killed(self, harness, sid, top, root, items, env, remember=None):
+        """The record step dies before its route exists (the session ended, the step was killed)."""
+        raise KeyboardInterrupt("record step killed")
+
+    def end_killed(self, sid=SID, harness="claude"):
+        with self.assertRaises(KeyboardInterrupt):
+            T.turn_end(harness, sid, str(self.repo), self.env, recorder=self.killed, appender=self.appender)
 
 
 class TurnAttributionTest(Fixture):
@@ -212,19 +222,19 @@ class TurnAttributionTest(Fixture):
         (self.repo / "greet.py").write_text('print("Hello")\n')
         self.assertEqual(self.end()["state"], "retry")
         (self.repo / "README.md").write_text("the person's own edit between turns\n")
-        self.assertEqual(self.start()["state"], "baseline")
-        self.assertEqual(self.end()["state"], "recorded")
+        self.assertEqual(self.start()["state"], "baseline")  # the retry runs at this boundary
+        self.assertEqual(self.end()["state"], "unchanged")
         self.assertEqual([call["sources"] for call in self.calls], [[["greet.py"]], [["greet.py"]]])
+        self.assertTrue(self.state()["records"][str(self.root)]["closed"])
 
     def test_a_record_that_keeps_failing_is_dropped_after_three_attempts(self):
         self.fail_records = 3
         self.start()
         (self.repo / "greet.py").write_text('print("Hello")\n')
-        self.assertEqual(self.end()["state"], "retry")
-        self.start()
-        self.assertEqual(self.end()["state"], "retry")
-        self.start()
-        self.assertEqual(self.end()["state"], "gave-up")
+        self.assertEqual(self.end()["state"], "retry")       # attempt 1
+        self.start()                                            # attempt 2, at the next boundary
+        self.assertEqual(self.end()["state"], "gave-up")       # attempt 3
+        self.assertEqual(len(self.calls), 3)
         self.assertTrue(self.state()["last_failure"]["gave_up"])
         self.assertEqual(self.state()["pending"], [])
 
@@ -258,6 +268,140 @@ class TurnAttributionTest(Fixture):
             self.assertEqual(self.start()["state"], "too-large")
             with mock.patch.object(T, "snapshot", side_effect=AssertionError("walked again")):
                 self.assertEqual(self.start()["state"], "too-large")
+
+
+class InterruptedRecordTest(Fixture):
+    def test_a_turn_starting_while_the_records_route_is_being_created_still_records(self):
+        # compose has written the automatic route's ledger line; the state does not know it yet.
+        self.ledger_line("claude", SID, "rt-being-created", automatic=True)
+        self.assertEqual(self.start()["state"], "baseline")
+        (self.repo / "greet.py").write_text('print("Hello")\n')
+        self.assertEqual(self.end()["state"], "recorded")
+
+    def test_a_turn_whose_record_step_was_killed_is_written_at_the_sessions_next_boundary(self):
+        self.start()
+        (self.repo / "greet.py").write_text('print("Hello")\n')
+        self.end_killed()
+        self.assertEqual(len(self.state()["pending"]), 1)
+        self.assertEqual(self.start()["state"], "baseline")
+        self.assertEqual(self.calls[0]["sources"], [["greet.py"]])
+        self.assertEqual(self.state()["pending"], [])
+
+    def test_a_turn_left_queued_by_an_ended_session_is_written_by_a_record_pass_in_the_same_folder(self):
+        self.start("ended-session")
+        (self.repo / "greet.py").write_text('print("Hello")\n')
+        self.end_killed("ended-session")
+        marker = T._pending_marker(self.env, str(self.root), "claude", "ended-session")
+        self.assertTrue(marker.exists())
+        recorded_as = []
+
+        def recorder(harness, sid, top, root, items, env, remember=None):
+            recorded_as.append((harness, sid))
+            return self.recorder(harness, sid, top, root, items, env, remember=remember)
+        with mock.patch.object(T, "ORPHAN_AFTER", 0.0), \
+                mock.patch.object(T, "session_ended", side_effect=lambda h, s: (h, s) == ("claude", "ended-session")):
+            self.start("other-session", "codex")
+            result = T.turn_end("codex", "other-session", str(self.repo), self.env,
+                                recorder=recorder, appender=self.appender)
+        self.assertEqual(recorded_as, [("claude", "ended-session")])
+        self.assertEqual(result["adopted"], ["claude:ended-session:recorded"])
+        ended = self.state("ended-session")
+        self.assertEqual(ended["pending"], [])
+        self.assertEqual(ended["records"][str(self.root)]["route_id"], "rt-a1")
+        self.assertFalse(marker.exists())
+        self.assertFalse(marker.parent.exists(), "the folder's marker directory is removed once empty")
+
+    def carry(self, carrier_cwd=None, **patches):
+        """The turn end of another session in ``carrier_cwd`` (default this repo)."""
+        cwd = str(carrier_cwd or self.repo)
+        with mock.patch.multiple(T, **patches):
+            T.turn_start("codex", "carrier", cwd, self.env, recorder=self.recorder, appender=self.appender)
+            return T.turn_end("codex", "carrier", cwd, self.env, recorder=self.recorder, appender=self.appender)
+
+    def test_a_carry_writes_only_the_folder_the_carrying_turn_is_in(self):
+        other = self.tmp / "work" / "other"
+        other.mkdir()
+        git(other, "init", "-q")
+        (other / "y.py").write_text("y = 1\n")
+        git(other, "add", "-A")
+        git(other, "commit", "-q", "-m", "init")
+        unavailable = lambda *a, **k: {"ok": False, "reason": "compose-failed"}  # noqa: E731
+        for cwd, path in ((self.repo, self.repo / "greet.py"), (other, other / "y.py")):
+            T.turn_start("claude", "ended-session", str(cwd), self.env, recorder=unavailable, appender=self.appender)
+            path.write_text("changed\n")
+            with self.assertRaises(KeyboardInterrupt):
+                T.turn_end("claude", "ended-session", str(cwd), self.env, recorder=self.killed, appender=self.appender)
+        self.assertEqual({row["root"] for row in self.state("ended-session")["pending"]},
+                         {str(self.root), str(other / ".agent_reports")})
+        result = self.carry(ORPHAN_AFTER=0.0, session_ended=lambda h, s: True)
+        self.assertEqual(result["adopted"], ["claude:ended-session:recorded"])
+        self.assertEqual([call["root"] for call in self.calls], [str(self.root)])
+        self.assertEqual([row["root"] for row in self.state("ended-session")["pending"]],
+                         [str(other / ".agent_reports")])
+
+    def test_an_idle_but_alive_session_is_not_carried_and_keeps_its_attempts(self):
+        self.start("idle-session")
+        (self.repo / "greet.py").write_text('print("Hello")\n')
+        self.end_killed("idle-session")
+        os.utime(T.state_path(self.env, "claude", "idle-session"), (time.time() - 3600,) * 2)
+        result = self.carry(session_ended=lambda h, s: False)  # quiet for an hour, not gone
+        self.assertEqual(result["adopted"], [])
+        self.assertEqual(self.calls, [])
+        idle = self.state("idle-session")
+        self.assertEqual((len(idle["pending"]), idle.get("attempts", 0)), (1, 0))
+
+    def test_a_failed_carry_does_not_use_up_the_sessions_attempts(self):
+        self.start("ended-session")
+        (self.repo / "greet.py").write_text('print("Hello")\n')
+        self.end_killed("ended-session")
+        self.fail_records = 5
+        for _ in range(4):
+            self.carry(ORPHAN_AFTER=0.0, session_ended=lambda h, s: h == "claude")
+        ended = self.state("ended-session")
+        self.assertEqual(len(self.calls), 4)
+        self.assertEqual((len(ended["pending"]), ended.get("attempts", 0)), (1, 0))
+        self.assertEqual(ended["last_carry_failure"]["reason"], "compose-failed")
+
+    def test_an_ended_session_is_carried_only_after_it_has_been_quiet(self):
+        self.start("ended-session")
+        (self.repo / "greet.py").write_text('print("Hello")\n')
+        self.end_killed("ended-session")
+        self.assertEqual(T.ORPHAN_AFTER, 120.0)
+        gone = {"session_ended": lambda h, s: h == "claude"}
+        self.assertEqual(self.carry(**gone)["adopted"], [])  # just ended: its own step may still be running
+        state_file = T.state_path(self.env, "claude", "ended-session")
+        os.utime(state_file, (time.time() - 200,) * 2)
+        self.assertEqual(self.carry(**gone)["adopted"], ["claude:ended-session:recorded"])
+
+    def test_session_ended_answers_only_from_the_runtimes_liveness_proof(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        from fleet.collectors import steward
+        for answer, expected in (("ended", True), ("live", False), ("unknown", False)):
+            with mock.patch.object(steward, "session_liveness", return_value=answer) as probe:
+                self.assertIs(T.session_ended("claude", "s"), expected)
+            probe.assert_called_once_with("claude", "s")
+
+    def test_a_stale_marker_is_pruned_when_a_new_session_starts(self):
+        stale = T._pending_marker(self.env, str(self.root), "claude", "long-gone")
+        stale.parent.mkdir(parents=True)
+        stale.touch()
+        T.turn_start("opencode", "brand-new", str(self.repo), self.env)
+        self.assertFalse(stale.exists())
+        self.assertFalse(stale.parent.exists())
+
+    def test_a_session_whose_record_pass_is_running_is_not_adopted(self):
+        self.start("busy-session")
+        (self.repo / "greet.py").write_text('print("Hello")\n')
+        self.end_killed("busy-session")
+        busy = T.state_path(self.env, "claude", "busy-session")
+        with mock.patch.object(T, "ORPHAN_AFTER", 0.0), mock.patch.object(T, "session_ended", return_value=True), \
+                T._locked(T._record_lock(busy), 0.0):
+            self.start("other-session", "codex")
+            result = T.turn_end("codex", "other-session", str(self.repo), self.env,
+                                recorder=self.recorder, appender=self.appender)
+        self.assertEqual(result["adopted"], ["claude:busy-session:busy"])
+        self.assertEqual(self.calls, [])
+        self.assertEqual(len(self.state("busy-session")["pending"]), 1)
 
 
 class OpenRouteTest(Fixture):
