@@ -137,6 +137,30 @@ def _shares_source_history(cwd, source, commit) -> bool:
                           capture_output=True).returncode == 0
 
 
+def recorded_head(state: Mapping[str, Any] | None) -> tuple[Any, Any]:
+    """The commit and summary digest a finished route records now: its latest update, else its finish."""
+    state = state or {}
+    intent = state.get("intent") or {}
+    updates = state.get("updates") or []
+    last = updates[-1] if updates and isinstance(updates[-1], dict) else {}
+    return (last.get("commit") or intent.get("commit"),
+            last.get("summary_sha256") or intent.get("summary_sha256"))
+
+
+def _follow_up(cwd, state, commit, sid) -> bool:
+    """True when ``commit`` is review fixes on top of this session's finished result.
+
+    It has to descend from the commit the route records now (a fast-forward of the same
+    branch) and come from the session that finished it. A rewound, rebased or unrelated
+    head, or another session, stays a conflict.
+    """
+    head, _summary = recorded_head(state)
+    return bool(commit and head and commit != head and sid
+                and state.get("claimant_session") == sid
+                and subprocess.run(["git", "-C", cwd, "merge-base", "--is-ancestor", head, commit],
+                                   capture_output=True).returncode == 0)
+
+
 def registered_route(route, jobs, inherited):
     from dispatch_contract import parse_registry_metadata
     try:
@@ -476,12 +500,18 @@ def finish(args, route: Mapping[str, Any], route_file: Path, api, *, _admission=
               "evidence_sha256":_digest(evidence_raw) if evidence_raw is not None else recorded_intent.get("evidence_sha256"),
               "summary_sha256":_digest(summary_raw) if summary_raw is not None else recorded_intent.get("summary_sha256"),
               "commit":commit, "cycle_record_digest":dispatch_terminal_commit.cycle_identity_digest(record)}
+    # The commit this call names. A finished route may record a later one than its finish
+    # (review fixes pushed to the same branch); its sealed record keeps the finish's own.
+    result_commit = commit
     if finished and all(recorded_intent.get(key) == value for key, value in intent.items()
                         if key not in {"evidence_sha256", "summary_sha256", "campaign_id", "cycle_record_digest",
-                                       "campaign_key"}):
+                                       "campaign_key", "commit"}):
         # The same finish, asked again after its files or its cycle's campaign moved on:
         # what it recorded stands (the receipt is not rewritten, nor is it cancelled).
+        # A different commit is decided under the lock: the head it records now, or a
+        # fast-forward of it, and nothing else.
         intent = dict(recorded_intent)
+        commit = recorded_intent.get("commit")
     intent_id = _digest(json.dumps(intent, sort_keys=True, separators=(",", ":")).encode())
 
     def make_binding(marker_digest):
@@ -528,7 +558,9 @@ def finish(args, route: Mapping[str, Any], route_file: Path, api, *, _admission=
                     or current_route.get("route_hash") != intent["route_hash"]
                     or api.route_hash(current_route) != intent["route_hash"]):
                 raise InlineFinishError("finish-route-drift")
-            if source_is_sha and not _on_a_branch(route["cwd"], intent["commit"]):
+            # The commit this call names; a later one of a finished route descends from the
+            # finish's own, so it being on a branch keeps that one on a branch too.
+            if source_is_sha and not _on_a_branch(route["cwd"], result_commit):
                 raise InlineFinishError("finish-commit-drift")
             observed_lease = artifact_producer._review_lease_observation(root, record["cycle_id"])
             choice = decide_continuation(route, action="finish-cycle",
@@ -545,6 +577,19 @@ def finish(args, route: Mapping[str, Any], route_file: Path, api, *, _admission=
                         and prior_intent.get("evidence_sha256") != intent["evidence_sha256"]):
                     raise InlineFinishError("finish-evidence-drift")
                 raise InlineFinishError("finish-intent-conflict")
+            update = None
+            if state and state.get("state") == "finished" and result_commit != recorded_head(state)[0]:
+                # Review asked for fixes after the finish and they were pushed to the same PR
+                # branch: the same evidence names a later head of this session's result. It
+                # is recorded as an update beside the finish, which stays as it was.
+                if not (source_is_sha and _follow_up(route["cwd"], state, result_commit, sid)):
+                    raise InlineFinishError("finish-intent-conflict")
+                previous_commit, previous_summary = recorded_head(state)
+                update = {"commit": result_commit, "previous_commit": previous_commit,
+                          "summary_sha256": (_digest(summary_raw) if summary_raw is not None
+                                             else previous_summary),
+                          "previous_summary_sha256": previous_summary, "session": sid,
+                          "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
             replayed_at_entry = state is not None
             marker_file = api.completion_dir(route["route_id"]) / (node["id"] + ".json")
             if not state:
@@ -712,7 +757,22 @@ def finish(args, route: Mapping[str, Any], route_file: Path, api, *, _admission=
                 if (verified.get("manifest_digest") != state.get("manifest_digest")
                         or state.get("receipt", {}).get("terminal_marker_digest") != marker_digest):
                     raise InlineFinishError("finish-seal-drift")
+            if update is not None:
+                # Only after the finish it updates is proven again. Its receipt, close and seal keep
+                # the finish's own commit (the sealed manifest binds the close's bytes); the update
+                # and the summary it names are kept beside them, oldest first.
+                if summary_raw is not None:
+                    update["summary_file"] = "summary-" + update["summary_sha256"][:16] + ".md"
+                    _atomic_bytes(base / update["summary_file"], summary_raw)
+                updated = dict(state, updates=[*(state.get("updates") or []), update])
+                if len(json.dumps(updated, sort_keys=True, indent=2).encode()) + 1 > 65536:
+                    raise InlineFinishError("finish-intent-conflict")  # never past what `_read` accepts
+                _atomic(state_path, updated)
+                state = updated
             result = dict(state["receipt"]); result["replay"] = replayed_at_entry
+            if state.get("updates"):
+                result["commit"] = recorded_head(state)[0]
+                result["updates"] = list(state["updates"])
             result["unscoped_tracked_dirt"] = unscoped_tracked_dirt
             if finished and verified.get("deleted"):
                 # Information only: the cycle (or its campaign) was deleted after the finish.
