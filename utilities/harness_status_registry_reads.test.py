@@ -118,6 +118,34 @@ class HarnessStatusRegistryReadsTest(unittest.TestCase):
                          json.loads(separate["headless_evidence"]))
         self.assertEqual(facts["orphaned_conductor_jobs"], separate["orphaned_conductor_jobs"])
 
+    def test_the_prompt_signal_reads_only_the_open_count(self):
+        # The per-prompt signal prints git, artifact-root and open-row facts and
+        # nothing from process evidence, orphan scan or resource counts; those
+        # are computed when the full status is asked for (HOOK2 follow-up).
+        # The git and artifact-root fields come from the same shared reader as
+        # the full status (its cache warms asynchronously, so values are not
+        # compared here); the registry part is what changes.
+        env = {**self.env, "AGENT_HOME": str(ROOT)}
+        for adapter, fields in (
+                ("opencode", ("artifact_root_kind", "git_operation", "headless_open_jobs")),
+                ("codex", ("artifact_root_kind", "git_operation", "git_dirty_tracked",
+                           "git_untracked", "git_extra_worktrees", "git_branch_done",
+                           "headless_open_jobs"))):
+            with self.subTest(adapter=adapter):
+                for log in (self.reads, self.awk_log):
+                    log.unlink(missing_ok=True)
+                signal = subprocess.run(
+                    [str(ROOT / "adapters" / adapter / "bin" / "preflight.sh"), "prompt-signal",
+                     str(ROOT), "test"], env=env, text=True,
+                    capture_output=True, timeout=120, check=False)
+                self.assertEqual(signal.returncode, 0, signal.stderr)
+                facts = dict(line.split("=", 1) for line in signal.stdout.splitlines() if "=" in line)
+                self.assertLessEqual(set(fields), set(facts))
+                self.assertEqual(facts["headless_open_jobs"], "2")
+                # Base: the full status ran on every prompt (one Python read).
+                self.assertEqual(self._lines(self.reads), [])
+                self.assertEqual(self._lines(self.awk_log), ["jobs"])
+
     def test_a_failed_shared_read_keeps_the_count_and_reports_unknown_evidence(self):
         broken = Path(self._tmp.name) / "broken-home"
         (broken / "utilities").mkdir(parents=True)
