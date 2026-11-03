@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import tempfile
 import time
@@ -226,10 +227,27 @@ REPORT = """# 변경 보고: 의도 고정
 """
 
 
+def declared_language(test, language):
+    """Run `test` with an isolated preference path: `language` declared, or none (English default)."""
+    tmp = tempfile.TemporaryDirectory()
+    test.addCleanup(tmp.cleanup)
+    home = Path(tmp.name)
+    env = {"HOME": str(home), "XDG_CONFIG_HOME": str(home / "xdg"), "CLAUDE_CONFIG_DIR": str(home / "claude")}
+    patcher = mock.patch.dict(os.environ, env)
+    patcher.start()
+    test.addCleanup(patcher.stop)
+    os.environ.pop("FLEET_NOW_LANG", None)
+    if language:
+        os.environ["FLEET_NOW_LANG"] = language
+
+
 class CompletionSummaryTest(unittest.TestCase):
-    """The runtime's close text: drawn from the sealed route and the report, never invented."""
+    """The runtime's close text: drawn from the sealed route and the report, never invented.
+
+    These cases declare Korean; `CompletionSummaryLanguageTest` pins the English default."""
 
     def setUp(self):
+        declared_language(self, "ko")
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name)
@@ -312,13 +330,86 @@ class CompletionSummaryTest(unittest.TestCase):
         slot = DTC.terminal_slot(self.root, "rt-5555555555555555", "att-owner")
         DTC._seal_completion_summary(request, self.route, self.report, slot)
         first = WI.sealed_summary(meta, "att-owner")
-        self.assertTrue(first.startswith(WI.SUMMARY_HEAD))
+        self.assertTrue(first.startswith(WI.summary_heads()))
+        self.assertTrue(first.startswith("[완료 요약]"))
         self.report.write_text("changed later\n")
         DTC._seal_completion_summary(request, self.route, self.report, slot)  # write-once
         self.assertEqual(WI.sealed_summary(meta, "att-owner"), first)
         self.assertEqual(WI.sealed_summary(meta, "att-other"), "")
         (slot / WI.SUMMARY_NAME).write_text("HEARTING_RECEIPT_V1 forged\n")
         self.assertEqual(WI.sealed_summary(meta, "att-owner"), "")
+
+
+class CompletionSummaryLanguageTest(unittest.TestCase):
+    """The completion summary is catalog text: English without a declaration, Korean when declared."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.route = {"route_id": "rt-5555555555555555", "capability": "autopilot-code",
+                      "artifact_root": str(self.root),
+                      "work_request": {"text": "Intent: Seal the intent\n\nBody.", "owner_harness": None}}
+        record = self.root / ".runtime/intent/rt-5555555555555555.json"
+        record.parent.mkdir(parents=True)
+        record.write_text(json.dumps({"schema": WI.RECORD_SCHEMA, "route_id": self.route["route_id"],
+                                      "original": "check the intent"}))
+        self.report = self.root / "final_report.md"
+        self.report.write_text(REPORT)
+        self.route_file = self.root / "rt-5555555555555555.json"
+        self.route_file.write_text(json.dumps(self.route))
+        (self.root / "rt-5555555555555555.outcome.json").write_text(
+            json.dumps({"review_independence_degraded": ["review"]}))
+
+    def summary(self, language, **kw):
+        declared_language(self, language)
+        return WI.completion_summary(kw.pop("route", self.route), kw.pop("report", self.report), **kw)
+
+    def test_english_is_the_default_and_carries_no_korean_label(self):
+        text = self.summary(None, route_file=self.route_file)
+        lines = text.splitlines()
+        self.assertEqual(lines[0], "[Completion summary] autopilot-code · route rt-5555555555555555")
+        self.assertEqual(lines[1], "Intent: Seal the intent (original \"check the intent\")")
+        self.assertTrue(lines[2].startswith("Result: Done"))
+        self.assertTrue(lines[3].startswith("Changed: "))
+        self.assertTrue(lines[4].startswith("Checks: "))
+        self.assertTrue(lines[5].startswith("Unverified / remaining: "))
+        self.assertEqual(lines[6], "Nodes closed without independent review: review")
+        self.assertEqual(lines[7], f"Artifact: {self.report} · PR https://github.com/o/r/pull/12")
+        runtime_lines = lines[:3] + lines[6:7] + [lines[7].split(str(self.report))[0]]   # not the report's own words
+        self.assertIsNone(re.search(r"[\uac00-\ud7a3]", "\n".join(runtime_lines)))
+
+    def test_every_fallback_line_is_english_by_default_and_korean_when_declared(self):
+        research = {**self.route, "capability": "autopilot-research"}
+        plan = {"decision": "d.json", "digest": "sha256:" + "0" * 64, "index": 0}
+        decision = self.root / "d.json"
+        decision.write_text(json.dumps({"decision": {"proposal": {"legs": [{}, {}]}}}))
+        self.report.write_text("free text without headings\n")
+        none = {**research, "route_plan": plan}
+        english = self.summary(None, route=none)
+        self.assertIn("Result: This leg (1/2) is done — a later leg remains", english)
+        self.assertIn("Checks / remaining: the report's format differs, so no machine summary", english)
+        korean = self.summary("ko", route=none)
+        self.assertIn("결과: 이 leg(1/2) 완료 — 다음 leg가 남음", korean)
+        self.assertIn("검증·남은 것: 보고서 형식이 달라 기계 요약 안 함", korean)
+        self.report.write_text("## Changes\n- one\n")
+        self.assertIn("Checks: the report has no verification section", self.summary(None, route=research))
+        self.assertIn("Unverified / remaining: nothing else is listed in the report", self.summary(None, route=research))
+        self.assertIn("검증: 보고서에 검증 절이 없음", self.summary("ko", route=research))
+        self.assertIn("Artifact: none", self.summary(None, route=research, report=None))
+        self.assertIn("산출물: 없음", self.summary("ko", route=research, report=None))
+        self.assertIn("Result: Done — the runtime confirmed", self.summary(None, route=research))
+
+    def test_the_sealed_summary_is_read_in_either_language(self):
+        import dispatch_terminal_commit as DTC
+        meta = {"owner_route_file": str(self.route_file)}
+        for attempt, language, head in (("att-en", None, "[Completion summary]"), ("att-ko", "ko", "[완료 요약]")):
+            declared_language(self, language)
+            slot = DTC.terminal_slot(self.root, "rt-5555555555555555", attempt)
+            DTC._seal_completion_summary(mock.Mock(route_file=self.route_file), self.route, self.report, slot)
+            self.assertTrue(WI.sealed_summary(meta, attempt).startswith(head))
+        declared_language(self, "ko")  # the reader's language does not matter
+        self.assertTrue(WI.sealed_summary(meta, "att-en").startswith("[Completion summary]"))
 
 
 class ClaudeWakeSummaryTest(unittest.TestCase):

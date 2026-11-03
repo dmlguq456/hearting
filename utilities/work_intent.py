@@ -367,7 +367,6 @@ def prompt_block(route) -> str:
 # ---------------------------------------------------------------------------
 
 SUMMARY_NAME = "completion-summary.md"
-SUMMARY_HEAD = "[완료 요약]"
 MAX_FIELD_CHARS = 320
 MAX_SUMMARY_CHARS = 1600
 _SECTION = re.compile(r"^#{2,3}\s+(?P<title>.+?)\s*$")
@@ -385,6 +384,26 @@ _SECTION_FIELDS = (
 )
 _PR_URL = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+/pull/\d+")
 _CARRIER_MARKERS = ("HEARTING_RECEIPT_V1", "AGENT_HARNESS_COMPLETION_V1")
+
+
+def _ui_text():
+    import importlib.util
+    path = Path(__file__).resolve().parents[1] / "tools" / "i18n" / "ui_text.py"
+    spec = importlib.util.spec_from_file_location("ui_text", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def ui_translator():
+    """The shared UI-text translator (English by default, Korean when declared)."""
+    return _ui_text().translator()
+
+
+def summary_heads() -> tuple[str, ...]:
+    """The summary's first words in every catalog language; the writer chose the language."""
+    module = _ui_text()
+    return tuple(module.text("completion.head", lang) for lang in module.LANGUAGES)
 
 
 def _has_word(title: str, word: str) -> bool:
@@ -437,7 +456,7 @@ def _review_degraded(route_file) -> list[str]:
     return [str(node) for node in nodes] if isinstance(nodes, list) else []
 
 
-def _result_line(route) -> str:
+def _result_line(route, t) -> str:
     """Completed; for one leg of an approved plan, say that a later leg remains."""
     plan = route.get("route_plan")
     if isinstance(plan, dict):
@@ -448,28 +467,31 @@ def _result_line(route) -> str:
         except (OSError, ValueError, KeyError, TypeError):
             legs = index = None
         if legs is not None and index + 1 < legs:
-            return f"이 leg({index + 1}/{legs}) 완료 — 다음 leg가 남음"
-    return "완료 — 런타임이 route·사이클 종결을 확인함"
+            return t("completion.result_leg", index=index + 1, legs=legs)
+    return t("completion.result_done")
 
 
-def completion_summary(route, primary, *, route_file=None) -> str:
+def completion_summary(route, primary, *, route_file=None, t=None) -> str:
     """The runtime's close text for one completed owner: intent, result, changes, checks, the rest.
 
     Every value comes from the sealed route, the route outcome and the primary
     report itself; a report whose headings cannot be matched is named, not
     summarised, so nothing is invented and nothing unverified reads as verified.
+    The labels come from the shared UI-text catalog (`t`; English unless Korean is declared).
     """
+    t = t or ui_translator()
     request = route.get("work_request") if isinstance(route.get("work_request"), dict) else {}
     intent = route_intent(route) or {}
-    head = f"{SUMMARY_HEAD} {route.get('capability') or '-'} · route {route.get('route_id') or '-'}"
+    head = f"{t('completion.head')} {route.get('capability') or '-'} · route {route.get('route_id') or '-'}"
     lines = [head]
     goal = intent.get("intent") or ""
     if not goal and request.get("text"):
         goal = draft(request["text"]).get("intent") or ""
     if goal:
-        original = f" (원문 \"{_line(intent['original'], 100)}\")" if intent.get("original") else ""
-        lines.append(f"의도: {_line(goal, 200)}{original}")
-    lines.append("결과: " + _result_line(route))
+        original = (t("completion.intent_original", original=_line(intent["original"], 100))
+                    if intent.get("original") else "")
+        lines.append(t("completion.intent", intent=_line(goal, 200), original=original))
+    lines.append(t("completion.result", result=_result_line(route, t)))
     try:
         text = Path(primary).read_text(encoding="utf-8") if primary else ""
     except (OSError, UnicodeError):
@@ -479,17 +501,17 @@ def completion_summary(route, primary, *, route_file=None) -> str:
     degraded = _review_degraded(route_file)
     if sections:
         if sections.get("changed"):
-            lines.append("바뀐 것: " + _joined(sections["changed"]))
-        checks = _joined(sections.get("verified") or []) or "보고서에 검증 절이 없음"
-        lines.append("검증: " + checks)
-        lines.append("미검증·남은 것: " + (_joined(sections.get("remaining") or [])
-                                         or "보고서에 따로 적힌 것 없음"))
+            lines.append(t("completion.changed", items=_joined(sections["changed"])))
+        checks = _joined(sections.get("verified") or []) or t("completion.no_checks")
+        lines.append(t("completion.checks", items=checks))
+        lines.append(t("completion.remaining", items=_joined(sections.get("remaining") or [])
+                       or t("completion.no_remaining")))
     else:
-        lines.append("검증·남은 것: 보고서 형식이 달라 기계 요약 안 함 — 보고서 본문을 그대로 볼 것")
+        lines.append(t("completion.unreadable"))
     if degraded:
-        lines.append("독립 리뷰 없이 닫힌 노드: " + ", ".join(degraded))
+        lines.append(t("completion.degraded", nodes=", ".join(degraded)))
     prs = list(dict.fromkeys(_PR_URL.findall(text)))[:3]
-    artifact = f"산출물: {primary}" if primary else "산출물: 없음"
+    artifact = t("completion.artifact", path=primary) if primary else t("completion.no_artifact")
     lines.append(artifact + (" · PR " + " ".join(prs) if prs else ""))
     rendered = "\n".join(line for line in lines if line.strip())
     return rendered[:MAX_SUMMARY_CHARS].rstrip() + "\n"
@@ -505,7 +527,7 @@ def sealed_summary(metadata, attempt_id: str) -> str:
         text = path.read_text(encoding="utf-8").strip()
     except Exception:  # noqa: BLE001 -- a missing summary leaves the existing delivery text as it was
         return ""
-    if not text.startswith(SUMMARY_HEAD) or "\n\n" in text or any(m in text for m in _CARRIER_MARKERS):
+    if not text.startswith(summary_heads()) or "\n\n" in text or any(m in text for m in _CARRIER_MARKERS):
         return ""
     return text
 
