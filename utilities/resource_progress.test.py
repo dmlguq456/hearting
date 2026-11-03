@@ -1621,6 +1621,14 @@ class ExperimentObservationTest(unittest.TestCase):
                              ("claude", "sid-claude-2", "sid-codex"))
             with mock.patch.object(handover, "_readable_lineage_signature", side_effect=OSError("ledger")):
                 self.assertIsNone(_ordinary_notice_target(identity, "codex-native-queue"))
+    def test_notice_text_survives_a_missing_catalog(self):
+        run = {"run_id": "r1", "status": "succeeded", "exit_code": 0}
+        observation = {"summary": {"metric": "loss", "trend": "개선"}, "elapsed_seconds": 60}
+        with mock.patch("importlib.util.spec_from_file_location", side_effect=FileNotFoundError("gone")):
+            text = "; ".join(progress._notice_texts(run, "final", observation, None, []))
+        self.assertIn("status=succeeded; exit=0; latest=no metrics; best=no metrics; trend=improving", text)
+        self.assertIn("actual=1m; plan=unknown duration", text)
+
     def test_notice_words_follow_the_declared_language(self):
         run = {"run_id": "r1", "status": "succeeded", "exit_code": 0}
         observation = {"summary": {"metric": "loss", "latest": {"value": 0.5, "epoch": 3},

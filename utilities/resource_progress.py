@@ -1367,13 +1367,25 @@ def _notice_targets(run):
 
 
 def _ui_translator():
-    """The shared UI-text catalog (English by default, Korean when declared)."""
-    import importlib.util
-    path = Path(__file__).resolve().parents[1] / "tools" / "i18n" / "ui_text.py"
-    spec = importlib.util.spec_from_file_location("ui_text", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.translator()
+    """The shared UI-text catalog (English by default, Korean when declared).
+
+    An observer never stops over its words: without a readable catalog a notice names its fields.
+    """
+    try:
+        import importlib.util
+        path = Path(__file__).resolve().parents[1] / "tools" / "i18n" / "ui_text.py"
+        spec = importlib.util.spec_from_file_location("ui_text", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.translator()
+    except Exception:  # noqa: BLE001 -- a missing or broken catalog must not end the observation
+        return _plain_text
+
+
+def _plain_text(message, /, **fields):
+    if fields:
+        return "; ".join(f"{name}={value}" for name, value in fields.items())
+    return message.rsplit(".", 1)[-1].replace("_", " ")
 
 
 # ``summary.trend`` is stored (registry rows, observation state) and read by other releases in
