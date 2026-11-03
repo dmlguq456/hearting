@@ -621,6 +621,10 @@ def decide_continuation(route=None, *, action, jobs=None, owner_attempt_id=None,
         if _plain_retry_successor(facts.get("registry_rows") or {}, metadata.get("attempt_id")):
             # An ordinary retry already continues this attempt; a claim would only compete with it.
             return ContinuationDecision(False, "not-applicable", next_action="observe")
+        if facts.get("completed_since") and not _replacement_in_flight(
+                jobs, facts.get("registry_rows") or {}, metadata):
+            # Another attempt finished this stage after this one began: it has its result.
+            return ContinuationDecision(False, "not-applicable", next_action="observe")
         if not facts.get("resume_capacity") and not _replacement_in_flight(jobs, facts["registry_rows"], metadata):
             if kind == "capacity":
                 return ContinuationDecision(False, "capacity", "replacement-capacity-wait", "arm-capacity-resume")

@@ -4783,6 +4783,57 @@ class ReplacementLaunchSafetyTest(unittest.TestCase):
         self.assertEqual(len(self.children), 1)
 
 
+class CompletedStageReplacementTest(unittest.TestCase):
+    """84b68e (2): the owner completed execute inline after its worker timed out, and the
+    replacement of that dead worker still launched and published a second execute result."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.jobs = self.root / 'jobs.log'
+        self.meta = {'attempt_schema_version': '2', 'dispatch_depth': '2', 'transport': 'headless',
+                     'execution_surface': 'registered-headless', 'registered_worker': '1',
+                     'fallback_hop': 'same-harness-headless', 'attempt_id': 'att-dead-execute',
+                     'parent_attempt_id': 'att-owner', 'worker_type': 'stage', 'route_node': 'execute',
+                     'route_id': 'rt-test', 'route_hash': 'sha256:test', 'harness': 'claude',
+                     'parent_sid': 'parent', 'note': 'dead-timeout', 'failure_class': 'runtime',
+                     'launch_claimed': '1', 'launch_started': '1'}
+        self.jobs.write_text('2026-10-21T18:51:30.574067Z\tdone\t' + str(self.root) + '\t' + str(self.root)
+                             + '\texecute\t' + ','.join(k + '=' + v for k, v in self.meta.items()) + '\n')
+        self.fields = self.jobs.read_text().rstrip('\n').split('\t')
+
+    def marker(self, attempt, completed_at, route_hash='sha256:test'):
+        path = self.root / 'completion' / 'rt-test' / 'execute.json'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({'route_id': 'rt-test', 'route_hash': route_hash, 'node_id': 'execute',
+                                    'attempt_id': attempt, 'completed_at': completed_at}))
+
+    def progress(self):
+        return R.route_authority.decide_continuation(
+            action='replacement-progress', jobs=self.jobs, status='done', metadata=self.meta,
+            facts={'kind': 'silent', 'resume_capacity': False, 'bound_carrier': False,
+                   'registry_rows': R.registry_rows(self.jobs),
+                   'completed_since': R.stage_completed_since(self.jobs, self.fields, self.meta)})
+
+    def test_a_stage_another_attempt_finished_after_it_began_is_not_replaced(self):
+        self.assertEqual(self.progress().state, 'launch')
+        self.marker('att-owner-execute-inline', '2026-10-21T23:30:33.055743Z')
+        self.assertTrue(R.stage_completed_since(self.jobs, self.fields, self.meta))
+        self.assertEqual((self.progress().state, self.progress().allowed), ('not-applicable', False))
+        with mock.patch.object(R, 'claim', side_effect=AssertionError('a finished stage was claimed')):
+            self.assertEqual(R._advance(self.jobs, 'att-dead-execute')['state'], 'not-applicable')
+
+    def test_an_earlier_or_own_or_foreign_result_still_leaves_the_replacement(self):
+        for attempt, completed_at, route_hash in (
+                ('att-earlier-round', '2026-10-21T14:41:59.113038Z', 'sha256:test'),
+                ('att-dead-execute', '2026-10-21T23:30:33.055743Z', 'sha256:test'),
+                ('att-other-route', '2026-10-21T23:30:33.055743Z', 'sha256:other')):
+            with self.subTest(attempt=attempt):
+                self.marker(attempt, completed_at, route_hash)
+                self.assertFalse(R.stage_completed_since(self.jobs, self.fields, self.meta))
+                self.assertEqual(self.progress().state, 'launch')
+
+
 class StageRecoveryProgressTest(unittest.TestCase):
     def test_timeout_and_no_progress_report_bounded_git_and_cycle_observations(self):
         import artifact_context
