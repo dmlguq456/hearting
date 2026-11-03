@@ -288,6 +288,54 @@ class Case1ParentSessionTest(unittest.TestCase):
                         HANDOVER.lineage_graph()
                     self.assertEqual(str(caught.exception), "lineage-ledger-unavailable", change)
 
+    def test_a_replaced_ledger_that_reuses_its_inode_is_caught_by_the_directory_check(self):
+        # RV-1142 L1: on ext4 a double replace reuses the inode number, so the per-file
+        # "only appended" check passes; the directory-generation check must refuse it.
+        import session_tidy as tidy
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            binding = HANDOVER.binding_of(root / "jobs.log", self.OWNER)
+            with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(root / "state")}):
+                self._record_handover(binding, "codex-sid", "codex-sid-after-clear",
+                                      "codex", "case-inode", 1, "clear")
+                read_bytes = tidy.read_bytes
+
+                def replaced_twice(path):
+                    if Path(path).suffix == ".jsonl":
+                        raw = Path(path).read_bytes()
+                        tidy.atomic_write(Path(path), raw + b"\n")
+                        tidy.atomic_write(Path(path), raw + b"\n\n")
+                    return read_bytes(path)
+
+                with mock.patch.object(tidy, "read_bytes", replaced_twice), \
+                        mock.patch.object(HANDOVER, "_appended_since", return_value=True), \
+                        self.assertRaises(OSError) as caught:
+                    HANDOVER.lineage_graph()
+                self.assertEqual(str(caught.exception), "lineage-directory-changed")
+
+    def test_unreadable_lineage_waits_instead_of_refusing_the_replacement_parent(self):
+        # RV-1142 M1: who answers for the source cannot be read; that is a wait for the
+        # same command, not a binding mismatch. A readable foreign parent is still refused.
+        record = {"route_id": self.OWNER["owner_route_id"], "route_hash": self.OWNER["owner_route_hash"]}
+        candidate = {**self.OWNER, "attempt_id": "att-owner-next", "parent_sid": "codex-sid-after-clear"}
+        jobs = Path("/tmp/registered-parent-unreadable-jobs")
+        with mock.patch.object(HANDOVER, "_readable_lineage_signature",
+                               side_effect=OSError("lineage-directory-changed")):
+            with self.assertRaises(DC.DispatchContractError) as waiting:
+                RA.require_recovery_binding(record, self.OWNER, candidate, jobs)
+        self.assertEqual((waiting.exception.reason, waiting.exception.next_action),
+                         ("handover-unreadable", "same-command"))
+        with tempfile.TemporaryDirectory() as td:
+            with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(Path(td) / "state")}):
+                with self.assertRaises(DC.DispatchContractError) as refused:
+                    RA.require_recovery_binding(record, self.OWNER, candidate, Path(td) / "jobs.log")
+                self.assertEqual(refused.exception.reason, "replacement-launch-binding-mismatch")
+                binding = HANDOVER.binding_of(Path(td) / "jobs.log", self.OWNER)
+                self._record_handover(binding, "codex-sid", "codex-sid-after-clear",
+                                      "codex", "case-wait", 1, "clear")
+                holder = RA.require_recovery_binding(record, self.OWNER, candidate, Path(td) / "jobs.log")
+                self.assertEqual(holder.session_id, "codex-sid-after-clear")
+
     def test_unreadable_handover_waits_without_registered_parent_authority(self):
         jobs = Path("/tmp/registered-parent-unreadable-jobs")
         with mock.patch.object(HANDOVER, "_readable_lineage_signature", side_effect=OSError("unreadable")):

@@ -116,8 +116,10 @@ def _lineage_signature(directory: Path):
 def _appended_since(observed, current) -> bool:
     """Whether a ledger only grew since ``observed``: the same file and mode, no fewer bytes.
 
-    Seat ledgers are append-only (`O_APPEND`) and are only ever replaced whole (a new inode),
+    Seat ledgers are append-only (`O_APPEND`) and are only ever replaced whole (a rename),
     so their first ``observed`` size bytes are still exactly what that observation saw.
+    A second replace can reuse the inode number (ext4 does), so this check alone does not
+    see a replacement: the directory-generation check every reader makes catches it.
     """
     observed, current = tuple(observed), tuple(current)
     return ((observed[0], observed[1], observed[5]) == (current[0], current[1], current[5])
