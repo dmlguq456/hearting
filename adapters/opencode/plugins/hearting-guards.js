@@ -418,27 +418,26 @@ function spawnCheckpoint(sid) {
 // Automatic change record, shared with Claude and Codex (utilities/turn_change_record.py):
 // chat.message notes this session's work tree, session.idle compares it, and a turn that
 // changed source files where the session holds no route leaves a completed direct route.
-// A child session (the task tool's subagent) is skipped: its work happens inside the
-// parent's turn and is the parent's, as a Claude subagent's is. Fire-and-forget like the
-// checkpoint above; the child step applies the shared exemptions and judges the rest.
-function spawnTurnChangeRecord(ctx, phase, sid, cwd) {
+// A child session (the task tool's subagent, known from its session.created info) is
+// skipped: its work happens inside the parent's turn and is the parent's, as a Claude
+// subagent's is. No SDK request is made for this. Fire-and-forget like the checkpoint
+// above; the child step applies the shared exemptions and judges the rest.
+function spawnTurnChangeRecord(phase, sid, cwd) {
   if (!sid || isWorkerSession()) return
-  compactSessionInfo(ctx, sid, true).catch(() => null).then((info) => {
-    if (info?.parentID || v2SessionInfo.get(sid)?.parentID) return
-    try {
-      const child = spawn("python3", [turnChangeRecord, phase, "--harness", "opencode",
-        "--session", sid, "--cwd", cwd || root], {
-        cwd: root,
-        env: { ...process.env, AGENT_HOME: root },
-        detached: true,
-        stdio: "ignore",
-      })
-      child.on("error", () => {})
-      child.unref()
-    } catch {
-      // best-effort; a turn never depends on its record
-    }
-  })
+  if (sessionInfoById.get(sid)?.parentID || v2SessionInfo.get(sid)?.parentID) return
+  try {
+    const child = spawn("python3", [turnChangeRecord, phase, "--harness", "opencode",
+      "--session", sid, "--cwd", cwd || root], {
+      cwd: root,
+      env: { ...process.env, AGENT_HOME: root },
+      detached: true,
+      stdio: "ignore",
+    })
+    child.on("error", () => {})
+    child.unref()
+  } catch {
+    // best-effort; a turn never depends on its record
+  }
 }
 
 function spawnIdleObserver(sid, cwd) {
@@ -2951,7 +2950,7 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
       }
       if (!isWorkerSession()) {
         spawnIdleObserver(eventSid, baseDir(ctx))
-        spawnTurnChangeRecord(ctx, "end", eventSid, baseDir(ctx))
+        spawnTurnChangeRecord("end", eventSid, baseDir(ctx))
         spawnSummary(eventSid, "final")
         await projectPane(eventSid, ctx)
       }
@@ -2997,7 +2996,7 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
     if (isWorkerSession()) return
     const eventSid = input.sessionID || output?.message?.sessionID || ""
     const sid = eventSid || "opencode-plugin"
-    spawnTurnChangeRecord(ctx, "start", eventSid, baseDir(ctx))
+    spawnTurnChangeRecord("start", eventSid, baseDir(ctx))
     spawnSummary(eventSid, "initial")
     await projectPane(eventSid, ctx)
     const prompt = promptText(output)
