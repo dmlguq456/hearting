@@ -3801,6 +3801,26 @@ def _discovery_generation_changed(snapshot: dict) -> bool:
     )
 
 
+def _interpreted_script(arguments: list[str]) -> str | None:
+    """The script path a python or POSIX shell process was started on, or None.
+
+    None means unknown: no script, code given with `-c` or `-m` (alone or
+    inside a combined short flag such as `-Ic<code>` or `-Bm mod`), or an
+    interpreter this parser does not know. An unknown script never counts as
+    a code root, so such a process keeps its release family.
+    """
+    if not arguments or not re.fullmatch(r"python[0-9.]*|(ba|da)?sh",
+                                         os.path.basename(arguments[0])):
+        return None
+    for value in arguments[1:]:
+        if value.startswith("-") and not value.startswith("--") and (
+                "c" in value[1:] or "m" in value[1:]):
+            return None
+        if not value.startswith("-"):
+            return value
+    return None
+
+
 def _release_held_by_live_process(candidate: Path) -> tuple[bool, str]:
     """Is any live process running out of this release right now?
 
@@ -3819,6 +3839,12 @@ def _release_held_by_live_process(candidate: Path) -> tuple[bool, str]:
     while that descriptor still names the original import tree. Older projected
     processes without a descriptor retain the install's release family until
     they exit; resolving their argv now cannot recover their original sys.path.
+    A python or POSIX shell process whose script is a real path inside one
+    release is taken to run from that release, the same single-root
+    assumption the descriptor makes; its other argv projections are data.
+    Contract: a harness script or service resolves its own code from
+    `Path(__file__).resolve()` or `AGENT_HOME`, never from a projection path
+    it receives as an argument; the assumption relies on that contract.
     A `/proc` that cannot be
     enumerated returns in-use: undecidable is in use, like every other source
     here. A pid that disappears mid-scan is skipped -- that one is decidable
@@ -3871,6 +3897,23 @@ def _release_held_by_live_process(candidate: Path) -> tuple[bool, str]:
             pass
         release_reference = False
         family = str(candidate.parent.resolve()).rstrip("/") + "/"
+        # Assumption: a process whose python or shell script is a real path
+        # inside release R loads its code from R (python puts the script's
+        # directory first on sys.path; the shell reads the script from R).
+        # That makes R its code root, the fact the descriptor below records
+        # once dispatch_contract is imported. A script that instead loads code
+        # through a projection it receives (for example importing a module
+        # from a `<data>/current` argument) breaks this assumption and is not
+        # detected here; see the contract in the docstring. A projected or
+        # unknown script still leaves the release unknown and keeps the family.
+        # The obligation runner an update starts carries
+        # `--service-current <data>/current` and runs out of the new release;
+        # before it opens its descriptor it must not hold the release it
+        # superseded.
+        script = _interpreted_script(arguments)
+        if (script and script.startswith(family)
+                and os.path.realpath(script) == script):
+            release_reference = True
         for link in links:
             try:
                 value = os.readlink(link)
