@@ -2,14 +2,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from .output import cell_width as _text_width
 from .style import normalize_style
+
+_CHAR_WIDTH = {}                           # one character -> its cells; drawing asks per character
 
 
 def cell_width(char):
     if not char:
         return 0
-    from .output import cell_width as existing_width
-    return existing_width(char)
+    if len(char) == 1:
+        width = _CHAR_WIDTH.get(char)
+        if width is None:
+            width = _CHAR_WIDTH[char] = _text_width(char)
+        return width
+    return _text_width(char)
 
 
 def clip_cells(text, room):

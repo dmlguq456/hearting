@@ -7944,7 +7944,12 @@ def _draw_explorer_frame(stdscr, frame, snapshot, *, stale=False):
     # The composed frame keeps the approved still glyph; working marks turn here, like Fleet's.
     spin = _SPIN[int(time.time() * 10) % len(_SPIN)]
     if frame.cells:
+        # One addstr per run of cells that share an attribute, not one per cell: a full
+        # screen is about ten thousand cells and is drawn ten times a second.
+        from .explorer.grid import cell_width
+        dim = getattr(curses, "A_DIM", 0) if stale else 0
         for y, row in enumerate(frame.cells[:h]):
+            start, attr_run, text, expected = None, None, [], None
             for x, cell in enumerate(row[:w]):
                 glyph, colour_key, tint = cell
                 if glyph == "":
@@ -7952,10 +7957,22 @@ def _draw_explorer_frame(stdscr, frame, snapshot, *, stale=False):
                 if not stale and glyph == "⠏" and colour_key in _EXPLORER_SPIN_KEYS:
                     glyph = spin
                 try:
-                    attr = _key_attr(colour_key, tint)
-                    if stale:
-                        attr |= getattr(curses, "A_DIM", 0)
-                    stdscr.addstr(y, x, glyph, attr)
+                    attr = _key_attr(colour_key, tint) | dim
+                except Exception:
+                    continue
+                if text and (attr != attr_run or x != expected):
+                    try:
+                        stdscr.addstr(y, start, "".join(text), attr_run)
+                    except Exception:
+                        pass
+                    text = []
+                if not text:
+                    start, attr_run = x, attr
+                text.append(glyph)
+                expected = x + max(1, cell_width(glyph))
+            if text:
+                try:
+                    stdscr.addstr(y, start, "".join(text), attr_run)
                 except Exception:
                     pass
     else:
