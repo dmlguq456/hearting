@@ -4165,7 +4165,9 @@ def compose_route(*, capability, capability_mode, shape, graph, slug, cwd, artif
     if unassigned and (campaign_key is not None or parent_cycle_id is not None):
         raise ValueError("compose-campaign-selection-conflict:--unassigned excludes --campaign-key and --parent-cycle")
     if campaign_key is None and parent_cycle_id is None and not unassigned:
-        raise ValueError("compose-campaign-key-required:" + compose_campaign_hint(artifact_root, cwd))
+        campaign_key = first_campaign_key(artifact_root, cwd)
+        if campaign_key is None:
+            raise ValueError("compose-campaign-key-required:" + compose_campaign_hint(artifact_root, cwd))
     if tracking is None:
         tracking = "tracked" if shape in ("staged", "framed") or resume_graph else "untracked"
     gate = None if selection_only else {
@@ -4755,6 +4757,23 @@ def cwd_campaign_keys(artifact_root, cwd, rows=_CAMPAIGN_ROWS_UNSET):
                 and os.path.realpath(route["cwd"]) == here):
             keys.append(key)
     return keys
+
+
+def first_campaign_key(artifact_root, cwd):
+    """The work stream a root without any active one opens: named after the project folder.
+
+    With nothing to choose from, the refusal only made the first person to start work in a
+    new repository type `--campaign-key <folder>` (W6-E). A root that already has an active
+    stream, or whose campaigns cannot be read, returns None and keeps the refusal that lists
+    them. The folder is the one that owns the artifact root (the primary checkout for a
+    linked worktree), else `cwd`; the word is the route presence gate's `--campaign-key`."""
+    rows = compose_campaign_summaries(artifact_root)
+    if rows is None or any(r.get("state") == "active" and r.get("key") not in (None, "_unassigned")
+                           for r in rows):
+        return None
+    root = Path(artifact_root)
+    folder = root.parent if root.name in (".agent_reports", ".claude_reports") else Path(cwd)
+    return re.sub(r"[^a-z0-9]+", "-", folder.name.lower()).strip("-")[:40] or "work"
 
 
 def compose_campaign_hint(artifact_root, cwd=None):
