@@ -4584,14 +4584,30 @@ class SeatHandoverRewakeTest(unittest.TestCase):
             tidy._append_ledger_entry(tidy.Seat("pane", "scan-fixture"),
                                      dict(event="start", harness="claude", sid="session-1"))
             ledgers = sorted((tidy.state_root() / "sessions").glob("*.jsonl"))
+            rewake.seat_handover._LINEAGE_GRAPH_CACHE.clear()
             with mock.patch.object(tidy, "read_bytes", wraps=tidy.read_bytes) as reads, \
                     mock.patch.object(rewake.seat_handover, "_readable_lineage_signature",
-                                      wraps=rewake.seat_handover._readable_lineage_signature) as scans:
+                                      wraps=rewake.seat_handover._readable_lineage_signature) as scans, \
+                    mock.patch.object(rewake.seat_handover, "_lineage_signature",
+                                      wraps=rewake.seat_handover._lineage_signature) as walks:
                 rows = rewake._session_owner_rows(self.jobs, "session-1", statuses=rewake.RECEIPT_ROW_STATUSES)
+            self.jobs.write_text("".join(
+                DispatchOwnerRewakeTest.row(attempt_id=f"att-owner-{n}", status="done" if n % 2 else "open",
+                                            route_id=f"rt-{n}", route_hash="digest")
+                for n in (1, 2)), encoding="utf-8")
+            rewake.seat_handover._LINEAGE_GRAPH_CACHE.clear()
+            with mock.patch.object(rewake.seat_handover, "_lineage_signature",
+                                   wraps=rewake.seat_handover._lineage_signature) as two_row_walks:
+                rewake._session_owner_rows(self.jobs, "session-1", statuses=rewake.RECEIPT_ROW_STATUSES)
         self.assertEqual(len(rows), 20)
         self.assertEqual(scans.call_count, 1)
         self.assertEqual([call.args[0] for call in reads.call_args_list], ledgers,
                          "one scan reads each current logical/physical ledger once")
+        # 2026-11-03: the graph was built once, but every row's `owns` still listed and
+        # stat'ed the whole sessions directory again (~8s of CPU per Bash call on a
+        # 1,600-row registry). The directory walks must not grow with the row count.
+        self.assertEqual(walks.call_count, two_row_walks.call_count,
+                         "one scan walks the sessions directory a fixed number of times")
 
     def test_the_successor_arms_the_row_the_old_window_launched_and_a_stranger_does_not(self) -> None:
         self.assertEqual(rewake._session_owner_rows(self.jobs, "session-2"), [])
