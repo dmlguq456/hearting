@@ -275,7 +275,10 @@ the isolated worktree first. If the source change was already made in place,
 Otherwise use `compose --start --prompt-file <task>` with no `--shape`; the
 frame chooses the capability, stages, and solo or staged shape, judging each
 leg's optional `size` (`one-change`, `one-pass`, `multi-stage`) first; an
-omitted shape follows it.
+omitted shape follows it. Direct has no review-worker path of its own: work that
+needs an independent review is not direct (omit `--shape`, or `staged`), and a
+light check of a direct change may use the harness's own native subagent
+(decision 2026-11-03).
 
 | Main decision | Command | Result |
 |---|---|---|
