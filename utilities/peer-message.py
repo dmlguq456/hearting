@@ -691,11 +691,13 @@ def read_peer_payload(ref):
 
 
 _PENDING_BYTES = 16 * 1024
-# Derived per-recipient index of the retained pending rows. It is a discovery
+# Derived per-session index of the retained pending rows: ``rows`` names the
+# rows a session receives and ``sent`` the rows it sent. It is a discovery
 # hint only: every row it names is still re-read and re-verified through
 # `_read_pending` before a caller acts on it. The runner publishes it with
-# `rebuild_recipient_index`; a pending write keeps an existing recipient entry
-# current, and the Stop hook reads it instead of opening every sibling row.
+# `rebuild_recipient_index`; a pending write keeps an existing session entry
+# current, and the Stop and context hooks read it instead of opening every
+# sibling row.
 _RECIPIENT_INDEX_SCHEMA = 1
 _RECIPIENT_INDEX_DIRECTORY = "peer-messages/index"
 _RECIPIENT_INDEX_LOCK_SUFFIX = ".lock"
@@ -707,12 +709,14 @@ class RecipientIndexRows(list):
 
     Missing, corrupt, foreign-schema, ``complete: false`` and stale indexes all
     return ``complete=False`` with no rows, so a caller keeps its existing full
-    scan and never treats a partial observation as current.
+    scan and never treats a partial observation as current. ``sent`` holds the
+    session's own sent rows when the caller asked for them.
     """
 
-    def __init__(self, rows=(), *, complete=False):
+    def __init__(self, rows=(), *, complete=False, sent=()):
         super().__init__(rows)
         self.complete = bool(complete)
+        self.sent = list(sent)
 
 
 def _pending_dir():
@@ -1334,11 +1338,80 @@ def _recipient_index_lock(path, *, wait=True):
     fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
-        yield
+        yield fd
     finally:
         with contextlib.suppress(OSError):
             fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
+
+
+# The index lock file also holds the session's write generation: the per-write
+# update bumps it under the lock for every row write that names the session,
+# whether or not an index exists. A publisher reads it before its scan and
+# certifies only when it is unchanged under the lock, so a write that landed
+# between the scan's read and the publish (a row bound to this session) never
+# leaves an index that looks current without that row.
+_UNKNOWN_INDEX_GENERATION = -1
+
+
+def _parse_index_generation(raw):
+    text = raw.decode("ascii", "replace").strip()
+    if not text:
+        return 0  # An older release's lock file, or one never bumped.
+    return int(text) if text.isdigit() else _UNKNOWN_INDEX_GENERATION
+
+
+def _index_generation(path):
+    """The write generation of the index at ``path``: 0 when absent, -1 unreadable."""
+    lock_path = path.with_name(path.name + _RECIPIENT_INDEX_LOCK_SUFFIX)
+    try:
+        fd = os.open(lock_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return 0
+    except OSError:
+        return _UNKNOWN_INDEX_GENERATION
+    try:
+        return _parse_index_generation(os.read(fd, 64))
+    except OSError:
+        return _UNKNOWN_INDEX_GENERATION
+    finally:
+        os.close(fd)
+
+
+def _bump_index_generation(fd):
+    """Advance the generation in a lock file this process holds."""
+    current = _parse_index_generation(os.pread(fd, 64, 0))
+    os.ftruncate(fd, 0)
+    os.pwrite(fd, b"%d\n" % (max(current, 0) + 1), 0)
+
+
+def _session_index_generation(dispatch_root, endpoint):
+    """Generation of one session's index before a scan (``-1`` when unusable)."""
+    key = _index_key(endpoint)
+    if key is None or dispatch_root is None:
+        return _UNKNOWN_INDEX_GENERATION
+    try:
+        return _index_generation(recipient_index_path(dispatch_root, *key))
+    except ValueError:
+        return _UNKNOWN_INDEX_GENERATION
+
+
+def _index_generations(dispatch_root):
+    """Every session's generation under ``dispatch_root``; absent ones are 0."""
+    generations = {}
+    base = Path(dispatch_root).expanduser() / _RECIPIENT_INDEX_DIRECTORY
+    for harness in _RECIPIENT_HARNESSES:
+        try:
+            entries = list(os.scandir(base / harness))
+        except OSError:
+            continue
+        suffix = ".json" + _RECIPIENT_INDEX_LOCK_SUFFIX
+        for entry in entries:
+            if entry.name.endswith(suffix):
+                session_id = entry.name[:-len(suffix)]
+                generations[(harness, session_id)] = _index_generation(
+                    Path(entry.path[:-len(_RECIPIENT_INDEX_LOCK_SUFFIX)]))
+    return generations
 
 
 def _atomic_index_write(path, payload):
@@ -1358,6 +1431,19 @@ def _atomic_index_write(path, payload):
             os.unlink(tmp)  # Own temporary payload only.
 
 
+def _valid_index_entries(entries):
+    if not isinstance(entries, list):
+        return False
+    for entry in entries:
+        if (not isinstance(entry, dict)
+                or not isinstance(entry.get("ref"), str)
+                or not re.fullmatch(r"[0-9a-f]{32}", entry["ref"])
+                or entry.get("state") not in ("pending", "queued", "unverified")
+                or type(entry.get("mtime_ns")) is not int):
+            return False
+    return True
+
+
 def _valid_index_payload(payload, harness, session_id):
     if not isinstance(payload, dict) or payload.get("schema") != _RECIPIENT_INDEX_SCHEMA:
         return False
@@ -1368,21 +1454,13 @@ def _valid_index_payload(payload, harness, session_id):
     if (not isinstance(payload.get("files_digest"), str)
             or type(payload.get("file_count")) is not int):
         return False
-    rows = payload.get("rows")
-    if not isinstance(rows, list):
-        return False
-    for entry in rows:
-        if (not isinstance(entry, dict)
-                or not isinstance(entry.get("ref"), str)
-                or not re.fullmatch(r"[0-9a-f]{32}", entry["ref"])
-                or entry.get("state") not in ("pending", "queued", "unverified")
-                or type(entry.get("mtime_ns")) is not int):
-            return False
-    return True
+    return _valid_index_entries(payload.get("rows"))
 
 
-def _index_payload(harness, session_id, rows, names):
-    return {
+def _index_payload(harness, session_id, rows, names, sent=None):
+    """``sent`` stays absent unless observed: an index written before sender
+    rows were indexed (or by an older writer) never claims them."""
+    payload = {
         "schema": _RECIPIENT_INDEX_SCHEMA,
         "harness": harness,
         "session_id": session_id,
@@ -1393,16 +1471,20 @@ def _index_payload(harness, session_id, rows, names):
         "file_count": len(names),
         "rows": sorted(rows, key=lambda entry: entry["ref"]),
     }
+    if sent is not None:
+        payload["sent"] = sorted(sent, key=lambda entry: entry["ref"])
+    return payload
 
 
-def read_recipient_index(dispatch_root, harness, session_id):
+def read_recipient_index(dispatch_root, harness, session_id, *, sent=False):
     """The rows one recipient may still need, or ``complete=False`` when stale.
 
     Currentness needs the published edge generation's equivalent for this
     store: the exact pending file-name set (additions, removals and renames)
     plus each named row's ``mtime_ns`` (content/state transitions). A row's
     state is re-read and re-verified by the caller, so a stale settlement view
-    never delivers anything on its own.
+    never delivers anything on its own. ``sent=True`` also requires the
+    session's sender list under the same rule and returns it as ``.sent``.
     """
     harness = str(harness or "").lower()
     if harness not in _RECIPIENT_HARNESSES or not isinstance(session_id, str) or not session_id:
@@ -1414,26 +1496,44 @@ def read_recipient_index(dispatch_root, harness, session_id):
     payload = _index_json(path)
     if not _valid_index_payload(payload, harness, session_id):
         return RecipientIndexRows()
+    if sent and not _valid_index_entries(payload.get("sent")):
+        return RecipientIndexRows()
     pending = _pending_dir()
     names = _pending_names(pending)
     if (names is None or payload["file_count"] != len(names)
             or payload["files_digest"] != _pending_names_digest(names)):
         return RecipientIndexRows()
-    for entry in payload["rows"]:
+    for entry in payload["rows"] + (payload["sent"] if sent else []):
         try:
             info = os.lstat(pending / (entry["ref"] + ".json"))
         except OSError:
             return RecipientIndexRows()
         if info.st_mtime_ns != entry["mtime_ns"]:
             return RecipientIndexRows()
-    return RecipientIndexRows(payload["rows"], complete=True)
+    return RecipientIndexRows(payload["rows"], complete=True,
+                              sent=payload["sent"] if sent else ())
 
 
-def _publish_recipient_index(pending, recipient, rows, names, *, dispatch_root=None):
+def _index_key(endpoint):
+    """``(harness, session_id)`` of an indexable session endpoint, else ``None``."""
+    if not isinstance(endpoint, dict):
+        return None
+    harness = str(endpoint.get("harness") or "").lower()
+    session_id = endpoint.get("session_id")
+    if harness not in _RECIPIENT_HARNESSES or not isinstance(session_id, str) or not session_id:
+        return None
+    return harness, session_id
+
+
+def _publish_recipient_index(pending, recipient, rows, names, *, sent=None, dispatch_root=None,
+                             generation=None):
     """Best-effort atomic publish; a failure leaves the caller's scan result.
 
     ``dispatch_root`` is the explicit root a runner observed; an implicit hook
     publish derives it from the pending store (see `_recipient_index_write_root`).
+    ``sent`` is the session's own sent rows when the same pass observed them.
+    ``generation`` is the session's write generation read before that pass; a
+    write for this session since then (or an unknown one) publishes nothing.
     """
     dispatch_root = (_recipient_index_write_root() if dispatch_root is None
                      else Path(dispatch_root).expanduser())
@@ -1446,44 +1546,67 @@ def _publish_recipient_index(pending, recipient, rows, names, *, dispatch_root=N
     try:
         path = recipient_index_path(dispatch_root, harness, session_id)
         with _recipient_index_lock(path, wait=False):
-            _atomic_index_write(path, _index_payload(harness, session_id, rows, names))
+            if generation is not None and (generation == _UNKNOWN_INDEX_GENERATION
+                                           or _index_generation(path) != generation):
+                return None  # The scan may have missed that write; never certify it.
+            _atomic_index_write(path, _index_payload(harness, session_id, rows, names, sent))
         return str(path)
     except (OSError, ValueError):
         return None
 
 
 def _update_recipient_index(row, *, created):
-    """Keep an existing recipient index current after one pending write.
+    """Keep existing session indexes current after one pending write.
 
-    Only an index the runner (or a completed full scan) already published is
-    maintained. ``created`` publishes the new file-name set; a state transition
-    of an existing row only refreshes that entry's ``mtime_ns``.
+    The row's delivery recipient keeps it in ``rows`` and its sender in
+    ``sent`` (one file when they are the same session). Only an index the
+    runner (or a completed full scan) already published is maintained.
     """
-    recipient = pending_delivery_recipient(row)
-    if not isinstance(recipient, dict):
-        return
     dispatch_root = _recipient_index_write_root()
     if dispatch_root is None:
         return
-    harness = str(recipient.get("harness") or "").lower()
-    session_id = recipient.get("session_id")
-    if harness not in _RECIPIENT_HARNESSES or not isinstance(session_id, str) or not session_id:
-        return
+    lists = {}
+    for endpoint, field in ((pending_delivery_recipient(row), "rows"), (row.get("from"), "sent")):
+        key = _index_key(endpoint)
+        if key is not None:
+            lists.setdefault(key, set()).add(field)
+    for (harness, session_id), fields in lists.items():
+        _update_session_index(dispatch_root, harness, session_id, row, fields, created=created)
+
+
+def _update_session_index(dispatch_root, harness, session_id, row, fields, *, created):
+    """Apply one row write to one session's index, or retire it.
+
+    Every write first bumps the session's generation, so a publisher whose
+    scan overlapped it does not certify. The published name set must be
+    exactly the current one (minus this row when it was just created);
+    anything else means another write was not observed, so the index can no
+    longer prove its lists.
+    """
     try:
         path = recipient_index_path(dispatch_root, harness, session_id)
-        if not path.is_file():
-            return  # Implicit publication owns creation, never a state transition.
-        with _recipient_index_lock(path):
+        with _recipient_index_lock(path) as lock_fd:
+            _bump_index_generation(lock_fd)
+            if not path.is_file():
+                return  # Implicit publication owns creation, never a state transition.
             payload = _index_json(path)
             if not _valid_index_payload(payload, harness, session_id):
                 return
             names = _pending_names(_pending_dir())
             if names is None:
                 return
-            known = {entry["ref"] for entry in payload["rows"]}
-            added = row["ref"] not in known
+            sent = payload.get("sent")
+            if sent is not None and not _valid_index_entries(sent):
+                sent = None  # Unpublished or foreign: it stays unclaimed.
+            current = {"rows": payload["rows"], "sent": sent}
             own = row["ref"] + ".json"
             proven = [name for name in names if not (created and name == own)]
+            # A non-received row this write adds to a list it was missing from
+            # (a row rebound to this recipient) is a row the index never proved.
+            added = row.get("state") != "received" and any(
+                current[field] is not None
+                and row["ref"] not in {item["ref"] for item in current[field]}
+                for field in fields)
             if ((added and not created) or (created and own not in names)
                     or len(proven) != payload["file_count"]
                     or _pending_names_digest(proven) != payload["files_digest"]):
@@ -1495,20 +1618,29 @@ def _update_recipient_index(row, *, created):
                 with contextlib.suppress(OSError):
                     os.unlink(path)
                 return
-            rows = [entry for entry in payload["rows"] if entry["ref"] != row["ref"]]
+            if not created and all(current[field] is None for field in fields):
+                return
+            entry = None
             if row.get("state") != "received":
-                mtime_ns = _pending_path(row["ref"]).lstat().st_mtime_ns
-                rows.append({"ref": row["ref"], "state": row["state"],
-                             "mtime_ns": mtime_ns})
-            _atomic_index_write(path, _index_payload(harness, session_id, rows, names))
+                entry = {"ref": row["ref"], "state": row["state"],
+                         "mtime_ns": _pending_path(row["ref"]).lstat().st_mtime_ns}
+            for field in fields:
+                if current[field] is None:
+                    continue  # No sender list was published; it stays unclaimed.
+                current[field] = [item for item in current[field] if item["ref"] != row["ref"]]
+                if entry is not None:
+                    current[field].append(entry)
+            _atomic_index_write(path, _index_payload(
+                harness, session_id, current["rows"], names, current["sent"]))
     except (OSError, ValueError, KeyError):
         return
 
 
 def rebuild_recipient_index(dispatch_root, time_budget_s=1.0):
-    """Publish every recipient's pending-row index in one bounded pass.
+    """Publish every session's pending-row index in one bounded pass.
 
-    The runner calls this on its periodic cleanup duty; hook fallbacks call the
+    Each session's file lists the rows it receives and the rows it sent. The
+    runner calls this on its periodic cleanup duty; hook fallbacks call the
     receipt-only variants. An over-budget pass publishes nothing (a partial
     index is never current) and reports ``complete: false`` so the next pass
     retries. Malformed rows are left for the existing full scan to quarantine;
@@ -1521,9 +1653,12 @@ def rebuild_recipient_index(dispatch_root, time_budget_s=1.0):
         budget = 1.0
     deadline = started + max(0.0, budget)
     pending = _pending_dir()
+    # Read before any row: a session written to during the pass is not certified.
+    generations = _index_generations(dispatch_root)
     names = _pending_names(pending)
     result = {"schema": _RECIPIENT_INDEX_SCHEMA, "complete": False, "scanned": 0,
-              "recipients": 0, "rows": 0, "generated_at": time.time()}
+              "recipients": 0, "rows": 0, "senders": 0, "sent": 0,
+              "generated_at": time.time()}
     if names is None:
         return result
     try:
@@ -1556,30 +1691,32 @@ def rebuild_recipient_index(dispatch_root, time_budget_s=1.0):
             continue
         if not row or row.get("state") == "received":
             continue
-        recipient = pending_delivery_recipient(row)
-        if not isinstance(recipient, dict):
-            continue
-        harness = str(recipient.get("harness") or "").lower()
-        session_id = recipient.get("session_id")
-        if harness not in _RECIPIENT_HARNESSES or not isinstance(session_id, str) or not session_id:
+        recipient_key = _index_key(pending_delivery_recipient(row))
+        sender_key = _index_key(row.get("from"))
+        if recipient_key is None and sender_key is None:
             continue
         try:
             mtime_ns = path.lstat().st_mtime_ns
         except OSError:
             continue
-        groups.setdefault((harness, session_id), []).append(
-            {"ref": row["ref"], "state": row["state"], "mtime_ns": mtime_ns})
+        entry = {"ref": row["ref"], "state": row["state"], "mtime_ns": mtime_ns}
+        for key, field in ((recipient_key, "rows"), (sender_key, "sent")):
+            if key is not None:
+                groups.setdefault(key, {"rows": [], "sent": []})[field].append(entry)
     if not verified_all:
         result.update(scanned=scanned, complete=False)
         return result
-    published = 0
-    for (harness, session_id), rows in groups.items():
+    recipients = senders = 0
+    for (harness, session_id), lists in groups.items():
         if _publish_recipient_index(
-                pending, {"harness": harness, "session_id": session_id}, rows, names,
-                dispatch_root=dispatch_root) is not None:
-            published += 1
-    result.update(complete=True, scanned=scanned, recipients=published,
-                  rows=sum(len(rows) for rows in groups.values()))
+                pending, {"harness": harness, "session_id": session_id}, lists["rows"], names,
+                sent=lists["sent"], dispatch_root=dispatch_root,
+                generation=generations.get((harness, session_id), 0)) is not None:
+            recipients += bool(lists["rows"])
+            senders += bool(lists["sent"])
+    result.update(complete=True, scanned=scanned, recipients=recipients,
+                  rows=sum(len(lists["rows"]) for lists in groups.values()),
+                  senders=senders, sent=sum(len(lists["sent"]) for lists in groups.values()))
     return result
 
 
@@ -1673,20 +1810,28 @@ def _quarantine_pending(path, expected):
         return False
 
 
-def _indexed_pending_rows(pending, recipient, *, roots, read_context):
-    """Rows named by a current recipient index, or ``None`` to take the full scan."""
+def _indexed_pending_rows(pending, recipient, *, roots, read_context, sent=False,
+                          deadline=None):
+    """Rows named by a current session index, or ``None`` to take the full scan.
+
+    ``sent`` adds the rows this session sent, in the full scan's ref order.
+    ``deadline`` stops reading as the full scan does; unread rows stay on disk.
+    """
     dispatch_root = _recipient_index_write_root()
     if dispatch_root is None:
         return None
     indexed = read_recipient_index(dispatch_root, recipient.get("harness"),
-                                   recipient.get("session_id"))
+                                   recipient.get("session_id"), sent=sent)
     if not indexed.complete:
         return None
+    received_refs = {entry["ref"] for entry in indexed}
+    sent_refs = {entry["ref"] for entry in indexed.sent}
     rows = []
-    for entry in indexed:
-        path = pending / (entry["ref"] + ".json")
+    for ref in sorted(received_refs | sent_refs):
+        if deadline is not None and time.monotonic() >= deadline:
+            break
         try:
-            row = _read_pending(entry["ref"], roots=roots() if callable(roots) else roots)
+            row = _read_pending(ref, roots=roots() if callable(roots) else roots)
         except UnsupportedPendingSchema:
             # A newer schema is another reader's; its bytes stay in place.
             continue
@@ -1696,8 +1841,10 @@ def _indexed_pending_rows(pending, recipient, *, roots, read_context):
             return None
         if not row or row["state"] == "received":
             continue
-        current_recipient = pending_delivery_recipient(row)
-        if not _same_transfer_session(current_recipient, recipient):
+        if ref in received_refs and not _same_transfer_session(
+                pending_delivery_recipient(row), recipient):
+            return None
+        if ref in sent_refs and not _same_transfer_session(row.get("from"), recipient):
             return None
         if not _registered_delivery_settled(row, read_context=read_context):
             rows.append(row)
@@ -1759,20 +1906,30 @@ def _pending_rows(*, recipient=None, sender=None, read_context=None, strict=Fals
         from peer_read_context import PeerReadContext
         read_context = PeerReadContext()
     pending = _pending_dir()
-    # The recipient index is discovery for the exact recipient-only, non-strict
-    # call (`pending_messages`). Intent reuse, sender-or-recipient scans and the
-    # full scans keep reading every row, and a missing/stale index falls back to
-    # that same full scan below.
-    use_index = recipient is not None and sender is None and not strict
+    # The session index is discovery for the non-strict recipient call
+    # (`pending_messages`) and for one session's own received-or-sent call
+    # (`emit_peer_context`). Intent reuse, sender-only or mixed-session scans
+    # and the full scans keep reading every row, and a missing/stale index
+    # falls back to that same full scan below.
+    use_index = (recipient is not None and not strict and ref is None
+                 and (sender is None or _same_transfer_session(sender, recipient)))
     if use_index:
         indexed = _indexed_pending_rows(pending, recipient, roots=roots,
-                                        read_context=read_context)
+                                        read_context=read_context,
+                                        sent=sender is not None, deadline=deadline)
         if indexed is not None:
             for row in indexed:
                 yield row
             return
+    # Read before any row (see `_index_generation`): a write for this session
+    # during the scan keeps this pass from certifying an index without it.
+    generation = (_session_index_generation(_recipient_index_write_root(), recipient)
+                  if use_index else None)
     names = sorted(path.name for path in pending.glob("*.json"))
+    # The scan's markers include this session's id, so every row it received
+    # or sent is fully read here; both lists are published together.
     observed = [] if use_index else None
+    observed_sent = [] if use_index else None
     verified_all = True
     # A well-formed row that names neither endpoint cannot match this filtered
     # scan, so it skips the full validation (transfer records, watch handover)
@@ -1827,19 +1984,23 @@ def _pending_rows(*, recipient=None, sender=None, read_context=None, strict=Fals
         current_recipient = pending_delivery_recipient(row)
         receiver_match = recipient is not None and _same_transfer_session(current_recipient, recipient)
         sender_match = sender is not None and _same_transfer_session(row.get("from"), sender)
+        if observed is not None and expected is not None:
+            entry = {"ref": row["ref"], "state": row["state"], "mtime_ns": expected.st_mtime_ns}
+            if receiver_match:
+                observed.append(entry)
+            if _same_transfer_session(row.get("from"), recipient):
+                observed_sent.append(entry)
         if (recipient is not None or sender is not None) and not (receiver_match or sender_match):
             continue
-        if observed is not None and receiver_match and expected is not None:
-            observed.append({"ref": row["ref"], "state": row["state"],
-                             "mtime_ns": expected.st_mtime_ns})
         if not _registered_delivery_settled(row, read_context=read_context):
             yield row
     if observed is not None and verified_all:
-        # The scan already opened every row, so publishing this recipient's
-        # index costs one small file. Future recipient-only reads skip the scan.
+        # The scan already opened every row, so publishing this session's
+        # index costs one small file. Future reads of it skip the scan.
         # A row this pass could not verify (or quarantined) leaves the index
         # unpublished: a partial observation is never current.
-        _publish_recipient_index(pending, recipient, observed, names)
+        _publish_recipient_index(pending, recipient, observed, names, sent=observed_sent,
+                                 generation=generation)
 
 
 def _same_transfer_session(left, right):
@@ -1878,8 +2039,9 @@ def _registered_delivery_settled(row, *, read_context=None):
         from peer_obligations import registered_delivery_settled
         if ((row.get("producer_binding") or {}).get("schema") == _RUNTIME_NOTICE_SCHEMA):
             from peer_obligations import ordinary_notice_transfer_is_current
-            return (registered_delivery_settled(row)
-                    or not ordinary_notice_transfer_is_current(row))
+            # The scan's read context reuses its registry/lineage reads per row.
+            return (registered_delivery_settled(row, read_context=read_context)
+                    or not ordinary_notice_transfer_is_current(row, read_context=read_context))
         return (registered_delivery_settled(row) if read_context is None else
                 registered_delivery_settled(row, read_context=read_context))
     except (OSError, ValueError, KeyError, RuntimeError):
