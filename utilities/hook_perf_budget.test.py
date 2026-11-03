@@ -173,10 +173,6 @@ _REWAKE = (
     "utilities/dispatch_seat_handover.py:668 resolves the jobs path again for every registry "
     "row (:1643, through owns at hooks/dispatch-owner-rewake.py:423), so stat calls double "
     "with the owner rows - removed by the rewake compact_lineage follow-up")
-_PEER_SCAN = (
-    "utilities/peer-message.py:3855 - emit_peer_context scans with sender=recipient, which "
-    "turns the recipient index off (:1766), so {caller} opens every peer row (7,500 -> "
-    "15,000) - removed by the follow-up that routes this read through the recipient index")
 # Cases that grow with unrelated state today, with the rule(s) each breaks and
 # the evidence. This is a ratchet, not an allowance: an entry must still break
 # exactly its listed rules (a fix that makes one pass fails the test until the
@@ -188,13 +184,6 @@ KNOWN_GROWTH = {
     "prompt-runner": (("stats",), _LINEAGE_WALKS),
     "rewake-bash": (("growth", "stats"), _REWAKE.format(event="Bash call")),
     "rewake-stop": (("growth", "stats"), _REWAKE.format(event="Stop")),
-    "peer-post-tool": (("growth",), _PEER_SCAN.format(
-        caller="every Claude PostToolUse (hooks/peer-message-record.py:441)")),
-    "peer-prompt": (("growth",), _PEER_SCAN.format(
-        caller="every Claude prompt (hooks/peer-message-record.py:477)")),
-    "codex-post-tool": (("growth",), _PEER_SCAN.format(
-        caller="every Codex PostToolUse "
-               "(adapters/codex/hooks/posttooluse-interaction-clear.py:65)")),
     "codex-prompt": (("growth", "stats"), (
         "adapters/codex/hooks/herdr_session_projection.py:58 - the Codex projection does not "
         "ask for published steward relations, so is_steward (tools/fleet/herdr_projection.py:358 "
