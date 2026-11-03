@@ -457,6 +457,12 @@ def registry_launch(payload: object) -> tuple[Launch, ArmClaim] | ArmRefusal | N
     if gate is None:
         return None
     payload, session = gate
+    if os.environ.get("AGENT_DISPATCH_CHILD") == "1":
+        # A registered worker session never holds a depth-1 claude-parent-runtime
+        # row: that carrier is chosen only outside a child
+        # (dispatch_parent_completion._direct_registered_parent). The scan below
+        # would read the whole registry on every call to find nothing.
+        return None
     jobs = _resolved_jobs(payload)
     if jobs is None:
         return None

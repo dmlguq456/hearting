@@ -1677,6 +1677,17 @@ class RegistryConfirmArmTest(unittest.TestCase):
         self.assertIsNone(rewake.registry_launch(self.payload(session_id=None)))
         self.assertIsNone(rewake.registry_launch(self.payload(tool_name="Read")))
 
+    def test_a_registered_worker_session_ends_without_scanning_the_registry(self) -> None:
+        # HOOK-LATENCY 7-4: a child session cannot hold such a row, so its scan is skipped.
+        self.jobs.write_text(self.row(), encoding="utf-8")
+        with mock.patch.dict(os.environ, {"AGENT_DISPATCH_CHILD": "1"}), \
+                mock.patch.object(rewake, "_session_owner_states",
+                                  side_effect=AssertionError("scanned")) as scan:
+            self.assertIsNone(rewake.registry_launch(self.payload()))
+        scan.assert_not_called()
+        with mock.patch.dict(os.environ, {"AGENT_DISPATCH_CHILD": "0"}):
+            self.assertIsNotNone(self.arm())
+
     def test_closed_or_non_owner_rows_never_arm(self) -> None:
         self.jobs.write_text(
             self.row() + self.row(status="done", note="completed-marker"), encoding="utf-8"
