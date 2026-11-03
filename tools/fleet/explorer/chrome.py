@@ -564,9 +564,8 @@ def draw_chrome(grid: CellGrid, vm, state, beat=1):
             total = sum(len(host[5]) for host in hosts if len(host) > 5)
             status = f"{count_word(len(hosts), 'host')} · GPU {busy}/{total}"
         elif state.view == "MEMORY":
-            summary = system.get("memory_summary", {}) if isinstance(system, Mapping) else {}
-            if isinstance(summary, Mapping):
-                status = f"today {summary.get('added_today', '·')} added · {summary.get('expired', '·')} expired"
+            from .resources import memory_status
+            status = memory_status(vm)
         elif state.view == "MODELS":
             models = vm.models if isinstance(vm.models, Mapping) else {}
             profile_count = len(models.get("profiles", ()))

@@ -14,7 +14,7 @@ if [ -f "$LOOP_DIR/.hold" ]; then _h=$(cat "$LOOP_DIR/.hold" 2>/dev/null); _t=$(
   fi;
 fi
 
-# NAS mount guard (2026-07-15 incident): if /home/nas is not mounted, the mkdir
+# NAS mount guard (2026-07-15 incident): if the shared mount is missing, the mkdir
 # below would create shadow dirs on the root fs and cd would "succeed" against
 # an empty tree. Fail loudly instead; the retry lands after remount.
 if [ -n "${AGENT_SCAN_MOUNT:-}" ] && ! mountpoint -q "$AGENT_SCAN_MOUNT"; then

@@ -211,6 +211,14 @@ class TestClosedSchemaUnknownKey(unittest.TestCase):
         doc["artifacts"][0]["bogus"] = 1
         self.assertIn("unknown-key", _codes(m.validate_shape(doc)))
 
+    def test_artifact_row_audience_is_optional_and_only_user(self):
+        doc = _valid_document()
+        self.assertEqual(_codes(m.validate_shape(doc)), set())
+        doc["artifacts"][0]["audience"] = "user"
+        self.assertEqual(_codes(m.validate_shape(doc)), set())
+        doc["artifacts"][0]["audience"] = "agent"
+        self.assertIn("wrong-literal", _codes(m.validate_shape(doc)))
+
     def test_rejects_unknown_key_in_artifact_revision_row(self):
         doc = _valid_document()
         doc["artifact_revisions"][0]["bogus"] = 1

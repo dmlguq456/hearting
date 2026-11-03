@@ -107,5 +107,48 @@ class NestedHomeRolloutTest(unittest.TestCase):
             self.assertIsNone(self._resolve(stray, tmp, os.path.join(tmp, "dot-codex")))
 
 
+class RegisteredWorkerHomeRolloutTest(unittest.TestCase):
+    """A registered Codex worker's rollout lives only in its recorded ``runtime_home``.
+
+    Since 2026-10-08 every registered Codex worker runs with its own CODEX_HOME, which the
+    registry records as ``runtime_home``. The attempt-rollout lookup searched only the
+    worktree projections, the Fleet process' CODEX_HOME and ``~/.codex``, so it never found
+    such a rollout: the runtime version stayed unknown, the context policy stayed unknown and
+    the worker's context gauge stayed empty while it worked (backlog d495ac).
+    """
+
+    def _job(self, root, runtime_home=None):
+        from types import SimpleNamespace
+        worktree = os.path.join(root, "worktree")
+        os.makedirs(worktree, exist_ok=True)
+        metadata = {"runtime_home": runtime_home} if runtime_home else {}
+        return SimpleNamespace(cwd=worktree, _registry_metadata=metadata)
+
+    def _lookup(self, root, job):
+        from fleet.collectors import dispatch
+        empty = os.path.join(root, "fleet-home")
+        os.makedirs(empty, exist_ok=True)
+        with mock.patch.dict(os.environ, {"CODEX_HOME": os.path.join(empty, ".codex"),
+                                          "HOME": empty}):
+            return dispatch._codex_attempt_rollout(job, _SID)
+
+    def test_rollout_in_the_recorded_runtime_home_is_found(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            worker_home = os.path.join(tmp, "dispatch", "homes", "codex", "worker")
+            rollout = _make_rollout(worker_home, os.path.join(tmp, "worktree"))
+            self.assertEqual(self._lookup(tmp, self._job(tmp, worker_home)),
+                             os.path.realpath(rollout))
+
+    def test_without_a_recorded_home_the_lookup_is_unchanged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            worker_home = os.path.join(tmp, "dispatch", "homes", "codex", "worker")
+            _make_rollout(worker_home, os.path.join(tmp, "worktree"))
+            self.assertIsNone(self._lookup(tmp, self._job(tmp)))
+
+    def test_a_relative_recorded_home_is_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(self._lookup(tmp, self._job(tmp, "relative/home")))
+
+
 if __name__ == "__main__":
     unittest.main()

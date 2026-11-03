@@ -36,7 +36,6 @@ def load_module(name: str, path: Path):
 CAPABILITY_ROUTE = load_module(
     "v44_capability_route", UTILITIES / "capability-route.py"
 )
-RECOVERY = load_module("v44_dispatch_recovery", UTILITIES / "dispatch-recovery.py")
 CLAUDE_SUPERVISOR = load_module(
     "v44_claude_supervisor", UTILITIES / "claude-session-supervisor.py"
 )
@@ -276,33 +275,6 @@ class DispatchV44ProjectionTest(unittest.TestCase):
                 reason="projection-fixture",
                 artifact_root=source["artifact_root"],
             )
-            request = RECOVERY.RecoveryRequest(
-                jobs=Path(tmp) / "jobs.log",
-                original_attempt_id="att-source",
-                route_file=Path(tmp) / "source-route.json",
-                resume_from_node="test",
-                requested_boundary="test",
-            )
-            snapshot = RECOVERY.AttemptSnapshot(
-                "done", "/repo", str(ROOT), "execute",
-                {
-                    "route_id": source["route_id"],
-                    "route_hash": source["route_hash"],
-                    "route_node": "execute",
-                    "attempt_id": request.original_attempt_id,
-                },
-                "sha256:" + "5" * 64,
-            )
-            recovery_identity = CONTRACT.recovery_id(
-                source_route_id=source["route_id"],
-                source_route_hash=source["route_hash"],
-                node_or_group_leg="execute",
-                original_attempt_id=request.original_attempt_id,
-                cancellation_receipt_digest="sha256:" + "6" * 64,
-            )
-            recovery_record = RECOVERY._new_record(
-                request, snapshot, recovery_identity
-            )
 
         continuation_fields = {
             "continuation_contract_version", "source_route_id", "source_route_hash",
@@ -368,12 +340,6 @@ class DispatchV44ProjectionTest(unittest.TestCase):
             },
         )
 
-        self.assertEqual(set(recovery_record), {
-            "schema_version", "recovery_id", "source", "current_phase", "phases",
-        })
-        self.assertEqual(set(recovery_record["source"]), {
-            "jobs", "attempt_id", "route_id", "route_hash", "node_or_group_leg",
-        })
         self.assertEqual(
             {field.name for field in fields(CONTRACT.RecoveryRetryClaim)},
             {
@@ -381,41 +347,11 @@ class DispatchV44ProjectionTest(unittest.TestCase):
                 "retry_attempt_id", "state", "reason", "start_permitted",
             },
         )
-        # RecoveryResult is a NamedTuple, not a @dataclass (D0: a hyphenated
-        # CLI module under `from __future__ import annotations` cannot carry
-        # a module-level @dataclass -- see dispatch-recovery.py), so it is
-        # introspected via `_fields` rather than `dataclasses.fields`.
-        self.assertEqual(
-            set(RECOVERY.RecoveryResult._fields),
-            {
-                "recovery_id", "phase", "state", "reason", "retry_attempt_id",
-                "child_spawned", "record_path",
-            },
-        )
         self.assertTrue({
             "recovery_id", "retry_ordinal", "retry_attempt_id", "retry_claimed_at",
             "cancellation_quiescence_receipt", "cancellation_receipt_digest",
             "quiescence_pgid_proof", "quiescence_descendant_proof",
         } <= CONTRACT.ATTEMPT_MUTABLE_METADATA)
-
-    def test_production_recovery_projects_official_continuation_and_batch_owner(self):
-        recovery_path = UTILITIES / "dispatch-recovery.py"
-        for method in ("publish_continuation", "start_gap"):
-            self.assertFalse(
-                _raises(
-                    recovery_path, "ProductionRecoveryServices", method,
-                    "RecoveryInterfaceUnavailable",
-                ),
-                f"ProductionRecoveryServices.{method} still refuses the Phase 4 interface",
-            )
-        production_fields = _strings(
-            recovery_path, class_name="ProductionRecoveryServices"
-        )
-        self.assertTrue({
-            "continuation", "--source-route", "--resume-from-node",
-            "--requested-boundary", "--reason", "--artifact-root", "--output",
-            "--continuation",
-        } <= production_fields)
 
     def test_delivery_decoders_and_timing_projection_are_isomorphic(self):
         child = {

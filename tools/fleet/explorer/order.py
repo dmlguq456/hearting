@@ -41,24 +41,33 @@ def move_session(order, repo, source, target=None):
 
 
 def reconcile_order(saved, repos, sessions):
-    """Prune ended identities and append new identities in current natural order."""
+    """Prune ended identities and add new identities in current natural order.
+
+    A new identity is appended, except a steward session, which goes in front of the
+    saved order the way the natural order already leads with it. An identity the user
+    already placed keeps its saved position.
+    """
     saved = saved if isinstance(saved, dict) else {}
     repo_ids = [str(item.get("id", item.get("name", ""))) for item in repos]
     repo_ids = list(dict.fromkeys(repo_ids))
     repo_order = [key for key in saved.get("repos", ()) if key in repo_ids]
     repo_order += [key for key in repo_ids if key not in repo_order]
-    current = {}
+    current, stewards = {}, set()
     for session in sessions:
         repo = str(session.get("repo_id", session.get("repo", "")))
         key = str(session.get("order_key", ""))
         if key:
             current.setdefault(repo, []).append(key)
+            if session.get("steward"):
+                stewards.add(key)
     stored = saved.get("sessions", {})
     session_order = {}
     for repo, keys in current.items():
         prior = stored.get(repo, ()) if isinstance(stored, dict) else ()
         ordered = [key for key in prior if key in keys]
-        ordered += [key for key in keys if key not in ordered]
+        newcomers = [key for key in keys if key not in ordered]
+        ordered = ([key for key in newcomers if key in stewards] + ordered
+                   + [key for key in newcomers if key not in stewards])
         session_order[repo] = ordered
     ordered_repos = [next(item for item in repos
                           if str(item.get("id", item.get("name", ""))) == repo)

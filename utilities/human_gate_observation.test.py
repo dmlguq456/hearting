@@ -16,6 +16,8 @@ from route_identity import route_hash, route_id_from_hash  # noqa: E402
 from dispatch_contract import hold_supervisor_lease, supervisor_lease_path  # noqa: E402
 import dispatch_owner_input as owner_input  # noqa: E402
 
+_REAL_PROBE = H._session_liveness_probe
+
 
 class PendingWaitTest(unittest.TestCase):
     def test_invalid_native_sidecar_projects_unknown_without_exposing_body(self):
@@ -44,6 +46,14 @@ class PendingWaitTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
+        # Never read the developer's live Codex rollouts or session processes: a
+        # real pending question or a real owner exit would change these fixtures.
+        for patch in (mock.patch.object(H, "_codex_rollout_waits",
+                                        return_value={"complete": True, "pending": {}}),
+                      mock.patch.object(H, "_session_liveness_probe",
+                                        lambda: (lambda harness, sid: "unknown"))):
+            patch.start()
+            self.addCleanup(patch.stop)
         self.artifacts = self.root / "artifacts"
         self.artifacts.mkdir()
         self.interview = self.artifacts / "interview.json"
@@ -288,7 +298,7 @@ class PendingWaitTest(unittest.TestCase):
         self.assertEqual(result["total"], 1)
         self.assertEqual(result["items"][0]["source"], "S3")
 
-    def test_blocked_owner_72_hour_and_seven_day_projection_boundaries(self):
+    def test_blocked_owner_folds_at_72_hours_and_age_never_drops_it(self):
         self._blocked_owner_fixture()
         terminal = self.jobs.read_text(encoding="utf-8").splitlines()[0].split("\t")[-1]
         terminal += ",note=dead-worker-blocked,failure_class=blocked"
@@ -301,11 +311,140 @@ class PendingWaitTest(unittest.TestCase):
         folded = H.read_answer_waits(jobs_paths=[self.jobs], now=300 + 72 * 3600)
         self.assertEqual((folded["total"], folded["stale_total"]), (0, 1))
         self.assertTrue(folded["items"][0]["stale"])
+        self.assertEqual(folded["items"][0]["fold"], "older")
 
+        # The former seven-day S3 cutoff silently removed an unanswered wait; the
+        # shared rule only folds it (user decision 2026-10-26: age never closes).
         self.jobs.write_text("299\tdone\t/repo\t/wt\towner\t" +
                              terminal + "\n", encoding="utf-8")
-        dropped = H.read_answer_waits(jobs_paths=[self.jobs], now=300 + 7 * 86400)
-        self.assertEqual((dropped["items"], dropped["total"], dropped["stale_total"]), ([], 0, 0))
+        for days in (7, 30):
+            kept = H.read_answer_waits(jobs_paths=[self.jobs], now=300 + days * 86400)
+            self.assertEqual([item["source"] for item in kept["items"]], ["S3"])
+            self.assertEqual((kept["total"], kept["stale_total"]), (0, 1))
+            self.assertEqual(kept["items"][0]["fold"], "older")
+
+    def test_proven_owner_exit_folds_as_ownerless_and_unobserved_owner_stays_current(self):
+        _route, attempt, _lease, metadata = self._blocked_owner_fixture()
+        self.jobs.write_text("300\tdone\t/repo\t/wt\towner\t" + metadata +
+                             ",note=dead-worker-blocked,failure_class=blocked,parent_harness=codex\n",
+                             encoding="utf-8")
+        seen = []
+
+        def probe(answer):
+            def liveness(harness, session_id):
+                seen.append((harness, session_id))
+                return answer
+            return liveness
+
+        ended = H.read_answer_waits(jobs_paths=[self.jobs], now=400, owner_liveness=probe("ended"))
+        item = ended["items"][0]
+        self.assertEqual((item["owner_state"], item["fold"], item["stale"]),
+                         ("none", "ownerless", True))
+        self.assertEqual((ended["total"], ended["stale_total"], ended["ownerless"]), (0, 1, 1))
+        self.assertEqual(ended["by_session"], {})
+        self.assertIn(("codex", "old-parent"), seen)
+
+        unknown = H.read_answer_waits(jobs_paths=[self.jobs], now=400,
+                                      owner_liveness=probe("unknown"))
+        self.assertEqual((unknown["items"][0]["owner_state"], unknown["items"][0]["fold"]),
+                         ("unknown", None))
+        self.assertEqual((unknown["total"], unknown["ownerless"]), (1, 0))
+
+        live = H.read_answer_waits(jobs_paths=[self.jobs], now=400, owner_liveness=probe("live"))
+        self.assertEqual(live["items"][0]["owner_state"], "live")
+        self.assertNotIn("registered_owner", live["items"][0])
+        self.assertEqual(live["by_session"], {("codex", "old-parent"): ["S3:" + attempt]})
+
+    def test_handover_successor_answers_and_keeps_the_registered_parent_visible(self):
+        _route, attempt, _lease, metadata = self._blocked_owner_fixture()
+        self.jobs.write_text("300\tdone\t/repo\t/wt\towner\t" + metadata +
+                             ",note=dead-worker-blocked,failure_class=blocked,parent_harness=codex\n",
+                             encoding="utf-8")
+        import dispatch_seat_handover
+        with mock.patch.object(dispatch_seat_handover, "effective_parent", return_value="new-parent"), \
+             mock.patch.object(dispatch_seat_handover, "effective_parent_harness", return_value="codex"):
+            result = H.read_answer_waits(jobs_paths=[self.jobs], now=400,
+                                         owner_liveness=lambda harness, sid: (
+                                             "live" if sid == "new-parent" else "ended"))
+        item = result["items"][0]
+        self.assertEqual(item["owner"]["session_id"], "new-parent")
+        self.assertEqual(item["registered_owner"], {"harness": "codex", "session_id": "old-parent"})
+        self.assertEqual((item["owner_state"], item["fold"], result["total"]), ("successor", None, 1))
+        self.assertEqual(item["id"], "S3:" + attempt)
+
+    def test_codex_question_only_in_its_rollout_is_kept_and_sidecar_wins(self):
+        project_root = str(Path(__file__).resolve().parents[1])
+        if project_root not in sys.path:
+            sys.path.insert(0, project_root)
+        from tools.fleet import interaction
+
+        now = 10_000.0
+        with mock.patch.dict("os.environ", {
+            "FLEET_INTERACTION_STATE_DIR": str(self.root / "interactions"),
+            "XDG_STATE_HOME": str(self.root / "xdg"),
+        }), mock.patch.object(H, "_codex_rollout_waits", return_value={"complete": True, "pending": {
+                "rollout-only": now - 60, "with-sidecar": now - 30}}):
+            self.assertTrue(interaction.set_wait("with-sidecar", "codex", "decision",
+                                                 "codex-appserver", now=now - 30,
+                                                 request_id="req-1", turn_id="turn-1"))
+            result = H.read_answer_waits(jobs_paths=[], now=now,
+                                         owner_liveness=lambda harness, sid: "live")
+        by_session = {item["owner"]["session_id"]: item for item in result["items"]}
+        self.assertEqual(set(by_session), {"rollout-only", "with-sidecar"})
+        rollout = by_session["rollout-only"]
+        self.assertEqual(rollout["id"], "S1:codex:rollout-only:%d" % int((now - 60) * 1000))
+        self.assertEqual((rollout["source"], rollout["kind"], rollout["owner_state"]),
+                         ("S1", "decision", "live"))
+        self.assertEqual(by_session["with-sidecar"]["request_id"], "req-1")
+        self.assertEqual((result["total"], result["complete"]), (2, True))
+
+    def test_unreadable_or_partial_codex_rollouts_are_unknown_not_an_empty_board(self):
+        env = {"FLEET_INTERACTION_STATE_DIR": str(self.root / "interactions"),
+               "XDG_STATE_HOME": str(self.root / "xdg")}
+        with mock.patch.dict("os.environ", env), \
+                mock.patch.object(H, "_codex_rollout_waits", return_value=None):
+            result = H.read_answer_waits(jobs_paths=[], now=100)
+        self.assertFalse(result["complete"])
+        self.assertIn({"source": "S1", "state": "unknown", "reason": "codex-rollouts-unreadable"},
+                      result["health"])
+        partial = {"complete": False, "pending": {"seen-sid": 90.0}}
+        with mock.patch.dict("os.environ", env), \
+                mock.patch.object(H, "_codex_rollout_waits", return_value=partial):
+            result = H.read_answer_waits(jobs_paths=[], now=100)
+        self.assertFalse(result["complete"])
+        self.assertIn({"source": "S1", "state": "unknown", "reason": "codex-rollouts-partial"},
+                      result["health"])
+        self.assertEqual([item["owner"]["session_id"] for item in result["items"]], ["seen-sid"])
+
+    def test_failed_lineage_read_keeps_the_owner_unknown_not_ownerless(self):
+        self._blocked_owner_fixture()
+        terminal = self.jobs.read_text(encoding="utf-8").splitlines()[0].split("\t")[-1]
+        self.jobs.write_text("300\tdone\t/repo\t/wt\towner\t" + terminal +
+                             ",note=dead-worker-blocked,failure_class=blocked,parent_harness=codex\n",
+                             encoding="utf-8")
+        import dispatch_seat_handover
+        with mock.patch.object(dispatch_seat_handover, "effective_parent",
+                               side_effect=OSError("handover-unreadable")):
+            result = H.read_answer_waits(jobs_paths=[self.jobs], now=400,
+                                         owner_liveness=lambda harness, sid: "ended")
+        item = result["items"][0]
+        self.assertEqual(item["owner"]["session_id"], "old-parent")
+        self.assertEqual((item["owner_state"], item["fold"], result["total"]), ("unknown", None, 1))
+
+    def test_owner_probe_outside_the_initial_pid_namespace_proves_no_exit(self):
+        project_root = str(Path(__file__).resolve().parents[1])
+        if project_root not in sys.path:
+            sys.path.insert(0, project_root)
+        from tools.fleet.collectors import procscan, steward
+        # setUp stubs the module's probe; _REAL_PROBE is the shipped one.
+        with mock.patch.object(procscan, "initial_pid_namespace", return_value=False), \
+                mock.patch.object(steward, "session_liveness", return_value="ended") as seen:
+            probe = _REAL_PROBE()
+            self.assertEqual(probe("claude", "sid-hidden"), "unknown")
+        seen.assert_not_called()
+        with mock.patch.object(procscan, "initial_pid_namespace", return_value=True), \
+                mock.patch.object(steward, "session_liveness", return_value="ended"):
+            self.assertEqual(_REAL_PROBE()("claude", "sid-host"), "ended")
 
     def test_s2_72_hour_and_older_projection_boundaries(self):
         route, _attempt, _lease, metadata = self._blocked_owner_fixture()

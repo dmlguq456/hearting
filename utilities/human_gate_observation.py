@@ -431,20 +431,98 @@ def pending_human_waits(route, *, jobs, outcome=None):
     return gates
 
 
-def read_answer_waits(*, jobs_paths, sessions=(), now=None):
+def _session_liveness_probe():
+    """One pass's owner observation: ``live`` / ``ended`` / ``unknown`` per session.
+
+    Reuses Fleet's shared session-end proof (``collectors.steward.session_liveness``),
+    and only from the initial PID namespace, where an absent process is really absent;
+    elsewhere, and for an unreadable table, the owner stays ``unknown`` (LOOP §4)."""
+    seen = {}
+    state = {}
+
+    def probe(harness, session_id):
+        key = (harness, session_id)
+        if key not in seen:
+            try:
+                project_root = str(Path(__file__).resolve().parents[1])
+                if project_root not in sys.path:
+                    sys.path.insert(0, project_root)
+                from tools.fleet.collectors import procscan, steward
+                if "observation" not in state:
+                    # Its registry fallback probes a recorded pid with a signal;
+                    # from another PID namespace an absent pid proves nothing.
+                    state["host"] = procscan.initial_pid_namespace()
+                    state["observation"] = steward.end_observation()
+                if not state["host"]:
+                    seen[key] = "unknown"
+                    return seen[key]
+                seen[key] = steward.session_liveness(harness, session_id, agents=(),
+                                                     observation=state["observation"])
+            except Exception:
+                seen[key] = "unknown"
+        return seen[key]
+    return probe
+
+
+def _owner_state(item, liveness):
+    """``live`` / ``successor`` / ``none`` / ``unknown`` for the session that answers now.
+
+    S2/S3 owners are already the end of the recorded handover lineage
+    (``effective_parent``); ``none`` therefore means the proven-ended owner has no
+    successor. S1/S4 belong to the exact native session that asked."""
+    if item.get("owner_state") in ("live", "successor", "none", "unknown"):
+        return item["owner_state"]
+    owner = item.get("owner") or {}
+    harness, session_id = owner.get("harness"), owner.get("session_id")
+    if not harness or not session_id:
+        return "unknown"
+    observed = liveness(harness, session_id)
+    if observed == "ended":
+        return "none"
+    if observed == "live":
+        return "successor" if item.get("registered_owner") else "live"
+    return "unknown"
+
+
+def _registered_owner(meta, harness, session_id):
+    """The registered parent when lineage moved the answering session, else None."""
+    registered = meta.get("parent_sid")
+    if not registered or not session_id or registered == session_id:
+        return None
+    return {"harness": meta.get("parent_harness") or harness, "session_id": registered}
+
+
+def _codex_rollout_waits():
+    """``{"complete", "pending": {sid: waiting_since}}`` from live Codex rollouts, or None.
+
+    A Codex thread started without the interaction hook leaves its unanswered
+    ``request_user_input`` only in its rollout; Fleet's own rollout cursor reads it."""
+    project_root = str(Path(__file__).resolve().parents[1])
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+    from tools.fleet.collectors import codex as codex_rollouts
+    return codex_rollouts.open_rollout_questions()
+
+
+def read_answer_waits(*, jobs_paths, sessions=(), now=None, owner_liveness=None):
     """Project current and folded older answer waits without changing sources.
 
     A damaged or partial registry is reported as unknown and is never used to
     prove that an owner has no successor. The existing owner-input reader may
     briefly take its advisory lease flock; contention simply omits that source
-    for this pass. No answer bodies are returned.
+    for this pass. No answer bodies are returned. Age only folds a wait
+    (``human_wait_state.wait_fold``); a proven-ended owner with no successor folds
+    it as ownerless. ``owner_liveness(harness, sid)`` defaults to the shared
+    session-end proof.
     """
     from collections import defaultdict
     from time import time as _time
 
     from dispatch_registry_cache import registry_read_scope, registry_snapshot
+    import human_wait_state
 
     instant = _time() if now is None else float(now)
+    liveness = owner_liveness or _session_liveness_probe()
     health = []
     items = []
     by_session = defaultdict(list)
@@ -530,6 +608,36 @@ def read_answer_waits(*, jobs_paths, sessions=(), now=None):
     except Exception as exc:
         health.append({"source": "S1", "state": "unknown", "reason": type(exc).__name__})
 
+    # S1 also keeps a Codex question that exists only in its live rollout (no hook
+    # sidecar). The sidecar for the same session wins; the id has the sidecar shape.
+    try:
+        observed = _codex_rollout_waits()
+        if observed is None:
+            health.append({"source": "S1", "state": "unknown", "reason": "codex-rollouts-unreadable"})
+        else:
+            if not observed["complete"]:
+                health.append({"source": "S1", "state": "unknown",
+                               "reason": "codex-rollouts-partial"})
+            rollout_waits = observed["pending"]
+            with_sidecar = {(item.get("owner") or {}).get("session_id") for item in items
+                            if item.get("source") == "S1"
+                            and (item.get("owner") or {}).get("harness") == "codex"}
+            for sid, since in sorted(rollout_waits.items()):
+                if sid in with_sidecar:
+                    continue
+                since = float(since)
+                if not math.isfinite(since):
+                    continue
+                add({"id": "S1:codex:" + sid + ":" + str(int(since * 1000)), "source": "S1",
+                     "kind": "decision", "question": None, "choices": [],
+                     "recommendation": None, "route_id": None, "route_hash": None,
+                     "attempt_id": None, "gate_id": None, "since": since,
+                     "owner": {"harness": "codex", "session_id": sid},
+                     # A live Codex process holds this rollout open.
+                     "owner_state": "live", "attribution": "exact"})
+    except Exception as exc:
+        health.append({"source": "S1", "state": "unknown", "reason": type(exc).__name__})
+
     # S4's writer owns its private file format; importing is lazy to keep the
     # legacy S1/S2 API independent from the new producer.
     try:
@@ -594,15 +702,14 @@ def read_answer_waits(*, jobs_paths, sessions=(), now=None):
                             health.append({"source": "S3", "attempt_id": attempt,
                                            "state": "unknown", "reason": "invalid-timestamp"})
                             continue
-                        age = instant - started
-                        if age < 0 or age > 7 * 86400:
+                        # Age folds a blocked owner (shared rule below); it never
+                        # drops one. Only answer, closure or a successor does.
+                        if instant - started < 0:
                             continue
                         route_record, outcome = _route_outcome(route_module, route_file,
                                                                route_id, route_digest)
                         if route_record is None:
                             continue
-                        started = epoch(meta.get("ended_at") or fields[0], float("nan"))
-                        folded = age > 72 * 3600
                         if outcome and outcome.get("closed_at") and outcome.get("match") is True:
                             continue
                         if blocked_owner_answers(path, attempt):
@@ -619,6 +726,7 @@ def read_answer_waits(*, jobs_paths, sessions=(), now=None):
                                         blocker = " ".join(str(raw).split())[:160]
                             except Exception:
                                 pass
+                        lineage_read = True
                         try:
                             if effective_parent is None:
                                 raise ImportError("lineage reader unavailable")
@@ -627,15 +735,21 @@ def read_answer_waits(*, jobs_paths, sessions=(), now=None):
                             parent_harness = effective_parent_harness(lineage_meta, path,
                                                                       read_context=read_context)
                         except Exception:
+                            # A failed lineage read cannot prove the owner has no
+                            # successor: keep the registered parent, owner unknown.
+                            lineage_read = False
                             parent, parent_harness = meta.get("parent_sid"), meta.get("parent_harness")
                         add({"id": "S3:" + str(attempt), "source": "S3",
                              "kind": "decision", "question": blocker, "choices": [],
                              "recommendation": None, "route_id": route_id,
                              "route_hash": route_digest, "attempt_id": attempt,
-                             "gate_id": None, "since": started, "stale": folded,
+                             "gate_id": None, "since": started,
                              "owner": {"harness": parent_harness or None,
                                        "session_id": parent or None,
                                        "seat_key": None},
+                             "registered_owner": _registered_owner(meta, parent_harness, parent),
+                             "cwd": route_record.get("cwd"),
+                             **({} if lineage_read else {"owner_state": "unknown"}),
                              "attribution": "lineage" if parent and parent_harness else "unattributed"})
                     except (OSError, ValueError, TypeError, KeyError, ImportError) as exc:
                         health.append({"source": "S3", "attempt_id": attempt,
@@ -670,18 +784,17 @@ def read_answer_waits(*, jobs_paths, sessions=(), now=None):
                                 meta = row.completion_metadata()
                             parent_sid = meta.get("parent_sid")
                             parent_harness = meta.get("parent_harness")
-                            if effective_parent is not None:
+                            lineage_read = effective_parent is not None
+                            if lineage_read:
                                 try:
                                     parent_sid = effective_parent(meta, path, read_context=read_context)
                                     parent_harness = effective_parent_harness(meta, path,
                                                                               read_context=read_context)
                                 except Exception:
-                                    pass
+                                    lineage_read = False
                             since = float(wait["waiting_since"])
-                            age = instant - since
-                            if age < 0:
+                            if instant - since < 0:
                                 continue
-                            stale = age > 72 * 3600
                             question, choices, recommendation = (
                                 _frame_question_detail(route_record, path, wait["gate_id"])
                                 if wait["gate_id"] == "frame-review" else (None, [], None))
@@ -690,9 +803,12 @@ def read_answer_waits(*, jobs_paths, sessions=(), now=None):
                                  "source": "S2", "kind": wait["kind"], "question": question,
                                  "choices": choices, "recommendation": recommendation, "route_id": route_id,
                                  "route_hash": route_digest, "attempt_id": meta.get("attempt_id"),
-                                 "gate_id": wait["gate_id"], "since": since, "stale": stale,
+                                 "gate_id": wait["gate_id"], "since": since,
                                  "owner": {"harness": parent_harness or None,
                                            "session_id": parent_sid or None},
+                                 "registered_owner": _registered_owner(meta, parent_harness, parent_sid),
+                                 "cwd": route_record.get("cwd"),
+                                 **({} if lineage_read else {"owner_state": "unknown"}),
                                  "attribution": "lineage" if parent_sid and parent_harness else "unattributed"})
                     except (OSError, ValueError, TypeError, KeyError, ImportError) as exc:
                         health.append({"source": "S2", "route_id": route_id,
@@ -701,17 +817,19 @@ def read_answer_waits(*, jobs_paths, sessions=(), now=None):
             health.append({"source": "registry", "path": str(path),
                            "state": "unknown", "reason": type(exc).__name__})
 
-    current_total = 0
-    stale_total = 0
     retained = []
     for item in items:
         try:
-            old = instant - float(item.get("since", instant))
-            if old < 0 or (item.get("source") == "S3" and old > 7 * 86400):
+            if instant - float(item.get("since", instant)) < 0:
                 continue
-            item["stale"] = old >= 72 * 3600
         except (TypeError, ValueError, OverflowError):
             continue
+        item["owner_state"] = _owner_state(item, liveness)
+        item["fold"] = human_wait_state.wait_fold(item["since"], instant,
+                                                  owner_state=item["owner_state"])
+        item["stale"] = item["fold"] is not None
+        if not item.get("registered_owner"):
+            item.pop("registered_owner", None)
         retained.append(item)
     items = retained
     by_session = defaultdict(list)
@@ -720,17 +838,9 @@ def read_answer_waits(*, jobs_paths, sessions=(), now=None):
         key = (owner.get("harness"), owner.get("session_id"))
         if key[0] and key[1] and not item.get("stale"):
             by_session[key].append(item["id"])
-    current_total = 0
-    stale_total = 0
-    for item in items:
-        if item["stale"]:
-            stale_total += 1
-        else:
-            current_total += 1
-    current_ids = {item["id"] for item in items if not item.get("stale")}
-    by_session = {key: [item_id for item_id in values if item_id in current_ids]
-                  for key, values in by_session.items()}
+    counts = human_wait_state.wait_counts(items)
     unattributed = [item["id"] for item in items if item.get("attribution") == "unattributed" and not item.get("stale")]
     return {"items": items, "by_session": dict(by_session), "unattributed": unattributed,
-            "total": current_total, "stale_total": stale_total, "health": health, "observed_at": instant,
+            "total": counts["total"], "stale_total": counts["older"],
+            "ownerless": counts["ownerless"], "health": health, "observed_at": instant,
             "complete": not any(row.get("state") == "unknown" for row in health)}

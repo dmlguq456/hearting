@@ -1147,6 +1147,18 @@ def _repo_results(snapshot, resolver, now):
     return found
 
 
+def stewards_first(rows):
+    """A stewarding session leads its repository; every other row keeps its order.
+
+    The monitor board has led each repo group with its steward since F-100c (user
+    2026-09-03, again 2026-10-06: "감독 세션을 fleet에서 가장 상단에"). The explorer
+    kept only first-seen order, so the rule is applied here once for every view.
+    """
+    rows = list(rows)
+    return ([row for row in rows if row.get("steward")]
+            + [row for row in rows if not row.get("steward")])
+
+
 def _repo_records(session_rows, routes, results=None, now=None):
     order = []
     for row in session_rows:
@@ -1906,7 +1918,8 @@ def current_claude_usage(model, snapshot, now):
     return replace(model, usage=usage) if replaced or row is not None else model
 
 
-def _parse_clock(ts):
+def _clock_stamp(ts):
+    """The local datetime a journal/route timestamp names, or None when unparsable."""
     if not isinstance(ts, str):
         return None
     try:
@@ -1915,7 +1928,25 @@ def _parse_clock(ts):
         return None
     if stamp.tzinfo is not None:
         stamp = stamp.astimezone()
-    return stamp.strftime("%H:%M")
+    return stamp
+
+
+def _parse_clock(ts):
+    stamp = _clock_stamp(ts)
+    return stamp.strftime("%H:%M") if stamp else None
+
+
+def _memory_when(ts, clock=None):
+    """TIME cell for a memory row: ``HH:MM`` on the current local date, else ``MM-DD``.
+
+    The memory columns are 7 cells wide, so a full date would break the table; a
+    month-day is the same width as a clock and still says "not today".
+    """
+    stamp = _clock_stamp(ts)
+    if stamp is None:
+        return None
+    today = datetime.datetime.fromtimestamp(time.time() if clock is None else clock).date()
+    return stamp.strftime("%H:%M" if stamp.date() == today else "%m-%d")
 
 
 _SAVED = frozenset({"add", "note", "tidy-add", "decision-record"})
@@ -1932,10 +1963,12 @@ def _memory_text(snippet):
     return re.sub(r"^\d{4}-\d\d-\d\d(?:\s+\d\d:\d\d)?(?:\s*KST)?\s*[.:]?\s+", "", text) or text
 
 
-def _memory_records(snapshot, accepted_detail):
-    detail = _get(accepted_detail, "memory")
-    if detail is not None and not isinstance(detail, Mapping):
-        return detail
+def _journal_groups(snapshot, clock=None):
+    """Journal rows per project, newest first: ``{project: [(epoch, [when, action, type, text])]}``.
+
+    The text is the record's stored headline when the collector found one, else the journal
+    snippet. None when no journal was read.
+    """
     memory = _get(snapshot, "memory")
     if not isinstance(memory, Mapping):
         return None
@@ -1959,16 +1992,30 @@ def _memory_records(snapshot, accepted_detail):
             if identity:
                 seen.add(identity)
             action = "saved" if action_name in _SAVED else "changed"
-            snippet = _memory_text(event.get("snippet"))
+            snippet = _memory_text(event.get("headline") or event.get("snippet"))
             project_source = _text(event.get("project"))
             if project_source and "/" in project_source:
                 project = _gpu_repo(project_source)
             else:
-                project = project_source or _gpu_repo(_get(event, "cwd")) or _shown_repo(repo)
+                # The collector's key is the board's own project grouping (git-aware), so a
+                # row written from a subfolder stays with its project and its DB records.
+                project = (project_source or _shown_repo(repo) or _gpu_repo(_get(event, "cwd"))
+                           or UNKNOWN_REPO)
             grouped.setdefault(project, []).append((_epoch_of(event.get("ts")) or 0.0,
-                [_parse_clock(event.get("ts")), action, _text(event.get("type")), snippet]))
-    return [[repo, [row for _stamp, row in sorted(rows, key=lambda item: -item[0])]]
-            for repo, rows in sorted(grouped.items()) if rows]
+                [_memory_when(event.get("ts"), clock), action, _text(event.get("type")), snippet]))
+    for rows in grouped.values():
+        rows.sort(key=lambda item: -item[0])
+    return {project: rows for project, rows in grouped.items() if rows}
+
+
+def _memory_records(journal, accepted_detail):
+    """MEMORY journal rows ``[repo, [[when, action, type, text], ...]]``; a replayed detail wins."""
+    detail = _get(accepted_detail, "memory")
+    if detail is not None and not isinstance(detail, Mapping):
+        return detail
+    if journal is None:
+        return None
+    return [[repo, [row for _stamp, row in rows]] for repo, rows in sorted(journal.items())]
 
 
 def _refers_to_route(route_id, references):
@@ -1982,59 +2029,122 @@ def _refers_to_route(route_id, references):
     return False
 
 
-def _memory_backlog(snapshot, routes):
+_OPEN_RECORD_TYPES = frozenset(("unresolved-obligation", "backlog", "task", "todo", "obligation"))
+_OPEN_MARKER_WORDS = ("백로그", "진행", "미확인", "부분 설치", "미해결", "수리")
+_HEADLINE_MARKER = re.compile(r"^\s*\[([^\]]{1,40})\]")
+OPEN_STAGES = ("doing", "waiting", "open")
+
+
+def _open_stage(record, routes):
+    """How far a possibly-open record got: ``doing``, ``waiting``, ``open`` or None (not open work).
+
+    Only what the record and the routes already say is used: its headline marker
+    (``[진행 중]``, ``[설치 완료·실사용 미확인]``, ``[해결 확인]`` …) and an exact route link.
+    An obligation or backlog record with neither stays open on record, never "in progress".
+    """
+    match = _HEADLINE_MARKER.match(_text(record.get("headline")) or "")
+    marker = match.group(1) if match else ""
+    if "해결" in marker and "미해결" not in marker:
+        return None
+    tags = {str(tag).strip("[]\"' ").casefold() for tag in record.get("tags") or ()}
+    if not (str(record.get("type") or "").casefold() in _OPEN_RECORD_TYPES or "backlog" in tags
+            or any(word in marker for word in _OPEN_MARKER_WORDS)):
+        return None
+    refs = tuple(record.get("links") or ()) + tuple(record.get("artifact_refs") or ())
+    linked = [route for route in routes if _refers_to_route(str(route.get("id") or ""), refs)]
+    if "진행" in marker or any(route.get("state") in ("working", "blocked") or
+                              any(stage.get("st") == "active" for stage in route.get("stages") or ())
+                              for route in linked):
+        return "doing"
+    if "미확인" in marker or "부분 설치" in marker or any(
+            route.get("state") == "done" and route.get("outcome") == "success" for route in linked):
+        return "waiting"
+    return "open"
+
+
+def _headline_text(text):
+    """A stored headline without its session tag, date or ``결정:`` lead (the row already says it)."""
+    text = _memory_text(text)
+    return re.sub(r"^(?:\[결정\]|결정\s*[:：])\s*", "", text) if text else text
+
+
+def _day_of(updated):
+    text = _text(updated) or ""
+    return text[5:10] if re.match(r"^\d{4}-\d\d-\d\d", text) else None
+
+
+def _day_epoch(updated):
+    try:
+        return datetime.datetime.strptime((_text(updated) or "")[:10], "%Y-%m-%d").timestamp()
+    except ValueError:
+        return None
+
+
+def _empty_project():
+    return {"last": None, "decisions": [], "open": [], "limited": False,
+            "counts": {name: 0 for name in OPEN_STAGES}}
+
+
+def _project_memory(snapshot, routes, session_rows, journal):
+    """Per project: newest decisions, open work and the time of the last change.
+
+    Decisions and open work come from the read-only DB summary (stored headlines only);
+    the last change is the newer of the journal row and the record date. Projects with a
+    live session come first, then the most recently changed.
+    """
     memory = _get(snapshot, "memory")
     database = _get(memory, "database") if isinstance(memory, Mapping) else None
-    if not isinstance(database, Mapping):
-        return {"state": "unknown", "by_repo": {}, "limited": False}
-    state = _text(database.get("state")) or "unknown"
-    if state != "success":
-        last_good = database.get("last_good_by_repo")
-        return {"state": state,
-                "by_repo": last_good if isinstance(last_good, Mapping) else {},
-                "limited": bool(database.get("limited")),
-                "stale": bool(database.get("last_good"))}
-    source = database.get("by_repo")
-    if not isinstance(source, Mapping):
-        return {"state": "incomplete", "by_repo": {}, "limited": False}
-    grouped = {}
-    seen = set()
-    for repo, records in source.items():
-        for record in records or ():
+    state, stale, source = "unknown", False, {}
+    if isinstance(database, Mapping):
+        state = _text(database.get("state")) or "unknown"
+        if state == "success":
+            source = database.get("by_repo")
+        else:
+            source = database.get("last_good_by_repo")
+            stale = bool(database.get("last_good"))
+        source = source if isinstance(source, Mapping) else {}
+    projects, last = {}, {}
+    for repo, rows in (journal or {}).items():
+        last[repo] = (rows[0][0], rows[0][1][0])
+        projects[repo] = _empty_project()
+    decisions_today = doing = 0
+    for repo, entry in source.items():
+        if not isinstance(entry, Mapping):
+            continue
+        repo = str(repo)
+        project = projects.setdefault(repo, _empty_project())
+        project["decisions"] = [[_day_of(record.get("updated")),
+                                 _headline_text(record.get("headline")) or _text(record.get("id"))]
+                                for record in entry.get("decisions") or () if isinstance(record, Mapping)]
+        decisions_today += int(_num(entry.get("decisions_today")) or 0)
+        items = []
+        for record in entry.get("open") or ():
             if not isinstance(record, Mapping):
                 continue
-            if str(record.get("status") or "active") == "superseded":
+            stage = _open_stage(record, routes)
+            if stage is None:
                 continue
-            tags = tuple(str(tag).casefold() for tag in (record.get("tags") or ()))
-            rtype = str(record.get("type") or "").casefold()
-            if "backlog" not in tags and rtype not in ("backlog", "task", "todo", "obligation"):
-                continue
-            canonical = _text(record.get("canonical_id")) or _text(record.get("id"))
-            if canonical and canonical in seen:
-                continue
-            if canonical:
-                seen.add(canonical)
-            refs = tuple(record.get("links") or ()) + tuple(record.get("artifact_refs") or ())
-            linked = [route for route in routes if _refers_to_route(str(route.get("id") or ""), refs)]
-            current = next((route for route in linked
-                            if route.get("state") in ("working", "blocked") or
-                            any(stage.get("st") == "active" for stage in route.get("stages") or ())), None)
-            settled = next((route for route in linked if route.get("state") == "done"
-                            and route.get("outcome") == "success"), None)
-            progress = "DOING" if current else "DONE" if settled else "TODO"
-            item = {
-                "id": _text(record.get("id")), "canonical_id": canonical,
-                "title": _text(record.get("headline")) or _text(record.get("source")) or
-                         _text(record.get("type")) or "backlog item",
-                "progress": progress,
-                "route_id": (current or settled or {}).get("id"),
-                "updated": _text(record.get("updated")),
-            }
-            grouped.setdefault(str(repo), []).append(item)
-    for items in grouped.values():
-        items.sort(key=lambda item: (item["progress"] != "DOING", item["title"].casefold()))
-    return {"state": "success", "by_repo": grouped, "stale": False,
-            "limited": bool(database.get("limited"))}
+            items.append([stage, _day_of(record.get("updated")),
+                          _headline_text(record.get("headline")) or _text(record.get("id")),
+                          _text(record.get("id"))])
+        # Stable sort: the collector's newest-first order stays within each stage.
+        items.sort(key=lambda item: OPEN_STAGES.index(item[0]))
+        project["open"] = items
+        project["limited"] = bool(entry.get("limited"))
+        project["counts"] = {name: sum(1 for item in items if item[0] == name) for name in OPEN_STAGES}
+        doing += project["counts"]["doing"]
+        stamp = _day_epoch(entry.get("updated"))
+        if stamp is not None and stamp > last.get(repo, (0.0, None))[0]:
+            last[repo] = (stamp, _day_of(entry.get("updated")))
+    for repo, (_stamp, text) in last.items():
+        projects[repo]["last"] = text
+    live = {row.get("repo_id") for row in session_rows or ()}
+    order = sorted(projects, key=lambda repo: (repo not in live, -last.get(repo, (0.0, None))[0], repo))
+    known = state == "success" or stale
+    return {"state": state, "stale": stale,
+            "decisions_today": decisions_today if known else None,
+            "doing": doing if known else None,
+            "order": order, "projects": projects}
 
 
 def _current_task_summary(accepted_detail, session_rows, session_index, routes):
@@ -2121,25 +2231,6 @@ def _system_record(snapshot, session_rows, compute, accepted_detail, usage, now=
                       if isinstance(value, Mapping) and "state" in value and not name.startswith("replay_")]
         if collectors:
             system["collectors"] = collectors
-    memory = _get(snapshot, "memory")
-    if isinstance(memory, Mapping):
-        today = memory.get("today") if isinstance(memory.get("today"), Mapping) else {}
-        all_events = [(repo, event) for repo, events in (memory.get("by_repo") or {}).items()
-                      for event in (events or ()) if isinstance(event, Mapping)]
-        local_day = datetime.datetime.fromtimestamp(now).date() if _num(now) is not None else None
-        added = sum(1 for _repo, event in all_events
-                    if event.get("action") == "add" and local_day is not None
-                    and (_epoch_of(event.get("ts")) is not None)
-                    and datetime.datetime.fromtimestamp(_epoch_of(event.get("ts"))).date() == local_day)
-        expired = sum(1 for _repo, event in all_events if event.get("action") == "lifecycle-expire")
-        summary = {"added_today": _num(today.get("added")) if today.get("added") is not None else added,
-                   "expired": _num(today.get("expired")) if today.get("expired") is not None else expired,
-                   "projects": len(memory.get("by_repo") or {})}
-        expired_at = max((_epoch_of(event.get("ts")) or 0.0 for _repo, event in all_events
-                          if event.get("action") == "lifecycle-expire"), default=0.0)
-        if expired_at:
-            summary["expired_at"] = _clock(expired_at)
-        system["memory_summary"] = summary
     gpu_processes, unregistered_gpu, gpu_summary, gpu_owner = _gpu_process_records(snapshot)
     if gpu_processes:
         system["gpu_processes"] = gpu_processes
@@ -2322,8 +2413,8 @@ def _peer_events(snapshot, session_index):
     return sorted(result, key=lambda item: -item[0])[:5]
 
 
-def _answered_records(snapshot):
-    """Decision records the user answered, per repo, newest first: ``[repo, [[HH:MM, text], ...]]``."""
+def _answered_records(snapshot, clock=None):
+    """Decision records the user answered, per repo, newest first: ``[repo, [[HH:MM|MM-DD, text], ...]]``."""
     memory = _get(snapshot, "memory")
     by_repo = memory.get("by_repo") if isinstance(memory, Mapping) else None
     if not isinstance(by_repo, Mapping):
@@ -2338,7 +2429,7 @@ def _answered_records(snapshot):
                     project = _gpu_repo(project)
                 project = project or _gpu_repo(_get(event, "cwd")) or _shown_repo(repo)
                 grouped.setdefault(project, []).append((_epoch_of(event.get("ts")) or 0.0,
-                    [_parse_clock(event.get("ts")), re.sub(r"^\[결정\]\s*", "", event["snippet"])]))
+                    [_memory_when(event.get("ts"), clock), re.sub(r"^\[결정\]\s*", "", event["snippet"])]))
     return [[repo, [row for _epoch, row in sorted(rows, key=lambda item: -item[0])]]
             for repo, rows in sorted(grouped.items()) if rows]
 
@@ -2752,7 +2843,8 @@ def build_view_model(snapshot, accepted_detail=None, cached_config=None, now=Non
         return current_claude_usage(ExplorerViewModel.from_mapping(snapshot), snapshot, clock)
     bindings = detail_bindings(snapshot)
     # Global view-only memory is independent of the selected session's incarnation.
-    memory = _memory_records(snapshot, accepted_detail)
+    journal = _journal_groups(snapshot, clock)
+    memory = _memory_records(journal, accepted_detail)
     accepted_detail = detail_for_bindings(accepted_detail, bindings)
     snapshot = _peer_snapshot(snapshot, accepted_detail, bindings)
     resolver = _resolver(snapshot)
@@ -2785,7 +2877,7 @@ def build_view_model(snapshot, accepted_detail=None, cached_config=None, now=Non
     by_repo = {}
     for row in session_rows:
         by_repo.setdefault(row["repo_id"], []).append(row)
-    session_rows = [row for repo in repos for row in by_repo.get(repo["id"], ())]
+    session_rows = [row for repo in repos for row in stewards_first(by_repo.get(repo["id"], ()))]
     focus, _seats, detail_config, panes = _detail_parts(accepted_detail)
     for row in session_rows:                          # a pane id the herdr read found for this session
         if not row.get("pane"):
@@ -2832,7 +2924,7 @@ def build_view_model(snapshot, accepted_detail=None, cached_config=None, now=Non
     feed.sort(key=lambda item: -item[0])
     feed = feed[:5]
     explicit = _get(focus, "source_records")
-    answered = _answered_records(snapshot)
+    answered = _answered_records(snapshot, clock)
     system = _system_record(snapshot, session_rows, compute, accepted_detail, usage, clock)
     system["answer_waits"] = answer_wait_summary
     observations = _get(snapshot, "observations", default={}) or {}
@@ -2841,7 +2933,7 @@ def build_view_model(snapshot, accepted_detail=None, cached_config=None, now=Non
         "state": _text(_get(peer_observation, "state")) or "unknown",
         "last_good": bool(_get(peer_observation, "last_good", default=False)),
     }
-    system["memory_backlog"] = _memory_backlog(snapshot, routes)
+    system["project_memory"] = _project_memory(snapshot, routes, session_rows, journal)
     system["task_summary"] = _current_task_summary(
         accepted_detail, session_rows, session_index, routes)
     if answered:

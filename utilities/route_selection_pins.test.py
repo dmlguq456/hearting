@@ -551,12 +551,11 @@ class WrapperPinTest(IsolatedCase):
         for adapter in ("claude", "codex"):
             wrapper = _wrapper(adapter)
             with self.subTest(adapter=adapter):
-                pins = {"worker": {"harness": adapter, "model": "fable", "effort": None},
-                        "frame": {"harness": adapter, "model": "fable", "effort": None}}
-                if adapter == "codex":
-                    top = wrapper.resolve_config("codex", source_root=ROOT)[0]["CFG_MAIN_SESSION_ONLY_MODELS"].split()[0]
-                    pins = {"worker": {"harness": adapter, "model": top, "effort": None},
-                            "frame": {"harness": adapter, "model": top, "effort": None}}
+                # The main-only pin is configuration, not a literal: read the shipped
+                # policy the wrapper itself reads so a model rename needs no test edit.
+                top = wrapper.resolve_config(adapter, source_root=ROOT)[0]["CFG_MAIN_SESSION_ONLY_MODELS"].split()[0]
+                pins = {"worker": {"harness": adapter, "model": top, "effort": None},
+                        "frame": {"harness": adapter, "model": top, "effort": None}}
                 route = self.route(adapter, **pins)
                 with self.assertRaises(wrapper.ModelSelectionError) as ctx:
                     wrapper.resolve_model_settings(self.args(adapter, route))
@@ -569,9 +568,7 @@ class WrapperPinTest(IsolatedCase):
         for adapter in ("claude", "codex"):
             wrapper = _wrapper(adapter)
             with self.subTest(adapter=adapter):
-                top = "fable"
-                if adapter == "codex":
-                    top = wrapper.resolve_config("codex", source_root=ROOT)[0]["CFG_MAIN_SESSION_ONLY_MODELS"].split()[0]
+                top = wrapper.resolve_config(adapter, source_root=ROOT)[0]["CFG_MAIN_SESSION_ONLY_MODELS"].split()[0]
                 ordinary = self.PIN_MODEL[adapter]
                 pins = {"worker": {"harness": adapter, "model": ordinary, "effort": None},
                         "frame": {"harness": adapter, "model": ordinary, "effort": None}}

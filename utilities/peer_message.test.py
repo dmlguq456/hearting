@@ -750,8 +750,9 @@ class F100cSenderAndStewardTest(unittest.TestCase):
         self.assertTrue(peer_message.mark_steward("claude", "sid-a", {"harness": "unknown", "name": "-"},
                                                   "explicit", ts, source="explicit"))
         root = str(peer_message.peer_state_root())
+        # Calls: the choice, the re-read under the seat lock, the remaining-role check.
         released, check = self._closed_session_fixture(
-            [[self._role("sid-a")], []],
+            [[self._role("sid-a")], [self._role("sid-a")], []],
             watches=[{"watch_id": "w1", "storage_root": root},
                      {"watch_id": "w2", "storage_root": "/elsewhere"}])
         settle = mock.Mock(return_value=True)
@@ -776,9 +777,24 @@ class F100cSenderAndStewardTest(unittest.TestCase):
         self.assertTrue(peer_message.steward_marker_path("claude", "sid-a").exists())
         check.assert_not_called()
 
+    def test_release_closed_session_skips_a_role_handed_over_before_the_seat_lock(self):
+        """The choice read outside the lock still names this session; under the lock the
+        role already belongs to the successor, so nothing is written against it."""
+        ts = "2026-11-02T00:00:00Z"
+        self.assertTrue(peer_message.mark_steward("claude", "sid-a", {"harness": "unknown", "name": "-"},
+                                                  "explicit", ts, source="explicit"))
+        handed = dict(self._role("sid-new"), lineage=[{"from": "sid-a", "to": "sid-new"}])
+        released, check = self._closed_session_fixture(
+            [[self._role("sid-a")], [handed], [handed]])
+        summary = peer_message.release_closed_session("claude", "sid-a", reason="cleared",
+                                                      settle_watch=mock.Mock())
+        self.assertEqual(released, [])
+        self.assertEqual((summary["roles"], summary["marker"]), (0, "kept"))
+        check.assert_not_called()
+
     def test_release_closed_session_reports_unresolved_roles_and_keeps_going(self):
         import dispatch_seat_handover as handover
-        released, _check = self._closed_session_fixture([[self._role("sid-a")]])
+        released, _check = self._closed_session_fixture([[self._role("sid-a")], [self._role("sid-a")]])
         with mock.patch.object(handover, "record_steward_release", return_value=False):
             watch = mock.Mock(return_value=True)
             summary = peer_message.release_closed_session("claude", "sid-a", reason="retired",

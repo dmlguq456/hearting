@@ -115,8 +115,8 @@ SURFACES = (
     {
         "id": "claude-settings.defaultMode",
         "title": "Claude settings.json permissions.defaultMode",
-        "seeded_by": "harness install (Claude activation, once)",
-        "when_absent": "template adapters/claude/settings.json applies until seeded",
+        "seeded_by": "user (the managed install never writes permissions; a dev `harness install` copies the template once)",
+        "when_absent": "Claude Code's own default applies",
         "validate": claude_settings_config.validate,
     },
 ) + tuple(

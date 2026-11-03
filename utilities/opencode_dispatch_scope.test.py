@@ -84,7 +84,7 @@ class OpenCodeDispatchScopeFixtureTest(unittest.TestCase):
             "--worker-type", "stage", "--assigned-contract", "code-execute",
             "--unit", "dev/backend", "--dispatch-depth", "1", "--intensity", "standard",
             "--registered-worker", "1", "--launch-lifecycle", "foreground-scoped",
-            "--foreground-timeout", "240", "--model", "openai/gpt-6.1-sol",
+            "--foreground-timeout", "240", "--model", "openai/model-x",
             "--variant", "runtime-default", "--prompt-text",
             "Run only the isolated guard fixture.",
         ]

@@ -1379,6 +1379,12 @@ def cmd_runtime(args):
                     "remove it, nothing may write there)"
                 )
         if args.runtime_command == "doctor":
+            # The README sends a new install here. PyYAML is a stated requirement that only
+            # the planning (frame) step reads, so say once when it is missing; direct work
+            # runs without it, so the exit code stays as it is.
+            pyyaml = host_probes.probe_pyyaml()
+            if pyyaml["status"] != "ok":
+                lines.append("missing: " + pyyaml["detail"])
             # Cross-surface skew is a property of the INSTALLATION, not of any one runtime,
             # so it is reported once after the per-runtime loop. The managed release root
             # is passed in rather than imported inside runtime_activation, which keeps that
@@ -1414,6 +1420,9 @@ def cmd_runtime(args):
                 exit_code = EXIT_VERIFY_FAIL
             for report in reports:
                 report["surface_skew"] = skew
+            if shutil.which("herdr") is None:
+                # Optional, never a failure: one line names what is off without herdr.
+                lines.append("optional: " + host_probes.probe_herdr()["detail"])
         if args.runtime_command in {"activate", "refresh"} and "codex" in targets:
             try:
                 launcher_result = codex_launcher.uninstall(
