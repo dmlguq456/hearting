@@ -2845,12 +2845,8 @@ def emit_orphan_status(rows, args):
     return 0
 
 
-def emit_orphan_scan(rows, args):
-    """SD-64/71: fail-open registry-wide orphan count for preflight status.
-
-    No filter is required (unlike ``reconcile``) since a status probe does
-    not know a specific route ahead of time; it only ever reads.
-    """
+def orphan_scan_rows(rows, args):
+    """SD-64/71: the orphaned conductors among ``rows`` (read-only)."""
     newest = {}
     for item in rows:
         key = fold_key(item["meta"])
@@ -2868,10 +2864,64 @@ def emit_orphan_scan(rows, args):
             boundary = resume_boundary(route_file, incomplete)
             orphans.append({"attempt_id": meta.get("attempt_id"), "route_id": route_id,
                             "slug": row["slug"], "resume_boundary": boundary or "-"})
+    return orphans
+
+
+def emit_orphan_scan(rows, args):
+    """SD-64/71: fail-open registry-wide orphan count for preflight status.
+
+    No filter is required (unlike ``reconcile``) since a status probe does
+    not know a specific route ahead of time; it only ever reads.
+    """
+    orphans = orphan_scan_rows(rows, args)
     print(f"check=ok\norphaned_conductor_jobs={len(orphans)}")
     if orphans:
         print(f"orphaned_resume_boundary={orphans[0]['resume_boundary']}")
         print(json.dumps(orphans, sort_keys=True))
+    return 0
+
+
+def emit_status_snapshot(args):
+    """Every registry fact `harness-status.sh` shows, from one read of jobs.log.
+
+    The open-row count and slugs (rows of exactly six fields with status
+    ``open``, as the former two awk passes counted), the observed-status
+    evidence, the orphan scan and the resource-run counts used to read the
+    registry five times in five processes on every OpenCode turn. One pinned
+    generation now serves all of them; each part stays fail-soft on its own,
+    as the separate commands were. Resource counts are printed with a
+    ``resource_count_`` prefix for the status script to place.
+    """
+    from dispatch_registry_cache import registry_read_scope, registry_snapshot
+    with registry_read_scope():
+        lines = registry_snapshot(args.jobs).lines
+        rows = read_rows(args.jobs, lines=lines)
+        open_slugs = [fields[4] for fields in (line.split("\t") for line in lines)
+                      if len(fields) == 6 and fields[1] == "open"]
+        print(f"headless_open_jobs={len(open_slugs)}")
+        if open_slugs:
+            print("headless_open_slugs=" + ",".join(open_slugs))
+        try:
+            evidence = observed_status_rows(rows, args)
+            print("headless_evidence=" + json.dumps(evidence, ensure_ascii=False, separators=(",", ":")))
+        except Exception:  # noqa: BLE001 - as the separate command: unknown, never a failed status
+            print("headless_evidence=unknown")
+        try:
+            orphans = orphan_scan_rows(rows, args)
+        except Exception:  # noqa: BLE001 - as the separate command: no orphan count is 0
+            orphans = []
+        print(f"orphaned_conductor_jobs={len(orphans)}")
+        if orphans:
+            print(f"orphaned_resume_boundary={orphans[0]['resume_boundary']}")
+        try:
+            # F-59 resource counts read the registry for legacy owner identity;
+            # inside this scope that is the same pinned read.
+            import resource_run_registry
+            resources = resource_run_registry.counts()
+            for key in ("working", "stale", "exited", "malformed"):
+                print(f"resource_count_{key}={resources[key]}")
+        except Exception:  # noqa: BLE001 - the status then asks resource_run_registry itself
+            pass
     return 0
 
 
@@ -2903,7 +2953,7 @@ def emit_inventory(state_root, args):
 
 
 def main(argv):
-    p = argparse.ArgumentParser(description=__doc__, allow_abbrev=False); p.add_argument("operation", choices=("current", "liveness", "observed-status", "reconcile", "attempt-state", "orphan-status", "orphan-scan", "repair-stale-row", "resolve-terminal-conflict", "archive-import", "inventory"))
+    p = argparse.ArgumentParser(description=__doc__, allow_abbrev=False); p.add_argument("operation", choices=("current", "liveness", "observed-status", "reconcile", "attempt-state", "orphan-status", "orphan-scan", "status-snapshot", "repair-stale-row", "resolve-terminal-conflict", "archive-import", "inventory"))
     p.add_argument("--jobs", type=Path); p.add_argument("--global-jobs", type=Path); p.add_argument("--local-jobs", type=Path)
     p.add_argument("--session"); p.add_argument("--route")
     p.add_argument("--node"); p.add_argument("--attempt"); p.add_argument("--job"); p.add_argument("--all", action="store_true")
@@ -3013,6 +3063,8 @@ def main(argv):
                 "--expected-row-sha256", result["row_sha256"], "--apply"]) + " --review-evidence <review report>"
         print("check=ok\n" + json.dumps(result, sort_keys=True))
         return 0
+    if args.operation == "status-snapshot":
+        return emit_status_snapshot(args)
     if args.operation not in ("liveness", "orphan-scan", "observed-status") and not any((args.session, args.route, args.node, args.attempt, args.job)):
         print("check=failed\nreason=current-filter-required"); return 64
     recovery_modes = sum(bool(value) for value in (

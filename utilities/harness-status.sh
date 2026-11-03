@@ -96,42 +96,35 @@ if [ -z "$status_home" ] || [ ! -f "$status_home/core/CORE.md" ]; then
 fi
 state_root=$(AGENT_HOME="$status_home" "$self_dir/dispatch-state-root.sh" 2>/dev/null) || state_root=""
 jobs_log=${AGENT_DISPATCH_JOBS:-${state_root:+$state_root/jobs.log}}
-headless_open=0
-headless_slugs=""
+# One read of the registry for every fact below: the open rows (exactly six
+# fields, status open), the observed process and result evidence, and the
+# SD-64/71 orphaned-conductor scan (dead owner, incomplete route, open child or
+# ready un-started successor), and the F-59 resource-run counts below.
+# Read-only; it changes no row and runs no work.
+resource_counts=""
 if [ -n "$jobs_log" ] && [ -f "$jobs_log" ]; then
-  headless_open=$(awk -F '\t' 'NF==6 && $2=="open"{c++} END{print c+0}' "$jobs_log")
-  headless_slugs=$(awk -F '\t' 'NF==6 && $2=="open"{printf "%s%s", sep, $5; sep=","}' "$jobs_log")
-fi
-printf 'headless_open_jobs=%s\n' "$headless_open"
-if [ -n "$headless_slugs" ]; then
-  printf 'headless_open_slugs=%s\n' "$headless_slugs"
-fi
-# Counts above name registry rows. This view observes process and result
-# evidence without changing any row or running work.
-if [ -n "$jobs_log" ] && [ -f "$jobs_log" ]; then
-  python3 "$self_dir/dispatch-registry.py" observed-status --jobs "$jobs_log" --agent-home "$status_home" 2>/dev/null \
-    || printf 'headless_evidence=unknown\n'
+  if registry_facts=$(python3 "$self_dir/dispatch-registry.py" status-snapshot --jobs "$jobs_log" --agent-home "$status_home" 2>/dev/null); then
+    printf '%s\n' "$registry_facts" | grep -v '^resource_count_' || true
+    resource_counts=$(printf '%s\n' "$registry_facts" | sed -n 's/^resource_count_//p')
+  else
+    # The status stays usable without the shared reader: the count from the
+    # file itself, unknown evidence and no orphan count.
+    awk -F '\t' 'NF==6 && $2=="open"{c++; slugs=slugs sep $5; sep=","}
+      END{print "headless_open_jobs=" c+0; if (slugs != "") print "headless_open_slugs=" slugs}' "$jobs_log"
+    printf 'headless_evidence=unknown\n'
+    printf 'orphaned_conductor_jobs=0\n'
+  fi
 else
+  printf 'headless_open_jobs=0\n'
   printf 'headless_evidence=none\n'
-fi
-
-# SD-64/71: orphaned-conductor visibility (dead owner, incomplete route, open
-# child or ready un-started successor). Fail-open to 0 with no registry.
-orphaned_conductor_jobs=0
-orphaned_resume_boundary=""
-if [ -n "$jobs_log" ] && [ -f "$jobs_log" ]; then
-  scan=$(python3 "$self_dir/dispatch-registry.py" orphan-scan --jobs "$jobs_log" --agent-home "$status_home" 2>/dev/null || true)
-  orphaned_conductor_jobs=$(printf '%s\n' "$scan" | awk -F= '$1=="orphaned_conductor_jobs"{print $2; exit}')
-  orphaned_resume_boundary=$(printf '%s\n' "$scan" | awk -F= '$1=="orphaned_resume_boundary"{print $2; exit}')
-fi
-printf 'orphaned_conductor_jobs=%s\n' "${orphaned_conductor_jobs:-0}"
-if [ -n "${orphaned_resume_boundary:-}" ]; then
-  printf 'orphaned_resume_boundary=%s\n' "$orphaned_resume_boundary"
+  printf 'orphaned_conductor_jobs=0\n'
 fi
 
 # F-59: the same exact-identity classifier used by Fleet. A malformed index or
 # registry is diagnostic data, never a reason for the status snapshot to fail.
-resource_counts=$(python3 "$self_dir/resource_run_registry.py" counts --format shell 2>/dev/null || true)
+if [ -z "$resource_counts" ]; then
+  resource_counts=$(python3 "$self_dir/resource_run_registry.py" counts --format shell 2>/dev/null || true)
+fi
 resource_live=$(printf '%s\n' "$resource_counts" | awk -F= '$1=="working"{print $2; exit}')
 resource_stale=$(printf '%s\n' "$resource_counts" | awk -F= '$1=="stale"{print $2; exit}')
 resource_exited=$(printf '%s\n' "$resource_counts" | awk -F= '$1=="exited"{print $2; exit}')
