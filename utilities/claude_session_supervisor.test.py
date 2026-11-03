@@ -3345,5 +3345,27 @@ class TerminalCommitActivationTests(unittest.TestCase):
 
 
 
+class TurnTokenUsageTest(unittest.TestCase):
+    """A resume-process turn leaves its token counters in the attempt log for the cost line."""
+
+    def test_counters_only_and_only_for_one_process_per_turn(self):
+        args = SimpleNamespace(parent_attempt_id=PARENT)
+        result = {"type": "result", "result": "secret answer text",
+                  "usage": {"input_tokens": 3, "cache_creation_input_tokens": 50,
+                            "cache_read_input_tokens": 900, "output_tokens": 40,
+                            "server_tool_use": {"web_search_requests": 1}, "service_tier": "standard"}}
+        row = supervisor.turn_token_usage(args, 2, "resume-process", result)
+        self.assertEqual(row, {"type": "dispatch.supervisor.token_usage", "parent_attempt_id": PARENT,
+                               "turn_ordinal": 2,
+                               "token_usage": {"turn": {"input_tokens": 3, "cache_creation_input_tokens": 50,
+                                                        "cache_read_input_tokens": 900, "output_tokens": 40}}})
+        self.assertNotIn("secret", json.dumps(row))
+        # A long-lived stream's result is not proven to cover one turn only: left out.
+        self.assertIsNone(supervisor.turn_token_usage(args, 2, "stream-json", result))
+        self.assertIsNone(supervisor.turn_token_usage(args, 2, "resume-process", {"type": "result"}))
+        self.assertIsNone(supervisor.turn_token_usage(
+            args, 2, "resume-process", {"usage": {"input_tokens": True, "output_tokens": -1}}))
+
+
 if __name__ == "__main__":
     unittest.main()
