@@ -20,6 +20,7 @@ import verifier
 import user_model_config
 import safe_fs
 import herdr_integration
+import user_rules
 
 RUNTIME = "opencode"
 
@@ -123,7 +124,9 @@ def _auto_loaded_bootstrap():
 
     Return ``None`` when that link is absent; the config entry is then the only
     load path and must stay. The symlink may point at an immutable snapshot
-    whose bytes trail this checkout, so the target path counts as well.
+    whose bytes trail this checkout, so the target path counts as well. When
+    the user keeps global rules, activation renders the file as their rules
+    block followed by the bootstrap, which is the same single carrier.
     """
     path = paths.xdg_config_home() / "opencode" / "AGENTS.md"
     if not path.exists():
@@ -132,6 +135,11 @@ def _auto_loaded_bootstrap():
         "/adapters/opencode/AGENTS.md"
     ):
         return path
+    try:
+        if not path.is_symlink() and path.read_bytes().startswith(user_rules.BEGIN):
+            return path
+    except OSError:
+        return None
     if _digest(path) == _digest(_instructions_path()):
         return path
     return None

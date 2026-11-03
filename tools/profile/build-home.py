@@ -306,12 +306,33 @@ def write_worker_copy(path, data):
         Path(temporary).unlink(missing_ok=True)
 
 
-def _codex_override_format():
-    path = Path(__file__).resolve().parents[1] / 'install/codex_override.py'
-    spec = importlib.util.spec_from_file_location('hearting_codex_override_format', path)
+def _install_module(name):
+    """Load one stdlib-only installer module by path, off the dispatch import path."""
+    path = Path(__file__).resolve().parents[1] / 'install' / f'{name}.py'
+    spec = importlib.util.spec_from_file_location(f'hearting_install_{name}', path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _codex_override_format():
+    return _install_module('codex_override')
+
+
+def publish_opencode_user_rules(claude_home, home, config):
+    """A v1 OpenCode worker reads only its own config home, so list the user's rules there.
+
+    The main session gets the same block in front of its global AGENTS.md; a v2
+    worker shares that main service and its global instructions.
+    """
+    rules = _install_module('user_rules').block(Path(claude_home))
+    target = Path(home) / 'hearting-user-rules.md'
+    if rules:
+        write_worker_copy(target, rules)
+        if str(target) not in config['instructions']:
+            config['instructions'].append(str(target))
+    elif target.is_file() and not target.is_symlink():
+        target.unlink()
 
 
 def publish_codex_user_override(source, home, bootstrap_name):
@@ -878,6 +899,8 @@ def build_worker_home(agent_home, harness, worker_type, identity, *, env=None, d
             config['permission'] = permission
             for name in ('plugins', 'plugin'):
                 symlink(source / name, home / name)
+            publish_opencode_user_rules(env.get('CLAUDE_CONFIG_DIR') or Path(home_env) / '.claude',
+                                        home, config)
         write_json(home / 'opencode.json', config)
         runtime = home / 'runtime'
         for kind in ('data', 'cache', 'state', 'config'):

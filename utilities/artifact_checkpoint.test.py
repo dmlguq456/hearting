@@ -13,6 +13,10 @@ import time
 import unittest
 from unittest import mock
 
+# The card screens these tests compare are Korean and UI text defaults to English,
+# so this suite declares the Korean operator language itself (tools/i18n/ui_text.py).
+os.environ["FLEET_NOW_LANG"] = "Korean"
+
 import artifact_cycle_titles as CT
 import artifact_checkpoint_trigger as T
 import artifact_manifest as m

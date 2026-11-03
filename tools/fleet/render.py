@@ -10351,6 +10351,17 @@ def _collect_memory_observed(*, include_backlog=False):
         return None, "failed"
 
 
+def _collect_project_status(sessions):
+    """Status documents for the sessions' projects (collectors.project_status); None in demo or on failure."""
+    if os.environ.get("FLEET_DEMO"):
+        return None
+    try:
+        from .collectors import project_status
+        return project_status.collect(getattr(session, "cwd", None) for session in sessions or ())
+    except Exception:
+        return None
+
+
 def _collect_governor():
     try:
         from .collectors import governor
@@ -10429,6 +10440,7 @@ def render_once(collect_all, hfilter, section, *, compute_hosts_refresh=None):
         import shutil
         size = shutil.get_terminal_size((100, 45))
         snapshot.governor, snapshot.memory = governor_snapshot, mem_snapshot
+        snapshot.project_status = _collect_project_status(sessions)
         gitinfo.enrich_entities(list(sessions) + list(jobs), schedule_ahead=False)
         frame = _explorer_once_frame(snapshot, size.columns, size.lines, detail=True)
         sys.stdout.write("\n".join(frame.text_rows()).rstrip() + "\n")
@@ -11990,9 +12002,9 @@ def _explorer_text_key(ch):
 
 
 def _explorer_question_refs():
+    from .explorer.state import older_waits_shown
     questions = getattr(_EXPLORER_MODEL, "questions", ()) if _EXPLORER_MODEL is not None else ()
-    older_open = getattr(_EXPLORER_STATE, "opened_for", lambda *_: "")(
-        "qolder:QUESTIONS", "") == "open"
+    older_open = older_waits_shown(_EXPLORER_STATE)
     return tuple(dict(item.get("ref") or {}) for item in questions
                  if isinstance(item, Mapping) and isinstance(item.get("ref"), Mapping)
                  and (not item.get("older") or older_open))
@@ -12266,6 +12278,7 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
             gitinfo.enrich_entities(value.sessions + value.jobs, schedule_ahead=True)
             value.memory, memory_state = _collect_memory_observed(include_backlog=_EXPLORER_ENABLED)
             value.governor = governor
+            value.project_status = _collect_project_status(value.sessions)
             observations = dict(getattr(value, "observations", None) or {})
             observations["optional:memory"] = {"state": memory_state,
                                                 "observed_at": time.time()}

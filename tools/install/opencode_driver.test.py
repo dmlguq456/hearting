@@ -162,6 +162,17 @@ class BootstrapLoadPathCheckTest(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertIn("2 times", result["detail"])
 
+    def test_rendered_bootstrap_led_by_user_rules_is_one_carrier(self):
+        def rendered(directory):
+            bootstrap = (SOURCE_ROOT / "adapters" / "opencode" / "AGENTS.md").read_bytes()
+            (directory / "AGENTS.md").write_bytes(
+                b"<!-- hearting:user-rules begin (fixture) -->\nrule\n"
+                b"<!-- hearting:user-rules end -->\n\n" + bootstrap)
+
+        result = self._check(rendered)
+        self.assertTrue(result["ok"], result["detail"])
+        self.assertIn("exactly once", result["detail"])
+
     def test_no_carrier_fails(self):
         result = self._check(lambda directory: None)
         self.assertFalse(result["ok"])

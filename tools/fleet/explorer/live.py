@@ -909,6 +909,11 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
             state = "blocked"
         else:
             state = "idle"
+        # The route reader's own verdict that a route still marked in flight has nothing of it
+        # running (``route.route_liveness``): shown as no response, never as working, never closed.
+        no_response = state in ("working", "idle") and _text(view.get("liveness")) == "unknown"
+        if no_response:
+            state = "stale"
         shown_node = active or next((n for n in view_nodes if n.get("state") != "done"), None) \
             or (view_nodes[-1] if view_nodes else None)
         run_children = [r for r in resources if rid in (_text(_get(r, "route_id")), _route_stem(_get(r, "route")))
@@ -924,6 +929,8 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
             "done" if state == "done" or (total and done == total) else "active"
         progress = f"{done}/{total}" if total else None
         worker_node, state_text = shown_node, None
+        if no_response:
+            state_text = "no work running"
         if state == "dead" and shown_node is not None and _stage_state(shown_node) == "todo":
             earlier = [n for n in view_nodes if _stage_state(n) in ("done", "failed")]
             if earlier:                            # the owner ended between stages: its last worker
@@ -1182,11 +1189,91 @@ def _repo_records(session_rows, routes, results=None, now=None):
     return repos
 
 
-def _question_records(snapshot, session_rows, session_index, now):
-    """Project only current, body-free records from the shared answer-wait cache."""
+STATUS_STALE_DAYS = 3          # an older status document gets its age in front of its line
+
+
+def _repo_status(repos, snapshot, session_rows, session_index, routes, questions, results, now):
+    """Attach each named project's status line (D4 #3) to its repo record as ``status``.
+
+    The project's status document (``collectors.project_status``, read by the detail pass)
+    gives the line, the count waiting on the person and the next step. Without one, the
+    facts Fleet already holds stand in: routes with live work (``current``, the same test
+    as a session row's ``route N``), questions waiting, and the newest completed result.
+    A project with none of these gets no ``status``.
+    """
+    documents = _get(snapshot, "project_status")
+    documents = documents if isinstance(documents, Mapping) else {}
+    cwds = {}
+    for row in session_rows:
+        cwd = _text(_get(session_index[row["tag"]]["session"], "cwd"))
+        if cwd:
+            cwds.setdefault(row["repo_id"], []).append(cwd)
+    for repo in repos:
+        name = repo["id"]
+        if name == UNKNOWN_REPO:
+            continue
+        doc = None
+        for cwd in cwds.get(name, ()):
+            found = documents.get(cwd)
+            if (isinstance(found, Mapping) and _num(found.get("mtime")) is not None
+                    and (doc is None or found["mtime"] > doc["mtime"])):
+                doc = found
+        open_routes = sum(1 for route in routes if route["repo"] == name and route.get("current"))
+        asked = sum(1 for item in questions if item.get("project") == name and not item.get("older"))
+        result = (results or {}).get(name) or {}
+        done_at = _num(result.get("at")) if result.get("result") == "success" else None
+        if doc is None and not (open_routes or asked or repo.get("done")):
+            continue
+        status = {"routes": open_routes, "questions": asked,
+                  "done": repo.get("done"), "done_age": repo.get("age")}
+        if doc is None:
+            status["changed"] = repo.get("age")
+        else:
+            decisions = [str(item) for item in doc.get("decisions") or () if _text(item)]
+            following = [str(item) for item in doc.get("next") or () if _text(item)]
+            doc_at = doc["mtime"]
+            stale = now is not None and now - doc_at >= STATUS_STALE_DAYS * 86400
+            status.update({
+                "line": _text(doc.get("line")) or _text(doc.get("title")) or doc.get("name"),
+                "decisions": len(decisions), "decision": decisions[0] if decisions else None,
+                "next": following[0] if following else None,
+                "doc": _text(doc.get("relative")) or _text(doc.get("name")),
+                "doc_age": _ago(doc_at, now),
+                "stale": bool(stale),
+                "changed": _ago(max(doc_at, done_at or 0), now)})
+        repo["status"] = status
+
+
+_OWNER_STATES = frozenset(("live", "successor", "none", "unknown"))
+
+
+def _clock_or_date(epoch, now):
+    """``21:40`` today, ``10-26 21:40`` on another day; None when unreadable."""
+    value = _num(epoch)
+    if value is None:
+        return None
+    try:
+        when = datetime.datetime.fromtimestamp(value)
+        today = datetime.datetime.fromtimestamp(now).date() if _num(now) is not None else None
+    except (OverflowError, OSError, ValueError):
+        return None
+    return when.strftime("%H:%M" if when.date() == today else "%m-%d %H:%M")
+
+
+def _question_records(snapshot, session_rows, session_index, now, routes=(), resolver=None):
+    """Project only current, body-free records from the shared answer-wait cache.
+
+    Each record says who answers it (the session row, or why there is none), when it began, which
+    route it belongs to and which gate (``node``) it waits on. ``owner_state`` and ``fold`` are the
+    answer-wait producer's own verdicts; nothing here judges a wait by its age.
+    """
     waits = _get(snapshot, "answer_waits")
     if not isinstance(waits, Mapping):
         return [], {"state": "unknown", "total": None, "older": None}
+    route_by_id = {str(route.get("id")): route for route in routes or ()
+                   if isinstance(route, Mapping) and route.get("id")}
+    tag_by_sid = {known: tag for tag, info in session_index.items()
+                  for known in (info.get("ids") or ())}
 
     complete = waits.get("complete") is True
     health = tuple(item for item in (waits.get("health") or ()) if isinstance(item, Mapping))
@@ -1235,18 +1322,43 @@ def _question_records(snapshot, session_rows, session_index, now):
             value = _text(value)
             if value:
                 ref[name] = value
-        questions.append({
+        owner_state = _text(item.get("owner_state"))
+        owner_state = owner_state if owner_state in _OWNER_STATES else None
+        fold = _text(item.get("fold"))
+        fold = fold if older and fold in ("older", "ownerless") else ("older" if older else None)
+        route_id = _text(item.get("route_id"))
+        route = route_by_id.get(route_id) if route_id else None
+        cwd = _text(item.get("cwd"))
+        project = (session["repo"] if session else
+                   _repo_of(resolver, cwd) if cwd and resolver is not None else None)
+        registered_sid = _text(item.get("registered_session_id"))
+        registered_tag = tag_by_sid.get(registered_sid) if registered_sid else None
+        # The original asker by its own tag; within the same seat (a cleared session) by its id.
+        registered = (f"[{registered_tag}]" if registered_tag and (not session or registered_tag != session["tag"])
+                      else f"session {registered_sid[:8]}" if registered_sid else None)
+        record = {
             "id": ident, "tag": tag, "h": session["harness"] if session else harness,
+            "m": session.get("model") if session else None,
+            "e": session.get("effort") if session else None,
             "ref": ref,
             "older": older,
             "kind": _text(item.get("kind")) or source or "wait",
             "source": source, "wait": _since(item.get("since"), now),
-            "project": session["repo"] if session else None,
+            "project": project,
             "session_tag": session["tag"] if session else None,
             "open_tag": session["tag"] if session else None,
             "pane": session["pane"] if session else None,
-            "marker": "◑" if source == "S2" else "●",
-        })
+            "marker": "◌" if owner_state == "none" else "◑" if source == "S2" else "●",
+            "node": _text(item.get("node")),
+            "since_at": _clock_or_date(item.get("since"), now),
+            "route_id": route_id,
+            "route_title": _text(route.get("title")) if route else None,
+            "owner_state": owner_state,
+            "owner_sid": sid[:8] if sid and not session else None,
+            "registered": registered if owner_state == "successor" else None,
+            "fold": fold,
+        }
+        questions.append(record)
         if session and not older:
             session["ask"] = "answer needed"
             marker = "◑" if source == "S2" else "●"
@@ -1259,8 +1371,13 @@ def _question_records(snapshot, session_rows, session_index, now):
     older = waits.get("older")
     if isinstance(older, bool) or not isinstance(older, int) or older < 0:
         older = None
+    ownerless = waits.get("ownerless")
+    if isinstance(ownerless, bool) or not isinstance(ownerless, int) or ownerless < 0:
+        ownerless = None
     summary = {"state": state, "total": total if state == "complete" else None,
                "older": older if state == "complete" else None}
+    if ownerless is not None and state == "complete":
+        summary["ownerless"] = ownerless
     return questions, summary
 
 
@@ -2855,7 +2972,8 @@ def build_view_model(snapshot, accepted_detail=None, cached_config=None, now=Non
         sid_of = {row["tag"]: session_index[row["tag"]]["sid"] for row in session_rows}
         session_rows.sort(key=lambda row: position.get(str(sid_of.get(row["tag"])), len(position)))
     routes, nodes = _route_records(snapshot, session_rows, session_index, resolver, clock)
-    repos = _repo_records(session_rows, routes, _repo_results(snapshot, resolver, clock), clock)
+    results = _repo_results(snapshot, resolver, clock)
+    repos = _repo_records(session_rows, routes, results, clock)
     if not order:
         latest_by_repo, mtime_by_tag = {}, {}
         for row in session_rows:
@@ -2867,7 +2985,9 @@ def build_view_model(snapshot, accepted_detail=None, cached_config=None, now=Non
         repo_rank = {row["id"]: index for index, row in enumerate(repos)}
         session_rows.sort(key=lambda row: (repo_rank.get(row["repo_id"], len(repo_rank)),
                                            -mtime_by_tag.get(row["tag"], 0), row["tag"]))
-    questions, answer_wait_summary = _question_records(snapshot, session_rows, session_index, clock)
+    questions, answer_wait_summary = _question_records(snapshot, session_rows, session_index, clock,
+                                                       routes=routes, resolver=resolver)
+    _repo_status(repos, snapshot, session_rows, session_index, routes, questions, results, clock)
     peer_nodes, peer_edges = _peer_records(session_rows, session_index, clock, snapshot)
     hosts, compute = _host_records(snapshot, session_index)
     gpu_lines = _session_gpu_lines(snapshot, session_index)

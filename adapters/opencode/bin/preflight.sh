@@ -116,7 +116,6 @@ usage: preflight.sh write <file> [session-id] [turn-id]
        preflight.sh headless [--check] <worktree>
        preflight.sh nested-headless --parent-harness <h> --parent-transport <t> --parent-sandbox <s> --child-harness <h> --launch-authority <authority> --worktree <path> [--json]
        preflight.sh dispatch-readiness --worktree <path> --jobs <canonical-jobs.log> --owner-harness <h>... --child-harness <h>... --output <evidence.json>
-       preflight.sh broker <status|stop> --jobs <jobs.log> [--root <broker-root>]  # legacy drain only
        preflight.sh dispatch [--dry-run|--register|--start] --worktree <path> --slug <slug> --capability <name> --capability-mode <mode> [--worker-mode <family/mode>] [--qa <level>] [--intensity <level>] [--dispatch-depth 1|2] [--parent <slug>] [--worker-type owner|stage|review|support|frame] [--unit <unit>] [--assigned-contract <capability>] [--owner <capability>] [--agent <agent>] (--model-profile <deep|balanced-deep|balanced|light|mini> [--model-role <role>]|--model-role <role>|--model <model> --variant <variant>|--inherit-model-settings) [--prompt-file <file>|--prompt-text <text>] [--jobs <jobs.log>] [--log-dir <dir>]
        preflight.sh dispatch-chain --route <route.json> --node <id> --slug <slug> --parent <slug> [--capability-mode <mode>] [--worker-mode <family/mode>] [--model-role <role>] [--dry-run|--register|--start]
        preflight.sh dispatch-session-chain <check|register|start> --manifest <chain.json> --parent <slug> [--jobs <jobs.log>]
@@ -461,7 +460,7 @@ job_registry=<agent-home>/.dispatch/jobs.log (immutable AGENT_DISPATCH_JOBS for 
 nested_eligibility_check=adapters/opencode/bin/preflight.sh nested-headless --parent-harness <h> --parent-transport <t> --parent-sandbox <s> --child-harness <h> --launch-authority <a> --worktree <path>
 fallback_chain=same-harness-headless,cross-harness-headless,native-subagent,inline
 fallback_runner=adapters/opencode/bin/preflight.sh dispatch-chain --route <route> --node <node> --dry-run|--register|--start
-broker_lifecycle=retired-status-stop-only
+broker_lifecycle=retired
 launch_authority=conductor
 liveness_surface=opencode-sqlite-session-mtime+plugin-heartbeat
 liveness_heartbeat=<agent-home>/.dispatch/logs/<slug>.heartbeat
@@ -510,10 +509,6 @@ EOF
   dispatch-readiness)
     shift
     python3 "$ROOT/utilities/dispatch-readiness.py" "$@"
-    ;;
-  broker)
-    shift
-    AGENT_HOME="$AGENT_ROOT" python3 "$ROOT/utilities/dispatch-broker.py" "$@"
     ;;
   liveness)
     shift

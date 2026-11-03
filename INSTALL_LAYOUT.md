@@ -374,6 +374,9 @@ Change this single value to `ko`/`Korean` or `en`/`English` to override only the
 title; NOW keeps its existing language. Korean/Japanese/Chinese titles use at
 most 20 characters, English titles at most 40 characters and 3–6 words.
 Absent or invalid preferences use `auto`; `harness config status` reports the file.
+The same selection also chooses the language of screen text kept in the shared
+catalog `tools/i18n/messages.json` (English unless Korean is declared); no
+separate language setting exists.
 
 To use another small provider, point `FLEET_TITLE_COMMAND` at a no-tools wrapper. The
 value is parsed as an argv template, never through a shell:
@@ -448,7 +451,14 @@ bootstrap uses exactly one of those two carriers: `runtime activate` owns the
 `AGENTS.md` link, and `harness install opencode` merges the `instructions[]`
 entry only when that link is absent. Both at once inject the bootstrap twice —
 OpenCode dedupes instruction sources by resolved path, so a projection and the
-link count as two sources (`core/ADAPTATION.md §6.1`).
+link count as two sources (`core/ADAPTATION.md §6.1`). When the user keeps
+Claude user rules (`$CLAUDE_CONFIG_DIR/rules/*.md`), activation writes
+`AGENTS.md` as a regular file instead: those rules in one
+`hearting:user-rules` block, then the bootstrap. Update rewrites the file and
+uninstall removes it, as it removes the link; the rule files are only read. The
+whole file is Hearting's: an edit is kept beside it as `AGENTS.md.edited-<time>`
+before the rewrite, and a rule file that is not UTF-8 text is skipped and named
+in the activation report.
 
 Keep `$HOME/.config/opencode` and `$HOME/.local/share/opencode` runtime-owned;
 the harness merges its skill entries — and the fallback instruction entry — into
