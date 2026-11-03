@@ -1338,11 +1338,80 @@ def _recipient_index_lock(path, *, wait=True):
     fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
-        yield
+        yield fd
     finally:
         with contextlib.suppress(OSError):
             fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
+
+
+# The index lock file also holds the session's write generation: the per-write
+# update bumps it under the lock for every row write that names the session,
+# whether or not an index exists. A publisher reads it before its scan and
+# certifies only when it is unchanged under the lock, so a write that landed
+# between the scan's read and the publish (a row bound to this session) never
+# leaves an index that looks current without that row.
+_UNKNOWN_INDEX_GENERATION = -1
+
+
+def _parse_index_generation(raw):
+    text = raw.decode("ascii", "replace").strip()
+    if not text:
+        return 0  # An older release's lock file, or one never bumped.
+    return int(text) if text.isdigit() else _UNKNOWN_INDEX_GENERATION
+
+
+def _index_generation(path):
+    """The write generation of the index at ``path``: 0 when absent, -1 unreadable."""
+    lock_path = path.with_name(path.name + _RECIPIENT_INDEX_LOCK_SUFFIX)
+    try:
+        fd = os.open(lock_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return 0
+    except OSError:
+        return _UNKNOWN_INDEX_GENERATION
+    try:
+        return _parse_index_generation(os.read(fd, 64))
+    except OSError:
+        return _UNKNOWN_INDEX_GENERATION
+    finally:
+        os.close(fd)
+
+
+def _bump_index_generation(fd):
+    """Advance the generation in a lock file this process holds."""
+    current = _parse_index_generation(os.pread(fd, 64, 0))
+    os.ftruncate(fd, 0)
+    os.pwrite(fd, b"%d\n" % (max(current, 0) + 1), 0)
+
+
+def _session_index_generation(dispatch_root, endpoint):
+    """Generation of one session's index before a scan (``-1`` when unusable)."""
+    key = _index_key(endpoint)
+    if key is None or dispatch_root is None:
+        return _UNKNOWN_INDEX_GENERATION
+    try:
+        return _index_generation(recipient_index_path(dispatch_root, *key))
+    except ValueError:
+        return _UNKNOWN_INDEX_GENERATION
+
+
+def _index_generations(dispatch_root):
+    """Every session's generation under ``dispatch_root``; absent ones are 0."""
+    generations = {}
+    base = Path(dispatch_root).expanduser() / _RECIPIENT_INDEX_DIRECTORY
+    for harness in _RECIPIENT_HARNESSES:
+        try:
+            entries = list(os.scandir(base / harness))
+        except OSError:
+            continue
+        suffix = ".json" + _RECIPIENT_INDEX_LOCK_SUFFIX
+        for entry in entries:
+            if entry.name.endswith(suffix):
+                session_id = entry.name[:-len(suffix)]
+                generations[(harness, session_id)] = _index_generation(
+                    Path(entry.path[:-len(_RECIPIENT_INDEX_LOCK_SUFFIX)]))
+    return generations
 
 
 def _atomic_index_write(path, payload):
@@ -1456,12 +1525,15 @@ def _index_key(endpoint):
     return harness, session_id
 
 
-def _publish_recipient_index(pending, recipient, rows, names, *, sent=None, dispatch_root=None):
+def _publish_recipient_index(pending, recipient, rows, names, *, sent=None, dispatch_root=None,
+                             generation=None):
     """Best-effort atomic publish; a failure leaves the caller's scan result.
 
     ``dispatch_root`` is the explicit root a runner observed; an implicit hook
     publish derives it from the pending store (see `_recipient_index_write_root`).
     ``sent`` is the session's own sent rows when the same pass observed them.
+    ``generation`` is the session's write generation read before that pass; a
+    write for this session since then (or an unknown one) publishes nothing.
     """
     dispatch_root = (_recipient_index_write_root() if dispatch_root is None
                      else Path(dispatch_root).expanduser())
@@ -1474,6 +1546,9 @@ def _publish_recipient_index(pending, recipient, rows, names, *, sent=None, disp
     try:
         path = recipient_index_path(dispatch_root, harness, session_id)
         with _recipient_index_lock(path, wait=False):
+            if generation is not None and (generation == _UNKNOWN_INDEX_GENERATION
+                                           or _index_generation(path) != generation):
+                return None  # The scan may have missed that write; never certify it.
             _atomic_index_write(path, _index_payload(harness, session_id, rows, names, sent))
         return str(path)
     except (OSError, ValueError):
@@ -1502,15 +1577,18 @@ def _update_recipient_index(row, *, created):
 def _update_session_index(dispatch_root, harness, session_id, row, fields, *, created):
     """Apply one row write to one session's index, or retire it.
 
-    The published name set must be exactly the current one (minus this row
-    when it was just created); anything else means another write was not
-    observed, so the index can no longer prove its lists.
+    Every write first bumps the session's generation, so a publisher whose
+    scan overlapped it does not certify. The published name set must be
+    exactly the current one (minus this row when it was just created);
+    anything else means another write was not observed, so the index can no
+    longer prove its lists.
     """
     try:
         path = recipient_index_path(dispatch_root, harness, session_id)
-        if not path.is_file():
-            return  # Implicit publication owns creation, never a state transition.
-        with _recipient_index_lock(path):
+        with _recipient_index_lock(path) as lock_fd:
+            _bump_index_generation(lock_fd)
+            if not path.is_file():
+                return  # Implicit publication owns creation, never a state transition.
             payload = _index_json(path)
             if not _valid_index_payload(payload, harness, session_id):
                 return
@@ -1575,6 +1653,8 @@ def rebuild_recipient_index(dispatch_root, time_budget_s=1.0):
         budget = 1.0
     deadline = started + max(0.0, budget)
     pending = _pending_dir()
+    # Read before any row: a session written to during the pass is not certified.
+    generations = _index_generations(dispatch_root)
     names = _pending_names(pending)
     result = {"schema": _RECIPIENT_INDEX_SCHEMA, "complete": False, "scanned": 0,
               "recipients": 0, "rows": 0, "senders": 0, "sent": 0,
@@ -1630,7 +1710,8 @@ def rebuild_recipient_index(dispatch_root, time_budget_s=1.0):
     for (harness, session_id), lists in groups.items():
         if _publish_recipient_index(
                 pending, {"harness": harness, "session_id": session_id}, lists["rows"], names,
-                sent=lists["sent"], dispatch_root=dispatch_root) is not None:
+                sent=lists["sent"], dispatch_root=dispatch_root,
+                generation=generations.get((harness, session_id), 0)) is not None:
             recipients += bool(lists["rows"])
             senders += bool(lists["sent"])
     result.update(complete=True, scanned=scanned, recipients=recipients,
@@ -1840,6 +1921,10 @@ def _pending_rows(*, recipient=None, sender=None, read_context=None, strict=Fals
             for row in indexed:
                 yield row
             return
+    # Read before any row (see `_index_generation`): a write for this session
+    # during the scan keeps this pass from certifying an index without it.
+    generation = (_session_index_generation(_recipient_index_write_root(), recipient)
+                  if use_index else None)
     names = sorted(path.name for path in pending.glob("*.json"))
     # The scan's markers include this session's id, so every row it received
     # or sent is fully read here; both lists are published together.
@@ -1914,7 +1999,8 @@ def _pending_rows(*, recipient=None, sender=None, read_context=None, strict=Fals
         # index costs one small file. Future reads of it skip the scan.
         # A row this pass could not verify (or quarantined) leaves the index
         # unpublished: a partial observation is never current.
-        _publish_recipient_index(pending, recipient, observed, names, sent=observed_sent)
+        _publish_recipient_index(pending, recipient, observed, names, sent=observed_sent,
+                                 generation=generation)
 
 
 def _same_transfer_session(left, right):

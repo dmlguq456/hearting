@@ -512,6 +512,62 @@ class ContextHookIndexTest(IndexTestCase):
         peer_message.emit_peer_context(self.target, stream=again)
         self.assertEqual(again.getvalue(), "")
 
+    def test_indexed_read_returns_the_full_scans_rows_in_its_order(self):
+        _text, inbound = self.pending("in", sender=self.other, recipient=self.target)
+        _text, outbound = self.pending("out", sender=self.target, recipient=self.other)
+        _text, own = self.pending("self", sender=self.target, recipient=self.target)
+        self.unrelated(40, 0)
+        with mock.patch.object(peer_message, "_indexed_pending_rows", return_value=None):
+            full = list(peer_message._pending_rows(recipient=self.target, sender=self.target))
+        self.assertTrue(self.target_index(sent=True).complete)
+        with _PendingRowOpens() as meter:
+            indexed = list(peer_message._pending_rows(recipient=self.target, sender=self.target))
+        self.assertEqual(sorted(row["ref"] for row in full), sorted([inbound, outbound, own]))
+        self.assertEqual(indexed, full)
+        self.assertLessEqual(set(meter.names), {ref + ".json" for ref in (inbound, outbound, own)})
+
+    def _bind_during_publish(self, publish):
+        """RV-HOOK-LATENCY-1201: another process binds a row to the target after
+        the pass read it unbound and before that pass publishes the target's index."""
+        _text, bound = peer_message.prepare_peer_message(
+            "addressed by name", self.other, {"name": "race-name"}, defer=True)
+        original = peer_message._publish_recipient_index
+        fired = []
+
+        def racing(pending, recipient, *args, **kwargs):
+            if not fired and recipient.get("session_id") == self.target["session_id"]:
+                fired.append(peer_message.bind_unresolved_pending_recipient(
+                    bound, dict(self.target)))
+            return original(pending, recipient, *args, **kwargs)
+
+        with mock.patch.object(peer_message, "_publish_recipient_index", racing):
+            publish()
+        self.assertTrue(fired and fired[0], fired)
+        return bound
+
+    def _assert_bound_row_is_seen(self, bound):
+        indexed = self.target_index(sent=True)
+        if indexed.complete:
+            self.assertIn(bound, [entry["ref"] for entry in indexed])
+        hook = [row["ref"] for row in peer_message._pending_rows(
+            recipient=self.target, sender=self.target)]
+        stop = [row["ref"] for row in peer_message.pending_messages(self.target)]
+        self.assertIn(bound, hook)
+        self.assertIn(bound, stop)
+
+    def test_a_row_bound_during_a_full_scan_is_not_hidden_by_its_publish(self):
+        self.pending("unrelated", sender=self.other,
+                     recipient={"harness": "codex", "session_id": "far-away"})
+        bound = self._bind_during_publish(lambda: list(peer_message._pending_rows(
+            recipient=self.target, sender=self.target)))
+        self._assert_bound_row_is_seen(bound)
+
+    def test_a_row_bound_during_the_runner_rebuild_is_not_hidden_by_its_publish(self):
+        self.pending("to the target", sender=self.other, recipient=self.target)
+        bound = self._bind_during_publish(lambda: peer_message.rebuild_recipient_index(
+            self.dispatch_root, time_budget_s=60.0))
+        self._assert_bound_row_is_seen(bound)
+
     def test_an_index_without_a_sender_list_falls_back_and_is_republished(self):
         _text, outbound = self.pending("from the target", sender=self.target,
                                        recipient=self.other)
