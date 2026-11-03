@@ -18,7 +18,9 @@ from pathlib import Path
 _HERE = Path(__file__).resolve().parent
 _HOOK = _HERE / "peer-message-record.py"
 _UTILITIES = _HERE.parent / "utilities"
+sys.path.insert(0, str(_HERE.parent / "tools"))
 sys.path.insert(0, str(_UTILITIES))
+import fixture_processes
 import dispatch_pending_delivery as pending_delivery
 import peer_obligations
 _PEER_SPEC = importlib.util.spec_from_file_location("hook_test_peer_message", _UTILITIES / "peer-message.py")
@@ -30,6 +32,11 @@ class _BaseTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
+        # A real `peer-steward watch` leaves the shared obligation runner (and
+        # a cache refresher) detached on this root by design. Stop them before
+        # the root goes: a runner pass during rmtree rewrites what it finds
+        # missing under peer-steward/obligations (Errno 39). Cleanups run LIFO.
+        self.addCleanup(fixture_processes.reap, self._tmp.name)
         self.tmp_root = Path(self._tmp.name)
         self.jobs_path = self.tmp_root / "jobs.log"
         self.jobs_path.touch()
