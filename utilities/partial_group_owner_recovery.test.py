@@ -54,8 +54,7 @@ class PartialGroupOwnerRecoveryTest(unittest.TestCase):
         self.api = self.f.route_api
         self.prompts = {}
         self.fail_gap = True
-        self.env = dict(self.f.env, CLAUDE_SESSION_ID="fixture-session",
-                        HEARTING_GATES="on", HEARTING_WORKFLOW_GROUP_REVIEW="off",
+        self.env = dict(self.f.env, CLAUDE_SESSION_ID="fixture-session", HEARTING_WORKFLOW_GROUP_REVIEW="off",
                         OPENCODE_DISPATCH_EARLY_EXIT_WATCH=".2",
                         AGENT_ARTIFACT_ROOT=str(self.f.artifacts),
                         AGENT_MODEL_GOVERNOR_ROOT=str(self.f.artifacts / ".runtime/model-worker-governor"))

@@ -28,7 +28,7 @@ if _spec is None or _spec.loader is None:
     raise RuntimeError("capability-route loader unavailable")
 ROUTE = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(ROUTE)
-from hearting_gates import gates_on, same_work_or_refuse
+from hearting_gates import note_same_work_drift
 
 
 class OwnerRouteBindingError(ValueError):
@@ -250,9 +250,7 @@ def _owner_row_proof(fields: list[str], meta: dict[str, str], *, route: dict,
                      binding: OwnerRouteBinding | None = None) -> None:
     sealed = _row_binding(meta)
     if binding_mode == "sealed" and sealed != binding:
-        if gates_on():
-            raise OwnerRouteBindingError("owner-route-owner-binding-mismatch")
-        same_work_or_refuse("owner-route-owner-binding-mismatch")
+        note_same_work_drift("owner-route-owner-binding-mismatch")
     if binding_mode == "unbound" and sealed is not None:
         raise OwnerRouteBindingError("owner-route-owner-already-bound")
     raw_worktree = str(route.get("cwd") or "")
@@ -268,13 +266,9 @@ def _owner_row_proof(fields: list[str], meta: dict[str, str], *, route: dict,
         # Hermetic callers may provide an explicit sealed repository identity.
         expected_repo = str(route.get("repo") or "")
     if fields[3] != expected_worktree:
-        if gates_on():
-            raise OwnerRouteBindingError("owner-route-owner-worktree-mismatch")
-        same_work_or_refuse("owner-route-owner-worktree-mismatch")
+        note_same_work_drift("owner-route-owner-worktree-mismatch")
     if expected_repo and str(Path(fields[2]).resolve(strict=False)) != str(Path(expected_repo).resolve(strict=False)):
-        if gates_on():
-            raise OwnerRouteBindingError("owner-route-owner-repo-mismatch")
-        same_work_or_refuse("owner-route-owner-repo-mismatch")
+        note_same_work_drift("owner-route-owner-repo-mismatch")
     required = {
         "worker_type": "owner", "unit": "_kernel/owner", "attempt_schema_version": "2",
         "dispatch_depth": "1", "registered_worker": "1",
@@ -287,24 +281,20 @@ def _owner_row_proof(fields: list[str], meta: dict[str, str], *, route: dict,
         required["intensity"] = str(route["effective_intensity"])
     for key, value in required.items():
         if not value or meta.get(key) != value:
-            if gates_on() or not value or key in {
+            if not value or key in {
                 "worker_type", "unit", "attempt_schema_version", "dispatch_depth",
                 "registered_worker", "execution_surface",
             }:
                 raise OwnerRouteBindingError(f"owner-route-owner-{key.replace('_', '-')}-mismatch")
-            same_work_or_refuse(f"owner-route-owner-{key.replace('_', '-')}-mismatch")
+            note_same_work_drift(f"owner-route-owner-{key.replace('_', '-')}-mismatch")
     harness = environ.get("AGENT_DISPATCH_OWNER_HARNESS") or environ.get("AGENT_DISPATCH_CURRENT_HARNESS")
     if harness and meta.get("owner_harness") != harness:
-        if gates_on():
-            raise OwnerRouteBindingError("owner-route-owner-harness-mismatch")
-        same_work_or_refuse("owner-route-owner-harness-mismatch")
+        note_same_work_drift("owner-route-owner-harness-mismatch")
     # The wrapper exports the launch parent's exact session independently of a
     # runtime thread that may advance during continuation.
     parent_session = environ.get("AGENT_DISPATCH_PARENT_SESSION_ID", "")
     if parent_session and meta.get("parent_sid") != parent_session:
-        if gates_on():
-            raise OwnerRouteBindingError("owner-route-owner-session-mismatch")
-        same_work_or_refuse("owner-route-owner-session-mismatch")
+        note_same_work_drift("owner-route-owner-session-mismatch")
     # `parent_sid` is the session that launched the registered owner.  A
     # continuation's runtime_lineage.thread_id describes execution *inside*
     # that owner and may legitimately advance or fork, so it is a separate axis
@@ -561,9 +551,7 @@ def _verified_binding(binding: OwnerRouteBinding, *, expected_cwd: str | None = 
     if (verified.get("route_id"), verified.get("route_hash")) != (
         binding.route_id, binding.route_hash
     ):
-        if gates_on():
-            raise OwnerRouteBindingError("owner-route-binding-hash-mismatch")
-        same_work_or_refuse("owner-route-binding-hash-mismatch")
+        note_same_work_drift("owner-route-binding-hash-mismatch")
     return raw, verified
 
 
@@ -610,9 +598,9 @@ def _resolve_attachment_locked(jobs: Path, owner_attempt_id: str,
     )
     for valid, reason in route_checks:
         if not valid:
-            if gates_on() or not reason.endswith("-mismatch") or reason == "owner-route-depth-mismatch":
+            if not reason.endswith("-mismatch") or reason == "owner-route-depth-mismatch":
                 raise OwnerRouteBindingError(reason)
-            same_work_or_refuse(reason)
+            note_same_work_drift(reason)
     _owner_row_proof(
         fields, meta, route=route,
         environ={
@@ -622,21 +610,13 @@ def _resolve_attachment_locked(jobs: Path, owner_attempt_id: str,
         binding_mode="unbound",
     )
     if str(Path(fields[3]).resolve(strict=False)) != attachment.worktree:
-        if gates_on():
-            raise OwnerRouteBindingError("owner-route-attachment-worktree-mismatch")
-        same_work_or_refuse("owner-route-attachment-worktree-mismatch")
+        note_same_work_drift("owner-route-attachment-worktree-mismatch")
     if str(Path(fields[2]).resolve(strict=False)) != attachment.repo:
-        if gates_on():
-            raise OwnerRouteBindingError("owner-route-attachment-repo-mismatch")
-        same_work_or_refuse("owner-route-attachment-repo-mismatch")
+        note_same_work_drift("owner-route-attachment-repo-mismatch")
     if meta.get("parent_sid", "") != attachment.parent_session_id:
-        if gates_on():
-            raise OwnerRouteBindingError("owner-route-attachment-session-mismatch")
-        same_work_or_refuse("owner-route-attachment-session-mismatch")
+        note_same_work_drift("owner-route-attachment-session-mismatch")
     if meta.get("owner_harness", "") != attachment.owner_harness:
-        if gates_on():
-            raise OwnerRouteBindingError("owner-route-attachment-harness-mismatch")
-        same_work_or_refuse("owner-route-attachment-harness-mismatch")
+        note_same_work_drift("owner-route-attachment-harness-mismatch")
     return OwnerRouteBinding(binding.route_file, route["route_id"], route["route_hash"])
 
 
@@ -665,9 +645,7 @@ def resolve_owner_route_lifecycle(jobs: str | Path, *, owner_attempt_id: str,
         rows=None if registry_rows is None else registry_rows)
     row_binding = _row_binding(meta)
     if sealed_binding is not None and row_binding != sealed_binding:
-        if gates_on():
-            raise OwnerRouteBindingError("owner-route-owner-binding-mismatch")
-        same_work_or_refuse("owner-route-owner-binding-mismatch")
+        note_same_work_drift("owner-route-owner-binding-mismatch")
     attachment_path = _attachment_root(canonical_jobs) / _attachment_key(owner_attempt_id)
     if observer is not None:
         observer("file", attachment_path)
@@ -853,9 +831,7 @@ def resolve_owner_route_advance(
                 or str(Path(candidate.from_route_file).resolve(strict=False))
                 != str(Path(current.route_file).resolve(strict=False))
             ):
-                if gates_on():
-                    raise OwnerRouteBindingError("owner-route-advance-source-mismatch")
-                same_work_or_refuse("owner-route-advance-source-mismatch")
+                note_same_work_drift("owner-route-advance-source-mismatch")
             if (
                 candidate.from_generation != generation
                 or candidate.to_generation != generation + 1
@@ -869,9 +845,7 @@ def resolve_owner_route_advance(
                 and candidate.route_family_key
                 != current_route.get("route_family_key")
             ):
-                if gates_on():
-                    raise OwnerRouteBindingError("owner-route-advance-family-mismatch")
-                same_work_or_refuse("owner-route-advance-family-mismatch")
+                note_same_work_drift("owner-route-advance-family-mismatch")
             if _candidate_started_by_owner(
                 registry_rows, owner_attempt_id=owner_attempt_id,
                 candidate=candidate, source_route=current_route,
@@ -900,11 +874,7 @@ def resolve_owner_route_advance(
                 verified_target.get("route_id") != record.to_route_id
                 or verified_target.get("route_hash") != record.to_route_hash
             ):
-                if gates_on():
-                    raise OwnerRouteBindingError(
-                        "owner-route-advance-target-hash-mismatch"
-                    )
-                same_work_or_refuse("owner-route-advance-target-hash-mismatch")
+                note_same_work_drift("owner-route-advance-target-hash-mismatch")
             target = OwnerRouteBinding(
                 str(target_path.resolve()), verified_target["route_id"],
                 verified_target["route_hash"],
@@ -916,24 +886,16 @@ def resolve_owner_route_advance(
             edge.get("from_route_id") != current.route_id
             or edge.get("from_route_hash") != current.route_hash
         ):
-            if gates_on():
-                raise OwnerRouteBindingError(
-                    "owner-route-advance-supersession-mismatch"
-                )
-            same_work_or_refuse("owner-route-advance-supersession-mismatch")
+            note_same_work_drift("owner-route-advance-supersession-mismatch")
         if (raw_target.get("source_route_id"), raw_target.get("source_route_hash")) != (
             current.route_id, current.route_hash
         ):
-            if gates_on():
-                raise OwnerRouteBindingError("owner-route-advance-source-mismatch")
-            same_work_or_refuse("owner-route-advance-source-mismatch")
+            note_same_work_drift("owner-route-advance-source-mismatch")
         if int(verified_target.get("advance_generation") or 0) != generation + 1:
             raise OwnerRouteBindingError("owner-route-advance-generation-invalid")
         target_owner = verified_target.get("owner_attempt_id")
         if target_owner != owner_attempt_id:
-            if gates_on():
-                raise OwnerRouteBindingError("owner-route-advance-owner-mismatch")
-            same_work_or_refuse("owner-route-advance-owner-mismatch")
+            note_same_work_drift("owner-route-advance-owner-mismatch")
         for field, reason in (
             ("cwd", "owner-route-advance-worktree-mismatch"),
             ("capability", "owner-route-advance-capability-mismatch"),
@@ -941,24 +903,20 @@ def resolve_owner_route_advance(
             ("artifact_root", "owner-route-advance-artifact-root-mismatch"),
         ):
             if current_route.get(field) and verified_target.get(field) != current_route.get(field):
-                if gates_on() or not reason.endswith("-mismatch") or reason == "owner-route-depth-mismatch":
+                if not reason.endswith("-mismatch") or reason == "owner-route-depth-mismatch":
                     raise OwnerRouteBindingError(reason)
-                same_work_or_refuse(reason)
+                note_same_work_drift(reason)
         if (
             record.route_family_key
             and record.route_family_key != verified_target.get("route_family_key")
         ):
-            if gates_on():
-                raise OwnerRouteBindingError("owner-route-advance-family-mismatch")
-            same_work_or_refuse("owner-route-advance-family-mismatch")
+            note_same_work_drift("owner-route-advance-family-mismatch")
         if (
             current_route.get("owner_attempt_id") == owner_attempt_id
             and current_route.get("route_family_key")
             != verified_target.get("route_family_key")
         ):
-            if gates_on():
-                raise OwnerRouteBindingError("owner-route-advance-family-mismatch")
-            same_work_or_refuse("owner-route-advance-family-mismatch")
+            note_same_work_drift("owner-route-advance-family-mismatch")
         current, generation = target, generation + 1
         current_route = verified_target
     raise OwnerRouteBindingError("owner-route-advance-generation-ceiling")
@@ -1020,9 +978,9 @@ def publish_owner_route_attachment_from_environment(
         )
         for valid, reason in checks:
             if not valid:
-                if gates_on() or not reason.endswith("-mismatch") or reason == "owner-route-depth-mismatch":
+                if not reason.endswith("-mismatch") or reason == "owner-route-depth-mismatch":
                     raise OwnerRouteBindingError(reason)
-                same_work_or_refuse(reason)
+                note_same_work_drift(reason)
         attachment = publish_owner_route_attachment(
             canonical_jobs,
             owner_attempt_id=attempt,
@@ -1073,9 +1031,7 @@ def publish_owner_route_advance_from_environment(jobs: str | Path, *, source_rou
             raise OwnerRouteBindingError("owner-route-owner-row-ineligible")
         row_binding = _row_binding(meta)
         if environment_binding is not None and environment_binding != row_binding:
-            if gates_on():
-                raise OwnerRouteBindingError("owner-route-owner-binding-mismatch")
-            same_work_or_refuse("owner-route-owner-binding-mismatch")
+            note_same_work_drift("owner-route-owner-binding-mismatch")
         if row_binding is not None:
             anchor = row_binding
             binding_mode = "sealed"
@@ -1100,13 +1056,9 @@ def publish_owner_route_advance_from_environment(jobs: str | Path, *, source_rou
         if (edge.get("from_route_id"), edge.get("from_route_hash")) != (
             source.route_id, source.route_hash
         ):
-            if gates_on():
-                raise OwnerRouteBindingError("owner-route-advance-supersession-mismatch")
-            same_work_or_refuse("owner-route-advance-supersession-mismatch")
+            note_same_work_drift("owner-route-advance-supersession-mismatch")
         if verified_target.get("owner_attempt_id") != attempt:
-            if gates_on():
-                raise OwnerRouteBindingError("owner-route-advance-owner-mismatch")
-            same_work_or_refuse("owner-route-advance-owner-mismatch")
+            note_same_work_drift("owner-route-advance-owner-mismatch")
         for field, reason in (
             ("cwd", "owner-route-advance-worktree-mismatch"),
             ("capability", "owner-route-advance-capability-mismatch"),
@@ -1114,15 +1066,13 @@ def publish_owner_route_advance_from_environment(jobs: str | Path, *, source_rou
             ("artifact_root", "owner-route-advance-artifact-root-mismatch"),
         ):
             if verified_target.get(field) != verified_source.get(field):
-                if gates_on() or not reason.endswith("-mismatch") or reason == "owner-route-depth-mismatch":
+                if not reason.endswith("-mismatch") or reason == "owner-route-depth-mismatch":
                     raise OwnerRouteBindingError(reason)
-                same_work_or_refuse(reason)
+                note_same_work_drift(reason)
         if verified_source.get("owner_attempt_id") == attempt and (
             verified_source.get("route_family_key") != verified_target.get("route_family_key")
         ):
-            if gates_on():
-                raise OwnerRouteBindingError("owner-route-advance-family-mismatch")
-            same_work_or_refuse("owner-route-advance-family-mismatch")
+            note_same_work_drift("owner-route-advance-family-mismatch")
         current, status = resolve_owner_route_advance(
             canonical_jobs, owner_attempt_id=attempt, anchor=anchor,
         )
@@ -1136,9 +1086,7 @@ def publish_owner_route_advance_from_environment(jobs: str | Path, *, source_rou
         # target` is replay after adoption. Anything else is a downgrade or an
         # unrelated source and cannot publish into this predecessor set.
         if current not in (source, target):
-            if gates_on():
-                raise OwnerRouteBindingError("owner-route-source-not-current")
-            same_work_or_refuse("owner-route-source-not-current")
+            note_same_work_drift("owner-route-source-not-current")
         # Re-read under the still-held canonical lock. Registry close/replacement
         # therefore cannot race the advance record commit.
         fields2, meta2 = _owner_snapshot(canonical_jobs, attempt)
@@ -1212,9 +1160,7 @@ def _derive_depth1_node_binding(route_file: str | Path, *, worktree: str | Path,
             raise OwnerRouteBindingError("frame-route-tuple-mismatch")
         from route_authority import depth1_supported_harnesses
         if harness not in depth1_supported_harnesses(route, worker_type="frame"):
-            if gates_on():
-                raise OwnerRouteBindingError("frame-route-harness-mismatch")
-            same_work_or_refuse("frame-route-harness-mismatch")
+            note_same_work_drift("frame-route-harness-mismatch")
     else:
         if route.get("effective_intensity") != "quick":
             raise OwnerRouteBindingError("quick-owner-route-required")
@@ -1282,9 +1228,9 @@ def validate_owner_route_binding(
     )
     for valid, reason in checks:
         if not valid:
-            if gates_on() or not reason.endswith("-mismatch") or reason == "owner-route-depth-mismatch":
+            if not reason.endswith("-mismatch") or reason == "owner-route-depth-mismatch":
                 raise OwnerRouteBindingError(reason)
-            same_work_or_refuse(reason)
+            note_same_work_drift(reason)
     return OwnerRouteBinding(
         route_file=str(path),
         route_id=str(route["route_id"]),

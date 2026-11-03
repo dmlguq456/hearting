@@ -350,7 +350,8 @@ def last_owner_refusal(request: TerminalCommitRequest, *, observer=None) -> Opti
                 if (reason == "output-invalid"
                         or (reason == "producer-finalize-failed" and detail.startswith("output-invalid:"))):
                     remediation = ("Correct the reported locator, add an existing self-exclusion marker to that exact "
-                                   "payload directory, or move it outside the cycle; the controller retries closure automatically.")
+                                   "payload directory, or move it outside the cycle; the next completion join judges closure again "
+                                   "and the same files give the same result.")
                 evidence = record.get("evidence")
                 if not (isinstance(evidence, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", evidence)):
                     evidence = None  # an old or foreign value is no evidence; the record still counts
@@ -534,7 +535,18 @@ def _seal_owner_envelope(*, request: TerminalCommitRequest, route: Mapping[str, 
             "primary_digest": second_digest, "terminal_commit_id": commit_id,
             "owner_attempt_id": request.owner_attempt_id, "terminal_nodes": list(terminal_nodes)}
     _atomic_json(slot / "owner-envelope.json", meta, exclusive=not (slot / "owner-envelope.json").exists())
+    _seal_completion_summary(request, route, primary, slot)
     return text
+
+
+def _seal_completion_summary(request, route, primary, slot) -> None:
+    """Write-once runtime close text beside the envelope (WORKFLOW §0.5); never fails the commit."""
+    try:
+        import work_intent
+        text = work_intent.completion_summary(route, primary, route_file=request.route_file)
+        _write_exclusive(slot / work_intent.SUMMARY_NAME, text.encode())
+    except Exception:  # noqa: BLE001 -- an existing or unrenderable summary keeps the delivery as it was
+        return
 
 
 def _component(value: str, label: str) -> str:
@@ -691,12 +703,20 @@ def verify_request_identity(request, route, *, registry_rows=None):
 
 def publish_producer_binding(*, artifact_root: Path, jobs: Path, route_file: Path,
                              owner_attempt_id: str, cycle_id: str,
-                             owner_begin: bool) -> ProducerBindingResult:
+                             owner_begin: bool, owner=None) -> ProducerBindingResult:
+    """Write (or replay) the owner's producer binding for ``cycle_id``.
+
+    ``owner`` is the `validate_owner_route` result its caller already has for
+    this exact owner and route; `begin` validates before it takes the admission
+    lock, so the registry is not read a second time while the lock is held.
+    The registry is never under that lock, so the second read proved nothing more.
+    """
     if owner_attempt_id == "-" or not owner_attempt_id:
         raise TerminalCommitError("producer-binding-required", "owner-attempt")
     root = Path(artifact_root).resolve()
     route_path = Path(route_file).resolve()
-    owner = validate_owner_route(jobs=jobs, route_file=route_path, owner_attempt_id=owner_attempt_id)
+    if owner is None:
+        owner = validate_owner_route(jobs=jobs, route_file=route_path, owner_attempt_id=owner_attempt_id)
     try:
         route = json.loads(route_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, ValueError) as exc:
@@ -2280,7 +2300,6 @@ def _owner_completion_state_scoped(jobs, status, metadata, *, selected_registry_
             elif facts["checkpoint"] == "owner-envelope-sealed":
                 _, publication, goal_pending = _observe_settled_transaction(
                     request, state, selected_registry_rows=selected_registry_rows)
-                facts["settlement_verified"] = True
                 facts["publication_pending"] = publication is not None and publication["status"] == "pending"
                 facts["goal_pending"] = goal_pending
         else:

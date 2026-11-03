@@ -355,7 +355,6 @@ GROUPS = (
     ("dispatch_harvest.test.py", ()),
     ("dispatch_liveness_matrix.test.py", ()),
     ("dispatch_completion_marker.test.py", (
-        "CompletionMarkerTest.test_a_sd154_dry_run_previews_auto_revision_without_mutation",
         "CompletionMarkerTest.test_a_sd154_dry_run_unobserved_review_preserves_marker_and_row",
         "CompletionMarkerTest.test_complete_unwritable_jobs_marker_preserved_then_reconcile_repairs")),
     ("stage_dispatch_fallback.test.py", (
@@ -384,7 +383,7 @@ sys.exit(not result.wasSuccessful())
 """
     # Gate-sensitive falsifiers run under their own test environment. This does
     # not alter the person's disabled gates or any installed runtime setting.
-    environment = dict(os.environ, HEARTING_GATES="on")
+    environment = dict(os.environ)
     for filename, classes in GROUPS:
         result = subprocess.run([sys.executable, "-c", child, str(HERE / filename), *classes],
                                 env=environment, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)

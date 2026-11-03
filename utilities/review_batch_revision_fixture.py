@@ -31,12 +31,21 @@ spec.loader.exec_module(ROUTE)
 spec = importlib.util.spec_from_file_location("revision_node", ROOT / "utilities/dispatch-node.py")
 NODE = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(NODE)
+spec = importlib.util.spec_from_file_location(
+    "revision_fixture_processes", ROOT / "tools/fixture_processes.py")
+fixture_processes = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(fixture_processes)
 
 
 class RevisionBatchFixture(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
+        # The real start path leaves detached writers on this root by design
+        # (reap watch, summary supervisor, title refresh). Stop them before the
+        # root goes, or a late write under dispatch/ fails rmtree with Errno 39.
+        # Cleanups run LIFO, so this runs just before the directory cleanup.
+        self.addCleanup(fixture_processes.reap, self.temp.name)
         self.base = Path(self.temp.name)
         self.repo = self.base / "repo"
         self.repo.mkdir()
@@ -65,7 +74,6 @@ class RevisionBatchFixture(unittest.TestCase):
             # Normal title work must use the fixture provider too, rather than
             # probing/calling host runtimes before reaching the fake Claude.
             "FLEET_TITLE_PROVIDER": "claude",
-            "HEARTING_GATES": "off",
             "PYTHONDONTWRITEBYTECODE": "1",
         }
         for command in (["init", "-q"], ["config", "user.email", "fixture@example.com"],
@@ -337,7 +345,7 @@ print(json.dumps({'type':'result','subtype':'success','is_error':False,'result':
             self.assertEqual((self.jobs.parent / 'completion' / self.route['route_id'] /
                               (node + '.json')).read_bytes(), original)
 
-    def _case_test_both_zero_admitted_resume_with_gates_on(self):
+    def _case_test_both_zero_admitted_resume(self):
         self.admitted_resume_scenario('on', 2)
 
     def _case_test_closure_capped_peer_pending_sibling(self):
@@ -347,7 +355,6 @@ print(json.dumps({'type':'result','subtype':'success','is_error':False,'result':
         self.admitted_resume_scenario('off', 1, peer_live=True)
 
     def admitted_resume_scenario(self, gates, missing_count, closure=False, peer_live=False):
-        self.env['HEARTING_GATES'] = gates
         first = self.launch()
         self.settle(first)
         self.revise_execute(first, 2)
@@ -445,10 +452,6 @@ print(json.dumps({'type':'result','subtype':'success','is_error':False,'result':
         return receipts[-1] if receipts else result.stdout
 
     def _case_test_two_pass_revision_inline_next_generation_and_cap_replay(self):
-        self.revision_scenario()
-
-    def _case_test_revision_generation_and_replay_with_gates_on(self):
-        self.env["HEARTING_GATES"] = "on"
         self.revision_scenario()
 
     def _case_test_foreign_registry_cannot_override_the_sealed_jobs(self):

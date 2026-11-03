@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("capability_route", ROOT / "utilities" / "capability-route.py")
 ROUTE = importlib.util.module_from_spec(SPEC); SPEC.loader.exec_module(ROUTE)
 sys.path.insert(0, str(ROOT / "utilities"))
-from hearting_gates import gates_on, same_work_or_refuse
+from hearting_gates import note_same_work_drift
 from artifact_context import scope_covers, scope_values
 
 
@@ -84,7 +84,7 @@ def validate_route_contract(route_path: str | Path, node_id: str, cwd: str | Pat
     except (OSError, json.JSONDecodeError) as exc: raise _fail("route-record-invalid", str(exc)) from exc
     rid = raw.get("route_id", "unknown")
     # The route is verified where it was sealed. A worker in another worktree is the
-    # same-work question the cwd check below answers (warn, or refuse with the gates on);
+    # same-work question the cwd check below answers (reported, not refused);
     # verifying at the worker's cwd instead rewrote the route cwd and then failed the
     # exact-worktree dispatch evidence (`dispatch-evidence-worktree-mismatch`).
     try: route = ROUTE.verify_route(raw, raw.get("cwd") or cwd)
@@ -105,14 +105,10 @@ def validate_route_contract(route_path: str | Path, node_id: str, cwd: str | Pat
     if not actual_cwd.is_absolute(): raise _fail("cwd-not-absolute", str(actual_cwd), rid)
     if not actual_root.is_absolute(): raise _fail("artifact-root-not-absolute", str(actual_root), rid)
     if actual_cwd.resolve() != Path(route["cwd"]).resolve():
-        if gates_on():
-            raise _fail("route-cwd-mismatch", str(actual_cwd), rid)
-        same_work_or_refuse("route-cwd-mismatch", str(actual_cwd))
+        note_same_work_drift("route-cwd-mismatch", str(actual_cwd))
         route = dict(route, cwd=str(actual_cwd.resolve()))
     if actual_root.resolve() != Path(route["artifact_root"]).resolve():
-        if gates_on():
-            raise _fail("route-artifact-root-mismatch", str(actual_root), rid)
-        same_work_or_refuse("route-artifact-root-mismatch", str(actual_root))
+        note_same_work_drift("route-artifact-root-mismatch", str(actual_root))
         route = dict(route, artifact_root=str(actual_root.resolve()))
     node = next((row for row in route["nodes"] if row["id"] == node_id), None)
     if node is None: raise _fail("route-node-mismatch", node_id, rid)
@@ -123,9 +119,7 @@ def validate_route_contract(route_path: str | Path, node_id: str, cwd: str | Pat
               ("intensity-reselection", intensity, route["effective_intensity"]))
     for reason, observed, expected in checks:
         if observed is not None and observed != expected:
-            if gates_on():
-                raise _fail(reason, f"expected={expected} observed={observed}", rid)
-            same_work_or_refuse(reason, f"expected={expected} observed={observed}")
+            note_same_work_drift(reason, f"expected={expected} observed={observed}")
     if write_scope is not None:
         # A narrower or differently written value of the sealed scope is the same approved work; a
         # value outside what the node was sealed with is not. The node's own sealed values are what
@@ -176,16 +170,7 @@ def validate_route_contract(route_path: str | Path, node_id: str, cwd: str | Pat
             "observed": observed, "distance": verdict.distance, "branch": verdict.branch,
         }
         if verdict.kind == "diverged":
-            if gates_on():
-                raise _fail(
-                    "route-source-commit-mismatch",
-                    f"expected={route['source_commit']} observed={git['head']}; "
-                    "next_action=return to the sealed line of work (git switch back to the sealed "
-                    "branch, or use reflog to restore the sealed commit) or compose a new route with "
-                    "--parent-cycle <current cycle>",
-                    rid,
-                )
-            same_work_or_refuse("route-source-commit-mismatch", f"expected={route['source_commit']} observed={observed}")
+            note_same_work_drift("route-source-commit-mismatch", f"expected={route['source_commit']} observed={observed}")
             route = dict(route, source_commit=observed)
         if verdict.kind == "unverifiable":
             # `unsafe-git-operation`/`unsafe-git-state` keep this guard's existing

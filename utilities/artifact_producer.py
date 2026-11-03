@@ -1415,7 +1415,8 @@ def route_cycle_for(root: Path, route: Mapping[str, Any]) -> Optional[Dict[str, 
 
 
 def cycle_route_admission(root: Path, record: Mapping[str, Any], route: Mapping[str, Any],
-                          *, finalize: bool = False, validation_only: bool = False) -> Admission:
+                          *, finalize: bool = False, validation_only: bool = False,
+                          sealing: bool = False) -> Admission:
     """D-120's one lineage judgment for a cycle route.
 
     Steps 0-4 as spelled out in artifact-path-contract §42: ``route``'s
@@ -1462,10 +1463,12 @@ def cycle_route_admission(root: Path, record: Mapping[str, Any], route: Mapping[
                     handed_over = _handed_over_routes(root, record)
                 if sibling["route_id"] in handed_over:
                     continue  # closed lineage: that branch belongs to another cycle
-                if (_unexecuted_continuation(root, sibling)
-                        and _closed_for_successor(node, path[path.index(node) + 1])):
-                    # The parent closed this route and handed its remaining work to the
-                    # next route on the path; a sibling that never ran is not a branch.
+                if _unexecuted_continuation(root, sibling) and (
+                        finalize or sealing or _closed_for_successor(node, path[path.index(node) + 1])):
+                    # Sealing: a sibling that never ran and that nothing continues holds no result
+                    # and runs no writer, so it is not a branch whatever closed its parent. Beginning
+                    # a route in the cycle still needs the parent's verified handoff to the next
+                    # route on the path (write-time fork protection).
                     skipped_siblings.append(sibling["route_id"])
                     continue
                 reason = "cycle-route-binding-mismatch:lineage-fork"
@@ -1610,9 +1613,10 @@ def _binding_core(entry: Mapping[str, Any]) -> Dict[str, Any]:
             ("route_id", "route_hash", "route_file", "basis", "continuation_id", "source_route_id")}
 
 
-def _bind_cycle_route_locked(root: Path, record: Mapping[str, Any], route: Mapping[str, Any]) -> Dict[str, Any]:
+def _bind_cycle_route_locked(root: Path, record: Mapping[str, Any], route: Mapping[str, Any],
+                             *, sealing: bool = False) -> Dict[str, Any]:
     """`bind_cycle_route`'s body, for a caller that already holds the admission lock."""
-    admission = cycle_route_admission(root, record, route)
+    admission = cycle_route_admission(root, record, route, sealing=sealing)
     if not admission.allow:
         raise ProducerError(admission.reason, admission.detail)
     expected = [_route_binding_entry(row, root, is_begin=(i == 0)) for i, row in enumerate(admission.path)]
@@ -2110,8 +2114,13 @@ def same_flow_source_cycle(root: Path, campaign_id: str, *, capability: str,
         if before not in cycles:
             return None
         cycles = cycles[:cycles.index(before)]
-    records = {row.get("cycle_id"): row for row in list_cycle_records(root)
-               if row.get("campaign_id") == campaign_id and row.get("cycle_id") in cycles}
+    # Only the campaign's own cycles can answer, so only their records are read (not every
+    # record of the root); `read_cycle_record` recovers a removed record as the listing does.
+    records = {}
+    for cycle_id in dict.fromkeys(cycles):
+        row = read_cycle_record(root, cycle_id) if isinstance(cycle_id, str) else None
+        if row is not None and row.get("campaign_id") == campaign_id:
+            records[cycle_id] = row
     begin_cycle = {rec["route_id"]: cycle_id for cycle_id, rec in records.items() if rec.get("route_id")}
     session_cycles = (_session_cycle_ids(root, campaign, route_chain_identity, begin_cycle)
                       if route_chain_identity else set())
@@ -2282,7 +2291,9 @@ def _begin_waiting_for_admission(root: Path, **kwargs: Any) -> Dict[str, Any]:
     again later.
     """
     deadline = time.monotonic() + OWNER_LAUNCH_ADMISSION_WAIT_SECONDS
-    looked = kwargs.get("node_id") is not None  # a node begin never looks for hand changes
+    # A node begin never looks for hand changes, and neither does the launch binding: it only
+    # resumes the cycle the same start's preparation began (and looked for) seconds before.
+    looked = kwargs.get("node_id") is not None or bool(kwargs.get("resume_only"))
     while True:
         if not looked:
             # §45 D-126 before the cycle begins. A look that finished is not repeated while
@@ -2746,6 +2757,11 @@ def _campaign_degradation(campaign: Mapping[str, Any]) -> Dict[str, Any]:
     return {}
 
 
+# Key under which `_begin_cycle_record` hands `begin` what the env is read from: the env reads
+# the root's other records, so it is resolved after the admission lock is released.
+_ENV_SOURCE = "_env_source"
+
+
 def _begin_cycle_record(
     root: Path,
     *,
@@ -2983,7 +2999,7 @@ def _begin_cycle_record(
                     dispatch_terminal_commit.publish_producer_binding(
                         artifact_root=root, jobs=binding_jobs, route_file=resolved_route_file,
                         owner_attempt_id=binding_owner, cycle_id=record["cycle_id"],
-                        owner_begin=owner_begin)
+                        owner_begin=owner_begin, owner=owner_binding)
                 except dispatch_terminal_commit.TerminalCommitError as exc:
                     raise ProducerError(exc.code, exc.detail) from exc
             title_updated = False
@@ -3002,7 +3018,7 @@ def _begin_cycle_record(
                 "status": "resumed", "layout": "cycle", "campaign_id": record["campaign_id"],
                 "cycle_id": record["cycle_id"], "producer_id": record["producer_id"],
                 "cycle_dir": str(cycle_dir(root, record["campaign_id"], record["cycle_id"], record)),
-                "env": _env_for(root, record, route),
+                _ENV_SOURCE: (root, record, route),
                 **({"rebound": True} if rebound else {}),
                 **({"title_updated": True} if title_updated else {}),
                 **({"campaign_reopened": True, "campaign_reopen_event_id": campaign_reopen_event_id}
@@ -3128,7 +3144,7 @@ def _begin_cycle_record(
                 dispatch_terminal_commit.publish_producer_binding(
                     artifact_root=root, jobs=binding_jobs, route_file=resolved_route_file,
                     owner_attempt_id=binding_owner, cycle_id=new_cycle_id,
-                    owner_begin=owner_begin)
+                    owner_begin=owner_begin, owner=owner_binding)
             except dispatch_terminal_commit.TerminalCommitError as exc:
                 raise ProducerError(exc.code, exc.detail) from exc
         artifact_locator.update_indexes(root, [campaign["campaign_id"]])
@@ -3144,7 +3160,7 @@ def _begin_cycle_record(
         return {
             "status": "begun", "layout": "cycle", "campaign_id": campaign["campaign_id"],
             "cycle_id": new_cycle_id, "producer_id": producer_id, "cycle_dir": str(target),
-            "campaign_created": campaign_created, "env": _env_for(root, record, route),
+            "campaign_created": campaign_created, _ENV_SOURCE: (root, record, route),
             **({"campaign_reopened": True, "campaign_reopen_event_id": campaign_reopen_event_id}
                if campaign_reopen_event_id else {}),
             **_campaign_degradation(campaign),
@@ -3177,9 +3193,17 @@ def begin(root: Path, *, _reconcile: bool = True, **kwargs: Any) -> Dict[str, An
     if _reconcile and kwargs.get("node_id") is None:
         reconcile_root(root)  # §45 D-126: what was moved or removed by hand is found before a cycle is begun
     result = _begin_cycle_record(root, **kwargs)
+    source = result.pop(_ENV_SOURCE, None)
+    if source is not None:
+        # The admission lock only reserves the cycle; what its env names (the source cycle,
+        # the workflow group, the runtime dir) is read after the lock is released.
+        result["env"] = _env_for(*source)
     if kwargs.get("node_id") is None and result.get("layout") == "cycle":
         _observe_after_begin(Path(root).resolve(), result)
-        deliver_pending_history(root)
+        if not kwargs.get("resume_only"):
+            # The same start's preparation handed waiting lines over seconds before (it reads
+            # every record to find them); a line still waiting goes with the next trigger.
+            deliver_pending_history(root)
     if result.get("title_updated"):
         # The existing publisher rereads the current open manifest under the
         # admission -> checkpoint lock order. No checkpoint scan or payload
@@ -5114,31 +5138,34 @@ def _rfc3339_to_epoch(value: str) -> float:
         return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
 
 
-def _lease_record_is_live(
+def _lease_record_state(
     record: Optional[Dict[str, Any]], *, root: Optional[Path] = None,
     now: Optional[float] = None,
-) -> bool:
-    """SD-105/SD-90 evidence hierarchy, cited not redefined (plan.md §6.2):
-    exact PID/start/PGID identity, a finite deadline, and judgment-impossible
-    inputs (corrupt record, unreadable /proc, clock anomaly, missing field)
-    read as *live* -- conservative, so an undecidable lease never lets an
-    abandon through (E47-4)."""
+) -> str:
+    """SD-105/SD-90 evidence hierarchy, cited not redefined (plan.md §6.2), in three states.
+
+    `live`: exact PID/start/PGID identity (or the v2 holder disposition) says the holder is running.
+    `ended`: the holder was observed gone (released, dead exact holder, deadline passed for v1,
+    process or start mismatch). `unobservable`: judgment-impossible inputs (corrupt record,
+    unreadable /proc, clock anomaly, missing field, a holder that cannot be seen before its
+    deadline). Writers treat `unobservable` like `live` (E47-4); only the report differs.
+    """
 
     if record is None:
-        return False
+        return "ended"
     if record.get("released_at") is not None:
-        return False
+        return "ended"
     deadline = record.get("deadline")
     if not isinstance(deadline, str):
-        return True
+        return "unobservable"
     try:
         deadline_ts = _rfc3339_to_epoch(deadline)
     except (ValueError, OverflowError):
-        return True
+        return "unobservable"
     when = time.time() if now is None else now
     if _is_v2_review_lease(record):
         if record.get("expired") is not False:
-            return True
+            return "unobservable"
         acquired_at = record.get("acquired_at")
         try:
             acquired_ts = (
@@ -5146,9 +5173,9 @@ def _lease_record_is_live(
                 if isinstance(acquired_at, str) else None
             )
         except (ValueError, OverflowError):
-            return True
+            return "unobservable"
         if root is None or acquired_ts is None or acquired_ts > when or deadline_ts <= acquired_ts:
-            return True
+            return "unobservable"
         metadata = dict(record)
         metadata["review_cycle_id"] = record.get("cycle_id", "")
         # The record stores the sealed fields while the jobs row mirrors the
@@ -5157,31 +5184,42 @@ def _lease_record_is_live(
         # malformed forever.
         metadata["review_lease_record_digest"] = review_lease_record_digest(record)
         disposition = review_holder_disposition(record, metadata, root, now=when)
-        if disposition.state in {"live", "malformed"}:
-            return True
+        if disposition.state == "live":
+            return "live"
+        if disposition.state == "malformed":
+            return "unobservable"
         if disposition.state == "dead":
-            return False
+            return "ended"
         # Valid but unobservable holders remain conservative until the finite
         # stale ceiling, after which time permits recovery but never grants a
         # write.
-        return when <= deadline_ts
+        return "unobservable" if when <= deadline_ts else "ended"
     if when > deadline_ts:
-        return False
+        return "ended"
     pid = record.get("pid")
     pid_start = record.get("pid_start")
     pgid = record.get("pgid")
     if not isinstance(pid, int) or not isinstance(pid_start, str) or not pid_start or not isinstance(pgid, int):
-        return True
+        return "unobservable"
     actual_start = process_start_ticks(pid)
     if actual_start is None:
-        return False
+        return "ended"
     if actual_start != pid_start:
-        return False
+        return "ended"
     try:
         actual_pgid = os.getpgid(pid)
     except OSError:
-        return False
-    return actual_pgid == pgid
+        return "ended"
+    return "live" if actual_pgid == pgid else "ended"
+
+
+def _lease_record_is_live(
+    record: Optional[Dict[str, Any]], *, root: Optional[Path] = None,
+    now: Optional[float] = None,
+) -> bool:
+    """The write guard: anything not observed ended blocks (finish, abandon, seal)."""
+
+    return _lease_record_state(record, root=root, now=now) != "ended"
 
 
 def _is_v2_review_lease(record: object) -> bool:
@@ -5215,6 +5253,28 @@ def _live_review_lease(
                 return path
             conservative = conservative or path
     return conservative
+
+
+def _review_lease_observation(
+    root: Path, cycle_id: str, *, now: Optional[float] = None
+) -> str:
+    """What the cycle's review leases say, for reporting only: `live`, `unobservable` or `ended`.
+
+    A lease whose holder is observed running is `live`; one that cannot be judged is
+    `unobservable` and is not called a live writer. `_live_review_lease` is still the write guard.
+    """
+    lease_dir = _review_lease_dir(root, cycle_id)
+    if not lease_dir.is_dir():
+        return "ended"
+    seen = "ended"
+    for path in sorted(lease_dir.glob("*.json")):
+        state = _lease_record_state(_read_json(path), root=root, now=now) if _read_json(path) is not None \
+            else "unobservable"
+        if state == "live":
+            return "live"
+        if state == "unobservable":
+            seen = "unobservable"
+    return seen
 
 
 def _raise_if_recovery_fenced(root: Path, cycle_id: str, *, now: Optional[float] = None) -> None:
@@ -5776,15 +5836,16 @@ def _finalize_route(root: Path, record: Mapping[str, Any], *, deadline: Optional
         if not candidates:
             return current
         if len(candidates) > 1:
-            # The same narrowed rule `cycle_route_admission` applies: when the
-            # parent handed its remaining work to exactly one candidate and every
-            # other candidate never ran, that candidate is the branch. Two
-            # executed branches, or a parent not closed for a successor, remain
-            # the symmetric fork this refusal describes.
+            # The same narrowed rule `cycle_route_admission` applies: when every
+            # other candidate never ran, the remaining one is the branch (when none
+            # ran, the parent's verified handoff names it). Two executed branches
+            # remain the symmetric fork this refusal describes.
             chosen = [c for c in candidates
-                      if _closed_for_successor(current, c)
-                      and all(other["route_id"] == c["route_id"]
-                              or _unexecuted_continuation(root, other) for other in candidates)]
+                      if all(other["route_id"] == c["route_id"]
+                             or _unexecuted_continuation(root, other) for other in candidates)]
+            if len(chosen) > 1:
+                # Nothing executed: only the parent's verified handoff names the one to follow.
+                chosen = [c for c in chosen if _closed_for_successor(current, c)]
             if len(chosen) == 1:
                 candidates = chosen
             else:
@@ -5952,6 +6013,9 @@ def finalize(
                 return {"status": "deferred", "reason": "files-changed-during-read", "cycle_id": cycle_id}
             if misses:
                 _reread_misses(prescan, misses)
+        # The root sweep's look at every open cycle is taken before the lock (§45 D-124); under
+        # it only the cycles that look has work for, and this one, are read again.
+        open_candidates = _recovery_open_candidates(root, cycle_id) if _recovery_scope == "root" else None
         if lock_fd is None:
             lock_fd = artifact_admission._acquire_lock(
                 root, artifact_admission.LOCK_TIMEOUT_DEFAULT if lock_timeout is None else lock_timeout, now=now)
@@ -5974,7 +6038,8 @@ def finalize(
         if _recovery_scope == "root":
             pre = read_cycle_record(root, cycle_id)
             sweep = _recover_locked(root, now=now,
-                                    target_campaign_id=pre["campaign_id"] if pre else None)
+                                    target_campaign_id=pre["campaign_id"] if pre else None,
+                                    open_candidates=open_candidates)
             sweep_unresolved = sweep.get("unresolved", [])
         elif _recovery_scope == "exact":
             _recover_exact_cycle_locked(root, cycle_id, expected_binding, now=now)
@@ -6109,7 +6174,7 @@ def finalize(
         admission = cycle_route_admission(root, record, route, finalize=True)
         if not admission.allow:
             raise ProducerError(admission.reason, admission.detail)
-        if _bind_cycle_route_locked(root, record, route)["written"]:
+        if _bind_cycle_route_locked(root, record, route, sealing=True)["written"]:
             # `_commit_sealed` below reseals from this local copy; refresh it
             # so the binding write just made is not clobbered back to stale.
             record = read_cycle_record(root, cycle_id)
@@ -7530,6 +7595,11 @@ def _prescan_open_cycle(root: Path, record: Mapping[str, Any], *, exclude_hidden
     except ProducerError as error:
         scan.error = error  # raised where the locked close always raised it
         return scan
+    if scan.violations:
+        # The close is refused on these names (`output-invalid`, raised where the locked close
+        # always raised it, after the refusals that come before it there); the digests of the
+        # other files would decide nothing, so none is read.
+        return scan
     bundle_dirs = [tree.directory for tree in scan.bundles]
     journal = _read_json(journal_path(root, cycle_id)) or {}
     owned_paths = {row.get("locator") for row in journal.get("directory_bundles", [])
@@ -8937,8 +9007,47 @@ def _is_recoverable_locator_defect(exc: BaseException) -> bool:
     return isinstance(exc, ProducerError) and exc.code == "record-locator-invalid"
 
 
+def _recovery_open_candidates(root: Path, cycle_id: Optional[str] = None) -> set:
+    """Before the admission lock: the open cycles the root sweep may have work for, and ``cycle_id``.
+
+    An open cycle sitting in the folder the published locator map names, with its own binding
+    and no `manifest.json`, is one the sweep only lists as open, so it is not read again under
+    the lock.  Everything else -- a folder gone or unpublished, a manifest written and not
+    recorded, a binding naming another cycle, and every open cycle of the campaign being closed
+    (whose locator defects the sweep raises) -- stays the sweep's, resolved there as before.
+    Only the map, an `lstat` and the small binding file are read here.  A cycle that turns into
+    one after this look is the next sweep's (the sweep is already best effort for every cycle
+    but the one being closed)."""
+    wanted = {cycle_id} if cycle_id else set()
+    root = Path(root)
+    try:
+        published = artifact_locator._load_index(root) or {}
+    except Exception:  # noqa: BLE001 -- an unreadable map leaves every open cycle to the sweep
+        published = {}
+    target = read_cycle_record(root, cycle_id) if cycle_id else None
+    target_campaign = (target or {}).get("campaign_id")
+    for record in list_cycle_records(root):
+        if (record.get("state") != "open" or record.get("deleted_at")
+                or (record.get("relocation") or {}).get("artifact_root")):
+            continue
+        where = published.get(record.get("cycle_id"))
+        if record.get("campaign_id") != target_campaign and isinstance(where, str) and where:
+            folder = root / where
+            try:
+                quiet = (stat.S_ISDIR(os.lstat(str(folder)).st_mode)
+                         and not _path_entry_present(folder / "manifest.json")
+                         and _folder_cycle_id(folder) == record["cycle_id"])
+            except OSError:
+                quiet = False
+            if quiet:
+                continue
+        wanted.add(record["cycle_id"])
+    return wanted
+
+
 def _recover_locked(root: Path, *, now: Optional[float] = None,
-                    target_campaign_id: Optional[str] = None) -> Dict[str, Any]:
+                    target_campaign_id: Optional[str] = None,
+                    open_candidates: Optional[Iterable[str]] = None) -> Dict[str, Any]:
     """Root-scope crash recovery. Visits every open record and journal entry.
 
     A record whose campaign is not `target_campaign_id` is isolated (§3.6a):
@@ -9015,7 +9124,12 @@ def _recover_locked(root: Path, *, now: Optional[float] = None,
                 _drop_unpublished_snapshot(root, cycle_id, journal)
                 entry.unlink()
                 result["rolled_back"].append(cycle_id)
-    for record in list_cycle_records(root):
+    # `open_candidates`: what `_recovery_open_candidates` found before the lock; without it
+    # (an explicit `recover`) every record is read here.
+    records = (list_cycle_records(root) if open_candidates is None else
+               [row for row in (read_cycle_record(root, item) for item in sorted(set(open_candidates)))
+                if row is not None])
+    for record in records:
         if (record.get("state") != "open" or record.get("deleted_at")
                 or (record.get("relocation") or {}).get("artifact_root")):
             continue

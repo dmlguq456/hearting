@@ -16,7 +16,7 @@ DEFAULTS_SPEC = importlib.util.spec_from_file_location("dispatch_defaults", ROOT
 DEFAULTS = importlib.util.module_from_spec(DEFAULTS_SPEC); DEFAULTS_SPEC.loader.exec_module(DEFAULTS)
 VALID_AFFINITY = DEFAULTS.AFFINITY_VALUES | {"unspecified"}
 sys.path.insert(0, str(ROOT/"utilities"))
-from hearting_gates import gates_on, same_work_or_refuse
+from hearting_gates import note_same_work_drift
 import artifact_locator as ARTIFACT_LOCATOR
 import harness_state_roots as HARNESS_STATE_ROOTS
 import git_index_lock
@@ -700,8 +700,8 @@ def revalidate_launch_compatibility(route):
             mismatches[name]={
                 "expected":expected,"actual":actual,"fields":sorted(changed),
             }
-    if mismatches and not malformed_roots and not gates_on():
-        same_work_or_refuse("launch-runtime-root-mismatch", ",".join(sorted(mismatches)))
+    if mismatches and not malformed_roots:
+        note_same_work_drift("launch-runtime-root-mismatch", ",".join(sorted(mismatches)))
         return True, mismatches
     return not mismatches,mismatches
 
@@ -830,9 +830,8 @@ def _continuation_reused_evidence(route, node):
             f"continuation-source-node-unverified:{node_id}:quiescence-proof"
         )
     evidence=marker.get("evidence") or {}
-    if not gates_on():
-        currency = evidence_currency(route, node, marker_path, marker)
-        evidence = dict(evidence, sha256=currency.evidence_digest)
+    currency = evidence_currency(route, node, marker_path, marker)
+    evidence = dict(evidence, sha256=currency.evidence_digest)
     public={
         "node_id":node_id,
         "completion_gate":node.get("completion_gate"),
@@ -1093,9 +1092,7 @@ def _continuation_lineage(
     )
     selected_turn=last_turn_id or expected_turn
     if last_turn_id and expected_turn and last_turn_id != expected_turn:
-        if gates_on():
-            raise ValueError("continuation-last-turn-mismatch")
-        same_work_or_refuse("continuation-last-turn-mismatch")
+        note_same_work_drift("continuation-last-turn-mismatch")
     if operation=="resume":
         if new_thread_id or forked_from_id:
             raise ValueError("continuation-resume-lineage-switch-forbidden")
@@ -1106,13 +1103,9 @@ def _continuation_lineage(
     if not source_thread or not new_thread_id or new_thread_id==source_thread:
         raise ValueError("continuation-fork-lineage-incomplete")
     if forked_from_id != source_thread:
-        if gates_on():
-            raise ValueError("continuation-fork-source-mismatch")
-        same_work_or_refuse("continuation-fork-source-mismatch")
+        note_same_work_drift("continuation-fork-source-mismatch")
     if not expected_turn or selected_turn != expected_turn:
-        if gates_on():
-            raise ValueError("continuation-last-turn-mismatch")
-        same_work_or_refuse("continuation-last-turn-mismatch")
+        note_same_work_drift("continuation-last-turn-mismatch")
     return {
         "operation":"fork","thread_id":new_thread_id,
         "forkedFromId":source_thread,"lastTurnId":selected_turn,
@@ -1297,9 +1290,7 @@ def _verify_continuation_gate_release_proofs(route):
             raise ValueError("continuation-human-gate-release-proof-unreadable") from exc
         resolution = WS.human_gate_resolution(entries, gate)
         if resolution.get("status") != "proceed" or resolution.get("epoch") != proof["epoch"]:
-            if gates_on():
-                raise ValueError("continuation-human-gate-release-proof-drift")
-            same_work_or_refuse("continuation-human-gate-release-proof-drift")
+            note_same_work_drift("continuation-human-gate-release-proof-drift")
         raise_count=0; matched_raise=False; matched_release=False
         for entry in entries:
             evidence=entry.get("evidence") if isinstance(entry,dict) else None
@@ -1322,9 +1313,7 @@ def _verify_continuation_gate_release_proofs(route):
                 )
                 matched_release=True
         if not matched_raise or not matched_release:
-            if gates_on():
-                raise ValueError("continuation-human-gate-release-proof-drift")
-            same_work_or_refuse("continuation-human-gate-release-proof-drift")
+            note_same_work_drift("continuation-human-gate-release-proof-drift")
     return proofs
 
 def build_continuation_route(
@@ -1672,9 +1661,7 @@ def _verify_continuation_route(route):
             _inside_git_worktree(cwd)
             and source_lineage_verdict(cwd,inherited).kind not in ("exact","descendant")
         ):
-            if gates_on():
-                raise ValueError("continuation-source-commit-rebind-lineage-unproven")
-            same_work_or_refuse("continuation-source-commit-rebind-lineage-unproven")
+            note_same_work_drift("continuation-source-commit-rebind-lineage-unproven")
     _validate_output_scopes(route.get("nodes",[]))
     return route
 
@@ -1703,9 +1690,7 @@ def publish_continuation_route(route,source_route,output_path):
             current_digest != route.get("source_evidence_digest")
             or canonical(current) != canonical(route.get("reused_nodes"))
         ):
-            if gates_on():
-                raise ValueError("continuation-source-evidence-drift")
-            same_work_or_refuse("continuation-source-evidence-drift")
+            note_same_work_drift("continuation-source-evidence-drift")
         path=Path(output_path)
         if classify_route_location(path,route["artifact_root"]) != "canonical":
             raise ValueError("route-output-outside-canonical")
@@ -1799,11 +1784,7 @@ def _assert_pin_matches_grounding(source_commit, launch):
     if not _COMMIT_SHA.fullmatch(base) or not _COMMIT_SHA.fullmatch(source_commit):
         return
     if base != source_commit:
-        if gates_on():
-            raise ValueError(
-                f"continuation-source-commit-grounding-mismatch: pin={source_commit} grounding={base}"
-            )
-        same_work_or_refuse(f"continuation-source-commit-grounding-mismatch: pin={source_commit} grounding={base}")
+        note_same_work_drift(f"continuation-source-commit-grounding-mismatch: pin={source_commit} grounding={base}")
 
 def _continuation_source_commit(source_route):
     """Reseal the resume-time HEAD as the continuation's `source_commit`.
@@ -1838,11 +1819,7 @@ def _continuation_source_commit(source_route):
         return inherited,None
     if verdict.kind == "diverged":
         observed=verdict.commits[0] if verdict.commits else _git_commit(cwd)
-        if gates_on():
-            raise ValueError(
-                f"continuation-source-commit-diverged: expected={inherited} observed={observed}"
-            )
-        same_work_or_refuse("continuation-source-commit-diverged", f"expected={inherited} observed={observed}")
+        note_same_work_drift("continuation-source-commit-diverged", f"expected={inherited} observed={observed}")
         return observed, None
     head=verdict.commits[0]
     return head,{
@@ -5068,7 +5045,7 @@ def compose_decision_lines(route, non_git_decision=None, t=None):
 
 
 def compose_card(route, plan=None, plan_source=None, *, owner_harness=None, route_plan_unreadable=False,
-                 campaign_selection=None, include_decisions=True, non_git_decision=None):
+                 campaign_selection=None, include_decisions=True, non_git_decision=None, intent_original=None):
     """One-line `[경로]` notice the acting session pastes instead of a card."""
     shape = route.get("selection", {}).get("shape") or shape_for_intensity(route["effective_intensity"])
     ids = [node["id"] for node in route["nodes"]]
@@ -5083,6 +5060,9 @@ def compose_card(route, plan=None, plan_source=None, *, owner_harness=None, rout
         + _compose_campaign_line(campaign_selection if campaign_selection is not None
                                  else compose_campaign_selection(route), t)
     )
+    import work_intent
+    for line in work_intent.card_lines(route, original=intent_original, t=t):
+        card += "\n" + line
     observed = compose_observations(route, t)
     if include_decisions:
         card += "\n" + "\n".join(compose_decision_lines(route, non_git_decision, t))
@@ -5732,17 +5712,13 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
     if reason:
         raise ValueError(reason)
     if route.get("route_hash") != route_hash(route):
-        if gates_on():
-            raise ValueError("stale or modified route hash")
-        same_work_or_refuse("route-hash-mismatch")
+        note_same_work_drift("route-hash-mismatch")
     if route.get("route_id") != "rt-"+route["route_hash"].split(":",1)[1][:16]:
-        if gates_on() or not re.fullmatch(r"rt-[0-9a-f]{16}", str(route.get("route_id") or "")):
+        if not re.fullmatch(r"rt-[0-9a-f]{16}", str(route.get("route_id") or "")):
             raise ValueError("invalid route id")
-        same_work_or_refuse("route-id-mismatch", str(route.get("route_id")))
+        note_same_work_drift("route-id-mismatch", str(route.get("route_id")))
     if expected_cwd and Path(expected_cwd).resolve()!=Path(route["cwd"]):
-        if gates_on():
-            raise ValueError("route cwd mismatch")
-        same_work_or_refuse("route-cwd-mismatch", str(expected_cwd))
+        note_same_work_drift("route-cwd-mismatch", str(expected_cwd))
         route = dict(route, cwd=str(Path(expected_cwd).resolve()))
     _verify_profile_contract(route)
     scope_version = route.get("entry_scope_contract_version")
@@ -5805,8 +5781,6 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
             }
     if classification["verdict"] != "current":
         if not allow_stale_registry:
-            if gates_on():
-                raise ValueError(classification["message"])
             # Catalog drift is expected across releases. Default continuation
             # uses the current tooling without prescribing an unverified old runtime.
             _validate_output_scopes(route.get("nodes", []))
@@ -6964,7 +6938,17 @@ def close_route(route, route_file, commit=None, summary=None, publication=None,
     # left over from before D-2 get resolved); everywhere else is rejected.
     location=classify_route_location(route_file,route["artifact_root"])
     if location != "canonical" and location not in _LEGACY_LOCATIONS:
-        raise ValueError("route-close-outside-canonical-or-legacy")
+        # A copy of the route kept elsewhere closes the one record of the same route (same id and
+        # hash) under this artifact root; a route with no such record would write into another root.
+        canonical=canonical_route_path(route["artifact_root"],route["route_id"])
+        try:
+            same=(canonical.is_file() and not canonical.is_symlink()
+                  and json.loads(canonical.read_text(encoding="utf-8")).get("route_hash")==route["route_hash"])
+        except (OSError,ValueError):
+            same=False
+        if not same:
+            raise ValueError("route-close-outside-canonical-or-legacy")
+        route_file,location=canonical,"canonical"
     alias_basename=(location=="canonical" and not route_path_is_exact(
         route_file,route["artifact_root"],route["route_id"]))
     if alias_basename or location in _LEGACY_LOCATIONS:
@@ -8240,9 +8224,7 @@ def _marker_identity_row(route, node, node_id, gate, *, jobs=None, exact_termina
             or marker.get("route_hash") != route.get("route_hash")
             or marker.get("node_id") != node_id
             or marker.get("completion_gate") != gate):
-        if gates_on():
-            return {"passed": False, "reason": "completion-marker-identity-mismatch"}
-        same_work_or_refuse("completion-marker-identity-mismatch", node_id)
+        note_same_work_drift("completion-marker-identity-mismatch", node_id)
     evidence = marker.get("evidence") or {}
     # SD-154 A-SD154-8: `evidence_currency` is the only place non-writer code
     # recomputes a completion marker's evidence sha256 -- this used to keep
@@ -10560,6 +10542,28 @@ def _unregistered_attempt(metadata):
     return str(value).lower() in {"0", "false"}
 
 
+def _sole_node_attempt(route,node,jobs_path):
+    """The attempt id of the one registered attempt of `node` on this exact route, else None."""
+    try:
+        lines=jobs_path.read_text(encoding="utf-8",errors="replace").splitlines()
+    except OSError:
+        return None
+    found=set()
+    for line in lines:
+        fields=line.split("\t")
+        if len(fields)!=6:
+            continue
+        metadata=parse_registry_metadata(fields[5])
+        try:
+            same=(metadata.get("attempt_id") and not ROUTE_AUTHORITY.subsession_row(metadata)
+                  and ROUTE_IDENTITY.registered_node_identity(metadata,node)
+                      ==(route["route_id"],route["route_hash"],node["id"]))
+        except (ValueError,KeyError,TypeError):
+            same=False
+        if same:
+            found.add(metadata["attempt_id"])
+    return next(iter(found)) if len(found)==1 else None
+
 def _complete_node_locked(
     route,
     node,
@@ -10573,7 +10577,11 @@ def _complete_node_locked(
     if review_claim and node.get("kind")!="review-worker":
         raise ValueError("reviewer-claim-on-non-review-node")
     if jobs and not attempt_id:
-        raise ValueError("registered completion requires --attempt-id")
+        # The registry names the attempt when exactly one registered attempt belongs to this node;
+        # none, or several, is a choice only the caller can make.
+        attempt_id=_sole_node_attempt(route,node,Path(jobs))
+        if not attempt_id:
+            raise ValueError("registered completion requires --attempt-id")
     if not jobs and attempt_id and explicit_attempt_metadata is None:
         raise ValueError("unregistered completion requires explicit attempt metadata")
     if not jobs and explicit_attempt_metadata is not None and not attempt_id:
@@ -10701,10 +10709,14 @@ def _complete_node_locked(
             # (note=completion-deferred, no marker yet) is the same shape --
             # a checked writer already committed the row, only the marker
             # publication is outstanding -- so it is marker-eligible too.
+            # The success judgment is the shared `verdict_pass`, not one note name. A row that already
+            # carries its marker is a replay (handled below), and a `dead-*` death note is never a success.
             marker_eligible=(
                 already_closed
+                and row_note!="completed-marker"
                 and (
-                    (row_note=="completed-supervisor" and row_metadata.get("failure_class")=="pass")
+                    (verdict_pass(row_metadata) and not terminal_conflict_pending(row_metadata)
+                     and not str(row_note or "").startswith("dead-"))
                     or deferred_completion(row_metadata)=="pending"
                 )
             )
@@ -12467,16 +12479,38 @@ def _correct_attempt_argument(value, jobs):
     return owner
 
 
+def _stage_route_owner(jobs, attempt_id):
+    """The owner a depth-2 stage attempt of the same route reports to, else `attempt_id` itself.
+
+    A correction addressed to a stage is a correction for the work its route owner is doing; only a
+    parent owner of the very same route counts, so another route's attempt stays refused."""
+    row = _find_attempt_row_metadata(Path(jobs), attempt_id)
+    if not row or row.get("worker_type") == "owner" or row.get("dispatch_depth") != "2":
+        return attempt_id
+    parent = _find_attempt_row_metadata(Path(jobs), row.get("parent_attempt_id") or "")
+    if (parent and parent.get("worker_type") == "owner" and parent.get("dispatch_depth") == "1"
+            and (parent.get("owner_route_id") or parent.get("route_id")) == (row.get("route_id") or row.get("route"))):
+        return parent["attempt_id"]
+    return attempt_id
+
+
 def _current_owner_attempt(jobs, attempt_id):
     """The newest launched owner in this attempt's replacement lineage (itself when none).
 
-    An answer sent with an older owner's id still reaches the owner doing the work now."""
+    An answer sent with an older owner's id (or a stage attempt of the same route) still reaches the
+    owner doing the work now. When the lineage of an attempt that was replaced cannot be read, the
+    old owner is not used in its place: the correction stays retained until it can be observed."""
+    start = _stage_route_owner(jobs, attempt_id)
     try:
         from dispatch_replacement import effective_attempts
-        effective, _mapping = effective_attempts(jobs, {attempt_id})
-        return next(iter(effective)) if len(effective) == 1 else attempt_id
+        effective, _mapping = effective_attempts(jobs, {start})
+        return next(iter(effective)) if len(effective) == 1 else start
     except (DispatchContractError, OSError, ValueError, StopIteration):
-        return attempt_id
+        row = _find_attempt_row_metadata(Path(jobs), start) or {}
+        if any(row.get(key) for key in ("replacement_family_id", "replacement_attempt_id",
+                                        "replacement_claim_digest")):
+            raise ValueError("owner-input-unavailable-retain-correction")
+        return start
 
 
 def _continue_after_answer(jobs, attempt_id, correction):
@@ -12621,18 +12655,8 @@ def _emit_compiled_route(a,route,artifact_root,output=None):
     """Shared tail of compile/compose: runtime-root check, canonical write-once, owner binding, prints."""
     output=output if output is not None else getattr(a,"output",None)
     vbasis=route.get("validation_basis") or {}
-    if vbasis.get("runtime_root_match") is False and not gates_on():
-        same_work_or_refuse("launch-runtime-root-mismatch")
-    if vbasis.get("runtime_root_match") is False and gates_on():
-        launch_tuple=route.get("launch_compatibility_tuple") or {}
-        expected=launch_tuple.get("registry_root")
-        observed=launch_tuple.get("runtime_root")
-        print("route_file_written=0 registered=0 started=0 child_spawned=0",file=sys.stderr)
-        print(runtime_root_hint(),file=sys.stderr)
-        raise ValueError(
-            "launch-runtime-root-mismatch "
-            f"expected={canonical(expected).decode()} observed={canonical(observed).decode()}"
-        )
+    if vbasis.get("runtime_root_match") is False:
+        note_same_work_drift("launch-runtime-root-mismatch")
     expected_output=canonical_route_path(artifact_root,route["route_id"])
     if output:
         output_path=Path(output)
@@ -12643,6 +12667,11 @@ def _emit_compiled_route(a,route,artifact_root,output=None):
     else:
         output_path=expected_output
     write_once(output_path,route)
+    try:  # the person's words, once and beside the route: never part of its identity (WORKFLOW §0.4)
+        import work_intent
+        work_intent.seal_original(route)
+    except Exception:  # noqa: BLE001 -- optional record; the route stands without it
+        pass
     retired=retire_stale_closure(output_path)
     if retired is not None:
         print(f"route_closure_retired={retired}",file=sys.stderr)
@@ -13182,9 +13211,13 @@ def main():
         # original choice instead of calling the newly-created stream a join.
         _campaign_for_card = compose_campaign_selection(route)
         if a.explain:
+            import work_intent
             print(compose_card(route, _plan_for_card, _plan_source_for_card, owner_harness=owner_pin,
                                route_plan_unreadable=route_plan_unreadable,
-                               campaign_selection=_campaign_for_card),file=sys.stderr)
+                               campaign_selection=_campaign_for_card,
+                               intent_original=(None if route.get("route_plan") else
+                                                work_intent.original_excerpt(route.get("cwd")) or None)),
+                  file=sys.stderr)
             print("route_file_written=0 explain=1",file=sys.stderr)
             print(json.dumps({"route_id":route["route_id"],"capability":route["capability"],
                               "effective_intensity":route["effective_intensity"],"shape":shape,
@@ -13240,7 +13273,13 @@ def main():
         a.attempt_id=_correct_attempt_argument(given,jobs)
         if a.attempt_id!=given:
             print(f"owner_attempt_default={a.attempt_id} route={given}",file=sys.stderr)
-        attempt=_current_owner_attempt(jobs,a.attempt_id)
+        try:
+            attempt=_current_owner_attempt(jobs,a.attempt_id)
+        except ValueError as exc:
+            print(json.dumps({"state":"not-admitted","reason":str(exc),"retry_when":"The owner lineage can be read.",
+                              "next_action":"same-command",
+                              "next_step":"Retain the correction. Inspect the exact owner; do not restart it or treat a file edit as delivery."}))
+            return 69
         try:
             result=(submit(jobs,attempt,a.message_file.read_text(),a.request_id)
                     if a.message_file else inspect(jobs,attempt))

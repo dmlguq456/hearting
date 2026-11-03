@@ -239,7 +239,7 @@ Efficiency is not corner cutting. Reduce duplicated orchestrator reasoning, not 
 - Remove repeated orchestrator reading and summarization and the accumulation of large result bodies in context.
 - Protect dispatch-depth-0 context first: before route confirmation, main uses compact
   entry metadata and the routing map rather than loading full Skill bodies or
-  references. The user receives a completed five-field proposal, which changes
+  references. The user receives a completed intent card, which changes
   the task from route generation to error recognition.
 - Pass results through files and return only the portable three-line worker
   envelope: artifact path, `PASS|FAIL|BLOCKED`, and a one-line blocker. Changed

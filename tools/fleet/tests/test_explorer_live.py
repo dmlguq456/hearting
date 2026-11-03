@@ -182,11 +182,11 @@ class ConfigFields(unittest.TestCase):
     def test_first_tick_process_row_is_kept_and_gpu_processes_use_renderer_record_shape(self):
         snapshot = {"sessions": [{"harness": "codex", "pid": 44, "proc_start": 100,
                                   "session_id": "sid-exact", "session_tag": "a3",
-                                  "cwd": "/work/SR_CorrNet-wt/branch", "liveness": "working"}],
+                                  "cwd": "/work/SR_ModelA-wt/branch", "liveness": "working"}],
                     "resources": [], "compute_hosts": {"hosts": [{"host": "host-a", "gpus": [
                         {"index": 0, "processes": [{"command": "python -B /tmp/resume.py --request-sha256 0123456789abcdef",
                             "used_memory_mib": 2560, "elapsed_s": 3600,
-                            "cwd": "/work/SR_CorrNet-wt/branch",
+                            "cwd": "/work/SR_ModelA-wt/branch",
                             "session_owner": {"harness": "codex", "session_id": "sid-exact"}}]}]}]},
                     "unregistered_gpu": []}
         vm = build_view_model(snapshot, now=2_000_000_000)
@@ -261,7 +261,7 @@ class RealDataFidelity(unittest.TestCase):
             names = {live._repo_of(lambda _cwd: "alice", cwd) for cwd in
                      ("/data/alice/work/projects/2026-08_keyword", "/data/alice")}
             self.assertEqual(names, {"2026-08_keyword", live.HOME_LABEL})
-            self.assertEqual(live._repo_of(lambda _cwd: "tool", "/data/alice/NN_Zoo/tool"), "tool")
+            self.assertEqual(live._repo_of(lambda _cwd: "tool", "/data/alice/Project_Zoo/tool"), "tool")
             self.assertEqual(live._repo_of(lambda _cwd: "alice-site", "/data/alice/alice-site"), "alice-site")
 
     def test_branch_is_the_known_branch_or_nothing(self):

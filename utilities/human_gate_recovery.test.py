@@ -45,12 +45,6 @@ class M1Decision(unittest.TestCase):
         self.fixture = SF.TestGateRelease()
         self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
-        # These cases exercise proof enforcement, independently of the user's
-        # default-off policy. No live setting or controller is changed.
-        policy = mock.patch.object(SF.ROUTE, "gates_on", return_value=True)
-        policy.start()
-        self.addCleanup(policy.stop)
-        self.enterContext(mock.patch.dict(os.environ, {"HEARTING_GATES": "on"}))
         with contextlib.redirect_stdout(io.StringIO()):
             self.source, self.route_file = self.fixture._blocked()
         self.source["launch_compatibility_tuple"] = {"jobs_path": {"path": str(self.fixture.jobs)}}
@@ -84,18 +78,6 @@ class M1Decision(unittest.TestCase):
         self.release("revise")
         self.builder_refuses()
 
-    def test_verifier_rejects_exact_stop_bytes_even_if_proof_says_proceed(self):
-        self.release("stop")
-        entries = self.ledger.journal()
-        raised = next(e for e in entries if e["workflow_state"] == "BLOCKED_HUMAN_GATE")
-        proof = dict(gate=self.gate, source_route_id=self.source["route_id"],
-                     source_route_hash=self.source["route_hash"], epoch=1, decision="proceed",
-                     jobs_path=str(self.fixture.jobs), journal_path=str(self.ledger.journal_path),
-                     raise_entry_digest=SF.ROUTE._sha256_record(raised),
-                     release_entry_digest=SF.ROUTE._sha256_record(entries[-1]))
-        with self.assertRaisesRegex(ValueError, "continuation-human-gate"):
-            SF.ROUTE._verify_continuation_gate_release_proofs(self.suffix(proof))
-
     def prior_proof(self):
         self.release("proceed")
         proof = SF.ROUTE._continuation_gate_release_proof(self.source, self.gate)
@@ -104,30 +86,10 @@ class M1Decision(unittest.TestCase):
             self.ledger.set_workflow_state("BLOCKED_HUMAN_GATE", evidence={"gate": self.gate})
         return proof
 
-    def assert_prior_invalid(self, proof):
-        self.builder_refuses()
-        with self.assertRaisesRegex(ValueError, "continuation-human-gate"):
-            SF.ROUTE._verify_continuation_gate_release_proofs(self.suffix(proof))
-
-    def test_latest_reraise_invalidates_prior_proof(self):
-        self.assert_prior_invalid(self.prior_proof())
-
     def test_disabled_gate_policy_accepts_same_work_drift(self):
         proof = self.prior_proof()
-        with mock.patch.dict(os.environ, {"HEARTING_GATES": "off"}), \
-                mock.patch.object(SF.ROUTE, "gates_on", return_value=False):
-            self.assertEqual(SF.ROUTE._verify_continuation_gate_release_proofs(
-                self.suffix(proof)), [proof])
-
-    def test_latest_stop_invalidates_prior_proof(self):
-        proof = self.prior_proof()
-        self.release("stop")
-        self.assert_prior_invalid(proof)
-
-    def test_latest_revise_invalidates_prior_proof(self):
-        proof = self.prior_proof()
-        self.release("revise")
-        self.assert_prior_invalid(proof)
+        self.assertEqual(SF.ROUTE._verify_continuation_gate_release_proofs(
+            self.suffix(proof)), [proof])
 
     def test_legacy_proceed_without_decision_remains_valid(self):
         with self.ledger.lock():

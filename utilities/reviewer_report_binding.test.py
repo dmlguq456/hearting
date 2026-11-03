@@ -476,7 +476,6 @@ class ReviewOutputWrapperBoundaryTest(unittest.TestCase):
             "AGENT_REVIEW_CYCLE_ID": self.cycle["cycle_id"],
             "AGENT_REVIEW_PRODUCER_ID": self.cycle["producer_id"],
             "AGENT_REVIEW_OUTPUT": str(output), **self.cycle["env"],
-            "HEARTING_GATES": "on",
         }
         with governed.open("r+b") as held:
             fcntl.flock(held.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)

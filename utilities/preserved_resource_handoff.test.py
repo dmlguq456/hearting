@@ -151,7 +151,7 @@ class PreservedResourceHandoffReplayTest(unittest.TestCase):
             AGENT_HOME=str(ROOT), AGENT_DISPATCH_JOBS=str(self.jobs),
             AGENT_ARTIFACT_ROOT=str(self.artifacts), AGENT_ARTIFACT_CHECKPOINT="off",
             AGENT_RESOURCE_RUN_INDEX=str(self.base / "resource-index.json"),
-            XDG_STATE_HOME=str(self.state_root), HEARTING_GATES="off",
+            XDG_STATE_HOME=str(self.state_root),
             COMPUTE_HOSTS_CONFIG=str(self.base / "no-compute.yaml"),
             CUDA_VISIBLE_DEVICES="",
         )
@@ -173,7 +173,7 @@ class PreservedResourceHandoffReplayTest(unittest.TestCase):
             ("{DISPATCH}", str(self.dispatch)),
             ("{RELEASES}", str(self.base / "releases")),
             ("{COMPUTE_RUNS}", str(self.base / "compute-runs")),
-            ("/home/example/NN_Zoo/SR_CorrNet", str(self.repo)),
+            ("/home/example/Project_Zoo/SR_ModelA", str(self.repo)),
         ]
 
     def _remove_base(self):
