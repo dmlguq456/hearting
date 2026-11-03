@@ -680,8 +680,9 @@ pathlib.Path(result).write_text(json.dumps(dataclasses.asdict(outcome)))
 _REGISTRATION_PROBE = r'''
 import json, os, pathlib, signal, sys, time
 import dispatch_contract as D
-jobs, parent, historical_owner = sys.argv[1:]
+jobs, parent, historical_owner, deadline = sys.argv[1:]
 jobs = pathlib.Path(jobs)
+deadline = float(deadline)
 binding = D.resolve_live_parent_attempt(jobs, parent_slug=parent,
     repo=os.environ["AGENT_HOME"], worktree=os.environ["AGENT_HOME"], expected_attempt_id=parent)
 real_flock = D.fcntl.flock
@@ -702,8 +703,19 @@ def flock(fd, operation):
         return value
     return real_flock(fd, operation)
 D.fcntl.flock = flock
+LOCK_WAIT_SECONDS = 4
 def expired(*_):
-    raise TimeoutError("registration-lock-deadline")
+    # The alarm catches a registration stuck on the registry lock, where a
+    # nested request would deadlock. A registration that is only slow on a
+    # loaded runner has no request waiting, so look again until the driver's
+    # own deadline instead of calling it blocked.
+    now = time.monotonic()
+    if any(call["acquired"] is None and now - call["requested"] >= LOCK_WAIT_SECONDS
+           for call in calls):
+        raise TimeoutError("registration-lock-deadline")
+    if now >= deadline:
+        raise TimeoutError("registration-deadline")
+    signal.setitimer(signal.ITIMER_REAL, min(1.0, deadline - now))
 signal.signal(signal.SIGALRM, expired)
 preclaim_calls = 0
 def preclaim(lines):
@@ -720,14 +732,15 @@ row = ("now\topen\t" + os.environ["AGENT_HOME"] + "\t" + os.environ["AGENT_HOME"
        "execution_surface=registered-headless,registered_worker=1,fallback_hop=same-harness-headless,"
        "attempt_id=" + aid)
 start = time.monotonic()
-signal.alarm(4)
+signal.alarm(LOCK_WAIT_SECONDS)
 try:
     registered = D.claim_attempt_row(jobs, aid, row, launch=True, preclaim=preclaim)
     if preclaim_calls != 1:
         raise AssertionError("registration did not exercise its locked observations")
     result = {"registered": registered, "state": "returned"}
-except TimeoutError:
-    result = {"registered": False, "state": "lock-timeout"}
+except TimeoutError as exc:
+    result = {"registered": False, "state": (
+        "lock-timeout" if exc.args == ("registration-lock-deadline",) else "deadline")}
 except AssertionError as exc:
     # Older observations may turn the alarm's OSError into a false liveness
     # result. Keep the exact lock evidence instead of losing it to a JSON
@@ -1013,7 +1026,6 @@ class RuntimeObservationCpuFixture(unittest.TestCase):
                 "XDG_STATE_HOME": str(home / ".local" / "state"),
                 "XDG_CACHE_HOME": str(home / ".cache"),
                 "HARNESS_DATA_ROOT": str(data_root),
-                "HEARTING_GATES": "on",
                 "AGENT_HOME": str(source),
                 "AGENT_DISPATCH_JOBS": str(jobs_path),
                 "AGENT_PEER_LEDGER_ROOT": str(state_root),
@@ -1472,14 +1484,20 @@ class RuntimeObservationCpuFixture(unittest.TestCase):
                     probe = temp_root / "registration-probe.py"
                     probe.write_text(_REGISTRATION_PROBE)
                     started = time.monotonic()
+                    probe_timeout = 12
+                    # The probe gives up a second before this run's own
+                    # timeout, so its lock evidence still reaches the report.
                     registration_run = subprocess.run([sys.executable, str(probe), str(jobs_path),
-                        foreground_processes[0][4], history_projects[0]["owner_attempt_id"]],
-                        capture_output=True, text=True, timeout=12)
+                        foreground_processes[0][4], history_projects[0]["owner_attempt_id"],
+                        str(started + probe_timeout - 1)],
+                        capture_output=True, text=True, timeout=probe_timeout)
                     registration = json.loads(registration_run.stdout)
                     registration["process_seconds"] = time.monotonic() - started
                     registration["returncode"] = registration_run.returncode
+                    # Blocked means a registry lock request waited or nested;
+                    # CPU time on a loaded runner is not blocking.
                     if not BASELINE_MODE and (not registration["registered"]
-                            or registration["nested_lock_request"] or registration["elapsed_seconds"] >= 4):
+                            or registration["nested_lock_request"]):
                         raise AssertionError(f"mixed workload blocked registration: {registration}")
                 finally:
                     successor_locks.close()

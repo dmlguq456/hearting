@@ -43,6 +43,17 @@ class LifecycleTest(unittest.TestCase):
 
     def _run_fake_runtime_chain(self, harness, mode):
         from foreground_activity import ForegroundActivityContext
+        deadline = 2
+        # A blocked chain must reach no-progress inside the hard deadline,
+        # after five interpreter start-ups. An active chain's runtime-only
+        # phases (the fake CLI's own quiet time before and after its tool,
+        # plus interpreter start-up and exit, none of which counts as
+        # progress) must stay inside one window. A quarter of the deadline
+        # leaves both sides room on a loaded runner.
+        window = deadline / 4
+        # Two of the launcher's samples (window / 20 each) are enough for it
+        # to observe the CLI alone before and after its tool.
+        runtime_only = window / 10
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
             helper = base / "runtime_helper.py"
@@ -64,10 +75,10 @@ class LifecycleTest(unittest.TestCase):
             fake_cli.write_text(
                 "import subprocess,sys,time\n"
                 "mode,log,tool=sys.argv[1:]\n"
-                "time.sleep(0.04)\n"
+                f"time.sleep({runtime_only})\n"
                 "p=subprocess.Popen([sys.executable,tool,mode,log])\n"
                 "p.wait()\n"
-                "time.sleep(0.12)\n",
+                f"time.sleep({runtime_only})\n",
                 encoding="utf-8",
             )
             helper.write_text(
@@ -93,10 +104,10 @@ class LifecycleTest(unittest.TestCase):
             )
             start = L.process_start_ticks(child.pid)
             context = ForegroundActivityContext(
-                0.22, harness, log, {}, runtime_executable=harness,
+                window, harness, log, {}, runtime_executable=harness,
             )
             try:
-                outcome = L.wait_foreground(child, 2, poll_interval=0.01,
+                outcome = L.wait_foreground(child, deadline, poll_interval=0.01,
                                             activity_context=context)
                 return outcome
             finally:
@@ -121,6 +132,45 @@ class LifecycleTest(unittest.TestCase):
                                             activity_context=context)
                 self.assertEqual(outcome.failure, "no-progress")
                 self.assertTrue(outcome.group_empty)
+            finally:
+                if child.poll() is None:
+                    L._bounded_group_stop(child, start or "", poll_interval=0.01)
+
+    def test_unobserved_time_before_a_known_sample_never_counts_as_quiet(self):
+        import foreground_activity as FA
+        window = 0.2
+        samples = []
+        stalled_end = []
+
+        class StalledFirstObservation:
+            def __init__(self, *_args):
+                pass
+
+            def sample(self):
+                samples.append(time.monotonic())
+                if len(samples) == 1:
+                    # A /proc scan stalls on a loaded host and still cannot
+                    # judge the child; nothing about that time is known.
+                    time.sleep(0.3)
+                    stalled_end.append(time.monotonic())
+                    return FA.ActivityObservation(True, True, ("observation-uncertain",))
+                return FA.ActivityObservation(False, False, ())
+
+        with tempfile.TemporaryDirectory() as td:
+            child = subprocess.Popen(
+                ["/bin/sh", "-c", "sleep 10"], start_new_session=True,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            start = L.process_start_ticks(child.pid)
+            context = FA.ForegroundActivityContext(window, "sh", Path(td) / "attempt.log", {})
+            try:
+                with mock.patch.object(FA, "ForegroundActivityMonitor", StalledFirstObservation):
+                    outcome = L.wait_foreground(child, 5, poll_interval=0.01,
+                                                activity_context=context)
+                self.assertEqual(outcome.failure, "no-progress")
+                # The confirming sample comes a full window after the first
+                # known one, never a window after the stalled unknown one.
+                self.assertGreaterEqual(samples[-1] - stalled_end[0], window)
             finally:
                 if child.poll() is None:
                     L._bounded_group_stop(child, start or "", poll_interval=0.01)

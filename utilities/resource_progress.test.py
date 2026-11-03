@@ -351,7 +351,7 @@ class ResourceProgressProductionTest(unittest.TestCase):
                 "production": {
                     "schema": "tf-rehancer.cnn-production/v1", "host": "cnn",
                     "capacity": capacity, "gpu_index": gpu,
-                    "directory": "/home/example/NN_Zoo/TF-Rehancer_artifacts"
+                    "directory": "/home/example/Project_Zoo/TF-Rehancer_artifacts"
                                  "/cnn_canonical_20261006/recovery-a1/%s/runs/%s"
                                  % (capacity.lower(), run),
                     "config_sha256": "9" * 64, "state": "training-updates",

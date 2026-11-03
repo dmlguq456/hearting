@@ -256,7 +256,7 @@ def _registered_readiness(observation: RegisteredWorkObservation) -> CompletionR
     if observation.pane_relation == "parent":
         if observation.delivery_state not in {
                 "unknown", "pending", "claimed", "queued", "unverified",
-                "sent-ambiguous", "acked", "not-required"}:
+                "sent-ambiguous", "acked", "not-required", "rejected", "expired"}:
             return CompletionReadiness("unknown", "registered-work", decision.outcome,
                                        decision.action, "registered-observation-invalid",
                                        provenance)
@@ -279,6 +279,12 @@ def _registered_readiness(observation: RegisteredWorkObservation) -> CompletionR
                 return CompletionReadiness("unknown", "registered-work", decision.outcome,
                                            decision.action, "registered-closure-unknown",
                                            provenance)
+            if observation.delivery_state in {"rejected", "expired"}:
+                # One readable delivery record says that notice ended; the settled result itself
+                # stays in the registry row and marker, so nothing is lost by calling it known.
+                return CompletionReadiness("ready", "registered-work", decision.outcome,
+                                           decision.action,
+                                           f"registered-delivery-ended:{observation.delivery_state}", provenance)
             return CompletionReadiness("ready", "registered-work", decision.outcome,
                                        decision.action, decision.reason, provenance)
     if observation.owner_completion_state == "unknown" or observation.cleanup_state == "unknown":

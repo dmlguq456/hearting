@@ -607,10 +607,16 @@ def published_installer(world: Path, tag: str, timeout: int) -> tuple[Path, str,
     return target, resolved, actual
 
 
-# §0.4 confirmation card: five labelled fields in order, then the option line.
-CARD_LABELS = ((("작업",), ("이유",), ("경로",), ("범위",), ("완료",)),
-               (("task", "work"), ("why", "reason"), ("route", "path"), ("scope",), ("done", "completion", "complete")))
-CARD_OPTIONS = (("진행", "중단"), ("proceed", "stop"))
+# §0.4 confirmation card: its labelled fields in order, then the option line. The intent card
+# (의도/범위/안 할 것/완료/경로; 범위 is not required here) replaced the five-field card; agents on an
+# older release still print that one.
+CARD_SHAPES = (
+    ((("의도",), ("안 할 것",), ("완료",), ("경로",)), ("진행", "중단")),
+    ((("intent",), ("not doing",), ("done", "completion", "complete"), ("route", "path")), ("proceed", "stop")),
+    ((("작업",), ("이유",), ("경로",), ("범위",), ("완료",)), ("진행", "중단")),
+    ((("task", "work"), ("why", "reason"), ("route", "path"), ("scope",), ("done", "completion", "complete")),
+     ("proceed", "stop")),
+)
 MAX_CANNED = 3
 
 
@@ -618,7 +624,7 @@ def card_answer(text: str) -> str | None:
     """Return the card's proceed word when the reply is a confirmation card, else None."""
     lines = [re.sub(r"^[\s>`•\-]+", "", line).replace("*", "").strip() for line in text.splitlines()]
     lines = [line for line in lines if line]
-    for labels, (proceed, stop) in zip(CARD_LABELS, CARD_OPTIONS):
+    for labels, (proceed, stop) in CARD_SHAPES:
         cursor = 0
         for names in labels:
             found = next((i for i in range(cursor, len(lines))

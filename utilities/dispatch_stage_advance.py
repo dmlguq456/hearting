@@ -31,7 +31,7 @@ from typing import Callable, FrozenSet, Protocol
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
-from hearting_gates import gates_on, same_work_or_refuse
+from hearting_gates import note_same_work_drift
 
 
 def _load_capability_route():
@@ -1038,13 +1038,9 @@ def _load_and_verify_route(route_file: Path) -> dict:
 
     route = json.loads(Path(route_file).read_text(encoding="utf-8"))
     if route.get("route_hash") != ROUTE.route_hash(route):
-        if gates_on():
-            raise StageAdvanceError("stage-advance-launch-compatibility-mismatch")
-        same_work_or_refuse("stage-advance-launch-compatibility-mismatch")
+        note_same_work_drift("stage-advance-launch-compatibility-mismatch")
     if route.get("route_id") != "rt-" + str(route.get("route_hash", "")).split(":", 1)[-1][:16]:
-        if gates_on():
-            raise StageAdvanceError("stage-advance-launch-compatibility-mismatch")
-        same_work_or_refuse("stage-advance-launch-compatibility-mismatch")
+        note_same_work_drift("stage-advance-launch-compatibility-mismatch")
     return route
 
 

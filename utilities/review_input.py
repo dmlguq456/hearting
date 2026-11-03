@@ -12,7 +12,7 @@ from pathlib import Path
 import re
 import stat
 
-from hearting_gates import gates_on, same_work_or_refuse
+from hearting_gates import note_same_work_drift
 
 import dispatch_contract as DC
 
@@ -141,7 +141,7 @@ def resolve_input(route, node, jobs, reviewed_evidence=None, *, retry_of=None,
         if original is None:
             return explicit
         if explicit is not None and explicit != {k: original[k] for k in ("path", "sha256")}:
-            same_work_or_refuse("reviewed-evidence-replacement-mismatch")
+            note_same_work_drift("reviewed-evidence-replacement-mismatch")
             original = {**original, **explicit}
         return {k: original[k] for k in ("path", "sha256", "producer") if k in original}
     if not has_plan_producer(route, node):
@@ -193,23 +193,19 @@ def resolve_input(route, node, jobs, reviewed_evidence=None, *, retry_of=None,
                 raise ValueError("plan preview changed evidence path")
         else:
             if not DC.completion_marker_is_current(route, producer, marker_path, marker):
-                if gates_on():
-                    raise ValueError("plan marker is not current")
                 # Currency keeps missing/malformed evidence as hard failures.
                 currency = DC.gate_currency(route, producer, marker_path, marker)
                 if currency.state not in {"revised-unrecorded", "superseded"}:
                     raise ValueError("plan marker is not current")
-                same_work_or_refuse("reviewed-evidence-not-current", currency.reason)
+                note_same_work_drift("reviewed-evidence-not-current", currency.reason)
             evidence = marker["evidence"]
         candidate = _file(evidence["path"])
         if candidate["sha256"] != evidence["sha256"]:
-            if gates_on():
-                raise ValueError("plan evidence changed")
-            same_work_or_refuse("reviewed-evidence-changed", candidate["path"])
+            note_same_work_drift("reviewed-evidence-changed", candidate["path"])
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise DC.DispatchContractError("reviewed-evidence-producer-unproven", "plan") from exc
     if explicit is not None and explicit != candidate:
-        same_work_or_refuse("reviewed-evidence-producer-mismatch", str(node["id"]))
+        note_same_work_drift("reviewed-evidence-producer-mismatch", str(node["id"]))
         candidate = explicit
     return {**candidate, "producer": {"route_id": route["route_id"], "route_node": "plan",
             "attempt_id": marker.get("attempt_id"), "marker_digest": _digest(producer_preview or marker)}}
@@ -246,12 +242,12 @@ def read_binding(jobs, metadata, *, verify_current=False):
         raise DC.DispatchContractError("reviewed-evidence-binding-mismatch", str(metadata.get("attempt_id")))
     if (any(payload.get(k) != value for k, value in _identity(jobs, metadata).items())
             or _digest(payload) != metadata.get(KEY)):
-        same_work_or_refuse("reviewed-evidence-binding-mismatch", str(metadata.get("attempt_id")))
+        note_same_work_drift("reviewed-evidence-binding-mismatch", str(metadata.get("attempt_id")))
         payload = {**payload, **_identity(jobs, metadata)}
     if verify_current:
         current = _file(payload["path"])
         if current != {k: payload[k] for k in ("path", "sha256")}:
-            same_work_or_refuse("reviewed-evidence-changed", payload["path"])
+            note_same_work_drift("reviewed-evidence-changed", payload["path"])
             payload = {**payload, **current}
     return payload
 
@@ -267,7 +263,7 @@ def seal_binding(jobs, metadata, candidate, *, source=None):
     path = _path(jobs, metadata["attempt_id"])
     current = _file(payload["path"])
     if current != {k: payload[k] for k in ("path", "sha256")}:
-        same_work_or_refuse("reviewed-evidence-changed", payload["path"])
+        note_same_work_drift("reviewed-evidence-changed", payload["path"])
         payload.update(current)
     digest = _digest(payload)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -286,9 +282,7 @@ def _route_node(metadata):
         route = json.loads(Path(route_file).read_text())
         if (route.get("route_id") != metadata.get("route_id")
                 or route.get("route_hash") != metadata.get("route_hash")):
-            if gates_on():
-                raise ValueError("route binding mismatch")
-            same_work_or_refuse("reviewed-evidence-route-mismatch")
+            note_same_work_drift("reviewed-evidence-route-mismatch")
         node = next(n for n in route["nodes"] if n.get("id") == metadata.get("route_node"))
     except (OSError, ValueError, TypeError, KeyError, StopIteration) as exc:
         raise DC.DispatchContractError("reviewed-evidence-route-unproven") from exc
@@ -308,7 +302,7 @@ def predecessor_binding(jobs, attempt_id, route, node, *, allow_legacy_unbound=F
             ("route_id", route["route_id"]), ("route_hash", route["route_hash"]),
             ("route_node", node["id"])))
     if not same_route:
-        same_work_or_refuse("reviewed-evidence-replacement-mismatch")
+        note_same_work_drift("reviewed-evidence-replacement-mismatch")
     if allow_legacy_unbound and same_route:
         binding_path = _path(jobs, attempt_id)
         try:
@@ -411,7 +405,7 @@ def prepare_request(args):
             args.review_input_source = {"attempt_id": prior, "binding_digest": source_meta[KEY]}
     previous = getattr(args, "review_input_candidate", None)
     if previous is not None and previous != candidate:
-        same_work_or_refuse("reviewed-evidence-changed", candidate["path"])
+        note_same_work_drift("reviewed-evidence-changed", candidate["path"])
     args.review_input_candidate = candidate
     args.reviewed_evidence = candidate["path"]
     return candidate

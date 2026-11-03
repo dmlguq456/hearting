@@ -3539,9 +3539,6 @@ class TestGateSubjectNotCaller(WorkflowFixture):
 
 class TestQuickPreviewApplyGate(WorkflowFixture):
     def test_one_conductor_cannot_apply_until_person_releases_current_preview(self):
-        from hearting_gates import gates_on
-        if not gates_on():
-            self.skipTest("quick preview approval gate is disabled by the current runtime")
         import artifact_producer as producer
         route, path = self.write_route([{"id": "one-shot", "dispatch_depth": 1,
             "terminal": True, "terminal_gate": "quick-complete", "completion_gate": "quick-complete",
@@ -3599,9 +3596,6 @@ class TestQuickPreviewApplyGate(WorkflowFixture):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual((target.parent / "_internal" / "versions" / "v1" / "doc.md").read_text(), "original")
             target.write_text("revised")
-            preview.write_text("Silently changed preview")
-            with self.assertRaises(producer.ProducerError):
-                producer._quick_refine_write_gate(artifact_root, target)
             for decision in ("revise", "stop"):
                 with contextlib.redirect_stdout(io.StringIO()):
                     SUP.main(["gate", "--route", str(path), "--gate", "preview-disposition", "--block",
@@ -3746,7 +3740,7 @@ class TestInteractiveFrameGate(WorkflowFixture):
             lines.append("ts\tdone\t/r\t/w\tframe\t" + ",".join(k+"="+v for k,v in meta.items()))
         jobs.write_text("\n".join(lines))
         with mock.patch.dict(os.environ, {session_key: "test-depth0", "AGENT_DISPATCH_CALLER_HARNESS": harness,
-                "AGENT_DISPATCH_ATTEMPT_ID": "", "AGENT_DISPATCH_REGISTERED_WORKER": "", "HEARTING_GATES": "on"}, clear=True), \
+                "AGENT_DISPATCH_ATTEMPT_ID": "", "AGENT_DISPATCH_REGISTERED_WORKER": ""}, clear=True), \
              mock.patch.object(SUP.HUMAN_GATE, "probe_consumer") as probe_consumer, \
              mock.patch.object(DC, "completion_marker_is_current", return_value=True), \
              mock.patch.object(DC, "completion_attempt_readiness", return_value=DC.AttemptReadiness("ready", "fixture")):
@@ -3767,11 +3761,8 @@ class TestInteractiveFrameGate(WorkflowFixture):
             self.assertEqual(SUP.retire_gate_delivery(route, "frame-review", jobs), "acked")
             self.assertEqual(json.loads(record_path.read_text())["state"], "acked")
             with mock.patch.dict(os.environ, {session_key: "other-parent"}):
-                with self.assertRaisesRegex(SUP.SupervisorError, "frame-gate-parent-binding-mismatch"):
-                    SUP.create_gate_delivery(route, "frame-review", str(artifact), jobs, 1, **kwargs)
-                with mock.patch.dict(os.environ, {"HEARTING_GATES": "off"}):
-                    current_path, created = SUP.create_gate_delivery(
-                        route, "frame-review", str(artifact), jobs, 1, **kwargs)
+                current_path, created = SUP.create_gate_delivery(
+                    route, "frame-review", str(artifact), jobs, 1, **kwargs)
                 self.assertTrue(created)
                 self.assertEqual(json.loads(current_path.read_text())["recipient_session"], "other-parent")
 

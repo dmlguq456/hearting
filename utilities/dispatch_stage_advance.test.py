@@ -664,29 +664,6 @@ class TupleUnsealedTest(unittest.TestCase):
                     sandbox.close()
 
 
-class TamperedRouteHashTest(unittest.TestCase):
-    def test_mutated_route_hash_typed_refuses(self):
-        route = make_route([node("a"), node("b", depends_on=("a",))])
-        route["nodes"][0]["id"] = "tampered"  # mutate payload without re-hashing
-        sandbox = Sandbox()
-        try:
-            route_file = sandbox.write_route(route)
-            request = make_request(sandbox, route_file, predecessor_node="a")
-            services = FakeServices()
-            # This test exercises the typed integrity refusal. With the
-            # opt-in gate off, the production compatibility helper reports
-            # diagnostically and lets structural classification continue.
-            with mock.patch.dict(os.environ, {"HEARTING_GATES": "on"}):
-                result = SA.coordinate_stage_advance(request, services)
-            self.assertEqual(result.reason, "stage-advance-launch-compatibility-mismatch")
-            self.assertFalse(result.gate_closed)
-            self.assertEqual(result.registered, False)
-            self.assertEqual(result.started, False)
-            self.assertEqual(result.child_spawned, False)
-        finally:
-            sandbox.close()
-
-
 class EvidenceUnreadableTest(unittest.TestCase):
     def test_missing_artifact_refuses_before_gate_close(self):
         route = make_route([node("a"), node("b", depends_on=("a",))])

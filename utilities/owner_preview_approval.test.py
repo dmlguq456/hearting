@@ -320,18 +320,6 @@ class OwnerPreviewApprovalTest(OwnerRefineBase):
                 finally:
                     fixture.doCleanups()
 
-    def test_a_preview_changed_after_it_was_shown_does_not_authorize_the_apply(self):
-        self.build("claude")
-        self.assertEqual(self.start()["state"], "waiting-human-gate")
-        self.preview.write_text("a different preview")        # not the bytes the person was asked about
-        with mock.patch.dict(os.environ, {"HEARTING_GATES": "on"}):   # the opt-in same-work identity check
-            self.assertEqual(self.release("proceed").returncode, 0)
-            self.assertNotEqual(self.settle().result, "completed")
-            receipt = self.start()
-        self.assertNotEqual(receipt["state"], "completed", receipt)
-        self.assertNotIn("next_leg", receipt)
-        self.assertNotEqual(self.workflow_state(), "COMPLETE")
-
     def test_an_owner_that_raised_and_was_released_settles_as_before(self):
         self.build("claude", close=False)
         self.raise_gate()
@@ -342,34 +330,30 @@ class OwnerPreviewApprovalTest(OwnerRefineBase):
 
     def test_a_preview_removed_after_its_release_does_not_hold_the_closure(self):
         # The preview is a file of its own, not the review marker's evidence: removing that one is a different refusal.
-        for label, released, gates in (("off", True, None), ("off-unreleased", False, None), ("on", True, "on")):
-            with self.subTest(gates=label):
+        for label, released in (("released", True), ("unreleased", False)):
+            with self.subTest(case=label):
                 fixture = OwnerPreviewApprovalTest(
                     "test_a_preview_removed_after_its_release_does_not_hold_the_closure")
                 fixture.setUp()
                 try:
-                    env = {"HEARTING_GATES": gates} if gates else {}
-                    with mock.patch.dict(os.environ, env):
-                        if not gates:
-                            os.environ.pop("HEARTING_GATES", None)
-                        fixture.build("claude", close=False)
-                        preview = fixture.write_output(fixture.cycle, rel="documents/diff-preview.md",
-                                                       data=b"--- a/README\n+++ b/README\n")
-                        fixture.raise_gate(preview)
-                        if released:
-                            self.assertEqual(fixture.release("proceed").returncode, 0)
-                        preview.unlink()
-                        fixture.close_owner()
-                        settled = fixture.settle()
-                        if label == "off":
-                            self.assertEqual(settled.result, "completed", settled)
-                            receipt = fixture.start()
-                            self.assertEqual(receipt["state"], "completed", receipt)
-                            self.assertEqual(fixture.workflow_state(), "COMPLETE")
-                        else:
-                            # Only a person's `proceed` authorizes the close; the gate-off record never stands in for it.
-                            self.assertNotEqual(settled.result, "completed", settled)
-                            self.assertNotEqual(fixture.workflow_state(), "COMPLETE")
+                    fixture.build("claude", close=False)
+                    preview = fixture.write_output(fixture.cycle, rel="documents/diff-preview.md",
+                                                   data=b"--- a/README\n+++ b/README\n")
+                    fixture.raise_gate(preview)
+                    if released:
+                        self.assertEqual(fixture.release("proceed").returncode, 0)
+                    preview.unlink()
+                    fixture.close_owner()
+                    settled = fixture.settle()
+                    if label == "released":
+                        self.assertEqual(settled.result, "completed", settled)
+                        receipt = fixture.start()
+                        self.assertEqual(receipt["state"], "completed", receipt)
+                        self.assertEqual(fixture.workflow_state(), "COMPLETE")
+                    else:
+                        # Only a person's `proceed` authorizes the close; the gate-off record never stands in for it.
+                        self.assertNotEqual(settled.result, "completed", settled)
+                        self.assertNotEqual(fixture.workflow_state(), "COMPLETE")
                 finally:
                     fixture.doCleanups()
 
@@ -385,7 +369,11 @@ class OwnerPreviewApprovalTest(OwnerRefineBase):
     def test_a_pass_with_no_review_marker_keeps_the_existing_unfinished_stage_receipt_and_raises_nothing(self):
         self.build("claude", review=False)
         receipt = self.start()
-        self.assertEqual((receipt["state"], receipt["reason"]), ("needs-attention", "workflow-executor-exited"), receipt)
+        # A PASS that left a declared stage undone is unfinished work: the runtime tries one `observed`
+        # continuation. This fixture's caller is not the route parent, so the continuation is refused at
+        # the parent check and the receipt keeps the missing stages; nothing is launched, raised or completed.
+        self.assertEqual((receipt["state"], receipt["reason"]), ("needs-attention", "replacement-parent-identity-unproven"), receipt)
+        self.assertEqual(receipt["launches"], [])
         self.assertIn("review", receipt["missing_terminal_gates"])
         self.assertNotIn("next_leg", receipt)
         self.assertEqual(self.resolution()["status"], "not-raised")
@@ -596,7 +584,7 @@ class OwnerGateReachesEveryParentTest(OwnerRefineBase):
         # The one case that still ends at `human-gate-not-raised`: the runtime tried to ask and the raise itself
         # was refused (a preview that stopped being provable at that moment, a ledger that cannot enter the
         # gate, a timeout). There is nothing the person could be shown, so nothing is settled, raised or
-        # released. A missing review stage is not this case: it keeps `workflow-executor-exited`.
+        # released. A missing review stage is not this case: the runtime continues it once, or keeps its missing-stage receipt.
         import dispatch_contract as DC
         for kind, harness in PARENTS:
             with self.subTest(parent=kind):

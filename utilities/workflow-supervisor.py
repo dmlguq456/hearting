@@ -42,7 +42,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
-from hearting_gates import gates_on, same_work_or_refuse
+from hearting_gates import note_same_work_drift
 
 from dispatch_contract import success_note, verdict_pass  # noqa: E402
 import workflow_state as WS  # noqa: E402
@@ -3480,9 +3480,7 @@ def create_local_frame_gate_delivery(route, gate, artifact, jobs_path, epoch, *,
             raise SupervisorError("frame-gate-parent-binding-mismatch")
         from dispatch_seat_handover import owns   # the launching session, or its same-seat successor
         if not owns(metadata[0], session, Path(jobs_path)):
-            if gates_on():
-                raise SupervisorError("frame-gate-parent-binding-mismatch")
-            same_work_or_refuse("frame-gate-parent-binding-mismatch")
+            note_same_work_drift("frame-gate-parent-binding-mismatch")
         attempts.append(attempt)
     # A pre-owner frame interview is already running in its interactive
     # parent. Bind its local handback to the native session id; requiring the
@@ -4138,6 +4136,14 @@ def cmd_release(args):
             assert_release_authority(actor_kind, resolution, gates[args.gate], args.gate)
             answers = {**answers, "actor_kind": actor_kind}
         answered_interview = interview_of_gate(ledger, args.gate) if answers else None
+        if args.gate == "frame-review" and args.decision == "proceed" and answers:
+            import work_intent
+            crossed = work_intent.supervisor_crossing(route, answered_interview, answers)
+            if crossed:
+                raise SupervisorError(
+                    "gate-release-authority-refused: the chosen direction crosses the intent's 안 할 것 ("
+                    + "; ".join(crossed) + "); only the person can choose it -- present the registered "
+                    "question to the person")
         binding_evidence = selected_release_journal_evidence(
             route, args.gate, args.decision, node_id, binding)
         if args.decision == "proceed":

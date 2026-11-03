@@ -458,7 +458,19 @@ Claude user rules (`$CLAUDE_CONFIG_DIR/rules/*.md`), activation writes
 uninstall removes it, as it removes the link; the rule files are only read. The
 whole file is Hearting's: an edit is kept beside it as `AGENTS.md.edited-<time>`
 before the rewrite, and a rule file that is not UTF-8 text is skipped and named
-in the activation report.
+in the activation report. The carry is on by default. These two lines in
+`~/.config/hearting/dispatch-defaults.yaml` stop it, and the next install, update,
+or refresh puts the plain link back (an edited file is kept aside first):
+
+```yaml
+user_rules:
+  opencode: off
+```
+
+`carry`, `on`, `true`, and `yes` keep it on; any other value reads as off and
+shows a warning. No value of this setting makes the file invalid; a syntax
+error on its line (odd indentation, a tab, a duplicate key) breaks the file like
+on any other line, and an off value is still honored.
 
 Keep `$HOME/.config/opencode` and `$HOME/.local/share/opencode` runtime-owned;
 the harness merges its skill entries — and the fallback instruction entry — into

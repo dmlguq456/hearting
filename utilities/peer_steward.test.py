@@ -13,6 +13,7 @@ import math
 import multiprocessing
 import os
 import re
+import select
 import shutil
 import signal
 import subprocess
@@ -1947,6 +1948,37 @@ class WatchWakeTest(unittest.TestCase):
         with mock.patch.object(peer_steward.os, "kill") as kill:
             self.assertFalse(peer_steward._wake_watch_observer({"observer_protocol": "bad"}))
         kill.assert_not_called()
+
+
+class WatcherIdentityTest(unittest.TestCase):
+    def test_exited_watcher_is_absent_even_when_its_row_vanishes_between_reads(self):
+        def stat_row(state, start):
+            return "4242 (python3) " + " ".join([state, *(["0"] * 18), start])
+
+        for state, present in (("S", True), ("R", True), ("Z", False), ("X", False)):
+            with self.subTest(state=state), mock.patch.object(
+                    peer_steward.Path, "read_text", return_value=stat_row(state, "800")):
+                self.assertIs(peer_steward._pid_identity_ok(4242, "800"), present)
+                self.assertFalse(peer_steward._pid_identity_ok(4242, "801"))
+        # The parent can reap an exited watcher between two reads of its row
+        # (CI: a replaced observer was then reported present and never respawned).
+        with mock.patch.object(peer_steward.Path, "read_text",
+                               side_effect=[stat_row("Z", "800"), FileNotFoundError()]):
+            self.assertFalse(peer_steward._watcher_present(
+                {"watcher": {"pid": 4242, "pid_start": "800"}}))
+
+    def test_observer_never_names_itself_without_its_own_start_ticks(self):
+        watch_id = "0123456789abcdef"
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = peer_steward._watch_paths(watch_id, Path(tmp))
+            arm = {"watch_id": watch_id, "target": "peer-a",
+                   "steward": {"session_id": "steward-1"}, "watcher": {}}
+            paths.arm.write_text(json.dumps(arm), encoding="utf-8")
+            # An empty pid_start would make this live observer read as exited.
+            with mock.patch.object(peer_steward, "_proc_start_ticks", return_value=None), \
+                    mock.patch.object(peer_steward, "process_start_ticks", return_value=None):
+                peer_steward._record_own_watch_identity(watch_id, paths, "default")
+            self.assertEqual(json.loads(paths.arm.read_text())["watcher"], {})
 
 
 class WatchArmTest(_WatchMixin, unittest.TestCase):
@@ -3999,7 +4031,6 @@ class StatusRearmTest(_WatchMixin, unittest.TestCase):
             "watcher": {"pid": idle.pid, "pid_start": peer_steward.process_start_ticks(idle.pid)},
         }
         self.assertTrue(peer_steward._pid_identity_ok(idle.pid, never_locks["watcher"]["pid_start"]))
-        self.assertFalse(peer_steward._is_zombie(idle.pid))
         self.assertFalse(peer_steward._alive(never_locks, self.watch_root))
 
         self._release()
@@ -4360,7 +4391,9 @@ class WatchMessageTransportSettlementTest(_WatchMixin, unittest.TestCase):
         latest = self._resume_until(
             store, duty["id"],
             lambda row: row["observation"].get("reason") == "received-binding-unverified")
-        self.assertEqual(latest["state"], "unknown")
+        # CI still saw 'complete' here after the duty moved behind the handover
+        # (run 41551665759). The record's observation names the settling path.
+        self.assertEqual(latest["state"], "unknown", latest)
         self.assertEqual(latest["observation"]["reason"], "received-binding-unverified")
         self.assertEqual(latest["delivery"], "pending")
 
@@ -4459,6 +4492,60 @@ class ReviewRoundOneTest(_WatchMixin, unittest.TestCase):
         self.assertEqual(self.calllog.read_text(), before)
 
 
+class NativeResultRunnerWakeTest(_WatchMixin, unittest.TestCase):
+    def test_native_result_over_a_pending_cached_projection_wakes_the_runner(self):
+        """A projection cached before the native result cannot reflect it.
+
+        The watcher requests a refresh only when the cache reads ready or
+        unavailable. For any other cached result it must still wake the runner,
+        or the runner reads the new result only at its next backoff pass
+        (CI 41449820688: the request came 30 s after the native result).
+        """
+        from dispatch_registry_cache import registry_view
+
+        store = peer_steward.peer_obligations.ObligationStore()
+        # Hold the runner lock and the wake input ourselves: no runner starts,
+        # and every wake the watcher sends lands here.
+        lock_fd = os.open(store.root / peer_steward.peer_obligations.RUNNER_LOCK_NAME,
+                          os.O_RDWR | os.O_CREAT, 0o600)
+        self.addCleanup(os.close, lock_fd)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        wake_fd = peer_steward.shared_readiness.open_runner_wake(store.root)
+        self.addCleanup(os.close, wake_fd)
+
+        env = self._env("held")
+        fields = self._fields(self._run("watch", "peer-a", env=env).stdout)
+        self._wait_for_native_wait_started(fields["watch_id"])
+        arm = json.loads((self.watch_root / f"{fields['watch_id']}.json").read_text())
+        start = str(peer_steward.process_start_ticks(os.getpid()))
+        with mock.patch.dict(os.environ, env):
+            identity = peer_steward._watch_readiness_identity(arm, "idle")
+            jobs = peer_steward._watch_selected_jobs_path()
+            generation = peer_steward.shared_readiness.registry_generation(
+                jobs, registry_view(jobs), selected=True)
+        peer_steward.shared_readiness.publish_runner_incarnation(
+            store.root, os.getpid(), start, "fixture-runner")
+        peer_steward.shared_readiness.publish_target_projection(
+            store.root, identity, {"state": "pending", "reason": "fixture-cached-pending"},
+            producer_pid=os.getpid(), producer_start=start, incarnation="fixture-runner",
+            generation=generation, lineage={key: arm["pane_identity"][key]
+                                            for key in ("shell_pid", "shell_start")})
+        with contextlib.suppress(BlockingIOError):
+            while os.read(wake_fd, 4096):
+                pass
+
+        self._release()
+        observation_path = self.watch_root / f"{fields['watch_id']}.observation.json"
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and (peer_steward._read_json(
+                observation_path) or {}).get("reason") != "fixture-cached-pending":
+            time.sleep(0.02)
+        self.assertEqual(peer_steward._read_json(observation_path).get("reason"),
+                         "fixture-cached-pending")
+        ready, _, _ = select.select([wake_fd], [], [], 10)
+        self.assertEqual(ready, [wake_fd], "the runner was not woken for the native result")
+
+
 class KillFixtureTest(_WatchMixin, unittest.TestCase):
     """A56-7 — the smallest falsifying test for the whole direction."""
 
@@ -4507,6 +4594,78 @@ class KillFixtureTest(_WatchMixin, unittest.TestCase):
         self._release()
         receipt = self._wait_for_receipt(arm["watch_id"])
         self.assertEqual(receipt["state"], "idle")
+
+    def _run_killed_after_spawn(self, argv):
+        """Run one peer-steward command that dies right after spawning its observer.
+
+        Spawners record the observer identity in the arm only after the spawn;
+        this stops the spawner in exactly that gap.
+        """
+        source = (
+            "import importlib.util, os, signal, subprocess, sys\n"
+            f"sys.path.insert(0, {str(_HERE)!r})\n"
+            "spec = importlib.util.spec_from_file_location(\n"
+            f"    'peer_steward_spawner', {str(_HERE / 'peer-steward.py')!r})\n"
+            "module = importlib.util.module_from_spec(spec)\n"
+            "spec.loader.exec_module(module)\n"
+            "real_popen = subprocess.Popen\n"
+            "def popen(command, *args, **kwargs):\n"
+            "    process = real_popen(command, *args, **kwargs)\n"
+            "    if '__watch-run' in command:\n"
+            "        os.kill(os.getpid(), signal.SIGKILL)\n"
+            "    return process\n"
+            "subprocess.Popen = popen\n"
+            f"sys.exit(module.main({list(argv)!r}))\n"
+        )
+        spawner = subprocess.run([sys.executable, "-c", source], env=self._env("held"),
+                                 capture_output=True, text=True, timeout=60)
+        self.assertEqual(spawner.returncode, -signal.SIGKILL, spawner.stdout + spawner.stderr)
+
+    def _wait_for_named_observer(self, arm_path):
+        # The observer holding the watch lock must be named by its arm, or the
+        # runner cannot wake it and no later pass can replace it.
+        deadline = time.monotonic() + 10
+        arm = json.loads(arm_path.read_text())
+        while (not peer_steward._alive(arm, self.watch_root)
+               and time.monotonic() < deadline):
+            time.sleep(0.02)
+            arm = json.loads(arm_path.read_text())
+        self.assertTrue(peer_steward._alive(arm, self.watch_root), arm)
+        return arm
+
+    def test_watcher_names_itself_when_its_caller_dies_right_after_the_spawn(self):
+        self._run_killed_after_spawn(["watch", "peer-a"])
+        arms = self._arm_records()
+        self.assertEqual(len(arms), 1, arms)
+        arm = self._wait_for_named_observer(arms[0])
+
+        self._release()
+        receipt = self._wait_for_receipt(arm["watch_id"])
+        self.assertEqual(receipt["state"], "idle")
+        self.assertEqual(receipt["watcher"], arm["watcher"])
+
+    def test_reattached_watcher_names_itself_when_its_spawner_dies_right_after_the_spawn(self):
+        # Here the arm still names the previous observer, which has exited.
+        armed = self._fields(self._run("watch", "peer-a", env=self._env("held")).stdout)
+        self._wait_for_lock(armed["watch_id"])
+        self._wait_for_wait_calls(1)
+        os.kill(int(armed["pid"]), signal.SIGKILL)
+        deadline = time.monotonic() + 10
+        while (peer_steward._pid_identity_ok(int(armed["pid"]), armed["pid_start"])
+               and time.monotonic() < deadline):
+            time.sleep(0.02)
+        self.assertFalse(peer_steward._pid_identity_ok(int(armed["pid"]), armed["pid_start"]))
+
+        self._run_killed_after_spawn(["rearm", armed["watch_id"]])
+        arm = self._wait_for_named_observer(self.watch_root / f"{armed['watch_id']}.json")
+        self.assertNotEqual(arm["watcher"]["pid"], int(armed["pid"]))
+        self.assertEqual(len(self._wait_calls()), 1,
+                         "the reattached observer adopts the one native wait")
+
+        self._release()
+        receipt = self._wait_for_receipt(armed["watch_id"])
+        self.assertEqual(receipt["state"], "idle")
+        self.assertEqual(receipt["watcher"], arm["watcher"])
 
     def test_wait_by_contrast_loses_its_herdr_child(self):
         # The regression proof: the identical fixture against (9) `wait`.
@@ -15995,12 +16154,15 @@ class NativeReceivingTurnRecoveryTest(_TmpRootMixin, unittest.TestCase):
         self.assertEqual((current["state"], current["delivery"]), ("complete", "acked"))
 
     def test_matching_terminal_tombstone_is_never_rematerialized(self):
+        import dispatch_attempt_reference as attempt_reference
         import dispatch_completion_join as join
         import dispatch_pending_delivery as pending
         store, duty, _aid, sid = self._duty()
         path = pending.record_path(self.tmp_root, sid, "delivery-native-crash")
         exact = pending.read(self.tmp_root, sid, "delivery-native-crash")
-        pending._write_prune_tombstone(path, exact)
+        # Production writes a tombstone inside the removal's reference admission.
+        with attempt_reference.admission(path.parents[2], pending.record_references(exact)):
+            pending._write_prune_tombstone(path, exact)
         path.unlink()
 
         with mock.patch.object(join, "materialize_after_terminal_close") as materialize, \

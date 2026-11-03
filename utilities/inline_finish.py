@@ -125,6 +125,18 @@ def _on_a_branch(cwd, commit) -> bool:
     return found.returncode == 0 and bool(found.stdout.strip())
 
 
+def _shares_source_history(cwd, source, commit) -> bool:
+    """True when ``commit`` and the route's sealed ``source`` have a common ancestor.
+
+    The source is where the route started, not a commit the result has to keep: review often
+    rebases the branch (its base moved, or a stacked parent was rewritten), which drops the
+    sealed commit from the new history while the work is the same. A commit from unrelated
+    history, or one this repository does not hold, is still not this route's result.
+    """
+    return subprocess.run(["git", "-C", cwd, "merge-base", source, commit],
+                          capture_output=True).returncode == 0
+
+
 def registered_route(route, jobs, inherited):
     from dispatch_contract import parse_registry_metadata
     try:
@@ -375,8 +387,10 @@ def finish(args, route: Mapping[str, Any], route_file: Path, api, *, _admission=
     admitted = artifact_producer.cycle_route_admission(root, record, route, finalize=True)
     if not admitted.allow:
         raise InlineFinishError("finish-route-cycle-" + admitted.reason)
+    observed_lease = artifact_producer._review_lease_observation(root, record["cycle_id"])
     choice = decide_continuation(route, action="finish-cycle", facts={"deleted": bool(record.get("deleted_at")),
-        "finished": finished, "review_live": artifact_producer._live_review_lease(root, record["cycle_id"]) is not None})
+        "finished": finished, "review_live": observed_lease == "live",
+        "review_unobservable": observed_lease == "unobservable"})
     if choice.state == "deleted":
         # The cycle was deleted while its route ran (§45 D-126): the route ends as a route with no output.
         return _finish_deleted_cycle(root, route, route_file, record, args, api)
@@ -436,9 +450,7 @@ def finish(args, route: Mapping[str, Any], route_file: Path, api, *, _admission=
         commit = str(args.commit or api._head_commit(route["cwd"]) or "").lower()
         if not api._COMMIT_SHA.fullmatch(commit):
             raise InlineFinishError("finish-commit-invalid")
-        ancestor = subprocess.run(["git", "-C", route["cwd"], "merge-base", "--is-ancestor", source, commit], capture_output=True)
-        head = subprocess.run(["git", "-C", route["cwd"], "rev-parse", "HEAD"], capture_output=True, text=True)
-        if ancestor.returncode or head.returncode or not _on_a_branch(route["cwd"], commit):
+        if not _shares_source_history(route["cwd"], source, commit) or not _on_a_branch(route["cwd"], commit):
             raise InlineFinishError("finish-commit-not-source-descendant")
     else:
         # The route's sealed source kind is authoritative, even if this folder
@@ -518,8 +530,10 @@ def finish(args, route: Mapping[str, Any], route_file: Path, api, *, _admission=
                 raise InlineFinishError("finish-route-drift")
             if source_is_sha and not _on_a_branch(route["cwd"], intent["commit"]):
                 raise InlineFinishError("finish-commit-drift")
+            observed_lease = artifact_producer._review_lease_observation(root, record["cycle_id"])
             choice = decide_continuation(route, action="finish-cycle",
-                facts={"review_live": artifact_producer._live_review_lease(root, record["cycle_id"]) is not None})
+                facts={"review_live": observed_lease == "live",
+                       "review_unobservable": observed_lease == "unobservable"})
             if not choice.allowed:
                 error = InlineFinishError(choice.reason)
                 error.retry_when = choice.retry_when

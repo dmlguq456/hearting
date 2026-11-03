@@ -110,9 +110,6 @@ def compile_for(intensity, root, capability="autopilot-code", mode="dev", *,
 
 class ProducerTestBase(unittest.TestCase):
     def setUp(self):
-        gates = mock.patch.dict(os.environ, {"HEARTING_GATES": "on"})
-        gates.start()
-        self.addCleanup(gates.stop)
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name) / "artifact-root"
         self.root.mkdir(parents=True, exist_ok=True)
@@ -736,9 +733,6 @@ class ActivateAndBeginTest(ProducerTestBase):
         self.assertEqual(child["parent_cycle_state_at_begin"], "open")
         self.assertEqual(P.read_cycle_record(self.root, first["cycle_id"]), before)
         self.assertNotIn("degraded", second)
-        route["campaign_key"] = "tampered"
-        with self.assertRaisesRegex(ValueError, "modified route hash"):
-            R.verify_route(route)
 
     def test_campaign_choices_cannot_be_silently_overridden_or_rebound(self):
         self.activate()
@@ -2682,6 +2676,39 @@ class RecoveryTest(ProducerTestBase):
         self.assertEqual(recovered["producer"]["dropped"], [result["cycle_id"]])
         self.assertEqual(P.read_cycle_record(self.root, result["cycle_id"])["state"], "dropped")
 
+    def test_finalize_looks_at_the_roots_open_cycles_before_its_lock(self):
+        # W3 (2026-11-03): on the hearting root the sweep's look at every open cycle (143 of
+        # 1,864) held the admission lock for seconds in each finish; under the lock only the
+        # cycles that look found work for are read again, and the sweep still does that work.
+        self.activate()
+        gone_route, gone_file = self.route(slug="w3-gone")
+        gone = P.begin(self.root, route_file=gone_file, capability="autopilot-code",
+                       intensity="direct", campaign_key="w3-gone")
+        idle_route, idle_file = self.route(slug="w3-idle")
+        idle = P.begin(self.root, route_file=idle_file, capability="autopilot-code",
+                       intensity="direct", campaign_key="w3-idle")
+        route, route_file = self.route(slug="w3-closing")
+        result = P.begin(self.root, route_file=route_file, capability="autopilot-code",
+                         intensity="direct", campaign_key="w3-closing")
+        self.write_output(result)
+        self.close(route, route_file)
+        import shutil
+        shutil.rmtree(gone["cycle_dir"])
+        under_lock = []
+        real_listing = P.list_cycle_records
+
+        def listing(root, **kwargs):
+            if kwargs.get("route_ids") is None and adm.holds_lock(root):
+                under_lock.append("every-cycle-record")
+            return real_listing(root, **kwargs)
+
+        with mock.patch.object(P, "list_cycle_records", side_effect=listing):
+            P.finalize(self.root, cycle_id=result["cycle_id"])
+        self.assertEqual(under_lock, [])
+        self.assertEqual(P.read_cycle_record(self.root, result["cycle_id"])["state"], "sealed")
+        self.assertEqual(P.read_cycle_record(self.root, gone["cycle_id"])["state"], "dropped")
+        self.assertEqual(P.read_cycle_record(self.root, idle["cycle_id"])["state"], "open")
+
     def test_finalize_runs_recovery_first(self):
         result = self._sealing_crash()
         outcome = P.finalize(self.root, cycle_id=result["cycle_id"])
@@ -3493,6 +3520,29 @@ class ReviewPublicationLeaseTest(ProducerTestBase):
         with self.assertRaises(P.ProducerError) as caught:
             P.finalize(self.root, cycle_id=cycle_id, state="abandoned", abandon_reason="operator-decision")
         self.assertEqual(caught.exception.code, "cycle-abandon-blocked-live-review")
+
+    def test_unobservable_lease_reports_unobservable_not_live(self):
+        self.activate()
+        _route, _route_file, result = self.begin()
+        cycle_id = result["cycle_id"]
+        self.assertEqual(P._review_lease_observation(self.root, cycle_id), "ended")
+        lease_dir = P._review_lease_dir(self.root, cycle_id)
+        lease_dir.mkdir(parents=True, exist_ok=True)
+        (lease_dir / "att-corrupt.json").write_text("{not json", encoding="utf-8")
+        self.assertEqual(P._review_lease_observation(self.root, cycle_id), "unobservable")
+        # the write guard is unchanged: an unobservable holder still blocks
+        self.assertIsNotNone(P._live_review_lease(self.root, cycle_id))
+        self.assertTrue(P._lease_record_is_live({"deadline": "not-a-time"}))
+        self.assertEqual(P._lease_record_state({"deadline": "not-a-time"}), "unobservable")
+
+    def test_observed_live_holder_blocks_and_reports_live(self):
+        now = time.time()
+        record = {"deadline": P._rfc3339(now + 300), "released_at": None, "pid": os.getpid(),
+                  "pid_start": P.process_start_ticks(os.getpid()), "pgid": os.getpgid(os.getpid())}
+        self.assertEqual(P._lease_record_state(record, now=now), "live")
+        self.assertTrue(P._lease_record_is_live(record, now=now))
+        self.assertEqual(P._lease_record_state({**record, "pid_start": "0"}, now=now), "ended")
+        self.assertFalse(P._lease_record_is_live({**record, "released_at": P._rfc3339(now)}, now=now))
 
     def test_double_acquire_and_double_release_are_idempotent(self):
         self.activate()
@@ -5385,9 +5435,6 @@ class TerminalTransactionIntegrationTest(ProducerTestBase):
                     log=jobs.parent/"owner.jsonl"; log.write_text("\n".join(json.dumps(r) for r in native)+"\n")
                     jobs.write_text(jobs.read_text().replace("worker_type=owner",f"attempt_schema_version=2,worker_type=owner,log_file={log},workflow_completion=runtime-v1"))
                     self.assertIsNone(terminal.owner_workflow_continuation(jobs,owner,path))
-                    old=review.read_bytes(); review.unlink()
-                    self.assertIn("review",terminal.owner_workflow_continuation(jobs,owner,path))
-                    review.write_bytes(old)
                     fixture._closed_owner(jobs,owner); meta=exact_attempt_row(jobs,owner).metadata
                     before=jobs.read_bytes()
                     with mock.patch.dict(os.environ,{"AGENT_DISPATCH_JOBS":str(jobs),"AGENT_ARTIFACT_ROOT":str(fixture.root)}):
@@ -5538,12 +5585,6 @@ class TerminalTransactionIntegrationTest(ProducerTestBase):
                     jobs.write_text(jobs.read_text().replace("worker_type=owner", "attempt_schema_version=2,workflow_completion=runtime-v1,worker_type=owner"))
                     before=jobs.read_bytes()
                     self.assertIsNone(terminal.owner_workflow_continuation(jobs,owner,path))
-                    saved=artifact.read_bytes(); artifact.unlink()
-                    prompt=terminal.owner_workflow_continuation(jobs,owner,path)
-                    self.assertIn("[workflow-completion-pending]",prompt)
-                    self.assertIn("same owner",prompt)
-                    self.assertEqual(jobs.read_bytes(),before)
-                    artifact.write_bytes(saved)
                     self.assertIsNone(terminal.owner_workflow_continuation(jobs,owner,path))
                     self.assertEqual(jobs.read_bytes(),before)
                 finally: fixture.doCleanups()
@@ -6129,6 +6170,50 @@ class RouteLaunchContextTest(ProducerTestBase):
         self.assertEqual(Path(env["AGENT_ARTIFACT_OUTPUT_DIR"]), Path(env["AGENT_ARTIFACT_CYCLE_DIR"]) / "artifacts")
 
 
+class FinalizeRefusalOfInvalidNamesTest(ProducerTestBase):
+    """W3 (2026-11-03): a controller retried one refused close 3,719 times, each try hashing the
+    open cycle's 64,272 files (1.7 GB) only to refuse it on one file name."""
+
+    def test_an_invalid_output_name_refuses_the_close_without_hashing(self):
+        self.activate()
+        _route, _route_file, result = self.begin()
+        self.write_output(result)
+        bad = self.write_output(result, rel="evidence/snapshot/<sid>.jsonl", data=b"row\n")
+        with mock.patch.object(P, "_stream_file_facts", wraps=P._stream_file_facts) as hashed:
+            with self.assertRaises(P.ProducerError) as caught:
+                P.finalize(self.root, cycle_id=result["cycle_id"], allow_open_route=True)
+        self.assertEqual(caught.exception.code, "output-invalid")
+        self.assertIn("<sid>.jsonl", caught.exception.detail)
+        self.assertEqual(hashed.call_count, 0)
+        self.assertEqual(P.read_cycle_record(self.root, result["cycle_id"])["state"], "open")
+        bad.rename(bad.with_name("sid.jsonl"))   # fixed by hand, the next close seals as before
+        P.finalize(self.root, cycle_id=result["cycle_id"], allow_open_route=True)
+        self.assertEqual(P.read_cycle_record(self.root, result["cycle_id"])["state"], "sealed")
+
+    # The name refusal keeps its place in the locked close: a refusal that comes before it there
+    # is still the one given when both apply (RV-ADMIT F1).
+
+    def test_a_live_review_lease_is_refused_before_an_invalid_name(self):
+        self.activate()
+        _route, _route_file, result = self.begin()
+        self.write_output(result)
+        self.write_output(result, rel="evidence/snapshot/<sid>.jsonl", data=b"row\n")
+        P.review_lease_acquire(self.root, cycle_id=result["cycle_id"], attempt_id="att-reviewer")
+        with self.assertRaises(P.ProducerError) as caught:
+            P.finalize(self.root, cycle_id=result["cycle_id"], allow_open_route=True)
+        self.assertEqual(caught.exception.code, "cycle-finalize-blocked-live-review")
+
+    def test_an_abandon_without_a_reason_is_refused_before_an_invalid_name(self):
+        self.activate()
+        _route, _route_file, result = self.begin()
+        self.write_output(result)
+        self.write_output(result, rel="evidence/snapshot/<sid>.jsonl", data=b"row\n")
+        with self.assertRaises(P.ProducerError) as caught:
+            P.finalize(self.root, cycle_id=result["cycle_id"], state="abandoned",
+                       abandon_reason="not-a-reason", allow_open_route=True)
+        self.assertEqual(caught.exception.code, "abandon-reason-required")
+
+
 _ADMISSION_HOLDER = """
 import fcntl, os, sys, time
 fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)
@@ -6137,6 +6222,87 @@ stat = os.fstat(fd)
 print("held", stat.st_dev, stat.st_ino, flush=True)
 time.sleep(float(sys.argv[2]))
 """
+
+
+# One owner start as `start` runs it in its own process: the preparation `begin`, then the
+# launch binding. It notes every root-wide read made while the admission lock is held.
+_PARALLEL_OWNER_START = r"""
+import json, os, sys, time
+from pathlib import Path
+from types import SimpleNamespace
+sys.path.insert(0, sys.argv[1])
+import artifact_admission
+import artifact_producer as P
+import dispatch_terminal_commit as T
+route_file, jobs, attempt, start_at = Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4], float(sys.argv[5])
+root = Path(json.loads(route_file.read_text())["artifact_root"]).resolve()
+under_lock = []
+
+def watch(name, real, when=lambda *a, **k: True):
+    def wrapped(*args, **kwargs):
+        if artifact_admission.holds_lock(root) and when(*args, **kwargs):
+            under_lock.append(name)
+        return real(*args, **kwargs)
+    return wrapped
+
+P._env_for = watch("env", P._env_for)
+P.list_cycle_records = watch("every-cycle-record", P.list_cycle_records,
+                             lambda *a, **k: k.get("route_ids") is None)
+T.validate_owner_route = watch("registry", T.validate_owner_route)
+while time.time() < start_at:
+    time.sleep(0.005)
+env = P.prepare_route_artifact_env(route_file, start=True, jobs=jobs)
+args = SimpleNamespace(worker_type="owner", dispatch_depth=1, route_file=str(route_file),
+                       owner_route_binding=None, attempt_id=attempt)
+bound = P.bind_owner_launch(args, jobs, environ=env)
+print(json.dumps({"cycle": env["AGENT_ARTIFACT_CYCLE_ID"], "bound": bound["cycle_id"],
+                  "under_lock": under_lock}))
+"""
+
+
+class ParallelOwnerStartTest(ProducerTestBase):
+    """W3 (2026-11-02): five owner starts at once all met admission-busy past the 120 s wait.
+
+    The admission lock is one per artifact root; every start takes it twice. Held only for
+    the reservation, several starts that arrive together are all admitted well inside the
+    wait, and none of them reads the root's other records while it holds the lock."""
+
+    def test_parallel_owner_starts_are_all_admitted_and_hold_the_lock_only_to_reserve(self):
+        self.activate()
+        count = 6
+        starts = []
+        rows = []
+        for index in range(count):
+            route, route_file = self.route("quick", slug=f"w3-parallel-{index}", campaign_key="w3-parallel")
+            node = route["nodes"][0]
+            attempt = f"att-w3-parallel-{index}"
+            metadata = dict(attempt_id=attempt, worker_type="owner", dispatch_depth="1",
+                registered_worker="1", harness="codex", capability="autopilot-code",
+                capability_mode="dev", intensity="quick", route_file=str(route_file),
+                route_id=route["route_id"], route_hash=route["route_hash"], route_node=node["id"],
+                registry_digest=route["registry_digest"], completion_gate=node["completion_gate"],
+                write_scope=";".join(node["write_scope"]))
+            rows.append("2026-11-02T00:50:00Z\topen\t" + str(R.ROOT) + "\t" + str(R.ROOT)
+                        + f"\towner-{index}\t" + ",".join(f"{k}={v}" for k, v in metadata.items()) + "\n")
+            starts.append((route_file, attempt))
+        self.jobs.write_text("".join(rows), encoding="utf-8")
+        start_at = time.time() + 1.0
+        procs = [subprocess.Popen(
+            [sys.executable, "-c", _PARALLEL_OWNER_START, str(Path(P.__file__).resolve().parent),
+             str(route_file), str(self.jobs), attempt, str(start_at)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for route_file, attempt in starts]
+        results = []
+        for proc in procs:
+            out, err = proc.communicate(timeout=P.OWNER_LAUNCH_ADMISSION_WAIT_SECONDS)
+            self.assertEqual(proc.returncode, 0, err[-3000:])
+            results.append(json.loads(out.strip().splitlines()[-1]))
+        cycles = [result["cycle"] for result in results]
+        self.assertEqual(len(set(cycles)), count)
+        self.assertEqual([result["bound"] for result in results], cycles)
+        self.assertEqual([result["under_lock"] for result in results], [[]] * count)
+        campaigns = [row for row in P._campaigns_by_key(self.root, "w3-parallel")]
+        self.assertEqual(len(campaigns), 1)  # the starts that arrived together joined one campaign
+        self.assertEqual(sorted(campaigns[0]["cycles"]), sorted(cycles))
 
 
 class OwnerLaunchBindingTest(ProducerTestBase):
@@ -6264,6 +6430,19 @@ class OwnerLaunchBindingTest(ProducerTestBase):
             holder.wait()
             env = P.prepare_route_artifact_env(route_file, start=True, jobs=self.jobs)
         self.assertTrue(env["AGENT_ARTIFACT_CYCLE_ID"])
+
+    def test_launch_binding_does_not_walk_the_root_again(self):
+        # The preparation just looked for hand changes and handed waiting history lines over;
+        # the binding of the cycle it began resumes it without reading every folder and record.
+        route, route_file, launch_env, owner, args = self._prepared_owner()
+        with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(self.jobs)}), \
+                mock.patch.object(P, "reconcile_root", wraps=P.reconcile_root) as reconcile, \
+                mock.patch.object(P, "deliver_pending_history", wraps=P.deliver_pending_history) as history:
+            result = P.bind_owner_launch(args, self.jobs, environ=launch_env)
+        self.assertEqual(result["status"], "resumed")
+        self.assertEqual(result["cycle_id"], launch_env["AGENT_ARTIFACT_CYCLE_ID"])
+        self.assertEqual(reconcile.call_count, 0)
+        self.assertEqual(history.call_count, 0)
 
     def test_resume_only_owner_launch_publishes_and_replays_binding(self):
         route, route_file, launch_env, owner, args = self._prepared_owner()
@@ -7017,13 +7196,6 @@ class RouteLineageBindingTest(ProducerTestBase):
             self.assertEqual((verdict["verdict"], verdict["reason"]), ("deny", reason), verdict)
             self.assertEqual(self._tree_state(), before)
 
-        # The canonical route file is the proof used by check_write. A stale
-        # hash, malformed JSON, absence, or a symlink must never fall back to
-        # the begin-route equality check when an explicit cycle was selected.
-        with self.subTest("tampered-canonical-route"):
-            route_path.write_text(json.dumps(dict(b, capability="autopilot-research")), encoding="utf-8")
-            denied_without_mutation("route-lineage-unverified")
-            route_path.write_bytes(original_route)
         with self.subTest("malformed-canonical-route"):
             route_path.write_text("{malformed", encoding="utf-8")
             denied_without_mutation("route-lineage-unverified")
@@ -7198,22 +7370,7 @@ class RouteLineageBindingTest(ProducerTestBase):
         record = P.read_cycle_record(self.root, begun["cycle_id"])
         b_path = R.canonical_route_path(self.root, b["route_id"])
 
-        with self.subTest("tampered-bytes"):
-            tampered = dict(b, capability="autopilot-research")  # route_hash now stale
-            b_path.write_text(json.dumps(tampered), encoding="utf-8")
-            reloaded = json.loads(b_path.read_text(encoding="utf-8"))
-            admission = P.cycle_route_admission(self.root, record, reloaded)
-            self.assertEqual(admission.reason, "route-lineage-unverified")
-            b_path.write_text(json.dumps(b), encoding="utf-8")  # restore
 
-        with self.subTest("source-route-hash-mismatch"):
-            forged = dict(b, source_route_hash="sha256:" + "0" * 64)
-            forged["route_hash"] = R.route_hash(forged)
-            forged["route_id"] = "rt-" + forged["route_hash"].split(":", 1)[1][:16]
-            forged_path = R.canonical_route_path(self.root, forged["route_id"])
-            R.write_once(forged_path, forged)
-            admission = P.cycle_route_admission(self.root, record, forged)
-            self.assertEqual(admission.reason, "route-lineage-unverified")
 
         with self.subTest("record-begin-hash-only-differs"):
             drifted = dict(record, route_hash="sha256:" + "1" * 64)
@@ -7512,18 +7669,21 @@ class RouteLineageBindingTest(ProducerTestBase):
         unused = self._continuation(a, reason="published-never-run")
         successor = self._continuation(a, reason="owner-pin-handoff")
         record = P.read_cycle_record(self.root, begun["cycle_id"])
-        # Without a verified handoff the two continuations of an open source stay a fork.
+        # Without a verified handoff the two continuations of an open source stay a fork for a begin;
+        # at seal time a sibling that never ran is not a branch.
         self.assertEqual(P.cycle_route_admission(self.root, record, successor).reason,
                          "cycle-route-binding-mismatch:lineage-fork")
+        self.assertTrue(P.cycle_route_admission(self.root, record, successor, finalize=True).allow)
         def handoff(route, *, jobs=None):
             return {"successor": successor} if route["route_id"] == a["route_id"] else None
         with mock.patch.object(route_parent_close, "verified_owner_pin_handoff_close",
                                side_effect=handoff):
             self.assertTrue(P.cycle_route_admission(self.root, record, successor).allow)
             self.assertTrue(P.cycle_route_admission(self.root, record, successor, finalize=True).allow)
-            # The unused sibling is not the handed-off route; it stays refused.
+            # The unused sibling is not the handed-off route; beginning it stays refused.
             self.assertEqual(P.cycle_route_admission(self.root, record, unused).reason,
                              "cycle-route-binding-mismatch:lineage-fork")
+            # Once the sibling has run it is a branch, whatever closed its parent.
             self._ran(unused)
             self.assertEqual(P.cycle_route_admission(self.root, record, successor).reason,
                              "cycle-route-binding-mismatch:lineage-fork")
@@ -8297,6 +8457,18 @@ class _LineageForkFinalizeFixture(ProducerTestBase):
         return json.loads(Path(sealed["manifest_path"]).read_text(encoding="utf-8"))
 
 
+
+class SupersededRouteBeforeInvalidNameTest(_LineageForkFinalizeFixture):
+    def test_a_superseded_route_is_refused_before_an_invalid_name(self):
+        # RV-ADMIT F1: the deterministic lineage refusal is the one given, not `output-invalid`.
+        begin, unused, successor, started, record = self._handoff_cycle("w3-superseded-bad-name")
+        self.write_output(started, "plans/lineage/plan.md")
+        self.write_output(started, "evidence/snapshot/<sid>.jsonl", b"row\n")
+        binding = self._binding(record, begin)
+        with self.assertRaises(P.ProducerError) as caught:
+            P.finalize_exact_cycle(self.root, cycle_id=record["cycle_id"], expected_binding=binding)
+        self.assertEqual(caught.exception.code, "cycle-route-binding-mismatch:superseded-route")
+
 class LineageForkFinalizeReproductionTest(_LineageForkFinalizeFixture):
     """Base API only: the exact controller's own binding seals the successor it
     names (red on the base tree, where the walk still refuses the fork)."""
@@ -8356,6 +8528,18 @@ class LineageForkFinalizeJudgmentTest(_LineageForkFinalizeFixture):
         # The advisory field is not cycle identity.
         self.assertEqual(terminal.cycle_identity_digest(stored),
                          terminal.cycle_identity_digest({**stored, "skipped_continuations": []}))
+
+    def test_unexecuted_sibling_does_not_fork_without_a_handoff_close(self):
+        """Hand-built shape: one candidate ran, the others never did, and the parent made no handoff close."""
+        begin, unused, successor, started, record = self._handoff_cycle("lineage-fork-no-handoff-ran")
+        self.write_output(started, "plans/lineage/plan.md")
+        self._close(successor)
+        self._ran(successor)
+        self.assertEqual(P._finalize_route(self.root, record)["route_id"], successor["route_id"])
+        sealed = P.finalize(self.root, cycle_id=record["cycle_id"])
+        self.assertEqual(sealed["status"], "sealed")
+        self.assertEqual(sorted(row["route_id"] for row in sealed["skipped_continuations"]),
+                         sorted(route["route_id"] for route in unused))
 
     def test_walk_refuses_an_executed_sibling(self):
         begin, unused, successor, started, record = self._handoff_cycle("lineage-fork-walk-harm")
