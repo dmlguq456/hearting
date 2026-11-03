@@ -349,8 +349,9 @@ def _route_chain():
     return route_chain
 
 
-def _ledger_roots(chain, identities) -> set[str]:
-    roots = set()
+def _ledger_routes(chain, identities) -> dict[str, set[str]]:
+    """Canonical artifact root -> the route ids the ledgers name for it."""
+    routes: dict[str, set[str]] = {}
     for harness, session_id in identities:
         try:
             path = chain.ledger_path(harness, session_id)
@@ -368,8 +369,14 @@ def _ledger_roots(chain, identities) -> set[str]:
                 continue
             root = record.get("artifact_root") if isinstance(record, dict) else None
             if isinstance(root, str) and root:
-                roots.add(os.path.realpath(root))
-    return roots
+                route_id = record.get("route_id")
+                routes.setdefault(os.path.realpath(root), set()).update(
+                    [route_id] if isinstance(route_id, str) and route_id else [])
+    return routes
+
+
+def _ledger_roots(chain, identities) -> set[str]:
+    return set(_ledger_routes(chain, identities))
 
 
 def _identities(chain, harness: str, session_id: str, env) -> list[tuple[str, str]]:
@@ -380,14 +387,21 @@ def _identities(chain, harness: str, session_id: str, env) -> list[tuple[str, st
     return found
 
 
-def held_roots(harness: str, session_id: str, env):
-    """The canonical artifact roots this session's route-chain ledger names, or None
-    when the session has no identity to look up."""
+def held_routes(harness: str, session_id: str, env):
+    """Canonical artifact root -> route ids this session's route-chain ledger names, or
+    None when the session has no identity to look up."""
     chain = _route_chain()
     identities = _identities(chain, harness, session_id, env)
     if not identities:
         return None
-    return _ledger_roots(chain, identities)
+    return _ledger_routes(chain, identities)
+
+
+def held_roots(harness: str, session_id: str, env):
+    """The canonical artifact roots this session's route-chain ledger names, or None
+    when the session has no identity to look up."""
+    routes = held_routes(harness, session_id, env)
+    return None if routes is None else set(routes)
 
 
 def _dev_activation(top: Path, env) -> bool:
@@ -403,13 +417,19 @@ def _dev_activation(top: Path, env) -> bool:
     return False
 
 
+def folder_root(top: Path, env) -> str:
+    """The canonical artifact root the gate asks about for work tree ``top``; ``""`` under
+    dev activation or when the root cannot be resolved."""
+    if _dev_activation(top, env):
+        return ""
+    return artifact_root(top, env) or ""
+
+
 def unrouted_root(top: Path, roots, env) -> str:
     """The canonical artifact root of work tree ``top`` when the session holds no route
     for it (``roots`` from ``held_roots``); ``""`` under dev activation, when the root
     cannot be resolved, or when a route exists there."""
-    if _dev_activation(top, env):
-        return ""
-    root = artifact_root(top, env)
+    root = folder_root(top, env)
     return "" if not root or root in roots else root
 
 

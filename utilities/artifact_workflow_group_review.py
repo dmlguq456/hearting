@@ -496,6 +496,19 @@ def _auto_eligible(entry: Optional[Mapping[str, Any]], sealed_on: str, enrolled_
     return entry.get("verdict") == "unassigned" and entry.get("cycle_state") == "open"
 
 
+def _automatic_record(row: Mapping[str, Any]) -> bool:
+    """Whether the cycle's route is an automatic change record; unreadable reads as not."""
+    route_file = row.get("route_file")
+    if not isinstance(route_file, str) or not route_file:
+        return False
+    try:
+        route = json.loads(Path(route_file).read_text(encoding="utf-8"))
+        import turn_change_record
+    except Exception:  # noqa: BLE001 -- an unreadable route is judged as before
+        return False
+    return turn_change_record.is_automatic_route(route)
+
+
 def _cycle_present(root: Path, row: Mapping[str, Any]) -> bool:
     """A cycle whose folder (and its `.cycle.json`) is gone cannot be a target or a group member;
     its record alone stays for the lifecycle reconciliation that notices the removal."""
@@ -535,6 +548,11 @@ def select_targets(root: Path, doc: Optional[Mapping[str, Any]], *, cycles: Sequ
         row = records.get(cycle_id)
         if row is None or not isinstance(row.get("campaign_id"), str):
             result.skipped.append({"cycle_id": cycle_id, "reason": "cycle-unknown"})
+            result.considered.append(cycle_id)
+            return
+        if not explicit and _automatic_record(row):
+            # An automatic change record (turn_change_record.py) is never worth a model call.
+            result.skipped.append({"cycle_id": cycle_id, "reason": "automatic-record"})
             result.considered.append(cycle_id)
             return
         sealed = producer.cycle_record_closed(row) and isinstance(row.get("sealed_on"), str)

@@ -10,33 +10,46 @@ Turn start (Claude and Codex ``UserPromptSubmit``, OpenCode ``chat.message``) no
 session's git work tree: HEAD and, for every path ``git status`` lists, its status, size
 and mtime. Turn end (Claude and Codex ``Stop``, OpenCode ``session.idle``) notes it
 again. Paths whose entry changed, plus the files of non-merge commits made during the
-turn, are the turn's changes; edits made between turns are not. Artifact roots, the
-temp directory and runtime homes are left out exactly as the gate leaves them out.
+turn, are the turn's changes. A turn is compared only against its own start snapshot:
+when that snapshot is missing (the start step did not run, a turn the runtime woke
+without a prompt), the turn is not attributed, so edits made between turns never are.
+Artifact roots, the temp directory and runtime homes are left out exactly as the gate
+leaves them out, and so is generated noise (``__pycache__``, ``*.pyc``, tool caches;
+git-ignored files never appear in ``git status``).
 
-When the session's route-chain ledger names no route for that folder -- the gate's own
-question, answered by the gate's functions -- and the turn changed source paths, the end
-step runs the two commands an agent runs for a change already made in place:
-``capability-route.py compose --shape direct`` (no ``--start``, so no worktree) and
-``finish`` with the changed files and a diff summary as evidence. The result is an
-ordinary direct route, closed as completed and shown in Fleet like any other; its
-tracked gate values read ``auto-record: ...``. Its compose line puts the folder in the
-session's ledger, so a session is recorded once per folder, as the gate asks once.
+The unit is one automatic record per session and folder. When the session's route-chain
+ledger names no route for the folder -- the gate's own question, answered by the gate's
+functions -- the first changing turn runs the two commands an agent runs for a change
+already made in place: ``capability-route.py compose --shape direct --unassigned`` (no
+``--start``, so no worktree; the unassigned container, so no unrelated campaign and no
+campaign default for the session's next compose) and ``finish`` with the changed files
+and a diff summary as evidence. The result is an ordinary direct route, closed as
+completed and shown in Fleet like any other; its tracked gate values read
+``auto-record: ...``. While that record is the session's only route for the folder,
+each later changing turn appends its section to ``artifacts/auto-record-turns.md`` in
+the same cycle (a closed cycle's changed file, refreshed through the producer's own
+checkpoint). Once the session composes a route of its own there, its changes belong to
+that route. The record's child runs with the background cycle review and campaign
+titling off, and that review leaves automatic records out, so no model is called.
 
 Hooks only start a detached child (``launch``) and return: nothing blocks, prompts or
-prints. A failed record keeps the turn's baseline and is tried again at the next turn
-end, at most ``MAX_ATTEMPTS`` times. Changes another process made in the same work tree
-during the turn cannot be told apart from the session's own; the evidence names the
-other Hearting sessions whose turns overlapped there instead of guessing. A turn the
-runtime ends without its end event (an interrupt) is not compared.
+prints. A created route is kept in the state file until it is closed; a failed close is
+tried again at every later turn boundary, so an automatic route never stays open as the
+session's default. A turn whose record could not be written keeps its own section and is
+written at a later boundary, at most ``MAX_ATTEMPTS`` times. Changes another process made
+in the same work tree during the turn cannot be told apart from the session's own; the
+evidence names the other Hearting sessions whose turns overlapped there instead of
+guessing. A turn the runtime ends without its end event (an interrupt) is not compared.
 
 ``HEARTING_AUTO_RECORD=off`` turns it off. Registered owners and workers, CI and dev
-activation are left alone, as by the gate.
+activation are left alone, as by the gate (``skipped``).
 """
 from __future__ import annotations
 
 import argparse
 import contextlib
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -59,9 +72,11 @@ SWITCH = "HEARTING_AUTO_RECORD"
 MARK = "auto-record"
 HARNESSES = ("claude", "codex", "opencode")
 PHASES = ("start", "end")
-SCHEMA = 1
+SCHEMA = 2
 MAX_ENTRIES = 5000
 MAX_ATTEMPTS = 3
+MAX_CLOSE_ATTEMPTS = 10
+MAX_PENDING = 20
 MAX_LISTED = 200
 EVIDENCE_LIMIT = 64 * 1024
 OPEN_TURN_SECONDS = 6 * 3600
@@ -70,9 +85,17 @@ END_LOCK_WAIT = 10.0
 GIT_TIMEOUT = 30
 COMPOSE_TIMEOUT = 600
 FINISH_TIMEOUT = 300
+CHECKPOINT_TIMEOUT = 120
 CLOCK_SLACK = 2.0
+APPENDED = "auto-record-turns.md"
 GATE_VALUE = (f"{MARK}: changes observed at turn end and recorded after the fact; "
               "this gate was not assessed")
+# Generated by running code or tools, not written by anyone; never a reason for a record.
+NOISE_DIRS = frozenset({"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox",
+                        ".nox", ".ipynb_checkpoints", "node_modules"})
+NOISE_SUFFIXES = (".pyc", ".pyo")
+# The record's own commands start no model: the background cycle review and campaign titling.
+QUIET_ENV = {"HEARTING_WORKFLOW_GROUP_REVIEW": "off", "HEARTING_CAMPAIGN_TITLE_AUTO": "off"}
 _SAFE_SID = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 _NESTED = ("context", "workspace", "session", "payload", "event", "input", "data", "properties")
 
@@ -82,6 +105,23 @@ _NESTED = ("context", "workspace", "session", "payload", "event", "input", "data
 
 def _off(env) -> bool:
     return str(env.get(SWITCH, "")).strip().lower() in {"off", "0", "false", "no", "disabled"}
+
+
+def skipped(env) -> bool:
+    """The one exemption judgment, for the hook launcher and the child alike: the switch,
+    registered owners and workers, CI (the gate's ``exempt_session``) and helper roles."""
+    return (_off(env) or gate.exempt_session(env)
+            or str(env.get("AGENT_SESSION_ROLE", "")).lower() in {"owner", "worker", "auxiliary", "reviewer"}
+            or env.get("FLEET_TITLE_REFRESH") == "1")
+
+
+def is_automatic_route(route) -> bool:
+    """Whether a route mapping is an automatic change record (its tracked gate values)."""
+    try:
+        source = route["tracked_gate_evidence"]["artifact_guard"]["source"]
+    except (KeyError, TypeError):
+        return False
+    return isinstance(source, str) and source.startswith(MARK + ":")
 
 
 def _field(payload, *keys: str) -> str:
@@ -109,8 +149,7 @@ def launch(phase: str, harness: str, payload, *, environ=None, popen=None) -> bo
             return False
         if popen is None and ("unittest" in sys.modules or "pytest" in sys.modules):
             return False
-        if _off(env) or gate.exempt_session(env) or str(env.get("AGENT_SESSION_ROLE", "")).lower() in {
-                "owner", "worker", "auxiliary", "reviewer"} or env.get("FLEET_TITLE_REFRESH") == "1":
+        if skipped(env):
             return False
         sid = _field(payload, "session_id", "sessionID", "thread_id", "threadID")
         if not _SAFE_SID.match(sid):
@@ -205,9 +244,12 @@ def _git(top: Path, args, env, *, text=True):
 def snapshot(top: Path, env):
     """``{"head", "entries"}`` of work tree ``top``; ``entries`` is None when too large.
     None when git cannot answer."""
-    head = _git(top, ["rev-parse", "--verify", "-q", "HEAD"], env)
-    status = _git(top, ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames",
-                        "--ignore-submodules=dirty"], env, text=False)
+    try:
+        head = _git(top, ["rev-parse", "--verify", "-q", "HEAD"], env)
+        status = _git(top, ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames",
+                            "--ignore-submodules=dirty"], env, text=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
     if status.returncode != 0:
         return None
     entries = {}
@@ -252,8 +294,14 @@ def _turn_commits(top: Path, before: str, after: str, began: float, env):
     return commits, files
 
 
+def _noise(relative: str) -> bool:
+    parts = relative.split("/")
+    return relative.endswith(NOISE_SUFFIXES) or any(part in NOISE_DIRS for part in parts)
+
+
 def changes(before: dict, after: dict, top: Path, root: str, began: float, env):
-    """``(source_paths, commits)``: what the turn changed, without artifact or runtime paths."""
+    """``(source_paths, commits)``: what the turn changed, without artifact, runtime or
+    generated paths."""
     prev, cur = before.get("entries") or {}, after.get("entries") or {}
     paths = {path for path in set(prev) | set(cur) if prev.get(path) != cur.get(path)}
     commits, committed = _turn_commits(top, before.get("head", ""), after.get("head", ""), began, env)
@@ -261,13 +309,13 @@ def changes(before: dict, after: dict, top: Path, root: str, began: float, env):
     kept = []
     for relative in sorted(paths):
         path = Path(os.path.realpath(top / relative))
-        if gate._excluded(path, env) or gate._artifact_path(path, top, root):
+        if _noise(relative) or gate._excluded(path, env) or gate._artifact_path(path, top, root):
             continue
         kept.append(relative)
     return kept, commits
 
 
-# --------------------------------------------------------------------- record
+# --------------------------------------------------------------------- evidence
 
 
 def _iso(stamp) -> str:
@@ -305,15 +353,26 @@ def concurrent_sessions(env, harness: str, sid: str, top: str, began: float, end
     return sorted(found)
 
 
-def _bounded(text: str) -> str:
+def _bounded(text: str, limit: int = EVIDENCE_LIMIT) -> str:
     raw = text.encode("utf-8")
-    if len(raw) <= EVIDENCE_LIMIT:
+    if len(raw) <= limit:
         return text
-    return raw[:EVIDENCE_LIMIT].decode("utf-8", "ignore") + "\n… (truncated)\n"
+    return raw[:limit].decode("utf-8", "ignore") + "\n… (truncated)\n"
 
 
-def evidence_text(harness, sid, top: Path, source, commits, before, after, began, ended,
-                  overlap, env) -> str:
+def record_header(harness: str, sid: str, top: Path) -> str:
+    return "\n".join([
+        "# Automatic change record", "",
+        "Hearting recorded these changes because this session changed files during a turn",
+        "while it held no route for this folder. No agent step was asked for. Later turns of",
+        f"this session in this folder are appended to `artifacts/{APPENDED}` in this cycle.", "",
+        f"- harness: {harness}", f"- session: {sid}", f"- work tree: {top}",
+        "- attribution: changes observed in this work tree between each turn's own start and end",
+        "", ""])
+
+
+def turn_section(harness, sid, top: Path, source, commits, before, after, began, ended,
+                 overlap, env) -> str:
     prev, cur = before.get("entries") or {}, after.get("entries") or {}
     listed = source[:MAX_LISTED]
     rows = []
@@ -321,12 +380,7 @@ def evidence_text(harness, sid, top: Path, source, commits, before, after, began
         code = (cur.get(path) or [""])[0].strip() or ("committed" if path not in prev else "clean")
         rows.append(f"{code:<9} {path}")
     earlier = [path for path in listed if path in prev]
-    lines = ["# Automatic change record", "",
-             "Hearting recorded these changes because this session changed files during a turn",
-             "while it held no route for this folder. No agent step was asked for.", "",
-             f"- harness: {harness}", f"- session: {sid}", f"- work tree: {top}",
-             f"- turn: {_iso(began)} to {_iso(ended)}",
-             "- attribution: changes observed in this work tree between the turn's start and end"]
+    lines = [f"## Turn {_iso(began)} to {_iso(ended)}", ""]
     if overlap:
         lines.append("- concurrent sessions in this work tree: " + ", ".join(overlap)
                      + " (some of these changes may be theirs)")
@@ -335,31 +389,37 @@ def evidence_text(harness, sid, top: Path, source, commits, before, after, began
     if earlier:
         lines.append("- already changed before the turn (the diff below is against HEAD and "
                      "includes those earlier edits): " + ", ".join(earlier[:20]))
-    lines += ["", f"## Changed files ({len(source)})", "", "```", *rows]
+    lines += ["", f"### Changed files ({len(source)})", "", "```", *rows]
     if len(source) > len(listed):
         lines.append(f"… and {len(source) - len(listed)} more")
     lines += ["```", ""]
-    head = after.get("head")
-    if head:
-        stat = _git(top, ["diff", "--stat=160", "--no-color", "HEAD", "--",
-                          *(f":(literal){path}" for path in listed)], env)
-        if stat.returncode == 0 and stat.stdout.strip():
-            lines += ["## Diff summary (against HEAD)", "", "```", stat.stdout.rstrip(), "```", ""]
+    if after.get("head"):
+        try:
+            stat = _git(top, ["diff", "--stat=160", "--no-color", "HEAD", "--",
+                              *(f":(literal){path}" for path in listed)], env)
+        except (OSError, subprocess.SubprocessError):
+            stat = None
+        if stat is not None and stat.returncode == 0 and stat.stdout.strip():
+            lines += ["### Diff summary (against HEAD)", "", "```", stat.stdout.rstrip(), "```", ""]
     new_files = [path for path in listed if (cur.get(path) or [""])[0] == "??"]
     if new_files:
-        lines += ["## New untracked files", "", "```"]
+        lines += ["### New untracked files", "", "```"]
         lines += [f"{max((cur.get(path) or ['', 0])[1], 0):>9} bytes  {path}" for path in new_files]
         lines += ["```", ""]
     if commits:
-        lines += ["## Commits made during the turn", "", "```"]
+        lines += ["### Commits made during the turn", "", "```"]
         lines += [f"{commit[:12]}  {subject}" for commit, subject in commits]
         lines += ["```", ""]
-    return _bounded("\n".join(lines))
+    return _bounded("\n".join(lines), EVIDENCE_LIMIT // 2)
 
 
-def _identity_env(env, harness: str, sid: str) -> dict:
-    """The hook's environment, naming this session the way its own commands see it."""
-    child = {**env, "AGENT_DISPATCH_CALLER_HARNESS": harness}
+# --------------------------------------------------------------------- commands
+
+
+def _child_env(env, harness: str, sid: str) -> dict:
+    """The hook's environment, naming this session the way its own commands see it, with
+    the record's background model triggers off."""
+    child = {**env, "AGENT_DISPATCH_CALLER_HARNESS": harness, **QUIET_ENV}
     try:
         from session_identity import session_env
         for name in session_env().get(harness, ()):
@@ -380,66 +440,123 @@ def _last_json(text: str):
     return {}
 
 
+def _run(args, env, timeout):
+    try:
+        return subprocess.run([sys.executable, *args], capture_output=True, text=True,
+                              timeout=timeout, check=False, env=env, cwd=str(ROOT))
+    except subprocess.TimeoutExpired as exc:
+        return subprocess.CompletedProcess(exc.cmd, 124, "", f"timeout after {timeout} s")
+    except OSError as exc:
+        return subprocess.CompletedProcess(args, 127, "", type(exc).__name__)
+
+
 def _route_command(*args) -> list[str]:
-    return [sys.executable, str(UTILITIES / "capability-route.py"), *args]
+    return [str(UTILITIES / "capability-route.py"), *args]
 
 
-def _settle(route_file: str, work: Path, env) -> dict:
-    """Close the composed route: ``finish`` with the evidence, else ``close`` (recorded unproven)."""
-    finished = subprocess.run(
-        _route_command("finish", "--route", route_file, "--evidence", str(work / "evidence.md"),
-                       "--summary-file", str(work / "summary.txt")),
-        capture_output=True, text=True, timeout=FINISH_TIMEOUT, check=False, env=env, cwd=str(ROOT))
-    if finished.returncode == 0:
-        return {"ok": True, "closed_by": "finish"}
-    summary = (work / "summary.txt").read_text(encoding="utf-8").strip()
-    closed = subprocess.run(_route_command("close", "--route", route_file, "--summary", summary),
-                            capture_output=True, text=True, timeout=FINISH_TIMEOUT, check=False,
-                            env=env, cwd=str(ROOT))
-    if closed.returncode == 0:
-        return {"ok": True, "closed_by": "close",
-                "finish_refusal": (finished.stderr or finished.stdout).strip()[-300:]}
-    return {"ok": False, "reason": "settle-failed",
-            "detail": (closed.stderr or closed.stdout or finished.stderr).strip()[-300:]}
+def _outcome_file(route_file: str) -> Path:
+    return Path(route_file).with_suffix(".outcome.json")
 
 
-def record(harness, sid, top: Path, root: str, source, commits, before, after, began, ended,
-           env) -> dict:
-    """Compose a direct route in place for the turn's changes and close it as completed."""
-    work = state_path(env, harness, sid).with_suffix(".record")
+def _work(env, harness: str, sid: str, root: str) -> Path:
+    digest = hashlib.sha256(root.encode("utf-8")).hexdigest()[:12]
+    return state_path(env, harness, sid).with_suffix(f".{digest}.record")
+
+
+def settle(route_file: str, work: Path, env) -> dict:
+    """Close the composed route: ``finish`` with the evidence, else ``close`` (recorded
+    unproven). Nothing here raises; ``closed`` says whether it is closed now."""
+    if _outcome_file(route_file).is_file():
+        return {"closed": True, "closed_by": "already"}
+    evidence, summary = work / "evidence.md", work / "summary.txt"
+    finished = None
+    if evidence.is_file() and summary.is_file():
+        finished = _run(_route_command("finish", "--route", route_file, "--evidence", str(evidence),
+                                       "--summary-file", str(summary)), env, FINISH_TIMEOUT)
+        if finished.returncode == 0:
+            return {"closed": True, "closed_by": "finish",
+                    "cycle_id": _last_json(finished.stdout).get("cycle_id")}
+    try:
+        line = summary.read_text(encoding="utf-8").strip() or "Automatic record"
+    except OSError:
+        line = "Automatic record"
+    closed = _run(_route_command("close", "--route", route_file, "--summary", line), env, FINISH_TIMEOUT)
+    if closed.returncode == 0 or _outcome_file(route_file).is_file():
+        return {"closed": True, "closed_by": "close",
+                "finish_refusal": ((finished.stderr or finished.stdout) if finished else "").strip()[-300:]}
+    return {"closed": False, "reason": "settle-failed",
+            "detail": (closed.stderr or closed.stdout or (finished.stderr if finished else "")).strip()[-300:]}
+
+
+def record(harness, sid, top: Path, root: str, items, env, remember=None) -> dict:
+    """Compose the session's automatic direct route for this folder in place and close it,
+    with the turns' sections as evidence. ``remember(route_file)`` is called as soon as the
+    route exists, before it is closed, so a close that fails or never runs is kept."""
+    work = _work(env, harness, sid, root)
     work.mkdir(mode=0o700, parents=True, exist_ok=True)
-    overlap = concurrent_sessions(env, harness, sid, str(top), began, ended)
-    (work / "evidence.md").write_text(
-        evidence_text(harness, sid, top, source, commits, before, after, began, ended, overlap, env),
-        encoding="utf-8")
+    source = list(dict.fromkeys(path for item in items for path in item.get("source", [])))
+    (work / "evidence.md").write_text(_bounded(
+        record_header(harness, sid, top) + "\n".join(item["section"] for item in items)), encoding="utf-8")
     shown = ", ".join(source[:5]) + (", …" if len(source) > 5 else "")
     (work / "summary.txt").write_text(
         f"Automatic record: {len(source)} file(s) changed during a {harness} turn without a route "
         f"({shown})\n", encoding="utf-8")
     (work / "request.md").write_text(
-        f"Intent: Hearting automatic record of the files this {harness} session changed during one "
-        f"turn without a route.\nScope: {shown}\n"
+        f"Intent: Hearting automatic record of the files this {harness} session changed in this "
+        f"folder during turns without a route.\nScope: {shown}\n"
         "Done: the changed files and a diff summary are kept as this route's evidence.\n",
         encoding="utf-8")
-    child_env = _identity_env(env, harness, sid)
-    fresh = [path for path in source if path not in (before.get("entries") or {})]
-    slug = gate._slug_word("auto-" + Path((fresh or source)[0]).stem)
-    composed = subprocess.run(
-        _route_command("compose", "--shape", "direct", "--cwd", str(top),
-                       "--campaign-key", gate._campaign_key(root, top), "--slug", slug,
-                       "--parent-harness", harness, "--prompt-file", str(work / "request.md"),
-                       "--spec-read", GATE_VALUE, "--drift-verdict", GATE_VALUE,
-                       "--artifact-guard", GATE_VALUE),
-        capture_output=True, text=True, timeout=COMPOSE_TIMEOUT, check=False, env=child_env,
-        cwd=str(ROOT))
+    child_env = _child_env(env, harness, sid)
+    fresh = [path for item in items for path in item.get("fresh", [])] or source
+    slug = gate._slug_word("auto-" + Path(fresh[0]).stem)
+    composed = _run(_route_command("compose", "--shape", "direct", "--cwd", str(top), "--unassigned",
+                                   "--slug", slug, "--parent-harness", harness,
+                                   "--prompt-file", str(work / "request.md"),
+                                   "--spec-read", GATE_VALUE, "--drift-verdict", GATE_VALUE,
+                                   "--artifact-guard", GATE_VALUE), child_env, COMPOSE_TIMEOUT)
     route_file = _last_json(composed.stdout).get("route_file")
-    if composed.returncode != 0 or not isinstance(route_file, str) or not route_file:
+    if not isinstance(route_file, str) or not route_file or not Path(route_file).is_file():
         return {"ok": False, "reason": "compose-failed",
                 "detail": (composed.stderr or composed.stdout).strip()[-300:]}
-    settled = _settle(route_file, work, child_env)
+    if remember is not None:
+        remember(route_file)
+    settled = settle(route_file, work, child_env)
     if settled.get("closed_by") == "finish":
         shutil.rmtree(work, ignore_errors=True)  # finish kept the evidence in the route's cycle
-    return {**settled, "route_file": route_file, "files": len(source), "concurrent": overlap}
+    return {"ok": True, "route_file": route_file, "route_id": Path(route_file).stem, **settled}
+
+
+def _cycle_dir(root: str, entry: dict):
+    import artifact_producer as producer
+    cycle_id = entry.get("cycle_id")
+    if not cycle_id:
+        route = json.loads(Path(entry["route_file"]).read_text(encoding="utf-8"))
+        found = producer.route_cycle_for(Path(root), route) or {}
+        cycle_id = found.get("cycle_id")
+    row = producer.read_cycle_record(Path(root), cycle_id) if cycle_id else None
+    if not row:
+        return None, None
+    return cycle_id, producer.cycle_dir(Path(root), row["campaign_id"], cycle_id, row)
+
+
+def append(harness, sid, top: Path, root: str, entry: dict, items, env) -> dict:
+    """Append later turns to the session's closed automatic record for this folder: one
+    file in the same cycle, then the producer's own checkpoint publishes it."""
+    try:
+        cycle_id, directory = _cycle_dir(root, entry)
+    except Exception as exc:  # noqa: BLE001 -- kept for the next boundary
+        return {"ok": False, "reason": "cycle-unreadable", "detail": type(exc).__name__}
+    if directory is None or not directory.is_dir():
+        return {"ok": False, "reason": "cycle-missing"}
+    target = directory / "artifacts" / APPENDED
+    target.parent.mkdir(parents=True, exist_ok=True)
+    head = "" if target.exists() else (record_header(harness, sid, top).split("\n\n", 1)[0] + "\n\n"
+                                       + f"Later turns of route {entry.get('route_id')}.\n\n")
+    with open(target, "a", encoding="utf-8") as stream:
+        stream.write(head + "\n".join(item["section"] for item in items) + "\n")
+    _run([str(UTILITIES / "artifact_producer.py"), "checkpoint", "--trigger", "explicit",
+          "--artifact-root", root, "--cycle", cycle_id], _child_env(env, harness, sid), CHECKPOINT_TIMEOUT)
+    return {"ok": True, "cycle_id": cycle_id, "file": str(target)}
 
 
 # ----------------------------------------------------------------------- turns
@@ -452,13 +569,93 @@ def _top(cwd: str, env):
     return Path(os.path.realpath(top))
 
 
-def _unrouted(harness: str, sid: str, top: Path, env) -> str:
-    roots = gate.held_roots(harness, sid, env)
-    return "" if roots is None else gate.unrouted_root(top, roots, env)
+def _mode(harness: str, sid: str, top: Path, state: dict, env):
+    """``("record", root)`` when the session's only routes for this folder are its own
+    automatic record (or none); ``("route-held", root)`` once it holds a route of its own;
+    ``("skip", "")`` under dev activation, without an identity or a resolvable root."""
+    routes = gate.held_routes(harness, sid, env)
+    root = gate.folder_root(top, env) if routes is not None else ""
+    if not root:
+        return "skip", ""
+    automatic = (state.get("records") or {}).get(root, {}).get("route_id")
+    return ("record" if routes.get(root, set()) <= {automatic} else "route-held"), root
+
+
+def _close_open(state: dict, harness: str, sid: str, env) -> None:
+    """Close every automatic route of this session that is still open (H1)."""
+    for root, entry in (state.get("records") or {}).items():
+        if entry.get("closed") or int(entry.get("close_attempts") or 0) >= MAX_CLOSE_ATTEMPTS:
+            continue
+        settled = settle(entry["route_file"], _work(env, harness, sid, root), _child_env(env, harness, sid))
+        if settled.get("closed"):
+            entry.update(closed=True, closed_by=settled.get("closed_by"))
+            if settled.get("cycle_id"):
+                entry["cycle_id"] = settled["cycle_id"]
+            if settled.get("closed_by") != "close":
+                shutil.rmtree(_work(env, harness, sid, root), ignore_errors=True)
+        else:
+            entry["close_attempts"] = int(entry.get("close_attempts") or 0) + 1
+            entry["last_failure"] = {"reason": settled.get("reason"), "detail": settled.get("detail")}
+
+
+def _without(rows, items):
+    return [row for row in rows if all(row is not item for item in items)]
+
+
+def _flush(state: dict, harness: str, sid: str, env, recorder, appender, now: float, save) -> str:
+    """Write pending turns into the session's record for their folder; returns what happened."""
+    pending = list(state.get("pending") or [])
+    if not pending:
+        return ""
+    records = state.setdefault("records", {})
+    done, result = [], ""
+    for root in dict.fromkeys(item["root"] for item in pending):
+        items = [item for item in pending if item["root"] == root]
+        top = Path(items[0]["top"])
+        entry = records.get(root)
+        try:
+            if entry is None:
+                def remember(route_file, root=root, items=items):
+                    # The route exists: keep it (and the turns it carries) before closing it.
+                    records[root] = {"route_file": route_file, "route_id": Path(route_file).stem,
+                                     "closed": False, "turns": len(items), "at": now, "close_attempts": 0}
+                    state["pending"] = _without(state.get("pending") or [], items)
+                    save(state)
+
+                outcome = recorder(harness, sid, top, root, items, env, remember=remember)
+                if outcome.get("route_file"):
+                    records.setdefault(root, {"route_file": outcome["route_file"], "turns": len(items),
+                                              "at": now, "close_attempts": 0})
+                    records[root].update(route_id=Path(outcome["route_file"]).stem,
+                                         closed=bool(outcome.get("closed")),
+                                         closed_by=outcome.get("closed_by"),
+                                         cycle_id=outcome.get("cycle_id"))
+            else:
+                outcome = appender(harness, sid, top, root, entry, items, env)
+                if outcome.get("ok"):
+                    entry["turns"] = int(entry.get("turns") or 0) + len(items)
+        except Exception as exc:  # noqa: BLE001 -- kept for the next boundary
+            outcome = {"ok": False, "reason": type(exc).__name__}
+        if outcome.get("ok"):
+            done.extend(id(item) for item in items)
+            result = "appended" if entry is not None else "recorded"
+        else:
+            state["attempts"] = int(state.get("attempts") or 0) + 1
+            state["last_failure"] = {"reason": outcome.get("reason"), "detail": outcome.get("detail"), "at": now}
+            result = "retry"
+    state["pending"] = [item for item in _without(state.get("pending") or [], [])
+                        if id(item) not in done]
+    if not state["pending"]:
+        state["attempts"] = 0
+    elif int(state.get("attempts") or 0) >= MAX_ATTEMPTS:
+        state["last_failure"] = {**(state.get("last_failure") or {}), "gave_up": True,
+                                 "dropped_turns": len(state["pending"])}
+        state["pending"], state["attempts"], result = [], 0, "gave-up"
+    return result
 
 
 def turn_start(harness: str, sid: str, cwd: str, env, *, now=None) -> dict:
-    """Note the work tree as this turn's baseline (git only when no route is held there)."""
+    """Take this turn's start snapshot (git only while the session records this folder)."""
     now = time.time() if now is None else now
     path = state_path(env, harness, sid)
     with _locked(path, 0.0) as held:
@@ -468,73 +665,78 @@ def turn_start(harness: str, sid: str, cwd: str, env, *, now=None) -> dict:
         if not state:
             _prune(path.parent, now)
         top = _top(cwd, env)
-        if top is None:
-            with contextlib.suppress(FileNotFoundError):
-                path.unlink()
-            return {"state": "no-work-tree"}
-        if state.get("retry") and state.get("top") == str(top) and state.get("entries") is not None:
-            # A record that failed keeps its baseline for the next attempt.
-            _write(path, {**state, "turn_ended_at": None})
-            return {"state": "retry-kept"}
-        base = {"harness": harness, "session_id": sid, "top": str(top), "turn_started_at": now,
-                "turn_ended_at": None, "recorded": state.get("recorded")}
-        if not _unrouted(harness, sid, top, env):
-            _write(path, {**base, "entries": None})
-            return {"state": "route-held"}
-        taken = snapshot(top, env)
-        _write(path, {**base, "head": (taken or {}).get("head", ""),
-                      "entries": (taken or {}).get("entries")})
-        return {"state": "baseline" if taken and taken.get("entries") is not None else "unreadable"}
+        state.update(harness=harness, session_id=sid, top=str(top) if top else None,
+                     turn_started_at=now, turn_ended_at=None, head="", entries=None, root="")
+        result = "no-work-tree"
+        if top is not None:
+            mode, root = _mode(harness, sid, top, state, env)
+            result = mode
+            if mode == "record" and state.get("skip_top") == str(top):
+                result = "too-large"
+            elif mode == "record":
+                taken = snapshot(top, env)
+                if taken is None:
+                    result = "unreadable"
+                elif taken["entries"] is None:
+                    state["skip_top"], result = str(top), "too-large"
+                else:
+                    state.update(head=taken["head"], entries=taken["entries"], root=root)
+                    result = "baseline"
+        _write(path, state)
+        _close_open(state, harness, sid, env)
+        _write(path, state)
+        return {"state": result}
 
 
-def turn_end(harness: str, sid: str, cwd: str, env, *, now=None, recorder=None) -> dict:
-    """Compare with the turn's baseline and record the turn's source changes when unrouted."""
+def turn_end(harness: str, sid: str, cwd: str, env, *, now=None, recorder=None, appender=None) -> dict:
+    """Compare with this turn's own start snapshot and write its source changes into the
+    session's automatic record for the folder."""
     now = time.time() if now is None else now
     recorder = record if recorder is None else recorder
+    appender = append if appender is None else appender
     path = state_path(env, harness, sid)
     with _locked(path, END_LOCK_WAIT) as held:
         if not held:
             return {"state": "busy"}
         state = _read(path)
-        top = Path(state["top"]) if state.get("top") else _top(cwd, env)
-        if top is None or not top.is_dir():
-            return {"state": "no-work-tree"}
-        began = state.get("turn_started_at") if state.get("top") == str(top) else None
-        base = {**state, "harness": harness, "session_id": sid, "top": str(top),
-                "turn_started_at": began if isinstance(began, (int, float)) else now,
-                "turn_ended_at": now}
-        root = _unrouted(harness, sid, top, env)
-        if not root:
-            _write(path, {**base, "entries": None, "retry": 0})
-            return {"state": "route-held"}
-        after = snapshot(top, env)
-        if after is None or after.get("entries") is None:
-            _write(path, {**base, "entries": None, "retry": 0})
-            return {"state": "unreadable"}
-        if not isinstance(began, (int, float)) or state.get("entries") is None:
-            # No baseline from this turn's start: this end is the next turn's baseline.
-            _write(path, {**base, **after, "retry": 0})
-            return {"state": "baseline"}
-        source, commits = changes(state, after, top, root, began, env)
-        if not source:
-            _write(path, {**base, **after, "retry": 0})
-            return {"state": "unchanged"}
-        try:
-            outcome = recorder(harness, sid, top, root, source, commits, state, after, began, now, env)
-        except Exception as exc:  # noqa: BLE001 -- kept as a failure for the next attempt
-            outcome = {"ok": False, "reason": type(exc).__name__}
-        if outcome.get("ok"):
-            recorded = {key: outcome.get(key) for key in ("route_file", "closed_by", "files", "concurrent")}
-            _write(path, {**base, "entries": None, "retry": 0, "last_failure": None,
-                          "recorded": {**recorded, "at": now}})
-            return {"state": "recorded", **outcome}
-        attempts = int(state.get("retry") or 0) + 1
-        failure = {"reason": outcome.get("reason"), "detail": outcome.get("detail"), "at": now}
-        if attempts >= MAX_ATTEMPTS:
-            _write(path, {**base, **after, "retry": 0, "last_failure": {**failure, "gave_up": True}})
-            return {"state": "gave-up", **outcome}
-        _write(path, {**base, "retry": attempts, "last_failure": failure})
-        return {"state": "retry", **outcome}
+        if not state:
+            return {"state": "no-start-snapshot"}
+        began, top = state.get("turn_started_at"), state.get("top")
+        opened = (state.get("turn_ended_at") is None and isinstance(began, (int, float)) and top
+                  and Path(top).is_dir())
+        result = "no-start-snapshot"
+        if opened:
+            top_path = Path(top)
+            mode, root = _mode(harness, sid, top_path, state, env)
+            result = mode
+            after = None
+            if mode == "record":
+                # Only this turn's own start snapshot is compared; without it nothing is attributed.
+                has_start = state.get("entries") is not None and root == state.get("root")
+                after = snapshot(top_path, env) if has_start else None
+                result = "unreadable" if has_start else "no-start-snapshot"
+                if after is not None and after.get("entries") is None:
+                    after = None
+            if after is not None:
+                source, commits = changes(state, after, top_path, root, began, env)
+                result = "unchanged"
+                if source:
+                    overlap = concurrent_sessions(env, harness, sid, top, began, now)
+                    pending = state.setdefault("pending", [])
+                    pending.append({
+                        "root": root, "top": top, "began": began, "ended": now, "source": source,
+                        "fresh": [p for p in source if p not in (state.get("entries") or {})],
+                        "section": turn_section(harness, sid, top_path, source, commits, state, after,
+                                                began, now, overlap, env)})
+                    del pending[:-MAX_PENDING]
+                    result = "changed"
+        state.update(turn_ended_at=now, entries=None, head="")
+        _write(path, state)
+        flushed = _flush(state, harness, sid, env, recorder, appender, now, lambda data: _write(path, data))
+        _close_open(state, harness, sid, env)
+        _write(path, state)
+        return {"state": flushed or result, "records": state.get("records") or {},
+                "pending": len(state.get("pending") or [])}
 
 
 def main(argv=None) -> int:
@@ -544,7 +746,7 @@ def main(argv=None) -> int:
     parser.add_argument("--session", required=True)
     parser.add_argument("--cwd", required=True)
     args = parser.parse_args(argv)
-    if not _SAFE_SID.match(args.session) or _off(os.environ):
+    if not _SAFE_SID.match(args.session) or skipped(os.environ):
         return 0
     try:
         step = turn_start if args.phase == "start" else turn_end
