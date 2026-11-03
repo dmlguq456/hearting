@@ -404,7 +404,7 @@ class JsoncRegistrationTest(unittest.TestCase):
 
 class NativeSessionReporterFixtureTest(unittest.TestCase):
     def _run_hook(self, harness, payload, *, allowed, launch_argv, extra_env=None,
-                  expect_report=True, source_asset=False):
+                  expect_report=True, source_asset=False, stale_tree=False):
         with tempfile.TemporaryDirectory(prefix="herdr session hook ") as tmp:
             root = Path(tmp)
             tools = root / "tools" / "fleet"
@@ -434,6 +434,16 @@ class NativeSessionReporterFixtureTest(unittest.TestCase):
             else:
                 source = ROOT / "adapters" / "codex" / "hooks" / "herdr-agent-state.sh"
                 script = source if source_asset else root / "codex home" / "herdr-agent-state.sh"
+            if stale_tree:
+                # A nearer tree whose package imports but whose projection fails.
+                stale = root / "stale"
+                (stale / "tools" / "fleet").mkdir(parents=True)
+                (stale / "tools" / "fleet" / "__init__.py").write_text("", encoding="utf-8")
+                (stale / "tools" / "fleet" / "herdr_projection.py").write_text(
+                    "raise ImportError('stale tree')\n", encoding="utf-8")
+                script = stale / "hooks" / "herdr-agent-state.sh"
+                # Codex tries AGENT_HOME first: point it at the broken tree.
+                extra_env = {**(extra_env or {}), **({"AGENT_HOME": str(stale)} if harness == "codex" else {})}
             if not source_asset:
                 script.parent.mkdir(parents=True)
                 shutil.copyfile(source, script)
@@ -490,6 +500,16 @@ class NativeSessionReporterFixtureTest(unittest.TestCase):
                     listener.accept()
             listener.close()
             return received[0] if received else None
+
+    def test_a_broken_candidate_tree_falls_through_to_the_next_one(self):
+        for harness, launch in (("claude", ["claude", "--resume", "ses-A"]),
+                                ("codex", ["codex", "resume", "ses-A"])):
+            with self.subTest(harness=harness):
+                request = self._run_hook(harness, {
+                    "hook_event_name": "SessionStart", "session_id": "ses-A", "source": "startup",
+                    "transcript_path": str(Path(tempfile.gettempdir()) / "ses-A.jsonl"),
+                }, allowed=True, launch_argv=launch, stale_tree=True)
+                self.assertEqual(request["params"]["agent_session_id"], "ses-A")
 
     def test_native_hooks_forward_transcript_source_resume_argv_and_nanosecond_sequence(self):
         for harness, launch in (("claude", ["claude", "--resume", "ses-A"]),

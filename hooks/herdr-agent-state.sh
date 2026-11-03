@@ -56,6 +56,10 @@ for tools in roots:
     if not (tools / "fleet" / "herdr_projection.py").is_file():
         continue
     try:
+        # A tree whose `fleet` package imported but whose projection failed stays
+        # cached; drop it so this candidate loads its own copy.
+        for name in [name for name in sys.modules if name == "fleet" or name.startswith("fleet.")]:
+            del sys.modules[name]
         sys.path.insert(0, str(tools))
         from fleet.herdr_projection import may_report
         allowed = may_report("claude", session_id, pane_id=pane_id)
