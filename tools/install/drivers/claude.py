@@ -348,12 +348,9 @@ def checks(scope="global"):
         elif action == "copy_managed":
             dest = Path(entry["dest"])
             integration_id = entry["integration_id"]
-            check_list.append({
-                "id": f"claude.herdr.installed.{integration_id}",
-                "ok": herdr_integration.version_marker(
-                    dest, integration_id, herdr_integration.VERSIONS[RUNTIME]),
-                "detail": f"{dest} carries the current {integration_id} integration",
-            })
+            check_list.append(verifier.check_managed_copy(
+                f"claude.herdr.installed.{integration_id}", dest, integration_id,
+                herdr_integration.VERSIONS[RUNTIME]))
         elif action == "seed_once":
             check_list.append(
                 user_model_config.verification_check(

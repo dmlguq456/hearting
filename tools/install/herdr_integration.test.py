@@ -25,6 +25,29 @@ import projector  # noqa: E402
 import runtime_activation as activation  # noqa: E402
 
 
+class ManagedCopyVerifyTest(unittest.TestCase):
+    """GA-A7-004: `verify` runs every check a driver lists; a managed copy's check is one too."""
+
+    def test_each_runtime_lists_a_callable_managed_copy_check_that_runs(self):
+        import verifier
+        passing = lambda *_a, **_k: (lambda: {"id": "other", "ok": True, "detail": ""})
+        for runtime in herdr.VERSIONS:
+            with self.subTest(runtime=runtime), tempfile.TemporaryDirectory() as temporary:
+                driver = importlib.import_module(f"drivers.{runtime}")
+                dest = Path(temporary) / "managed-asset"
+                entry = {"action": "copy_managed", "dest": str(dest), "integration_id": runtime,
+                         "source": str(dest)}
+                with mock.patch.object(driver.projector, "plan", return_value={runtime: [entry]}), \
+                        mock.patch.object(driver.verifier, "check_herdr_integration", side_effect=passing), \
+                        mock.patch.object(driver.verifier, "check_cmd", side_effect=passing):
+                    checks = driver.checks()
+                self.assertTrue(checks and all(callable(check) for check in checks))
+                results = verifier.run(runtime, mock.Mock(checks=lambda: checks))
+                managed = [row for row in results if row["id"] == f"{runtime}.herdr.installed.{runtime}"]
+                self.assertEqual(len(managed), 1)
+                self.assertFalse(managed[0]["ok"])          # absent copy: a failed check, not a TypeError
+
+
 class PinnedSourceTest(unittest.TestCase):
     def test_three_runtime_sources_have_the_expected_marker_and_entrypoint(self):
         for runtime in herdr.VERSIONS:
