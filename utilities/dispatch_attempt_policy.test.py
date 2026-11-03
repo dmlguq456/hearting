@@ -285,7 +285,8 @@ class CompletionReadinessProjectionTest(unittest.TestCase):
         result = POLICY.completion_readiness(failed)
         self.assertEqual((result.state, result.outcome), ("ready", "failed"))
 
-    def test_parent_rejected_delivery_is_not_ack_and_settled_outcomes_are_preserved(self):
+    def test_rejected_and_expired_delivery_are_one_known_state(self):
+        """A settled result whose one delivery record ended is known (ready), not unknown; the result stays."""
         for delivery in ("rejected", "expired"):
             with self.subTest(delivery=delivery):
                 work = POLICY.RegisteredWorkObservation(
@@ -293,8 +294,20 @@ class CompletionReadinessProjectionTest(unittest.TestCase):
                     POLICY.AttemptDecision("succeeded", "advance", "completion", "settled"),
                     "quiescent", "terminal-settled", pane_relation="parent",
                     delivery_state=delivery)
-                result = POLICY.completion_readiness(self.pane(bound_work=(work,)))
-                self.assertEqual((result.state, result.outcome), ("unknown", None))
+                result = POLICY.completion_readiness(work)
+                self.assertEqual((result.state, result.outcome, result.reason),
+                                 ("ready", "succeeded", f"registered-delivery-ended:{delivery}"))
+                self.assertEqual(POLICY.completion_readiness(self.pane(bound_work=(work,))).state, "ready")
+
+    def test_unreadable_delivery_stays_unknown(self):
+        """A delivery that cannot be read (no record, or record and row disagree) is not a known end."""
+        work = POLICY.RegisteredWorkObservation(
+            "att-parent", POLICY.AttemptDecision("succeeded", "advance", "completion", "settled"),
+            "quiescent", "terminal-settled", pane_relation="parent", delivery_state="unknown")
+        self.assertEqual(POLICY.completion_readiness(work).reason, "registered-closure-unknown")
+        self.assertEqual(POLICY.completion_readiness(self.pane(bound_work=(work,))).state, "unknown")
+
+    def test_parent_settled_outcomes_are_preserved(self):
         for outcome, action in (("review-blocked", "review"), ("cancelled", "inspect-failure")):
             with self.subTest(outcome=outcome):
                 work = POLICY.RegisteredWorkObservation(

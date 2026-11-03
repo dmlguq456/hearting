@@ -76,6 +76,28 @@ class FrameAlternativeSelectionTest(unittest.TestCase):
             jobs.write_text(jobs.read_text().rstrip() + ",harness=codex\n")
             self.assertEqual(OWNER._first_frame_attempt(route, jobs)[0]["harness"], "codex")
 
+    def _frame_row(self, td, *, status, **extra):
+        jobs = Path(td) / "jobs.log"
+        meta = {"route_id": "rt-frame-bc45", "route_hash": "sha256:bc45", "route_node": "frame",
+                "worker_type": "frame", "attempt_id": "att-first", "harness": "claude", **extra}
+        jobs.write_text("now\t" + status + "\t/r\t/w\tframe\t"
+                        + ",".join(f"{k}={v}" for k, v in meta.items()) + "\n")
+        return {"route_id": "rt-frame-bc45", "route_hash": "sha256:bc45"}, jobs
+
+    def test_terminal_first_frame_with_settled_cleanup_is_not_absent(self):
+        """Hand-built shape of BC45: the first frame ended `dead-launch-exit-1` and was cleaned up."""
+        with tempfile.TemporaryDirectory() as td:
+            route, jobs = self._frame_row(td, status="done", note="dead-launch-exit-1", launch_started="1",
+                                          failure_class="launch", cleanup_receipt_digest="sha256:cleanup")
+            first = OWNER._first_frame_attempt(route, jobs)[0]
+            self.assertEqual((first["attempt_id"], first["harness"]), ("att-first", "claude"))
+
+    def test_terminal_first_frame_with_unsettled_cleanup_stays_pending(self):
+        with tempfile.TemporaryDirectory() as td:
+            route, jobs = self._frame_row(td, status="done", note="dead-launch-exit-1", launch_started="1",
+                                          failure_class="launch")
+            self.assertIsNone(OWNER._first_frame_attempt(route, jobs)[0])
+
     def choose(self, first, selected, *, ranks=None, scores=None, band="primary",
                strategy="capacity-aware", gate=90):
         ranks = ranks if ranks is not None else {"primary": ["claude", "codex"], "relief": [],

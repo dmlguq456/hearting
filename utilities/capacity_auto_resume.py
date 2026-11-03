@@ -30,16 +30,19 @@ parent. The carrier checks that existing lineage read-only and arms the same
 start path at once. Its record is keyed by the exact source edge, so consuming
 the same notice later does not create another run.
 
-A Claude usage-limit pause does not always last until its reset: another account
-may be signed in, or the quota may come back earlier. Every `RECHECK_SECONDS` of
-the wait asks the usage gate as a launch decision would (`usage_states(...,
-recheck=True)`), and resumes at once when the gate reports Claude `ok`. An early
-resume frees the record's name, so a `start` that pauses again arms a new one.
+A usage-limit pause does not always last until its reset: another account may be
+signed in, or the quota may come back earlier. Every `RECHECK_SECONDS` of the wait
+asks the usage gate as a launch decision would (`usage_states(..., recheck=True)`
+for the record's harness), and resumes at once when the gate reports that harness
+`ok`. An early resume frees the record's name, so a `start` that pauses again arms
+a new one.
 
 Bounded on purpose: one resume per record, a sleep of at most `MAX_SLEEP_SECONDS`,
-and at most `MAX_CHAIN` automatic resumes in a row for one route (a resume that
-pauses again arms the next one). A pause without a known reset time arms
-nothing; its receipt keeps asking for the manual resume.
+and at most `MAX_CHAIN` automatic resumes in a row for one route. A usage-limit
+pause whose reset time is unknown, farther than `MAX_SLEEP_SECONDS`, or past the
+chain limit is not left to a person: it waits until the longest wait (one record
+per route and source attempt) and the `start` there looks at the usage gate again --
+time never grants a launch, so a still-limited gate arms the next wait.
 """
 from __future__ import annotations
 
@@ -135,12 +138,22 @@ def arm(result: dict, route_file, jobs, *, environ=None, spawn=subprocess.Popen,
         chain = int(env.get(CHAIN_ENV) or 0)
     except ValueError:
         chain = MAX_CHAIN
+    waits_to_cap = False
     if epoch is None or chain >= MAX_CHAIN or epoch - now() > MAX_SLEEP_SECONDS:
-        return None
+        if cause != "capacity":
+            return None
+        # A usage-limit pause the reset time cannot time (unknown, too far, or past the chain limit)
+        # waits to the longest wait; the `start` there re-asks the usage gate.
+        epoch = now() + MAX_SLEEP_SECONDS - SLACK_SECONDS
+        retry_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+        waits_to_cap = True
     if cause == "replacement":
         path = replacement_record_path(Path(jobs), eligibility["route_id"],
                                        eligibility["route_hash"], eligibility["source_attempt_id"])
         route_file = eligibility["route_file"]
+    elif waits_to_cap:
+        path = record_path(Path(jobs), result.get("route_id") or "",
+                           "capacity-wait:" + (result.get("source_attempt_id") or result.get("route_id") or ""))
     else:
         path = record_path(Path(jobs), result.get("route_id") or "", retry_at)
     record = {"schema": "capacity-resume-v1", "route_id": result.get("route_id"),
@@ -172,10 +185,11 @@ def _write(path: Path, record: dict) -> None:
 
 
 def _cleared(record: dict) -> bool:
-    """True once the usage gate, asked as a launch decision, reports Claude `ok` for a paused
-    Claude usage limit. Other harnesses, and the allocation usage gate (not a usage limit),
-    keep waiting for their reset."""
-    if (record.get("cause") != "capacity" or record.get("harness") != "claude"
+    """True once the usage gate, asked as a launch decision, reports the record's harness `ok` for a
+    paused usage limit. The allocation usage gate (not a usage limit) and a harness whose reader
+    cannot say `ok` keep waiting for the deadline."""
+    harness = record.get("harness")
+    if (record.get("cause") != "capacity" or not harness
             or record.get("usage_state") == "allocation-usage-gate"):
         return False
     try:
@@ -186,8 +200,8 @@ def _cleared(record: dict) -> bool:
             # incomplete records keep their reset deadline instead of treating
             # that incomplete view as proof the paused worker can run.
             return False
-        states = usage_states(record["jobs"], models={"claude": model}, recheck=True)
-        return states.get("claude") == "ok"
+        states = usage_states(record["jobs"], models={harness: model}, recheck=True)
+        return states.get(harness) == "ok"
     except Exception:  # noqa: BLE001 -- a failed check keeps the wait for retry_at
         return False
 
@@ -234,9 +248,11 @@ def run(path: Path, *, sleep=time.sleep, now=time.time, call=subprocess.run, cle
     record = json.loads(path.read_text(encoding="utf-8"))
     if record.get("state") != "armed":
         return 0
-    if early:
-        # A start that pauses again before retry_at would name this same record; free the name.
-        moved = path.with_name(f"{path.stem}.early-{int(now())}.json")
+    capped = (record.get("cause") == "capacity"
+              and path != record_path(Path(record["jobs"]), record.get("route_id") or "", record["retry_at"]))
+    if early or capped:
+        # A start that pauses again would name this same record; free the name.
+        moved = path.with_name(f"{path.stem}.{'early' if early else 'resumed'}-{int(now())}.json")
         try:
             os.replace(path, moved)
             path = moved
@@ -257,11 +273,11 @@ def run(path: Path, *, sleep=time.sleep, now=time.time, call=subprocess.run, cle
                   exit_code=done.returncode, result_state=receipt.get("state"),
                   owner_attempt_id=receipt.get("owner_attempt_id"), **({"early": True} if early else {}))
     _write(path, record)
-    _notify(record, receipt)
+    _notify(record, receipt, capped=capped and not early)
     return 0
 
 
-def _notify(record: dict, receipt: dict) -> None:
+def _notify(record: dict, receipt: dict, capped: bool = False) -> None:
     """One notice to the session that owns the route; a resume that paused again says so, and
     one whose `start` failed or left no receipt carries the command to run it again."""
     try:
@@ -285,10 +301,14 @@ def _notify(record: dict, receipt: dict) -> None:
                    else "the parent's replacement start returned no settled result")
         elif why is None:
             why = ("resumed before its recorded reset because the usage gate cleared it"
-                   if record.get("early") else "resumed after the usage limit reset")
+                   if record.get("early") else
+                   "re-checked capacity at the end of its longest wait" if capped
+                   else "resumed after the usage limit reset")
         text = (f"route {record['route_id']} {why}: state {state}"
                 + (f", owner {receipt['owner_attempt_id']}" if receipt.get("owner_attempt_id") else "")
                 + (f", reason {receipt['reason']}" if state == "needs-attention" and receipt.get("reason") else "")
+                + (f", a question is waiting for the person: required action {receipt['required_action']}"
+                   if state == "needs-interview" and receipt.get("required_action") else "")
                 + (f"; paused again until {receipt.get('retry_at', 'an unknown time')}" if again else "")
                 + (f"; start exited {record.get('exit_code')}, run it again: "
                    f"{resume_command(record['route_file'], record['jobs'], agent_home=ROOT)}" if failed else ""))
