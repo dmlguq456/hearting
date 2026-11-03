@@ -7686,7 +7686,6 @@ def completion_marker_gate(
     *,
     registry_lines: list[str] | None = None,
     attempt_id: str | None = None,
-    planned_revision_nodes: set[str] | frozenset[str] = frozenset(),
     saved_resource_admissions: dict | None = None,
     _raising_frame_gate: bool = False,
 ) -> None:
@@ -7767,22 +7766,6 @@ def completion_marker_gate(
         if not completion_marker_is_current(route, dep_node, marker_path, marker, jobs=jobs):
             currency = gate_currency(route, dep_node, marker_path, marker, jobs=jobs)
             if currency.state == "revised-unrecorded":
-                if action == "dry-run" and dep in planned_revision_nodes:
-                    # Round admission proved the same review basis that the
-                    # start path uses to publish this revision. Treat that
-                    # exact predecessor as current for the read-only preview;
-                    # no marker or registry state is changed here.
-                    markers[dep] = marker
-                    readiness = completion_attempt_readiness(
-                        route,
-                        dep_node,
-                        marker,
-                        jobs or (resolve_dispatch_state_root(agent_home) / "jobs.log"),
-                        registry_lines=registry_lines,
-                    )
-                    if readiness.state != "ready":
-                        blocked.append((dep, readiness))
-                    continue
                 # SD-154 rule 6: a route-state refusal, not "missing" -- the
                 # dependency's gate evidence changed and needs `revise`, not
                 # another launch of a predecessor that already ran.

@@ -25,7 +25,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "utilities"))
-from review_input import preview_request_nodes
 from codex_permission_profile import (commit_profile_config, config_arguments,
                                       code_stage_profile_config,
                                       recordish_profile_config, named_profiles_available)

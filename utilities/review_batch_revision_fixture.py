@@ -1280,7 +1280,7 @@ class CurrentDesignPeerSelectionTest(unittest.TestCase):
                 return SimpleNamespace(
                     budget=SimpleNamespace(next_round=3, cap=2, state="admit", round_kind="first",
                                             correction_round=False),
-                    planned_revision_nodes=frozenset(), requires_next_round=True,
+                    requires_next_round=True,
                     physical_attempt_ids=frozenset((attempts[0],)), current_attempt_ids=frozenset(),
                     prior_attempt_ids=frozenset((attempts[0],)), reviewed_input=None,
                     source_subject_digest="sha256:" + "c" * 64,

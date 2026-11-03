@@ -26,7 +26,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "utilities"))
-from review_input import preview_request_nodes
 from worker_runtime_home import prepare_worker_home, claude_worker_arguments
 from dispatch_contract import (
     _atomic_registry_replace,
