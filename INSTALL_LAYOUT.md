@@ -448,7 +448,11 @@ bootstrap uses exactly one of those two carriers: `runtime activate` owns the
 `AGENTS.md` link, and `harness install opencode` merges the `instructions[]`
 entry only when that link is absent. Both at once inject the bootstrap twice —
 OpenCode dedupes instruction sources by resolved path, so a projection and the
-link count as two sources (`core/ADAPTATION.md §6.1`).
+link count as two sources (`core/ADAPTATION.md §6.1`). When the user keeps
+Claude user rules (`$CLAUDE_CONFIG_DIR/rules/*.md`), activation writes
+`AGENTS.md` as a regular file instead: those rules in one
+`hearting:user-rules` block, then the bootstrap. Update refreshes the block and
+uninstall removes the file, as it removes the link; the rule files are only read.
 
 Keep `$HOME/.config/opencode` and `$HOME/.local/share/opencode` runtime-owned;
 the harness merges its skill entries — and the fallback instruction entry — into

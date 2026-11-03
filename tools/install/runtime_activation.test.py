@@ -19,6 +19,7 @@ import runtime_activation as activation  # noqa: E402
 import installer  # noqa: E402
 import fixture_env  # noqa: E402
 import codex_hook_trust  # noqa: E402
+import user_rules  # noqa: E402
 
 
 class OpenCodeGuardDiscoveryTest(unittest.TestCase):
@@ -81,6 +82,41 @@ class OpenCodeGuardDiscoveryTest(unittest.TestCase):
         state["owned_paths"].append(activation._entry(self.module, self.js, "hook_config"))
         activation._atomic_json(activation._state_path("opencode"), state)
         return report
+
+    def test_user_rules_ride_in_front_of_the_bootstrap_and_leave_with_it(self):
+        rules = Path(os.environ["CLAUDE_CONFIG_DIR"]) / "rules"
+        rules.mkdir(parents=True)
+        rule_file = rules / "external-communications-read-only.md"
+        rule = "# 외부 소통은 읽기 전용\n- 메일은 읽기만 한다.\n".encode()
+        rule_file.write_bytes(rule)
+        agents = self.home / "AGENTS.md"
+        bootstrap = (self.source / "adapters/opencode/AGENTS.md").read_bytes()
+        for mode in ("linked", "packaged"):
+            with self.subTest(mode=mode):
+                report = self.run_activation(mode)
+                self.assertEqual(report["freshness"], "fresh", report)
+                data = agents.read_bytes()
+                self.assertFalse(agents.is_symlink())
+                self.assertTrue(data.startswith(user_rules.BEGIN))
+                self.assertEqual(data.count(rule), 1)
+                self.assertEqual(user_rules.strip(data), bootstrap)
+                self.assertEqual(activation.refresh("opencode")["freshness"], "fresh")
+                self.assertEqual(agents.read_bytes(), data)
+
+        rule_file.write_bytes(rule + b"- added later\n")
+        activation.refresh("opencode")
+        self.assertIn(b"- added later\n", agents.read_bytes())
+        self.remove(rule_file)
+        activation.refresh("opencode")
+        self.assertTrue(agents.is_symlink())
+
+        rule_file.write_bytes(rule)
+        self.run_activation()
+        self.assertFalse(agents.is_symlink())
+        result = activation.deactivate("opencode")
+        self.assertIn(str(agents), result["removed"])
+        self.assertFalse(agents.exists() or agents.is_symlink())
+        self.assertEqual(rule_file.read_bytes(), rule)
 
     def test_v2_linked_packaged_update_and_repeat_keep_one_direct_bundle_import(self):
         for mode in ("linked", "packaged"):

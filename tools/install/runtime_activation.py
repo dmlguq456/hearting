@@ -43,6 +43,7 @@ import user_model_config
 import codex_tui_config
 import codex_override
 import herdr_integration
+import user_rules
 import manifest
 
 
@@ -629,6 +630,25 @@ def _opencode_v2_plugin_entry(entrypoint: Path, server: Path, dest: Path,
     return entry
 
 
+def _opencode_bootstrap_entry(bootstrap: Path, dest: Path) -> dict:
+    """The OpenCode bootstrap link, or a rendered copy led by the user's own rules.
+
+    OpenCode auto-loads only ``<config>/AGENTS.md``, so the user's rules from
+    Claude's user rule folder ride in front of the bootstrap as one marked block.
+    """
+    rules = user_rules.block(paths.runtime_home("claude"))
+    if not rules or not bootstrap.is_file():
+        return _entry(bootstrap, dest, "instructions")
+    try:
+        content = (rules + bootstrap.read_bytes()).decode("utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise ActivationError(f"cannot render OpenCode bootstrap with user rules: {exc}") from exc
+    entry = _entry(bootstrap, dest, "instructions", kind="render")
+    entry["content"] = content
+    entry["content_sha256"] = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    return entry
+
+
 def _kernel_agents(source_root: Path) -> set[str]:
     manifest_path = source_root / harness_manifest.MANIFEST_NAME
     if not manifest_path.is_file():
@@ -878,9 +898,10 @@ def _linked_entries(
                               home / "hooks/herdr-agent-state.sh", "hook_config", kind="copy"))
 
     elif runtime == "opencode":
+        entries.append(_entry(source_root, home / "hearting", "instructions"))
+        entries.append(_opencode_bootstrap_entry(
+            source_root / "adapters/opencode/AGENTS.md", home / "AGENTS.md"))
         fixed = [
-            (source_root, home / "hearting", "instructions"),
-            (source_root / "adapters/opencode/AGENTS.md", home / "AGENTS.md", "instructions"),
             (source_root / "core", home / "agent-core", "instructions"),
             (source_root / "capabilities", home / "agent-capabilities", "instructions"),
             (source_root / "roles", home / "agent-roles", "instructions"),
