@@ -17,6 +17,10 @@ import argparse, contextlib, datetime, fcntl, functools, hashlib, io, json, os, 
 from collections import namedtuple
 from pathlib import Path
 
+# Before the package imports below: under load their time counts toward the
+# per-prompt candidate probe's budget too.
+_PROCESS_STARTED = time.monotonic()
+
 MEM_MODULE_DIR = Path(__file__).resolve().parent
 if str(MEM_MODULE_DIR) not in sys.path:
     sys.path.insert(0, str(MEM_MODULE_DIR))
@@ -135,6 +139,14 @@ CANDIDATE_SEEN_LOCK_WAIT_SECONDS = 1.0
 CANDIDATE_SEEN_SESSIONLESS = frozenset(
     {"", "memory-prompt-hook", "opencode-plugin", "codex-hook"})
 CANDIDATE_HOOK_STDIN_SECONDS = 0.5
+# `mem candidates` runs inside every prompt hook: Claude cancels it at 10 s,
+# the Codex and OpenCode bridges kill it at 2 s and 3 s. Its git and FTS reads
+# share one deadline from process start; a read the deadline cuts shows no
+# candidates this turn (PEER-HOOK measured 72 s with the DB pages evicted and
+# a slow NAS cwd). Normal probes take about 0.2 s.
+CANDIDATE_PROBE_BUDGET_SECONDS = 5.0
+_PROBE_PROGRESS_STEPS = 1000     # SQLite VM steps between deadline checks
+_probe_clock = time.monotonic
 # Optional short body (off unless MEM_CANDIDATE_BODY=1): one clearly leading,
 # newly shown record, at most CANDIDATE_BODY_MAX_CHARS characters, paid for by
 # at most half of the bytes this session already saved by not repeating ids.
@@ -261,12 +273,27 @@ def enc_cwd(path):
     return re.sub(r"[/._]", "-", str(path))
 
 
+_GIT_DEADLINE = None     # set only around the candidate probe's project key
+_GIT_CUT = False
+
+
 def _git_out(args, cwd):
     """Return stripped git stdout on success; never raise and return empty on failure."""
+    global _GIT_CUT
+    timeout = 5
+    if _GIT_DEADLINE is not None:
+        timeout = min(timeout, _GIT_DEADLINE - _probe_clock())
+        if timeout <= 0:
+            _GIT_CUT = True
+            return ""
     try:
         r = subprocess.run(["git"] + args, cwd=str(cwd),
-                           capture_output=True, text=True, timeout=5)
+                           capture_output=True, text=True, timeout=timeout)
         return r.stdout.strip() if r.returncode == 0 else ""
+    except subprocess.TimeoutExpired:
+        if _GIT_DEADLINE is not None:
+            _GIT_CUT = True
+        return ""
     except Exception:
         return ""
 
@@ -549,6 +576,21 @@ def _seed_marker(marker):
     except Exception:
         pass  # Failure only leaves the marker visible in git status.
     return val
+
+
+def _bounded_project_key(cwd, deadline):
+    """``project_key`` whose git calls end at ``deadline``; None when one was cut.
+
+    A cut git answer would silently fall back to another key (the bare cwd),
+    so the caller treats None as "no answer this time", never as a key.
+    """
+    global _GIT_DEADLINE, _GIT_CUT
+    _GIT_DEADLINE, _GIT_CUT = deadline, False
+    try:
+        key = project_key(cwd)
+        return None if _GIT_CUT else key
+    finally:
+        _GIT_DEADLINE = None
 
 
 def project_key(cwd=None, seed=False):
@@ -2724,19 +2766,27 @@ def apply_candidate_receipt(pending):
 
 def candidates(query, *, limit=CANDIDATE_MAX_RESULTS,
                max_bytes=CANDIDATE_MAX_UTF8_BYTES, runtime=None,
-               session_id=None, turn_id=None, hook=False):
+               session_id=None, turn_id=None, hook=False,
+               deadline=None, project=None):
     """Expose capsule-only lexical indexes; a session sees each record once.
 
     The ranked top ``limit`` is chosen exactly as before; the ones this session
     was already shown are then dropped and their places stay empty. Bodies are
     neither read nor touched unless MEM_CANDIDATE_BODY=1.
+
+    ``deadline`` (``_probe_clock()`` value) bounds the git and FTS reads of a
+    hook probe; past it nothing is shown and no record counts as seen.
     """
     runtime = runtime or os.environ.get("MEM_RECALL_RUNTIME", "unknown")
     session_id = session_id if session_id is not None else (
         os.environ.get("MEM_SID") or _session_id_from_env()
     )
     turn_id = turn_id if turn_id is not None else os.environ.get("MEM_TURN_ID", "")
-    project = project_key(Path.cwd())
+    if project is None:
+        project = (project_key(Path.cwd()) if deadline is None
+                   else _bounded_project_key(Path.cwd(), deadline))
+        if project is None:
+            return []
     query_hash = hashlib.sha256((query or "").encode()).hexdigest()
     deferred = [] if (hook and _candidate_defer_requested()) else None
     limit = max(1, min(int(limit), CANDIDATE_MAX_RESULTS))
@@ -2749,10 +2799,17 @@ def candidates(query, *, limit=CANDIDATE_MAX_RESULTS,
     terms = _tokenize_query((query or "")[:CANDIDATE_MAX_QUERY_CHARS])[
         :CANDIDATE_MAX_FTS_TERMS
     ]
+    if deadline is not None and _probe_clock() >= deadline:
+        return []
     if DB.is_file() and terms:
         con = None
         try:
             con = sqlite3.connect(DB.resolve().as_uri() + "?mode=ro", uri=True, timeout=1)
+            if deadline is not None:
+                # A query still running at the deadline is interrupted
+                # (sqlite3.OperationalError): an error probe with no candidates.
+                con.set_progress_handler(lambda: _probe_clock() >= deadline,
+                                         _PROBE_PROGRESS_STEPS)
             has_capsule = con.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' "
                 "AND name='records_capsule_fts'"
@@ -8071,12 +8128,18 @@ def _exchange_state_load():
     return data if isinstance(data, dict) else {}
 
 
+_PROBE_PROJECT = _UNSET_PROJECT = object()
+
+
 def _exchange_caller_project():
     """Capture the foreground cwd identity before the worker changes cwd to STORE."""
-    try:
-        value = project_key(Path.cwd())
-    except Exception:
-        return None
+    if _PROBE_PROJECT is not _UNSET_PROJECT:
+        value = _PROBE_PROJECT  # the candidate probe's bounded key (None when cut)
+    else:
+        try:
+            value = project_key(Path.cwd())
+        except Exception:
+            return None
     if (not isinstance(value, str) or not value or len(value) > protocol_v2.MAX_IDENTIFIER_BYTES
             or re.search(r"[\x00-\x1f\x7f]", value)):
         return None
@@ -10946,7 +11009,7 @@ def main():
 
 
 def _cli_main():
-    global _EXCHANGE_SUPPRESS
+    global _EXCHANGE_SUPPRESS, _PROBE_PROJECT
     ap = argparse.ArgumentParser(prog="mem", description="Unified Memory System", allow_abbrev=False)
     sub = ap.add_subparsers(dest="cmd", required=True,
                             parser_class=functools.partial(argparse.ArgumentParser, allow_abbrev=False))
@@ -11203,6 +11266,11 @@ def _cli_main():
     no_touch_read = args.cmd in ("show", "recall") and getattr(args, "no_touch", False)
     if not no_touch_read and args.cmd not in ("candidates", "inject", "recall-gate"):
         _exchange_consume_notice()
+    probe_deadline = None
+    if args.cmd == "candidates":
+        # One bounded project key for the probe and the read trigger below.
+        probe_deadline = _PROCESS_STARTED + CANDIDATE_PROBE_BUDGET_SECONDS
+        _PROBE_PROJECT = _bounded_project_key(Path.cwd(), probe_deadline)
     if not no_touch_read and args.cmd in ("recall", "candidates", "inject"):
         _exchange_read_trigger()
 
@@ -11234,9 +11302,11 @@ def _cli_main():
             sys.stderr.write(f"[recall] read-only lookup failed: {exc}\n")
             sys.exit(2)
     elif args.cmd == "candidates":
-        candidates(args.query, limit=args.limit, max_bytes=args.max_bytes,
-                   runtime=args.runtime, session_id=args.session_id,
-                   turn_id=args.turn_id, hook=args.hook)
+        if _PROBE_PROJECT is not None:  # None: git did not answer in time, no candidates
+            candidates(args.query, limit=args.limit, max_bytes=args.max_bytes,
+                       runtime=args.runtime, session_id=args.session_id,
+                       turn_id=args.turn_id, hook=args.hook,
+                       deadline=probe_deadline, project=_PROBE_PROJECT)
     elif args.cmd == "bootstrap-context":
         try:
             out = bootstrap_context(args.query, cwd=args.cwd, limit=args.limit,
