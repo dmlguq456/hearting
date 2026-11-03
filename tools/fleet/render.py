@@ -7070,7 +7070,8 @@ def _explorer_requests(snapshot, state, model):
     elif state.view == "HISTORY":
         refs = tuple(r for tag in index for r in (ref(tag),) if r)
         if refs:
-            requests["seats"] = (FocusKey("*", "seats"), refs, ())
+            # HISTORY alone also lists the seats whose session already ended.
+            requests["seats"] = (FocusKey("*", "seats"), refs, ("ended",))
         opened = state.opened_for("hopen:HISTORY")
         if opened:
             session_request(opened, ("seat", "cards", generation_want(opened)))
