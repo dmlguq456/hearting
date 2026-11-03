@@ -5475,7 +5475,7 @@ def _launch_completion_input(route, node, marker=None):
                         reads["nodes"].append((source["route_id"], dict(node)))
 
 
-def _launch_dependencies(lines, fields, callbacks=(), reads=None):
+def _launch_dependencies(lines, fields, callbacks=(), reads=None, parsed=None):
     """Pin prepared row inputs, including absent competitors, without a TTL.
 
     Shared gates depend on their consumed nodes and exact attempt lineage. An opaque
@@ -5501,17 +5501,17 @@ def _launch_dependencies(lines, fields, callbacks=(), reads=None):
     nodes = {metadata.get("route_node")}
     for callback in callbacks:
         nodes.update(getattr(callback, "_dispatch_registry_nodes", ()))
-    rows = [(line, line.split("\t")) for line in lines]
+    rows = (parsed or _RegistryParse()).rows(lines)
     selected = set()
     # Include ancestors and successors even when an adopted parent has moved
     # to a different route or worktree. This is an in-memory closure only.
     changed = True
     while changed:
         changed = False
-        for index, (_line, candidate) in enumerate(rows):
-            if len(candidate) != 6:
+        for index, entry in enumerate(rows):
+            if entry is None:
                 continue
-            meta = parse_registry_metadata(candidate[5])
+            candidate, meta = entry
             same_worktree = candidate[2:4] == fields[2:4]
             # A different node's ordinary registration/start/completion does
             # not change this admission. In particular, parallel batch legs
@@ -5560,17 +5560,15 @@ def _launch_dependencies(lines, fields, callbacks=(), reads=None):
                     if meta.get("attempt_id") and meta["attempt_id"] not in executions:
                         executions.add(meta["attempt_id"])
                         changed = True
-    return tuple(_launch_row_value(candidate) for index, (_line, candidate) in enumerate(rows)
-                 if index in selected)
+    return tuple(_launch_row_value(rows[index][0]) for index in sorted(selected))
 
 
-def _launch_cancellation_routes(jobs, lines, metadata):
+def _launch_cancellation_routes(jobs, lines, metadata, parsed=None):
     """Resolve foreign/adopted owner routes outside every global lock."""
     routes = {}
     related = [metadata]
     from owner_route_binding import OwnerRouteBindingError, resolve_owner_route_lifecycle
-    rows = [(line.split("\t"), parse_registry_metadata(line.split("\t")[5]))
-            for line in lines if len(line.split("\t")) == 6]
+    rows = [entry for entry in (parsed or _RegistryParse()).rows(lines) if entry is not None]
     by_id = {meta.get("attempt_id"): meta for _fields, meta in rows}
     current, seen = metadata, set()
     while current.get("attempt_id") not in seen:
@@ -9582,8 +9580,38 @@ def new_attempt_id(value: str | None = None) -> str:
 
 
 def row_has_attempt(pipe: str, attempt_id: str) -> bool:
+    # A row of this attempt holds the literal `attempt_id=<id>`; every other row
+    # is ruled out by that text alone, before its metadata is parsed.
+    if f"attempt_id={attempt_id}" not in pipe:
+        return False
     metadata = parse_registry_metadata(pipe)
     return metadata.get("attempt_id") == attempt_id
+
+
+class _RegistryParse:
+    """One registration's parse of registry rows: each row text is split and parsed once.
+
+    A registration looks at the same rows in several checks, and again in its fresh
+    read under the jobs lock; this keeps one parse per row text across all of them.
+    The fields and metadata it returns are shared, so callers only read them.
+    """
+
+    __slots__ = ("_rows",)
+
+    def __init__(self):
+        self._rows = {}
+
+    def rows(self, lines):
+        """`(fields, metadata)` for each line, or None for a line without six fields."""
+        parsed, out = self._rows, []
+        for line in lines:
+            entry = parsed.get(line, False)
+            if entry is False:
+                fields = line.split("\t")
+                entry = (fields, parse_registry_metadata(fields[5])) if len(fields) == 6 else None
+                parsed[line] = entry
+            out.append(entry)
+        return out
 
 
 def _immutable_attempt_identity(fields: list[str]) -> tuple[object, ...]:
@@ -11139,12 +11167,13 @@ def claim_attempt_row(
     ensure_global_registry_writable(jobs)
     with _launch_serialization_lock(jobs, attempt_id), _launch_completion_reads() as reads:
         lines = jobs.read_text(encoding="utf-8", errors="replace").splitlines()
+        parsed = _RegistryParse()
         from dispatch_replacement import replacement_row
         row, replacement = replacement_row(jobs, lines, row)
         fields = row.split("\t")
         metadata = parse_registry_metadata(fields[5])
-        existing = [line.split("\t") for line in lines
-                    if len(line.split("\t")) == 6 and row_has_attempt(line.split("\t")[5], attempt_id)]
+        existing = [list(entry[0]) for entry in parsed.rows(lines)
+                    if entry is not None and entry[1].get("attempt_id") == attempt_id]
         from review_input import validate_launch
         if mutation_precheck is not None:
             mutation_precheck(lines)
@@ -11161,9 +11190,9 @@ def claim_attempt_row(
         # Revision admission consumes the sealed subject (including document
         # identity across checklist progress), as it did before unlocked prep.
         validate_launch(jobs, metadata)
-        routes = _launch_cancellation_routes(jobs, lines, metadata)
+        routes = _launch_cancellation_routes(jobs, lines, metadata, parsed)
         return _commit_attempt_row(
-            jobs, attempt_id, "\t".join(fields), prepared_lines=lines,
+            jobs, attempt_id, "\t".join(fields), prepared_lines=lines, prepared_parse=parsed,
             prepared_replacement=replacement, prepared_reads=reads, cancellation_routes=routes, launch=launch,
             exclusive_metadata=exclusive_metadata, exclusive_live_metadata=exclusive_live_metadata,
             terminal_attempt_limit=terminal_attempt_limit, replacement_attempt_limit=replacement_attempt_limit,
@@ -11176,6 +11205,7 @@ def _commit_attempt_row(
     row: str,
     *,
     prepared_lines: list[str],
+    prepared_parse: _RegistryParse | None = None,
     prepared_replacement: bool,
     prepared_reads: dict,
     cancellation_routes: tuple,
@@ -11198,27 +11228,29 @@ def _commit_attempt_row(
     if row_metadata.get("attempt_id") != attempt_id:
         raise DispatchContractError("attempt-row-identity-mismatch", attempt_id)
     ensure_global_registry_writable(jobs)
+    # The rows the preparation parsed keep their parse; only rows written since are new text.
+    parsed = prepared_parse or _RegistryParse()
     lock_path = Path(f"{jobs}.lock")
     with lock_path.open("a", encoding="utf-8") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         lines = jobs.read_text(encoding="utf-8", errors="replace").splitlines()
+        rows = parsed.rows(lines)
         # Arbitrary external callbacks have already run. Pin their input and
         # the prepared lineage, then run only fresh local census/fence checks.
         _launch_local_fences(jobs, row_metadata, cancellation_routes, registration=True)
         # A terminal writer or a legacy launcher may win during preparation.
         # Preserve idempotent False for that exact work, including close races.
-        for existing in lines:
-            fields = existing.split("\t")
-            if len(fields) == 6 and row_has_attempt(fields[5], attempt_id):
-                metadata = parse_registry_metadata(fields[5])
+        for entry in rows:
+            if entry is not None and entry[1].get("attempt_id") == attempt_id:
+                fields, metadata = entry
                 if (_immutable_attempt_identity(fields) == _immutable_attempt_identity(row_fields)
                         and (not launch or metadata.get("launch_claimed") == "1"
                              or fields[1] != "open")):
                     return False
         def pin_preparation():
-            if (_launch_dependencies(lines, row_fields, (mutation_precheck, preclaim if launch else None), prepared_reads)
-                    != _launch_dependencies(prepared_lines, row_fields,
-                                            (mutation_precheck, preclaim if launch else None), prepared_reads)):
+            callbacks = (mutation_precheck, preclaim if launch else None)
+            if (_launch_dependencies(lines, row_fields, callbacks, prepared_reads, parsed)
+                    != _launch_dependencies(prepared_lines, row_fields, callbacks, prepared_reads, parsed)):
                 raise DispatchContractError("attempt-registration-dependency-changed", attempt_id)
 
         automatic_replacement = prepared_replacement
@@ -11226,18 +11258,16 @@ def _commit_attempt_row(
         # consumes markers. Recheck the same conflict policy at actual claim,
         # including an observation arriving after the coordinator's preview.
         if launch and row_metadata.get("session_chain_id"):
-            for existing in lines:
-                fields = existing.split("\t")
-                if len(fields) != 6:
+            for entry in rows:
+                if entry is None:
                     continue
-                prior = parse_registry_metadata(fields[5])
+                prior = entry[1]
                 if (prior.get("session_chain_id") == row_metadata["session_chain_id"]
                         and terminal_conflict_pending(prior)):
                     raise DispatchContractError("terminal-evidence-conflict", prior.get("attempt_id", ""))
-        for index, existing in enumerate(lines):
-            fields = existing.split("\t")
-            if len(fields) == 6 and row_has_attempt(fields[5], attempt_id):
-                metadata = parse_registry_metadata(fields[5])
+        for index, entry in enumerate(rows):
+            if entry is not None and entry[1].get("attempt_id") == attempt_id:
+                fields, metadata = list(entry[0]), entry[1]
                 validate_attempt_metadata(metadata)
                 if _immutable_attempt_identity(fields) != _immutable_attempt_identity(row_fields):
                     if not _never_launched_same_work(fields, metadata, row_fields, row_metadata):
@@ -11264,21 +11294,19 @@ def _commit_attempt_row(
                 _atomic_registry_replace(jobs, lines)
                 return True
         if exclusive_metadata:
-            for existing in lines:
-                fields = existing.split("\t")
-                if len(fields) != 6:
+            for entry in rows:
+                if entry is None:
                     continue
-                metadata = parse_registry_metadata(fields[5])
+                metadata = entry[1]
                 if all(metadata.get(key) == value for key, value in exclusive_metadata.items()):
                     return False
         if exclusive_live_metadata:
             matching_terminal_attempts = set()
             replacement_attempts = set()
-            for existing in lines:
-                fields = existing.split("\t")
-                if len(fields) != 6:
+            for entry in rows:
+                if entry is None:
                     continue
-                metadata = parse_registry_metadata(fields[5])
+                fields, metadata = entry
                 if not all(
                     metadata.get(key) == value
                     for key, value in exclusive_live_metadata.items()
