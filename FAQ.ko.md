@@ -50,6 +50,13 @@ Code 작업자에만 적용됩니다. Codex 작업자는 Codex의 `workspace-wri
 있습니다. 메시지에 이유가 적혀 있습니다. 그 메시지를 에이전트에게 주면 처음 요청
 안에서 이어 갑니다. 내부 명령을 배우거나 새 작업을 시작할 필요는 없습니다.
 
+## 바뀐 내용이 내 프로젝트 폴더에 보이지 않습니다
+
+요청이 소스 코드를 바꾸면 하팅은 보통 프로젝트 옆의 별도 git worktree
+`<project>-wt/<name>`에서 자기 브랜치로 바꿉니다. 사용자의 폴더, 브랜치, 커밋하지
+않은 파일은 그대로입니다. 결과에 변경이 있는 폴더와 브랜치, 커밋했는지가 나옵니다.
+거기서 검토하고, 내 브랜치로 가져오고 싶을 때 에이전트에게 말하세요.
+
 ## 프로젝트에 .agent_reports가 생긴 이유는 무엇인가요?
 
 모든 하네스와 프로젝트의 모든 git worktree가 공유하는 계획, 근거, 결과, 인계를
@@ -64,14 +71,17 @@ Code 작업자에만 적용됩니다. Codex 작업자는 Codex의 `workspace-wri
 
 ## Python은 어느 버전이 필요한가요?
 
-Python 3.11 이상과 그 인터프리터용 PyYAML(`python3 -m pip install --user pyyaml`)이
-필요합니다. 설치 스크립트는 `python3`가 있는지만 확인하므로, 더 오래된 Python은 나중에
-`tomllib`을 찾을 수 없다는 식의 import 오류로 실패할 수 있습니다. 먼저
-`python3 --version`을 확인하세요.
+Python 3.11 이상과 그 인터프리터용 PyYAML(`python3 -m pip install --user pyyaml`
+또는 `python3-yaml` 같은 OS 패키지)이 필요합니다. `python3`가 3.11보다 낮으면
+설치기가 분명한 메시지와 함께 멈춥니다. PyYAML은 설치하지 않으며, 빠져 있으면
+`hearting runtime doctor`가 알려 줍니다. PyYAML이 없으면 계획 단계로 시작하는 일은
+계획 전에 멈추고, 한 번에 끝나는 direct 수정은 그대로 돕니다.
 
 ## herdr, Cairn, NAS, GPU 없이 쓸 수 있나요?
 
-네, 모두 선택 기능입니다. herdr가 없으면 관련 hook이 조용히 끝납니다. Cairn은
+네, 모두 선택 기능입니다. herdr가 없으면 관련 hook이 조용히 끝나고,
+`hearting runtime doctor`가 꺼지는 것(peer 창, pane 제목, 질문 알림, 자동
+`/clear`)을 알려 줍니다. Cairn은
 준비되어 있지 않으면 사용할 수 없다고 알립니다. `compute-hosts`는 호스트를 지정하기
 전까지 주석 처리된 템플릿이고, 호스트 없이 연산을 요청하면 분명한 오류가 납니다.
 `~/.config/hearting/memory-sync.json`으로 교환을 설정하지 않으면 메모리는 로컬에만
@@ -79,10 +89,14 @@ Python 3.11 이상과 그 인터프리터용 PyYAML(`python3 -m pip install --us
 
 ## 언어 설정이 모든 문구를 번역하나요?
 
-아니요. 대화는 사용자의 언어를 따릅니다.
-`${XDG_CONFIG_HOME:-~/.config}/hearting/fleet.json`의 `title_language`와
-`FLEET_NOW_LANG`는 Fleet 제목과 NOW 줄의 언어만 정합니다. 일부 Fleet 상태 단어는
-아직 한국어뿐이며, 공통 번역 표로 옮기는 일을 계획하고 있습니다.
+아니요. 대화는 사용자의 언어를 따릅니다. 요청 시작 때의 경로 카드처럼 하팅이
+직접 찍는 고정 문구는 영어와 한국어가 함께 든 공통 문구 모음 하나에서 나옵니다.
+한국어를 선언하지 않으면 영어입니다. 한 번만 선언하면 됩니다.
+`${XDG_CONFIG_HOME:-~/.config}/hearting/fleet.json`에 `"title_language": "ko"`를
+두거나, `FLEET_NOW_LANG=Korean`을 설정하거나, Claude Code의 `language` 설정을
+한국어로 둡니다. 같은 선언이 Fleet 세션 제목과 NOW 줄의 언어도 정합니다. Fleet
+화면은 아직 이 모음에 들어가지 않아 영어로 나오고, MEMORY 화면과 일부 상태 단어는
+아직 한국어뿐입니다. 옮길 예정입니다.
 
 ## 진행을 알 수 없다고 나오는 이유는? 원문 출력을 볼 수 있나요?
 
@@ -102,9 +116,28 @@ Python 3.11 이상과 그 인터프리터용 PyYAML(`python3 -m pip install --us
 ## 업데이트 뒤 새 세션이 필요한 이유는?
 
 활성 릴리스를 바꾸는 일과 열린 세션이 지침을 다시 읽는 일은 다릅니다.
-`~/.local/bin/hearting runtime status --runtime all`을 실행해 보고된
-`session_action`을 따르세요. 하네스가 모든 지침을 실시간으로 다시 읽는다고
+`~/.local/bin/hearting runtime status --runtime all`을 실행해 하네스마다 나오는
+`next=` 값(`--json`에서는 `session_action`)을 따르세요. 하네스가 모든 지침을 실시간으로 다시 읽는다고
 가정하지 마세요.
+
+## 하팅이 OpenCode가 읽는 내용을 바꾸나요?
+
+네, 한 곳에서 바꿉니다. OpenCode에는 사용자 전역 규칙 파일이 따로 없어서,
+`~/.claude/rules/`(또는 `$CLAUDE_CONFIG_DIR/rules/`)에 Claude Code 사용자 규칙이
+있으면 하팅이 OpenCode의 전역 `AGENTS.md`를 그 규칙 다음에 하팅 지침이 오는
+파일로 씁니다. 특정 경로에만 적용되는 규칙은 빼고, 규칙 파일은 읽기만 합니다. 그
+결과 규칙 본문은 OpenCode가 쓰는 모델 제공자에게도 전달됩니다. 끄려면
+`${XDG_CONFIG_HOME:-$HOME/.config}/hearting/dispatch-defaults.yaml`에 아래 줄을
+넣으세요.
+
+```yaml
+user_rules:
+  opencode: off
+```
+
+다음 설치, 업데이트, 또는 `hearting runtime refresh --runtime opencode`가 하팅
+지침만 있는 원래 상태로 되돌립니다. 그 `AGENTS.md`를 고쳐 두었다면 고친 판은
+옆에 `AGENTS.md.edited-<시각>`으로 남습니다.
 
 ## Windows를 지원하나요?
 

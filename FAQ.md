@@ -55,6 +55,15 @@ own reasons. The message names the reason. Give it to the agent so it can
 continue from the failure within your original request; you do not need to
 learn internal commands or start a second task.
 
+## I don't see the change in my project folder
+
+When a request changes source code, Hearting usually makes the change in a
+separate git worktree beside your project, `<project>-wt/<name>`, on its own
+branch. Your folder, branch, and uncommitted files stay as they were. The
+result names the folder and branch that hold the change and whether it is
+committed. Review it there, and ask the agent when you want it in your own
+branch.
+
 ## Why did .agent_reports appear in my project?
 
 It stores plans, evidence, results, and handoffs shared by every runtime and
@@ -71,13 +80,17 @@ terminal, call them by full path, for example
 ## Which Python version do I need?
 
 Python 3.11 or later, with PyYAML installed for that interpreter
-(`python3 -m pip install --user pyyaml`). The installer script only checks that
-`python3` exists, so an older Python can fail later with an import error such
-as `tomllib` not found. Check `python3 --version` first.
+(`python3 -m pip install --user pyyaml`, or your OS package such as
+`python3-yaml`). The installer stops with a clear message when `python3` is
+older than 3.11. It does not install PyYAML; `hearting runtime doctor` says
+when it is missing. Without it, work that starts with the planning step stops
+before planning, while a one-step direct change still runs.
 
 ## Can I use it without herdr, Cairn, a NAS, or GPUs?
 
-Yes; these are optional. Without herdr the related hooks exit quietly. Cairn
+Yes; these are optional. Without herdr the related hooks exit quietly, and
+`hearting runtime doctor` names what is off: peer windows, pane titles,
+question notifications, and automatic `/clear`. Cairn
 reports itself unavailable when it is not set up. `compute-hosts` stays a
 commented template until you name a host, and a compute request without a host
 fails with a clear error. Memory stays local unless you configure an exchange
@@ -85,10 +98,15 @@ in `~/.config/hearting/memory-sync.json`.
 
 ## Does the language setting translate every label?
 
-No. Conversation follows your language. `title_language` in
-`${XDG_CONFIG_HOME:-~/.config}/hearting/fleet.json` and `FLEET_NOW_LANG` set
-the language of Fleet titles and its NOW line only. A few Fleet status words
-are still Korean-only; moving them to a shared translation table is planned.
+No. Conversation follows your language. The fixed text Hearting prints
+itself, such as the route card at the start of a request, comes from one
+shared catalog in English and Korean. It is English unless you declare Korean
+once: `"title_language": "ko"` in
+`${XDG_CONFIG_HOME:-~/.config}/hearting/fleet.json`, `FLEET_NOW_LANG=Korean`,
+or Korean as Claude Code's `language` setting. The same declaration sets the
+language of Fleet's session titles and NOW lines. Fleet's screens are not in
+the catalog yet: they stay English, and the MEMORY screen and a few status
+words are still Korean-only. Moving them is planned.
 
 ## Why can progress be unknown? Can I read the original output?
 
@@ -109,8 +127,27 @@ a bill or a quota forecast. The only timings we have are in
 
 Switching the active release and reloading instructions in an open session are
 different events. Run `~/.local/bin/hearting runtime status --runtime all` and
-follow the reported `session_action`. Do not assume a runtime reloads all
-instructions live.
+follow each runtime's `next=` value (`session_action` in `--json`). Do not
+assume a runtime reloads all instructions live.
+
+## Does Hearting change what OpenCode reads?
+
+Yes, in one place. OpenCode has no user-level rule file of its own, so when
+`~/.claude/rules/` (or `$CLAUDE_CONFIG_DIR/rules/`) holds Claude Code user
+rules, Hearting writes OpenCode's global `AGENTS.md` as those rules followed by
+its own instructions. Rules limited to certain paths are left out, and the
+rule files are only read. The rule text then also reaches the model provider
+your OpenCode uses. To stop it, add these lines to
+`${XDG_CONFIG_HOME:-$HOME/.config}/hearting/dispatch-defaults.yaml`:
+
+```yaml
+user_rules:
+  opencode: off
+```
+
+The next install, update, or `hearting runtime refresh --runtime opencode`
+puts the plain instructions back. If you had edited that `AGENTS.md`, your
+version is kept beside it as `AGENTS.md.edited-<time>`.
 
 ## Is Windows supported?
 

@@ -10,7 +10,8 @@
 
 - Linux 또는 macOS. Windows(Git Bash)는 실험 단계입니다.
 - Git, `curl` 또는 `wget`, 그리고 PyYAML이 설치된 Python 3.11 이상
-  (`python3 -m pip install --user pyyaml`).
+  (`python3 -m pip install --user pyyaml` 또는 `python3-yaml` 같은 OS 패키지).
+  Python 버전은 설치기가 확인합니다.
 - 설치하고 로그인한 에이전트 CLI 하나 이상: Claude Code, Codex, OpenCode.
   Claude Code만 있어도 됩니다.
 - herdr, Cairn, NAS, 원격 메모리 교환, GPU는 필요 없습니다.
@@ -26,9 +27,14 @@ curl -fsSL https://github.com/dmlguq456/hearting/releases/latest/download/instal
 `--runtime all`을 쓰세요. 설치기는 이미 열린 셸의 `PATH`를 바꾸지 못하므로, 그
 디렉터리를 `PATH`에 넣기 전까지는 `~/.local/bin/...` 경로를 쓰세요.
 
-설치기는 안내를 한 줄 출력합니다. 백그라운드 Claude 작업자는 기본으로 bypass
-모드로 돌고, 같은 안내가 allowlist로 바꾸는 파일을 알려 줍니다.
-[권한](README.ko.md#권한)을 참고하세요.
+설치기는 꼭 읽어야 할 안내를 하나 출력합니다. 백그라운드 Claude 작업자는 기본으로
+bypass 모드로 돌고, 같은 안내가 allowlist로 바꾸는 파일을 알려 줍니다.
+[권한](README.ko.md#권한)을 참고하세요. OpenCode도 설치하고 Claude Code 사용자
+규칙이 있으면, 그 규칙이 이제 OpenCode에도 적용된다는 안내가 하나 더 나옵니다. 끄는
+법은 같은 절에 있습니다.
+
+`runtime doctor`는 PyYAML이나 herdr처럼 빠진 선택 요소가 있으면 그것과, 그것
+없이 안 되는 일을 알려 줍니다. herdr에 대한 줄은 이 따라 하기와 상관없습니다.
 
 ## 오타 하나 고치기
 
@@ -55,7 +61,9 @@ curl -fsSL https://github.com/dmlguq456/hearting/releases/latest/download/instal
 
 ## 결과 읽기
 
-바뀐 파일, 확인 결과, 남은 일을 읽으세요. 한 줄 수정보다 큰 일이면 계획, 근거,
+바뀐 파일, 확인 결과, 남은 일을 읽으세요. 변경은 보통 프로젝트 옆의 별도 git
+worktree `<project>-wt/<name>`에 자기 브랜치로 있고, 사용자의 폴더는 그대로입니다.
+결과에 그 폴더와 브랜치, 커밋했는지가 나옵니다. 한 줄 수정보다 큰 일이면 계획, 근거,
 보고서가 프로젝트의 `.agent_reports/` 폴더에 남습니다. 작업이 막혀도 이 폴더를
 지우지 마세요. 다음 단계가 그 안의 근거를 읽습니다.
 

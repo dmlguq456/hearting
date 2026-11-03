@@ -8,12 +8,13 @@ path to seeing it work.
 
 - Linux or macOS. Windows (Git Bash) is experimental.
 - Git, `curl` or `wget`, and Python 3.11 or later with PyYAML for that Python
-  (`python3 -m pip install --user pyyaml`).
+  (`python3 -m pip install --user pyyaml`, or your OS package such as
+  `python3-yaml`). The installer checks the Python version.
 - At least one agent CLI, installed and signed in: Claude Code, Codex, or
   OpenCode. Claude Code alone is enough.
 - You do not need herdr, Cairn, a NAS, remote memory exchange, or a GPU.
 
-<!-- TODO(public-readiness stage 5): add the tested OS x runtime matrix and confirm the minimum Python version. -->
+<!-- TODO(public-readiness stage 5): add the tested OS x runtime matrix. -->
 
 ## Install and check
 
@@ -29,7 +30,13 @@ directory is on your `PATH`.
 
 The installer prints one note you should read: background Claude workers run
 in bypass mode by default, and the same note names the file that switches them
-to allowlist mode. See [Permissions](README.md#permissions).
+to allowlist mode. See [Permissions](README.md#permissions). If you also install
+OpenCode and keep Claude Code user rules, another note says those rules now
+apply in OpenCode too; the same section says how to turn that off.
+
+`runtime doctor` names an optional piece that is missing, such as PyYAML or
+herdr, and what does not work without it. A herdr line does not matter for this
+walk-through.
 
 ## Fix one typo
 
@@ -59,6 +66,9 @@ For a worker's raw output, ask the agent for its attempt id and run
 ## Read the result
 
 Read the changed files, the verification result, and anything left undone.
+The change is usually in a separate git worktree beside your project,
+`<project>-wt/<name>`, on its own branch; your own folder stays as it was. The
+result names that folder and branch and whether the change is committed.
 For anything beyond a one-line fix, the plan, evidence, and report stay in the
 project's `.agent_reports/` folder. Do not delete it to unblock a task; the
 next stage reads the evidence it holds.
