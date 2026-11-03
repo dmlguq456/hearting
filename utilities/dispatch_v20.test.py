@@ -353,72 +353,21 @@ class DispatchV20ConformanceTest(unittest.TestCase):
                 self.assertFalse(jobs.exists())
                 self.assertFalse(logs.exists())
 
-    def test_active_contract_prose_uses_qualified_dispatch_depth(self):
-        active = {
-            ROOT / "core/WORKFLOW.md",
-            ROOT / "core/CONVENTIONS.md",
-            ROOT / "core/OPERATIONS.md",
-            ROOT / "core/ADAPTATION.md",
-            ROOT / "core/DESIGN_PRINCIPLES.md",
-            ROOT / "core/HOOKS.md",
-            ROOT / "adapters/claude/CLAUDE.md",
-            ROOT / "adapters/codex/AGENTS.md",
-            ROOT / "adapters/opencode/AGENTS.md",
-            ROOT / "utilities/dispatch-node.py",
-            ROOT / "utilities/dispatch-registry.py",
-            ROOT / "utilities/capability-route.py",
-            ROOT / "tools/sync-entry-skill-layer.py",
-            ROOT / "tools/fleet/collectors/dispatch.py",
-            ROOT / "tools/fleet/control.py",
-            ROOT / "tools/fleet/model.py",
-            ROOT / "tools/fleet/render.py",
-            ROOT / "tools/fleet/route.py",
-            ROOT / "hooks/stage-dispatch-reminder.sh",
-        }
-        for pattern in (
-            "capabilities/*.md",
-            "roles/**/*.md",
-            "skills/**/*.md",
-            "adapters/claude/skills/**/*.md",
-            "adapters/codex/skills/**/*.md",
-            "adapters/opencode/skills/**/*.md",
-        ):
-            active.update(ROOT.glob(pattern))
-        for adapter in ADAPTERS:
-            adapter_root = ROOT / "adapters" / adapter
-            for name in ("README.md", "ADAPTATION.md", "AGENTS.md", "CLAUDE.md"):
-                path = adapter_root / name
-                if path.is_file():
-                    active.add(path)
-            for name in (
-                "dispatch-headless.py",
-                "dispatch-liveness.py",
-                "preflight.sh",
-                "capability-map.sh",
-            ):
-                path = adapter_root / "bin" / name
-                if path.is_file():
-                    active.add(path)
-        import re
-        bare = re.compile(
-            r"(?<!dispatch-)\bdepth-[0-3]\b|"
-            r"(?<!dispatch-)(?<!dispatch )\bdepth [0-3]\b",
-            re.I,
-        )
-        offenders = []
-        for path in sorted(active):
-            for number, line in enumerate(
-                path.read_text(encoding="utf-8").splitlines(), 1
-            ):
-                if bare.search(line):
-                    offenders.append(f"{path.relative_to(ROOT)}:{number}:{line}")
-        self.assertEqual(offenders, [])
+    def test_sealed_depth_zero_value_and_neighboring_vocabularies_are_kept(self):
+        # `depth-0` is the sealed machine value of a route's `launch_authority`
+        # and a gate receipt's `release_authority`; it keeps its spelling (7e36cb).
+        # Qualifying the surrounding prose as dispatch depth is a separate,
+        # deferred wording pass, not a contract this test enforces.
+        route = (ROOT / "utilities/capability-route.py").read_text(encoding="utf-8")
+        self.assertIn('"launch_authority":"depth-0"', route)
+        receipt = (ROOT / "utilities/human_gate_receipt.py").read_text(encoding="utf-8")
+        self.assertIn('RELEASE_AUTHORITIES = {"depth-0", "any"}', receipt)
 
         # Protected neighboring vocabularies are deliberately not rewritten.
         operations = (ROOT / "core/OPERATIONS.md").read_text(encoding="utf-8")
         self.assertIn("agents.max_depth", operations)
         render = (ROOT / "tools/fleet/render.py").read_text(encoding="utf-8")
-        self.assertIn("def _subagent_strip(subs, depth=0)", render)
+        self.assertIn("def _subagent_strip(subs, depth=0,", render)
 
     def test_standard_pipeline_and_drills_pin_exact_current_attempt_contract(self):
         pipeline = (

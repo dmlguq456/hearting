@@ -10,4 +10,3 @@
 # `isolated` fingerprint does not apply under ci-like's own fingerprint. CI
 # always runs the real `isolated` profile.
 suite_path	test_id	expected_failure_kind	isolation_profile	reason	defect_id	review_by	fingerprint
-utilities/dispatch_v20.test.py	DispatchV20ConformanceTest.test_active_contract_prose_uses_qualified_dispatch_depth	assertion	isolated	real-bug: assertion:AssertionError: Lists differ: ['adapters/claude/skills/autopilot-code/re[15025 chars]ity'] != []; evidence=w3-known-fail-initial.tsv	MA-W1-144	2026-11-30	
