@@ -1949,6 +1949,24 @@ class WatchWakeTest(unittest.TestCase):
         kill.assert_not_called()
 
 
+class WatcherIdentityTest(unittest.TestCase):
+    def test_exited_watcher_is_absent_even_when_its_row_vanishes_between_reads(self):
+        def stat_row(state, start):
+            return "4242 (python3) " + " ".join([state, *(["0"] * 18), start])
+
+        for state, present in (("S", True), ("R", True), ("Z", False), ("X", False)):
+            with self.subTest(state=state), mock.patch.object(
+                    peer_steward.Path, "read_text", return_value=stat_row(state, "800")):
+                self.assertIs(peer_steward._pid_identity_ok(4242, "800"), present)
+                self.assertFalse(peer_steward._pid_identity_ok(4242, "801"))
+        # The parent can reap an exited watcher between two reads of its row
+        # (CI: a replaced observer was then reported present and never respawned).
+        with mock.patch.object(peer_steward.Path, "read_text",
+                               side_effect=[stat_row("Z", "800"), FileNotFoundError()]):
+            self.assertFalse(peer_steward._watcher_present(
+                {"watcher": {"pid": 4242, "pid_start": "800"}}))
+
+
 class WatchArmTest(_WatchMixin, unittest.TestCase):
     """A56-1."""
 
@@ -3999,7 +4017,6 @@ class StatusRearmTest(_WatchMixin, unittest.TestCase):
             "watcher": {"pid": idle.pid, "pid_start": peer_steward.process_start_ticks(idle.pid)},
         }
         self.assertTrue(peer_steward._pid_identity_ok(idle.pid, never_locks["watcher"]["pid_start"]))
-        self.assertFalse(peer_steward._is_zombie(idle.pid))
         self.assertFalse(peer_steward._alive(never_locks, self.watch_root))
 
         self._release()
