@@ -5300,5 +5300,49 @@ class D5PublicOwnerStartTest(unittest.TestCase):
                         self.assertEqual(usage.call_args.args[1],'deep')
                         self.assertNotIn('headless-main-session-only-model',result['launches'][0]['receipt'])
 
+
+class RegistrationReportingLaunchTest(unittest.TestCase):
+    """The default launcher reports the wrapper's registration line while the launch is still running."""
+
+    def _launch(self, lines_before, lines_after=b""):
+        with tempfile.TemporaryDirectory() as tmp:
+            gate = Path(tmp) / "registered"
+            script = ("import pathlib, sys, time\n"
+                      f"sys.stdout.buffer.write({lines_before!r}); sys.stdout.flush()\n"
+                      "print('a diagnostic', file=sys.stderr, flush=True)\n"
+                      "gate, deadline = pathlib.Path(sys.argv[1]), time.time() + 20\n"
+                      "while not gate.exists() and time.time() < deadline:\n"
+                      "    time.sleep(0.05)\n"
+                      f"sys.stdout.buffer.write({lines_after!r})\n"
+                      "print('check=ok' if gate.exists() else 'check=registration-reported-late')\n")
+            reported = []
+
+            def on_registered():
+                reported.append("att-x")
+                gate.write_text("")
+
+            done = W._run_reporting_registration([sys.executable, "-c", script, str(gate)], "att-x", on_registered)
+        return reported, done
+
+    def test_the_registration_is_reported_before_the_launch_ends_and_the_receipt_is_whole(self):
+        reported, done = self._launch(b"status=eligible\nattempt_registered=att-other\nattempt_registered=att-x\n")
+        self.assertEqual(reported, ["att-x"])   # once, and only for this attempt's line
+        self.assertEqual(done.returncode, 0)
+        self.assertEqual(done.stdout, "status=eligible\nattempt_registered=att-other\n"
+                                      "attempt_registered=att-x\ncheck=ok\n")
+        self.assertEqual(done.stderr, "a diagnostic\n")
+
+    def test_an_undecodable_byte_never_stops_the_running_launch(self):
+        reported, done = self._launch(b"note=\xff\xfe\nattempt_registered=att-x\n", b"tail=\xff\n")
+        self.assertEqual((reported, done.returncode), (["att-x"], 0))
+        self.assertTrue(done.stdout.endswith("check=ok\n"), done.stdout)   # it ran to its end
+        self.assertIn("\ufffd", done.stdout)
+
+    def test_without_a_registration_line_it_is_the_ordinary_run(self):
+        done = W._run_reporting_registration(
+            [sys.executable, "-c", "import sys; print('check=failed'); sys.exit(65)"],
+            "att-x", lambda: self.fail("no registration was printed"))
+        self.assertEqual((done.returncode, done.stdout, done.stderr), (65, "check=failed\n", ""))
+
 if __name__ == "__main__":
     unittest.main()
