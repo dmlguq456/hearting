@@ -673,7 +673,7 @@ def _opencode_carry_notices(previous: Optional[dict], scope: str,
     if carried and prior != "render":
         notices.append("OpenCode AGENTS.md now starts with your Claude user rules; to stop, put "
                        f"`opencode: off` on its own line under a `user_rules:` line in {switch}")
-    elif not carried and prior == "render":
+    elif not carried and prior == "render" and not user_rules.carry_enabled():
         notices.append("OpenCode AGENTS.md no longer carries your Claude user rules "
                        f"(the `opencode` value under `user_rules:` in {switch} is not an on value)")
     return notices

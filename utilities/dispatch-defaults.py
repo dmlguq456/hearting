@@ -36,9 +36,10 @@ TOP_LEVEL_KEYS = {
 # Whether activation carries the user's unscoped Claude user rules
 # ($CLAUDE_CONFIG_DIR/rules) into OpenCode's global AGENTS.md. One value table
 # serves the reader and the validator (user_rules_opencode): absent or an on
-# value carries, an off value stops, anything else stops with a warning. A
-# problem here is never a validation error: this switch must not stop routing
-# or worker-home creation.
+# value carries, an off value stops, anything else stops with a warning. No
+# value of this switch is a validation error, so it cannot stop routing or
+# worker-home creation; a syntax error on its line breaks the file like on any
+# other line, and the line scan still honors an off value then.
 USER_RULES_KEYS = {"opencode"}
 USER_RULES_ON = ("carry", "on", "true", "yes")
 USER_RULES_OFF = ("off", "false", "no")
@@ -235,6 +236,10 @@ def parse_yaml_subset(text):
         stripped = _strip_comment(raw).rstrip()
         if not stripped.strip():
             continue
+        if "\t" in stripped[:len(stripped) - len(stripped.lstrip(" \t"))]:
+            # YAML forbids tab indentation; counting it as zero spaces would
+            # silently lift a nested key to the top level.
+            raise DefaultsConfigError(f"line {lineno}: tab indentation is not supported: {raw!r}")
         indent = len(stripped) - len(stripped.lstrip(" "))
         if indent % 2 != 0:
             raise DefaultsConfigError(f"line {lineno}: odd indentation is not supported: {raw!r}")
@@ -1071,10 +1076,14 @@ def user_rules_opencode(config):
         value, where = section, "user_rules"
         warnings.append("user_rules: expected `opencode: <value>` on its own line under "
                         "`user_rules:`; reading the one-line value")
-    if value is _ABSENT and dotted is not _ABSENT:
-        value = dotted
+    if dotted is not _ABSENT:
         warnings.append("user_rules.opencode: put `opencode: <value>` on its own line under "
                         "`user_rules:`; reading the dotted key")
+        if value is _ABSENT:
+            value, where = dotted, USER_RULES_DOTTED
+        elif _user_rules_mode(value, where)[0] != _user_rules_mode(dotted, USER_RULES_DOTTED)[0]:
+            warnings.append(f"user_rules.opencode: the dotted key ({dotted!r}) and the "
+                            f"`user_rules:` section ({value!r}) disagree; using the section")
     if value is _ABSENT:
         return DEFAULT_USER_RULES_OPENCODE, warnings
     mode, problems = _user_rules_mode(value, where)
@@ -1093,7 +1102,7 @@ def _scan_user_rules(text):
         line = _strip_comment(raw).rstrip()
         if not line.strip():
             continue
-        indent = len(line) - len(line.lstrip(" "))
+        indent = len(line) - len(line.lstrip(" \t"))  # a tab counts as indentation here
         key, colon, value = line.strip().partition(":")
         key, value = key.strip(), value.strip()
         if not colon:

@@ -1156,6 +1156,16 @@ class WorkerHomes(unittest.TestCase):
         nested = prepare_worker_home(ROOT, 'opencode', 'stage', 'inner', env=nested_env)
         self.assertFalse((Path(nested['OPENCODE_CONFIG_DIR']) / 'hearting-user-rules.md').exists())
 
+    def test_a_deleted_user_config_means_the_default_for_nested_workers(self):
+        parent = self._user_rules_parent('')
+        first = prepare_worker_home(ROOT, 'opencode', 'owner', 'outer-deleted', env=parent)
+        pinned = Path(first['DISPATCH_DEFAULTS_CONFIG'])
+        pinned.unlink()  # the user removes their config while work is running
+        nested_env = {**parent, **{key: value for key, value in first.items() if value is not None}}
+        nested = prepare_worker_home(ROOT, 'opencode', 'stage', 'inner-deleted', env=nested_env)
+        rules = Path(nested['OPENCODE_CONFIG_DIR']) / 'hearting-user-rules.md'
+        self.assertTrue(rules.is_file())  # absent switch: on
+
     def test_a_bad_user_rules_value_never_stops_worker_homes(self):
         parent = self._user_rules_parent('user_rules: opencode: off\n')
         for harness in ('opencode', 'claude', 'codex'):

@@ -471,7 +471,24 @@ class DispatchDefaultsV4Tests(unittest.TestCase):
         ("user_rules: true\n", "carry", True),
         ("user_rules.opencode: off\n", "off", True),
         ("user_rules.opencode: on\n", "carry", True),
+        ("user_rules:\n  opencode: on\nuser_rules.opencode: off\n", "carry", True),
     )
+
+    def test_section_and_dotted_forms_that_disagree_are_named(self):
+        config = D.parse_yaml_subset(self.V3_TEXT + "user_rules:\n  opencode: on\n"
+                                     "user_rules.opencode: off\n")
+        mode, warnings = D.user_rules_opencode(config)
+        self.assertEqual(mode, "carry")
+        self.assertTrue(any("disagree" in warning for warning in warnings), warnings)
+
+    def test_tab_indentation_is_a_parse_error_and_off_still_holds(self):
+        text = "schema_version: 4\nuser_rules:\n\topencode: off\n"
+        with self.assertRaises(D.DefaultsConfigError):
+            D.parse_yaml_subset(text)
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "dispatch-defaults.yaml"
+            path.write_text(text)
+            self.assertEqual(D.load_user_rules_opencode(str(path)), "off")
 
     def test_user_rules_values_share_one_table_and_never_invalidate_routing(self):
         for text, expected, warns in self.USER_RULES_TABLE:

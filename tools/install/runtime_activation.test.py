@@ -258,6 +258,29 @@ class OpenCodeGuardDiscoveryTest(unittest.TestCase):
         self.assertFalse(any("now starts" in line for line in report["notices"]), report["notices"])
         self.assertEqual(os.readlink(agents), str(own))
 
+    def test_no_stop_notice_while_the_switch_is_on(self):
+        rule_file = self.seed_rule()
+        agents = self.home / "AGENTS.md"
+        self.run_activation()
+        # The user removes their only rule while the carry is on: the link returns quietly.
+        self.remove(rule_file)
+        report = activation.refresh("opencode")
+        self.assertTrue(agents.is_symlink())
+        self.assertFalse(any("no longer carries" in line for line in report["notices"]),
+                         report["notices"])
+        # The user puts their own link where the render goes while on: quiet on every refresh.
+        rule_file.write_bytes(self.RULE)
+        activation.refresh("opencode")
+        self.assertFalse(agents.is_symlink())
+        own = self.root / "mine.md"
+        own.write_text("# my own global rules\n")
+        self.remove(agents)
+        agents.symlink_to(own)
+        for _ in range(2):
+            report = activation.refresh("opencode")
+            self.assertEqual(report["notices"], [])
+            self.assertEqual(os.readlink(agents), str(own))
+
     def test_the_old_one_line_form_turns_the_carry_off(self):
         self.seed_rule()
         self.run_activation()

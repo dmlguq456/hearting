@@ -468,7 +468,9 @@ user_rules:
 ```
 
 `carry`, `on`, `true`, and `yes` keep it on; any other value reads as off and
-shows a warning. The setting never makes the file invalid.
+shows a warning. No value of this setting makes the file invalid; a syntax
+error on its line (odd indentation, a tab, a duplicate key) breaks the file like
+on any other line, and an off value is still honored.
 
 Keep `$HOME/.config/opencode` and `$HOME/.local/share/opencode` runtime-owned;
 the harness merges its skill entries — and the fallback instruction entry — into

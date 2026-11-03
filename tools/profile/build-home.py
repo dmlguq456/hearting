@@ -558,7 +558,10 @@ def _worker_account_selection(harness, env):
     """Read the existing validated dispatch-defaults config from this env."""
     defaults = _dispatch_defaults_module()
     config_path = defaults.default_config_path(environ=env)
-    if not env.get('DISPATCH_DEFAULTS_CONFIG') and not os.path.lexists(config_path):
+    # Inside a worker the path was pinned by the parent's build; a file the
+    # user removed since then means the shipped defaults, like at top level.
+    vanished = bool(env.get('HEARTING_WORKER_HOME'))
+    if (not env.get('DISPATCH_DEFAULTS_CONFIG') or vanished) and not os.path.lexists(config_path):
         # Account selection is optional. A minimal packaged root may omit the
         # shipped defaults file entirely; keep the pre-account worker-home
         # behavior in that case. Explicit paths and present configs still pass
