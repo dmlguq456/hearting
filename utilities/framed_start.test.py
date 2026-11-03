@@ -1904,6 +1904,13 @@ class AutomaticDirectionTest(StartBase):
                 self.assertIsNone(self.automatic())
         self.set_briefs(full_brief([DIRECT]), full_brief([DIRECT]))
         self.assertIsNotNone(self.automatic())
+        for node in F.FRAME_IDS:
+            with self.subTest("brief-missing", node=node):
+                # The decision opens only with both briefs (U4); a missing one is never agreed for the person.
+                self.set_briefs(full_brief([DIRECT]), full_brief([DIRECT]))
+                (self.output / "shards" / node / "direction-brief.md").unlink()
+                self.assertIsNone(self.automatic())
+        self.set_briefs(full_brief([DIRECT]), full_brief([DIRECT]))
         with mock.patch.dict(os.environ, {"AGENT_DISPATCH_REGISTERED_WORKER": "1"}):
             self.assertIsNone(self.automatic())
 
