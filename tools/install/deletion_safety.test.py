@@ -556,6 +556,101 @@ class ReleaseHeldByLiveProcessTest(unittest.TestCase):
             held, why = distribution._release_held_by_live_process(Path(tmp))
             self.assertFalse(held, why)
 
+    def test_a_real_release_script_holds_its_release_but_not_the_family(self):
+        # `harness update` starts the obligation runner from the new release's
+        # real script path with `--service-current <data>/current`. Until it
+        # opens its code-root descriptor, that projection argument made every
+        # release in the family look in use, so the superseded release survived
+        # the update (install-lifecycle CI, run 41586869055).
+        import subprocess
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp).resolve()
+            releases = base / "releases"
+            old, new = releases / "v-old", releases / "v-new"
+            for release in (old, new):
+                (release / "utilities").mkdir(parents=True)
+                (release / "utilities" / "runner.py").write_text(
+                    "import sys\nsys.stdin.readline()\n", encoding="utf-8")
+            current = base / "current"
+            current.symlink_to(new, target_is_directory=True)
+
+            def started(script):
+                process = subprocess.Popen(
+                    [sys.executable, str(script), "--service-current", str(current)],
+                    stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    cwd=tmp)
+                self.addCleanup(process.wait, 5)
+                self.addCleanup(process.communicate, b"\n")
+                return process
+
+            runner = started(new / "utilities" / "runner.py")
+            self.assertEqual(distribution._release_held_by_live_process(old), (False, ""))
+            held, why = distribution._release_held_by_live_process(new)
+            self.assertTrue(held)
+            self.assertEqual(why, f"live-process:{runner.pid}")
+            # A projected script still holds the whole family: which release
+            # it loaded cannot be recovered from argv.
+            projected = started(current / "utilities" / "runner.py")
+            self.assertEqual(distribution._release_held_by_live_process(old),
+                             (True, f"live-process:{projected.pid}:unsealed-projection"))
+
+    def _release_family(self, tmp):
+        base = Path(tmp).resolve()
+        releases = base / "releases"
+        old, new = releases / "v-old", releases / "v-new"
+        for release in (old, new):
+            (release / "utilities").mkdir(parents=True)
+            (release / "utilities" / "runner.py").write_text(
+                "import sys\nsys.stdin.readline()\n", encoding="utf-8")
+        current = base / "current"
+        current.symlink_to(old, target_is_directory=True)
+        return old, new, current
+
+    def _started(self, argv, cwd):
+        import subprocess
+        process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL, cwd=cwd)
+        self.addCleanup(process.wait, 5)
+        self.addCleanup(process.communicate, b"\n")
+        return process
+
+    def test_a_process_started_through_current_keeps_the_old_release_after_rotation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old, new, current = self._release_family(tmp)
+            # Started while current named the old release, then current moves.
+            projected = self._started(
+                [sys.executable, str(current / "utilities" / "runner.py")], tmp)
+            rotated = current.with_name("current.next")
+            rotated.symlink_to(new, target_is_directory=True)
+            # destructive-ok: reason=rotate this test's temporary current pointer; boundary=current symlink under TemporaryDirectory
+            os.replace(rotated, current)
+            self.assertEqual(os.path.realpath(current), str(new))
+            self.assertEqual(distribution._release_held_by_live_process(old),
+                             (True, f"live-process:{projected.pid}:unsealed-projection"))
+
+    def test_code_given_with_c_or_m_leaves_the_script_unknown(self):
+        script = "/data/releases/v-new/utilities/runner.py"
+        for argv in (["python3", "-c", "pass", script],
+                     ["python3", "-cpass", script],
+                     ["python3", "-Icpass", script],
+                     ["python3", "-Ic", "pass", script],
+                     ["python3", "-m", "runner", script],
+                     ["python3", "-Bm", "runner", script],
+                     ["sh", "-lc", "true", script]):
+            with self.subTest(argv=argv):
+                self.assertIsNone(distribution._interpreted_script(argv))
+        self.assertEqual(distribution._interpreted_script(["python3", "-u", script]), script)
+        with tempfile.TemporaryDirectory() as tmp:
+            old, new, current = self._release_family(tmp)
+            # Code passed inside a combined flag may import through current
+            # (the old release here); the real path after it is only data.
+            code = ("-Icimport sys; sys.path.insert(0, sys.argv[2] + '/utilities'); "
+                    "sys.stdin.readline()")
+            process = self._started(
+                [sys.executable, code, str(new / "utilities" / "runner.py"), str(current)], tmp)
+            self.assertEqual(distribution._release_held_by_live_process(old),
+                             (True, f"live-process:{process.pid}:unsealed-projection"))
+
     def test_an_unreadable_process_does_not_mark_every_release_in_use(self):
         # Some of our own processes deny /proc entirely (`(sd-pam)`), and pid 1
         # belongs to another user. If either were treated as undecidable, every

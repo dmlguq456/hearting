@@ -461,7 +461,7 @@ def _fixture_values(renderer):
                 ["mgpu-a1", 0, "python", 25.6, "1d 6h"],
                 ["cnn", 0, "python", 20.2, "3d 16h"],
                 ["mgpu-a1", 1, "python", 19.7, "19h"],
-                ["mpwav", 0, "python", 19.7, "3h"]],
+                ["gpu-c", 0, "python", 19.7, "3h"]],
             "unregistered_gpu_summary": {"count": 11, "remaining": 7, "owner": "a3"},
             "gpu_processes": gpu_processes,
             "gpu_process_summary": {

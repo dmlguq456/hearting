@@ -257,7 +257,9 @@ When a request changes source code, Hearting usually makes the change in a
 separate git worktree beside your project, `<project>-wt/<name>`, on its own
 branch, so your folder, branch, and uncommitted files stay as they were. The
 result then names the folder and branch that hold the change and whether it is
-committed.
+committed. A small edit made in place, by any tool, is still recorded
+automatically as a direct route — one record per session and folder, later
+turns appended, no model call. Set `HEARTING_AUTO_RECORD=off` to stop it.
 
 The [Quickstart](QUICKSTART.md) walks this task end to end with measured times,
 and the [FAQ](FAQ.md) covers `PATH`, Python versions, and permissions.
@@ -338,6 +340,12 @@ same `dispatch-defaults.yaml`; the next install, update, or
 user_rules:
   opencode: off
 ```
+
+Codex reads only one global instruction file, so if you keep your own
+`~/.codex/AGENTS.override.md` with text in it, Hearting adds its instructions
+below your text in one marked block. Update replaces only that block and
+uninstall removes it; a missing or empty override is never created. Background
+workers on every runtime also get your global rules.
 
 ## Artifacts and status
 

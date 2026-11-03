@@ -287,7 +287,9 @@ def _first_frame_attempt(route, jobs):
 
     A leg that already ended is still the first leg: its harness is the one the other leg must
     avoid. It counts only once its cleanup is settled, so leg two never starts over an unsettled
-    failure; a leg that is neither live, completed nor settled is reported as not yet placed."""
+    failure; a leg that is neither live, completed nor settled is reported as not yet placed.
+    `start` launches leg two as soon as leg one's row is registered, so this holds at the moment
+    of selection: a leg one that fails after it is continued by the replacement controller."""
     try:
         lines = Path(jobs).read_text().splitlines()
     except OSError as exc:
@@ -818,6 +820,7 @@ def run_owner_wrapper(argv: list[str], env: dict[str, str]) -> int:
 def main(argv):
     try:
         frame_degradation = None
+        first = None
         pair_model_profile = None
         pair_model_reason = "not-applicable"
         explicit, values, forwarded, route_evidence, derived = _parse(argv)
@@ -1178,8 +1181,12 @@ def main(argv):
                     from artifact_producer import prepare_route_artifact_env, ProducerError
                     try:
                         child_env.pop("AGENT_ARTIFACT_PARENT_OUTPUT_DIR", None)  # SD-163: no stale source
+                        # The alternative joins the cycle its live first leg's preparation began and
+                        # looked the root over for, in this start or an earlier start of the route:
+                        # it is not walked again; later hand changes go to the next begin or listing.
                         child_env.update(prepare_route_artifact_env(
-                            Path(binding.route_file), start="--start" in forwarded, jobs=Path(jobs)))
+                            Path(binding.route_file), start="--start" in forwarded, jobs=Path(jobs),
+                            sibling_looked=bool(first) and first.get("_status") in {"open", "running"}))
                     except ProducerError as exc:
                         raise OwnerError(f"{exc.code}:{exc.detail}") from exc
                 # Deliberately NOT export_owner_route_env() here. The adapters

@@ -282,7 +282,7 @@ class ResourceProgressTest(unittest.TestCase):
 class ResourceProgressProductionTest(unittest.TestCase):
     """Bridge arms[].production: local unwrap vs remote-origin guard.
 
-    Mirrors tf-rehancer.canonical-resource-bridge/v1 (cnn T/B arms): child
+    Mirrors project-c.canonical-resource-bridge/v1 (cnn T/B arms): child
     identity/directory/config live inside arm["production"] with an explicit
     host. Remote-origin arms must never be resolved in local /proc and their
     metadata alone never proves live/done.
@@ -330,7 +330,7 @@ class ResourceProgressProductionTest(unittest.TestCase):
         return {"capacity": "T", "state": "training-updates",
                 "run_id": "local-20261006-t",
                 "production": {
-                    "schema": "tf-rehancer.cnn-production/v1",
+                    "schema": "project-c.cnn-production/v1",
                     "capacity": "T", "gpu_index": 0,
                     "directory": str(self.directory),
                     "config_sha256": self.digest, "state": "training-updates",
@@ -349,9 +349,9 @@ class ResourceProgressProductionTest(unittest.TestCase):
                     "run_id": "cnn-20261006-015922-tf-canonical-%s-scratch400k-a1"
                               % capacity.lower()},
                 "production": {
-                    "schema": "tf-rehancer.cnn-production/v1", "host": "cnn",
+                    "schema": "project-c.cnn-production/v1", "host": "cnn",
                     "capacity": capacity, "gpu_index": gpu,
-                    "directory": "/home/example/Project_Zoo/TF-Rehancer_artifacts"
+                    "directory": "/home/example/Project_Zoo/Project-C_artifacts"
                                  "/cnn_canonical_20261006/recovery-a1/%s/runs/%s"
                                  % (capacity.lower(), run),
                     "config_sha256": "9" * 64, "state": "training-updates",
@@ -468,12 +468,12 @@ class RemoteCandidatesTest(unittest.TestCase):
                 "run_id": "cnn-20261006-%s" % capacity.lower(),
                 "compute_host_receipt": {"host": host},
                 "production": {
-                    "schema": "tf-rehancer.cnn-production/v1", "host": host,
+                    "schema": "project-c.cnn-production/v1", "host": host,
                     "capacity": capacity, "gpu_index": gpu,
                     "directory": str(directory), "config_sha256": config_sha,
                     "state": "training-updates", "run_name": run,
                     "compute_run_id": "cnn-20261006-%s" % capacity.lower(),
-                    "command": ["/bin/tf-rehancer-train", "--config", str(self.config)],
+                    "command": ["/bin/project-c-train", "--config", str(self.config)],
                     "process_identity": {"pid": pid, "starttime": start,
                                          "cmdline_sha256": "d" * 64}}}
 

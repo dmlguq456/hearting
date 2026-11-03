@@ -39,10 +39,15 @@ a new one.
 
 Bounded on purpose: one resume per record, a sleep of at most `MAX_SLEEP_SECONDS`,
 and at most `MAX_CHAIN` automatic resumes in a row for one route. A usage-limit
-pause whose reset time is unknown, farther than `MAX_SLEEP_SECONDS`, or past the
-chain limit is not left to a person: it waits until the longest wait (one record
-per route and source attempt) and the `start` there looks at the usage gate again --
-time never grants a launch, so a still-limited gate arms the next wait.
+pause whose reset time is unknown, or farther than `MAX_SLEEP_SECONDS`, is not
+left to a person: it waits until the longest wait (one record per route and
+source attempt) and the `start` there looks at the usage gate again -- time
+never grants a launch, so a still-limited gate arms the next wait. A known reset
+time stays the time to wait for even past the chain limit: the record is re-armed
+at that time (or at a floor that doubles per step past the limit when the reset
+already passed), still within the longest wait. The same holds for a worker-start
+budget pause (`launch-capacity`: nothing was created or failed), whose stable
+record name is freed after its one resume so a later pause may arm again.
 """
 from __future__ import annotations
 
@@ -76,6 +81,18 @@ def _epoch(retry_at: str) -> float | None:
         return datetime.strptime(retry_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
     except (TypeError, ValueError):
         return None
+
+
+def _waited_to_cap(record: dict) -> bool:
+    """Whether the record's own retry_at is the longest wait, not a known reset.
+
+    A stable-key record is also written for a known reset past the chain limit;
+    only the record that actually waited to the cap reports the longest wait."""
+    armed = _epoch(record.get("armed_at") or "")
+    resume = _epoch(record.get("retry_at") or "")
+    if armed is None or resume is None:
+        return False
+    return resume - armed >= MAX_SLEEP_SECONDS - SLACK_SECONDS
 
 
 def record_path(jobs: Path, route_id: str, retry_at: str) -> Path:
@@ -139,11 +156,23 @@ def arm(result: dict, route_file, jobs, *, environ=None, spawn=subprocess.Popen,
     except ValueError:
         chain = MAX_CHAIN
     waits_to_cap = False
-    if epoch is None or chain >= MAX_CHAIN or epoch - now() > MAX_SLEEP_SECONDS:
+    known_reset = epoch is not None and epoch - now() <= MAX_SLEEP_SECONDS
+    if chain >= MAX_CHAIN and known_reset and cause in {"capacity", "launch-capacity"}:
+        # A known reset time stays the time to wait for even past the chain limit.
+        # The floor doubles per step past the limit so an already-passed (stale)
+        # reset cannot re-arm in the same second; every step still stays inside
+        # the longest wait.
+        floor = LATER_SECONDS * 2 ** (chain - MAX_CHAIN)
+        delay = min(max(epoch - now(), floor), MAX_SLEEP_SECONDS - SLACK_SECONDS)
+        epoch = now() + delay
+        retry_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+        waits_to_cap = True
+    elif epoch is None or chain >= MAX_CHAIN or epoch - now() > MAX_SLEEP_SECONDS:
         if cause != "capacity":
             return None
-        # A usage-limit pause the reset time cannot time (unknown, too far, or past the chain limit)
-        # waits to the longest wait; the `start` there re-asks the usage gate.
+        # A usage-limit pause the reset time cannot time (unknown or too far, or a
+        # cause this rule does not time past the chain limit) waits to the longest
+        # wait; the `start` there re-asks the usage gate.
         epoch = now() + MAX_SLEEP_SECONDS - SLACK_SECONDS
         retry_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
         waits_to_cap = True
@@ -248,7 +277,7 @@ def run(path: Path, *, sleep=time.sleep, now=time.time, call=subprocess.run, cle
     record = json.loads(path.read_text(encoding="utf-8"))
     if record.get("state") != "armed":
         return 0
-    capped = (record.get("cause") == "capacity"
+    capped = (record.get("cause") in {"capacity", "launch-capacity"}
               and path != record_path(Path(record["jobs"]), record.get("route_id") or "", record["retry_at"]))
     if early or capped:
         # A start that pauses again would name this same record; free the name.
@@ -302,7 +331,7 @@ def _notify(record: dict, receipt: dict, capped: bool = False) -> None:
         elif why is None:
             why = ("resumed before its recorded reset because the usage gate cleared it"
                    if record.get("early") else
-                   "re-checked capacity at the end of its longest wait" if capped
+                   "re-checked capacity at the end of its longest wait" if capped and _waited_to_cap(record)
                    else "resumed after the usage limit reset")
         text = (f"route {record['route_id']} {why}: state {state}"
                 + (f", owner {receipt['owner_attempt_id']}" if receipt.get("owner_attempt_id") else "")

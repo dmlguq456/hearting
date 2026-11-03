@@ -1352,6 +1352,48 @@ class SameRowTest(unittest.TestCase):
                         child.wait(timeout=5)
                 self.assertTrue(D.close_attempt_row(jobs, args.attempt_id, "dead-exact-pid"))
 
+    def _append_started(self, stdout, *, action="start", claimed=True):
+        with mock.patch.object(C.subprocess, "check_output", return_value="/repo\n"), \
+             mock.patch.object(C, "sealed_launch_home", return_value="/home"), \
+             mock.patch.object(C, "workflow_completion_receipt", return_value=""), \
+             mock.patch.object(C, "stage_session_metadata", return_value=""), \
+             mock.patch.object(C, "route_node_leg_fields", return_value=("-", "-")), \
+             mock.patch("review_input.registration_fragment", return_value=""), \
+             mock.patch("dispatch_replacement.seal_launch_input", return_value=""), \
+             redirect_stdout(stdout):
+            args = self.args(Path(self.tmp))
+            args.action = action
+            return C.append_job(Path(self.tmp) / "jobs.log", args, harness="claude",
+                                runtime_sandbox="adapter-default", effort_key="effort",
+                                claim=lambda *a, **kw: claimed, marker_gate=None)
+
+    def test_a_started_registration_names_its_row_before_the_launch_goes_on(self):
+        """A framed start launches its second leg from this line instead of the whole receipt;
+        a refused claim or a registration without a start prints nothing."""
+        for action, claimed, expected in (("start", True, "attempt_registered=att-1\n"),
+                                          ("start", False, ""), ("register", True, "")):
+            with self.subTest(action=action, claimed=claimed):
+                out = io.StringIO()
+                self.assertEqual(self._append_started(out, action=action, claimed=claimed), claimed)
+                self.assertEqual(out.getvalue(), expected)
+
+    def test_a_reader_that_is_gone_does_not_stop_the_registered_launch(self):
+        """The line is a notice: a closed pipe or a closed stdout leaves the registered row to be launched."""
+        read_end, write_end = os.pipe()
+        os.close(read_end)                                   # nobody reads any more: EPIPE on write
+        broken = os.fdopen(write_end, "w")
+        closed = io.StringIO()
+        closed.close()                                       # ValueError on write
+        try:
+            for stdout in (broken, closed):
+                with self.subTest(stdout=type(stdout).__name__):
+                    self.assertTrue(self._append_started(stdout))
+        finally:
+            try:
+                broken.close()
+            except OSError:
+                pass
+
     def test_repository_marker_is_only_added_for_non_git_rows(self):
         non_git_fields = self.row("codex", repository_kind="non-git",
                                   runtime_sandbox="workspace-write", effort_key="reasoning")

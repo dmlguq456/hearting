@@ -51,7 +51,7 @@ class ProbeCommandAndSessionEvidenceTest(unittest.TestCase):
 
     def test_long_interpreter_and_script_survive_collection_then_render_by_filename(self):
         ns = _probe_namespace()
-        prefix = "/home/example/Project_Zoo/TF-Rehancer_artifacts/envs/private_unity_" + "x" * 96
+        prefix = "/home/example/Project_Zoo/Project-C_artifacts/envs/private_unity_" + "x" * 96
         script = prefix + "/scripts/private_unity_train.py"
         words = [prefix + "/bin/python", script, "--epochs", "100", "--config", "/cfg/final.yaml"]
         raw = b"\0".join(word.encode() for word in words) + b"\0"

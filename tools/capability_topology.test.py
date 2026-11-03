@@ -184,7 +184,7 @@ class TestTopology(unittest.TestCase):
             ("autopilot-draft",("doc","paper","presentation")):("finalize","finalize","final-artifact"),
             # The setup sink moved off the detached run: a training process exiting is
             # not a workflow completing, so the sink offer anchors on the handoff that
-            # records what happens next (2026-08-04 BC_ResNet_tf).
+            # records what happens next (2026-08-04 KWS_Net_tf).
             ("autopilot-lab",("setup",)):("handoff","full-run","experiment-artifact"),
             ("autopilot-lab",("eval",)):("sync","publish","bundle-publication.json"),
             ("autopilot-refine",("default",)):("transaction","transaction","revised-artifact"),

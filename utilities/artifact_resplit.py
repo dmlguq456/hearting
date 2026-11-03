@@ -127,8 +127,8 @@ def _default_root_slug(root: Path) -> str:
     `.claude_reports`), so the repo basename is the root's *parent* directory
     name -- `_slugify(root.name)` would yield `agent-reports` for every root in
     the fleet and collapse all their cycle keys onto one slug. `resolve()`
-    happens first so a symlinked repo (`BC_ResNet_tf` -> `BC_ResNet`) slugs from
-    its realpath, matching the roster entry (`bc-resnet`). A root that is not one
+    happens first so a symlinked repo (`KWS_Net_tf` -> `KWS_Net`) slugs from
+    its realpath, matching the roster entry (`kws-net`). A root that is not one
     of those two container names is not a repo-relative artifact root, so its own
     name stays the slug.
     """

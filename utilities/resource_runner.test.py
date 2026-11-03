@@ -639,6 +639,45 @@ class ComputeRunAdoptionTest(unittest.TestCase):
                                   for path in before_workflow.rglob("*") if path.is_file()}, before_journal)
 
 
+class FastExitSettleTest(unittest.TestCase):
+    def test_exited_detached_payload_settles_with_its_exit_code_before_its_reap(self):
+        # CI (41576230552, 41576786995): the detached wrapper of a command that
+        # exited 7 was still an unreaped zombie when the observer settled it,
+        # and the row said process-identity-unreadable instead of exit-7.
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            sentinel = base / "run.log.exit"
+            sentinel.write_text("7", encoding="utf-8")
+            child = subprocess.Popen(["/bin/sleep", "30"])
+            try:
+                # Until exec has set it up, a new child's cmdline can still be empty.
+                deadline = time.monotonic() + 10
+                identity = R.proc_identity(child.pid)
+                while identity is None and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                    identity = R.proc_identity(child.pid)
+                self.assertIsNotNone(identity)
+                run = {"run_id": "fast", **{key: identity[key] for key in ("pid", "starttime", "command_hash")},
+                       "resource_policy": "verified-resume", "status": "running",
+                       "workflow_state": "RUNNING", "sentinel": str(sentinel)}
+                registry = base / "registry.json"
+                registry.write_text(json.dumps({"schema_version": 1, "runs": {"fast": run}}),
+                                    encoding="utf-8")
+                os.kill(child.pid, signal.SIGKILL)
+                stat = Path(f"/proc/{child.pid}/stat")
+                deadline = time.monotonic() + 10
+                while (stat.read_text().rsplit(") ", 1)[1].split()[0] != "Z"
+                       and time.monotonic() < deadline):
+                    time.sleep(0.01)
+                row, settled = R.settle(registry, "fast", run)
+            finally:
+                child.kill()
+                child.wait()
+        self.assertTrue(settled)
+        self.assertEqual((row["status"], row["exit_code"], row["failure_class"]),
+                         ("failed", 7, "exit-7"))
+
+
 class TestProgressLaunch(unittest.TestCase):
     def test_main_assigns_one_path_and_replaces_inherited_run_identity(self):
         with tempfile.TemporaryDirectory() as tmp:

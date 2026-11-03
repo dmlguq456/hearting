@@ -2541,12 +2541,12 @@ class FrameAssignmentIncidentTest(unittest.TestCase):
         path.write_text(json.dumps(doc), encoding="utf-8")
         return path, doc
 
-    def _first_leg_row(self, doc, harness, model):
-        return ("2026-11-01\trunning\t/r\t/w\tframe\t"
+    def _first_leg_row(self, doc, harness, model, status="running", extra=""):
+        return (f"2026-11-01\t{status}\t/r\t/w\tframe\t"
                 f"route_id={doc['route_id']},route_hash={doc['route_hash']},route_node=frame,"
-                f"worker_type=frame,harness={harness},model={model},attempt_id=att-first\n")
+                f"worker_type=frame,harness={harness},model={model},attempt_id=att-first{extra}\n")
 
-    def _launch(self, path, node, *, first=None, scores=None, states=None, usage_gate=None):
+    def _launch(self, path, node, *, first=None, scores=None, states=None, usage_gate=None, first_row=None):
         """One real `dispatch-owner.py` frame launch (`--start`), with the wrapper, the live
         usage readers and the sealed-route hash binding replaced. The route evidence reader,
         the pin and eligibility judgments, the gate/band selection and `frame_harness_admission`
@@ -2554,7 +2554,7 @@ class FrameAssignmentIncidentTest(unittest.TestCase):
         import artifact_producer
         doc = json.loads(path.read_text(encoding="utf-8"))
         jobs = path.parent / "jobs.log"
-        jobs.write_text(self._first_leg_row(doc, *first) if first else "", encoding="utf-8")
+        jobs.write_text(self._first_leg_row(doc, *first, **(first_row or {})) if first else "", encoding="utf-8")
         binding = SimpleNamespace(route_file=str(path), route_id=doc["route_id"],
                                   route_hash=doc["route_hash"], route_node=node,
                                   registry_digest="sha256:test", write_scope=str(path.parent),
@@ -2570,7 +2570,7 @@ class FrameAssignmentIncidentTest(unittest.TestCase):
                  "scores": scores, "sources": {h: "test" for h in self.HARNESSES}}), \
              mock.patch.object(OWNER, "derive_frame_route_binding", return_value=binding), \
              mock.patch.object(OWNER, "_declares_top", return_value=True), \
-             mock.patch.object(artifact_producer, "prepare_route_artifact_env", return_value={}), \
+             mock.patch.object(artifact_producer, "prepare_route_artifact_env", return_value={}) as prepare, \
              mock.patch.object(OWNER, "select_launch_lifecycle", return_value="detached"), \
              mock.patch.object(OWNER, "record_frame_launch_degradation") as record, \
              mock.patch.object(OWNER, "run_owner_wrapper", return_value=0) as wrapper, \
@@ -2580,7 +2580,7 @@ class FrameAssignmentIncidentTest(unittest.TestCase):
                              "--route-evidence", str(path), "--prompt-text", "probe"])
         argv = wrapper.call_args.args[0] if wrapper.called else []
         return SimpleNamespace(
-            rc=rc, out=out.getvalue(), argv=argv, record=record,
+            rc=rc, out=out.getvalue(), argv=argv, record=record, prepare=prepare,
             wrapper=Path(argv[0]).parts[-3] if argv else None,
             source=(re.search(r"(?m)^selection_source=(.*)$", out.getvalue()) or [None, None])[1])
 
@@ -2612,6 +2612,20 @@ class FrameAssignmentIncidentTest(unittest.TestCase):
         import dispatch_contract
         self.assertEqual(dispatch_contract.frame_harness_admission(
             doc, path.parent / "jobs.log", [], ["opencode", "opencode"], ["top", "top"]), [])
+
+    def test_the_alternative_joins_a_live_first_legs_cycle_without_walking_the_root(self):
+        """The first leg's preparation looked the root over for the cycle both legs share; the
+        alternative of a live first leg does not walk it again, one of an ended first leg does."""
+        path, _ = self._route("rt_ad3fb")
+        first = self._launch(path, "frame")
+        self.assertEqual(first.prepare.call_args.kwargs["sibling_looked"], False)
+        for status, extra, looked in (("running", "", True), ("open", "", True),
+                                      ("done", ",cleanup_receipt_digest=sha256:settled", False)):
+            with self.subTest(first_leg=status):
+                second = self._launch(path, "frame-alternative", first=("opencode", "muse-spark"),
+                                      first_row={"status": status, "extra": extra})
+                self.assertEqual(second.rc, 0, second.out)
+                self.assertEqual(second.prepare.call_args.kwargs["sibling_looked"], looked)
 
     def test_an_owner_pin_alone_leaves_the_frame_to_the_automatic_selection(self):
         _, doc = self._route("rt_ad3fb")

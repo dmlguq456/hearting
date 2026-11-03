@@ -97,6 +97,6 @@ cycle verification returns `already-sealed`. Product work was not rerun. The
 observer session performed no operating-record repair.
 
 Local verification records: `/tmp/hidden-final-verification.json`,
-`/tmp/homeos-hidden-settlement-observation.json`,
-`/tmp/homeos-hidden-installed-inspect.json`, `/tmp/hidden-installed-integrity.json`,
+`/tmp/homeapp-hidden-settlement-observation.json`,
+`/tmp/homeapp-hidden-installed-inspect.json`, `/tmp/hidden-installed-integrity.json`,
 `/tmp/hidden-runtime-doctor.json`, `/tmp/hidden-runtime-verify.json`.

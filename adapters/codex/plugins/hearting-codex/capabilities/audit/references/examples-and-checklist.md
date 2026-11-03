@@ -2,10 +2,10 @@
 
 ```text
 # Full document-artifact audit
-/audit 2026-05-06_se-seminar-tfrestormer
+/audit 2026-05-06_se-seminar-tfenhancer
 
 # Facts-only audit after many refine cycles
-/audit 2026-05-06_se-seminar-tfrestormer --scope facts
+/audit 2026-05-06_se-seminar-tfenhancer --scope facts
 
 # Research-card consistency audit
 /audit speech-enhancement-trends --scope facts
@@ -14,7 +14,7 @@
 /audit 2026-05-11_audit-skill-infra --scope all --read-only
 
 # Compatibility spelling; audits always end with the report
-/audit 2026-05-06_se-seminar-tfrestormer --report-only
+/audit 2026-05-06_se-seminar-tfenhancer --report-only
 ```
 
 ## Post-Audit Checklist

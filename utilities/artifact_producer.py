@@ -2293,7 +2293,12 @@ def _begin_waiting_for_admission(root: Path, **kwargs: Any) -> Dict[str, Any]:
     deadline = time.monotonic() + OWNER_LAUNCH_ADMISSION_WAIT_SECONDS
     # A node begin never looks for hand changes, and neither does the launch binding: it only
     # resumes the cycle the same start's preparation began (and looked for) seconds before.
-    looked = kwargs.get("node_id") is not None or bool(kwargs.get("resume_only"))
+    # Nor does a frame leg joining the cycle of its live sibling leg (`sibling_looked`), whenever
+    # this route's later start launches it: the sibling's preparation looked the root over and
+    # handed the waiting history lines over before beginning this cycle. A hand change or a line
+    # since then is found by the next begin, listing or campaign close (reconcile is best effort).
+    sibling_looked = bool(kwargs.pop("sibling_looked", False))
+    looked = kwargs.get("node_id") is not None or bool(kwargs.get("resume_only")) or sibling_looked
     while True:
         if not looked:
             # §45 D-126 before the cycle begins. A look that finished is not repeated while
@@ -2301,7 +2306,7 @@ def _begin_waiting_for_admission(root: Path, **kwargs: Any) -> Dict[str, Any]:
             # its own lock wait ran out) is taken again before the next try.
             looked = reconcile_root(root).get("status") in _RECONCILE_FINISHED
         try:
-            return begin(root, _reconcile=False, **kwargs)
+            return begin(root, _reconcile=False, _deliver_history=not sibling_looked, **kwargs)
         except artifact_admission.AdmissionBusy:
             if time.monotonic() >= deadline:
                 raise ProducerError(
@@ -2350,11 +2355,14 @@ def bind_owner_launch(args, jobs: Path, *, environ=None) -> Optional[Dict[str, A
 
 
 def prepare_route_artifact_env(route_file: Path, *, start: bool, jobs: Path,
-                               require_cycle: bool = True) -> Dict[str, str]:
+                               require_cycle: bool = True, sibling_looked: bool = False) -> Dict[str, str]:
     """Resolve the route's own output context; callers need not copy begin's env.
 
     Start owns idempotent preparation. Readiness checks only read an existing
     cycle. No inherited cycle or 'latest' directory participates in selection.
+    `sibling_looked`: a live sibling leg of the same route prepared this cycle (in this start
+    or an earlier one), so this preparation does not walk the root for hand changes or waiting
+    history lines again; the next begin, listing or campaign close does.
     """
     raw = _read_json(route_file)
     if not isinstance(raw, dict) or not raw.get("artifact_root"):
@@ -2371,7 +2379,8 @@ def prepare_route_artifact_env(route_file: Path, *, start: bool, jobs: Path,
             selection = {"workflow_group_id": context["group_id"]}
         return _begin_waiting_for_admission(
             root, route_file=route_file, capability=route["capability"],
-            intensity=route["effective_intensity"], require_cycle=require_cycle, jobs=jobs, **selection)["env"]
+            intensity=route["effective_intensity"], require_cycle=require_cycle, jobs=jobs,
+            sibling_looked=sibling_looked, **selection)["env"]
     record = route_cycle_for(root, route)
     if record is None:
         return {"AGENT_ARTIFACT_ROOT": str(root), **{name: "" for name in (
@@ -2419,8 +2428,8 @@ def _campaign_naming(campaign_key: Optional[str]) -> Tuple[str, str, str, bool]:
     A campaign is the work stream the agent proposed; its locator and title
     come from that proposal, never from the first route that happened to
     join it.  Deriving the campaign name from the first cycle's slug produced
-    ``<date>_tf-rehancer-analysis-cx`` for the stream ``tf-rehancer-icassp``
-    (TF-Rehancer 2026-09-15).  The reserved `_unassigned` container keeps its
+    ``<date>_project-c-analysis-cx`` for the stream ``project-c-icassp``
+    (Project-C 2026-09-15).  The reserved `_unassigned` container keeps its
     fixed name.
     """
     if campaign_key is None:
@@ -3189,7 +3198,7 @@ def _observe_after_begin(root: Path, result: Mapping[str, Any]) -> None:
         pass
 
 
-def begin(root: Path, *, _reconcile: bool = True, **kwargs: Any) -> Dict[str, Any]:
+def begin(root: Path, *, _reconcile: bool = True, _deliver_history: bool = True, **kwargs: Any) -> Dict[str, Any]:
     if _reconcile and kwargs.get("node_id") is None:
         reconcile_root(root)  # §45 D-126: what was moved or removed by hand is found before a cycle is begun
     result = _begin_cycle_record(root, **kwargs)
@@ -3200,7 +3209,7 @@ def begin(root: Path, *, _reconcile: bool = True, **kwargs: Any) -> Dict[str, An
         result["env"] = _env_for(*source)
     if kwargs.get("node_id") is None and result.get("layout") == "cycle":
         _observe_after_begin(Path(root).resolve(), result)
-        if not kwargs.get("resume_only"):
+        if not kwargs.get("resume_only") and _deliver_history:
             # The same start's preparation handed waiting lines over seconds before (it reads
             # every record to find them); a line still waiting goes with the next trigger.
             deliver_pending_history(root)
@@ -3263,6 +3272,27 @@ def _browser_profile(parts: Sequence[str], *, directory: bool = False) -> bool:
         for index, part in enumerate(payload)
         if index > 1 and (directory or index < len(payload) - 1)
     ))
+
+
+# How much of an `output-invalid` refusal names: its first violations, up to these bounds, then
+# "and M more". The refusal is recorded and read back whole (a record over 64 KiB is not read),
+# and a held refusal watches the files it names; once those are fixed the next close names the
+# rest, so naming them all is never needed.
+OUTPUT_INVALID_NAMED = 20
+OUTPUT_INVALID_NAMED_BYTES = 8192
+
+
+def output_invalid_detail(violations: Sequence[str]) -> str:
+    """`code:path` items for the first violations, and `and M more` for the rest."""
+    shown: List[str] = []
+    size = 0
+    for item in violations:
+        if len(shown) >= OUTPUT_INVALID_NAMED or (shown and size + len(item) + 1 > OUTPUT_INVALID_NAMED_BYTES):
+            break
+        shown.append(item)
+        size += len(item) + 1
+    more = len(violations) - len(shown)
+    return ";".join(shown + ([f"and {more} more"] if more else []))
 
 
 def _payload_root(rel: str) -> Optional[str]:
@@ -6223,7 +6253,7 @@ def finalize(
                     digest_value, size = _stream_file_facts(entry)
                     facts.append((rel, digest_value, size))
         if violations:
-            raise ProducerError("output-invalid", ";".join(violations))
+            raise ProducerError("output-invalid", output_invalid_detail(violations))
         for rel, digest_value, size in _bundle_exact_evidence_facts(
                 root, record, directory, bundle_trees, route, primary):
             if all(row[0] != rel for row in facts):

@@ -55,7 +55,7 @@ Long frontmatter renders as an unreadable block and delays access to the first a
 
 Use exactly:
 
-- One H1 title, for example `# TF-Restormer Camera-Ready Cheatsheet v3 — Appendix + Conclusion`.
+- One H1 title, for example `# TF-Enhancer Camera-Ready Cheatsheet v3 — Appendix + Conclusion`.
 - A two- to four-sentence overview stating scope, number of entries, and paste flow. Do not include tracking statistics.
 - One legend blockquote, localized to the artifact language, equivalent to: `> **Legend**: 🔴 mandatory · 🟡 high · 🟢 optional · ⏳ not applied / 📌 applied · audit link inline`.
 

@@ -64,6 +64,14 @@ def main() -> int:
     except Exception:
         pass
     try:
+        # The automatic change record (utilities/turn_change_record.py) compares this
+        # turn's work tree with its start; detached and silent, as for Claude and OpenCode.
+        import turn_change_record
+
+        turn_change_record.launch("end", "codex", payload)
+    except Exception:
+        pass
+    try:
         # Observe this session's (or dispatched worker's) cycle: the open cycle's
         # interim manifest, or a closed cycle's changed files. Detached,
         # rate-limited, silent -- the launcher Claude Stop and OpenCode share.

@@ -59,6 +59,18 @@ def _session_identity(env):
     return identity(env)
 
 
+def _automatic(route):
+    """`utilities/turn_change_record.is_automatic_route`, imported lazily (this module needs only `tools`)."""
+    try:
+        utilities = str(Path(__file__).resolve().parents[2] / "utilities")
+        if utilities not in sys.path:
+            sys.path.insert(0, utilities)
+        from turn_change_record import is_automatic_route
+        return bool(is_automatic_route(route))
+    except Exception:
+        return False
+
+
 def writer_identity(environ=None):
     """Return the depth-0 ledger anchor as ``(harness, session_id)`` when known.
 
@@ -209,6 +221,10 @@ def build_line(route, *, event, harness, session_id, route_file, plan=None, plan
         "dispatch_depth": dispatch_depth,
         "by_attempt": by_attempt,
     }
+    if _automatic(route):
+        # An automatic change record (utilities/turn_change_record.py) never stands in for the
+        # session's own routes: `own_lines` leaves it out while the session has any.
+        line["automatic"] = True
     payload = json.dumps(line, ensure_ascii=False, sort_keys=True)
     if len(payload.encode("utf-8")) > MAX_LINE_BYTES:
         raise ValueError("route-chain-line-too-large")
@@ -418,8 +434,17 @@ def session_lines(session, *, full_history=False):
     return merged
 
 
+def own_lines(lines):
+    """`lines` without automatic change records, unless those are all the session has."""
+    lines = list(lines or [])
+    own = [line for line in lines if not line.get("automatic")]
+    return own or lines
+
+
 def current_segment(lines):
-    """The continuous tail run of `lines` sharing the last line's chain key (U1)."""
+    """The continuous tail run of `lines` sharing the last line's chain key (U1). An automatic
+    change record does not end or replace the session's own chain (`own_lines`)."""
+    lines = own_lines(lines)
     if not lines:
         return []
     key = chain_key(lines[-1])

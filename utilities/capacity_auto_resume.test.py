@@ -72,13 +72,36 @@ class ArmTest(unittest.TestCase):
                 self.assertEqual(again["state"], "already-armed")   # one wait per route and source attempt
                 self.assertEqual(len(self.spawned), 1)
 
-    def test_chain_limit_keeps_a_capacity_wait_to_the_cap(self):
-        armed = self.arm({**PAUSE, "source_attempt_id": "att-dead"}, env={C.CHAIN_ENV: str(C.MAX_CHAIN)})
-        self.assertEqual((armed["state"], armed["cause"]), ("armed", "capacity"))
-        self.assertEqual(C._epoch(armed["resume_at"]), self.CAP)
-        self.assertEqual(json.loads(Path(armed["record"]).read_text())["chain"], C.MAX_CHAIN + 1)
+    def test_chain_limit_keeps_a_known_reset(self):
+        # Past the chain limit a known reset is still a time to wait for, not a reason
+        # to fall back to the longest wait.
+        armed = self.arm({**PAUSE, "source_attempt_id": "att-dead"}, env={C.CHAIN_ENV: str(C.MAX_CHAIN + 1)})
+        self.assertEqual((armed["state"], armed["cause"], armed["resume_at"]),
+                         ("armed", "capacity", PAUSE["retry_at"]))
+        self.assertEqual(json.loads(Path(armed["record"]).read_text())["chain"], C.MAX_CHAIN + 2)
+
+    def test_a_past_reset_past_the_chain_limit_waits_at_least_the_floor(self):
+        # A stale reader value (the reset already passed) must not re-arm in the same
+        # second after the limit: the floor doubles per step past it.
+        now = RETRY_EPOCH - 3600
+        past = {**PAUSE, "retry_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - 30)),
+                "source_attempt_id": "att-dead"}
+        for cause, result in (
+                ("capacity", past),
+                ("launch-capacity", {**past, "reason": "launch-capacity-wait",
+                                     "required_action": "report-capacity-wait"})):
+            for chain, floor in ((C.MAX_CHAIN, C.LATER_SECONDS), (C.MAX_CHAIN + 1, 2 * C.LATER_SECONDS)):
+                with self.subTest(cause=cause, chain=chain):
+                    self.spawned.clear()
+                    armed = self.arm({**result, "route_id": f"rt-{cause}-{chain}"},
+                                     env={C.CHAIN_ENV: str(chain)})
+                    self.assertEqual((armed["state"], armed["cause"]), ("armed", cause))
+                    self.assertGreaterEqual(C._epoch(armed["resume_at"]), now + floor)
 
     def test_only_a_capacity_pause_waits_to_the_cap(self):
+        """keep-human-exits ② is out of this rule: `launch-not-started` keeps its
+        no-arm exit at the chain limit; a `launch-capacity` pause without a reset
+        time never occurs and stays unarmed."""
         launch = {"state": "waiting-capacity", "reason": "launch-capacity-wait",
                   "required_action": "report-capacity-wait", "route_id": "rt-b", "retry_at": None}
         self.assertIsNone(self.arm(launch))
@@ -88,6 +111,8 @@ class ArmTest(unittest.TestCase):
 
 
     def test_a_launch_that_did_not_start_is_run_again_a_minute_later(self):
+        """keep-human-exits ②: three launches in a row that did not start are reported
+        as a start failure, so this exit keeps its no-arm rule at the chain limit."""
         for index, reason in enumerate(C.LATER_REASONS):
             with self.subTest(reason=reason):
                 result = {"state": "needs-attention", "reason": reason, "required_action": "resume-later",
@@ -114,9 +139,41 @@ class ArmTest(unittest.TestCase):
         first = {**refused, "route_id": "rt-first", "required_action": "resume-after-capacity"}
         self.assertIsNone(self.arm(first))
         self.assertEqual(self.arm(first, env={C.CHAIN_ENV: "1"})["cause"], "launch-capacity")
-        self.assertIsNone(self.arm({**refused, "route_id": "rt-last"}, env={C.CHAIN_ENV: str(C.MAX_CHAIN)}))
+        last = self.arm({**refused, "route_id": "rt-last"}, env={C.CHAIN_ENV: str(C.MAX_CHAIN)})
+        self.assertEqual((last["state"], last["cause"], last["resume_at"]),
+                         ("armed", "launch-capacity", PAUSE["retry_at"]))
         self.assertIsNone(self.arm({**refused, "route_id": "rt-none", "retry_at": None}))
-        self.assertEqual(len(self.spawned), 2)
+        self.assertEqual(len(self.spawned), 3)
+
+    def test_a_launch_capacity_wait_frees_its_name_after_run(self):
+        # A stable capped-wait key must be freed after its one resume, or the next
+        # pause of the same source is refused as `already-armed`. The `capacity`
+        # subTest keeps the pre-existing behavior.
+        for cause, reason, action in (
+                ("capacity", "owner-capacity-wait", "resume-after-capacity"),
+                ("launch-capacity", "launch-capacity-wait", "report-capacity-wait")):
+            with self.subTest(cause=cause):
+                route_id, source = f"rt-{cause}-name", f"att-{cause}"
+                path = C.record_path(self.jobs, route_id, "capacity-wait:" + source)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps({"state": "armed", "cause": cause, "route_id": route_id,
+                                            "retry_at": "1970-01-01T00:16:40Z", "route_file": str(self.route),
+                                            "jobs": str(self.jobs), "chain": C.MAX_CHAIN + 1}))
+                clock, calls = [1000.0], []
+                def sleep(seconds):
+                    clock[0] += seconds
+                with mock.patch.object(C, "_notify"):
+                    C.run(path, sleep=sleep, now=lambda: clock[0],
+                          call=lambda argv, **kw: calls.append(argv)
+                          or SimpleNamespace(returncode=0, stdout='{"state":"running"}\n'))
+                self.assertEqual(len(calls), 1)
+                self.assertFalse(path.exists())   # the stable name is free again
+                self.assertEqual(len(list(path.parent.glob(path.stem + ".resumed-*.json"))), 1)
+                again = self.arm({"state": "waiting-capacity", "reason": reason,
+                                  "required_action": action, "route_id": route_id,
+                                  "retry_at": PAUSE["retry_at"], "source_attempt_id": source},
+                                 env={C.CHAIN_ENV: str(C.MAX_CHAIN)})
+                self.assertEqual((again["state"], again["cause"]), ("armed", cause))
 
     def test_an_answer_awaiting_the_parent_is_started_at_once(self):
         armed = self.arm({"reason": C.ANSWER_REASON, "route_id": "rt-answer"})

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import errno
 import json
 import os
 import signal
@@ -367,6 +368,77 @@ class ResourceRegistryTest(unittest.TestCase):
                 os.killpg(leader.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+
+    def test_an_unrelated_process_exiting_mid_scan_does_not_hold_a_drained_group(self):
+        leader = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+        identity = registry.launched_identity(leader)
+        self.assertIsNotNone(identity)
+        leader.wait(timeout=5)
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        sentinel = Path(temporary.name) / "run.exit"
+        sentinel.write_text("0")
+        row = {
+            **identity, "run_id": "drained-process-group",
+            "resource_policy": "supervised-owner", "status": "succeeded",
+            "workflow_state": "STAGE_SUCCEEDED", "exit_code": 0,
+            "process_group": leader.pid, "pid_namespace": os.readlink("/proc/self/ns/pid"),
+            "sentinel": str(sentinel),
+        }
+        self.assertEqual(registry.classify_identity(row)[0], "exited")
+        self.assertTrue(registry.resource_process_group_quiescent(row))
+        # Another of this user's processes exits while the scan reads it: its
+        # open /proc stat file reads ESRCH, or its entry is already gone.
+        vanished = Path(f"/proc/{os.getpid()}")
+        real_read_text, real_stat = Path.read_text, Path.stat
+
+        def read_text(path, *args, **kwargs):
+            if path == vanished / "stat":
+                raise ProcessLookupError(errno.ESRCH, "No such process")
+            return real_read_text(path, *args, **kwargs)
+
+        def stat(path, *args, **kwargs):
+            if path == vanished:
+                raise ProcessLookupError(errno.ESRCH, "No such process")
+            return real_stat(path, *args, **kwargs)
+
+        for name, replacement in (("read_text", read_text), ("stat", stat)):
+            with self.subTest(vanished_during=name), \
+                    mock.patch.object(Path, name, replacement):
+                self.assertTrue(registry.resource_process_group_quiescent(row))
+
+    def test_detached_wrapper_zombie_is_exited_not_unreadable(self):
+        # A detached wrapper (no launch controller) is reaped by whichever
+        # process adopted it. Until then /proc keeps a zombie with no cmdline.
+        child = subprocess.Popen(["/bin/sleep", "30"])
+        try:
+            # Until exec has set it up, a new child's cmdline can still be empty.
+            deadline = time.monotonic() + 10
+            identity = registry.proc_identity(child.pid)
+            while identity is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+                identity = registry.proc_identity(child.pid)
+            self.assertIsNotNone(identity)
+            row = {key: identity[key] for key in registry.IDENTITY_KEYS}
+            os.kill(child.pid, signal.SIGKILL)
+            stat = Path(f"/proc/{child.pid}/stat")
+            deadline = time.monotonic() + 10
+            while (stat.read_text().rsplit(") ", 1)[1].split()[0] != "Z"
+                   and time.monotonic() < deadline):
+                time.sleep(0.01)
+            self.assertEqual(stat.read_text().rsplit(") ", 1)[1].split()[0], "Z")
+            self.assertEqual(registry.classify_identity(row),
+                             ("exited", None, "process-exited-unreaped"))
+            # A controller-launched child keeps the exact-owner rule.
+            controlled = {**row, "launch_controller": {"pid": os.getpid()}}
+            self.assertEqual(registry.classify_identity(controlled),
+                             ("stale", None, "process-identity-unreadable"))
+            self.assertEqual(registry.classify_identity({**row, "starttime": "1"})[0], "stale")
+        finally:
+            if child.returncode is None:
+                child.kill()
+                child.wait()
+        self.assertEqual(registry.classify_identity(row), ("exited", None, "process-absent"))
 
     def test_owned_zombie_requires_exact_kernel_and_controller_identity(self):
         pid = 999999999

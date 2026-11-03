@@ -7,7 +7,7 @@ identity thrown away rather than identity missing:
 
   * Claude's own SendMessage addresses a peer by its socket, and the socket is named
     after that session's PID — an exact identity the ledger stored as a `name` (222 rows).
-  * A Claude derived name (`bc-resnet-15`) is the very string the badge is read off, so a
+  * A Claude derived name (`kws-net-15`) is the very string the badge is read off, so a
     row carrying the name but no id could still be badged.
   * The receive path dropped the sender's harness whenever the sender had no session id,
     leaving the renderer nothing to look anything up with — while the send path had
@@ -108,8 +108,8 @@ class DerivedNameTest(unittest.TestCase):
         return session_handle.session_id_for_derived_name(name, home=self.cfg)
 
     def test_a_derived_name_names_its_session(self):
-        _write_session(self.cfg, 1, "sid-15", name="bc-resnet-15")
-        self.assertEqual(self._resolve("bc-resnet-15"), "sid-15")
+        _write_session(self.cfg, 1, "sid-15", name="kws-net-15")
+        self.assertEqual(self._resolve("kws-net-15"), "sid-15")
 
     def test_a_user_set_name_of_the_same_shape_is_not_an_identity(self):
         # F-100a: `release-1a` looks exactly like a derived name and is not one.
@@ -133,7 +133,7 @@ class EndpointUpgradeTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        _write_session(self.tmp.name, 777, "sid-peer", name="bc-resnet-15")
+        _write_session(self.tmp.name, 777, "sid-peer", name="kws-net-15")
         patcher = mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": self.tmp.name})
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -147,7 +147,7 @@ class EndpointUpgradeTest(unittest.TestCase):
                                      {("claude", "sid-peer"): "15"}), "[15]")
 
     def test_a_name_only_row_reaches_the_badge(self):
-        self.assertEqual(self._label("bc-resnet-15", {("claude", "sid-peer"): "15"}),
+        self.assertEqual(self._label("kws-net-15", {("claude", "sid-peer"): "15"}),
                          "[15]")
 
     def test_a_peer_that_resolves_to_no_badge_keeps_its_readable_name(self):
@@ -172,7 +172,7 @@ class ReceivedHarnessTest(unittest.TestCase):
     def _record(self, kind="notice"):
         ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 120))
         return {"ts": ts, "kind": kind,
-                "from": {"harness": "claude", "session_id": "", "name": "bc-resnet-15"},
+                "from": {"harness": "claude", "session_id": "", "name": "kws-net-15"},
                 "to": {"harness": "claude", "session_id": "sid-recv"},
                 "delivery": {"status": "received"}}
 
@@ -180,7 +180,7 @@ class ReceivedHarnessTest(unittest.TestCase):
         row = self._collect([self._record()])[("claude", "sid-recv")]
         self.assertEqual(row["last_recv"]["from_harness"], "claude")
         self.assertIsNone(row["last_recv"]["from_session_id"])
-        self.assertEqual(row["last_recv"]["from_name"], "bc-resnet-15")
+        self.assertEqual(row["last_recv"]["from_name"], "kws-net-15")
 
     def test_the_two_directions_agree_about_an_identity_less_peer(self):
         rows = self._collect([self._record(kind="steer")])

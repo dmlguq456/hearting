@@ -514,6 +514,12 @@ def main() -> int:
     current_cwd = cwd(payload)
     interaction_sid = interaction_session_id(payload)
     try:
+        # Baseline for the automatic change record; detached, before any context work.
+        from turn_change_record import launch as launch_turn_record
+        launch_turn_record("start", "codex", payload)
+    except Exception:
+        pass
+    try:
         from herdr_session_projection import project
         project(payload, interaction_sid or "", worker=False)
     except Exception:

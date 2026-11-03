@@ -26,7 +26,7 @@ TERMINAL_STATUSES = {"succeeded", "failed"}
 # The payload runs under a tiny shell sentinel wrapper so its exit status survives
 # every observer. A detached run whose launcher, supervisor, and session are all gone
 # must still be able to prove *how* it ended; without this, "the process is not there"
-# is indistinguishable from "the process finished successfully" (2026-08-04 BC_ResNet_tf).
+# is indistinguishable from "the process finished successfully" (2026-08-04 KWS_Net_tf).
 SENTINEL_SCRIPT = (
     '"$@"; ec=$?; '
     'printf %s "$ec" > "$AGENT_RESOURCE_SENTINEL.partial" 2>/dev/null && '

@@ -928,11 +928,26 @@ def drive_serial_chain(
     )
 
 
-def _previous_attempt_notes(route: dict, chain_id: str, row: dict) -> list[str]:
-    """What a stopped session's retry must know: how its attempt ended, what it recorded as
-    done (the chain handoff it flushed), and the leg's done-when items it left unmet."""
+def _previous_attempt_notes(route: dict, chain_id: str, row: dict, jobs: Path | None = None) -> list[str]:
+    """What a stopped session's retry must know: how its attempt ended (its blocker and report),
+    what it recorded as done (the chain handoff it flushed), what changed since it began, the
+    findings of the stages that judge its node, and the leg's done-when items it left unmet.
+    The same runtime records a full-stage round reads (``worker_bootstrap.prior_round_context``)."""
     metadata = row["metadata"]
     lines = [f"The previous attempt {metadata.get('attempt_id')} ended {metadata.get('note') or row['status']}."]
+    try:
+        import worker_bootstrap as WB
+        outcome = WB.attempt_outcome(route, metadata)
+        if outcome.get("blocker"):
+            lines.append(f"Its blocker: {outcome['blocker']}")
+        if outcome.get("artifact"):
+            lines.append(f"Its report: {outcome['artifact']}")
+        lines += [f"Changed since it began: {line}" for line in WB.attempt_changes(route, metadata)]
+        if jobs is not None:
+            lines += [f"Findings to close: {item}"
+                      for item in WB.judge_findings(route, metadata.get("route_node"), jobs=jobs)]
+    except Exception:  # the record is a help, never a reason to withhold the continuation
+        pass
     try:
         handoff = HANDOFF.handoff_path(route["artifact_root"], route["route_id"], chain_id).read_text(encoding="utf-8")
         if f"predecessor_attempt_id: {metadata.get('attempt_id')}" in handoff:
@@ -981,7 +996,7 @@ def chain_continuation(jobs: Path, chain_id: str) -> dict | None:
         unfinished.append(session["index"])
         if metadata.get("launch_started") == "1":
             ran.add(session["index"])
-            notes[session["index"]] = _previous_attempt_notes(route, chain_id, row)
+            notes[session["index"]] = _previous_attempt_notes(route, chain_id, row, jobs)
     if not unfinished:
         return None
     home = HANDOFF.handoff_path(route["artifact_root"], route["route_id"], chain_id).parent
@@ -1597,10 +1612,19 @@ class RealSubsessionAdvanceServices:
 
     @staticmethod
     def _caller_is_parent(request) -> bool:
-        """The caller is the registered parent attempt or its final launched replacement."""
+        """The caller is the registered parent attempt or its final launched replacement.
+
+        An unreadable seat lineage (``parent_attempt_succeeded``'s wait) still reads as
+        "not the parent" here: this runs inside the owner's supervisor, which a raised wait
+        would end, and the chain has no wait before registration to hand it to.
+        """
         import route_authority as RA
         caller = os.environ.get("AGENT_DISPATCH_ATTEMPT_ID")
-        return bool(caller) and RA.parent_attempt_succeeded(getattr(request, "jobs", None), request.parent_attempt_id, caller)
+        try:
+            return bool(caller) and RA.parent_attempt_succeeded(
+                getattr(request, "jobs", None), request.parent_attempt_id, caller)
+        except DC.DispatchContractError:
+            return False
 
     def _parent_slug(self, request):
         try:

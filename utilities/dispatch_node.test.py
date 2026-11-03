@@ -919,8 +919,8 @@ class RoundProtocolTest(unittest.TestCase):
                 )
                 prompt, _ = self._launch(node, row)
                 self.assertIn("Round protocol (round 2 of route node `impl-review`", prompt)
-                self.assertIn("full independent review", prompt)
-                self.assertIn("full assigned scope", prompt)
+                self.assertIn("independent first review", prompt)
+                self.assertIn("no blocking verdict is open in this node's lineage", prompt)
                 self.assertIn(f"판정 없음({note})", prompt)
                 self.assertNotIn("This is a correction round", prompt)
                 self.assertNotIn("Implementation source changed", prompt)
@@ -954,7 +954,7 @@ class RoundProtocolTest(unittest.TestCase):
         self.assertIn("slug-dead (판정 없음(dead-capacity))", prompt)
         self.assertIn("full execution of the original assigned task and scope", prompt)
         self.assertIn("verdict-less attempts provide execution context only", prompt)
-        self.assertNotIn("This is a full independent review", prompt)
+        self.assertNotIn("This is an independent first review", prompt)
         self.assertNotIn("This is a correction round", prompt)
         self.assertNotIn("Read the failing review artifact first", prompt)
 
@@ -1050,6 +1050,94 @@ class ReviewRoundCapTest(unittest.TestCase):
                 launched,
             )
         return code, printed
+
+    def test_producing_stage_launch_carries_its_previous_round_context(self):
+        import worker_bootstrap
+        node = make_node(depth=1, dispatch_fallback=[])
+        route = seal_route_hash(make_route(node, tuples=[]))
+        context = "\n\n## Previous round (runtime record)\n- Findings to close: fixture\n"
+        seen, carried = [], []
+        real_run = subprocess.run
+
+        def fake_run(cmd, **kwargs):
+            if cmd and str(cmd[0]) == "git":
+                return real_run(cmd, **kwargs)
+            if any("dispatch-headless.py" in str(part) for part in cmd):
+                carried.append(N.os.environ.get("AGENT_DISPATCH_RETRY_BRIEF"))
+            return mock.Mock(returncode=0)
+
+        def previous(route_arg, node_id, jobs):
+            seen.append(node_id)
+            return context
+
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / ".dispatch" / "jobs.log"
+            jobs.parent.mkdir()
+            jobs.write_text("")
+            route_path = Path(td) / "route.json"
+            route_path.write_text(json.dumps(route))
+            argv = ["dispatch-node.py", "--route", str(route_path), "--node", "execute",
+                    "--adapter", "claude", "--slug", "slug-execute", "--action", "dry-run",
+                    "--prompt-text", "Close the review findings."]
+            with mock.patch.object(sys, "argv", argv), \
+                 mock.patch.dict(N.os.environ, {"AGENT_DISPATCH_JOBS": str(jobs)}, clear=True), \
+                 mock.patch.object(N.subprocess, "run", side_effect=fake_run), \
+                 mock.patch.object(worker_bootstrap, "prior_round_context", side_effect=previous), \
+                 mock.patch("builtins.print"):
+                try:
+                    N.main()
+                except SystemExit:
+                    pass
+        self.assertEqual(seen, ["execute"])
+        self.assertEqual(carried, [context])
+
+    def test_a_sub_session_launch_runs_at_the_repeat_escalation_profile(self):
+        import model_profile
+        node = make_node(depth=1, dispatch_fallback=[])
+        route = make_route(node, tuples=[])
+        route = seal_route_hash(route)
+        route["route_id"] = ROUTE_IDENTITY.route_id_from_hash(route["route_hash"])
+        escalation = {"kind": "owner-inline", "from": node["model_profile"], "launch_profile": "deep",
+                      "streak": 3, "class": "other", "attempts": ["a", "b", "c"]}
+        launched, printed = [], []
+        real_run = subprocess.run
+
+        def fake_run(cmd, **kwargs):
+            if cmd and str(cmd[0]) == "git":
+                return real_run(cmd, **kwargs)
+            if any("dispatch-headless.py" in str(part) for part in cmd):
+                launched.append(cmd)
+            return mock.Mock(returncode=0)
+
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / ".dispatch" / "jobs.log"
+            jobs.parent.mkdir()
+            jobs.write_text("")
+            route_path = Path(td) / "route.json"
+            route_path.write_text(json.dumps(route))
+            argv = ["dispatch-node.py", "--route", str(route_path), "--node", "execute",
+                    "--adapter", "claude", "--slug", "slug-gap", "--action", "dry-run",
+                    "--prompt-text", "Close the remaining items.",
+                    "--subsession-id", "ss-gap-1", "--subsession-index", "1",
+                    "--subsession-count", "1", "--subsession-mode", "serial",
+                    "--subsession-purpose", "gap-retry",
+                    "--session-chain-id", "chain-gap", "--phase-brief", "brief",
+                    "--narrow-verify", "true", "--expected-round-trips", "1",
+                    "--stage-authority", "0", "--attempt-id", "att-gap-1"]
+            with mock.patch.object(sys, "argv", argv), \
+                 mock.patch.dict(N.os.environ, {"AGENT_DISPATCH_JOBS": str(jobs)}, clear=True), \
+                 mock.patch.object(N.subprocess, "run", side_effect=fake_run), \
+                 mock.patch.object(model_profile, "repeat_escalation", return_value=escalation), \
+                 mock.patch("builtins.print", side_effect=lambda *a, **k: printed.append(" ".join(map(str, a)))):
+                try:
+                    N.main()
+                except SystemExit:
+                    pass
+        self.assertEqual(len(launched), 1, printed)
+        command = launched[0]
+        self.assertEqual(command[command.index("--model-profile") + 1], "deep")
+        self.assertIn("repeat_escalation=owner-inline", printed)
+        self.assertIn(f"repeat_escalation_profile={node['model_profile']}->deep", printed)
 
     def test_direct_and_quick_reject_the_second_round(self):
         for intensity in ("direct", "quick"):

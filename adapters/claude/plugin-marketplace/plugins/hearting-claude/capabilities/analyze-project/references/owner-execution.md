@@ -74,7 +74,7 @@ Inspect current directory:
 | paper | `<artifact-root>/analysis_project/paper/` | flat (project's paper collection accumulates) |
 | doc | `<artifact-root>/analysis_project/doc/{name}/` | per-task subdir |
 
-For doc mode, derive `{name}` from the input folder basename (positional argument) or the cwd basename (default when the positional argument is omitted). Example: running `--mode doc` in `/.../tf_restormer/` produces `analysis_project/doc/tf_restormer/`; `--mode doc tf_restormer_patent` overrides it with `analysis_project/doc/tf_restormer_patent/`.
+For doc mode, derive `{name}` from the input folder basename (positional argument) or the cwd basename (default when the positional argument is omitted). Example: running `--mode doc` in `/.../tf_enhancer/` produces `analysis_project/doc/tf_enhancer/`; `--mode doc tf_enhancer_patent` overrides it with `analysis_project/doc/tf_enhancer_patent/`.
 
 ---
 

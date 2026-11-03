@@ -1177,7 +1177,7 @@ def _proc_start_ticks(pid):
 # The harness flag that puts a launched session in a chosen directory. `herdr agent
 # start` has none of its own — the agent it starts inherits the PANE's shell cwd — so
 # `--cwd` used to move nothing but this CLI process: a session started with
-# `--cwd <hearting>` came up in `SR_CorrNet`, the pane's own directory (measured
+# `--cwd <hearting>` came up in `SR_ModelA`, the pane's own directory (measured
 # 2026-09-10). Codex takes `-C/--cd`; Claude Code and OpenCode have no equivalent today,
 # so for those `--cwd` is REFUSED rather than silently ignored. Launching an agent
 # somewhere other than where the caller said is the failure this exists to prevent, and a
@@ -4843,7 +4843,7 @@ def _record_own_watch_identity(watch_id, paths, server):
         recorded = arm.get("watcher") or {}
         if {"pid": recorded.get("pid"), "pid_start": recorded.get("pid_start")} == own:
             return False
-        return not _pid_identity_ok(recorded.get("pid"), recorded.get("pid_start"))
+        return not _watcher_present(arm)
 
     arm = _read_json(paths.arm)
     if not needs_naming(arm):
@@ -4862,6 +4862,9 @@ def _record_own_watch_identity(watch_id, paths, server):
         if not needs_naming(current) or paths.receipt.exists():
             return current if isinstance(current, dict) else arm
         updated = {**current, "watcher": own}
+        # A failed write raises: this observer then ends and releases the lock,
+        # so the next spawn can start and name a replacement. An unnamed
+        # observer that kept the lock could be neither woken nor replaced.
         _write_json_atomic(paths.arm, updated)
         return updated
     finally:
@@ -5367,9 +5370,10 @@ def cmd_watch_run(args):
                             _write_watch_observation(paths, observation)
                             awaiting_readiness = True
                             if readiness.reason != "shared-readiness-revalidating":
-                                # No refresh was requested: the cached projection
-                                # predates this native result. Without a wake the
-                                # runner would read it only at its next backoff pass.
+                                # No refresh was requested (a pending or unknown
+                                # cached projection, or a local check failed).
+                                # Without a wake the runner would read this native
+                                # result only at its next backoff pass.
                                 _wake_shared_runner(peer_obligations.ObligationStore().root)
                     else:
                         state, agent = result_state, wait_record.get("agent") or expected_agent
@@ -5810,7 +5814,6 @@ def _spawn_watch_observer(watch_id, arm, *, service_current=None,
             return True
         arm = current_arm
         os.set_inheritable(lock_fd, True)
-        log_fd = os.open(str(paths.log), os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
         server = arm.get("server") or "default"
         import peer_obligations
         env = _herdr_env_for_server(server)
@@ -5821,20 +5824,34 @@ def _spawn_watch_observer(watch_id, arm, *, service_current=None,
             lock_fd=lock_fd, service_current=binding)]
         if child_env is not None:
             env = child_env
+        # Record the generation this observer will run under before it exists.
+        # A spawner killed right after the spawn then leaves only the watcher
+        # identity unwritten, and the observer names itself; the arm still
+        # matches the argv a later release takeover expects.
+        ledger = dict(arm)
+        ledger["observer_generation"] = int(arm.get("observer_generation", 1)) + 1
+        ledger["rearm_count"] = int(arm.get("rearm_count", 0)) + 1
+        ledger["observer_protocol"] = 2
+        _write_json_atomic(paths.arm, ledger)
+        # Opened last: nothing that can fail before the spawn holds it open.
+        log_fd = os.open(str(paths.log), os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
         try:
-            proc = subprocess.Popen(
-                argv, stdin=subprocess.DEVNULL, stdout=log_fd, stderr=subprocess.STDOUT,
-                start_new_session=True, close_fds=True, pass_fds=(lock_fd,),
-                cwd=str(paths.arm.parent), env=env,
-            )
+            # As in `cmd_watch`: a wake sent before the observer installs its
+            # handler stays pending instead of killing it.
+            watcher_signal_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGUSR1})
+            try:
+                proc = subprocess.Popen(
+                    argv, stdin=subprocess.DEVNULL, stdout=log_fd, stderr=subprocess.STDOUT,
+                    start_new_session=True, close_fds=True, pass_fds=(lock_fd,),
+                    cwd=str(paths.arm.parent), env=env,
+                )
+            finally:
+                signal.pthread_sigmask(signal.SIG_SETMASK, watcher_signal_mask)
         finally:
             os.close(log_fd)
         # Re-read: the observer may have written the session it took meanwhile.
         current_arm = _read_json(paths.arm)
-        updated = dict(current_arm if isinstance(current_arm, dict) else arm)
-        updated["observer_generation"] = int(arm.get("observer_generation", 1)) + 1
-        updated["rearm_count"] = int(arm.get("rearm_count", 0)) + 1
-        updated["observer_protocol"] = 2
+        updated = dict(current_arm if isinstance(current_arm, dict) else ledger)
         updated["watcher"] = {"pid": proc.pid, "pid_start": process_start_ticks(proc.pid) or ""}
         _write_json_atomic(paths.arm, updated)
         return True
@@ -5860,8 +5877,8 @@ def _watch_observer_takeover_argvs(watch_id, arm):
                 watch_id, arm, rearm_generation=accepted_generation,
                 timeout_before_refs=True)]
 
-        # A successful restart records the next observer_generation only after
-        # spawning. The live process therefore carries the preceding value.
+        # A restart records the next observer_generation just before it
+        # spawns. The live process therefore carries the preceding value.
         accepted_generation = generation - 1
         current = _watch_observer_duty_argv(
             watch_id, arm, rearm_generation=accepted_generation)
@@ -6964,8 +6981,7 @@ def _watch_note_transition_lock_contention(root, watch_id, paths):
     try:
         shared_readiness.clear_watch_transition(root, watch_id)
         if not same_request:
-            shared_readiness.wake_runner(root)
-            peer_obligations.ensure_normal_runner(reconciliation_required=True)
+            _wake_shared_runner(root)
         else:
             marker = _read_json(Path(root) / "readiness-v1" / "runner.json") or {}
             try:
