@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import datetime
 import hashlib
 import io
 import json
@@ -90,6 +91,14 @@ class TidyCase(unittest.TestCase):
     @staticmethod
     def logical_seat(seat, harness, sid):
         return st.session_seat(seat, harness, sid)
+
+    def claude_without_agents(self, *sids):
+        """Claude sessions with a transcript and no background agent: tidy keeps the clear.
+        (A session whose transcript cannot be found is compacted instead.)"""
+        for sid in sids:
+            path = self.iso.claude_dir / "projects" / "-fixture" / f"{sid}.jsonl"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"type": "user", "sessionId": sid}) + "\n", encoding="utf-8")
 
     def library(self, extra=None):
         env = {"HERDR_PANE_ID": PANE}
@@ -3998,6 +4007,7 @@ class TidyOneCallTest(TidyCase):
         self.fake_herdr.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         self.fake_herdr.chmod(0o755)
         self.started = []
+        self.claude_without_agents("sid-A", "sid-B")
 
     reservation = ClearBookingTest.reservation
 
@@ -4899,10 +4909,13 @@ class BackgroundAgentCompactTest(TidyCase):
         record = {"agentType": "deep", "toolUseId": "toolu_" + agent_id, "requestShape": "background", **meta}
         (self.agents / f"agent-{agent_id}.meta.json").write_text(json.dumps(record), encoding="utf-8")
 
-    def notify(self, agent_id, path=None):
-        self.write_row({"type": "user", "message": {"content": (
+    def notify(self, agent_id, path=None, *, waiting=False, at=None):
+        at = at or datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+        summary = (f'<summary>Agent "{agent_id}" is waiting on its own background work</summary>'
+                   if waiting else f'<summary>Agent "{agent_id}" completed</summary>')
+        self.write_row({"type": "user", "timestamp": at, "message": {"content": (
             f"<task-notification>\n<task-id>{agent_id}</task-id>\n<status>completed</status>\n"
-            "</task-notification>")}}, path)
+            f"{summary}\n</task-notification>")}}, path)
 
     def running(self):
         with self.iso.patched_environ(self.extra):
@@ -4935,6 +4948,8 @@ class BackgroundAgentCompactTest(TidyCase):
     def test_agent_records_decide_whether_background_agents_still_run(self):
         self.assertFalse(self.running())                          # no subagent record at all
         self.agent("a1", finished=True)
+        self.assertTrue(self.running())                           # finished, its notice not delivered yet
+        self.notify("a1")
         self.agent("a2", requestShape="foreground")               # ran inside its turn
         self.assertFalse(self.running())
         self.agent("a3")                                          # launched, not finished
@@ -4943,12 +4958,30 @@ class BackgroundAgentCompactTest(TidyCase):
         self.assertFalse(self.running())
         self.agent("a4", parentAgentId="a3")                      # launched by an agent
         self.assertTrue(self.running())
-        self.notify("a4", self.agents / "agent-a3.jsonl")
+        self.notify("a4", self.agents / "agent-a3.jsonl")         # reaches a3, which then reports
+        self.notify("a3")
+        self.assertFalse(self.running())
+        with self.iso.patched_environ(self.extra):
+            self.assertFalse(clear.background_agents_running("codex", "sid-A"))
+
+    def test_waiting_or_resumed_agents_still_run_and_unknowns_compact(self):
+        self.agent("a1", finished=True)
+        self.notify("a1", waiting=True, at="2026-11-03T14:00:00.000Z")   # waits on its own Bash
+        self.assertTrue(self.running())
+        self.notify("a1", at="2026-11-03T14:05:00.000Z")                 # then really finished
+        self.assertFalse(self.running())
+        transcript = self.agents / "agent-a1.jsonl"                       # SendMessage resumed it
+        transcript.write_text("{}\n", encoding="utf-8")
+        resumed = datetime.datetime(2026, 11, 3, 14, 7, tzinfo=datetime.timezone.utc).timestamp()
+        os.utime(transcript, (resumed, resumed))
+        self.assertTrue(self.running())
+        os.utime(transcript, (resumed - 120, resumed - 120))             # last write before the notice
         self.assertFalse(self.running())
         (self.agents / "agent-a5.meta.json").write_text("{not json", encoding="utf-8")
         self.assertTrue(self.running())                           # unreadable counts as running
-        with self.iso.patched_environ(self.extra):
-            self.assertFalse(clear.background_agents_running("codex", "sid-A"))
+        (self.agents / "agent-a5.meta.json").unlink()
+        self.transcript.rename(self.transcript.with_suffix(".moved"))
+        self.assertTrue(self.running())                           # no transcript: undecidable
 
     def test_running_agents_book_compact_confirmed_by_the_boundary_and_continue_the_same_session(self):
         import dispatch_seat_handover as handover
@@ -5001,6 +5034,7 @@ class BackgroundAgentCompactTest(TidyCase):
 
     def test_without_background_agents_the_clear_is_unchanged(self):
         self.agent("a1", finished=True)
+        self.notify("a1")
         seat, req = self.booked()
 
         def cleared(claim):
@@ -5054,6 +5088,7 @@ class SeatHandoverTest(TidyCase):
         self.jobs = self.iso.root / "dispatch" / "jobs.log"
         self.jobs.parent.mkdir()
         self.rows = []
+        self.claude_without_agents("sid-A", "sid-B", "sid-C")
         import dispatch_seat_handover as handover
         self.handover = handover
 

@@ -10142,9 +10142,20 @@ class ClearTest(_TmpRootMixin, unittest.TestCase):
         self.st, self.clear = st, clear
         self.seat = st.Seat("pane", st._digest("pane", "w1:pX"), "w1:pX", "claude", "")
         self.path = clear.reservation_path(self.seat.key)
+        self.claude_transcript("sid-A")
+
+    def claude_transcript(self, sid):
+        """A Claude session that never launched a background agent (no subagents folder)."""
+        path = Path(os.environ["HOME"]) / ".claude" / "projects" / "-proj" / f"{sid}.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists():
+            path.write_text(json.dumps({"type": "user", "sessionId": sid}) + "\n", encoding="utf-8")
+        return path
 
     def book(self, harness="claude", sid="sid-A", pane="w1:pX", seq=0, deadline_in=600):
         st, clear = self.st, self.clear
+        if harness == "claude":
+            self.claude_transcript(sid)
         seat = st.Seat("pane", st._digest("pane", pane), pane, harness, "")
         now = time.time()
         with st.seat_lock(seat.key):
@@ -10185,9 +10196,7 @@ class ClearTest(_TmpRootMixin, unittest.TestCase):
 
     def test_background_agents_get_one_compact_and_the_helper_waits_for_its_evidence(self):
         self.book()
-        transcript = Path(os.environ["HOME"]) / ".claude" / "projects" / "-proj" / "sid-A.jsonl"
-        transcript.parent.mkdir(parents=True)
-        transcript.write_text(json.dumps({"type": "user", "sessionId": "sid-A"}) + "\n", encoding="utf-8")
+        transcript = self.claude_transcript("sid-A")
         agents = transcript.with_suffix("") / "subagents"
         agents.mkdir(parents=True)
         (agents / "agent-a1.meta.json").write_text(json.dumps({"requestShape": "background"}), encoding="utf-8")

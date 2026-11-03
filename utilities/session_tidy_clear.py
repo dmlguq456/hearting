@@ -50,6 +50,7 @@ import shutil
 import subprocess
 import sys
 import time
+from datetime import datetime
 from typing import Callable, Optional
 
 HERE = Path(__file__).resolve().parent
@@ -71,6 +72,9 @@ CLEAR_COMMAND = {"claude": "/clear", "codex": "/clear", "opencode": "/new"}
 COMPACT_COMMAND = "/compact"
 COMPACT_CONFIRM_SEC = 900.0          # compaction of ~950k tokens took 145 s (measured 2026-11-03)
 _TASK_ID = re.compile(rb"<task-id>([0-9A-Za-z_-]{1,80})</task-id>")
+_NOTICE = re.compile(rb"<task-notification>(.*?)</task-notification>", re.S)
+_WAITING = (b"waiting on its own background work", b"background work of its own")
+_RESUME_MARGIN_SEC = 5.0             # a finished agent's last write lands within 0.1 s of its notice
 # No-trailer body used by the exact-native attachment or the sealed pending-ref carrier.
 CONTINUE_TEXT = "이어서해"
 STATUS_ONLY_TEXT = "현재 카드 기준 현황만 짧게 표시하고 새 작업은 시작하지 말고 다음 입력을 기다리세요."
@@ -1136,15 +1140,17 @@ def _claude_transcript(seat: Optional["st.Seat"], sid: str):
 
 
 def background_agents_running(harness: str, sid: str, seat: Optional["st.Seat"] = None) -> bool:
-    """Whether this Claude session may still have unfinished native background agents.
+    """Whether this Claude session may still have native background agents that run or resume.
 
     Claude keeps one ``subagents/agent-<id>.meta.json`` per Agent-tool launch beside the
-    session transcript. A background launch is over when its record says ``finished`` or
-    its completion notification (``<task-id>`` of that agent) reached the main transcript
-    or the launching agent's transcript. An unreadable record counts as running, so the
-    window is compacted rather than cleared; a session with no transcript at all has no
-    agent record and keeps the clear. Codex and OpenCode subagents run inside the parent's
-    turn, so an idle window of theirs has none.
+    session transcript, and reports each stop with a task notification (``<task-id>`` of the
+    agent) in the launching transcript. A background agent is over only when its last
+    notification is a final one and its own transcript was not written after it: a "waiting
+    on its own background work" notification or a later write (a SendMessage resume) means it
+    still runs, and so does a launch with no notification yet. A transcript or record that
+    cannot be found or read leaves the answer open, and then the window is compacted. A
+    session that never launched an agent has no ``subagents`` folder. Codex and OpenCode keep
+    their clear (see capabilities/session-tidy.md).
     """
     if harness != "claude" or not sid:
         return False
@@ -1152,9 +1158,7 @@ def background_agents_running(harness: str, sid: str, seat: Optional["st.Seat"] 
         main = _claude_transcript(seat, sid)
     except Exception:  # noqa: BLE001 - undecidable: keep the agents
         return True
-    if main is None:
-        return False
-    if main.suffix != ".jsonl":
+    if main is None or main.suffix != ".jsonl":
         return True
     folder = main.with_suffix("") / "subagents"
     try:
@@ -1164,7 +1168,7 @@ def background_agents_running(harness: str, sid: str, seat: Optional["st.Seat"] 
         return False
     except OSError:
         return True
-    pending = {}
+    launched = {}
     for name in names:
         try:
             meta = json.loads((folder / name).read_text(encoding="utf-8"))
@@ -1174,22 +1178,47 @@ def background_agents_running(harness: str, sid: str, seat: Optional["st.Seat"] 
             return True
         if not isinstance(meta, dict):
             return True
-        if meta.get("requestShape") not in (None, "background") or meta.get("finished") is True:
-            continue
-        pending[name[len("agent-"):-len(".meta.json")]] = str(meta.get("parentAgentId") or "")
-    if not pending:
+        if meta.get("requestShape") in (None, "background"):
+            launched[name[len("agent-"):-len(".meta.json")]] = str(meta.get("parentAgentId") or "")
+    if not launched:
         return False
-    reported = set()
-    sources = {main, *(folder / f"agent-{parent}.jsonl" for parent in pending.values() if parent)}
+    notices: dict = {}      # agent id -> (epoch of its last notification, that one says "waiting")
+    sources = {main, *(folder / f"agent-{parent}.jsonl" for parent in launched.values() if parent)}
     for source in sources:
         try:
-            data = source.read_bytes()
+            with open(source, "rb") as handle:
+                for line in handle:
+                    if b"<task-notification>" not in line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                        at = datetime.fromisoformat(str(row["timestamp"]).replace("Z", "+00:00")).timestamp()
+                    except (ValueError, KeyError, TypeError):
+                        continue
+                    for block in _NOTICE.findall(line):
+                        agent = _TASK_ID.search(block)
+                        if not agent:
+                            continue
+                        agent_id = agent.group(1).decode("ascii")
+                        if at >= notices.get(agent_id, (float("-inf"), False))[0]:
+                            notices[agent_id] = (at, any(mark in block for mark in _WAITING))
         except FileNotFoundError:
             continue
         except OSError:
             return True
-        reported.update(found.decode("ascii") for found in _TASK_ID.findall(data))
-    return any(agent not in reported for agent in pending)
+    for agent_id in launched:
+        notice = notices.get(agent_id)
+        if notice is None or notice[1]:
+            return True
+        try:
+            written = (folder / f"agent-{agent_id}.jsonl").stat().st_mtime
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return True
+        if written > notice[0] + _RESUME_MARGIN_SEC:
+            return True
+    return False
 
 
 def _compact_mode(req: dict) -> bool:
