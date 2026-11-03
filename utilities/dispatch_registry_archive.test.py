@@ -299,6 +299,29 @@ class RaceAndCrashTest(Fixture):
         self.assertEqual(A.sweep(self.jobs, now_ns=NOW, force=True), {"skipped": "registry-not-whole-utf8"})
 
 
+class RetentionPassesTest(unittest.TestCase):
+    def test_every_pass_runs_in_order_and_one_failure_never_stops_the_next(self):
+        import importlib
+        calls = []
+
+        def module(name, fail=False):
+            def sweep(jobs):
+                calls.append((name, jobs))
+                if fail:
+                    raise OSError("broken")
+            return mock.Mock(sweep_best_effort=sweep)
+        modules = {name: module(name, fail=(name == "dispatch_log_retention")) for name in A.RETENTION_PASSES}
+        with mock.patch.object(importlib, "import_module", side_effect=lambda name: modules[name]), \
+                mock.patch.object(A.os, "fork", return_value=0) as fork, \
+                mock.patch.object(A.os, "nice") as nice:
+            A.retention_passes("/state/jobs.log")
+            self.assertEqual(A._main(["retention", "--jobs", "/state/jobs.log"]), 0)   # the grandchild
+        fork.assert_called_once_with()
+        nice.assert_called_once_with(10)
+        expected = [(name, "/state/jobs.log") for name in A.RETENTION_PASSES]
+        self.assertEqual(calls, expected * 2)
+
+
 class ReaderCompatibilityTest(Fixture):
     def test_ids_of_moved_rows_still_resolve_and_are_not_copied_back(self):
         import importlib.util

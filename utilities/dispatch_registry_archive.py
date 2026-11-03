@@ -568,10 +568,29 @@ def restore(jobs, needle: str = "") -> int:
         return len(back)
 
 
+# The post-exit retention passes, in order. Each keeps its own due gate and lock, so a
+# caller may run them as often as it likes; a pass that is not due returns at once.
+RETENTION_PASSES = ("worker_home_retention", "dispatch_log_retention",
+                    "reusable_runtime_retention", "dispatch_registry_archive")
+
+
+def retention_passes(jobs) -> None:
+    """Run every post-exit retention pass once, each best effort and independent.
+
+    The dispatch reap watch runs them when an attempt's watch ends; the peer obligation
+    runner's maintenance pass starts them too, so they run even while nothing dispatches."""
+    import importlib
+    for name in RETENTION_PASSES:
+        try:
+            importlib.import_module(name).sweep_best_effort(jobs)
+        except Exception:  # noqa: BLE001 -- one pass never stops the next
+            pass
+
+
 def _main(argv=None) -> int:
     import argparse
     parser = argparse.ArgumentParser(description="Put archived dispatch registry rows back.")
-    parser.add_argument("action", choices=("restore",))
+    parser.add_argument("action", choices=("restore", "retention"))
     parser.add_argument("--jobs", default="", help="registry path (default: the canonical jobs.log)")
     parser.add_argument("--id", default="", help="only the archived groups that name this route or attempt id")
     args = parser.parse_args(argv)
@@ -579,6 +598,15 @@ def _main(argv=None) -> int:
     if not jobs:
         from dispatch_contract import stable_state_root
         jobs = stable_state_root(os.environ) / "jobs.log"
+    if args.action == "retention":
+        # Started by the peer obligation runner: hand the passes to a grandchild so the
+        # runner reaps its child at once, and run them at a lower priority.
+        if os.fork():
+            os._exit(0)
+        with contextlib.suppress(OSError):
+            os.nice(10)
+        retention_passes(jobs)
+        return 0
     print(f"restored={restore(jobs, args.id)}")
     return 0
 

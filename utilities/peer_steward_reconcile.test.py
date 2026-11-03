@@ -528,6 +528,44 @@ class ReconcileDutyTest(IsolatedCase):
         self.assertTrue(peer_obligations.read_runner_duty_state(
             self.root, "peer-history"))
 
+    def _retention_starts(self, popen):
+        return [call for call in popen.call_args_list
+                if call.args and str(call.args[0][1:2]).find("dispatch_registry_archive.py") >= 0]
+
+    def test_maintenance_pass_starts_the_retention_passes_once_per_due_window(self):
+        # With nothing dispatched no reap watch ends, so the runner starts the post-exit
+        # retention passes (registry archive included) itself, detached, for its own root.
+        import dispatch_contract
+        with mock.patch.object(peer_steward.subprocess, "Popen") as popen, \
+                mock.patch.object(dispatch_contract, "stable_state_root", return_value=self.root):
+            popen.return_value.pid = 4242
+            first = peer_steward._runner_maintenance_pass(self.store)
+            second = peer_steward._runner_maintenance_pass(self.store)
+        self.assertEqual(first["retention"], {"started": 4242})
+        self.assertNotIn("retention", second)
+        starts = self._retention_starts(popen)
+        self.assertEqual(len(starts), 1)
+        argv, kwargs = starts[0].args[0], starts[0].kwargs
+        self.assertTrue(argv[1].endswith("utilities/dispatch_registry_archive.py"))
+        self.assertEqual(argv[2:], ["retention", "--jobs", str(self.root / "jobs.log")])
+        self.assertTrue(kwargs["start_new_session"])
+        popen.return_value.wait.assert_called_with(timeout=10)   # its child exits at once: no zombie
+
+    def test_a_retention_start_that_fails_is_not_retried_before_its_due_window(self):
+        import dispatch_contract
+        with mock.patch.object(peer_steward.subprocess, "Popen", side_effect=OSError("no fork")) as popen, \
+                mock.patch.object(dispatch_contract, "stable_state_root", return_value=self.root):
+            peer_steward._runner_maintenance_pass(self.store)
+            peer_steward._runner_maintenance_pass(self.store)
+        self.assertEqual(len(self._retention_starts(popen)), 1)
+        self.assertTrue(peer_obligations.read_runner_duty_state(self.root, "retention")["last_pass_ns"])
+
+    def test_maintenance_pass_never_starts_retention_for_a_fixture_root(self):
+        with mock.patch.object(peer_steward.subprocess, "Popen") as popen:
+            result = peer_steward._runner_maintenance_pass(self.store)
+        self.assertNotIn("retention", result)
+        self.assertEqual(self._retention_starts(popen), [])
+
     def test_incomplete_registry_never_judges_records_and_still_prunes(self):
         records = self._open_records(3)
         result = join.reconcile_pending_delivery(self.jobs, time_budget_s=0)
