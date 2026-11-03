@@ -30,6 +30,7 @@ class PeerReadContext:
         self.compact_lineage = compact_lineage
         self._registry_views = {}
         self._registry_snapshots = {}
+        self._jobs_keys = {}
         self._handover_snapshots = None
         self._handover_ledgers = {}
         self._lineage_graphs = {}
@@ -87,7 +88,7 @@ class PeerReadContext:
         from dispatch_registry_cache import registry_view
 
         jobs = Path(jobs)
-        key = str(jobs.resolve(strict=False))
+        key = self.jobs_key(jobs)
         if key not in self._registry_views:
             try:
                 self._registry_views[key] = registry_view(
@@ -107,13 +108,24 @@ class PeerReadContext:
         from dispatch_registry_cache import registry_snapshot
 
         jobs = Path(jobs)
-        key = str(jobs.resolve(strict=False))
+        key = self.jobs_key(jobs)
         if key not in self._registry_snapshots:
             try:
                 self._registry_snapshots[key] = registry_snapshot(jobs)
             except FileNotFoundError:
                 self._registry_snapshots[key] = None
         return self._registry_snapshots[key]
+
+    def jobs_key(self, jobs) -> str:
+        """A registry path resolved once per pass, not once per row.
+
+        A scan resolves the same jobs path for every row it judges; each
+        resolution lstats every path component (~1,600 rows per Bash call).
+        """
+        raw = str(jobs)
+        if raw not in self._jobs_keys:
+            self._jobs_keys[raw] = str(Path(jobs).resolve(strict=False))
+        return self._jobs_keys[raw]
 
     def handover_snapshots(self, loader):
         if self._handover_snapshots is None:
