@@ -264,6 +264,51 @@ class RunTest(unittest.TestCase):
         self.assertEqual(C.run(self.path, sleep=self.sleep, now=lambda: self.clock[0],
                                call=lambda *a, **k: self.fail("resumed twice")), 0)
 
+    def test_a_closed_route_is_started_and_only_a_plain_completed_skips_the_notice(self):
+        # Four of five Codex waits armed on 10-29 named routes that were
+        # continued and closed by other paths. `start` still runs (it retries
+        # settlement and spec publication and reports what is left); only a
+        # plain `completed` of a proven finished route sends no notice.
+        route = Path(self._tmp.name) / "routes" / "rt-closed.json"
+        route.parent.mkdir()
+        route.write_text(json.dumps({"route_id": PAUSE["route_id"], "route_hash": "sha256:route"}))
+        record = json.loads(self.path.read_text())
+        outcome = route.with_name("rt-closed.outcome.json")
+        proven = {"route_id": PAUSE["route_id"], "route_hash": "sha256:route",
+                  "terminal_gate_proven": True}
+        completed = {"state": "completed", "required_action": "advance-completed"}
+        pending = {"state": "needs-attention", "reason": "workflow-completion-pending"}
+        cases = (
+            (proven, completed, False),
+            (proven, pending, True),                                  # settlement left: say so
+            (proven, {**completed, "next_leg": {"index": 1}}, True),  # the plan goes on
+            ({**proven, "terminal_gate_proven": False}, completed, True),
+            ({**proven, "autoclose": True}, completed, True),
+            ({**proven, "route_id": "rt-other"}, completed, True),
+        )
+        for closure, receipt, notified in cases:
+            with self.subTest(closure=closure, receipt=receipt):
+                self.path.write_text(json.dumps({**record, "route_file": str(route)}))
+                outcome.write_text(json.dumps(closure))
+                calls = []
+                done = SimpleNamespace(returncode=0, stdout=json.dumps(receipt) + "\n")
+                with mock.patch.object(C, "_notify") as notify:
+                    C.run(self.path, sleep=self.sleep, now=lambda: self.clock[0],
+                          call=lambda argv, **kw: calls.append(argv) or done)
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(notify.call_count, 1 if notified else 0)
+                saved = json.loads(self.path.read_text())
+                self.assertEqual((saved["state"], saved["result_state"]), ("resumed", receipt["state"]))
+                self.assertEqual(saved.get("notice"), None if notified else "skipped-route-completed")
+        # A framed route's closure is never treated as plainly finished.
+        self.path.write_text(json.dumps({**record, "route_file": str(route)}))
+        outcome.write_text(json.dumps(proven))
+        done = SimpleNamespace(returncode=0, stdout=json.dumps(completed) + "\n")
+        with mock.patch("route_plan.is_framed_route", return_value=True), \
+                mock.patch.object(C, "_notify") as notify:
+            C.run(self.path, sleep=self.sleep, now=lambda: self.clock[0], call=lambda argv, **kw: done)
+        notify.assert_called_once()
+
     def test_the_resume_runs_the_installed_release_not_the_arming_one(self):
         done = SimpleNamespace(returncode=0, stdout="{}\n")
         calls = []
