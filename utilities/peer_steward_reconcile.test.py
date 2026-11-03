@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import importlib.util
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -777,6 +778,102 @@ class PeerHistoryCleanupTest(IsolatedCase):
         self.assertTrue(new_received.exists())
         self.assertTrue(old_pending.exists())
         self.assertTrue(transfer.exists())
+
+
+class PeerRowLockTest(IsolatedCase):
+    """``.lock-<ref>`` files: the holder re-checks the path after its flock, so the 7-day
+    history prune can remove the lock of a row that no longer exists."""
+
+    REF = "d" * 32
+
+    def setUp(self):
+        super().setUp()
+        self.pm = peer_steward.peer_message
+        self.pending = self.pm._pending_dir()
+        self.pending.mkdir(parents=True, exist_ok=True)
+        self.lock = self.pending / (".lock-" + self.REF)
+
+    def age(self, path, days):
+        old = time.time() - days * 86400
+        os.utime(path, (old, old))
+
+    def held_by_another(self, path):
+        fd = os.open(path, os.O_RDWR)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        finally:
+            os.close(fd)
+        return False
+
+    def test_a_lock_file_removed_before_the_flock_is_taken_again(self):
+        real_flock = fcntl.flock
+        removed = []
+
+        def flock(fd, operation):
+            if not removed and operation & fcntl.LOCK_EX:
+                removed.append(True)
+                os.unlink(self.lock)      # another process removed it after this open
+            return real_flock(fd, operation)
+
+        with mock.patch.object(self.pm.fcntl, "flock", side_effect=flock):
+            with self.pm.pending_lock(self.REF):
+                self.assertTrue(removed)
+                self.assertTrue(self.lock.is_file())
+                self.assertTrue(self.held_by_another(self.lock))   # the file the path names now
+        self.assertFalse(self.held_by_another(self.lock))
+
+    def test_only_an_old_unheld_lock_of_a_missing_row_is_removed(self):
+        cutoff = time.time() - 7 * 86400
+        self.lock.touch(mode=0o600)
+        self.age(self.lock, 1)
+        self.assertFalse(self.pm.remove_orphan_pending_lock(self.REF, created_before=cutoff))
+        self.age(self.lock, 8)
+        (self.pending / (self.REF + ".json")).write_text("{}")
+        self.assertFalse(self.pm.remove_orphan_pending_lock(self.REF, created_before=cutoff))
+        (self.pending / (self.REF + ".json")).unlink()
+        with self.pm.pending_lock(self.REF):
+            self.age(self.lock, 8)
+            self.assertFalse(self.pm.remove_orphan_pending_lock(self.REF, created_before=cutoff))
+        self.assertTrue(self.lock.exists())
+        self.assertTrue(self.pm.remove_orphan_pending_lock(self.REF, created_before=cutoff))
+        self.assertFalse(self.lock.exists())
+        self.assertFalse(self.pm.remove_orphan_pending_lock("prepare-x", created_before=cutoff))
+
+    def test_the_history_prune_removes_old_locks_of_missing_rows_only(self):
+        now = time.time()
+        orphan = self.lock
+        kept_row, fresh = "e" * 32, "f" * 32
+        for name in (orphan.name, ".lock-" + kept_row, ".lock-" + fresh, ".lock-prepare-" + "1" * 64):
+            (self.pending / name).touch(mode=0o600)
+        (self.pending / (kept_row + ".json")).write_text(json.dumps(
+            {"ref": kept_row, "state": "pending", "received_at": None}))
+        for name in (orphan.name, ".lock-" + kept_row, ".lock-prepare-" + "1" * 64):
+            self.age(self.pending / name, 8)
+        result = peer_steward._prune_received_peer_history(now=now)
+        self.assertEqual(result["locks_removed"], 1)
+        self.assertFalse(orphan.exists())
+        self.assertTrue((self.pending / (".lock-" + kept_row)).exists())
+        self.assertTrue((self.pending / (".lock-" + fresh)).exists())
+        self.assertTrue((self.pending / (".lock-prepare-" + "1" * 64)).exists())
+
+    def test_a_cut_walk_resumes_after_a_lock_name(self):
+        now = time.time()
+        (self.pending / (".lock-" + "a" * 32)).touch(mode=0o600)
+        self.age(self.pending / (".lock-" + "a" * 32), 8)
+        row = self.pending / ("b" * 32 + ".json")
+        row.write_text(json.dumps({"ref": "b" * 32, "state": "received", "received_at": now - 8 * 86400,
+                                   "to": {"harness": "claude", "session_id": "A"},
+                                   "from": {"harness": "runtime", "session_id": None}}))
+        clock = iter([0, 5])
+        with mock.patch.object(peer_steward, "time",
+                               SimpleNamespace(time=lambda: now, monotonic_ns=lambda: next(clock))):
+            cut = peer_steward._prune_received_peer_history(now=now, deadline_ns=3)
+        self.assertEqual((cut["cursor"], cut["locks_removed"]), (".lock-" + "a" * 32, 1))
+        rest = peer_steward._prune_received_peer_history(now=now, start_after=cut["cursor"])
+        self.assertEqual((rest["removed"], rest["complete"]), (1, True))
+        self.assertFalse(row.exists())
 
 
 class LineageBundleRetirementTest(IsolatedCase):

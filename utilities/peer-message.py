@@ -740,14 +740,73 @@ def pending_lock(key="prepare"):
         with _pending_directory_lock(path):
             yield
         return
-    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    fd = _locked_pending_file(path)
+    try:
+        yield
+    finally:
+        os.close(fd)
+
+
+def _locked_pending_file(path):
+    """An fd holding the flock of the file ``path`` names now (standard lock-file pattern).
+
+    A lock file may be removed once its row is gone (``remove_orphan_pending_lock``), so
+    after the flock the path must still name the locked inode; when it was removed or
+    replaced meanwhile, the current file is taken instead."""
+    for _attempt in range(3):
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+                raise ValueError("peer-pending-lock-unsafe")
+            # Never hang a hook behind an RPC writer. The next normal callback retries.
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                current = path.lstat()
+            except FileNotFoundError:
+                current = None
+            if current is not None and (current.st_dev, current.st_ino) == (info.st_dev, info.st_ino):
+                return fd
+        except BaseException:
+            os.close(fd)
+            raise
+        os.close(fd)
+    raise BlockingIOError(errno.EAGAIN, "pending lock changed", str(path))
+
+
+def remove_orphan_pending_lock(ref, *, created_before):
+    """Remove ``.lock-<ref>`` of a row that no longer exists; True when removed.
+
+    Only a regular lock file created before ``created_before`` (flock never changes its
+    mtime) whose ``<ref>.json`` is gone, while holding that lock and after checking that
+    the path still names the locked inode. A process that opened it before the removal
+    finds the path changed after its own flock and takes the new file
+    (``_locked_pending_file``)."""
+    if not isinstance(ref, str) or not re.fullmatch(r"[0-9a-f]{32}", ref):
+        return False
+    pending = _pending_dir()
+    path = pending / (".lock-" + ref)
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return False
     try:
         info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
-            raise ValueError("peer-pending-lock-unsafe")
-        # Never hang a hook behind an RPC writer. The next normal callback retries.
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        yield
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                or info.st_mtime >= created_before):
+            return False
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            current = path.lstat()
+        except OSError:
+            return False
+        if ((current.st_dev, current.st_ino) != (info.st_dev, info.st_ino)
+                or os.path.lexists(pending / (ref + ".json"))):
+            return False
+        os.unlink(path)
+        return True
+    except OSError:
+        return False
     finally:
         os.close(fd)
 

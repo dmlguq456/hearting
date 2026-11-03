@@ -10200,8 +10200,15 @@ def _prefill_live_inboxes(root, *, deadline_ns, expected_root_identity=None):
     return result
 
 
+_ROW_LOCK_NAME = re.compile(r"\.lock-([0-9a-f]{32})")
+
+
 def _prune_received_peer_history(*, now=None, deadline_ns=None, start_after=None):
     """Drop received queue rows past the 7-day history window; transfers stay.
+
+    The same walk drops the ``.lock-<ref>`` file of a row that no longer exists once
+    that lock is older than the window (``peer_message.remove_orphan_pending_lock``
+    holds it while it checks); preparation and other keyed locks stay.
 
     ``start_after`` resumes the sorted walk at the next file name. A pass cut
     off by the shared deadline returns ``complete=False`` and the last examined
@@ -10210,10 +10217,13 @@ def _prune_received_peer_history(*, now=None, deadline_ns=None, start_after=None
     """
     now = time.time() if now is None else float(now)
     cutoff = now - PEER_HISTORY_RETENTION_SECONDS
-    result = {"removed": 0, "examined": 0, "cursor": None, "complete": True}
+    result = {"removed": 0, "examined": 0, "cursor": None, "complete": True, "locks_removed": 0}
     try:
         pending_dir = peer_message._pending_dir()
-        names = sorted(path.name for path in pending_dir.glob("*.json"))
+        with os.scandir(pending_dir) as entries:
+            names = sorted(entry.name for entry in entries
+                           if (entry.name.endswith(".json") and not entry.name.startswith("."))
+                           or _ROW_LOCK_NAME.fullmatch(entry.name))
     except OSError:
         return result
     start_after = start_after if isinstance(start_after, str) and start_after else None
@@ -10227,6 +10237,11 @@ def _prune_received_peer_history(*, now=None, deadline_ns=None, start_after=None
             return result
         result["examined"] += 1
         last = name
+        lock = _ROW_LOCK_NAME.fullmatch(name)
+        if lock:
+            if peer_message.remove_orphan_pending_lock(lock.group(1), created_before=cutoff):
+                result["locks_removed"] += 1
+            continue
         path = pending_dir / name
         try:
             row = json.loads(path.read_text(encoding="utf-8"))
@@ -10665,7 +10680,8 @@ def _runner_maintenance_pass(store):
                 root, "peer-history", {
                     "last_pass_ns": time.time_ns() if counts.get("complete", True) else 0,
                     "cursor": counts.get("cursor"),
-                    "removed": counts["removed"]},
+                    "removed": counts["removed"],
+                    "locks_removed": counts.get("locks_removed", 0)},
                 expected_root_identity=identity)
     except (OSError, ValueError, RuntimeError):
         pass
