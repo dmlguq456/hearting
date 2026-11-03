@@ -360,7 +360,7 @@ separable stage inline requires the recorded reason in the experiment
 ## Config Lifecycle and Provenance
 
 The 2026-08-03 BC_ResNet_tf pilot accumulated configs without distinguishing
-adopted, rejected, and historical reproduction settings. The prior SR_CorrNet
+adopted, rejected, and historical reproduction settings. The prior SR_Separator
 case hid configs in gitignored or per-run directories without a stable snapshot
 or hash. These incidents motivate the following contract.
 

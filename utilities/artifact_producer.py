@@ -1415,7 +1415,8 @@ def route_cycle_for(root: Path, route: Mapping[str, Any]) -> Optional[Dict[str, 
 
 
 def cycle_route_admission(root: Path, record: Mapping[str, Any], route: Mapping[str, Any],
-                          *, finalize: bool = False, validation_only: bool = False) -> Admission:
+                          *, finalize: bool = False, validation_only: bool = False,
+                          sealing: bool = False) -> Admission:
     """D-120's one lineage judgment for a cycle route.
 
     Steps 0-4 as spelled out in artifact-path-contract §42: ``route``'s
@@ -1462,10 +1463,12 @@ def cycle_route_admission(root: Path, record: Mapping[str, Any], route: Mapping[
                     handed_over = _handed_over_routes(root, record)
                 if sibling["route_id"] in handed_over:
                     continue  # closed lineage: that branch belongs to another cycle
-                if (_unexecuted_continuation(root, sibling)
-                        and _closed_for_successor(node, path[path.index(node) + 1])):
-                    # The parent closed this route and handed its remaining work to the
-                    # next route on the path; a sibling that never ran is not a branch.
+                if _unexecuted_continuation(root, sibling) and (
+                        finalize or sealing or _closed_for_successor(node, path[path.index(node) + 1])):
+                    # Sealing: a sibling that never ran and that nothing continues holds no result
+                    # and runs no writer, so it is not a branch whatever closed its parent. Beginning
+                    # a route in the cycle still needs the parent's verified handoff to the next
+                    # route on the path (write-time fork protection).
                     skipped_siblings.append(sibling["route_id"])
                     continue
                 reason = "cycle-route-binding-mismatch:lineage-fork"
@@ -1610,9 +1613,10 @@ def _binding_core(entry: Mapping[str, Any]) -> Dict[str, Any]:
             ("route_id", "route_hash", "route_file", "basis", "continuation_id", "source_route_id")}
 
 
-def _bind_cycle_route_locked(root: Path, record: Mapping[str, Any], route: Mapping[str, Any]) -> Dict[str, Any]:
+def _bind_cycle_route_locked(root: Path, record: Mapping[str, Any], route: Mapping[str, Any],
+                             *, sealing: bool = False) -> Dict[str, Any]:
     """`bind_cycle_route`'s body, for a caller that already holds the admission lock."""
-    admission = cycle_route_admission(root, record, route)
+    admission = cycle_route_admission(root, record, route, sealing=sealing)
     if not admission.allow:
         raise ProducerError(admission.reason, admission.detail)
     expected = [_route_binding_entry(row, root, is_begin=(i == 0)) for i, row in enumerate(admission.path)]
@@ -5113,31 +5117,34 @@ def _rfc3339_to_epoch(value: str) -> float:
         return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
 
 
-def _lease_record_is_live(
+def _lease_record_state(
     record: Optional[Dict[str, Any]], *, root: Optional[Path] = None,
     now: Optional[float] = None,
-) -> bool:
-    """SD-105/SD-90 evidence hierarchy, cited not redefined (plan.md §6.2):
-    exact PID/start/PGID identity, a finite deadline, and judgment-impossible
-    inputs (corrupt record, unreadable /proc, clock anomaly, missing field)
-    read as *live* -- conservative, so an undecidable lease never lets an
-    abandon through (E47-4)."""
+) -> str:
+    """SD-105/SD-90 evidence hierarchy, cited not redefined (plan.md §6.2), in three states.
+
+    `live`: exact PID/start/PGID identity (or the v2 holder disposition) says the holder is running.
+    `ended`: the holder was observed gone (released, dead exact holder, deadline passed for v1,
+    process or start mismatch). `unobservable`: judgment-impossible inputs (corrupt record,
+    unreadable /proc, clock anomaly, missing field, a holder that cannot be seen before its
+    deadline). Writers treat `unobservable` like `live` (E47-4); only the report differs.
+    """
 
     if record is None:
-        return False
+        return "ended"
     if record.get("released_at") is not None:
-        return False
+        return "ended"
     deadline = record.get("deadline")
     if not isinstance(deadline, str):
-        return True
+        return "unobservable"
     try:
         deadline_ts = _rfc3339_to_epoch(deadline)
     except (ValueError, OverflowError):
-        return True
+        return "unobservable"
     when = time.time() if now is None else now
     if _is_v2_review_lease(record):
         if record.get("expired") is not False:
-            return True
+            return "unobservable"
         acquired_at = record.get("acquired_at")
         try:
             acquired_ts = (
@@ -5145,9 +5152,9 @@ def _lease_record_is_live(
                 if isinstance(acquired_at, str) else None
             )
         except (ValueError, OverflowError):
-            return True
+            return "unobservable"
         if root is None or acquired_ts is None or acquired_ts > when or deadline_ts <= acquired_ts:
-            return True
+            return "unobservable"
         metadata = dict(record)
         metadata["review_cycle_id"] = record.get("cycle_id", "")
         # The record stores the sealed fields while the jobs row mirrors the
@@ -5156,31 +5163,42 @@ def _lease_record_is_live(
         # malformed forever.
         metadata["review_lease_record_digest"] = review_lease_record_digest(record)
         disposition = review_holder_disposition(record, metadata, root, now=when)
-        if disposition.state in {"live", "malformed"}:
-            return True
+        if disposition.state == "live":
+            return "live"
+        if disposition.state == "malformed":
+            return "unobservable"
         if disposition.state == "dead":
-            return False
+            return "ended"
         # Valid but unobservable holders remain conservative until the finite
         # stale ceiling, after which time permits recovery but never grants a
         # write.
-        return when <= deadline_ts
+        return "unobservable" if when <= deadline_ts else "ended"
     if when > deadline_ts:
-        return False
+        return "ended"
     pid = record.get("pid")
     pid_start = record.get("pid_start")
     pgid = record.get("pgid")
     if not isinstance(pid, int) or not isinstance(pid_start, str) or not pid_start or not isinstance(pgid, int):
-        return True
+        return "unobservable"
     actual_start = process_start_ticks(pid)
     if actual_start is None:
-        return False
+        return "ended"
     if actual_start != pid_start:
-        return False
+        return "ended"
     try:
         actual_pgid = os.getpgid(pid)
     except OSError:
-        return False
-    return actual_pgid == pgid
+        return "ended"
+    return "live" if actual_pgid == pgid else "ended"
+
+
+def _lease_record_is_live(
+    record: Optional[Dict[str, Any]], *, root: Optional[Path] = None,
+    now: Optional[float] = None,
+) -> bool:
+    """The write guard: anything not observed ended blocks (finish, abandon, seal)."""
+
+    return _lease_record_state(record, root=root, now=now) != "ended"
 
 
 def _is_v2_review_lease(record: object) -> bool:
@@ -5214,6 +5232,28 @@ def _live_review_lease(
                 return path
             conservative = conservative or path
     return conservative
+
+
+def _review_lease_observation(
+    root: Path, cycle_id: str, *, now: Optional[float] = None
+) -> str:
+    """What the cycle's review leases say, for reporting only: `live`, `unobservable` or `ended`.
+
+    A lease whose holder is observed running is `live`; one that cannot be judged is
+    `unobservable` and is not called a live writer. `_live_review_lease` is still the write guard.
+    """
+    lease_dir = _review_lease_dir(root, cycle_id)
+    if not lease_dir.is_dir():
+        return "ended"
+    seen = "ended"
+    for path in sorted(lease_dir.glob("*.json")):
+        state = _lease_record_state(_read_json(path), root=root, now=now) if _read_json(path) is not None \
+            else "unobservable"
+        if state == "live":
+            return "live"
+        if state == "unobservable":
+            seen = "unobservable"
+    return seen
 
 
 def _raise_if_recovery_fenced(root: Path, cycle_id: str, *, now: Optional[float] = None) -> None:
@@ -5775,15 +5815,16 @@ def _finalize_route(root: Path, record: Mapping[str, Any], *, deadline: Optional
         if not candidates:
             return current
         if len(candidates) > 1:
-            # The same narrowed rule `cycle_route_admission` applies: when the
-            # parent handed its remaining work to exactly one candidate and every
-            # other candidate never ran, that candidate is the branch. Two
-            # executed branches, or a parent not closed for a successor, remain
-            # the symmetric fork this refusal describes.
+            # The same narrowed rule `cycle_route_admission` applies: when every
+            # other candidate never ran, the remaining one is the branch (when none
+            # ran, the parent's verified handoff names it). Two executed branches
+            # remain the symmetric fork this refusal describes.
             chosen = [c for c in candidates
-                      if _closed_for_successor(current, c)
-                      and all(other["route_id"] == c["route_id"]
-                              or _unexecuted_continuation(root, other) for other in candidates)]
+                      if all(other["route_id"] == c["route_id"]
+                             or _unexecuted_continuation(root, other) for other in candidates)]
+            if len(chosen) > 1:
+                # Nothing executed: only the parent's verified handoff names the one to follow.
+                chosen = [c for c in chosen if _closed_for_successor(current, c)]
             if len(chosen) == 1:
                 candidates = chosen
             else:
@@ -6108,7 +6149,7 @@ def finalize(
         admission = cycle_route_admission(root, record, route, finalize=True)
         if not admission.allow:
             raise ProducerError(admission.reason, admission.detail)
-        if _bind_cycle_route_locked(root, record, route)["written"]:
+        if _bind_cycle_route_locked(root, record, route, sealing=True)["written"]:
             # `_commit_sealed` below reseals from this local copy; refresh it
             # so the binding write just made is not clobbered back to stale.
             record = read_cycle_record(root, cycle_id)

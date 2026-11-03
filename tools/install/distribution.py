@@ -3125,7 +3125,11 @@ def _route_registry_index(text: str) -> dict:
                     "claude-result", "opencode-result", "turn.completed", "step_finish.stop"})
             or (metadata.get("note") == "dead-worker-fail"
                 and metadata.get("failure_class") == "fail")
-            or (metadata.get("note") in {"dead-runtime-exit", "dead-runtime-error"}
+            # Same columns as `dispatch_supervisor_terminal.runtime_ended_without_result`:
+            # the supervisor recorded a runtime end, whatever the harness named the reason.
+            or ((metadata.get("note") in {"dead-runtime-exit", "dead-runtime-error"}
+                 or (metadata.get("terminal_event") == "dispatch.supervisor.error"
+                     and metadata.get("failure_class") in {"runtime", "protocol"}))
                 and metadata.get("launch_started") == "1"
                 and metadata.get("supervisor_lease") == "flock-v1"
                 and bool(metadata.get("supervisor_lease_file")))
@@ -5101,6 +5105,14 @@ def _install_or_update(
             f"preserved user-changed: {item['path']}"
             for item in preserved
         ]
+        # Activation notices (a skipped rule file, an edit kept aside) must
+        # reach the person here too, not only through `harness runtime activate`.
+        for row in activation_rows:
+            notices = row.get("notices") if isinstance(row, dict) else None
+            for notice in notices if isinstance(notices, list) else []:
+                line = f"{row.get('runtime')}: {notice}"
+                if isinstance(notice, str) and line not in report_lines:
+                    report_lines.append(line)
         return {
             "status": "installed" if previous_state is None else "updated",
             "version": release["version"],
@@ -5774,6 +5786,9 @@ def _print_result(result: dict, as_json: bool) -> None:
         print("activated: " + ", ".join(result["runtimes"]))
     for runtime, reason in result.get("skipped", {}).items():
         print(f"skipped: {runtime} ({reason})")
+    for line in result.get("report_lines", []):
+        if isinstance(line, str):
+            print(line)
     scheduler = result.get("auto_update")
     if scheduler:
         print(f"auto-update: {scheduler['status']} ({scheduler['kind']})")

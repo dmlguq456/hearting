@@ -1250,6 +1250,8 @@ class ManagedRuntimeAdoptionTest(unittest.TestCase):
             "runtimes": [
                 {"runtime": runtime, "preserved": [
                     path for owner, path in self.activation_preserved if owner == runtime
+                ], "notices": [
+                    line for owner, line in getattr(self, "activation_notices", []) if owner == runtime
                 ]}
                 for runtime in selected
             ],
@@ -1300,6 +1302,18 @@ class ManagedRuntimeAdoptionTest(unittest.TestCase):
             "preserved user-changed: /fixture/home/.claude/skills/user-edit"
         ])
         self.assertNotIn("activate: claude projection refreshed", result["report_lines"])
+
+    def test_update_forwards_activation_notices_to_the_person(self) -> None:
+        self._bootstrap_claude_codex_then_activate_opencode()
+        self._make_release("v1.1.0")
+        skipped = "OpenCode user rules: skipped legacy.md is not UTF-8 text"
+        self.activation_notices = [("opencode", skipped)]
+        result = distribution.update()
+        self.assertEqual(result["report_lines"], [f"opencode: {skipped}"])
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            distribution._print_result(result, as_json=False)
+        self.assertIn(f"opencode: {skipped}", printed.getvalue().splitlines())
 
 
 class ActivationFailureDiagnosticTest(unittest.TestCase):

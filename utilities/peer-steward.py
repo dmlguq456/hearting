@@ -3924,34 +3924,22 @@ def _read_json(path):
         return None
 
 
-def _is_zombie(pid):
-    """A reaped-but-not-yet-collected watcher is dead, not pending.
-
-    A zombie still has `/proc/<pid>/stat` with matching start ticks, so PID
-    identity alone would call it alive. It holds no file locks, so `_alive`
-    already rejects it; `cmd_join` cannot use the lock condition (it holds the
-    lock itself) and needs this explicitly.
-    """
-    try:
-        raw = (Path("/proc") / str(int(pid)) / "stat").read_text(encoding="utf-8")
-    except (OSError, ValueError):
-        return False
-    tail = raw[raw.rfind(")") + 2:].split()
-    return bool(tail) and tail[0] == "Z"
-
-
 def _pid_identity_ok(pid, pid_start):
-    """§5.12 PID identity: the pid exists *and* its start ticks still match."""
+    """§5.12 PID identity: the pid exists *and* its start ticks still match.
+
+    Birth and exit come from one `/proc/<pid>/stat` read. A zombie (Z) or a
+    process its parent is reaping (X) still shows the same start ticks, but it
+    has exited and holds no lock. A second read could find the row already
+    gone and call that exited watcher alive.
+    """
     try:
         pid = int(pid)
     except (TypeError, ValueError):
         return False
     if pid <= 0:
         return False
-    observed = process_start_ticks(pid)
-    if observed is None or str(observed) != str(pid_start):
-        return False
-    return not _is_zombie(pid)
+    observed = _proc_start_ticks(pid)
+    return observed is not None and observed == str(pid_start)
 
 
 def _lock_held(lock_path):

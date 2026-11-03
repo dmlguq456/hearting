@@ -139,6 +139,7 @@ class WorkerHomes(unittest.TestCase):
         files = (
             'tools/profile/build-home.py',
             'tools/install/codex_override.py',
+            'tools/install/user_rules.py',
             'utilities/dispatch-defaults.py',
             'utilities/dispatch_allocation.py',
             'utilities/claude_credential_recovery.py',
@@ -1100,6 +1101,28 @@ class WorkerHomes(unittest.TestCase):
         self.assertEqual(actual['permission']['skill'], {'*': 'deny'})
         self.assertEqual((home / 'plugins').resolve(), (self.source / 'plugins').resolve())
         self.assertEqual(env['OPENCODE_DISABLE_CLAUDE_CODE_PROMPT'], '1')
+
+    def test_opencode_v1_worker_lists_the_user_rules_block(self):
+        claude = self.base / 'claude-home'
+        (claude / 'rules').mkdir(parents=True)
+        rule = '# 외부 소통은 읽기 전용\n- 메일은 읽기만 한다.\n'.encode()
+        (claude / 'rules/external.md').write_bytes(rule)
+        (self.source / 'opencode.json').write_text(json.dumps({'instructions': ['/user/own.md']}))
+        self.env.update(OPENCODE_CONFIG_DIR=str(self.source), CLAUDE_CONFIG_DIR=str(claude))
+        home = Path(prepare_worker_home(ROOT, 'opencode', 'stage', 'rules', env=self.env)['OPENCODE_CONFIG_DIR'])
+        target = home / 'hearting-user-rules.md'
+        self.assertEqual(json.loads((home / 'opencode.json').read_text())['instructions'],
+                         ['/user/own.md', str(target)])
+        self.assertEqual(target.read_bytes().count(rule), 1)
+        self.assertEqual(target.stat().st_mode & 0o777, 0o400)
+        self.assertEqual(json.loads((self.source / 'opencode.json').read_text())['instructions'],
+                         ['/user/own.md'])
+        self.assertEqual((claude / 'rules/external.md').read_bytes(), rule)
+
+        (claude / 'rules/external.md').write_text('  \n')
+        prepare_worker_home(ROOT, 'opencode', 'stage', 'rules', env=self.env)
+        self.assertFalse(target.exists())
+        self.assertEqual(json.loads((home / 'opencode.json').read_text())['instructions'], ['/user/own.md'])
 
     def test_opencode_v2_worker_uses_shared_service_without_db_or_auth_links(self):
         data_home = self.base / 'v2-data'

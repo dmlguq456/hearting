@@ -148,7 +148,6 @@ utility-deferred	gpu_leases.py
 utility-deferred	dispatch-artifact-root.test.py
 utility-deferred	dispatch-attempt-ready.py
 utility-deferred	dispatch-batch.py
-utility-deferred	dispatch-broker.py
 utility-deferred	dispatch-concurrency.test.sh
 utility-deferred	dispatch-liveness.sh
 utility-deferred	dispatch-liveness.test.sh
@@ -167,7 +166,6 @@ utility-deferred	dispatch_adapters_v11.test.py
 utility-deferred	dispatch_batch_obligations.py
 utility-deferred	dispatch_allocation.py
 utility-deferred	dispatch_allocation_receipt.py
-utility-deferred	dispatch_broker.test.py
 utility-deferred	dispatch_budget_record.py
 utility-deferred	dispatch_codex_nocommit_fixture.test.py
 utility-deferred	dispatch_completion_join.py
@@ -351,6 +349,7 @@ tool-deferred	generate.py
 tool-deferred	generated-projections.test.sh
 tool-deferred	git-hooks
 tool-deferred	harness_manifest.py
+tool-deferred	i18n
 tool-deferred	improvement
 tool-deferred	install
 tool-deferred	installed-layout-triggers.tsv

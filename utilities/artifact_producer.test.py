@@ -3494,6 +3494,29 @@ class ReviewPublicationLeaseTest(ProducerTestBase):
             P.finalize(self.root, cycle_id=cycle_id, state="abandoned", abandon_reason="operator-decision")
         self.assertEqual(caught.exception.code, "cycle-abandon-blocked-live-review")
 
+    def test_unobservable_lease_reports_unobservable_not_live(self):
+        self.activate()
+        _route, _route_file, result = self.begin()
+        cycle_id = result["cycle_id"]
+        self.assertEqual(P._review_lease_observation(self.root, cycle_id), "ended")
+        lease_dir = P._review_lease_dir(self.root, cycle_id)
+        lease_dir.mkdir(parents=True, exist_ok=True)
+        (lease_dir / "att-corrupt.json").write_text("{not json", encoding="utf-8")
+        self.assertEqual(P._review_lease_observation(self.root, cycle_id), "unobservable")
+        # the write guard is unchanged: an unobservable holder still blocks
+        self.assertIsNotNone(P._live_review_lease(self.root, cycle_id))
+        self.assertTrue(P._lease_record_is_live({"deadline": "not-a-time"}))
+        self.assertEqual(P._lease_record_state({"deadline": "not-a-time"}), "unobservable")
+
+    def test_observed_live_holder_blocks_and_reports_live(self):
+        now = time.time()
+        record = {"deadline": P._rfc3339(now + 300), "released_at": None, "pid": os.getpid(),
+                  "pid_start": P.process_start_ticks(os.getpid()), "pgid": os.getpgid(os.getpid())}
+        self.assertEqual(P._lease_record_state(record, now=now), "live")
+        self.assertTrue(P._lease_record_is_live(record, now=now))
+        self.assertEqual(P._lease_record_state({**record, "pid_start": "0"}, now=now), "ended")
+        self.assertFalse(P._lease_record_is_live({**record, "released_at": P._rfc3339(now)}, now=now))
+
     def test_double_acquire_and_double_release_are_idempotent(self):
         self.activate()
         route, route_file, result = self.begin()
@@ -7606,18 +7629,21 @@ class RouteLineageBindingTest(ProducerTestBase):
         unused = self._continuation(a, reason="published-never-run")
         successor = self._continuation(a, reason="owner-pin-handoff")
         record = P.read_cycle_record(self.root, begun["cycle_id"])
-        # Without a verified handoff the two continuations of an open source stay a fork.
+        # Without a verified handoff the two continuations of an open source stay a fork for a begin;
+        # at seal time a sibling that never ran is not a branch.
         self.assertEqual(P.cycle_route_admission(self.root, record, successor).reason,
                          "cycle-route-binding-mismatch:lineage-fork")
+        self.assertTrue(P.cycle_route_admission(self.root, record, successor, finalize=True).allow)
         def handoff(route, *, jobs=None):
             return {"successor": successor} if route["route_id"] == a["route_id"] else None
         with mock.patch.object(route_parent_close, "verified_owner_pin_handoff_close",
                                side_effect=handoff):
             self.assertTrue(P.cycle_route_admission(self.root, record, successor).allow)
             self.assertTrue(P.cycle_route_admission(self.root, record, successor, finalize=True).allow)
-            # The unused sibling is not the handed-off route; it stays refused.
+            # The unused sibling is not the handed-off route; beginning it stays refused.
             self.assertEqual(P.cycle_route_admission(self.root, record, unused).reason,
                              "cycle-route-binding-mismatch:lineage-fork")
+            # Once the sibling has run it is a branch, whatever closed its parent.
             self._ran(unused)
             self.assertEqual(P.cycle_route_admission(self.root, record, successor).reason,
                              "cycle-route-binding-mismatch:lineage-fork")
@@ -8450,6 +8476,18 @@ class LineageForkFinalizeJudgmentTest(_LineageForkFinalizeFixture):
         # The advisory field is not cycle identity.
         self.assertEqual(terminal.cycle_identity_digest(stored),
                          terminal.cycle_identity_digest({**stored, "skipped_continuations": []}))
+
+    def test_unexecuted_sibling_does_not_fork_without_a_handoff_close(self):
+        """Hand-built shape: one candidate ran, the others never did, and the parent made no handoff close."""
+        begin, unused, successor, started, record = self._handoff_cycle("lineage-fork-no-handoff-ran")
+        self.write_output(started, "plans/lineage/plan.md")
+        self._close(successor)
+        self._ran(successor)
+        self.assertEqual(P._finalize_route(self.root, record)["route_id"], successor["route_id"])
+        sealed = P.finalize(self.root, cycle_id=record["cycle_id"])
+        self.assertEqual(sealed["status"], "sealed")
+        self.assertEqual(sorted(row["route_id"] for row in sealed["skipped_continuations"]),
+                         sorted(route["route_id"] for route in unused))
 
     def test_walk_refuses_an_executed_sibling(self):
         begin, unused, successor, started, record = self._handoff_cycle("lineage-fork-walk-harm")

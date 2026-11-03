@@ -586,12 +586,14 @@ stamp path in `core/HOOKS.md`.
   Claude wake and the shared completion follow-up describe a parked owner as
   paused at the gate, not failed. A revise or stop recorded while the owner is
   parked starts nothing automatically.
-  An owner that ended `BLOCKED` outside any declared gate is waiting for an answer:
-  `resume_command` reports `owner-blocked`, and `capability-route.py correct` keeps
-  the answer and continues the route in the same call. The continuation is a
-  replacement owner whose shared `recovery_instructions` carry the answer
-  (`dispatch_replacement` `corrected`), the same on every adapter.
-  An owner whose turn ended normally but whose final result does not follow the three-line handoff format waits for an answer the same way: `correct` continues the route, the format failure stays recorded, and nothing retries automatically.
+  An owner that ended `BLOCKED` or with a malformed final handoff outside any declared
+  gate and with no kept answer is continued once by the runtime, not left for a person:
+  the replacement owner's shared `recovery_instructions` carry the original result and
+  its report as observations (`dispatch_replacement` `observed`), the same on every
+  adapter. Only a real user decision reaches a person: `resume_command` reports
+  `owner-blocked`, and `capability-route.py correct` keeps the answer and continues the
+  route in the same call (`corrected`). A `PASS` owner that left declared stages undone
+  is continued the same way once (`observed`); its PASS row is not rewritten.
   A Codex delivery uses a distinct strict `human-gate` receipt and `hg-dlv-*`
   gateway identity. It binds the route id/hash/file, gate raise epoch, exact
   live owner attempt and sealed batch, immutable registry, recipient thread and
@@ -821,7 +823,7 @@ a standard+ stage ranks checked direct-headless candidates through its sealed qu
 
 ### 8.3. Direct headless launch under SD-61~63
 
-dispatch contract v3 has no resident launch broker, request spool, broker heartbeat, broker lease, or broker fencing identity. A standard+ dispatch-depth-1 conductor invokes the checked adapter wrapper directly for every same- or cross-harness dispatch-depth-2 attempt. The selected checked tuple's parent harness, transport, and sandbox must equal the actual launching wrapper identity exported in `AGENT_DISPATCH_CURRENT_*`; a missing partial identity or mismatch fails before child wrapper invocation. The canonical registry first records the stable attempt as `launch_claimed=0`. The checked wrapper then spawns a parent-death-safe pre-exec fence while holding the registry lock and atomically publishes the complete PID/start/namespace/leader-PGID identity together with the only `launch_claimed=1` transition. The fence records `launch_started=1` under the same exact row immediately before payload `exec`; a launcher lost before spawn leaves a retryable registered row, and a dead fence that never recorded start may be reset only after exact process-group quiescence. A duplicate or already-started claim never creates another child. A Codex dispatch-depth-1 capability owner running with `workspace-write` receives `sandbox_workspace_write.network_access=true`, `AGENT_NESTED_HEADLESS_NETWORK=1`, and a dispatch-state writable `CODEX_HOME`; that home links existing auth/config read-only and keeps mutable nested session state inside the owner sandbox. Dispatch-depth-2 workers do not inherit the network widening. Contract-v1/v2 route and broker state are read-only migration inputs. The broker utility may expose diagnostic `status` and idempotent `stop` for one compatibility release, but production dispatch never calls `ensure`, `request`, or `serve`.
+dispatch contract v3 has no resident launch broker, request spool, broker heartbeat, broker lease, or broker fencing identity. A standard+ dispatch-depth-1 conductor invokes the checked adapter wrapper directly for every same- or cross-harness dispatch-depth-2 attempt. The selected checked tuple's parent harness, transport, and sandbox must equal the actual launching wrapper identity exported in `AGENT_DISPATCH_CURRENT_*`; a missing partial identity or mismatch fails before child wrapper invocation. The canonical registry first records the stable attempt as `launch_claimed=0`. The checked wrapper then spawns a parent-death-safe pre-exec fence while holding the registry lock and atomically publishes the complete PID/start/namespace/leader-PGID identity together with the only `launch_claimed=1` transition. The fence records `launch_started=1` under the same exact row immediately before payload `exec`; a launcher lost before spawn leaves a retryable registered row, and a dead fence that never recorded start may be reset only after exact process-group quiescence. A duplicate or already-started claim never creates another child. A Codex dispatch-depth-1 capability owner running with `workspace-write` receives `sandbox_workspace_write.network_access=true`, `AGENT_NESTED_HEADLESS_NETWORK=1`, and a dispatch-state writable `CODEX_HOME`; that home links existing auth/config read-only and keeps mutable nested session state inside the owner sandbox. Dispatch-depth-2 workers do not inherit the network widening. Contract-v1/v2 route and broker state are read-only migration inputs. The broker utility is removed; production dispatch never launches through a broker.
 
 ### 8.4. Namespace-safe launch lifecycle under SD-72
 
