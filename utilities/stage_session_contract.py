@@ -11,7 +11,6 @@ import re
 import subprocess
 from typing import Any
 
-from hearting_gates import gates_on
 from owner_write_advisory import worktree_mutating_scope
 
 SCHEMA_VERSION = 1
@@ -413,12 +412,11 @@ def load_manifest(
         # sealed cwd; every identity field can match while the tree is foreign
         # (routing-flex canary review round 2, M1).
         sealed_cwd = route.get("cwd")
-        # A linked worktree of the same repository is accepted while the
-        # same-work gates are off; with the gates on it stays refused.
+        # A linked worktree of the same repository is accepted.
         if (
             isinstance(sealed_cwd, str) and sealed_cwd
             and worktree != Path(sealed_cwd).resolve()
-            and (gates_on() or not same_repository_worktree(worktree, sealed_cwd))
+            and (not same_repository_worktree(worktree, sealed_cwd))
         ):
             raise StageSessionError(f"manifest-worktree-mismatch:{worktree}:{Path(sealed_cwd).resolve()}")
     if node is not None:

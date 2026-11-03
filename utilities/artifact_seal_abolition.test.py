@@ -69,11 +69,10 @@ class SealAbolitionBase(FX.ProducerTestBase):
         # A worker's own AGENT_* variables must not leak into the fixture runtime.
         scrubbed = {key: os.environ.pop(key) for key in list(os.environ) if key.startswith("AGENT_")}
         self.addCleanup(os.environ.update, scrubbed)
-        # Same switch tools/run-tests.py sets: route-hash and identity checks refuse, not warn.
-        # A machine's own config (e.g. a closed-cycle refresh switch) must not steer the fixture either.
+        # A machine's own config (e.g. a closed-cycle refresh switch) must not steer the fixture.
         config = tempfile.TemporaryDirectory()
         self.addCleanup(config.cleanup)
-        patcher = mock.patch.dict(os.environ, {"HEARTING_GATES": "on", "XDG_CONFIG_HOME": config.name})
+        patcher = mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": config.name})
         patcher.start()
         self.addCleanup(patcher.stop)
         super().setUp()
@@ -335,11 +334,6 @@ class A1PolicyWritesParentsTest(SealAbolitionBase):
         through = P.check_write(self.root, cycle_dir / "artifacts" / "plans" / "linked" / "x.md")
         self.assertEqual((through["verdict"], through["reason"]), ("allow", "outside-artifact-root"), through)
         self.assertNotEqual(through.get("layout"), "cycle")
-        # route hash seal: a tampered route file stays unreadable as a route.
-        tampered, _tampered_file = self.route(slug="tamper-probe", campaign_key="guards")
-        tampered["campaign_key"] = "tampered"
-        with self.assertRaisesRegex(ValueError, "modified route hash"):
-            R.verify_route(tampered)
 
     # -- binding ---------------------------------------------------------
     def test_a1_binding_identity_ignores_campaign_move_only(self):

@@ -63,7 +63,7 @@ release. Other flags are hints, except a shape the person or an earlier frame
 already decided: honor it, and use `--shape staged --graph <stage,…>` for
 stages the person named (§0.2.1). A refusal names what to add, such as
 `--campaign-key`. For a user's material request that is not yet approved,
-present the §0.4 five-field card before starting (진행 / 수정 / 중단); a
+present the §0.4 intent card before starting (진행 / 수정 / 중단); a
 request from a peer session needs only the `[경로]` line compose prints plus
 one clause of scope, unless the work is destructive or external-facing.
 Dispatch depth 3 is forbidden.

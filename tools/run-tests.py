@@ -379,8 +379,6 @@ def build_isolated_env(tmpdir: Path, repo_root: Path = ROOT) -> dict[str, str]:
     # directory; suites that import `tools.fleet...` need the checkout root
     # (seven of them failed on import in every CI run until 2026-10-02).
     env["PYTHONPATH"] = str(repo_root)
-    # Gates ship switched off; the suites still exercise them.
-    env["HEARTING_GATES"] = "on"
     # A suite that seals a cycle must not start the background workflow-group review.
     env["HEARTING_WORKFLOW_GROUP_REVIEW"] = "off"
     # ...nor the background campaign display-title job.

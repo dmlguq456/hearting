@@ -166,31 +166,6 @@ class ChainHeadMovedGuardAcceptanceTest(unittest.TestCase):
                 )
             self.assertEqual(node["id"], "execute")
 
-    def test_diverged_head_still_rejects_regardless_of_registry_rows(self):
-        # The retired control tests asserted a refusal driven by registry
-        # content (missing pre-registration row, a note outside
-        # SUCCESS_NOTES). That distinction is gone; what still refuses is a
-        # genuinely diverged HEAD (rewritten, not a first-parent descendant
-        # of the sealed commit) -- with the exact same fully-valid registry
-        # fixture this class otherwise uses to show a pass.
-        with tempfile.TemporaryDirectory() as td:
-            repo, route, path, jobs = self._prep(td)
-            # Rewrite the sealed root commit itself (not slice 1's commit on
-            # top of it), so the observed HEAD shares no first-parent history
-            # with `route["source_commit"]` at all.
-            subprocess.run(
-                ["git", "-C", str(repo), "reset", "-q", "--hard", route["source_commit"]], check=True,
-            )
-            subprocess.run(
-                ["git", "-C", str(repo), "commit", "--amend", "-qm", "rewritten"], check=True,
-            )
-            with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(jobs)}):
-                with self.assertRaises(GUARD.WorkerRouteError) as ctx:
-                    GUARD.validate_route_contract(
-                        path, "execute", repo, repo, current_attempt="att-slice-2",
-                    )
-            self.assertEqual(ctx.exception.reason, "route-source-commit-mismatch")
-
 
 class ChainSerialRegisterAtomicityTest(unittest.TestCase):
     """`stage-session-chain.py`'s serial register loop side (WP5)."""

@@ -1720,7 +1720,7 @@ check_codex_native_skill_projection() {
         || grep -Fq '## Portable Contract' "$skill"; then
         fail_msg "$skill must keep entry-router procedure detail out of the dispatch-depth-0 projection"
       fi
-      if ! grep -Fq 'five-field confirmation card' "$skill" \
+      if ! grep -Fq 'Present the intent card' "$skill" \
         || ! grep -Fq 'dispatch-depth-1 owner reads it' "$skill" \
         || ! grep -Fq 'stage workers read only their assigned contracts' "$skill"; then
         fail_msg "$skill must project the confirmation and owner/worker context boundary"
@@ -1735,7 +1735,7 @@ check_codex_native_skill_projection() {
       fail_msg "$skill must use Codex Skill frontmatter only, without adapter metadata"
     fi
   done
-  if ! grep -Fq 'five-field confirmation card' adapters/codex/skills/autopilot-code/SKILL.md \
+  if ! grep -Fq 'Present the intent card' adapters/codex/skills/autopilot-code/SKILL.md \
     || ! grep -Fq 'dispatch-depth-1 owner reads it' adapters/codex/skills/autopilot-code/SKILL.md \
     || grep -Fq '## Projected Portable Details' adapters/codex/skills/autopilot-code/SKILL.md; then
     fail_msg "Codex autopilot-code entry projection must stay compact and delegate contract reading"
@@ -1795,7 +1795,7 @@ check_codex_native_plugin_projection() {
   if [ ! -f "$marketplace" ]; then
     fail_msg "Codex native plugin marketplace is missing"
   fi
-  if ! grep -Fq 'five-field confirmation card' "$plugin_root/skills/autopilot-lab/SKILL.md" \
+  if ! grep -Fq 'Present the intent card' "$plugin_root/skills/autopilot-lab/SKILL.md" \
     || grep -Fq '## Projected Portable Details' "$plugin_root/skills/autopilot-lab/SKILL.md"; then
     fail_msg "Codex native plugin entry Skill must preserve the compact confirmation boundary"
   fi
@@ -1838,7 +1838,7 @@ check_codex_native_plugin_entry_skill() {
     fail_msg "$skill is missing"
     return
   fi
-  if ! grep -Fq 'five-field confirmation card' "$skill" \
+  if ! grep -Fq 'Present the intent card' "$skill" \
     || ! grep -Fq 'dispatch-depth-1 owner reads it' "$skill" \
     || grep -Fq '## Projected Portable Details' "$skill"; then
     fail_msg "Codex native plugin autopilot-code entry projection must stay compact"
@@ -2689,7 +2689,7 @@ check_opencode_native_skill_projection() {
       if grep -Fq '## Portable Contract' "$skill"; then
         fail_msg "$skill must keep entry-router procedure detail out of the dispatch-depth-0 projection"
       fi
-      if ! grep -Fq 'five-field confirmation card' "$skill" \
+      if ! grep -Fq 'Present the intent card' "$skill" \
         || ! grep -Fq 'dispatch-depth-1 owner reads it' "$skill" \
         || ! grep -Fq 'stage workers read only their assigned contracts' "$skill"; then
         fail_msg "$skill must project the confirmation and owner/worker context boundary"
@@ -2861,8 +2861,8 @@ check_opencode_native_command_projection() {
   fi
   if ! grep -Fq "_RUNLOG" adapters/opencode/commands/autopilot-lab.md \
     || ! grep -Fq "_RUNLOG" capabilities/autopilot-lab.md \
-    || ! grep -Fq 'five-field confirmation card' adapters/opencode/skills/autopilot-lab/SKILL.md \
-    || ! grep -Fq 'five-field confirmation card' adapters/codex/skills/autopilot-lab/SKILL.md; then
+    || ! grep -Fq 'Present the intent card' adapters/opencode/skills/autopilot-lab/SKILL.md \
+    || ! grep -Fq 'Present the intent card' adapters/codex/skills/autopilot-lab/SKILL.md; then
     fail_msg "native autopilot-lab projections must preserve compact entry routing and owner-readable _RUNLOG detail"
   fi
 }

@@ -188,7 +188,7 @@ class ReleaseDecisionTest(WF.TestGateSubjectNotCaller):
         self.iso = isolated_env()
         self.addCleanup(self.iso.cleanup)
         keep = {key: os.environ[key] for key in (
-            "AGENT_WORKFLOW_ROOT", "AGENT_HOME", "AGENT_ARTIFACT_CHECKPOINT", "HEARTING_GATES",
+            "AGENT_WORKFLOW_ROOT", "AGENT_HOME", "AGENT_ARTIFACT_CHECKPOINT",
             "HEARTING_WORKFLOW_GROUP_REVIEW", "HEARTING_CAMPAIGN_TITLE_AUTO") if key in os.environ}
         patched = self.iso.patched_environ(extra=keep)
         patched.__enter__()

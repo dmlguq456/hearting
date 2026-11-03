@@ -35,7 +35,7 @@ the same across them. You stay in charge, and the work holds together even
 when the agent contributes little on its own.
 
 - **Consistent work, whatever the agent.** Some agents do a lot on their own,
-  some very little. Hearting confirms the direction with you before work
+  some very little. Hearting confirms your intent with you before work
   starts, keeps each worker inside a bounded scope, and checks results
   independently, so the work stays tied to what you asked rather than to how
   capable the agent happens to be.
@@ -62,14 +62,16 @@ a request, is English by default. For Korean, declare it once: set
 `"title_language": "ko"` in
 `${XDG_CONFIG_HOME:-~/.config}/hearting/fleet.json`, set
 `FLEET_NOW_LANG=Korean`, or set Claude Code's `language` setting to Korean.
-The same declaration sets the language of Fleet's session titles.
+The same declaration sets the language of Fleet's session titles. Two newer
+messages, the summary written when a request finishes and the one-line
+direction notice, are not in the catalog yet and print in Korean.
 
 > “Implement and test the login API, then leave a change report.”
 
 ```text
 your request
   ├─ prior-art scan    what the project already has: code, artifacts, memory, git history
-  ├─ frame             two capable-model legs propose a route; you confirm the direction
+  ├─ frame             two capable-model legs propose a route; you are asked only if there is a choice
   └─ owner             one session keeps your request and its finish line to the end
        ├─ plan ─► plan check
        ├─ execute      a lower-cost worker; the only stage that edits source
@@ -77,6 +79,15 @@ your request
        └─ report       what changed, what was verified, what is left
                        … and Fleet shows every step above while it runs
 ```
+
+Before work you asked for starts, the agent shows one short card in your
+language: your words and what it understood — intent, scope, what it will not
+do, and when it is done. You answer Proceed, Edit, or Stop, and those lines
+travel with the request to the owner and every worker. When the two frame legs
+agree and leave nothing for you to choose, work starts without another
+question and you get a one-line notice you can correct in your next message.
+When a dispatched request finishes, the runtime writes a short summary of the
+intent, the result, what changed, what was checked, and what is left.
 
 How much of this runs depends on the request. A one-line answer or a typo runs
 inline (`direct`). A small change gets the frame and one quick worker

@@ -344,7 +344,7 @@ def record_native_answer(route, jobs, asked):
 
 
 def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
-                         decision="proceed", runtime_root=ROOT, run=subprocess.run):
+                         decision="proceed", runtime_root=ROOT, run=subprocess.run, automatic=False):
     """Own raise -> actual answers -> intent -> release through existing commands.
 
     The caller supplies semantic questions/real answers. WorkflowLedger remains
@@ -365,7 +365,9 @@ def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
         understanding, brief = "", {field: "" for field in FI.BRIEF_FIELDS}
         try:
             # A draft from the request and the anchor frame's brief; the owner rewrites it for the person.
-            understanding = FI.understanding_draft((route.get("work_request") or {}).get("text") or "")
+            import work_intent
+            understanding = (work_intent.draft((route.get("work_request") or {}).get("text") or "")
+                             .get("intent") or "")[:FI.MAX_UNDERSTANDING_CHARS]
             output = prepare_route_artifact_env(Path(path), start=False, jobs=Path(jobs)).get("AGENT_ARTIFACT_OUTPUT_DIR")
             if output:
                 brief = FI.brief_draft((Path(output) / "shards/frame/direction-brief.md").read_text(encoding="utf-8"))
@@ -438,6 +440,7 @@ def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
                 "created": original.get("created") or datetime.now(timezone.utc).strftime("%Y-%m-%d")}
     errors = mark_errors + FI.validate(question, intensity=route["effective_intensity"])
     native = directory / FI.NATIVE_ANSWERS_NAME
+    refused_answer = None
     if not answers and not next_round and resolution["status"] == "blocked" and native.is_file():
         answers = native                    # the person's native reply, recorded when it arrived
     response = (FI.load_json_file(answers, max_bytes=FI.MAX_ANSWERS_BYTES, kind="answers")
@@ -456,6 +459,10 @@ def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
         # question. A refused machine reply must leave room for the real reply.
         registered_worker = os.environ.get("AGENT_DISPATCH_REGISTERED_WORKER") == "1"
         actor_kind = FI.answer_actor_kind(response, registered_worker=registered_worker)
+        if (response.get("basis") == FI.AUTOMATIC_BASIS) != bool(automatic) or (
+                automatic and actor_kind != "supervisor"):
+            raise ValueError("gate-release-authority-refused: only the runtime records an automatic agreement, "
+                             "and only when both frames agree with nothing left to choose")
         binding = next((row for row in route.get("human_gate_bindings", [])
                         if row.get("gate") == "frame-review"), {})
         authority = (resolution.get("release_authority") or
@@ -465,6 +472,13 @@ def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
             raise ValueError("gate-release-authority-refused: frame-review takes the person's actual answer, "
                              "or a supervisor's answer on the person's behalf")
         response = {**response, "actor_kind": actor_kind}
+        import work_intent
+        crossed = work_intent.supervisor_crossing(route, question, response) if decision == "proceed" else []
+        if crossed:
+            # Outside the supervisor's delegation (user decision 2026-11-03): nothing is recorded,
+            # and the same registered question goes to the person.
+            refused_answer = {"actor_kind": actor_kind, "crossed_not_doing": crossed}
+            response = None
     if not next_round and resolution["status"] != "not-raised" and resolution.get("artifact") != str(question_path):
         raise ValueError("frame-interview-binding-conflict: use the currently registered interview")
     _store_once(question_path, question)
@@ -488,6 +502,19 @@ def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
     if resolution["status"] == "not-raised" or next_round:
         command("gate", "--block", "--artifact", str(question_path))
         resolution = WS.human_gate_resolution(ledger.journal(), "frame-review")
+    if response is None and decision == "proceed" and refused_answer:
+        return {"state": "needs-question", "required_action": "ask-registered-question",
+                "reason": "supervisor-choice-crosses-not-doing", "refused_answer": refused_answer,
+                "interview_file": str(question_path), "interview": question,
+                "answers_template": FI.answers_template(question),
+                "human_wait": {"state": "pending", "fallback": "ordinary-conversation",
+                               "question_block": FI.pending_question_block(question)},
+                "parent_next": "end-turn",
+                "next_step": ("The chosen direction crosses the intent's 안 할 것 ("
+                              + "; ".join(refused_answer["crossed_not_doing"]) + "), so only the person can "
+                              "choose it; the answer was not recorded. Present the registered question to the "
+                              "person once, then rerun resume_command with their answer (actor_kind user). "
+                              + FI.PENDING_ANSWER_RULE)}
     if response is None and decision == "proceed":
         return {"state": "needs-question", "required_action": "ask-registered-question" if ask_now else "wait-for-user-answer",
                 "interview_file": str(question_path), "interview": question,
@@ -1173,6 +1200,99 @@ def _interview_questions(rows):
                       for leg, key in approvals]
 
 
+AUTOMATIC_DIRECTION_DIR = "shards/frame/automatic"
+
+
+def _automatic_direction(route, rows, output):
+    """`(interview, answers)` the runtime records itself when there is nothing to choose, else None.
+
+    Only when both frame legs returned valid, equal proposals, no start approval is in scope,
+    neither brief lists a question only the user can answer, and the caller is not a registered
+    worker. The answer is the depth-0 session's existing on-behalf (`supervisor`) authority with
+    basis `automatic-agreement`; every other case asks the person exactly as before (WORKFLOW §0.4)."""
+    import frame_interview as FI
+    if os.environ.get("AGENT_DISPATCH_REGISTERED_WORKER") == "1":
+        return None
+    if len(rows) != 2 or not RP.proposals_equal(rows) or any(_start_approval_keys(row) for row in rows):
+        return None
+    texts = []
+    for row in rows:
+        try:
+            texts.append((Path(output) / "shards" / row["node"] / "direction-brief.md").read_text(encoding="utf-8"))
+        except (OSError, UnicodeError):
+            return None
+    if any(FI.user_questions_left(text) for text in texts):
+        return None
+    import work_intent
+    not_doing = work_intent.draft((route.get("work_request") or {}).get("text") or "").get("not_doing")
+    if work_intent.crossed_not_doing(not_doing, rows[0]["proposal"]):
+        return None   # a direction past the intent's 안 할 것 is the person's to choose
+    brief = FI.brief_draft(texts[0])
+    import work_intent
+    understanding = (work_intent.draft((route.get("work_request") or {}).get("text") or "")
+                     .get("intent") or "")[:FI.MAX_UNDERSTANDING_CHARS]
+    summaries = list(dict.fromkeys(" ".join(str(row["proposal"].get("summary") or "").split()) for row in rows))
+    # The legs agree on the route; when they word it differently, the notice shows both.
+    summary = " / ".join(item for item in summaries if item) if RP.wording_differs(rows) else summaries[0]
+    if len(summary) > FI.MAX_OPTION_MEANS_CHARS:
+        summary = summary[:FI.MAX_OPTION_MEANS_CHARS - 1].rstrip() + "…"
+    question = {"id": FI.ROUTE_QUESTION_ID, "topic": "진행 방향", "kind": "yes-no",
+                "question": "두 갈래 검토가 같은 진행 방향을 냈습니다. 이대로 시작할까요?",
+                "options": [{"label": "진행", "means": summary or "두 갈래가 함께 낸 방향대로 시작합니다",
+                             FI.PROPOSAL_MARK: rows[0]["node"]},
+                            {"label": "보류", "means": "시작하지 않고 방향을 다시 봅니다"}],
+                "recommended": 0, "why": "두 갈래가 같은 결론이고 사람이 고를 질문을 남기지 않았습니다"}
+    interview = {"schema": FI.SCHEMA, "route_id": route["route_id"], "round": 1,
+                 "understanding": understanding, "brief": brief, "questions": [question]}
+    if FI.validate({**interview, "summary": "-"}, intensity=route["effective_intensity"]):
+        return None
+    answers = {"schema": FI.ANSWERS_SCHEMA, "route_id": route["route_id"], "round": 1,
+               "actor_kind": "supervisor", "basis": FI.AUTOMATIC_BASIS,
+               "understanding_confirmed": True, "correction": "",
+               "answers": {FI.ROUTE_QUESTION_ID: {
+                   "choice": 0, "note": "자동: 두 갈래가 같은 방향을 내고 물을 것을 남기지 않음"}}}
+    return interview, answers
+
+
+AUTOMATIC_NOTICE_NAME = "notice.txt"
+
+
+def _automatic_direction_notice_text(interview, answers) -> str:
+    """The one-line notice for a frame review the runtime released itself; "" for any other release."""
+    import frame_interview as FI
+    if not isinstance(answers, dict) or answers.get("basis") != FI.AUTOMATIC_BASIS:
+        return ""
+    try:
+        option = str(interview["questions"][0]["options"][0].get("means") or "")
+    except (KeyError, IndexError, TypeError, AttributeError):
+        option = ""
+    return ("[방향 통지] 두 갈래 검토가 같은 방향을 내고 물을 것을 남기지 않아 묻지 않고 시작했습니다"
+            + (f": {option}" if option else "") + ". 고칠 점이 있으면 다음 말로 알려 주세요.")
+
+
+def _automatic_direction_notice(output) -> str:
+    """The notice the decision recorded, read on the first start and every repeat without the interview."""
+    try:
+        return (Path(output) / AUTOMATIC_DIRECTION_DIR / AUTOMATIC_NOTICE_NAME).read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError):
+        return ""
+
+
+DIRECTION_NOTICE_STEP = ("Show direction_notice to the person in one line, as written, in this reply; "
+                         "nothing waits for an answer. ")
+
+
+def _automatic_frame_release(route, path, jobs, output, interview, answers):
+    """Record the runtime's own interview and answer, release through the existing commands, and say so."""
+    directory = Path(output) / AUTOMATIC_DIRECTION_DIR
+    directory.mkdir(parents=True, exist_ok=True)
+    interview_path, answers_path = directory / "interview.json", directory / "answers.json"
+    _store_once(interview_path, interview)
+    _store_once(answers_path, answers)
+    step = frame_interview_step(route, path, jobs, interview=interview_path, answers=answers_path, automatic=True)
+    return {**step, "automatic_direction": True}
+
+
 def _marked_route_proposals(route, jobs, interview):
     """`(interview, errors)`: a framed interview's `route_proposals`, built from its `proposal` marks.
 
@@ -1300,6 +1420,9 @@ def _decide(route, jobs, root, record, output, briefs, intent):
                                  intent=intent, proposals=rows)
 
     interview, answers = _recorded_interview(route, jobs)
+    notice = _automatic_direction_notice_text(interview, answers)
+    if notice:  # decided once; the first leg's receipt and every repeat read it without re-reading the interview
+        _store_bytes_once(output / AUTOMATIC_DIRECTION_DIR / AUTOMATIC_NOTICE_NAME, (notice + "\n").encode())
     if not isinstance(interview, dict) or not isinstance(answers, dict) or "route_proposals" not in interview:
         return ended(RP.NO_PROPOSAL_READ)
     rows = _proposal_rows(route, jobs, root, record, output)
@@ -1586,6 +1709,12 @@ def _framed_settle(route, path, jobs, result, *, closed=None, wait=False, run=su
             receipt = dict(_first_leg_state(root, decision_record, jobs, receipt))
         receipt["route_decision"] = {"record_file": str(record_path), "selected": decision["selected"],
                                      "frame_route_id": route["route_id"]}
+        notice = _automatic_direction_notice(output)
+        if notice:  # the first leg's own receipt carries it, on the first start and on every repeat
+            receipt["direction_notice"] = notice
+            receipt["next_step"] = DIRECTION_NOTICE_STEP + str(receipt.get("next_step") or "")
+            if not replayed:
+                print(notice, file=sys.stderr, flush=True)   # beside the leg's card in the start output
         return receipt
     intent_file = root / decision["intent"]["path"]
     return {**result, "state": "completed", "reason": "route-decision-none", "required_action": "compose-route",
@@ -2094,6 +2223,10 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
             if RP.is_framed_route(route) and step["state"] == "needs-interview":
                 root, record, output = _framed_cycle(route)
                 rows = _proposal_rows(route, jobs, root, record, output)
+                automatic = _automatic_direction(route, rows, output)
+                if automatic is not None:
+                    step = _automatic_frame_release(route, path, jobs, output, *automatic)
+            if RP.is_framed_route(route) and step["state"] == "needs-interview":
                 template = {**(step.get("interview_template") or {}), "questions": _interview_questions(rows)}
                 step = {**step, "interview_template": template,
                         "route_proposal_review": _proposal_review(route, path, jobs, rows),

@@ -610,6 +610,22 @@ def completion_scope_prompt() -> str:
     )
 
 
+def sealed_intent_prompt(args) -> str:
+    """The route's start intent (prompt-file lines and the person's words), for routes without a frame release."""
+    binding = getattr(args, "owner_route_binding", None)
+    route_file = getattr(args, "route_file", None) or getattr(binding, "route_file", None)
+    if not route_file:
+        return ""
+    try:
+        route = json.loads(Path(route_file).read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return ""
+    if route.get("route_id") != (getattr(args, "route_id", None) or getattr(binding, "route_id", None)):
+        return ""
+    import work_intent
+    return work_intent.prompt_block(route)
+
+
 def released_task_prompt(args) -> str:
     """Carry the same released task across owner/stage and runtime boundaries.
 
@@ -629,11 +645,12 @@ def released_task_prompt(args) -> str:
 
     jobs = getattr(args, "jobs", None)
     if jobs is not None and not Path(jobs).expanduser().exists():
-        return ""  # A fresh registry preview has no recorded release to consume.
+        return sealed_intent_prompt(args)  # A fresh registry preview has no recorded release.
     ledger = workflow.WorkflowLedger(route_id, jobs=jobs)
     resolution = workflow.human_gate_resolution(ledger.journal(), "frame-review")
     if resolution["status"] != "proceed" or not resolution.get("interview"):
-        return ""  # Frame preparation and legacy routes retain their own inputs.
+        # No release on this route (a leg, quick or staged route): the intent sealed at start.
+        return sealed_intent_prompt(args)
     artifact = str(resolution.get("artifact") or "")
     try:
         source = Path(artifact)

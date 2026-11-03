@@ -21,7 +21,7 @@ capability contract. It is adapter-owned output, not a legacy compatibility Skil
 ## Use
 
 1. Before approval, route from this compact metadata and `core/WORKFLOW.md §0.2`; do not read the full portable source merely to propose the route.
-2. Present the five-field confirmation card from `core/WORKFLOW.md §0.4` unless the same route and scope are already approved.
+2. Present the intent card from `core/WORKFLOW.md §0.4` unless the same route and scope are already approved.
 3. After approval, direct/quick acting sessions read `capabilities/autopilot-ship.md`; at `standard+`, the dispatch-depth-1 owner reads it and stage workers read only their assigned contracts.
 4. Before the first durable capability artifact, compile and bind the checked route with `preflight.sh route --capability autopilot-ship ...`. A native-agent restriction never authorizes direct execution.
 5. Run `adapters/opencode/bin/preflight.sh capability-info autopilot-ship` and obey the reported status:
