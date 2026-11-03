@@ -120,7 +120,6 @@ usage: preflight.sh write <file> [session-id] [turn-id]
        preflight.sh headless [--check] [--require-hook-trust] <worktree>
        preflight.sh nested-headless --parent-harness <h> --parent-transport <t> --parent-sandbox <s> --child-harness <h> --launch-authority <authority> --worktree <path> [--prospective-standard-owner --jobs <canonical-jobs.log>] [--user-disabled] [--json]
        preflight.sh dispatch-readiness --worktree <path> --jobs <canonical-jobs.log> --owner-harness <h>... --child-harness <h>... --output <evidence.json>
-       preflight.sh broker <status|stop> --jobs <jobs.log> [--root <broker-root>]  # legacy drain only
        preflight.sh dispatch [--dry-run|--register|--start] [--require-hook-trust] --worktree <path> --slug <slug> --capability <name> --capability-mode <mode> [--worker-mode <family/mode>] [--qa <level>] [--intensity <level>] [--dispatch-depth 1|2] [--parent <slug>] [--worker-type owner|stage|review|support|frame] [--unit <unit>] [--assigned-contract <capability>] [--owner <capability>] (--model-profile <deep|balanced-deep|balanced|light|mini> [--model-role <role>]|--model-role <role>|--model <model> --reasoning <effort>) [--prompt-file <file>|--prompt-text <text>] [--jobs <jobs.log>]
        preflight.sh dispatch-owner [--dry-run|--register|--start] --route-evidence <route.json> [--prompt-file <file>|--prompt-text <text>]   # the route fills the owner tuple
        preflight.sh dispatch-owner [--adapter <harness>] [--dry-run|--register|--start] --worktree <path> --slug <slug> --capability <name> --capability-mode <mode> [--qa <level>] --intensity <level> --dispatch-depth 1 --worker-type owner --assigned-contract <capability> --owner <capability> --model-profile <deep|balanced-deep|balanced|light> [--prompt-file <file>|--prompt-text <text>] [--jobs <jobs.log>]
@@ -556,7 +555,7 @@ nested_eligibility_check=adapters/codex/bin/preflight.sh nested-headless --paren
 prospective_codex_owner_check=adapters/codex/bin/preflight.sh nested-headless --parent-harness codex --parent-transport headless --parent-sandbox workspace-write --child-harness <h> --launch-authority conductor --worktree <path> --prospective-standard-owner --jobs <canonical-jobs.log>
 fallback_chain=same-harness-headless,cross-harness-headless,native-subagent,inline
 fallback_runner=adapters/codex/bin/preflight.sh dispatch-chain --route <route> --node <node> --dry-run|--register|--start
-broker_lifecycle=retired-status-stop-only
+broker_lifecycle=retired
 launch_authority=conductor
 liveness_surface=codex-session-jsonl-mtime
 liveness_check=adapters/codex/bin/preflight.sh liveness [jobs.log]
@@ -652,10 +651,6 @@ EOF
   dispatch-readiness)
     shift
     python3 "$ROOT/utilities/dispatch-readiness.py" "$@"
-    ;;
-  broker)
-    shift
-    AGENT_HOME="$AGENT_ROOT" python3 "$ROOT/utilities/dispatch-broker.py" "$@"
     ;;
   dispatch-wait)
     shift
