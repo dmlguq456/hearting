@@ -8256,9 +8256,25 @@ class ComposeRouteTest(TestRoute):
    first=self.compose(artifact_root=str(project/".agent_reports"),unassigned=False)
    self.assertEqual(first["campaign_key"],"my-project-2"); self.assertNotIn("campaign_unassigned",first)
    camp=project/".agent_reports"/"campaigns"/"2026-11-04_my-project-2"; camp.mkdir(parents=True)
-   (camp/"campaign.json").write_text(json.dumps({"campaign_id":"camp_"+"4"*32,"key":"my-project-2","title":"t","goal":"g","state":"active","cycles":[],"created_on":"2026-11-04T00:00:00Z"}))
+   def stream(state):
+    (camp/"campaign.json").write_text(json.dumps({"campaign_id":"camp_"+"4"*32,"key":"my-project-2","title":"t","goal":"g","state":state,"cycles":[],"created_on":"2026-11-04T00:00:00Z"}))
+   stream("active")
    with self.assertRaisesRegex(ValueError,"compose-campaign-key-required.*--unassigned"):
     self.compose(artifact_root=str(project/".agent_reports"),unassigned=False)
+   # One that cannot be joined keeps the refusal that lists the streams; no stream is opened.
+   stream("abandoned")
+   with self.assertRaisesRegex(ValueError,"compose-campaign-key-required.*--unassigned"):
+    self.compose(artifact_root=str(project/".agent_reports"),unassigned=False)
+   # The rule on the fold's states: none or closed (reopens, as `--campaign-key <folder>` would)
+   # opens the folder's stream; any active stream, or one that cannot be joined, refuses.
+   reports=str(project/".agent_reports")
+   for rows,expected in (([], "my-project-2"),
+                         ([{"key":"my-project-2","state":"satisfied","campaign_id":"camp_"+"4"*32}], "my-project-2"),
+                         ([{"key":"my-project-2","state":"abandoned"}], None),
+                         ([{"key":"my-project-2","state":"satisfied"},{"key":"my-project-2","state":"satisfied"}], None),
+                         ([{"key":"other","state":"active"}], None), (None, None)):
+    with self.subTest(rows=rows), mock.patch.object(R,"compose_campaign_summaries",return_value=rows):
+     self.assertEqual(R.first_campaign_key(reports,R.ROOT),expected)
   with self.assertRaisesRegex(ValueError,"compose-campaign-selection-conflict"): self.compose(campaign_key="tts-v6-release",unassigned=True)
   by_parent=self.compose(parent_cycle_id="cyc_"+"b"*32)
   self.assertNotIn("campaign_unassigned",by_parent); self.assertEqual(R.compose_campaign_selection(by_parent)["mode"],"parent")

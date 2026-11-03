@@ -4773,7 +4773,16 @@ def first_campaign_key(artifact_root, cwd):
         return None
     root = Path(artifact_root)
     folder = root.parent if root.name in (".agent_reports", ".claude_reports") else Path(cwd)
-    return re.sub(r"[^a-z0-9]+", "-", folder.name.lower()).strip("-")[:40] or "work"
+    key = re.sub(r"[^a-z0-9]+", "-", folder.name.lower()).strip("-")[:40] or "work"
+    # A closed stream of that name reopens, as `--campaign-key <folder>` would; one that cannot
+    # be joined (abandoned, superseded, ambiguous) keeps the refusal, which lists the streams.
+    try:
+        import artifact_producer
+        if artifact_producer.classify_campaign_key(rows, key).get("mode") == "blocked":
+            return None
+    except (ImportError, AttributeError, TypeError, ValueError):
+        return None
+    return key
 
 
 def compose_campaign_hint(artifact_root, cwd=None):
