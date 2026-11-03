@@ -3,6 +3,7 @@
 import concurrent.futures
 import contextlib
 import copy
+import hashlib
 import importlib.util
 import io
 import json
@@ -926,18 +927,28 @@ class ReplacementTest(unittest.TestCase):
         prep.assert_not_called()
         self.assertEqual(env['AGENT_ARTIFACT_CYCLE_ID'],'cyc-stale')
 
+    def _existing_recovery_attention(self, attempt_id, recovery_id, reason):
+        # The two files an SD-106 recovery exhaustion recorded, by-source index
+        # first; its writer is retired and replacement still reads them.
+        base = self.jobs.parent / 'recovery-attention'
+        R._once(base / 'by-source' / (R._id(attempt_id) + '.json'),
+                {'original_attempt_id': attempt_id, 'recovery_id': recovery_id})
+        R._once(base / (hashlib.sha256(recovery_id.encode()).hexdigest() + '.json'),
+                {'schema': 'recovery-attention-v1', 'original_attempt_id': attempt_id,
+                 'recovery_id': recovery_id, 'state': 'needs-attention', 'reason': reason})
+
     def test_exhausted_sd106_budget_cannot_start_new_family(self):
         for addition in [{'recovery_exhausted':'1'}, {'start_permitted':'0'},
                          {'recovery_id':'rid-dead'}]:
             self.write({**self.meta,**addition})
             if addition.get('recovery_id'):
-                D._write_recovery_attention(self.jobs,'att-source','rid-dead','exhausted')
+                self._existing_recovery_attention('att-source','rid-dead','exhausted')
             with self.subTest(addition=addition),self.assertRaises(D.DispatchContractError) as caught:self.claim()
             self.assertEqual(caught.exception.reason,'automatic-replacement-exhausted')
         self.assertFalse((R._directory(self.jobs)/'claims').exists())
 
     def test_sd106_attention_before_row_publication_already_consumes_budget(self):
-        D._write_recovery_attention(self.jobs,'att-source','rid-dead','exhausted')
+        self._existing_recovery_attention('att-source','rid-dead','exhausted')
         self.assertNotIn('recovery_id',self.jobs.read_text())
         with self.assertRaises(D.DispatchContractError) as caught:self.claim()
         self.assertEqual(caught.exception.reason,'automatic-replacement-exhausted')
@@ -1595,29 +1606,32 @@ class ReplacementTest(unittest.TestCase):
         meta.update(D.parse_registry_metadata(R.seal_launch_input(args, 'codex', 'the raw task')))
         return meta
 
-    def _legacy_retry_claim(self, meta, remaining=8):
+    def _legacy_recovery_id(self, meta):
         identity = {'source_route_id': meta['route_id'],
                     'source_route_hash': meta['route_hash'],
                     'node_or_group_leg': meta['route_node'],
                     'original_attempt_id': meta['attempt_id'],
                     'cancellation_receipt_digest': meta['cancellation_receipt_digest']}
-        return D.claim_recovery_retry(self.jobs,
-            recovery_id=D._recovery_identity_digest(identity),
-            source_route_id=identity['source_route_id'],
-            source_route_hash=identity['source_route_hash'],
-            node_or_group_leg=identity['node_or_group_leg'],
-            original_attempt_id=identity['original_attempt_id'], remaining_cascade=remaining)
+        return 'rec-' + hashlib.sha256(json.dumps(
+            identity, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+    def _legacy_retry_claim(self, meta):
+        # The row an existing SD-106 recovery claim left; its writer is retired,
+        # and replacement still reads such rows as a spent budget.
+        recovery = self._legacy_recovery_id(meta)
+        claim = SimpleNamespace(recovery_id=recovery, retry_ordinal=1,
+                                retry_attempt_id=D._stable_recovery_attempt_id(recovery))
+        self.assertTrue(D.annotate_attempt_row(self.jobs, meta['attempt_id'], {
+            'recovery_id': recovery, 'retry_ordinal': '1',
+            'retry_attempt_id': claim.retry_attempt_id,
+            'retry_claimed_at': '2026-09-01T00:00:00Z'}))
+        return claim
 
     def _legacy_claimed_pair(self):
         route, path = self._legacy_real_route('legacy-root')
         original = self._legacy_row('att-legacy-original', route, path)
         self.write(original)
         first = self._legacy_retry_claim(original)
-        self.assertTrue(first.start_permitted)
-        self.assertEqual(first.retry_ordinal, 1)
-        self.assertEqual(first.retry_attempt_id, D._stable_recovery_attempt_id(first.recovery_id))
-        # Existing SD106 idempotence must survive the shared-budget guard.
-        self.assertEqual(self._legacy_retry_claim(original), first)
         original = R._rows(self.jobs.read_text().splitlines())[original['attempt_id']][1]
         target = self._legacy_row(first.retry_attempt_id, route, path)
         self.assertNotIn('automatic_retry_of', target)
@@ -1647,10 +1661,6 @@ class ReplacementTest(unittest.TestCase):
                 self._legacy_assert_exhausted(lambda: R.admission(
                     self.jobs, self.jobs.read_text().splitlines(),
                     {**target, 'attempt_id': 'att-second-retry', predecessor_key: target['attempt_id']}))
-
-    def test_sd106_stable_target_cannot_claim_another_sd106_retry(self):
-        _, _, _, target = self._legacy_claimed_pair()
-        self._legacy_assert_exhausted(lambda: self._legacy_retry_claim(target))
 
     def test_legacy_automatic_retry_still_protects_its_exact_predecessor(self):
         route, path = self._legacy_real_route('automatic-root')
@@ -1717,7 +1727,6 @@ class ReplacementTest(unittest.TestCase):
         self.assertTrue(R.legacy_budget_exhausted(
             self.jobs, self.jobs.read_text().splitlines(), current, route=route))
         self._legacy_assert_exhausted(lambda: R.claim(self.jobs, current['attempt_id']))
-        self._legacy_assert_exhausted(lambda: self._legacy_retry_claim(current))
 
     def test_sd106_other_node_in_verified_continuation_has_own_budget(self):
         root, _, _, _ = self._legacy_claimed_pair()
@@ -1737,25 +1746,21 @@ class ReplacementTest(unittest.TestCase):
             self.jobs, self.jobs.read_text().splitlines(), current, route=route))
         self.assertEqual(R.claim(self.jobs, current['attempt_id'])['original_attempt_id'], current['attempt_id'])
 
-    def test_sd106_attention_first_write_crash_consumes_continuation_budget(self):
+    def test_sd106_attention_index_without_row_annotation_consumes_continuation_budget(self):
+        # An SD-106 exhaustion that stopped after its first durable write left
+        # only the by-source attention index; the source row carries nothing.
         root, path = self._legacy_real_route('attention-root')
         original = self._legacy_row('att-attention-original', root, path)
         self.write(original)
-        real_once = R._once
-        def crash_after_index(path, value):
-            if path.parent.name == 'recovery-attention':
-                raise RuntimeError('crash before attention record and row annotation')
-            return real_once(path, value)
-        with mock.patch.object(R, '_once', side_effect=crash_after_index):
-            with self.assertRaisesRegex(RuntimeError, 'crash before'):
-                self._legacy_retry_claim(original, remaining=0)
+        R._once(self.jobs.parent / 'recovery-attention' / 'by-source'
+                / (R._id(original['attempt_id']) + '.json'),
+                {'original_attempt_id': original['attempt_id'],
+                 'recovery_id': self._legacy_recovery_id(original)})
         self.assertNotIn('recovery_exhausted', self.jobs.read_text())
-        self.assertEqual(len(list((self.jobs.parent / 'recovery-attention/by-source').glob('*.json'))), 1)
         route, path = self._legacy_real_route('attention-continuation', root)
         current = self._legacy_row('att-after-attention-crash', route, path)
         self.write(current, append=True); R._route.return_value = (path, route)
         self._legacy_assert_exhausted(lambda: R.claim(self.jobs, current['attempt_id']))
-        self._legacy_assert_exhausted(lambda: self._legacy_retry_claim(current))
 
     def test_sd157_unresolved_reservation_protects_continuation(self):
         root, path = self._legacy_real_route('reservation-root')
@@ -1778,7 +1783,6 @@ class ReplacementTest(unittest.TestCase):
         with self.assertRaises(D.DispatchContractError) as refused:
             R.claim(self.jobs, current['attempt_id'])
         self.assertEqual(refused.exception.reason, 'replacement-legacy-budget-link-unproven')
-        self._legacy_assert_exhausted(lambda: self._legacy_retry_claim(current))
 
     def test_unrelated_corrupt_historical_route_does_not_block_healthy_stream(self):
         _, foreign_path, _, _ = self._legacy_claimed_pair()

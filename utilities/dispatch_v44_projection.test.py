@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import ast
-from dataclasses import fields
 import importlib.util
 import json
 import os
@@ -340,13 +339,6 @@ class DispatchV44ProjectionTest(unittest.TestCase):
             },
         )
 
-        self.assertEqual(
-            {field.name for field in fields(CONTRACT.RecoveryRetryClaim)},
-            {
-                "recovery_id", "original_attempt_id", "retry_ordinal",
-                "retry_attempt_id", "state", "reason", "start_permitted",
-            },
-        )
         self.assertTrue({
             "recovery_id", "retry_ordinal", "retry_attempt_id", "retry_claimed_at",
             "cancellation_quiescence_receipt", "cancellation_receipt_digest",
