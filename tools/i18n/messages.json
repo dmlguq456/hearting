@@ -2,6 +2,42 @@
  "schema": 1,
  "note": "User-facing text. Korean entries match the pre-catalog strings byte for byte. {name} fields are filled by str.format.",
  "messages": {
+  "route.a.depends_on_work": {
+   "en": "unconfirmed (depends on the work)",
+   "ko": "미확인 (작업 의미에 따름)"
+  },
+  "route.a.lab_declared": {
+   "en": "yes (lab run declared)",
+   "ko": "예 (lab 실행 선언됨)"
+  },
+  "route.a.lineage": {
+   "en": "unconfirmed (existing lineage and append-only RUNLOG contract stays)",
+   "ko": "미확인 (기존 lineage·append-only RUNLOG 유지 계약)"
+  },
+  "route.a.no": {
+   "en": "no",
+   "ko": "아니오"
+  },
+  "route.a.not_applicable": {
+   "en": "not applicable",
+   "ko": "해당 없음"
+  },
+  "route.a.single_run": {
+   "en": "none (single run)",
+   "ko": "없음 (단일 실행)"
+  },
+  "route.a.stages_declared": {
+   "en": "{count} declared",
+   "ko": "{count}개 선언됨"
+  },
+  "route.a.surface": {
+   "en": "native {native} / headless {headless}",
+   "ko": "native {native} / headless {headless}"
+  },
+  "route.a.yes": {
+   "en": "yes",
+   "ko": "예"
+  },
   "route.campaign.blocked": {
    "en": "Campaign {key} (begin will refuse: {reason})",
    "ko": "캠페인 {key} (begin 거부 예정: {reason})"
@@ -34,9 +70,181 @@
    "en": "Campaign {key} (cannot tell whether it exists: campaign list unreadable)",
    "ko": "캠페인 {key} (기존 여부 확인 불가: 캠페인 목록 읽기 실패)"
   },
+  "route.capability.compose_default": {
+   "en": "capability={capability} (source=compose-default, --capability not given; fixed default, the task text is not classified; consider autopilot-lab/eval for result analysis, evaluation or comparison)",
+   "ko": "capability={capability} (source=compose-default, --capability 지정 안 됨; 고정 기본값, 과제 문장 분류 없음; 결과 분석·평가·비교는 autopilot-lab/eval 검토)"
+  },
+  "route.capability.frame_pending": {
+   "en": "capability=awaiting frame decision (source=frame-shape)",
+   "ko": "capability=frame 결정 대기 (source=frame-shape)"
+  },
+  "route.capability.non_git_unresolved": {
+   "en": "capability={capability} (source=non-git-unresolved; task kind not classified)",
+   "ko": "capability={capability} (source=non-git-unresolved; 작업 종류 미분류)"
+  },
+  "route.card.borrowed": {
+   "en": "Borrowed parts {parts}",
+   "ko": "빌린 부품 {parts}"
+  },
+  "route.card.capability_unresolved": {
+   "en": "Task kind undecided — set it with `--capability`",
+   "ko": "작업 종류 미정 — `--capability`로 지정"
+  },
+  "route.card.confirmation": {
+   "en": "Confirmation {method} · origin {origin}",
+   "ko": "확인 방식 {method} · 출처 {origin}"
+  },
+  "route.card.cost_one": {
+   "en": "Cost: one frame leg · one direction-check question",
+   "ko": "비용: frame 한 갈래 · 방향 확인 질문 1회"
+  },
+  "route.card.cost_two": {
+   "en": "Cost: two top-model legs · one direction-check question",
+   "ko": "비용: 최상위 모델 두 갈래 · 방향 확인 질문 1회"
+  },
+  "route.card.frame_proposes": {
+   "en": "frame assembles and proposes the direction and route",
+   "ko": "frame이 방향과 경로를 조립해 제안합니다"
+  },
+  "route.card.header": {
+   "en": "[Route] {capability} · {shape}({intensity}) {graph} · route {route_id} · origin compose · human gate {gates}",
+   "ko": "[경로] {capability} · {shape}({intensity}) {graph} · route {route_id} · origin compose · 사람 게이트 {gates}"
+  },
+  "route.card.inputs": {
+   "en": "Inputs {names} ← {cycles} {path}",
+   "ko": "입력 {names} ← {cycles} {path}"
+  },
+  "route.card.non_git_direct": {
+   "en": "Not a git folder — this session proceeds directly. If a worker is needed, start again without --shape (source edits need git init)",
+   "ko": "git 아닌 폴더 — 이 세션이 직접 진행. 작업자가 필요하면 --shape 없이 다시 시작(원본 수정은 git init 필요)"
+  },
+  "route.card.output": {
+   "en": "Output {path}",
+   "ko": "산출물 {path}"
+  },
+  "route.card.plan": {
+   "en": "Plan {plan}{suffix}",
+   "ko": "계획 {plan}{suffix}"
+  },
+  "route.card.plan_inherited": {
+   "en": " (inherited)",
+   "ko": " (상속)"
+  },
+  "route.card.plan_unreadable": {
+   "en": "Route plan could not be read",
+   "ko": "경로 계획을 읽지 못함"
+  },
+  "route.card.scope": {
+   "en": "Execution scope {scope}",
+   "ko": "실행 범위 {scope}"
+  },
+  "route.card.split": {
+   "en": "Approved split: {items}",
+   "ko": "승인된 분할: {items}"
+  },
+  "route.card.split_more": {
+   "en": "; {count} more (all in the route and owner instructions)",
+   "ko": "; 외 {count}개(route·owner 지시문에 전부)"
+  },
+  "route.card.start_approval": {
+   "en": "Start approval {approval} ({part})",
+   "ko": "시작 승인 {approval} ({part})"
+  },
+  "route.error.not_git_worker": {
+   "en": "Not a git repository: source-mutating worker route; run git init and start again, or continue in this session with --shape direct",
+   "ko": "git 저장소 아님: source-mutating worker route; git init 후 다시 시작하거나, 이 세션에서 --shape direct로 진행"
+  },
+  "route.frame.pending": {
+   "en": "awaiting frame decision",
+   "ko": "frame 결정 대기"
+  },
+  "route.intensity.hint": {
+   "en": "Intensity note: consider --intensity strong for a judgment or root-cause analysis",
+   "ko": "강도 안내: 판정·원인 분석이면 --intensity strong 검토"
+  },
+  "route.intensity.unspecified": {
+   "en": ", not specified",
+   "ko": ", 지정 안 됨"
+  },
+  "route.none": {
+   "en": "none",
+   "ko": "없음"
+  },
+  "route.nongit.cause": {
+   "en": "Not a git repository: {cwd}",
+   "ko": "git 저장소 아님: {cwd}"
+  },
+  "route.nongit.next_refuse": {
+   "en": "run git init and start again, or run the same compose from the depth-0 parent without --shape or with --shape direct",
+   "ko": "git init 후 다시 시작하거나, depth-0 부모에서 같은 compose를 --shape 없이 또는 --shape direct로 실행"
+  },
+  "route.nongit.next_worker": {
+   "en": "run git init and start again, or continue in this session with --shape direct",
+   "ko": "git init 후 다시 시작하거나, 이 세션에서 --shape direct로 진행"
+  },
+  "route.obs.seen": {
+   "en": "observed",
+   "ko": "관측됨"
+  },
+  "route.obs.unknown": {
+   "en": "unconfirmed",
+   "ko": "미확인"
+  },
+  "route.q.delegation_surface": {
+   "en": "Delegation surface",
+   "ko": "위임 표면"
+  },
+  "route.q.inline_exception": {
+   "en": "Inline exception",
+   "ko": "inline 예외"
+  },
+  "route.q.main_capability": {
+   "en": "Main capability",
+   "ko": "주 capability"
+  },
+  "route.q.new_measurement": {
+   "en": "New measurement",
+   "ko": "새 실측"
+  },
+  "route.q.split_stages": {
+   "en": "Separate stages",
+   "ko": "분리 단계"
+  },
+  "route.size": {
+   "en": "Size: nodes={nodes} worker_dispatches={workers} owner_dispatches={owners} resource(measured)={resources} (initial run estimate; retries and follow-up routes excluded)",
+   "ko": "규모: nodes={nodes} worker_dispatches={workers} owner_dispatches={owners} resource(측정)={resources} (초기 실행 예상, 재시도·후속 route 제외)"
+  },
+  "route.size.frame_default": {
+   "en": "default",
+   "ko": "기본"
+  },
+  "route.size.frame_legacy": {
+   "en": "route built under the earlier rule",
+   "ko": "이전 규칙으로 만든 경로"
+  },
+  "route.size.frame_one": {
+   "en": "; frame: one leg ({label})",
+   "ko": "; frame 한 갈래({label})"
+  },
+  "route.size.frame_two": {
+   "en": "; frame: two legs ({label})",
+   "ko": "; frame 두 갈래({label})"
+  },
+  "route.size.same_only": {
+   "en": " · same harness (only {harness} is usable)",
+   "ko": " · 같은 하네스(쓸 수 있는 하네스가 {harness} 하나)"
+  },
+  "route.size.same_pinned": {
+   "en": " · same harness (frame pinned to {pin})",
+   "ko": " · 같은 하네스(frame 지정 {pin})"
+  },
   "route.spec.shared": {
    "en": "Shared spec available — read: {path}",
    "ko": "공유 spec 있음 — 읽을 경로: {path}"
+  },
+  "route.tier.inline": {
+   "en": "current-session (tier not recorded)",
+   "ko": "current-session(등급 미기록)"
   }
  }
 }
