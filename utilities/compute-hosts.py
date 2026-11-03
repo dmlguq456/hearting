@@ -3087,15 +3087,18 @@ def cmd_run(args):
 
 
 COMPLETION_POLL_SECONDS = 60
-# A run with no exit code whose own files have not changed for this long is no
-# longer watched (the user's seven-day unused rule). Its end is unknown: never
-# success or failure. A remote run whose wrapper died before writing
-# `exit_code` would otherwise keep one resident watcher, respawned on every
-# install, for as long as its directory exists.
+# A run with no exit code whose own files have not changed for this long, and
+# whose session its host reports gone, is no longer watched (the user's
+# seven-day unused rule). Its end is unknown: never success or failure. A
+# remote run whose wrapper died before writing `exit_code` would otherwise keep
+# one resident watcher, respawned on every install, for as long as its
+# directory exists.
 RUN_QUIET_SECONDS = 7 * 24 * 3600
 # Written when watching stops for that reason; a later exit code is then
 # reported once by the next observer reconnect (`resource-observers`).
 QUIET_RUN_MARKER = ".observation-unknown"
+# A quiet run's session is asked about at most this often (one ssh probe).
+QUIET_PROBE_SECONDS = 3600
 
 
 def _run_last_activity(run_dir):
@@ -3127,6 +3130,20 @@ def _run_quiet_since(run_dir, now):
     return last
 
 
+def _run_session_alive(run_dir):
+    """The run's tmux session on its host: True, False when reported gone, None when unknown."""
+    try:
+        meta = json.loads((Path(run_dir) / "meta.json").read_text(encoding="utf-8"))
+        host_name = meta.get("host")
+        if not isinstance(host_name, str) or not host_name:
+            return None
+        (_name, host), = _select(load_config(), [host_name])
+        return _tmux_session_alive(host, meta.get("run_id") or Path(run_dir).name,
+                                   transport=meta.get("tmux_transport", _LEGACY_TMUX_TRANSPORT))
+    except Exception:  # noqa: BLE001 -- an unreadable answer keeps the watch
+        return None
+
+
 def _iso_time(epoch):
     return datetime.datetime.fromtimestamp(epoch).astimezone().isoformat(timespec="seconds")
 
@@ -3136,7 +3153,7 @@ def _record_quiet_run(run_dir, last_activity, now):
     path = Path(run_dir) / QUIET_RUN_MARKER
     if path.exists():
         return
-    body = json.dumps({"state": "unknown", "reason": "no-activity-without-exit-code",
+    body = json.dumps({"state": "unknown", "reason": "session-gone-without-exit-code",
                        "last_activity": _iso_time(last_activity),
                        "recorded_at": _iso_time(now)}, sort_keys=True) + "\n"
     temporary = path.with_name(f"{QUIET_RUN_MARKER}.{os.getpid()}.tmp")
@@ -3348,6 +3365,7 @@ def _watch_run(args, *, sleep=time.sleep, now=time.time):
     run_dir = Path(args.run_dir)
     exit_path = run_dir / "exit_code"
     last_observation = None
+    next_session_probe = 0.0
     while True:
         if not run_dir.is_dir():
             return 0
@@ -3359,11 +3377,15 @@ def _watch_run(args, *, sleep=time.sleep, now=time.time):
             break
         observed_at = now()
         quiet_since = _run_quiet_since(run_dir, observed_at)
-        if quiet_since is not None:
-            # No exit code and nothing written for RUN_QUIET_SECONDS: stop
-            # watching and leave the end unknown instead of waiting forever.
-            _record_quiet_run(run_dir, quiet_since, observed_at)
-            return 0
+        if quiet_since is not None and observed_at >= next_session_probe:
+            # Nothing written for RUN_QUIET_SECONDS and no exit code. A run can
+            # stay alive and silent (buffered stdout, metrics only under its
+            # output dir), so only a session its host reports gone ends the
+            # watch, with the end left unknown. Alive or unreadable keeps it.
+            next_session_probe = observed_at + QUIET_PROBE_SECONDS
+            if _run_session_alive(run_dir) is False:
+                _record_quiet_run(run_dir, quiet_since, observed_at)
+                return 0
         try:
             meta_live = json.loads((run_dir / "meta.json").read_text(encoding="utf-8"))
             last_observation = _observe_compute_experiment(meta_live, run_dir, observed_at) or last_observation

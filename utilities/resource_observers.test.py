@@ -237,7 +237,7 @@ class AdoptionTest(unittest.TestCase):
             compute = OBS.load_tool('compute-hosts')
             old = time.time() - compute.RUN_QUIET_SECONDS - 3600
             runs = {}
-            for name in ('quiet', 'active', 'late', 'finished'):
+            for name in ('quiet', 'quiet-alive', 'active', 'late', 'finished'):
                 run = root / 'compute' / name
                 run.mkdir(parents=True)
                 (run / 'meta.json').write_text(json.dumps(
@@ -246,7 +246,7 @@ class AdoptionTest(unittest.TestCase):
             (runs['late'] / compute.QUIET_RUN_MARKER).write_text('{}\n')
             for name in ('late', 'finished'):
                 (runs[name] / 'exit_code').write_text('0\n')
-            for name in ('quiet', 'late', 'finished'):
+            for name in ('quiet', 'quiet-alive', 'late', 'finished'):
                 for path in runs[name].iterdir():
                     os.utime(path, (old, old))
             with mock.patch.dict(os.environ, {'AGENT_RESOURCE_RUN_INDEX': str(root / 'index.json')}), \
@@ -254,12 +254,15 @@ class AdoptionTest(unittest.TestCase):
                  mock.patch.object(compute, 'load_config', return_value={'run_root': root / 'compute'}), \
                  mock.patch.object(compute, '_refuse_namespace_self'), \
                  mock.patch.object(compute, '_spawn_completion_watch', return_value=True) as attach, \
-                 mock.patch.object(OBS, 'retire_watch', return_value=0) as retire:
+                 mock.patch.object(OBS, 'retire_watch', return_value=0) as retire, \
+                 mock.patch.object(compute, '_run_session_alive',
+                                   side_effect=lambda run: False if run.name == 'quiet' else None):
                 result = OBS.reconcile()
-            # The active run and the late exit get an observer; the quiet run and
+            # The active run, a quiet run whose session may be alive, and the
+            # late exit get an observer; a quiet run whose session is gone and
             # an ordinary finished run do not.
             self.assertEqual(sorted(Path(call.args[0]).name for call in attach.call_args_list),
-                             ['active', 'late'])
+                             ['active', 'late', 'quiet-alive'])
             quiet = next(row for row in result['results'] if row.get('run_id') == 'quiet')
             self.assertEqual((quiet['watching'], quiet['state']), (False, 'unknown'))
             self.assertTrue((runs['quiet'] / compute.QUIET_RUN_MARKER).is_file())

@@ -3136,18 +3136,56 @@ class CompletionWatchTest(unittest.TestCase):
         for path in self.run_dir.iterdir():
             os.utime(path, (old, old))
 
-    def test_a_quiet_run_without_an_exit_code_stops_being_watched_as_unknown(self):
+    def test_a_quiet_run_whose_session_is_gone_stops_being_watched_as_unknown(self):
         module = load_module()
         self._make_quiet(module)
-        with mock.patch("session_notice.notify") as notify:
+        with mock.patch("session_notice.notify") as notify, \
+                mock.patch.object(module, "_run_session_alive", return_value=False) as probe:
             self.assertEqual(module.cmd_watch_run(SimpleNamespace(run_dir=str(self.run_dir)),
                                                   sleep=lambda s: self.fail("slept")), 0)
         notify.assert_not_called()
+        probe.assert_called_once()
         record = json.loads((self.run_dir / module.QUIET_RUN_MARKER).read_text())
         self.assertEqual((record["state"], record["reason"]),
-                         ("unknown", "no-activity-without-exit-code"))
+                         ("unknown", "session-gone-without-exit-code"))
         self.assertFalse((self.run_dir / "exit_code").exists())
         self.assertFalse((self.run_dir / module.STOP_REASON_FILENAME).exists())
+
+    def test_a_quiet_run_that_is_alive_or_unknown_keeps_its_watch(self):
+        # Alive and silent (buffered stdout, metrics only under its output
+        # dir): the watch stays and still reports the end and its outputs.
+        module = load_module()
+        for alive in (True, None):
+            with self.subTest(alive=alive):
+                (self.run_dir / "exit_code").unlink(missing_ok=True)
+                self._make_quiet(module)
+                slept = []
+
+                def sleep(seconds):
+                    slept.append(seconds)
+                    if len(slept) == 3:
+                        (self.run_dir / "exit_code").write_text("0\n")
+
+                with mock.patch("session_notice.notify") as notify, \
+                        mock.patch.object(module, "_run_session_alive", return_value=alive) as probe:
+                    module.cmd_watch_run(SimpleNamespace(run_dir=str(self.run_dir)), sleep=sleep)
+                self.assertEqual(slept, [module.COMPLETION_POLL_SECONDS] * 3)
+                probe.assert_called_once()           # at most once per QUIET_PROBE_SECONDS
+                self.assertEqual(notify.call_count, 1)
+                self.assertFalse((self.run_dir / module.QUIET_RUN_MARKER).exists())
+
+    def test_the_session_probe_reads_the_runs_host_and_transport(self):
+        module = load_module()
+        meta = {**self.meta, "host": "here", "tmux_transport": {"kind": "nohup-v1"}}
+        (self.run_dir / "meta.json").write_text(json.dumps(meta))
+        with mock.patch.object(module, "load_config", return_value={"hosts": {}}), \
+                mock.patch.object(module, "_select", return_value=[("here", {"address": "h"})]), \
+                mock.patch.object(module, "_tmux_session_alive", return_value=False) as alive:
+            self.assertIs(module._run_session_alive(self.run_dir), False)
+        self.assertEqual(alive.call_args.args, ({"address": "h"}, "here-1"))
+        self.assertEqual(alive.call_args.kwargs["transport"], {"kind": "nohup-v1"})
+        with mock.patch.object(module, "load_config", side_effect=module.ConfigError("missing", "x")):
+            self.assertIsNone(module._run_session_alive(self.run_dir))
 
     def test_a_run_that_writes_again_is_still_watched(self):
         module = load_module()
@@ -3168,7 +3206,9 @@ class CompletionWatchTest(unittest.TestCase):
     def test_a_late_exit_code_is_reported_once_and_clears_the_unknown_record(self):
         module = load_module()
         self._make_quiet(module)
-        module.cmd_watch_run(SimpleNamespace(run_dir=str(self.run_dir)), sleep=lambda s: self.fail("slept"))
+        with mock.patch.object(module, "_run_session_alive", return_value=False):
+            module.cmd_watch_run(SimpleNamespace(run_dir=str(self.run_dir)),
+                                 sleep=lambda s: self.fail("slept"))
         self.assertTrue((self.run_dir / module.QUIET_RUN_MARKER).exists())
         (self.run_dir / "exit_code").write_text("0\n")
         with mock.patch("session_notice.notify") as notify:

@@ -169,7 +169,12 @@ def reconcile():
                     continue
             else:
                 quiet_since = compute._run_quiet_since(directory, now)
-                if quiet_since is not None:
+                # A quiet run is let go only once its host reports the session
+                # gone (recorded beside it, so it is asked once); a live or
+                # unreadable session keeps its watcher.
+                if quiet_since is not None and (
+                        (directory / compute.QUIET_RUN_MARKER).exists()
+                        or compute._run_session_alive(directory) is False):
                     compute._record_quiet_run(directory, quiet_since, now)
                     retired = retire_watch(
                         [sys.executable, str(Path(compute.__file__).resolve()), 'watch-run', str(directory)],
