@@ -180,6 +180,33 @@ class OpenCodeGuardDiscoveryTest(unittest.TestCase):
         self.assertEqual(os.readlink(agents), str(own))
         self.assertEqual(own.read_bytes(), b"# my own global rules\n")
 
+    def test_an_edit_made_while_the_last_edit_is_kept_aside_is_put_back(self):
+        self.seed_rule()
+        agents = self.home / "AGENTS.md"
+        self.run_activation()
+        edited = agents.read_bytes() + b"\n- my own line\n"
+        agents.write_bytes(edited)
+        newer = edited + b"- and one more, typed meanwhile\n"
+        real_move = activation.shutil.move
+
+        def edit_then_move(source, target):
+            if source == str(agents):
+                Path(source).write_bytes(newer)
+            return real_move(source, target)
+
+        with mock.patch.object(activation.shutil, "move", side_effect=edit_then_move):
+            with self.assertRaisesRegex(activation.ActivationError, "concurrent-successor"):
+                activation.refresh("opencode")
+        # Rollback puts the newer edit back; the earlier one stays kept aside.
+        self.assertEqual(agents.read_bytes(), newer)
+        self.assertEqual([path.read_bytes() for path in self.home.glob("AGENTS.md.edited-*")], [edited])
+        # The next refresh keeps the newer edit too and rewrites the file.
+        report = activation.refresh("opencode")
+        self.assertEqual(report["freshness"], "fresh", report)
+        self.assertEqual(agents.read_bytes(), self.expected_render())
+        self.assertEqual(sorted(path.read_bytes() for path in self.home.glob("AGENTS.md.edited-*")),
+                         sorted([edited, newer]))
+
     def set_carry(self, value):
         """Write the user's dispatch-defaults with `user_rules.opencode`, or remove the section."""
         user_file = activation.paths.hearting_config_dir() / "dispatch-defaults.yaml"
