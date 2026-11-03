@@ -719,6 +719,54 @@ class IdleObserverTests(unittest.TestCase):
         self.assertEqual((booked["origin"], booked["seat"]["pane"], booked["sid"]), ("idle", self.pane, "sid-A"))
         self.assertEqual(len(self.started), 1)
 
+    def test_a_detached_observer_carries_the_hook_proof_from_booking_to_clear(self):
+        # Booking, the reply card and the clear all run in the detached observer/helper,
+        # which cannot prove a seat itself; each step uses the Stop hook's proof.
+        import session_tidy_runner as runner
+        with self.iso.patched_environ(self.extra):
+            seat = st.resolve_seat("claude", str(self.cwd), sid="sid-A")
+        proof = {**seat.as_dict(), "session": {"harness": "claude", "sid": "sid-A"}}
+        orphan = {key: value for key, value in self.extra.items() if key != "HERDR_PANE_ID"}
+
+        def stop(reply=None, turn="turn-A", now=None):
+            payload = {"hook_event_name": "Stop", "session_id": "sid-A", "cwd": str(self.cwd),
+                       "transcript_path": self.transcript("sid-A", 200000), "turn_id": turn,
+                       "_seat": proof}
+            if reply is not None:
+                payload["last_assistant_message"] = reply
+            with self.iso.patched_environ(orphan), \
+                    mock.patch.object(pane_ownership, "verified_pane", return_value=""):
+                return idle.observe_payload("claude", payload, now=now)
+
+        with mock.patch.object(clear, "herdr_command", return_value=str(self.iso.root / "fake-herdr")), \
+                mock.patch.object(clear, "_start_helper", return_value=12345), \
+                mock.patch.object(runner, "start_detached", return_value=None), \
+                mock.patch.object(st, "now_epoch", return_value=4241):
+            self.assertEqual(stop(now=1000), "booking=scheduled")
+            with self.iso.patched_environ(self.extra):
+                path = clear.reservation_path(seat.key)
+                claim, reason = clear.claim_idle_card_request(path, clear.read_reservation(seat.key)["nonce"])
+                self.assertEqual(reason, "")
+                st.run_hook("claude", "prompt", "sid-A", cwd=str(self.cwd),
+                            prompt_text=clear.idle_card_request_text(claim))
+                self.assertTrue(clear.finish_idle_card_request(claim, accepted=True))
+            begin, end = st.reply_card_markers(claim["nonce"])
+            stop(f"{begin}\n진행 중: 분리된 관찰자가 받은 카드\n다음 할 일: 기다림\n{end}", turn="turn-tidy")
+            with self.iso.patched_environ(self.extra):
+                accepted = clear.read_reservation(seat.key)
+                self.assertEqual(accepted["idle_request"]["state"], "accepted")
+                self.assertEqual(st.read_latest_card(st.session_seat(seat, "claude", "sid-A"))["body"],
+                                 "진행 중: 분리된 관찰자가 받은 카드\n다음 할 일: 기다림")
+                sent = []
+                outcome = clear.run_helper(
+                    seat.key, accepted["nonce"], wait=lambda *_a: "idle",
+                    steward=lambda *_a: sent.append("clear") or {"cleared": "true", "new_session": "sid-B"},
+                    continuer=lambda *_a: sent.append("status") or {"continued": "true"},
+                    sleep=lambda _s: None)
+                held = clear.read_reservation(seat.key)
+        self.assertEqual((outcome, sent), ("continued", ["clear", "status"]))
+        self.assertEqual((held["status"], held["new_session"]), ("cleared", "sid-B"))
+
     def test_detached_launcher_excludes_worker_owner_auxiliary_and_reviewer(self):
         spawn = mock.Mock()
         payload = {"hook_event_name": "Stop", "session_id": "sid-A", "cwd": str(self.cwd)}

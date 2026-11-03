@@ -290,10 +290,11 @@ def observe_payload(harness: str, payload: dict, *, now: float | None = None,
     try:
         # A card written as the reply to an automatic tidy request is taken before the
         # compact/idle bookings below look at this turn; an ordinary reply changes nothing.
-        accept_reply_card(harness, sid, cwd, last_reply(harness, payload, sid))
+        accept_reply_card(harness, sid, cwd, last_reply(harness, payload, sid), seat=proven)
     except Exception:  # noqa: BLE001 - optional; the request simply stays unanswered
         pass
-    compact_result = reconcile_compact_frontier(harness, sid, cwd, now=now, lock_wait=lock_wait)
+    compact_result = reconcile_compact_frontier(harness, sid, cwd, now=now, lock_wait=lock_wait,
+                                                seat=proven)
     if compact_result and compact_result not in ("booking=skipped reason=new-input",
                                                   "booking=skipped reason=card-changed"):
         return compact_result
@@ -331,7 +332,7 @@ def launch_observer(harness: str, payload: dict, *, environ=None, popen=None) ->
         import session_tidy as tidy
         sid = _walk(payload, "session_id", "sessionID", "thread_id", "threadID")
         cwd = _walk(payload, "cwd", "working_directory", "workingDirectory") or os.getcwd()
-        seat = tidy.resolve_seat(harness, cwd, environ, sid)
+        seat = tidy.resolve_seat(harness, cwd, environ, sid, hook=True)
         if seat.kind in ("pane", "native") and sid:
             # The observer is detached: once this hook exits it has no runtime
             # ancestor left to prove a seat with, so it takes this hook's proof.

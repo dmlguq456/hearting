@@ -66,13 +66,14 @@ class PaneOwnershipTest(unittest.TestCase):
                 mock.patch.object(po, "_caller_runtime", return_value=((99, 1, 1, 0, 0, "1"), True)), \
                 mock.patch.object(po, "codex_tui_process_bindings", return_value=[binding]), \
                 mock.patch.object(po, "_process", return_value=(1234, 1, 1, 0, 0, "77")):
-            self.assertEqual(po.codex_caller_binding(sid, pid=99, environ={}), binding)
-            self.assertIsNone(po.codex_caller_binding(sid, pid=99, environ={
+            self.assertEqual(po.codex_caller_binding(sid, pid=99, environ={}, from_hook=True), binding)
+            self.assertIsNone(po.codex_caller_binding(sid, pid=99, environ={}))   # not a hook
+            self.assertIsNone(po.codex_caller_binding(sid, pid=99, from_hook=True, environ={
                 "CODEX_THREAD_ID": "019facc9-fe83-7480-89f6-9e64fbebf0cb"}))
         with mock.patch.object(po, "_registered_worker", return_value=False), \
                 mock.patch.object(po, "_caller_runtime", return_value=((99, 1, 1, 0, 0, "1"), False)), \
                 mock.patch.object(po, "codex_tui_process_bindings", return_value=[binding]):
-            self.assertIsNone(po.codex_caller_binding(sid, pid=99, environ={}))   # not the daemon
+            self.assertIsNone(po.codex_caller_binding(sid, pid=99, environ={}, from_hook=True))   # not the daemon
 
     def test_the_daemon_hook_gets_the_bound_pane_and_a_fallback_names_its_steps(self):
         sid = "019facc9-fe83-7480-89f6-9e64fbebf0ca"
@@ -85,16 +86,18 @@ class PaneOwnershipTest(unittest.TestCase):
                 mock.patch.object(po, "_caller_runtime", return_value=((99, 1, 1, 0, 0, "1"), True)), \
                 mock.patch.object(po, "_process", return_value=(1234, 1, 1, 0, 0, "77")):
             with mock.patch.object(po, "codex_tui_process_bindings", return_value=[binding]):
-                seat = st.resolve_seat("codex", temp, sid=sid)
+                seat = st.resolve_seat("codex", temp, sid=sid, hook=True)
+                # Outside a hook the caller's own thread id is still required.
+                self.assertEqual(st.resolve_seat("codex", temp, sid=sid).kind, "project")
             self.assertEqual((seat.kind, seat.pane, seat.socket_path),
                              ("pane", "w:p1", "/run/herdr/actual.sock"))
             records = Path(temp) / "state" / "hearting" / "session-tidy" / "seat-fallback"
-            self.assertFalse(records.exists())
+            self.assertFalse(records.exists())                 # only a hook's fallback is recorded
             with mock.patch.object(po, "codex_tui_process_bindings", return_value=[]):
-                self.assertEqual(st.resolve_seat("codex", temp, sid=sid).kind, "project")
+                self.assertEqual(st.resolve_seat("codex", temp, sid=sid, hook=True).kind, "project")
                 (record,) = records.glob("*.json")
                 first = json.loads(record.read_text())
-                st.resolve_seat("codex", temp, sid=sid)
+                st.resolve_seat("codex", temp, sid=sid, hook=True)
             self.assertEqual({key: first[key] for key in
                               ("sid", "caller", "service", "thread_env", "binding")},
                              {"sid": sid, "caller": "codex", "service": True,
