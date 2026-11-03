@@ -425,6 +425,19 @@ def materialize_pending_delivery(jobs: Path, row_fields: list[str]) -> Path | No
     return pending_delivery.record_path(root, metadata["parent_sid"], record["delivery_id"])
 
 
+def unpersistable_recipient_kind(metadata: dict) -> str:
+    """The recorded recipient kind of a delivery-intent row that no record can ever take.
+
+    ``dispatch_pending_delivery.create`` refuses a kind outside ``RECIPIENT_KINDS``
+    (``recipient-kind-unknown``) on every call, and a stamped kind never changes.
+    Empty when the row has no intent or its kind is persistable.
+    """
+    kind = metadata.get("delivery_recipient_kind", "")
+    if metadata.get("delivery_intent") != "1" or not kind or kind in pending_delivery.RECIPIENT_KINDS:
+        return ""
+    return kind
+
+
 def materialize_after_terminal_close(jobs: Path, attempt_id: str) -> Path | None:
     """SD-111 P2 trigger 1 -- shared helper. Call once, right after a
     lock-releasing terminal close (`close_attempt_row`, `close_attempt_row_if`,
@@ -468,6 +481,11 @@ def materialize_after_terminal_close(jobs: Path, attempt_id: str) -> Path | None
             settlement = settle_owner_completion(jobs, row.status, row.metadata)
             if settlement is not None and settlement.result != "completed":
                 return None
+        if unpersistable_recipient_kind(row.metadata):
+            # No record can ever take this kind; skip the claim work the notice
+            # would gate and keep the existing refusal trace below.
+            raise pending_delivery.PendingDeliveryError(
+                "delivery-persistence-refused", "recipient-kind-unknown")
         # A resultless-death recovery claim is durable controller work. Publish
         # it before the immutable terminal notice becomes visible to carriers;
         # the carrier still waits for a launched successor or a settled failure.
@@ -773,8 +791,12 @@ def reconcile_pending_delivery(jobs: Path, *, max_rows: int | None = None,
             from dispatch_owner_input import materialize_unresolved
             materialize_unresolved(jobs, attempt_id)
         if attempt_id and metadata.get("delivery_intent") == "1":
-            if materialize_backstop_due(root, metadata.get("parent_sid"),
-                                        metadata.get("delivery_id")) \
+            if unpersistable_recipient_kind(metadata):
+                # Its refusal was recorded when the row closed; a stamped kind
+                # never changes, so retrying each sweep only repeats it.
+                result["skipped"] += 1
+            elif materialize_backstop_due(root, metadata.get("parent_sid"),
+                                          metadata.get("delivery_id")) \
                     and materialize_after_terminal_close(jobs, attempt_id) is not None:
                 result["materialized"] += 1
 
