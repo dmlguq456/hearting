@@ -6129,9 +6129,49 @@ def _peer_status_line(entry):
     return line
 
 
+def _watch_may_reach(watch_id, arm, sid, harness, seat_holders):
+    """Whether ``_status_entry`` could name ``(harness, sid)`` this watch's recipient.
+
+    Its recipient is the arm's steward unless the steward seat's ledger records
+    a confirmed same-harness successor (`_confirmed_watch_successor`), so the
+    arm and that one ledger decide it; ``seat_holders`` keeps each seat's
+    watch holders for the rest of the pass. An arm without a steward, or a
+    ledger that could not be read here, is left to the full status entry.
+    """
+    steward = arm.get("steward") if isinstance(arm, dict) else None
+    if not isinstance(steward, dict):
+        return True
+    if steward.get("harness") != harness:
+        return False
+    if steward.get("session_id") == sid:
+        return True
+    seat = arm.get("steward_seat")
+    seat_key = seat.get("key") if isinstance(seat, dict) else None
+    if not seat_key:
+        return False
+    if seat_key not in seat_holders:
+        try:
+            import dispatch_seat_handover as handover
+            seat_holders[seat_key] = {
+                watch: relation.get("holder")
+                for watch, (_key, relation) in handover._watch_states(seat_key).items()}
+        except Exception:  # noqa: BLE001 - unread lineage never hides a receipt
+            seat_holders[seat_key] = None
+    holders = seat_holders[seat_key]
+    if holders is None:
+        return True
+    holder = holders.get(str(watch_id))
+    return (isinstance(holder, dict) and holder.get("harness") == harness
+            and holder.get("sid") == sid)
+
+
 def undelivered_watch_rows(entries=None, root=None, *, deadline=None):
     """This session's watch receipts that nobody acknowledged and no queued
     exact notice carries: `status --undelivered` and the Claude prompt sweep.
+
+    Only watches whose recipient can be this session reach the per-watch
+    status read, and each seat ledger is parsed once per call, so the cost
+    follows this session's watches instead of every session's.
 
     ``deadline`` (``time.monotonic()``) bounds a hook. Watches it did not reach
     stay un-acked for the next prompt, the Stop path and the asyncRewake hook;
@@ -6141,15 +6181,23 @@ def undelivered_watch_rows(entries=None, root=None, *, deadline=None):
     root = root or _watch_root()
     entries = _watch_entries(root) if entries is None else entries
     sid, harness = _current_session_identity()
-    rows = []
-    for watch_id, arm in entries:  # newest arm first
-        if deadline is not None and time.monotonic() >= deadline:
-            break
-        row = _status_entry(watch_id, arm, root)
-        recipient = row.get("recipient") or {}
-        if (row["state"] == "receipt" and recipient.get("session_id") == sid
-                and recipient.get("harness") == harness):
-            rows.append(row)
+    rows, seat_holders = [], {}
+    try:
+        import session_tidy
+        one_ledger_read = session_tidy.seat_ledger_read_scope()
+    except Exception:  # noqa: BLE001 - without the shared cache each read happens as before
+        one_ledger_read = contextlib.nullcontext()
+    with one_ledger_read:
+        for watch_id, arm in entries:  # newest arm first
+            if deadline is not None and time.monotonic() >= deadline:
+                break
+            if not _watch_may_reach(watch_id, arm, sid, harness, seat_holders):
+                continue
+            row = _status_entry(watch_id, arm, root)
+            recipient = row.get("recipient") or {}
+            if (row["state"] == "receipt" and recipient.get("session_id") == sid
+                    and recipient.get("harness") == harness):
+                rows.append(row)
     if not rows:
         return rows
     # A queued exact native notice owns the display/ACK path for its receipt.
