@@ -231,6 +231,66 @@ class AdoptionTest(unittest.TestCase):
                         proc.terminate()
                     proc.wait(timeout=3)
 
+    def test_reconcile_stops_watching_a_quiet_run_and_reports_a_late_exit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            compute = OBS.load_tool('compute-hosts')
+            old = time.time() - compute.RUN_QUIET_SECONDS - 3600
+            runs = {}
+            for name in ('quiet', 'active', 'late', 'finished'):
+                run = root / 'compute' / name
+                run.mkdir(parents=True)
+                (run / 'meta.json').write_text(json.dumps(
+                    {'run_id': name, 'provenance': {'session': {'harness': 'codex', 'id': 'old'}}}))
+                runs[name] = run
+            (runs['late'] / compute.QUIET_RUN_MARKER).write_text('{}\n')
+            for name in ('late', 'finished'):
+                (runs[name] / 'exit_code').write_text('0\n')
+            for name in ('quiet', 'late', 'finished'):
+                for path in runs[name].iterdir():
+                    os.utime(path, (old, old))
+            with mock.patch.dict(os.environ, {'AGENT_RESOURCE_RUN_INDEX': str(root / 'index.json')}), \
+                 mock.patch.object(OBS, 'load_tool', return_value=compute), \
+                 mock.patch.object(compute, 'load_config', return_value={'run_root': root / 'compute'}), \
+                 mock.patch.object(compute, '_refuse_namespace_self'), \
+                 mock.patch.object(compute, '_spawn_completion_watch', return_value=True) as attach, \
+                 mock.patch.object(OBS, 'retire_watch', return_value=0) as retire:
+                result = OBS.reconcile()
+            # The active run and the late exit get an observer; the quiet run and
+            # an ordinary finished run do not.
+            self.assertEqual(sorted(Path(call.args[0]).name for call in attach.call_args_list),
+                             ['active', 'late'])
+            quiet = next(row for row in result['results'] if row.get('run_id') == 'quiet')
+            self.assertEqual((quiet['watching'], quiet['state']), (False, 'unknown'))
+            self.assertTrue((runs['quiet'] / compute.QUIET_RUN_MARKER).is_file())
+            self.assertFalse((runs['quiet'] / 'exit_code').exists())
+            retire.assert_called_once()
+            self.assertEqual(retire.call_args.args[0][2:], ['watch-run', str(runs['quiet'])])
+
+    def test_retire_watch_stops_only_an_older_release_observer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            scripts = []
+            for release in ('old', 'new'):
+                script = root / release / 'compute-hosts.py'
+                script.parent.mkdir()
+                script.write_text('import time\ntime.sleep(60)\n')
+                scripts.append(script)
+            source = root / 'run'
+            source.mkdir()
+            old = subprocess.Popen([sys.executable, str(scripts[0]), 'watch-run', str(source)])
+            current = subprocess.Popen([sys.executable, str(scripts[1]), 'watch-run', str(source)])
+            try:
+                command = [sys.executable, str(scripts[1]), 'watch-run', str(source)]
+                self.assertEqual(OBS.retire_watch(command, source / '.watch.lock'), 1)
+                self.assertEqual(old.wait(timeout=3), -signal.SIGTERM)
+                self.assertIsNone(current.poll())     # this release's observer leaves by itself
+            finally:
+                for proc in (old, current):
+                    if proc.poll() is None:
+                        proc.terminate()
+                    proc.wait(timeout=3)
+
     def test_installed_current_subprocess_observes_rootless_exact_source(self):
         import resource_progress
 

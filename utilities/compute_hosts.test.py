@@ -2153,6 +2153,42 @@ class ComputeHostsTest(unittest.TestCase):
         # host's default tmux server.
         self.assertEqual(listed.returncode, 0, listed.stderr)
 
+    def test_runs_lists_a_quiet_run_as_unknown_unless_its_session_is_seen(self):
+        module = load_module()
+        run_dir = self.run_root / "quiet-20261007-000001-gone-silent"
+        run_dir.mkdir(parents=True)
+        (run_dir / "meta.json").write_text(
+            json.dumps({"run_id": run_dir.name, "host": "here",
+                        "command": ["bash", "-c", "train"]}), encoding="utf-8")
+        (run_dir / "log").write_text("epoch 3\n", encoding="utf-8")
+        old = time.time() - module.RUN_QUIET_SECONDS - 3600
+        for path in run_dir.iterdir():
+            os.utime(path, (old, old))
+        config = {"run_root": self.run_root}
+        state = module._run_state(config, run_dir.name)
+        # Callers that act on a run (a route close stops "running") keep doing so.
+        self.assertEqual(state["state"], "running")
+        self.assertEqual(state["quiet_since"][:10],
+                         time.strftime("%Y-%m-%d", time.localtime(old)))
+        for alive, expected in ((None, "unknown"), (True, "running"), (False, "stopped")):
+            with self.subTest(alive=alive), \
+                    mock.patch.object(module, "load_config", return_value=config), \
+                    mock.patch.object(module, "_refuse_namespace_self"), \
+                    mock.patch.object(module, "_select", return_value=[("here", {})]), \
+                    mock.patch.object(module, "_tmux_session_alive", return_value=alive), \
+                    contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(module.cmd_runs(SimpleNamespace(limit=10, host=None, json=True)), 0)
+                row = json.loads(output.getvalue())[0]
+                self.assertEqual((row["state"], row["exit_code"]), (expected, None))
+        with mock.patch.object(module, "load_config", return_value=config), \
+                mock.patch.object(module, "_refuse_namespace_self"), \
+                mock.patch.object(module, "_select", return_value=[("here", {})]), \
+                mock.patch.object(module, "_tmux_session_alive", return_value=None), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            module.cmd_runs(SimpleNamespace(limit=10, host=None, json=False))
+        self.assertIn("unknown (no activity since " + state["quiet_since"][:10], output.getvalue())
+        self.assertFalse((run_dir / "exit_code").exists())
+
     def test_record_stop_writes_once_and_keeps_a_natural_exit(self):
         module = load_module()
         run_dir = self.root / "record-once"
@@ -3093,6 +3129,53 @@ class CompletionWatchTest(unittest.TestCase):
         self.assertEqual((len(mine), len(parents)), (0, 1))          # the parent, not the worker's own session
         self.assertIn("started by attempt att-worker-1 in route rt-0123456789abcdef",
                       sweep.delivery_context([(state / "dispatch", parents)]))
+
+    def _make_quiet(self, module):
+        (self.run_dir / "log").write_text("epoch 1\n")
+        old = time.time() - module.RUN_QUIET_SECONDS - 3600
+        for path in self.run_dir.iterdir():
+            os.utime(path, (old, old))
+
+    def test_a_quiet_run_without_an_exit_code_stops_being_watched_as_unknown(self):
+        module = load_module()
+        self._make_quiet(module)
+        with mock.patch("session_notice.notify") as notify:
+            self.assertEqual(module.cmd_watch_run(SimpleNamespace(run_dir=str(self.run_dir)),
+                                                  sleep=lambda s: self.fail("slept")), 0)
+        notify.assert_not_called()
+        record = json.loads((self.run_dir / module.QUIET_RUN_MARKER).read_text())
+        self.assertEqual((record["state"], record["reason"]),
+                         ("unknown", "no-activity-without-exit-code"))
+        self.assertFalse((self.run_dir / "exit_code").exists())
+        self.assertFalse((self.run_dir / module.STOP_REASON_FILENAME).exists())
+
+    def test_a_run_that_writes_again_is_still_watched(self):
+        module = load_module()
+        self._make_quiet(module)
+        (self.run_dir / "log").write_text("epoch 2\n")
+        slept = []
+
+        def sleep(seconds):
+            slept.append(seconds)
+            (self.run_dir / "exit_code").write_text("0\n")
+
+        with mock.patch("session_notice.notify") as notify:
+            module.cmd_watch_run(SimpleNamespace(run_dir=str(self.run_dir)), sleep=sleep)
+        self.assertEqual(slept, [module.COMPLETION_POLL_SECONDS])
+        self.assertEqual(notify.call_count, 1)
+        self.assertFalse((self.run_dir / module.QUIET_RUN_MARKER).exists())
+
+    def test_a_late_exit_code_is_reported_once_and_clears_the_unknown_record(self):
+        module = load_module()
+        self._make_quiet(module)
+        module.cmd_watch_run(SimpleNamespace(run_dir=str(self.run_dir)), sleep=lambda s: self.fail("slept"))
+        self.assertTrue((self.run_dir / module.QUIET_RUN_MARKER).exists())
+        (self.run_dir / "exit_code").write_text("0\n")
+        with mock.patch("session_notice.notify") as notify:
+            module.cmd_watch_run(SimpleNamespace(run_dir=str(self.run_dir)), sleep=lambda s: self.fail("slept"))
+        self.assertEqual(notify.call_count, 1)
+        self.assertIn("run here-1 on here ended with exit 0", notify.call_args.kwargs["text"])
+        self.assertFalse((self.run_dir / module.QUIET_RUN_MARKER).exists())
 
     def test_a_removed_run_ends_the_watch_quietly(self):
         module = load_module()
