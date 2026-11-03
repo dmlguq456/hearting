@@ -998,7 +998,9 @@ python3 utilities/capability-route.py status <route id | route file | attempt id
 `status` defaults the artifact root from the cwd, and each open row carries its
 `resume_command`. Given one route or attempt, it reports that route and its
 registry attempts. `start`, `finish`, `close`, `correct` and `status` each take a
-route id, route file or attempt id. That command names a canonical route by its ID
+route id, route file or attempt id; `close` given an attempt that is not its route's
+owner stops that attempt alone and leaves the route open (OPERATIONS "Parent close").
+That command names a canonical route by its ID
 (`start --route rt-<16 hex>`); `start` finds the record under the cwd's artifact
 root, `AGENT_ARTIFACT_ROOT`, the jobs registry or a session's route-chain ledger,
 and still takes a route file. A `start` without `--route` continues this session's newest

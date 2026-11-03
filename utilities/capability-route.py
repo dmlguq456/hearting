@@ -12699,13 +12699,15 @@ def _emit_compiled_route(a,route,artifact_root,output=None):
 
 def _close_route_argument(a):
     """`close`/`finish --route` take a route file, an `rt-...` id or a registry attempt id; an id is
-    looked up under the artifact root, an attempt by its registry row. Without one, `finish` takes
-    this session's latest route there."""
+    looked up under the artifact root, an attempt by its registry row. `close` remembers a named
+    attempt: one that is not its route's owner is stopped alone and the route stays open. Without
+    one, `finish` takes this session's latest route there."""
     import artifact_producer
     route=a.route
     if route and not artifact_producer._ROUTE_ID_RE.fullmatch(str(route)) and not Path(route).exists():
         found=attempt_route_file(route,getattr(a,"jobs",None))
         if found is not None:
+            a.named_attempt=str(route)
             return str(found)
     if route and (not artifact_producer._ROUTE_ID_RE.fullmatch(str(route)) or Path(route).exists()):
         return route
@@ -12972,7 +12974,9 @@ def main():
     rv.add_argument("--author-attempt-id",help="the recording attempt; default AGENT_DISPATCH_ATTEMPT_ID")
     rv.add_argument("--recorded-by",default="owner")
     rv.add_argument("--output")
-    cl=sub.add_parser("close"); cl.add_argument("--route",required=True,help="route file path or route id (rt-...)")
+    cl=sub.add_parser("close"); cl.add_argument("--route",required=True,help="route file path or route id (rt-...); "
+                                                 "an attempt id that is not its route's owner stops that attempt "
+                                                 "alone and leaves the route open")
     cl.add_argument("--artifact-root",default=None,
                     help="for a route id: default AGENT_ARTIFACT_ROOT, else utilities/artifact-root.sh for the current directory")
     cl.add_argument("--commit",help="result commit; defaults to HEAD in the route cwd")
@@ -13528,6 +13532,14 @@ def main():
     else:
         if a.command=="close":
             a.route=_close_route_argument(a)
+            if getattr(a,"named_attempt",None):
+                # An attempt that is not its route's owner (a stage worker, one frame leg) is
+                # stopped alone; its route, owner and every other attempt keep running.
+                import route_parent_close
+                stopped=route_parent_close.stop_attempt(a.named_attempt)
+                if stopped is not None:
+                    print(json.dumps(stopped,sort_keys=True))
+                    return
         if a.command=="complete" and getattr(a, "inline", False) and not getattr(a, "route", None):
             try:
                 from owner_route_binding import default_owner_route_file
@@ -13605,6 +13617,13 @@ def main():
             # An unproven terminal gate is recorded and warned about below, never refused:
             # the refusal was bypassed almost every time it fired.
             import route_parent_close
+            # Running frame legs are this route's work too: they stop before the record closes.
+            legs=route_parent_close.stop_route_legs(route)
+            if legs and legs["state"]!="cancelled":
+                print(json.dumps(legs,sort_keys=True))
+                return
+            if legs:
+                print("stopped_attempts="+",".join(legs["stopped_attempts"]),file=sys.stderr)
             outcome=route_parent_close.close(route, a.route, stop_resources=a.stop_resources,
                                             summary=a.summary, commit=a.commit)
             if outcome is None:
