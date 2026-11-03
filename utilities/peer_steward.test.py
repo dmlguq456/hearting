@@ -4360,7 +4360,9 @@ class WatchMessageTransportSettlementTest(_WatchMixin, unittest.TestCase):
         latest = self._resume_until(
             store, duty["id"],
             lambda row: row["observation"].get("reason") == "received-binding-unverified")
-        self.assertEqual(latest["state"], "unknown")
+        # CI still saw 'complete' here after the duty moved behind the handover
+        # (run 41551665759). The record's observation names the settling path.
+        self.assertEqual(latest["state"], "unknown", latest)
         self.assertEqual(latest["observation"]["reason"], "received-binding-unverified")
         self.assertEqual(latest["delivery"], "pending")
 
