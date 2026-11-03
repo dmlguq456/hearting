@@ -338,6 +338,54 @@
    "en": "current-session (tier not recorded)",
    "ko": "current-session(등급 미기록)"
   },
+  "tidy.apply.added": {
+   "en": "added {count}",
+   "ko": "추가 {count}"
+  },
+  "tidy.apply.batch": {
+   "en": "batch {batch}: {text}",
+   "ko": "묶음 {batch}: {text}"
+  },
+  "tidy.apply.choice_over_cap": {
+   "en": "choice records went {count} over the limit of {limit}; all were recorded",
+   "ko": "선택지 기록이 상한 {limit}건을 {count}건 넘어 모두 기록"
+  },
+  "tidy.apply.integrity": {
+   "en": "deletion check failed (what was applied can be undone)",
+   "ko": "삭제 검사 실패 (적용분은 되돌릴 수 있음)"
+  },
+  "tidy.apply.interrupted": {
+   "en": "the previous run stopped before it finished",
+   "ko": "이전 실행이 끝나기 전에 멈췄습니다"
+  },
+  "tidy.apply.over_budget": {
+   "en": "dropped over the limit {count}",
+   "ko": "상한 초과 폐기 {count}"
+  },
+  "tidy.apply.partial": {
+   "en": "partly applied ({count} done)",
+   "ko": "부분 적용 {count}건"
+  },
+  "tidy.apply.reinforced": {
+   "en": "reinforced {count}",
+   "ko": "강화 {count}"
+  },
+  "tidy.apply.rejected": {
+   "en": "rejected {count}",
+   "ko": "거부 {count}"
+  },
+  "tidy.apply.skipped": {
+   "en": "skipped {count}",
+   "ko": "건너뜀 {count}"
+  },
+  "tidy.apply.undo_hint": {
+   "en": "undo: mem tidy-undo {batch}",
+   "ko": "되돌리기: mem tidy-undo {batch}"
+  },
+  "tidy.apply.updated": {
+   "en": "updated {count}",
+   "ko": "갱신 {count}"
+  },
   "tidy.say.accepted": {
    "en": "The card and memory tidy are accepted. The window-clear result will be reported in one line on your next input.",
    "ko": "카드와 기억 정리 접수를 마쳤습니다. 창 비우기 결과는 다음 입력 때 한 줄로 알려 드립니다."
@@ -357,6 +405,50 @@
   "tidy.say.you_can_now": {
    "en": "You can now {command} or close it.",
    "ko": "이제 {command} 하거나 닫아도 됩니다."
+  },
+  "tidy.undo.already": {
+   "en": "already undone",
+   "ko": "이미 되돌렸습니다"
+  },
+  "tidy.undo.changed": {
+   "en": "record {record} changed after the batch was applied",
+   "ko": "{record} 기록이 묶음 적용 뒤에 바뀌었습니다"
+  },
+  "tidy.undo.done": {
+   "en": "{count} undone, nothing deleted",
+   "ko": "{count}건을 삭제 없이 되돌렸습니다"
+  },
+  "tidy.undo.either_gone": {
+   "en": "record {old} or {new} is gone",
+   "ko": "{old} 또는 {new} 기록이 없어졌습니다"
+  },
+  "tidy.undo.gone": {
+   "en": "record {record} is gone",
+   "ko": "{record} 기록이 없어졌습니다"
+  },
+  "tidy.undo.no_marker": {
+   "en": "could not create the undo marker",
+   "ko": "되돌림 표식을 만들지 못했습니다"
+  },
+  "tidy.undo.refused": {
+   "en": "undo refused — {problem}",
+   "ko": "되돌리기를 거부했습니다 — {problem}"
+  },
+  "tidy.undo.reinforce_failed": {
+   "en": "could not undo the reinforcement of {record}",
+   "ko": "{record} 강화 되돌리기 실패"
+  },
+  "tidy.undo.restore_failed": {
+   "en": "could not restore {record}: {error}",
+   "ko": "{record} 되살리기 실패: {error}"
+  },
+  "tidy.undo.stopped": {
+   "en": "undo stopped ({count} undone) — {failure}; run mem tidy-undo {batch} again",
+   "ko": "되돌리기 중 멈춤 ({count}건 되돌림) — {failure}; 다시 mem tidy-undo {batch}"
+  },
+  "tidy.undo.takedown_failed": {
+   "en": "could not take {record} out of use: {error}",
+   "ko": "{record} 내리기 실패: {error}"
   }
  }
 }

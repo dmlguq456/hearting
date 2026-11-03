@@ -346,6 +346,30 @@ class UndoTest(TidyApplyCase):
         self.assertIn(added, self.last_line(undo))
         self.assertEqual(self.rows(), before)
 
+    def test_lines_read_in_english_without_a_korean_declaration(self):
+        # The suites pin Korean (tidy_isolation); the catalog default is English.
+        english = {"FLEET_NOW_LANG": "English"}
+        old = self.seed("durable", "lesson", "an old lesson the english batch replaces")
+        path, batch = self.actions([self.add_action(1), self.add_action(2),
+                                    {"kind": "supersede", "old_id": old, "body": "its english replacement"},
+                                    {"kind": "reinforce", "target_id": "gone"}])
+        result = self.mem("tidy-apply", str(path), "--cwd", str(self.proj), extra=english)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.last_line(result),
+                         f"[tidy] batch {batch}: added 2 · updated 1 · reinforced 0 · skipped 0 · rejected 1"
+                         f" — undo: mem tidy-undo {batch}")
+        added = self.result_json(batch)["added"][0]
+        self.assertEqual(self.mem("reinforce", added).returncode, 0)
+        refused = self.mem("tidy-undo", batch, extra=english)
+        self.assertEqual(refused.returncode, 1)
+        self.assertEqual(self.last_line(refused), f"[tidy] batch {batch}: undo refused — "
+                                                  f"record {added} changed after the batch was applied")
+        _, fresh = self.apply([self.add_action(3)])
+        undo = self.mem("tidy-undo", fresh, extra=english)
+        self.assertEqual(self.last_line(undo), f"[tidy] batch {fresh}: 1 undone, nothing deleted")
+        again = self.mem("tidy-undo", fresh, extra=english)
+        self.assertEqual(self.last_line(again), f"[tidy] batch {fresh}: already undone")
+
     def test_undo_of_unknown_batch_is_a_one_line_error(self):
         undo = self.mem("tidy-undo", "nope")
         self.assertEqual(undo.returncode, 2)
