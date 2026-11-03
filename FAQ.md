@@ -50,8 +50,10 @@ By default the dispatcher carries on with current inputs when a difference stays
 inside the work you approved. It refuses what would cause an observed harm:
 writing or granting outside the approved scope, touching another route's work,
 relaunching an attempt that already started, or treating a superseded result
-as current. Your runtime or a missing configuration can also refuse for its
-own reasons. The message names the reason. Give it to the agent so it can
+as current. A record Hearting could not read at that moment is not a
+refusal: the message asks to wait and run the same command again. Your
+runtime or a missing configuration can also refuse for its own reasons. The
+message names the reason. Give it to the agent so it can
 continue from the failure within your original request; you do not need to
 learn internal commands or start a second task.
 
@@ -62,7 +64,8 @@ separate git worktree beside your project, `<project>-wt/<name>`, on its own
 branch. Your folder, branch, and uncommitted files stay as they were. The
 result names the folder and branch that hold the change and whether it is
 committed. Review it there, and ask the agent when you want it in your own
-branch.
+branch. A small edit the agent made in place instead is in your folder, and
+Hearting records it automatically as a direct route.
 
 ## Why did .agent_reports appear in my project?
 
@@ -149,6 +152,11 @@ user_rules:
 The next install, update, or `hearting runtime refresh --runtime opencode`
 puts the plain instructions back. If you had edited that `AGENTS.md`, your
 version is kept beside it as `AGENTS.md.edited-<time>`.
+
+On Codex, Hearting writes into a file of yours only when you keep a non-empty
+`~/.codex/AGENTS.override.md`: Codex reads only that one global file, so
+Hearting appends its instructions below your text in one marked block. Update
+replaces only that block and uninstall removes it.
 
 ## Is Windows supported?
 
