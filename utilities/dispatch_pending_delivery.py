@@ -1244,6 +1244,29 @@ def _gateway_consumed(root: Path, recipient_key: str, aid: str) -> bool:
     return aid in _verified_gateway_consumption(json.loads(path.read_text()), recipient_key)
 
 
+def _handed_over_recipient(recipient_key: str, storage: str, value: dict,
+                           metadata: dict) -> bool:
+    """Whether a successor's parent is this record's recipient after a confirmed seat handover.
+
+    The source's notice stays stored under the seat that existed at its terminal
+    commit. A successor launched after that seat handed over (session-tidy,
+    compaction) reports to the new seat, so its acked completion is read from its
+    own storage. Only the same carrier on the recipient's confirmed same-harness
+    seat chain counts; an unresolved or unreadable chain keeps the deferral.
+    """
+    carrier = value.get("recipient_kind")
+    if not storage or not carrier or metadata.get("parent_completion_delivery") != carrier:
+        return False
+    try:
+        from harness_capabilities import HARNESSES, parent_completion
+        from dispatch_seat_handover import seat_chain_contains
+    except ImportError:
+        return False
+    harness = next((name for name in HARNESSES
+                    if parent_completion(name).get("carrier") == carrier), None)
+    return bool(harness) and seat_chain_contains(harness, recipient_key, storage)
+
+
 def _replacement_disposition(root: Path, recipient_key: str, value: dict,
                              jobs: Path | str | None = None) -> str:
     """Original completion is deferred until its proven successor is consumed.
@@ -1319,10 +1342,12 @@ def _replacement_disposition(root: Path, recipient_key: str, value: dict,
             consumed = True
             for aid in effective:
                 metadata = rows[aid][1]
-                if metadata.get("parent_sid") != recipient_key:
+                storage = metadata.get("parent_sid") or ""
+                if storage != recipient_key and not _handed_over_recipient(
+                        recipient_key, storage, value, metadata):
                     return "defer"
                 target_id = metadata.get("delivery_id")
-                target = read(root, recipient_key, target_id) if target_id else None
+                target = read(root, storage, target_id) if target_id else None
                 if target is None or target.get("state") != "acked" or aid not in target.get("attempt_ids", []):
                     consumed = False
             return "consumed" if consumed else "defer"
