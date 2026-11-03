@@ -78,7 +78,25 @@ if grace > 0:
         pass
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
+parents = {}
+for pid in (os.listdir("/proc") if left else []):
+    try:
+        parents[int(pid)] = int(open(f"/proc/{pid}/stat").read().rsplit(")", 1)[1].split()[1])
+    except (ValueError, OSError, IndexError):
+        continue
+mine, names = {os.getpid()}, []
+for _ in range(16):
+    mine |= {pid for pid, parent in parents.items() if parent in mine}
+for pid in sorted(mine - {os.getpid()}):
+    try:
+        argv = open(f"/proc/{pid}/cmdline", "rb").read().split(b"\0")
+    except OSError:
+        continue
+    words = [os.path.basename(w.decode("utf-8", "replace")) for w in argv[:2] if w]
+    if words:
+        names.append(" ".join(words)[:80])
 print(json.dumps({"journey_settle": {"cli_seconds": round(cli, 3), "left_running": left,
+                                     "left": sorted(set(names))[:12],
                                      "settle_seconds": round(time.monotonic() - began - cli, 3)}}),
       flush=True)
 sys.exit(code)
@@ -988,7 +1006,8 @@ def headless_turn(harness: str, command: str, prompt: str, cwd: Path, world: Pat
                       "seconds": settled.get("cli_seconds", step["seconds"]),
                       "session_id": sid, "permission_denials": denials,
                       **({"settle_seconds": settled.get("settle_seconds"),
-                          "settle_left_running": settled.get("left_running")} if settled else {})})
+                          "settle_left_running": settled.get("left_running"),
+                          "settle_left": settled.get("left") or []} if settled else {})})
         if step["exit"] == 124: status = "task-timeout"; break
         if step["exit"] != 0: status = "task-failed"; break
         if judge and judge():
@@ -1329,7 +1348,8 @@ def journey_profile(profile: str, args: argparse.Namespace, repo: Path) -> dict:
                             if "settle_seconds" in turn:
                                 record["steps"].append({"name": f"settle:{harness}:{turn['index']}", "exit": 0,
                                                         "seconds": turn["settle_seconds"],
-                                                        "left_running": turn.get("settle_left_running")})
+                                                        "left_running": turn.get("settle_left_running"),
+                                                        "left": turn.get("settle_left") or []})
                         usage_started = time.monotonic()
                         account_after = claude_account_snapshot(home / ".claude") if harness == "claude" else None
                         if harness == "claude": record["steps"].append({"name":"usage-after:claude","exit":0 if account_after else 1,"seconds":round(time.monotonic()-usage_started,3),"status":"measured" if account_after else "unknown"})

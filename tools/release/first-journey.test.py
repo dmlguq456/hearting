@@ -675,7 +675,9 @@ else: raise SystemExit(5)
                                                seconds=1), capture_output=True, text=True, timeout=60)
         self.assertLess(time.monotonic() - started, 4)
         self.assertEqual(result.returncode, 0)
-        self.assertTrue(fj.settle_result(result.stdout)["left_running"])
+        settled = fj.settle_result(result.stdout)
+        self.assertTrue(settled["left_running"])
+        self.assertIn("sleep 5", settled["left"])
         self.assertIsNone(fj.settle_result("no settle line"))
 
     def test_success_judgment_accepts_non_main_branch(self):
