@@ -10,6 +10,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 SPEC = importlib.util.spec_from_file_location("first_journey", Path(__file__).with_name("first-journey.py"))
 fj = importlib.util.module_from_spec(SPEC)
@@ -591,6 +592,33 @@ else: raise SystemExit(5)
     def test_model_run_count_does_not_repeat_claude_in_all_profile(self):
         self.assertEqual(fj.TASK_HARNESSES["claude-only"], ["claude"])
         self.assertEqual(fj.TASK_HARNESSES["all"], ["codex", "opencode"])
+
+    def test_profile_option_runs_only_the_named_profile(self):
+        ran = []
+        prior = (fj.journey_profile, fj.write_report)
+        handled = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+        handlers = tuple(signal.getsignal(signum) for signum in handled)
+        fj.journey_profile = lambda profile, args, repo: ran.append(profile) or {"failures": []}
+        fj.write_report = lambda record, output: None
+        try:
+            with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+                for argv, expected in ((["--profile", "claude-only"], ["claude-only"]),
+                                       ([], ["claude-only", "all"])):
+                    ran.clear()
+                    with mock.patch("sys.argv", ["first-journey.py", "run", "--output", tmp + "/out",
+                                                          "--local-root", tmp, *argv]):
+                        self.assertEqual(fj.main(), 0)
+                    self.assertEqual(ran, expected)
+        finally:
+            fj.journey_profile, fj.write_report = prior
+            for signum, handler in zip(handled, handlers):
+                signal.signal(signum, handler)
+
+    def test_world_path_has_standard_tools_and_no_optional_host_tools(self):
+        for name in ("grep", "sed", "awk", "head", "ls", "find", "basename"):
+            self.assertIn(name, fj.WORLD_COMMANDS)
+        for name in ("herdr", "tmux", "claude", "codex", "opencode"):
+            self.assertNotIn(name, fj.WORLD_COMMANDS)
 
     def test_report_has_json_and_markdown_with_unknown_account_usage(self):
         record = {"profile": "all", "source": "published", "isolation": {"level": "env-home-only", "d3": "not-proven"},
