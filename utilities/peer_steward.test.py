@@ -15947,12 +15947,15 @@ class NativeReceivingTurnRecoveryTest(_TmpRootMixin, unittest.TestCase):
         self.assertEqual((current["state"], current["delivery"]), ("complete", "acked"))
 
     def test_matching_terminal_tombstone_is_never_rematerialized(self):
+        import dispatch_attempt_reference as attempt_reference
         import dispatch_completion_join as join
         import dispatch_pending_delivery as pending
         store, duty, _aid, sid = self._duty()
         path = pending.record_path(self.tmp_root, sid, "delivery-native-crash")
         exact = pending.read(self.tmp_root, sid, "delivery-native-crash")
-        pending._write_prune_tombstone(path, exact)
+        # Production writes a tombstone inside the removal's reference admission.
+        with attempt_reference.admission(path.parents[2], pending.record_references(exact)):
+            pending._write_prune_tombstone(path, exact)
         path.unlink()
 
         with mock.patch.object(join, "materialize_after_terminal_close") as materialize, \
