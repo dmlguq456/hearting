@@ -1130,16 +1130,18 @@ def _lineage_rows(route, jobs) -> dict[str, list[tuple[str, dict]]]:
         pass
     rows: dict[str, list[tuple[str, dict]]] = {}
     try:
-        # The shared registry view (one cached generation, appends read as a
-        # suffix) instead of a private full read of jobs.log per launch.
-        from dispatch_registry_cache import registry_view
+        # A private stat-keyed read, not the shared registry view: most callers are
+        # one fresh launch process, where building the shared view costs more
+        # (RV-BC-P2B: 0.62 s -> 1.05 s) than this read; repeat calls in one process
+        # hit the stat cache below.
         path = Path(jobs).resolve()
-        view = registry_view(path)
-        key = (str(path), view.signature, frozenset(map(str, identities)))
+        info = path.stat()
+        key = (str(path), info.st_ino, info.st_mtime_ns, info.st_ctime_ns, info.st_size,
+               frozenset(map(str, identities)))
         if key in _LINEAGE_CACHE:
             return _LINEAGE_CACHE[key]
-        lines = view.lines
-    except (OSError, TypeError, ValueError):
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except (OSError, TypeError):
         return rows
     for index, line in enumerate(lines):
         fields = line.split("\t")
@@ -1227,7 +1229,7 @@ def attempt_changes(route, meta) -> list[str]:
 
     lines = []
     from dispatch_replacement import commits_after
-    observed = commits_after(worktree, head)
+    observed = commits_after(worktree, head, timeout=5)
     commits = [f"{commit[:12]} {subject}" for commit, subject in observed or ()]
     if observed is not None:
         shown = "; ".join(commits[:_PRIOR_ROUND_LIMITS["commits"]]) or "none"
