@@ -463,7 +463,11 @@ def recover_consumer(jobs, attempt, *, session=None, spawn=None):
         if owned is None:
             # Unknown is neither the parent nor another one: nothing is restored now and
             # the correction stays queued for the next start or correct (LOOP §4).
-            return _recovery_result("not-started", route_authority.LINEAGE_UNREADABLE_WAIT.reason)
+            # The receipt names when to run the same command again; consumer_* keys
+            # sit beside the caller's own directive fields without replacing them.
+            wait = route_authority.lineage_unreadable_wait(metadata, jobs)
+            return _recovery_result("not-started", wait.reason, consumer_retry_when=wait.retry_when,
+                                    consumer_detail=wait.detail)
         if not owned:
             return _recovery_result("awaiting-parent")
         if metadata.get("launch_claimed") != "1" or metadata.get("launch_started") != "1":
