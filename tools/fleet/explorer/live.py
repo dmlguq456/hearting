@@ -14,6 +14,7 @@ import re
 import time
 
 from .view_model import ExplorerViewModel
+from ..config import ui_text
 from ..display import codex_credits
 from ..model import exec_child_is_wait
 
@@ -717,7 +718,8 @@ def _node_detail(node, now):
     result = {
         "n": _text(node.get("id")) or "·", "st": state, "verdict": verdict, "who": who,
         "when": when, "rounds": [],
-        "rounds_note": f"R{int(rounds)} · 앞 {int(rounds) - 1}회는 이 기록 밖" if rounds and rounds > 1 else "",
+        "rounds_note": (ui_text("fleet.route.rounds_note", round=int(rounds), earlier=int(rounds) - 1)
+                        if rounds and rounds > 1 else ""),
         "unit": " · ".join(p for p in (_text(node.get("unit")), _text(node.get("model_profile"))) if p) or "·",
         "gate": _text(node.get("gate")),
         "out": " · ".join(str(p) for p in (node.get("write_scope") or ())) or "·", "says": "",

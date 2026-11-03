@@ -1,6 +1,7 @@
 """Seat and generation list for the HISTORY view."""
 
 from collections.abc import Mapping
+from ..config import ui_text
 from .grid import cell_width
 from .tables import _clip, _recede_row, _tint_row, repo_rule_label
 
@@ -186,7 +187,8 @@ def draw_seat_expand(grid, vm, state, tag, x, use, y, bottom, seat, harness):
         cursor = grid.put(x0, y, f"{count} generations", "soft", limit=x + use + 1)
         usage = (vm.system or {}).get("usage_api") if isinstance(vm.system, Mapping) else None
         stamp = usage.get("freshness") if isinstance(usage, Mapping) else None
-        note = f"{stamp} 전에 남은 카드 본문이 없습니다." if stamp else "읽은 카드 본문이 없습니다."
+        note = (ui_text("fleet.history.no_card_before", when=stamp) if stamp
+                else ui_text("fleet.history.no_card"))
         limit = x + use + 1
         line = f"  · last clear {last_clear}   {note}"
         grid.put(cursor, y, _hard_cut(line, limit - cursor), "dim", limit=limit)

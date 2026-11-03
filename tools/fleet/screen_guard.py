@@ -38,6 +38,8 @@ import threading
 import time
 import unicodedata
 
+from .config import ui_text
+
 try:
     import curses
 except ImportError:  # pragma: no cover - platforms without curses never run the live loop
@@ -51,7 +53,6 @@ WRITE_BUDGET = 0.25      # a pty write with room returns in microseconds
 REPAINT_AFTER = 5.0      # a stall this long means the terminal went away; repaint everything
 QUIT_GRACE = 1.0         # quitting waits this long for a frame the terminal has not taken
 RECOVERED_NOTE_SEC = 60.0
-STALLED = "화면 출력이 막혀 있음"
 # render globals that describe the painted frame: what a click or a navigation key is
 # resolved against (``_explorer_click_current``, ``reduce(..., _EXPLORER_FRAME)``, the
 # group screen's row maps). ``_draw`` resets and refills them on every pass.
@@ -70,11 +71,9 @@ def _cells(text):
 
 def _span(seconds):
     seconds = max(0, int(seconds))
-    if seconds < 60:
-        return f"{seconds}초"
-    if seconds < 3600:
-        return f"{seconds // 60}분"
-    return f"{seconds // 3600}시간"
+    count, unit = ((seconds, "second") if seconds < 60 else (seconds // 60, "minute") if seconds < 3600
+                   else (seconds // 3600, "hour"))
+    return ui_text(f"fleet.span.{unit}" if count == 1 else f"fleet.span.{unit}s", count=count)
 
 
 class ScreenGuard:
@@ -193,7 +192,7 @@ class ScreenGuard:
         if self._screen is None:
             return None
         if not self._done.is_set() or not self._takes_bytes():
-            return STALLED
+            return ui_text("fleet.screen.stalled")
         return None
 
     # -- state ----------------------------------------------------------------------------------
@@ -358,7 +357,7 @@ class ScreenGuard:
         if recovered is not None:
             when, lasted = recovered
             if self._clock() - when < RECOVERED_NOTE_SEC:
-                parts.append(f"화면 출력이 {_span(lasted)} 막혔다가 다시 그림")
+                parts.append(ui_text("fleet.screen.recovered", span=_span(lasted)))
             else:
                 self._recovered = None
         if callable(self.note):

@@ -17,6 +17,7 @@ import re
 import threading
 import time
 
+from ..config import ui_text
 from .output import OutputReader, read_generation, utility
 from .types import AttemptRow, FocusRequest, FocusResult, Health
 from ..refresh import RefreshPump
@@ -332,7 +333,7 @@ def read_lineage(session, harness, sid, *, read_context=None):
             env["HERDR_PANE_ID"] = str(pane)
         seat = module.resolve_seat(harness, cwd=nav._get(session, "cwd", "project"), env=env, sid=sid)
     except Exception as exc:
-        return None, Health("failed", None, f"seat 없음 · {type(exc).__name__}")
+        return None, Health("failed", None, ui_text("fleet.seat.missing", error=type(exc).__name__))
     try:
         rows = module.seat_lineage(seat, sid=sid, read_context=read_context)
     except Exception as exc:
@@ -411,7 +412,7 @@ def read_seat_history(session, harness, sid, *, cards=False, pane=None, read_con
         else:
             seat = module.resolve_seat(harness, cwd=nav._get(session, "cwd", "project"), env={}, sid=sid)
     except Exception as exc:
-        return None, "", Health("failed", None, f"seat 없음 · {type(exc).__name__}")
+        return None, "", Health("failed", None, ui_text("fleet.seat.missing", error=type(exc).__name__))
     try:
         entries = _seat_entries(module, seat, harness, sid, cards=cards, read_context=read_context)
     except Exception as exc:

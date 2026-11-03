@@ -21,6 +21,19 @@ TOOLS = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(TOOLS))
 from fleet import install_follow, screen_guard  # noqa: E402
 
+# Screen words come from tools/i18n/messages.json. These suites keep the Korean words byte for
+# byte under a Korean declaration (the real-terminal child gets the same declaration).
+STALLED = "화면 출력이 막혀 있음"
+_KOREAN = mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"})
+
+
+def setUpModule():
+    _KOREAN.start()
+
+
+def tearDownModule():
+    _KOREAN.stop()
+
 CLEAR = b"\x1b[H\x1b[2J"          # xterm-256color clear: a full repaint starts with it
 
 
@@ -96,7 +109,7 @@ class ScreenGuardTest(unittest.TestCase):
         for _ in range(3):
             frame(guard, "next")
             self.assertEqual(guard.getch(), -1)
-            self.assertEqual(guard.hold_reason(), screen_guard.STALLED)
+            self.assertEqual(guard.hold_reason(), STALLED)
         self.assertEqual(screen.calls, before, "no curses call may race the pending write")
         self.assertEqual(guard.skipped, 3)
         screen.gate.set()
@@ -128,7 +141,7 @@ class ScreenGuardTest(unittest.TestCase):
         frame(guard)
         self.assertEqual(screen.calls, [])
         self.assertIsNone(guard._worker)
-        self.assertEqual(guard.hold_reason(), screen_guard.STALLED)
+        self.assertEqual(guard.hold_reason(), STALLED)
         self.assertEqual(guard.getch(), ord("k"), "input still reads when no write is pending")
 
     def test_frame_drawn_before_output_stopped_is_settled_not_flushed(self):
@@ -183,6 +196,23 @@ class ScreenGuardTest(unittest.TestCase):
         screen.calls.clear()
         frame(guard)
         self.assertFalse([args for name, args in screen.calls if name == "addstr" and args[0] == 4])
+
+    @mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "English"})
+    def test_hold_and_recovered_notes_read_in_english_without_a_korean_declaration(self):
+        clock = [100.0]
+        screen = FakeScreen(rows=5, cols=80)
+        writable = [False]
+        guard = self.guard(screen, writable=lambda: writable[0], repaint_after=5.0,
+                           clock=lambda: clock[0])
+        frame(guard)
+        self.assertEqual(guard.hold_reason(), "screen output is blocked")
+        clock[0] += 60
+        writable[0] = True
+        frame(guard)
+        shown = [args[2] for name, args in screen.calls if name == "addstr" and args[0] == 4]
+        self.assertEqual(shown, ["screen output was blocked for 1 minute, now redrawn"])
+        self.assertEqual([screen_guard._span(value) for value in (1, 59, 120, 7200)],
+                         ["1 second", "59 seconds", "2 minutes", "2 hours"])
 
     def test_close_waits_for_the_pending_write(self):
         screen = FakeScreen()
@@ -579,7 +609,8 @@ class RealTerminalTest(unittest.TestCase):
                         HOME=str(self.base / "home"), XDG_STATE_HOME=str(self.base / "xdg-state"),
                         XDG_DATA_HOME=str(self.base / "xdg-data"),
                         XDG_CACHE_HOME=str(self.base / "xdg-cache"),
-                        XDG_CONFIG_HOME=str(self.base / "xdg-config"), TMPDIR=str(self.base / "tmp"))
+                        XDG_CONFIG_HOME=str(self.base / "xdg-config"), TMPDIR=str(self.base / "tmp"),
+                        FLEET_NOW_LANG="Korean")
 
     def start(self, *args):
         terminal = Terminal([sys.executable, str(Path(__file__).resolve()), "--child", *args],
@@ -622,7 +653,7 @@ class RealTerminalTest(unittest.TestCase):
         time.sleep(1.0)
         later = self.progress()
         self.assertGreaterEqual(later["tick"] - stalled["tick"], 8, (stalled, later))
-        self.assertEqual(later["hold"], screen_guard.STALLED)
+        self.assertEqual(later["hold"], STALLED)
         self.assertGreater(later["skipped"], stalled.get("skipped", 0))
         mark = len(terminal.received)
         self.assertTrue(terminal.read_for(10, lambda: CLEAR in terminal.received[mark:]
@@ -718,7 +749,7 @@ class RealTerminalTest(unittest.TestCase):
         terminal.read_for(0.5)
         terminal.fill()
         self.activate(data, state, new)
-        held = lambda: any(event.get("hold") == screen_guard.STALLED  # noqa: E731
+        held = lambda: any(event.get("hold") == STALLED  # noqa: E731
                            for event in self.events())
         self.assertTrue(_wait(held, 10), (self.events(), self.stderr_log()))
         second = self.progress()["collects"]
