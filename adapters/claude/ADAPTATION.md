@@ -523,7 +523,7 @@ unimplemented follow-up work.
 
 - **Runtime support:** PreCompact accepts successful stdout as summary instructions; PostCompact provides `compact_summary` and `trigger` for auto/idle and manual compaction.
 - **Adapter realization:** the shared compact hook requests six fields, records the epoch, saves the complete nonempty summary at the session's own verified pane/native seat, and queues memory tidying. Only `trigger=auto` with successful JSON and text card persistence can use the existing snapshot/clear/continue booking. The helper waits up to three hours for transcript evidence of actual turn completion, then stores bounded recent conversation and the transcript path before the clear.
-- **Fallback:** manual/unknown trigger, missing or empty summaries, card-write failure, project/outside-herdr seats, and workers/sub-sessions never auto-clear. Hook failures leave compaction running; summary admission is bounded at 256 KiB without truncation.
+- **Fallback:** manual/unknown trigger, missing or empty summaries, card-write failure, project seats (no Herdr or tmux pane), and workers/sub-sessions never auto-clear. Hook failures leave compaction running; summary admission is bounded at 256 KiB without truncation.
 
 ## Idle tidy
 
