@@ -7267,6 +7267,11 @@ class HistoricalReviewSelfDispositionTest(InlineStageCompletionRecipeTest):
    self.replay(actor="")
   self.assertEqual((waiting.exception.reason,waiting.exception.next_action),("handover-unreadable","same-command"))
   self.assertEqual(before,{p:p.read_bytes() for p in self.base.rglob('*') if p.is_file()})
+  # RV-1151 L3: a readable different holder is still refused with the existing reason.
+  with mock.patch.object(route_authority,"caller_identity",return_value=("codex","another-session")), \
+       self.assertRaisesRegex(ValueError,"review-self-disposition-actor-unproven"):
+   self.replay(actor="")
+  self.assertEqual(before,{p:p.read_bytes() for p in self.base.rglob('*') if p.is_file()})
 
  def test_crash_retry_preserves_commit_boundary_and_origin(self):
   for boundary in ("history","canonical","pointer"):

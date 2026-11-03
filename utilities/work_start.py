@@ -710,7 +710,7 @@ def _slot(route, node, rows, jobs=None):
         # the session a supervisor handed the route to may harvest it.
         if status != "done":
             parent = _current_parent_session_id()
-            if not route_authority.require_known(_owns(meta, parent, jobs)):
+            if not route_authority.require_known(_owns(meta, parent, jobs), meta, jobs):
                 raise DispatchContractError("work-parent-recovery-required", aid)
         digest = (meta.get("owner_route_hash") or meta.get("route_hash")) if node == "owner" else meta.get("route_hash")
         if aid in adopted:
@@ -1909,10 +1909,11 @@ def pin_handoff_continuation(route, path, jobs, outcome):
     metadata = (_rows(jobs).get(outcome.get("owner_attempt_id")) or (None, {}))[1]
     owned = _owns(metadata, _current_parent_session_id(), jobs)
     if owned is None:  # an unreadable seat lineage: wait, as the preparation failure below does
-        wait = route_authority.LINEAGE_UNREADABLE_WAIT
+        wait = route_authority.lineage_unreadable_wait(metadata, jobs)
         return {**outcome, "handoff_reason": wait.reason, "next_action": wait.next_action,
                 "retry_when": wait.retry_when, "recovery_command": resume_command(path, jobs, agent_home=ROOT),
-                "next_step": "Owner cleanup settled; continuation preparation waits. " + wait.retry_when}
+                "next_step": "Owner cleanup settled; continuation preparation waits because the seat lineage "
+                    "could not be read (" + wait.detail + "). Run recovery_command once it reads; nothing else changed."}
     if not owned:
         return {**outcome, "handoff_reason": "work-parent-recovery-required"}
     pinned = route_authority.sealed_pin_harness(route, worker_type="owner")

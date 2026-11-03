@@ -347,6 +347,9 @@ class Case1ParentSessionTest(unittest.TestCase):
                 RA.require_owner(self.OWNER, "claude-sid", jobs, "parent-only")
         self.assertEqual((waiting.exception.reason, waiting.exception.next_action, waiting.exception.retry_when),
                          ("handover-unreadable", "same-command", RA.LINEAGE_UNREADABLE_WAIT.retry_when))
+        # RV-1151 L1: the wait names whose lineage could not be read and why.
+        self.assertEqual(str(waiting.exception),
+                         "handover-unreadable:attempt att-owner, registered parent codex-sid: unreadable")
         with tempfile.TemporaryDirectory() as td, \
                 mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(Path(td) / "state")}):
             self.assertIs(RA.owns(self.OWNER, "codex-sid", Path(td) / "jobs.log"), True)
@@ -354,6 +357,27 @@ class Case1ParentSessionTest(unittest.TestCase):
             with self.assertRaises(DC.DispatchContractError) as refused:
                 RA.require_owner(self.OWNER, "claude-sid", Path(td) / "jobs.log", "parent-only")
             self.assertEqual((refused.exception.reason, refused.exception.next_action), ("parent-only", None))
+
+    def test_a_diverged_lineage_waits_and_names_the_cause(self):
+        # RV-1151 L1: a fork stays unknown until the ledgers change; the wait says so, so a
+        # person can act instead of rerunning the same command blindly.
+        import session_tidy as tidy
+        with tempfile.TemporaryDirectory() as td, \
+                mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(Path(td) / "state")}):
+            for n, target in enumerate(("fork-a", "fork-b")):
+                ledger = tidy._ledger_path(tidy.Seat("pane", f"case-fork-{n}", f"w9:pF{n}"))
+                ledger.parent.mkdir(parents=True, exist_ok=True)
+                ledger.write_text(json.dumps({"event": "handover", "source": "clear", "from": "codex-sid",
+                                              "sid": target, "harness": "codex", "ts": 1}) + "\n")
+            HANDOVER._LINEAGE_GRAPH_CACHE.clear()
+            jobs = Path(td) / "jobs.log"
+            self.assertIsNone(RA.owns(self.OWNER, "codex-sid", jobs))
+            with self.assertRaises(DC.DispatchContractError) as waiting:
+                RA.require_owner(self.OWNER, "codex-sid", jobs, "parent-only")
+        self.assertEqual((waiting.exception.reason, waiting.exception.next_action),
+                         ("handover-unreadable", "same-command"))
+        self.assertIn("attempt att-owner, registered parent codex-sid: handover-lineage-unresolved",
+                      str(waiting.exception))
 
     def test_an_unreadable_lineage_neither_matches_nor_refuses_a_successor_parent(self):
         # A replacement registered by the /clear successor: whether that successor still answers

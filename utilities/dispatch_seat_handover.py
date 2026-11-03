@@ -1523,9 +1523,9 @@ class RecipientResolution(NamedTuple):
 
 
 def recipient_continuation(result, actor=None):
-    from route_authority import ContinuationDecision, LINEAGE_UNREADABLE_WAIT
+    from route_authority import ContinuationDecision, lineage_unreadable_wait
     if result.state == "unreadable":
-        return LINEAGE_UNREADABLE_WAIT
+        return lineage_unreadable_wait({"parent_sid": result.registered_session}, cause=result.reason)
     if actor is not None and result.session_id != actor:
         return ContinuationDecision(False, "protected", "work-parent-recovery-required", "report")
     return ContinuationDecision(True, "continue")

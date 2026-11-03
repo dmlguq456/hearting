@@ -285,7 +285,9 @@ class RetainedReviewTest(unittest.TestCase):
                                side_effect=OSError("lineage-directory-changed")):
             preview=self.preview()
             with self.assertRaises(D.DispatchContractError) as waiting:self.apply()
-        self.assertEqual((preview["authority_ready"],preview["authority_reason"]),(False,"handover-unreadable"))
+        self.assertFalse(preview["authority_ready"])
+        self.assertTrue(preview["authority_reason"].startswith(
+            "handover-unreadable:attempt att-retained-owner, registered parent "+PARENT+": "),preview)
         self.assertEqual((waiting.exception.reason,waiting.exception.next_action),("handover-unreadable","same-command"))
         self.assertEqual(before,self.f.jobs.read_bytes())
         self.assertTrue(self.preview()["authority_ready"])

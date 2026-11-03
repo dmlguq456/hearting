@@ -170,9 +170,10 @@ def _owner(route, path, jobs, rows):
                     or meta.get("owner_route_file") == str(path.resolve())
                     or route.get("owner_attempt_id") == aid)
         owned = AUTH.owns(meta, AUTH.default_parent_session_id(), jobs)
-        if relevant or fields[1] in OPEN:
-            # Who holds this route's owner, or a live one, is a wait while the lineage is unreadable.
-            owned = AUTH.require_known(owned)
+        if relevant and fields[1] in OPEN:
+            # Only who holds this route's live owner changes the close; for it an unreadable
+            # lineage is a wait. Another route's owner in the same folder is skipped as before.
+            owned = AUTH.require_known(owned, meta, jobs)
         # Ordinary route-free owners and unrelated historical rows coexist in
         # this registry. Their absent/old binding is not current-route evidence.
         if (not owned or fields[1] not in OPEN) and not relevant:

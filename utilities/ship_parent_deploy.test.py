@@ -148,6 +148,10 @@ class ParentDeployTest(unittest.TestCase):
             S.validate_completion(self.route, self.jobs, self.record)
         self.assertEqual(waiting.exception.reason, "handover-unreadable")
         S.validate_completion(self.route, self.jobs, self.record)
+        # RV-1151 L3: a readable different holder of the owner is still not the executor's parent.
+        self.meta["parent_sid"] = "another-parent"
+        with self.assertRaisesRegex(ValueError, "parent-deploy-executor-unverified"):
+            S.validate_completion(self.route, self.jobs, self.record)
 
     def test_registered_current_owner_can_prepare_but_cannot_execute(self):
         with patch.dict(os.environ, {"AGENT_DISPATCH_ATTEMPT_ID": "owner", "AGENT_DISPATCH_CHILD": "1"}), patch.object(S.authority, "review_owner_authority") as auth:

@@ -103,10 +103,26 @@ class ContinuationDecision(NamedTuple):
 
 
 # The recipient judgment when the seat lineage cannot be read: wait and run the same
-# command (``recipient_continuation``, ``require_known``).
+# command (``recipient_continuation``, ``require_known``). ``detail`` names the record
+# and the cause (``lineage_unreadable_wait``), so a lineage that stays unreadable can be
+# looked at instead of retried blindly.
 LINEAGE_UNREADABLE_WAIT = ContinuationDecision(
     False, "wait", "handover-unreadable", "same-command",
-    "The existing controller observes the same lineage again.")
+    "The seat lineage can be read again: nothing was changed, so run the same command then. "
+    "If it stays unreadable, detail names the record and why its lineage cannot be read.")
+
+
+def lineage_unreadable_wait(meta=None, jobs=None, *, cause="", read_context=None):
+    """``LINEAGE_UNREADABLE_WAIT`` naming whose seat lineage could not be read, and why."""
+    meta = meta or {}
+    if not cause and meta.get("parent_sid"):
+        from dispatch_seat_handover import resolve_recipient
+        cause = resolve_recipient("job-holder", metadata=meta, jobs=jobs, read_context=read_context).reason
+    cause = str(cause or "").removeprefix("handover-unreadable:") or "readable again on a second look"
+    record = ", ".join(part for part in (
+        "attempt " + meta["attempt_id"] if meta.get("attempt_id") else "",
+        "registered parent " + meta["parent_sid"] if meta.get("parent_sid") else "") if part)
+    return LINEAGE_UNREADABLE_WAIT._replace(detail=(record + ": " if record else "") + cause)
 
 
 PROVEN_BLOCKED_GATE_REASONS = frozenset({
@@ -1042,11 +1058,12 @@ def owns(meta, session, jobs, *, read_context=None):
     return seat_owns(meta, session, jobs, read_context=read_context)
 
 
-def require_known(answer):
+def require_known(answer, meta=None, jobs=None, *, read_context=None):
     """``answer`` unless it is unknown (None): then the recipient judgment's wait for the
-    same command is raised, never a refusal and never ownership (LOOP §4)."""
+    same command is raised, naming ``meta``'s record and the cause; never a refusal and
+    never ownership (LOOP §4)."""
     if answer is None:
-        require_continuation(LINEAGE_UNREADABLE_WAIT)
+        require_continuation(lineage_unreadable_wait(meta, jobs, read_context=read_context))
     return answer
 
 
@@ -1056,7 +1073,8 @@ def require_owner(meta, session, jobs, reason, detail="", *, read_context=None) 
     The one place an ownership answer becomes a refusal: an unreadable seat lineage
     waits for the same command (``require_known``) instead.
     """
-    if not require_known(owns(meta, session, jobs, read_context=read_context)):
+    if not require_known(owns(meta, session, jobs, read_context=read_context), meta, jobs,
+                         read_context=read_context):
         raise _contract_error(reason, detail)
 
 
@@ -1148,7 +1166,7 @@ def replacement_parent_matches(source, candidate, jobs, *, lineage=False) -> boo
         return True
     if source.get('dispatch_depth') != '1':
         return False
-    if require_known(owns(source, candidate.get('parent_sid'), jobs)):
+    if require_known(owns(source, candidate.get('parent_sid'), jobs), source, jobs):
         return True
     if lineage and candidate.get('dispatch_depth') == '1':
         # A registered A -> B edge survives a later B -> C handover. Admission
@@ -1156,8 +1174,9 @@ def replacement_parent_matches(source, candidate, jobs, *, lineage=False) -> boo
         from dispatch_seat_handover import effective_parent
         current = effective_parent(source, jobs)
         if not current and source.get('parent_sid'):
-            require_known(None)  # the source's holder cannot be read now
-        return bool(current) and bool(require_known(owns(candidate, current, jobs)))
+            # The lineage stopped reading between the two observations of the source.
+            require_known(None, source, jobs)
+        return bool(current) and bool(require_known(owns(candidate, current, jobs), candidate, jobs))
     return False
 
 
