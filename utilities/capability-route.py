@@ -10,6 +10,8 @@ from typing import NamedTuple
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("capability_topology", ROOT/"tools/capability_topology.py")
 TOPO = importlib.util.module_from_spec(SPEC); SPEC.loader.exec_module(TOPO)
+UI_SPEC = importlib.util.spec_from_file_location("ui_text", ROOT/"tools/i18n/ui_text.py")
+UI_TEXT = importlib.util.module_from_spec(UI_SPEC); UI_SPEC.loader.exec_module(UI_TEXT)
 DEFAULTS_SPEC = importlib.util.spec_from_file_location("dispatch_defaults", ROOT/"utilities/dispatch-defaults.py")
 DEFAULTS = importlib.util.module_from_spec(DEFAULTS_SPEC); DEFAULTS_SPEC.loader.exec_module(DEFAULTS)
 VALID_AFFINITY = DEFAULTS.AFFINITY_VALUES | {"unspecified"}
@@ -3683,11 +3685,12 @@ def _spec_reads_recorded(paths, artifact_root):
     return read
 
 
-def _compose_spec_read_notice(route):
+def _compose_spec_read_notice(route, t=None):
     """One `[경로]` card line when compose found a shared spec it did not ask the caller to read."""
+    t = t or UI_TEXT.translator()
     source = ((route.get("tracked_gate_evidence") or {}).get("spec_read") or {}).get("source")
     if isinstance(source, str) and source.startswith(SPEC_READ_SHARED_PREFIX):
-        return "  공유 spec 있음 — 읽을 경로: " + source[len(SPEC_READ_SHARED_PREFIX):]
+        return "  " + t("route.spec.shared", path=source[len(SPEC_READ_SHARED_PREFIX):])
     return None
 
 
@@ -4529,8 +4532,7 @@ def compile_first_leg(leg, *, frame_route, frame_cycle_id, context, binding, wor
     diagnosis = _compose_git_diagnosis(kwargs["cwd"])
     if (diagnosis.get("state") == "non-git" and selection.get("shape") != "direct"
             and _isolates_worktree(selection)):
-        raise ValueError("git 저장소 아님: source-mutating worker route; git init 후 다시 시작하거나, "
-                         "이 세션에서 --shape direct로 진행")
+        raise ValueError(UI_TEXT.translator()("route.error.not_git_worker"))
     frame_preparation = frame_route.get("framed_worktree") or {}
     inherit_frame_allocation = _inherits_frame_worktree(frame_route, leg, index, kwargs["cwd"])
     if _isolates_worktree(selection) and not inherit_frame_allocation:
@@ -4857,26 +4859,27 @@ def compose_default_slug(task_text, *, capability=None, shape=None):
     return ARTIFACT_LOCATOR.slugify(stem + suffix)[0]
 
 
-def _compose_campaign_line(selection):
+def _compose_campaign_line(selection, t=None):
+    t = t or UI_TEXT.translator()
     mode = selection["mode"]
     if mode == "join":
-        text = f"캠페인 {selection['key']} (기존 합류)"
+        text = t("route.campaign.join", key=selection["key"])
     elif mode == "create":
-        text = f"캠페인 {selection['key']} (신규 생성)"
+        text = t("route.campaign.create", key=selection["key"])
     elif mode == "reopen":
-        text = f"캠페인 {selection['key']} (닫힌 캠페인 재개)"
+        text = t("route.campaign.reopen", key=selection["key"])
     elif mode == "blocked":
-        text = f"캠페인 {selection['key']} (begin 거부 예정: {selection['blocked_reason']})"
+        text = t("route.campaign.blocked", key=selection["key"], reason=selection["blocked_reason"])
     elif mode == "parent":
-        text = f"캠페인 parent {selection['parent_cycle_id']} 상속"
+        text = t("route.campaign.parent", parent=selection["parent_cycle_id"])
     elif mode == "unresolved":
-        text = f"캠페인 {selection['key']} (기존 여부 확인 불가: 캠페인 목록 읽기 실패)"
+        text = t("route.campaign.unresolved", key=selection["key"])
     else:
-        text = "캠페인 미배정 (_unassigned, degraded)"
+        text = t("route.campaign.unassigned")
     shown = ", ".join(selection["active_keys"][:6])
     if selection["active_count"] > 6:
         shown += " …"
-    return f"  {text} · 활성 캠페인 {selection['active_count']}개" + (f": {shown}" if shown else "")
+    return "  " + t("route.campaign.line", text=text, count=selection["active_count"]) + (f": {shown}" if shown else "")
 
 
 def route_start_approvals(route, registry=None):
@@ -4910,7 +4913,7 @@ def route_start_approvals(route, registry=None):
     return rows
 
 
-def compose_observations(route):
+def compose_observations(route, t=None):
     """Display facts already known by compose; never changes routing or approval."""
     from session_identity import identity
     who = identity()
@@ -4927,16 +4930,18 @@ def compose_observations(route):
     selection = route.get("selection") or {}
     evidence = route.get("dispatch_evidence") or {}
     native = evidence.get("native_subagent")
-    native_label = "관측됨" if native else "미확인"
+    t = t or UI_TEXT.translator()
+    seen, unknown = t("route.obs.seen"), t("route.obs.unknown")
+    native_label = seen if native else unknown
     headless = bool(evidence.get("tuples") or route.get("registered_headless_candidates"))
     answers = [
-        ("주 capability", route["capability"]),
-        ("새 실측", "예 (lab 실행 선언됨)" if lab_run else "미확인 (작업 의미에 따름)"),
-        ("standard+", "예" if route["effective_intensity"] in {"standard", "strong", "thorough", "adversarial"} else "아니오"),
-        ("분리 단계", f"{len(nodes)}개 선언됨" if shape == "staged" else "frame 결정 대기" if shape == "framed" else "없음 (단일 실행)"),
-        ("inline 예외", str(selection.get("inline_reason") or selection.get("selection_basis") or "미확인") if shape == "direct" else "해당 없음"),
-        ("위임 표면", f"native {native_label} / headless {'관측됨' if headless else '미확인'}"),
-        ("lineage·RUNLOG", "미확인 (기존 lineage·append-only RUNLOG 유지 계약)"),
+        (t("route.q.main_capability"), route["capability"]),
+        (t("route.q.new_measurement"), t("route.a.lab_declared") if lab_run else t("route.a.depends_on_work")),
+        ("standard+", t("route.a.yes") if route["effective_intensity"] in {"standard", "strong", "thorough", "adversarial"} else t("route.a.no")),
+        (t("route.q.split_stages"), t("route.a.stages_declared", count=len(nodes)) if shape == "staged" else t("route.frame.pending") if shape == "framed" else t("route.a.single_run")),
+        (t("route.q.inline_exception"), str(selection.get("inline_reason") or selection.get("selection_basis") or unknown) if shape == "direct" else t("route.a.not_applicable")),
+        (t("route.q.delegation_surface"), t("route.a.surface", native=native_label, headless=seen if headless else unknown)),
+        ("lineage·RUNLOG", t("route.a.lineage")),
     ]
     return {"confirmation": confirmation,
             "pre_execution_answers": [{"question": i, "name": name, "answer": value} for i, (name, value) in enumerate(answers, 1)]}
@@ -4969,34 +4974,34 @@ def compose_omission_lines(route):
     return lines
 
 
-def compose_decision_lines(route, non_git_decision=None):
+def compose_decision_lines(route, non_git_decision=None, t=None):
     """Read only the sealed selection/nodes; same display for every harness."""
     import route_plan as RP
 
+    t = t or UI_TEXT.translator()
     basis = {row.get("axis"): row for row in
              (route.get("selection") or {}).get("selection_basis", [])}
     intensity = basis.get("compose-intensity", {})
     source = intensity.get("source", "sealed-route")
     requested = intensity.get("signal", route.get("requested_intensity"))
-    detail = ", 지정 안 됨" if source == "shape-default" else ""
+    detail = t("route.intensity.unspecified") if source == "shape-default" else ""
     if requested and requested != route["effective_intensity"]:
         detail += f", requested={requested}"
     lines = [f"  intensity={route['effective_intensity']} (source={source}{detail})"]
     shape = (route.get("selection") or {}).get("shape") or shape_for_intensity(route["effective_intensity"])
     if source == "shape-default" and shape != "framed":
-        lines.append("  강도 안내: 판정·원인 분석이면 --intensity strong 검토")
+        lines.append("  " + t("route.intensity.hint"))
     capability = basis.get("compose-capability", {})
     if capability.get("source") == "compose-default":
-        lines.append(f"  capability={route['capability']} (source=compose-default, --capability 지정 안 됨; "
-                     "고정 기본값, 과제 문장 분류 없음; 결과 분석·평가·비교는 autopilot-lab/eval 검토)")
+        lines.append("  " + t("route.capability.compose_default", capability=route['capability']))
     elif capability.get("source") == "non-git-unresolved":
-        lines.append(f"  capability={route['capability']} (source=non-git-unresolved; 작업 종류 미분류)")
+        lines.append("  " + t("route.capability.non_git_unresolved", capability=route['capability']))
     elif capability.get("source") == "non-git-task-classification":
         lines.append(f"  capability={route['capability']} (source=non-git-task-classification)")
     elif capability.get("source") == "frame-shape":
-        lines.append("  capability=frame 결정 대기 (source=frame-shape)")
+        lines.append("  " + t("route.capability.frame_pending"))
     elif not capability:
-        label = "frame 결정 대기" if shape == "framed" else route["capability"]
+        label = t("route.frame.pending") if shape == "framed" else route["capability"]
         lines.append(f"  capability={label} (source=sealed-route)")
     profiles = {}
     nodes = route.get("nodes", [])
@@ -5004,34 +5009,33 @@ def compose_decision_lines(route, non_git_decision=None):
         if _no_model_node(node):
             continue
         anchor = node.get("parallel_anchor") or node["id"]
-        profile = ("current-session(등급 미기록)" if node.get("execution_surface") == "inline"
+        profile = (t("route.tier.inline") if node.get("execution_surface") == "inline"
                    else node.get("model_profile") or "unknown")
         profiles.setdefault(anchor, []).append(profile)
-    lines.append("  tiers: " + (" ".join(f"{node}={'+'.join(values)}" for node, values in profiles.items()) or "없음"))
+    lines.append("  tiers: " + (" ".join(f"{node}={'+'.join(values)}" for node, values in profiles.items()) or t("route.none")))
     workers = sum(n.get("dispatch_depth") == 2 or _frame_node(n) for n in nodes)
     owners = int(shape != "framed" and route["effective_intensity"] != "direct")
     resources = [n["id"] for n in nodes if n.get("kind") == "resource-runner"]
-    size = f"  규모: nodes={len(nodes)} worker_dispatches={workers} owner_dispatches={owners} " \
-           f"resource(측정)={','.join(resources) or '없음'} (초기 실행 예상, 재시도·후속 route 제외)"
+    size = "  " + t("route.size", nodes=len(nodes), workers=workers, owners=owners,
+                      resources=",".join(resources) or t("route.none"))
     if shape == "framed":
         frame_basis = basis.get("frame-legs")
         if frame_basis:
             count = frame_basis.get("signal")
             source = frame_basis.get("source")
             reason = frame_basis.get("reason")
-            label = "기본" if source == "default" else reason
-            size_word = "한" if str(count) == "1" else "두"
-            size += f"; frame {size_word} 갈래({label})"
+            label = t("route.size.frame_default") if source == "default" else reason
+            size += t("route.size.frame_one" if str(count) == "1" else "route.size.frame_two", label=label)
         else:
             count = len(RP.frame_legs(route))
-            size_word = "한" if count == 1 else "두"
-            size += f"; frame {size_word} 갈래(이전 규칙으로 만든 경로)"
+            size += t("route.size.frame_one" if count == 1 else "route.size.frame_two",
+                      label=t("route.size.frame_legacy"))
         supported = ROUTE_AUTHORITY.depth1_supported_harnesses(route, worker_type="frame")
         pin = (((route.get("selection_pins") or {}).get("frame") or {}).get("harness"))
         if len(supported) == 1:
-            size += f" · 같은 하네스(쓸 수 있는 하네스가 {next(iter(supported))} 하나)"
+            size += t("route.size.same_only", harness=next(iter(supported)))
         elif pin and pin in supported:
-            size += f" · 같은 하네스(frame 지정 {pin})"
+            size += t("route.size.same_pinned", pin=pin)
     lines.append(size)
     for row in ((route.get("composed_recipe") or {}).get("compose") or {}).get("auto_completed_nodes", []):
         purpose = "owner closing summary" if row["reason"] == "terminal-anchor" else "registry consumer"
@@ -5047,46 +5051,48 @@ def compose_card(route, plan=None, plan_source=None, *, owner_harness=None, rout
     ids = [node["id"] for node in route["nodes"]]
     framed = shape == "framed"
     graph = "→".join(ids) if ids else "-"
-    gates = ",".join(sorted({row["gate"] for row in route.get("human_gate_bindings") or []})) or "없음"
+    t = UI_TEXT.translator()
+    gates = ",".join(sorted({row["gate"] for row in route.get("human_gate_bindings") or []})) or t("route.none")
     card = (
-        f"[경로] {route['capability']} · {shape}({route['effective_intensity']}) {graph}"
-        f" · route {route['route_id']} · origin compose · 사람 게이트 {gates}\n"
-        f"  cwd {route['cwd']} · slug {route.get('slug', '-')}\n"
+        t("route.card.header", capability=route['capability'], shape=shape,
+          intensity=route['effective_intensity'], graph=graph, route_id=route['route_id'], gates=gates)
+        + f"\n  cwd {route['cwd']} · slug {route.get('slug', '-')}\n"
         + _compose_campaign_line(campaign_selection if campaign_selection is not None
-                                 else compose_campaign_selection(route))
+                                 else compose_campaign_selection(route), t)
     )
-    observed = compose_observations(route)
+    observed = compose_observations(route, t)
     if include_decisions:
-        card += "\n" + "\n".join(compose_decision_lines(route, non_git_decision))
+        card += "\n" + "\n".join(compose_decision_lines(route, non_git_decision, t))
     if non_git_decision and non_git_decision.get("kind") == "direct":
-        card += "\n  git 아닌 폴더 — 이 세션이 직접 진행. 작업자가 필요하면 --shape 없이 다시 시작(원본 수정은 git init 필요)"
+        card += "\n  " + t("route.card.non_git_direct")
         if non_git_decision.get("capability_unresolved"):
-            card += "\n  작업 종류 미정 — `--capability`로 지정"
-    card += f"\n  확인 방식 {observed['confirmation']['method']} · 출처 {observed['confirmation']['origin']}"
+            card += "\n  " + t("route.card.capability_unresolved")
+    card += "\n  " + t("route.card.confirmation", method=observed['confirmation']['method'],
+                          origin=observed['confirmation']['origin'])
     for answer in observed["pre_execution_answers"]:
         card += f"\n  {answer['question']}. {answer['name']}: {answer['answer']}"
     if framed:
         pair = len([n for n in route.get("nodes", []) if _frame_node(n)]) == 2
-        card += ("\n  frame이 방향과 경로를 조립해 제안합니다"
-                 + ("\n  비용: 최상위 모델 두 갈래 · 방향 확인 질문 1회" if pair
-                    else "\n  비용: frame 한 갈래 · 방향 확인 질문 1회"))
+        card += ("\n  " + t("route.card.frame_proposes")
+                 + "\n  " + t("route.card.cost_two" if pair else "route.card.cost_one"))
     sourced = {}
     for node in route["nodes"]:
         for name, source in (node.get("input_sources") or {}).items():
             sourced.setdefault(name, source)
     if sourced:  # SD-163: inputs filled from a prior cycle
         source_dir = os.path.commonpath([str(Path(source["path"]).parent) for source in sourced.values()])
-        card += (f"\n  입력 {'·'.join(sourced)} ← {','.join(sorted({s['cycle_id'] for s in sourced.values()}))}"
-                 f" {Path(route['artifact_root']) / source_dir}")
+        card += "\n  " + t("route.card.inputs", names='·'.join(sourced),
+                              cycles=','.join(sorted({s['cycle_id'] for s in sourced.values()})),
+                              path=Path(route['artifact_root']) / source_dir)
     borrowed = list(dict.fromkeys(node["part"] for node in route["nodes"] if node.get("part")))
     if borrowed:  # SD-165: parts taken from another recipe, written under parts/<capability>/<stage>/
-        card += f"\n  빌린 부품 {'·'.join(borrowed)}"
+        card += "\n  " + t("route.card.borrowed", parts='·'.join(borrowed))
     if valid_entry_execution_scope_marker(route.get("entry_scope_contract_version"),
                                          route.get("entry_execution_scope")) and route.get("entry_scope_contract_version") == 1:
-        card += f"\n  실행 범위 {route['entry_execution_scope']}"
+        card += "\n  " + t("route.card.scope", scope=route['entry_execution_scope'])
     else:
         for row in route_start_approvals(route):
-            card += f"\n  시작 승인 {row['start_approval']} ({row['part']})"
+            card += "\n  " + t("route.card.start_approval", approval=row['start_approval'], part=row['part'])
     from artifact_producer import route_cycle_for, cycle_dir, default_bucket, ProducerError
     try:
         record = route_cycle_for(Path(route["artifact_root"]), route)
@@ -5094,19 +5100,19 @@ def compose_card(route, plan=None, plan_source=None, *, owner_harness=None, rout
         record = None
     if record is not None:
         folder = cycle_dir(Path(route["artifact_root"]), record["campaign_id"], record["cycle_id"], record)
-        card += f"\n  산출물 {folder.resolve() / 'artifacts' / default_bucket(route['capability'])}"
+        card += "\n  " + t("route.card.output", path=folder.resolve() / 'artifacts' / default_bucket(route['capability']))
     if plan:
-        suffix = " (상속)" if plan_source == "inherited" else ""
-        card += f"\n  계획 {' › '.join(plan)}{suffix}"
+        suffix = t("route.card.plan_inherited") if plan_source == "inherited" else ""
+        card += "\n  " + t("route.card.plan", plan=' › '.join(plan), suffix=suffix)
     leg_plan = ROUTE_PLAN.leg_plan(route)
     parallel = (leg_plan or {}).get("leg", {}).get("parallel") or []
     if parallel:
-        card += "\n  승인된 분할: " + " · ".join(parallel[:3])
+        card += "\n  " + t("route.card.split", items=" · ".join(parallel[:3]))
         if len(parallel) > 3:
-            card += f"; 외 {len(parallel) - 3}개(route·owner 지시문에 전부)"
+            card += t("route.card.split_more", count=len(parallel) - 3)
     if route_plan_unreadable:
-        card += "\n  경로 계획을 읽지 못함"
-    notice = _compose_spec_read_notice(route)
+        card += "\n  " + t("route.card.plan_unreadable")
+    notice = _compose_spec_read_notice(route, t)
     if notice:
         card += "\n" + notice
     for advisory in OWNER_WRITE_ADVISORY.advisories(route, owner_harness=owner_harness):
@@ -11387,13 +11393,14 @@ def _decide_non_git_compose(cwd_diagnosis, requested_shape,
     if state != "non-git":
         detail = cwd_diagnosis.get("detail") or "git diagnosis unavailable"
         return {**common, "kind": "error", "detail": f"{common['cwd']}: {detail}"}
-    cause = f"git 저장소 아님: {common['cwd']}"
+    t = UI_TEXT.translator()
+    cause = t("route.nongit.cause", cwd=common['cwd'])
     if requested_shape != "direct":
         return {**common, "kind": "worker-candidate", "cause": cause,
-                "next": "git init 후 다시 시작하거나, 이 세션에서 --shape direct로 진행"}
+                "next": t("route.nongit.next_worker")}
     if dispatch_depth > 0 or registered_attempt:
         return {**common, "kind": "refuse", "cause": cause,
-                "next": "git init 후 다시 시작하거나, depth-0 부모에서 같은 compose를 --shape 없이 또는 --shape direct로 실행"}
+                "next": t("route.nongit.next_refuse")}
     return {**common, "kind": "direct", "cause": cause}
 
 
@@ -11489,6 +11496,77 @@ def _primary_worktree(cwd, common):
             if OWNER_WRITE_ADVISORY.git_topology(root) == "primary":
                 return os.path.realpath(root)
     return None
+
+
+def _moved_preparation(route, top):
+    """The preparation record that moved this route out of the person's folder, or None.
+
+    Only a record this route's own start wrote qualifies: its worktree is `top`, its base is the
+    route's sealed `source_commit` (compose runs in the prepared worktree), and its origin lies
+    outside it. An approved linked task, a retained linked worktree and a start that prepared
+    nothing write no such record, so their own folder is never reported as somewhere else."""
+    folder = Path(route.get("artifact_root") or "") / ".runtime" / "worktree-preparation"
+    base = route.get("source_commit")
+    needle = json.dumps(str(top), ensure_ascii=False).encode("utf-8")   # as `atomic_write` writes it
+    try:
+        entries = list(os.scandir(folder)) if route.get("artifact_root") else []
+    except OSError:
+        return None
+    for entry in entries:
+        if not entry.name.endswith(".json"):
+            continue
+        try:
+            with open(entry.path, "rb") as handle:
+                data = handle.read()
+            if needle not in data:  # cheap filter before parsing every record
+                continue
+            record = json.loads(data)
+        except (OSError, ValueError):
+            continue
+        origin = record.get("origin_cwd") if isinstance(record, dict) else None
+        if (isinstance(origin, str) and origin and record.get("remote_default") != "approved-linked-task"
+                and os.path.realpath(record.get("path") or "") == os.path.realpath(top)
+                and record.get("base_sha") == base
+                and os.path.commonpath([os.path.realpath(origin), os.path.realpath(top)])
+                != os.path.realpath(top)):
+            return record
+    return None
+
+
+def _result_location_line(route):
+    """One plain closing line naming where a route's source change is when its start moved the
+    work out of the person's folder, or "".
+
+    A source start from a primary checkout runs in a prepared `<repo>-wt/<slug>` worktree from
+    the fetched remote default, and leaves the person's folder untouched, so a person who reads
+    only the agent's last message looks for the change in the folder they started from.
+    Read-only, no new record. "" for an unversioned route (no git at all), a route that ran in
+    the person's own folder, a worktree with nothing changed since its base, a change already in
+    that folder, or any git failure. It names the place, branch and commit state only: no merge
+    command, since a worktree rebased onto or merged with upstream would carry those commits too."""
+    cwd, base = route.get("cwd"), route.get("source_commit")
+    if base == "unversioned" or not cwd or not os.path.isdir(cwd):
+        return ""
+    top = _git(cwd, "rev-parse", "--show-toplevel")
+    head = _git(top, "rev-parse", "HEAD") if top else None
+    pending = _git(top, "status", "--porcelain") if head else None
+    if pending is None or (head == base and not pending):
+        return ""   # nothing this work changed (or unreadable)
+    git_dir, common = _git(top, "rev-parse", "--git-dir"), _git_common_dir(top)
+    if not git_dir or not common or os.path.realpath(os.path.join(top, git_dir)) == os.path.realpath(common):
+        return ""   # the primary checkout is the person's own folder; no record scan
+    record = _moved_preparation(route, os.path.realpath(top))
+    origin = _git(record["origin_cwd"], "rev-parse", "--show-toplevel") if record and os.path.isdir(
+        record["origin_cwd"]) else None
+    if not origin or os.path.realpath(origin) == os.path.realpath(top):
+        return ""
+    origin_head = _git(origin, "rev-parse", "HEAD")
+    if not pending and origin_head and _worktree_git(
+            top, "merge-base", "--is-ancestor", "HEAD", origin_head).returncode == 0:
+        return ""   # already in the person's folder
+    branch = _git(top, "symbolic-ref", "-q", "--short", "HEAD")
+    label = (f"branch {branch}" if branch else "detached HEAD") + (", not committed yet" if pending else "")
+    return f"result: the change is in {top} ({label}), not in {origin}"
 
 
 def _preparation_record_path(artifact_root, key):
@@ -13373,7 +13451,11 @@ def main():
                 receipt=_legacy_inline_finish(a,route,a.route,sys.modules[__name__], _admission=admission)
         else:
             receipt=_legacy_inline_finish(a,route,a.route,sys.modules[__name__], _admission=admission)
-        print(json.dumps(receipt,sort_keys=True))
+        print(json.dumps(receipt,sort_keys=True),flush=True)
+        # Last, on stderr: stdout keeps exactly the one receipt its readers parse.
+        location=_result_location_line(route)
+        if location:
+            print(location,file=sys.stderr)
     else:
         if a.command=="close":
             a.route=_close_route_argument(a)

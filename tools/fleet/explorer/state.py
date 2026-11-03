@@ -208,6 +208,15 @@ def _question_schema_items(detail):
     return (item,)
 
 
+OLDER_WAITS_FOLD = "qolder:QUESTIONS"
+
+
+def older_waits_shown(state):
+    """Older waits are listed until the person folds them; age alone never hides a wait."""
+    opened_for = getattr(state, "opened_for", None)
+    return not callable(opened_for) or opened_for(OLDER_WAITS_FOLD, "") != "closed"
+
+
 def question_items(detail):
     """Return visible fields, hiding hidden fields and unsatisfied conditions."""
     if not isinstance(detail, Mapping):
@@ -883,8 +892,7 @@ def _reduce(state, event, frame=None):
             return replace(state, opened=opened, folds=tuple(sorted(folds.items()))), ()
         if action[0] == "question.older.toggle":
             folds = state.fold_map()
-            key = "qolder:QUESTIONS"
-            folds[key] = "" if folds.get(key) == "open" else "open"
+            folds[OLDER_WAITS_FOLD] = "" if folds.get(OLDER_WAITS_FOLD) == "closed" else "closed"
             return replace(state, folds=tuple(sorted(folds.items()))), ()
         if action[0] == "question.select" and len(action) > 2:
             return _question_selection(state, action[2])

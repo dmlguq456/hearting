@@ -417,9 +417,15 @@ def _draw_overview_tail(grid, vm, state, x, use, right, y, route_rows, repos, he
         y += 1
 
 
+def route_counts(routes):
+    """``(open, no_response, stopped)``: a route nothing of which runs (no response) is not open."""
+    states = [str(route.get("state") or "") for route in routes]
+    return (sum(1 for state in states if state not in ("done", "stale")),
+            states.count("stale"), states.count("dead"))
+
+
 def _draw_overview_routes_rule(grid, vm, state, x, use, right, y, route_rows):
-    open_routes = sum(1 for route in route_rows if route.get("state") != "done")
-    stopped = sum(1 for route in route_rows if route.get("state") == "dead")
+    open_routes, no_response, stopped = route_counts(route_rows)
     grid.put(x, y, "── ", "line")
     label_x = grid.put(x + 3, y, "ROUTES", "head")
     # Open routes pulse on the shared working beat (the same g_work/g_work_off pair as the
@@ -428,7 +434,8 @@ def _draw_overview_routes_rule(grid, vm, state, x, use, right, y, route_rows):
     count_key = ("g_work" if lit else "g_work_off") if open_routes else "dim"
     count_x = grid.put(label_x, y, "  ", "dim", limit=right)
     count_end = grid.put(count_x, y, f"{open_routes} open", count_key, limit=right)
-    meta = (f" · {stopped} stopped leg{'s' if stopped != 1 else ''}" if stopped else "")
+    meta = ((f" · no response {no_response}" if no_response else "") +
+            (f" · {stopped} stopped leg{'s' if stopped != 1 else ''}" if stopped else ""))
     meta_end = grid.put(count_end, y, meta, "dim", limit=right) if meta else count_end
     grid.put(meta_end, y, " ", "branch_s")
     for cell_x in range(meta_end + 1, right):
@@ -436,7 +443,7 @@ def _draw_overview_routes_rule(grid, vm, state, x, use, right, y, route_rows):
     mix = _harness_mix(route_rows)
     mix_width = sum(len(text) for text, _key in mix)
     mix_x = x + use - 2 - mix_width
-    if mix_x - x >= 40:                      # only where it clears the section's own title
+    if mix_x - x >= 40 and mix_x > meta_end + 1:     # only where it clears the section's own title
         cursor = mix_x
         for text, key in mix:
             cursor = grid.put(cursor, y, text, key, limit=right)
@@ -454,7 +461,7 @@ def _recent_row(grid, repo, x, use, y):
 def _harness_mix(routes):
     counts = {"claude": 0, "codex": 0, "opencode": 0}
     for route in routes:
-        if route.get("state") in ("dead", "done"):
+        if route.get("state") in ("dead", "done", "stale"):
             continue
         owner = str(route.get("harness") or "")
         if owner in counts:
@@ -516,12 +523,12 @@ def _session_unfold(grid, vm, x, use, y, session, c):
         grid.put(x_val, y, "·", "dim")
         y += 1
     grid.put(x_lab, y, "ASK", "label")
-    question = next((item for item in (vm.questions or ())
-                     if item.get("session_tag") == tag), None)
+    mine = [item for item in (vm.questions or ()) if item.get("session_tag") == tag]
+    question = next((item for item in mine if not item.get("older")), mine[0] if mine else None)
     if question:
         marker = str(question.get("marker") or "●")
         lead = [(marker, "lvl_y" if marker == "◑" else "blocked"),
-                (" " + str(question.get("source") or question.get("kind") or "wait"), "blocked"),
+                (" " + str(question_about(question)), "blocked"),
                 (" · waiting " + str(question.get("wait")) + " · ", "dim")]
         from .pages import _segs
         cursor = _segs(grid, x_val, y, lead, right)
@@ -598,8 +605,8 @@ def _draw_route_line(grid, x0, x1, y, route, tag=True, repo=True, steward=False,
     own = room - (repo_w + GAP if repo_w else 0) >= 8 + GAP + 12 + GAP + 12
     state = "working" if route.get("activity") == "running" else route.get("state")
     marker, marker_key = {"working": ("⠏", "g_spin"), "dead": ("✕", "g_dead"),
-                          "blocked": ("●", "g_blocked"), "done": ("✓", "grp_live")}.get(
-                              state, ("●", "g_work_off"))
+                          "blocked": ("●", "g_blocked"), "done": ("✓", "grp_live"),
+                          "stale": ("◌", "dim")}.get(state, ("●", "g_work_off"))
     grid.put(x0, y, marker, marker_key)
     x = x0 + 2
     if repo_w:
@@ -624,6 +631,9 @@ def _draw_route_line(grid, x0, x1, y, route, tag=True, repo=True, steward=False,
 
 
 def _draw_route_progress(grid, x, end, y, route):
+    if route.get("state") == "stale" and x < end:
+        # Still marked in flight, but nothing of it runs: said in words before its stages.
+        x = grid.put(x, y, "no response ", "lvl_y", limit=end)
     if route.get("capability") == "frame" and route.get("shape") == "framed":
         legs = tuple(route.get("legs") or ())
         # The route's own leg is appended after every earlier leg, so the last frame leg is
@@ -924,8 +934,8 @@ def draw_routes(grid, vm, state, x=34, y=3):
             status = route.get("state") if route.get("activity") != "running" else "running"
             marker, key = {"running": ("⠏", "g_spin"), "working": ("⠏", "g_spin"),
                            "blocked": ("●", "g_blocked"), "dead": ("✕", "g_dead"),
-                           "done": ("✓", "done"), "idle": ("●", "g_work_off")}.get(
-                               status, ("●", "g_work_off"))
+                           "done": ("✓", "done"), "idle": ("●", "g_work_off"),
+                           "stale": ("◌", "dim")}.get(status, ("●", "g_work_off"))
             grid.put(x + cols["st"], y, marker, key)
             tag = str(route.get("session_tag") or route.get("past_from") or "")
             if tag:
@@ -1086,13 +1096,72 @@ def draw_routes(grid, vm, state, x=34, y=3):
 
 
 
+_OLDER_NOTE = "not closed automatically · leaves when answered or the work ends"
+# What each wait asks, in plain words, from its source alone: the shared cache is body-free and a
+# list row never carries the question text (that is read only for the selected row).
+_QUESTION_ABOUT = {"S1-approval": "permission approval", "S1-question": "question window answer",
+                   "S3": "blocked work needs direction", "S4": "marked question"}
+
+
+def question_about(question):
+    """``frame plan review`` / ``blocked work needs direction`` …: a body-free one-line summary of a wait."""
+    source, node = question.get("source"), question.get("node")
+    if source == "S2":
+        if node == "frame-review":
+            return "frame plan review"
+        return f"{node} gate check" if node else "route human gate"
+    return _QUESTION_ABOUT.get(source) or question.get("kind") or "·"
+
+
+def _question_line(question):
+    """The QUESTION cell: what the wait asks and its route, after why no session can take it."""
+    parts = []
+    owner_state = question.get("owner_state")
+    if owner_state == "none":
+        parts.append(("no session to take it · ", "lvl_y"))
+    elif owner_state == "successor":
+        parts.append(("taken over · ", "dim"))
+    parts.append((str(question_about(question)), "soft"))
+    if question.get("route_title") or question.get("route_id"):
+        parts.append((" · " + str(question.get("route_title") or question.get("route_id")), "dim"))
+    return parts
+
+
+def _question_detail(question):
+    """Who, when and which route, for an unfolded wait: ``(label, text, style)`` lines."""
+    lines = []
+    route_id = question.get("route_id")
+    if route_id:
+        title = question.get("route_title")
+        lines.append(("route:", f"{title} · {route_id}" if title else str(route_id), "soft"))
+    if question.get("since_at"):
+        lines.append(("since:", f"{question['since_at']} · waiting {question.get('wait') or '·'}",
+                      "soft"))
+    owner_state = question.get("owner_state")
+    session_tag = question.get("session_tag")
+    owner_sid = question.get("owner_sid")
+    if owner_state == "successor":
+        registered = question.get("registered")
+        lines.append(("owner:", f"[{session_tag or '··'}] taken over"
+                      + (f" · originally {registered}" if registered else ""), "soft"))
+    elif owner_state == "none":
+        lines.append(("owner:", "no session to take it · original session ended"
+                      + (f" ({owner_sid})" if owner_sid else ""), "lvl_y"))
+    elif not session_tag:
+        lines.append(("owner:", f"session {owner_sid} · not in the Fleet list" if owner_sid
+                      else "no record of who takes it", "dim"))
+    return tuple(lines)
+
+
 def draw_questions(grid, vm, state, x=34, y=3):
     use = max(0, grid.cols - x - 2)
     right, bottom = x + use + 1, grid.rows - 5
+    from .chrome import older_waits_text
+    from .state import older_waits_shown
     all_questions = tuple(vm.questions or ())
     current_questions = tuple(item for item in all_questions if not item.get("older"))
     older_questions = tuple(item for item in all_questions if item.get("older"))
-    older_open = state.opened_for("qolder:QUESTIONS", "") == "open"
+    older_open = older_waits_shown(state)
     questions = current_questions + (older_questions if older_open else ())
     system = vm.system if hasattr(vm.system, "get") else {}
     waits = system.get("answer_waits") if hasattr(system, "get") else None
@@ -1100,14 +1169,13 @@ def draw_questions(grid, vm, state, x=34, y=3):
         waits = {"state": "complete", "total": len(current_questions), "older": len(older_questions)}
     known = waits.get("state") == "complete"
     total = waits.get("total") if known else None
-    older = waits.get("older") if known else None
     older_count = len(older_questions)
     grid.put(x, y, "── ", "line")
     cursor = grid.put(x + 3, y, "WAITING", "sect")
     cursor = grid.put(cursor, y, "  " + (str(total) if total is not None else "?") + " question" +
                       ("s" if total != 1 else ""), "dim")
-    if isinstance(older, int) and older > 0:
-        cursor = grid.put(cursor, y, f" · older waits {older}", "dim")
+    if older_waits_text(waits):
+        cursor = grid.put(cursor, y, older_waits_text(waits), "dim", limit=right)
     elif not known:
         cursor = grid.put(cursor, y, " · observation " + str(waits.get("state")), "dim")
     grid.put(cursor, y, " ", "branch_s")
@@ -1115,13 +1183,13 @@ def draw_questions(grid, vm, state, x=34, y=3):
     y += 1
     narrow = use < 100
     kind_x = 10 + (13 if narrow else 25) + 2
-    wait_x = kind_x + 11
+    wait_x = kind_x + (11 if narrow else 14)          # wide rows fit ``blocked owner`` whole
     project_x = None if narrow else wait_x + 10
     session_x = wait_x + 10 + (0 if narrow else 14)
     columns = [(3, "ID"), (10, "HARNESS"), (kind_x, "KIND"), (wait_x, "WAITING")]
     if project_x is not None:
         columns.append((project_x, "PROJECT"))
-    columns.append((session_x, "SESSION"))
+    columns.append((session_x, "QUESTION"))
     grid.fill(x, right, y, " ", tint=234)
     for off, name in columns:
         grid.put(x + off, y, name, "head", tint=234, limit=right)
@@ -1136,8 +1204,10 @@ def draw_questions(grid, vm, state, x=34, y=3):
             grid.put(right - 18, bottom, "↓ more below", "dim", limit=right)
             return
         if question.get("older") and not older_heading_drawn:
-            grid.put(x + 3, y, f"OLDER WAITS · {older_count}", "sect", limit=right)
             toggle = "[ hide ]"
+            cursor = grid.put(x + 3, y, f"OLDER WAITS · {older_count}", "sect", limit=right)
+            grid.put(cursor, y, _clip("  " + _OLDER_NOTE, right - len(toggle) - 1 - cursor), "dim",
+                     limit=right - len(toggle) - 1)
             end = grid.put(right - len(toggle), y, toggle, "hearting", limit=right)
             grid.add_hit(y, right - len(toggle), end, ("question.older.toggle",))
             grid.add_hit(y, x, right, ("question.older.toggle",))
@@ -1146,7 +1216,10 @@ def draw_questions(grid, vm, state, x=34, y=3):
             if y >= bottom:
                 return
         tag = str(question.get("tag") or "·")
-        tag_text = _clip(tag, 5)
+        # The bracket names who answers: the answering session's tag, ``··`` while none is listed.
+        shown_tag = (str(question.get("session_tag")) if question.get("session_tag")
+                     else "··" if "session_tag" in question else tag)
+        tag_text = _clip(shown_tag, 5)
         tag_x = x + 4
         is_open = closed != tag
         current_ref = question.get("ref")
@@ -1160,9 +1233,10 @@ def draw_questions(grid, vm, state, x=34, y=3):
             grid.fill(x - 1, right, y, " ", tint=236)
             grid.put(x, y, "▶", "soft")
         marker = str(question.get("marker") or "●")
-        grid.put(x + 1, y, marker, "lvl_y" if marker == "◑" else "blocked")
+        grid.put(x + 1, y, marker, "lvl_y" if marker == "◑" else "dim" if marker == "◌" else "blocked")
         grid.put(x + 3, y, "[", "dim")
-        grid.put(tag_x, y, tag_text, "soft", limit=tag_x + _seg_width(tag_text))
+        grid.put(tag_x, y, tag_text, "soft" if question.get("session_tag") or shown_tag == tag
+                 else "dim", limit=tag_x + _seg_width(tag_text))
         grid.put(tag_x + _seg_width(tag_text), y, "]", "dim", limit=x + 10)
         harness = str(question.get("h") or "·")
         grid.put(x + 10, y, harness, "hb_" + harness)
@@ -1178,13 +1252,19 @@ def draw_questions(grid, vm, state, x=34, y=3):
             effort = str(question.get("e") or "")
             cursor = grid.put(cursor, y, effort, "eff_" + effort if effort in ("medium", "xhigh") else "dim")
             grid.put(cursor, y, ")", "dim")
-        grid.put(x + kind_x, y, str(question.get("kind") or "·"), "blocked")
-        grid.put(x + wait_x, y, str(question.get("wait") or "·"), "soft")
+        grid.put(x + kind_x, y, _clip(str(question.get("kind") or "·"), wait_x - kind_x - 1), "blocked")
+        # An older wait keeps its age in sight (yellow); it is listed, never closed by age.
+        grid.put(x + wait_x, y, str(question.get("wait") or "·"),
+                 "lvl_y" if question.get("fold") == "older" else "soft")
         if project_x is not None:
             grid.put(x + project_x, y, str(question.get("project") or "·"), "soft")
-        row_label = question.get("session_tag") or question.get("title") or "·"
-        grid.put(x + session_x, y, _clip(str(row_label),
-                                         use - session_x), "hb_" + harness)
+        if "session_tag" not in question and question.get("title") is not None:
+            # A title-carrying reference record names its session there.
+            grid.put(x + session_x, y, _clip(str(question["title"]), use - session_x),
+                     "hb_" + harness)
+        else:
+            from .grid import put_fit
+            put_fit(grid, x + session_x, y, _question_line(question), limit=x + use)
         if tag == selected:
             grid.put(x, y, "◆", "hearting")
         if is_open:
@@ -1197,8 +1277,7 @@ def draw_questions(grid, vm, state, x=34, y=3):
                              *(([("project:", question.get("project"), "soft")] if narrow else [])),
                              ("now:", question.get("now"), "soft"))
         else:
-            detail_fields = (("source:", question.get("source"), "soft"),
-                             ("kind:", question.get("kind"), "blocked"),
+            detail_fields = (*_question_detail(question),
                              *(([("project:", question.get("project"), "soft")] if narrow else [])))
         for label, value, style in detail_fields:
             grid.put(x + 10, y, label, "label")
@@ -1448,8 +1527,10 @@ def draw_questions(grid, vm, state, x=34, y=3):
                 y += 1
     if older_count > 0 and not older_heading_drawn:
         label = f"OLDER WAITS · {older_count}"
-        grid.put(x + 3, y, label, "sect", limit=right)
         toggle = "[ show ]" if not older_open else "[ hide ]"
+        cursor = grid.put(x + 3, y, label, "sect", limit=right)
+        grid.put(cursor, y, _clip("  " + _OLDER_NOTE, right - len(toggle) - 1 - cursor), "dim",
+                 limit=right - len(toggle) - 1)
         end = grid.put(right - len(toggle), y, toggle, "hearting", limit=right)
         grid.add_hit(y, right - len(toggle), end, ("question.older.toggle",))
         y += 1
