@@ -2798,9 +2798,22 @@ reason. So in a proven tmux pane session-tidy books and performs
 the automatic clear and continue, `peer-steward prompt`, `clear`, `continue`,
 `idle-card-request` and `wait` accept the pane id (without Herdr, names and
 Fleet tags resolve among that server's panes), the Claude idle callback retries
-pending delivery there, the pane header goes to the tmux pane title and the
-`@hearting_title` pane option, and `interactive-main-recovery` checks and opens
-through tmux on a checked owner-only socket. `peer-steward start`, `watch` and
+pending delivery there, the pane header of all three harnesses goes to the tmux
+pane title and the `@hearting_title` pane option (a shared Codex service, which
+runs hooks in some other pane's environment, sets none), and
+`interactive-main-recovery` checks and opens through tmux on a checked
+owner-only socket. An open question's notification (registration, then the 1 h
+and 6 h reminders) uses Herdr's `notification show`, tried again on the next
+refresh when it fails; without Herdr, and once in addition when Herdr's call
+fails, it is one status-line message on each client attached to the tmux
+server the producer runs inside (`$TMUX`; an installed tmux with no such server
+counts for nothing, so the producer does not stay for reminders nobody can
+see) and, when the producer sits in a graphical session with a session bus, one
+`notify-send` desktop notification. Both are display only and bounded, the
+producer that sends them runs detached, and when nothing could show a reminder
+it is tried again on the next refresh. Hearting writes no OSC 9/777
+escape: the producer owns no terminal, and writing into another pane's terminal
+could interleave with that program's output. `peer-steward start`, `watch` and
 `retire` stay Herdr-only. tmux pane ids are unique per server only, so a pane
 travels as `%N@<socket>`: a bare `%N` given to `peer-steward prompt` or `wait`
 means the caller's own server, and a seat key includes the server. cmux's

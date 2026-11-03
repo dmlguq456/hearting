@@ -340,5 +340,19 @@ class TmuxPeerStewardTest(unittest.TestCase):
                          "kept")
 
 
+    def test_a_runtime_without_a_herdr_pane_projects_onto_the_tmux_pane_it_runs_in(self):
+        # The Codex and OpenCode publishers name no pane; the projector takes $TMUX_PANE
+        # as the hint and proves the runtime there, the same as for Claude.
+        self.in_runtime(
+            "import json, os\nfrom pathlib import Path\nfrom fleet.herdr_projection import project\n"
+            "os.environ.pop('HERDR_PANE_ID', None)\n"
+            "project('claude', sid, report_session=False)\n"
+            "Path(out).write_text(json.dumps('done'))\n")
+        title = self.tmux("display-message", "-p", "-t", self.pane, "#{pane_title}").stdout.strip()
+        self.assertIn("claude", title)
+        self.assertEqual(self.tmux("show-options", "-p", "-t", self.pane, "-v", "@hearting_title").stdout.strip(),
+                         title)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

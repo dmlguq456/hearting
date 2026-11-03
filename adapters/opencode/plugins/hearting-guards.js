@@ -472,6 +472,15 @@ function sdkResponseData(result) {
   return Object.hasOwn(result, "data") ? result.data : result
 }
 
+// Herdr's pane, else the tmux pane this TUI runs in. Either is only a hint: the
+// projector's may_report proves the foreground runtime there before any header.
+function paneHint() {
+  const herdr = process.env.HERDR_PANE_ID || ""
+  if (herdr) return herdr
+  const tmux = process.env.TMUX_PANE || ""
+  return process.env.TMUX && /^%[0-9]+$/.test(tmux) ? tmux : ""
+}
+
 function runCompactHook(action, payload = {}) {
   try {
     const result = spawnSync("python3", [path.join(root, "utilities", "worker-state-hook.py"),
@@ -842,7 +851,7 @@ function observePaneCallback(ctx, callback, sid) {
   if (paneCallbackObservedAt.size >= 128) paneCallbackObservedAt.delete(paneCallbackObservedAt.keys().next().value)
   paneCallbackObservedAt.set(key, now + 10000)
   const reason = !sid ? "callback-no-session" : isWorkerSession() ? "callback-worker"
-    : !process.env.HERDR_PANE_ID ? "callback-no-pane" : "callback-entry"
+    : !paneHint() ? "callback-no-pane" : "callback-entry"
   peerIdentityLog(ctx, "callback", reason, { callback, sessionID: sid })
 }
 
@@ -1544,7 +1553,7 @@ const paneProjectionBusy = new Map()
 const paneProjectionRetryAt = new Map()
 let paneProjectionGeneration = 0
 async function projectPane(sid, ctx, retry = false) {
-  if (!sid || isWorkerSession() || !process.env.HERDR_PANE_ID) return
+  if (!sid || isWorkerSession() || !paneHint()) return
   const binding = registerPaneContext(ctx)
   if (!binding.active) return
   let ownsSession = binding.ownsOrigin && paneNativeOrigin?.sid === sid
@@ -1694,7 +1703,7 @@ function scheduleInitialPaneProjection(ctx, binding, sid) {
   const origin = paneNativeOrigin
   if (!sid || !binding?.active || !binding.ownsOrigin || paneOwningContext !== ctx
       || !origin || origin.sid !== sid || origin.state !== "pending"
-      || binding.startupScheduled || !process.env.HERDR_PANE_ID || isWorkerSession()) return
+      || binding.startupScheduled || !paneHint() || isWorkerSession()) return
   binding.startupScheduled = true
   binding.startupQueued = true
   const generation = paneProjectionGeneration
@@ -1705,7 +1714,7 @@ function scheduleInitialPaneProjection(ctx, binding, sid) {
     if (!binding.active || paneOwningContext !== ctx || binding.generation !== generation
         || generation !== paneProjectionGeneration || paneNativeOrigin !== origin
         || origin.sid !== sid || origin.state !== "pending"
-        || !process.env.HERDR_PANE_ID || isWorkerSession()) return
+        || !paneHint() || isWorkerSession()) return
     binding.startupRunning = true
     Promise.resolve().then(() => projectPane(sid, ctx)).catch(() => {}).finally(() => {
       binding.startupRunning = false

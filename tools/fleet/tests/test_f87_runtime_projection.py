@@ -837,6 +837,31 @@ class ProjectionObservationTest(unittest.TestCase):
             self.assertEqual(send.call_args.args[0][2], "report-agent-session")
             self.assertEqual(observation["reason"], "guard-refused-before-metadata")
 
+    def test_without_a_herdr_pane_every_harness_takes_its_tmux_pane_as_the_hint(self):
+        from tools.fleet import herdr_projection as hp
+        env = {"HERDR_PANE_ID": "", "TMUX": "/fixture/tmux.sock,1,0", "TMUX_PANE": "%7"}
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness), unittest.mock.patch.dict(os.environ, env), \
+                 unittest.mock.patch.object(hp, "_in_shared_codex_service", return_value=False), \
+                 unittest.mock.patch.object(hp, "_project_tmux", return_value=True) as tmux:
+                self.assertIs(hp.project(harness, "exact", report_session=False), True)
+                # The hint carries its server, as every tmux pane address does.
+                self.assertEqual(tmux.call_args.args[:3], (harness, "exact", "%7@/fixture/tmux.sock"))
+        # A shared Codex service runs hooks in some other pane's environment: no hint.
+        with unittest.mock.patch.dict(os.environ, env), \
+             unittest.mock.patch.object(hp, "_in_shared_codex_service", return_value=True), \
+             unittest.mock.patch.object(hp.shutil, "which", return_value=None), \
+             unittest.mock.patch.object(hp, "_project_tmux") as tmux:
+            self.assertIs(hp.project("codex", "exact"), True)
+            tmux.assert_not_called()
+        # A Herdr pane stays Herdr; an explicit pane is never replaced.
+        for kwargs, extra in (({}, {"HERDR_PANE_ID": "w1:p2"}), ({"pane_id": "w1:p3"}, {})):
+            with unittest.mock.patch.dict(os.environ, dict(env, **extra)), \
+                 unittest.mock.patch.object(hp.shutil, "which", return_value=None), \
+                 unittest.mock.patch.object(hp, "_project_tmux") as tmux:
+                self.assertIs(hp.project("opencode", "exact", **kwargs), True)
+                tmux.assert_not_called()
+
     def test_unavailable_and_no_report_session_observation_never_promote_identity(self):
         from tools.fleet import herdr_projection as hp
         with unittest.mock.patch.object(hp.shutil, "which", return_value=None), \
