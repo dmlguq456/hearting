@@ -11522,6 +11522,77 @@ def _primary_worktree(cwd, common):
     return None
 
 
+def _moved_preparation(route, top):
+    """The preparation record that moved this route out of the person's folder, or None.
+
+    Only a record this route's own start wrote qualifies: its worktree is `top`, its base is the
+    route's sealed `source_commit` (compose runs in the prepared worktree), and its origin lies
+    outside it. An approved linked task, a retained linked worktree and a start that prepared
+    nothing write no such record, so their own folder is never reported as somewhere else."""
+    folder = Path(route.get("artifact_root") or "") / ".runtime" / "worktree-preparation"
+    base = route.get("source_commit")
+    needle = json.dumps(str(top), ensure_ascii=False).encode("utf-8")   # as `atomic_write` writes it
+    try:
+        entries = list(os.scandir(folder)) if route.get("artifact_root") else []
+    except OSError:
+        return None
+    for entry in entries:
+        if not entry.name.endswith(".json"):
+            continue
+        try:
+            with open(entry.path, "rb") as handle:
+                data = handle.read()
+            if needle not in data:  # cheap filter before parsing every record
+                continue
+            record = json.loads(data)
+        except (OSError, ValueError):
+            continue
+        origin = record.get("origin_cwd") if isinstance(record, dict) else None
+        if (isinstance(origin, str) and origin and record.get("remote_default") != "approved-linked-task"
+                and os.path.realpath(record.get("path") or "") == os.path.realpath(top)
+                and record.get("base_sha") == base
+                and os.path.commonpath([os.path.realpath(origin), os.path.realpath(top)])
+                != os.path.realpath(top)):
+            return record
+    return None
+
+
+def _result_location_line(route):
+    """One plain closing line naming where a route's source change is when its start moved the
+    work out of the person's folder, or "".
+
+    A source start from a primary checkout runs in a prepared `<repo>-wt/<slug>` worktree from
+    the fetched remote default, and leaves the person's folder untouched, so a person who reads
+    only the agent's last message looks for the change in the folder they started from.
+    Read-only, no new record. "" for an unversioned route (no git at all), a route that ran in
+    the person's own folder, a worktree with nothing changed since its base, a change already in
+    that folder, or any git failure. It names the place, branch and commit state only: no merge
+    command, since a worktree rebased onto or merged with upstream would carry those commits too."""
+    cwd, base = route.get("cwd"), route.get("source_commit")
+    if base == "unversioned" or not cwd or not os.path.isdir(cwd):
+        return ""
+    top = _git(cwd, "rev-parse", "--show-toplevel")
+    head = _git(top, "rev-parse", "HEAD") if top else None
+    pending = _git(top, "status", "--porcelain") if head else None
+    if pending is None or (head == base and not pending):
+        return ""   # nothing this work changed (or unreadable)
+    git_dir, common = _git(top, "rev-parse", "--git-dir"), _git_common_dir(top)
+    if not git_dir or not common or os.path.realpath(os.path.join(top, git_dir)) == os.path.realpath(common):
+        return ""   # the primary checkout is the person's own folder; no record scan
+    record = _moved_preparation(route, os.path.realpath(top))
+    origin = _git(record["origin_cwd"], "rev-parse", "--show-toplevel") if record and os.path.isdir(
+        record["origin_cwd"]) else None
+    if not origin or os.path.realpath(origin) == os.path.realpath(top):
+        return ""
+    origin_head = _git(origin, "rev-parse", "HEAD")
+    if not pending and origin_head and _worktree_git(
+            top, "merge-base", "--is-ancestor", "HEAD", origin_head).returncode == 0:
+        return ""   # already in the person's folder
+    branch = _git(top, "symbolic-ref", "-q", "--short", "HEAD")
+    label = (f"branch {branch}" if branch else "detached HEAD") + (", not committed yet" if pending else "")
+    return f"result: the change is in {top} ({label}), not in {origin}"
+
+
 def _preparation_record_path(artifact_root, key):
     return Path(artifact_root).resolve() / ".runtime" / "worktree-preparation" / f"{key}.json"
 
@@ -13414,7 +13485,11 @@ def main():
                 receipt=_legacy_inline_finish(a,route,a.route,sys.modules[__name__], _admission=admission)
         else:
             receipt=_legacy_inline_finish(a,route,a.route,sys.modules[__name__], _admission=admission)
-        print(json.dumps(receipt,sort_keys=True))
+        print(json.dumps(receipt,sort_keys=True),flush=True)
+        # Last, on stderr: stdout keeps exactly the one receipt its readers parse.
+        location=_result_location_line(route)
+        if location:
+            print(location,file=sys.stderr)
     else:
         if a.command=="close":
             a.route=_close_route_argument(a)
