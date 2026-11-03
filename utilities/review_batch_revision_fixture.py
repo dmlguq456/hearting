@@ -31,12 +31,21 @@ spec.loader.exec_module(ROUTE)
 spec = importlib.util.spec_from_file_location("revision_node", ROOT / "utilities/dispatch-node.py")
 NODE = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(NODE)
+spec = importlib.util.spec_from_file_location(
+    "revision_fixture_processes", ROOT / "tools/fixture_processes.py")
+fixture_processes = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(fixture_processes)
 
 
 class RevisionBatchFixture(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
+        # The real start path leaves detached writers on this root by design
+        # (reap watch, summary supervisor, title refresh). Stop them before the
+        # root goes, or a late write under dispatch/ fails rmtree with Errno 39.
+        # Cleanups run LIFO, so this runs just before the directory cleanup.
+        self.addCleanup(fixture_processes.reap, self.temp.name)
         self.base = Path(self.temp.name)
         self.repo = self.base / "repo"
         self.repo.mkdir()
