@@ -4525,6 +4525,44 @@ class KillFixtureTest(_WatchMixin, unittest.TestCase):
         receipt = self._wait_for_receipt(arm["watch_id"])
         self.assertEqual(receipt["state"], "idle")
 
+    def test_watcher_names_itself_when_its_caller_dies_right_after_the_spawn(self):
+        # `watch` records the observer identity in the arm only after the
+        # spawn. Kill the caller in exactly that gap: the observer holding the
+        # watch lock must still be named by its arm, or the runner cannot wake
+        # it and no later pass can replace it.
+        caller_source = (
+            "import importlib.util, os, signal, subprocess, sys\n"
+            f"sys.path.insert(0, {str(_HERE)!r})\n"
+            "spec = importlib.util.spec_from_file_location(\n"
+            f"    'peer_steward_caller', {str(_HERE / 'peer-steward.py')!r})\n"
+            "module = importlib.util.module_from_spec(spec)\n"
+            "spec.loader.exec_module(module)\n"
+            "real_popen = subprocess.Popen\n"
+            "def popen(argv, *args, **kwargs):\n"
+            "    process = real_popen(argv, *args, **kwargs)\n"
+            "    if '__watch-run' in argv:\n"
+            "        os.kill(os.getpid(), signal.SIGKILL)\n"
+            "    return process\n"
+            "subprocess.Popen = popen\n"
+            "sys.exit(module.main(['watch', 'peer-a']))\n"
+        )
+        caller = subprocess.run([sys.executable, "-c", caller_source], env=self._env("held"),
+                                capture_output=True, text=True, timeout=60)
+        self.assertEqual(caller.returncode, -signal.SIGKILL, caller.stdout + caller.stderr)
+        arms = self._arm_records()
+        self.assertEqual(len(arms), 1, arms)
+        deadline = time.monotonic() + 10
+        arm = json.loads(arms[0].read_text())
+        while not (arm.get("watcher") or {}).get("pid") and time.monotonic() < deadline:
+            time.sleep(0.02)
+            arm = json.loads(arms[0].read_text())
+        self.assertTrue(peer_steward._alive(arm, self.watch_root), arm)
+
+        self._release()
+        receipt = self._wait_for_receipt(arm["watch_id"])
+        self.assertEqual(receipt["state"], "idle")
+        self.assertEqual(receipt["watcher"], arm["watcher"])
+
     def test_wait_by_contrast_loses_its_herdr_child(self):
         # The regression proof: the identical fixture against (9) `wait`.
         caller = self._spawn_caller("wait")
