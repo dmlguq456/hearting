@@ -141,6 +141,12 @@ def herdr_command() -> Optional[str]:
     return str(injected) if injected else shutil.which("herdr")
 
 
+def pane_command(pane: str) -> Optional[str]:
+    """The terminal command that reaches ``pane``: tmux for a tmux pane id, else herdr."""
+    from terminal_surface import is_tmux_pane
+    return shutil.which("tmux") if is_tmux_pane(pane) else herdr_command()
+
+
 # ---------------------------------------------------------------------------
 # The booking
 # ---------------------------------------------------------------------------
@@ -872,7 +878,7 @@ def schedule_compact_card_request(seat: "st.Seat", harness: str, sid: str, cwd: 
             or compact_context.get("card_request_required") is not True
             or not identity or seat.kind != "pane" or not seat.pane
             or not transcript or isinstance(boundary, bool) or not isinstance(boundary, int)
-            or boundary < 0 or not herdr_command()):
+            or boundary < 0 or not pane_command(seat.pane)):
         return "clear=skipped reason=compact-ineligible"
     import session_tidy_runner as runner
     operation_id = identity
@@ -999,7 +1005,8 @@ def schedule_for_enqueue(seat: "st.Seat", harness: str, sid: str, cwd: str, *, o
                     "tail_start_id", "compaction_part_id", "boundary_offset")
                    if compact_context.get(key) is not None}
     native = seat.kind == "native" and seat.native and harness == "claude"
-    if not native and (seat.kind != "pane" or not seat.pane or harness not in CLEAR_COMMAND or herdr_command() is None):
+    if not native and (seat.kind != "pane" or not seat.pane or harness not in CLEAR_COMMAND
+                       or pane_command(seat.pane) is None):
         if compact:
             return "clear=skipped reason=outside-herdr"
         cancel(seat)
@@ -1667,16 +1674,29 @@ def release_unsent_continue(claim):
 # ---------------------------------------------------------------------------
 
 def _herdr_wait_idle(pane: str, timeout_ms: int) -> str:
-    """One event-driven ``herdr agent wait``: ``idle``/``done``, or the reason it did not end that way."""
-    exe = herdr_command()
-    if not exe:
-        return "herdr-not-found"
-    command = [exe, "agent", "wait", pane, "--until", "idle", "--until", "done", "--timeout", str(max(1, timeout_ms))]
-    try:
-        done = subprocess.run(command, capture_output=True, text=True, timeout=timeout_ms / 1000.0 + 30)
-    except (OSError, subprocess.SubprocessError):
-        return "herdr-invocation-failed"
-    for stream in (done.stdout, done.stderr):
+    """One event-driven ``herdr agent wait``: ``idle``/``done``, or the reason it did not end that way.
+
+    A tmux pane has no agent event: the tmux surface re-reads the runtime's own turn
+    record inside the same bound and answers in the same payload shape."""
+    from terminal_surface import is_tmux_pane, pane_surface
+    if is_tmux_pane(pane):
+        surface = pane_surface(pane)
+        if surface is None:
+            return "tmux-not-found"
+        payload = surface.wait_agent(pane, ("idle", "done"), max(1, timeout_ms))
+        streams = (json.dumps(payload),) if isinstance(payload, dict) else ()
+    else:
+        exe = herdr_command()
+        if not exe:
+            return "herdr-not-found"
+        command = [exe, "agent", "wait", pane, "--until", "idle", "--until", "done",
+                   "--timeout", str(max(1, timeout_ms))]
+        try:
+            done = subprocess.run(command, capture_output=True, text=True, timeout=timeout_ms / 1000.0 + 30)
+        except (OSError, subprocess.SubprocessError):
+            return "herdr-invocation-failed"
+        streams = (done.stdout, done.stderr)
+    for stream in streams:
         try:
             payload = json.loads(stream)
         except (ValueError, TypeError):
