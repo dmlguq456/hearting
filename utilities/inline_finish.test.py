@@ -106,55 +106,116 @@ class PendingForCycleTest(unittest.TestCase):
 
 
 class ResultLocationLineTest(unittest.TestCase):
-    """finish ends with one line naming where the change is when it is not the person's folder."""
+    """finish ends with one line naming where the change is, only when its start moved the work.
+
+    The fixture follows real preparation: a bare origin whose `main` is ahead of the person's
+    folder, which sits on another branch, and a worktree prepared from the fetched remote tip."""
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="result-location-")
-        base = Path(self.temp.name)
-        self.repo = base / "repo"
-        self.wt = base / "repo-wt" / "greet"
+        base = Path(os.path.realpath(self.temp.name))
+        self.base = base
         self.env = {**os.environ, "GIT_CEILING_DIRECTORIES": str(base)}
-        self.git(base, "init", "-q", str(self.repo))
-        self.git(self.repo, "config", "user.email", "test@example.com")
-        self.git(self.repo, "config", "user.name", "Result Location Test")
+        origin, self.repo, writer = base / "origin.git", base / "repo", base / "writer"
+        self.git(base, "init", "-q", "--bare", "-b", "main", str(origin))
+        self.git(base, "clone", "-q", str(origin), str(self.repo))
+        self.identity(self.repo)
         (self.repo / "greet.py").write_text("print('Helo')\n", encoding="utf-8")
         self.git(self.repo, "add", "greet.py")
         self.git(self.repo, "commit", "-qm", "base")
-        self.git(self.repo, "worktree", "add", "-q", "-b", "greet", str(self.wt))
-        self.repo = Path(os.path.realpath(self.repo))
-        self.wt = Path(os.path.realpath(self.wt))
+        self.git(self.repo, "push", "-q", "-u", "origin", "main")
+        self.git(self.repo, "switch", "-q", "-c", "feature")          # the person is on another branch
+        self.git(base, "clone", "-q", str(origin), str(writer))
+        self.identity(writer)
+        (writer / "upstream.txt").write_text("upstream\n", encoding="utf-8")
+        self.git(writer, "add", "upstream.txt")
+        self.git(writer, "commit", "-qm", "upstream moves on")         # origin/main is ahead of the folder
+        self.git(writer, "push", "-q", "origin", "main")
+        self.root = base / "reports"
+        self.root.mkdir()
+        with unittest.mock.patch.dict(os.environ, {"GIT_CEILING_DIRECTORIES": str(base)}):
+            made = CAP.prepare_isolated_worktree(self.repo, "greet", artifact_root=self.root,
+                                                 preparation_key={"request": "fix the greeting"})
+        self.assertEqual(made["state"], "created", made)
+        self.wt = Path(made["path"])
+        self.route = {"cwd": str(self.wt), "artifact_root": str(self.root),
+                      "source_commit": self.git(self.wt, "rev-parse", "HEAD")}
 
     def tearDown(self):
         self.temp.cleanup()
 
     def git(self, cwd, *args):
-        subprocess.run(["git", "-C", str(cwd), *args], check=True, env=self.env,
-                       capture_output=True, text=True)
+        return subprocess.run(["git", "-C", str(cwd), *args], check=True, env=self.env,
+                              capture_output=True, text=True).stdout.strip()
 
-    def line(self, cwd):
-        with unittest.mock.patch.dict(os.environ, {"GIT_CEILING_DIRECTORIES": self.env["GIT_CEILING_DIRECTORIES"]}):
-            return CAP._result_location_line(str(cwd))
+    def identity(self, repo):
+        self.git(repo, "config", "user.email", "test@example.com")
+        self.git(repo, "config", "user.name", "Result Location Test")
 
-    def test_primary_checkout_and_untouched_worktree_say_nothing(self):
-        self.assertEqual(self.line(self.repo), "")
-        self.assertEqual(self.line(self.wt), "")
-        self.assertEqual(self.line(self.repo.parent / "missing"), "")
+    def line(self, route=None):
+        with unittest.mock.patch.dict(os.environ, {"GIT_CEILING_DIRECTORIES": str(self.base)}):
+            return CAP._result_location_line(route or self.route)
 
-    def test_uncommitted_change_in_a_worktree_names_both_folders_and_the_merge(self):
+    def fix(self, commit=False):
         (self.wt / "greet.py").write_text("print('Hello')\n", encoding="utf-8")
-        line = self.line(self.wt)
-        self.assertTrue(line.startswith(f"result: the change is in {self.wt} (branch greet, not committed yet)"), line)
-        self.assertIn(f"not in {self.repo}", line)
-        self.assertTrue(line.endswith(f"git -C {self.repo} merge greet"), line)
+        if commit:
+            self.identity(self.wt)
+            self.git(self.wt, "commit", "-qam", "fix greeting")
 
-    def test_committed_change_in_a_worktree_names_its_branch(self):
-        (self.wt / "greet.py").write_text("print('Hello')\n", encoding="utf-8")
-        self.git(self.wt, "commit", "-qam", "fix greeting")
-        line = self.line(self.wt)
-        self.assertTrue(line.startswith(f"result: the change is on branch greet in {self.wt}"), line)
-        self.assertNotIn("not committed", line)
+    def test_untouched_prepared_worktree_says_nothing_though_the_folder_is_behind(self):
+        # F1: the worktree starts at origin/main, which the person's folder does not hold.
+        self.assertEqual(self.line(), "")
+
+    def test_change_names_both_folders_but_no_merge_into_an_unrelated_branch(self):
+        # F3: merging into `feature` would also bring in the upstream commits.
+        self.fix()
+        line = self.line()
+        self.assertEqual(line, f"result: the change is in {self.wt} (branch greet, not committed yet), "
+                               f"not in {self.repo}")
+        self.fix(commit=True)
+        self.assertEqual(self.line(), f"result: the change is in {self.wt} (branch greet), not in {self.repo}")
+
+    def test_merge_command_names_its_target_when_it_brings_in_exactly_this_work(self):
+        self.git(self.repo, "switch", "-q", "main")
+        self.git(self.repo, "pull", "-q", "--ff-only")
+        self.fix(commit=True)
+        self.assertEqual(self.line(), f"result: the change is in {self.wt} (branch greet), not in {self.repo}; "
+                                      f"to bring it into main there, run: git -C {self.repo} merge greet")
+        (self.repo / "notes.txt").write_text("the person's own edit\n", encoding="utf-8")
+        self.assertNotIn("git -C", self.line())                        # a dirty folder gets no command
+        (self.repo / "notes.txt").unlink()
         self.git(self.repo, "merge", "-q", "greet")
-        self.assertEqual(self.line(self.wt), "")
+        self.assertEqual(self.line(), "")                              # already in the person's folder
+
+    def test_detached_head_names_the_folder_only(self):
+        self.fix(commit=True)
+        self.git(self.wt, "switch", "-q", "--detach")
+        self.assertEqual(self.line(), f"result: the change is in {self.wt} (detached HEAD), not in {self.repo}")
+
+    def test_work_in_the_persons_own_folders_says_nothing(self):
+        # F2: the primary itself, a linked worktree the person made, and an approved linked task.
+        (self.repo / "greet.py").write_text("print('Hello')\n", encoding="utf-8")
+        head = self.git(self.repo, "rev-parse", "HEAD")
+        self.assertEqual(self.line({**self.route, "cwd": str(self.repo), "source_commit": head}), "")
+        mine = self.base / "repo-wt" / "mine"
+        self.git(self.repo, "worktree", "add", "-q", "-b", "mine", str(mine))
+        mine_route = {**self.route, "cwd": str(mine), "source_commit": self.git(mine, "rev-parse", "HEAD")}
+        self.identity(mine)
+        (mine / "greet.py").write_text("print('Hello')\n", encoding="utf-8")
+        self.git(mine, "commit", "-qam", "my own fix")
+        self.assertEqual(self.line(mine_route), "")
+        with unittest.mock.patch.dict(os.environ, {"GIT_CEILING_DIRECTORIES": str(self.base)}):
+            approved = CAP.prepare_isolated_worktree(mine, "mine", artifact_root=self.root,
+                                                     preparation_key={"request": "continue"},
+                                                     explicitly_approved=True)
+        self.assertEqual(approved["reason"], "approved-linked-task", approved)
+        self.assertEqual(self.line(mine_route), "")
+        self.fix()
+        self.assertEqual(self.line({**self.route, "cwd": str(self.base / "missing")}), "")
+
+    def test_unversioned_route_runs_no_git(self):
+        with unittest.mock.patch.object(CAP, "_git", side_effect=AssertionError("git probed")):
+            self.assertEqual(self.line({**self.route, "source_commit": "unversioned"}), "")
 
 
 class PublicInlineFinishTest(unittest.TestCase):
