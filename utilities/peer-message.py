@@ -1321,19 +1321,19 @@ def _index_directory(path):
 
 
 @contextlib.contextmanager
-def _recipient_index_lock(path):
+def _recipient_index_lock(path, *, wait=True):
     """Serialize published writes for one recipient index (readers are lock-free).
 
-    Never waits: a busy lock raises ``BlockingIOError`` and the caller skips
-    its publish. A skipped write leaves the index's file set or ``mtime_ns``
-    behind the rows, which every reader already treats as stale (full read),
-    so a hook never queues behind another writer's disk flush.
+    ``wait=False`` raises ``BlockingIOError`` on a busy lock instead of queuing:
+    only a full-scan publish uses it, because skipping a publish never makes an
+    index look current. The per-write update keeps waiting, as every installed
+    release does, so a writer of either release always sees the other's file.
     """
     _index_directory(path)
     lock_path = path.with_name(path.name + _RECIPIENT_INDEX_LOCK_SUFFIX)
     fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(fd, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
         yield
     finally:
         with contextlib.suppress(OSError):
@@ -1445,7 +1445,7 @@ def _publish_recipient_index(pending, recipient, rows, names, *, dispatch_root=N
         return None
     try:
         path = recipient_index_path(dispatch_root, harness, session_id)
-        with _recipient_index_lock(path):
+        with _recipient_index_lock(path, wait=False):
             _atomic_index_write(path, _index_payload(harness, session_id, rows, names))
         return str(path)
     except (OSError, ValueError):
@@ -1482,12 +1482,16 @@ def _update_recipient_index(row, *, created):
                 return
             known = {entry["ref"] for entry in payload["rows"]}
             added = row["ref"] not in known
-            if added and not created:
-                return
-            if added and payload["file_count"] + 1 != len(names):
-                # More than this one file appeared since publication (or a
-                # record disappeared). The index can no longer prove the name
-                # set, so retire it and let the next read rebuild it.
+            own = row["ref"] + ".json"
+            proven = [name for name in names if not (created and name == own)]
+            if ((added and not created) or (created and own not in names)
+                    or len(proven) != payload["file_count"]
+                    or _pending_names_digest(proven) != payload["files_digest"]):
+                # Republish only over the exact name set this index already
+                # proved, plus the one file this write created. Any other change
+                # (another writer's new row, a removal, a row rebound to this
+                # recipient) may be a row this index does not list, so retire
+                # it and let the next read rebuild it from a full scan.
                 with contextlib.suppress(OSError):
                     os.unlink(path)
                 return
@@ -3957,14 +3961,32 @@ def emit_peer_context(recipient, event=None, *, extra_context="", stream=None,
                 _save_pending(dict(current, sender_notice_receipt="context-emitted"))
 
 
-# `context` is the OpenCode tool-output boundary, whose plugin kills it at
-# 1.5 s; stopping cooperatively first never leaves a claim half-written.
+# `context` is the OpenCode tool-output boundary, whose plugin kills the child
+# 1.5 s after spawning it; stop claiming 1.0 s after this process started.
 _CONTEXT_CLI_BUDGET_S = 1.0
+
+
+def process_started_monotonic():
+    """This process's start on the ``time.monotonic()`` scale (now when unknown).
+
+    A hook's timeout runs from spawn, and interpreter start plus imports can
+    take seconds on a loaded machine, so a budget counted from the first line
+    of hook code would overrun by exactly that much.
+    """
+    try:
+        with open("/proc/self/stat", "rb") as handle:
+            fields = handle.read().rsplit(b")", 1)[1].split()
+        started = int(fields[19]) / os.sysconf("SC_CLK_TCK")  # field 22: starttime
+        age = time.clock_gettime(time.CLOCK_BOOTTIME) - started
+    except (OSError, ValueError, IndexError, AttributeError):
+        return time.monotonic()
+    now = time.monotonic()
+    return now - min(max(age, 0.0), 60.0)
 
 
 def cmd_context(args):
     emit_peer_context({"harness": args.to_harness, "session_id": args.to_session_id},
-                      deadline=time.monotonic() + _CONTEXT_CLI_BUDGET_S)
+                      deadline=process_started_monotonic() + _CONTEXT_CLI_BUDGET_S)
     return 0
 
 

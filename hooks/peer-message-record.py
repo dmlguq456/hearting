@@ -22,6 +22,12 @@ context is flushed therefore shares one budget (`_HOOK_BUDGET_S`) counted from
 process start: work past it is left exactly as it is on disk for the next
 prompt or tool call, the Stop path, the asyncRewake hook or the runner,
 instead of making the user wait. What was claimed or shown is still settled.
+
+After the flush the hook must also end in time, because a cancelled hook's
+output is discarded even when its rows were already marked received. The
+watch ACKs therefore run in a child with a hard timeout, and a run started
+as a script exits on its own `_EXIT_AFTER_FLUSH_S` after spawn once its
+output is flushed.
 """
 import contextlib
 import importlib.util
@@ -29,11 +35,29 @@ import io
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
 from pathlib import Path
 
+
+def _process_started():
+    """This process's spawn on the ``time.monotonic()`` scale (now when unknown).
+
+    The harness timeout runs from spawn, and interpreter start plus imports can
+    take seconds on a loaded machine."""
+    try:
+        with open("/proc/self/stat", "rb") as handle:
+            fields = handle.read().rsplit(b")", 1)[1].split()
+        age = (time.clock_gettime(time.CLOCK_BOOTTIME)
+               - int(fields[19]) / os.sysconf("SC_CLK_TCK"))
+    except (OSError, ValueError, IndexError, AttributeError):
+        return time.monotonic()
+    return time.monotonic() - min(max(age, 0.0), 60.0)
+
+
+# Module load; a run started as a script rebinds it to the process spawn below.
 _STARTED = time.monotonic()
 _HOOKS_DIR = Path(__file__).resolve().parent
 _UTILITIES_DIR = _HOOKS_DIR.parent / "utilities"
@@ -46,19 +70,20 @@ _HOOK_BUDGET_S = 2.5
 # The watch sweep is the fallback carrier: it runs after the exact peer-message
 # claims and may use at most this much of what they left.
 _SWEEP_SHARE_S = 1.0
-# ACKs for receipts already shown. One left undone shows its line again on the
-# next prompt, which is better than a cancelled hook losing the whole context.
-_ACK_ALLOWANCE_S = 1.5
+# ACKs for receipts already shown run in a child that must end this long after
+# spawn. One left undone shows its line again on the next prompt, which is
+# better than a cancelled hook losing the whole context.
+_ACK_END_S = 4.0
+# A script run that is still busy settling this long after spawn exits once its
+# output is flushed, so the harness (10 s) never discards what it showed.
+_EXIT_AFTER_FLUSH_S = 8.5
+# `record` children write one ledger row each; they keep their own bound.
+_RECORD_TIMEOUT_S = 2.5
 _MODULES = {}
 
 
 def _deadline():
     return _STARTED + _HOOK_BUDGET_S
-
-
-def _timeout(cap):
-    """A child's timeout: what is left of the budget, never below half a second."""
-    return max(0.5, min(cap, _deadline() - time.monotonic()))
 
 
 def _load_module(key, path, name):
@@ -176,7 +201,7 @@ def handle_post_tool(payload):
     subprocess.run(
         [sys.executable, str(_PEER_MESSAGE_PY), "record"] + args_list,
         input=message.encode("utf-8", "replace"),
-        timeout=_timeout(5),
+        timeout=_RECORD_TIMEOUT_S,
         capture_output=True,
     )
 
@@ -243,13 +268,13 @@ def _record(args_list, body):
     subprocess.run(
         [sys.executable, str(_PEER_MESSAGE_PY), "record"] + args_list,
         input=body.encode("utf-8"),
-        timeout=_timeout(5),
+        timeout=_RECORD_TIMEOUT_S,
         capture_output=True,
     )
 
 
 def _typed_watch_line(row):
-    agent = row.get("agent") or {}
+    agent = row.get("agent") if isinstance(row.get("agent"), dict) else {}
     return (
         f"state={row.get('receipt_state') or 'unknown'} agent={agent.get('harness', '-')} "
         f"session_id={agent.get('session_id', '-')} name={agent.get('name') or row.get('target', '-')} "
@@ -311,11 +336,25 @@ def sweep_undelivered(payload, deadline=None):
         return []
 
 
-def ack_rows(payload, rows, deadline=None):
-    """ACK the receipts just shown through the normal `ack` command, in-process.
+_ACK_SCRIPT = """
+import runpy, signal, sys
+signal.alarm(int(float(sys.argv[2])) + 1)  # ends itself even if its parent is gone
+steward = runpy.run_path(sys.argv[1])
+for watch_id in sys.argv[3:]:
+    try:
+        steward["main"](["ack", watch_id, "--carrier", "userprompt-sweep"])
+    except (Exception, SystemExit):
+        continue
+"""
 
-    Each watch is revalidated by `ack` itself. ``deadline`` bounds the phase:
-    an unacknowledged receipt is listed again on the next prompt.
+
+def ack_rows(payload, rows, deadline=None):
+    """ACK the receipts just shown through the normal `ack` command.
+
+    Each watch is revalidated by `ack` itself, which may wait on its seat lock,
+    so the ACKs run in one child with a hard timeout ending at ``deadline``
+    (process spawn + `_ACK_END_S` by default). An unacknowledged receipt is
+    listed again on the next prompt.
     """
     session_id = payload.get("session_id")
     if not session_id:
@@ -323,17 +362,48 @@ def ack_rows(payload, rows, deadline=None):
     watch_ids = [str(row["watch_id"]) for row in rows[:_SWEEP_MAX] if row.get("watch_id")]
     if not watch_ids:
         return
-    steward = _steward_module()
-    if steward is None:
+    deadline = _STARTED + _ACK_END_S if deadline is None else deadline
+    remaining = deadline - time.monotonic()
+    if remaining < 0.5:
         return
-    with _steward_call(session_id):
-        for watch_id in watch_ids:
-            if deadline is not None and time.monotonic() >= deadline:
-                break
-            try:
-                steward.main(["ack", watch_id, "--carrier", "userprompt-sweep"])
-            except BaseException:
-                continue
+    env = dict(os.environ)
+    env["CLAUDE_CODE_SESSION_ID"] = str(session_id)
+    try:
+        subprocess.run(
+            [sys.executable, "-c", _ACK_SCRIPT, str(_PEER_STEWARD_PY),
+             str(remaining), *watch_ids],
+            capture_output=True, timeout=remaining, env=env)
+    except Exception:
+        pass
+
+
+class _FlushMark:
+    """Stdout that remembers whether the hook output reached the harness."""
+
+    def __init__(self, stream):
+        self.stream = stream
+        self.flushed = False
+
+    def write(self, text):
+        return self.stream.write(text)
+
+    def flush(self):
+        self.stream.flush()
+        self.flushed = True
+
+
+def _exit_after_flush(mark):
+    """Past `_EXIT_AFTER_FLUSH_S`, a run ends as soon as its output is flushed,
+    even inside a blocked lock wait; until then it keeps its cooperative path."""
+    def on_alarm(_signum, _frame):
+        if mark.flushed:
+            os._exit(0)
+    try:
+        signal.signal(signal.SIGALRM, on_alarm)
+        signal.setitimer(signal.ITIMER_REAL,
+                         max(0.01, _STARTED + _EXIT_AFTER_FLUSH_S - time.monotonic()), 0.25)
+    except (OSError, ValueError, AttributeError):
+        pass
 
 
 def _is_helper_process():
@@ -350,11 +420,14 @@ def _is_helper_process():
             or bool(env.get("AGENT_DISPATCH_DEPTH")))
 
 
-def main():
+def main(exit_guard=False):
     mode = sys.argv[1] if len(sys.argv) > 1 else ""
     if _is_helper_process():
         return
     payload = _read_stdin_json()
+    out = _FlushMark(sys.stdout)
+    if exit_guard:
+        _exit_after_flush(out)
     if mode == "post-tool":
         try:
             handle_post_tool(payload)
@@ -367,7 +440,7 @@ def main():
             if mod and not str(payload.get("agent_id") or "").strip():
                 mod.emit_peer_context({"harness": "claude", "session_id": payload.get("session_id")},
                                       "PostToolUse", native_delivery=True,
-                                      deadline=_deadline())
+                                      deadline=_deadline(), stream=out)
     elif mode == "prompt":
         # The cross-session `notice` record path runs first and unconditionally:
         # the sweep must never be able to swallow it.
@@ -388,35 +461,37 @@ def main():
         def extra_context():
             # The watch sweep is the fallback carrier (asyncRewake is the primary),
             # so it runs after the exact peer-message claims, in what they left.
-            rows.extend(sweep_undelivered(
-                payload, deadline=min(_deadline(), time.monotonic() + _SWEEP_SHARE_S)))
+            found = sweep_undelivered(
+                payload, deadline=min(_deadline(), time.monotonic() + _SWEEP_SHARE_S))
             sweep = ""
-            if rows:
-                # The only stdout this path ever writes, and only when something is
-                # actually pending. Written and flushed BEFORE the acks (review M2).
+            if found:
                 sweep = "\n".join(
                     ["[peer-steward] undelivered watch receipts:"]
-                    + [_typed_watch_line(row) for row in rows])
+                    + [_typed_watch_line(row) for row in found])
+            # Only receipts whose line was built may be ACKed after the flush
+            # (review M2): an ACK with no display behind it would silence them.
+            rows.extend(found)
             return "\n".join(filter(None, [sweep, guidance]))
 
         if mod:
             mod.emit_peer_context({"harness": "claude", "session_id": payload.get("session_id")},
                                   "UserPromptSubmit", extra_context=extra_context,
-                                  native_delivery=True, deadline=_deadline())
+                                  native_delivery=True, deadline=_deadline(), stream=out)
         else:
             extra = extra_context()
             if extra:
-                print(json.dumps({"hookSpecificOutput": {
+                out.write(json.dumps({"hookSpecificOutput": {
                     "hookEventName": "UserPromptSubmit", "additionalContext": extra}},
-                    ensure_ascii=False))
-                sys.stdout.flush()
-        if rows:
-            ack_rows(payload, rows, deadline=_deadline() + _ACK_ALLOWANCE_S)
+                    ensure_ascii=False) + "\n")
+                out.flush()
+        if rows and out.flushed:
+            ack_rows(payload, rows)
 
 
 if __name__ == "__main__":
+    _STARTED = _process_started()
     try:
-        main()
+        main(exit_guard=True)
     except BaseException:
         pass
     sys.exit(0)

@@ -453,6 +453,57 @@ class BoundedScanTest(IndexTestCase):
         self.assertEqual([row["ref"] for row in rows], [watched])
         self.assertNotIn(other, validated)
 
+    def test_a_write_whose_index_update_never_ran_is_never_hidden(self):
+        """RV-BC-1186: a row created without its index update (a writer that
+        skipped it, an older release, a crash) must not be certified away by
+        the next transition update, which used to republish the current names."""
+        _text, first = self.pending("first")
+        self.assertEqual([row["ref"] for row in peer_message.pending_messages(self.recipient)],
+                         [first])
+        self.assertTrue(self.index_path().exists())
+        with mock.patch.object(peer_message, "_update_recipient_index"):
+            _text, second = self.pending("second")
+        row = peer_message._read_pending(first)
+        with peer_message.pending_lock(first):
+            peer_message._save_pending(dict(row, receipt="later-transition"))
+        self.assertEqual(sorted(row["ref"] for row in peer_message.pending_messages(self.recipient)),
+                         sorted([first, second]))
+
+    def test_a_row_rebound_to_this_recipient_retires_its_index(self):
+        _text, mine = self.pending("mine")
+        _text, moved = self.pending("moved", recipient=self.other)
+        self.assertEqual([row["ref"] for row in peer_message.pending_messages(self.recipient)],
+                         [mine])
+        self.assertTrue(self.index_path().exists())
+        row = peer_message._read_pending(moved)
+        with mock.patch.object(peer_message, "pending_delivery_recipient",
+                               return_value=dict(self.recipient)):
+            with peer_message.pending_lock(moved):
+                peer_message._save_pending(dict(row, receipt="rebound"))
+        self.assertFalse(self.index_path().exists())
+
+    def test_the_update_waits_for_the_index_lock_like_every_installed_release(self):
+        _text, first = self.pending()
+        peer_message.pending_messages(self.recipient)
+        path = self.index_path()
+        lock = path.with_name(path.name + ".lock")
+        fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        waited = []
+        original = fcntl.flock
+
+        def observed(handle, operation):
+            waited.append(operation)
+            if handle != fd and operation == fcntl.LOCK_EX:
+                os.close(fd)  # the other writer finishes while this one waits
+            return original(handle, operation)
+
+        with mock.patch.object(peer_message.fcntl, "flock", side_effect=observed):
+            row = peer_message._read_pending(first)
+            with peer_message.pending_lock(first):
+                peer_message._save_pending(dict(row, receipt="after-wait"))
+        self.assertIn(fcntl.LOCK_EX, waited)
+
     def test_a_held_index_lock_skips_the_publish_instead_of_waiting(self):
         _text, ref = self.pending()
         path = self.index_path()
