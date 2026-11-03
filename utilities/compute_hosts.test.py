@@ -998,6 +998,18 @@ class ComputeOutputReceiptTest(unittest.TestCase):
                 self.assertNotEqual(self.observe()["state"], "quiescent")
 
 
+# A suite run directly from an agent session inherits that session's identity.
+# A run started by a fixture would then attribute itself to the session's real
+# route (its route chain lives under the real HOME) and notify that session
+# through a runner under the fixture's temp state root -- a leaked runner that
+# reaches the real pane only when it is idle (C-W7: a notice ~18 h late).
+# Fixtures start from no session; a test that needs one sets it explicitly.
+def without_live_session(env):
+    session_keys = {key for key, _harness in load_module().SESSION_ENV_KEYS}
+    return {key: value for key, value in env.items()
+            if key not in session_keys and not key.startswith("HERDR_")}
+
+
 class ComputeHostsTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -1019,9 +1031,10 @@ class ComputeHostsTest(unittest.TestCase):
         self.fakebin = self.root / "fake-tmux-bin"
         install_fake_tmux(self.fakebin)
         # A run's completion watch notifies through the dispatch state root; keep it here.
-        self.env = {**os.environ, "COMPUTE_HOSTS_CONFIG": str(self.config),
-                    "HARNESS_STATE_ROOT": str(self.root / "state"),
-                    "PATH": str(self.fakebin) + os.pathsep + os.environ.get("PATH", "")}
+        self.env = without_live_session(
+            {**os.environ, "COMPUTE_HOSTS_CONFIG": str(self.config),
+             "HARNESS_STATE_ROOT": str(self.root / "state"),
+             "PATH": str(self.fakebin) + os.pathsep + os.environ.get("PATH", "")})
         self.env.pop("AGENT_DISPATCH_JOBS", None)
         for key in ("AGENT_ROUTE_FILE", "AGENT_OWNER_ROUTE_FILE", "AGENT_DISPATCH_DEPTH"):
             self.env.pop(key, None)
@@ -1374,6 +1387,26 @@ class ComputeHostsTest(unittest.TestCase):
         tail = self.run_tool("tail", run_id)
         self.assertIn("quoted output", tail.stdout)
         self.assertIn("exit 0", tail.stdout)
+
+    def test_a_fixture_run_from_an_agent_session_neither_attributes_nor_notifies(self):
+        # C-W7: run from an agent pane, this fixture used to attribute its run to
+        # that session's real route and leave a runner notifying the real pane.
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "live-session-c-w7",
+                                          "HERDR_PANE_ID": "fixture-pane-not-real"}):
+            self.tearDown()
+            self.setUp()
+        result = self.run_tool("run", "here", "--name", "ok", "--", "bash", "-c", "exit 0")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        run_id = result.stdout.split()[1]
+        meta = json.loads((self.run_root / run_id / "meta.json").read_text(encoding="utf-8"))
+        provenance = meta.get("provenance") or {}
+        self.assertFalse(provenance.get("session"), provenance)
+        self.assertFalse(provenance.get("route"), provenance)
+        for _ in range(50):
+            if (self.run_root / run_id / "exit_code").is_file():
+                break
+            time.sleep(0.1)
+        self.assertFalse((self.root / "state" / "dispatch" / "pending-delivery").exists())
 
     def test_local_run_exports_exact_compute_identity(self):
         result = self.run_tool(
@@ -2201,8 +2234,9 @@ class LauncherProvenanceTest(unittest.TestCase):
         environ.start()
         self.addCleanup(environ.stop)
         # A run's completion watch notifies through the dispatch state root; keep it here.
-        self.env = {**os.environ, "COMPUTE_HOSTS_CONFIG": str(self.config),
-                    "HARNESS_STATE_ROOT": str(self.root / "state")}
+        self.env = without_live_session(
+            {**os.environ, "COMPUTE_HOSTS_CONFIG": str(self.config),
+             "HARNESS_STATE_ROOT": str(self.root / "state")})
         self.env.pop("AGENT_DISPATCH_JOBS", None)
         for key in ("AGENT_ROUTE_FILE", "AGENT_OWNER_ROUTE_FILE", "AGENT_DISPATCH_DEPTH"):
             self.env.pop(key, None)
