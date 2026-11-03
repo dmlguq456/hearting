@@ -78,6 +78,34 @@ class HistoryChannelTests(unittest.TestCase):
                 self.assertEqual(ledger.read_bytes(), before)
                 self.assertFalse(session_tidy._consumed_path(seat).exists())
 
+    def test_a_late_start_leaves_out_only_the_person_notice(self):
+        # HOOK-LATENCY: the notice reads the whole shared lineage (about half of
+        # a 1 s start). Past the hook's deadline it is left out; the start is
+        # still recorded and the card path runs as before.
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "state"
+            seat = session_tidy.Seat("pane", "late-start-seat", "pane", "claude")
+            for deadline, expected in ((0.0, []), (None, ["PERSON-NOTICE"]),
+                                       (float("inf"), ["PERSON-NOTICE"])):
+                with self.subTest(deadline=deadline), \
+                     patch.dict("os.environ", {"XDG_STATE_HOME": str(state)}, clear=False), \
+                     patch.object(session_tidy, "resolve_seat", return_value=seat), \
+                     patch.object(session_tidy, "build_human_history_notice",
+                                  return_value="PERSON-NOTICE") as notice:
+                    emitted = []
+                    session_tidy.run_hook("claude", "start", f"sid-{deadline}", source="startup",
+                                          env={}, emit_human=emitted.append, deferred=[],
+                                          human_deadline=deadline)
+                    self.assertEqual(emitted, expected)
+                    self.assertEqual(notice.called, bool(expected))
+                    ledger = session_tidy._ledger_path(seat).read_text(encoding="utf-8")
+                    self.assertIn(f"sid-{deadline}", ledger)
+
+    def test_the_claude_card_hook_bounds_the_notice_only_for_a_tidy_that_knows_it(self):
+        hook = (ROOT / "hooks" / "session-card-inject.sh").read_text(encoding="utf-8")
+        self.assertIn('getattr(session_tidy, "HUMAN_NOTICE_BUDGET_SECONDS", None)', hook)
+        self.assertEqual(session_tidy.HUMAN_NOTICE_BUDGET_SECONDS, 2.0)
+
     def test_opencode_history_notice_lookup_settles_per_session(self):
         script = r'''
 import { readFileSync } from "node:fs"

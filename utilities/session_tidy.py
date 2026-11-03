@@ -2910,6 +2910,12 @@ def build_card_injection(card: dict, card_path: Path, now: float, cap: int,
 # Hook
 # ---------------------------------------------------------------------------
 
+# The Claude SessionStart card hook has 5 s; it shows the person-only history
+# line only while it is within this much of its start (a normal start takes
+# about 1 s, HOOK-LATENCY measured up to 3.7 s).
+HUMAN_NOTICE_BUDGET_SECONDS = 2.0
+
+
 def build_human_history_notice(seat: Seat, harness: str, sid: str, *, env=None) -> str:
     """Build a person-only predecessor notice without adding it to model context."""
     env = os.environ if env is None else env
@@ -2962,7 +2968,8 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
               compact_summary: str = "", compact_context: Optional[dict] = None,
               prompt_text: str = "", emit_human: Optional[Callable[[str], None]] = None,
               human_only: bool = False,
-              deferred: Optional[list] = None, _closed: Optional[list] = None) -> str:
+              deferred: Optional[list] = None, _closed: Optional[list] = None,
+              human_deadline: Optional[float] = None) -> str:
     """Record the session, and print the card / notices it is due exactly once.
 
     Returns the text that was emitted ("" for none). The receipt is written only
@@ -3277,7 +3284,12 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
                 parts.append(resume_text)
         parts.extend(answer_wait_lines)
         text = "\n".join(parts)
-        if event == "start" and emit_human:
+        # The person-only "previous conversation" line needs the whole shared
+        # lineage (every seat ledger, about half of a 1 s start). Past
+        # ``human_deadline`` (monotonic) a loaded start leaves it out so the
+        # card itself still reaches the session inside the hook's limit.
+        if event == "start" and emit_human and (
+                human_deadline is None or time.monotonic() < human_deadline):
             with contextlib.suppress(BaseException):
                 notice = build_human_history_notice(seat, harness, sid, env=env)
                 if notice:
