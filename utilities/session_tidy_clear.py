@@ -436,24 +436,18 @@ def validate_idle_request(path, nonce: Optional[str] = None, *, now: Optional[fl
     return req, ""
 
 
-def reply_card_guide(nonce: str) -> str:
+def reply_card_guide(nonce: str, t=None) -> str:
+    t = t or st._ui_translator()
     begin, end = st.reply_card_markers(nonce)
-    return ("Skill·지침·도구를 쓰지 말고 답 하나로 끝내세요. 답의 첫 줄은 정확히 " + begin + ", 마지막 줄은 정확히 "
-            + end + " 로 쓰고, 그 사이에 카드 본문을 다음 순서로 사용자의 언어로 90줄 이내로 씁니다: "
-            + " → ".join(st.CARD_FIELDS) + ". "
-            "이전 카드의 " + "·".join(st.CARD_FIXED_FIELDS)
-            + "은 다시 요약하지 말고 그대로 이어받으세요. 날짜 있는 사용자 원문 인용을 보존하고, "
-            "새 내용은 다시 요약하지 말고 이어 붙이세요. "
-            "사용자가 대체한 항목만 제거하세요. 실제 작업 전에 카드 전체와 PRD를 다시 읽으세요. "
-            "관련 등 기존 칸에서 세션을 적을 때 확정 Fleet 번호와 관측 pane·전체 native SID를 함께 남기고, "
-            "모르는 번호·pane·SID는 미확인으로 두세요. "
-            "턴이 끝나면 하팅이 이 답을 카드로 저장하고 기억 정리를 접수합니다. ")
+    return t("tidy.request.card_guide", begin=begin, end=end, fields=" → ".join(st.CARD_FIELDS),
+             fixed="·".join(st.CARD_FIXED_FIELDS))
 
 
-def idle_tidy_terms(req: Optional[dict] = None, *, request: bool = True) -> str:
+def idle_tidy_terms(req: Optional[dict] = None, *, request: bool = True, t=None) -> str:
     """The real conditions of automatic idle tidy and how to turn it off, for the person.
     ``request=False`` is the wording of its result line (which never suggests a clear)."""
     from session_tidy_policy import DEFAULT_IDLE, config_path
+    t = t or st._ui_translator()
     idle = (req or {}).get("idle") if isinstance((req or {}).get("idle"), dict) else {}
     tokens = idle.get("min_tokens", DEFAULT_IDLE["min_tokens"])
     tokens = tokens if type(tokens) is int and tokens > 0 else DEFAULT_IDLE["min_tokens"]
@@ -461,35 +455,28 @@ def idle_tidy_terms(req: Optional[dict] = None, *, request: bool = True) -> str:
         minutes = max(1, round(float(idle.get("wait_seconds", DEFAULT_IDLE["wait_seconds"])) / 60))
     except (TypeError, ValueError):
         minutes = round(DEFAULT_IDLE["wait_seconds"] / 60)
-    amount = f"{tokens // 10000}만" if tokens % 10000 == 0 else f"{tokens:,}"
+    # Korean counts tokens in units of 10,000 (만) when the number is round.
+    amount = f"{tokens // 10000}만" if getattr(t, "lang", "") == "ko" and tokens % 10000 == 0 else f"{tokens:,}"
     path = config_path()
     try:
         shown = "~/" + str(path.relative_to(Path.home()))
     except ValueError:
         shown = str(path)
-    when = (f"마지막 요청 입력이 {amount} 토큰 이상이고, 턴이 끝난 뒤 사람 입력 없이 약 {minutes}분이 지났고, "
-            "화면이 쉬는 중이며 입력창이 비어 있고 질문·확인 창이 열려 있지 않을 때만")
-    off = f"끄려면 {shown}에 {{\"idle\": {{\"enabled\": false}}}}를 두세요."
+    when = t("tidy.idle.when", amount=amount,
+             wait=t("tidy.idle.wait_minute" if minutes == 1 else "tidy.idle.wait_minutes", count=minutes))
+    off = t("tidy.idle.off", path=shown)
     claude = (req or {}).get("harness") == "claude"     # only Claude windows compact for agents
     if not request:
-        agents = "하고, 백그라운드 에이전트가 있으면 창을 비우는 대신 /compact로 압축합니다" if claude else "합니다"
-        return f"자동 유휴 정리는 {when} 동작{agents}. {off}"
-    agents = "(백그라운드 에이전트가 있으면 /clear 대신 /compact)" if claude else ""
-    return f"{when} 이 요청을 보냅니다. 카드를 받으면 이 창을 비우고{agents} 현황만 짧게 보여 줍니다. {off}"
+        return t("tidy.idle.result_claude" if claude else "tidy.idle.result", when=when, off=off)
+    return t("tidy.idle.request_claude" if claude else "tidy.idle.request", when=when, off=off)
 
 
 def idle_card_request_text(req: dict) -> str:
+    t = st._ui_translator()
     nonce = str(req.get("nonce") or "")
     if req.get("origin") == "compact":
-        return ("자동 압축 뒤 카드 작성 요청입니다. 지금까지의 이 대화만 바탕으로 session-tidy 카드를 쓰세요. "
-                + reply_card_guide(nonce) +
-                "빈 요약을 만들거나 다음 작업을 시작하지 마세요. "
-                "이 요청이 끝나면 창 비우기와 이어서하기는 예약된 기존 절차가 처리합니다. "
-                f"요청 식별자: {nonce}")
-    return ("자동 유휴 정리 요청입니다. " + idle_tidy_terms(req) + " 지금까지의 이 대화만 바탕으로 session-tidy 카드를 쓰세요. "
-            + reply_card_guide(nonce) +
-            "별도 작업을 시작하거나 이어서 하지 말고, 답을 마치면 다음 입력을 기다리세요. "
-            f"요청 식별자: {nonce}")
+        return t("tidy.request.compact", guide=reply_card_guide(nonce, t), nonce=nonce)
+    return t("tidy.request.idle", terms=idle_tidy_terms(req, t=t), guide=reply_card_guide(nonce, t), nonce=nonce)
 
 
 def claim_idle_card_request(path, nonce: Optional[str] = None):
@@ -2014,24 +2001,33 @@ def followup_text(req: dict) -> str:
     return STATUS_ONLY_TEXT if req.get("followup_kind") == "status-only" else CONTINUE_TEXT
 
 
+def _reason_text(reason: str, t) -> str:
+    """Why a step held, in the reader's language (``tidy.hold.<reason>``; REASON_TEXT is its Korean)."""
+    if not reason:
+        return t("tidy.hold.unknown")
+    try:
+        return t("tidy.hold." + reason)
+    except KeyError:
+        return REASON_TEXT.get(reason, reason)
+
+
 def _notice_text(outcome: str, reason: str, harness: str, *, compact: bool = False) -> str:
-    why = REASON_TEXT.get(reason, reason or "알 수 없음")
+    t = st._ui_translator()
+    why = _reason_text(reason, t)
     if compact:
         # Background agents kept this window: the next step is the same /compact, never a clear.
-        kept = "" if reason in NO_CARD_REASONS else " 카드는 저장돼 있어 압축 뒤 이 세션이 받습니다."
+        kept = "" if reason in NO_CARD_REASONS else t("tidy.clear.kept_compact")
         if outcome == "unverified":
-            return ("[정리] 백그라운드 에이전트가 있어 /compact를 보냈지만 압축을 확인하지 못했습니다. "
-                    f"창 상태를 확인하고 압축되지 않았으면 /compact 하세요.{kept}")
-        verb = "실패했습니다" if outcome == "failed" else "하지 않았습니다"
-        return (f"[정리] 백그라운드 에이전트가 있어 /compact로 정리하려 했지만 {verb}({why}). "
-                f"필요하면 /compact 하세요(에이전트가 모두 끝난 뒤라면 /clear도 됩니다).{kept}")
+            return t("tidy.clear.compact_unverified", kept=kept)
+        return t("tidy.clear.compact_failed" if outcome == "failed" else "tidy.clear.compact_skipped",
+                 why=why, kept=kept)
     hint = CLEAR_COMMAND.get(harness, "/clear")
-    kept = "" if reason in NO_CARD_REASONS else f" 카드는 저장돼 있어 {hint} 하면 새 창이 카드를 받습니다."
+    kept = "" if reason in NO_CARD_REASONS else t("tidy.clear.kept", hint=hint)
     if outcome == "unverified":
-        return f"[정리] 창 비우기를 요청했지만 결과를 확인하지 못했습니다. 창 상태를 확인하고 필요하면 {hint} 하세요.{kept}"
+        return t("tidy.clear.unverified", hint=hint, kept=kept)
     if outcome == "failed":
-        return f"[정리] 창 비우기에 실패했습니다({why}). 필요하면 {hint} 하세요.{kept}"
-    return f"[정리] 창을 자동으로 비우지 않았습니다({why}). 필요하면 {hint} 하세요.{kept}"
+        return t("tidy.clear.failed", why=why, hint=hint, kept=kept)
+    return t("tidy.clear.skipped", why=why, hint=hint, kept=kept)
 
 
 # Why an idle card request was not sent, as it was at the last look.
@@ -2049,29 +2045,28 @@ _IDLE_QUIET = frozenset({"new-input", "draft", "card-changed", "superseded", "of
 def _idle_notice_text(req: dict, reason: str) -> str:
     """The automatic idle tidy result line, true to what happened: whether its request was
     typed at all, and why it stopped. "" when the person's own input stopped it."""
+    t = st._ui_translator()
     request = req.get("idle_request") if isinstance(req.get("idle_request"), dict) else {}
     sent = request.get("state") in ("sending", "arrived", "sent", "accepted", "unverified")
-    why = (_IDLE_WAIT_TEXT.get(reason)
-           or ("화면이 쉬는 중이 아니었습니다" if str(reason).startswith("not-idle-") else "")
-           or REASON_TEXT.get(reason, reason or "알 수 없음"))
-    terms = idle_tidy_terms(req, request=False)
+    # _IDLE_WAIT_TEXT is the Korean of tidy.idle_wait.<reason>, as REASON_TEXT is of tidy.hold.<reason>.
+    why = (t("tidy.idle_wait." + reason) if reason in _IDLE_WAIT_TEXT else
+           t("tidy.idle_wait.not_idle") if str(reason).startswith("not-idle-") else _reason_text(reason, t))
+    terms = idle_tidy_terms(req, request=False, t=t)
     if not sent:
         if reason in _IDLE_QUIET:
             return ""
-        return (f"[정리] 자동 유휴 정리 요청을 보내지 않았습니다({why}). 이 창에는 아무것도 입력하지 않았고, "
-                f"다음 사람 입력 뒤 조건이 맞으면 다시 시도합니다. {terms}")
-    return f"[정리] 자동 유휴 정리 요청은 보냈지만 창 전환을 확인하지 못했습니다({why}). {terms}"
+        return t("tidy.clear.idle_not_sent", why=why, terms=terms)
+    return t("tidy.clear.idle_sent_unverified", why=why, terms=terms)
 
 
 def _continue_notice_text(outcome: str, reason: str, prompt_text: str = CONTINUE_TEXT) -> str:
+    # ``prompt_text`` is the input actually typed (CONTINUE_TEXT / STATUS_ONLY_TEXT): named as is.
+    t = st._ui_translator()
     said = f'"{prompt_text}"'
     if outcome == "unverified":
-        return f"[정리] 새 세션에 {said}를 넣었지만 전달을 확인하지 못했습니다. 진행되지 않았다면 {said}라고 입력하세요."
-    why = REASON_TEXT.get(reason, reason or "알 수 없음")
-    if reason.startswith("not-idle-"):
-        why = "새 세션이 입력 대기 상태가 되지 않았습니다"
-    verb = "넣지 못했습니다" if outcome == "failed" else "넣지 않았습니다"
-    return f"[정리] 창은 비웠지만 {said}를 {verb}({why}). 이어서 하려면 {said}라고 입력하세요."
+        return t("tidy.continue.unverified", said=said)
+    why = t("tidy.continue.not_idle") if reason.startswith("not-idle-") else _reason_text(reason, t)
+    return t("tidy.continue.failed" if outcome == "failed" else "tidy.continue.skipped", said=said, why=why)
 
 
 def _booking_seat_fields(seat: "st.Seat", harness: str, sid: str) -> dict:
@@ -2131,7 +2126,7 @@ def _finish(seat_key: str, nonce: str, outcome: str, reason: str = "", *, observ
             if req.get("origin") == "idle":
                 notice = _idle_notice_text(req, reason)
             elif req.get("origin") == "compact":
-                notice = "[정리] 자동 정리의 창 전환을 확인하지 못했습니다."
+                notice = st._ui_translator()("tidy.clear.auto_unverified")
             else:
                 notice = _notice_text(outcome, reason, str(req.get("harness") or ""),
                                       compact=req.get("clear_command") == "compact")
@@ -2188,7 +2183,7 @@ def _finish_continue(seat_key: str, nonce: str, outcome: str, reason: str = "", 
     if outcome != "true" and not (outcome == "skipped" and reason in CONTINUE_QUIET):
         with contextlib.suppress(BaseException):
             if req.get("origin") == "idle" and held.get("kind") == "status-only":
-                notice = "[정리] 자동 현황 안내를 확인하지 못했습니다. 다음 입력을 기다립니다."
+                notice = st._ui_translator()("tidy.continue.status_unverified")
             else:
                 prompt_text = STATUS_ONLY_TEXT if held.get("kind") == "status-only" else CONTINUE_TEXT
                 notice = _continue_notice_text(outcome, reason, prompt_text)

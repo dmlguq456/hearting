@@ -7716,6 +7716,33 @@ class CardWordLanguage(unittest.TestCase):
             guidance = st._ui_translator()("tidy.card.first_reply", fields="·".join(st.CARD_FIXED_FIELDS))
         self.assertEqual(guidance, st.CARD_FIRST_REPLY_GUIDANCE)
 
+    def test_every_hold_reason_has_catalog_words_with_the_same_korean(self):
+        with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"}):
+            t = st._ui_translator()
+            for code, korean in clear.REASON_TEXT.items():
+                with self.subTest(code=code):
+                    self.assertEqual(t("tidy.hold." + code), korean)
+
+    def test_clear_notices_and_idle_request_in_english(self):
+        with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "English"}):
+            failed = clear._notice_text("failed", "agent-not-found", "claude")
+            kept = clear._notice_text("skipped", "card-taken", "opencode")
+            cont = clear._continue_notice_text("failed", "not-idle-native")
+            request = clear.idle_card_request_text({"nonce": "n9", "origin": "idle", "harness": "codex",
+                                                    "idle": {"min_tokens": 300000, "wait_seconds": 60}})
+        self.assertEqual(failed, "[Tidy] Clearing the window failed (the window was not found). Run /clear if "
+                                 "needed. The card is saved; after /clear the new window receives it.")
+        self.assertEqual(kept, "[Tidy] The window was not cleared automatically (the card was already handed "
+                               "to another session). Run /new if needed.")
+        self.assertEqual(cont, '[Tidy] The window was cleared, but "이어서해" could not be typed (the new session '
+                               'did not start waiting for input). To continue, type "이어서해".')
+        self.assertTrue(request.startswith("This is an automatic idle tidy request. This request is sent only "
+                                           "when the last request's input is at least 300,000 tokens, the turn "
+                                           "ended about 1 minute ago"), request)
+        self.assertTrue(request.endswith("Request id: n9"), request)
+        self.assertIsNone(re.search(r"[가-힣]", request.replace(" → ".join(st.CARD_FIELDS), "")
+                                    .replace("·".join(st.CARD_FIXED_FIELDS), "")), request)
+
     def test_card_injection_and_compact_body_in_english(self):
         previous = {"harness": "claude", "sid": "a" * 36,
                     "transcript": {"path": "/" + "x" * 400, "status": "available"}}
