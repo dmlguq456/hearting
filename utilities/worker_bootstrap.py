@@ -1130,6 +1130,10 @@ def _lineage_rows(route, jobs) -> dict[str, list[tuple[str, dict]]]:
         pass
     rows: dict[str, list[tuple[str, dict]]] = {}
     try:
+        # A private stat-keyed read, not the shared registry view: most callers are
+        # one fresh launch process, where building the shared view costs more
+        # (RV-BC-P2B: 0.62 s -> 1.05 s) than this read; repeat calls in one process
+        # hit the stat cache below.
         path = Path(jobs).resolve()
         info = path.stat()
         key = (str(path), info.st_ino, info.st_mtime_ns, info.st_ctime_ns, info.st_size,
@@ -1224,9 +1228,10 @@ def attempt_changes(route, meta) -> list[str]:
         return result.stdout.decode("utf-8", "replace") if result.returncode == 0 else None
 
     lines = []
-    log = git("log", "--format=%h %s", f"{head}..HEAD")
-    commits = [line[:160] for line in (log or "").splitlines() if line.strip()]
-    if log is not None:
+    from dispatch_replacement import commits_after
+    observed = commits_after(worktree, head, timeout=5)
+    commits = [f"{commit[:12]} {subject}" for commit, subject in observed or ()]
+    if observed is not None:
         shown = "; ".join(commits[:_PRIOR_ROUND_LIMITS["commits"]]) or "none"
         more = len(commits) - _PRIOR_ROUND_LIMITS["commits"]
         lines.append(f"commits since `{head[:12]}`: {shown}" + (f" (+{more} more)" if more > 0 else ""))

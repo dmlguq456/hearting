@@ -725,15 +725,39 @@ def _source_scope_matches(path, scopes):
     return False
 
 
-def _git_readonly(worktree, *args):
+def _git_readonly(worktree, *args, timeout=3):
     import artifact_context
     try:
         return subprocess.run(
             ['git', '-C', str(worktree), *args], capture_output=True,
-            env=artifact_context._readonly_git_env(), timeout=3, check=False,
+            env=artifact_context._readonly_git_env(), timeout=timeout, check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
+
+
+def commits_after(worktree, launch_head, *, timeout=3):
+    """``[(commit, subject)]`` after ``launch_head`` up to HEAD, by read-only Git; None when unobservable.
+
+    The one commit-range observation of a prior attempt: a timed-out stage's
+    replacement and a judged stage's next round (``worker_bootstrap.attempt_changes``)
+    both read it here.
+    """
+    result = _git_readonly(worktree, 'log', '--format=%H%x00%s%x1e', f'{launch_head}..HEAD',
+                           timeout=timeout)
+    if result is None or result.returncode != 0:
+        return None
+    commits = []
+    for record in result.stdout.split(b'\x1e'):
+        fields = record.strip(b'\r\n').split(b'\0')
+        if len(fields) != 2:
+            continue
+        commit, subject = fields
+        if not re.fullmatch(rb'(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})', commit):
+            continue
+        commits.append((commit.decode('ascii'),
+                        subject.decode('utf-8', 'replace').replace('\n', ' ')[:160]))
+    return commits
 
 
 def _stage_progress_block(jobs, aid, fields, meta, lines):
@@ -808,21 +832,10 @@ def _stage_progress_block(jobs, aid, fields, meta, lines):
     elif not worktree or not head:
         observations.append(f'- launch_head recorded ({launch_head}); commit range unavailable')
     else:
-        result = _git_readonly(worktree, 'log', '--format=%H%x00%s%x1e',
-                               f'{launch_head}..HEAD')
-        if result is None or result.returncode != 0:
+        commits = commits_after(worktree, launch_head)
+        if commits is None:
             observations.append(f'- commit range {launch_head}..HEAD unavailable (Git observation failed)')
         else:
-            commits = []
-            for record in result.stdout.split(b'\x1e'):
-                fields = record.strip(b'\r\n').split(b'\0')
-                if len(fields) != 2:
-                    continue
-                commit, subject = fields
-                if not re.fullmatch(rb'(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})', commit):
-                    continue
-                commits.append((commit.decode('ascii'),
-                                subject.decode('utf-8', 'replace').replace('\n', ' ')[:160]))
             observations.append(f'- commits after launch_head: {len(commits)} observed')
             for commit, subject in commits[:20]:
                 observations.append(f'  - {commit} {subject}')
