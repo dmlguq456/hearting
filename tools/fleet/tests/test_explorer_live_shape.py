@@ -4,8 +4,8 @@ The screens read the fixture's records positionally and by key. A live builder t
 puts an object where the fixture has a pair, or changes a type breaks a screen only on real data
 (that is how a ``ResourceJob`` object once reached the COMPUTE rail). Each section is compared here:
 the live record's keys are drawn from the fixture's keys, its value types are the fixture's types,
-and an unknown value is ``None``. Additive route fields have the explicit
-optional contract below, so old render fixtures remain valid inputs.
+and an unknown value is ``None``. Additive route fields and the repo ``status`` record have the
+explicit optional contracts below, so old render fixtures remain valid inputs.
 """
 import unittest
 from datetime import datetime
@@ -46,6 +46,19 @@ def route_extension(key, value):
             and optional_pct(row["context"]) and optional_number(row["window"])
             for row in value)
     raise ValueError(key)
+
+
+REPO_STATUS_TEXT = frozenset(("done", "done_age", "changed", "line", "decision", "next", "doc", "doc_age"))
+REPO_STATUS_COUNT = frozenset(("routes", "questions", "decisions"))
+
+
+def repo_status(value):
+    """The optional per-project status line (D4 #3): counts, optional texts and the stale flag."""
+    if not isinstance(value, dict) or set(value) - REPO_STATUS_TEXT - REPO_STATUS_COUNT - {"stale"}:
+        return False
+    return (all(type(value[key]) is int and value[key] >= 0 for key in REPO_STATUS_COUNT & set(value))
+            and all(value[key] is None or isinstance(value[key], str) for key in REPO_STATUS_TEXT & set(value))
+            and type(value.get("stale", False)) is bool)
 
 
 def project_memory_shape(value):
@@ -117,6 +130,10 @@ def conform(live, samples, path, problems):
             if path == "routes[]" and key in ("owner_gauge", "worker_contexts", "current", "worker_context_index"):
                 if not route_extension(key, live[key]):
                     problems.append(f"{path}.{key}: invalid optional route field shape")
+                continue
+            if path == "repos[]" and key == "status":
+                if not repo_status(live[key]):
+                    problems.append(f"{path}.status: invalid optional status shape")
                 continue
             if path == "system.gpu_processes[]" and key == "session_tag":
                 if live[key] is not None and not isinstance(live[key], str):

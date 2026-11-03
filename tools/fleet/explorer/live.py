@@ -1182,6 +1182,61 @@ def _repo_records(session_rows, routes, results=None, now=None):
     return repos
 
 
+STATUS_STALE_DAYS = 3          # an older status document gets its age in front of its line
+
+
+def _repo_status(repos, snapshot, session_rows, session_index, routes, questions, results, now):
+    """Attach each named project's status line (D4 #3) to its repo record as ``status``.
+
+    The project's status document (``collectors.project_status``, read by the detail pass)
+    gives the line, the count waiting on the person and the next step. Without one, the
+    facts Fleet already holds stand in: routes with live work (``current``, the same test
+    as a session row's ``route N``), questions waiting, and the newest completed result.
+    A project with none of these gets no ``status``.
+    """
+    documents = _get(snapshot, "project_status")
+    documents = documents if isinstance(documents, Mapping) else {}
+    cwds = {}
+    for row in session_rows:
+        cwd = _text(_get(session_index[row["tag"]]["session"], "cwd"))
+        if cwd:
+            cwds.setdefault(row["repo_id"], []).append(cwd)
+    for repo in repos:
+        name = repo["id"]
+        if name == UNKNOWN_REPO:
+            continue
+        doc = None
+        for cwd in cwds.get(name, ()):
+            found = documents.get(cwd)
+            if (isinstance(found, Mapping) and _num(found.get("mtime")) is not None
+                    and (doc is None or found["mtime"] > doc["mtime"])):
+                doc = found
+        open_routes = sum(1 for route in routes if route["repo"] == name and route.get("current"))
+        asked = sum(1 for item in questions if item.get("project") == name and not item.get("older"))
+        result = (results or {}).get(name) or {}
+        done_at = _num(result.get("at")) if result.get("result") == "success" else None
+        if doc is None and not (open_routes or asked or repo.get("done")):
+            continue
+        status = {"routes": open_routes, "questions": asked,
+                  "done": repo.get("done"), "done_age": repo.get("age")}
+        if doc is None:
+            status["changed"] = repo.get("age")
+        else:
+            decisions = [str(item) for item in doc.get("decisions") or () if _text(item)]
+            following = [str(item) for item in doc.get("next") or () if _text(item)]
+            doc_at = doc["mtime"]
+            stale = now is not None and now - doc_at >= STATUS_STALE_DAYS * 86400
+            status.update({
+                "line": _text(doc.get("line")) or _text(doc.get("title")) or doc.get("name"),
+                "decisions": len(decisions), "decision": decisions[0] if decisions else None,
+                "next": following[0] if following else None,
+                "doc": _text(doc.get("relative")) or _text(doc.get("name")),
+                "doc_age": _ago(doc_at, now),
+                "stale": bool(stale),
+                "changed": _ago(max(doc_at, done_at or 0), now)})
+        repo["status"] = status
+
+
 def _question_records(snapshot, session_rows, session_index, now):
     """Project only current, body-free records from the shared answer-wait cache."""
     waits = _get(snapshot, "answer_waits")
@@ -2855,7 +2910,8 @@ def build_view_model(snapshot, accepted_detail=None, cached_config=None, now=Non
         sid_of = {row["tag"]: session_index[row["tag"]]["sid"] for row in session_rows}
         session_rows.sort(key=lambda row: position.get(str(sid_of.get(row["tag"])), len(position)))
     routes, nodes = _route_records(snapshot, session_rows, session_index, resolver, clock)
-    repos = _repo_records(session_rows, routes, _repo_results(snapshot, resolver, clock), clock)
+    results = _repo_results(snapshot, resolver, clock)
+    repos = _repo_records(session_rows, routes, results, clock)
     if not order:
         latest_by_repo, mtime_by_tag = {}, {}
         for row in session_rows:
@@ -2868,6 +2924,7 @@ def build_view_model(snapshot, accepted_detail=None, cached_config=None, now=Non
         session_rows.sort(key=lambda row: (repo_rank.get(row["repo_id"], len(repo_rank)),
                                            -mtime_by_tag.get(row["tag"], 0), row["tag"]))
     questions, answer_wait_summary = _question_records(snapshot, session_rows, session_index, clock)
+    _repo_status(repos, snapshot, session_rows, session_index, routes, questions, results, clock)
     peer_nodes, peer_edges = _peer_records(session_rows, session_index, clock, snapshot)
     hosts, compute = _host_records(snapshot, session_index)
     gpu_lines = _session_gpu_lines(snapshot, session_index)
