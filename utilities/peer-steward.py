@@ -5366,6 +5366,11 @@ def cmd_watch_run(args):
                                            "native_wait": wait_record, "observed_ts": _utc_now()}
                             _write_watch_observation(paths, observation)
                             awaiting_readiness = True
+                            if readiness.reason != "shared-readiness-revalidating":
+                                # No refresh was requested: the cached projection
+                                # predates this native result. Without a wake the
+                                # runner would read it only at its next backoff pass.
+                                _wake_shared_runner(peer_obligations.ObligationStore().root)
                     else:
                         state, agent = result_state, wait_record.get("agent") or expected_agent
                         break
@@ -6978,6 +6983,15 @@ def _watch_note_transition_lock_contention(root, watch_id, paths):
         pass
 
 
+def _wake_shared_runner(root):
+    """Ask the existing runner for a pass now; start one if none holds its lock."""
+    try:
+        shared_readiness.wake_runner(root)
+        peer_obligations.ensure_normal_runner(reconciliation_required=True)
+    except Exception:
+        pass
+
+
 def _watch_transition_readiness(target, native_state, arm, expected, server,
                                 watch_id, paths, *, authority_lock_held=False,
                                 deadline=None):
@@ -7015,12 +7029,8 @@ def _watch_transition_readiness(target, native_state, arm, expected, server,
             return SimpleNamespace(state="unknown",
                                    reason="shared-readiness-refresh-unavailable")
         _write_json_atomic(paths.observation, updated)
-        try:
-            shared_readiness.wake_runner(root)
-            peer_obligations.ensure_normal_runner(reconciliation_required=True)
-        except Exception:
-            # A missing response stays pending and reuses this exact request.
-            pass
+        # A missing response stays pending and reuses this exact request.
+        _wake_shared_runner(root)
         return SimpleNamespace(state="pending", reason="shared-readiness-revalidating")
 
     if (isinstance(request, dict) and request.get("identity") == identity

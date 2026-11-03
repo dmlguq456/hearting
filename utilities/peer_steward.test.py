@@ -13,6 +13,7 @@ import math
 import multiprocessing
 import os
 import re
+import select
 import shutil
 import signal
 import subprocess
@@ -4489,6 +4490,60 @@ class ReviewRoundOneTest(_WatchMixin, unittest.TestCase):
         before = self.calllog.read_text()
         self.assertEqual(self._run("__ensure-obligations", env=self._env("held")).returncode, 0)
         self.assertEqual(self.calllog.read_text(), before)
+
+
+class NativeResultRunnerWakeTest(_WatchMixin, unittest.TestCase):
+    def test_native_result_over_a_pending_cached_projection_wakes_the_runner(self):
+        """A projection cached before the native result cannot reflect it.
+
+        The watcher requests a refresh only when the cache reads ready or
+        unavailable. For any other cached result it must still wake the runner,
+        or the runner reads the new result only at its next backoff pass
+        (CI 41449820688: the request came 30 s after the native result).
+        """
+        from dispatch_registry_cache import registry_view
+
+        store = peer_steward.peer_obligations.ObligationStore()
+        # Hold the runner lock and the wake input ourselves: no runner starts,
+        # and every wake the watcher sends lands here.
+        lock_fd = os.open(store.root / peer_steward.peer_obligations.RUNNER_LOCK_NAME,
+                          os.O_RDWR | os.O_CREAT, 0o600)
+        self.addCleanup(os.close, lock_fd)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        wake_fd = peer_steward.shared_readiness.open_runner_wake(store.root)
+        self.addCleanup(os.close, wake_fd)
+
+        env = self._env("held")
+        fields = self._fields(self._run("watch", "peer-a", env=env).stdout)
+        self._wait_for_native_wait_started(fields["watch_id"])
+        arm = json.loads((self.watch_root / f"{fields['watch_id']}.json").read_text())
+        start = str(peer_steward.process_start_ticks(os.getpid()))
+        with mock.patch.dict(os.environ, env):
+            identity = peer_steward._watch_readiness_identity(arm, "idle")
+            jobs = peer_steward._watch_selected_jobs_path()
+            generation = peer_steward.shared_readiness.registry_generation(
+                jobs, registry_view(jobs), selected=True)
+        peer_steward.shared_readiness.publish_runner_incarnation(
+            store.root, os.getpid(), start, "fixture-runner")
+        peer_steward.shared_readiness.publish_target_projection(
+            store.root, identity, {"state": "pending", "reason": "fixture-cached-pending"},
+            producer_pid=os.getpid(), producer_start=start, incarnation="fixture-runner",
+            generation=generation, lineage={key: arm["pane_identity"][key]
+                                            for key in ("shell_pid", "shell_start")})
+        with contextlib.suppress(BlockingIOError):
+            while os.read(wake_fd, 4096):
+                pass
+
+        self._release()
+        observation_path = self.watch_root / f"{fields['watch_id']}.observation.json"
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and (peer_steward._read_json(
+                observation_path) or {}).get("reason") != "fixture-cached-pending":
+            time.sleep(0.02)
+        self.assertEqual(peer_steward._read_json(observation_path).get("reason"),
+                         "fixture-cached-pending")
+        ready, _, _ = select.select([wake_fd], [], [], 10)
+        self.assertEqual(ready, [wake_fd], "the runner was not woken for the native result")
 
 
 class KillFixtureTest(_WatchMixin, unittest.TestCase):
