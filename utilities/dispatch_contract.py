@@ -7721,6 +7721,7 @@ def completion_marker_gate(
         return
     _launch_completion_input(route, node)
     missing = []
+    resource_actions: dict[str, str] = {}
     markers = {}
     proceeding = []
     blocked: list[tuple[str, AttemptReadiness]] = []
@@ -7808,6 +7809,8 @@ def completion_marker_gate(
                     f"{dep}:{currency.state}:{currency.reason}",
                 )
             missing.append(dep)
+            if currency.state == "resource-stage-not-current":
+                resource_actions[dep] = resource_stage_next_action(currency, dep)
             continue
         markers[dep] = marker
         proceeding.append((dep_node, marker_path, marker))
@@ -7821,7 +7824,11 @@ def completion_marker_gate(
         if readiness.state != "ready":
             blocked.append((dep, readiness))
     if missing:
-        raise DispatchContractError("completion-marker-missing", ",".join(missing))
+        # A marker beside a resource stage that is not current names its own step (never `revise`).
+        raise DispatchContractError(
+            "completion-marker-missing", ",".join(missing),
+            next_action="; ".join(resource_actions.get(dep) or f"wait for node {dep} to publish a completion marker"
+                                  for dep in missing) if resource_actions else None)
     if not blocked:
         _frame_pair_attempt_gate(route, node, markers,
                                  jobs or (resolve_dispatch_state_root(agent_home) / "jobs.log"),
@@ -8722,6 +8729,45 @@ def completion_superseded(currency: GateCurrency, *, answered: bool = False) -> 
     return answered and currency.state in ANSWERED_CURRENCY_STATES
 
 
+# `resource-stage-not-current` reasons. Unsettled is an observation: the readable ledger records
+# the supervised stage in a state other than STAGE_SUCCEEDED (or its success was retracted).
+# Unobservable is a record that exists but could not be read right now. Everything else (a settled
+# stage whose proof does not match, a missing or malformed record) keeps `completion-marker-missing`.
+RESOURCE_STAGE_UNSETTLED = "resource-stage-unsettled"
+RESOURCE_STAGE_UNOBSERVABLE = "resource-stage-unobservable"
+
+
+def resource_stage_unsettled(currency: GateCurrency) -> bool:
+    """Whether a marker stands beside a resource stage observed not to have settled as succeeded.
+
+    Such a marker is not the stage's result. The launch gate reads it as missing, as it reads every
+    not-current resource marker, and a replacement owner continues that stage. Nothing else is read
+    this way: a proof mismatch or an unreadable record stays unknown and keeps its refusal.
+    """
+    return (currency.state == "resource-stage-not-current"
+            and currency.reason == RESOURCE_STAGE_UNSETTLED)
+
+
+def resource_stage_unobservable(currency: GateCurrency) -> bool:
+    """Whether a resource stage's records could not be read right now: unknown, never unsettled."""
+    return (currency.state == "resource-stage-not-current"
+            and currency.reason == RESOURCE_STAGE_UNOBSERVABLE)
+
+
+def resource_stage_next_action(currency: GateCurrency, node_id: str) -> str:
+    """The supported step for a marker beside a resource stage that is not current.
+
+    `revise` refuses such a marker, so it is never the step.
+    """
+    if resource_stage_unsettled(currency):
+        return (f"continue resource stage {node_id}: its runs have not settled as succeeded, so run its "
+                "next registered resource; the next start of its successor after a successful run settles it")
+    if resource_stage_unobservable(currency):
+        return f"retry the same command when the run records of resource stage {node_id} can be read again"
+    return (f"inspect the run records and completion marker of resource stage {node_id}: its settled "
+            "run's proof did not match, or a run record is missing or malformed")
+
+
 def _completion_instant(marker: Mapping[str, object]):
     # An unreadable, timezone-less or otherwise unorderable value cannot be placed against
     # another completion, so it is no instant (never a reason to call a result older).
@@ -8874,15 +8920,20 @@ def _resource_stage_marker_current(route, node, marker, marker_path, jobs):
         raw = marker_path.read_bytes()
         marker_sha = hashlib.sha256(raw).hexdigest()
         marker_sequence = marker.get("sequence")
+        stage = state.get("nodes", {}).get(node["id"], {})
+        # Only a recorded stage state is an observation: no entry for the node is not "unsettled".
+        observed = stage.get("state")
+        not_current = GateCurrency("resource-stage-not-current",
+                                   RESOURCE_STAGE_UNSETTLED if observed and observed != "STAGE_SUCCEEDED"
+                                   else "completion-marker-missing")
         for entry in ledger.journal():
             evidence = entry.get("evidence") or {}
             if (entry.get("actor") == "resource-false-success-reconciliation"
                     and evidence.get("marker_sha256") == marker_sha
                     and evidence.get("marker_sequence") == marker_sequence):
-                return GateCurrency("resource-stage-not-current", "completion-marker-missing")
-        stage = state.get("nodes", {}).get(node["id"], {})
-        if stage.get("state") != "STAGE_SUCCEEDED":
-            return GateCurrency("resource-stage-not-current", "completion-marker-missing")
+                return not_current
+        if observed != "STAGE_SUCCEEDED":
+            return not_current
         resource_identity = marker.get("resource_execution_identity")
         if resource_identity is None:
             return None
@@ -8912,7 +8963,11 @@ def _resource_stage_marker_current(route, node, marker, marker_path, jobs):
     except FileNotFoundError:
         return (GateCurrency("resource-stage-not-current", "completion-marker-missing")
                 if marker.get("resource_execution_identity") is not None else None)
-    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+    except OSError:
+        # A record that exists but cannot be read right now is not observed yet, whatever the
+        # marker carries: a hand marker without an identity is not current on an unread ledger.
+        return GateCurrency("resource-stage-not-current", RESOURCE_STAGE_UNOBSERVABLE)
+    except (ValueError, KeyError, TypeError, AttributeError):
         if marker.get("resource_execution_identity") is not None:
             return GateCurrency("resource-stage-not-current", "completion-marker-missing")
         return None
