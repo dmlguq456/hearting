@@ -1721,7 +1721,12 @@ beyond the successor its sealed route already declares.
 Resource watches follow exact resource identity rather than a 24-hour deadline.
 Release activation reattaches observation to existing compute/resource runs,
 retaining payload, exit/sentinel and route/node identity. The argument-free
-`hearting run resource-observers` repeats that reconciliation. A registered
+`hearting run resource-observers` repeats that reconciliation. A compute run
+with no exit code whose own files have not changed for seven days, and whose
+tmux session its host reports gone, is no longer watched; a live or unreadable
+session keeps the watch. Listings show such an end as unknown rather than
+success or failure, and an exit code written later is reported once at the next
+reconciliation. A registered
 `resource-runner observe` side run shares its live resource's route/node and
 recipients, with its own run id, log, progress and sentinel. Its success/failure
 is reported separately from the unchanged stage predecessor and completion.
