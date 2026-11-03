@@ -160,7 +160,7 @@ def session_route(harness: str, session_id: str) -> Optional[Tuple[str, str]]:
         sys.path.insert(0, str(tools))
     from fleet import route_chain  # noqa: E402
 
-    lines = route_chain.read_tail(harness, session_id)
+    lines = route_chain.own_lines(route_chain.read_tail(harness, session_id))
     if not lines:
         return None
     last = max(lines, key=lambda line: line.get("ts") or 0)
