@@ -3801,6 +3801,19 @@ def _discovery_generation_changed(snapshot: dict) -> bool:
     )
 
 
+def _interpreted_script(arguments: list[str]) -> str | None:
+    """The script path an interpreter process was started on, if argv names one."""
+    if not arguments or not re.fullmatch(r"python[0-9.]*|(ba|da)?sh",
+                                         os.path.basename(arguments[0])):
+        return None
+    for value in arguments[1:]:
+        if value in {"-c", "-m"}:
+            return None
+        if not value.startswith("-"):
+            return value
+    return None
+
+
 def _release_held_by_live_process(candidate: Path) -> tuple[bool, str]:
     """Is any live process running out of this release right now?
 
@@ -3871,6 +3884,16 @@ def _release_held_by_live_process(candidate: Path) -> tuple[bool, str]:
             pass
         release_reference = False
         family = str(candidate.parent.resolve()).rstrip("/") + "/"
+        # A script started from a real path inside one release names its code
+        # root exactly, as the descriptor below does. Only a projected script
+        # (or none) leaves the release unknown. The obligation runner an update
+        # starts carries `--service-current <data>/current` and runs out of the
+        # new release; before it opens its descriptor it must not hold the
+        # release it superseded.
+        script = _interpreted_script(arguments)
+        if (script and script.startswith(family)
+                and os.path.realpath(script) == script):
+            release_reference = True
         for link in links:
             try:
                 value = os.readlink(link)

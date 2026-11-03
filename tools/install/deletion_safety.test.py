@@ -556,6 +556,44 @@ class ReleaseHeldByLiveProcessTest(unittest.TestCase):
             held, why = distribution._release_held_by_live_process(Path(tmp))
             self.assertFalse(held, why)
 
+    def test_a_real_release_script_holds_its_release_but_not_the_family(self):
+        # `harness update` starts the obligation runner from the new release's
+        # real script path with `--service-current <data>/current`. Until it
+        # opens its code-root descriptor, that projection argument made every
+        # release in the family look in use, so the superseded release survived
+        # the update (install-lifecycle CI, run 41586869055).
+        import subprocess
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp).resolve()
+            releases = base / "releases"
+            old, new = releases / "v-old", releases / "v-new"
+            for release in (old, new):
+                (release / "utilities").mkdir(parents=True)
+                (release / "utilities" / "runner.py").write_text(
+                    "import sys\nsys.stdin.readline()\n", encoding="utf-8")
+            current = base / "current"
+            current.symlink_to(new, target_is_directory=True)
+
+            def started(script):
+                process = subprocess.Popen(
+                    [sys.executable, str(script), "--service-current", str(current)],
+                    stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    cwd=tmp)
+                self.addCleanup(process.wait, 5)
+                self.addCleanup(process.communicate, b"\n")
+                return process
+
+            runner = started(new / "utilities" / "runner.py")
+            self.assertEqual(distribution._release_held_by_live_process(old), (False, ""))
+            held, why = distribution._release_held_by_live_process(new)
+            self.assertTrue(held)
+            self.assertEqual(why, f"live-process:{runner.pid}")
+            # A projected script still holds the whole family: which release
+            # it loaded cannot be recovered from argv.
+            projected = started(current / "utilities" / "runner.py")
+            self.assertEqual(distribution._release_held_by_live_process(old),
+                             (True, f"live-process:{projected.pid}:unsealed-projection"))
+
     def test_an_unreadable_process_does_not_mark_every_release_in_use(self):
         # Some of our own processes deny /proc entirely (`(sd-pam)`), and pid 1
         # belongs to another user. If either were treated as undecidable, every
