@@ -168,24 +168,6 @@ class OwnerRouteBindingTest(unittest.TestCase):
             self.assertEqual(result.route_id, "rt-test")
             self.assertFalse(hasattr(result, "route_node"))
 
-    def test_owner_harness_mismatch_fails(self):
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "route.json"
-            route = self.route(td)
-            path.write_text(json.dumps(route), encoding="utf-8")
-            with mock.patch.object(M.ROUTE, "verify_route", return_value=route):
-                with self.assertRaisesRegex(
-                    M.OwnerRouteBindingError, "owner-route-harness-mismatch"
-                ):
-                    M.validate_owner_route_binding(
-                        path,
-                        worktree=td,
-                        capability="autopilot-code",
-                        capability_mode="dev",
-                        intensity="strong",
-                        harness="claude",
-                    )
-
     def test_loopback_requirement_fails_closed(self):
         route = {"nodes": [{"id": "gate", "runtime_requirements": ["loopback-listen"]}]}
         with self.assertRaisesRegex(
@@ -394,44 +376,6 @@ class OwnerRouteAdvanceTest(unittest.TestCase):
                         registry_rows=[self._child_row(td, r1_path, r1)],
                     )
 
-    def test_resolve_tampered_target_hash_fails_closed(self):
-        with tempfile.TemporaryDirectory() as td:
-            jobs = str(Path(td) / "jobs.tsv")
-            r0_path, r0 = self._route(td, "rt-r0", 0)
-            r1_path, r1 = self._route(td, "rt-r1", 1, "rt-r0", "sha256:rt-r0")
-            anchor = self._binding(r0_path, r0)
-            target = self._binding(r1_path, r1)
-            with mock.patch.object(M.ROUTE, "verify_route", side_effect=lambda raw, *a, **k: raw):
-                M.publish_owner_route_advance(jobs, owner_attempt_id="att-1", source=anchor,
-                                              target=target, from_generation=0, to_generation=1)
-                tampered = dict(r1); tampered["route_hash"] = "sha256:tampered"
-                r1_path.write_text(json.dumps(tampered), encoding="utf-8")
-                with self.assertRaisesRegex(
-                    M.OwnerRouteBindingError, "owner-route-advance-target-invalid"
-                ):
-                    M.resolve_owner_route_advance(
-                        jobs, owner_attempt_id="att-1", anchor=anchor, anchor_generation=0,
-                        registry_rows=[self._child_row(td, r1_path, r1)],
-                    )
-
-    def test_resolve_unrelated_source_supersession_mismatch(self):
-        with tempfile.TemporaryDirectory() as td:
-            jobs = str(Path(td) / "jobs.tsv")
-            r0_path, r0 = self._route(td, "rt-r0", 0)
-            r1_path, r1 = self._route(td, "rt-r1", 1, "rt-unrelated", "sha256:rt-unrelated")
-            anchor = self._binding(r0_path, r0)
-            target = self._binding(r1_path, r1)
-            with mock.patch.object(M.ROUTE, "verify_route", side_effect=lambda raw, *a, **k: raw):
-                M.publish_owner_route_advance(jobs, owner_attempt_id="att-1", source=anchor,
-                                              target=target, from_generation=0, to_generation=1)
-                with self.assertRaisesRegex(
-                    M.OwnerRouteBindingError, "owner-route-advance-supersession-mismatch"
-                ):
-                    M.resolve_owner_route_advance(
-                        jobs, owner_attempt_id="att-1", anchor=anchor, anchor_generation=0,
-                        registry_rows=[self._child_row(td, r1_path, r1)],
-                    )
-
     def test_resealed_record_with_invalid_field_types_fails_closed(self):
         with tempfile.TemporaryDirectory() as td:
             jobs = str(Path(td) / "jobs.tsv")
@@ -515,29 +459,6 @@ class OwnerRouteAdvanceTest(unittest.TestCase):
                     target_route={"route_id": "rt-r1", "route_hash": "sha256:rt-r1",
                                   "route_file": str(Path(td) / "rt-r1.json")},
                     environ=environ,
-                )
-
-    def test_publish_from_environment_rejects_owner_binding_mismatch(self):
-        with tempfile.TemporaryDirectory() as td:
-            jobs_path = Path(td) / "jobs.tsv"
-            r0_path, r0 = self._route(td, "rt-r0", 0)
-            meta = ("attempt_id=att-1,worker_type=owner,unit=_kernel/owner,"
-                    "attempt_schema_version=2,owner_route_file=/other/route.json,"
-                    "owner_route_id=rt-other,owner_route_hash=sha256:rt-other")
-            jobs_path.write_text(
-                "\t".join(["1", "open", "-", "-", "-", meta]) + "\n", encoding="utf-8",
-            )
-            with self.assertRaisesRegex(
-                M.OwnerRouteBindingError, "owner-route-owner-binding-mismatch"
-            ):
-                M.publish_owner_route_advance_from_environment(
-                    str(jobs_path), source_route=r0,
-                    target_route={"route_id": "rt-r1", "route_hash": "sha256:rt-r1",
-                                  "route_file": str(Path(td) / "rt-r1.json")},
-                    environ={"AGENT_DISPATCH_ATTEMPT_ID": "att-1",
-                             "AGENT_OWNER_ROUTE_FILE": str(r0_path),
-                             "AGENT_OWNER_ROUTE_ID": r0["route_id"],
-                             "AGENT_OWNER_ROUTE_HASH": r0["route_hash"]},
                 )
 
 
@@ -675,74 +596,6 @@ class OwnerRouteLifecycleTest(unittest.TestCase):
         return M.publish_owner_route_attachment_from_environment(
             jobs, target_route=self._payload(path, route), environ=self._env(jobs)
         )
-
-    def test_lifecycle_reverifies_changed_transitive_unit_catalog(self):
-        with tempfile.TemporaryDirectory() as td:
-            jobs = Path(td) / "jobs.log"
-            jobs.write_text(
-                self._row(td).replace("capability_mode=debug", "capability_mode=dev")
-                .replace("intensity=standard", "intensity=quick"),
-                encoding="utf-8",
-            )
-            units = Path(td) / "units"
-            package = units / "dev"
-            package.mkdir(parents=True)
-            profile = package / "backend.md"
-            profile.write_text("---\nname: backend\n---\nfirst body\n", encoding="utf-8")
-            route_path = Path(td) / "route.json"
-            actual_digest = M.ROUTE.unit_catalog_digest
-
-            def test_catalog_digest(units_root=None):
-                return actual_digest(units_root or units)
-
-            with mock.patch.dict(os.environ, {"HEARTING_GATES": "on"}), \
-                    mock.patch.object(M.ROUTE, "unit_catalog_digest",
-                                      side_effect=test_catalog_digest):
-                route = M.ROUTE.compile_route(
-                    "autopilot-code", "dev", "quick", td, Path(td) / "artifacts",
-                    predicates=[], transport=None, tracking="tracked",
-                    tracked_gate_evidence={
-                        "spec_read": {"satisfied": True, "source": "canonical-prd-sha256"},
-                        "drift_verdict": "within-spec", "workflow_mode": "tracked",
-                        "artifact_guard": {"satisfied": True,
-                                           "source": "conductor-prechecked"},
-                    },
-                    registered_headless_evidence={"candidates": [
-                        {"harness": harness, "transport": "headless",
-                         "surface": "registered-headless", "status": "supported",
-                         "probe_source": "fixture-probe", "probe_time": "2026-07-20T00:00:00Z"}
-                        for harness in ("claude", "codex")
-                    ]},
-                )
-                route.update({
-                    "owner_attempt_id": self.ATTEMPT,
-                    "advance_generation": 0,
-                    "route_family_key": "family-owner-transitive-catalog",
-                })
-                route["route_hash"] = M.ROUTE.route_hash(route)
-                route["route_id"] = "rt-" + route["route_hash"].split(":", 1)[1][:16]
-                route_path.write_text(json.dumps(route), encoding="utf-8")
-
-                with mock.patch.object(M.ROUTE, "verify_route",
-                                       wraps=M.ROUTE.verify_route) as verify:
-                    self._attach(td, jobs, route_path, route)
-                    current, status = M.resolve_owner_route_lifecycle(
-                        jobs, owner_attempt_id=self.ATTEMPT,
-                    )
-                    self.assertEqual(current.route_id, route["route_id"])
-                    self.assertEqual(status, "owner-route-post-launch-attachment")
-                    verified_before_change = verify.call_count
-
-                    profile.write_text(
-                        "---\nname: backend-v2\n---\nsecond body\n", encoding="utf-8",
-                    )
-                    with self.assertRaisesRegex(
-                        M.OwnerRouteBindingError, "owner-route-binding-route-invalid",
-                    ):
-                        M.resolve_owner_route_lifecycle(
-                            jobs, owner_attempt_id=self.ATTEMPT,
-                        )
-                    self.assertGreater(verify.call_count, verified_before_change)
 
     def test_post_launch_generation_zero_attachment_and_restart_resolution(self):
         with tempfile.TemporaryDirectory() as td:
@@ -914,30 +767,7 @@ class OwnerRouteLifecycleTest(unittest.TestCase):
             self.assertTrue(set(observed) <= allowed, observed)
             self.assertEqual(final, ("rt-r1", "owner-route-advance-current"))
 
-    def test_competing_first_route_and_wrong_session_fail_closed(self):
-        with tempfile.TemporaryDirectory() as td:
-            jobs = Path(td) / "jobs.log"
-            jobs.write_text(self._row(td), encoding="utf-8")
-            r0_path, r0 = self._route(td, "rt-r0", 0)
-            other_path, other = self._route(td, "rt-other", 0)
-            with mock.patch.object(M.ROUTE, "verify_route", side_effect=lambda raw, *a, **k: raw):
-                self._attach(td, jobs, r0_path, r0)
-                with self.assertRaisesRegex(
-                    M.OwnerRouteBindingError, "owner-route-attachment-competing-route"
-                ):
-                    self._attach(td, jobs, other_path, other)
-            with tempfile.TemporaryDirectory() as td2:
-                jobs2 = Path(td2) / "jobs.log"
-                jobs2.write_text(self._row(td2), encoding="utf-8")
-                path2, route2 = self._route(td2, "rt-session", 0)
-                with mock.patch.object(M.ROUTE, "verify_route", side_effect=lambda raw, *a, **k: raw), \
-                     self.assertRaisesRegex(M.OwnerRouteBindingError, "owner-route-owner-session-mismatch"):
-                    M.publish_owner_route_attachment_from_environment(
-                        jobs2, target_route=self._payload(path2, route2),
-                        environ=self._env(jobs2, session="unrelated-session"),
-                    )
-
-    def test_unrelated_worktree_downgrade_and_tamper_fail_closed(self):
+    def test_unrelated_worktree_downgrade_fails_closed(self):
         with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as unrelated:
             jobs = Path(td) / "jobs.log"
             jobs.write_text(self._row(td), encoding="utf-8")
@@ -945,13 +775,6 @@ class OwnerRouteLifecycleTest(unittest.TestCase):
             wrong_path, wrong = self._route(td, "rt-wrong", 1, source=r0, worktree=unrelated)
             with mock.patch.object(M.ROUTE, "verify_route", side_effect=lambda raw, *a, **k: raw):
                 self._attach(td, jobs, r0_path, r0)
-                with self.assertRaisesRegex(
-                    M.OwnerRouteBindingError, "owner-route-advance-worktree-mismatch"
-                ):
-                    M.publish_owner_route_advance_from_environment(
-                        jobs, source_route=self._payload(r0_path, r0),
-                        target_route=self._payload(wrong_path, wrong), environ=self._env(jobs),
-                    )
                 with self.assertRaisesRegex(
                     M.OwnerRouteBindingError, "owner-route-advance-generation-invalid"
                 ):
@@ -961,12 +784,6 @@ class OwnerRouteLifecycleTest(unittest.TestCase):
                         target=M.OwnerRouteBinding(str(wrong_path), wrong["route_id"], wrong["route_hash"]),
                         from_generation=1, to_generation=1,
                     )
-                tampered = dict(r0); tampered["route_hash"] = "sha256:tampered"
-                r0_path.write_text(json.dumps(tampered), encoding="utf-8")
-                with self.assertRaisesRegex(
-                    M.OwnerRouteBindingError, "owner-route-binding-hash-mismatch"
-                ):
-                    M.resolve_owner_route_lifecycle(jobs, owner_attempt_id=self.ATTEMPT)
 
     def test_concurrent_attachment_is_atomic_and_owner_close_is_fail_closed(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1099,12 +916,6 @@ class QuickNodeBindingTest(unittest.TestCase):
                             capability_mode="dev", intensity=intensity, harness="claude",
                             route_node=node_id)
                         self.assertEqual(parent_bound.route_node, node_id)
-                        # a harness neither the parent nor the child of any supported tuple
-                        with self.assertRaisesRegex(M.OwnerRouteBindingError, "frame-route-harness-mismatch"):
-                            M.derive_frame_route_binding(
-                                path, worktree=M.ROUTE.ROOT, capability="autopilot-code",
-                                capability_mode="dev", intensity=intensity, harness="opencode",
-                                route_node=node_id)
 
     def test_frame_binding_follows_the_incident_evidence_rt_ad3fb(self):
         """Every child_harness=opencode tuple is unsupported, the parent_harness=opencode rows

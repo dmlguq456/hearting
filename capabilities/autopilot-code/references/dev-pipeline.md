@@ -138,8 +138,7 @@ fallback stops with `child_spawned=0` and reports the reason's own `next_action`
 instead of degrading to an inline run of a node whose own recorded state, not runtime availability, is
 what is blocking it — most often `capability-route.py revise --route <route> --node <node> --evidence
 <evidence-path> --basis review-findings|user-direction|owner-correction` when the gate's evidence
-changed after its marker published (opt-in gates only; with gates off, the default, the edit is
-kept as history and the node proceeds). For case 3, record reasoning in the
+changed after its marker published (a recorded edit is kept as history and the node proceeds). For case 3, record reasoning in the
 selected node's declared output; an unrecorded inline standard+ run violates the contract.
 Still parallelize separable census or disjoint file groups. The Claude stage-dispatch hook
 only reminds you of this list; it does not deny the in-session run.
@@ -363,7 +362,7 @@ one long serial session. Run one command:
 It reads the block, mints the chain and slice ids, writes one phase brief per slice, proves
 exact files, worktree and write-scope containment and pairwise disjointness with the same
 `load_manifest` the admission re-proves, reserves the slots, and registers and starts the
-slices. Slices run in the route cwd or, while the same-work gates are off, in a linked
+slices. Slices run in the route cwd or in a linked
 worktree of the same repository, and each binds to this owner by the inherited attempt id.
 Close the single stage gate with the receipt's `next_command`
 (`capability-route.py complete --route <route-file> --node execute --evidence <stage

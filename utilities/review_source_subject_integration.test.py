@@ -402,23 +402,6 @@ class SourceSubjectIntegrationTest(unittest.TestCase):
         self.complete_node('report', 'att-historical-report', 'historical report')
         self._row(self._metadata(self.get_node('report'), 'att-historical-report', 'stage'),
                   extra=finished_process())
-        report_path = ROUTE_WRITER.completion_dir(
-            self.route['route_id'], jobs=self.jobs) / 'report.json'
-        original_report = report_path.read_bytes()
-        invalid_report = {**json.loads(original_report), 'route_hash': 'sha256:' + '0' * 64}
-        report_path.write_text(json.dumps(invalid_report), encoding='utf-8')
-        try:
-            with mock.patch.dict(os.environ, {'HEARTING_GATES': 'on'}):
-                self.assertTrue(DC.gate_currency(
-                    self.route, self.get_node('report'), report_path,
-                    jobs=self.jobs).state.startswith('integrity-broken'))
-                with self.assertRaises(DC.DispatchContractError) as corrupt:
-                    replacement._reuse_snapshot(
-                        self.jobs, self.route, self.jobs.read_text().splitlines())
-                self.assertEqual((corrupt.exception.reason, corrupt.exception.detail),
-                                 ('replacement-completion-unproven', 'report'))
-        finally:
-            report_path.write_bytes(original_report)
         snapshot = replacement._reuse_snapshot(self.jobs, self.route,
                                                 self.jobs.read_text().splitlines())
         self.assertEqual(snapshot['pending'],
@@ -562,10 +545,9 @@ class SourceSubjectIntegrationTest(unittest.TestCase):
         self.assertEqual(completed_snapshot['pending'], [])
         self.assertEqual([item['node'] for item in completed_snapshot['completed']],
                          ['plan', 'execute', 'impl-review', 'test', 'report'])
-        with mock.patch.dict(os.environ, {'HEARTING_GATES': 'on'}):
-            self.assertEqual(self.currency(marker).state, 'current')
-            self.assertEqual(replacement._reuse_snapshot(
-                self.jobs, self.route, self.jobs.read_text().splitlines())['pending'], [])
+        self.assertEqual(self.currency(marker).state, 'current')
+        self.assertEqual(replacement._reuse_snapshot(
+            self.jobs, self.route, self.jobs.read_text().splitlines())['pending'], [])
 
         bad = json.loads(json.dumps(marker))
         bad['source_subject']['inline_provenance'].pop('manifest_sha256')
@@ -651,10 +633,9 @@ class SourceSubjectIntegrationTest(unittest.TestCase):
                 self.assertEqual((marker_dir / 'impl-review.json').read_bytes(),
                                  b_canonical_before)
                 self.assertEqual(b_history_path.read_bytes(), b_history_before)
-        with mock.patch.dict(os.environ, {'HEARTING_GATES': 'on'}):
-            pending = replacement._reuse_snapshot(
-                self.jobs, self.route, self.jobs.read_text().splitlines())['pending']
-            self.assertIn('impl-review', pending)
+        pending = replacement._reuse_snapshot(
+            self.jobs, self.route, self.jobs.read_text().splitlines())['pending']
+        self.assertIn('impl-review', pending)
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -1295,26 +1276,19 @@ class SourceSubjectIntegrationTest(unittest.TestCase):
                 attempt_id=attempt, attempt_metadata=metadata, jobs=self.jobs,
             )
 
-    def test_gates_off_does_not_reuse_a_stale_review_pass(self):
+    def test_does_not_reuse_a_stale_review_pass(self):
         self.current_smoke_markers("A")
         _meta, a_pass = self.complete_review("att-review-gate-off-A")
         (self.repo / "engine.py").write_text("value = 'B'\n", encoding="utf-8")
         self.current_smoke_markers("B")
         self.assertEqual(self.currency(a_pass).state, "superseded")
-        with mock.patch.dict(os.environ, {**os.environ, "HEARTING_GATES": "off"}, clear=True), \
-             mock.patch.object(DC, "completion_attempt_readiness",
+        with mock.patch.object(DC, "completion_attempt_readiness",
                                side_effect=AssertionError("stale PASS must not be consumed")):
             DC.completion_marker_gate(str(self.route_file), "test", "start",
                                       self.agent_home, self.jobs)
-        with mock.patch.dict(os.environ, {**os.environ, "HEARTING_GATES": "on"}, clear=True):
-            with self.assertRaises(DC.DispatchContractError) as refused:
-                DC.completion_marker_gate(str(self.route_file), "test", "start",
-                                          self.agent_home, self.jobs)
-        self.assertEqual(refused.exception.reason, "completion-review-source-stale")
 
-    def _gate_start(self, node, *, gates, readiness=False):
-        env = {**os.environ, "HEARTING_GATES": gates}
-        patches = [mock.patch.dict(os.environ, env, clear=True)]
+    def _gate_start(self, node, *, readiness=False):
+        patches = []
         if not readiness:
             patches.append(mock.patch.object(DC, "completion_attempt_readiness",
                                              side_effect=AssertionError("superseded PASS must not be consumed")))
@@ -1323,7 +1297,7 @@ class SourceSubjectIntegrationTest(unittest.TestCase):
                 stack.enter_context(patch)
             DC.completion_marker_gate(str(self.route_file), node, "start", self.agent_home, self.jobs)
 
-    def test_gates_off_stale_test_source_proceeds_without_reusing_pass(self):
+    def test_stale_test_source_proceeds_without_reusing_pass(self):
         # N21: a source-bound test PASS whose source moved is dropped from the observation, never consumed.
         self.current_smoke_markers("A")
         (self.repo / "engine.py").write_text("value = 'B'\n", encoding="utf-8")
@@ -1332,33 +1306,24 @@ class SourceSubjectIntegrationTest(unittest.TestCase):
         currency = DC.gate_currency(self.route, self.get_node("smoke"), smoke, marker, observe=True)
         self.assertEqual((currency.state, currency.reason), ("superseded", "completion-test-source-stale"))
         self.assertTrue(DC.completion_superseded(currency))
-        self._gate_start("impl-review", gates="off")
-        with self.assertRaises(DC.DispatchContractError) as refused:
-            self._gate_start("impl-review", gates="on")
-        self.assertEqual(refused.exception.reason, "completion-test-source-stale")
+        self._gate_start("impl-review")
 
-    def test_gates_off_unknown_review_subject_proceeds_without_reusing_pass(self):
+    def test_unknown_review_subject_proceeds_without_reusing_pass(self):
         # N28: a review PASS that records no subject cannot be read as current; the next node proceeds.
         self.current_smoke_markers("A")
         self.complete_review("att-review-unbound")
         with mock.patch.object(DC, "gate_currency", return_value=DC.GateCurrency(
                 "superseded", "completion-review-subject-unknown")), \
                 mock.patch.object(DC, "completion_marker_is_current", return_value=False):
-            self._gate_start("test", gates="off")
-            with self.assertRaises(DC.DispatchContractError) as refused:
-                self._gate_start("test", gates="on")
-        self.assertEqual(refused.exception.reason, "completion-review-subject-unknown")
+            self._gate_start("test")
 
-    def test_gates_off_missing_review_input_proceeds_without_reusing_pass(self):
+    def test_missing_review_input_proceeds_without_reusing_pass(self):
         self.current_smoke_markers("A")
         self.complete_review("att-review-input-missing")
         with mock.patch.object(DC, "gate_currency", return_value=DC.GateCurrency(
                 "superseded", "completion-review-subject-input-missing")), \
                 mock.patch.object(DC, "completion_marker_is_current", return_value=False):
-            self._gate_start("test", gates="off")
-            with self.assertRaises(DC.DispatchContractError) as refused:
-                self._gate_start("test", gates="on")
-        self.assertEqual(refused.exception.reason, "completion-review-subject-input-missing")
+            self._gate_start("test")
 
     def test_superseded_rule_never_admits_integrity_breaks(self):
         for state in ("integrity-broken:history-conflict", "integrity-broken:identity-mismatch"):
@@ -1375,23 +1340,9 @@ class SourceSubjectIntegrationTest(unittest.TestCase):
         smoke = ROUTE_WRITER.completion_dir(self.route["route_id"], jobs=self.jobs) / "smoke.json"
         broken = json.loads(smoke.read_text(encoding="utf-8"))
         smoke.write_text(json.dumps({**broken, "route_hash": "sha256:" + "0" * 64}), encoding="utf-8")
-        for gates in ("off", "on"):
-            with self.assertRaises(DC.DispatchContractError) as refused:
-                self._gate_start("impl-review", gates=gates)
-            self.assertEqual(refused.exception.reason, "completion-marker-integrity-broken")
-
-    def test_upstream_revision_tombstone_is_superseded_and_gates_on_names_the_rerun(self):
-        self.current_smoke_markers("A")
-        self.revise_execute("att-execute-revision", "execute evidence revised")
-        smoke = ROUTE_WRITER.completion_dir(self.route["route_id"], jobs=self.jobs) / "smoke.json"
-        tombstone = json.loads(smoke.read_text(encoding="utf-8"))
-        self.assertEqual(tombstone["state"], "superseded-by-upstream-revision")
-        currency = DC.gate_currency(self.route, self.get_node("smoke"), smoke, tombstone, observe=True)
-        self.assertTrue(DC.completion_superseded(currency))
         with self.assertRaises(DC.DispatchContractError) as refused:
-            self._gate_start("impl-review", gates="on", readiness=True)
-        self.assertEqual(refused.exception.reason, "completion-evidence-superseded")
-        self.assertIn("rerun dependency node", refused.exception.next_action)
+            self._gate_start("impl-review")
+        self.assertEqual(refused.exception.reason, "completion-marker-integrity-broken")
 
     def test_registration_and_launch_fences_reject_source_races_without_spawning(self):
         admitted_digest = SUBJECT.observe(self.route, self.review_node,
@@ -1605,11 +1556,10 @@ class SourceSubjectIntegrationTest(unittest.TestCase):
                     attempt = f'att-new-inline-{kind}-{label}'
                     before = self._completion_state(directory)
                     with self.subTest(history=kind, evidence=label):
-                        with mock.patch.dict(os.environ, {'HEARTING_GATES': 'on'}):
-                            with self.assertRaisesRegex(ValueError, expected):
-                                ROUTE_WRITER.complete_node(
-                                    self.route, node, node['id'], candidate, attempt_id=attempt,
-                                    explicit_attempt_metadata=self._inline_metadata(node, attempt))
+                        with self.assertRaisesRegex(ValueError, expected):
+                            ROUTE_WRITER.complete_node(
+                                self.route, node, node['id'], candidate, attempt_id=attempt,
+                                explicit_attempt_metadata=self._inline_metadata(node, attempt))
                         # Canonical, history, attempt links and epoch are all unchanged.
                         self.assertEqual(self._completion_state(directory), before)
                         self.assertEqual(
@@ -1628,21 +1578,19 @@ class SourceSubjectIntegrationTest(unittest.TestCase):
             fresh = self.artifact_root / 'intact-fresh.md'
             fresh.write_text('new review bytes over an intact unknown head', encoding='utf-8')
             attempt = 'att-new-inline-intact'
-            with mock.patch.dict(os.environ, {'HEARTING_GATES': 'on'}):
-                marker, result = ROUTE_WRITER.complete_node(
-                    self.route, node, node['id'], fresh, attempt_id=attempt,
-                    explicit_attempt_metadata=self._inline_metadata(node, attempt))
+            marker, result = ROUTE_WRITER.complete_node(
+                self.route, node, node['id'], fresh, attempt_id=attempt,
+                explicit_attempt_metadata=self._inline_metadata(node, attempt))
             self.assertEqual(result['status'], 'unregistered-complete')
             self.assertEqual(marker['sequence'], old['sequence'] + 1)
             self.assertEqual(self.currency(marker).state, 'current')
             self.assertEqual((directory / f"impl-review.{old['sequence']}.json").read_bytes(),
                              old_bytes[1])
             # The same historical bytes are still refused as unknown, never rebound.
-            with mock.patch.dict(os.environ, {'HEARTING_GATES': 'on'}):
-                with self.assertRaisesRegex(ValueError, '^review-source-binding-missing:'):
-                    ROUTE_WRITER.complete_node(
-                        self.route, node, node['id'], evidence, attempt_id='att-rebind-old',
-                        explicit_attempt_metadata=self._inline_metadata(node, 'att-rebind-old'))
+            with self.assertRaisesRegex(ValueError, '^review-source-binding-missing:'):
+                ROUTE_WRITER.complete_node(
+                    self.route, node, node['id'], evidence, attempt_id='att-rebind-old',
+                    explicit_attempt_metadata=self._inline_metadata(node, 'att-rebind-old'))
 
         # A canonical head lost between history and canonical writes recovers by exact replay.
         with self.subTest(history='canonical-absent-exact-replay'):
@@ -1651,16 +1599,15 @@ class SourceSubjectIntegrationTest(unittest.TestCase):
             attempt = 'att-fresh-then-lose-canonical'
             fresh = self.artifact_root / 'replay-fresh.md'
             fresh.write_text('fresh review whose canonical head is lost', encoding='utf-8')
-            with mock.patch.dict(os.environ, {'HEARTING_GATES': 'on'}):
-                marker, _result = ROUTE_WRITER.complete_node(
-                    self.route, node, node['id'], fresh, attempt_id=attempt,
-                    explicit_attempt_metadata=self._inline_metadata(node, attempt))
-                directory = ROUTE_WRITER.completion_dir(self.route['route_id'], jobs=self.jobs)
-                history_bytes = (directory / f"impl-review.{marker['sequence']}.json").read_bytes()
-                (directory / 'impl-review.json').unlink()
-                replay, _result = ROUTE_WRITER.complete_node(
-                    self.route, node, node['id'], fresh, attempt_id=attempt,
-                    explicit_attempt_metadata=self._inline_metadata(node, attempt))
+            marker, _result = ROUTE_WRITER.complete_node(
+                self.route, node, node['id'], fresh, attempt_id=attempt,
+                explicit_attempt_metadata=self._inline_metadata(node, attempt))
+            directory = ROUTE_WRITER.completion_dir(self.route['route_id'], jobs=self.jobs)
+            history_bytes = (directory / f"impl-review.{marker['sequence']}.json").read_bytes()
+            (directory / 'impl-review.json').unlink()
+            replay, _result = ROUTE_WRITER.complete_node(
+                self.route, node, node['id'], fresh, attempt_id=attempt,
+                explicit_attempt_metadata=self._inline_metadata(node, attempt))
             self.assertEqual(replay, marker)
             self.assertEqual((directory / f"impl-review.{marker['sequence']}.json").read_bytes(),
                              history_bytes)
@@ -1749,9 +1696,8 @@ class UpstreamOrderTest(unittest.TestCase):
     def judge(self, node):
         return DC.gate_currency(self.route, self.get_node(node), self.path(node), self.marker(node), observe=True)
 
-    def start(self, node, gates):
-        with mock.patch.dict(os.environ, {**os.environ, "HEARTING_GATES": gates}, clear=True), \
-                mock.patch.object(DC, "completion_attempt_readiness",
+    def start(self, node):
+        with mock.patch.object(DC, "completion_attempt_readiness",
                                   side_effect=AssertionError("a superseded result must not be consumed")):
             DC.completion_marker_gate(str(self.route_file), node, "start", self.agent_home, self.jobs)
 
@@ -1770,12 +1716,8 @@ class UpstreamOrderTest(unittest.TestCase):
             self.assertEqual((currency.state, currency.reason), ("superseded", "completion-evidence-superseded"))
             self.assertIn("inspect@2 completed again", currency.next_action)
         self.assertTrue(DC.completion_superseded(self.judge("report")))
-        # Not a new refusal: gates off, the node after the stale result proceeds without consuming the old
-        # PASS; gates on, it names the rerun it owes (the existing refusal).
-        self.start("ship", "off")
-        with self.assertRaises(DC.DispatchContractError) as refused:
-            self.start("ship", "on")
-        self.assertEqual(refused.exception.reason, "completion-evidence-superseded")
+        # Not a new refusal: the node after the stale result proceeds without consuming the old PASS.
+        self.start("ship")
         # The reopened node's own new completion, after its upstream's, is current again.
         self.complete("report", "att-report-2", "report v2")
         self.assertEqual(self.judge("report").state, "current")

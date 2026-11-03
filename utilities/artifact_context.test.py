@@ -539,7 +539,6 @@ class BoundTerminalArtifactTest(PRODUCER_FIXTURE.ProducerTestBase):
                 clean_env = {
                     "AGENT_HOME": str(Path(self._tmp.name) / "agent-home"),
                     "AGENT_DISPATCH_JOBS": str(self.jobs),
-                    "HEARTING_GATES": "off",
                 }
                 with mock.patch.dict(os.environ, clean_env, clear=True):
                     sealed = P.finalize(self.root, cycle_id=self.cycle["cycle_id"])
@@ -584,7 +583,6 @@ class BoundTerminalArtifactTest(PRODUCER_FIXTURE.ProducerTestBase):
                     isolated = {
                         "AGENT_HOME": str(Path(self._tmp.name) / "agent-home"),
                         "AGENT_DISPATCH_JOBS": str(self.jobs),
-                        "HEARTING_GATES": "off",
                         **env,
                     }
                     with self.subTest(phase=phase, harness=harness, ambient=bool(env)), \

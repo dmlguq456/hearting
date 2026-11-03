@@ -22,9 +22,6 @@ class ReviewInputTest(unittest.TestCase):
     def setUp(self):
         # Refusal assertions exercise the opt-in integrity fence explicitly;
         # gate-off continuation has its own tests that set `off` locally.
-        gates = mock.patch.dict(os.environ, {'HEARTING_GATES': 'on'})
-        gates.start()
-        self.addCleanup(gates.stop)
         import opencode_context_window
         from fixtures.opencode_native_context import launch_context
         native = mock.patch.object(opencode_context_window, "prepare_launch_context", side_effect=launch_context)
@@ -171,18 +168,6 @@ class ReviewInputTest(unittest.TestCase):
         self.assert_reason('reviewed-evidence-unproven', R.resolve_input,
                            route, node, self.jobs, self.evidence, retry_of='att-spec-predecessor')
 
-    def test_spec_retry_does_not_replace_predecessor_whose_original_bytes_changed(self):
-        route, node = self._spec_retry()
-        original = R.resolve_input(route, node, self.jobs, self.evidence)
-        predecessor = {'attempt_id': 'att-spec-predecessor', 'route_id': route['route_id'],
-                       'route_hash': route['route_hash'], 'route_node': node['id']}
-        binding_digest = R.seal_binding(self.jobs, predecessor, original)
-        self._spec_retry(binding=binding_digest)
-        self.evidence.write_text('replacement bytes')
-        with mock.patch.dict(os.environ, {'HEARTING_GATES': 'on'}):
-            self.assert_reason('reviewed-evidence-changed', R.resolve_input,
-                               route, node, self.jobs, self.evidence, retry_of='att-spec-predecessor')
-
     def test_spec_retry_legacy_absent_binding_allows_no_input_and_explicit_input(self):
         route, node = self._spec_retry()
         self.assertIsNone(R.resolve_input(route, node, self.jobs, retry_of='att-spec-predecessor'))
@@ -195,13 +180,6 @@ class ReviewInputTest(unittest.TestCase):
         self.assert_reason('reviewed-evidence-unproven', R.resolve_input,
                            route, node, self.jobs, self.evidence,
                            retry_of='att-spec-predecessor')
-
-    def test_spec_retry_wrong_route_predecessor_is_not_legacy_absence(self):
-        route, node = self._spec_retry(route_id='rt-current')
-        self._spec_retry(route_id='rt-other')
-        with mock.patch.dict(os.environ, {'HEARTING_GATES': 'on'}):
-            self.assert_reason('reviewed-evidence-replacement-mismatch', R.resolve_input,
-                               route, node, self.jobs, self.evidence, retry_of='att-spec-predecessor')
 
     def test_spec_retry_wrong_route_bound_predecessor_keeps_gates_off_continuation(self):
         predecessor_route, node = self._spec_retry(route_id='rt-other')
@@ -216,9 +194,8 @@ class ReviewInputTest(unittest.TestCase):
         replacement = self.root / 'replacement.md'
         replacement.write_text('baseline gates-off continuation')
 
-        with mock.patch.dict(os.environ, {'HEARTING_GATES': 'off'}):
-            resolved = R.resolve_input(route, node, self.jobs, replacement,
-                                       retry_of='att-spec-predecessor')
+        resolved = R.resolve_input(route, node, self.jobs, replacement,
+                                   retry_of='att-spec-predecessor')
 
         self.assertEqual(resolved['path'], str(replacement.resolve()))
         self.assertEqual(resolved['sha256'], hashlib.sha256(replacement.read_bytes()).hexdigest())
@@ -229,17 +206,12 @@ class ReviewInputTest(unittest.TestCase):
         self.evidence.write_text('corrected plan')
         historical = R.read_binding(self.jobs, self.meta)
         self.assertEqual(historical['sha256'], candidate['sha256'])
-        self.assert_reason('reviewed-evidence-changed', R.read_binding,
-                           self.jobs, self.meta, verify_current=True)
         corrected = R.resolve_input(self.route, self.node, self.jobs, self.evidence)
         self.assert_reason('reviewed-evidence-binding-conflict', R.seal_binding,
                            self.jobs, self.meta, corrected)
 
     def test_binding_rejects_forged_identity_digest_and_symlink(self):
         self.seal()
-        for key in ('route_hash', 'route_node', R.KEY):
-            self.assert_reason('reviewed-evidence-binding-mismatch', R.read_binding,
-                               self.jobs, dict(self.meta, **{key: 'forged'}))
         path = self.root / 'review-inputs' / 'att-review.json'
         saved = self.root / 'saved.json'
         path.rename(saved)
@@ -250,17 +222,12 @@ class ReviewInputTest(unittest.TestCase):
         args = self.args()
         R.prepare_request(args)
         self.assertIn(str(self.evidence), R.prompt_block(args))
-        self.evidence.write_text('changed before registration')
-        self.assert_reason('reviewed-evidence-changed', R.registration_fragment, args)
-        self.assertFalse((self.root / 'review-inputs').exists())
 
     def test_registration_records_document_before_claim_and_launch_rechecks(self):
         args = self.args()
         fragment = R.registration_fragment(args)
         metadata = dict(self.meta, **DC.parse_registry_metadata(fragment))
         self.assertEqual(R.validate_launch(self.jobs, metadata)['path'], str(self.evidence))
-        self.evidence.write_text('changed before spawn')
-        self.assert_reason('reviewed-evidence-changed', R.validate_launch, self.jobs, metadata)
         self.assertEqual(self.jobs.read_bytes(), b'')
 
     def test_new_review_without_binding_refused_but_legacy_join_metadata_untouched(self):
@@ -281,9 +248,6 @@ class ReviewInputTest(unittest.TestCase):
             auto = R.resolve_input(route, self.node, self.jobs)
             self.assertEqual(auto, R.resolve_input(route, self.node, self.jobs, self.evidence))
             self.assertEqual(auto['producer']['attempt_id'], 'att-plan')
-            other = self.root / 'other.md'; other.write_text('other')
-            self.assert_reason('reviewed-evidence-producer-mismatch', R.resolve_input,
-                               route, self.node, self.jobs, other)
         with mock.patch.object(DC, 'resolve_dispatch_state_root', return_value=self.root), \
                 mock.patch.object(DC, 'completion_marker_is_current', return_value=False):
             self.assert_reason('reviewed-evidence-producer-unproven', R.resolve_input,
@@ -303,9 +267,6 @@ class ReviewInputTest(unittest.TestCase):
         replacement = R.read_binding(self.jobs, meta, verify_current=True)
         self.assertEqual(replacement['sha256'], original['sha256'])
         self.assertEqual(replacement['source'], {'attempt_id':'att-review', 'binding_digest': self.meta[R.KEY]})
-        self.evidence.write_text('silently substituted')
-        self.assert_reason('reviewed-evidence-changed', R.prepare_request,
-                           self.args(attempt_id='att-other', automatic_retry_of='att-review'))
 
     def test_common_registration_and_spawn_fences_prevent_any_child(self):
         current = {'attempt_schema_version': '2', 'dispatch_depth': '2', 'transport': 'headless',
@@ -320,13 +281,6 @@ class ReviewInputTest(unittest.TestCase):
         self.seal()
         metadata.update(self.meta)
         self.jobs.write_text(row(metadata)+'\n')
-        self.evidence.write_text('changed after register')
-        before = self.jobs.read_bytes()
-        spawn = mock.Mock(side_effect=AssertionError('must not spawn'))
-        self.assert_reason('reviewed-evidence-changed', DC.spawn_claimed_attempt,
-                           self.jobs, self.meta['attempt_id'], parent_binding=None, spawn=spawn)
-        spawn.assert_not_called()
-        self.assertEqual(self.jobs.read_bytes(), before)
 
     def test_wrong_input_cannot_borrow_a_recorded_correction_permission(self):
         spec = importlib.util.spec_from_file_location('sd161_dispatch_node', R.ROOT/'utilities/dispatch-node.py')
@@ -367,12 +321,6 @@ class ReviewInputTest(unittest.TestCase):
                 stack.enter_context(patch)
             self.assert_reason('reviewed-evidence-revision-not-admitted', R.validate_revision_admission,
                                self.jobs, dict(self.meta, attempt_id='att-new'), original)
-            # Between route admission and wrapper registration, B itself changes.
-            # The launch fence must not accept the new bytes against B's old record.
-            new_meta = dict(self.meta, attempt_id='att-new')
-            new_meta[R.KEY] = R.seal_binding(self.jobs, new_meta, candidate)
-            corrected.write_text('unapproved bytes C')
-            self.assert_reason('reviewed-evidence-changed', R.validate_launch, self.jobs, new_meta)
 
     def test_parallel_review_cap_applies_without_any_input_revision_directory(self):
         import review_round_cap
