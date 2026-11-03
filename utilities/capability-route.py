@@ -11566,8 +11566,8 @@ def _result_location_line(route):
     only the agent's last message looks for the change in the folder they started from.
     Read-only, no new record. "" for an unversioned route (no git at all), a route that ran in
     the person's own folder, a worktree with nothing changed since its base, a change already in
-    that folder, or any git failure. The merge command is offered only when it brings in exactly
-    this work: the folder is clean, on a branch, and already holds the base."""
+    that folder, or any git failure. It names the place, branch and commit state only: no merge
+    command, since a worktree rebased onto or merged with upstream would carry those commits too."""
     cwd, base = route.get("cwd"), route.get("source_commit")
     if base == "unversioned" or not cwd or not os.path.isdir(cwd):
         return ""
@@ -11589,17 +11589,9 @@ def _result_location_line(route):
             top, "merge-base", "--is-ancestor", "HEAD", origin_head).returncode == 0:
         return ""   # already in the person's folder
     branch = _git(top, "symbolic-ref", "-q", "--short", "HEAD")
-    where = (f"in {top} (branch {branch}" + (", not committed yet)" if pending else ")")
-             if branch else f"in {top} (detached HEAD" + (", not committed yet)" if pending else ")"))
-    line = f"result: the change is {where}, not in {origin}"
-    target = _git(origin, "symbolic-ref", "-q", "--short", "HEAD")
-    safe = (branch and target and origin_head and _git(origin, "status", "--porcelain") == ""
-            and _worktree_git(origin, "merge-base", "--is-ancestor", base, origin_head).returncode == 0)
-    if not safe:
-        return line
-    merge = shlex.join(["git", "-C", origin, "merge", branch])
-    return (line + f"; to bring it into {target} there, "
-            + (f"commit it in {top}, then run: " if pending else "run: ") + merge)
+    label = (f"branch {branch}" if branch else "detached HEAD") + (", not committed yet" if pending else "")
+    return f"result: the change is in {top} ({label}), not in {origin}"
+
 
 def _preparation_record_path(artifact_root, key):
     return Path(artifact_root).resolve() / ".runtime" / "worktree-preparation" / f"{key}.json"

@@ -166,8 +166,7 @@ class ResultLocationLineTest(unittest.TestCase):
         # F1: the worktree starts at origin/main, which the person's folder does not hold.
         self.assertEqual(self.line(), "")
 
-    def test_change_names_both_folders_but_no_merge_into_an_unrelated_branch(self):
-        # F3: merging into `feature` would also bring in the upstream commits.
+    def test_change_names_both_folders_and_its_commit_state(self):
         self.fix()
         line = self.line()
         self.assertEqual(line, f"result: the change is in {self.wt} (branch greet, not committed yet), "
@@ -175,17 +174,49 @@ class ResultLocationLineTest(unittest.TestCase):
         self.fix(commit=True)
         self.assertEqual(self.line(), f"result: the change is in {self.wt} (branch greet), not in {self.repo}")
 
-    def test_merge_command_names_its_target_when_it_brings_in_exactly_this_work(self):
+    def test_no_merge_command_even_when_the_folder_holds_the_base(self):
         self.git(self.repo, "switch", "-q", "main")
         self.git(self.repo, "pull", "-q", "--ff-only")
         self.fix(commit=True)
-        self.assertEqual(self.line(), f"result: the change is in {self.wt} (branch greet), not in {self.repo}; "
-                                      f"to bring it into main there, run: git -C {self.repo} merge greet")
-        (self.repo / "notes.txt").write_text("the person's own edit\n", encoding="utf-8")
-        self.assertNotIn("git -C", self.line())                        # a dirty folder gets no command
-        (self.repo / "notes.txt").unlink()
+        self.assertEqual(self.line(), f"result: the change is in {self.wt} (branch greet), not in {self.repo}")
         self.git(self.repo, "merge", "-q", "greet")
         self.assertEqual(self.line(), "")                              # already in the person's folder
+
+    def upstream_moves(self):
+        writer = self.base / "writer"
+        (writer / "later.txt").write_text("later\n", encoding="utf-8")
+        self.git(writer, "add", "later.txt")
+        self.git(writer, "commit", "-qm", "upstream moves again")
+        self.git(writer, "push", "-q", "origin", "main")
+        self.git(self.wt, "fetch", "-q", "origin")
+
+    def test_rebased_or_main_merged_worktree_gets_no_merge_command(self):
+        # R1: after a rebase onto (or merge of) upstream, `git merge greet` would also carry the
+        # upstream commits into the person's branch, so the line names the place only.
+        self.git(self.repo, "switch", "-q", "main")
+        self.git(self.repo, "pull", "-q", "--ff-only")                 # the folder holds the base only
+        self.fix(commit=True)
+        fix_only = self.git(self.wt, "rev-parse", "HEAD")
+        self.upstream_moves()
+        self.git(self.wt, "rebase", "-q", "origin/main")
+        self.assertEqual(self.line(), f"result: the change is in {self.wt} (branch greet), not in {self.repo}")
+        self.git(self.wt, "reset", "-q", "--hard", fix_only)          # back to the fix alone, then merge main
+        self.git(self.wt, "merge", "-q", "--no-edit", "origin/main")
+        self.assertEqual(self.git(self.wt, "rev-list", "--count", "HEAD", "--not", self.git(self.repo, "rev-parse", "HEAD")), "3")
+        self.assertEqual(self.line(), f"result: the change is in {self.wt} (branch greet), not in {self.repo}")
+
+    def test_folder_moved_to_another_branch_is_still_named_by_place(self):
+        self.git(self.repo, "switch", "-q", "main")
+        self.git(self.repo, "pull", "-q", "--ff-only")
+        self.git(self.repo, "switch", "-q", "-c", "other")             # holds the base, different name
+        self.fix()
+        self.assertEqual(self.line(), f"result: the change is in {self.wt} (branch greet, not committed yet), "
+                                      f"not in {self.repo}")
+
+    def test_old_route_without_source_commit_says_nothing(self):
+        self.fix(commit=True)
+        old = {key: value for key, value in self.route.items() if key != "source_commit"}
+        self.assertEqual(self.line(old), "")
 
     def test_detached_head_names_the_folder_only(self):
         self.fix(commit=True)
@@ -210,6 +241,10 @@ class ResultLocationLineTest(unittest.TestCase):
                                                      explicitly_approved=True)
         self.assertEqual(approved["reason"], "approved-linked-task", approved)
         self.assertEqual(self.line(mine_route), "")
+        # The approved record's base is this route's start, so only the exclusion keeps it quiet.
+        approved_route = {**mine_route, "source_commit": self.git(mine, "rev-parse", "HEAD")}
+        (mine / "greet.py").write_text("print('Hello again')\n", encoding="utf-8")
+        self.assertEqual(self.line(approved_route), "")
         self.fix()
         self.assertEqual(self.line({**self.route, "cwd": str(self.base / "missing")}), "")
 
