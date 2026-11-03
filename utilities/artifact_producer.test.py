@@ -6446,6 +6446,19 @@ class OwnerLaunchBindingTest(ProducerTestBase):
             env = P.prepare_route_artifact_env(route_file, start=True, jobs=self.jobs)
         self.assertTrue(env["AGENT_ARTIFACT_CYCLE_ID"])
 
+    def test_launch_binding_does_not_walk_the_root_again(self):
+        # The preparation just looked for hand changes and handed waiting history lines over;
+        # the binding of the cycle it began resumes it without reading every folder and record.
+        route, route_file, launch_env, owner, args = self._prepared_owner()
+        with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(self.jobs)}), \
+                mock.patch.object(P, "reconcile_root", wraps=P.reconcile_root) as reconcile, \
+                mock.patch.object(P, "deliver_pending_history", wraps=P.deliver_pending_history) as history:
+            result = P.bind_owner_launch(args, self.jobs, environ=launch_env)
+        self.assertEqual(result["status"], "resumed")
+        self.assertEqual(result["cycle_id"], launch_env["AGENT_ARTIFACT_CYCLE_ID"])
+        self.assertEqual(reconcile.call_count, 0)
+        self.assertEqual(history.call_count, 0)
+
     def test_resume_only_owner_launch_publishes_and_replays_binding(self):
         route, route_file, launch_env, owner, args = self._prepared_owner()
         self.assertFalse(P.dispatch_terminal_commit.producer_binding_path(

@@ -2291,7 +2291,9 @@ def _begin_waiting_for_admission(root: Path, **kwargs: Any) -> Dict[str, Any]:
     again later.
     """
     deadline = time.monotonic() + OWNER_LAUNCH_ADMISSION_WAIT_SECONDS
-    looked = kwargs.get("node_id") is not None  # a node begin never looks for hand changes
+    # A node begin never looks for hand changes, and neither does the launch binding: it only
+    # resumes the cycle the same start's preparation began (and looked for) seconds before.
+    looked = kwargs.get("node_id") is not None or bool(kwargs.get("resume_only"))
     while True:
         if not looked:
             # §45 D-126 before the cycle begins. A look that finished is not repeated while
@@ -3198,7 +3200,10 @@ def begin(root: Path, *, _reconcile: bool = True, **kwargs: Any) -> Dict[str, An
         result["env"] = _env_for(*source)
     if kwargs.get("node_id") is None and result.get("layout") == "cycle":
         _observe_after_begin(Path(root).resolve(), result)
-        deliver_pending_history(root)
+        if not kwargs.get("resume_only"):
+            # The same start's preparation handed waiting lines over seconds before (it reads
+            # every record to find them); a line still waiting goes with the next trigger.
+            deliver_pending_history(root)
     if result.get("title_updated"):
         # The existing publisher rereads the current open manifest under the
         # admission -> checkpoint lock order. No checkpoint scan or payload
