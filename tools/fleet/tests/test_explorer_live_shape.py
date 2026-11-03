@@ -32,7 +32,7 @@ def route_extension(key, value):
     pair = lambda item: isinstance(item, (list, tuple)) and len(item) == 2
     if key == "owner_gauge":
         return pair(value) and optional_pct(value[0]) and optional_number(value[1])
-    if key == "current":
+    if key in ("current", "owner_waits"):
         return type(value) is bool
     if key == "worker_context_index":
         return type(value) is int and value >= 0
@@ -142,7 +142,8 @@ def conform(live, samples, path, problems):
     if kind == "map":
         keys = set().union(*(set(sample) for sample in samples if bucket(sample) == "map"))
         for key in live:
-            if path == "routes[]" and key in ("owner_gauge", "worker_contexts", "current", "worker_context_index"):
+            if path == "routes[]" and key in ("owner_gauge", "worker_contexts", "current",
+                                              "worker_context_index", "owner_waits"):
                 if not route_extension(key, live[key]):
                     problems.append(f"{path}.{key}: invalid optional route field shape")
                 continue

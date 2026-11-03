@@ -70,7 +70,7 @@ def _record(owner=None):
 
 
 def _vm(running=False, owner=None, attempts=None, node_state=None, chain=None,
-        extra_owners=(), live_legs=FRAME_LEGS):
+        extra_owners=(), live_legs=FRAME_LEGS, owner_session=None):
     view = _view(running, node_state, live_legs)
     record = _record(owner)
     jobs = [_frame_job("frame", "claude", "opus", "max", "frame" in live_legs),
@@ -82,6 +82,7 @@ def _vm(running=False, owner=None, attempts=None, node_state=None, chain=None,
     jobs.extend(extra_owners)
     session = {"harness": "claude", "session_id": "sid-owner", "session_tag": "z9",
                "cwd": REPO, "liveness": "idle", "is_child": False, "title": "owner"}
+    session.update(owner_session or {})
     if chain is not None:
         session["route_chain"] = {"nodes": chain}
     slot = {"view": view, "record": record, "jobs": jobs, "sessions": [session]}
@@ -306,6 +307,31 @@ class FrameOwnerLevelTests(unittest.TestCase):
                 band = next(i for i, line in enumerate(lines)
                             if "frame ∥ frame-alternative" in line and "┌" in line)
                 self.assertIn("frame  claude", lines[band + 1])
+
+    def test_route_row_shows_the_owners_own_state_while_its_legs_run(self):
+        """3cffaf: an owner that handed the stage to workers and waits does not spin."""
+        wait = {"pid": 9, "comm": "sleep", "kind": "wait", "etime_s": 600}
+        work = {"pid": 9, "comm": "python3", "kind": "work", "etime_s": 600}
+        for owner_session, waits in (({"liveness": "idle"}, True),
+                                     ({"liveness": "working", "exec_child": wait}, True),
+                                     ({"liveness": "working", "exec_child": work}, False),
+                                     ({"liveness": "working"}, False)):
+            with self.subTest(owner=owner_session):
+                _view_value, _record_value, route, vm = _vm(running=True,
+                                                            owner_session=owner_session)
+                self.assertIs(route["owner_waits"], waits)
+                for view in ("ROUTES", "OVERVIEW"):
+                    text = "\n".join(draw(vm, NavState(view=view, title=view), 180, 60).text_rows())
+                    row = next(line for line in text.splitlines()
+                               if "[z9]" in line and "frame" in line and "│" in line)
+                    if waits:
+                        self.assertNotIn("⠏", row)
+                    else:
+                        self.assertIn("⠏", row)
+                    if view == "ROUTES":
+                        self.assertIn(("●" if waits else "⠏") + " [z9]", row)
+        _view_value, _record_value, route, _vm_value = _vm(owner_session={"liveness": "idle"})
+        self.assertIs(route["owner_waits"], False)          # nothing runs: not a delegation
 
     def test_framed_progress_mark_follows_the_frame_legs(self):
         _view_value, _record_value, _route, running = _vm(running=True)
