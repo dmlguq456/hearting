@@ -41,6 +41,7 @@ import retired_memory_state
 import safe_fs
 import user_model_config
 import codex_tui_config
+import codex_override
 import herdr_integration
 import manifest
 
@@ -2615,6 +2616,7 @@ def _activation_protected_paths(runtime: str, scope: str = "global") -> List[Pat
             if target != config:
                 paths_owned.append(target)
         paths_owned.append(_config_path(runtime, scope, CODEX_IDENTITY_BACKUP))
+        paths_owned.append(paths.runtime_home(runtime, scope) / codex_override.OVERRIDE_NAME)
     elif runtime == "opencode":
         home = paths.runtime_home(runtime, scope)
         paths_owned.append(manifest._manifest_path(runtime, scope))
@@ -2706,7 +2708,10 @@ def _prepare_runtime_config(
             paths.runtime_home("codex", scope) / "hooks.json", "codex",
             source_root=active_root,
         )
-        return [result, herdr_hook]
+        # A user AGENTS.override.md hides the linked AGENTS.md from Codex.
+        override = codex_override.apply(paths.runtime_home("codex", scope),
+                                        active_root / "adapters/codex/AGENTS.md")
+        return [result, herdr_hook, override]
     if runtime == "opencode":
         seeded = _seed_opencode_tui_entry(active_root, previous, scope)
         registration = herdr_integration.migrate_opencode_configs(
@@ -4548,6 +4553,9 @@ def deactivate(runtime: str, scope: str = "global", dry_run: bool = False) -> di
         hook_path = paths.runtime_home("codex", scope) / "hooks.json"
         if herdr_integration.remove_managed_hook_file(hook_path, managed_hook, dry_run=dry_run):
             restored.append(str(hook_path))
+        override = codex_override.remove(paths.runtime_home("codex", scope), dry_run=dry_run)
+        if override["changed"]:
+            restored.append(override["path"])
     elif runtime == "opencode":
         restored = _unseed_opencode_tui_entry(state, scope, dry_run=dry_run)
         managed_registration = (state.get("managed_config") or {}).get("herdr_opencode")

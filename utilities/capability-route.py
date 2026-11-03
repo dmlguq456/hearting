@@ -7162,8 +7162,10 @@ def route_sidecar_kind(path):
     return None
 
 
-def route_status(artifact_root, *, diagnostics=None, open_only=False):
+def route_status(artifact_root, *, diagnostics=None, open_only=False, only=None):
     """Report every compiled route under one artifact root and whether it is closed.
+
+    `only` (a route file) narrows the report to that one record without reading the others.
 
     Scans the canonical `.runtime/routes/` directory plus four legacy locations
     (root-level `*-route.json`, `routes/`, `_routes/`, `.routes/`) read-only —
@@ -7181,10 +7183,14 @@ def route_status(artifact_root, *, diagnostics=None, open_only=False):
     search_dirs=[canonical,root,root/"routes",root/"_routes",root/".routes"]
     by_route_id={}
     rows=[]
+    only_path=os.path.realpath(only) if only is not None else None
     for search_dir in search_dirs:
         if not search_dir.is_dir(): continue
         with os.scandir(search_dir) as stream:
             entries = sorted(stream, key=lambda entry: entry.name)
+        if only_path is not None:
+            entries = [entry for entry in entries if entry.name == os.path.basename(only_path)
+                       and os.path.realpath(entry.path) == only_path]
         closed_names = ({entry.name.removesuffix(".outcome.json") for entry in entries
                          if entry.name.endswith(".outcome.json") and entry.is_file()}
                         if open_only and diagnostics is None and search_dir == canonical else set())
@@ -12088,15 +12094,80 @@ def prepare_isolated_worktree(cwd, slug, *, artifact_root=None, preparation_key=
 ROUTE_ID_FORM = re.compile(r"rt-[0-9a-f]{16}")
 
 
+def _registry_rows(jobs=None, needle=None):
+    """`{attempt_id: (status, metadata)}` from the jobs registry, latest row per attempt last.
+
+    Only lines containing `needle` are parsed (the registry is large). Read-only; an
+    unreadable registry is an empty one."""
+    rows = {}
+    try:
+        text = Path(jobs or _compose_default_jobs()).read_text(encoding="utf-8")
+    except OSError:
+        return rows
+    for line in text.splitlines():
+        if needle and needle not in line:
+            continue
+        fields = line.split("\t")
+        if len(fields) != 6:
+            continue
+        meta = parse_registry_metadata(fields[5])
+        attempt = meta.get("attempt_id")
+        if attempt:
+            rows.pop(attempt, None)
+            rows[attempt] = (fields[1], meta)
+    return rows
+
+
+def attempt_route_file(value, jobs=None):
+    """The route file one registry attempt runs for (an owner's route, else its stage route), or None.
+
+    Lets every command that takes a route also take the attempt id a receipt printed."""
+    text = str(value)
+    if not text or any(ch in text for ch in "\t\n,=/"):
+        return None
+    row = _registry_rows(jobs, needle="attempt_id=" + text).get(text)
+    if row is None:
+        return None
+    meta = row[1]
+    for key in ("owner_route_file", "route_file"):
+        if meta.get(key) and Path(meta[key]).is_file():
+            return Path(meta[key])
+    return None
+
+
+ROUTE_ATTEMPT_FIELDS = ("worker_type", "route_node", "harness", "failure_class", "note", "log_file")
+
+
+def route_attempts(route_id, jobs=None):
+    """The registry attempts of one route, most recently updated last: id, registry status and a
+    few row fields.
+
+    Read-only: the same row a registry reconcile dry run starts from, without classifying it."""
+    return [{"attempt_id": aid, "status": status,
+             **{key: meta[key] for key in ROUTE_ATTEMPT_FIELDS if meta.get(key)}}
+            for aid, (status, meta) in _registry_rows(jobs, needle=route_id).items()
+            if route_id in {meta.get("owner_route_id"), meta.get("route_id")}]
+
+
+def route_owner_attempt(route_id, jobs=None):
+    """The newest registered owner attempt of one route, or None."""
+    owners = [aid for aid, (_status, meta) in _registry_rows(jobs, needle=route_id).items()
+              if meta.get("worker_type") == "owner"
+              and route_id in {meta.get("owner_route_id"), meta.get("route_id")}]
+    return owners[-1] if owners else None
+
+
 def resolve_route_argument(value, jobs=None):
     """`--route` as given: a route file, or a route ID (`rt-<16 hex>`, the form `resume_command`
     prints) looked up as the canonical record under the cwd's artifact root, then under
     `AGENT_ARTIFACT_ROOT`, then by the file the jobs registry or a route-chain ledger names for it
     (this session's, then the newest ledgers of every session). An ID that names no route file is
-    refused (`route-id-unresolved:<id>`)."""
+    refused (`route-id-unresolved:<id>`). An attempt id from the registry names its route."""
     text = str(value)
-    if not ROUTE_ID_FORM.fullmatch(text) or Path(text).is_file():
+    if Path(text).is_file():
         return Path(text)
+    if not ROUTE_ID_FORM.fullmatch(text):
+        return attempt_route_file(text, jobs) or Path(text)
     roots = [os.environ.get("AGENT_ARTIFACT_ROOT")]
     try:
         roots.insert(0, _compose_artifact_root(os.getcwd()))
@@ -12301,6 +12372,23 @@ def _route_chain_identity(event, route):
     return harness, sid, depth, None
 
 
+def _correct_attempt_argument(value, jobs):
+    """`correct` takes an owner attempt id as given; a route id or route file names that route's
+    newest registered owner (`route-owner-unregistered:<id>` when it has none)."""
+    text = str(value)
+    if not (ROUTE_ID_FORM.fullmatch(text) or Path(text).is_file()):
+        return text
+    route_file = resolve_route_argument(text, jobs)
+    try:
+        route_id = json.loads(Path(route_file).read_text(encoding="utf-8")).get("route_id") or text
+    except (OSError, ValueError):
+        route_id = text
+    owner = route_owner_attempt(route_id, jobs)
+    if owner is None:
+        raise ValueError(f"route-owner-unregistered:{route_id}; this route has no registered owner to correct")
+    return owner
+
+
 def _current_owner_attempt(jobs, attempt_id):
     """The newest launched owner in this attempt's replacement lineage (itself when none).
 
@@ -12362,7 +12450,9 @@ def _record_route_chain(route, route_file, event, *, plan=None, plan_source=None
             line.get("route_id") == route.get("route_id")
             for line in rc.read_tail(harness, sid)
         ):
-            print("route_chain_written=0 reason=start-already-recorded", file=sys.stderr)
+            # A repeated start is a normal continuation of the same route, not a refusal:
+            # the ledger already holds it, and the start receipt below is the answer.
+            print("route_chain_already_recorded=1", file=sys.stderr)
             return
         line = rc.build_line(
             route, event=event, harness=harness, session_id=sid, route_file=route_file,
@@ -12512,10 +12602,15 @@ def _emit_compiled_route(a,route,artifact_root,output=None):
     return output_path.resolve()
 
 def _close_route_argument(a):
-    """`close`/`finish --route` take a route file or an `rt-...` id; an id is looked up under the
-    artifact root. Without one, `finish` takes this session's latest route there."""
+    """`close`/`finish --route` take a route file, an `rt-...` id or a registry attempt id; an id is
+    looked up under the artifact root, an attempt by its registry row. Without one, `finish` takes
+    this session's latest route there."""
     import artifact_producer
     route=a.route
+    if route and not artifact_producer._ROUTE_ID_RE.fullmatch(str(route)) and not Path(route).exists():
+        found=attempt_route_file(route,getattr(a,"jobs",None))
+        if found is not None:
+            return str(found)
     if route and (not artifact_producer._ROUTE_ID_RE.fullmatch(str(route)) or Path(route).exists()):
         return route
     root=getattr(a,"artifact_root",None) or os.environ.get("AGENT_ARTIFACT_ROOT") or _compose_artifact_root(os.getcwd())
@@ -12717,7 +12812,9 @@ def main():
     finish.add_argument("--summary-file",required=True,type=Path)
     finish.add_argument("--commit",help="full result commit; defaults to current HEAD on first claim")
     correction=sub.add_parser("correct", help="deliver a correction to one existing owner; without a message file, inspect its receipts")
-    correction.add_argument("--attempt-id", required=True)
+    correction.add_argument("--attempt-id", help="the owner attempt; a route id or route file names that route's "
+                                                 "current owner (default: this session's open route)")
+    correction.add_argument("--route", dest="correct_route", help="route id or file; same as --attempt-id <route>")
     correction.add_argument("--jobs", type=Path)
     correction.add_argument("--message-file", type=Path)
     correction.add_argument("--request-id", help="stable idempotency key; defaults to the message digest")
@@ -12791,6 +12888,10 @@ def main():
                           "terminal-gate-unproven warning when the terminal node has not completed")
     st=sub.add_parser("status"); st.add_argument("--artifact-root",default=None,help="default: utilities/artifact-root.sh for cwd")
     st.add_argument("--open-only",action="store_true",help="list only routes with no recorded outcome")
+    st.add_argument("target",nargs="?",default=None,
+                    help="optional route id, route file or attempt id: report only that route and its attempts")
+    st.add_argument("--route","--route-id","--attempt-id",dest="route",default=None,help="same as the positional target")
+    st.add_argument("--jobs",type=Path,default=None)
     sg=sub.add_parser("stages",help="list a capability's (or every capability's) stage ids, in recipe order, for --graph")
     sg.add_argument("--capability",default=None,help="default: every capability")
     sg.add_argument("--json",action="store_true")
@@ -13031,7 +13132,8 @@ def main():
                 started={**started,"access_change":access_change}
             if worktree is not None and worktree.get("cwd"):
                 started={**started,"worktree":worktree}
-            print(json.dumps({**started, **compose_observations(route)},ensure_ascii=False),flush=True)
+            started={**started, **compose_observations(route)}
+            print(json.dumps(started,ensure_ascii=False),flush=True)
         # Bookkeeping runs after the work has started: the start does not depend on it (the sweep
         # never closes this route, and a cycle it seals is never the one this route begins or continues).
         _route_autoclose(artifact_root,"compose",route)
@@ -13039,19 +13141,39 @@ def main():
                            route_plan_unreadable=route_plan_unreadable,
                            campaign_selection=_campaign_for_card, include_decisions=not a.start,
                            non_git_decision=non_git_decision),file=sys.stderr)
+        if a.start:
+            from start_receipt import print_next_line
+            print_next_line(started)
         return 0
     if a.command=="correct":
         from dispatch_owner_input import submit, inspect, InputError
         jobs=Path(a.jobs or _compose_default_jobs())
+        given=a.attempt_id or a.correct_route
+        if given is None:
+            found,source,rows=caller_open_route(os.getcwd())
+            if found is None:
+                print(json.dumps({"state":"no-open-route" if source=="none" else "open-route-ambiguous",
+                                  "cwd":os.getcwd(),"open_routes":rows,
+                                  "next_step":"Name the owner: --attempt-id <attempt or route id>."},
+                                 ensure_ascii=False))
+                return 2
+            print(f"route_default={found} source={source}",file=sys.stderr)
+            given=found
+        a.attempt_id=_correct_attempt_argument(given,jobs)
+        if a.attempt_id!=given:
+            print(f"owner_attempt_default={a.attempt_id} route={given}",file=sys.stderr)
         attempt=_current_owner_attempt(jobs,a.attempt_id)
         try:
             result=(submit(jobs,attempt,a.message_file.read_text(),a.request_id)
                     if a.message_file else inspect(jobs,attempt))
         except InputError as exc:
-            print(json.dumps({"state":"not-admitted","reason":str(exc),
-                              "retry_when":getattr(exc,"retry_when",""),
-                              "next_action":getattr(exc,"next_action","same-command"),
-                              "next_step":"Retain the correction. Inspect the exact owner; do not restart it or treat a file edit as delivery."}))
+            refusal={"state":"not-admitted","reason":str(exc),
+                     "retry_when":getattr(exc,"retry_when",""),
+                     "next_action":getattr(exc,"next_action","same-command"),
+                     "next_step":"Retain the correction. Inspect the exact owner; do not restart it or treat a file edit as delivery."}
+            print(json.dumps(refusal))
+            from start_receipt import print_next_line
+            print_next_line(refusal)
             return 69
         if attempt!=a.attempt_id:
             result["redirected_from"]=a.attempt_id
@@ -13063,6 +13185,8 @@ def main():
             # one shared start (a replacement owner receives it).
             result=_continue_after_answer(jobs,attempt,result)
         print(json.dumps(result,ensure_ascii=False))
+        from start_receipt import print_next_line
+        print_next_line(result)
         return 0
     if a.command=="start":
         from work_start import start_work
@@ -13089,7 +13213,10 @@ def main():
             result={**result,"pin_change":pin_change}
         if access_change is not None:
             result={**result,"access_change":access_change}
-        print(json.dumps({**result, **compose_observations(route)},ensure_ascii=False))
+        result={**result, **compose_observations(route)}
+        print(json.dumps(result,ensure_ascii=False))
+        from start_receipt import print_next_line
+        print_next_line(result)
         return 0
     if a.command=="compile":
         spec_read=(compose_spec_read(a.cwd,a.artifact_root,None) if a.spec_read is None else
@@ -13247,7 +13374,23 @@ def main():
         print(f"route_file={output_path.resolve()}",file=sys.stderr)
         print(json.dumps(route,sort_keys=True))
     elif a.command=="status":
-        rows=route_status(a.artifact_root or _compose_artifact_root(os.getcwd()), open_only=a.open_only)
+        target=a.target or a.route
+        if target:
+            route_file=resolve_route_argument(target,a.jobs)
+            if not route_file.is_file():
+                raise ValueError(f"route-not-found: {target} (pass a route id, route file or attempt id)")
+            try:
+                sealed_root=json.loads(route_file.read_text(encoding="utf-8")).get("artifact_root")
+            except (OSError,ValueError):
+                sealed_root=None
+            rows=route_status(a.artifact_root or sealed_root or _compose_artifact_root(os.getcwd()),
+                              open_only=a.open_only,only=route_file)
+            if not rows and not a.open_only:
+                rows=route_status(route_file.parent,only=route_file)
+            for row in rows:
+                row["attempts"]=route_attempts(row["route_id"],a.jobs)
+        else:
+            rows=route_status(a.artifact_root or _compose_artifact_root(os.getcwd()), open_only=a.open_only)
         from parent_next_directive import resume_command
         for row in rows:
             if not row["closed"] and not row.get("read_only"):

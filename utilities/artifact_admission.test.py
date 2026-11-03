@@ -22,6 +22,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -825,6 +826,148 @@ class TestReviewFindingRegressions(AdmissionContractBase):
         self.assertEqual(
             report["fallback_idempotency_keys"], [doc["manifest_id"]]
         )
+
+
+class TestIndexGenerationCache(AdmissionContractBase):
+    """One index generation may be answered without re-reading its bytes."""
+
+    def setUp(self):
+        super().setUp()
+        adm.clear_index_cache()
+        self.addCleanup(adm.clear_index_cache)
+
+    def _doc(self, marker="a"):
+        root_id = self._identity().artifact_root_id
+        cycle = "cyc_" + "c" * 32
+        digest = "sha256:" + "d" * 64
+        return idx.IndexDocument(
+            schema_version=1, artifact_root_id=root_id,
+            stable_ids={"camp_" + "e" * 32: {"kind": "campaign", "cycle_id": None,
+                                             "manifest_id": None},
+                        cycle: {"kind": "cycle", "cycle_id": cycle,
+                                "manifest_id": None}},
+            routes={root_id: {"rt_" + "f" * 32: {"cycle_id": cycle, "route_hash": None}}},
+            event_ids={}, streams={},
+            manifests={marker: {"manifest_id": "man_" + "1" * 32,
+                                "manifest_revision_id": "mrev_" + "2" * 32,
+                                "cycle_id": cycle, "manifest_digest": digest,
+                                "idempotency_key": marker}},
+            cycles={cycle: {"campaign_id": "camp_" + "e" * 32,
+                            "cycle_path": "campaigns/a/cycles/b",
+                            "manifest_digest": digest}},
+        )
+
+    def _settle(self):
+        index = adm._index_path(self.root)
+        stat = index.stat()
+        os.utime(index, ns=(stat.st_atime_ns, time.time_ns() - 5_000_000_000))
+
+    def _write_settled(self, doc):
+        adm._write_index(self.root, doc)
+        self._settle()
+        adm.clear_index_cache()
+
+    def test_settled_generation_is_parsed_once(self):
+        self._write_settled(self._doc())
+        with mock.patch.object(idx, "_parse_owned", wraps=idx._parse_owned) as parse:
+            first = adm.load_index(self.root)
+            second = adm.load_index(self.root)
+        self.assertEqual(parse.call_count, 1)
+        self.assertEqual(first.manifests, second.manifests)
+
+    def test_hit_sections_are_isolated_from_caller_edits(self):
+        self._write_settled(self._doc())
+        first = adm.load_index(self.root)
+        first.manifests["evil"] = dict(first.manifests["a"])
+        first.stable_ids.clear()
+        second = adm.load_index(self.root)
+        self.assertNotIn("evil", second.manifests)
+        self.assertTrue(second.stable_ids)
+
+    def test_seed_hits_only_inside_the_lock_interval_that_wrote_it(self):
+        doc = self._doc()
+        fd = adm._acquire_lock(self.root, 5)
+        try:
+            adm._write_index(self.root, doc)
+            with mock.patch.object(idx, "_parse_owned", wraps=idx._parse_owned) as parse:
+                self.assertTrue(adm.load_index(self.root).manifests)
+            self.assertEqual(parse.call_count, 0)
+        finally:
+            adm._release_lock(self.root, fd)
+        adm.clear_index_cache()
+        fd = adm._acquire_lock(self.root, 5)
+        try:
+            adm._write_index(self.root, doc)
+        finally:
+            adm._release_lock(self.root, fd)
+        with mock.patch.object(idx, "_parse_owned", wraps=idx._parse_owned) as parse:
+            self.assertTrue(adm.load_index(self.root).manifests)
+        # A different lock interval, and the file is still inside the settle window.
+        self.assertEqual(parse.call_count, 1)
+
+    def test_editing_the_written_document_afterwards_does_not_poison_the_seed(self):
+        doc = self._doc()
+        fd = adm._acquire_lock(self.root, 5)
+        try:
+            adm._write_index(self.root, doc)
+            doc.manifests["late"] = dict(doc.manifests["a"])
+            doc.stable_ids.clear()
+            loaded = adm.load_index(self.root)
+        finally:
+            adm._release_lock(self.root, fd)
+        self.assertNotIn("late", loaded.manifests)
+        self.assertTrue(loaded.stable_ids)
+
+    def test_head_is_created_by_a_reader_and_a_stale_head_is_ignored(self):
+        doc = self._doc()
+        self._write_settled(doc)
+        head_path = adm._index_head_path(self.root)
+        if head_path.exists():
+            head_path.unlink()
+        adm.load_index(self.root)
+        self.assertTrue(head_path.exists())
+        head = adm.load_index_head(self.root)
+        self.assertIsNotNone(head)
+        self.assertTrue(head.has_prefixed_stable_id("camp_" + "e" * 32))
+        self.assertTrue(head.has_prefixed_stable_id("cyc_" + "c" * 32))
+        self.assertFalse(head.has_prefixed_stable_id("art_" + "0" * 32))
+        old_key = list(head.key)
+        # A writer replaces the index without a head (an older release, or a
+        # crash between the two writes): the stale head must be ignored.
+        replacement = self._doc(marker="b")
+        adm._atomic_write_bytes(adm._index_path(self.root), idx.canonical_bytes(replacement))
+        self._settle()
+        self.assertIsNone(adm.load_index_head(self.root))
+        # A racing reader can rewrite a head for the generation it parsed; a
+        # head whose key is not the current index key is still ignored.
+        adm._write_index_head(self.root, doc, old_key)
+        self.assertIsNone(adm.load_index_head(self.root))
+        current_key = adm._file_key(adm._index_path(self.root))
+        adm._write_index_head(self.root, replacement, current_key)
+        self.assertIsNotNone(adm.load_index_head(self.root))
+
+    def test_corrupt_head_falls_back_and_the_next_reader_recovers_it(self):
+        self._write_settled(self._doc())
+        head_path = adm._index_head_path(self.root)
+        head_path.write_text("{broken", encoding="utf-8")
+        self.assertIsNone(adm.load_index_head(self.root))
+        loaded = adm.load_index(self.root)
+        self.assertIn("a", loaded.manifests)
+        self.assertIsNotNone(adm.load_index_head(self.root))
+
+    def test_verify_index_fast_path_accepts_canonical_non_canonical_and_rejects_drift(self):
+        self._admit_valid(key="k-generation-cache")
+        report = adm.verify_index(self.root)
+        self.assertTrue(report.ok, report)
+        index_path = adm._index_path(self.root)
+        payload = json.loads(index_path.read_bytes())
+        adm._atomic_write_bytes(index_path, json.dumps(payload, indent=1).encode("utf-8"))
+        self.assertTrue(adm.verify_index(self.root).ok)
+        payload["artifact_root_id"] = "root_" + "9" * 32
+        adm._atomic_write_bytes(index_path, json.dumps(payload).encode("utf-8"))
+        report = adm.verify_index(self.root)
+        self.assertFalse(report.ok)
+        self.assertIn("index-drift", [violation.code for violation in report.violations])
 
 
 if __name__ == "__main__":

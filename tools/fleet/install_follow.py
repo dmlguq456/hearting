@@ -6,11 +6,15 @@ from pathlib import Path
 import stat
 import sys
 import tempfile
+import time
 
 from . import installinfo
 
 _HANDOFF = "_FLEET_REEXEC_FD"
 _STDERR = "_FLEET_REEXEC_STDERR_FD"
+WAIT_NOTE_AFTER = 30.0     # a newer release still waiting this long is named on screen
+_DECLINE_FRESH = 10.0      # a refusal newer than this is the reason shown
+_LOOP_HOLD = "확인 창·입력이 끝나면 넘어감"
 
 
 def read_handoff(env=None):
@@ -40,7 +44,11 @@ def read_handoff(env=None):
 
 
 class InstallFollower:
-    def __init__(self, source=None, *, env=None):
+    def __init__(self, source=None, *, env=None, hold=None):
+        # ``hold`` answers why this terminal cannot take a new viewer now (None = it can).
+        self.hold = hold
+        self._pending = None                 # (target, first seen) for the newest candidate
+        self._declined = None                # (reason, when) for the last refused restart
         self.env = dict(os.environ if env is None else env)
         self.source = Path(source or installinfo._root_from_module()).resolve()
         home = Path.home()
@@ -115,10 +123,38 @@ class InstallFollower:
 
     def target(self):
         with self._installed() as ready:
-            return self._candidate() if ready else None
+            found = self._candidate() if ready else None
+        pending = self._pending
+        if found is None:
+            self._pending = None
+        elif pending is None or pending[0] != found:
+            self._pending = (found, time.monotonic())
+        return found
+
+    def waiting_note(self, now=None):
+        """``v…로 넘어가기 대기: 이유`` once a newer release has waited ``WAIT_NOTE_AFTER``."""
+        pending = self._pending
+        if pending is None:
+            return None
+        now = time.monotonic() if now is None else now
+        if now - pending[1] < WAIT_NOTE_AFTER:
+            return None
+        declined = self._declined
+        reason = (declined[0] if declined is not None and now - declined[1] < _DECLINE_FRESH
+                  else _LOOP_HOLD)
+        return f"{pending[0].name}로 넘어가기 대기: {reason}"
 
     def restart(self, target, argv, viewer_state, *, stderr_fd=None):
         """Recheck under the install lock, then exec in-place with anonymous state."""
+        try:
+            held = self.hold() if callable(self.hold) else None
+        except Exception:
+            held = None
+        if held:
+            # The new process would block on its first terminal write before its own
+            # guard exists; this viewer keeps running and follows once output returns.
+            self._declined = (str(held), time.monotonic())
+            return False
         with self._installed() as ready:
             if not ready or self._candidate() != target:
                 return False
@@ -136,7 +172,8 @@ class InstallFollower:
                         env[_STDERR] = str(stderr_fd)
                     os.execve(sys.executable,
                               [sys.executable, str(target / "tools/fleet/fleet.py"), *argv], env)
-            except (OSError, ValueError, TypeError):
+            except (OSError, ValueError, TypeError) as exc:
+                self._declined = (f"새 릴리스 실행 실패 ({type(exc).__name__})", time.monotonic())
                 return False
             finally:
                 if stderr_fd is not None:
