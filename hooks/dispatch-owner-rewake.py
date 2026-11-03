@@ -1297,12 +1297,13 @@ class ClaimDeferred:
     visible through a launched successor or must be announced."""
 
 
-def _reserved_successor_launched(launch: Launch, metadata: dict[str, str]) -> bool:
+def _reserved_successor_launched(launch: Launch, metadata: dict[str, str]) -> bool | None:
     """Whether the accepted claim behind a deferred delivery already launched.
 
     The source row's own binding names the exact reserved successor; only a
-    registered row past the launch fence counts as a launch. Anything unreadable
-    stays ``False`` so the caller announces instead of assuming a launch."""
+    registered row past the launch fence counts as a launch. ``None`` means the
+    binding or the successor row could not be read: the caller still announces
+    (it never assumes a launch), but does not state that nothing launched."""
     try:
         from dispatch_replacement import source_binding
 
@@ -1312,7 +1313,7 @@ def _reserved_successor_launched(launch: Launch, metadata: dict[str, str]) -> bo
         row = current_attempt_row(launch.jobs, binding[1])
     except (DispatchContractError, JoinContractError, OSError, ValueError,
             KeyError, TypeError):
-        return False
+        return None
     return bool(row is not None and row.metadata.get("launch_claimed") == "1")
 
 
@@ -1999,11 +2000,14 @@ def _run_carrier_once(launch, claim, payload, observation, holder, deadline) -> 
         # the launch fence keeps the ordinary silent exit: the follow path owns
         # its completion.
         observation["reason"] = "completion-claim-unavailable"
-        if _reserved_successor_launched(launch, owing):
+        launched = _reserved_successor_launched(launch, owing)
+        if launched:
             return _ended(claim, 0, terminal=True)
         message += (
             " Runtime fact: a replacement is reserved for this owner and was not launched;"
-            " `start` on the route continues it."
+            " `start` on the route continues it." if launched is False else
+            " Runtime fact: a replacement is reserved for this owner; whether it launched"
+            " could not be read. `start` on the route continues it if it did not."
         )
         return _emit_with_gates(launch, claim, state, message, block=False,
                                 owner_closed=wait_state == "ready")

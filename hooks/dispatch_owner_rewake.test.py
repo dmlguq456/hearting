@@ -2861,6 +2861,19 @@ class RuntimeDeathSuccessorTest(CarrierOneClaimGateTest):
         self.assertEqual(self.replacement.recovery_delivery_state(self.jobs, "att-owner-1"),
                          "accepted")
 
+    def test_a_deferred_claim_whose_successor_is_unreadable_does_not_say_not_launched(self):
+        """#1153 impl-review: an unreadable successor row still announces (never a
+        silent exit), but no longer asserts that nothing launched."""
+        self._write_runtime_owner(status="open")
+        self._supervisor_death()
+        with mock.patch.object(rewake, "replacement_authority", return_value=False), \
+                mock.patch("dispatch_replacement.source_binding",
+                           side_effect=OSError("registry unreadable")):
+            code, observation, stdout, _stderr, _holder = self._carrier()
+        self.assertEqual(code, 2, observation)
+        self.assertNotIn("was not launched", stdout)
+        self.assertIn("whether it launched could not be read", stdout)
+
     def test_a_deferred_claim_whose_successor_already_launched_keeps_the_silent_exit(self):
         """Existing behavior kept: once the reserved successor crossed the launch fence,
         the ordinary follow path owns the continuation, so the deferred record still

@@ -67,6 +67,9 @@ MAX_CHAIN = 3
 SLACK_SECONDS = 60
 POLL_SECONDS = 60
 LATER_SECONDS = 60
+# Past the chain limit the re-arm floor doubles per step; this many doublings
+# already exceed the longest wait, so a larger chain value changes nothing.
+MAX_FLOOR_DOUBLINGS = (MAX_SLEEP_SECONDS // LATER_SECONDS).bit_length()
 # The usage gate's own probe interval (dispatch_capacity_evidence.PROBE_INTERVAL).
 RECHECK_SECONDS = 600
 LATER_REASONS = ("owner-launch-not-admitted", "owner-launch-not-started")
@@ -162,7 +165,7 @@ def arm(result: dict, route_file, jobs, *, environ=None, spawn=subprocess.Popen,
         # The floor doubles per step past the limit so an already-passed (stale)
         # reset cannot re-arm in the same second; every step still stays inside
         # the longest wait.
-        floor = LATER_SECONDS * 2 ** (chain - MAX_CHAIN)
+        floor = LATER_SECONDS * 2 ** min(chain - MAX_CHAIN, MAX_FLOOR_DOUBLINGS)
         delay = min(max(epoch - now(), floor), MAX_SLEEP_SECONDS - SLACK_SECONDS)
         epoch = now() + delay
         retry_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
