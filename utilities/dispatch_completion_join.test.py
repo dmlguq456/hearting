@@ -5109,6 +5109,33 @@ class ReconcilePendingDeliveryTest(unittest.TestCase):
             root = jobs.resolve(strict=False).parent
             self.assertEqual(len(list((root / "pending-delivery").glob("*/*.json"))), 1)
 
+    def test_a_retired_recipient_kind_is_refused_once_not_every_sweep(self):
+        # HOOK-LATENCY 7-4: 59 rows of a retired kind were re-materialized (and
+        # jobs.log re-parsed) on every sweep, failing with recipient-kind-unknown.
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs.log"
+            jobs.write_text(self._row("att-reconcile-retired") + "\n", encoding="utf-8")
+            with mock.patch.object(JOIN, "materialize_pending_delivery"):
+                self.assertTrue(D.close_attempt_row(jobs, "att-reconcile-retired", "completed-marker"))
+            jobs.write_text(jobs.read_text(encoding="utf-8").replace(
+                "claude-parent-runtime", "parent-runtime-supervised"), encoding="utf-8")
+            row = JOIN.current_attempt_row(jobs, "att-reconcile-retired")
+            self.assertEqual(row.metadata.get("delivery_recipient_kind"), "parent-runtime-supervised")
+            self.assertEqual(JOIN.unpersistable_recipient_kind(row.metadata),
+                             "parent-runtime-supervised")
+            # The terminal trigger still refuses and records it, without claim work.
+            with mock.patch("dispatch_replacement.accept_terminal_delivery_duty") as accept:
+                self.assertIsNone(JOIN.materialize_after_terminal_close(jobs, "att-reconcile-retired"))
+            accept.assert_not_called()
+            real = JOIN.materialize_after_terminal_close
+            with mock.patch.object(JOIN, "materialize_after_terminal_close",
+                                   side_effect=real) as materialize:
+                first = JOIN.reconcile_pending_delivery(jobs)
+                second = JOIN.reconcile_pending_delivery(jobs)
+            materialize.assert_not_called()
+            self.assertEqual((first["materialized"], second["materialized"]), (0, 0))
+            self.assertGreaterEqual(first["skipped"], 1)
+
     def test_second_pass_is_a_no_op(self):
         with tempfile.TemporaryDirectory() as td:
             jobs = Path(td) / "jobs.log"
