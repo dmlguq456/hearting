@@ -7569,6 +7569,11 @@ def _prescan_open_cycle(root: Path, record: Mapping[str, Any], *, exclude_hidden
     except ProducerError as error:
         scan.error = error  # raised where the locked close always raised it
         return scan
+    if scan.violations:
+        # The close is refused on these names (`output-invalid`, raised where the locked close
+        # always raised it, after the refusals that come before it there); the digests of the
+        # other files would decide nothing, so none is read.
+        return scan
     bundle_dirs = [tree.directory for tree in scan.bundles]
     journal = _read_json(journal_path(root, cycle_id)) or {}
     owned_paths = {row.get("locator") for row in journal.get("directory_bundles", [])
