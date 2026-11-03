@@ -2567,6 +2567,31 @@ class ReplacementTest(unittest.TestCase):
         # the wait stays a valid supervisor attention item
         self.assertEqual(R.validate_attention(self.jobs,[result])[0]['reason'],'replacement-capacity-wait')
 
+    def test_cap_start_while_still_limited_creates_no_row_and_rearms(self):
+        """The longest-wait `start` re-asks the usage gate: still limited, it launches nothing and the pause re-arms."""
+        import capacity_auto_resume as CAP
+        import work_start
+        self._capacity_owner()
+        self.route['selection_pins'] = {'owner': {'harness': 'codex'}}
+        files = lambda: sorted(str(p.relative_to(R._directory(self.jobs))) for p in R._directory(self.jobs).rglob('*') if p.is_file())
+        before = (files(), self.jobs.read_bytes())
+        hold = {'until_epoch': 4102444800, 'label': '2100-01-01T00:00:00Z'}
+        spawned, clock = [], [1_800_000_000.0]
+        arm = lambda result: CAP.arm(result, self.path, self.jobs, environ={}, now=lambda: clock[0],
+                                     spawn=lambda *a, **k: spawned.append(a))
+        with mock.patch('dispatch_capacity_evidence.harness_hold', return_value=hold):
+            attention = R.advance(self.jobs, 'att-source', authority_check=lambda *_: True, resume_capacity=True)
+        self.assertEqual((files(), self.jobs.read_bytes()), before)   # no row, no claim, no process
+        pause = work_start._capacity_pause({'route_id': 'rt-test'}, {**attention, 'retry_at': None, 'harness': 'codex'}, 'resume')
+        first = arm(pause)
+        self.assertEqual(first['state'], 'armed')
+        import json as _json
+        record = Path(first['record'])
+        moved = record.with_name(record.stem + '.resumed-1.json')
+        record.replace(moved)   # what `run` does at the longest wait before it starts the route
+        self.assertEqual(arm(pause)['state'], 'armed')   # the limited start paused again: the same wait re-arms
+        self.assertEqual(len(spawned), 2)
+
     def test_a_launched_replacement_is_not_disturbed_by_a_later_hold_or_release_change(self):
         self._owner(note='dead-exact-pid')
         record=self.claim()
@@ -2706,6 +2731,302 @@ class ReplacementTest(unittest.TestCase):
                                or SimpleNamespace(returncode=0, stdout='', stderr=''))
         return result, commands
 
+    # -- U7/U4 default budget: a repeated runtime end stops at the budget state -------------------
+    def _runtime_end(self, **changes):
+        """Hand-built shape of an owner (or BC45 frame leg) whose runtime ended with no result."""
+        worker = changes.pop('worker_type', 'owner')
+        meta = {**self.meta, 'worker_type': worker, 'launch_started': '1', 'note': 'dead-runtime-exit',
+                'failure_class': 'runtime', 'terminal_event': 'dispatch.supervisor.error',
+                'supervisor_lease': 'flock-v1',
+                'supervisor_lease_file': str(D.supervisor_lease_path(self.jobs, 'att-source')), **changes}
+        meta.pop('launch_outcome', None)
+        self.write(meta)
+        return meta
+
+    def _claim_runtime_end(self):
+        with mock.patch('codex_dispatch_terminal.inspect_terminal_attempt',
+                        return_value={'state': 'absent', 'failure_class': ''}):
+            return self.claim()
+
+    def _second_runtime_end(self, worker_type, first_row=None, **second):
+        parent = self._runtime_end(worker_type=worker_type, **(first_row or {}))
+        first = self._claim_runtime_end()
+        self.assertEqual(first['proof']['death_kind'], 'runtime')
+        successor = self._successor(first, parent, status='open')
+        columns = {'note': 'dead-runtime-exit', 'failure_class': 'runtime',
+                   'terminal_event': 'dispatch.supervisor.error', 'launch_started': '1',
+                   'supervisor_lease': 'flock-v1',
+                   'supervisor_lease_file': str(D.supervisor_lease_path(self.jobs, successor['attempt_id'])),
+                   **second}
+        ended = self._die(successor, **columns)
+        return ended
+
+    def test_repeated_same_runtime_owner_death_stops_at_budget(self):
+        ended = self._second_runtime_end('owner', note='dead-protocol')   # note differs; columns do not
+        with mock.patch('codex_dispatch_terminal.inspect_terminal_attempt',
+                        return_value={'state': 'absent', 'failure_class': ''}):
+            with self.assertRaises(D.DispatchContractError) as caught:
+                R.claim(self.jobs, ended['attempt_id'])
+        self.assertEqual(caught.exception.reason, 'automatic-replacement-exhausted')
+
+    def test_changed_frame_failure_class_replaces_again(self):
+        launch = {'note': 'dead-launch-exit-1', 'failure_class': 'launch', 'terminal_event': ''}
+        ended = self._second_runtime_end('frame', launch, **{**launch, 'failure_class': 'protocol'})
+        with mock.patch('codex_dispatch_terminal.inspect_terminal_attempt',
+                        return_value={'state': 'absent', 'failure_class': ''}):
+            self.assertEqual(R.claim(self.jobs, ended['attempt_id'])['proof']['death_kind'], 'runtime')
+
+    def test_owner_transport_death_keeps_its_no_cutoff_policy(self):
+        """SD-157: an owner's `dead-runtime-*` death is replaced every time; only newly opened ends are budgeted."""
+        ended = self._second_runtime_end('owner')   # same columns, note dead-runtime-exit
+        with mock.patch('codex_dispatch_terminal.inspect_terminal_attempt',
+                        return_value={'state': 'absent', 'failure_class': ''}):
+            second = R.claim(self.jobs, ended['attempt_id'])
+        self.assertEqual(second['proof']['death_kind'], 'runtime')
+
+    def test_changed_harness_or_failure_class_replaces_again(self):
+        for change in ({'failure_class': 'protocol'}, {'terminal_event': 'dispatch.supervisor.other'}):
+            with self.subTest(change=change):
+                self.tearDown_case()
+                ended = self._second_runtime_end('owner', **change)
+                with mock.patch('codex_dispatch_terminal.inspect_terminal_attempt',
+                                return_value={'state': 'absent', 'failure_class': ''}):
+                    second = R.claim(self.jobs, ended['attempt_id'])
+                self.assertEqual(second['proof']['death_kind'], 'runtime')
+
+    def test_repeated_same_launch_failure_stops_at_budget(self):
+        launch = {'note': 'dead-launch-exit-1', 'failure_class': 'launch', 'terminal_event': ''}
+        ended = self._second_runtime_end('frame', launch, **launch)
+        with mock.patch('codex_dispatch_terminal.inspect_terminal_attempt',
+                        return_value={'state': 'absent', 'failure_class': ''}):
+            with self.assertRaises(D.DispatchContractError) as caught:
+                R.claim(self.jobs, ended['attempt_id'])
+        self.assertEqual(caught.exception.reason, 'automatic-replacement-exhausted')
+
+    def test_sd106_recovery_flags_stop_the_claim_at_the_budget_state(self):
+        """U7-D2: `retry_ordinal`, `recovery_exhausted` and `start_permitted` are the receipt-unavailable
+        recovery's own records (`dispatch-recovery.py`: a retry already claimed for this edge, or its
+        route-wide cascade spent). The general claim reads them as the budget it is, not as a harm refusal."""
+        for flags in ({'retry_ordinal': '1'}, {'recovery_exhausted': '1'}, {'start_permitted': '0'}):
+            with self.subTest(flags=flags):
+                self.tearDown_case()
+                meta = self._runtime_end(**flags)
+                self.assertTrue(R._budget_exhausted(self.jobs, meta, capacity=True))
+                with mock.patch('codex_dispatch_terminal.inspect_terminal_attempt',
+                                return_value={'state': 'absent', 'failure_class': ''}):
+                    with self.assertRaises(D.DispatchContractError) as caught:
+                        R.claim(self.jobs, 'att-source')
+                self.assertEqual(caught.exception.reason, 'automatic-replacement-exhausted')
+                self.assertFalse((R._directory(self.jobs) / 'claims').exists())
+        self.tearDown_case()
+        meta = self._runtime_end()
+        self.assertFalse(R._budget_exhausted(self.jobs, meta, capacity=True))   # no flag: no budget
+
+    def test_competing_successor_stays_protected_in_claim(self):
+        parent = self._runtime_end()
+        first = self._claim_runtime_end()
+        successor = self._successor(first, parent, status='open')
+        self._successor_competitor = successor
+        rows = R._rows(self.jobs.read_text().splitlines())
+        competitor = {**parent, 'attempt_id': 'att-rival', 'automatic_retry_of': 'att-source'}
+        with self.assertRaises(D.DispatchContractError) as caught:
+            R._no_competing_successor({**rows, 'att-rival': (['now', 'open'], competitor)}, 'att-source')
+        self.assertEqual(caught.exception.reason, 'automatic-replacement-exhausted')
+
+    # -- U7 observed continuation: an unanswered BLOCKED / format-error owner end ------------------
+    def _observed_owner(self, *, with_log=True, **changes):
+        """Hand-built shape of an owner that ended BLOCKED outside any gate; no recorded copy needed."""
+        import dispatch_owner_input as I
+        log = self.root / 'owner.log'
+        if with_log:
+            log.write_text('owner final result\n')
+        meta = {**self.meta, 'worker_type': 'owner', 'launch_started': '1',
+                'note': 'dead-worker-blocked', 'failure_class': 'blocked',
+                **({'log_file': str(log)} if with_log else {}), **changes}
+        meta.pop('launch_outcome', None)
+        self.write(meta, 'open')
+        I.initialize_owner_input(self.jobs, meta['attempt_id'], 'claude-next-turn')
+        self.jobs.write_text(self.jobs.read_text().replace('\topen\t', '\tdone\t'))
+        return meta
+
+    def _observed_launch(self, report):
+        with mock.patch.object(R, '_blocked_handoff', return_value=report):
+            return self._launch()
+
+    def test_blocked_owner_from_hearting_refusal_continues_without_person(self):
+        for refusal in ('target-identity-unverified', 'resource-route-body-conflict',
+                        'reviewed-evidence-revision-not-admitted', 'subsession-batch-refused',
+                        'some-other-refusal'):
+            with self.subTest(refusal=refusal):
+                self.tearDown_case()
+                self._observed_owner()
+                report = str(self.root / (refusal + '.md'))
+                self.assertEqual(R.death_kind(*R._rows(self.jobs.read_text().splitlines())['att-source'],
+                                              jobs=self.jobs), R.OBSERVED)
+                result, commands = self._observed_launch(report)
+                self.assertEqual(len(commands), 1)
+                proof = result['record']['proof']
+                self.assertEqual((proof['death_kind'], proof['source_result'], proof['handoff']),
+                                 ('observed', 'BLOCKED', report))
+                text = R.recovery_instructions(SimpleNamespace(
+                    automatic_retry_of='att-source', worker_type='owner', jobs_path=self.jobs,
+                    attempt_id=result['record']['replacement_attempt_id']))
+                self.assertIn(report, text)
+                self.assertIn('no person has answered', text)
+                self.assertIn('observe again whether that refusal still holds', text)
+                for forbidden in ('a person approved', 'Treat it as given', 'a person has answered it',
+                                  'received an answer'):
+                    self.assertNotIn(forbidden, text)
+                import dispatch_owner_input as I
+                self.assertEqual(I.retained(self.jobs, 'att-source'), [])   # no answer store was written
+
+    def test_format_only_end_continues_without_person(self):
+        self._observed_owner(note='dead-contract', failure_class='contract',
+                             classifier_source='supervisor-terminal-v1', process_exit='0',
+                             reconcile_reason='pass-blocker-not-none', terminal_event='turn.completed')
+        result, commands = self._observed_launch('')
+        self.assertEqual(len(commands), 1)
+        self.assertEqual(result['record']['proof']['source_result'], 'CONTRACT')
+        self.assertEqual(result['record']['proof']['log_file'], str(self.root / 'owner.log'))
+        text = R.recovery_instructions(SimpleNamespace(automatic_retry_of='att-source', worker_type='owner',
+            jobs_path=self.jobs, attempt_id=result['record']['replacement_attempt_id']))
+        self.assertIn('handoff-format error and no person has answered', text)
+
+    def test_observed_continuation_keeps_original_owner_verdict(self):
+        meta = self._observed_owner()
+        before = {k: R._rows(self.jobs.read_text().splitlines())['att-source'][1].get(k)
+                  for k in ('note', 'failure_class')}
+        result, _ = self._observed_launch(str(self.root / 'report.md'))
+        fields, after = R._rows(self.jobs.read_text().splitlines())['att-source']
+        self.assertEqual(fields[1], 'done')
+        self.assertEqual({k: after.get(k) for k in ('note', 'failure_class')}, before)
+        self.assertEqual(before, {'note': 'dead-worker-blocked', 'failure_class': 'blocked'})
+        for row in R._rows(self.jobs.read_text().splitlines()).values():
+            if row[1].get('attempt_id') != 'att-source':
+                self.assertNotEqual(row[1].get('failure_class'), 'pass')
+
+    def test_second_blocked_after_observed_continuation_goes_to_person(self):
+        self._observed_owner()
+        with mock.patch.object(R, 'created_as', return_value='observed'):
+            fields, meta = R._rows(self.jobs.read_text().splitlines())['att-source']
+            self.assertIsNone(R.death_kind(fields, meta, jobs=self.jobs))
+            self.assertEqual(R.advance(self.jobs, 'att-source', authority_check=lambda *_: True,
+                                       resume_capacity=True)['state'], 'not-applicable')
+
+    def test_gate_fail_and_kept_answer_are_not_observed(self):
+        import route_authority as RA
+        self._observed_owner()
+        fields, meta = R._rows(self.jobs.read_text().splitlines())['att-source']
+        gate = {'gate': 'g', 'status': 'blocked', 'epoch': 1}
+        with mock.patch.object(R, 'owner_parked_gate', return_value=gate):
+            self.assertIsNone(R.death_kind(fields, meta, jobs=self.jobs))   # a declared gate keeps its path
+        self.assertTrue(self._answer()['retained'])
+        self.assertEqual(R.death_kind(fields, meta, jobs=self.jobs), R.CORRECTED)   # an answer keeps its wording
+
+    def test_dead_protocol_owner_without_correction_starts_replacement(self):
+        """Hand-built shape of SR rt-aad5: a supervised owner ended `dead-protocol` with no answer kept."""
+        meta = self._runtime_end(note='dead-protocol', failure_class='protocol',
+                                 reconcile_reason='opencode-final-stop-missing')
+        fields, stored = R._rows(self.jobs.read_text().splitlines())['att-source']
+        self.assertEqual(R.death_kind(fields, stored, jobs=self.jobs), 'runtime')
+        with mock.patch('codex_dispatch_terminal.inspect_terminal_attempt',
+                        return_value={'state': 'absent', 'failure_class': ''}):
+            result, commands = self._launch()
+        self.assertEqual(len(commands), 1, result)
+        self.assertEqual(result['record']['proof']['death_kind'], 'runtime')
+        text = R.recovery_instructions(SimpleNamespace(automatic_retry_of='att-source', worker_type='owner',
+            jobs_path=self.jobs, attempt_id=result['record']['replacement_attempt_id']))
+        self.assertIn('You replace exact-dead attempt', text)
+
+    # -- U11-J: an owner PASS that left declared stages undone is unfinished work, continued once -----------
+    GAPS = {'review': 'completion-marker-absent'}
+
+    def _pass_owner_with_gaps(self, **changes):
+        """Hand-built shape: the owner exited PASS (runtime-v1) while a declared stage has no completion evidence."""
+        log = self.root / 'owner.log'
+        log.write_text('owner final result\n')
+        meta = {**self.meta, 'worker_type': 'owner', 'launch_started': '1', 'note': 'completed-supervisor',
+                'failure_class': 'pass', 'workflow_completion': 'runtime-v1', 'log_file': str(log), **changes}
+        meta.pop('launch_outcome', None)
+        self.write(meta, 'open')
+        self.jobs.write_text(self.jobs.read_text().replace('\topen\t', '\tdone\t'))
+        return meta
+
+    def _gaps(self, value=None):
+        return mock.patch('dispatch_terminal_commit.owner_workflow_gaps', return_value=self.GAPS if value is None else value)
+
+    def test_pass_owner_with_undone_stages_continues_once_and_keeps_its_pass(self):
+        self._pass_owner_with_gaps()
+        before = R._rows(self.jobs.read_text().splitlines())['att-source']
+        with self._gaps():
+            self.assertEqual(R.death_kind(*before, jobs=self.jobs), R.OBSERVED)
+            result, commands = self._observed_launch('')
+            self.assertEqual(len(commands), 1, result)
+            proof = result['record']['proof']
+            self.assertEqual((proof['death_kind'], proof['source_result']), ('observed', 'INCOMPLETE'))
+            self.assertEqual(proof['log_file'], str(self.root / 'owner.log'))
+            text = R.recovery_instructions(SimpleNamespace(
+                automatic_retry_of='att-source', worker_type='owner', jobs_path=self.jobs,
+                attempt_id=result['record']['replacement_attempt_id']))
+        self.assertIn('ended PASS with declared stages undone', text)
+        self.assertIn('original PASS result stays as it is', text)
+        self.assertIn('completion-marker-absent', text)
+        self.assertIn('completed stages are not rerun', text)
+        for forbidden in ('a person approved', 'Treat it as given', 'received an answer'):
+            self.assertNotIn(forbidden, text)
+        # E2-N06: the runtime wrote no PASS and left the original row exactly as it was.
+        rows = R._rows(self.jobs.read_text().splitlines())
+        keep = ('note', 'failure_class', 'classifier_source', 'workflow_completion', 'launch_started')
+        self.assertEqual((rows['att-source'][0][1], {k: rows['att-source'][1].get(k) for k in keep}),
+                         (before[0][1], {k: before[1].get(k) for k in keep}))
+        self.assertEqual(rows['att-source'][0][1], 'done')
+        for aid, (_, meta) in rows.items():
+            if aid != 'att-source':
+                self.assertNotEqual(meta.get('failure_class'), 'pass')
+        import dispatch_owner_input as I
+        self.assertEqual(I.retained(self.jobs, 'att-source'), [])
+
+    def test_pass_owner_continuation_is_not_repeated_for_a_replacement_owner(self):
+        for created in ('observed', 'runtime', 'corrected', 'capacity'):
+            with self.subTest(created=created):
+                self.tearDown_case()
+                self._pass_owner_with_gaps()
+                fields, meta = R._rows(self.jobs.read_text().splitlines())['att-source']
+                with self._gaps(), mock.patch.object(R, 'created_as', return_value=created):
+                    self.assertIsNone(R.death_kind(fields, meta, jobs=self.jobs))
+                    self.assertEqual(R.advance(self.jobs, 'att-source', authority_check=lambda *_: True,
+                                               resume_capacity=True)['state'], 'not-applicable')
+                self.assertFalse((R._directory(self.jobs) / 'claims').exists())
+
+    def test_pass_owner_without_undone_stages_or_with_unobservable_ones_is_not_continued(self):
+        self._pass_owner_with_gaps()
+        fields, meta = R._rows(self.jobs.read_text().splitlines())['att-source']
+        with self._gaps({}):
+            self.assertIsNone(R.death_kind(fields, meta, jobs=self.jobs))   # nothing is undone
+        with mock.patch('dispatch_terminal_commit.owner_workflow_gaps', side_effect=OSError('unreadable marker')):
+            self.assertIsNone(R.death_kind(fields, meta, jobs=self.jobs))   # not observed, so no claim
+        with self._gaps(), mock.patch.object(R, 'owner_parked_gate', return_value={'gate': 'g', 'status': 'blocked', 'epoch': 1}):
+            self.assertIsNone(R.death_kind(fields, meta, jobs=self.jobs))   # a declared gate keeps its own path
+        self.assertFalse((R._directory(self.jobs) / 'claims').exists())
+
+    def test_readable_fail_still_waits_for_approved_fix(self):
+        self._observed_owner(note='dead-worker-fail', failure_class='fail')
+        fields, meta = R._rows(self.jobs.read_text().splitlines())['att-source']
+        self.assertIsNone(R.death_kind(fields, meta, jobs=self.jobs))   # a readable FAIL waits for an approved fix
+
+    def test_unreadable_report_and_log_waits_without_observed(self):
+        import route_authority as RA
+        self._observed_owner(with_log=False)
+        fields, meta = R._rows(self.jobs.read_text().splitlines())['att-source']
+        self.assertEqual(RA.observed_stop(fields[1], meta, self.jobs), 'unreadable')
+        self.assertIsNone(R.death_kind(fields, meta, jobs=self.jobs))
+        waiting = RA.decide_continuation(action='owner', jobs=self.jobs, status=fields[1], metadata=meta,
+                                         facts={'observed': 'unreadable'})
+        self.assertEqual((waiting.allowed, waiting.state, waiting.reason), (False, 'wait', 'owner-settlement-pending'))
+        self.assertTrue(waiting.retry_when)
+        self.assertEqual(R.advance(self.jobs, 'att-source', authority_check=lambda *_: True,
+                                   resume_capacity=True)['state'], 'not-applicable')
+
     def test_an_owner_that_ended_blocked_continues_once_its_answer_arrives(self):
         self._blocked_owner()
         fields, meta = R._rows(self.jobs.read_text().splitlines())['att-source']
@@ -2813,12 +3134,16 @@ class ReplacementTest(unittest.TestCase):
         self.assertTrue(RA.runtime_owner_can_resume('done', meta))
         self.assertTrue(RA.runtime_owner_can_resume(
             'done', {**meta, 'reconcile_reason': 'opencode-final-stop-missing'}))
-        for change in ({'note': 'dead-worker-fail'}, {'note': 'completed-supervisor'},
-                       {'reconcile_reason': 'terminal-envelope-invalid'}, {'launch_started': '0'},
+        # the reason name is not judged; the supervisor's recorded columns are
+        self.assertTrue(RA.runtime_owner_can_resume(
+            'done', {**meta, 'reconcile_reason': 'a-reason-no-harness-has-named-yet'}))
+        for change in ({'note': 'dead-worker-fail', 'failure_class': 'fail'},
+                       {'note': 'completed-supervisor', 'failure_class': 'pass'},
+                       {'failure_class': 'contract'}, {'launch_started': '0'},
                        {'terminal_event': 'dispatch.supervisor.done'}):
             self.assertFalse(RA.runtime_owner_can_resume('done', {**meta, **change}))
         self.assertFalse(RA.runtime_owner_can_resume('cancelled', meta))
-        with mock.patch.object(RA, 'readable_result', return_value='PASS'):
+        with mock.patch('dispatch_attempt_policy.readable_result', return_value='PASS'):
             self.assertFalse(RA.runtime_owner_can_resume('done', meta))
         for state in ('live', 'unverifiable'):
             with self.subTest(state=state), mock.patch.object(D, 'attempt_process_quiescence',
@@ -4429,6 +4754,28 @@ class ReplacementReuseCurrencyTest(unittest.TestCase):
                                   return_value=SimpleNamespace(allow=True)):
             return R._reuse_snapshot(self.jobs, self.route, [])
 
+    def test_unreadable_marker_is_wait_not_damage(self):
+        """Hand-built shape: a marker path that exists but cannot be read (here, not a file) is not damage."""
+        states = {node["id"]: ("current", "") for node in self.route["nodes"]}
+        marker_path = self.completion / "plan.json"
+        marker_path.unlink()
+        marker_path.mkdir()   # exists, but reading it fails with an OS error
+        with self.assertRaises(D.DispatchContractError) as caught:
+            self.snapshot(states)
+        self.assertEqual(caught.exception.reason, "replacement-completion-unobservable")
+        self.assertEqual((caught.exception.next_action, bool(caught.exception.retry_when)), ("same-command", True))
+
+    def test_corrupt_marker_still_refused(self):
+        states = {node["id"]: ("current", "") for node in self.route["nodes"]}
+        (self.completion / "plan.json").write_text("{not json", encoding="utf-8")
+        with self.assertRaises(D.DispatchContractError) as caught:
+            self.snapshot(states)
+        self.assertEqual(caught.exception.reason, "replacement-record-unreadable")
+        (self.completion / "plan.json").write_text("[]", encoding="utf-8")
+        with self.assertRaises(D.DispatchContractError) as caught:
+            self.snapshot(states)
+        self.assertEqual(caught.exception.reason, "replacement-record-invalid")
+
     def test_shared_reader_reuses_both_automatic_record_forms_and_rejects_history_conflict(self):
         spec = importlib.util.spec_from_file_location(
             "replacement_completion_marker_fixture",
@@ -5283,7 +5630,7 @@ class ClosedNativeFrameCapacityRecoveryTest(unittest.TestCase):
                     **D.parse_registry_metadata(digest_field)}
         return history, candidate, metadata
 
-    def _public_start(self, launches):
+    def _public_start(self, launches, *, register=True):
         import work_start as W
 
         def join(**kwargs):
@@ -5293,6 +5640,8 @@ class ClosedNativeFrameCapacityRecoveryTest(unittest.TestCase):
 
         def launch(command, **kwargs):
             launches.append(command)
+            if not register:   # the launcher returned before it registered the replacement row
+                return subprocess.CompletedProcess(command, 0, "", "")
             source = self.rows()["att-source"][1]
             binding = R.source_binding(self.jobs, source)
             record = R._read(R._record_path(self.jobs, binding[0]))
@@ -5351,6 +5700,29 @@ class ClosedNativeFrameCapacityRecoveryTest(unittest.TestCase):
         self.assertEqual(self.rows()["att-peer"][0], peer)
         self.assertEqual(self.log_path.read_bytes(), terminal)
         self.assertNotEqual(self.jobs.read_bytes(), before)
+
+    def test_capacity_dead_frame_leg_is_replaced_and_decision_waits(self):
+        """T4-4: hand-built shape (not a copy) of E4-C4 -- frame-alternative `dead-capacity` with no output,
+        a replacement claim but no registry row for it. The claim is re-entered; the decision stays closed."""
+        launches = []
+        with self._current_capacity(80):
+            first = self._public_start(launches, register=False)
+            claims = list((R._directory(self.jobs) / "claims").glob("*.json"))
+            self.assertEqual(len(claims), 1)                 # claim written, no registry row for its replacement
+            claim = R._read(claims[0])
+            self.assertNotIn(claim["replacement_attempt_id"], self.rows())
+            self.assertNotEqual(first.get("reason"), "frame-outcome-needs-inspection", first)
+            self.assertNotIn("frame_interview", first)
+            second = self._public_start(launches)
+        self.assertEqual([len(launches)], [2])               # the same claim launched again, not a second claim
+        self.assertEqual(len(list((R._directory(self.jobs) / "claims").glob("*.json"))), 1)
+        self.assertIn(claim["replacement_attempt_id"], self.rows())
+        self.assertEqual(second["state"], "preparing", second)
+        self.assertNotEqual(second.get("reason"), "frame-outcome-needs-inspection", second)
+        for receipt in (first, second):   # one successful brief never opens the decision
+            self.assertNotIn("frame_interview", receipt)
+            self.assertNotIn("gate", receipt)
+            self.assertNotEqual(receipt["state"], "needs-interview")
 
     def test_public_start_keeps_pinned_limited_frame_waiting_with_reset_without_claim(self):
         import route_authority

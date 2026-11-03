@@ -48,6 +48,8 @@ class CapacityResumeTest(unittest.TestCase):
         self.launch_home = None
         for patcher in (
                 mock.patch.object(W, "default_parent_session_id", return_value="parent"),
+                # These fixtures drive start synchronously; a pause must not leave a detached timer.
+                mock.patch("capacity_auto_resume.arm", return_value=None),
                 mock.patch.dict(os.environ, {"AGENT_CODEX_MANAGED_GATEWAY": "0"}),
                 mock.patch.object(W, "join_selected_attempts", side_effect=self.observe),
                 mock.patch.object(W, "current_delivery_state", side_effect=self.delivery),
@@ -220,7 +222,7 @@ class CapacityResumeTest(unittest.TestCase):
             self.assertEqual(result["reason"], "owner-capacity-wait")
             self.assertTrue(result["retry_at"].startswith("2099-01-01"), result)
             self.assertNotIn("parent_next", result)
-            self.assertIn("from the session that owns the route", result["next_step"])
+            self.assertIn("usage gate reports capacity again", result["next_step"])
         self.assertEqual((self.calls, self.claims()), ([], []))
         self.assertFalse((R._directory(self.jobs) / "by-source").exists())
         self.set_limit("att-owner", FREE)

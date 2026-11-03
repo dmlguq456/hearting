@@ -369,7 +369,11 @@ class OwnerPreviewApprovalTest(OwnerRefineBase):
     def test_a_pass_with_no_review_marker_keeps_the_existing_unfinished_stage_receipt_and_raises_nothing(self):
         self.build("claude", review=False)
         receipt = self.start()
-        self.assertEqual((receipt["state"], receipt["reason"]), ("needs-attention", "workflow-executor-exited"), receipt)
+        # A PASS that left a declared stage undone is unfinished work: the runtime tries one `observed`
+        # continuation. This fixture's caller is not the route parent, so the continuation is refused at
+        # the parent check and the receipt keeps the missing stages; nothing is launched, raised or completed.
+        self.assertEqual((receipt["state"], receipt["reason"]), ("needs-attention", "replacement-parent-identity-unproven"), receipt)
+        self.assertEqual(receipt["launches"], [])
         self.assertIn("review", receipt["missing_terminal_gates"])
         self.assertNotIn("next_leg", receipt)
         self.assertEqual(self.resolution()["status"], "not-raised")
@@ -580,7 +584,7 @@ class OwnerGateReachesEveryParentTest(OwnerRefineBase):
         # The one case that still ends at `human-gate-not-raised`: the runtime tried to ask and the raise itself
         # was refused (a preview that stopped being provable at that moment, a ledger that cannot enter the
         # gate, a timeout). There is nothing the person could be shown, so nothing is settled, raised or
-        # released. A missing review stage is not this case: it keeps `workflow-executor-exited`.
+        # released. A missing review stage is not this case: the runtime continues it once, or keeps its missing-stage receipt.
         import dispatch_contract as DC
         for kind, harness in PARENTS:
             with self.subTest(parent=kind):

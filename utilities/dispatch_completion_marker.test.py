@@ -1910,9 +1910,11 @@ class CompletionMarkerTest(unittest.TestCase):
         route_path = self.write_route(route)
         evidence = self.base / "plan.md"
         evidence.write_text("plan body\n", encoding="utf-8")
+        # A success is judged by the verdict (`verdict_pass`), not by one note name: a PASS row without a
+        # `completed-supervisor` note is eligible (see capability_route U11 tests); a failing verdict or a
+        # `dead-*` death note stays refused.
         for attempt, extra in (
             ("att-killed-note", "note=dead-worker-fail,failure_class=fail"),
-            ("att-no-note", "failure_class=pass"),
             ("att-orphan-note", "note=dead-parent-orphaned,failure_class=pass"),
         ):
             self.write_row("done", attempt, attempt, extra)

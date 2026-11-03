@@ -39,7 +39,11 @@ def _target(jobs, attempt):
     row = exact_attempt_row(Path(jobs), attempt)
     meta = row.metadata
     if meta.get("worker_type") != "owner" or meta.get("dispatch_depth") != "1":
-        raise InputError("correction-target-not-owner")
+        error = InputError("correction-target-not-owner")
+        if meta.get("worker_type") == "frame":
+            # A frame leg has no owner to receive a correction; the runtime continues the leg.
+            error.retry_when = "A frame leg is continued by the runtime; run resume_command."
+        raise error
     keys = ("attempt_id", "harness", "owner_route_id", "owner_route_hash",
             "route_id", "route_hash", "parent_sid", "supervisor_lease_nonce")
     return row, _digest({key: meta.get(key, "") for key in keys})

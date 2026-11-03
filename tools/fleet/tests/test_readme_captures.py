@@ -17,8 +17,18 @@ sys.path[:0] = [str(ROOT), str(ROOT / "tools")]
 
 DOCS = ROOT / "docs"
 HANGUL = re.compile(r"[ᄀ-ᇿ㄰-㆏가-힯]")
-# Names that would mean a real project, host or person leaked into the demo rows or the images.
-PRIVATE = re.compile(r"corrnet|uihyeop|dmlguq|moving4|larynx|xavier|mpwav|/home/nas|agent_setting", re.I)
+# Shapes that would mean a real machine, person or project leaked into the demo rows or the images:
+# a home directory other than the demo one, a mount path, an e-mail address, a private-range IP,
+# or a legacy install-directory name.
+PRIVATE = re.compile(
+    r"/home/(?!demo\b)[\w.-]+"
+    r"|/Users/[\w.-]+"
+    r"|/(?:mnt|nas|data|net)/[\w.-]+"
+    r"|[\w.+-]+@[\w-]+\.[\w.-]+"
+    r"|\b(?:10\.\d{1,3}|192\.168|172\.(?:1[6-9]|2\d|3[01]))\.\d{1,3}\.\d{1,3}\b"
+    r"|\b(?:agent|claude|codex|opencode)_setting\b",
+    re.I,
+)
 CELL_W, CELL_H = 9, 18
 PNG_LIMIT, GIF_LIMIT, SVG_LIMIT = 120_000, 600_000, 150_000
 
@@ -116,10 +126,10 @@ class PublishedFiles(unittest.TestCase):
         self.assertEqual(gif.read_bytes()[:6], b"GIF89a")
         self.assertLess(gif.stat().st_size, GIF_LIMIT)
 
-    def test_real_project_name_is_gone_from_public_pages(self):
+    def test_no_private_path_or_address_on_public_pages(self):
         for relative in ("docs/fleet.svg", "docs/index.html", "tools/render-landing.py"):
             text = (ROOT / relative).read_text(encoding="utf-8")
-            self.assertIsNone(re.search("corrnet", text, re.I), relative)
+            self.assertIsNone(PRIVATE.search(text), relative)
 
 
 if __name__ == "__main__":

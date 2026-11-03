@@ -375,8 +375,10 @@ def finish(args, route: Mapping[str, Any], route_file: Path, api, *, _admission=
     admitted = artifact_producer.cycle_route_admission(root, record, route, finalize=True)
     if not admitted.allow:
         raise InlineFinishError("finish-route-cycle-" + admitted.reason)
+    observed_lease = artifact_producer._review_lease_observation(root, record["cycle_id"])
     choice = decide_continuation(route, action="finish-cycle", facts={"deleted": bool(record.get("deleted_at")),
-        "finished": finished, "review_live": artifact_producer._live_review_lease(root, record["cycle_id"]) is not None})
+        "finished": finished, "review_live": observed_lease == "live",
+        "review_unobservable": observed_lease == "unobservable"})
     if choice.state == "deleted":
         # The cycle was deleted while its route ran (§45 D-126): the route ends as a route with no output.
         return _finish_deleted_cycle(root, route, route_file, record, args, api)
@@ -518,8 +520,10 @@ def finish(args, route: Mapping[str, Any], route_file: Path, api, *, _admission=
                 raise InlineFinishError("finish-route-drift")
             if source_is_sha and not _on_a_branch(route["cwd"], intent["commit"]):
                 raise InlineFinishError("finish-commit-drift")
+            observed_lease = artifact_producer._review_lease_observation(root, record["cycle_id"])
             choice = decide_continuation(route, action="finish-cycle",
-                facts={"review_live": artifact_producer._live_review_lease(root, record["cycle_id"]) is not None})
+                facts={"review_live": observed_lease == "live",
+                       "review_unobservable": observed_lease == "unobservable"})
             if not choice.allowed:
                 error = InlineFinishError(choice.reason)
                 error.retry_when = choice.retry_when

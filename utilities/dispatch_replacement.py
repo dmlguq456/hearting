@@ -44,7 +44,11 @@ FRAME_CAPACITY = 'frame-capacity'
 # closed before spawning, or an owner that ended BLOCKED and has since been answered. Each pause
 # opens its own family (`after_capacity` keeps the digests of existing capacity families unchanged).
 CORRECTED = 'corrected'
-PAUSE_KINDS = frozenset({'capacity', 'unlaunched', CORRECTED})
+# An owner that ended BLOCKED (or with a handoff-format error) while no person has answered and no
+# declared gate holds it: the runtime carries its original result and report to a replacement owner
+# as observations, never as an answer. It is a pause of its own family, taken once per owner.
+OBSERVED = 'observed'
+PAUSE_KINDS = frozenset({'capacity', 'unlaunched', CORRECTED, OBSERVED})
 FRAME_TRANSITION = {'from': 'top', 'to': 'deep', 'reason': 'capacity', 'ordinal': 1, 'origin': 'frame-rule'}
 CONTINUATION_WAIT_NOTE = (
     'This route has already used its one automatic continuation. If you raise a human gate later, '
@@ -512,6 +516,15 @@ def _same_role_successful_frame_peer_harness(jobs, meta, *, lines=None):
         return None
 
 
+def created_as(jobs, meta):
+    """The death kind of the claim that created this replacement row, or ''."""
+    family = meta.get('replacement_family_id')
+    if not family or not meta.get('replacement_original_attempt_id') or jobs is None:
+        return ''   # a source row's own family fields describe the claim it started, not how it was created
+    record = _read(_record_path(jobs, family))
+    return str(((record or {}).get('proof') or {}).get('death_kind') or '')
+
+
 def death_kind(fields, meta, *, jobs=None, lines=None):
     return route_authority._replacement_kind(fields[1], meta, jobs=jobs, lines=lines)
 
@@ -548,6 +561,17 @@ def death_proof(fields, meta, *, jobs=None, lines=None):
             result['source_result'] = 'EXITED'
         elif route_authority.owner_result_format_only_end(fields[1], meta):
             result['source_result'] = 'CONTRACT'
+    elif kind == OBSERVED:
+        # Observations only: the original result and where its report or log is. No person answered,
+        # so nothing is written to the owner input store and no correction is carried.
+        result['source_result'] = ('INCOMPLETE' if DC.verdict_pass(meta)
+                                   else 'CONTRACT' if route_authority.owner_result_format_only_end(fields[1], meta)
+                                   else 'BLOCKED')
+        handoff = _blocked_handoff(fields, meta)
+        if handoff:
+            result['handoff'] = handoff
+        else:
+            result['log_file'] = meta.get('log_file', '')
     elif kind == 'unlaunched' and jobs is not None:
         carried = _unstarted_replacement_claim(jobs, meta.get('attempt_id'))
         carried_proof = (carried or {}).get('proof') or {}
@@ -1274,6 +1298,27 @@ def _budget_exhausted(jobs, source, *, lines=None, route=None, capacity=False):
     return legacy_budget_exhausted(jobs, lines, source, route=route)
 
 
+def _same_runtime_end(jobs, rows, source):
+    """Whether `source` is itself a `runtime` replacement that ended on the same observed columns.
+
+    The columns are the supervisor's recorded observation (`failure_class`, `terminal_event`,
+    harness, model profile), never a note or reason name. A repeat means the cause did not
+    change, so the default budget stops a further automatic replacement; any changed column
+    (another harness, protocol instead of runtime) is a changed cause and replaces once more.
+    """
+    prior_id, family = source.get('replacement_original_attempt_id'), source.get('replacement_family_id')
+    if not prior_id or not family or prior_id not in rows:
+        return False
+    if source.get('worker_type') == 'owner' and source.get('note') in RUNTIME_DEATH_NOTES:
+        return False   # SD-157: an owner's transport/process death keeps its no-cutoff replacement policy
+    record = _read(_record_path(jobs, family))
+    if (record or {}).get('proof', {}).get('death_kind') != 'runtime':
+        return False
+    prior = rows[prior_id][1]
+    return all(source.get(key, '') == prior.get(key, '')
+               for key in ('failure_class', 'terminal_event', 'harness', 'model_profile'))
+
+
 def _plain_retry_successor(rows, aid):
     """Does an ordinary same-node retry, not a replacement claim, already continue this attempt?"""
     return any((meta.get('automatic_retry_of') == aid or meta.get('prior_attempt_id') == aid)
@@ -1345,7 +1390,8 @@ def claim(jobs: Path, aid: str, *, resume_capacity=False) -> dict:
         route_authority.require_continuation(route_authority.decide_continuation(route,
             action="replacement", status=fields[1], metadata=meta,
             facts={"death_kind": proof['death_kind'],
-                   "budget_exhausted": _budget_exhausted(jobs, meta, lines=lines, route=route, capacity=capacity)}))
+                   "budget_exhausted": _budget_exhausted(jobs, meta, lines=lines, route=route, capacity=capacity)
+                   or (proof['death_kind'] == 'runtime' and _same_runtime_end(jobs, rows, meta))}))
         _no_competing_successor(rows, aid)
         owner = aid if meta.get('worker_type') == 'owner' else meta.get('parent_attempt_id') or aid
         _source_fences(jobs, meta, route['route_id'], aid)
@@ -1821,8 +1867,19 @@ def _reuse_snapshot(jobs, route, lines, *, proof=None, pinned=None):
     present = []
     for node in route.get('nodes', []):
         path = directory/(str(node['id'])+'.json')
-        if path.exists():
-            present.append((node, path, _read(path)))
+        if not path.exists():
+            continue
+        try:
+            marker = _read(path)
+        except DC.DispatchContractError as exc:
+            if exc.reason == 'replacement-record-unreadable' and isinstance(exc.__cause__, OSError):
+                # A marker that exists but cannot be read right now is not observed yet; it is not damage.
+                waiting = DC.DispatchContractError('replacement-completion-unobservable', str(node['id']))
+                waiting.next_action = 'same-command'
+                waiting.retry_when = 'The completion marker can be read again.'
+                raise waiting from exc
+            raise  # malformed JSON, symlink or non-object is damage evidence and stays refused
+        present.append((node, path, marker))
     basis, reference = _answered_fail_basis(jobs, proof, pinned)
     answered = _answered_fail_verdicts(
         route, {str(node['id']): marker for node, _path, marker in present}, basis, reference)
@@ -3121,6 +3178,8 @@ def recovery_instructions(args):
     pending = ', '.join(str(node) for node in current_reuse.get('pending', [])) or '(none)'
     source_fields, source = _rows(lines)[prior]
     kind = death_kind(source_fields, source, jobs=jobs, lines=lines)
+    if (record.get('proof') or {}).get('death_kind') == OBSERVED:
+        kind = OBSERVED   # the claim names how this owner was created; the source may have moved on since
     fix = kind == CORRECTED and (record.get('proof') or {}).get('source_result') == 'FAIL'
     if fix:
         opening = (f'The previous owner {prior} ended FAIL and a person approved a fix for it; this continues '
@@ -3133,6 +3192,31 @@ def recovery_instructions(args):
                  'ended BLOCKED and a person has answered it')
         opening = (f'The previous owner {prior} {ended}; this continues '
                    f'the same work on the existing route {record["route_id"]}.\n')
+    elif kind == OBSERVED:
+        proof = record.get('proof') or {}
+        ended = ('ended with a handoff-format error' if proof.get('source_result') == 'CONTRACT'
+                 else 'ended PASS with declared stages undone' if proof.get('source_result') == 'INCOMPLETE'
+                 else 'ended BLOCKED')
+        where = (f'its report {proof["handoff"]}' if proof.get('handoff')
+                 else f'its log {proof.get("log_file", "")}')
+        if proof.get('source_result') == 'INCOMPLETE':
+            undone = route_authority.unfinished_pass_owner(source_fields[1], source, jobs)
+            opening = (f'The previous owner {prior} {ended} and no person has answered. What follows is what the '
+                       f'runtime observed, not an answer or an approval: its original PASS result stays as it is, '
+                       f'{where}, completed stages {completed}, stages still pending {pending}'
+                       + (f', missing completion evidence {json.dumps(undone, sort_keys=True)}' if undone else '')
+                       + f'. Finish the pending stages on the existing route {record["route_id"]}; completed '
+                       'stages are not rerun and this runtime does not turn the PASS into a completion. If a '
+                       'stage cannot proceed, name the actual blocker and end BLOCKED.\n')
+        else:
+            opening = (f'The previous owner {prior} {ended} and no person has answered. What follows is what the '
+                       f'runtime observed, not an answer or an approval: the original result and {where}. '
+                       f'Read it, then decide the next step within the approved scope; this continues the same '
+                       f'work on the existing route {record["route_id"]}. If it stopped on a Hearting refusal '
+                       '(for example target-identity-unverified, resource-route-body-conflict or '
+                       'reviewed-evidence-revision-not-admitted), observe again whether that refusal still '
+                       'holds before acting. If only a person can decide, name that question and end BLOCKED; '
+                       'the runtime then hands it to a person.\n')
     elif kind == 'capacity':
         opening = f'The previous attempt {prior} stopped at a usage limit; this resumes it on the existing route {record["route_id"]}.\n'
     elif kind == 'unlaunched':

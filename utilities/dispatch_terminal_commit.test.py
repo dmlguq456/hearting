@@ -1926,7 +1926,8 @@ class OwnerTerminalPlacementReplayTest(unittest.TestCase):
             self.assertIn("artifacts/evidence/results/bad|name.txt", notice)
             self.assertIn(Path(refusal["record_path"]).name, notice)
             self.assertIn("Correct the reported locator", notice)
-            self.assertIn("retries closure automatically", notice)
+            self.assertIn("judges closure again", notice)
+            self.assertNotIn("retries closure automatically", notice)
             self.assertEqual(supervision.receipt_digest(receipt), receipt_digest)
         self.assertEqual(bad.read_bytes(), before_bad)
 
