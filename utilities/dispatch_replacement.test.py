@@ -4883,6 +4883,15 @@ class CompletedStageReplacementTest(unittest.TestCase):
         with mock.patch.object(R, 'claim', side_effect=AssertionError('a finished stage was claimed')):
             self.assertEqual(R._advance(self.jobs, 'att-dead-execute')['state'], 'not-applicable')
 
+    def test_a_replacement_already_in_flight_keeps_its_decision_after_a_later_marker(self):
+        # RV-BC-P1B: the in-flight guard is needed because the replacement's own marker
+        # is also "another attempt's later marker"; removing it must fail here.
+        self.marker('att-dead-execute-replacement', '2026-10-21T23:30:33.055743Z')
+        self.assertTrue(R.stage_completed_since(self.jobs, self.fields, self.meta))
+        self.assertEqual(self.progress().state, 'not-applicable')
+        with mock.patch.object(R, '_replacement_in_flight', return_value=True):
+            self.assertNotEqual(self.progress().state, 'not-applicable')
+
     def test_an_earlier_or_own_or_foreign_result_still_leaves_the_replacement(self):
         for attempt, completed_at, route_hash in (
                 ('att-earlier-round', '2026-10-21T14:41:59.113038Z', 'sha256:test'),

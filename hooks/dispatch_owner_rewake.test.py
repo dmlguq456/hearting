@@ -148,6 +148,14 @@ class ReplacementCarrierTest(unittest.TestCase):
             with mock.patch.object(rewake, "_row_metadata", return_value=metadata), \
                     mock.patch.object(rewake.seat_handover, "owns", return_value=False):
                 self.assertEqual(rewake._reclaim_refusal(existing, jobs, "sid"), "foreign-session")
+            # RV-BC-P1B: a successor seat re-arming (arm by sid, caller sid-B) reads
+            # an unreadable lineage as unknown too, not as another session.
+            with mock.patch.object(rewake, "_row_metadata", return_value=metadata), \
+                    mock.patch.object(rewake.seat_handover, "owns", return_value=None):
+                self.assertEqual(rewake._reclaim_refusal(existing, jobs, "sid-B"), "handover-unreadable")
+            with mock.patch.object(rewake, "_row_metadata", return_value=metadata), \
+                    mock.patch.object(rewake.seat_handover, "owns", return_value=False):
+                self.assertEqual(rewake._reclaim_refusal(existing, jobs, "sid-B"), "foreign-session")
 
     def test_restarted_carrier_follows_same_registered_successor(self):
         import dispatch_replacement as replacement
