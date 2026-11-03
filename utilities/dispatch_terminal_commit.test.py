@@ -1939,7 +1939,7 @@ class OwnerTerminalPlacementReplayTest(unittest.TestCase):
             self.assertEqual(supervision.receipt_digest(receipt), receipt_digest)
         self.assertEqual(bad.read_bytes(), before_bad)
 
-    def _invalid_output_owner(self):
+    def _invalid_output_owner(self, extra_bad=0):
         from dispatch_completion_join import exact_attempt_row
 
         fixture = PRODUCER_FIXTURE.TerminalTransactionIntegrationTest()
@@ -1950,6 +1950,8 @@ class OwnerTerminalPlacementReplayTest(unittest.TestCase):
         evidence.mkdir(parents=True)
         bad = evidence / "bad|name.txt"
         bad.write_bytes(b"preserve invalid locator payload")
+        for index in range(extra_bad):
+            (evidence / f"many|bad-{index:04d}-{'x' * 60}.txt").write_bytes(b"row\n")
         log = jobs.parent / "owner.jsonl"
         text = f"artifact: {bad}\nverdict: PASS\nblocker: none"
         log.write_text(json.dumps({"type": "item.completed", "item": {
@@ -1994,6 +1996,29 @@ class OwnerTerminalPlacementReplayTest(unittest.TestCase):
             self.assertEqual(self._controller_passes(jobs, request, meta, 1), 1)
             self.assertNotEqual(T.owner_completion_state(jobs, "done", meta).reason,
                                 "producer-finalize-refused")
+
+    def test_hundreds_of_invalid_names_keep_a_readable_held_refusal(self):
+        # RV-ADMIT follow-up: 701 invalid names made a 78,762-byte record, which the refusal
+        # reader skips (over 64 KiB), so the refusal was settled again every round.
+        fixture, jobs, request, bad, meta = self._invalid_output_owner(extra_bad=700)
+        with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(jobs),
+                                          "AGENT_ARTIFACT_ROOT": str(fixture.root)}):
+            self.assertEqual(self._controller_passes(jobs, request, meta, 3), 1)
+            state = T.owner_completion_state(jobs, "done", meta)
+            self.assertEqual((state.state, state.reason), ("blocked", "producer-finalize-refused"))
+            refusal = T.inspect_owner_completion(jobs, "done", meta)["last_refusal"]
+            self.assertLess(Path(refusal["record_path"]).stat().st_size, 64 * 1024)
+            self.assertRegex(refusal["detail"], r";and [0-9]+ more$")
+            named = [item.partition(":")[2] for item in refusal["detail"][len("output-invalid: "):].split(";")
+                     if ":" in item]
+            directory = bad.parents[3]   # the cycle folder the paths are relative to
+            for rel in named:   # a person fixes the names the record shows
+                path = directory / rel
+                path.rename(path.with_name(path.name.replace("|", "-")))
+            self.assertTrue(T.owner_completion_pending(jobs, "done", meta))
+            self.assertEqual(self._controller_passes(jobs, request, meta, 2), 1)   # refused on the next ones, held again
+            nxt = T.inspect_owner_completion(jobs, "done", meta)["last_refusal"]
+            self.assertNotEqual(nxt["detail"], refusal["detail"])
 
     def test_a_refusal_that_can_change_is_still_settled_again_each_pass(self):
         import artifact_producer

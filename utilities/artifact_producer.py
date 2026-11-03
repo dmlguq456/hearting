@@ -3241,6 +3241,27 @@ def _browser_profile(parts: Sequence[str], *, directory: bool = False) -> bool:
     ))
 
 
+# How much of an `output-invalid` refusal names: its first violations, up to these bounds, then
+# "and M more". The refusal is recorded and read back whole (a record over 64 KiB is not read),
+# and a held refusal watches the files it names; once those are fixed the next close names the
+# rest, so naming them all is never needed.
+OUTPUT_INVALID_NAMED = 20
+OUTPUT_INVALID_NAMED_BYTES = 8192
+
+
+def output_invalid_detail(violations: Sequence[str]) -> str:
+    """`code:path` items for the first violations, and `and M more` for the rest."""
+    shown: List[str] = []
+    size = 0
+    for item in violations:
+        if len(shown) >= OUTPUT_INVALID_NAMED or (shown and size + len(item) + 1 > OUTPUT_INVALID_NAMED_BYTES):
+            break
+        shown.append(item)
+        size += len(item) + 1
+    more = len(violations) - len(shown)
+    return ";".join(shown + ([f"and {more} more"] if more else []))
+
+
 def _payload_root(rel: str) -> Optional[str]:
     """Return the exact legal payload subtree for a non-empty cycle-relative locator."""
     root, separator, tail = rel.partition("/")
@@ -6158,7 +6179,7 @@ def finalize(
                     digest_value, size = _stream_file_facts(entry)
                     facts.append((rel, digest_value, size))
         if violations:
-            raise ProducerError("output-invalid", ";".join(violations))
+            raise ProducerError("output-invalid", output_invalid_detail(violations))
         for rel, digest_value, size in _bundle_exact_evidence_facts(
                 root, record, directory, bundle_trees, route, primary):
             if all(row[0] != rel for row in facts):

@@ -1339,7 +1339,8 @@ def _completion_refusal_notice(receipt: dict, *, notice_context=None) -> str:
     details = []
     if isinstance(raw_detail, str):
         for item in raw_detail.split(";"):
-            match = re.match(r"[a-z0-9-]{1,80}:[^;\x00-\x1f\x7f]{1,500}", item)
+            match = (re.match(r"[a-z0-9-]{1,80}:[^;\x00-\x1f\x7f]{1,500}", item)
+                     or re.fullmatch(r"and [0-9]{1,9} more", item))
             if match:
                 details.append(match.group(0))
     safe_detail = "; ".join(details) if details else "invalid payload locator"
