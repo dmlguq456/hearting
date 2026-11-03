@@ -2444,6 +2444,92 @@ class ReplacementTest(unittest.TestCase):
         self.assertEqual(PD.read(self.root, 'parent', old_intermediate['delivery_id'])['state'], 'acked')
         self.assertEqual(delivered[0]['state'], 'claimed')
 
+    def test_an_opencode_parent_gets_the_death_notice_instead_of_a_silent_reservation(self):
+        """C-#1153: the OpenCode turn carrier delivers notices but launches nothing, so
+        a reservation at the terminal commit only deferred the notice and left the
+        parent with nothing until a person ran `start`."""
+        import dispatch_completion_join as JOIN
+        import dispatch_pending_delivery as PD
+
+        self.meta.update(parent_sid='parent', parent_attempt_id='att-parent',
+                         parent_completion_delivery='opencode-turn')
+        (R._directory(self.jobs)/'inputs/att-source.json').unlink()
+        self.meta.update(D.parse_registry_metadata(R.seal_launch_input(self.args,'codex','the raw task')))
+        self.write(self.meta, status='open')
+        self.assertTrue(D.close_attempt_row(self.jobs, 'att-source', 'dead-exact-pid',
+                                            evidence={'failure_class':'contract'}))
+        path=JOIN.materialize_after_terminal_close(self.jobs, 'att-source')
+        self.assertEqual(R.recovery_delivery_state(self.jobs, 'att-source'), 'none')
+        original=PD.read(self.root, 'parent', path.stem)
+        claimed=PD.claim(self.root, 'parent', original['delivery_id'],
+                         claim_owner='fixture', lease_seconds=30, jobs=self.jobs)
+        self.assertEqual(claimed['state'], 'claimed')
+        # The parent's `start` still reserves and launches the same replacement.
+        record=R.claim(self.jobs, 'att-source')
+        self.assertEqual(record['original_attempt_id'], 'att-source')
+        for carrier, expected in (('claude-parent-runtime', True), ('codex-native-queue', True),
+                                  ('opencode-turn', False), ('session-resume-supervised', True),
+                                  ('', True)):
+            with self.subTest(carrier=carrier):
+                self.assertIs(R._parent_carrier_replaces(
+                    {'parent_completion_delivery': carrier}), expected)
+
+    def test_a_successor_acked_by_the_handed_over_seat_consumes_the_old_seat_notice(self):
+        """rt-a87cfd349fd0aada: the source's failure notice is stored under the seat of
+        its terminal commit; the successor reported to the seat that seat handed over
+        to, and its completion was acked there. The old-seat notice (and its
+        registered-batch duty) stayed `replacement-defer` forever."""
+        import dispatch_completion_join as JOIN
+        import dispatch_pending_delivery as PD
+        import dispatch_seat_handover as SEAT
+
+        self.meta.update(parent_sid='seat-old', parent_attempt_id='att-parent',
+                         parent_completion_delivery='claude-parent-runtime')
+        (R._directory(self.jobs)/'inputs/att-source.json').unlink()
+        self.meta.update(D.parse_registry_metadata(R.seal_launch_input(self.args,'codex','the raw task')))
+        self.write(self.meta, status='open')
+        self.assertTrue(D.close_attempt_row(self.jobs, 'att-source', 'dead-exact-pid',
+                                            evidence={'failure_class':'contract'}))
+        original=PD.read(self.root, 'seat-old',
+                         JOIN.materialize_after_terminal_close(self.jobs, 'att-source').stem)
+        claim=R.claim(self.jobs, 'att-source')
+        successor=self._successor(claim, self.meta, status='running', launch_started='1',
+                                  parent_sid='seat-new')
+        self.assertTrue(D.close_attempt_row(self.jobs, successor['attempt_id'], 'completed-marker',
+                                            evidence={'failure_class':'pass'}))
+        delivered=PD.read(self.root, 'seat-new', JOIN.materialize_after_terminal_close(
+            self.jobs, successor['attempt_id']).stem)
+        PD.claim(self.root, 'seat-new', delivered['delivery_id'],
+                 claim_owner='fixture', lease_seconds=30)
+        PD.ack(self.root, 'seat-new', delivered['delivery_id'], acked_by='fixture')
+
+        def graph(*edges):
+            return SEAT.LineageGraph(edges=tuple(edges), unresolved=frozenset(), ledger_keys=(),
+                                     ledger_rows={}, binding_rows={}, generation=(),
+                                     seat_edges=(), seat_unresolved=frozenset())
+
+        # No confirmed handover (or a different seat): the deferral is kept.
+        for edges in ((), (('claude', 'seat-old', 'seat-other'),),
+                      (('codex', 'seat-old', 'seat-new'),)):
+            with self.subTest(edges=edges), \
+                    mock.patch.object(SEAT, 'lineage_graph', return_value=graph(*edges)):
+                with self.assertRaises(PD.PendingDeliveryError) as refused:
+                    PD.claim(self.root, 'seat-old', original['delivery_id'],
+                             claim_owner='fixture', lease_seconds=30, jobs=self.jobs)
+                self.assertIn('replacement-defer', refused.exception.detail)
+                self.assertEqual(PD.read(self.root, 'seat-old', original['delivery_id'])['state'],
+                                 'pending')
+        # The confirmed seat handover makes the successor's acked completion count.
+        with mock.patch.object(SEAT, 'lineage_graph',
+                               return_value=graph(('claude', 'seat-old', 'seat-new'))):
+            with self.assertRaises(PD.PendingDeliveryError) as refused:
+                PD.claim(self.root, 'seat-old', original['delivery_id'],
+                         claim_owner='fixture', lease_seconds=30, jobs=self.jobs)
+        self.assertIn('replacement-consumed', refused.exception.detail)
+        retired=PD.read(self.root, 'seat-old', original['delivery_id'])
+        self.assertEqual((retired['state'], retired['expiry_reason']),
+                         ('rejected', 'replacement-consumed'))
+
     def test_terminal_delivery_is_deferred_before_successor_registration(self):
         import dispatch_completion_join as JOIN
         import dispatch_pending_delivery as PD
