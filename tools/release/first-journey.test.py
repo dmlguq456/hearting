@@ -644,6 +644,40 @@ else: raise SystemExit(5)
         self.assertIn("Headless uncovered", markdown)
         self.assertIn("Isolation checks", markdown)
 
+    def test_route_evidence_counts_route_records_and_names_automatic_ones(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            routes = Path(tmp) / "repos/greet/.agent_reports/.runtime/routes"
+            routes.mkdir(parents=True)
+            guard = lambda source: {"tracked_gate_evidence": {"artifact_guard": {"satisfied": True, "source": source}}}
+            (routes / "rt-0a1b.json").write_text(json.dumps(guard("auto-record: changes observed at turn end")))
+            (routes / "rt-0a1b.outcome.json").write_text("{}")
+            (routes / ".route-children-index.json").write_text("{}")
+            (routes / "rt-2c3d.json").write_text(json.dumps(guard("compose-prechecked")))
+            self.assertEqual(fj.route_evidence(Path(tmp)), 2)
+            self.assertEqual(fj.auto_route_evidence(Path(tmp)), 1)
+
+    def test_settle_wrapper_keeps_detached_work_alive_and_reports_cli_time_apart(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "recorded"
+            command = f"setsid sh -c 'sleep 1; touch {marker}' </dev/null >/dev/null 2>&1 & exit 3"
+            result = subprocess.run(fj.settle_argv(["sh", "-c", command], seconds=20),
+                                    capture_output=True, text=True, timeout=60)
+            self.assertEqual(result.returncode, 3)
+            self.assertTrue(marker.exists(), "the detached step finished before the wrapper returned")
+            settled = fj.settle_result(result.stdout)
+            self.assertFalse(settled["left_running"])
+            self.assertLess(settled["cli_seconds"], 1)
+            self.assertGreaterEqual(settled["settle_seconds"], 0.5)
+
+    def test_settle_wrapper_stops_waiting_at_its_bound(self):
+        started = time.monotonic()
+        result = subprocess.run(fj.settle_argv(["sh", "-c", "setsid sleep 5 </dev/null >/dev/null 2>&1 & exit 0"],
+                                               seconds=1), capture_output=True, text=True, timeout=60)
+        self.assertLess(time.monotonic() - started, 4)
+        self.assertEqual(result.returncode, 0)
+        self.assertTrue(fj.settle_result(result.stdout)["left_running"])
+        self.assertIsNone(fj.settle_result("no settle line"))
+
     def test_success_judgment_accepts_non_main_branch(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo=Path(tmp)

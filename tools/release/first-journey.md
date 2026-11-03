@@ -101,8 +101,18 @@ questions, refusals, and incomplete work stop without retry. Sessions the
 installed product starts on its own count toward the same task: tokens are summed
 over every transcript in the world. A task is `completed` only when a candidate
 passes the original focused test and the product left a route record
-(`.runtime/routes/*.json`) in the world; a fix without one is reported as
-`fixed-without-route-evidence`.
+(`.runtime/routes/rt-*.json`) in the world; a fix without one is reported as
+`fixed-without-route-evidence`. A route the product recorded on its own for a
+turn that changed files without one (`utilities/turn_change_record.py`, for
+example after a shell `sed -i`) counts the same and is also reported as
+`route_evidence_auto`.
+
+The sandbox is a PID namespace, so everything left in it dies when the agent
+CLI exits, while on a user's machine the product's detached hook steps keep
+running. Each sandboxed turn therefore runs under a small subreaper that waits
+up to 30 seconds for those descendants after the CLI exits. Turn and task
+seconds are the CLI's own time; the wait is reported as `settle:<harness>:<n>`
+steps (`left_running` when the bound ended it).
 
 Inside the sandbox the world keeps its host path, while the real HOME and
 `/home/nas` are empty tmpfs mounts; the report's isolation checks show this.
