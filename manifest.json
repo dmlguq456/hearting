@@ -987,6 +987,13 @@
       "hard_block": false
     },
     {
+      "slug": "hook__turn-change-record.py__Stop",
+      "name": "turn-change-record.py end",
+      "mono": "turn-change-record.py",
+      "event": "Stop",
+      "hard_block": false
+    },
+    {
       "slug": "hook__dispatch-session-sweep.py__UserPromptSubmit",
       "name": "dispatch-session-sweep.py",
       "mono": "dispatch-session-sweep.py",
@@ -1032,6 +1039,13 @@
       "slug": "hook__session-card-inject__UserPromptSubmit",
       "name": "session-card-inject",
       "mono": "session-card-inject",
+      "event": "UserPromptSubmit",
+      "hard_block": false
+    },
+    {
+      "slug": "hook__turn-change-record.py__UserPromptSubmit",
+      "name": "turn-change-record.py start",
+      "mono": "turn-change-record.py",
       "event": "UserPromptSubmit",
       "hard_block": false
     }

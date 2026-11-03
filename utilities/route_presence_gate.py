@@ -65,9 +65,8 @@ def _truthy(value) -> bool:
     return str(value or "").strip().lower() not in ("", *_OFF)
 
 
-def _exempt(env) -> bool:
-    if str(env.get(SWITCH, "")).strip().lower() in _OFF:
-        return True
+def exempt_session(env) -> bool:
+    """A registered owner or worker, or CI: no route is asked of this session."""
     try:
         if int(env.get("AGENT_DISPATCH_DEPTH") or 0) > 0:
             return True
@@ -78,6 +77,10 @@ def _exempt(env) -> bool:
             or env.get("AGENT_DISPATCH_REGISTERED_WORKER") == "1"
             or bool(env.get("OPENCODE_DISPATCH_SLUG"))
             or _truthy(env.get("CI")))
+
+
+def _exempt(env) -> bool:
+    return str(env.get(SWITCH, "")).strip().lower() in _OFF or exempt_session(env)
 
 
 def _real(raw, base: Path) -> Path:
@@ -377,6 +380,16 @@ def _identities(chain, harness: str, session_id: str, env) -> list[tuple[str, st
     return found
 
 
+def held_roots(harness: str, session_id: str, env):
+    """The canonical artifact roots this session's route-chain ledger names, or None
+    when the session has no identity to look up."""
+    chain = _route_chain()
+    identities = _identities(chain, harness, session_id, env)
+    if not identities:
+        return None
+    return _ledger_roots(chain, identities)
+
+
 def _dev_activation(top: Path, env) -> bool:
     target = _primary(top)
     for candidate in (env.get("AGENT_HOME"), str(ROOT)):
@@ -388,6 +401,16 @@ def _dev_activation(top: Path, env) -> bool:
         if home == Path(os.path.realpath(top)) or (target and _primary(home) == target):
             return True
     return False
+
+
+def unrouted_root(top: Path, roots, env) -> str:
+    """The canonical artifact root of work tree ``top`` when the session holds no route
+    for it (``roots`` from ``held_roots``); ``""`` under dev activation, when the root
+    cannot be resolved, or when a route exists there."""
+    if _dev_activation(top, env):
+        return ""
+    root = artifact_root(top, env)
+    return "" if not root or root in roots else root
 
 
 # ---------------------------------------------------------------------- refusal
@@ -492,16 +515,12 @@ def judge(harness: str, payload: dict, env=None) -> str:
         triggers = _triggers(payload, env)
         if not triggers:
             return ""
-        chain = _route_chain()
-        identities = _identities(chain, harness, _session_id(payload), env)
-        if not identities:
+        roots = held_roots(harness, _session_id(payload), env)
+        if roots is None:
             return ""
-        roots = _ledger_roots(chain, identities)
         for kind, top, target in triggers:
-            if _dev_activation(top, env):
-                continue
-            root = artifact_root(top, env)
-            if not root or root in roots:
+            root = unrouted_root(top, roots, env)
+            if not root:
                 continue
             if target and _artifact_path(Path(target), top, root):
                 continue

@@ -347,6 +347,11 @@
             "type": "command",
             "command": "sh \"${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/run-hook.sh\" python3 session-tidy-idle.py",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/run-hook.sh\" python3 turn-change-record.py end",
+            "timeout": 5
           }
         ]
       }
@@ -415,6 +420,15 @@
             "type": "command",
             "command": "sh \"${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/run-hook.sh\" python3 peer-message-record.py prompt",
             "timeout": 10
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/run-hook.sh\" python3 turn-change-record.py start",
+            "timeout": 5
           }
         ]
       }

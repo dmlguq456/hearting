@@ -695,6 +695,11 @@ route, its freshness, lineage, stage or proof. Registered owners and workers,
 artifact roots, the temp directory, runtime homes, CI and dev activation pass;
 any judgement failure passes; `HEARTING_ROUTE_GATE=off` turns it off.
 `capability-route.py verify`/`status` still only inspect a route that exists.
+A turn that changes source files without such a route, through any tool, gets one
+afterwards: at turn end the runtime records an ordinary direct route in place with
+the changed files and a diff summary as evidence and closes it
+(`utilities/turn_change_record.py`, `core/HOOKS.md`). It asks nothing of the agent
+and blocks nothing; that session×folder then holds a route like any other.
 
 Compute-host storage access follows the `execution_needs` declaration on the
 registered part catalog row in `capabilities/topologies.json`. Native and
