@@ -302,6 +302,14 @@ class ExtractionTest(unittest.TestCase):
         bare = {"legs": [{key: value for key, value in kept["legs"][0].items() if key != "size"}]}
         self.assertTrue(RP.same_proposal(kept, bare))
         self.assertNotIn("size", self.parse(brief([DIRECT]))["legs"][0])
+        # RV-1072: an interview copy written straight from the brief names the size
+        # without the shape it decides; it is still the same route.
+        sized, _, _ = RP.parse_proposal_with_notes(brief([{"capability": "autopilot-code",
+                                                           "size": "one-pass"}]))
+        raw_copy = {"legs": [{"capability": "autopilot-code", "size": "one-pass"}]}
+        self.assertTrue(RP.same_proposal(sized, raw_copy))
+        self.assertFalse(RP.same_proposal(sized, {"legs": [{"capability": "autopilot-draft",
+                                                             "size": "one-pass"}]}))
 
     def test_cwd_is_optional_and_an_interview_cannot_silently_change_the_worktree(self):
         one = self.parse(brief([{**DIRECT, "cwd": "/existing/worktree one"}]))
