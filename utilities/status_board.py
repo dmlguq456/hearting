@@ -20,7 +20,6 @@ A PR merge happens on GitHub, with no Hearting event to attach to.
 from __future__ import annotations
 
 import fcntl
-import json
 import os
 import re
 import tempfile
@@ -37,6 +36,7 @@ _STAMP = re.compile(r"^(?P<word>갱신|Updated)(?P<gap>\s+)\d{4}-\d{2}-\d{2}(?:[
 _HEADING = re.compile(r"^##\s+(?P<title>.+?)\s*$")
 _SECTIONS = {"ko": "## 최근 마감", "en": "## Recently closed"}
 _PR_URL = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+/pull/\d+")
+_OURS = re.compile(r"^- \d{4}-\d{2}-\d{2} \d{2}:\d{2} · .* · route rt-[0-9a-f]{16}(?: · .*)?$")
 _HANGUL = re.compile(r"[가-힣]")
 
 
@@ -44,20 +44,14 @@ def _fold(name: str) -> str:
     return unicodedata.normalize("NFC", name).casefold()
 
 
-def campaign_dir(root: Path, key: str) -> Path | None:
-    """The active campaign folder sealed under `key`, read from its own `campaign.json`."""
-    if not key or "/" in key or key.startswith("."):
+def campaign_dir(root: Path, route) -> Path | None:
+    """The route's active campaign folder, found by the existing resolver route autoclose uses."""
+    try:
+        import route_autoclose
+        found = route_autoclose.campaign_of_route(Path(root), route)
+    except Exception:  # noqa: BLE001 -- no campaign found means no page to refresh
         return None
-    campaigns = Path(root) / "campaigns"
-    found = []
-    for candidate in campaigns.glob("*_" + key):
-        try:
-            record = json.loads((candidate / "campaign.json").read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        if isinstance(record, dict) and record.get("key") == key and record.get("state", "active") == "active":
-            found.append(candidate)
-    return found[0] if len(found) == 1 else None
+    return Path(found[1]) if found else None
 
 
 def status_page(campaign: Path) -> Path | None:
@@ -96,8 +90,16 @@ def closure_line(route, outcome, now: datetime) -> str:
     return "- " + " · ".join(part for part in parts + prs if part)
 
 
+def _ours(row: str) -> bool:
+    return _OURS.match(row) is not None
+
+
 def refreshed(text: str, line: str, now: datetime) -> str:
-    """`text` with its stamp set to `now` and `line` first in the recent-closures section."""
+    """`text` with its stamp set to `now` and `line` first among the runtime's closure lines.
+
+    Only the stamp's date and time and the runtime's own lines (`_OURS`) change; every other
+    byte -- the person's notes, sub-bullets or paragraphs inside the section included -- stays
+    where it was. Past `KEEP`, the oldest runtime lines go."""
     lines = text.split("\n")
     first_section = next((i for i, row in enumerate(lines) if _HEADING.match(row)), len(lines))
     for index in range(first_section):
@@ -111,15 +113,20 @@ def refreshed(text: str, line: str, now: datetime) -> str:
     start = next((i for i, row in enumerate(lines)
                   if _HEADING.match(row) and _fold(_HEADING.match(row)["title"]) in titles), None)
     if start is None:
-        while lines and lines[-1] == "":
-            lines.pop()
-        lines += ["", _SECTIONS[language], line, ""]
-        return "\n".join(lines)
+        head = "\n".join(lines)
+        gap = "" if not head else ("\n" if head.endswith("\n") else "\n\n")
+        return head + gap + _SECTIONS[language] + "\n" + line + "\n"
     end = next((i for i in range(start + 1, len(lines)) if _HEADING.match(lines[i])
                 or lines[i].startswith("# ")), len(lines))
-    kept = [row for row in lines[start + 1:end] if row.startswith("- ") and row != line]
-    body = [line] + kept[:KEEP - 1]
-    return "\n".join(lines[:start + 1] + body + [""] + lines[end:]).rstrip("\n") + "\n"
+    section = lines[start + 1:end]
+    if line in section:
+        return "\n".join(lines)
+    ours = [i for i, row in enumerate(section) if _ours(row)]
+    at = ours[0] if ours else 0
+    section.insert(at, line)
+    drop = set([i + 1 if i >= at else i for i in ours][KEEP - 1:])
+    section = [row for i, row in enumerate(section) if i not in drop]
+    return "\n".join(lines[:start + 1] + section + lines[end:])
 
 
 def note_route_closed(route, outcome, *, now: datetime | None = None) -> Path | None:
@@ -127,10 +134,9 @@ def note_route_closed(route, outcome, *, now: datetime | None = None) -> Path | 
     if not isinstance(outcome, dict) or outcome.get("terminal_gate_proven") is not True:
         return None                       # a cancelled or unproven close is not finished work
     root = Path(str(route.get("artifact_root") or ""))
-    key = route.get("campaign_key")
-    if not root.is_dir() or not isinstance(key, str):
+    if not root.is_dir():
         return None
-    campaign = campaign_dir(root, key)
+    campaign = campaign_dir(root, route)
     page = status_page(campaign) if campaign is not None else None
     if page is None:
         return None

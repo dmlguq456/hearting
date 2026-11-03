@@ -37,10 +37,15 @@ class StatusBoardTest(unittest.TestCase):
         self.root = Path(tmp.name) / ".agent_reports"
         self.campaign = self.root / "campaigns" / "2026-11-01_demo"
         (self.campaign / "2026-11-01_first" / "artifacts").mkdir(parents=True)
-        (self.campaign / "campaign.json").write_text(json.dumps({"key": "demo", "state": "active"}))
+        self.write_campaign(self.campaign, "active")
         self.page = self.campaign / "2026-11-01_first" / "artifacts" / "현황.md"
         self.route = {"route_id": "rt-1111111111111111", "artifact_root": str(self.root),
                       "campaign_key": "demo", "slug": "fix-step-two", "capability": "autopilot-code"}
+
+    def write_campaign(self, folder, state, key="demo"):
+        (folder / "campaign.json").write_text(json.dumps({
+            "campaign_id": "camp_" + "1" * 32, "key": key, "title": "Demo", "goal": "g", "state": state,
+            "cycles": [], "created_on": "2026-11-01T00:00:00Z"}))
 
     def close(self, minute, route=None, summary="done https://github.com/o/r/pull/7", proven=True):
         return SB.note_route_closed(route or self.route, {"summary": summary, "terminal_gate_proven": proven},
@@ -92,9 +97,45 @@ class StatusBoardTest(unittest.TestCase):
                       {**self.route, "campaign_key": "../demo"}):
             self.assertIsNone(self.close(4, route=route))
         self.assertIsNone(self.close(4, proven=False))          # a cancelled close is not finished work
-        (self.campaign / "campaign.json").write_text(json.dumps({"key": "demo", "state": "satisfied"}))
+        self.write_campaign(self.campaign, "satisfied")
         self.assertIsNone(self.close(5))
         self.assertEqual(self.page.read_text(encoding="utf-8"), PAGE)
+
+    def test_the_persons_lines_inside_the_section_stay_byte_for_byte(self):
+        # RV-BC-P11A: only the runtime's own closure lines move; notes, sub-bullets and
+        # paragraphs a person wrote in the section stay exactly where they were.
+        mine = ("## 최근 마감\n"
+                "메모: 아래는 자동 기록, 위 문단은 내 것.\n"
+                "- 2026-11-03 09:00 · old work · route rt-2222222222222222\n"
+                "  - 사람이 단 하위 bullet\n"
+                "- 사람이 쓴 top-level bullet\n"
+                "\n"
+                "끝 문단, 줄바꿈 없음")
+        self.page.write_text(PAGE + "\n" + mine, encoding="utf-8")
+        self.close(5)
+        text = self.page.read_text(encoding="utf-8")
+        self.assertEqual(text, PAGE.replace("갱신 2026-11-01 09:00", "갱신 2026-11-04 10:05") + "\n" + mine.replace(
+            "메모: 아래는 자동 기록, 위 문단은 내 것.\n",
+            "메모: 아래는 자동 기록, 위 문단은 내 것.\n- 2026-11-04 10:05 · fix-step-two · route "
+            "rt-1111111111111111 · https://github.com/o/r/pull/7\n"))
+        for minute in range(6, 12):                      # only runtime lines are trimmed to five
+            self.close(minute, route={**self.route, "route_id": f"rt-{minute:016d}"}, summary="")
+        text = self.page.read_text(encoding="utf-8")
+        self.assertEqual(sum(1 for row in text.splitlines() if SB._ours(row)), SB.KEEP)
+        for kept in ("메모: 아래는 자동 기록, 위 문단은 내 것.", "  - 사람이 단 하위 bullet",
+                     "- 사람이 쓴 top-level bullet", "\n\n끝 문단, 줄바꿈 없음"):
+            self.assertIn(kept, text)
+        self.assertTrue(text.endswith("끝 문단, 줄바꿈 없음"))
+        self.assertNotIn("rt-2222222222222222", text)    # the oldest runtime line went
+
+    def test_the_existing_resolver_finds_a_campaign_whose_folder_carries_a_suffix(self):
+        framed = self.root / "campaigns" / "2026-11-02_demo-framing"
+        (framed / "2026-11-02_leg" / "artifacts").mkdir(parents=True)
+        self.campaign.rename(self.root / "campaigns" / "gone")
+        self.write_campaign(framed, "active")
+        page = framed / "2026-11-02_leg" / "artifacts" / "현황.md"
+        page.write_text(PAGE, encoding="utf-8")
+        self.assertEqual(self.close(7), page)
 
     def test_the_newest_page_of_the_campaign_is_the_one_refreshed(self):
         older = self.page
