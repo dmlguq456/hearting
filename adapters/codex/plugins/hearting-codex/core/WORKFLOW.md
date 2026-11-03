@@ -752,9 +752,10 @@ behalf (including adopting a recommendation). The answer template keeps
 remain unknown, and registered workers cannot claim either release authority.
 A supervisor answer releases frame-review with its source preserved in intent;
 person-only start approvals keep their existing gates. A direction that crosses
-the intent's `안 할 것` (§0.4; the chosen proposal names every content word of
-one of its lines) is the person's to choose: a supervisor answer choosing it is
-not recorded and the same registered question goes to the person. This meaning is shared
+the intent's `안 할 것` (§0.4: the chosen proposal's summary or parts say they do
+one of its items, apart from clauses that keep away from it or hand it over) is
+the person's to choose: a supervisor answer choosing it is not recorded and the
+same registered question goes to the person. This meaning is shared
 by Claude, Codex and OpenCode.
 
 When there is nothing to choose — both frame legs return valid, equal

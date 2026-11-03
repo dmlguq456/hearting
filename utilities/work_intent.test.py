@@ -355,5 +355,38 @@ class ClaudeWakeSummaryTest(unittest.TestCase):
             self.assertTrue(message.endswith("Do not emit a periodic progress recap."))
 
 
+class NotDoingTest(unittest.TestCase):
+    """A proposal crosses `안 할 것` only by what it says it will do (RV-intent re-review of 913736e59)."""
+
+    LINES = ["PR 병합", "설치", "새 게이트·필수 입력"]
+
+    def crossed(self, summary, **leg):
+        return WI.crossed_not_doing(self.LINES, {"summary": summary, "legs": [
+            {"capability": "autopilot-code", "mode": "dev", "graph": ["plan", "execute", "test", "report"], **leg}]})
+
+    def test_promises_handoffs_and_restated_limits_are_not_crossings(self):
+        cases = {
+            "keeps the rule": ("기존 경로만 고치고 새 게이트·필수 입력은 추가하지 않는다", {}),
+            "hands it over": ("수정 후 79에게 병합·설치를 인계한다", {}),
+            "parent does it": ("이 worktree branch로 PR까지 연다(병합은 메인 세션)", {}),
+            "restated in why": ("fix the probe", {"why": "pr·병합·실제 릴리스·설치를 하지 않은 상태로 인계"}),
+            "restated in done_when": ("fix the probe", {"done_when": ["새 플래그·게이트·승인·필수 입력이 추가되지 않는다"]}),
+            "keys and paths": ("fix the probe", {"cwd": "/srv/install/pr-merge", "verify": ["installer test"]}),
+            "word inside a word": ("pushed fixes for the merger report", {}),
+        }
+        for name, (summary, leg) in cases.items():
+            with self.subTest(name):
+                self.assertEqual(self.crossed(summary, **leg), [])
+
+    def test_saying_it_will_do_it_is_a_crossing(self):
+        self.assertEqual(self.crossed("새 게이트 hook을 추가해 매 편집을 막는다"), ["새 게이트·필수 입력"])
+        self.assertEqual(self.crossed("구현·검증하고 승인된 PR·CI·병합까지 완료한다"), ["PR 병합"])
+        self.assertEqual(self.crossed("릴리스를 만들어 설치까지 진행한다"), ["설치"])
+        ship = {"summary": "release it", "legs": [{"capability": "autopilot-ship", "graph": ["deploy"]}]}
+        self.assertEqual(WI.crossed_not_doing(["배포"], ship), ["배포"])
+        self.assertEqual(WI.crossed_not_doing(["install"], {"summary": "x", "legs": [
+            {"capability": "autopilot-ship", "extra_stages": [{"stage": "install", "after": "deploy"}]}]}), ["install"])
+
+
 if __name__ == "__main__":
     unittest.main()

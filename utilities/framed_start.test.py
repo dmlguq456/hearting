@@ -1908,10 +1908,11 @@ class AutomaticDirectionTest(StartBase):
             self.assertIsNone(self.automatic())
 
     def test_an_agreed_direction_past_the_intents_not_doing_is_asked(self):
-        self.set_briefs(full_brief([DIRECT]), full_brief([DIRECT]))
+        summary = "frame-review에 새 게이트를 추가한다"
+        self.set_briefs(full_brief([DIRECT], summary=summary), full_brief([DIRECT], summary=summary))
         self.assertIsNotNone(self.automatic())
         self.route = {**self.route, "work_request": {**self.route["work_request"],
-                                                     "text": "안 할 것: small edit\n\n" + self.route["work_request"]["text"]}}
+                                                     "text": "안 할 것: 새 게이트·필수 입력\n\n" + self.route["work_request"]["text"]}}
         self.assertIsNone(self.automatic())          # both legs agree, but only the person may choose it
 
     def test_section_seven_reads_none_in_either_language_and_anything_else_as_a_question(self):
