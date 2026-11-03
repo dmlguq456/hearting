@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import datetime
 import hashlib
 import io
 import json
@@ -91,6 +92,14 @@ class TidyCase(unittest.TestCase):
     @staticmethod
     def logical_seat(seat, harness, sid):
         return st.session_seat(seat, harness, sid)
+
+    def claude_without_agents(self, *sids):
+        """Claude sessions with a transcript and no background agent: tidy keeps the clear.
+        (A session whose transcript cannot be found is compacted instead.)"""
+        for sid in sids:
+            path = self.iso.claude_dir / "projects" / "-fixture" / f"{sid}.jsonl"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"type": "user", "sessionId": sid}) + "\n", encoding="utf-8")
 
     def library(self, extra=None):
         env = {"HERDR_PANE_ID": PANE}
@@ -4332,6 +4341,7 @@ class TidyOneCallTest(TidyCase):
         self.fake_herdr.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         self.fake_herdr.chmod(0o755)
         self.started = []
+        self.claude_without_agents("sid-A", "sid-B")
 
     reservation = ClearBookingTest.reservation
 
@@ -4656,6 +4666,7 @@ class ClearHelperTest(TidyCase):
                       "HEARTING_TIDY_HERDR": str(self.fake_herdr), "HEARTING_TIDY_CLEAR_OBSERVE": "0.3",
                       "AGENT_DISPATCH_JOBS": str(self.jobs)}
         self.calls = []
+        self.claude_without_agents("sid-A", "sid-B")
 
     def test_helper_env_keeps_the_herdr_socket_but_not_the_callers_pane(self):
         env = clear._helper_env({"HERDR_PANE_ID": PANE, "HERDR_TAB_ID": "t", "HERDR_ENV": "1",
@@ -5207,6 +5218,252 @@ class ContinueHelperTest(TidyCase):
             self.assertEqual(clear.validate_request(path, req["nonce"]), (None, "superseded"))  # no second clear
 
 
+class BackgroundAgentCompactTest(TidyCase):
+    """A Claude window whose native background agents still run is compacted, never cleared."""
+
+    def setUp(self):
+        super().setUp()
+        self.fake_herdr = self.iso.root / "fake-herdr"
+        self.fake_herdr.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        self.fake_herdr.chmod(0o755)
+        self.extra = {"HERDR_PANE_ID": PANE, "HEARTING_TIDY_TEST_ROOT": str(self.iso.root),
+                      "HEARTING_TIDY_HERDR": str(self.fake_herdr), "HEARTING_TIDY_CLEAR_OBSERVE": "0.3",
+                      "HEARTING_TIDY_COMPACT_CONFIRM": "30"}
+        self.transcript = self.iso.claude_dir / "projects" / "-proj" / "sid-A.jsonl"
+        self.transcript.parent.mkdir(parents=True)
+        self.write_row({"type": "user", "sessionId": "sid-A", "message": {"content": "work"}})
+        self.agents = self.transcript.with_suffix("") / "subagents"
+        self.calls = []
+
+    def write_row(self, row, path=None):
+        with open(path or self.transcript, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row) + "\n")
+
+    def agent(self, agent_id, **meta):
+        self.agents.mkdir(parents=True, exist_ok=True)
+        record = {"agentType": "deep", "toolUseId": "toolu_" + agent_id, "requestShape": "background", **meta}
+        (self.agents / f"agent-{agent_id}.meta.json").write_text(json.dumps(record), encoding="utf-8")
+
+    def notify(self, agent_id, path=None, *, waiting=False, at=None):
+        at = at or datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+        summary = (f'<summary>Agent "{agent_id}" is waiting on its own background work</summary>'
+                   if waiting else f'<summary>Agent "{agent_id}" completed</summary>')
+        self.write_row({"type": "user", "timestamp": at, "message": {"content": (
+            f"<task-notification>\n<task-id>{agent_id}</task-id>\n<status>completed</status>\n"
+            f"{summary}\n</task-notification>")}}, path)
+
+    def running(self):
+        with self.iso.patched_environ(self.extra):
+            return clear.background_agents_running("claude", "sid-A")
+
+    def booked(self):
+        with self.iso.patched_environ(self.extra), mock.patch.object(clear, "_start_helper", return_value=1):
+            seat = st.resolve_seat("claude", str(self.cwd))
+            with st.seat_lock(seat.key):
+                st.write_card(seat, "claude", "sid-A", "진행 중: 시험\n다음 할 일: 표식 쓰기",
+                              prompt_seq=st.read_prompt_seq(seat))
+            item = runner.enqueue_item(seat, "claude", "sid-A", str(self.cwd), str(self.transcript), start=False)
+            clear.schedule_for_enqueue(seat, "claude", "sid-A", str(self.cwd), queue_id=item["id"])
+            return seat, clear.read_reservation(seat.key)
+
+    def run_helper(self, seat, req, during_send):
+        def steward(path, nonce, _pane):
+            claim, why = clear.claim_clear(path, nonce)       # the steward's own one claim
+            self.calls.append(("send", (claim or {}).get("clear_claim", {}).get("command", "clear"), why))
+            return during_send(claim)
+
+        def continuer(path, nonce, _pane):
+            held = clear.read_reservation(seat.key)
+            self.calls.append(("continue", held.get("new_session")))
+            return {"continued": "true"}
+        with self.iso.patched_environ(self.extra):
+            return clear.run_helper(seat.key, req["nonce"], wait=lambda *_a: "idle", steward=steward,
+                                    continuer=continuer, sleep=lambda _s: None)
+
+    def test_agent_records_decide_whether_background_agents_still_run(self):
+        self.assertFalse(self.running())                          # no subagent record at all
+        self.agent("a1", finished=True)
+        self.assertTrue(self.running())                           # finished, its notice not delivered yet
+        self.notify("a1")
+        self.agent("a2", requestShape="foreground")               # ran inside its turn
+        self.assertFalse(self.running())
+        self.agent("a3")                                          # launched, not finished
+        self.assertTrue(self.running())
+        self.notify("a3")                                         # older records carry no finished flag
+        self.assertFalse(self.running())
+        self.agent("a4", parentAgentId="a3")                      # launched by an agent
+        self.assertTrue(self.running())
+        self.notify("a4", self.agents / "agent-a3.jsonl")         # reaches a3, which then reports
+        self.notify("a3")
+        self.assertFalse(self.running())
+        with self.iso.patched_environ(self.extra):
+            self.assertFalse(clear.background_agents_running("codex", "sid-A"))
+
+    def test_waiting_or_resumed_agents_still_run_and_unknowns_compact(self):
+        self.agent("a1", finished=True)
+        self.notify("a1", waiting=True, at="2026-11-03T14:00:00.000Z")   # waits on its own Bash
+        self.assertTrue(self.running())
+        self.notify("a1", at="2026-11-03T14:05:00.000Z")                 # then really finished
+        self.assertFalse(self.running())
+        transcript = self.agents / "agent-a1.jsonl"                       # SendMessage resumed it
+        transcript.write_text("{}\n", encoding="utf-8")
+        resumed = datetime.datetime(2026, 11, 3, 14, 7, tzinfo=datetime.timezone.utc).timestamp()
+        os.utime(transcript, (resumed, resumed))
+        self.assertTrue(self.running())
+        os.utime(transcript, (resumed - 120, resumed - 120))             # last write before the notice
+        self.assertFalse(self.running())
+        # A notice is queued, then delivered later; its enqueue time is the one that counts.
+        self.agent("a2", finished=True)
+        for at in ("2026-11-03T14:10:00.000Z", "2026-11-03T14:10:10.000Z"):
+            self.notify("a2", at=at)
+        written = self.agents / "agent-a2.jsonl"
+        written.write_text("{}\n", encoding="utf-8")
+        resumed = datetime.datetime(2026, 11, 3, 14, 10, 6, tzinfo=datetime.timezone.utc).timestamp()
+        os.utime(written, (resumed, resumed))                             # woken 6 s after enqueue
+        self.assertTrue(self.running())
+        written.unlink()
+        (self.agents / "agent-a5.meta.json").write_text("{not json", encoding="utf-8")
+        self.assertTrue(self.running())                           # unreadable counts as running
+        (self.agents / "agent-a5.meta.json").unlink()
+        self.transcript.rename(self.transcript.with_suffix(".moved"))
+        self.assertTrue(self.running())                           # no transcript: undecidable
+
+    def test_running_agents_book_compact_confirmed_by_the_boundary_and_continue_the_same_session(self):
+        import dispatch_seat_handover as handover
+        self.agent("a1")
+        seat, req = self.booked()
+
+        def compacted(claim):
+            self.assertEqual(claim["clear_claim"]["command"], "compact")
+            self.write_row({"type": "system", "subtype": "compact_boundary", "sessionId": "sid-A",
+                            "compactMetadata": {"trigger": "manual"}})
+            return {"cleared": "unverified", "reason": "compact-pending"}
+        self.assertEqual(self.run_helper(seat, req, compacted), "continued")
+        self.assertEqual(self.calls, [("send", "compact", ""), ("continue", "sid-A")])
+        with self.iso.patched_environ(self.extra):
+            held = clear.read_reservation(seat.key)
+            self.assertIsNone(handover.read_snapshot(seat.key))   # no successor, no snapshot
+        self.assertEqual((held["status"], held["new_session"], held["clear_command"], held["snapshot_state"]),
+                         ("cleared", "sid-A", "compact", "not-applicable"))
+        self.assertEqual(held["continued"]["state"], "sent")
+
+    def test_the_postcompact_row_confirms_it_without_a_second_memory_tidy_or_card(self):
+        self.agent("a1")
+        seat, req = self.booked()
+        caller = self.logical_seat(seat, "claude", "sid-A")
+        with self.iso.patched_environ(self.extra):
+            queue_before = [item["id"] for item in runner.list_items()]
+            generation = st.read_latest_card(caller)["generation"]
+        hook = []
+
+        def compacted(_claim):
+            hook.append(st.run_hook("claude", "compact", "sid-A", cwd=str(self.cwd), phase="after",
+                                    compact_summary="자동 요약", compact_context={"trigger": "manual"}))
+            return {"cleared": "unverified", "reason": "compact-pending"}
+        self.assertEqual(self.run_helper(seat, req, compacted), "continued")
+        self.assertEqual(hook, ["booking=skipped reason=tidy-compact"])
+        with self.iso.patched_environ(self.extra):
+            self.assertEqual([item["id"] for item in runner.list_items()], queue_before)
+            self.assertEqual(st.read_latest_card(caller)["generation"], generation)
+            held = clear.read_reservation(seat.key)
+        self.assertEqual(held["compact_event"]["queue_id"], req["queue_id"])
+        self.assertEqual(self.calls[-1], ("continue", "sid-A"))
+
+    def test_an_unconfirmed_compact_is_not_continued_and_not_retyped(self):
+        self.agent("a1")
+        seat, req = self.booked()
+        self.extra["HEARTING_TIDY_COMPACT_CONFIRM"] = "0"
+        outcome = self.run_helper(seat, req, lambda _claim: {"cleared": "unverified", "reason": "compact-pending"})
+        self.assertEqual(outcome, "unverified")
+        self.assertEqual(self.calls, [("send", "compact", "")])
+
+    def test_without_background_agents_the_clear_is_unchanged(self):
+        self.agent("a1", finished=True)
+        self.notify("a1")
+        seat, req = self.booked()
+
+        def cleared(claim):
+            self.assertNotIn("command", claim["clear_claim"])
+            return {"cleared": "true", "new_session": "sid-B"}
+        self.assertEqual(self.run_helper(seat, req, cleared), "continued")
+        self.assertEqual(self.calls, [("send", "clear", ""), ("continue", "sid-B")])
+        with self.iso.patched_environ(self.extra):
+            held = clear.read_reservation(seat.key)
+        self.assertNotIn("clear_command", held)
+        self.assertEqual(held["snapshot_state"], "ready")
+
+    def test_a_task_notification_is_not_human_input_and_keeps_a_compact_booking(self):
+        notice = "<task-notification>\n<task-id>a1</task-id>\n<status>completed</status>\n</task-notification>"
+        self.agent("a1")
+        seat, req = self.booked()
+        caller = self.logical_seat(seat, "claude", "sid-A")
+        with self.iso.patched_environ(self.extra):
+            path = clear.reservation_path(seat.key)
+            self.assertTrue(clear.mark_compact(seat.key, "claude", "sid-A"))
+            frontier = st.real_prompt_frontier(seat, "claude", "sid-A")
+            st.run_hook("claude", "prompt", "sid-A", cwd=str(self.cwd), prompt_text=notice)
+            self.assertEqual(st.read_prompt_seq(caller), req["prompt_seq"] + 1)       # new content
+            self.assertEqual(st.prompt_state(caller)["source"], "notification")
+            self.assertEqual(st.real_prompt_frontier(seat, "claude", "sid-A"), frontier)  # no rearm
+            held, why = clear.validate_request(path, req["nonce"])
+            self.assertEqual((why, held and held["status"]), ("", "reserved"))     # /compact keeps it
+            held = clear.read_reservation(seat.key)
+            held.pop("clear_command")
+            booked_seat = clear._booking_at(path)[1]
+            # An automatic clear would miss that turn; a tidy the person ran compacts at its claim.
+            self.assertEqual(clear._unchanged_since_card({**held, "origin": "idle"}, booked_seat),
+                             "notification-turn")
+            self.assertEqual(clear._unchanged_since_card(held, booked_seat), "")
+            st.run_hook("claude", "prompt", "sid-A", cwd=str(self.cwd), prompt_text="사람이 친 말")
+            self.assertEqual(clear.validate_request(path, req["nonce"])[1], "new-input")  # the person did
+
+    def test_a_task_notification_turns_a_manual_tidy_into_a_compact_not_a_cancel(self):
+        notice = "<task-notification>\n<task-id>bx1</task-id>\n<status>completed</status>\n</task-notification>"
+        seat, req = self.booked()                                   # the person ran tidy; no agent
+        with self.iso.patched_environ(self.extra):
+            st.run_hook("claude", "prompt", "sid-A", cwd=str(self.cwd), prompt_text=notice)
+
+        def compacted(claim):
+            self.write_row({"type": "system", "subtype": "compact_boundary", "sessionId": "sid-A"})
+            return {"cleared": "unverified", "reason": "compact-pending"}
+        self.assertEqual(self.run_helper(seat, req, compacted), "continued")
+        self.assertEqual(self.calls, [("send", "compact", ""), ("continue", "sid-A")])
+        with self.iso.patched_environ(self.extra):
+            held = clear.read_reservation(seat.key)
+        self.assertEqual((held["status"], held["new_session"], held["clear_command"]),
+                         ("cleared", "sid-A", "compact"))
+
+    def test_a_failed_manual_compact_names_compact_as_the_next_step(self):
+        for outcome, reason in (("unverified", "compact-pending"), ("failed", "herdr-exit-1"),
+                                ("skipped", "draft")):
+            text = clear._notice_text(outcome, reason, "claude", compact=True)
+            self.assertIn("/compact 하세요", text)
+            self.assertNotIn("/clear 하세요", text)
+            self.assertNotIn("새 창", text)
+        self.assertIn("/clear 하세요", clear._notice_text("failed", "herdr-exit-1", "claude"))   # clear unchanged
+
+    def test_tidy_says_once_that_background_agents_make_it_a_compact(self):
+        def tidy():
+            args = SimpleNamespace(harness="claude", session_id="sid-A", cwd=str(self.cwd), file=None,
+                                   text="진행 중: 한 번에\n다음 할 일: 기다림", no_clear=False,
+                                   no_continue=False, handoff=None)
+            out = io.StringIO()
+            with self.iso.patched_environ(self.extra), contextlib.redirect_stdout(out), \
+                    mock.patch.object(clear, "_start_helper", return_value=4242), \
+                    mock.patch.object(runner, "start_detached", return_value=None):
+                self.assertEqual(st.cmd_tidy(args), 0)
+                seat = st.resolve_seat("claude", str(self.cwd))
+                held = clear.read_reservation(seat.key)
+            return [line for line in out.getvalue().splitlines() if line.startswith("say=")], held
+        said, held = tidy()
+        self.assertEqual(len(said), 1)
+        self.assertNotIn("clear_command", held)
+        self.agent("a1")
+        said, held = tidy()
+        self.assertEqual(said[1:], ["say=백그라운드 에이전트가 있어 /compact로 정리"])
+        self.assertEqual((held["clear_command"], held["snapshot_state"]), ("compact", "not-applicable"))
+
+
 class SeatHandoverTest(TidyCase):
     """A cleared window's successor at the same pane answers for the predecessor's depth-1 attempts."""
 
@@ -5226,6 +5483,7 @@ class SeatHandoverTest(TidyCase):
         self.jobs = self.iso.root / "dispatch" / "jobs.log"
         self.jobs.parent.mkdir()
         self.rows = []
+        self.claude_without_agents("sid-A", "sid-B", "sid-C")
         import dispatch_seat_handover as handover
         self.handover = handover
 

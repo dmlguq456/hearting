@@ -11934,12 +11934,21 @@ def cmd_clear(args):
     req, why = clear.claim_clear(args.request, args.nonce)
     if req is None:
         return finish("skipped", why, agent)
+    compacting = (req.get("clear_claim") or {}).get("command") == "compact"
+    if compacting:
+        command = clear.COMPACT_COMMAND     # background agents keep running in the same session
     before = _codex_footer_threads(lines) if harness == "codex" else set()
     rc, payload = _herdr_prompt(target, command, wait=False, timeout_ms=_PROMPT_VERIFY_TIMEOUT_MS)
     if rc is None:
         return finish("failed", "herdr-invocation-failed", agent)
     if rc != 0:
         return finish("failed", _herdr_error_reason(payload, rc), agent)
+    if compacting:
+        # The session id stays; the helper waits (bounded) for the compaction evidence.
+        if clear.compact_confirmed(_read_json(Path(args.request)) or {}):
+            new_session = old_sid
+            return finish("true", None, agent)
+        return finish("unverified", "compact-pending", agent)
     new_session = _clear_observe(target, req, args.request, before)
     if new_session is None:
         return finish("unverified", "new-session-not-observed", agent)

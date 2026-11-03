@@ -89,6 +89,30 @@ class IdleObserverTests(unittest.TestCase):
                              (first["nonce"], first["idle"]["due_at"]))
             self.assertEqual(self.started, [first["nonce"]])
 
+    def test_the_documented_off_switch_books_no_idle_tidy(self):
+        # Exactly the example the request text and capabilities/session-tidy.md give.
+        config = self.iso.xdg_config / "hearting" / "session-tidy.json"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text('{"idle": {"enabled": false}}', encoding="utf-8")
+        with self.iso.patched_environ(self.extra), \
+                mock.patch.object(clear, "herdr_command", return_value=str(self.iso.root / "fake-herdr")), \
+                mock.patch.object(clear, "_start_helper", side_effect=lambda key, nonce: self.started.append(nonce) or 1):
+            self.assertEqual(self.observe_claude(tokens=900000), "booking=off")
+            seat = st.resolve_seat("claude", str(self.cwd), sid="sid-A")
+            self.assertIsNone(clear.read_reservation(seat.key))
+            texts = {harness: clear.idle_card_request_text(
+                {"nonce": "n1", "origin": "idle", "harness": harness,
+                 "idle": {"min_tokens": 200000, "wait_seconds": 3240}})
+                for harness in ("claude", "codex", "opencode")}
+            failed = clear.idle_tidy_terms({"harness": "codex"}, request=False)
+        self.assertEqual(self.started, [])
+        for text in texts.values():
+            for shown in ("20만 토큰 이상", "약 54분", "입력창이 비어", "질문·확인 창",
+                          '{"idle": {"enabled": false}}', "hearting/session-tidy.json"):
+                self.assertIn(shown, text)
+        self.assertIn("/compact", texts["claude"])            # only Claude windows compact for agents
+        self.assertNotIn("/compact", texts["codex"] + texts["opencode"] + failed)
+
     def test_threshold_unknown_and_worker_signals_fail_closed(self):
         with self.iso.patched_environ(self.extra), mock.patch.object(clear, "herdr_command", return_value="fake"), \
              mock.patch.object(clear, "_start_helper", return_value=12345):
@@ -674,6 +698,26 @@ class IdleObserverTests(unittest.TestCase):
             frontier = st.real_prompt_frontier(seat, "claude", "sid-A")
             self.assertEqual((saved_claim["state"], saved_claim["arrival_seq"]), ("arrived", 1))
             self.assertEqual((prompt_state["source"], frontier["sequence"]), ("real", prompt_state["seq"]))
+
+    def test_a_task_notification_after_the_idle_booking_still_lets_the_request_go(self):
+        notice = "<task-notification>\n<task-id>bx1</task-id>\n<status>completed</status>\n</task-notification>"
+        with self.iso.patched_environ(self.extra), \
+                mock.patch.object(clear, "herdr_command", return_value=str(self.iso.root / "fake-herdr")), \
+                mock.patch.object(clear, "_start_helper", return_value=12345):
+            self.assertEqual(self.observe_claude(), "booking=scheduled")
+            seat = st.resolve_seat("claude", str(self.cwd), sid="sid-A")
+            path = clear.reservation_path(seat.key)
+            nonce = clear.read_reservation(seat.key)["nonce"]
+            st.run_hook("claude", "prompt", "sid-A", cwd=str(self.cwd), prompt_text=notice)
+            # Its own turn's Stop neither rearms nor replaces the booking.
+            self.assertEqual(self.observe_claude(event_id="turn-notice", now=1100),
+                             "booking=skipped reason=not-rearmed")
+            held, why = clear.validate_idle_request(path, nonce, now=4241)
+            self.assertEqual((why, held and held["status"]), ("", "reserved"))
+            st.run_hook("claude", "prompt", "sid-A", cwd=str(self.cwd), prompt_text="사람이 친 말")
+            self.assertEqual(clear.validate_idle_request(path, nonce, now=4241)[1], "superseded")
+            held = clear.read_reservation(seat.key)
+            self.assertEqual((held["status"], held["reason"]), ("cancelled", "new-input"))   # the person did
 
     def test_detached_launcher_keeps_pane_hint_and_strips_worker_context(self):
         captured = {}

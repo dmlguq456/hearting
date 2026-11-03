@@ -1126,6 +1126,8 @@ def mark_prompt_source(seat: Seat, harness: str, sid: str, sequence: int, source
         current["claim_id"] = claim_id[:96]
     else:
         current.pop("claim_id", None)
+    if source == "notification" and type(current.get("prior_human_seq")) is int:
+        current["last_human_seq"] = current["prior_human_seq"]
     atomic_write_json(path, current)
 
 
@@ -2719,10 +2721,27 @@ def bump_prompt_seq(seat: Seat, harness: str, sid: str, now: float) -> int:
     folds old ones. The source tag is filled immediately by the shared claim classifier.
     """
     seat = session_seat(seat, harness, sid)
+    previous = read_json(_prompt_seq_path(seat))
     seq = read_prompt_seq(seat) + 1
+    prior_human = last_human_prompt_seq(seat) if isinstance(previous, dict) else 0
     atomic_write_json(_prompt_seq_path(seat), {"schema": SCHEMA, "seq": seq, "at": now,
-                                              "harness": harness, "sid": sid, "source": "pending"})
+                                              "harness": harness, "sid": sid, "source": "pending",
+                                              "last_human_seq": seq, "prior_human_seq": prior_human})
     return seq
+
+
+def last_human_prompt_seq(seat: Seat) -> int:
+    """The newest prompt boundary that was not a runtime task notification (older files: the newest)."""
+    current = read_json(_prompt_seq_path(seat))
+    if not isinstance(current, dict):
+        return 0
+    value = current.get("last_human_seq", current.get("seq", 0))
+    return value if type(value) is int and value >= 0 else int(current.get("seq", 0) or 0)
+
+
+def is_task_notification(prompt_text: str) -> bool:
+    """A turn the runtime started for a finished background task (Claude ``<task-notification>``)."""
+    return isinstance(prompt_text, str) and prompt_text.lstrip().startswith("<task-notification>")
 
 
 def _current_request_origin(prompt_text: str, harness: str, sid: str) -> Optional[dict]:
@@ -3097,8 +3116,13 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
             return text
         if event == "prompt":
             sequence = bump_prompt_seq(seat, harness, sid, now)
-            request_origin = _current_request_origin(prompt_text, harness, sid)
-            if request_origin:
+            notification = is_task_notification(prompt_text)
+            request_origin = None if notification else _current_request_origin(prompt_text, harness, sid)
+            if notification:
+                # A finished background task reporting back is new content, not the person:
+                # it neither answers a wait nor rearms or cancels automatic tidy.
+                mark_prompt_source(seat, harness, sid, sequence, "notification")
+            elif request_origin:
                 record_prompt_origin(seat, harness, sid, sequence, request_origin)
             else:
                 # A physical user prompt closes this exact seat's marked wait.
@@ -3108,7 +3132,8 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
                     human_wait_state.close_signal(seat.key, sequence=sequence)
             with contextlib.suppress(BaseException):
                 import session_tidy_clear as clear
-                if not clear.observe_prompt_locked(seat, harness, sid, prompt_text, now, sequence):
+                if not notification and not clear.observe_prompt_locked(seat, harness, sid, prompt_text,
+                                                                        now, sequence):
                     clear.note_real_prompt_locked(seat, harness, sid, sequence, now)
         sessions = session_summary(seat)
         prior = sessions.get((harness, sid))
@@ -3407,6 +3432,7 @@ def _run_compact_after(harness: str, sid: str, summary: str, *, cwd: str, transc
     record_error = ""
     preserve_idle = False
     compact_request_in_progress = False
+    tidy_compact = False
     expected_booking_nonce: Optional[str] = None
     inherit_continue_off = False
     try:
@@ -3451,13 +3477,26 @@ def _run_compact_after(harness: str, sid: str, summary: str, *, cwd: str, transc
             compact_request_in_progress = bool(same_session and held.get("origin") == "compact"
                                                and held.get("status") == "reserved"
                                                and (held.get("compact") or {}).get("card_request_required"))
+            # The /compact a tidy booking typed (background agents kept the window): its
+            # memory tidy is the booking's queue item and its card is the booked one.
+            claim = (held or {}).get("clear_claim") if isinstance((held or {}).get("clear_claim"), dict) else {}
+            tidy_compact = bool(same_session and claim.get("command") == "compact"
+                                and claim.get("state") in ("sending", "sent")
+                                and held.get("status") in ("reserved", "cleared", "unverified")
+                                and not held.get("compact_event")
+                                and now >= float(claim.get("at", 0) or 0))
+            if tidy_compact:
+                held["compact_event"] = {"identity": context["identity"], "at": now,
+                                         "operation_id": str(held.get("operation_id") or ""),
+                                         "queue_id": str(held.get("queue_id") or "")}
+                clear._write_reservation(held)
             if not ledger_event:
                 compacting = not (prior and now - prior["last_compact_at"] < COMPACT_DEDUPE_SEC)
                 record_event(seat, harness, sid, "compact", source="compact",
                              transcript=context["transcript"] or (prior or {}).get("transcript", ""),
                              cwd=cwd, now=now, bump_epoch=compacting,
                              compact_identity=context["identity"], compact_context=context)
-            if not preserve_idle and not compact_request_in_progress and not codex_auto \
+            if not preserve_idle and not compact_request_in_progress and not codex_auto and not tidy_compact \
                     and body and not card_duplicate and not newer_card and seat.kind in COMPACT_CARD_SEAT_KINDS:
                 try:
                     card = write_card(seat, harness, sid, body, cwd=cwd, now=now,
@@ -3504,6 +3543,8 @@ def _run_compact_after(harness: str, sid: str, summary: str, *, cwd: str, transc
         except BaseException as exc:  # noqa: BLE001 - the ledger event lets an ordinary hook retry
             return f"booking=pending reason=queue-write-{type(exc).__name__}"
 
+    if tidy_compact:
+        return "booking=skipped reason=tidy-compact"
     if preserve_idle:
         return "booking=skipped reason=idle-origin-preserved"
     if compact_request_in_progress and not (ledger_event and
@@ -3874,6 +3915,14 @@ def cmd_tidy(args) -> int:
         print(handoff_line)
     origin = str((idle_context or {}).get("origin") or "")
     print("say=" + tidy_report_line(line, handoff=handoff, origin=origin, harness=caller[1]))
+    if caller[1] == "claude" and "clear=scheduled" in line.split():
+        compact = False
+        with contextlib.suppress(BaseException):
+            import session_tidy_clear as clear
+            compact = clear.background_agents_running("claude", caller[2], caller[0]) \
+                and clear.mark_compact(caller[0].key, "claude", caller[2])
+        if compact:
+            print("say=" + _ui_translator()("tidy.say.compact_for_agents"))
     return code
 
 

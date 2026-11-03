@@ -10272,9 +10272,20 @@ class ClearTest(_TmpRootMixin, unittest.TestCase):
         self.st, self.clear = st, clear
         self.seat = st.Seat("pane", st._digest("pane", "w1:pX"), "w1:pX", "claude", "")
         self.path = clear.reservation_path(self.seat.key)
+        self.claude_transcript("sid-A")
+
+    def claude_transcript(self, sid):
+        """A Claude session that never launched a background agent (no subagents folder)."""
+        path = Path(os.environ["HOME"]) / ".claude" / "projects" / "-proj" / f"{sid}.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists():
+            path.write_text(json.dumps({"type": "user", "sessionId": sid}) + "\n", encoding="utf-8")
+        return path
 
     def book(self, harness="claude", sid="sid-A", pane="w1:pX", seq=0, deadline_in=600):
         st, clear = self.st, self.clear
+        if harness == "claude":
+            self.claude_transcript(sid)
         seat = st.Seat("pane", st._digest("pane", pane), pane, harness, "")
         now = time.time()
         with st.seat_lock(seat.key):
@@ -10312,6 +10323,23 @@ class ClearTest(_TmpRootMixin, unittest.TestCase):
         prompts = [c for c in world.calls if c[:3] == ["herdr", "agent", "prompt"]]
         self.assertEqual(prompts, [["herdr", "agent", "prompt", "w1:pX", "/clear"]])   # no trailer, no wait
         self.assertEqual([c for c in world.calls if c[:3] == ["herdr", "agent", "send-keys"]], [])
+
+    def test_background_agents_get_one_compact_and_the_helper_waits_for_its_evidence(self):
+        self.book()
+        transcript = self.claude_transcript("sid-A")
+        agents = transcript.with_suffix("") / "subagents"
+        agents.mkdir(parents=True)
+        (agents / "agent-a1.meta.json").write_text(json.dumps({"requestShape": "background"}), encoding="utf-8")
+        world = _ClearWorld(screens=[CLAUDE_EMPTY])
+        rc, line = self.clear_cmd(world)
+        self.assertEqual(rc, 5, line)
+        self.assertIn("cleared=unverified", line)
+        self.assertIn("reason=compact-pending", line)
+        prompts = [c for c in world.calls if c[:3] == ["herdr", "agent", "prompt"]]
+        self.assertEqual(prompts, [["herdr", "agent", "prompt", "w1:pX", "/compact"]])
+        claim = self.clear.read_reservation(self.seat.key)["clear_claim"]
+        self.assertEqual((claim["command"], claim["transcript"], claim["offset"]),
+                         ("compact", str(transcript), transcript.stat().st_size))
 
     def test_a_compact_booking_types_only_after_the_turn_ended_and_only_once(self):
         st, clear = self.st, self.clear

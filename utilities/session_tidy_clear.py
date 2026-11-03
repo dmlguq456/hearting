@@ -50,6 +50,7 @@ import shutil
 import subprocess
 import sys
 import time
+from datetime import datetime
 from typing import Callable, Optional
 
 HERE = Path(__file__).resolve().parent
@@ -66,6 +67,14 @@ OBSERVE_WAIT_SEC = 20.0
 STEWARD_TIMEOUT_SEC = 180.0
 # The built-in command that starts a fresh conversation in each harness.
 CLEAR_COMMAND = {"claude": "/clear", "codex": "/clear", "opencode": "/new"}
+# Typed instead of the clear while a Claude window still has native background agents:
+# compaction keeps the session, its agents and their results (see background_agents_running).
+COMPACT_COMMAND = "/compact"
+COMPACT_CONFIRM_SEC = 900.0          # compaction of ~950k tokens took 145 s (measured 2026-11-03)
+_TASK_ID = re.compile(rb"<task-id>([0-9A-Za-z_-]{1,80})</task-id>")
+_NOTICE = re.compile(rb"<task-notification>(.*?)</task-notification>", re.S)
+_WAITING = (b"waiting on its own background work", b"background work of its own")
+_RESUME_MARGIN_SEC = 5.0             # a finished agent's last write lands within 0.1 s of its notice
 # No-trailer body used by the exact-native attachment or the sealed pending-ref carrier.
 CONTINUE_TEXT = "이어서해"
 STATUS_ONLY_TEXT = "현재 카드 기준 현황만 짧게 표시하고 새 작업은 시작하지 말고 다음 입력을 기다리세요."
@@ -96,6 +105,8 @@ REASON_TEXT = {
     "usage-unknown": "현재 입력 토큰을 확인하지 못했습니다",
     "idle-card-not-accepted": "유휴 정리 카드를 접수하지 못했습니다",
 }
+# A clear booking whose card a later task-notification turn would miss: cancelled without a line.
+NOTIFICATION_TURN = "notification-turn"
 # Reasons after which this seat holds no card for the next session to receive.
 NO_CARD_REASONS = frozenset({"card-taken", "idle-card-not-accepted"})
 # Continue skips the person caused (or chose) themselves: no result line for these.
@@ -392,7 +403,10 @@ def validate_idle_request(path, nonce: Optional[str] = None, *, now: Optional[fl
         return None, "turn-not-ended"
     if now > float(req.get("deadline", 0) or 0):
         return None, "expired"
-    if st.read_prompt_seq(seat) != int(req.get("prompt_seq", -1)):
+    sequence, booked = st.read_prompt_seq(seat), int(req.get("prompt_seq", -1))
+    if sequence != booked and not _only_notifications_since(seat, booked, sequence):
+        # A task notification is not the person: the request follows its turn, so the
+        # card written in reply covers it.
         return None, "new-input"
     card = st.read_latest_card(seat)
     if (int(card.get("generation", 0) or 0) if card else 0) != int(req.get("card_generation", -1)):
@@ -419,6 +433,34 @@ def reply_card_guide(nonce: str) -> str:
             "턴이 끝나면 하팅이 이 답을 카드로 저장하고 기억 정리를 접수합니다. ")
 
 
+def idle_tidy_terms(req: Optional[dict] = None, *, request: bool = True) -> str:
+    """The real conditions of automatic idle tidy and how to turn it off, for the person.
+    ``request=False`` is the wording of its result line (which never suggests a clear)."""
+    from session_tidy_policy import DEFAULT_IDLE, config_path
+    idle = (req or {}).get("idle") if isinstance((req or {}).get("idle"), dict) else {}
+    tokens = idle.get("min_tokens", DEFAULT_IDLE["min_tokens"])
+    tokens = tokens if type(tokens) is int and tokens > 0 else DEFAULT_IDLE["min_tokens"]
+    try:
+        minutes = max(1, round(float(idle.get("wait_seconds", DEFAULT_IDLE["wait_seconds"])) / 60))
+    except (TypeError, ValueError):
+        minutes = round(DEFAULT_IDLE["wait_seconds"] / 60)
+    amount = f"{tokens // 10000}만" if tokens % 10000 == 0 else f"{tokens:,}"
+    path = config_path()
+    try:
+        shown = "~/" + str(path.relative_to(Path.home()))
+    except ValueError:
+        shown = str(path)
+    when = (f"마지막 요청 입력이 {amount} 토큰 이상이고, 턴이 끝난 뒤 사람 입력 없이 약 {minutes}분이 지났고, "
+            "화면이 쉬는 중이며 입력창이 비어 있고 질문·확인 창이 열려 있지 않을 때만")
+    off = f"끄려면 {shown}에 {{\"idle\": {{\"enabled\": false}}}}를 두세요."
+    claude = (req or {}).get("harness") == "claude"     # only Claude windows compact for agents
+    if not request:
+        agents = ", 백그라운드 에이전트가 있으면 창을 비우는 대신 /compact로 압축합니다" if claude else "합니다"
+        return f"자동 유휴 정리는 {when} 동작{agents}. {off}"
+    agents = "(백그라운드 에이전트가 있으면 /clear 대신 /compact)" if claude else ""
+    return f"{when} 이 요청을 보냅니다. 카드를 받으면 이 창을 비우고{agents} 현황만 짧게 보여 줍니다. {off}"
+
+
 def idle_card_request_text(req: dict) -> str:
     nonce = str(req.get("nonce") or "")
     if req.get("origin") == "compact":
@@ -427,7 +469,7 @@ def idle_card_request_text(req: dict) -> str:
                 "빈 요약을 만들거나 다음 작업을 시작하지 마세요. "
                 "이 요청이 끝나면 창 비우기와 이어서하기는 예약된 기존 절차가 처리합니다. "
                 f"요청 식별자: {nonce}")
-    return ("자동 유휴 정리 요청입니다. 지금까지의 이 대화만 바탕으로 session-tidy 카드를 쓰세요. "
+    return ("자동 유휴 정리 요청입니다. " + idle_tidy_terms(req) + " 지금까지의 이 대화만 바탕으로 session-tidy 카드를 쓰세요. "
             + reply_card_guide(nonce) +
             "별도 작업을 시작하거나 이어서 하지 말고, 답을 마치면 다음 입력을 기다리세요. "
             f"요청 식별자: {nonce}")
@@ -1167,12 +1209,179 @@ def _refresh_compact_card(req: dict, observation: dict) -> None:
         return
 
 
+def _claude_transcript(seat: Optional["st.Seat"], sid: str):
+    """The session's own transcript: the path its hooks recorded, else the runtime's projects."""
+    import tidy_transcripts as transcripts
+    hint = ""
+    if seat is not None:
+        with contextlib.suppress(Exception):
+            hint = str((st.session_summary(st.session_seat(seat, "claude", sid)).get(("claude", sid)) or {})
+                       .get("transcript") or "")
+    return transcripts.locate_transcript("claude", sid, hint or None)
+
+
+def background_agents_running(harness: str, sid: str, seat: Optional["st.Seat"] = None) -> bool:
+    """Whether this Claude session may still have native background agents that run or resume.
+
+    Claude keeps one ``subagents/agent-<id>.meta.json`` per Agent-tool launch beside the
+    session transcript, and reports each stop with a task notification (``<task-id>`` of the
+    agent) in the launching transcript. A background agent is over only when its last
+    notification is a final one and its own transcript was not written after it: a "waiting
+    on its own background work" notification or a later write (a SendMessage resume) means it
+    still runs, and so does a launch with no notification yet. A transcript or record that
+    cannot be found or read leaves the answer open, and then the window is compacted. A
+    session that never launched an agent has no ``subagents`` folder. Codex and OpenCode keep
+    their clear (see capabilities/session-tidy.md).
+    """
+    if harness != "claude" or not sid:
+        return False
+    try:
+        main = _claude_transcript(seat, sid)
+    except Exception:  # noqa: BLE001 - undecidable: keep the agents
+        return True
+    if main is None or main.suffix != ".jsonl":
+        return True
+    folder = main.with_suffix("") / "subagents"
+    try:
+        names = sorted(entry.name for entry in os.scandir(folder)
+                       if entry.name.startswith("agent-") and entry.name.endswith(".meta.json"))
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    launched = {}
+    for name in names:
+        try:
+            meta = json.loads((folder / name).read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError, UnicodeError):
+            return True
+        if not isinstance(meta, dict):
+            return True
+        if meta.get("requestShape") in (None, "background"):
+            launched[name[len("agent-"):-len(".meta.json")]] = str(meta.get("parentAgentId") or "")
+    if not launched:
+        return False
+    events: dict = {}       # (agent id, notification text) -> (earliest row epoch: its enqueue, "waiting")
+    sources = {main, *(folder / f"agent-{parent}.jsonl" for parent in launched.values() if parent)}
+    for source in sources:
+        try:
+            with open(source, "rb") as handle:
+                for line in handle:
+                    if b"<task-notification>" not in line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                        at = datetime.fromisoformat(str(row["timestamp"]).replace("Z", "+00:00")).timestamp()
+                    except (ValueError, KeyError, TypeError):
+                        continue
+                    for block in _NOTICE.findall(line):
+                        agent = _TASK_ID.search(block)
+                        if not agent:
+                            continue
+                        key = (agent.group(1).decode("ascii"), block)
+                        if at < events.get(key, (float("inf"), False))[0]:
+                            events[key] = (at, any(mark in block for mark in _WAITING))
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return True
+    notices: dict = {}      # agent id -> its newest notification (enqueued at, says "waiting")
+    for (agent_id, _block), event in events.items():
+        if event[0] >= notices.get(agent_id, (float("-inf"), False))[0]:
+            notices[agent_id] = event
+    for agent_id in launched:
+        notice = notices.get(agent_id)
+        if notice is None or notice[1]:
+            return True
+        try:
+            written = (folder / f"agent-{agent_id}.jsonl").stat().st_mtime
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return True
+        if written > notice[0] + _RESUME_MARGIN_SEC:
+            return True
+    return False
+
+
+def _compact_mode(req: dict) -> bool:
+    """Whether this booking's one window command is /compact (Claude with background agents)."""
+    if req.get("harness") != "claude":
+        return False
+    if req.get("clear_command") == "compact":
+        return True
+    seat = st.seat_from_dict(req["seat"]) if isinstance(req.get("seat"), dict) else None
+    return background_agents_running("claude", str(req.get("sid") or ""), seat)
+
+
+def mark_compact(seat_key: str, harness: str, sid: str, nonce: str = "") -> bool:
+    """Make this reserved, unclaimed Claude booking type /compact; it never goes back to the clear.
+
+    The same session continues after /compact, so a handover snapshot not taken yet is not
+    needed. Returns True when the booking now says compact."""
+    if harness != "claude":
+        return False
+    try:
+        with st.seat_lock(seat_key, wait=1.0):
+            req = read_reservation(seat_key)
+            if (not req or req.get("status") != "reserved" or (nonce and req.get("nonce") != nonce)
+                    or (req.get("harness"), req.get("sid")) != (harness, sid) or req.get("clear_claim")):
+                return False
+            if req.get("clear_command") == "compact" and req.get("snapshot_state") != "pending":
+                return True
+            req["clear_command"] = "compact"
+            if req.get("snapshot_state") == "pending":
+                req["snapshot_state"] = "not-applicable"
+            _write_reservation(req)
+            return True
+    except (OSError, TimeoutError, st.StateError):
+        return False     # the snapshot is taken as usual; the claim still types /compact
+
+
+def compact_confirmed(req: dict) -> bool:
+    """The booked session compacted after the /compact claim: a ``compact_boundary`` row after
+    the transcript end seen at the claim, or this session's PostCompact ledger row since then."""
+    claim = req.get("clear_claim") if isinstance(req.get("clear_claim"), dict) else {}
+    harness, sid = str(req.get("harness") or ""), str(req.get("sid") or "")
+    if claim.get("command") != "compact" or not sid:
+        return False
+    source, offset = str(claim.get("transcript") or ""), claim.get("offset")
+    if source and type(offset) is int and offset >= 0:
+        with contextlib.suppress(OSError):
+            with open(source, "rb") as handle:
+                handle.seek(offset)
+                for line in handle:
+                    if b'"compact_boundary"' not in line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except ValueError:
+                        continue
+                    if (isinstance(row, dict) and row.get("type") == "system"
+                            and row.get("subtype") == "compact_boundary"
+                            and row.get("sessionId") in (None, sid)):
+                        return True
+    try:
+        seat = _booked_seat(req, str((req.get("seat") or {}).get("key") or ""))
+        since = float(claim.get("at", 0) or 0)
+        return any(row.get("event") == "compact" and row.get("harness") == harness and row.get("sid") == sid
+                   and float(row.get("ts", 0) or 0) >= since for row in st._read_ledger_lines(seat))
+    except (OSError, ValueError, TypeError, st.StateError):
+        return False
+
+
 def _prepare_handover_snapshot(req: dict) -> bool:
     """Take the dispatch snapshot after durable queueing, outside the short hook's lock."""
     seat = st.session_seat(st.seat_from_dict(req["seat"]),
                            str(req.get("harness") or ""), str(req.get("sid") or ""))
     if seat.kind not in ("pane", "native"):
         return True
+    if ((_compact_mode(req) or _notified_manual_tidy(req, seat))
+            and mark_compact(seat.key, str(req.get("harness") or ""),
+                             str(req.get("sid") or ""), str(req.get("nonce") or ""))):
+        return True    # /compact keeps this session: there is no successor to hand over to
     import dispatch_seat_handover as handover
     try:
         bindings = handover.collect_snapshot_bindings(str(req.get("harness") or ""), str(req.get("sid") or ""))
@@ -1244,7 +1453,8 @@ def note_start_locked(seat: "st.Seat", harness: str, sid: str, now: float) -> No
 
 def _drop_unverified_notice(seat: "st.Seat", req: dict) -> None:
     """Remove the "could not confirm" line this booking left (caller holds the seat lock)."""
-    text = _notice_text("unverified", "", str(req.get("harness") or ""))
+    text = _notice_text("unverified", "", str(req.get("harness") or ""),
+                        compact=req.get("clear_command") == "compact")
     path = st._notices_path(seat)
     data = st.read_json(path)
     items = data.get("items") if isinstance(data, dict) else None
@@ -1314,7 +1524,30 @@ def _unchanged_since_card(req: dict, seat: "st.Seat") -> str:
     if observation is None:
         return "idle-card-observation-unavailable"
     card, sequence = observation
-    return _card_unchanged_reason(req, card, sequence)
+    reason = _card_unchanged_reason(req, card, sequence)
+    booked = int(req.get("prompt_seq", -1))
+    if reason == "new-input" and _only_notifications_since(seat, booked, sequence):
+        if req.get("clear_command") != "compact" and req.get("origin") in ("idle", "compact"):
+            # The card misses that turn, so no automatic clear; nobody typed, so no line.
+            return NOTIFICATION_TURN
+        # /compact keeps the notification turns; a tidy the person ran compacts at its claim
+        # instead of dropping them (see claim_clear).
+        reason = _card_unchanged_reason(req, card, booked)
+    return reason
+
+
+def _notified_manual_tidy(req: dict, seat: "st.Seat") -> bool:
+    """A tidy the person ran, followed only by task notifications since its card. It is kept,
+    not cancelled: /compact keeps that turn, where a clear would drop it."""
+    if req.get("origin") in ("idle", "compact"):
+        return False
+    observation = _card_frontier(seat)
+    return bool(observation and _only_notifications_since(seat, int(req.get("prompt_seq", -1)), observation[1]))
+
+
+def _only_notifications_since(seat: "st.Seat", booked: int, sequence: int) -> bool:
+    """Every prompt after ``booked`` up to ``sequence`` was a runtime task notification."""
+    return sequence > booked >= 0 and st.last_human_prompt_seq(seat) <= booked
 
 
 def _card_unchanged_reason(req: dict, card, sequence: int) -> str:
@@ -1458,12 +1691,22 @@ def claim_clear(path, nonce: Optional[str] = None):
     req, seat, reason = _booking_at(Path(path))
     if req is None:
         return None, reason
+    compact = _compact_mode(req) or _notified_manual_tidy(req, seat)   # outside the lock: own files
+    transcript, offset = "", None
+    if compact:
+        with contextlib.suppress(Exception):
+            found = _claude_transcript(seat, str(req.get("sid") or ""))
+            if found is not None:
+                transcript, offset = str(found), found.stat().st_size
     with st.seat_lock(seat.key):
         req, reason = validate_request(path, nonce)
         if req is None:
             return None, reason
         claim = {"state": "sending", "nonce": req["nonce"], "token": secrets.token_hex(12),
                  "at": st.now_epoch()}
+        if compact or req.get("clear_command") == "compact" or _notified_manual_tidy(req, seat):
+            claim.update(command="compact", transcript=transcript, offset=offset)
+            req["clear_command"] = "compact"
         req["clear_claim"] = claim
         _write_reservation(req)
         return {**req, "clear_claim": claim}, ""
@@ -1739,9 +1982,18 @@ def followup_text(req: dict) -> str:
     return STATUS_ONLY_TEXT if req.get("followup_kind") == "status-only" else CONTINUE_TEXT
 
 
-def _notice_text(outcome: str, reason: str, harness: str) -> str:
-    hint = CLEAR_COMMAND.get(harness, "/clear")
+def _notice_text(outcome: str, reason: str, harness: str, *, compact: bool = False) -> str:
     why = REASON_TEXT.get(reason, reason or "알 수 없음")
+    if compact:
+        # Background agents kept this window: the next step is the same /compact, never a clear.
+        kept = "" if reason in NO_CARD_REASONS else " 카드는 저장돼 있어 압축 뒤 이 세션이 받습니다."
+        if outcome == "unverified":
+            return ("[정리] 백그라운드 에이전트가 있어 /compact를 보냈지만 압축을 확인하지 못했습니다. "
+                    f"창 상태를 확인하고 압축되지 않았으면 /compact 하세요.{kept}")
+        verb = "실패했습니다" if outcome == "failed" else "하지 않았습니다"
+        return (f"[정리] 백그라운드 에이전트가 있어 /compact로 정리하려 했지만 {verb}({why}). "
+                f"필요하면 /compact 하세요(에이전트가 모두 끝난 뒤라면 /clear도 됩니다).{kept}")
+    hint = CLEAR_COMMAND.get(harness, "/clear")
     kept = "" if reason in NO_CARD_REASONS else f" 카드는 저장돼 있어 {hint} 하면 새 창이 카드를 받습니다."
     if outcome == "unverified":
         return f"[정리] 창 비우기를 요청했지만 결과를 확인하지 못했습니다. 창 상태를 확인하고 필요하면 {hint} 하세요.{kept}"
@@ -1796,6 +2048,8 @@ def _finish(seat_key: str, nonce: str, outcome: str, reason: str = "", *, observ
         if not req or req.get("nonce") != nonce or req.get("status") not in ("reserved", "unverified"):
             return False
         now = st.now_epoch()
+        if reason == NOTIFICATION_TURN:
+            outcome = "cancelled"
         req.update(status=outcome, reason=reason, finished=now)
         claim = req.get("clear_claim")
         if isinstance(claim, dict) and claim.get("state") == "sending":
@@ -1811,12 +2065,15 @@ def _finish(seat_key: str, nonce: str, outcome: str, reason: str = "", *, observ
             req["continued"] = {"state": "pending", "kind": kind,
                                 "deadline": now + _tunable("CONTINUE_WINDOW", CONTINUE_WINDOW_SEC)}
         _write_reservation(req)
-    if outcome != "cleared":
+    if outcome not in ("cleared", "cancelled"):
         with contextlib.suppress(BaseException):
-            if req.get("origin") in ("idle", "compact"):
+            if req.get("origin") == "idle":
+                notice = "[정리] 자동 유휴 정리의 창 전환을 확인하지 못했습니다. " + idle_tidy_terms(req, request=False)
+            elif req.get("origin") == "compact":
                 notice = "[정리] 자동 정리의 창 전환을 확인하지 못했습니다."
             else:
-                notice = _notice_text(outcome, reason, str(req.get("harness") or ""))
+                notice = _notice_text(outcome, reason, str(req.get("harness") or ""),
+                                      compact=req.get("clear_command") == "compact")
             st.write_notice(_booked_seat(req, seat_key), notice,
                             author_harness=str(req.get("harness") or ""), author_sid=str(req.get("sid") or ""))
     return True
@@ -2234,6 +2491,20 @@ def run_helper(seat_key: str, nonce: str, *, wait: Optional[Callable[[str, int],
     if outcome == "true":
         _finish(seat_key, nonce, "cleared", observed=verdict.get("new_session", ""))
         return _continue(seat_key, nonce, continuer, sleep=sleep)
+    held = read_reservation(seat_key) or {}
+    if outcome == "unverified" and (held.get("clear_claim") or {}).get("command") == "compact":
+        # /compact was typed once; the same session shows it ends (it takes minutes).
+        deadline = time.monotonic() + _tunable("COMPACT_CONFIRM", COMPACT_CONFIRM_SEC)
+        while True:
+            held = read_reservation(seat_key)
+            if not held or held.get("nonce") != nonce or held.get("status") != "reserved":
+                return "superseded"
+            if compact_confirmed(held):
+                _finish(seat_key, nonce, "cleared", observed=str(held.get("sid") or ""))
+                return _continue(seat_key, nonce, continuer, sleep=sleep)
+            if time.monotonic() >= deadline:
+                return "unverified" if _finish(seat_key, nonce, "unverified", reason) else "superseded"
+            sleep(COMPACT_POLL_SEC)
     if outcome == "unverified":
         # The clear was written once and never repeated; allow the new conversation's
         # start hook a short bounded window to show up before calling it unconfirmed.
