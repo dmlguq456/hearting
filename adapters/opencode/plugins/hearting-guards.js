@@ -65,7 +65,8 @@ let contextPolicyRuntimeVersion = null
 let contextPolicyRequestedWindow = null
 const frameNativeAnswer = path.join(root, "utilities", "frame_native_answer.py")
 const startReceipt = path.join(root, "utilities", "start_receipt.py")
-const routeGateTools = new Set(["write", "edit", "multiedit", "patch", "apply_patch", "bash"])
+// V2 names its shell tool `shell` (V1: `bash`); both reach the gate's one shell branch.
+const routeGateTools = new Set(["write", "edit", "multiedit", "patch", "apply_patch", "bash", "shell"])
 const designPattern = /(designs?\/|\/design\/|spec\/design|preview\.html$|slides?\.html$|03_components|scaffolds\/)/
 const promptBySession = new Map()
 const turnBySession = new Map()
@@ -1201,11 +1202,22 @@ async function setupOpenCodeV2(ctx) {
     if (command) forgetShellCommand(command, event.sessionID)
     await withSession(event.sessionID, async () => {
       const content = event.status === "completed" ? event.result?.content : []
+      // V2 carries the tool's own metadata on the result (the question tool's `answers`, the
+      // same shape V1 hands `tool.execute.after`); keep it so the shared hook reads one shape.
+      const metadata = event.status === "completed" && event.result?.metadata
+        && typeof event.result.metadata === "object" ? { ...event.result.metadata } : {}
       const output = { output: Array.isArray(content)
         ? content.map((part) => part?.text || "").filter(Boolean).join("\n") : "",
-        metadata: event.status === "error" ? { exit: 1 } : {} }
+        metadata: event.status === "error" ? { exit: 1 } : metadata }
       const originalText = output.output
       if (v2WorkerSessions.has(event.sessionID)) {
+        // A worker keeps only the shared contract's observations: the spec-read record
+        // (as the general hook below does for `read`) and the spec-sync nudge.
+        if (event.tool === "read" && event.status === "completed") {
+          const args = event.input || {}
+          const readFile = normalizeFile(ctx, args.filePath || args.path || args.file)
+          if (readFile) collectPreflight("read", [readFile, event.sessionID || "opencode-plugin"])
+        }
         await appendSpecSyncNudge(ctx, { tool: event.tool, sessionID: event.sessionID, args: event.input || {} }, output, root)
       } else {
         await hooks["tool.execute.after"]?.(
