@@ -369,7 +369,9 @@ def move_parked_consumer(jobs, row, target, request_id, *, session=None, spawn=N
                 caller = route_authority.caller_identity()[1]
             except (DispatchContractError, OSError, ValueError, TypeError):
                 caller = ""
-        if not route_authority.owns(metadata, caller, jobs):
+        # Only the effective parent moves it; an unreadable lineage (unknown) moves
+        # nothing now, and the next correction looks again.
+        if route_authority.owns(metadata, caller, jobs) is not True:
             return {}
         lease_path = supervisor_lease_path(jobs, attempt)
         if metadata.get("supervisor_lease_file") != str(lease_path):
@@ -453,7 +455,12 @@ def recover_consumer(jobs, attempt, *, session=None, spawn=None):
                 caller = route_authority.caller_identity()[1]
             except (DispatchContractError, OSError, ValueError, TypeError):
                 caller = ""
-        if not route_authority.owns(metadata, caller, jobs):
+        owned = route_authority.owns(metadata, caller, jobs)
+        if owned is None:
+            # Unknown is neither the parent nor another one: nothing is restored now and
+            # the correction stays queued for the next start or correct (LOOP §4).
+            return _recovery_result("not-started", route_authority.LINEAGE_UNREADABLE_WAIT.reason)
+        if not owned:
             return _recovery_result("awaiting-parent")
         if metadata.get("launch_claimed") != "1" or metadata.get("launch_started") != "1":
             return _recovery_result("not-started", "owner-launch-not-claimed")

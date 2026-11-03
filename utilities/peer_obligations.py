@@ -3854,6 +3854,10 @@ def bound_work_for_pane(pane: str, harness: str, session_id: str, *,
         if include_parent:
             parent_owned = seat_owns(metadata, session_id, jobs_path,
                                      read_context=read_context)
+            if parent_owned is None and not executor:
+                # Whose work this is cannot be read now: neither this session's nor
+                # another's, so the observation is unknown, as for an unreadable registry.
+                return (), "unknown"
             parent_harness = effective_parent_harness(
                 metadata, jobs_path, read_context=read_context)
         else:

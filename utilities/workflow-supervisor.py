@@ -3479,7 +3479,10 @@ def create_local_frame_gate_delivery(route, gate, artifact, jobs_path, epoch, *,
         if len(metadata) != 1:
             raise SupervisorError("frame-gate-parent-binding-mismatch")
         from dispatch_seat_handover import owns   # the launching session, or its same-seat successor
-        if not owns(metadata[0], session, Path(jobs_path)):
+        owned = owns(metadata[0], session, Path(jobs_path))
+        if owned is None:  # an unreadable lineage is no mismatch
+            note_same_work_drift("handover-unreadable", attempt)
+        elif not owned:
             note_same_work_drift("frame-gate-parent-binding-mismatch")
         attempts.append(attempt)
     # A pre-owner frame interview is already running in its interactive

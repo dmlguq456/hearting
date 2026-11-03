@@ -2969,5 +2969,35 @@ class OpenCodeV2EndpointIdentityTest(unittest.TestCase):
                          (first, second, self.api.calls))
 
 
+
+class WorkflowOwnerPersonContextTest(unittest.TestCase):
+    """RV-OWNS-TRI: an unreadable lineage is unknown (None), never "another parent"."""
+
+    def judge(self, owns):
+        import dispatch_seat_handover
+        import route_authority
+        metadata = {"parent_harness": "codex", "parent_sid": "sid-parent"}
+        base = {"owner": {"harness": "codex", "session_id": "sid-parent"}}
+        env = {key: value for key, value in os.environ.items()
+               if key not in {"AGENT_DISPATCH_REGISTERED_WORKER", "AGENT_DISPATCH_CHILD",
+                              "AGENT_DISPATCH_ATTEMPT_ID", "AGENT_DISPATCH_DEPTH"}}
+        owns_patch = (mock.patch.object(route_authority, "owns", side_effect=owns) if callable(owns)
+                      else mock.patch.object(route_authority, "owns", return_value=owns))
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(route_authority, "caller_identity", return_value=("codex", "sid-parent")), \
+                mock.patch.object(dispatch_seat_handover, "effective_parent", return_value="sid-parent"), \
+                mock.patch.object(dispatch_seat_handover, "effective_parent_harness", return_value="codex"), \
+                owns_patch:
+            return state._workflow_owner_person_context(base, metadata, Path("/nonexistent/jobs.log"))
+
+    def test_owner_not_owner_and_unknown_stay_distinct(self):
+        self.assertIs(self.judge(True), True)
+        self.assertIs(self.judge(False), False)
+        self.assertIsNone(self.judge(None))
+
+        def unreadable(*_args, **_kwargs):
+            raise OSError("lineage-directory-changed")
+        self.assertIsNone(self.judge(unreadable))
+
 if __name__ == "__main__":
     unittest.main()

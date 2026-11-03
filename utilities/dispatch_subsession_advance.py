@@ -1615,8 +1615,10 @@ class RealSubsessionAdvanceServices:
         """The caller is the registered parent attempt or its final launched replacement.
 
         An unreadable seat lineage (``parent_attempt_succeeded``'s wait) still reads as
-        "not the parent" here: this runs inside the owner's supervisor, which a raised wait
-        would end, and the chain has no wait before registration to hand it to.
+        "not the parent" here, a kept exception to the three-value rule (RV-1151 L2): this
+        runs inside the owner's supervisor, which a raised wait would end, and the chain's
+        only later-tick retry is the start phase's prelaunch wait (``_start_waits``). The
+        register phase that asks first has none, and giving it one is a new wait path.
         """
         import route_authority as RA
         caller = os.environ.get("AGENT_DISPATCH_ATTEMPT_ID")

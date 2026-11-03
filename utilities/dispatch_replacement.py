@@ -2278,6 +2278,8 @@ def parent_resume_eligibility(jobs, aid, *, route_id=None, environ=None, require
         validate_claim_source(jobs, lines, record)
         _children_quiescent(rows, aid)
         if require_parent:
+            # An unreadable lineage raises the recipient wait, which arms nothing here: unknown
+            # is not the parent, and the parent's own `start` raises the same wait itself.
             from session_identity import identity
             caller = identity(environ)
             if not caller.known or not caller.session_id:
