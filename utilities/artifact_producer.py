@@ -5931,19 +5931,6 @@ def finalize(
                 return {"status": "deferred", "reason": "files-changed-during-read", "cycle_id": cycle_id}
             if misses:
                 _reread_misses(prescan, misses)
-            if (prescan.error is not None or prescan.violations) and not adopt_root_outputs:
-                # The files as they stand refuse this close (`lstat` just confirmed the read), and
-                # nothing the locked section does changes a name or a link.  Refused here, the
-                # refusal holds no admission lock: a controller retrying a payload that still
-                # needs fixing no longer stalls every start of the root (W3, 2026-11-03: one
-                # such close was retried 3,719 times, each holding the lock for seconds).
-                # A cycle no longer open, or with a close journal to recover, takes the locked path.
-                current = read_cycle_record(root, cycle_id)
-                if (current is not None and current.get("state") == "open" and not current.get("deleted_at")
-                        and not _path_entry_present(journal_path(root, cycle_id))):
-                    if prescan.error is not None:
-                        raise prescan.error
-                    raise ProducerError("output-invalid", ";".join(prescan.violations))
         if lock_fd is None:
             lock_fd = artifact_admission._acquire_lock(
                 root, artifact_admission.LOCK_TIMEOUT_DEFAULT if lock_timeout is None else lock_timeout, now=now)
@@ -7523,7 +7510,10 @@ def _prescan_open_cycle(root: Path, record: Mapping[str, Any], *, exclude_hidden
         scan.error = error  # raised where the locked close always raised it
         return scan
     if scan.violations:
-        return scan  # the close is refused on these names; reading the files would decide nothing
+        # The close is refused on these names (`output-invalid`, raised where the locked close
+        # always raised it, after the refusals that come before it there); the digests of the
+        # other files would decide nothing, so none is read.
+        return scan
     bundle_dirs = [tree.directory for tree in scan.bundles]
     journal = _read_json(journal_path(root, cycle_id)) or {}
     owned_paths = {row.get("locator") for row in journal.get("directory_bundles", [])
