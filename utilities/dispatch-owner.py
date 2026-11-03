@@ -818,6 +818,7 @@ def run_owner_wrapper(argv: list[str], env: dict[str, str]) -> int:
 def main(argv):
     try:
         frame_degradation = None
+        first = None
         pair_model_profile = None
         pair_model_reason = "not-applicable"
         explicit, values, forwarded, route_evidence, derived = _parse(argv)
@@ -1178,8 +1179,11 @@ def main(argv):
                     from artifact_producer import prepare_route_artifact_env, ProducerError
                     try:
                         child_env.pop("AGENT_ARTIFACT_PARENT_OUTPUT_DIR", None)  # SD-163: no stale source
+                        # The alternative joins the cycle its live first leg's preparation began, and
+                        # that preparation already looked the root over: it is not walked again.
                         child_env.update(prepare_route_artifact_env(
-                            Path(binding.route_file), start="--start" in forwarded, jobs=Path(jobs)))
+                            Path(binding.route_file), start="--start" in forwarded, jobs=Path(jobs),
+                            sibling_looked=bool(first) and first.get("_status") in {"open", "running"}))
                     except ProducerError as exc:
                         raise OwnerError(f"{exc.code}:{exc.detail}") from exc
                 # Deliberately NOT export_owner_route_env() here. The adapters
