@@ -299,6 +299,7 @@ utility-deferred	worker-state-ledger.py
 utility-deferred	worker_bootstrap.test.py
 utility-deferred	worker_runtime_home.py
 utility-deferred	worker_dispatch_prompt.test.py
+utility-deferred	reusable_runtime_retention.py
 utility-deferred	worker_home_retention.py
 utility-deferred	worker_route_guard.test.py
 utility-deferred	workflow-supervisor.py
