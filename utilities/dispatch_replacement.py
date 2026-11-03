@@ -1446,6 +1446,35 @@ def claim(jobs: Path, aid: str, *, resume_capacity=False) -> dict:
         return record
 
 
+# Parent proofs whose completion carrier is also a bound replacement controller:
+# the Claude rewake hook (`runtime-hook`) and Codex managed completion
+# (`native-session`) pass `authority_check` to `advance`. A carrier proven only
+# by its environment (`carrier-env`, the OpenCode turn plugin) delivers notices
+# but never launches a replacement.
+REPLACEMENT_CARRIER_PROOFS = frozenset({'runtime-hook', 'native-session'})
+
+
+def _parent_carrier_replaces(metadata):
+    """Whether the row's declared parent carrier can launch its automatic replacement.
+
+    A carrier no adapter declares (an owner supervisor, a worker parent) keeps the
+    reservation, as before; only a declared parent carrier without a controller
+    is excluded.
+    """
+    carrier = metadata.get('parent_completion_delivery')
+    if not carrier:
+        return True
+    try:
+        from harness_capabilities import HARNESSES, parent_completion
+        declared = [parent_completion(name) for name in HARNESSES]
+    except (ImportError, OSError, ValueError, KeyError):
+        return True
+    for completion in declared:
+        if completion.get('carrier') == carrier:
+            return completion.get('parent_proof') in REPLACEMENT_CARRIER_PROOFS
+    return True
+
+
 def accept_terminal_delivery_duty(jobs, aid):
     """Publish an eligible automatic recovery claim before its notice is materialized.
 
@@ -1461,6 +1490,10 @@ def accept_terminal_delivery_duty(jobs, aid):
         return None
     row = rows.get(aid)
     if row is None or not row[1].get('delivery_intent'):
+        return None
+    if not _parent_carrier_replaces(row[1]):
+        # Nothing bound to this parent would launch the reservation, and it would
+        # only defer the notice: the parent gets the death notice and its `start`.
         return None
     try:
         kind = death_kind(row[0], row[1], jobs=jobs)
