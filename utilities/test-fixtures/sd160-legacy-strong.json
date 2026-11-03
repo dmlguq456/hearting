@@ -35,7 +35,7 @@
     }
   },
   "spec_touch": false,
-  "cwd": "/home/nas/user/Uihyeop/personal/hearting-wt/capacity-review-routing-0927",
+  "cwd": "/home/user/hearting-wt/capacity-review-routing-0927",
   "artifact_root": "/tmp/tmpqeb9l_3d",
   "source_commit": "63a929740b256f7515098fe50c47b999b7e503e7",
   "registry_digest": "sha256:4260c26aebc1ab2f5bbb722d1b77a0d3fe555504a4122ec5dd3c891dd8071f10",
@@ -245,7 +245,7 @@
               "probe_source": "frozen-old-compiler",
               "probe_time": "2026-09-27T00:00:00Z",
               "status": "supported",
-              "checked_worktree": "/home/nas/user/Uihyeop/personal/hearting-wt/capacity-review-routing-0927",
+              "checked_worktree": "/home/user/hearting-wt/capacity-review-routing-0927",
               "codex_command": "ok",
               "failure_scope": "none",
               "retry_on_isolated_worktree": 0
@@ -266,7 +266,7 @@
               "probe_source": "frozen-old-compiler",
               "probe_time": "2026-09-27T00:00:00Z",
               "status": "supported",
-              "checked_worktree": "/home/nas/user/Uihyeop/personal/hearting-wt/capacity-review-routing-0927",
+              "checked_worktree": "/home/user/hearting-wt/capacity-review-routing-0927",
               "codex_command": "not-applicable",
               "failure_scope": "none",
               "retry_on_isolated_worktree": 0
@@ -374,7 +374,7 @@
               "probe_source": "frozen-old-compiler",
               "probe_time": "2026-09-27T00:00:00Z",
               "status": "supported",
-              "checked_worktree": "/home/nas/user/Uihyeop/personal/hearting-wt/capacity-review-routing-0927",
+              "checked_worktree": "/home/user/hearting-wt/capacity-review-routing-0927",
               "codex_command": "ok",
               "failure_scope": "none",
               "retry_on_isolated_worktree": 0
@@ -395,7 +395,7 @@
               "probe_source": "frozen-old-compiler",
               "probe_time": "2026-09-27T00:00:00Z",
               "status": "supported",
-              "checked_worktree": "/home/nas/user/Uihyeop/personal/hearting-wt/capacity-review-routing-0927",
+              "checked_worktree": "/home/user/hearting-wt/capacity-review-routing-0927",
               "codex_command": "not-applicable",
               "failure_scope": "none",
               "retry_on_isolated_worktree": 0
@@ -500,7 +500,7 @@
               "probe_source": "frozen-old-compiler",
               "probe_time": "2026-09-27T00:00:00Z",
               "status": "supported",
-              "checked_worktree": "/home/nas/user/Uihyeop/personal/hearting-wt/capacity-review-routing-0927",
+              "checked_worktree": "/home/user/hearting-wt/capacity-review-routing-0927",
               "codex_command": "ok",
               "failure_scope": "none",
               "retry_on_isolated_worktree": 0
@@ -521,7 +521,7 @@
               "probe_source": "frozen-old-compiler",
               "probe_time": "2026-09-27T00:00:00Z",
               "status": "supported",
-              "checked_worktree": "/home/nas/user/Uihyeop/personal/hearting-wt/capacity-review-routing-0927",
+              "checked_worktree": "/home/user/hearting-wt/capacity-review-routing-0927",
               "codex_command": "not-applicable",
               "failure_scope": "none",
               "retry_on_isolated_worktree": 0
@@ -625,7 +625,7 @@
               "probe_source": "frozen-old-compiler",
               "probe_time": "2026-09-27T00:00:00Z",
               "status": "supported",
-              "checked_worktree": "/home/nas/user/Uihyeop/personal/hearting-wt/capacity-review-routing-0927",
+              "checked_worktree": "/home/user/hearting-wt/capacity-review-routing-0927",
               "codex_command": "ok",
               "failure_scope": "none",
               "retry_on_isolated_worktree": 0
@@ -646,7 +646,7 @@
               "probe_source": "frozen-old-compiler",
               "probe_time": "2026-09-27T00:00:00Z",
               "status": "supported",
-              "checked_worktree": "/home/nas/user/Uihyeop/personal/hearting-wt/capacity-review-routing-0927",
+              "checked_worktree": "/home/user/hearting-wt/capacity-review-routing-0927",
               "codex_command": "not-applicable",
               "failure_scope": "none",
               "retry_on_isolated_worktree": 0
@@ -759,7 +759,7 @@
               "probe_source": "frozen-old-compiler",
               "probe_time": "2026-09-27T00:00:00Z",
               "status": "supported",
-              "checked_worktree": "/home/nas/user/Uihyeop/personal/hearting-wt/capacity-review-routing-0927",
+              "checked_worktree": "/home/user/hearting-wt/capacity-review-routing-0927",
               "codex_command": "ok",
               "failure_scope": "none",
               "retry_on_isolated_worktree": 0
@@ -780,7 +780,7 @@
               "probe_source": "frozen-old-compiler",
               "probe_time": "2026-09-27T00:00:00Z",
               "status": "supported",
-              "checked_worktree": "/home/nas/user/Uihyeop/personal/hearting-wt/capacity-review-routing-0927",
+              "checked_worktree": "/home/user/hearting-wt/capacity-review-routing-0927",
               "codex_command": "not-applicable",
               "failure_scope": "none",
               "retry_on_isolated_worktree": 0
@@ -882,7 +882,7 @@
               "probe_source": "frozen-old-compiler",
               "probe_time": "2026-09-27T00:00:00Z",
               "status": "supported",
-              "checked_worktree": "/home/nas/user/Uihyeop/personal/hearting-wt/capacity-review-routing-0927",
+              "checked_worktree": "/home/user/hearting-wt/capacity-review-routing-0927",
               "codex_command": "ok",
               "failure_scope": "none",
               "retry_on_isolated_worktree": 0
@@ -903,7 +903,7 @@
               "probe_source": "frozen-old-compiler",
               "probe_time": "2026-09-27T00:00:00Z",
               "status": "supported",
-              "checked_worktree": "/home/nas/user/Uihyeop/personal/hearting-wt/capacity-review-routing-0927",
+              "checked_worktree": "/home/user/hearting-wt/capacity-review-routing-0927",
               "codex_command": "not-applicable",
               "failure_scope": "none",
               "retry_on_isolated_worktree": 0
@@ -1006,7 +1006,7 @@
               "probe_source": "frozen-old-compiler",
               "probe_time": "2026-09-27T00:00:00Z",
               "status": "supported",
-              "checked_worktree": "/home/nas/user/Uihyeop/personal/hearting-wt/capacity-review-routing-0927",
+              "checked_worktree": "/home/user/hearting-wt/capacity-review-routing-0927",
               "codex_command": "ok",
               "failure_scope": "none",
               "retry_on_isolated_worktree": 0
@@ -1027,7 +1027,7 @@
               "probe_source": "frozen-old-compiler",
               "probe_time": "2026-09-27T00:00:00Z",
               "status": "supported",
-              "checked_worktree": "/home/nas/user/Uihyeop/personal/hearting-wt/capacity-review-routing-0927",
+              "checked_worktree": "/home/user/hearting-wt/capacity-review-routing-0927",
               "codex_command": "not-applicable",
               "failure_scope": "none",
               "retry_on_isolated_worktree": 0
@@ -1117,7 +1117,7 @@
               "probe_source": "frozen-old-compiler",
               "probe_time": "2026-09-27T00:00:00Z",
               "status": "supported",
-              "checked_worktree": "/home/nas/user/Uihyeop/personal/hearting-wt/capacity-review-routing-0927",
+              "checked_worktree": "/home/user/hearting-wt/capacity-review-routing-0927",
               "codex_command": "ok",
               "failure_scope": "none",
               "retry_on_isolated_worktree": 0
@@ -1138,7 +1138,7 @@
               "probe_source": "frozen-old-compiler",
               "probe_time": "2026-09-27T00:00:00Z",
               "status": "supported",
-              "checked_worktree": "/home/nas/user/Uihyeop/personal/hearting-wt/capacity-review-routing-0927",
+              "checked_worktree": "/home/user/hearting-wt/capacity-review-routing-0927",
               "codex_command": "not-applicable",
               "failure_scope": "none",
               "retry_on_isolated_worktree": 0
@@ -1239,7 +1239,7 @@
               "probe_source": "frozen-old-compiler",
               "probe_time": "2026-09-27T00:00:00Z",
               "status": "supported",
-              "checked_worktree": "/home/nas/user/Uihyeop/personal/hearting-wt/capacity-review-routing-0927",
+              "checked_worktree": "/home/user/hearting-wt/capacity-review-routing-0927",
               "codex_command": "ok",
               "failure_scope": "none",
               "retry_on_isolated_worktree": 0
@@ -1260,7 +1260,7 @@
               "probe_source": "frozen-old-compiler",
               "probe_time": "2026-09-27T00:00:00Z",
               "status": "supported",
-              "checked_worktree": "/home/nas/user/Uihyeop/personal/hearting-wt/capacity-review-routing-0927",
+              "checked_worktree": "/home/user/hearting-wt/capacity-review-routing-0927",
               "codex_command": "not-applicable",
               "failure_scope": "none",
               "retry_on_isolated_worktree": 0
@@ -1450,7 +1450,7 @@
         "probe_source": "frozen-old-compiler",
         "probe_time": "2026-09-27T00:00:00Z",
         "status": "supported",
-        "checked_worktree": "/home/nas/user/Uihyeop/personal/hearting-wt/capacity-review-routing-0927",
+        "checked_worktree": "/home/user/hearting-wt/capacity-review-routing-0927",
         "codex_command": "ok",
         "failure_scope": "none",
         "retry_on_isolated_worktree": 0
@@ -1465,7 +1465,7 @@
         "probe_source": "frozen-old-compiler",
         "probe_time": "2026-09-27T00:00:00Z",
         "status": "supported",
-        "checked_worktree": "/home/nas/user/Uihyeop/personal/hearting-wt/capacity-review-routing-0927",
+        "checked_worktree": "/home/user/hearting-wt/capacity-review-routing-0927",
         "codex_command": "not-applicable",
         "failure_scope": "none",
         "retry_on_isolated_worktree": 0
@@ -1479,9 +1479,9 @@
   "unit_catalog_digest": "sha256:a565c51b6d07e301836027295e3e49d01dcb2b2bdacb98845441711c73188314",
   "validation_basis": {
     "basis_version": 1,
-    "registry_root": "/home/nas/user/Uihyeop/personal/hearting-wt/capacity-review-routing-0927",
-    "unit_catalog_root": "/home/nas/user/Uihyeop/personal/hearting-wt/capacity-review-routing-0927",
-    "runtime_root": "/home/nas/user/Uihyeop/personal/hearting-wt/capacity-review-routing-0927",
+    "registry_root": "/home/user/hearting-wt/capacity-review-routing-0927",
+    "unit_catalog_root": "/home/user/hearting-wt/capacity-review-routing-0927",
+    "runtime_root": "/home/user/hearting-wt/capacity-review-routing-0927",
     "runtime_root_validated": true,
     "runtime_root_match": true
   },
@@ -1490,21 +1490,21 @@
     "tuple_version": 1,
     "registry_root": {
       "kind": "registry_root",
-      "path": "/home/nas/user/Uihyeop/personal/hearting-wt/capacity-review-routing-0927",
+      "path": "/home/user/hearting-wt/capacity-review-routing-0927",
       "release_id": "63a929740b256f7515098fe50c47b999b7e503e7+dirty:324acb544629",
       "content_digest": "sha256:9250faa77d5cfe296f0ac30e3b000876b004c80513017fa4260395c4d16b843c",
       "binding_digest": "sha256:126fd660187fe265eef98a4b2630d989e354e832bfa95f37d70d16009ed25937"
     },
     "launch_home": {
       "kind": "launch_home",
-      "path": "/home/nas/user/Uihyeop/personal/hearting-wt/capacity-review-routing-0927",
+      "path": "/home/user/hearting-wt/capacity-review-routing-0927",
       "release_id": "63a929740b256f7515098fe50c47b999b7e503e7+dirty:324acb544629",
       "content_digest": "sha256:9250faa77d5cfe296f0ac30e3b000876b004c80513017fa4260395c4d16b843c",
       "binding_digest": "sha256:970402ec332696640af54dfbe320a96e101a02960cdd9ebe3f12f0f771ee6c25"
     },
     "runtime_root": {
       "kind": "runtime_root",
-      "path": "/home/nas/user/Uihyeop/personal/hearting-wt/capacity-review-routing-0927",
+      "path": "/home/user/hearting-wt/capacity-review-routing-0927",
       "release_id": "63a929740b256f7515098fe50c47b999b7e503e7+dirty:324acb544629",
       "content_digest": "sha256:9250faa77d5cfe296f0ac30e3b000876b004c80513017fa4260395c4d16b843c",
       "binding_digest": "sha256:64addb69afa7eb50857277e5f55b19a0a3e240756e826b1f744b0323236147eb"
@@ -1512,7 +1512,7 @@
     "grounding_roots": {
       "cwd": {
         "kind": "grounding_cwd",
-        "path": "/home/nas/user/Uihyeop/personal/hearting-wt/capacity-review-routing-0927",
+        "path": "/home/user/hearting-wt/capacity-review-routing-0927",
         "release_id": "63a929740b256f7515098fe50c47b999b7e503e7+dirty:324acb544629",
         "content_digest": "sha256:9250faa77d5cfe296f0ac30e3b000876b004c80513017fa4260395c4d16b843c",
         "binding_digest": "sha256:5dc93a744df95cc4195c65f87b203c02ccd7c802161734a14bd92cd289597684"
@@ -1527,7 +1527,7 @@
     },
     "wrapper_root": {
       "kind": "wrapper_root",
-      "path": "/home/nas/user/Uihyeop/personal/hearting-wt/capacity-review-routing-0927/adapters",
+      "path": "/home/user/hearting-wt/capacity-review-routing-0927/adapters",
       "release_id": "63a929740b256f7515098fe50c47b999b7e503e7+dirty:dfd266de887a",
       "content_digest": "sha256:4c2bf7a6d0708bb7a9e07b9f38cca6ebd6a39c1236695f64815b99e4a27485bd",
       "binding_digest": "sha256:5956b1278956ea9eb22803a799ff106e705ceb432fbf85d97362fc82ec3b3b07"
@@ -2100,8 +2100,8 @@
       "base_capability": "autopilot-code"
     }
   },
-  "route_hash": "sha256:a31883ed8489424ac08061ffe262b3f131eb4a7f8746e040d67145aed037e8e1",
-  "route_id": "rt-a31883ed8489424a",
+  "route_hash": "sha256:d605ceb43b0b72642535375e9769a9d3f4a0a90be502ea1a27baf702c6be7c7e",
+  "route_id": "rt-d605ceb43b0b7264",
   "owner_attempt_id": "-",
   "route_family_key": "sha256:9d8af9c10f7439604543e54a7c791a5cb67e5aea597f2351ba06c7979335f23b",
   "campaign_unassigned": true
