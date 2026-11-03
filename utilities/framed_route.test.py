@@ -1135,6 +1135,47 @@ class FramedStartTest(FramedBase):
         self.start()
         self.assertEqual(len(self.calls), 2)  # both rows exist: a repeat launches nothing
 
+    def test_the_alternative_launches_once_the_first_leg_is_claimed_not_after_its_whole_launch(self):
+        """The alternative reads only the first leg's row (its harness and model): it is launched while
+        the first leg's launch still spawns and watches its worker, and the receipts stay in leg order."""
+        import threading
+        alternative_started, first_returned, seen = threading.Event(), threading.Event(), {}
+
+        def launcher(command, **kwargs):
+            node = command[command.index("--route-node") + 1]
+            if node == "frame":
+                completed = self.run_fake(command)               # the row is claimed here
+                kwargs.get("on_claim", lambda: None)()
+                seen["first saw the alternative start"] = alternative_started.wait(timeout=10)
+                first_returned.set()
+                return completed
+            seen["alternative saw the first return"] = first_returned.is_set()
+            alternative_started.set()
+            return self.run_fake(command)
+
+        result = W.start_work(self.route, self.path, self.jobs, run=launcher)
+        self.assertEqual(result["state"], "preparing", result)
+        self.assertEqual(seen, {"first saw the alternative start": True,
+                                "alternative saw the first return": False})
+        nodes = [c[c.index("--route-node") + 1] for c in self.calls]
+        self.assertEqual(nodes, FRAME_IDS)
+        self.assertEqual([launch["attempt_id"] for launch in result["launches"]],
+                         [W.attempt_id(self.route, node) for node in FRAME_IDS])
+        self.assertEqual(sorted(result["frame_attempts"]),
+                         sorted(W.attempt_id(self.route, node) for node in FRAME_IDS))
+
+    def test_a_first_leg_that_is_never_claimed_launches_no_alternative(self):
+        """No row, no second leg: the refusal comes back exactly as a sequential start returned it."""
+        def refused(command, **kwargs):
+            self.calls.append(command)
+            return subprocess.CompletedProcess(
+                command, 65, "check=failed\nreason=no-eligible-candidate\nchild_spawned=0\n", "")
+
+        result = W.start_work(self.route, self.path, self.jobs, run=refused)
+        self.assertEqual((result["state"], result["reason"]), ("needs-attention", "frame-launch-not-admitted"))
+        self.assertEqual([c[c.index("--route-node") + 1] for c in self.calls], ["frame"])
+        self.assertEqual(len(result["launches"]), 1)
+
     def test_without_pyyaml_the_start_launches_no_frame_leg_and_names_the_fix(self):
         self.pyyaml.stop()
         with mock.patch.dict(sys.modules, {"yaml": None}):

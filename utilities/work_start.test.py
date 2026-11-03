@@ -5234,5 +5234,39 @@ class D5PublicOwnerStartTest(unittest.TestCase):
                         self.assertEqual(usage.call_args.args[1],'deep')
                         self.assertNotIn('headless-main-session-only-model',result['launches'][0]['receipt'])
 
+
+class ClaimReportingLaunchTest(unittest.TestCase):
+    """The default launcher reports the wrapper's claim line while the launch is still running."""
+
+    def test_the_claim_is_reported_before_the_launch_ends_and_the_receipt_is_whole(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gate = Path(tmp) / "claimed"
+            script = ("import pathlib, sys, time\n"
+                      "print('status=eligible', flush=True)\n"
+                      "print('attempt_claimed=att-other', flush=True)\n"
+                      "print('attempt_claimed=att-x', flush=True)\n"
+                      "print('a diagnostic', file=sys.stderr, flush=True)\n"
+                      "gate, deadline = pathlib.Path(sys.argv[1]), time.time() + 20\n"
+                      "while not gate.exists() and time.time() < deadline:\n"
+                      "    time.sleep(0.05)\n"
+                      "print('check=ok' if gate.exists() else 'check=claim-reported-late')\n")
+            claims = []
+
+            def on_claim():
+                claims.append("att-x")
+                gate.write_text("")
+
+            done = W._run_reporting_claim([sys.executable, "-c", script, str(gate)], "att-x", on_claim)
+        self.assertEqual(claims, ["att-x"])   # once, and only for this attempt's line
+        self.assertEqual(done.returncode, 0)
+        self.assertEqual(done.stdout, "status=eligible\nattempt_claimed=att-other\n"
+                                      "attempt_claimed=att-x\ncheck=ok\n")
+        self.assertEqual(done.stderr, "a diagnostic\n")
+
+    def test_without_a_claim_line_it_is_the_ordinary_run(self):
+        done = W._run_reporting_claim([sys.executable, "-c", "import sys; print('check=failed'); sys.exit(65)"],
+                                      "att-x", lambda: self.fail("no claim was printed"))
+        self.assertEqual((done.returncode, done.stdout, done.stderr), (65, "check=failed\n", ""))
+
 if __name__ == "__main__":
     unittest.main()

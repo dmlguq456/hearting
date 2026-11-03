@@ -816,7 +816,7 @@ def append_job(jobs: Path, args: argparse.Namespace, *, harness: str, runtime_sa
         jobs, args.route_id, args.parent_attempt_id or args.attempt_id
     )
     mutation_precheck._dispatch_registry_scoped = True
-    return claim(
+    claimed = claim(
         jobs, args.attempt_id, row, launch=False,
         exclusive_metadata=exclusive,
         exclusive_live_metadata=quick_exclusive,
@@ -826,6 +826,12 @@ def append_job(jobs: Path, args: argparse.Namespace, *, harness: str, runtime_sa
         mutation_precheck=mutation_precheck,
         preclaim=preclaim,
     )
+    if claimed and args.action == "start" and args.attempt_id:
+        # The row is in the registry now, before the spawn, launch fence and early-death watch.
+        # A reader that needs only the row (a framed start launching its second leg, which reads
+        # the first leg's harness and model) goes on from this line instead of the whole receipt.
+        print(f"attempt_claimed={args.attempt_id}", flush=True)
+    return claimed
 
 
 def _interactive_main_identity(jobs: Path, args, harness: str):

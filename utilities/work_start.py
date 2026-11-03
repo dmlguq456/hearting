@@ -16,6 +16,7 @@ from pathlib import Path
 import shlex
 import subprocess
 import sys
+import threading
 import time
 from types import SimpleNamespace
 
@@ -786,7 +787,31 @@ def _harvest_unread_blocked_owner(route, jobs, run):
     return {"ok": True, "attempt_id": aid, "status": "exact-result-consumed"}
 
 
-def _start(route, path, jobs, node, harness, run):
+def _run_reporting_claim(command, attempt, on_claim):
+    """`subprocess.run(command, text=True, capture_output=True)` that also calls `on_claim` as soon as
+    the launcher's receipt says this attempt's registry row is claimed (`attempt_claimed=<attempt>`),
+    while the launch itself goes on (spawn, launch fence, early-death watch)."""
+    marker = f"attempt_claimed={attempt}"
+    with subprocess.Popen(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
+        errors = []
+        drain = threading.Thread(target=lambda: errors.append(process.stderr.read()), daemon=True)
+        drain.start()
+        lines = []
+        try:
+            for line in process.stdout:
+                lines.append(line)
+                if line.rstrip("\n") == marker:
+                    on_claim()
+            process.wait()
+        except BaseException:
+            process.kill()   # what `subprocess.run` does when its caller is interrupted
+            raise
+        finally:
+            drain.join()
+    return subprocess.CompletedProcess(command, process.returncode, "".join(lines), "".join(errors))
+
+
+def _start(route, path, jobs, node, harness, run, on_claim=None):
     command = [sys.executable, str(ROOT / "utilities/dispatch-owner.py"), "--start",
                "--route-evidence", str(path), "--jobs", str(jobs),
                "--slug", route["slug"] + "-" + node,
@@ -828,7 +853,12 @@ def _start(route, path, jobs, node, harness, run):
             }
         if prepared is not None:
             command += ["--execution-access-file", str(prepared)]
-    result = run(command, text=True, capture_output=True, check=False)
+    if on_claim is None:
+        result = run(command, text=True, capture_output=True, check=False)
+    elif run is subprocess.run:
+        result = _run_reporting_claim(command, attempt_id(route, node), on_claim)
+    else:   # an injected launcher may report the claim itself, or simply return when done
+        result = run(command, text=True, capture_output=True, check=False, on_claim=on_claim)
     receipt = {"attempt_id": attempt_id(route, node), "exit_code": result.returncode,
                "receipt": result.stdout, "diagnostic": result.stderr}
     if access_diagnostic:
@@ -917,7 +947,7 @@ def _capacity_refusal(launch):
     }
 
 
-def _launch_admitted(route, path, jobs, node, harness, run, result, *, wait, sleep, clock):
+def _launch_admitted(route, path, jobs, node, harness, run, result, *, wait, sleep, clock, on_claim=None):
     """Start one node, retrying a capacity refusal exactly once inside one wait.
 
     A registered row is the sole authority that a launch was admitted (plan
@@ -927,7 +957,7 @@ def _launch_admitted(route, path, jobs, node, harness, run, result, *, wait, sle
     retry so a capacity-freeing event another resume already used never
     causes a duplicate launch.
     """
-    launch = _start(route, path, jobs, node, harness, run)
+    launch = _start(route, path, jobs, node, harness, run, on_claim)
     result["launches"].append(launch)
     rows = _rows(jobs)
     aid = launch["attempt_id"]
@@ -942,12 +972,59 @@ def _launch_admitted(route, path, jobs, node, harness, run, result, *, wait, sle
     rows = _rows(jobs)
     if aid in rows:
         return rows, None
-    launch = _start(route, path, jobs, node, harness, run)
+    launch = _start(route, path, jobs, node, harness, run, on_claim)
     result["launches"].append(launch)
     rows = _rows(jobs)
     if aid in rows:
         return rows, None
     return rows, _capacity_refusal(launch) or refusal
+
+
+def _launch_until_claimed(route, path, jobs, node, run, result, *, wait, sleep, clock):
+    """`_launch_admitted` for a frame leg that another leg follows, returning once this leg's row is claimed.
+
+    The following leg reads only this leg's registered row (its harness and model, to pick another), so it
+    need not wait while this launch spawns its worker, passes the launch fence and watches for an early
+    death. That rest goes on in a thread; `_finish_launch` waits for it and puts its receipt back in order.
+    A launch that ends without a claim (refused, failed, deferred) comes back finished, exactly as
+    `_launch_admitted` would return it. Returns `(rows, refusal, tail)`; `tail` is None when finished.
+    """
+    own = {"launches": [], **{key: result[key] for key in ("capacity_waited_seconds",) if key in result}}
+    claimed, box = threading.Event(), {}
+
+    def launch():
+        try:
+            box["value"] = _launch_admitted(route, path, jobs, node, None, run, own, wait=wait,
+                                            sleep=sleep, clock=clock, on_claim=claimed.set)
+        except BaseException as exc:  # noqa: BLE001 - re-raised in the caller's thread
+            box["error"] = exc
+        finally:
+            claimed.set()
+
+    thread = threading.Thread(target=launch, name=f"frame-launch-{node}")
+    thread.start()
+    claimed.wait()
+    tail = {"thread": thread, "box": box, "own": own, "position": len(result["launches"])}
+    if "capacity_waited_seconds" in own:
+        # A capacity wait comes before the claim; the following launch must not wait again.
+        result["capacity_waited_seconds"] = own["capacity_waited_seconds"]
+    if box or not thread.is_alive():
+        rows, refusal = _finish_launch(tail, result)
+        return rows, refusal, None
+    return _rows(jobs), None, tail
+
+
+def _finish_launch(tail, result):
+    """Wait for a claimed launch's rest; its receipt goes back where the launch began."""
+    tail["thread"].join()
+    position, own = tail["position"], tail["own"]
+    result["launches"][position:position] = own["launches"]
+    if "capacity_waited_seconds" in own:
+        result["capacity_waited_seconds"] = max(own["capacity_waited_seconds"],
+                                                result.get("capacity_waited_seconds", 0))
+    if "error" in tail["box"]:
+        raise tail["box"]["error"]
+    return tail["box"]["value"]
 
 
 def _wait_budget(result):
@@ -2125,47 +2202,56 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
         if any(aid not in rows for aid in slots):
             # Advisory and detached; the first leg's prompt waits for it at most PRIOR_ART_WAIT_SECONDS.
             _start_prior_art(route, request["text"])
-        for node, aid in zip(frames, slots):
-            if aid not in rows:
-                # Readiness proves runtime support, not remaining usage. Passing
-                # a round-robin candidate as --adapter turned an automatic
-                # choice into a user override and bypassed the capacity gate.
-                # The selector rechecks live usage inside the sealed pool for
-                # each frame, just as it does for an automatic owner.
-                rows, refusal = _launch_admitted(route, path, jobs, node["id"], None, run, result,
-                                                  wait=wait, sleep=sleep, clock=clock)
+        tail = None
+        try:
+            for index, (node, aid) in enumerate(zip(frames, slots)):
                 if aid not in rows:
-                    result["frame_attempts"] = sorted(attempts)
-                    if refusal:
-                        return _capacity_wait(result, aid, node["id"], refusal, resume, clock)
-                    receipt_lines = result["launches"][-1]["receipt"].splitlines()
-                    if "reason=frame-harness-unavailable" in receipt_lines and "child_spawned=0" in receipt_lines:
-                        return {**result, "state": "needs-attention", "reason": "frame-harness-unavailable",
-                                "frame_attempts": sorted(attempts)}
-                    launch_reason = _launch_failure_reason(result["launches"][-1])
-                    if launch_reason.startswith("execution-access-"):
-                        return {**result, "state": "needs-attention", "reason": launch_reason,
-                                "frame_attempts": sorted(attempts)}
-                    if (node["id"] == "frame-alternative" and result["launches"][-1]["exit_code"] == 75
-                            and "check=deferred" in receipt_lines
-                            and "reason=frame-first-attempt-pending" in receipt_lines
-                            and "child_spawned=0" in receipt_lines):
-                        if attempts and all(rows.get(a, ("open",))[0] in {"done", "killed", "cancelled"}
-                                            for a in attempts):
-                            # The first leg already ended: parking here would wait for a result that
-                            # never comes. The replacement controller below continues that leg; the
-                            # alternative follows once the leg is placed again.
-                            break
-                        return {**result, "state": "preparing", "reason": "frame-first-attempt-pending",
-                                "required_action": "wait-for-first-frame-attempt",
+                    # Readiness proves runtime support, not remaining usage. Passing
+                    # a round-robin candidate as --adapter turned an automatic
+                    # choice into a user override and bypassed the capacity gate.
+                    # The selector rechecks live usage inside the sealed pool for
+                    # each frame, just as it does for an automatic owner.
+                    if tail is None and any(later not in rows for later in slots[index + 1:]):
+                        rows, refusal, tail = _launch_until_claimed(route, path, jobs, node["id"], run, result,
+                                                                    wait=wait, sleep=sleep, clock=clock)
+                    else:
+                        rows, refusal = _launch_admitted(route, path, jobs, node["id"], None, run, result,
+                                                          wait=wait, sleep=sleep, clock=clock)
+                    if aid not in rows:
+                        result["frame_attempts"] = sorted(attempts)
+                        if refusal:
+                            return _capacity_wait(result, aid, node["id"], refusal, resume, clock)
+                        receipt_lines = result["launches"][-1]["receipt"].splitlines()
+                        if "reason=frame-harness-unavailable" in receipt_lines and "child_spawned=0" in receipt_lines:
+                            return {**result, "state": "needs-attention", "reason": "frame-harness-unavailable",
+                                    "frame_attempts": sorted(attempts)}
+                        launch_reason = _launch_failure_reason(result["launches"][-1])
+                        if launch_reason.startswith("execution-access-"):
+                            return {**result, "state": "needs-attention", "reason": launch_reason,
+                                    "frame_attempts": sorted(attempts)}
+                        if (node["id"] == "frame-alternative" and result["launches"][-1]["exit_code"] == 75
+                                and "check=deferred" in receipt_lines
+                                and "reason=frame-first-attempt-pending" in receipt_lines
+                                and "child_spawned=0" in receipt_lines):
+                            if attempts and all(rows.get(a, ("open",))[0] in {"done", "killed", "cancelled"}
+                                                for a in attempts):
+                                # The first leg already ended: parking here would wait for a result that
+                                # never comes. The replacement controller below continues that leg; the
+                                # alternative follows once the leg is placed again.
+                                break
+                            return {**result, "state": "preparing", "reason": "frame-first-attempt-pending",
+                                    "required_action": "wait-for-first-frame-attempt",
+                                    "frame_attempts": sorted(attempts),
+                                    **_wait_fields(attempts, rows, resume)}
+                        return {**result, "state": "needs-attention", "reason": "frame-launch-not-admitted",
                                 "frame_attempts": sorted(attempts),
-                                **_wait_fields(attempts, rows, resume)}
-                    return {**result, "state": "needs-attention", "reason": "frame-launch-not-admitted",
-                            "frame_attempts": sorted(attempts),
-                            **(_wait_fields(attempts, rows, resume) if attempts else {})}
-            attempts.add(aid)
-            result["frame_attempts"] = sorted(attempts)
-            result.update(_wait_fields(attempts, rows, resume))
+                                **(_wait_fields(attempts, rows, resume) if attempts else {})}
+                attempts.add(aid)
+                result["frame_attempts"] = sorted(attempts)
+                result.update(_wait_fields(attempts, rows, resume))
+        finally:
+            if tail is not None:
+                _finish_launch(tail, result)
         joined = _timed_join(
             result, clock, jobs=jobs, expected_attempts=attempts,
             timeout=_wait_budget(result) if wait else 0, recover=True, observe_only=not wait)

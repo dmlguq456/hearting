@@ -1500,7 +1500,10 @@ guarantee an unfinished report node.
 
 For code/design/draft/refine/spec at quick+, `compose --start` (and a later
 `start`) launches `frame` and `frame-alternative` before the owner through the
-`dispatch-owner.py` selector. The route supplies depth, type, unit, model, and
+`dispatch-owner.py` selector. `frame-alternative` reads only the registered
+`frame` row (its harness and model), so `start` launches it once the wrapper
+prints `attempt_claimed=<attempt>` for that row, while `frame` still spawns and
+watches its worker; the receipts keep leg order. The route supplies depth, type, unit, model, and
 output context; the selector picks each leg's harness from live usage within the
 sealed candidates, prepares or resumes the route's cycle, and passes its exact
 paths and producer environment to the child. `dispatch-node --node frame` uses
