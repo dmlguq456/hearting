@@ -279,7 +279,7 @@ class StageSessionStateDirTests(unittest.TestCase):
 
     def _artifact_args(self, *, node="voter", worktree=None, brief_text=None, scope=None, outputs=None):
         worktree = worktree or self.worktree
-        sources = ["pyproject.toml", "sr_corrnet_sd/diar.py", "sr_corrnet_sd/paths.py", "uv.lock"]
+        sources = ["pyproject.toml", "sr_modela_sd/diar.py", "sr_modela_sd/paths.py", "uv.lock"]
         for name in sources:
             path = worktree / name
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -324,7 +324,7 @@ class StageSessionStateDirTests(unittest.TestCase):
                  "범위 밖 reports/other.md, ../escape.json, placeholder reviews/claims/<filename>.md.\n")
         args, route, cycle, output_dir = self._artifact_args(brief_text=brief)
         declarations = sorted(str((self.worktree / name).resolve()) for name in [
-            "pyproject.toml", "sr_corrnet_sd/diar.py", "sr_corrnet_sd/paths.py", "uv.lock"])
+            "pyproject.toml", "sr_modela_sd/diar.py", "sr_modela_sd/paths.py", "uv.lock"])
         self._bind_artifact(args, route, cycle, output_dir, action="start")
         expected = {
             str(output_dir / "reviews/claims/voter3.json"),
@@ -334,7 +334,7 @@ class StageSessionStateDirTests(unittest.TestCase):
             str(output_dir / "reviews/claim-verdict.json"),
         }
         self.assertEqual(args.fixed_file, sorted(str((self.worktree / name).resolve()) for name in [
-            "pyproject.toml", "sr_corrnet_sd/diar.py", "sr_corrnet_sd/paths.py", "uv.lock"]))
+            "pyproject.toml", "sr_modela_sd/diar.py", "sr_modela_sd/paths.py", "uv.lock"]))
         self.assertEqual(args.effective_fixed_files, sorted(expected))
         for relative in ("reviews/claims/voter3.json",
                          "reviews/claims/voter3-evidence.md",
@@ -463,7 +463,7 @@ class StageSessionStateDirTests(unittest.TestCase):
             with self.subTest(failure=failure):
                 args, route, cycle, output_dir = self._artifact_args(brief_text="reviews/claims/item.md\n")
                 declared = sorted(str((self.worktree / name).resolve()) for name in [
-                    "pyproject.toml", "sr_corrnet_sd/diar.py", "sr_corrnet_sd/paths.py", "uv.lock"])
+                    "pyproject.toml", "sr_modela_sd/diar.py", "sr_modela_sd/paths.py", "uv.lock"])
                 if failure == "missing":
                     args.route_file = str(self.root / "missing-route.json")
                     self._bind_artifact(args, route, cycle, output_dir, action="start")

@@ -2174,7 +2174,7 @@ class ComputeHostsTest(unittest.TestCase):
 class LauncherProvenanceTest(unittest.TestCase):
     """The launcher forwards runtime-known provenance into detached payloads.
 
-    Regression cover for the 2026-10-06 BC_ResNet eval loss
+    Regression cover for the 2026-10-06 KWS_Net eval loss
     (`mgpu-a1-20261006-102542`): the payload's guard read exactly
     `AGENT_HOME` and `AGENT_DISPATCH_ATTEMPT_ID` with strict lookups and died
     with `KeyError` before the first inference, while the launch receipt
@@ -3161,7 +3161,7 @@ class PathNamespaceInventoryTest(unittest.TestCase):
     def load_text(self, path_namespace, run_root="/mnt/shared/runs"):
         self.path.write_text(
             "schema_version: 1\nrun_root: " + run_root + "\nhosts:\n"
-            "  mpwav:\n    ssh_host: mpwav\n    path_namespace:\n"
+            "  gpu-c:\n    ssh_host: gpu-c\n    path_namespace:\n"
             + path_namespace, encoding="utf-8")
         return self.module.load_config(str(self.path))
 
@@ -3170,7 +3170,7 @@ class PathNamespaceInventoryTest(unittest.TestCase):
                                side_effect=AssertionError("inventory validation must not probe mounts")):
             config = self.load_text("      /mnt/shared: /mnt/shared_alt\n"
                                     "      /datasets: /mnt/datasets\n")
-        self.assertEqual(config["hosts"]["mpwav"]["path_namespace"],
+        self.assertEqual(config["hosts"]["gpu-c"]["path_namespace"],
                          {"/mnt/shared": "/mnt/shared_alt", "/datasets": "/mnt/datasets"})
 
     def test_rejects_invalid_mapping_shapes_and_path_relationships(self):
@@ -3279,18 +3279,18 @@ class PathNamespaceInventoryTest(unittest.TestCase):
 
         with mock.patch.object(module, "remote", side_effect=capture), \
              mock.patch.object(module, "collect_ssh_session_bridges", return_value=[]):
-            module.probe_host("mpwav", plain, [], [])
+            module.probe_host("gpu-c", plain, [], [])
             probe_plain = captured.pop()
-            module.probe_host("mpwav", mapped, [], [])
+            module.probe_host("gpu-c", mapped, [], [])
             self.assertEqual(probe_plain, captured.pop())
 
         for host in (plain, mapped):
-            config = {"run_root": Path(self.tmp.name), "hosts": {"mpwav": host}}
+            config = {"run_root": Path(self.tmp.name), "hosts": {"gpu-c": host}}
             with mock.patch.object(module, "load_config", return_value=config), \
                  mock.patch.object(module, "remote", side_effect=capture), \
                  mock.patch.object(module, "_record_claim"), \
                  mock.patch("sys.stdout", io.StringIO()):
-                args = SimpleNamespace(host="mpwav", session="session", harness="codex",
+                args = SimpleNamespace(host="gpu-c", session="session", harness="codex",
                                        pid=7, json=True)
                 self.assertEqual(module.cmd_claim(args), 0)
         claim_plain, claim_mapped = captured[-2:]
@@ -3300,11 +3300,11 @@ class PathNamespaceInventoryTest(unittest.TestCase):
         def capture_stop(_host, script, **_kwargs):
             captured.append(script)
             return subprocess.CompletedProcess([], 1, "", "")
-        state = {"meta": {"host": "mpwav", "tmux_transport": {
+        state = {"meta": {"host": "gpu-c", "tmux_transport": {
                     "kind": "hearting-tmux-v1", "server": "hearting-0123456789abcdefabcd"}},
                  "dir": Path(self.tmp.name), "exit_code": None, "stop_reason": None}
         for host in (plain, mapped):
-            config = {"run_root": Path(self.tmp.name), "hosts": {"mpwav": host}}
+            config = {"run_root": Path(self.tmp.name), "hosts": {"gpu-c": host}}
             with mock.patch.object(module, "load_config", return_value=config), \
                  mock.patch.object(module, "_run_state", return_value=state), \
                  mock.patch.object(module, "remote", side_effect=capture_stop):
@@ -3319,7 +3319,7 @@ class PathNamespaceInventoryTest(unittest.TestCase):
         run_dir.mkdir()
         (run_dir / "stop_reason").write_text("path-namespace-unshare\n")
         (run_dir / "exit_code").write_text("125\n")
-        meta = {"run_id": "fixture-run", "host": "mpwav",
+        meta = {"run_id": "fixture-run", "host": "gpu-c",
                 "provenance": {"notify": {"harness": "codex", "id": "session-1"}}}
         (run_dir / "meta.json").write_text(json.dumps(meta))
         config = {"run_root": Path(self.tmp.name), "hosts": {}}

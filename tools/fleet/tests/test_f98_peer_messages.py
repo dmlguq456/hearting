@@ -608,7 +608,7 @@ class PeerEndpointLabelTest(unittest.TestCase):
         # denylist rather than a guess at what a name looks like.
         # `wB:p3` is deliberately absent: a pane id says where a session runs, not which
         # session it is, and the live board printed it in the name slot.
-        for value in ("hearting-46", "bc-resnet-67", "케언 W15 사이클 이어받기",
+        for value in ("hearting-46", "kws-net-67", "케언 W15 사이클 이어받기",
                       "q1-tts: v6 본생산"):
             with self.subTest(value=value):
                 self.assertTrue(render._peer_name_is_readable(value))
@@ -681,7 +681,7 @@ class PeerEndpointOneShapeTest(unittest.TestCase):
     """Every relation must read the same way, whoever else is on the board.
 
     Measured on the live board before this: the same kind of line appeared as `[67] claude`,
-    `wB:p5`, `bc-resnet-67`, `a8e66aa4a25f5d807`, a full Korean session title, and a bare
+    `wB:p5`, `kws-net-67`, `a8e66aa4a25f5d807`, a full Korean session title, and a bare
     `claude` — six shapes for one relation, which is the inconsistency the user reported.
     """
 
@@ -689,7 +689,7 @@ class PeerEndpointOneShapeTest(unittest.TestCase):
         # Off-board peers resolve their own tag, so a session does not change shape when it
         # scrolls off screen.
         with mock.patch.object(render, "_resolve_session_tag", return_value="3a"):
-            for name in ("a8e66aa4a25f5d807", "wB:p5", "bc-resnet-67", None,
+            for name in ("a8e66aa4a25f5d807", "wB:p5", "kws-net-67", None,
                          "Claude Code 사용량 리셋 및 감독 인수인계"):
                 with self.subTest(name=name):
                     segs = render._peer_endpoint_segs("codex", "sid-1", name, {})
@@ -702,8 +702,8 @@ class PeerEndpointOneShapeTest(unittest.TestCase):
 
     def test_a_resolver_failure_never_breaks_the_row(self):
         with mock.patch.object(render, "_resolve_session_tag", side_effect=OSError("boom")):
-            segs = render._peer_endpoint_segs("claude", "sid-1", "bc-resnet-67", {})
-        self.assertEqual("".join(t for t, _ in segs), "bc-resnet-67")
+            segs = render._peer_endpoint_segs("claude", "sid-1", "kws-net-67", {})
+        self.assertEqual("".join(t for t, _ in segs), "kws-net-67")
 
     def test_machine_values_are_never_shown_as_a_name(self):
         with mock.patch.object(render, "_resolve_session_tag", return_value=None):

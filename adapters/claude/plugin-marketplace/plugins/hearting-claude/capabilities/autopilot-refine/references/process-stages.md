@@ -12,7 +12,7 @@ ls -d <artifact-root>/research/*<keyword>* <artifact-root>/documents/*<keyword>*
 
 - **One match:** use it as the artifact root and infer type from the path prefix.
 - **Multiple matches:** list candidates and ask the user to choose.
-- **No match:** ask the user to include an artifact identifier in the prompt. Preserve the compatibility example: `어느 산출물에 대한 작업인가요? prompt에 식별자(speech-enhancement-trends, 2026-05-06_se-seminar-tfrestormer 같은) 포함 부탁`. Apply the adapter's pause/autonomy rule. In Claude Code, schedule a ten-minute wakeup at the same time; if no answer arrives, continue with the most recently modified artifact.
+- **No match:** ask the user to include an artifact identifier in the prompt. Preserve the compatibility example: `어느 산출물에 대한 작업인가요? prompt에 식별자(speech-enhancement-trends, 2026-05-06_se-seminar-tfenhancer 같은) 포함 부탁`. Apply the adapter's pause/autonomy rule. In Claude Code, schedule a ten-minute wakeup at the same time; if no answer arrives, continue with the most recently modified artifact.
 - An existing tracked repository document is also a valid target when the approved route already binds its exact path in `target-artifact` scope. Use that path and its assigned worktree; do not search the repository for a replacement target.
 
 Infer type:

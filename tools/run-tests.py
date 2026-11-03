@@ -388,6 +388,8 @@ def build_isolated_env(tmpdir: Path, repo_root: Path = ROOT) -> dict[str, str]:
     # Same for the memory exchange: no detached worker races the temp-dir cleanup;
     # the scheduler's own suite turns it back on.
     env["MEM_EXCHANGE_AUTO"] = "0"
+    # ...nor the automatic change record a suite's Stop or prompt hook would start.
+    env["HEARTING_AUTO_RECORD"] = "off"
     env["HOME"] = str(home)
     env["XDG_STATE_HOME"] = str(xdg_state)
     env["XDG_DATA_HOME"] = str(xdg_data)

@@ -28,13 +28,13 @@ Invocation examples, application constraints, exclusions, and the post-apply che
 /autopilot-refine "speech-enhancement-trends에서 최신 카드 5편이 분류표에 누락됐는지 검토" --review-only
 
 # Memo mode for a deferred review.
-/autopilot-refine --memo .../review_memo.md "2026-05-06_se-seminar-tfrestormer 메모 반영"
+/autopilot-refine --memo .../review_memo.md "2026-05-06_se-seminar-tfenhancer 메모 반영"
 
 # Document artifact, detected from the prompt keyword.
-/autopilot-refine "se-seminar-tfrestormer draft Slide 4 task family 표를 4행으로 변경"
+/autopilot-refine "se-seminar-tfenhancer draft Slide 4 task family 표를 4행으로 변경"
 
 # Higher rigor before application; rigor is derived from intensity.
-/autopilot-refine "se-seminar-tfrestormer 결론 챕터 wording 다듬기" --intensity standard
+/autopilot-refine "se-seminar-tfenhancer 결론 챕터 wording 다듬기" --intensity standard
 ```
 
 The Korean text above is intentional quoted multilingual request data; preserve it verbatim when validating invocation behavior.

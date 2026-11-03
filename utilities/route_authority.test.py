@@ -288,11 +288,118 @@ class Case1ParentSessionTest(unittest.TestCase):
                         HANDOVER.lineage_graph()
                     self.assertEqual(str(caught.exception), "lineage-ledger-unavailable", change)
 
+    def test_a_replaced_ledger_that_reuses_its_inode_is_caught_by_the_directory_check(self):
+        # RV-1142 L1: on ext4 a double replace reuses the inode number, so the per-file
+        # "only appended" check passes; the directory-generation check must refuse it.
+        import session_tidy as tidy
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            binding = HANDOVER.binding_of(root / "jobs.log", self.OWNER)
+            with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(root / "state")}):
+                self._record_handover(binding, "codex-sid", "codex-sid-after-clear",
+                                      "codex", "case-inode", 1, "clear")
+                read_bytes = tidy.read_bytes
+
+                def replaced_twice(path):
+                    if Path(path).suffix == ".jsonl":
+                        raw = Path(path).read_bytes()
+                        tidy.atomic_write(Path(path), raw + b"\n")
+                        tidy.atomic_write(Path(path), raw + b"\n\n")
+                    return read_bytes(path)
+
+                with mock.patch.object(tidy, "read_bytes", replaced_twice), \
+                        mock.patch.object(HANDOVER, "_appended_since", return_value=True), \
+                        self.assertRaises(OSError) as caught:
+                    HANDOVER.lineage_graph()
+                self.assertEqual(str(caught.exception), "lineage-directory-changed")
+
+    def test_unreadable_lineage_waits_instead_of_refusing_the_replacement_parent(self):
+        # RV-1142 M1: who answers for the source cannot be read; that is a wait for the
+        # same command, not a binding mismatch. A readable foreign parent is still refused.
+        record = {"route_id": self.OWNER["owner_route_id"], "route_hash": self.OWNER["owner_route_hash"]}
+        candidate = {**self.OWNER, "attempt_id": "att-owner-next", "parent_sid": "codex-sid-after-clear"}
+        jobs = Path("/tmp/registered-parent-unreadable-jobs")
+        with mock.patch.object(HANDOVER, "_readable_lineage_signature",
+                               side_effect=OSError("lineage-directory-changed")):
+            with self.assertRaises(DC.DispatchContractError) as waiting:
+                RA.require_recovery_binding(record, self.OWNER, candidate, jobs)
+        self.assertEqual((waiting.exception.reason, waiting.exception.next_action),
+                         ("handover-unreadable", "same-command"))
+        with tempfile.TemporaryDirectory() as td:
+            with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(Path(td) / "state")}):
+                with self.assertRaises(DC.DispatchContractError) as refused:
+                    RA.require_recovery_binding(record, self.OWNER, candidate, Path(td) / "jobs.log")
+                self.assertEqual(refused.exception.reason, "replacement-launch-binding-mismatch")
+                binding = HANDOVER.binding_of(Path(td) / "jobs.log", self.OWNER)
+                self._record_handover(binding, "codex-sid", "codex-sid-after-clear",
+                                      "codex", "case-wait", 1, "clear")
+                holder = RA.require_recovery_binding(record, self.OWNER, candidate, Path(td) / "jobs.log")
+                self.assertEqual(holder.session_id, "codex-sid-after-clear")
+
     def test_unreadable_handover_waits_without_registered_parent_authority(self):
+        # The answer is unknown (None), neither the registered parent nor another session.
         jobs = Path("/tmp/registered-parent-unreadable-jobs")
         with mock.patch.object(HANDOVER, "_readable_lineage_signature", side_effect=OSError("unreadable")):
-            self.assertFalse(RA.owns(self.OWNER, "codex-sid", jobs))
-            self.assertFalse(RA.owns(self.OWNER, "claude-sid", jobs))
+            self.assertIsNone(RA.owns(self.OWNER, "codex-sid", jobs))
+            self.assertIsNone(RA.owns(self.OWNER, "claude-sid", jobs))
+            self.assertIs(RA.owns(self.OWNER, "", jobs), False)        # no session named is not unknown
+            with self.assertRaises(DC.DispatchContractError) as waiting:
+                RA.require_owner(self.OWNER, "claude-sid", jobs, "parent-only")
+        self.assertEqual((waiting.exception.reason, waiting.exception.next_action, waiting.exception.retry_when),
+                         ("handover-unreadable", "same-command", RA.LINEAGE_UNREADABLE_WAIT.retry_when))
+        # RV-1151 L1: the wait names whose lineage could not be read and why.
+        self.assertEqual(str(waiting.exception),
+                         "handover-unreadable:attempt att-owner, registered parent codex-sid: unreadable")
+        with tempfile.TemporaryDirectory() as td, \
+                mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(Path(td) / "state")}):
+            self.assertIs(RA.owns(self.OWNER, "codex-sid", Path(td) / "jobs.log"), True)
+            self.assertIs(RA.owns(self.OWNER, "claude-sid", Path(td) / "jobs.log"), False)
+            with self.assertRaises(DC.DispatchContractError) as refused:
+                RA.require_owner(self.OWNER, "claude-sid", Path(td) / "jobs.log", "parent-only")
+            self.assertEqual((refused.exception.reason, refused.exception.next_action), ("parent-only", None))
+
+    def test_a_diverged_lineage_waits_and_names_the_cause(self):
+        # RV-1151 L1: a fork stays unknown until the ledgers change; the wait says so, so a
+        # person can act instead of rerunning the same command blindly.
+        import session_tidy as tidy
+        with tempfile.TemporaryDirectory() as td, \
+                mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(Path(td) / "state")}):
+            for n, target in enumerate(("fork-a", "fork-b")):
+                ledger = tidy._ledger_path(tidy.Seat("pane", f"case-fork-{n}", f"w9:pF{n}"))
+                ledger.parent.mkdir(parents=True, exist_ok=True)
+                ledger.write_text(json.dumps({"event": "handover", "source": "clear", "from": "codex-sid",
+                                              "sid": target, "harness": "codex", "ts": 1}) + "\n")
+            HANDOVER._LINEAGE_GRAPH_CACHE.clear()
+            jobs = Path(td) / "jobs.log"
+            self.assertIsNone(RA.owns(self.OWNER, "codex-sid", jobs))
+            with self.assertRaises(DC.DispatchContractError) as waiting:
+                RA.require_owner(self.OWNER, "codex-sid", jobs, "parent-only")
+        self.assertEqual((waiting.exception.reason, waiting.exception.next_action),
+                         ("handover-unreadable", "same-command"))
+        self.assertIn("attempt att-owner, registered parent codex-sid: handover-lineage-unresolved",
+                      str(waiting.exception))
+
+    def test_an_unreadable_lineage_neither_matches_nor_refuses_a_successor_parent(self):
+        # A replacement registered by the /clear successor: whether that successor still answers
+        # for the source is unknown, so lineage confirmation waits instead of "not the parent".
+        candidate = {**self.OWNER, "attempt_id": "att-owner-next", "parent_sid": "codex-sid-after-clear"}
+        jobs = Path("/tmp/registered-parent-unreadable-jobs")
+        with mock.patch.object(HANDOVER, "_readable_lineage_signature",
+                               side_effect=OSError("lineage-directory-changed")):
+            for lineage in (False, True):
+                with self.subTest(lineage=lineage), self.assertRaises(DC.DispatchContractError) as waiting:
+                    RA.replacement_parent_matches(self.OWNER, candidate, jobs, lineage=lineage)
+                self.assertEqual((waiting.exception.reason, waiting.exception.next_action),
+                                 ("handover-unreadable", "same-command"))
+            # The same parent session needs no lineage and still matches.
+            self.assertTrue(RA.replacement_parent_matches(self.OWNER, {**self.OWNER}, jobs, lineage=True))
+        with tempfile.TemporaryDirectory() as td, \
+                mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(Path(td) / "state")}):
+            jobs = Path(td) / "jobs.log"
+            self.assertFalse(RA.replacement_parent_matches(self.OWNER, candidate, jobs, lineage=True))
+            binding = HANDOVER.binding_of(jobs, self.OWNER)
+            self._record_handover(binding, "codex-sid", "codex-sid-after-clear", "codex", "case-match", 1, "clear")
+            self.assertTrue(RA.replacement_parent_matches(self.OWNER, candidate, jobs, lineage=True))
 
     def test_a_non_owner_cannot_start_the_replacement_owner(self):
         with self.assertRaises(DC.DispatchContractError) as refused:
@@ -570,6 +677,16 @@ class OwnerPinChangeTest(unittest.TestCase):
         self.assertEqual(row["by"], {"harness": "codex", "session_id": "codex-sid"})
         again, _ = self.start_pin(["owner=claude"])
         self.assertFalse(again["changed"])
+
+    def test_start_pin_waits_while_the_lineage_cannot_be_read(self):
+        # Unknown is not "another session": the same start is the way on and nothing is recorded.
+        with mock.patch.object(HANDOVER, "_readable_lineage_signature",
+                               side_effect=OSError("lineage-directory-changed")):
+            with self.assertRaises(DC.DispatchContractError) as waiting:
+                self.start_pin(["owner=claude"], caller=("claude", "another-sid"))
+        self.assertEqual((waiting.exception.reason, waiting.exception.next_action),
+                         ("handover-unreadable", "same-command"))
+        self.assertEqual(RA.pin_changes(self.route), [])
 
     def test_start_pin_refuses_what_it_cannot_do_and_records_nothing(self):
         for values, kwargs, reason in (
@@ -1601,11 +1718,14 @@ class AccessChangeTest(unittest.TestCase):
         other = dict(self.route, route_hash="sha256:" + "0" * 64)
         self.assertIsNone(RA.access_in_force(other))
 
-    def given(self, *, caller=("opencode", "oc-sid"), owner_parent="oc-sid", env=True):
+    def given(self, *, caller=("opencode", "oc-sid"), owner_parent="oc-sid", env=True, lineage=False):
         router = _load("route_authority_capability_route_access", "utilities/capability-route.py")
         import work_start
         rows = {"att-owner": ("done", {"worker_type": "owner", "owner_route_id": self.route["route_id"],
-                                       "parent_sid": owner_parent, "attempt_id": "att-owner"})}
+                                       "parent_sid": owner_parent, "attempt_id": "att-owner",
+                                       # a depth-1 route-bound owner, whose holder the seat lineage answers
+                                       **({"dispatch_depth": "1", "owner_route_hash": self.route["route_hash"]}
+                                          if lineage else {})})}
         extra = {"AGENT_DISPATCH_EXECUTION_ACCESS_FILE": str(self.request_file)} if env else {}
         with mock.patch.dict(os.environ, extra), \
              mock.patch.object(RA, "caller_identity", return_value=caller), \
@@ -1633,6 +1753,17 @@ class AccessChangeTest(unittest.TestCase):
         self.assertFalse(invalid["changed"])
         self.assertTrue(invalid["reason"].startswith("execution-access-root-too-broad"))
         self.assertEqual(RA.access_changes(self.route), [])
+
+    def test_an_unreadable_lineage_records_nothing_and_waits_for_the_same_start(self):
+        with mock.patch.object(HANDOVER, "_readable_lineage_signature",
+                               side_effect=OSError("lineage-directory-changed")):
+            waiting = self.given(caller=("claude", "other-sid"), lineage=True)
+        self.assertEqual((waiting["changed"], waiting["reason"], waiting["next_action"]),
+                         (False, "handover-unreadable", "same-command"), waiting)
+        self.assertTrue(waiting["retry_when"])
+        self.assertEqual(RA.access_changes(self.route), [])
+        self.assertEqual(self.given(caller=("claude", "other-sid"), lineage=True),
+                         {"changed": False, "reason": "access-change-parent-only"})
 
 
 class RelocationAuthorityTest(unittest.TestCase):
@@ -2321,6 +2452,50 @@ class U4FrameRuntimeKindTest(unittest.TestCase):
         # a usage-limit stop keeps its own capacity path, not the runtime one
         self.assertNotEqual(RA._replacement_kind(
             "done", {**self.FRAME, "note": "dead-capacity", "failure_class": "capacity"}), "runtime")
+
+
+class U4RuntimeBoundCarrierTest(unittest.TestCase):
+    """A runtime end is launched by the parent's bound carrier; a supervisor tick keeps
+    the old `start`-only path (SD-157 ③)."""
+
+    OWNER = {"attempt_id": "att-owner", "worker_type": "owner", "launch_started": "1",
+             "note": "dead-runtime-exit", "failure_class": "runtime",
+             "terminal_event": "dispatch.supervisor.error"}
+    FRAME = {"attempt_id": "att-frame", "worker_type": "frame", "launch_started": "1",
+             "note": "dead-launch-exit-1", "failure_class": "launch", "route_node": "frame"}
+
+    def _progress(self, metadata, **facts):
+        return RA.decide_continuation(action="replacement-progress", status="done", metadata=metadata,
+            facts={"kind": "runtime", "resume_capacity": False, "registry_rows": {}, **facts})
+
+    def test_a_bound_carrier_launches_a_runtime_owner_end(self):
+        bound = self._progress(self.OWNER, bound_carrier=True)
+        self.assertEqual((bound.allowed, bound.state, bound.next_action), (True, "launch", "start"))
+        for facts in ({"bound_carrier": False}, {}):
+            with self.subTest(facts=facts):
+                tick = self._progress(self.OWNER, **facts)
+                self.assertEqual((tick.allowed, tick.state, tick.next_action),
+                                 (False, "not-applicable", "observe"))
+
+    def test_a_bound_carrier_launches_a_resultless_frame_end(self):
+        bound = self._progress(self.FRAME, bound_carrier=True)
+        self.assertEqual((bound.allowed, bound.state), (True, "launch"))
+        self.assertEqual(self._progress(self.FRAME).state, "not-applicable")
+
+    def test_only_the_runtime_kind_takes_the_bound_carrier_branch(self):
+        for kind in ("unlaunched", "corrected", "observed"):
+            with self.subTest(kind=kind):
+                choice = RA.decide_continuation(action="replacement-progress", status="done",
+                    metadata={"attempt_id": "att-other", "worker_type": "owner"},
+                    facts={"kind": kind, "bound_carrier": True, "resume_capacity": False,
+                           "registry_rows": {}})
+                self.assertEqual((choice.state, choice.next_action), ("not-applicable", "observe"))
+        capacity = RA.decide_continuation(action="replacement-progress", status="done",
+            metadata={"attempt_id": "att-cap", "worker_type": "owner"},
+            facts={"kind": "capacity", "bound_carrier": True, "resume_capacity": False,
+                   "registry_rows": {}})
+        self.assertEqual((capacity.reason, capacity.next_action),
+                         ("replacement-capacity-wait", "arm-capacity-resume"))
 
 
 class U4CapacityNextActionTest(unittest.TestCase):

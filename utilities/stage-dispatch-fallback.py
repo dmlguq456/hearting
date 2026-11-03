@@ -1231,7 +1231,7 @@ def finished_verdict_row(jobs: Path, route_id: str, node_id: str, attempt_id: st
     `worker_failure=completed-review-blocking`. That is this round's result,
     not a failed launch: retrying it on the next hop reran the same unchanged
     artifact and spent another review round before the owner could correct it
-    (home-os rt-96dd5b62, 2026-09-27). `classify_round_row` is the one
+    (home-app rt-96dd5b62, 2026-09-27). `classify_round_row` is the one
     definition of "this row is a verdict" the round budget also counts.
     """
     for row in reversed(registry_rows(jobs, route_id, node_id)):
@@ -2282,7 +2282,7 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
         except OwnerRouteBindingError as exc:
             return fail(str(exc), 64, detail="name the route with --route", child_spawned="0")
     # The wrappers run with cwd=ROOT, so a relative prompt path would be read
-    # against the harness tree instead of the caller's directory (home-os,
+    # against the harness tree instead of the caller's directory (home-app,
     # 2026-09-27: three launches fell through to "inline, runtime-unavailable").
     if args.prompt_file is not None:
         args.prompt_file = args.prompt_file.expanduser().resolve()

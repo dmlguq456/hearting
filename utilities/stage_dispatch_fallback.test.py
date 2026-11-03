@@ -2336,7 +2336,7 @@ class FallbackTest(unittest.TestCase):
   self.assertEqual(state,"fallback")
   self.assertNotIn("review_verdict",fields)
  def test_finished_verdict_row_stops_the_chain_instead_of_retrying(self):
-  # home-os rt-96dd5b62 (2026-09-27): a foreground reviewer's blocking FAIL came
+  # home-app rt-96dd5b62 (2026-09-27): a foreground reviewer's blocking FAIL came
   # back as worker_failure=completed-review-blocking, the chain retried the same
   # unchanged plan on the next hop, and the round budget was spent twice before
   # the owner could correct it. A verdict row is this round's result.

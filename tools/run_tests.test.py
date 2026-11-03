@@ -1637,6 +1637,12 @@ class CiLikeProfileFixture(unittest.TestCase):
             self.assertEqual(env["HEARTING_CAMPAIGN_TITLE_AUTO"], "off")
             self.assertEqual(env["HEARTING_PRIOR_ART"], "off")
 
+    def test_isolated_env_switches_the_automatic_change_record_off(self):
+        # A suite that runs a Stop or prompt hook must not start the detached record step.
+        for env in (self.mod.build_isolated_env(self.root / "iso"),
+                    self.mod.build_ci_like_env(self.root / "ci", self.root)):
+            self.assertEqual(env["HEARTING_AUTO_RECORD"], "off")
+
     def test_isolated_env_declares_no_operator_language(self):
         # FLEET_NOW_LANG is the operator's language for Fleet titles as well as UI
         # text. A runner-wide value turned every Fleet title suite into a Korean

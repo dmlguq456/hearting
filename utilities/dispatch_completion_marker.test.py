@@ -726,7 +726,7 @@ class CompletionMarkerTest(unittest.TestCase):
         return route, route_path, evidence, marker_path
 
     def _consumed_incident_route(self, name, *, registered_after_observation=True):
-        """SR_CorrNet rt-a2361c0d97558824 shape, through the real writers: `plan`
+        """SR_ModelA rt-a2361c0d97558824 shape, through the real writers: `plan`
         completes, its evidence is edited and that edit is observed, then
         `plan-check` and `execute` register and complete on the edited plan."""
         from datetime import datetime, timezone

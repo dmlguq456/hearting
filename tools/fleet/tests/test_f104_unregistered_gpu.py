@@ -188,9 +188,9 @@ class UnregisteredGpuRowTest(UnregisteredGpuTestBase):
         # plus a long script path with no --run-id/--name/--config identifier.
         # Path prefixes must not hide the script, even in the narrower row.
         entry = compute_hosts.unregistered_gpu(_snapshot((0, [_process(
-            command="/home/example/Project_Zoo/TF-Rehancer_artifacts/envs/"
+            command="/home/example/Project_Zoo/Project-C_artifacts/envs/"
                      "private_cnn_cu128_20261006/bin/python "
-                     "/home/example/Project_Zoo/TF-Rehancer_artifacts/envs/"
+                     "/home/example/Project_Zoo/Project-C_artifacts/envs/"
                      "private_cnn_train.py",
             used_memory_mib=4915, elapsed_s=8 * 3600 + 47 * 60,
         )])))[0]

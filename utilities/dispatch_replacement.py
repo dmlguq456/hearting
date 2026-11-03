@@ -33,8 +33,9 @@ DEATH_NOTES = frozenset({
     'dead-no-progress', 'dead-timeout',
 })
 # An owner whose runtime died under it: the process exited (`dead-runtime-exit`) or the runtime
-# returned an error envelope such as a provider 5xx (`dead-runtime-error`). Only an explicit `start`
-# replaces each settled failed attempt through the same checked path.
+# returned an error envelope such as a provider 5xx (`dead-runtime-error`). An explicit `start`
+# replaces each settled failed attempt through the same checked path without a count cutoff; the
+# parent's bound completion carrier replaces one observed column set once.
 RUNTIME_DEATH_NOTES = frozenset({'dead-runtime-exit', 'dead-runtime-error'})
 SCHEMA = 'automatic-dead-replacement-v1'
 # D2: a frame leg whose `top` the frame rule assigned is replaced once, one profile lower, when it
@@ -1298,19 +1299,21 @@ def _budget_exhausted(jobs, source, *, lines=None, route=None, capacity=False):
     return legacy_budget_exhausted(jobs, lines, source, route=route)
 
 
-def _same_runtime_end(jobs, rows, source):
+def _same_runtime_end(jobs, rows, source, *, explicit=False):
     """Whether `source` is itself a `runtime` replacement that ended on the same observed columns.
 
     The columns are the supervisor's recorded observation (`failure_class`, `terminal_event`,
     harness, model profile), never a note or reason name. A repeat means the cause did not
     change, so the default budget stops a further automatic replacement; any changed column
     (another harness, protocol instead of runtime) is a changed cause and replaces once more.
+    An explicit `start` keeps the owner runtime death's no-cutoff policy (SD-157).
     """
     prior_id, family = source.get('replacement_original_attempt_id'), source.get('replacement_family_id')
     if not prior_id or not family or prior_id not in rows:
         return False
-    if source.get('worker_type') == 'owner' and source.get('note') in RUNTIME_DEATH_NOTES:
-        return False   # SD-157: an owner's transport/process death keeps its no-cutoff replacement policy
+    if (explicit and source.get('worker_type') == 'owner'
+            and source.get('note') in RUNTIME_DEATH_NOTES):
+        return False   # an explicit `start` keeps its no-cutoff replacement policy (SD-157)
     record = _read(_record_path(jobs, family))
     if (record or {}).get('proof', {}).get('death_kind') != 'runtime':
         return False
@@ -1391,7 +1394,8 @@ def claim(jobs: Path, aid: str, *, resume_capacity=False) -> dict:
             action="replacement", status=fields[1], metadata=meta,
             facts={"death_kind": proof['death_kind'],
                    "budget_exhausted": _budget_exhausted(jobs, meta, lines=lines, route=route, capacity=capacity)
-                   or (proof['death_kind'] == 'runtime' and _same_runtime_end(jobs, rows, meta))}))
+                   or (proof['death_kind'] == 'runtime'
+                       and _same_runtime_end(jobs, rows, meta, explicit=resume_capacity))}))
         _no_competing_successor(rows, aid)
         owner = aid if meta.get('worker_type') == 'owner' else meta.get('parent_attempt_id') or aid
         _source_fences(jobs, meta, route['route_id'], aid)
@@ -2324,13 +2328,14 @@ def _validate_launch(jobs, lines, metadata, *, owned_launch=None):
     if (not record or record.get('original_attempt_id') != prior
             or record.get('replacement_attempt_id') != metadata.get('attempt_id')):
         raise DC.DispatchContractError('automatic-replacement-exhausted', prior)
-    route_authority.require_recovery_binding(record, source, metadata, jobs)
+    holder = route_authority.require_recovery_binding(record, source, metadata, jobs)
     _, source, replay = validate_claim_source(jobs, lines, record, owned_launch=owned_launch)
     candidate = launch_input(jobs, metadata['attempt_id'], metadata)
     parent_values = {}
     if source.get('dispatch_depth') == '1':
         from dispatch_seat_handover import resolve_recipient, recipient_continuation
-        current = resolve_recipient("job-holder", metadata=source, jobs=jobs)
+        # The holder the binding check observed is judged again, not read again.
+        current = holder if holder is not None else resolve_recipient("job-holder", metadata=source, jobs=jobs)
         route_authority.require_continuation(recipient_continuation(current, metadata['parent_sid']))
     if source.get('dispatch_depth') == '1' and metadata.get('parent_sid') != source.get('parent_sid'):
         parent_values = {'parent_session_id': metadata['parent_sid'],
@@ -2740,7 +2745,8 @@ def _advance(jobs, aid, *, run=subprocess.run, authority_check=None, resume_capa
     fields, source = rows[aid]
     kind = death_kind(fields, source, jobs=jobs)
     progress = route_authority.decide_continuation(action='replacement-progress', jobs=jobs,
-        status=fields[1], metadata=source, facts={'kind': kind, 'resume_capacity': resume_capacity, 'registry_rows': rows})
+        status=fields[1], metadata=source, facts={'kind': kind, 'resume_capacity': resume_capacity,
+        'bound_carrier': authority_check is not None, 'registry_rows': rows})
     if progress.state == 'advance':
         return advance(jobs, source['replacement_original_attempt_id'], run=run,
                        authority_check=authority_check, resume_capacity=resume_capacity)
@@ -3238,8 +3244,9 @@ def recovery_instructions(args):
                        f'{where}, completed stages {completed}, stages still pending {pending}'
                        + (f', missing completion evidence {json.dumps(undone, sort_keys=True)}' if undone else '')
                        + f'. Finish the pending stages on the existing route {record["route_id"]}; completed '
-                       'stages are not rerun and this runtime does not turn the PASS into a completion. If a '
-                       'stage cannot proceed, name the actual blocker and end BLOCKED.\n')
+                       'stages are not rerun and this runtime does not turn the PASS into a completion. '
+                       'Runtime fact: this is the one continuation made without a person; a stage that '
+                       'cannot proceed and ends BLOCKED with its actual blocker named is handed to a person.\n')
         else:
             opening = (f'The previous owner {prior} {ended} and no person has answered. What follows is what the '
                        f'runtime observed, not an answer or an approval: the original result and {where}. '
@@ -3247,8 +3254,8 @@ def recovery_instructions(args):
                        f'work on the existing route {record["route_id"]}. If it stopped on a Hearting refusal '
                        '(for example target-identity-unverified, resource-route-body-conflict or '
                        'reviewed-evidence-revision-not-admitted), observe again whether that refusal still '
-                       'holds before acting. If only a person can decide, name that question and end BLOCKED; '
-                       'the runtime then hands it to a person.\n')
+                       'holds before acting. Runtime fact: this is the one continuation made without a '
+                       'person; a BLOCKED end from it is handed to a person with the question it names.\n')
     elif kind == 'capacity':
         opening = f'The previous attempt {prior} stopped at a usage limit; this resumes it on the existing route {record["route_id"]}.\n'
     elif kind == 'unlaunched':

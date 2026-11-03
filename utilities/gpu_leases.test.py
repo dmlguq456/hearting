@@ -92,9 +92,9 @@ class LeasesTest(unittest.TestCase):
         return G.acquire(self.state, OBS, **kwargs)
 
     def test_selection_and_explicit_conflict_gives_owner_task_time_and_free_gpu(self):
-        lease = self.acquire(owner={"label": "SR_CorrNet [cd]"}, task="train", run_id="one")
+        lease = self.acquire(owner={"label": "SR_ModelA [cd]"}, task="train", run_id="one")
         self.assertEqual(lease["gpus"], ["0"])
-        with self.assertRaisesRegex(G.GPUUnavailable, r"SR_CorrNet \[cd\].*train.*free GPUs: gpu1"):
+        with self.assertRaisesRegex(G.GPUUnavailable, r"SR_ModelA \[cd\].*train.*free GPUs: gpu1"):
             self.acquire(requested="0")
         second = self.acquire()
         self.assertEqual(second["gpus"], ["1"])

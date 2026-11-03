@@ -139,7 +139,7 @@ Write verified drafts to global DB records with `type=profile`; do not edit prof
 
 ```markdown
 ## 1. Architecture Diagram
-- block: rounded rectangle, grayscale outline (TF-Restormer Fig.1 / TF-Separator Fig.2)
+- block: rounded rectangle, grayscale outline (TF-Enhancer Fig.1 / TF-Separator Fig.2)
 - color: encoder green #548235 / decoder orange #ED7D31 / ours red #C00000
 - arrow: solid 1.5pt, sans-serif label 8pt
 ```

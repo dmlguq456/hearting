@@ -37,7 +37,7 @@ class TestProvenance(unittest.TestCase):
     def _dir(self):
         return Path(tempfile.mkdtemp(dir=self.temp.name))
 
-    def _custom_repo(self, roots, layout_name="bcresnet", extra_top=None):
+    def _custom_repo(self, roots, layout_name="kwsnet", extra_top=None):
         repo = self._dir()
         payload = {"schema_version": 1, "layout": layout_name, "roots": roots}
         if extra_top: payload.update(extra_top)
@@ -499,10 +499,10 @@ class TestProvenance(unittest.TestCase):
 
     def test_T_F1_8_label_only_declaration_is_honest_about_roots(self):
         repo = self._dir()
-        (repo / ".lab-config-layout").write_text("bcresnet\n")
+        (repo / ".lab-config-layout").write_text("kwsnet\n")
         label, roots, kind = M.layout_spec(repo.resolve())
         self.assertEqual(kind, "label-only")
-        self.assertEqual(label, "declared/bcresnet")
+        self.assertEqual(label, "declared/kwsnet")
         self.assertEqual(roots, M.DEFAULT_ROOTS)
 
     def test_T_F1_9_bad_json_reports_declaration_path_in_stderr(self):

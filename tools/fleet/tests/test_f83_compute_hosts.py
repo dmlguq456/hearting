@@ -159,7 +159,7 @@ class ComputeHostCollectorTest(unittest.TestCase):
 class ComputeHostRenderTest(unittest.TestCase):
     def test_expanded_reservation_keeps_start_without_task_description(self):
         gpu = self.snapshot["hosts"][0]["gpus"][0]
-        gpu["reservations"] = [{"owner": {"label": "SR_CorrNet [cd]"},
+        gpu["reservations"] = [{"owner": {"label": "SR_ModelA [cd]"},
                                 "task": "css 1ch training", "started_at": 1728000000}]
         render._ROUTE_FOLD = {render._GPU_FOLD_ALL: False}
         render.set_compute_hosts(self.snapshot)
@@ -167,7 +167,7 @@ class ComputeHostRenderTest(unittest.TestCase):
             rows = render._compute_host_rows(width)
             text = "\n".join(render._plain(row) for row in rows)
             self.assertIn("reserved 미귀속", text)
-            self.assertNotIn("SR_CorrNet", text)
+            self.assertNotIn("SR_ModelA", text)
             self.assertIn("10-04", text)
             self.assertNotIn("css", text)
             self.assertTrue(all(render._dw(render._plain(row)) <= width for row in rows))

@@ -4213,7 +4213,7 @@ def _retain_dead_terminal_owners(jobs, now, jobs_path=None, *, orphan_rows_cache
         # continuation route whose SD-104 supersession chain leads back to it, or — F-83c —
         # the same worktree and capability under a freshly compiled route: an operator who
         # re-routes instead of continuing has moved on, and the dead card would otherwise
-        # accumulate forever (observed 2026-08-27: four ✕ owners stacked in home-os while a
+        # accumulate forever (observed 2026-08-27: four ✕ owners stacked in home-app while a
         # fifth live owner worked the same worktree on new route ids).
         worktree = row.get("worktree") or ""
         capability = row["meta"].get("capability") or row["meta"].get("owner") or ""

@@ -58,7 +58,7 @@ chat locale.
 
 - `<artifact_path>` (REQUIRED): one of
   - Absolute path to a `<artifact-root>/{plans,research,documents}/*` directory
-  - Fuzzy short name (for example, `se-seminar-tfrestormer`) — resolve with `ls -d <artifact-root>/{plans,research,documents}/*$ARG* 2>/dev/null`. Use a single match. For multiple matches, ask which artifact to use in the conversation language and follow the adapter pause/autonomy rule; if no answer arrives, use the most recently modified candidate. Return an error for zero matches.
+  - Fuzzy short name (for example, `se-seminar-tfenhancer`) — resolve with `ls -d <artifact-root>/{plans,research,documents}/*$ARG* 2>/dev/null`. Use a single match. For multiple matches, ask which artifact to use in the conversation language and follow the adapter pause/autonomy rule; if no answer arrives, use the most recently modified candidate. Return an error for zero matches.
 - `--scope` (default `auto`): select the aspect set. An explicit user value takes precedence. Otherwise, infer an appropriate set from artifact mode, refinement count, status, and structure. Map `facts | style | structure | cross-ref | coverage | all` to the type-specific groups in Stage B.
 - `--read-only` (default for plans): for plan artifacts, skip aspects that require executing tests or linters and perform only static inspection. For research and document artifacts, read-only behavior is implicit and the flag is a no-op; report that those audit types are always read-only.
 - `--report-only`: retained as a compatibility option. Audit produces its report and stops without dispatching follow-up edits by default.
