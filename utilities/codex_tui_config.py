@@ -9,9 +9,11 @@ import tempfile
 import tomllib
 
 
+# `thread-id` leads: Codex clips an overflowing footer from the right, so a
+# narrow pane loses trailing telemetry instead of the identity Fleet reads.
 DEFAULT_STATUS_LINE = (
-    "thread-title", "git-branch", "context-used", "model-with-reasoning",
-    "five-hour-limit", "weekly-limit", "thread-id",
+    "thread-id", "thread-title", "git-branch", "context-used", "model-with-reasoning",
+    "five-hour-limit", "weekly-limit",
 )
 DEFAULT_STATUS_LINE_USE_COLORS = True
 BACKUP_NAME = "config.toml.pre-harness-tui"
@@ -40,7 +42,10 @@ def _parse(text: str, label: str = "Codex config") -> dict:
 def _normalize(items):
     if not isinstance(items, (list, tuple)) or any(not isinstance(item, str) for item in items):
         raise CodexTuiConfigError("tui.status_line must be an array of strings")
-    return [item for item in items if item != "thread-id"] + ["thread-id"]
+    # The single managed identity item goes first; every other item keeps its
+    # order. Earlier releases put it last, so the former default and lists that
+    # end with it converge here on the next install or refresh.
+    return ["thread-id"] + [item for item in items if item != "thread-id"]
 
 
 def _array_end(lines, start, limit):
@@ -95,7 +100,7 @@ def _table_insert_index(lines, start, end):
 
 def merge_status_line_text(text: str, defaults=DEFAULT_STATUS_LINE,
                            default_colors=DEFAULT_STATUS_LINE_USE_COLORS) -> str:
-    """Return valid TOML with one thread-id item last; leave all other values intact."""
+    """Return valid TOML with one thread-id item first; leave all other values intact."""
     current = _parse(text)
     tui = current.get("tui", {})
     if not isinstance(tui, dict):
@@ -164,7 +169,9 @@ def status_line_capability(text: str) -> str:
         return "incapable"
     if not isinstance(items, list) or any(not isinstance(item, str) for item in items):
         return "unknown"
-    return "capable" if items and items[-1] == "thread-id" else "incapable"
+    # First is the current order; last is how installs before the reorder still
+    # read until their next refresh. Both are a whole field the footer reader proves.
+    return "capable" if items and "thread-id" in (items[0], items[-1]) else "incapable"
 
 
 def _status_line_override(argv) -> bool:

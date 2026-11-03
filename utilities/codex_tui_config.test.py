@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Behavioral regressions for Codex status-line merge and feasibility."""
+import json
 from pathlib import Path
 import os
 import stat
@@ -9,6 +10,12 @@ import unittest
 
 import codex_tui_config as config
 
+FRAGMENT = Path(__file__).resolve().parents[1] / "adapters/codex/config/tui-statusline.toml"
+# The Hearting default before thread-id moved first (narrow panes clipped it).
+FORMER_DEFAULT = ["thread-title", "git-branch", "context-used", "model-with-reasoning",
+                  "five-hour-limit", "weekly-limit", "thread-id"]
+NEW_DEFAULT = ["thread-id", "thread-title", "git-branch", "context-used", "model-with-reasoning",
+               "five-hour-limit", "weekly-limit"]
 
 class CodexTuiConfigTest(unittest.TestCase):
     def _tracked_merge(self, text, previous=None):
@@ -28,7 +35,7 @@ class CodexTuiConfigTest(unittest.TestCase):
 
     def test_restore_keeps_later_items_colors_and_other_tables(self):
         merged, record = self._tracked_merge('[tui]\nstatus_line = ["x"]\n')
-        edited = merged.replace('["x", "thread-id"]', '["x", "new", "thread-id"]')
+        edited = merged.replace('["thread-id", "x"]', '["thread-id", "x", "new"]')
         edited = edited.replace('status_line_use_colors = true', 'status_line_use_colors = false')
         edited += '\n[projects."/work"]\ntrust_level = "trusted"\n'
         for refresh in (False, True):
@@ -42,9 +49,10 @@ class CodexTuiConfigTest(unittest.TestCase):
 
     def test_restore_keeps_user_owned_thread_id_and_new_table_settings(self):
         merged, record = self._tracked_merge('[tui]\nstatus_line = ["thread-id", "x"]\n')
-        edited = merged.replace('["x", "thread-id"]', '["new", "thread-id"]')
+        edited = merged.replace('["thread-id", "x"]', '["thread-id", "new"]')
+        self.assertNotEqual(edited, merged)
         self.assertEqual(tomllib.loads(config.restore_status_line_text(edited, record))["tui"]["status_line"],
-                         ["new", "thread-id"])
+                         ["thread-id", "new"])
         merged, record = self._tracked_merge('')
         edited = merged + 'notification_method = "osc9"\n'
         self.assertEqual(tomllib.loads(config.restore_status_line_text(edited, record)),
@@ -63,7 +71,7 @@ class CodexTuiConfigTest(unittest.TestCase):
             self.assertIn('\n# >>> managed block\n[other]\nvalue = true\n', merged)
             self.assertEqual(config.restore_status_line_text(merged, record), source)
 
-    def test_existing_items_and_comments_survive_with_thread_id_last(self):
+    def test_existing_items_and_comments_survive_with_thread_id_first(self):
         source = ('# keep this comment\n[tui] # preserve header\n'
                   'status_line = [\n  "project-name", # item comment\n'
                   '  "thread-id", "custom-item",\n]\n'
@@ -72,7 +80,7 @@ class CodexTuiConfigTest(unittest.TestCase):
         merged = config.merge_status_line_text(source)
         parsed = tomllib.loads(merged)
         self.assertEqual(parsed["tui"]["status_line"],
-                         ["project-name", "custom-item", "thread-id"])
+                         ["thread-id", "project-name", "custom-item"])
         self.assertIs(parsed["tui"]["status_line_use_colors"], False)
         self.assertIn("# keep this comment", merged)
         self.assertIn("# preserve header", merged)
@@ -81,16 +89,70 @@ class CodexTuiConfigTest(unittest.TestCase):
         self.assertEqual(config.merge_status_line_text(merged), merged)
 
     def test_absent_table_key_empty_and_duplicates_converge(self):
-        self.assertEqual(tomllib.loads(config.merge_status_line_text(""))["tui"]["status_line"][-1],
+        self.assertEqual(tomllib.loads(config.merge_status_line_text(""))["tui"]["status_line"][0],
                          "thread-id")
         self.assertEqual(tomllib.loads(config.merge_status_line_text(
-            '[tui]\nstatus_line_use_colors = false\n'))["tui"]["status_line"][-1], "thread-id")
+            '[tui]\nstatus_line_use_colors = false\n'))["tui"]["status_line"][0], "thread-id")
         for source in ('[tui]\nstatus_line = []\n',
                        '[tui]\nstatus_line = ["thread-id", "x", "thread-id"]\n'):
             with self.subTest(source=source):
                 merged = config.merge_status_line_text(source)
                 items = tomllib.loads(merged)["tui"]["status_line"]
-                self.assertEqual(items, (["x", "thread-id"] if '"x"' in source else ["thread-id"]))
+                self.assertEqual(items, (["thread-id", "x"] if '"x"' in source else ["thread-id"]))
+
+    def test_default_order_leads_with_thread_id(self):
+        self.assertEqual(list(config.DEFAULT_STATUS_LINE), NEW_DEFAULT)
+        fragment = tomllib.loads(FRAGMENT.read_text(encoding="utf-8"))["tui"]
+        self.assertEqual(fragment["status_line"], NEW_DEFAULT)
+        self.assertEqual(tomllib.loads(config.merge_status_line_text(""))["tui"]["status_line"],
+                         NEW_DEFAULT)
+        self.assertEqual(tomllib.loads(config.merge_status_line_from_fragment("", FRAGMENT))
+                         ["tui"]["status_line"], NEW_DEFAULT)
+
+    def test_former_default_moves_thread_id_first_and_keeps_every_other_byte(self):
+        former = "status_line = " + json.dumps(FORMER_DEFAULT) + " # footer"
+        current = "status_line = " + json.dumps(NEW_DEFAULT) + " # footer"
+        source = ('model = "keep"\n# user comment\n[tui]\n' + former + '\n'
+                  'status_line_use_colors = false\nnotification_method = "osc9"\n\n'
+                  '[projects."/work"]\ntrust_level = "trusted"\n')
+        merged = config.merge_status_line_from_fragment(source, FRAGMENT)
+        self.assertEqual(merged, source.replace(former, current))
+        self.assertEqual(config.merge_status_line_from_fragment(merged, FRAGMENT), merged)
+
+    def test_former_default_install_refreshes_and_still_restores(self):
+        # An install recorded the former default as its own projection.
+        for source in ("", 'model = "keep"\n'):
+            with self.subTest(source=source):
+                # What the earlier release wrote: the same bytes with the former order.
+                former = config.merge_status_line_text(source).replace(
+                    json.dumps(NEW_DEFAULT), json.dumps(FORMER_DEFAULT))
+                record = config.status_line_record(source, former)
+                self.assertEqual(record["keys"]["status_line"]["projected"], FORMER_DEFAULT)
+                refreshed, record = self._tracked_merge(former, record)
+                self.assertEqual(tomllib.loads(refreshed)["tui"]["status_line"], NEW_DEFAULT)
+                self.assertEqual(config.restore_status_line_text(refreshed, record), source)
+
+    def test_user_list_keeps_its_items_order_and_other_bytes(self):
+        tail = ('status_line_use_colors = false\n\n[hooks.state]\n"example" = "keep"\n')
+        lead = 'model = "keep"\n[tui]\n'
+        # A list that already leads with thread-id is left byte for byte.
+        for items in (["thread-id"], ["thread-id", "project-name", "weekly-limit"]):
+            with self.subTest(items=items):
+                source = lead + "status_line = " + json.dumps(items) + "\n" + tail
+                self.assertEqual(config.merge_status_line_from_fragment(source, FRAGMENT), source)
+        # A customised list keeps its own items and order; only the one managed
+        # identity item takes the leading place.
+        custom = ["project-name", "git-branch", "context-used", "model-with-reasoning",
+                  "weekly-limit", "context-window-size", "approval-mode"]
+        for items in (custom + ["thread-id"], custom):
+            with self.subTest(items=items):
+                line = "status_line = " + json.dumps(items)
+                source = lead + line + "\n" + tail
+                merged = config.merge_status_line_from_fragment(source, FRAGMENT)
+                self.assertEqual(merged, source.replace(
+                    line, "status_line = " + json.dumps(["thread-id"] + custom)))
+                merged, record = self._tracked_merge(source)
+                self.assertEqual(config.restore_status_line_text(merged, record), source)
 
     def test_startup_default_preserves_explicit_values_and_inserts_at_toml_root(self):
         for value in (True, False):
@@ -195,7 +257,7 @@ class CodexTuiConfigTest(unittest.TestCase):
             self.assertIs(merged["check_for_update_on_startup"], False)
             self.assertEqual(merged["model"], "keep")
             self.assertEqual(merged["tui"]["status_line"],
-                             ["project-name", "custom-item", "thread-id"])
+                             ["thread-id", "project-name", "custom-item"])
             self.assertIs(merged["tui"]["status_line_use_colors"], False)
             self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o640)
 
@@ -215,7 +277,7 @@ class CodexTuiConfigTest(unittest.TestCase):
             result = config.apply_status_line(path, fragment)
             parsed = tomllib.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(parsed["check_for_update_on_startup"], "mine")
-            self.assertEqual(parsed["tui"]["status_line"][-1], "thread-id")
+            self.assertEqual(parsed["tui"]["status_line"][0], "thread-id")
             self.assertIn("must be a boolean", result["startup_error"])
 
     def test_invalid_symlink_target_is_unchanged_and_not_backed_up(self):
@@ -240,8 +302,15 @@ class CodexTuiConfigTest(unittest.TestCase):
         self.assertEqual(config.status_line_capability('[tui]\nstatus_line = []\n'), "incapable")
         self.assertEqual(config.status_line_capability(
             '[tui]\nstatus_line = ["x", "thread-id"]\n'), "capable")
+        # First is the current order; last is a not-yet-refreshed install.
         self.assertEqual(config.status_line_capability(
-            '[tui]\nstatus_line = ["thread-id", "x"]\n'), "incapable")
+            '[tui]\nstatus_line = ["thread-id", "x"]\n'), "capable")
+        self.assertEqual(config.status_line_capability(
+            '[tui]\nstatus_line = ' + json.dumps(list(config.DEFAULT_STATUS_LINE)) + '\n'), "capable")
+        self.assertEqual(config.status_line_capability(
+            '[tui]\nstatus_line = ' + json.dumps(FORMER_DEFAULT) + '\n'), "capable")
+        self.assertEqual(config.status_line_capability(
+            '[tui]\nstatus_line = ["x", "thread-id", "y"]\n'), "incapable")
         self.assertEqual(config.status_line_capability('[tui]\nstatus_line = 7\n'), "unknown")
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

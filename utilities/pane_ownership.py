@@ -36,6 +36,11 @@ _CODEX_LOCATION_MENU = (
     "usecurrentgitworktree", "keepusingthecurrentworkingdirectory", "createnewgitworktree",
 )
 _CODEX_FOOTER_HINT = ("?forshortcuts",)
+# A narrow pane drops "? for shortcuts" first and keeps the agents hint.
+_CODEX_COMPACT_FOOTER_HINT = ("foragents",)
+# A trailing thread-id the TUI clipped: the line uses the pre-reorder layout,
+# so its first field is a title or project, not the thread.
+_CLIPPED_THREAD_ID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f-]{0,27}…")
 _WORKER_ENV = ("AGENT_DISPATCH_CHILD", "AGENT_DISPATCH_DEPTH", "OPENCODE_DISPATCH_SLUG",
                "FLEET_TITLE_REFRESH", "MEM_DISTILL")
 
@@ -56,13 +61,20 @@ def _codex_current_footer(lines):
     flat = "".join("".join(tail).split()).lower()
     if any(token in flat for token in _CODEX_LOCATION_MENU):
         return "invalid", ""
-    if not tail or not any(token in "".join(tail[-1].lower().split())
-                           for token in _CODEX_FOOTER_HINT):
-        return "none", ""
+    hint_row = "".join(tail[-1].lower().split()) if tail else ""
+    if not any(token in hint_row for token in _CODEX_FOOTER_HINT):
+        # The compact hint counts only in the exact status/help-row layout.
+        if len(tail) != 2 or not any(token in hint_row for token in _CODEX_COMPACT_FOOTER_HINT):
+            return "none", ""
     if len(tail) != 2:
         return "invalid", ""
-    last_field = tail[0].rsplit("·", 1)[-1].strip()
+    fields = tail[0].split("·")
+    last_field, first_field = fields[-1].strip(), fields[0].strip()
+    # Hearting puts thread-id first so a narrow pane clips telemetry, not the
+    # UUID; installs not yet refreshed still show it last.
     match = _THREAD_ID_RE.fullmatch(last_field)
+    if not match and not _CLIPPED_THREAD_ID_RE.fullmatch(last_field):
+        match = _THREAD_ID_RE.fullmatch(first_field)
     # Clipping or a status line without thread-id supplies no identity. It
     # cannot contradict an independently proved daemon/process-native ID.
     return ("current", match.group(0)) if match else ("none", "")
@@ -79,9 +91,11 @@ class _CodexFooterThreads(set):
 def codex_footer_threads(lines, *, current_id_only=False):
     """Return thread UUIDs from the visible Codex footer.
 
-    Current identity is the whole UUID in the last native footer field, after a
-    composer/status/help-row layout. A hidden footer or a conversation-location
-    menu is unknown. Broad discovery remains available to non-ownership readers.
+    Current identity is the whole UUID in the first native footer field (the
+    current Hearting order) or the last one (installs before that order), after a
+    composer/status/help-row layout. A hidden footer, a clipped trailing UUID or
+    a conversation-location menu is unknown. Broad discovery remains available
+    to non-ownership readers.
     """
     if not isinstance(lines, (list, tuple)):
         return set()

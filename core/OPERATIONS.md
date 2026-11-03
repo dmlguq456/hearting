@@ -865,16 +865,17 @@ tidy at its existing project seat and pane hooks silent, without new user input
 or runtime-state migration.
 
 For native Codex callbacks in a shared service, exactly one `thread-id` is the
-last `[tui].status_line` item, and the complete UUID in the last visible native
-footer field provides the current `Thread.id`; `sessionId` remains its tree
-root. A UUID in an earlier field, title, transcript, or arbitrary screen text
-is not current identity. A missing, clipped, wrapped, partial, ambiguous, or
-hidden last field stays unknown. Two fresh samples share stable foreground
-PID/start/TTY and one unique endpoint/pane, also used for reporting, number
-lookup and title. Managed apply preserves every other custom footer item and
-its order. Callback or environment SID, cwd, title, inherited pane and shared
-ancestry alone remain hints; registered workers have no foreground pane
-ownership.
+first `[tui].status_line` item (installs not yet refreshed keep it last), and
+the complete UUID in the first or last visible native footer field provides the
+current `Thread.id`; `sessionId` remains its tree root. A UUID in a middle
+field, title, transcript, or arbitrary screen text is not current identity. A
+missing, clipped, wrapped, partial, ambiguous, or hidden identity field stays
+unknown, and a clipped trailing UUID voids the first field too. Two fresh
+samples share stable foreground PID/start/TTY and one unique endpoint/pane, also
+used for reporting, number lookup and title. Managed apply preserves every other
+custom footer item and its order. Callback or environment SID, cwd, title,
+inherited pane and shared ancestry alone remain hints; registered workers have
+no foreground pane ownership.
 
 For an unproven background caller, default `peer-steward start` locates the
 inherited pane's workspace by its live foreground directory in the caller's
