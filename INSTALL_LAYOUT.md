@@ -149,8 +149,10 @@ activation record carrying a retired `profile*` field is read but ignored.
 - The SHA-256 sidecar is an integrity/corruption check. Authenticity remains
   anchored to the repository's GitHub Release and HTTPS publisher account; the
   sidecar is not an independent signature.
-- `linked` is the maintainer default. It projects one explicit local checkout;
-  managed update never fetches, pulls, or repoints it.
+- `linked` is an explicit live-debug mode (`runtime activate --mode linked`);
+  `runtime activate` defaults to `packaged` for maintainers too. `linked`
+  projects one explicit local checkout; managed update never fetches, pulls,
+  or repoints it.
 - A manually activated `packaged` source changes only after `runtime refresh`;
   a managed release changes through `harness update`. Both use the same native
   discovery paths.

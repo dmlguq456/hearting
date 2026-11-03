@@ -277,5 +277,5 @@ def ensure_node(dry_run: bool = False) -> dict:
         return _result(
             "warning", f"node install failed: {stderr[0] if stderr else exc}"
         )
-    except (OSError, urllib.error.URLError, ValueError) as exc:
+    except (OSError, urllib.error.URLError, ValueError, subprocess.TimeoutExpired) as exc:
         return _result("warning", f"node install failed: {exc}")
