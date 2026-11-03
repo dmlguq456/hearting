@@ -70,6 +70,8 @@ while True:
     log.write(data)
     seen += data
     if seen.endswith(b"\x1b[201~\r"):
+        if b"/exit" in seen:
+            break
         if b"/clear" in seen:
             declare(new_sid, "idle")
         else:
@@ -352,6 +354,148 @@ class TmuxPeerStewardTest(unittest.TestCase):
         self.assertIn("claude", title)
         self.assertEqual(self.tmux("show-options", "-p", "-t", self.pane, "-v", "@hearting_title").stdout.strip(),
                          title)
+
+
+    def fake_claude_on_path(self):
+        """A `claude` on the panes' PATH that runs the fake TUI as an idle session OLD."""
+        bindir = self.root / "bin"
+        bindir.mkdir(exist_ok=True)
+        wrapper = bindir / "claude"
+        wrapper.write_text("#!/bin/bash\nexec -a claude " + shlex.join(
+            [sys.executable, str(self.root / "claude.py"), str(self.log), OLD, "idle", NEW, ""]) + "\n")
+        wrapper.chmod(0o755)
+        # A pane split from this process takes this process's environment; it runs a plain
+        # shell, since a login shell's profile would reset PATH.
+        os.environ["PATH"] = f"{bindir}:{os.environ.get('PATH', '')}"
+        self.tmux("set-option", "-g", "default-command", "exec sh")
+
+    def panes(self):
+        return self.tmux("list-panes", "-t", "p1", "-F", "#{pane_id}").stdout.split()
+
+    def test_start_opens_beside_the_reference_pane_and_types_the_launch_once(self):
+        import re
+        self.fake_claude_on_path()
+        reference_screen = self.tmux("capture-pane", "-p", "-t", self.pane).stdout
+        cwd = os.path.realpath(self.root)
+        rc, line = self.steward("start", "helper", "--kind", "claude", "--beside", self.pane, "--cwd", cwd)
+        self.assertEqual(rc, 0, line)
+        self.assertIn("started=true", line)
+        self.assertIn(f"session_id={OLD}", line)
+        self.assertIn("surface=tmux", line)
+        new = re.search(r" pane=(%[0-9]+@\S+)", line).group(1)
+        self.assertEqual(peer_steward.terminal_surface.tmux_address(new)[1], os.path.realpath(self.socket))
+        # One window: the supervisor's pane stays where it was, the new one sits beside it.
+        self.assertEqual(self.panes(), [self.pane, peer_steward.terminal_surface.tmux_address(new)[0]])
+        self.assertEqual(self.tmux("capture-pane", "-p", "-t", self.pane).stdout, reference_screen)
+        agent = peer_steward.terminal_surface.TmuxSurface(socket=str(self.socket)).agent(new)["result"]["agent"]
+        self.assertEqual((agent["agent"], agent["name"], agent["agent_session"]["value"]), ("claude", "helper", OLD))
+        # The retained-pane reuse command adopts the running session and types nothing.
+        typed = self.typed()
+        rc, again = self.steward("start", "helper", "--kind", "claude", "--pane", new)
+        self.assertEqual(rc, 0, again)
+        self.assertIn("start_verify=observed-pane", again)
+        self.assertEqual(self.typed(), typed)
+
+    def test_start_types_nothing_into_a_window_whose_keys_are_mirrored(self):
+        self.fake_claude_on_path()
+        self.tmux("set-option", "-w", "-t", self.pane, "synchronize-panes", "on")
+        before = self.panes()
+        rc, line = self.steward("start", "helper", "--kind", "claude", "--beside", self.pane,
+                                "--cwd", os.path.realpath(self.root))
+        self.assertEqual(rc, 1, line)
+        self.assertIn("reason=pane-synchronized", line)
+        self.assertIn("pane_cleanup=closed", line)
+        self.assertEqual(self.panes(), before)
+        self.assertNotIn("claude", self.tmux("capture-pane", "-p", "-t", self.pane).stdout)
+
+
+    def test_retire_by_name_exits_the_started_claude_once_and_closes_its_pane(self):
+        import re
+        self.fake_claude_on_path()
+        reference_screen = self.tmux("capture-pane", "-p", "-t", self.pane).stdout
+        rc, line = self.steward("start", "helper", "--kind", "claude", "--beside", self.pane,
+                                "--cwd", os.path.realpath(self.root))
+        self.assertEqual(rc, 0, line)
+        new = re.search(r" pane=(%[0-9]+@\S+)", line).group(1)
+        rc, out = self.steward("retire", "helper")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("retired=true", out)
+        self.assertEqual(self.typed(), b"\x1b[200~/exit\x1b[201~\r")
+        # Its own pane closed after its shell came back; the supervisor's pane is untouched.
+        self.assertEqual(self.panes(), [self.pane])
+        self.assertEqual(self.tmux("capture-pane", "-p", "-t", self.pane).stdout, reference_screen)
+        self.assertNotIn(peer_steward.terminal_surface.tmux_address(new)[0], self.panes())
+
+    def test_retire_types_nothing_into_a_busy_claude(self):
+        import re
+        self.fake_claude_on_path()
+        rc, line = self.steward("start", "helper", "--kind", "claude", "--beside", self.pane,
+                                "--cwd", os.path.realpath(self.root))
+        self.assertEqual(rc, 0, line)
+        new = re.search(r" pane=(%[0-9]+@\S+)", line).group(1)
+        surface = peer_steward.terminal_surface.TmuxSurface(socket=str(self.socket))
+        pid = surface.agent(new)["result"]["agent"]["pid"]
+        registry = Path(os.environ["HOME"]) / ".claude" / "sessions" / f"{pid}.json"
+        record = json.loads(registry.read_text())
+        registry.write_text(json.dumps(dict(record, status="busy")))
+        rc, out = self.steward("retire", new)
+        # The existing contract: a busy target keeps the retire pending (its runner retries).
+        self.assertIn("retired=false", out)
+        self.assertIn("pending=true", out)
+        self.assertIn("reason=agent-working", out)
+        self.assertEqual(self.typed(), b"")
+        self.assertEqual(len(self.panes()), 2)
+
+
+    def _started_helper(self):
+        import re
+        self.fake_claude_on_path()
+        rc, line = self.steward("start", "helper", "--kind", "claude", "--beside", self.pane,
+                                "--cwd", os.path.realpath(self.root))
+        self.assertEqual(rc, 0, line)
+        return re.search(r" pane=(%[0-9]+@\S+)", line).group(1)
+
+    def _retire_phase(self):
+        store = peer_steward.peer_obligations.ObligationStore()
+        rows = store.list(states=peer_steward.peer_obligations._PENDING_STATES | {"complete"},
+                          kinds={"retire"})
+        self.assertEqual(len(rows), 1)
+        return rows[0]["observation"].get("phase", "waiting")
+
+    def test_a_retire_into_copy_mode_waits_and_finishes_once_the_pane_takes_keys(self):
+        new = self._started_helper()
+        bare = peer_steward.terminal_surface.tmux_address(new)[0]
+        self.tmux("copy-mode", "-t", bare)
+        rc, out = self.steward("retire", "helper")
+        self.assertIn("retired=false", out)
+        self.assertIn("reason=pane-in-mode-wait", out)
+        self.assertIn("pending=true", out)
+        self.assertEqual(self.typed(), b"")
+        self.assertEqual(self._retire_phase(), "waiting")
+        self.tmux("send-keys", "-t", bare, "-X", "cancel")  # leave copy mode (a mode command, not input)
+        rc, out = self.steward("retire", "helper")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("retired=true", out)
+        self.assertEqual(self.typed(), b"\x1b[200~/exit\x1b[201~\r")
+
+    def test_a_refusal_after_the_claim_returns_the_retire_to_waiting(self):
+        self._started_helper()
+        real_refusal, sent = peer_steward._tmux_input_refusal, []
+
+        def refused_send(pane, operation, value):
+            sent.append((operation, value))
+            return False
+        refusal = lambda pane: "pane-in-mode" if sent else real_refusal(pane)
+        with mock.patch.object(peer_steward, "_pane_send", side_effect=refused_send), \
+             mock.patch.object(peer_steward, "_tmux_input_refusal", side_effect=refusal):
+            rc, out = self.steward("retire", "helper")
+        self.assertIn("reason=pane-in-mode-wait", out)
+        self.assertEqual(sent, [("send-text", "/exit")])
+        self.assertEqual(self._retire_phase(), "waiting")
+        rc, out = self.steward("retire", "helper")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("retired=true", out)
+        self.assertEqual(self.typed(), b"\x1b[200~/exit\x1b[201~\r")
 
 
 if __name__ == "__main__":

@@ -2813,10 +2813,22 @@ see) and, when the producer sits in a graphical session with a session bus, one
 producer that sends them runs detached, and when nothing could show a reminder
 it is tried again on the next refresh. Hearting writes no OSC 9/777
 escape: the producer owns no terminal, and writing into another pane's terminal
-could interleave with that program's output. `peer-steward start`, `watch` and
-`retire` stay Herdr-only. tmux pane ids are unique per server only, so a pane
-travels as `%N@<socket>`: a bare `%N` given to `peer-steward prompt` or `wait`
-means the caller's own server, and a seat key includes the server. cmux's
+could interleave with that program's output. `peer-steward start` beside a
+tmux pane opens the new pane in that window through the same placement, waits
+until its own shell shows the same empty prompt twice, types the launch line
+once through the guarded paste, and reports the runtime once its process (and,
+when it has one, its session record) shows in the pane; the started runtime's
+name is a pane option bound to its PID and start time. A start that cannot type
+closes only the pane it opened, while that shell still shows that screen; after
+typing it keeps the pane and prints its reuse command, which adopts the runtime
+without typing. `peer-steward retire` takes a tmux pane or that name and sends
+the same one normal exit action through the same guarded input, then waits
+through the bounded runtime-record wait for the original shell. OpenCode on
+tmux has no turn record, so retire types nothing into it there. `watch` stays
+Herdr-only: its observer is built on Herdr's event stream. tmux pane ids are
+unique per server only, so a pane travels as `%N@<socket>`: a bare `%N` given
+to `peer-steward prompt` or `wait` means the caller's own server, and a seat key
+includes the server. cmux's
 documented API reports no surface process or terminal, so Hearting does not
 type into cmux surfaces.
 

@@ -930,10 +930,34 @@ class TmuxSurface:
         session_id = _process_session(harness, pid, pane, self)
         agent = {"pane_id": pane, "agent": harness, "pid": pid,
                  "agent_status": native_turn(harness, pid, session_id) if session_id else "unknown",
-                 "name": None, "cwd": _cwd(pid)}
+                 "name": self._started_name(pane, pid), "cwd": _cwd(pid)}
         if session_id:
             agent["agent_session"] = {"kind": "id", "value": session_id}
         return {"result": {"type": "agent_info", "agent": agent}}
+
+    def _started_name(self, pane, pid):
+        """The name ``peer-steward start`` gave this exact runtime process, else None.
+
+        The name is bound to the runtime's PID and start time, so a later program in
+        the same pane never inherits it.
+        """
+        from pane_ownership import _process
+        found = self._describe(pane, "#{@hearting_name}", "#{@hearting_name_pid}")
+        live = _process(pid)
+        if not found or not found[0] or not live or found[1] != f"{pid}:{live[5]}":
+            return None
+        return found[0]
+
+    def name_started(self, pane, pid, name):
+        """Bind ``name`` to the runtime ``pid`` now in ``pane`` (pane options only)."""
+        from pane_ownership import _process
+        live = _process(pid)
+        return bool(live) and self.annotate(pane, None, {"name": str(name),
+                                                         "name_pid": f"{pid}:{live[5]}"})
+
+    def close(self, pane):
+        target = self._target(pane)
+        return target is not None and self._tmux("kill-pane", "-t", target) is not None
 
     def agents(self):
         """``herdr agent list``'s payload over every pane of this tmux server."""
