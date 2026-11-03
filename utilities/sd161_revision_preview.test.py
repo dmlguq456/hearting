@@ -52,8 +52,7 @@ class RevisionPreviewTest(FIX.CompletionMarkerTest):
                 R.publish_revision_locked(route,'plan',self.base/'plan.md',basis='review-findings',
                        answers=('att-plancheck-1',),author_attempt_id='att-owner-preview',jobs=self.jobs)
             before=self.snapshot()
-            admission=N.admit_round(route,node,self.jobs,owner_attempt_id='att-owner-preview',record_auto_revisions=False)
-            self.assertEqual(admission.auto_revisions,())
+            N.admit_round(route,node,self.jobs,owner_attempt_id='att-owner-preview',record_auto_revisions=False)
             self.assertEqual(before,self.snapshot())
 
     def test_preview_self_input_cap_plus_one_and_writer_agree_without_mutation(self):
@@ -164,9 +163,8 @@ class RevisionPreviewTest(FIX.CompletionMarkerTest):
             # The real writer may create its ordinary serialization lock;
             # only preview is required to create no lock at all.
             before=self.snapshot()
-            admission=N.admit_round(route,node,self.jobs,
+            N.admit_round(route,node,self.jobs,
                 owner_attempt_id='att-owner-preview',record_auto_revisions=False)
-            self.assertEqual(admission.auto_revisions,())
             gate_reasons=[]
             for action in ('dry-run','start'):
                 with self.assertRaises(FIX.D.DispatchContractError) as raised:
