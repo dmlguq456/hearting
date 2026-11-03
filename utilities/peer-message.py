@@ -740,14 +740,98 @@ def pending_lock(key="prepare"):
         with _pending_directory_lock(path):
             yield
         return
-    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    fd = _locked_pending_file(path)
+    try:
+        yield
+    finally:
+        os.close(fd)
+
+
+_PENDING_LOCK_ATTEMPTS = 3
+
+
+def _flock_current(fd, path, info):
+    """Flock ``fd`` (exclusive, non-blocking) and confirm ``path`` still names it.
+
+    A flock belongs to the inode, not the name. A lock file unlinked after this
+    process opened it (the history prune removes rowless ref locks while holding
+    them) would otherwise leave this process holding a lock that the next
+    opener, locking a new file at the same path, never sees. False means the
+    name moved; the caller closes ``fd`` and retries or reports busy. A held
+    lock raises BlockingIOError: a hook never waits behind an RPC writer, and
+    the next normal callback retries.
+    """
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        current = os.lstat(path)
+    except FileNotFoundError:
+        return False
+    return (current.st_dev, current.st_ino) == (info.st_dev, info.st_ino)
+
+
+def _locked_pending_file(path):
+    """Open or create the regular lock file ``path``; return its fd, flocked."""
+    for _attempt in range(_PENDING_LOCK_ATTEMPTS):
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+                raise ValueError("peer-pending-lock-unsafe")
+            if _flock_current(fd, path, info):
+                return fd
+        except BaseException:
+            os.close(fd)
+            raise
+        os.close(fd)  # The name moved between open and flock; take the new file.
+    raise BlockingIOError(errno.EAGAIN, "pending lock changed", str(path))
+
+
+def remove_rowless_ref_lock(pending, ref, *, created_before):
+    """Unlink ``.lock-<ref>`` while holding it when no ``<ref>.json`` row exists.
+
+    True when removed. A held lock, a ref whose row exists (checked again under
+    the lock) and a lock file whose mtime is after ``created_before`` all stay.
+    Current lockers re-check the name after flock (`_flock_current`), so they
+    never keep the unlinked inode, whatever its age.
+
+    Older releases still running (registered trees pin theirs) open, fstat and
+    flock with no re-check, and remove no lock file. One that opened this file
+    just before the unlink and flocks just after would hold the unlinked inode
+    while the next opener locks a new file. That is not harmless for a ref with
+    no row: under this lock `receive_peer_message` records the receiver notice
+    of a transfer whose pending row is absent, deduplicated only by
+    `_peer_notice_exists` (older releases do the same through `cmd_record`),
+    and `schedule_acceptance_reply` creates its fixed ref's row when absent.
+    Removal is therefore limited to lock files created before the row-retention
+    window (``created_before``): lock files are never written, so mtime is when
+    the ref was first locked. A row the prune removes was received, normally
+    under this lock, at least that long ago, so its lock goes in the same pass.
+    An old release could still split one of these locks only if it locks that
+    week-old ref inside the few instructions between its open and flock while
+    this prune removes it, and a second locker of the same ref overlaps it.
+    """
+    path = pending / (".lock-" + ref)
+    row = pending / (ref + ".json")
+    if not re.fullmatch(r"[0-9a-f]{32}", ref):
+        return False
+    try:
+        if os.lstat(path).st_mtime > created_before or os.path.lexists(row):
+            return False
+        fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return False
     try:
         info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
-            raise ValueError("peer-pending-lock-unsafe")
-        # Never hang a hook behind an RPC writer. The next normal callback retries.
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        yield
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                or info.st_mode & 0o077 or info.st_mtime > created_before):
+            return False
+        if not _flock_current(fd, path, info) or os.path.lexists(row):
+            return False
+        # Only this inode's flock holder removes its name, so the name is still it.
+        os.unlink(path)
+        return True
+    except OSError:  # BlockingIOError: a holder is inside; its lock stays.
+        return False
     finally:
         os.close(fd)
 
@@ -801,12 +885,7 @@ def _pending_directory_lock(path):
         if (not (directory or stat.S_ISREG(info.st_mode))
                 or info.st_uid != os.geteuid() or info.st_mode & 0o077):
             raise ValueError("peer-pending-lock-unsafe")
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        try:
-            current = path.lstat()
-        except FileNotFoundError as exc:
-            raise BlockingIOError(errno.EAGAIN, "pending lock changed", str(path)) from exc
-        if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino):
+        if not _flock_current(fd, path, info):
             raise BlockingIOError(errno.EAGAIN, "pending lock changed", str(path))
         acquired = True
         yield
