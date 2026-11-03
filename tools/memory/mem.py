@@ -274,7 +274,7 @@ def enc_cwd(path):
 
 
 _GIT_DEADLINE = None     # set only around the candidate probe's project key
-_GIT_CUT = False
+_GIT_CUT = False         # a probe git call that gave no answer (deadline, signal, error)
 
 
 def _git_out(args, cwd):
@@ -289,13 +289,20 @@ def _git_out(args, cwd):
     try:
         r = subprocess.run(["git"] + args, cwd=str(cwd),
                            capture_output=True, text=True, timeout=timeout)
-        return r.stdout.strip() if r.returncode == 0 else ""
-    except subprocess.TimeoutExpired:
-        if _GIT_DEADLINE is not None:
+    except FileNotFoundError as exc:
+        # No git at all keeps the non-git key the records were written with;
+        # anything else that stops git is no answer, like a timeout.
+        if _GIT_DEADLINE is not None and exc.filename != "git":
             _GIT_CUT = True
         return ""
     except Exception:
+        if _GIT_DEADLINE is not None:
+            _GIT_CUT = True
         return ""
+    if r.returncode < 0 and _GIT_DEADLINE is not None:
+        _GIT_CUT = True  # killed by a signal: no answer, not "not a repository"
+        return ""
+    return r.stdout.strip() if r.returncode == 0 else ""
 
 
 def _git_rc(args, cwd):
@@ -579,10 +586,13 @@ def _seed_marker(marker):
 
 
 def _bounded_project_key(cwd, deadline):
-    """``project_key`` whose git calls end at ``deadline``; None when one was cut.
+    """``project_key`` whose git calls end at ``deadline``; None when one gave no answer.
 
-    A cut git answer would silently fall back to another key (the bare cwd),
-    so the caller treats None as "no answer this time", never as a key.
+    A git call cut by the deadline, killed by a signal or failing to run would
+    silently fall back to another key (the bare cwd), so the caller treats None
+    as "no answer this time", never as a key. A plain "not a repository" or
+    "no remote" exit is still an answer, and a machine without git keeps its
+    non-git key.
     """
     global _GIT_DEADLINE, _GIT_CUT
     _GIT_DEADLINE, _GIT_CUT = deadline, False

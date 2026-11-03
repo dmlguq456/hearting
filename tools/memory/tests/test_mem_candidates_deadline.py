@@ -114,6 +114,36 @@ class CandidateProbeDeadlineTest(unittest.TestCase):
         self.assertTrue(all(0 < value <= 0.25 for value in timeouts), timeouts)
         self.assertEqual(self.seen_files(), before)
 
+    def test_a_git_that_dies_or_cannot_run_shows_nothing(self):
+        # Review RV-BC-HOOK2B: a signal or an OSError also fell back to the
+        # bare-cwd key and showed candidates under another project.
+        real_run = subprocess.run
+        failures = {
+            "signal": lambda command, *a, **k: subprocess.CompletedProcess(command, -9, "", ""),
+            "oserror": lambda command, *a, **k: (_ for _ in ()).throw(OSError(12, "Cannot allocate memory")),
+        }
+        for label, failure in failures.items():
+            with self.subTest(failure=label):
+                def git_fails(command, *args, **kwargs):
+                    if command and command[0] == "git":
+                        return failure(command, *args, **kwargs)
+                    return real_run(command, *args, **kwargs)
+                before = self.seen_files()
+                with mock.patch.object(self.mem.subprocess, "run", side_effect=git_fails):
+                    self.assertEqual(self.probe("--session-id", f"probe-dies-{label}"), "")
+                self.assertEqual(self.seen_files(), before)
+
+    def test_a_machine_without_git_keeps_its_non_git_key(self):
+        real_run = subprocess.run
+
+        def no_git(command, *args, **kwargs):
+            if command and command[0] == "git":
+                raise FileNotFoundError(2, "No such file or directory", "git")
+            return real_run(command, *args, **kwargs)
+
+        with mock.patch.object(self.mem.subprocess, "run", side_effect=no_git):
+            self.assertIn("gadget headline", self.probe("--session-id", "probe-no-git"))
+
     def test_no_git_runs_once_the_budget_is_spent(self):
         before = self.seen_files()
         with mock.patch.object(self.mem, "_PROCESS_STARTED", time.monotonic() - 6, create=True), \
