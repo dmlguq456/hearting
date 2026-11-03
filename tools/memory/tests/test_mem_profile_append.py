@@ -187,6 +187,35 @@ class ProfileAppendTest(unittest.TestCase):
         # first attempt: before (1,1,1) != after (2,2,2) -> retry; second: (3,3,3) == (3,3,3)
         self.assertEqual(result.stdout.split(), ["4", "1"])
 
+    def test_older_store_still_migrates_once_through_get_con(self):
+        db = self.store / "memory.db"
+        with sqlite3.connect(db) as con:
+            con.execute("PRAGMA user_version=9")
+        probe = (
+            "import importlib.util, sqlite3, sys\n"
+            "spec = importlib.util.spec_from_file_location('mem_probe', sys.argv[1])\n"
+            "mem = importlib.util.module_from_spec(spec); spec.loader.exec_module(mem)\n"
+            "calls = []\n"
+            "def get_con():\n"
+            "    calls.append(1)\n"
+            "    raise sqlite3.OperationalError('database is locked')\n"
+            "mem.get_con = get_con\n"
+            "try:\n"
+            "    mem._profile_rows('SELECT 1')\n"
+            "except sqlite3.OperationalError:\n"
+            "    pass\n"
+            "print(len(calls))\n"
+        )
+        result = subprocess.run([sys.executable, "-c", probe, str(MEM)], cwd=self.project,
+                                env=self.env(), text=True, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, timeout=120)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.split(), ["1"])  # a failing migration is not repeated
+        body = self.mem("profile", "06_collaboration_style").stdout
+        self.assertIn("먼저 방향을 짧게 확인한다.", body)
+        with sqlite3.connect(db) as con:
+            self.assertGreater(con.execute("PRAGMA user_version").fetchone()[0], 9)
+
     def _profile_id(self):
         shown = self.mem("recall", "기존 메모 하나.", "--full").stdout
         for line in shown.splitlines():

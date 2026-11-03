@@ -3866,16 +3866,15 @@ def _profile_rows(sql):
         except OSError:
             break
         queries = ["?mode=ro"] + (["?mode=ro&immutable=1"] if before else [])
-        retry = False
+        retry = outdated = False
         for query in queries:
             con = None
             try:
                 con = sqlite3.connect(db.as_uri() + query, uri=True, timeout=1)
-                if con.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION:
-                    con.close()
-                    return _profile_rows_migrated(sql)  # an older store needs migration
-                con.execute("PRAGMA query_only=ON")
-                rows = con.execute(sql).fetchall()
+                outdated = con.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION
+                if not outdated:
+                    con.execute("PRAGMA query_only=ON")
+                    rows = con.execute(sql).fetchall()
             except sqlite3.Error:
                 if query.endswith("immutable=1"):
                     retry = True  # the file changed under the immutable read
@@ -3883,6 +3882,8 @@ def _profile_rows(sql):
             finally:
                 if con is not None:
                     con.close()
+            if outdated:
+                break  # an older store needs get_con()'s migration, run once below
             if query.endswith("immutable=1"):
                 try:
                     unchanged = _profile_store_state(db) == before
@@ -3892,7 +3893,7 @@ def _profile_rows(sql):
                     retry = True
                     break
             return rows
-        if not retry:
+        if outdated or not retry:
             break
     return _profile_rows_migrated(sql)
 
