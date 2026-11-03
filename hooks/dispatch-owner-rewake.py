@@ -586,11 +586,14 @@ def _row_metadata(jobs: Path, attempt_id: object) -> dict[str, str] | None:
     return row.metadata if row is not None else None
 
 
-def _handed_to(jobs: Path, attempt_id: object, session: str) -> bool:
-    """Whether the registry row of `attempt_id` now belongs to `session` by a same-seat handover."""
+def _handed_to(jobs: Path, attempt_id: object, session: str) -> bool | None:
+    """Whether the registry row of `attempt_id` now belongs to `session` by a same-seat handover.
+
+    ``None`` when the seat lineage cannot be read: unknown, not another session."""
     metadata = _row_metadata(jobs, attempt_id)
-    return bool(metadata) and metadata.get("parent_sid") != session \
-        and seat_handover.effective_parent(metadata, jobs) == session
+    if not metadata or metadata.get("parent_sid") == session:
+        return False
+    return seat_handover.owns(metadata, session, jobs)
 
 
 class LineageMoved(RuntimeError):
@@ -633,6 +636,8 @@ def _reclaim_refusal(existing: dict[str, Any], jobs: Path, session: str) -> str 
         return "unreadable"
     # The session that armed it may have been cleared; its same-seat successor takes the wait over.
     handed = existing.get("session_id") != session and _handed_to(jobs, existing.get("attempt_id"), session)
+    if handed is None:
+        return "handover-unreadable"   # unknown, not another session: the next call looks again
     if existing.get("session_id") != session and not handed:
         return "foreign-session"
     metadata = _row_metadata(jobs, existing.get("attempt_id"))
