@@ -3087,6 +3087,82 @@ def cmd_run(args):
 
 
 COMPLETION_POLL_SECONDS = 60
+# A run with no exit code whose own files have not changed for this long, and
+# whose session its host reports gone, is no longer watched (the user's
+# seven-day unused rule). Its end is unknown: never success or failure. A
+# remote run whose wrapper died before writing `exit_code` would otherwise keep
+# one resident watcher, respawned on every install, for as long as its
+# directory exists.
+RUN_QUIET_SECONDS = 7 * 24 * 3600
+# Written when watching stops for that reason; a later exit code is then
+# reported once by the next observer reconnect (`resource-observers`).
+QUIET_RUN_MARKER = ".observation-unknown"
+# A quiet run's session is asked about at most this often (one ssh probe).
+QUIET_PROBE_SECONDS = 3600
+
+
+def _run_last_activity(run_dir):
+    """Newest change among the run's own top-level files, never the observer's."""
+    newest = None
+    try:
+        entries = list(os.scandir(run_dir))
+    except OSError:
+        return None
+    for entry in entries:
+        if entry.name.startswith(".observation-"):
+            continue
+        try:
+            changed = entry.stat(follow_symlinks=False).st_mtime
+        except OSError:
+            continue
+        newest = changed if newest is None else max(newest, changed)
+    return newest
+
+
+def _run_quiet_since(run_dir, now):
+    """The run's last activity when it is quiet without an exit code, else None."""
+    run_dir = Path(run_dir)
+    if (run_dir / "exit_code").exists() or _read_stop_reason(run_dir):
+        return None
+    last = _run_last_activity(run_dir)
+    if last is None or now - last < RUN_QUIET_SECONDS:
+        return None
+    return last
+
+
+def _run_session_alive(run_dir):
+    """The run's tmux session on its host: True, False when reported gone, None when unknown."""
+    try:
+        meta = json.loads((Path(run_dir) / "meta.json").read_text(encoding="utf-8"))
+        host_name = meta.get("host")
+        if not isinstance(host_name, str) or not host_name:
+            return None
+        (_name, host), = _select(load_config(), [host_name])
+        return _tmux_session_alive(host, meta.get("run_id") or Path(run_dir).name,
+                                   transport=meta.get("tmux_transport", _LEGACY_TMUX_TRANSPORT))
+    except Exception:  # noqa: BLE001 -- an unreadable answer keeps the watch
+        return None
+
+
+def _iso_time(epoch):
+    return datetime.datetime.fromtimestamp(epoch).astimezone().isoformat(timespec="seconds")
+
+
+def _record_quiet_run(run_dir, last_activity, now):
+    """Keep why watching stopped beside the run; an existing record stays."""
+    path = Path(run_dir) / QUIET_RUN_MARKER
+    if path.exists():
+        return
+    body = json.dumps({"state": "unknown", "reason": "session-gone-without-exit-code",
+                       "last_activity": _iso_time(last_activity),
+                       "recorded_at": _iso_time(now)}, sort_keys=True) + "\n"
+    temporary = path.with_name(f"{QUIET_RUN_MARKER}.{os.getpid()}.tmp")
+    try:
+        temporary.write_text(body, encoding="utf-8")
+        os.replace(temporary, path)
+    except OSError:
+        with contextlib.suppress(OSError):
+            temporary.unlink()
 
 
 def _observe_compute_experiment(meta, run_dir, now, *, final=False):
@@ -3297,6 +3373,7 @@ def _watch_run(args, *, sleep=time.sleep, now=time.time):
     run_dir = Path(args.run_dir)
     exit_path = run_dir / "exit_code"
     last_observation = None
+    next_session_probe = 0.0
     while True:
         if not run_dir.is_dir():
             return 0
@@ -3306,12 +3383,32 @@ def _watch_run(args, *, sleep=time.sleep, now=time.time):
             code = None
         if code is not None:
             break
+        observed_at = now()
+        quiet_since = _run_quiet_since(run_dir, observed_at)
+        if quiet_since is not None and observed_at >= next_session_probe:
+            # Nothing written for RUN_QUIET_SECONDS and no exit code. A run can
+            # stay alive and silent (buffered stdout, metrics only under its
+            # output dir), so only a session its host reports gone ends the
+            # watch, with the end left unknown. Alive or unreadable keeps it.
+            next_session_probe = observed_at + QUIET_PROBE_SECONDS
+            if _run_session_alive(run_dir) is False:
+                _record_quiet_run(run_dir, quiet_since, observed_at)
+                return 0
         try:
             meta_live = json.loads((run_dir / "meta.json").read_text(encoding="utf-8"))
-            last_observation = _observe_compute_experiment(meta_live, run_dir, now()) or last_observation
+            last_observation = _observe_compute_experiment(meta_live, run_dir, observed_at) or last_observation
         except (OSError, ValueError, TypeError):
             pass
         sleep(COMPLETION_POLL_SECONDS)
+    try:
+        return _report_run_end(run_dir, code, last_observation, now)
+    finally:
+        # The end is known now; a reconnect has nothing late left to report.
+        with contextlib.suppress(OSError):
+            (run_dir / QUIET_RUN_MARKER).unlink()
+
+
+def _report_run_end(run_dir, code, last_observation, now):
     try:
         meta = json.loads((run_dir / "meta.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -3381,7 +3478,12 @@ def _run_state(config, run_id):
     stop_reason = _read_stop_reason(run_dir)
     # Launch writes metadata only after the remote receipt. An empty legacy
     # directory and an in-flight launch are both unconfirmed, never proof of
-    # running or failure. Keep this observation read-only and age-independent.
+    # running or failure. Keep this observation read-only and age-independent:
+    # `state` is what callers act on (a route close still stops a quiet run).
+    # `quiet_since` only tells that nothing was written past RUN_QUIET_SECONDS,
+    # so the run is no longer watched and listings show its end as unknown.
+    quiet_since = (_run_quiet_since(run_dir, time.time())
+                   if has_metadata and exit_code is None and not stop_reason else None)
     state = ("finished" if exit_code is not None else
              "stopped" if stop_reason else
              "running" if has_metadata else "unknown")
@@ -3423,6 +3525,7 @@ def _run_state(config, run_id):
             "launch_receipt": receipt,
             "experiment_observation": experiment_record,
             "experiment_record_path": str(experiment_record_path) if experiment_record_path else None,
+            "quiet_since": _iso_time(quiet_since) if quiet_since is not None else None,
             "state": state}
 
 
@@ -3818,7 +3921,9 @@ def cmd_runs(args):
                         host, row["run_id"], transport=transport
                     )
             row["stale"] = (alive is False)
-            row["state"] = "stopped" if alive is False else "running"
+            # A quiet run reads as unknown unless its session is seen either way.
+            row["state"] = ("stopped" if alive is False else "running"
+                            if alive or not row.get("quiet_since") else "unknown")
         else:
             row["stale"] = False
     if args.json:
@@ -3836,6 +3941,8 @@ def cmd_runs(args):
             tail = "stopped (gone)"
         elif row.get("stop_reason"):
             tail = f"stopped ({row['stop_reason']})"
+        elif row["state"] == "unknown" and row.get("quiet_since"):
+            tail = f"unknown (no activity since {row['quiet_since'][:10]})"
         else:
             tail = row["state"]
         command = " ".join(row["meta"].get("command") or [])
