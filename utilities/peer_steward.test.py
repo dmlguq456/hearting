@@ -4080,6 +4080,18 @@ class StatusRearmTest(_WatchMixin, unittest.TestCase):
         flipping this branch back to `arms_hook=True` passed all 68 tests.
         """
         dead = self._arm(target="peer-dead", mode="held")
+        # Kill the watcher only after its one native wait is running: the
+        # rearmed watcher adopts that wait (the FIFO reader released below).
+        # A watcher killed before launching it leaves no reader at all, and
+        # under CI load that made the final release fail.
+        self._wait_for_lock(dead["watch_id"])
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not [
+                line for line in self._wait_calls() if " peer-dead" in f" {line} "]:
+            time.sleep(0.02)
+        self.assertEqual(
+            len([line for line in self._wait_calls() if " peer-dead" in f" {line} "]), 1,
+            self._wait_calls())
         os.kill(int(dead["pid"]), signal.SIGKILL)
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline and peer_steward._pid_identity_ok(
@@ -4233,23 +4245,33 @@ class WatchMessageTransportSettlementTest(_WatchMixin, unittest.TestCase):
         peer_steward._write_json_atomic(arm_path, arm)
         return fields, env, seat
 
-    def _transfer_duty(self, watch_id, *, old_transfer):
-        sender = {"harness": "claude", "session_id": "transport-sender", "name": "sender"}
-        recipient = {"harness": "claude", "session_id": "steward-1", "name": "steward"}
+    _TRANSPORT_SENDER = {"harness": "claude", "session_id": "transport-sender", "name": "sender"}
+    _TRANSPORT_RECIPIENT = {"harness": "claude", "session_id": "steward-1", "name": "steward"}
+
+    def _transfer(self, watch_id, *, old_transfer):
         _text, ref = peer_steward.peer_message.prepare_peer_message(
-            "[peer-steward] watch receipt transport", sender, recipient, defer=True,
-            refs=[f"peer-watch:{watch_id}"])
+            "[peer-steward] watch receipt transport", self._TRANSPORT_SENDER,
+            self._TRANSPORT_RECIPIENT, defer=True, refs=[f"peer-watch:{watch_id}"])
         if old_transfer:
             path = peer_steward.peer_message._transfer_path(ref)
             transfer = json.loads(path.read_text(encoding="utf-8"))
             transfer.pop("refs", None)
             path.write_text(json.dumps(transfer), encoding="utf-8")
+        return ref
+
+    def _message_duty(self, ref):
         row = peer_steward.peer_message._read_pending(ref)
         store = peer_steward.peer_obligations.ObligationStore()
         duty = store.create("message-" + ref, "message",
-            {"server": "default", "pane": "fixture:watch-transport-seat", **recipient},
-            {"ref": ref, "body_digest": row["body_sha256"], "from": sender,
+            {"server": "default", "pane": "fixture:watch-transport-seat",
+             **self._TRANSPORT_RECIPIENT},
+            {"ref": ref, "body_digest": row["body_sha256"], "from": self._TRANSPORT_SENDER,
              "to": row["to"], "refs": row["refs"]})
+        return row, store, duty
+
+    def _transfer_duty(self, watch_id, *, old_transfer):
+        ref = self._transfer(watch_id, old_transfer=old_transfer)
+        row, store, duty = self._message_duty(ref)
         return ref, row, store, duty
 
     def _resume_until(self, store, duty_id, settled):
@@ -4305,8 +4327,12 @@ class WatchMessageTransportSettlementTest(_WatchMixin, unittest.TestCase):
         import dispatch_seat_handover as handover
 
         fields, env, seat = self._watch("watch-stale-transport")
-        ref, _row, store, duty = self._transfer_duty(
-            fields["watch_id"], old_transfer=True)
+        # The message duty is created only after the handover below. While it
+        # exists, the detached shared runner may resume it at any moment; one
+        # pass between the ACK and the handover settles it with the ACK's then
+        # still current binding (complete, which is correct), and this test
+        # would never see the stale-generation case it is about.
+        ref = self._transfer(fields["watch_id"], old_transfer=True)
         ack = self._run("ack", fields["watch_id"], "--carrier", "fixture-test", env=env)
         self.assertEqual(ack.returncode, 0, ack.stdout + ack.stderr)
         pending = peer_steward.peer_message._read_pending(ref)
@@ -4330,6 +4356,7 @@ class WatchMessageTransportSettlementTest(_WatchMixin, unittest.TestCase):
                 pending, include_acked=True)
             self.assertNotEqual(current_binding, old_binding)
 
+        _row, store, duty = self._message_duty(ref)
         latest = self._resume_until(
             store, duty["id"],
             lambda row: row["observation"].get("reason") == "received-binding-unverified")
@@ -4453,7 +4480,13 @@ class KillFixtureTest(_WatchMixin, unittest.TestCase):
         deadline = time.monotonic() + 30
         arm = None
         while time.monotonic() < deadline:
-            arms = [p for p in self.watch_root.glob("*.json")] if self.watch_root.is_dir() else []
+            # Only "<watch_id>.json" is an arm record. The writer's atomic temp
+            # file (".tmp-*.json") matches "*.json" too and vanishes at its
+            # rename (FileNotFoundError on CI), and observation/receipt files
+            # carry no watcher identity.
+            arms = ([p for p in self.watch_root.glob("*.json")
+                     if not p.name.startswith(".") and p.name.count(".") == 1]
+                    if self.watch_root.is_dir() else [])
             if arms:
                 candidate = json.loads(arms[0].read_text())
                 # The accepted record exists before its observer is published.

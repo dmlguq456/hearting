@@ -305,7 +305,6 @@ utilities/dispatch_allocation.test.py	0.08
 utilities/dispatch_allocation_receipt.test.py	0.55
 utilities/dispatch_attempt_policy.test.py	0.09
 utilities/dispatch_attempt_ready.test.py	0.89
-utilities/dispatch_broker.test.py	1.79
 utilities/dispatch_budget_record.test.py	1.33
 utilities/dispatch_capacity_evidence.test.py	1.37
 utilities/dispatch_codex_nocommit_fixture.test.py	4.77
@@ -336,8 +335,6 @@ utilities/dispatch_pending_delivery.test.py	0.46
 utilities/dispatch_progress.test.py	7.70
 utilities/dispatch_readiness.test.py	0.18
 utilities/dispatch_reap_watch.test.py	8.95
-utilities/dispatch_recovery.test.py	0.70
-utilities/dispatch_recovery_crash.test.py	0.52
 utilities/dispatch_registry.test.py	44.42
 utilities/dispatch_registry_cache.test.py	0.12
 utilities/dispatch_registry_inventory.test.py	0.18

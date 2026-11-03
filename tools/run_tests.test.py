@@ -1637,6 +1637,14 @@ class CiLikeProfileFixture(unittest.TestCase):
             self.assertEqual(env["HEARTING_CAMPAIGN_TITLE_AUTO"], "off")
             self.assertEqual(env["HEARTING_PRIOR_ART"], "off")
 
+    def test_isolated_env_declares_no_operator_language(self):
+        # FLEET_NOW_LANG is the operator's language for Fleet titles as well as UI
+        # text. A runner-wide value turned every Fleet title suite into a Korean
+        # operator's board; a suite that checks Korean screens declares it itself.
+        for env in (self.mod.build_isolated_env(self.root / "iso"),
+                    self.mod.build_ci_like_env(self.root / "ci", self.root)):
+            self.assertNotIn("FLEET_NOW_LANG", env)
+
     def test_ci_like_reuses_the_isolated_trust_entry(self):
         env = self.mod.build_ci_like_env(self.root / "ci", self.root)
         self.assertEqual(Path(env["GIT_CONFIG_GLOBAL"]).read_text(encoding="utf-8"),

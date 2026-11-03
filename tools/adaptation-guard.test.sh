@@ -21,6 +21,14 @@ trap 'rm -rf "$COPY_PARENT"' EXIT
 checkout_copy "$ROOT" "$COPY_PARENT/repo" || { echo "FAIL - checkout copy"; exit 1; }
 ROOT="$COPY_PARENT/repo"
 cd "$ROOT"
+# Each guard pass starts about 240 Python processes and this suite runs seven
+# passes. The test runner sets PYTHONDONTWRITEBYTECODE, so every one of them
+# recompiled each module it imported from source (one capability-map call
+# compiles the 12k-line dispatch_contract): close to half of the suite's CPU
+# on a fresh copy. Compile each module once, into a cache beside the private
+# copy rather than inside it, so the copy's tree stays exactly the checkout.
+export PYTHONPYCACHEPREFIX="$COPY_PARENT/pycache"
+unset PYTHONDONTWRITEBYTECODE
 
 GUARD="tools/check-adaptation-boundary.sh"
 BM="tools/build-manifest.py"

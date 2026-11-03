@@ -21,6 +21,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+# The card screens these tests compare are Korean and UI text defaults to English,
+# so this suite declares the Korean operator language itself (tools/i18n/ui_text.py).
+os.environ["FLEET_NOW_LANG"] = "Korean"
+
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent / "tools"))
@@ -295,6 +299,30 @@ class FramedRouteCompileTest(FramedBase):
             slug="other", cwd=R.ROOT, artifact_root=self.root, spec_read="fixture", unassigned=True,
             dispatch_evidence={"tuples": [T.nested("claude", "codex")]})
         self.assertNotIn("frame이 방향과 경로를 조립해", R.compose_card(staged))
+
+    def test_the_card_prints_in_english_unless_korean_is_declared(self):
+        import re
+        hangul = re.compile(r"[\uac00-\ud7a3]")
+        route = self.compose()
+        with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "English"}):
+            card = R.compose_card(route)
+            lines = "\n".join(R.compose_decision_lines(route))
+        self.assertIsNone(hangul.search(card), card)
+        self.assertIsNone(hangul.search(lines), lines)
+        self.assertTrue(card.startswith("[Route] route-frame \u00b7 framed("), card)
+        self.assertIn("human gate frame-review", card.splitlines()[0])
+        self.assertIn("  frame assembles and proposes the direction and route", card)
+        self.assertIn("  Cost: two top-model legs \u00b7 one direction-check question", card)
+        self.assertIn("  Size: nodes=", lines)
+        self.assertIn("awaiting frame decision", lines)
+        with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"}):
+            korean = R.compose_card(route)
+        self.assertTrue(korean.startswith("[경로] route-frame"), korean)
+        self.assertIn("사람 게이트 frame-review", korean.splitlines()[0])
+        # Same card, same structure: only the words differ.
+        self.assertEqual(len(card.splitlines()), len(korean.splitlines()))
+        with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Japanese"}):
+            self.assertEqual(R.compose_card(route), card)  # other languages get English
 
     def test_basis_free_historical_framed_routes_verify_and_keep_the_old_card_label(self):
         """Fixture method: strip frame-legs from today's sealed compose result and reseal with existing hash/id."""

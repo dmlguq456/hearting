@@ -562,11 +562,30 @@ fields and this order. In Korean, the canonical card is:
 → 진행 / 수정: <틀린 부분> / 중단
 ```
 
+In English, the same five fields in the same order are:
+
+```text
+[Run confirmation]
+
+Task: <what to produce, and the expected result>
+Reason: <current background and why the work is needed>
+Route: <primary entry capability> · <mode/intensity> — <why this route>
+Scope: <what is included and the important exclusions>
+Start approval (if needed): <the marked part this route asks approval for — this leg's execution scope>
+Done: <deliverables and verification criteria>
+
+→ Proceed / Edit: <what is wrong> / Stop
+```
+
+The card follows the user's communication language; the shared UI-text
+selection (`tools/i18n/ui_text.py`) governs only text the tools print, such as
+the `[경로]` notice, whose marker prints as `[Route]` in English.
+
 When the runtime exposes a native structured-question surface (Claude
 `AskUserQuestion`, Codex `request_user_input`, OpenCode `question`), deliver this confirmation
 through it: the five confirmation fields form the question body; the optional
 start-approval line is scope metadata, and the options are exactly
-진행 (recommended) / 수정 / 중단. The plain-text card above is the fallback when
+진행 (recommended) / 수정 / 중단 (in English Proceed (recommended) / Edit / Stop). The plain-text card above is the fallback when
 no such surface exists or it fails. The structured form changes only the
 delivery surface — never the five fields, their order, the one-time approval
 semantics, or the exemptions below.
