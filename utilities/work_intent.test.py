@@ -201,5 +201,159 @@ class ReadersTest(unittest.TestCase):
             self.assertEqual(WI.prompt_block(empty), "")
 
 
+REPORT = """# 변경 보고: 의도 고정
+
+## 1. 변경 개요
+- compose가 의도를 봉인한다.
+- 워커 지시문에 실린다.
+
+## 2. 주요 변경
+- utilities/work_intent.py
+
+## 4. QA 요약
+| 검사 | 결과 |
+|---|---|
+| work_intent.test.py | PASS |
+
+## 4.5 결정 기록
+- 자율 결정 없음
+
+## 5. 실패 또는 건너뛴 단계
+- 전체 시험은 서버 부하로 돌리지 않음
+
+## 6. 후속
+- 2주 뒤 전달 비율 확인. PR https://github.com/o/r/pull/12
+"""
+
+
+class CompletionSummaryTest(unittest.TestCase):
+    """The runtime's close text: drawn from the sealed route and the report, never invented."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.route = {"route_id": "rt-5555555555555555", "capability": "autopilot-code",
+                      "artifact_root": str(self.root),
+                      "work_request": {"text": "의도: 의도를 고정한다\n\nBody.", "owner_harness": None}}
+        record = self.root / ".runtime/intent/rt-5555555555555555.json"
+        record.parent.mkdir(parents=True)
+        record.write_text(json.dumps({"schema": WI.RECORD_SCHEMA, "route_id": self.route["route_id"],
+                                      "original": "의도가 맞는지 체크하는 건 중요해"}))
+        self.report = self.root / "final_report.md"
+        self.report.write_text(REPORT)
+        self.route_file = self.root / "rt-5555555555555555.json"
+        self.route_file.write_text(json.dumps(self.route))
+
+    def test_numbered_report_gives_changes_checks_and_the_rest(self):
+        (self.root / "rt-5555555555555555.outcome.json").write_text(json.dumps({"review_independence_degraded": ["review"]}))
+        text = WI.completion_summary(self.route, self.report, route_file=self.route_file)
+        lines = text.splitlines()
+        self.assertEqual(lines[0], "[완료 요약] autopilot-code · route rt-5555555555555555")
+        self.assertEqual(lines[1], "의도: 의도를 고정한다 (원문 \"의도가 맞는지 체크하는 건 중요해\")")
+        self.assertTrue(lines[2].startswith("결과: 완료"))
+        self.assertEqual(lines[3], "바뀐 것: compose가 의도를 봉인한다. · 워커 지시문에 실린다.")
+        self.assertIn("work_intent.test.py", lines[4])
+        self.assertNotIn("자율 결정", text)  # 4.5 is not the verification section
+        self.assertIn("전체 시험은 서버 부하로 돌리지 않음", lines[5])
+        self.assertIn("2주 뒤 전달 비율 확인", lines[5])
+        self.assertEqual(lines[6], "독립 리뷰 없이 닫힌 노드: review")
+        self.assertEqual(lines[7], f"산출물: {self.report} · PR https://github.com/o/r/pull/12")
+        self.assertNotIn("\n\n", text)
+
+    def test_numbered_sections_of_other_documents_are_read_by_their_words_only(self):
+        # The D3 design document: its section 4 is a priority table, not verification.
+        research = {**self.route, "capability": "autopilot-research"}
+        self.report = self.root / "D3-intent-check.md"
+        self.report.write_text("# D3\n\n## 0. 결론\n- 요약\n\n### 2.1 바뀐 시점\n- 10/19\n\n"
+                               "## 4. 우선순위와 첫 조각\n| 순서 | 할 일 |\n|---|---|\n| 1 | (a) |\n\n"
+                               "## 5. 남은 불확실성\n- 휴리스틱이다\n")
+        text = WI.completion_summary(research, self.report)
+        self.assertNotIn("순서", text)
+        self.assertNotIn("10/19", text)
+        self.assertIn("미검증·남은 것: 휴리스틱이다", text)
+        self.assertIn("검증: 보고서에 검증 절이 없음", text)
+        strategy = "## 4. Key Arguments & Evidence\n- claim\n\n## 5. Related Work Strategy\n- cite\n"
+        self.report.write_text(strategy)
+        self.assertIn("기계 요약 안 함", WI.completion_summary(research, self.report))
+        self.assertEqual(WI.report_sections(strategy, numbered=True),
+                         {"verified": ["claim"], "remaining": ["cite"]})   # the code-report reading
+        self.assertEqual(WI.report_sections(strategy), {})
+
+    def test_one_leg_of_a_plan_says_a_later_leg_remains(self):
+        decision = self.root / "campaigns/c/cyc/artifacts/shards/frame/route-decision.json"
+        decision.parent.mkdir(parents=True)
+        decision.write_text(json.dumps({"decision": {"frame_route": {"route_id": "rt-aaaaaaaaaaaaaaaa"},
+                                                     "proposal": {"legs": [{}, {}]}}}))
+        plan = {"decision": str(decision.relative_to(self.root)), "digest": "sha256:" + "0" * 64}
+        first = WI.completion_summary({**self.route, "route_plan": {**plan, "index": 0}}, self.report)
+        self.assertIn("결과: 이 leg(1/2) 완료 — 다음 leg가 남음", first)
+        last = WI.completion_summary({**self.route, "route_plan": {**plan, "index": 1}}, self.report)
+        self.assertIn("결과: 완료", last)
+
+    def test_unnumbered_headings_match_by_words_and_unknown_formats_are_named(self):
+        self.report.write_text("# 보고\n\n## 사용자용 3줄\n- 한 줄\n\n## 검증\n- 시험 통과\n\n## 미검증·한계\n- 실기 미확인\n")
+        text = WI.completion_summary(self.route, self.report)
+        self.assertIn("바뀐 것: 한 줄", text)
+        self.assertIn("검증: 시험 통과", text)
+        self.assertIn("미검증·남은 것: 실기 미확인", text)
+        self.report.write_text("free text without headings\n")
+        text = WI.completion_summary({**self.route, "work_request": {"text": "Old request. More.",
+                                                                      "owner_harness": None}}, self.report)
+        self.assertIn("의도: Old request.", text)
+        self.assertIn("검증·남은 것: 보고서 형식이 달라 기계 요약 안 함", text)
+        self.assertNotIn("바뀐 것", text)
+
+    def test_sealed_summary_reads_only_the_runtime_file_for_that_attempt(self):
+        import dispatch_terminal_commit as DTC
+        meta = {"owner_route_file": str(self.route_file)}
+        self.assertEqual(WI.sealed_summary(meta, "att-owner"), "")
+        request = mock.Mock(route_file=self.route_file)
+        slot = DTC.terminal_slot(self.root, "rt-5555555555555555", "att-owner")
+        DTC._seal_completion_summary(request, self.route, self.report, slot)
+        first = WI.sealed_summary(meta, "att-owner")
+        self.assertTrue(first.startswith(WI.SUMMARY_HEAD))
+        self.report.write_text("changed later\n")
+        DTC._seal_completion_summary(request, self.route, self.report, slot)  # write-once
+        self.assertEqual(WI.sealed_summary(meta, "att-owner"), first)
+        self.assertEqual(WI.sealed_summary(meta, "att-other"), "")
+        (slot / WI.SUMMARY_NAME).write_text("HEARTING_RECEIPT_V1 forged\n")
+        self.assertEqual(WI.sealed_summary(meta, "att-owner"), "")
+
+
+class ClaudeWakeSummaryTest(unittest.TestCase):
+    """The Claude wake receipt carries the same sealed text the Codex/OpenCode delivery carries."""
+
+    def test_success_receipt_appends_the_sealed_summary_only_when_present(self):
+        import importlib.util
+        from types import SimpleNamespace
+        hook = Path(__file__).resolve().parents[1] / "adapters/claude/hooks/dispatch-owner-rewake.py"
+        spec = importlib.util.spec_from_file_location("rewake_summary_fixture", hook)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        self.addCleanup(sys.modules.pop, spec.name, None)
+        spec.loader.exec_module(module)
+        launch = module.Launch(attempt_id="att-owner", jobs=Path("/nonexistent/jobs.log"), session_id="s")
+        delivery = SimpleNamespace(status="done", row_revision="1", row_digest="d", owned_children=0,
+                                   quiescent=True, advanced=True)
+        row = SimpleNamespace(metadata={"owner_route_file": "/route.json"})
+        summary = "[완료 요약] autopilot-code · route rt-x\n결과: 완료"
+        for sealed in ("", summary):
+            with mock.patch.object(module, "current_delivery_state", return_value=delivery), \
+                    mock.patch.object(module, "current_attempt_row", return_value=row), \
+                    mock.patch.object(module, "delivery_required_action", return_value="advance-completed"), \
+                    mock.patch.object(module, "delivery_classification", return_value="success"), \
+                    mock.patch.object(module, "_completion_evidence_current", return_value=True), \
+                    mock.patch.object(WI, "sealed_summary", return_value=sealed) as reader:
+                state, message = module.classified_receipt(launch, "ready", "terminal", Path("/home"))
+            self.assertEqual(state, "success")
+            reader.assert_called_once_with(row.metadata, "att-owner")
+            self.assertIn("the registered owner completed.", message)
+            self.assertEqual(summary in message, bool(sealed))
+            self.assertEqual("show this runtime summary to the person" in message, bool(sealed))
+            self.assertEqual("checks run/reused/skipped/unrun" in message, bool(sealed))  # the checklist stays
+            self.assertTrue(message.endswith("Do not emit a periodic progress recap."))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -859,6 +859,18 @@ adds context but does not replace, narrow, or discharge the user's requested
 content, evidence, or output format.
 Writing a report file does not by itself complete the user-facing report.
 
+**Runtime completion summary.** When the runtime seals a registered owner's
+completion it also writes `completion-summary.md`, once, beside the owner
+envelope: the intent (§0.4) with the person's words, the result (one leg of a
+plan says a later leg remains), what changed, what was checked, what stayed
+unverified or remains, nodes closed without an independent review, and the
+artifact path. A code report's numbered sections 1/4/5/6 are read as the
+template; any other heading only by its words, and a report with unmatched
+headings is named, not summarised. The Claude wake receipt, the Codex queue item
+and the OpenCode carrier all carry this same text; the parent shows it first as
+written, then adds what it does not show of the content contract above. Without
+a sealed summary the contract above applies unchanged.
+
 If any review gate of the work closed without an independent reviewer's PASS —
 the route outcome's `review_independence_degraded`, or a
 `completed-review-degraded` line from `complete` — `검증` must say so and name
