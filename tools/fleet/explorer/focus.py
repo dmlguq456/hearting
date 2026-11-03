@@ -413,9 +413,15 @@ def read_seat_history(session, harness, sid, *, cards=False, pane=None, read_con
     except Exception as exc:
         return None, "", Health("failed", None, f"seat 없음 · {type(exc).__name__}")
     try:
-        rows = module.seat_lineage(seat, sid=sid, read_context=read_context)
+        entries = _seat_entries(module, seat, harness, sid, cards=cards, read_context=read_context)
     except Exception as exc:
         return None, "", Health("failed", None, type(exc).__name__)
+    return entries, (seat.pane if seat.kind == "pane" else ""), Health("success", time.time())
+
+
+def _seat_entries(module, seat, harness, sid, *, cards=False, read_context=None):
+    """One seat's sessions oldest first (the current one last), each with its cards."""
+    rows = module.seat_lineage(seat, sid=sid, read_context=read_context)
     rows = [row for row in rows[:SEAT_SESSION_LIMIT + 1]]
     current = [row for row in rows if row.get("harness") == harness and row.get("sid") == sid]
     earlier = [row for row in rows if row not in current]
@@ -438,7 +444,92 @@ def read_seat_history(session, harness, sid, *, cards=False, pane=None, read_con
                         "relation": row.get("relation"),
                         "transcript": dict(row.get("transcript") or {}),
                         "current": bool(row in current), "cards": read})
-    return tuple(entries), (seat.pane if seat.kind == "pane" else ""), Health("success", time.time())
+    return tuple(entries)
+
+
+ENDED_SEAT_LIMIT = 8
+ENDED_SEAT_WINDOW = 7 * 24 * 3600
+_SESSION_ANNOUNCED = re.compile(rb'"(?:session_id|thread_id|sessionID)"\s*:\s*"([0-9A-Za-z_-]{8,})"')
+_ATTEMPT_SESSIONS = {}                     # log path -> the native session id its head announced
+
+
+def _attempt_sessions(cwds, since):
+    """Native session ids that dispatch-registered attempts in ``cwds`` announced, or None.
+
+    An attempt's own session id is not a registry field; its log announces it in the first
+    records. Only attempts started in the same directories after ``since`` are read, and a
+    found id is remembered per log. ``None`` means the registry could not be read.
+    """
+    try:
+        from ..collectors import dispatch
+        found = set()
+        for path in dispatch._candidate_jobs_paths():
+            for _order, fields, metadata in dispatch.parsed_registry_rows(path):
+                if len(fields) < 3 or fields[2] not in cwds or str(fields[0]) < since:
+                    continue
+                log = metadata.get("log_file")
+                if not log:
+                    continue
+                if log not in _ATTEMPT_SESSIONS:
+                    try:
+                        with open(log, "rb") as stream:
+                            head = stream.read(16384)
+                    except OSError:
+                        continue
+                    match = _SESSION_ANNOUNCED.search(head)
+                    if not match:
+                        continue
+                    _ATTEMPT_SESSIONS[log] = match.group(1).decode("ascii")
+                found.add(_ATTEMPT_SESSIONS[log])
+        return found
+    except Exception:
+        return None
+
+
+def read_ended_seats(shown, *, read_context=None, now=None, limit=ENDED_SEAT_LIMIT,
+                     window=ENDED_SEAT_WINDOW):
+    """Recently ended seats for HISTORY, newest first, read-only from the seat ledgers.
+
+    ``shown`` holds every ``(harness, sid)`` a live seat already lists. A session counts when it
+    ended its chain without a live successor (an ``ended`` seat), or when its chain continues in
+    a live session that does not list it (``successor``, drawn under that seat). A session that a
+    dispatch-registered attempt announced is a worker, not a seat; when the registry cannot be
+    read nothing is hidden.
+    """
+    module = utility("session_tidy")
+    handover = utility("dispatch_seat_handover")
+    graph = handover._pass_lineage_graph(read_context)
+    _rows, sessions, ledgers, _summaries = module._lineage_history_index(dict(graph.ledger_rows))
+    now = time.time() if now is None else now
+    shown = {(str(harness), str(sid)) for harness, sid in shown}
+    live = {sid for _harness, sid in shown}
+    candidates = []
+    for (harness, sid), summary in sessions.items():
+        last_seen = float(summary.get("last_seen") or 0)
+        if harness not in ("claude", "codex", "opencode") or (harness, sid) in shown or now - last_seen > window:
+            continue
+        end, how = handover._chain_end(graph, harness, sid)
+        if how == "unresolved" or (how == "successor" and end not in live):
+            continue                       # ambiguous, or a predecessor of another ended session
+        candidates.append((last_seen, harness, sid, str(summary.get("cwd") or ""),
+                           (harness, end) if how == "successor" else None))
+    candidates.sort(reverse=True)
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(now - window))
+    workers = _attempt_sessions({item[3] for item in candidates if item[3]}, stamp)
+    ended = []
+    for last_seen, harness, sid, cwd, successor in candidates:
+        if workers is not None and sid in workers:
+            continue
+        seat = module.Seat("pane", str(ledgers.get((harness, sid)) or ""), "", harness, "")
+        try:
+            entries = _seat_entries(module, seat, harness, sid, read_context=read_context)
+        except Exception:
+            continue
+        ended.append({"harness": harness, "sid": sid, "cwd": cwd, "ended_at": last_seen,
+                      "successor": successor, "entries": entries})
+        if len(ended) >= limit:
+            break
+    return ended
 
 
 def lineage_from_seat(entries):
@@ -1025,6 +1116,15 @@ def collect_aux(request, *, snapshot=None, now=None, aux_reader=None):
                 errors.append(f"{ref}: {health.error}")
             else:
                 seats[ref] = entries
+        if "ended" in tuple(getattr(request, "wants", ()) or ()):
+            # HISTORY's ended seats travel under one reserved key beside the live seats.
+            shown = {(entry.get("harness"), entry.get("sid"))
+                     for entries in seats.values() for entry in entries}
+            shown |= {tuple(ref.partition(":")[::2]) for ref in request.expanded_sessions}
+            try:
+                seats["ended"] = tuple(read_ended_seats(shown, read_context=read_context))
+            except Exception as exc:
+                errors.append(f"ended seats: {type(exc).__name__}")
         records["seats"] = seats
     elif kind == "models":
         config = read_model_config()

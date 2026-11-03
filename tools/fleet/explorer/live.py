@@ -2599,7 +2599,8 @@ def detail_for_bindings(detail, bindings, *, strict=False):
     ref = f"{_get(key, 'harness')}:{_get(key, 'sid')}"
     if focus is not None and not matches(focus, ref):
         focus = None
-    seats = {ref: value for ref, value in seats.items() if matches(results.get("seats"), ref)}
+    seats = {ref: value for ref, value in seats.items()
+             if ref == ENDED_SEATS or matches(results.get("seats"), ref)}
     panes = {sid: pane for sid, pane in panes.items()
              if any(value[1] == sid and matches(results.get("panes"), ref)
                     for ref, value in bindings.items())} if strict or results else panes
@@ -2723,7 +2724,11 @@ def selected_detail(model, detail, *, peer_model=None):
     for ref, current_tag in tag_of.items():
         if current_tag in by_tag and ref.partition(":")[2] in panes:
             by_tag[current_tag]["pane"] = panes[ref.partition(":")[2]]
+    if ENDED_SEATS in seats:
+        old_seats = [seat for seat in old_seats if not ended_seat(seat)]
     for seat in seat_rows:
+        if ended_seat(seat):
+            continue
         by_tag[seat[0]]["generation"] = seat[2]
         by_tag[seat[0]]["last_clear"] = None if seat[3] == "·" else seat[3].split(" · ")[0]
     panes_result = detail.results.get("panes")
@@ -2845,9 +2850,61 @@ def _seat_view(tag, repo, harness, sid, entries, now, now_text=None):
     return seat, generations, cards
 
 
-def _detail_sections(rows, session_index, accepted_detail, now):
+ENDED_SEATS = "ended"                     # the seats key HISTORY's ended seats travel under
+
+
+def ended_seat(seat):
+    """The ``ended`` record of a HISTORY seat row, or None for a live seat."""
+    extra = seat[7] if len(seat) > 7 else None
+    return extra if isinstance(extra, Mapping) and extra.get("ended") else None
+
+
+def _ended_seat_rows(ended, seat_rows, session_index, now, resolver):
+    """HISTORY rows for seats whose session ended: short SID and ``ended``, never a freed tag.
+
+    A seat whose chain continues in a live session that does not list it is drawn under that
+    seat with the PEERS handover words (``gen N → [tag]``).
+    """
+    tag_by_sid = {known: tag for tag, info in session_index.items()
+                  for known in (*info.get("ids", ()), info.get("sid")) if known}
+    generation_count = {seat[0]: seat[2] for seat in seat_rows}
+    rows, generations, cards = [], {}, {}
+    for item in ended or ():
+        if not isinstance(item, Mapping) or not item.get("entries"):
+            continue
+        harness, sid = _text(item.get("harness")) or "·", str(item.get("sid") or "")
+        key = "~" + sid[:8]
+        seat, gens, card_block = _seat_view(key, _repo_of(resolver, _text(item.get("cwd"))),
+                                            harness, sid, list(item["entries"]), now)
+        successor = item.get("successor") or ()
+        tag = tag_by_sid.get(successor[1]) if len(successor) == 2 else None
+        count = generation_count.get(tag)
+        seat.append({"ended": True, "sid": sid[:8], "harness": harness,
+                     "at": _ended_text(_num(item.get("ended_at")), now),
+                     "successor": tag, "gen": count - 1 if count else None})
+        rows.append(seat)
+        generations[key] = gens
+        if card_block is not None:
+            cards[key] = card_block
+    return rows, generations, cards
+
+
+def _ended_text(epoch, now):
+    if epoch is None:
+        return "ended"
+    try:
+        when = datetime.datetime.fromtimestamp(epoch)
+        today = datetime.datetime.fromtimestamp(now).date()
+    except (OverflowError, OSError, ValueError):
+        return "ended"
+    return "ended " + when.strftime("%H:%M" if when.date() == today else "%m-%d")
+
+
+def _detail_sections(rows, session_index, accepted_detail, now, resolver=None):
     """Seat, generation, card, dialogue, pane and raw-output sections from the pump's results."""
     focus, seats, _config, _panes = _detail_parts(accepted_detail)
+    seats = dict(seats)
+    ended = seats.pop(ENDED_SEATS, None)
     by_ref = {}
     for row in rows:
         info = session_index[row["tag"]]
@@ -2874,6 +2931,13 @@ def _detail_sections(rows, session_index, accepted_detail, now):
         generations[row["tag"]] = gens
         if card_block is not None:
             cards[row["tag"]] = card_block
+    if ended is not None:
+        from ..model import project_of
+        ended_rows, ended_generations, ended_cards = _ended_seat_rows(
+            ended, seat_rows, session_index, now, resolver or project_of)
+        seat_rows.extend(ended_rows)
+        generations.update(ended_generations)
+        cards.update(ended_cards)
     pane_read, raw, spoken = None, None, None
     if focus_ref in by_ref:
         tag = by_ref[focus_ref]["tag"]
@@ -3004,12 +3068,14 @@ def build_view_model(snapshot, accepted_detail=None, cached_config=None, now=Non
             info = session_index[row["tag"]]
             row["pane"] = next((panes[i] for i in info["ids"] if i in panes), None)
     seat_rows, generations, cards, dialogue, pane_read, raw = _detail_sections(
-        session_rows, session_index, accepted_detail, clock)
+        session_rows, session_index, accepted_detail, clock, resolver)
     peer_nodes, peer_edges = _finish_peers(peer_nodes, peer_edges, session_rows, session_index, routes,
                                            _handover_links(snapshot, session_index, seat_rows, clock),
                                            _routeless_jobs(snapshot, session_index))
     by_tag = {row["tag"]: row for row in session_rows}
     for seat in seat_rows:
+        if ended_seat(seat):
+            continue
         row = by_tag[seat[0]]
         row["generation"] = seat[2]
         row["last_clear"] = None if seat[3] == "·" else seat[3].split(" · ")[0]
