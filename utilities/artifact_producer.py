@@ -2114,8 +2114,13 @@ def same_flow_source_cycle(root: Path, campaign_id: str, *, capability: str,
         if before not in cycles:
             return None
         cycles = cycles[:cycles.index(before)]
-    records = {row.get("cycle_id"): row for row in list_cycle_records(root)
-               if row.get("campaign_id") == campaign_id and row.get("cycle_id") in cycles}
+    # Only the campaign's own cycles can answer, so only their records are read (not every
+    # record of the root); `read_cycle_record` recovers a removed record as the listing does.
+    records = {}
+    for cycle_id in dict.fromkeys(cycles):
+        row = read_cycle_record(root, cycle_id) if isinstance(cycle_id, str) else None
+        if row is not None and row.get("campaign_id") == campaign_id:
+            records[cycle_id] = row
     begin_cycle = {rec["route_id"]: cycle_id for cycle_id, rec in records.items() if rec.get("route_id")}
     session_cycles = (_session_cycle_ids(root, campaign, route_chain_identity, begin_cycle)
                       if route_chain_identity else set())
@@ -2750,6 +2755,11 @@ def _campaign_degradation(campaign: Mapping[str, Any]) -> Dict[str, Any]:
     return {}
 
 
+# Key under which `_begin_cycle_record` hands `begin` what the env is read from: the env reads
+# the root's other records, so it is resolved after the admission lock is released.
+_ENV_SOURCE = "_env_source"
+
+
 def _begin_cycle_record(
     root: Path,
     *,
@@ -2987,7 +2997,7 @@ def _begin_cycle_record(
                     dispatch_terminal_commit.publish_producer_binding(
                         artifact_root=root, jobs=binding_jobs, route_file=resolved_route_file,
                         owner_attempt_id=binding_owner, cycle_id=record["cycle_id"],
-                        owner_begin=owner_begin)
+                        owner_begin=owner_begin, owner=owner_binding)
                 except dispatch_terminal_commit.TerminalCommitError as exc:
                     raise ProducerError(exc.code, exc.detail) from exc
             title_updated = False
@@ -3006,7 +3016,7 @@ def _begin_cycle_record(
                 "status": "resumed", "layout": "cycle", "campaign_id": record["campaign_id"],
                 "cycle_id": record["cycle_id"], "producer_id": record["producer_id"],
                 "cycle_dir": str(cycle_dir(root, record["campaign_id"], record["cycle_id"], record)),
-                "env": _env_for(root, record, route),
+                _ENV_SOURCE: (root, record, route),
                 **({"rebound": True} if rebound else {}),
                 **({"title_updated": True} if title_updated else {}),
                 **({"campaign_reopened": True, "campaign_reopen_event_id": campaign_reopen_event_id}
@@ -3132,7 +3142,7 @@ def _begin_cycle_record(
                 dispatch_terminal_commit.publish_producer_binding(
                     artifact_root=root, jobs=binding_jobs, route_file=resolved_route_file,
                     owner_attempt_id=binding_owner, cycle_id=new_cycle_id,
-                    owner_begin=owner_begin)
+                    owner_begin=owner_begin, owner=owner_binding)
             except dispatch_terminal_commit.TerminalCommitError as exc:
                 raise ProducerError(exc.code, exc.detail) from exc
         artifact_locator.update_indexes(root, [campaign["campaign_id"]])
@@ -3148,7 +3158,7 @@ def _begin_cycle_record(
         return {
             "status": "begun", "layout": "cycle", "campaign_id": campaign["campaign_id"],
             "cycle_id": new_cycle_id, "producer_id": producer_id, "cycle_dir": str(target),
-            "campaign_created": campaign_created, "env": _env_for(root, record, route),
+            "campaign_created": campaign_created, _ENV_SOURCE: (root, record, route),
             **({"campaign_reopened": True, "campaign_reopen_event_id": campaign_reopen_event_id}
                if campaign_reopen_event_id else {}),
             **_campaign_degradation(campaign),
@@ -3181,6 +3191,11 @@ def begin(root: Path, *, _reconcile: bool = True, **kwargs: Any) -> Dict[str, An
     if _reconcile and kwargs.get("node_id") is None:
         reconcile_root(root)  # §45 D-126: what was moved or removed by hand is found before a cycle is begun
     result = _begin_cycle_record(root, **kwargs)
+    source = result.pop(_ENV_SOURCE, None)
+    if source is not None:
+        # The admission lock only reserves the cycle; what its env names (the source cycle,
+        # the workflow group, the runtime dir) is read after the lock is released.
+        result["env"] = _env_for(*source)
     if kwargs.get("node_id") is None and result.get("layout") == "cycle":
         _observe_after_begin(Path(root).resolve(), result)
         deliver_pending_history(root)

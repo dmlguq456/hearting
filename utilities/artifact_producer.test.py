@@ -6162,6 +6162,87 @@ time.sleep(float(sys.argv[2]))
 """
 
 
+# One owner start as `start` runs it in its own process: the preparation `begin`, then the
+# launch binding. It notes every root-wide read made while the admission lock is held.
+_PARALLEL_OWNER_START = r"""
+import json, os, sys, time
+from pathlib import Path
+from types import SimpleNamespace
+sys.path.insert(0, sys.argv[1])
+import artifact_admission
+import artifact_producer as P
+import dispatch_terminal_commit as T
+route_file, jobs, attempt, start_at = Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4], float(sys.argv[5])
+root = Path(json.loads(route_file.read_text())["artifact_root"]).resolve()
+under_lock = []
+
+def watch(name, real, when=lambda *a, **k: True):
+    def wrapped(*args, **kwargs):
+        if artifact_admission.holds_lock(root) and when(*args, **kwargs):
+            under_lock.append(name)
+        return real(*args, **kwargs)
+    return wrapped
+
+P._env_for = watch("env", P._env_for)
+P.list_cycle_records = watch("every-cycle-record", P.list_cycle_records,
+                             lambda *a, **k: k.get("route_ids") is None)
+T.validate_owner_route = watch("registry", T.validate_owner_route)
+while time.time() < start_at:
+    time.sleep(0.005)
+env = P.prepare_route_artifact_env(route_file, start=True, jobs=jobs)
+args = SimpleNamespace(worker_type="owner", dispatch_depth=1, route_file=str(route_file),
+                       owner_route_binding=None, attempt_id=attempt)
+bound = P.bind_owner_launch(args, jobs, environ=env)
+print(json.dumps({"cycle": env["AGENT_ARTIFACT_CYCLE_ID"], "bound": bound["cycle_id"],
+                  "under_lock": under_lock}))
+"""
+
+
+class ParallelOwnerStartTest(ProducerTestBase):
+    """W3 (2026-11-02): five owner starts at once all met admission-busy past the 120 s wait.
+
+    The admission lock is one per artifact root; every start takes it twice. Held only for
+    the reservation, several starts that arrive together are all admitted well inside the
+    wait, and none of them reads the root's other records while it holds the lock."""
+
+    def test_parallel_owner_starts_are_all_admitted_and_hold_the_lock_only_to_reserve(self):
+        self.activate()
+        count = 6
+        starts = []
+        rows = []
+        for index in range(count):
+            route, route_file = self.route("quick", slug=f"w3-parallel-{index}", campaign_key="w3-parallel")
+            node = route["nodes"][0]
+            attempt = f"att-w3-parallel-{index}"
+            metadata = dict(attempt_id=attempt, worker_type="owner", dispatch_depth="1",
+                registered_worker="1", harness="codex", capability="autopilot-code",
+                capability_mode="dev", intensity="quick", route_file=str(route_file),
+                route_id=route["route_id"], route_hash=route["route_hash"], route_node=node["id"],
+                registry_digest=route["registry_digest"], completion_gate=node["completion_gate"],
+                write_scope=";".join(node["write_scope"]))
+            rows.append("2026-11-02T00:50:00Z\topen\t" + str(R.ROOT) + "\t" + str(R.ROOT)
+                        + f"\towner-{index}\t" + ",".join(f"{k}={v}" for k, v in metadata.items()) + "\n")
+            starts.append((route_file, attempt))
+        self.jobs.write_text("".join(rows), encoding="utf-8")
+        start_at = time.time() + 1.0
+        procs = [subprocess.Popen(
+            [sys.executable, "-c", _PARALLEL_OWNER_START, str(Path(P.__file__).resolve().parent),
+             str(route_file), str(self.jobs), attempt, str(start_at)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for route_file, attempt in starts]
+        results = []
+        for proc in procs:
+            out, err = proc.communicate(timeout=P.OWNER_LAUNCH_ADMISSION_WAIT_SECONDS)
+            self.assertEqual(proc.returncode, 0, err[-3000:])
+            results.append(json.loads(out.strip().splitlines()[-1]))
+        cycles = [result["cycle"] for result in results]
+        self.assertEqual(len(set(cycles)), count)
+        self.assertEqual([result["bound"] for result in results], cycles)
+        self.assertEqual([result["under_lock"] for result in results], [[]] * count)
+        campaigns = [row for row in P._campaigns_by_key(self.root, "w3-parallel")]
+        self.assertEqual(len(campaigns), 1)  # the starts that arrived together joined one campaign
+        self.assertEqual(sorted(campaigns[0]["cycles"]), sorted(cycles))
+
+
 class OwnerLaunchBindingTest(ProducerTestBase):
     def _prepared_owner(self):
         from types import SimpleNamespace
