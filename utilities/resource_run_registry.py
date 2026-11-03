@@ -432,9 +432,11 @@ def resource_process_group_quiescent(run: dict) -> bool:
         for process in Path("/proc").iterdir():
             if not process.name.isdigit():
                 continue
+            # A process that exits during the scan is gone, not unverifiable:
+            # its entry vanishes (ENOENT) or its open stat file reads ESRCH.
             try:
                 info = process.stat()
-            except FileNotFoundError:
+            except (FileNotFoundError, ProcessLookupError):
                 continue
             except OSError:
                 return False
@@ -445,7 +447,7 @@ def resource_process_group_quiescent(run: dict) -> bool:
                 fields = raw.rsplit(") ", 1)[1].split()
                 process_group = int(fields[2])
                 process_state = fields[0]
-            except FileNotFoundError:
+            except (FileNotFoundError, ProcessLookupError):
                 continue
             except (OSError, IndexError, ValueError):
                 return False
