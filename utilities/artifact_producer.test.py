@@ -2682,6 +2682,39 @@ class RecoveryTest(ProducerTestBase):
         self.assertEqual(recovered["producer"]["dropped"], [result["cycle_id"]])
         self.assertEqual(P.read_cycle_record(self.root, result["cycle_id"])["state"], "dropped")
 
+    def test_finalize_looks_at_the_roots_open_cycles_before_its_lock(self):
+        # W3 (2026-11-03): on the hearting root the sweep's look at every open cycle (143 of
+        # 1,864) held the admission lock for seconds in each finish; under the lock only the
+        # cycles that look found work for are read again, and the sweep still does that work.
+        self.activate()
+        gone_route, gone_file = self.route(slug="w3-gone")
+        gone = P.begin(self.root, route_file=gone_file, capability="autopilot-code",
+                       intensity="direct", campaign_key="w3-gone")
+        idle_route, idle_file = self.route(slug="w3-idle")
+        idle = P.begin(self.root, route_file=idle_file, capability="autopilot-code",
+                       intensity="direct", campaign_key="w3-idle")
+        route, route_file = self.route(slug="w3-closing")
+        result = P.begin(self.root, route_file=route_file, capability="autopilot-code",
+                         intensity="direct", campaign_key="w3-closing")
+        self.write_output(result)
+        self.close(route, route_file)
+        import shutil
+        shutil.rmtree(gone["cycle_dir"])
+        under_lock = []
+        real_listing = P.list_cycle_records
+
+        def listing(root, **kwargs):
+            if kwargs.get("route_ids") is None and adm.holds_lock(root):
+                under_lock.append("every-cycle-record")
+            return real_listing(root, **kwargs)
+
+        with mock.patch.object(P, "list_cycle_records", side_effect=listing):
+            P.finalize(self.root, cycle_id=result["cycle_id"])
+        self.assertEqual(under_lock, [])
+        self.assertEqual(P.read_cycle_record(self.root, result["cycle_id"])["state"], "sealed")
+        self.assertEqual(P.read_cycle_record(self.root, gone["cycle_id"])["state"], "dropped")
+        self.assertEqual(P.read_cycle_record(self.root, idle["cycle_id"])["state"], "open")
+
     def test_finalize_runs_recovery_first(self):
         result = self._sealing_crash()
         outcome = P.finalize(self.root, cycle_id=result["cycle_id"])
