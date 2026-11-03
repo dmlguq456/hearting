@@ -5987,6 +5987,9 @@ def finalize(
                 return {"status": "deferred", "reason": "files-changed-during-read", "cycle_id": cycle_id}
             if misses:
                 _reread_misses(prescan, misses)
+        # The root sweep's look at every open cycle is taken before the lock (§45 D-124); under
+        # it only the cycles that look has work for, and this one, are read again.
+        open_candidates = _recovery_open_candidates(root, cycle_id) if _recovery_scope == "root" else None
         if lock_fd is None:
             lock_fd = artifact_admission._acquire_lock(
                 root, artifact_admission.LOCK_TIMEOUT_DEFAULT if lock_timeout is None else lock_timeout, now=now)
@@ -6009,7 +6012,8 @@ def finalize(
         if _recovery_scope == "root":
             pre = read_cycle_record(root, cycle_id)
             sweep = _recover_locked(root, now=now,
-                                    target_campaign_id=pre["campaign_id"] if pre else None)
+                                    target_campaign_id=pre["campaign_id"] if pre else None,
+                                    open_candidates=open_candidates)
             sweep_unresolved = sweep.get("unresolved", [])
         elif _recovery_scope == "exact":
             _recover_exact_cycle_locked(root, cycle_id, expected_binding, now=now)
@@ -7565,6 +7569,11 @@ def _prescan_open_cycle(root: Path, record: Mapping[str, Any], *, exclude_hidden
     except ProducerError as error:
         scan.error = error  # raised where the locked close always raised it
         return scan
+    if scan.violations:
+        # The close is refused on these names (`output-invalid`, raised where the locked close
+        # always raised it, after the refusals that come before it there); the digests of the
+        # other files would decide nothing, so none is read.
+        return scan
     bundle_dirs = [tree.directory for tree in scan.bundles]
     journal = _read_json(journal_path(root, cycle_id)) or {}
     owned_paths = {row.get("locator") for row in journal.get("directory_bundles", [])
@@ -8972,8 +8981,47 @@ def _is_recoverable_locator_defect(exc: BaseException) -> bool:
     return isinstance(exc, ProducerError) and exc.code == "record-locator-invalid"
 
 
+def _recovery_open_candidates(root: Path, cycle_id: Optional[str] = None) -> set:
+    """Before the admission lock: the open cycles the root sweep may have work for, and ``cycle_id``.
+
+    An open cycle sitting in the folder the published locator map names, with its own binding
+    and no `manifest.json`, is one the sweep only lists as open, so it is not read again under
+    the lock.  Everything else -- a folder gone or unpublished, a manifest written and not
+    recorded, a binding naming another cycle, and every open cycle of the campaign being closed
+    (whose locator defects the sweep raises) -- stays the sweep's, resolved there as before.
+    Only the map, an `lstat` and the small binding file are read here.  A cycle that turns into
+    one after this look is the next sweep's (the sweep is already best effort for every cycle
+    but the one being closed)."""
+    wanted = {cycle_id} if cycle_id else set()
+    root = Path(root)
+    try:
+        published = artifact_locator._load_index(root) or {}
+    except Exception:  # noqa: BLE001 -- an unreadable map leaves every open cycle to the sweep
+        published = {}
+    target = read_cycle_record(root, cycle_id) if cycle_id else None
+    target_campaign = (target or {}).get("campaign_id")
+    for record in list_cycle_records(root):
+        if (record.get("state") != "open" or record.get("deleted_at")
+                or (record.get("relocation") or {}).get("artifact_root")):
+            continue
+        where = published.get(record.get("cycle_id"))
+        if record.get("campaign_id") != target_campaign and isinstance(where, str) and where:
+            folder = root / where
+            try:
+                quiet = (stat.S_ISDIR(os.lstat(str(folder)).st_mode)
+                         and not _path_entry_present(folder / "manifest.json")
+                         and _folder_cycle_id(folder) == record["cycle_id"])
+            except OSError:
+                quiet = False
+            if quiet:
+                continue
+        wanted.add(record["cycle_id"])
+    return wanted
+
+
 def _recover_locked(root: Path, *, now: Optional[float] = None,
-                    target_campaign_id: Optional[str] = None) -> Dict[str, Any]:
+                    target_campaign_id: Optional[str] = None,
+                    open_candidates: Optional[Iterable[str]] = None) -> Dict[str, Any]:
     """Root-scope crash recovery. Visits every open record and journal entry.
 
     A record whose campaign is not `target_campaign_id` is isolated (§3.6a):
@@ -9050,7 +9098,12 @@ def _recover_locked(root: Path, *, now: Optional[float] = None,
                 _drop_unpublished_snapshot(root, cycle_id, journal)
                 entry.unlink()
                 result["rolled_back"].append(cycle_id)
-    for record in list_cycle_records(root):
+    # `open_candidates`: what `_recovery_open_candidates` found before the lock; without it
+    # (an explicit `recover`) every record is read here.
+    records = (list_cycle_records(root) if open_candidates is None else
+               [row for row in (read_cycle_record(root, item) for item in sorted(set(open_candidates)))
+                if row is not None])
+    for record in records:
         if (record.get("state") != "open" or record.get("deleted_at")
                 or (record.get("relocation") or {}).get("artifact_root")):
             continue

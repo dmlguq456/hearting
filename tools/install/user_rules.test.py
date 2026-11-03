@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -19,6 +21,11 @@ class UserRulesBlockTest(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory(prefix="user-rules-")
         self.addCleanup(temporary.cleanup)
         self.claude = Path(temporary.name) / ".claude"
+        # Never read the real user's switch: an absent override file means on.
+        switch = mock.patch.dict(os.environ, {
+            "DISPATCH_DEFAULTS_CONFIG": str(Path(temporary.name) / "no-defaults.yaml")})
+        switch.start()
+        self.addCleanup(switch.stop)
 
     def write(self, relative: str, data: bytes) -> None:
         path = self.claude / "rules" / relative
@@ -61,6 +68,27 @@ class UserRulesBlockTest(unittest.TestCase):
         self.assertEqual([name for name, _data in rules], ["external.md"])
         self.assertEqual(skipped, ["legacy.md is not UTF-8 text"])
         self.assertEqual(user_rules.block(self.claude).count(RULE), 1)
+
+
+class UserRulesSwitchTest(unittest.TestCase):
+    def test_off_in_the_user_defaults_renders_nothing(self):
+        with tempfile.TemporaryDirectory(prefix="user-rules-switch-") as temporary:
+            claude = Path(temporary) / ".claude"
+            (claude / "rules").mkdir(parents=True)
+            (claude / "rules/external.md").write_bytes(RULE)
+            switch = Path(temporary) / "dispatch-defaults.yaml"
+            environ = {"DISPATCH_DEFAULTS_CONFIG": str(switch)}
+            self.assertTrue(user_rules.block(claude, environ))  # file absent: on
+            switch.write_text("schema_version: 4\nuser_rules:\n  opencode: off\n")
+            self.assertFalse(user_rules.carry_enabled(environ))
+            self.assertEqual(user_rules.block(claude, environ), b"")
+            switch.write_text("schema_version: 4\nuser_rules:\n  opencode: carry\n")
+            self.assertEqual(user_rules.block(claude, environ).count(RULE), 1)
+            switch.write_text("schema_version: 4\nuser_rules:\n  opencode: on\n")
+            self.assertTrue(user_rules.carry_enabled(environ))
+            switch.write_text("schema_version: 4\nuser_rules: opencode: off\n")
+            self.assertFalse(user_rules.carry_enabled(environ))
+            self.assertEqual(user_rules.switch_path(environ), str(switch))
 
 
 if __name__ == "__main__":
