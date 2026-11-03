@@ -2293,7 +2293,12 @@ def _begin_waiting_for_admission(root: Path, **kwargs: Any) -> Dict[str, Any]:
     deadline = time.monotonic() + OWNER_LAUNCH_ADMISSION_WAIT_SECONDS
     # A node begin never looks for hand changes, and neither does the launch binding: it only
     # resumes the cycle the same start's preparation began (and looked for) seconds before.
-    looked = kwargs.get("node_id") is not None or bool(kwargs.get("resume_only"))
+    # Nor does a frame leg joining the cycle of its live sibling leg (`sibling_looked`), whenever
+    # this route's later start launches it: the sibling's preparation looked the root over and
+    # handed the waiting history lines over before beginning this cycle. A hand change or a line
+    # since then is found by the next begin, listing or campaign close (reconcile is best effort).
+    sibling_looked = bool(kwargs.pop("sibling_looked", False))
+    looked = kwargs.get("node_id") is not None or bool(kwargs.get("resume_only")) or sibling_looked
     while True:
         if not looked:
             # §45 D-126 before the cycle begins. A look that finished is not repeated while
@@ -2301,7 +2306,7 @@ def _begin_waiting_for_admission(root: Path, **kwargs: Any) -> Dict[str, Any]:
             # its own lock wait ran out) is taken again before the next try.
             looked = reconcile_root(root).get("status") in _RECONCILE_FINISHED
         try:
-            return begin(root, _reconcile=False, **kwargs)
+            return begin(root, _reconcile=False, _deliver_history=not sibling_looked, **kwargs)
         except artifact_admission.AdmissionBusy:
             if time.monotonic() >= deadline:
                 raise ProducerError(
@@ -2350,11 +2355,14 @@ def bind_owner_launch(args, jobs: Path, *, environ=None) -> Optional[Dict[str, A
 
 
 def prepare_route_artifact_env(route_file: Path, *, start: bool, jobs: Path,
-                               require_cycle: bool = True) -> Dict[str, str]:
+                               require_cycle: bool = True, sibling_looked: bool = False) -> Dict[str, str]:
     """Resolve the route's own output context; callers need not copy begin's env.
 
     Start owns idempotent preparation. Readiness checks only read an existing
     cycle. No inherited cycle or 'latest' directory participates in selection.
+    `sibling_looked`: a live sibling leg of the same route prepared this cycle (in this start
+    or an earlier one), so this preparation does not walk the root for hand changes or waiting
+    history lines again; the next begin, listing or campaign close does.
     """
     raw = _read_json(route_file)
     if not isinstance(raw, dict) or not raw.get("artifact_root"):
@@ -2371,7 +2379,8 @@ def prepare_route_artifact_env(route_file: Path, *, start: bool, jobs: Path,
             selection = {"workflow_group_id": context["group_id"]}
         return _begin_waiting_for_admission(
             root, route_file=route_file, capability=route["capability"],
-            intensity=route["effective_intensity"], require_cycle=require_cycle, jobs=jobs, **selection)["env"]
+            intensity=route["effective_intensity"], require_cycle=require_cycle, jobs=jobs,
+            sibling_looked=sibling_looked, **selection)["env"]
     record = route_cycle_for(root, route)
     if record is None:
         return {"AGENT_ARTIFACT_ROOT": str(root), **{name: "" for name in (
@@ -3189,7 +3198,7 @@ def _observe_after_begin(root: Path, result: Mapping[str, Any]) -> None:
         pass
 
 
-def begin(root: Path, *, _reconcile: bool = True, **kwargs: Any) -> Dict[str, Any]:
+def begin(root: Path, *, _reconcile: bool = True, _deliver_history: bool = True, **kwargs: Any) -> Dict[str, Any]:
     if _reconcile and kwargs.get("node_id") is None:
         reconcile_root(root)  # §45 D-126: what was moved or removed by hand is found before a cycle is begun
     result = _begin_cycle_record(root, **kwargs)
@@ -3200,7 +3209,7 @@ def begin(root: Path, *, _reconcile: bool = True, **kwargs: Any) -> Dict[str, An
         result["env"] = _env_for(*source)
     if kwargs.get("node_id") is None and result.get("layout") == "cycle":
         _observe_after_begin(Path(root).resolve(), result)
-        if not kwargs.get("resume_only"):
+        if not kwargs.get("resume_only") and _deliver_history:
             # The same start's preparation handed waiting lines over seconds before (it reads
             # every record to find them); a line still waiting goes with the next trigger.
             deliver_pending_history(root)
