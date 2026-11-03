@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Unit tests for hooks/peer-message-record.py (SD-122)."""
+import contextlib
 import fcntl
 import hashlib
 import importlib.util
@@ -954,6 +955,87 @@ class F100cHelperProcessGuardTest(_BaseTest):
         self._run("prompt", {"session_id": "sid-child", "cwd": "/tmp/proj",
                              "prompt": "x (peer-from: claude sid-a hearting-46)"})
         self.assertEqual(len(self._all_records()), 1)
+
+
+class BoundedPromptPathTest(_BaseTest):
+    """A slow pending store costs the prompt at most the hook budget, and the
+    message the prompt did not reach still arrives once, on a later boundary."""
+
+    _seed_message = NativeContextReceiptTest._seed_message
+
+    def _hook(self):
+        spec = importlib.util.spec_from_file_location("bounded_prompt_hook", _HOOK)
+        hook = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(hook)
+        return hook
+
+    def _prompt_in_process(self, hook, sid, *, slow_read=None):
+        """One `prompt` run as a fresh hook process would make it, timed from start."""
+        out = io.StringIO()
+        payload = json.dumps({"session_id": sid, "cwd": str(self.tmp_root), "prompt": "next"})
+        with mock.patch.dict(os.environ, self.env, clear=True), \
+                mock.patch.object(sys, "argv", [str(_HOOK), "prompt"]), \
+                mock.patch.object(sys, "stdin", io.StringIO(payload)), \
+                contextlib.redirect_stdout(out), contextlib.ExitStack() as stack:
+            mod = hook._peer_message_module()
+            if slow_read is not None:
+                stack.enter_context(mock.patch.object(mod, "_raw_pending_row", slow_read(mod)))
+            hook._STARTED = time.monotonic()
+            hook.main()
+            elapsed = time.monotonic() - hook._STARTED
+        return out.getvalue(), elapsed
+
+    def _state(self, ref):
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            row = peer_message._read_pending(ref)
+        return row["state"], row.get("receipt")
+
+    def test_a_spent_budget_defers_the_message_and_the_next_prompt_delivers_it_once(self):
+        sid = "sid-bounded-prompt"
+        text, ref = self._seed_message(recipient_sid=sid)
+        before = self._state(ref)
+        hook = self._hook()
+        with mock.patch.object(hook, "_HOOK_BUDGET_S", 0.0):
+            output, _elapsed = self._prompt_in_process(hook, sid)
+        # Nothing was read, claimed or shown: the row is exactly as it was.
+        self.assertEqual(output, "")
+        self.assertEqual(self._state(ref), before)
+        delivered, _elapsed = self._prompt_in_process(self._hook(), sid)
+        context = json.loads(delivered)["hookSpecificOutput"]["additionalContext"]
+        self.assertEqual(context, text)
+        self.assertEqual(self._state(ref)[0], "received")
+        again, _elapsed = self._prompt_in_process(self._hook(), sid)
+        self.assertEqual(again, "")
+
+    def test_a_slow_store_costs_the_prompt_at_most_its_budget(self):
+        sid = "sid-slow-store"
+        text, ref = self._seed_message(recipient_sid=sid)
+        for index in range(12):
+            self._seed_message(recipient_sid=f"sid-elsewhere-{index}",
+                               body=f"[steer] another session's message {index}")
+
+        def slow_read(mod):
+            original = mod._raw_pending_row
+
+            def read(path):
+                time.sleep(0.4)  # every row read waits on a saturated disk
+                return original(path)
+            return read
+
+        hook = self._hook()
+        output, elapsed = self._prompt_in_process(hook, sid, slow_read=slow_read)
+        # 13 rows x 0.4 s would be 5.2 s; the scan stops at the budget instead.
+        self.assertLess(elapsed, hook._HOOK_BUDGET_S + 1.0)
+        shown = [output] if output else []
+        if self._state(ref)[0] != "received":
+            # Not reached in time: untouched, and the next prompt delivers it.
+            later, _elapsed = self._prompt_in_process(self._hook(), sid)
+            shown.append(later)
+        self.assertEqual(self._state(ref)[0], "received")
+        self.assertEqual(
+            [json.loads(item)["hookSpecificOutput"]["additionalContext"] for item in shown],
+            [text])
+        self.assertEqual(self._prompt_in_process(self._hook(), sid)[0], "")
 
 
 if __name__ == "__main__":
