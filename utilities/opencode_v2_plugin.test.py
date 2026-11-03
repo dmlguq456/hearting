@@ -1442,6 +1442,63 @@ try {
                                     cwd=ROOT, env=env, text=True, capture_output=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_v2_question_answers_reach_the_frame_answer_recorder(self):
+        # GA-A5-013: V2 hands the question tool's answers on `event.result.metadata`
+        # (OpenCode 2.0.32: `metadata: {answers}`); the shared after hook reads them as in V1.
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node is unavailable for the V2 plugin module contract")
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            project = Path(tmp) / "project"
+            harness = Path(tmp) / "harness"
+            for directory in (home, project, harness / "core", harness / "utilities",
+                              harness / "adapters" / "opencode" / "bin"):
+                directory.mkdir(parents=True)
+            (harness / "core" / "CORE.md").write_text("fixture\n")
+            (harness / "adapters" / "opencode" / "bin" / "preflight.sh").write_text("exit 0\n")
+            seen = Path(tmp) / "seen.json"
+            (harness / "utilities" / "frame_native_answer.py").write_text(
+                "import sys\nopen(%r, 'a').write(sys.stdin.read() + '\\n')\n" % str(seen))
+            script = r"""
+import { pathToFileURL } from "node:url"
+const plugin = (await import(pathToFileURL(process.env.PLUGIN_PATH))).default
+const hooks = new Map()
+const ctx = {
+  location: { directory: process.env.TEMP_ROOT, project: { id: "fixture" } },
+  app: { log: async () => {} },
+  session: {
+    get: async () => ({ data: { id: "ses_main", agent: "build", title: "Main", parentID: null } }),
+    prompt: async () => ({ data: null }), context: async () => ({ data: [] }),
+    hook: async (name, fn) => hooks.set("session." + name, fn),
+  },
+  tool: { hook: async (name, fn) => hooks.set("tool." + name, fn) },
+  shell: { hook: async (name, fn) => hooks.set("shell." + name, fn) },
+  event: { subscribe: async function* ({ signal }) {
+    await new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true }))
+  } },
+  permission: { hook: async (name, fn) => hooks.set("permission." + name, fn) },
+}
+const cleanup = await plugin.setup(ctx)
+try {
+  await hooks.get("tool.execute.after")({ tool: "question", sessionID: "ses_main", status: "completed",
+    input: { questions: [{ question: "Which?", options: [{ label: "A" }, { label: "B" }] }] },
+    result: { content: [{ type: "text", text: "answered" }], metadata: { answers: [["B"]] } } })
+} finally { await cleanup() }
+"""
+            env = {**BASE_ENV, "PLUGIN_PATH": str(ROOT / "adapters/opencode/plugins/hearting-guards.js"),
+                   "TEMP_ROOT": str(project), "HOME": str(home), "AGENT_HOME": str(harness),
+                   "PYTHONDONTWRITEBYTECODE": "1", "XDG_STATE_HOME": str(home / ".state"),
+                   "XDG_CONFIG_HOME": str(home / ".config"), "XDG_DATA_HOME": str(home / ".data"),
+                   "XDG_CACHE_HOME": str(home / ".cache")}
+            result = subprocess.run([node, "--input-type=module", "-e", script],
+                                    cwd=ROOT, env=env, text=True, capture_output=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            recorded = [json.loads(line) for line in seen.read_text().splitlines() if line.strip()]
+            self.assertEqual(len(recorded), 1)
+            self.assertEqual(recorded[0]["answers"], [["B"]])
+            self.assertEqual(recorded[0]["args"]["questions"][0]["question"], "Which?")
+
     def test_v2_registers_guards_and_worker_hooks_are_silent(self):
         node = shutil.which("node")
         if not node:

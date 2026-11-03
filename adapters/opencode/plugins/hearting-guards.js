@@ -1202,9 +1202,13 @@ async function setupOpenCodeV2(ctx) {
     if (command) forgetShellCommand(command, event.sessionID)
     await withSession(event.sessionID, async () => {
       const content = event.status === "completed" ? event.result?.content : []
+      // V2 carries the tool's own metadata on the result (the question tool's `answers`, the
+      // same shape V1 hands `tool.execute.after`); keep it so the shared hook reads one shape.
+      const metadata = event.status === "completed" && event.result?.metadata
+        && typeof event.result.metadata === "object" ? { ...event.result.metadata } : {}
       const output = { output: Array.isArray(content)
         ? content.map((part) => part?.text || "").filter(Boolean).join("\n") : "",
-        metadata: event.status === "error" ? { exit: 1 } : {} }
+        metadata: event.status === "error" ? { exit: 1 } : metadata }
       const originalText = output.output
       if (v2WorkerSessions.has(event.sessionID)) {
         await appendSpecSyncNudge(ctx, { tool: event.tool, sessionID: event.sessionID, args: event.input || {} }, output, root)
