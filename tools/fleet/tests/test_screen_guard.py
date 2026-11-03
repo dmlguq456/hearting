@@ -134,7 +134,7 @@ class ScreenGuardTest(unittest.TestCase):
     def test_frame_drawn_before_output_stopped_is_settled_not_flushed(self):
         screen = FakeScreen()
         answers = iter([True, False])
-        guard = self.guard(screen, writable=lambda: next(answers))
+        guard = self.guard(screen, writable=lambda: next(answers, False))
         frame(guard)
         self.assertEqual(screen.names(), ["erase", "addstr", "noutrefresh"])
 
@@ -216,6 +216,33 @@ class ScreenGuardTest(unittest.TestCase):
             guard.close()                  # returns only once the write is finished
         self.assertTrue(guard._done.is_set())
         self.assertEqual(interrupts, [0])
+
+    def test_quitting_drops_a_frame_the_terminal_is_not_reading(self):
+        """RV-1042 S2: a writer blocked on a terminal that stopped reading cannot hold quit."""
+        master, slave = pty.openpty()
+        self.addCleanup(os.close, master)
+        self.addCleanup(os.close, slave)
+
+        class Curses:                      # one frame larger than any pty queue
+            def getmaxyx(self):
+                return 10, 40
+
+            def refresh(self):
+                os.write(slave, b"x" * (1 << 20))
+
+            def __getattr__(self, name):
+                return lambda *args: None
+
+        guard = screen_guard.ScreenGuard(budget=0.05).attach(Curses(), fd=slave)
+        guard._written = 1                 # past the first frame, which is written in full
+        frame(guard)
+        self.assertFalse(guard._done.is_set(), "nobody reads the terminal")
+        started = time.monotonic()
+        guard.settle(grace=0.2)
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertTrue(guard._done.is_set(), "the writer finished; curses is free")
+        self.assertTrue(select.select((), (slave,), (), 0)[1], "room for the restore")
+        guard.close()
 
     def test_first_frame_is_written_in_full(self):
         """Render's raw mouse-mode write follows the first paint; it must not split it."""
@@ -605,6 +632,38 @@ class RealTerminalTest(unittest.TestCase):
         self.assertGreater(self.progress()["tick"], resumed)
         os.write(terminal.master, b"q")
         self.assertTrue(terminal.read_for(10, lambda: terminal.child.poll() is not None))
+        self.assertEqual(terminal.child.returncode, 0)
+
+    def stalled_explorer(self):
+        none = str(self.base / "no-release")
+        terminal = self.start("explorer", str(self.base), none, none, none)
+        started = terminal.read_for(45, lambda: self.progress().get("collects", 0) >= 3
+                                    and len(terminal.received) > 512)
+        self.assertTrue(started, self.stderr_log())
+        terminal.fill()                    # the terminal stops reading
+        first = self.progress()["collects"]
+        self.assertTrue(_wait(lambda: self.progress()["collects"] >= first + 2, 10),
+                        self.stderr_log())
+        return terminal
+
+    def test_q_quits_the_explorer_while_its_terminal_is_not_reading(self):
+        """RV-1042 S1: mouse reporting goes off after the frame in flight, and the quit
+        does not wait for the terminal to read again."""
+        terminal = self.stalled_explorer()
+        os.write(terminal.master, b"q")
+        self.assertTrue(_wait(lambda: terminal.child.poll() is not None, 15), self.stderr_log())
+        self.assertEqual(terminal.child.returncode, 0)
+        terminal.read_for(1.0)
+        self.assertIn(b"\x1b[?1006l\x1b[?1002l", bytes(terminal.received).rsplit(b"~", 1)[-1])
+
+    def test_repeated_ctrl_c_quits_the_explorer_while_its_terminal_is_not_reading(self):
+        """RV-1042 S2: no Ctrl-C leaves the viewer waiting on a terminal that is not reading."""
+        terminal = self.stalled_explorer()
+        os.killpg(terminal.child.pid, signal.SIGINT)
+        time.sleep(0.3)
+        if terminal.child.poll() is None:
+            os.killpg(terminal.child.pid, signal.SIGINT)
+        self.assertTrue(_wait(lambda: terminal.child.poll() is not None, 15), self.stderr_log())
         self.assertEqual(terminal.child.returncode, 0)
 
     def release(self, data, version):
