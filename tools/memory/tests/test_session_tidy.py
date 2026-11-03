@@ -5408,26 +5408,38 @@ class BackgroundAgentCompactTest(TidyCase):
             self.assertEqual((why, held and held["status"]), ("", "reserved"))     # /compact keeps it
             held = clear.read_reservation(seat.key)
             held.pop("clear_command")
-            clear._write_reservation(held)
-            self.assertEqual(clear.validate_request(path, req["nonce"])[1], "notification-turn")  # a clear does not
-            held["clear_command"] = "compact"
-            clear._write_reservation(held)
+            booked_seat = clear._booking_at(path)[1]
+            # An automatic clear would miss that turn; a tidy the person ran compacts at its claim.
+            self.assertEqual(clear._unchanged_since_card({**held, "origin": "idle"}, booked_seat),
+                             "notification-turn")
+            self.assertEqual(clear._unchanged_since_card(held, booked_seat), "")
             st.run_hook("claude", "prompt", "sid-A", cwd=str(self.cwd), prompt_text="사람이 친 말")
             self.assertEqual(clear.validate_request(path, req["nonce"])[1], "new-input")  # the person did
 
-    def test_a_task_notification_cancels_a_clear_booking_without_a_line(self):
+    def test_a_task_notification_turns_a_manual_tidy_into_a_compact_not_a_cancel(self):
         notice = "<task-notification>\n<task-id>bx1</task-id>\n<status>completed</status>\n</task-notification>"
-        seat, req = self.booked()                                   # no agent: an ordinary clear
+        seat, req = self.booked()                                   # the person ran tidy; no agent
         with self.iso.patched_environ(self.extra):
             st.run_hook("claude", "prompt", "sid-A", cwd=str(self.cwd), prompt_text=notice)
-        outcome = self.run_helper(seat, req, lambda _claim: {"cleared": "true", "new_session": "sid-B"})
-        self.assertEqual(outcome, "skipped")
-        self.assertEqual(self.calls, [])                            # nothing typed
+
+        def compacted(claim):
+            self.write_row({"type": "system", "subtype": "compact_boundary", "sessionId": "sid-A"})
+            return {"cleared": "unverified", "reason": "compact-pending"}
+        self.assertEqual(self.run_helper(seat, req, compacted), "continued")
+        self.assertEqual(self.calls, [("send", "compact", ""), ("continue", "sid-A")])
         with self.iso.patched_environ(self.extra):
             held = clear.read_reservation(seat.key)
-            notes = st.read_json(st._notices_path(self.logical_seat(seat, "claude", "sid-A")))
-        self.assertEqual((held["status"], held["reason"]), ("cancelled", "notification-turn"))
-        self.assertEqual((notes or {}).get("items", []), [])
+        self.assertEqual((held["status"], held["new_session"], held["clear_command"]),
+                         ("cleared", "sid-A", "compact"))
+
+    def test_a_failed_manual_compact_names_compact_as_the_next_step(self):
+        for outcome, reason in (("unverified", "compact-pending"), ("failed", "herdr-exit-1"),
+                                ("skipped", "draft")):
+            text = clear._notice_text(outcome, reason, "claude", compact=True)
+            self.assertIn("/compact 하세요", text)
+            self.assertNotIn("/clear 하세요", text)
+            self.assertNotIn("새 창", text)
+        self.assertIn("/clear 하세요", clear._notice_text("failed", "herdr-exit-1", "claude"))   # clear unchanged
 
     def test_tidy_says_once_that_background_agents_make_it_a_compact(self):
         def tidy():

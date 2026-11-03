@@ -453,11 +453,12 @@ def idle_tidy_terms(req: Optional[dict] = None, *, request: bool = True) -> str:
     when = (f"마지막 요청 입력이 {amount} 토큰 이상이고, 턴이 끝난 뒤 사람 입력 없이 약 {minutes}분이 지났고, "
             "화면이 쉬는 중이며 입력창이 비어 있고 질문·확인 창이 열려 있지 않을 때만")
     off = f"끄려면 {shown}에 {{\"idle\": {{\"enabled\": false}}}}를 두세요."
+    claude = (req or {}).get("harness") == "claude"     # only Claude windows compact for agents
     if not request:
-        return (f"자동 유휴 정리는 {when} 동작하고, 백그라운드 에이전트가 있으면 창을 비우는 대신 /compact로 "
-                f"압축합니다. {off}")
-    return (f"{when} 이 요청을 보냅니다. 카드를 받으면 이 창을 비우고(백그라운드 에이전트가 있으면 /clear 대신 "
-            f"/compact) 현황만 짧게 보여 줍니다. {off}")
+        agents = ", 백그라운드 에이전트가 있으면 창을 비우는 대신 /compact로 압축합니다" if claude else "합니다"
+        return f"자동 유휴 정리는 {when} 동작{agents}. {off}"
+    agents = "(백그라운드 에이전트가 있으면 /clear 대신 /compact)" if claude else ""
+    return f"{when} 이 요청을 보냅니다. 카드를 받으면 이 창을 비우고{agents} 현황만 짧게 보여 줍니다. {off}"
 
 
 def idle_card_request_text(req: dict) -> str:
@@ -1377,8 +1378,9 @@ def _prepare_handover_snapshot(req: dict) -> bool:
                            str(req.get("harness") or ""), str(req.get("sid") or ""))
     if seat.kind not in ("pane", "native"):
         return True
-    if _compact_mode(req) and mark_compact(seat.key, str(req.get("harness") or ""),
-                                           str(req.get("sid") or ""), str(req.get("nonce") or "")):
+    if ((_compact_mode(req) or _notified_manual_tidy(req, seat))
+            and mark_compact(seat.key, str(req.get("harness") or ""),
+                             str(req.get("sid") or ""), str(req.get("nonce") or ""))):
         return True    # /compact keeps this session: there is no successor to hand over to
     import dispatch_seat_handover as handover
     try:
@@ -1524,12 +1526,22 @@ def _unchanged_since_card(req: dict, seat: "st.Seat") -> str:
     reason = _card_unchanged_reason(req, card, sequence)
     booked = int(req.get("prompt_seq", -1))
     if reason == "new-input" and _only_notifications_since(seat, booked, sequence):
-        if req.get("clear_command") != "compact":
-            # The card misses that turn, so no clear; nobody typed, so nothing to report.
+        if req.get("clear_command") != "compact" and req.get("origin") in ("idle", "compact"):
+            # The card misses that turn, so no automatic clear; nobody typed, so no line.
             return NOTIFICATION_TURN
-        # /compact keeps the notification turns too.
+        # /compact keeps the notification turns; a tidy the person ran compacts at its claim
+        # instead of dropping them (see claim_clear).
         reason = _card_unchanged_reason(req, card, booked)
     return reason
+
+
+def _notified_manual_tidy(req: dict, seat: "st.Seat") -> bool:
+    """A tidy the person ran, followed only by task notifications since its card. It is kept,
+    not cancelled: /compact keeps that turn, where a clear would drop it."""
+    if req.get("origin") in ("idle", "compact"):
+        return False
+    observation = _card_frontier(seat)
+    return bool(observation and _only_notifications_since(seat, int(req.get("prompt_seq", -1)), observation[1]))
 
 
 def _only_notifications_since(seat: "st.Seat", booked: int, sequence: int) -> bool:
@@ -1678,7 +1690,7 @@ def claim_clear(path, nonce: Optional[str] = None):
     req, seat, reason = _booking_at(Path(path))
     if req is None:
         return None, reason
-    compact = _compact_mode(req)     # read outside the lock: only the runtime's own files
+    compact = _compact_mode(req) or _notified_manual_tidy(req, seat)   # outside the lock: own files
     transcript, offset = "", None
     if compact:
         with contextlib.suppress(Exception):
@@ -1691,7 +1703,7 @@ def claim_clear(path, nonce: Optional[str] = None):
             return None, reason
         claim = {"state": "sending", "nonce": req["nonce"], "token": secrets.token_hex(12),
                  "at": st.now_epoch()}
-        if compact or req.get("clear_command") == "compact":
+        if compact or req.get("clear_command") == "compact" or _notified_manual_tidy(req, seat):
             claim.update(command="compact", transcript=transcript, offset=offset)
             req["clear_command"] = "compact"
         req["clear_claim"] = claim
@@ -1969,9 +1981,18 @@ def followup_text(req: dict) -> str:
     return STATUS_ONLY_TEXT if req.get("followup_kind") == "status-only" else CONTINUE_TEXT
 
 
-def _notice_text(outcome: str, reason: str, harness: str) -> str:
-    hint = CLEAR_COMMAND.get(harness, "/clear")
+def _notice_text(outcome: str, reason: str, harness: str, *, compact: bool = False) -> str:
     why = REASON_TEXT.get(reason, reason or "알 수 없음")
+    if compact:
+        # Background agents kept this window: the next step is the same /compact, never a clear.
+        kept = "" if reason in NO_CARD_REASONS else " 카드는 저장돼 있어 압축 뒤 이 세션이 받습니다."
+        if outcome == "unverified":
+            return ("[정리] 백그라운드 에이전트가 있어 /compact를 보냈지만 압축을 확인하지 못했습니다. "
+                    f"창 상태를 확인하고 압축되지 않았으면 /compact 하세요.{kept}")
+        verb = "하지 못했습니다" if outcome == "failed" else "하지 않았습니다"
+        return (f"[정리] 백그라운드 에이전트가 있어 /compact로 정리하려 했지만 {verb}({why}). "
+                f"필요하면 /compact 하세요(에이전트가 모두 끝난 뒤라면 /clear도 됩니다).{kept}")
+    hint = CLEAR_COMMAND.get(harness, "/clear")
     kept = "" if reason in NO_CARD_REASONS else f" 카드는 저장돼 있어 {hint} 하면 새 창이 카드를 받습니다."
     if outcome == "unverified":
         return f"[정리] 창 비우기를 요청했지만 결과를 확인하지 못했습니다. 창 상태를 확인하고 필요하면 {hint} 하세요.{kept}"
@@ -2050,7 +2071,8 @@ def _finish(seat_key: str, nonce: str, outcome: str, reason: str = "", *, observ
             elif req.get("origin") == "compact":
                 notice = "[정리] 자동 정리의 창 전환을 확인하지 못했습니다."
             else:
-                notice = _notice_text(outcome, reason, str(req.get("harness") or ""))
+                notice = _notice_text(outcome, reason, str(req.get("harness") or ""),
+                                      compact=req.get("clear_command") == "compact")
             st.write_notice(_booked_seat(req, seat_key), notice,
                             author_harness=str(req.get("harness") or ""), author_sid=str(req.get("sid") or ""))
     return True

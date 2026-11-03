@@ -100,12 +100,18 @@ class IdleObserverTests(unittest.TestCase):
             self.assertEqual(self.observe_claude(tokens=900000), "booking=off")
             seat = st.resolve_seat("claude", str(self.cwd), sid="sid-A")
             self.assertIsNone(clear.read_reservation(seat.key))
-            text = clear.idle_card_request_text({"nonce": "n1", "origin": "idle",
-                                                 "idle": {"min_tokens": 200000, "wait_seconds": 3240}})
+            texts = {harness: clear.idle_card_request_text(
+                {"nonce": "n1", "origin": "idle", "harness": harness,
+                 "idle": {"min_tokens": 200000, "wait_seconds": 3240}})
+                for harness in ("claude", "codex", "opencode")}
+            failed = clear.idle_tidy_terms({"harness": "codex"}, request=False)
         self.assertEqual(self.started, [])
-        for shown in ("20만 토큰 이상", "약 54분", "입력창이 비어", "질문·확인 창", "/compact",
-                      '{"idle": {"enabled": false}}', "hearting/session-tidy.json"):
-            self.assertIn(shown, text)
+        for text in texts.values():
+            for shown in ("20만 토큰 이상", "약 54분", "입력창이 비어", "질문·확인 창",
+                          '{"idle": {"enabled": false}}', "hearting/session-tidy.json"):
+                self.assertIn(shown, text)
+        self.assertIn("/compact", texts["claude"])            # only Claude windows compact for agents
+        self.assertNotIn("/compact", texts["codex"] + texts["opencode"] + failed)
 
     def test_threshold_unknown_and_worker_signals_fail_closed(self):
         with self.iso.patched_environ(self.extra), mock.patch.object(clear, "herdr_command", return_value="fake"), \
