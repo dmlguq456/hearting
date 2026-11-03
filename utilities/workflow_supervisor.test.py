@@ -128,6 +128,15 @@ class WorkflowFixture(unittest.TestCase):
         }
         for key in self._previous_dispatch:
             os.environ.pop(key, None)
+        # A fixture run must never name the caller's own session, state root, or
+        # terminal pane: a run started from a live session recorded that session as
+        # its notice recipient, and fixture run h0-a2's `experiment final` notice
+        # reached it (2026-10-28). tools/run-tests.py never passes these either.
+        import session_identity
+        inherited = [name for names in session_identity.session_env().values() for name in names]
+        inherited += [*session_identity.HARNESS_ENV, "HARNESS_STATE_ROOT", "TMUX", "TMUX_PANE",
+                      *(key for key in os.environ if key.startswith("HERDR_"))]
+        self._previous_session = {key: os.environ.pop(key) for key in inherited if key in os.environ}
         self.addCleanup(self._restore)
         self.addCleanup(self.tmp.cleanup)
         # A detached successor (`arm --successor-command`) can still be writing its
@@ -149,6 +158,7 @@ class WorkflowFixture(unittest.TestCase):
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
+        os.environ.update(self._previous_session)
 
     # -- fixtures -------------------------------------------------------------
     @contextlib.contextmanager
@@ -326,6 +336,23 @@ class WorkflowFixture(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # A. the portable state machine
 # ---------------------------------------------------------------------------
+class FixtureIsolationTest(unittest.TestCase):
+    def test_fixture_hides_the_callers_session_and_pane_until_cleanup(self):
+        caller = {"CLAUDE_CODE_SESSION_ID": "caller-session", "CODEX_THREAD_ID": "caller-thread",
+                  "AGENT_DISPATCH_CALLER_HARNESS": "claude", "HERDR_PANE_ID": "caller-pane",
+                  "HERDR_SOCKET_PATH": "/nonexistent/herdr.sock",
+                  "HARNESS_STATE_ROOT": "/nonexistent/live-state", "TMUX_PANE": "%9"}
+        with mock.patch.dict(os.environ, caller):
+            fixture = WorkflowFixture("run")
+            fixture.setUp()
+            try:
+                self.assertEqual({key: os.environ.get(key) for key in caller},
+                                 dict.fromkeys(caller))
+            finally:
+                fixture.doCleanups()
+            self.assertEqual({key: os.environ.get(key) for key in caller}, caller)
+
+
 class TestStateMachine(WorkflowFixture):
     def test_complete_is_reachable_only_through_terminal_verify(self):
         self.assertTrue(WS.can_transition("TERMINAL_VERIFY", "COMPLETE"))
