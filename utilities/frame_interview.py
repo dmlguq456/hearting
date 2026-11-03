@@ -190,6 +190,23 @@ def brief_draft(text: str) -> dict:
     return draft
 
 
+_NO_USER_QUESTIONS = re.compile(
+    r"^[\W_]*(?:없음|없다|없습니다|0\s*(?:개|건)|none|no questions?|n/?a|nothing)(?![가-힣A-Za-z])", re.I)
+
+
+def user_questions_left(text: str) -> bool:
+    """Whether a direction brief's section 7 (questions only the user can answer) lists any.
+
+    A brief without that section is treated as listing some: the person is asked as before."""
+    head = re.search(_HEADING.format(7), text or "", re.M)
+    if head is None:
+        return True
+    rest = text[head.end():]
+    tail = re.search(_HEADING.format(r"[0-9]{1,2}"), rest, re.M)
+    body = (rest[:tail.start()] if tail else rest).strip()
+    return bool(body) and not _NO_USER_QUESTIONS.match(body)
+
+
 def understanding_draft(request: str) -> str:
     """The restatement drafted from the work request's first sentence, within its length."""
     first = re.split(r"(?<=[.!?。])\s|\n", (request or "").strip(), maxsplit=1)[0]
@@ -328,6 +345,10 @@ def approval_question_id(leg, key) -> str:
 # those parts keep their gate for the person.
 FRAME_REVIEW_SOURCES = ("user", "supervisor")
 PERSON_ONLY_START_APPROVALS = ("deploy", "handback", "preview")
+# A supervisor answer the runtime records for the depth-0 session when both frame legs agree, no
+# start approval is in scope and no question is left (WORKFLOW §0.4): the existing on-behalf
+# authority, labelled so it is never mistaken for a session's own judgement.
+AUTOMATIC_BASIS = "automatic-agreement"
 
 
 def answer_releases_gate(actor_kind, gate) -> bool:

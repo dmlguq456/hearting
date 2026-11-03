@@ -535,7 +535,18 @@ def _seal_owner_envelope(*, request: TerminalCommitRequest, route: Mapping[str, 
             "primary_digest": second_digest, "terminal_commit_id": commit_id,
             "owner_attempt_id": request.owner_attempt_id, "terminal_nodes": list(terminal_nodes)}
     _atomic_json(slot / "owner-envelope.json", meta, exclusive=not (slot / "owner-envelope.json").exists())
+    _seal_completion_summary(request, route, primary, slot)
     return text
+
+
+def _seal_completion_summary(request, route, primary, slot) -> None:
+    """Write-once runtime close text beside the envelope (WORKFLOW §0.5); never fails the commit."""
+    try:
+        import work_intent
+        text = work_intent.completion_summary(route, primary, route_file=request.route_file)
+        _write_exclusive(slot / work_intent.SUMMARY_NAME, text.encode())
+    except Exception:  # noqa: BLE001 -- an existing or unrenderable summary keeps the delivery as it was
+        return
 
 
 def _component(value: str, label: str) -> str:

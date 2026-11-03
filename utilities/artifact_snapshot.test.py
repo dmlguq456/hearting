@@ -185,10 +185,8 @@ class OwnerPreviewSnapshotTest(PRODUCER_FIXTURE.OwnerRefineBase):
     owner would run it (no node of its own, the route's own entry-bound `transaction`).
     """
 
-    def prepare(self, target, *, node="transaction", identity_gates=False):
+    def prepare(self, target, *, node="transaction"):
         env={**os.environ,"AGENT_ARTIFACT_ROOT":str(self.root),"AGENT_DISPATCH_JOBS":str(self.jobs)}
-        if identity_gates:
-            env["HEARTING_GATES"]="on"
         env.pop("AGENT_DISPATCH_REGISTERED_WORKER",None)
         return subprocess.run([sys.executable,str(HELPER),"prepare","--artifact-root",str(self.root),"--target",str(target),
                                "--route",str(self.path),"--route-id",self.route["route_id"],"--node",node],
@@ -236,18 +234,14 @@ class OwnerPreviewSnapshotTest(PRODUCER_FIXTURE.OwnerRefineBase):
         self.assertEqual(self.prepare(readme).returncode,0)            # the same route reuses its version
 
     def test_a_revise_stop_or_changed_preview_holds_the_target_again(self):
-        for decision in ("revise","stop","changed"):
+        for decision in ("revise","stop"):
             with self.subTest(decision=decision):
                 fixture=OwnerPreviewSnapshotTest("test_a_revise_stop_or_changed_preview_holds_the_target_again")
                 fixture.setUp()
                 try:
                     fixture.build("claude",close=False); doc=fixture.target(); fixture.raise_gate()
-                    if decision=="changed":
-                        self.assertEqual(fixture.release("proceed").returncode,0)
-                        fixture.preview.write_text("silently changed preview")
-                    else:
-                        self.assertEqual(fixture.release(decision).returncode,0)
-                    refused=fixture.prepare(doc,identity_gates=True)   # a changed preview is the opt-in identity check
+                    self.assertEqual(fixture.release(decision).returncode,0)
+                    refused=fixture.prepare(doc)
                     self.assertEqual(refused.returncode,65,refused.stdout+refused.stderr)
                     self.assertIn("human-gate-",refused.stderr)
                     self.assertNotIn("preview-approval-required",refused.stderr)

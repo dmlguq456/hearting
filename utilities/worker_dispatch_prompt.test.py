@@ -554,6 +554,34 @@ class ReleasedTaskPromptTest(unittest.TestCase):
         self.assertEqual(WB.released_task_prompt(self.args(jobs=fresh_jobs)), "")
         self.assertFalse(fresh_jobs.parent.exists())
 
+    def test_without_a_release_owner_and_stage_receive_the_intent_at_start(self):
+        self.write_journal(self.raised)
+        route_file = self.root / "route.json"
+        route_id = "rt-0123456789abcdef"
+        route = {"route_id": route_id, "artifact_root": str(self.root), "work_request": {
+            "text": "의도: Seal the intent once.\n안 할 것: new gates\n\nBody.", "owner_harness": None}}
+        route_file.write_text(json.dumps(route))
+        record = self.root / ".runtime/intent" / f"{route_id}.json"
+        record.parent.mkdir(parents=True)
+        record.write_text(json.dumps({"schema": "work_intent_original_v1", "route_id": route_id,
+                                      "original": "의도 확인은 중요해"}))
+        binding = SimpleNamespace(route_id=route_id, route_file=str(route_file))
+        fresh_jobs = self.root / "fresh-preview" / "jobs.log"
+        if True:  # the raised-but-unreleased journal above: no frame-review release on this route
+            for args in (self.args(route_id=route_id, route_file=str(route_file)),
+                         self.args(worker_type="owner", route_id=None, owner_route_binding=binding),
+                         self.args(route_id=route_id, route_file=str(route_file), jobs=fresh_jobs)):
+                with self.subTest(worker_type=args.worker_type):
+                    context = WB.released_task_prompt(args)
+                    self.assertTrue(context.startswith("Intent at the start of this work"))
+                    self.assertIn("\"의도 확인은 중요해\"", context)
+                    self.assertIn("- Intent: Seal the intent once.", context)
+                    self.assertIn("- Not doing: new gates", context)
+            self.assertEqual(WB.released_task_prompt(self.args(route_file=str(route_file), route_id="rt-other")), "")
+            self.assertEqual(WB.released_task_prompt(self.args(worker_type="frame", route_file=str(route_file))), "")
+        self.write_journal(self.raised, self.released)
+        self.assertIn("Released task context (frame-review)", WB.released_task_prompt(self.args()))
+
     def test_missing_or_foreign_input_returns_the_exact_recovery_path(self):
         self.interview.unlink()
         with self.assertRaisesRegex(ValueError, "Restore the recorded interview"):

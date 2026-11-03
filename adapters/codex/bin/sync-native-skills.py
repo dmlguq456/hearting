@@ -110,7 +110,7 @@ def render(identifier: str, spec: dict, capability_file: Path) -> tuple[str, str
     description = compact(f"{invocation['use_when']} {invocation['not_for']}")
     if invocation_class == "entry-router":
         use_steps = f"""1. Before approval, route from this compact metadata and `core/WORKFLOW.md §0.2`; do not read the full portable source merely to propose the route.
-2. Present the five-field confirmation card from `core/WORKFLOW.md §0.4` unless the same route and scope are already approved.
+2. Present the intent card from `core/WORKFLOW.md §0.4` unless the same route and scope are already approved.
 3. After approval, direct/quick acting sessions read `capabilities/{identifier}.md`; at `standard+`, the dispatch-depth-1 owner reads it and stage workers read only their assigned contracts.
 4. Before the first durable capability artifact, compile and bind the checked route with `preflight.sh route --capability {identifier} ...`; `preflight.sh route {identifier}` is grounding only, not route participation. A native-subagent restriction never authorizes direct execution.
 5. Run `adapters/codex/bin/preflight.sh capability-info {identifier}` and obey the reported status:"""

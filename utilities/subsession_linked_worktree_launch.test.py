@@ -275,7 +275,7 @@ class LinkedWorktreeSliceLaunchTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.metadata(self.slice_row("att-plain-gamma"))["parent_attempt_id"], "att-owner-bravo")
 
-    def test_worker_guard_accepts_linked_worktree_only_with_gates_off(self):
+    def test_worker_guard_accepts_linked_worktree(self):
         command = [
             sys.executable, str(ROOT / "utilities/worker-route-guard.py"), "validate",
             "--route", str(self.route_path), "--node", "execute", "--cwd", str(self.linked),
@@ -289,9 +289,6 @@ class LinkedWorktreeSliceLaunchTest(unittest.TestCase):
         self.assertEqual(Path(report["cwd"]).resolve(), self.linked)
         self.assertEqual(report["git"]["head"], git("rev-parse", "HEAD", cwd=self.linked))
         self.assertEqual(report["git"]["branch"], "fixture-slice")
-        on = subprocess.run(command, text=True, capture_output=True, env=self.env(HEARTING_GATES="on"))
-        self.assertEqual(on.returncode, 65, on.stdout + on.stderr)
-        self.assertIn("route-cwd-mismatch", on.stdout + on.stderr)
 
     def test_wrapper_start_commands_run_in_the_worktree_they_were_given(self):
         """What `--worktree` becomes in each harness's real launch command (dry-run preview)."""

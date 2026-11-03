@@ -255,13 +255,12 @@ class RetainedReviewTest(unittest.TestCase):
         self.seed()
         changed=json.loads(self.path.read_text());changed["slug"]="different sealed assignment"
         self.path.write_text(json.dumps(changed))
-        with mock.patch.dict(os.environ,{"HEARTING_GATES":"off"}):
-            observed=self.preview()
-            self.assertFalse(observed["can_reuse_prior_review"])
-            self.assertIn("route-lineage-unverified",observed["recovery_reason"])
-            before=self.f.jobs.read_bytes()
-            with self.assertRaises(ValueError):self.apply()
-            self.assertEqual(before,self.f.jobs.read_bytes())
+        observed=self.preview()
+        self.assertFalse(observed["can_reuse_prior_review"])
+        self.assertIn("route-lineage-unverified",observed["recovery_reason"])
+        before=self.f.jobs.read_bytes()
+        with self.assertRaises(ValueError):self.apply()
+        self.assertEqual(before,self.f.jobs.read_bytes())
 
     def test_wrong_actor_live_attempt_and_row_race_are_refused(self):
         self.seed()

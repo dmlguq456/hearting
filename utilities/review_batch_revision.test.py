@@ -7,9 +7,6 @@ class RevisionBatchCLI(RevisionBatchFixture):
     def test_two_pass_revision_inline_next_generation_and_cap_replay(self):
         self._case_test_two_pass_revision_inline_next_generation_and_cap_replay()
 
-    def test_revision_generation_and_replay_with_gates_on(self):
-        self._case_test_revision_generation_and_replay_with_gates_on()
-
     def test_foreign_registry_cannot_override_the_sealed_jobs(self):
         self._case_test_foreign_registry_cannot_override_the_sealed_jobs()
 

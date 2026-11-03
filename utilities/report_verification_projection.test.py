@@ -455,13 +455,11 @@ class ClosedFindingTests(ProjectionFixture):
         node, path, marker = self.real_currency()
         marker["state"] = "superseded-by-upstream-revision"
         self.save_marker(node["id"], marker)
-        with mock.patch.dict(os.environ, HEARTING_GATES="off"):
-            self.assertEqual(REAL_GATE(self.route, node, path, marker).state, "current")
-            self.assertEqual(REAL_GATE(self.route, node, path, marker, observe=True).state, "superseded")
-            before = tree_snapshot(Path(self.tmp.name))
-            self.assertEqual(self.payload()["verification"]["verdict"], "unresolved")
-            self.assertEqual(tree_snapshot(Path(self.tmp.name)), before)
-            self.assertEqual(os.environ["HEARTING_GATES"], "off")
+        self.assertEqual(REAL_GATE(self.route, node, path, marker).state, "current")
+        self.assertEqual(REAL_GATE(self.route, node, path, marker, observe=True).state, "superseded")
+        before = tree_snapshot(Path(self.tmp.name))
+        self.assertEqual(self.payload()["verification"]["verdict"], "unresolved")
+        self.assertEqual(tree_snapshot(Path(self.tmp.name)), before)
 
     def test_legacy_tombstone_retains_sequence_and_revision_provenance_checks(self):
         node, path, original = self.real_currency()
@@ -470,23 +468,21 @@ class ClosedFindingTests(ProjectionFixture):
                 marker = dict(original, state="superseded-by-upstream-revision", **fields)
                 path.write_bytes(encoded(marker))
                 (self.marker_dir / f"{node['id']}.1.json").write_bytes(encoded(marker))
-                with mock.patch.dict(os.environ, HEARTING_GATES="off"):
-                    self.assertEqual(REAL_GATE(self.route, node, path, marker).reason,
-                                     "revision-provenance-invalid")
+                self.assertEqual(REAL_GATE(self.route, node, path, marker).reason,
+                                 "revision-provenance-invalid")
 
     def test_history_conflict_and_live_digest_edit_are_not_read_current(self):
         node, path, marker = self.real_currency()
         prior = dict(marker, route_hash="sha256:" + "0" * 64)
         (self.marker_dir / f"{node['id']}.1.json").write_bytes(encoded(prior))
-        with mock.patch.dict(os.environ, HEARTING_GATES="off"):
-            self.assertEqual(REAL_GATE(self.route, node, path, marker).state, "current")
-            self.assertNotEqual(REAL_GATE(self.route, node, path, marker, observe=True).state, "current")
-            self.assertEqual(self.payload()["verification"]["verdict"], "unresolved")
-            self.save_marker(node["id"], marker)
-            self.peer_paths[node["id"]].write_bytes(b"changed evidence")
-            self.assertEqual(REAL_EVIDENCE(self.route, node, path, marker).state, "current")
-            self.assertEqual(REAL_EVIDENCE(self.route, node, path, marker, observe=True).state,
-                             "revised-unrecorded")
+        self.assertEqual(REAL_GATE(self.route, node, path, marker).state, "current")
+        self.assertNotEqual(REAL_GATE(self.route, node, path, marker, observe=True).state, "current")
+        self.assertEqual(self.payload()["verification"]["verdict"], "unresolved")
+        self.save_marker(node["id"], marker)
+        self.peer_paths[node["id"]].write_bytes(b"changed evidence")
+        self.assertEqual(REAL_EVIDENCE(self.route, node, path, marker).state, "current")
+        self.assertEqual(REAL_EVIDENCE(self.route, node, path, marker, observe=True).state,
+                         "revised-unrecorded")
 
     def test_attempt_hash_mismatch_retains_execution_compatibility(self):
         node, path, marker = self.real_currency()
@@ -494,15 +490,14 @@ class ClosedFindingTests(ProjectionFixture):
         meta["route_hash"] = "sha256:" + "0" * 64
         meta["note"] = "completed-marker"
         lines = [self.registry_line(meta)]
-        with mock.patch.dict(os.environ, HEARTING_GATES="off"):
-            self.assertEqual(REAL_READINESS(self.route, node, marker, self.jobs,
-                                           registry_lines=lines).state, "ready")
-            result = REAL_READINESS(self.route, node, marker, self.jobs,
-                                    registry_lines=lines, observe=True)
-            self.assertEqual(result.reason, "attempt-route-hash-mismatch")
-            with mock.patch.object(dispatch_contract, "completion_attempt_readiness", REAL_READINESS):
-                self.jobs.write_text(lines[0] + "\n")
-                self.assertEqual(self.payload()["verification"]["verdict"], "unresolved")
+        self.assertEqual(REAL_READINESS(self.route, node, marker, self.jobs,
+                                       registry_lines=lines).state, "ready")
+        result = REAL_READINESS(self.route, node, marker, self.jobs,
+                                registry_lines=lines, observe=True)
+        self.assertEqual(result.reason, "attempt-route-hash-mismatch")
+        with mock.patch.object(dispatch_contract, "completion_attempt_readiness", REAL_READINESS):
+            self.jobs.write_text(lines[0] + "\n")
+            self.assertEqual(self.payload()["verification"]["verdict"], "unresolved")
 
     def test_real_lineage_source_hash_mismatch_cannot_pass(self):
         parent = dict(self.route, route_id="rt-" + "a" * 16)
@@ -516,7 +511,7 @@ class ClosedFindingTests(ProjectionFixture):
         self.document["routes"][0]["route_hash"] = self.route["route_hash"]
         self.route_path.write_bytes(encoded(self.route))
         (self.cycle / "manifest.json").write_bytes(encoded(self.document))
-        with mock.patch.dict(os.environ, HEARTING_GATES="off"), mock.patch.object(
+        with mock.patch.object(
                 route_identity, "route_hash", REAL_ROUTE_HASH), mock.patch.object(
                 route_lineage, "verified_route_lineage", REAL_LINEAGE):
             self.assertEqual(len(REAL_LINEAGE(self.route)), 2)
@@ -662,12 +657,11 @@ class ClosedFindingTests(ProjectionFixture):
                        revision={"of_sequence": 1, "of_marker_sha256": sha(prior_raw),
                                  "evidence_sha256": current["evidence"]["sha256"]})
         self.save_marker(leg, current)
-        with mock.patch.dict(os.environ, HEARTING_GATES="off"):
-            self.assertEqual(REAL_GATE(self.route, node, path, current, observe=True).state, "current")
-            result = self.payload()
-            self.assertEqual(result["verification"]["verdict"], "PASS")
-            self.assertEqual(result["verification"]["history"], [{"sequence": 1,
-                "verdict": "unresolved", "reason": "historical-evidence-unbound"}])
+        self.assertEqual(REAL_GATE(self.route, node, path, current, observe=True).state, "current")
+        result = self.payload()
+        self.assertEqual(result["verification"]["verdict"], "PASS")
+        self.assertEqual(result["verification"]["history"], [{"sequence": 1,
+            "verdict": "unresolved", "reason": "historical-evidence-unbound"}])
 
     def test_existing_scope_disclosures_travel_with_peer_payload(self):
         leg = "independent-verify"

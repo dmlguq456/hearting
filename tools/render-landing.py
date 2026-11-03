@@ -356,7 +356,7 @@ CSS = r"""
   .seal b { color: var(--accent); font-weight: 600; }
   .seal .k { color: var(--text-3); }
 
-  /* the five-field card the user actually approves */
+  /* the intent card the user actually approves */
   .rcard {
     border: 1px solid var(--border-2); border-radius: var(--r-md); background: var(--solid);
     padding: 15px 17px; box-shadow: var(--shadow); margin-bottom: 14px;
@@ -873,8 +873,9 @@ def build_info(d: dict) -> dict:
          "Orphaned rows are surfaced rather than dropped.",
          "part of the harness, not a separate product"),
         ("rt:card", "route card", "contract",
-         "Before material work the agent proposes task, reason, route, scope, and completion in five fields. "
-         "You approve a filled-in proposal instead of recalling capability names or flags.",
+         "Before material work the agent shows the intent kept with the route: your own words, the intent, "
+         "its scope, what it will not do, and when it is done, plus the route. You approve a filled-in proposal "
+         "instead of recalling capability names or flags.",
          "WORKFLOW §0.4"),
         ("rt:seal", "sealed route", "contract",
          "The compiler binds capability, intensity, topology, node write scopes, and model profiles to the "
@@ -1088,14 +1089,15 @@ def build_canvas(d: dict) -> str:
 
             <div class="rcard">
               <div class="rh">Route card &mdash; the whole handshake</div>
-              <div class="rrow"><span class="rk">task</span><span class="rv">Implement and test the login API, then leave a change report</span></div>
-              <div class="rrow"><span class="rk">reason</span><span class="rv">The endpoint is already in the spec; no implementation cycle has run against it</span></div>
-              <div class="rrow"><span class="rk">route</span><span class="rv"><b>autopilot-code</b> &middot; dev &middot; <code>standard</code> &mdash; multi-file, needs independent verification</span></div>
-              <div class="rrow"><span class="rk">scope</span><span class="rv">src/auth/**, tests/auth/** &mdash; no schema or migration change</span></div>
+              <div class="rrow"><span class="rk">your words</span><span class="rv">&ldquo;The login API in the spec still isn&rsquo;t built &mdash; build it with tests&rdquo;</span></div>
+              <div class="rrow"><span class="rk">intent</span><span class="rv">Implement and test the login API, then leave a change report</span></div>
+              <div class="rrow"><span class="rk">scope</span><span class="rv">src/auth/**, tests/auth/**</span></div>
+              <div class="rrow"><span class="rk">not doing</span><span class="rv">No schema or migration change</span></div>
               <div class="rrow"><span class="rk">done</span><span class="rv">Tests green, <code>plans/&lt;cycle&gt;/pipeline_summary.md</code> written</span></div>
+              <div class="rrow"><span class="rk">route</span><span class="rv"><b>autopilot-code</b> &middot; dev &middot; <code>standard</code> &mdash; multi-file, needs independent verification</span></div>
               <div class="rops">
                 <span class="rop on">Proceed</span><span class="rop">Amend</span><span class="rop">Stop</span>
-                <span class="rnote">one approval, five fields, before anything is touched</span>
+                <span class="rnote">one approval, sealed with the route, before anything is touched</span>
               </div>
             </div>
 

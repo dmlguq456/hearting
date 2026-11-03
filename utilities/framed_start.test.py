@@ -1860,6 +1860,153 @@ for _name in dir(F.FramedStartTest):
         setattr(ReviewStartTest, _name, None)
 
 
+def full_brief(legs, *, questions="없음. 범위와 방향은 요청으로 정해졌다.", **kw):
+    """A brief with the sections the interview brief is drafted from, and section 7 as given."""
+    return brief(legs, **kw).replace(
+        "## 7. Questions\n\nnone\n",
+        "## 4. Direction Verdict\n\nGo direct.\n\n## 5. Hotfix Boundary\n\nNo shortcut.\n\n"
+        "## 7. Questions\n\n" + questions + "\n")
+
+
+class AutomaticDirectionTest(StartBase):
+    """Frame review asks only when the two legs diverge or leave a question; otherwise the runtime
+    records the same interview with actor_kind automatic (WORKFLOW §0.4)."""
+
+    def automatic(self):
+        root, record, output = W._framed_cycle(self.route)
+        return W._automatic_direction(self.route, W._proposal_rows(self.route, self.jobs, root, record, output), output)
+
+    def test_equal_proposals_with_nothing_to_choose_get_a_valid_runtime_interview(self):
+        self.set_briefs(full_brief([DIRECT]), full_brief([DIRECT], questions="none"))
+        interview, answers = self.automatic()
+        derived, errors = W._marked_route_proposals(self.route, self.jobs, interview)
+        self.assertEqual(errors, [])
+        self.assertEqual(FI.validate({**derived, "summary": "-"}), [])
+        self.assertEqual(list(derived["route_proposals"]["by_option"]), ["진행"])
+        self.assertEqual(derived["route_proposals"]["by_option"]["진행"]["legs"][0]["shape"], "direct")
+        self.assertEqual((answers["actor_kind"], answers["basis"]), ("supervisor", FI.AUTOMATIC_BASIS))
+        self.assertEqual(FI.validate_answers(derived, answers), [])
+        self.assertFalse(FI.answer_releases_gate("automatic", "frame-review"))   # no new release source
+        with self.assertRaisesRegex(ValueError, "registered worker cannot claim supervisor"):
+            FI.answer_actor_kind(answers, registered_worker=True)
+
+    def test_a_question_left_a_divergence_an_approval_or_a_worker_caller_keeps_the_person_asked(self):
+        cases = {
+            "question": (full_brief([DIRECT]), full_brief([DIRECT], questions="1. 이번에 같이 고칠까요?")),
+            "no-section": (full_brief([DIRECT]), brief([DIRECT]).replace("## 7. Questions\n\nnone\n", "")),
+            "diverged": (full_brief([DIRECT]), full_brief([CODE_STAGED])),
+            "approval": (full_brief([LAB_SETUP]), full_brief([LAB_SETUP])),
+            "thin-brief": (brief([DIRECT]), brief([DIRECT])),
+        }
+        for name, briefs in cases.items():
+            with self.subTest(name):
+                self.set_briefs(*briefs)
+                self.assertIsNone(self.automatic())
+        self.set_briefs(full_brief([DIRECT]), full_brief([DIRECT]))
+        self.assertIsNotNone(self.automatic())
+        for node in F.FRAME_IDS:
+            with self.subTest("brief-missing", node=node):
+                # The decision opens only with both briefs (U4); a missing one is never agreed for the person.
+                self.set_briefs(full_brief([DIRECT]), full_brief([DIRECT]))
+                (self.output / "shards" / node / "direction-brief.md").unlink()
+                self.assertIsNone(self.automatic())
+        self.set_briefs(full_brief([DIRECT]), full_brief([DIRECT]))
+        with mock.patch.dict(os.environ, {"AGENT_DISPATCH_REGISTERED_WORKER": "1"}):
+            self.assertIsNone(self.automatic())
+
+    def test_an_agreed_direction_past_the_intents_not_doing_is_asked(self):
+        summary = "frame-review에 새 게이트를 추가한다"
+        self.set_briefs(full_brief([DIRECT], summary=summary), full_brief([DIRECT], summary=summary))
+        self.assertIsNotNone(self.automatic())
+        self.route = {**self.route, "work_request": {**self.route["work_request"],
+                                                     "text": "안 할 것: 새 게이트·필수 입력\n\n" + self.route["work_request"]["text"]}}
+        self.assertIsNone(self.automatic())          # both legs agree, but only the person may choose it
+
+    def test_section_seven_reads_none_in_either_language_and_anything_else_as_a_question(self):
+        for body, left in (("없음.", False), ("없다(0건).", False), ("0개 — 모두 코드로 정한다.", False),
+                           ("None.", False), ("", False), ("1. 지울까요?", True), ("없음을 확인할 질문", True)):
+            with self.subTest(body=body):
+                self.assertEqual(FI.user_questions_left(f"## 7. Questions\n\n{body}\n\n## 8. Next\n\nx\n"), left)
+        self.assertTrue(FI.user_questions_left("## 6. Risks\n\nx\n"))
+
+
+class AutomaticDirectionStartTest(F.FramedStartTest):
+    """The start that reaches the interview releases it itself, once, through the real settle path."""
+
+    def test_nothing_to_choose_releases_through_the_runtime_and_settles_for_real(self):
+        self.start()
+        self.ready = True
+        record = P.list_cycle_records(self.root)[0]
+        cycle = P.cycle_dir(self.root, record["campaign_id"], record["cycle_id"], record) / "artifacts"
+        for node in F.FRAME_IDS:
+            (cycle / "shards" / node).mkdir(parents=True, exist_ok=True)
+            (cycle / "shards" / node / "direction-brief.md").write_text(full_brief([DIRECT]), encoding="utf-8")
+        seen = []
+
+        def step(route, path, jobs, **kw):
+            seen.append(kw)
+            if kw.get("automatic"):
+                self.released = True
+                return {"state": "released", "decision": "proceed"}
+            return {"state": "needs-interview", "required_action": "prepare-frame-question", "next_step": "go"}
+        W.frame_interview_step.side_effect = step
+        W._ROUTE_MODULE = R
+        self.addCleanup(setattr, W, "_ROUTE_MODULE", None)
+        settled = []
+        real_settle = W._framed_settle
+
+        def settle(*args, **kw):
+            settled.append(args[0]["route_id"])
+            return real_settle(*args, **kw)
+        with mock.patch.object(W, "_framed_settle", side_effect=settle):
+            result = self.start()
+        self.assertEqual([bool(kw.get("automatic")) for kw in seen], [False, True])
+        automatic = seen[1]
+        self.assertEqual(json.loads(Path(automatic["answers"]).read_text())["basis"], FI.AUTOMATIC_BASIS)
+        self.assertTrue(str(automatic["interview"]).startswith(str(cycle / W.AUTOMATIC_DIRECTION_DIR)))
+        self.assertEqual(settled, [self.route["route_id"]])          # the real settle ran
+        self.assertIn("state", result)
+        self.assertEqual(len(self.calls), 2)                          # no question was asked
+
+
+class AutomaticDirectionNoticeTest(StartBase):
+    """The first leg's receipt -- the one the parent actually gets -- carries the notice, every time."""
+
+    def recorded(self, *, actor_kind="supervisor", basis=FI.AUTOMATIC_BASIS):
+        self.set_briefs(full_brief([DIRECT]), full_brief([DIRECT]))
+        root, record, output = W._framed_cycle(self.route)
+        interview, answers = W._automatic_direction(
+            self.route, W._proposal_rows(self.route, self.jobs, root, record, output), output)
+        self.interview, _ = W._marked_route_proposals(self.route, self.jobs, interview)
+        self.answers = {**answers, "actor_kind": actor_kind}
+        if basis is None:
+            self.answers.pop("basis")
+
+    def test_the_started_leg_receipt_and_its_replay_carry_the_direction_notice(self):
+        self.recorded()
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            first = self.settle()
+        self.assertTrue(first["direction_notice"].startswith("[방향 통지]"))
+        self.assertIn("Do the work", first["direction_notice"])
+        self.assertTrue(first["next_step"].startswith(W.DIRECTION_NOTICE_STEP))
+        self.assertIn(first["direction_notice"], stderr.getvalue())
+        self.assertEqual(len(self.leg_routes()), 1)                     # the leg really started
+        replay = self.settle()
+        self.assertEqual(replay["direction_notice"], first["direction_notice"])
+
+    def test_a_persons_answer_starts_the_leg_without_a_notice(self):
+        self.recorded(actor_kind="user", basis=None)
+        result = self.settle()
+        self.assertNotIn("direction_notice", result)
+        self.assertNotIn(W.DIRECTION_NOTICE_STEP, str(result.get("next_step") or ""))
+
+
+for _name in dir(F.FramedStartTest):
+    if _name.startswith("test_") and _name not in AutomaticDirectionStartTest.__dict__:
+        setattr(AutomaticDirectionStartTest, _name, None)
+
+
 class NonFramedClosedRouteTest(T.ProducerTestBase):
     """A closed direct route keeps its values; only the observation receipt reference is additive."""
 

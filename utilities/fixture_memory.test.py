@@ -24,7 +24,7 @@ def load(name, path):
 class MemoryBoundaryTest(unittest.TestCase):
     def test_real_release_producers_write_only_the_common_fixture_store(self):
         with isolated_env() as ambient, ambient.patched_environ(extra={
-                "HEARTING_GATES": "on", "AGENT_ARTIFACT_CHECKPOINT": "off",
+                "AGENT_ARTIFACT_CHECKPOINT": "off",
                 "HEARTING_WORKFLOW_GROUP_REVIEW": "off"}):
             module = load("memory_boundary_work_start", ROOT / "utilities/work_start.test.py")
             cases = [

@@ -166,6 +166,30 @@
    "en": ", not specified",
    "ko": ", 지정 안 됨"
   },
+  "route.intent.done": {
+   "en": "Done {done}",
+   "ko": "완료 {done}"
+  },
+  "route.intent.drafted": {
+   "en": " (the request's first sentence)",
+   "ko": " (요청 첫 문장)"
+  },
+  "route.intent.line": {
+   "en": "[Intent] {intent}",
+   "ko": "[의도] {intent}"
+  },
+  "route.intent.not_doing": {
+   "en": "Not doing {items}",
+   "ko": "안 할 것 {items}"
+  },
+  "route.intent.original": {
+   "en": "Original \"{original}\"",
+   "ko": "원문 \"{original}\""
+  },
+  "route.intent.scope": {
+   "en": "Scope {scope}",
+   "ko": "범위 {scope}"
+  },
   "route.none": {
    "en": "none",
    "ko": "없음"

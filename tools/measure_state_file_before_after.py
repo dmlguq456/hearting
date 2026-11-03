@@ -176,7 +176,7 @@ root.mkdir(parents=True, exist_ok=True)
 registry_jobs = ADM_FIX / "jobs.log"
 registry_jobs.write_text("", encoding="utf-8")
 os.environ.update({
-    "HEARTING_GATES": "on", "HOME": str(home), "XDG_CONFIG_HOME": str(config),
+    "HOME": str(home), "XDG_CONFIG_HOME": str(config),
     "XDG_STATE_HOME": str(state), "AGENT_HOME": str(agent_home),
     "AGENT_DISPATCH_JOBS": str(registry_jobs),
 })
@@ -319,7 +319,6 @@ os.chdir(CODE_ROOT)
 for key in list(os.environ):
     if key.startswith("AGENT_DISPATCH_") and key != "AGENT_DISPATCH_JOBS":
         os.environ.pop(key)
-os.environ.setdefault("HEARTING_GATES", "on")
 
 def io_snapshot():
     values = {}
@@ -714,8 +713,7 @@ class Fixture:
                 "XDG_CONFIG_HOME": str(self.directory / "config"),
                 "XDG_STATE_HOME": str(self.directory / "state"),
                 "AGENT_HOME": str(self.directory / "agent-home"),
-                "AGENT_DISPATCH_JOBS": str(self.directory / "admission" / "jobs.log"),
-                "HEARTING_GATES": "on"}
+                "AGENT_DISPATCH_JOBS": str(self.directory / "admission" / "jobs.log")}
 
 
 CAPACITY_SCENARIOS = ("C0-cold-build", "C1-warm-hit", "C2-append", "C3-close-recent",
