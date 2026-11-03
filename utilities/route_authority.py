@@ -102,20 +102,46 @@ class ContinuationDecision(NamedTuple):
     census: object = None
 
 
+# The recipient judgment when the seat lineage cannot be read: wait and run the same
+# command (``recipient_continuation``, ``require_known``). ``detail`` names the record
+# and the cause (``lineage_unreadable_wait``), so a lineage that stays unreadable can be
+# looked at instead of retried blindly.
+LINEAGE_UNREADABLE_WAIT = ContinuationDecision(
+    False, "wait", "handover-unreadable", "same-command",
+    "The seat lineage can be read again: nothing was changed, so run the same command then. "
+    "If it stays unreadable, detail names the record and why its lineage cannot be read.")
+
+
+def lineage_unreadable_wait(meta=None, jobs=None, *, cause="", read_context=None):
+    """``LINEAGE_UNREADABLE_WAIT`` naming whose seat lineage could not be read, and why."""
+    meta = meta or {}
+    if not cause and meta.get("parent_sid"):
+        from dispatch_seat_handover import resolve_recipient
+        cause = resolve_recipient("job-holder", metadata=meta, jobs=jobs, read_context=read_context).reason
+    cause = str(cause or "").removeprefix("handover-unreadable:") or "readable again on a second look"
+    record = ", ".join(part for part in (
+        "attempt " + meta["attempt_id"] if meta.get("attempt_id") else "",
+        "registered parent " + meta["parent_sid"] if meta.get("parent_sid") else "") if part)
+    return LINEAGE_UNREADABLE_WAIT._replace(detail=(record + ": " if record else "") + cause)
+
+
 PROVEN_BLOCKED_GATE_REASONS = frozenset({
     "completion-attempt-not-current", "completion-evidence-revised-unrecorded",
 })
 
 # A producer finalize refusal that more settling cannot change: the route
-# lineage it judged is recorded evidence, not in-flight work. Kept to these
-# detail prefixes so unreadable/transient causes (`route-unreadable`,
-# `route-lineage-unverified`, `output-invalid`, lock/busy) stay recoverable.
+# lineage it judged (and, for `output-invalid`, the files it names, which a
+# person fixes) is recorded evidence, not in-flight work. Kept to these detail
+# prefixes so unreadable/transient causes (`route-unreadable`,
+# `route-lineage-unverified`, lock/busy) stay recoverable.
 DETERMINISTIC_FINALIZE_REFUSALS = (
     "cycle-route-binding-mismatch", "route-hash-drift", "completion-route-hash-mismatch",
     "route-invalid", "route-artifact-root-mismatch", "completion-route-composite-mismatch",
+    "output-invalid",
 )
 DETERMINISTIC_FINALIZE_RETRY_WHEN = (
-    "The route lineage or the installed runtime changed; a later join or finish judges it again.")
+    "The route lineage, the files the refusal names, or the installed runtime changed; "
+    "a later join or finish judges it again.")
 
 
 def deterministic_finalize_refusal(reason, detail) -> bool:
@@ -170,7 +196,9 @@ def _replacement_kind(status, meta, *, jobs=None, lines=None):
     if (meta.get('worker_type') == 'owner' and status == 'done' and capacity_row):
         return 'capacity'
     if meta.get('worker_type') == 'owner' and status == 'done' and _runtime_ended(meta):
-        return 'runtime'  # the owner's runtime ended under it; only an explicit `start` replaces it
+        # The owner's runtime ended under it: an explicit `start` or the parent's bound
+        # carrier replaces it; a supervisor tick does not.
+        return 'runtime'
     if jobs is not None and meta.get('worker_type') == 'frame' and status == 'done' and capacity_row:
         if DR._same_role_successful_frame_peer_harness(jobs, meta, lines=lines):
             # The ordinary route selector may replay this missing leg at the
@@ -186,8 +214,9 @@ def _replacement_kind(status, meta, *, jobs=None, lines=None):
     if (meta.get('worker_type') == 'frame' and status == 'done' and meta.get('launch_started') == '1'
             and not capacity_row and not readable_result(meta) and not verdict_pass(meta)):
         # A launched frame leg that ended with no result of its own is replaced
-        # like a dead owner runtime (explicit start only). A readable FAIL/BLOCKED
-        # is a result, not a death; the claim's terminal check keeps any result.
+        # like a dead owner runtime (explicit start or the parent's bound carrier).
+        # A readable FAIL/BLOCKED is a result, not a death; the claim's terminal
+        # check keeps any result.
         return 'runtime'
     return None
 
@@ -595,7 +624,10 @@ def decide_continuation(route=None, *, action, jobs=None, owner_attempt_id=None,
         if not facts.get("resume_capacity") and not _replacement_in_flight(jobs, facts["registry_rows"], metadata):
             if kind == "capacity":
                 return ContinuationDecision(False, "capacity", "replacement-capacity-wait", "arm-capacity-resume")
-            if kind in {"runtime", "unlaunched", "corrected", "observed"}:
+            if kind in {"runtime", "unlaunched", "corrected", "observed"} and not (
+                    kind == "runtime" and facts.get("bound_carrier")):
+                # An explicit `start` (resume_capacity) or the parent's bound carrier
+                # launches a runtime end; a supervisor tick waits for one of them.
                 return ContinuationDecision(False, "not-applicable", next_action="observe")
         return ContinuationDecision(True, "launch", next_action="start")
     if action == "replacement-result":
@@ -892,11 +924,16 @@ def decide_continuation(route=None, *, action, jobs=None, owner_attempt_id=None,
             any(last_id in (r.get("supersedes") or ()) for r in budget_revisions)))
         if closure:
             state = "admit"
-        # Attempt history does not establish a prior judgment. A crash,
-        # capacity death, or invalid envelope may advance the lineage's round
-        # number, but until a substantive verdict exists for this subject the
-        # next admitted pass is still a full first review.
-        round_kind = "closure-check" if closure else "correction" if verdicts else "first"
+        # The verdict budget stays with the content subject, but the round kind
+        # follows the node lineage: a correction always changes the reviewed
+        # content, so a review whose lineage ends in a blocking verdict checks
+        # that 🔴 list and the delta instead of auditing the new subject from
+        # scratch. A list the owner already disposed (owner-closure) is not
+        # open, and attempt history alone (crash, capacity death, invalid
+        # envelope) never establishes a prior judgment.
+        lineage_closure = bool(source_aware and not verdicts and node.get("kind") == "review-worker"
+                               and _ROUND.open_blocking_verdict(rows, worker_type) is not None)
+        round_kind = "closure-check" if closure or lineage_closure else "correction" if verdicts else "first"
         budget = _ROUND.RoundBudget(len(verdicts), counted, budget_kinds_for_streak.count("verdict-less"), cap, state,
             len(rows) + 1, len(rows) + 1 if rows else 0,
             round_kind,
@@ -1012,12 +1049,12 @@ def correction_source_session(environ=None) -> str:
     return session_label(environ)
 
 
-def owns(meta, session, jobs, *, read_context=None) -> bool:
+def owns(meta, session, jobs, *, read_context=None):
     """Only the session that answers for the attempt now (``effective_parent``).
 
     That is the registered parent before a confirmed handover and the end of its
-    lineage after one. Unreadable handover state retains the existing
-    registered-parent fallback.
+    lineage after one. True, False, or None when the seat lineage cannot be read:
+    unknown is neither, so a caller that refuses goes through ``require_owner``.
     """
     if not session:
         return False
@@ -1025,6 +1062,26 @@ def owns(meta, session, jobs, *, read_context=None) -> bool:
     if read_context is None:
         return seat_owns(meta, session, jobs)
     return seat_owns(meta, session, jobs, read_context=read_context)
+
+
+def require_known(answer, meta=None, jobs=None, *, read_context=None):
+    """``answer`` unless it is unknown (None): then the recipient judgment's wait for the
+    same command is raised, naming ``meta``'s record and the cause; never a refusal and
+    never ownership (LOOP §4)."""
+    if answer is None:
+        require_continuation(lineage_unreadable_wait(meta, jobs, read_context=read_context))
+    return answer
+
+
+def require_owner(meta, session, jobs, reason, detail="", *, read_context=None) -> None:
+    """Refuse ``session`` with ``reason`` only when the lineage names another holder.
+
+    The one place an ownership answer becomes a refusal: an unreadable seat lineage
+    waits for the same command (``require_known``) instead.
+    """
+    if not require_known(owns(meta, session, jobs, read_context=read_context), meta, jobs,
+                         read_context=read_context):
+        raise _contract_error(reason, detail)
 
 
 def parent_attempt_succeeded(jobs, recorded, actual) -> bool:
@@ -1084,7 +1141,8 @@ def require_replacement_parent(jobs, rows, meta, *, current_session) -> None:
     Dispatch depth 2: the caller's own attempt is the registered parent attempt
     or its final launched replacement, and is live. Otherwise: the registered
     parent session or its same-seat successor. ``current_session`` is called
-    only on that second path.
+    only on that second path, where an unreadable lineage is the recipient
+    judgment's wait for the same command, never a verdict on the caller.
     """
     if meta.get('dispatch_depth') == '2':
         import dispatch_contract as DC
@@ -1096,26 +1154,35 @@ def require_replacement_parent(jobs, rows, meta, *, current_session) -> None:
         fields, caller_meta = rows[caller]
         if fields[1] not in {'open', 'running'} or not DC._parent_liveness_evidence(Path(jobs), caller_meta)[0]:
             raise DC.DispatchContractError('replacement-parent-not-live')
-    elif not meta.get('parent_sid') or not owns(meta, current_session(), jobs):
+    elif not meta.get('parent_sid'):
         raise _contract_error('replacement-parent-identity-unproven')
+    else:
+        require_owner(meta, current_session(), jobs, 'replacement-parent-identity-unproven')
 
 
 def replacement_parent_matches(source, candidate, jobs, *, lineage=False) -> bool:
-    """The parent attempt follows the replacement lineage; a depth-1 session may be its recorded successor."""
+    """The parent attempt follows the replacement lineage; a depth-1 session may be its recorded successor.
+
+    When that depends on a seat lineage that cannot be read, the answer is neither:
+    the recipient judgment's wait is raised (``require_known``).
+    """
     if not parent_attempt_succeeded(jobs, source.get('parent_attempt_id'), candidate.get('parent_attempt_id')):
         return False
     if candidate.get('parent_sid') == source.get('parent_sid'):
         return True
     if source.get('dispatch_depth') != '1':
         return False
-    if owns(source, candidate.get('parent_sid'), jobs):
+    if require_known(owns(source, candidate.get('parent_sid'), jobs), source, jobs):
         return True
     if lineage and candidate.get('dispatch_depth') == '1':
         # A registered A -> B edge survives a later B -> C handover. Admission
         # still accepts only the source's current effective parent.
         from dispatch_seat_handover import effective_parent
         current = effective_parent(source, jobs)
-        return bool(current) and effective_parent(candidate, jobs) == current
+        if not current and source.get('parent_sid'):
+            # The lineage stopped reading between the two observations of the source.
+            require_known(None, source, jobs)
+        return bool(current) and bool(require_known(owns(candidate, current, jobs), candidate, jobs))
     return False
 
 
@@ -1745,13 +1812,32 @@ def require_recovery_binding(record, source, candidate, jobs):
     The caller has already read and digest-checked the claim and original input.
     The record's current route was resolved through the registered owner lineage,
     rather than through candidate-supplied ancestor IDs.
+
+    When a depth-1 candidate names another parent session, who answers for the source
+    now is observed once and returned, so the caller judges that same observation again
+    instead of reading the lineage a second time; otherwise None.
     """
     route_key = "owner_route_id" if source.get("owner_route_id") else "route_id"
     hash_key = "owner_route_hash" if source.get("owner_route_id") else "route_hash"
     if (candidate.get(route_key) != record["route_id"]
             or candidate.get(hash_key) != record["route_hash"]
-            or not replacement_parent_matches(source, candidate, jobs)
             or any(candidate.get(key) != source.get(key) for key in RECOVERY_SCOPE_KEYS)):
+        raise _contract_error("replacement-launch-binding-mismatch", source.get("attempt_id", ""))
+    holder = None
+    if source.get("dispatch_depth") == "1" and candidate.get("parent_sid") != source.get("parent_sid"):
+        # An unreadable lineage is the existing recipient judgment's wait for the same
+        # command, never a verdict that the candidate is not the parent (LOOP §4).
+        if not (candidate.get("parent_sid") and parent_attempt_succeeded(
+                jobs, source.get("parent_attempt_id"), candidate.get("parent_attempt_id"))):
+            raise _contract_error("replacement-launch-binding-mismatch", source.get("attempt_id", ""))
+        from dispatch_seat_handover import recipient_continuation, resolve_recipient
+        holder = resolve_recipient("job-holder", metadata=source, jobs=jobs)
+        if holder.state == "unreadable":
+            require_continuation(recipient_continuation(holder))
+        parent_matches = holder.session_id == candidate.get("parent_sid")
+    else:
+        parent_matches = replacement_parent_matches(source, candidate, jobs)
+    if not parent_matches:
         raise _contract_error("replacement-launch-binding-mismatch", source.get("attempt_id", ""))
     if source.get("session_chain_id"):
         from dispatch_replacement_subsession import SCOPE_KEYS
@@ -1765,6 +1851,7 @@ def require_recovery_binding(record, source, candidate, jobs):
                 or successor.get("source") != {
                     "attempt_id": source["attempt_id"], "binding_digest": source["review_input_digest"]}):
             raise _contract_error("reviewed-evidence-replacement-mismatch")
+    return holder
 
 
 def recovery_node_task(record, source, history, *, attempt_id, route, node, harness, parent, jobs):
@@ -2866,6 +2953,13 @@ def retry_predecessor(prior_rows, *, jobs=None, task=None):
     return ""
 
 
+def unmet_progress(previous, current) -> bool:
+    """Whether a BLOCKED round progressed: its unmet `done_when` items are a strict subset of the
+    previous round's. Unknown items on either side are no progress. `blocked_progress` and the
+    repeat-failure count (`worker_bootstrap.repeat_failure`) read this one rule."""
+    return previous is not None and current is not None and current < previous
+
+
 def _blocked_round_items(route, metadata):
     """The unmet `done_when` ids a BLOCKED round left, from the items file beside its artifact;
     None when that round's items cannot be judged (no plan items, no readable file, or a file
@@ -2911,7 +3005,7 @@ def blocked_progress(route, rows, *, worker_type="test") -> int:
     streak, previous = 0, None
     for metadata in tail:
         current = _blocked_round_items(route, metadata) if route.get("route_plan") is not None else None
-        streak = 1 if previous is not None and current is not None and current < previous else streak + 1
+        streak = 1 if unmet_progress(previous, current) else streak + 1
         previous = current
     return streak
 

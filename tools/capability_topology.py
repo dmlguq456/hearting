@@ -770,7 +770,7 @@ def _validate_workflow_vocabulary(registry):
                 or not set(targets) <= known:
             raise TopologyError(f"workflow transition targets invalid for {state}")
     # COMPLETE reachable only through TERMINAL_VERIFY is the mechanical form of "a workflow
-    # never completes before its terminal node" (2026-08-04 BC_ResNet_tf).
+    # never completes before its terminal node" (2026-08-04 KWS_Net_tf).
     reaching_complete = {s for s, t in transitions.items() if "COMPLETE" in t}
     if reaching_complete != {"TERMINAL_VERIFY"}:
         raise TopologyError("COMPLETE must be reachable only from TERMINAL_VERIFY")
@@ -799,7 +799,7 @@ def _validate_continuations(recipe, registry, nodes, by_id):
     """Refuse a graph that can stall: every non-terminal node names its continuation.
 
     A stage graph whose last node is a detached process, or whose middle node has no
-    declared way to reach the next one, is the exact 2026-08-04 BC_ResNet_tf failure:
+    declared way to reach the next one, is the exact 2026-08-04 KWS_Net_tf failure:
     training finished and nothing owned what came after it. The refusal happens at
     registry validation and therefore at route compile, because a graph repaired at
     runtime has already lost the run.

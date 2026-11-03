@@ -665,7 +665,9 @@ def _current_parent_session_id():
 
 
 def _owns(meta, parent, jobs):
-    """The launching session, or its confirmed same-seat successor after a /clear (seat handover)."""
+    """The launching session, or its confirmed same-seat successor after a /clear (seat handover).
+
+    None when the seat lineage cannot be read; a refusal maps it with ``route_authority.require_known``."""
     return route_authority.owns(meta, parent, jobs)
 
 
@@ -708,7 +710,7 @@ def _slot(route, node, rows, jobs=None):
         # the session a supervisor handed the route to may harvest it.
         if status != "done":
             parent = _current_parent_session_id()
-            if not _owns(meta, parent, jobs):
+            if not route_authority.require_known(_owns(meta, parent, jobs), meta, jobs):
                 raise DispatchContractError("work-parent-recovery-required", aid)
         digest = (meta.get("owner_route_hash") or meta.get("route_hash")) if node == "owner" else meta.get("route_hash")
         if aid in adopted:
@@ -1238,7 +1240,7 @@ def _automatic_direction(route, rows, output):
         summary = summary[:FI.MAX_OPTION_MEANS_CHARS - 1].rstrip() + "…"
     question = {"id": FI.ROUTE_QUESTION_ID, "topic": "진행 방향", "kind": "yes-no",
                 "question": "두 갈래 검토가 같은 진행 방향을 냈습니다. 이대로 시작할까요?",
-                "options": [{"label": "진행", "means": summary or "두 갈래가 함께 낸 방향대로 시작합니다",
+                "options": [{"label": "진행", "means": summary or work_intent.ui_translator()("direction.default_means"),
                              FI.PROPOSAL_MARK: rows[0]["node"]},
                             {"label": "보류", "means": "시작하지 않고 방향을 다시 봅니다"}],
                 "recommended": 0, "why": "두 갈래가 같은 결론이고 사람이 고를 질문을 남기지 않았습니다"}
@@ -1266,8 +1268,8 @@ def _automatic_direction_notice_text(interview, answers) -> str:
         option = str(interview["questions"][0]["options"][0].get("means") or "")
     except (KeyError, IndexError, TypeError, AttributeError):
         option = ""
-    return ("[방향 통지] 두 갈래 검토가 같은 방향을 내고 물을 것을 남기지 않아 묻지 않고 시작했습니다"
-            + (f": {option}" if option else "") + ". 고칠 점이 있으면 다음 말로 알려 주세요.")
+    import work_intent
+    return work_intent.ui_translator()("direction.notice", option=f": {option}" if option else "")
 
 
 def _automatic_direction_notice(output) -> str:
@@ -1905,7 +1907,14 @@ def pin_handoff_continuation(route, path, jobs, outcome):
     if outcome.get("state") != "cancelled":
         return {**outcome, "recovery_command": _pin_handoff_close_command(path, jobs)}
     metadata = (_rows(jobs).get(outcome.get("owner_attempt_id")) or (None, {}))[1]
-    if not _owns(metadata, _current_parent_session_id(), jobs):
+    owned = _owns(metadata, _current_parent_session_id(), jobs)
+    if owned is None:  # an unreadable seat lineage: wait, as the preparation failure below does
+        wait = route_authority.lineage_unreadable_wait(metadata, jobs)
+        return {**outcome, "handoff_reason": wait.reason, "next_action": wait.next_action,
+                "retry_when": wait.retry_when, "recovery_command": resume_command(path, jobs, agent_home=ROOT),
+                "next_step": "Owner cleanup settled; continuation preparation waits because the seat lineage "
+                    "could not be read (" + wait.detail + "). Run recovery_command once it reads; nothing else changed."}
+    if not owned:
         return {**outcome, "handoff_reason": "work-parent-recovery-required"}
     pinned = route_authority.sealed_pin_harness(route, worker_type="owner")
     if not pinned:
@@ -2605,6 +2614,9 @@ def start_work(route, path, jobs, *, wait=False, interview=None, answers=None,
         result = {**result, "state": "needs-attention",
                   "reason": "source-worktree-preparation-failed" if preparation_failed else
                             getattr(exc, "reason", type(exc).__name__), "detail": str(exc)}
+        if getattr(exc, "retry_when", ""):
+            # A typed wait (e.g. an unreadable seat lineage) keeps its own retry condition.
+            result.update(next_action=exc.next_action, retry_when=exc.retry_when, next_step=exc.retry_when)
         # A caller can lose the launch reply after the adapter claimed a row.
         # Preserve those durable obligations in this receipt too; do not spawn
         # a replacement or infer completion from the caller's exception.

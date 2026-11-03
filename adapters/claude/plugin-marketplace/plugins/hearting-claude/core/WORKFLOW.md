@@ -780,8 +780,9 @@ proposals, no start approval is in scope, and neither brief's section 7 lists a
 question only the user can answer — the runtime records that interview itself as
 the depth-0 session's on-behalf answer (`supervisor`, basis
 `automatic-agreement`), releases frame-review through the same commands, and
-the first leg's start receipt (each repeat too) carries a one-line `[방향 통지]`
-the session shows in its reply; nothing waits. A hand-written answer cannot
+the first leg's start receipt (each repeat too) carries a one-line direction
+notice (`[Direction notice]`, `[방향 통지]` when Korean is declared) the session
+shows in its reply; nothing waits. A hand-written answer cannot
 carry that basis. Every other case asks as below.
 
 The interview proceeds in this order:
@@ -894,7 +895,8 @@ completion it also writes `completion-summary.md`, once, beside the owner
 envelope: the intent (§0.4) with the person's words, the result (one leg of a
 plan says a later leg remains), what changed, what was checked, what stayed
 unverified or remains, nodes closed without an independent review, and the
-artifact path. A code report's numbered sections 1/4/5/6 are read as the
+artifact path, in the shared UI-text catalog's language (English by default,
+Korean when declared). A code report's numbered sections 1/4/5/6 are read as the
 template; any other heading only by its words, and a report with unmatched
 headings is named, not summarised. The Claude wake receipt, the Codex queue item
 and the OpenCode carrier all carry this same text; the parent shows it first as

@@ -33,7 +33,7 @@ See `eval-procedure.md` for E2, E3-2, and E3-3.
 Project:        <name>
 Experiment:     <date>_<slug>
 mode:           setup
-Reference:      model/TF_Restormer from similar_models.md
+Reference:      model/TF_Enhancer from similar_models.md
                 or parent: <slug> with checkpoint continuation
 Motivation:     <derived from the previous or parent result>
 This attempt:   <one line from the request>
@@ -127,7 +127,7 @@ Launching requires the route-start approval to include this environment and part
 At the same point, create `experiments/{date}_{slug}/run.json` with `status: "running"`, `skill_mode: "setup"` from `pipeline_state.mode`, `parent`, current ISO 8601 `started_at`, scaffold config path in `config_ref`, and the expected best-checkpoint path in `ckpt_path` under `$AGENT_RUNTIME_DIR/experiments/{slug}/runs/{run}/ckpt/`. Omit `best`, `ended_at`, `ckpt_sha256` and `ckpt_byte_size` while running. Once the checkpoint exists, record its optional SHA256 and byte size and verify its digest at handoff and parent evaluation. E3-4 updates completion fields.
 
 ```markdown
-| 2026-05-26 | lr_sweep | TF_Restormer base, lr 1e-3→3e-4 | ⏳ 대기 | — |
+| 2026-05-26 | lr_sweep | TF_Enhancer base, lr 1e-3→3e-4 | ⏳ 대기 | — |
 ```
 
 **S3-2b. Seal config provenance before smoke.** Resolve the config, compute a collision-safe `run_id`, seal the exact snapshot and manifest under the artifact root, and write `config_ref`, `config_sha256`, `source_commit`, `source_dirty`, `run_id`, and `config_layout` into the new `run.json`. Only then create the smoke attestation with `--config-manifest`; an attestation without the matching config hash is rejected.

@@ -68,7 +68,7 @@ class NVMLFallbackTest(unittest.TestCase):
         self.write("proc/%d/maps" % pid,
                    "".join("100-200 rw-s 0 00:00 0 /dev/nvidia%d\n" % i for i in mapped))
         base = self.root / "proc" / str(pid)
-        (base / "cwd").symlink_to("/work/SR_CorrNet")
+        (base / "cwd").symlink_to("/work/SR_ModelA")
         (base / "fd").mkdir(exist_ok=True)
         for index in devices:
             (base / "fd" / str(index + 10)).symlink_to("/dev/nvidia%d" % index)

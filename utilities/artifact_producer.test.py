@@ -348,25 +348,25 @@ class ActivateAndBeginTest(ProducerTestBase):
                          ("legacy-derived", "campaign-key"))
 
     def test_campaign_is_named_from_its_key_not_the_first_route_slug(self):
-        """TF-Rehancer 2026-09-15: key `tf-rehancer-icassp`, first slug
-        `tf-rehancer-analysis-cx` produced campaign folder
-        `<date>_tf-rehancer-analysis-cx`."""
+        """Project-C 2026-09-15: key `project-c-icassp`, first slug
+        `project-c-analysis-cx` produced campaign folder
+        `<date>_project-c-analysis-cx`."""
         self.activate()
-        first_route, first_file = self.route(slug="tf-rehancer-analysis-cx", campaign_key="tf-rehancer-icassp")
+        first_route, first_file = self.route(slug="project-c-analysis-cx", campaign_key="project-c-icassp")
         first = P.begin(self.root, route_file=first_file, capability="autopilot-code", intensity="direct")
         campaign = P.read_campaign(self.root, first["campaign_id"])
         date = campaign["created_on"][:10]
-        self.assertEqual(campaign["locator"], f"{date}_tf-rehancer-icassp")
+        self.assertEqual(campaign["locator"], f"{date}_project-c-icassp")
         self.assertEqual((campaign["key"], campaign["slug"], campaign["title"], campaign["slug_source"]),
-                         ("tf-rehancer-icassp", "tf-rehancer-icassp", "tf-rehancer-icassp", "campaign-key"))
-        self.assertEqual(Path(first["cycle_dir"]).name, f"{date}_tf-rehancer-analysis-cx")
-        self.assertEqual(Path(first["cycle_dir"]).parent.name, f"{date}_tf-rehancer-icassp")
+                         ("project-c-icassp", "project-c-icassp", "project-c-icassp", "campaign-key"))
+        self.assertEqual(Path(first["cycle_dir"]).name, f"{date}_project-c-analysis-cx")
+        self.assertEqual(Path(first["cycle_dir"]).parent.name, f"{date}_project-c-icassp")
         # A second route with another slug joins the same folder; it adds a cycle, not a name.
-        _, second_file = self.route(slug="tf-rehancer-research", campaign_key="tf-rehancer-icassp",
+        _, second_file = self.route(slug="project-c-research", campaign_key="project-c-icassp",
                                     gate_source="second")
         second = P.begin(self.root, route_file=second_file, capability="autopilot-code", intensity="direct")
         self.assertEqual(second["campaign_id"], first["campaign_id"])
-        self.assertEqual(Path(second["cycle_dir"]).parent.name, f"{date}_tf-rehancer-icassp")
+        self.assertEqual(Path(second["cycle_dir"]).parent.name, f"{date}_project-c-icassp")
         self.assertEqual(P.read_campaign(self.root, first["campaign_id"])["locator"], campaign["locator"])
         # The key is the title verbatim; the locator is its D-88 slug.
         _, odd_file = self.route(slug="bounded-task", campaign_key="TTS.v6:Release", gate_source="odd")
@@ -383,9 +383,9 @@ class ActivateAndBeginTest(ProducerTestBase):
         self.assertTrue(keyless["degraded"])
         summaries = P.list_campaign_summaries(self.root)
         self.assertEqual(sorted(row["key"] for row in summaries),
-                         ["TTS.v6:Release", "_unassigned", "tf-rehancer-icassp"])
+                         ["TTS.v6:Release", "_unassigned", "project-c-icassp"])
         by_key = {row["key"]: row for row in summaries}
-        self.assertEqual(by_key["tf-rehancer-icassp"]["cycle_count"], 2)
+        self.assertEqual(by_key["project-c-icassp"]["cycle_count"], 2)
         self.assertTrue(by_key["_unassigned"]["degraded"])
         odd_campaign["state"] = "superseded"
         P._write_campaign(self.root, odd_campaign, exclusive=False)
@@ -6075,7 +6075,7 @@ class TerminalTransactionIntegrationTest(ProducerTestBase):
 class LocatorDateDuplicationTest(ProducerTestBase):
     """One date in a new work locator, two in a migration locator.
 
-    BC_ResNet 2026-09-10 carried six campaign directories named
+    KWS_Net 2026-09-10 carried six campaign directories named
     ``<date>_<same date>-<slug>`` and one whose two dates disagreed, so the
     directory sorted under one day and read as another.
     """
@@ -6168,6 +6168,19 @@ class RouteLaunchContextTest(ProducerTestBase):
         self.assertEqual(len(list(P.list_cycle_records(self.root))), 1)
         self.assertEqual(P.read_cycle_record(self.root, env["AGENT_ARTIFACT_CYCLE_ID"])["route_id"], route["route_id"])
         self.assertEqual(Path(env["AGENT_ARTIFACT_OUTPUT_DIR"]), Path(env["AGENT_ARTIFACT_CYCLE_DIR"]) / "artifacts")
+
+
+class OutputInvalidDetailTest(unittest.TestCase):
+    def test_a_short_list_is_named_whole_and_a_long_one_is_bounded(self):
+        few = [f"locator-invalid-component:artifacts/a|{index}" for index in range(3)]
+        self.assertEqual(P.output_invalid_detail(few), ";".join(few))
+        many = [f"locator-invalid-component:artifacts/{'d' * 300}/b|{index}" for index in range(701)]
+        detail = P.output_invalid_detail(many)
+        items = detail.split(";")
+        self.assertEqual(items[-1], f"and {701 - (len(items) - 1)} more")
+        self.assertEqual(items[:-1], many[:len(items) - 1])
+        self.assertLessEqual(len(items) - 1, P.OUTPUT_INVALID_NAMED)
+        self.assertLessEqual(len(detail), P.OUTPUT_INVALID_NAMED_BYTES + 32)
 
 
 class FinalizeRefusalOfInvalidNamesTest(ProducerTestBase):
@@ -7959,7 +7972,7 @@ class CycleBucketDeclarationTest(unittest.TestCase):
 
 
 class PrimarySupportExclusionTest(unittest.TestCase):
-    """2026-09-24 TF-Rehancer: a research cycle sealed `_internal/prompts/report.md`
+    """2026-09-24 Project-C: a research cycle sealed `_internal/prompts/report.md`
     as its primary, so Cairn (which does not list C-INT paths) dropped the cycle."""
 
     def test_support_paths_are_not_auto_nominated_while_output_exists(self):
