@@ -38,6 +38,25 @@ class ResponsibilityTest(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.jobs = self.root / "jobs.log"
 
+    def test_transient_capacity_wait_is_exact_attempt_bounded_and_superseded_by_next_turn(self):
+        log = self.root / "owner.jsonl"
+        start = {"type": "dispatch.supervisor.transient-wait.started",
+                 "parent_attempt_id": "att-owner", "thread_id": "thread-a",
+                 "turn_id": "turn-a", "reason_code": "transient-capacity",
+                 "ordinal": 1, "deadline_monotonic": 160.0}
+        log.write_text(json.dumps(start) + "\n")
+        metadata = {"harness": "codex", "log_file": str(log)}
+        with mock.patch.object(supervision.time, "monotonic", return_value=100.0):
+            self.assertTrue(supervision._transient_retry_wait_active(metadata, "att-owner"))
+            self.assertFalse(supervision._transient_retry_wait_active(metadata, "att-other"))
+        with mock.patch.object(supervision.time, "monotonic", return_value=161.0):
+            self.assertFalse(supervision._transient_retry_wait_active(metadata, "att-owner"))
+        log.write_text(json.dumps(start) + "\n" + json.dumps({
+            "type": "dispatch.supervisor.turn.started", "parent_attempt_id": "att-owner",
+            "thread_id": "thread-a", "turn_id": "turn-b"}) + "\n")
+        with mock.patch.object(supervision.time, "monotonic", return_value=100.0):
+            self.assertFalse(supervision._transient_retry_wait_active(metadata, "att-owner"))
+
     def test_committed_success_survives_delays_and_unknown_cleanup_for_all_harnesses(self):
         for harness in ("claude", "codex", "opencode"):
             for state, action in (("live", "wait"), ("unverifiable", "recover"), ("quiescent", "advance")):
