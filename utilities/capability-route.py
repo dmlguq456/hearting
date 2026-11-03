@@ -5084,7 +5084,7 @@ def compose_card(route, plan=None, plan_source=None, *, owner_harness=None, rout
                                  else compose_campaign_selection(route), t)
     )
     import work_intent
-    for line in work_intent.card_lines(route, original=intent_original):
+    for line in work_intent.card_lines(route, original=intent_original, t=t):
         card += "\n" + line
     observed = compose_observations(route, t)
     if include_decisions:

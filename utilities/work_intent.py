@@ -304,26 +304,40 @@ def route_intent(route, *, original=None) -> dict:
     return {"original": words, **value} if words else value
 
 
-def card_lines(route, *, original=None) -> list[str]:
-    """Two or three lines under compose's `[경로]` notice."""
+# The card labels when no translator is given; the same text as `route.intent.*` in
+# tools/i18n/messages.json.
+_KO_LABELS = {
+    "route.intent.line": "[의도] {intent}",
+    "route.intent.drafted": " (요청 첫 문장)",
+    "route.intent.scope": "범위 {scope}",
+    "route.intent.not_doing": "안 할 것 {items}",
+    "route.intent.done": "완료 {done}",
+    "route.intent.original": "원문 \"{original}\"",
+}
+
+
+def card_lines(route, *, original=None, t=None) -> list[str]:
+    """Two or three lines under compose's `[경로]` notice; `t` is the route card's UI-text
+    translator (Korean labels without one). The person's words and the intent stay as written."""
     value = route_intent(route, original=original)
     if not value.get("intent") and not value.get("original"):
         return []
+    label = t or (lambda key, **fields: _KO_LABELS[key].format(**fields))
     lines = []
     if value.get("intent"):
-        drafted = " (요청 첫 문장)" if value.get("basis") == "first-sentence" else ""
-        lines.append(f"  [의도] {_line(value['intent'], 160)}{drafted}")
+        drafted = label("route.intent.drafted") if value.get("basis") == "first-sentence" else ""
+        lines.append("  " + label("route.intent.line", intent=_line(value["intent"], 160)) + drafted)
     extra = []
     if value.get("scope"):
-        extra.append("범위 " + _line(value["scope"], 80))
+        extra.append(label("route.intent.scope", scope=_line(value["scope"], 80)))
     if value.get("not_doing"):
-        extra.append("안 할 것 " + "; ".join(_line(item, 80) for item in value["not_doing"]))
+        extra.append(label("route.intent.not_doing", items="; ".join(_line(item, 80) for item in value["not_doing"])))
     if value.get("done"):
-        extra.append("완료 " + _line(value["done"], 100))
+        extra.append(label("route.intent.done", done=_line(value["done"], 100)))
     if extra:
         lines.append("    " + " · ".join(extra))
     if value.get("original"):
-        lines.append(f"    원문 \"{_line(value['original'], 120)}\"")
+        lines.append("    " + label("route.intent.original", original=_line(value["original"], 120)))
     return lines
 
 
