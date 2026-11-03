@@ -85,5 +85,104 @@ class DrawRunsTest(unittest.TestCase):
             self.assertEqual(grid.cell_width("가"), 2)
 
 
+RISKY = ("A" + "\u1100\u1161\u11a8" + "X|", "B" + "\u3248" + "Y|", "C" + "\u200e" + "Z|",
+         "D" + "\x7f" + "W|", "E" + "가🤖●…⏳⠏─│" + "V|")
+
+
+def _ncurses_child(out):
+    """In a private pty: paint each frame both ways with real ncurses and keep every cell."""
+    import curses
+    import fcntl
+    import json
+    import locale
+    import struct
+    import termios
+    locale.setlocale(locale.LC_ALL, "")
+    fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", 60, 200, 0, 0))
+    from tools.fleet.explorer.grid import Grid
+
+    class Frame:
+        def __init__(self, cells):
+            self.cells, self.lines = cells, []
+
+    model = ef.demo_model(detail=True)
+    frames = [draw(model, state, 120, 40, beat=1)
+              for state in (NavState(), NavState(view="PEERS", title="PEERS"),
+                            NavState(view="HISTORY", title="HISTORY"))]
+    risky = Grid(40, len(RISKY))
+    for y, text in enumerate(RISKY):
+        risky.put(0, y, text)
+    frames.append(Frame(risky.cells))
+
+    def cells(win, rows, cols):
+        return [[win.inch(y, x) for x in range(cols)] for y in range(rows)]
+
+    def main(stdscr):
+        result = []
+        for frame in frames:
+            rows, cols = len(frame.cells), len(frame.cells[0])
+            win = curses.newwin(rows, cols, 0, 0)
+            win.erase()
+            for y, row in enumerate(frame.cells):          # the painting before runs
+                for x, (glyph, key, tint) in enumerate(row):
+                    if glyph == "":
+                        continue
+                    if glyph == "⠏" and key in render._EXPLORER_SPIN_KEYS:
+                        glyph = render._SPIN[0]
+                    try:
+                        win.addstr(y, x, glyph, render._key_attr(key, tint))
+                    except curses.error:
+                        pass
+            before = cells(win, rows, cols)
+            render._draw_explorer_frame(win, frame, None)
+            result.append(before == cells(win, rows, cols))
+        with open(out, "w") as stream:
+            json.dump(result, stream)
+
+    with mock.patch.object(render, "_explorer_hit_geometry"), \
+         mock.patch.object(render.time, "time", return_value=0.0), \
+         mock.patch.object(render, "_key_attr", side_effect=lambda key, tint: (
+             render.curses.A_BOLD if hash((key, tint)) % 2 else 0)):
+        curses.wrapper(main)
+
+
+class NcursesRunsTest(unittest.TestCase):
+    def test_real_ncurses_puts_every_character_where_per_cell_painting_did(self):
+        """Fleet's width and the terminal's can disagree (decomposed jamo, U+3248, LRM, DEL)."""
+        import json
+        import pty
+        import tempfile
+        import time
+        with tempfile.TemporaryDirectory() as temp:
+            out = os.path.join(temp, "cells.json")
+            pid, fd = pty.fork()
+            if pid == 0:
+                os.environ.update(TERM="xterm-256color", LC_ALL="C.UTF-8")
+                try:
+                    _ncurses_child(out)
+                except BaseException as error:  # noqa: BLE001 - reported through the file
+                    with open(out + ".error", "w") as stream:
+                        stream.write(repr(error))
+                finally:
+                    os._exit(0)
+            deadline = time.time() + 60
+            while time.time() < deadline:
+                try:
+                    if not os.read(fd, 65536):
+                        break
+                except OSError:
+                    break
+            os.waitpid(pid, 0)
+            os.close(fd)
+            if not os.path.exists(out):
+                error = out + ".error"
+                reason = open(error).read() if os.path.exists(error) else "no result"
+                if "locale" in reason:
+                    self.skipTest("no UTF-8 locale here: " + reason)
+                self.fail(reason)
+            with open(out) as stream:
+                self.assertEqual(json.load(stream), [True, True, True, True])
+
+
 if __name__ == "__main__":
     unittest.main()

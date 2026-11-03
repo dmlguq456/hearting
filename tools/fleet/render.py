@@ -7944,37 +7944,52 @@ def _draw_explorer_frame(stdscr, frame, snapshot, *, stale=False):
     # The composed frame keeps the approved still glyph; working marks turn here, like Fleet's.
     spin = _SPIN[int(time.time() * 10) % len(_SPIN)]
     if frame.cells:
-        # One addstr per run of cells that share an attribute, not one per cell: a full
-        # screen is about ten thousand cells and is drawn ten times a second.
-        from .explorer.grid import cell_width
+        # One addstr per run of cells that share a style, not one per cell: a full screen
+        # is about ten thousand cells and is drawn ten times a second. A run is written in
+        # one call only when the terminal is sure to give every character the cells Fleet
+        # gave it; any other run is written cell by cell as before.
+        from itertools import groupby
+        from operator import itemgetter
+        from .explorer.grid import cell_width, run_safe
         dim = getattr(curses, "A_DIM", 0) if stale else 0
+        attrs = {}
+        style_of = itemgetter(1, 2)
         for y, row in enumerate(frame.cells[:h]):
-            start, attr_run, text, expected = None, None, [], None
-            for x, cell in enumerate(row[:w]):
-                glyph, colour_key, tint = cell
-                if glyph == "":
+            x = 0
+            for style, group in groupby(row[:w], key=style_of):
+                glyphs = [cell[0] for cell in group]
+                start, x = x, x + len(glyphs)
+                text = "".join(glyphs)
+                if not text:
                     continue
-                if not stale and glyph == "⠏" and colour_key in _EXPLORER_SPIN_KEYS:
-                    glyph = spin
-                try:
-                    attr = _key_attr(colour_key, tint) | dim
-                except Exception:
-                    continue
-                if text and (attr != attr_run or x != expected):
+                attr = attrs.get(style)
+                if attr is None:
                     try:
-                        stdscr.addstr(y, start, "".join(text), attr_run)
+                        attr = attrs[style] = _key_attr(*style) | dim
+                    except Exception:
+                        attr = attrs[style] = False
+                if attr is False:
+                    continue
+                if not stale and style[0] in _EXPLORER_SPIN_KEYS and "⠏" in text:
+                    text = text.replace("⠏", spin)
+                    glyphs = [spin if glyph == "⠏" else glyph for glyph in glyphs]
+                lead = 0
+                while glyphs[lead] == "":
+                    lead += 1
+                if (len(text) == len(glyphs) - lead and text.isascii() and text.isprintable()) or (
+                        all(run_safe(char) for char in text)
+                        and sum(cell_width(char) for char in text) == len(glyphs) - lead):
+                    try:
+                        stdscr.addstr(y, start + lead, text, attr)
                     except Exception:
                         pass
-                    text = []
-                if not text:
-                    start, attr_run = x, attr
-                text.append(glyph)
-                expected = x + max(1, cell_width(glyph))
-            if text:
-                try:
-                    stdscr.addstr(y, start, "".join(text), attr_run)
-                except Exception:
-                    pass
+                    continue
+                for offset, glyph in enumerate(glyphs):
+                    if glyph:
+                        try:
+                            stdscr.addstr(y, start + offset, glyph, attr)
+                        except Exception:
+                            pass
     else:
         for y, line in enumerate(frame.lines[:h]):
             try:

@@ -19,6 +19,41 @@ def cell_width(char):
     return _text_width(char)
 
 
+_RUN_SAFE = {}                             # one character -> whether the terminal agrees on its cells
+_LIBC_WIDTH = []
+
+
+def _terminal_width(char):
+    """The C library's width of ``char`` (what ncurses uses), or None when it cannot be asked."""
+    if not _LIBC_WIDTH:
+        try:
+            import ctypes
+            import ctypes.util
+            libc = ctypes.CDLL(ctypes.util.find_library("c") or None)
+            libc.wcwidth.argtypes = (ctypes.c_wchar,)
+            libc.wcwidth.restype = ctypes.c_int
+            _LIBC_WIDTH.append(libc.wcwidth)
+        except (OSError, AttributeError, TypeError):
+            _LIBC_WIDTH.append(None)
+    wcwidth = _LIBC_WIDTH[0]
+    return None if wcwidth is None else wcwidth(char)
+
+
+def run_safe(char):
+    """Whether ``char`` may share one write with its neighbours.
+
+    A run is placed by the terminal, which advances by its own width of each character. Where
+    that width differs from Fleet's (decomposed Hangul jamo, U+3248, LRM, DEL ...) the rest of
+    the run would land in other columns, so such a character is written in its own cell.
+    """
+    safe = _RUN_SAFE.get(char)
+    if safe is None:
+        width = cell_width(char) if len(char) == 1 else 0
+        safe = width >= 1 and (" " <= char <= "~" or _terminal_width(char) == width)
+        _RUN_SAFE[char] = safe
+    return safe
+
+
 def clip_cells(text, room):
     """Cut ``text`` to ``room`` cells, always ending in ``…`` when something was cut.
 
