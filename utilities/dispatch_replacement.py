@@ -1322,6 +1322,26 @@ def _same_runtime_end(jobs, rows, source, *, explicit=False):
                for key in ('failure_class', 'terminal_event', 'harness', 'model_profile'))
 
 
+def stage_completed_since(jobs, fields, meta):
+    """Whether another attempt published this stage's completion after ``meta``'s attempt began.
+
+    A worker stage only: the owner already ran it inline, or a later attempt finished it, so a
+    replacement of this dead attempt would only repeat finished work (84b68e). Anything that
+    cannot be read answers False and leaves the ordinary decision unchanged.
+    """
+    node, route_id = meta.get('route_node'), meta.get('route_id')
+    if meta.get('worker_type') == 'owner' or not node or not route_id:
+        return False
+    try:
+        marker = _read(DC.resolve_dispatch_state_root(DC.resolve_agent_home(), Path(jobs))
+                       / 'completion' / route_id / f'{node}.json')
+        return bool(marker and marker.get('route_hash') == meta.get('route_hash')
+                    and marker.get('attempt_id') not in {None, '', meta.get('attempt_id')}
+                    and _instant(marker.get('completed_at')) > _instant(fields[0]))
+    except (DC.DispatchContractError, OSError, ValueError, TypeError, AttributeError):
+        return False
+
+
 def _plain_retry_successor(rows, aid):
     """Does an ordinary same-node retry, not a replacement claim, already continue this attempt?"""
     return any((meta.get('automatic_retry_of') == aid or meta.get('prior_attempt_id') == aid)
@@ -2746,7 +2766,8 @@ def _advance(jobs, aid, *, run=subprocess.run, authority_check=None, resume_capa
     kind = death_kind(fields, source, jobs=jobs)
     progress = route_authority.decide_continuation(action='replacement-progress', jobs=jobs,
         status=fields[1], metadata=source, facts={'kind': kind, 'resume_capacity': resume_capacity,
-        'bound_carrier': authority_check is not None, 'registry_rows': rows})
+        'bound_carrier': authority_check is not None, 'registry_rows': rows,
+        'completed_since': bool(kind) and stage_completed_since(jobs, fields, source)})
     if progress.state == 'advance':
         return advance(jobs, source['replacement_original_attempt_id'], run=run,
                        authority_check=authority_check, resume_capacity=resume_capacity)
