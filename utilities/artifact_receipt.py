@@ -519,8 +519,9 @@ def resolve(artifact_root: Any, receipt: Mapping[str, Any]) -> Verdict:
         return _unavailable("local-state-unreadable", 3)
     try:
         index_payload = json.loads(raw_index)
-        index = artifact_index.parse(index_payload)
-    except (ValueError, TypeError):
+        # A large root keeps artifact and event rows beside index.json (read-only here).
+        index = artifact_admission.attach_bulk_rows(root, artifact_index.parse(index_payload))
+    except (ValueError, TypeError, OSError):
         return _unavailable("local-state-unreadable", 3)
 
     # S4
@@ -531,7 +532,10 @@ def resolve(artifact_root: Any, receipt: Mapping[str, Any]) -> Verdict:
     stable_id_rows = {}
     for key in _INDEXED_V3_ID_KEYS:
         kind = V3_ID_KINDS[key]
-        row = index.stable_ids.get(receipt[key])
+        try:
+            row = index.stable_ids.get(receipt[key])
+        except (OSError, ValueError, TypeError):
+            return _unavailable("local-state-unreadable", 3)
         if row is None:
             return _rejected("local-manifest-unregistered", 3)
         if row.get("kind") != kind:
