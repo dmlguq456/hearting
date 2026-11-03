@@ -1851,6 +1851,8 @@ def _answered_fail_verdicts(route, markers, basis, reference):
 
 
 ANSWERED_FAIL_REOPEN = 'corrected-fail-verdict'
+# `DC.gate_currency` state of a supervised resource stage that has not settled as succeeded.
+UNFINISHED_RESOURCE_STAGE = 'resource-stage-not-current'
 
 
 def _reuse_snapshot(jobs, route, lines, *, proof=None, pinned=None):
@@ -1897,8 +1899,12 @@ def _reuse_snapshot(jobs, route, lines, *, proof=None, pinned=None):
         # approved fix answered, is not reused; its node is reopened.
         superseded = DC.completion_superseded(currency)
         reopened = str(node['id']) in answered and DC.completion_superseded(currency, answered=True)
+        # A resource stage whose runs have not settled as succeeded is unfinished, whatever
+        # marker a hand `complete` wrote beside it: the launch gate already reads that marker
+        # as missing. The replacement continues the same stage; it is neither reused nor refused.
+        unfinished = currency.state == UNFINISHED_RESOURCE_STAGE
         if (currency.state != 'current' and not superseded and not merge_unobservable
-                and not gates_off_edit and not reopened):
+                and not gates_off_edit and not reopened and not unfinished):
             raise _completion_unproven(route, node, marker, currency)
         ready = DC.completion_attempt_readiness(route, node, marker, Path(jobs), registry_lines=lines)
         if ready.state != 'ready':
@@ -1914,7 +1920,7 @@ def _reuse_snapshot(jobs, route, lines, *, proof=None, pinned=None):
         # Keep the predecessor digest with its own observation; the reuse
         # rows below are built in a second pass over every node.
         observations[str(node['id'])] = (node, path, marker, currency, restored_from)
-        if superseded or merge_unobservable or reopened:
+        if superseded or merge_unobservable or reopened or unfinished:
             invalidated[str(node['id'])] = {
                 'node': node['id'], 'marker_digest': _digest(marker),
                 'attempt_id': marker.get('attempt_id', ''),
@@ -2051,7 +2057,7 @@ def _reuse_preserved(previous, current):
         # An answered FAIL verdict is reopened on its exact pinned marker whatever
         # evidence change it shows; _reuse_snapshot already refused integrity breaks.
         return (row.get('reopened') == ANSWERED_FAIL_REOPEN
-                or (row.get('currency') in {'current', 'superseded'})
+                or (row.get('currency') in {'current', 'superseded', UNFINISHED_RESOURCE_STAGE})
                 or (row.get('currency') == 'completion-evidence-unreadable'
                     and row.get('currency_reason') == 'review-source-index-unmerged'))
 
@@ -3175,7 +3181,10 @@ def recovery_instructions(args):
     if not _reuse_preserved(record['reuse'], current_reuse):
         raise DC.DispatchContractError('replacement-reuse-evidence-drift')
     completed = ', '.join(str(row['node']) for row in current_reuse['completed']) or '(none)'
-    invalidated = ', '.join(str(row['node']) for row in current_reuse.get('invalidated', []))
+    invalidated = ', '.join(str(row['node']) for row in current_reuse.get('invalidated', [])
+                            if row.get('currency') != UNFINISHED_RESOURCE_STAGE)
+    unfinished = ', '.join(str(row['node']) for row in current_reuse.get('invalidated', [])
+                           if row.get('currency') == UNFINISHED_RESOURCE_STAGE)
     pending = ', '.join(str(node) for node in current_reuse.get('pending', [])) or '(none)'
     source_fields, source = _rows(lines)[prior]
     kind = death_kind(source_fields, source, jobs=jobs, lines=lines)
@@ -3241,6 +3250,9 @@ def recovery_instructions(args):
             f'Reuse the existing cycle {record["reuse"]["cycle_id"]} and completion evidence for: {completed}.\n'
             + (f'Reopen these stages because their former result is historical: {invalidated}.\n'
                if invalidated else '')
+            + (f'Continue these resource stages from their existing run records; their runs have not '
+               f'settled as succeeded, so the marker beside each is not their result: {unfinished}.\n'
+               if unfinished else '')
             + _reopened_outputs_note(route, current_reuse.get('invalidated', []), jobs)
             + f'Unfinished route stages: {pending}.\n'
             + rerun +

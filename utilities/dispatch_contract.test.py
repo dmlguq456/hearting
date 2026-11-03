@@ -7862,6 +7862,20 @@ class ResourceStageMarkerSuccessorTest(unittest.TestCase):
             {**evidence, "owner_attempt_id": "att-other"},
             self.holder(False), self.binding()).state, "resource-stage-not-current")
 
+    def test_hand_marker_beside_a_stage_still_running_after_a_failed_run_is_not_its_result(self):
+        # The owner's last run failed, the stage stayed RUNNING, and a hand `complete`
+        # wrote a marker without a resource identity (Cairn v216 host-run).
+        self.ledger._append({"at": self.ledger.journal()[-1]["at"], "route_id": self.route_id,
+                             "route_hash": self.route_hash, "node": "full-run",
+                             "state": "RUNNING", "evidence": {"next_resource": "run-2"}})
+        hand = {"sequence": 1, "evidence": {"path": str(self.output)}}
+        self.marker_path.write_text(json.dumps(hand))
+        currency = D._resource_stage_marker_current(
+            self.route, self.route["nodes"][0], hand, self.marker_path, str(self.jobs))
+        self.assertEqual((currency.state, currency.reason),
+                         ("resource-stage-not-current", "completion-marker-missing"))
+        self.assertFalse(D.completion_superseded(currency))
+
 
 class RegistryLineageWriterTest(unittest.TestCase):
     def setUp(self):

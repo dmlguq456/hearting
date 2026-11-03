@@ -3056,6 +3056,50 @@ class ReplacementTest(unittest.TestCase):
             self.assertIn(expected, text)
         self.assertNotIn('You replace exact-dead attempt', text)
 
+    def test_answered_blocked_owner_continues_a_resource_stage_its_failed_run_left_unsettled(self):
+        # Cairn v216: the last host run failed, the stage stayed RUNNING, the owner wrote a
+        # hand marker and ended BLOCKED; the person's answer continues that same stage.
+        import artifact_producer
+        self.route['nodes'] = [
+            {'id': 'host-run', 'kind': 'resource-runner', 'depends_on': [],
+             'outputs': ['parts/host-run/run.json', 'parts/host-run/logs/**'],
+             'continuation': {'kind': 'supervised'}},
+            {'id': 'impl-review', 'kind': 'review-worker', 'depends_on': ['host-run']}]
+        directory = D._route_module().completion_dir('rt-test', jobs=self.jobs)
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / 'host-run.json').write_text(json.dumps(
+            {'route_id': 'rt-test', 'route_hash': 'sha256:test', 'node_id': 'host-run',
+             'attempt_id': None, 'registered_worker': False, 'sequence': 1,
+             'evidence': {'path': str(self.root / 'run.json'), 'sha256': 'fixture'}}), encoding='utf-8')
+        self.reuse.stop()
+        stack = contextlib.ExitStack()
+        self.addCleanup(stack.close)
+        stack.enter_context(mock.patch.object(D, 'gate_currency', return_value=D.GateCurrency(
+            'resource-stage-not-current', 'completion-marker-missing')))
+        stack.enter_context(mock.patch.object(D, 'completion_attempt_readiness',
+                                              return_value=SimpleNamespace(state='ready')))
+        stack.enter_context(mock.patch.object(R, '_gate_snapshot', return_value=[]))
+        stack.enter_context(mock.patch.object(artifact_producer, 'route_cycle_for', return_value={
+            'cycle_id': 'cyc-test', 'producer_id': 'prod-test'}))
+        stack.enter_context(mock.patch.object(artifact_producer, 'cycle_route_admission',
+                                              return_value=SimpleNamespace(allow=True)))
+        self._blocked_owner()
+        answer = 'Record the timeout as an environment FAIL and continue the host runs.'
+        self.assertTrue(self._answer(text=answer)['retained'])
+        result, commands = self._launch()
+        self.assertEqual((len(commands), result['reason']), (1, 'replacement-launch-pending'), result)
+        reuse = result['record']['reuse']
+        self.assertEqual(([row['node'] for row in reuse['invalidated']], reuse['pending']),
+                         (['host-run'], ['host-run', 'impl-review']))
+        text = R.recovery_instructions(SimpleNamespace(automatic_retry_of='att-source', worker_type='owner',
+                                       jobs_path=self.jobs, attempt_id=result['record']['replacement_attempt_id']))
+        for expected in ('ended BLOCKED and a person has answered it', answer,
+                         'Continue these resource stages from their existing run records; their runs have '
+                         'not settled as succeeded, so the marker beside each is not their result: host-run.',
+                         'Unfinished route stages: host-run, impl-review.'):
+            self.assertIn(expected, text)
+        self.assertNotIn('former result is historical', text)
+
     def test_format_only_contract_end_keeps_contract_proof_and_carries_answer(self):
         meta = self._blocked_owner()
         meta.update(note='dead-contract', failure_class='contract',
@@ -4867,6 +4911,30 @@ class ReplacementReuseCurrencyTest(unittest.TestCase):
         self.assertEqual(invalid["test"]["depends_on_invalid"], ["impl-review"])
         self.assertEqual(current["pending"], ["impl-review", "test", "report"])
         self.assertTrue(R._reuse_preserved(self.previous_snapshot(), current))
+
+    def test_unfinished_resource_stage_is_continued_not_refused(self):
+        # A marker beside a resource stage whose runs have not settled as succeeded is not
+        # its result: the replacement continues that stage and what follows it.
+        states = {node["id"]: ("current", "completion-marker-verified")
+                  for node in self.route["nodes"]}
+        states["impl-review"] = ("resource-stage-not-current", "completion-marker-missing")
+        current = self.snapshot(states)
+        self.assertEqual({row["node"] for row in current["completed"]}, {"plan", "independent-verify"})
+        invalid = {row["node"]: row for row in current["invalidated"]}
+        self.assertEqual(set(invalid), {"impl-review", "test", "report"})
+        self.assertEqual((invalid["impl-review"]["currency"], invalid["impl-review"]["currency_reason"]),
+                         ("resource-stage-not-current", "completion-marker-missing"))
+        self.assertEqual(invalid["test"]["depends_on_invalid"], ["impl-review"])
+        self.assertEqual(current["pending"], ["impl-review", "test", "report"])
+        self.assertTrue(R._reuse_preserved(current, current))
+        # Settled at claim, found unsettled before launch: the same successor continues it.
+        self.assertTrue(R._reuse_preserved(self.previous_snapshot(), current))
+        # Unproven evidence elsewhere keeps its refusal.
+        states["plan"] = ("integrity-broken:history-conflict", "completion-marker-history-conflict")
+        with self.assertRaises(D.DispatchContractError) as broken:
+            self.snapshot(states)
+        self.assertEqual((broken.exception.reason, broken.exception.detail),
+                         ("replacement-completion-unproven", "plan"))
 
     def test_claim_to_launch_drift_shrinks_the_same_successors_reuse_projection(self):
         settled = {node["id"]: ("current", "completion-marker-verified")
