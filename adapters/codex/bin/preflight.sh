@@ -392,7 +392,7 @@ case "$cmd" in
   prompt-signal)
     cwd=${2:-$PWD}
     sid=${3:-${CODEX_THREAD_ID:-codex}}
-    status=$(AGENT_ADAPTER=codex "$ROOT/utilities/harness-status.sh" "$cwd" "$sid")
+    status=$(AGENT_ADAPTER=codex "$ROOT/utilities/harness-status.sh" --signal "$cwd" "$sid")
     artifact_root_kind=$(printf '%s\n' "$status" | awk -F= '$1=="artifact_root_kind"{print $2; exit}')
     git_operation=$(printf '%s\n' "$status" | awk -F= '$1=="git_operation"{print $2; exit}')
     git_dirty_tracked=$(printf '%s\n' "$status" | awk -F= '$1=="git_dirty_tracked"{print $2; exit}')
