@@ -678,6 +678,38 @@ class ProjectMemoryAndCurrentTaskProjection(unittest.TestCase):
         self.assertIn("1 link · last good · observation unknown", stale_text)
 
 
+class ScreenWordLanguage(unittest.TestCase):
+    """Route-page and seat words read the shared catalog: English unless Korean is declared."""
+
+    def test_earlier_rounds_note(self):
+        from tools.fleet.explorer.live import _node_detail
+        node = {"id": "execute", "state": "active", "route_attempt_round": 3}
+        with mock.patch.dict("os.environ", {"FLEET_NOW_LANG": "Korean"}):
+            self.assertEqual(_node_detail(node, 0)["rounds_note"], "R3 · 앞 2회는 이 기록 밖")
+        with mock.patch.dict("os.environ", {"FLEET_NOW_LANG": "English"}):
+            self.assertEqual(_node_detail(node, 0)["rounds_note"], "R3 · earlier rounds outside this record: 2")
+            self.assertEqual(_node_detail({**node, "route_attempt_round": 1}, 0)["rounds_note"], "")
+
+    def test_seat_card_note_without_card_text(self):
+        from tools.fleet.explorer.grid import CellGrid
+        from tools.fleet.explorer.history import draw_seat_expand
+        from tools.fleet.explorer.state import NavState
+        from tools.fleet.explorer.view_model import ExplorerViewModel
+
+        for language, system, expected in (
+                ("Korean", {"usage_api": {"freshness": "21:36"}}, "21:36 전에 남은 카드 본문이 없습니다."),
+                ("Korean", {}, "읽은 카드 본문이 없습니다."),
+                ("English", {"usage_api": {"freshness": "21:36"}}, "no card text was kept before 21:36."),
+                ("English", {}, "no card text was read.")):
+            with self.subTest(language=language, system=system), \
+                    mock.patch.dict("os.environ", {"FLEET_NOW_LANG": language}):
+                grid = CellGrid(160, 6)
+                vm = ExplorerViewModel.from_mapping({"system": system})
+                draw_seat_expand(grid, vm, NavState(view="HISTORY"), "a1", 0, 150, 0, 5,
+                                 ("a1", "claude", 2, "10:00 · x"), "claude")
+                self.assertIn(expected, "\n".join(grid.rows_text()))
+
+
 class ParallelRouteProjection(unittest.TestCase):
     def test_idle_owner_state_stays_idle_while_active_route_stage_is_running(self):
         from types import SimpleNamespace
