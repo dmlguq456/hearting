@@ -870,6 +870,26 @@ class TmuxSurface:
     def answers(self):
         return self._tmux("display-message", "-p", "#{pid}") is not None
 
+    def notify(self, text, *, seconds=10):
+        """Show ``text`` once on every client attached to this server; display only.
+
+        Herdr's ``notification show`` counterpart: a status-line message, so nothing is
+        typed and no pane, focus, title or option changes. ``#`` is doubled so a
+        question is never read as a tmux format. True when a client was there to show it.
+        """
+        rows = self._rows(1, "list-clients", "-F", "#{client_name}")
+        message = str(text or "").replace("#", "##")
+        if not rows or not message:
+            return False
+        shown = False
+        for (client,) in rows[:16]:
+            ok = self._tmux("display-message", "-c", client, "-d", int(seconds * 1000),
+                            "--", message) is not None
+            if not ok:  # tmux before 3.2 has no -d; its own display-time applies
+                ok = self._tmux("display-message", "-c", client, "--", message) is not None
+            shown = ok or shown
+        return shown
+
     def agent(self, pane, *, table=None):
         """``herdr agent get``'s payload for one tmux pane; None when tmux cannot answer.
 

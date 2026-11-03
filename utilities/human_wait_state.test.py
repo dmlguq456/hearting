@@ -400,6 +400,110 @@ class HumanWaitStateTests(unittest.TestCase):
                                                 boundary="registered"))
         self.assertFalse((state.state_root() / "notifications").exists())
 
+    def _fake_notifiers(self, *, herdr_rc=None, clients="/dev/pts/9\n"):
+        """Fake herdr/tmux/notify-send on an otherwise empty PATH; each logs its argv."""
+        bin_dir = Path(self.tmp.name) / "notify-bin"
+        bin_dir.mkdir(exist_ok=True)
+        log = Path(self.tmp.name) / "notify.calls"
+        clients_file = Path(self.tmp.name) / "clients"
+        clients_file.write_text(clients, encoding="utf-8")
+        scripts = {
+            "tmux": "#!/bin/sh\nprintf 'tmux' >> \"$NOTIFY_LOG\"\nfor a; do printf ' [%s]' \"$a\" >> \"$NOTIFY_LOG\"; done\n"
+                    "printf '\\n' >> \"$NOTIFY_LOG\"\n"
+                    "case \" $* \" in *\" list-clients \"*) while IFS= read -r l; do printf '%s\\n' \"$l\"; done"
+                    " < \"$NOTIFY_CLIENTS\";; esac\nexit 0\n",
+            "notify-send": "#!/bin/sh\nprintf 'notify-send' >> \"$NOTIFY_LOG\"\n"
+                           "for a; do printf ' [%s]' \"$a\" >> \"$NOTIFY_LOG\"; done\nprintf '\\n' >> \"$NOTIFY_LOG\"\n",
+        }
+        herdr_rc_file = Path(self.tmp.name) / "herdr.rc"
+        if herdr_rc is not None:
+            herdr_rc_file.write_text("%d\n" % herdr_rc, encoding="utf-8")
+            scripts["herdr"] = ("#!/bin/sh\nprintf 'herdr %s\\n' \"$*\" >> \"$NOTIFY_LOG\"\n"
+                                "read rc < \"$NOTIFY_HERDR_RC\"\nexit \"$rc\"\n")
+        for name, body in scripts.items():
+            path = bin_dir / name
+            path.write_text(body, encoding="utf-8")
+            path.chmod(0o755)
+        return {"PATH": str(bin_dir), "NOTIFY_LOG": str(log), "NOTIFY_CLIENTS": str(clients_file),
+                "NOTIFY_HERDR_RC": str(herdr_rc_file), "TMUX": self._tmux_socket() + ",1,0"}, log
+
+    def _tmux_socket(self):
+        """A real (listening-free) Unix socket file standing in for this process's tmux server."""
+        import socket
+        directory = tempfile.mkdtemp(prefix="hws", dir="/tmp")
+        self.addCleanup(shutil.rmtree, directory, True)
+        path = os.path.join(directory, "s")
+        server = socket.socket(socket.AF_UNIX)
+        server.bind(path)
+        server.close()
+        return path
+
+    def test_without_herdr_a_question_reaches_tmux_clients_and_the_desktop_once(self):
+        env, log = self._fake_notifiers()
+        env.update(DISPLAY=":0", DBUS_SESSION_BUS_ADDRESS="unix:path=/nonexistent")
+        item = {"id": "S4:tmux", "question": "배포 #1 진행?", "since": time.time()}
+        sock = env["TMUX"].split(",")[0]
+        with mock.patch.dict(os.environ, env):
+            self.assertTrue(state._notify_item(item, boundary="registered"))
+            self.assertTrue(state._notify_item(item, boundary="registered"))
+        lines = log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(lines, [
+            "tmux [-S] [%s] [list-clients] [-F] [#{client_name}]" % sock,
+            "tmux [-S] [%s] [display-message] [-c] [/dev/pts/9] [-d] [10000] [--] [◑답변 필요: 배포 ##1 진행?]" % sock,
+            "notify-send [-a] [Hearting] [--] [◑답변 필요] [배포 #1 진행?]",
+        ])
+
+    def test_failed_herdr_is_retried_while_tmux_shows_the_reminder_once(self):
+        env, log = self._fake_notifiers(herdr_rc=1)
+        item = {"id": "S4:fallback", "question": "확인", "since": 1}
+        with mock.patch.dict(os.environ, env):
+            for key in ("DISPLAY", "WAYLAND_DISPLAY"):
+                os.environ.pop(key, None)  # a bare login: the desktop is never tried
+            # Herdr fails twice: each refresh tries Herdr again; tmux shows it once.
+            self.assertFalse(state._notify_item(item, boundary="6h", sound=True))
+            self.assertFalse(state._notify_item(item, boundary="6h", sound=True))
+            Path(env["NOTIFY_HERDR_RC"]).write_text("0\n", encoding="utf-8")
+            self.assertTrue(state._notify_item(item, boundary="6h", sound=True))
+            self.assertTrue(state._notify_item(item, boundary="6h", sound=True))  # delivered: no call
+        lines = log.read_text(encoding="utf-8").splitlines()
+        herdr = [line for line in lines if line.startswith("herdr ")]
+        self.assertEqual(len(herdr), 3)
+        self.assertTrue(all(line.startswith("herdr notification show ◑답변 필요 · ") and "--sound request" in line
+                            for line in herdr))
+        self.assertEqual(sum("[display-message] [-c] [/dev/pts/9]" in line for line in lines), 1)
+        self.assertFalse(any(line.startswith("notify-send") for line in lines))
+
+    def test_unseen_reminder_keeps_no_marker_and_shows_once_a_client_attaches(self):
+        env, log = self._fake_notifiers(clients="")
+        item = {"id": "S4:later", "question": "나중에", "since": time.time()}
+        with mock.patch.dict(os.environ, env):
+            for key in ("DISPLAY", "WAYLAND_DISPLAY"):
+                os.environ.pop(key, None)
+            self.assertFalse(state._notify_item(item, boundary="registered"))
+            self.assertEqual(list((state.state_root() / "notifications").glob("*.sent")), [])
+            Path(env["NOTIFY_CLIENTS"]).write_text("/dev/pts/3\n", encoding="utf-8")
+            self.assertTrue(state._notify_item(item, boundary="registered"))
+        self.assertEqual(sum("display-message" in line for line in log.read_text(encoding="utf-8").splitlines()), 1)
+        self.assertEqual(state._notification_available(), False)  # PATH is the empty bin again
+
+    def test_an_installed_tmux_nobody_runs_in_keeps_no_producer_or_notification(self):
+        env, log = self._fake_notifiers()
+        item = {"id": "S4:no-server", "question": "확인", "since": time.time()}
+        for tmux in (None, os.path.join(self.tmp.name, "not-a-socket")):
+            with self.subTest(tmux=tmux), mock.patch.dict(os.environ, env):
+                for key in ("TMUX", "DISPLAY", "WAYLAND_DISPLAY"):
+                    os.environ.pop(key, None)
+                if tmux:
+                    Path(tmux).write_text("", encoding="utf-8")
+                    os.environ["TMUX"] = tmux + ",1,0"
+                self.assertFalse(state._notification_available())
+                self.assertFalse(state._notify_item(item, boundary="registered"))
+                # Without a notifier the producer has no reminder boundary to stay for.
+                self.assertIsNone(state._notification_delay(
+                    [{"source": "S4", "since": time.time(), "stale": False}], time.time(),
+                    enabled=state._notification_available()))
+        self.assertFalse(log.exists())
+
     def test_producer_stays_only_for_future_current_notification_boundaries(self):
         now = 10_000.0
         item = {"source": "S3", "since": now - 1800, "stale": False}

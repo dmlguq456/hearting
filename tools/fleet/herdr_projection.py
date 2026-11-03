@@ -692,6 +692,11 @@ def project(harness: str, session_id: str, *, pane_id=None, worker=None,
     if observation is not None:
         observation.update(schema="hearting-pane-observation-v1", reason="not-attempted",
                            session_report="not-attempted", metadata_report="not-attempted")
+    if not pane and not (harness == "codex" and _in_shared_codex_service()):
+        # Without a Herdr pane, the tmux pane this runtime's hook runs in is the same
+        # kind of hint for all three harnesses; may_report below proves it. A shared
+        # Codex service inherited some other pane's environment, so it gets none.
+        pane = caller_tmux_pane()
     if _is_tmux_pane(pane):
         return _project_tmux(harness, session_id, pane, worker=worker, observation=observation,
                              permission=permission, display_relations=display_relations)
