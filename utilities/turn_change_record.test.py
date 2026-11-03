@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -16,6 +17,8 @@ from unittest import mock
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(ROOT / "tools"))
+from fleet import route_chain  # noqa: E402
 _spec = importlib.util.spec_from_file_location("turn_change_record", HERE / "turn_change_record.py")
 T = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(T)
@@ -138,9 +141,23 @@ class TurnAttributionTest(Fixture):
         (self.repo / "__pycache__" / "greet.cpython-312.pyc").write_bytes(b"\0")
         (self.repo / "stray.pyc").write_bytes(b"\0")
         (self.repo / ".pytest_cache" / "v").mkdir(parents=True)
+        (self.repo / ".pytest_cache" / ".gitignore").write_text("*\n")  # as pytest writes it
         (self.repo / ".pytest_cache" / "v" / "lastfailed").write_text("{}")
         self.assertEqual(self.end()["state"], "unchanged")
         self.assertEqual(self.calls, [])
+
+    def test_tracked_files_count_wherever_they_live(self):
+        (self.repo / "node_modules" / "pkg").mkdir(parents=True)
+        (self.repo / "node_modules" / "pkg" / "index.js").write_text("module.exports = 1\n")
+        (self.repo / "tools").mkdir()
+        (self.repo / "tools" / "cache.pyc").write_bytes(b"\0")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "vendored")
+        self.start()
+        (self.repo / "node_modules" / "pkg" / "index.js").write_text("module.exports = 2\n")
+        (self.repo / "tools" / "cache.pyc").write_bytes(b"\1")
+        self.assertEqual(self.end()["state"], "recorded")
+        self.assertEqual(self.calls[0]["sources"], [["node_modules/pkg/index.js", "tools/cache.pyc"]])
 
     def test_a_session_holding_its_own_route_here_runs_no_git_and_records_nothing(self):
         self.ledger_line("claude", SID, "rt-own")
@@ -275,6 +292,32 @@ class OpenRouteTest(Fixture):
         self.assertFalse(state["records"][str(self.root)]["closed"])
         self.assertEqual(state["pending"], [])
 
+    def test_a_record_closed_without_a_cycle_keeps_its_evidence_and_later_turns_beside_the_route(self):
+        routes = self.root / ".runtime" / "routes"
+        routes.mkdir(parents=True)
+        route = routes / "rt-a1.json"
+        route.write_text("{}")
+        work = T._work(self.env, "claude", SID, str(self.root))
+        work.mkdir(parents=True)
+        (work / "evidence.md").write_text("# Automatic change record\n\n## Turn one\ngreet.py\n")
+        (work / "summary.txt").write_text("Automatic record\n")
+
+        def run(argv, **kwargs):
+            refused = argv[2] == "finish"
+            return subprocess.CompletedProcess(argv, 1 if refused else 0, "", "finish-scoped-tracked-dirt" if refused else "")
+        with mock.patch.object(T.subprocess, "run", side_effect=run):
+            settled = T.settle(str(route), work, self.env)
+        self.assertEqual(settled["closed_by"], "close")
+        kept = T.kept_record(str(route))
+        self.assertEqual(kept, self.root / ".runtime" / "auto-record" / "rt-a1.md")
+        self.assertIn("Turn one", kept.read_text())
+        entry = {"route_file": str(route), "route_id": "rt-a1", "closed": True, "closed_by": "close"}
+        later = [{"id": "2", "root": str(self.root), "top": str(self.repo), "source": ["README.md"],
+                  "section": "## Turn two\nREADME.md\n"}]
+        self.assertTrue(T.append("claude", SID, self.repo, str(self.root), entry, later, self.env)["ok"])
+        self.assertIn("Turn two", kept.read_text())
+        self.assertIn("Turn one", kept.read_text())
+
     def test_finish_that_times_out_falls_back_to_close(self):
         work = self.tmp / "work-dir"
         work.mkdir()
@@ -310,11 +353,72 @@ class ConcurrencyTest(Fixture):
                               ["codex:other-thread"], self.env)
         self.assertIn("codex:other-thread (some of these changes may be theirs)", text)
 
-    def test_a_busy_session_lock_skips_the_start_instead_of_waiting(self):
+    def test_a_state_lock_held_past_its_wait_skips_the_start(self):
         path = T.state_path(self.env, "claude", SID)
-        with T._locked(path, 0.0) as held:
+        with T._locked(T._state_lock(path), 0.0) as held, mock.patch.object(T, "STATE_LOCK_WAIT", 0.3):
             self.assertTrue(held)
             self.assertEqual(self.start()["state"], "busy")
+
+    def test_the_next_turn_starts_and_is_kept_while_a_record_is_being_written(self):
+        # The person sends the next prompt while the first record is still composing.
+        inside = {}
+
+        def slow_recorder(harness, sid, top, root, items, env, remember=None):
+            inside["start"] = self.start()["state"]
+            (self.repo / "README.md").write_text("the next turn's edit\n")
+            return self.recorder(harness, sid, top, root, items, env, remember=remember)
+        self.start()
+        (self.repo / "greet.py").write_text('print("Hello")\n')
+        T.turn_end("claude", SID, str(self.repo), self.env, recorder=slow_recorder, appender=self.appender)
+        self.assertEqual(inside["start"], "baseline")
+        self.assertEqual(self.end()["state"], "appended")
+        self.assertEqual(self.appended, [[["README.md"]]])
+
+    def test_a_turn_that_ends_while_a_record_is_written_is_taken_by_that_record_pass(self):
+        ended = {}
+
+        def slow_recorder(harness, sid, top, root, items, env, remember=None):
+            self.start()
+            (self.repo / "README.md").write_text("the next turn's edit\n")
+            worker = threading.Thread(target=lambda: ended.update(self.end()))
+            worker.start()
+            deadline = time.monotonic() + 10
+            while len(self.state().get("pending") or []) < 2 and time.monotonic() < deadline:
+                time.sleep(0.05)
+            ended["worker"] = worker
+            return self.recorder(harness, sid, top, root, items, env, remember=remember)
+        self.start()
+        (self.repo / "greet.py").write_text('print("Hello")\n')
+        first = T.turn_end("claude", SID, str(self.repo), self.env, recorder=slow_recorder, appender=self.appender)
+        ended["worker"].join(30)
+        self.assertEqual(first["state"], "appended")
+        self.assertEqual(self.appended, [[["README.md"]]])
+        self.assertEqual(self.state()["pending"], [])
+        self.assertEqual(self.state()["records"][str(self.root)]["turns"], 2)
+
+
+class FleetChainTest(unittest.TestCase):
+    """An automatic record does not replace the session's own route chain in Fleet."""
+
+    def line(self, route_id, key, automatic=False, ts=0):
+        row = {"v": 1, "ts": ts, "event": "compose", "route_id": route_id, "campaign_key": key,
+               "route_file": f"/r/{route_id}.json"}
+        return {**row, "automatic": True} if automatic else row
+
+    def test_an_automatic_record_line_is_marked_and_does_not_end_the_session_chain(self):
+        auto = {"route_id": "rt-auto", "tracked_gate_evidence": {"artifact_guard": {
+            "satisfied": True, "source": T.GATE_VALUE}}, "selection": {}}
+        own = {"route_id": "rt-own", "tracked_gate_evidence": {"artifact_guard": {
+            "satisfied": True, "source": "compose-prechecked"}}, "selection": {}}
+        self.assertTrue(route_chain.build_line(auto, event="compose", harness="claude", session_id=SID,
+                                               route_file="/r/rt-auto.json")["automatic"])
+        self.assertNotIn("automatic", route_chain.build_line(own, event="compose", harness="claude",
+                                                             session_id=SID, route_file="/r/rt-own.json"))
+        lines = [self.line("rt-1", "foo", ts=1), self.line("rt-2", "foo", ts=2),
+                 self.line("rt-auto", None, automatic=True, ts=3)]
+        self.assertEqual([line["route_id"] for line in route_chain.current_segment(lines)], ["rt-1", "rt-2"])
+        # With nothing of its own, the session shows its automatic record.
+        self.assertEqual([line["route_id"] for line in route_chain.current_segment(lines[2:])], ["rt-auto"])
 
 
 class LaunchTest(unittest.TestCase):
@@ -410,7 +514,8 @@ class EndToEndTest(Fixture):
         self.assertIn("greet.py | 2 +-", evidence.read_text())
         ledger = [json.loads(line) for line in
                   (self.ledgers / "claude" / f"{SID}.jsonl").read_text().splitlines()]
-        self.assertEqual([(line["event"], line["campaign_key"]) for line in ledger], [("compose", None)])
+        self.assertEqual([(line["event"], line["campaign_key"], line.get("automatic")) for line in ledger],
+                         [("compose", None, True)])
 
         result = self.turn(lambda: (self.repo / "README.md").write_text("notes, revised\n"))
         self.assertEqual(result["state"], "appended", result)
