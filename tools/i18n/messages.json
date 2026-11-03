@@ -198,6 +198,14 @@
    "en": "[Direction notice] The two review legs agreed on a direction and left nothing to ask, so work started without asking{option}. If anything needs fixing, let me know in your next message.",
    "ko": "[방향 통지] 두 갈래 검토가 같은 방향을 내고 물을 것을 남기지 않아 묻지 않고 시작했습니다{option}. 고칠 점이 있으면 다음 말로 알려 주세요."
   },
+  "fleet.delivery.no_recipient": {
+   "en": " · no receiving session {count}",
+   "ko": " · 받을 세션 없음 {count}"
+  },
+  "fleet.gpu.unattributed": {
+   "en": "unattributed",
+   "ko": "미귀속"
+  },
   "fleet.history.no_card": {
    "en": "no card text was read.",
    "ko": "읽은 카드 본문이 없습니다."
@@ -217,6 +225,10 @@
   "fleet.install.waiting": {
    "en": "waiting to switch to {version}: {reason}",
    "ko": "{version}로 넘어가기 대기: {reason}"
+  },
+  "fleet.keys.kill_select": {
+   "en": "kill selection · ↑↓ move · x request kill · Esc cancel · q quit",
+   "ko": "종료 선택 · ↑↓ 이동 · x 종료 요청 · Esc 취소 · q 끝"
   },
   "fleet.loading": {
    "en": "loading",

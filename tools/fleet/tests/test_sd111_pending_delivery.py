@@ -822,6 +822,7 @@ class PendingDeliveryCountsTest(unittest.TestCase):
             self.assertEqual(self._observed_registry_count([manual[0]], {("claude", "unqualified")})["no_recipient"], 1)
             self.assertEqual(self._observed_registry_count([manual[0]], {manual[3]})["no_recipient"], 0)
 
+    @mock.patch.dict("os.environ", {"FLEET_NOW_LANG": "Korean"})   # Korean screen words
     def test_collected_intent_counts_reach_existing_render_projections(self):
         from fleet import render
         from fleet.explorer.live import build_view_model
@@ -914,6 +915,7 @@ class PendingDeliveryCountsTest(unittest.TestCase):
             self.assertEqual(unknown["pending"], 1)
             self.assertIsNone(unknown["no_recipient"])
 
+    @mock.patch.dict("os.environ", {"FLEET_NOW_LANG": "Korean"})   # Korean screen words
     def test_render_and_overview_show_known_count_but_never_unknown_as_zero(self):
         from fleet import render
         from fleet.explorer.live import build_view_model
@@ -944,6 +946,31 @@ class PendingDeliveryCountsTest(unittest.TestCase):
                         self.assertNotIn("받을 세션 없음", text)
                     self.assertNotIn("no_recipient", vm.system["peer_delivery"])
                 self.assertEqual(json.dumps(snapshot, sort_keys=True), before)
+
+
+class RenderWordLanguage(unittest.TestCase):
+    """The no-recipient count and the kill-selection key row read the shared catalog."""
+
+    def test_no_recipient_count_and_kill_selection_row(self):
+        from fleet import render
+        from fleet.explorer.chrome import draw_chrome
+        from fleet.explorer.grid import CellGrid
+        from fleet.explorer.state import NavState
+        from fleet.explorer.view_model import ExplorerViewModel
+        vm = ExplorerViewModel.from_mapping({"system": {"peer_delivery": {"pending": 3, "no_recipient": 2},
+                                                        "install": {"version": "v9"}}})
+        for language, words, keys in (
+                ("Korean", " · 받을 세션 없음 2", "종료 선택 · ↑↓ 이동 · x 종료 요청 · Esc 취소 · q 끝"),
+                ("English", " · no receiving session 2",
+                 "kill selection · ↑↓ move · x request kill · Esc cancel · q quit")):
+            with self.subTest(language=language), mock.patch.dict(os.environ, {"FLEET_NOW_LANG": language}), \
+                    mock.patch.object(render, "_PROMPT", None), mock.patch.object(render, "_SELECT_MODE", True):
+                self.assertEqual(render._delivery_pending_rows({"pending": 3, "no_recipient": 2}),
+                                 [[("  delivery pending: 3 · awaiting recipient" + words, "lvl_y")]])
+                grid = CellGrid(140, 45)
+                draw_chrome(grid, vm, NavState(view="SYSTEM"))
+                self.assertIn("pending" + words, grid.rows_text()[-1])
+                self.assertEqual(render._explorer_keys_provider(140)(None), (keys,))
 
 
 if __name__ == "__main__":

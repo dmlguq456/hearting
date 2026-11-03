@@ -48,6 +48,7 @@ from .model import (fmt_min, dash, project_of, exec_child_is_wait,
                     current_background_shell_jobs, session_parent_visible,
                     current_attempt_rank)
 from . import gitinfo, titles
+from .config import ui_text
 from .work_titles import readable as _readable_name, resource_name as _resource_name, resource_title_key, subject_command
 from .collectors import compute_hosts as _compute_hosts
 from .refresh import LiveSnapshot, RefreshPump, background_read, as_snapshot
@@ -3816,7 +3817,7 @@ def _delivery_pending_rows(counts):
         line = "  delivery pending: %d · awaiting recipient" % counts["pending"]
         no_recipient = counts.get("no_recipient")
         if isinstance(no_recipient, int) and not isinstance(no_recipient, bool):
-            line += " · 받을 세션 없음 %d" % no_recipient
+            line += ui_text("fleet.delivery.no_recipient", count=no_recipient)
         return [[(line, "lvl_y")]]
     return []
 
@@ -6517,7 +6518,8 @@ def _gpu_session_label(owner, sessions=None, display_snapshot=None):
     """Name only an exact session; workload labels carry no session identity."""
     key = _gpu_session_key(owner)
     if key is None:
-        return "미귀속", "미귀속"
+        unattributed = ui_text("fleet.gpu.unattributed")
+        return unattributed, unattributed
     session = next((s for s in sessions or () if key in _gpu_session_keys(s)), None)
     name = ""
     if session is not None:
@@ -7348,7 +7350,7 @@ def _explorer_keys_provider(width):
     if _PROMPT is not None:
         text = _snapshot_line(_prompt_segs(_PROMPT, width))
     elif _SELECT_MODE:
-        text = "종료 선택 · ↑↓ 이동 · x 종료 요청 · Esc 취소 · q 끝"
+        text = ui_text("fleet.keys.kill_select")
     else:
         return None
     return lambda rect: (text,)
