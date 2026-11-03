@@ -505,6 +505,12 @@ def main(argv=None) -> int:
         sweep_best_effort(args.jobs)
     except Exception:  # noqa: BLE001 -- independent best-effort retention
         pass
+    try:
+        # Settled history leaves the live registry for the dispatch archive, at most every few hours.
+        from dispatch_registry_archive import sweep_best_effort
+        sweep_best_effort(args.jobs)
+    except Exception:  # noqa: BLE001 -- independent best-effort retention
+        pass
     return result
 
 

@@ -661,6 +661,19 @@ def _rows(jobs):
     return rows
 
 
+def _archived_rows(jobs, route_id):
+    """`_rows` of the settled rows naming this route that the registry archive holds."""
+    from dispatch_registry_archive import archived_rows
+    rows = {}
+    for line in archived_rows(jobs, route_id):
+        fields = line.split("\t")
+        if len(fields) == 6:
+            meta = parse_registry_metadata(fields[5])
+            if meta.get("attempt_id"):
+                rows[meta["attempt_id"]] = (fields[1], meta)
+    return rows
+
+
 def _current_parent_session_id():
     """The calling native session owns delivery, never a witnessed sibling."""
     return default_parent_session_id()
@@ -2102,6 +2115,9 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
                                   sleep=sleep, clock=clock)
         owner = closed.get("terminal_owner_attempt_id")
         rows = _rows(jobs)
+        if owner and owner not in rows:
+            # A route closed long ago may have its settled rows in the dispatch archive.
+            rows = {**_archived_rows(jobs, route["route_id"]), **rows}
         if owner and owner not in rows:
             raise ValueError("closed-route-owner-missing")
         publication = None

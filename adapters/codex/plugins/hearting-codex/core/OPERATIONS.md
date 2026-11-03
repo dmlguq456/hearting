@@ -625,6 +625,15 @@ complete record boundaries under their writer lock, retaining a bounded set of
 closed segments. Their active inode and authoritative receipts/ACK records are
 not removed by this policy.
 
+**Dispatch registry archive.** The same post-exit tail, at most every six
+hours, moves settled history out of the live `jobs.log`: a group of rows that
+share an attempt or route id moves only as a whole, when every row ended at
+least 14 days ago, belongs to a route closed at least 14 days ago, owes no
+parent delivery and has no attempt log left. Rows go byte-exact to `<state root>/archive/registry-<YYYY-MM>/`
+(read by `dispatch-registry.py inventory --include-archive` and closed-route
+replay) and are synced there before the registry is replaced under its lock;
+uncertain evidence keeps a row live.
+
 Preflight doctors share the same failure presentation: preserve the check's
 exit status, report a bounded cause excerpt when available (favoring explicit
 reason/error lines and otherwise the final lines), and identify empty output.

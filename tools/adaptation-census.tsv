@@ -195,6 +195,7 @@ utility-deferred	dispatch_pending_delivery.py
 utility-deferred	dispatch_progress.test.py
 utility-deferred	dispatch_quality_peer.py
 utility-deferred	dispatch_registry.test.py
+utility-deferred	dispatch_registry_archive.py
 utility-deferred	dispatch_registry_cache.py
 utility-deferred	dispatch_registry_inventory.py
 utility-deferred	dispatch_retention.py
