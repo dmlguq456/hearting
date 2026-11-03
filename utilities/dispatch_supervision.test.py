@@ -502,7 +502,8 @@ except d.DispatchContractError as e: print(json.dumps({'reason':e.reason}))
             expected_epoch=1, expected_attempts={"att-owner"}, expected_sealed_batch_id="batch-test")
         self.assertIn("not workflow completion", supervision.render_text(first["receipt"]))
 
-    def test_completion_pending_notice_late_renders_exact_refusal_without_finish_requirement(self):
+    def test_output_invalid_notice_does_not_promise_automatic_retry(self):
+        # (also: renders the exact refusal late, without a finish requirement)
         import dispatch_terminal_commit
         self._notice_rows()
         receipt = supervision.materialize(
@@ -523,8 +524,9 @@ except d.DispatchContractError as e: print(json.dumps({'reason':e.reason}))
         self.assertNotIn("ignored", text)
         self.assertIn("event.json", text)
         self.assertIn("Correct the reported locator", text)
-        self.assertIn("retries closure automatically", text)
-        self.assertIn("read-only diagnosis", text)
+        self.assertIn("The next completion join judges closure again", text)
+        self.assertNotIn("retries closure automatically", text)   # no promise the runtime does not keep
+        self.assertIn("ead-only diagnosis", text)
         self.assertNotIn(" finish ", text)
         self.assertEqual(supervision.receipt_digest(receipt), digest)
 
