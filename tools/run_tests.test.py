@@ -1351,6 +1351,30 @@ class RetryFixture(RunTestsFixtureBase):
         self.assertIn("policy=unlisted-serial-retry", rows[0]["detail"])
         self.assertEqual((self.root / "attempts.txt").read_text(), "2")
 
+    def test_flaky_pass_names_each_test_that_failed_in_the_summary(self):
+        # One `flaky-pass:` line per failing test name, so CI logs count flakes per test.
+        write_suite(self.root, "retry.test.py", """
+            import unittest
+            from pathlib import Path
+
+            class Retry(unittest.TestCase):
+                def test_flaky(self):
+                    p = Path('attempts.txt')
+                    n = int(p.read_text()) + 1 if p.exists() else 1
+                    p.write_text(str(n))
+                    self.assertGreater(n, 1)
+
+                def test_steady(self):
+                    pass
+
+            unittest.main()
+        """)
+        result, rows = self.run_fixture([], extra_args=["--retries", "1"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(rows[0]["verdict"], "FLAKY-PASS")
+        lines = [line for line in result.stdout.splitlines() if line.startswith("flaky-pass: ")]
+        self.assertEqual(lines, ["flaky-pass: retry.test.py::Retry.test_flaky failed=1/2"])
+
     def test_unlisted_failure_that_fails_again_still_fails(self):
         self.write_retry_suite("all-fail")
         result, rows = self.run_fixture([], extra_args=["--retries", "1"])
@@ -1975,6 +1999,12 @@ class TimeoutDescendantReclaimFixture(RunTestsFixtureBase):
         result, rows = self.run_fixture([], extra_args=["--timeout", "10"])
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(rows[0]["verdict"], "PASS")
+        # The summary names the suite that left it running, for a CI-wide survey.
+        reaped = [line for line in result.stdout.splitlines()
+                  if line.startswith("fixture-processes-reaped: ")]
+        self.assertEqual(len(reaped), 1, result.stdout)
+        self.assertRegex(reaped[0], r"^fixture-processes-reaped: detached\.test\.py count=1 "
+                                    r"commands=python[0-9.]*$")
         pid = int(pidfile.read_text())
         deadline = time.monotonic() + 3
         while time.monotonic() < deadline:
