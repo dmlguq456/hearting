@@ -144,13 +144,15 @@ def registry_text(jobs):
 
 def _rows(lines):
     """Registry rows by attempt id. Callers re-read the same registry many times in one
-    process, so the last parse is reused for identical content; each call gets copies."""
+    process, so the last parse is reused for identical content; each call gets copies.
+    The memo keeps each row's line index, not a second split copy of every line: a
+    resident observer would otherwise hold the whole registry text twice."""
     lines = tuple(lines)
     key, cached = _ROWS_MEMO
     if cached is None or key != lines:
-        cached = _parse_rows(lines)
+        cached = _parse_rows(lines, keep_fields=False)
         _ROWS_MEMO[:] = [lines, cached]
-    return {aid: (list(fields), dict(meta)) for aid, (fields, meta) in cached.items()}
+    return {aid: (lines[index].split('\t'), dict(meta)) for aid, (index, meta) in cached.items()}
 
 
 _REGISTRY_ROWS_MEMO = [None, None]
@@ -177,9 +179,10 @@ def registry_rows(jobs):
     return cached
 
 
-def _parse_rows(lines):
+def _parse_rows(lines, *, keep_fields=True):
+    """Rows by attempt id: ``(fields, meta)``, or ``(line index, meta)`` without fields."""
     result = {}
-    for line in lines:
+    for index, line in enumerate(lines):
         fields = line.split('\t')
         if len(fields) != 6:
             continue
@@ -188,7 +191,7 @@ def _parse_rows(lines):
         if aid:
             if aid in result:
                 raise DC.DispatchContractError('replacement-attempt-ambiguous', aid)
-            result[aid] = (fields, meta)
+            result[aid] = (fields if keep_fields else index, meta)
     return result
 
 

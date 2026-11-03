@@ -134,6 +134,56 @@ class ControlledConsumerTestCase(unittest.TestCase):
   with controlled_process_scope(lambda:getattr(self,"jobs",None)):
    return super().run(result)
 
+class RegistryMetadataCacheTest(unittest.TestCase):
+ """The row parse cache keeps about one registry of row text, never every generation."""
+ def rows(self,count,start=0):
+  return [f"attempt_id=att-{i:06d},harness=codex,status_word=open,launch_claimed=1,"
+          f"note={'x'*40},log_file=/state/logs/row-{i:06d}.jsonl" for i in range(start,start+count)]
+ def test_results_match_a_plain_parse_and_each_caller_gets_its_own_dict(self):
+  cache=D._RegistryMetadataCache(64,1<<20)
+  for pipe in ["a=1,b=x=y,c,d=", "dup=1,dup=2", "", "k=v"]+self.rows(3):
+   expected=dict(part.split("=",1) for part in pipe.split(",") if "=" in part)
+   self.assertEqual(dict(cache(pipe)),expected)
+   self.assertEqual(dict(cache(pipe)),expected)
+  info=cache.cache_info()
+  self.assertEqual((info.hits,info.misses,info.maxsize,info.currsize),(7,7,64,7))
+  first,second=D.parse_registry_metadata("a=1"),D.parse_registry_metadata("a=1")
+  first["a"]="changed"
+  self.assertEqual(second,{"a":"1"})
+ def test_row_text_bound_drops_the_oldest_rows_first(self):
+  rows=self.rows(40)
+  budget=sum(len(pipe) for pipe in rows[:10])
+  cache=D._RegistryMetadataCache(1000,budget)
+  for pipe in rows:
+   cache(pipe)
+  self.assertLessEqual(cache._bytes,budget)
+  self.assertEqual(list(cache._entries),rows[-10:])
+  cache(rows[-10])                        # a hit refreshes, so the next miss drops rows[-9]
+  cache(self.rows(1,start=99)[0])
+  self.assertIn(rows[-10],cache._entries)
+  self.assertNotIn(rows[-9],cache._entries)
+  cache.cache_clear()
+  self.assertEqual((cache._bytes,cache.cache_info().currsize,len(cache._shared)),(0,0,0))
+ def test_field_names_and_short_values_are_shared_and_long_values_are_not(self):
+  cache=D._RegistryMetadataCache(64,1<<20)
+  left,right=(dict(cache(pipe)) for pipe in self.rows(2))
+  name=lambda row,key:next(k for k in row if k==key)
+  self.assertIs(name(left,"harness"),name(right,"harness"))
+  self.assertIs(left["harness"],right["harness"])
+  self.assertIs(left["launch_claimed"],right["launch_claimed"])
+  self.assertIsNot(left["note"],right["note"])            # 40 characters: not shared
+  with mock.patch.object(D,"_REGISTRY_METADATA_SHARED_MAX",4):
+   for pipe in self.rows(5,start=10):
+    cache(pipe)
+   self.assertLessEqual(len(cache._shared),4)
+ def test_the_module_cache_keeps_the_lru_surface_and_its_bounds(self):
+  info=D._registry_metadata_items.cache_info()
+  self.assertEqual(info.maxsize,D._REGISTRY_METADATA_CACHE_SIZE)
+  self.assertEqual(D._registry_metadata_items.maxbytes,D._REGISTRY_METADATA_CACHE_BYTES)
+  D._registry_metadata_items.cache_clear()
+  D.parse_registry_metadata("attempt_id=att-1");D.parse_registry_metadata("attempt_id=att-1")
+  self.assertEqual(D._registry_metadata_items.cache_info()[:2],(1,1))
+
 class PreviousBootQuiescenceTest(unittest.TestCase):
  def test_exact_retained_identity_uses_shared_host_proof_before_pid_reuse(self):
   import resource_run_registry as R
