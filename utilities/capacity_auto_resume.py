@@ -192,7 +192,26 @@ def _cleared(record: dict) -> bool:
         return False
 
 
-def run(path: Path, *, sleep=time.sleep, now=time.time, call=subprocess.run, cleared=_cleared) -> int:
+def follow_installed_release(path: Path) -> None:
+    """Hand this wait to the installed release before it resumes anything (same PID).
+
+    A wait can last days, and its usage recheck and notice would otherwise run
+    the code of the release that armed it. The record is the wait's only
+    state, so the installed release's `run` takes the same record from its
+    start; the log stream stays. A steady wait only reads the pointer.
+    """
+    from parent_next_directive import release_moved
+    if not release_moved(ROOT):
+        return
+    try:
+        import peer_obligations
+        peer_obligations.follow_installed_release(__file__, ["run", "--record", str(path)])
+    except Exception:  # noqa: BLE001 -- a failed move keeps waiting with this code
+        pass
+
+
+def run(path: Path, *, sleep=time.sleep, now=time.time, call=subprocess.run, cleared=_cleared,
+        follow=follow_installed_release) -> int:
     record = json.loads(path.read_text(encoding="utf-8"))
     epoch = _epoch(record.get("retry_at"))
     if record.get("state") != "armed" or epoch is None:
@@ -206,6 +225,7 @@ def run(path: Path, *, sleep=time.sleep, now=time.time, call=subprocess.run, cle
         sleep(min(POLL_SECONDS, max(0.0, deadline - now())))
         if not path.is_file():
             return 0
+        follow(path)
         if deadline > now() >= recheck_at:
             recheck_at = now() + RECHECK_SECONDS
             if cleared(record):

@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 import importlib.util,os,subprocess,sys,tempfile,unittest
-import hashlib,json
+import contextlib,hashlib,io,json
+from contextlib import ExitStack
 from pathlib import Path
+from unittest import mock
 P=Path(__file__).with_name("smoke-attestation.py"); S=importlib.util.spec_from_file_location("smoke",P); M=importlib.util.module_from_spec(S); S.loader.exec_module(M)
 ROOT=Path(__file__).resolve().parents[1]
 PROV=ROOT/"tools"/"lab-config-provenance.py"
@@ -350,5 +352,162 @@ class TestSmoke(unittest.TestCase):
    with self.assertRaises(ValueError) as ctx:
        M.verify(data)
    self.assertIn("config snapshot row is not bound to an input", str(ctx.exception))
+
+def _attest_environment(root):
+    home = Path(root) / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    env = dict(CLEAN_ENV)
+    env.update({
+        "HARNESS_DATA_ROOT": str(Path(root) / "share" / "hearting"),
+        "HARNESS_STATE_ROOT": str(Path(root) / "state"),
+        "HOME": str(home),
+    })
+    env.pop("XDG_DATA_HOME", None)
+    env.pop("XDG_STATE_HOME", None)
+    return env
+
+
+def _attest(root, inputs, env):
+    output = Path(root) / "attestation.json"
+    args = [sys.executable, str(P), "attest"]
+    for item in inputs:
+        args += ["--input", str(item)]
+    args += ["--cwd", str(root), "--output", str(output), "--", sys.executable, "-c", "pass"]
+    result = subprocess.run(args, cwd=str(root), env=env, text=True, capture_output=True)
+    return result, output
+
+
+def _load_distribution():
+    spec = importlib.util.spec_from_file_location(
+        "smoke_parity_distribution", ROOT / "tools" / "install" / "distribution.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+class TestAttestedInputReferences(unittest.TestCase):
+    """The smoke writer and the installer reader that keeps a bound release."""
+
+    def _release_input(self, root, name="v-old"):
+        release = Path(root) / "share" / "hearting" / "releases" / name
+        (release / "tools").mkdir(parents=True, exist_ok=True)
+        probe = release / "tools" / "probe.py"
+        probe.write_text("VALUE = 1\n", encoding="utf-8")
+        return release, probe
+
+    def _patch_cleanup(self, stack, distribution):
+        for name, value in {
+            "_stable_registry_snapshot": [],
+            "_open_route_launch_homes": ([], ""),
+            "_release_held_by_live_process": (False, ""),
+            "_release_projection_referenced": False,
+            "_succeed_dispatch_state": True,
+            "_migration_deletion_precondition": (True, ""),
+            "_retention_containment_precondition": (True, ""),
+        }.items():
+            stack.enter_context(mock.patch.object(distribution, name, return_value=value))
+
+    def test_attest_records_a_reference_only_for_release_tree_inputs(self):
+        with tempfile.TemporaryDirectory() as td:
+            env = _attest_environment(td)
+            _release, probe = self._release_input(td)
+            outside = Path(td) / "config.yaml"
+            outside.write_text("config\n", encoding="utf-8")
+            result, output = _attest(td, [probe, outside], env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            refs = Path(td) / "state" / "dispatch" / "attestation-refs.jsonl"
+            rows = [json.loads(line) for line in refs.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["schema_version"], 1)
+            self.assertEqual(rows[0]["inputs"], [str(probe.resolve())])
+            self.assertEqual(rows[0]["attestation"], str(output.resolve()))
+            self.assertTrue(M.verify(json.loads(output.read_text(encoding="utf-8"))))
+            # An attestation of only release-outside inputs writes no line at all.
+            refs.unlink()
+            result, _ = _attest(td, [outside], env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(refs.exists())
+
+    def test_reference_write_failure_does_not_change_the_attest_result(self):
+        with tempfile.TemporaryDirectory() as td:
+            env = _attest_environment(td)
+            _release, probe = self._release_input(td)
+            blocked = Path(td) / "state" / "dispatch"
+            Path(td, "state").mkdir()
+            blocked.write_text("not a directory", encoding="utf-8")
+            result, output = _attest(td, [probe], env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("attested-input reference not recorded", result.stderr)
+            self.assertTrue(M.verify(json.loads(output.read_text(encoding="utf-8"))))
+
+    def test_writer_and_installer_reader_share_the_reference_path_and_grammar(self):
+        distribution = _load_distribution()
+        for env in (
+            {"HARNESS_STATE_ROOT": "/tmp/fixture-state"},
+            {"XDG_STATE_HOME": "/tmp/fixture-xdg-state", "HOME": "/tmp/fixture-home"},
+            {"HOME": "/tmp/fixture-home"},
+        ):
+            self.assertEqual(M._attestation_refs_path(env),
+                             distribution._attestation_refs_path(env))
+        for env in (
+            {"HARNESS_DATA_ROOT": "/tmp/fixture-data"},
+            {"XDG_DATA_HOME": "/tmp/fixture-xdg-data", "HOME": "/tmp/fixture-home"},
+            {"HOME": "/tmp/fixture-home"},
+        ):
+            with mock.patch.dict(os.environ, env, clear=True):
+                self.assertEqual(M._data_root(env), distribution.data_root())
+        with tempfile.TemporaryDirectory() as td:
+            env = _attest_environment(td)
+            _release, probe = self._release_input(td)
+            result, output = _attest(td, [probe], env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(distribution._attestation_refs_snapshot(env),
+                             [(str(output.resolve()), str(probe.resolve()))])
+
+    def test_seal_cleanup_verify_round_trip_does_not_refuse_with_65(self):
+        distribution = _load_distribution()
+        with tempfile.TemporaryDirectory() as td:
+            env = _attest_environment(td)
+            releases = Path(td) / "share" / "hearting" / "releases"
+            for name, stamp in (("v-old", 1), ("v-middle", 2), ("v-newest", 3)):
+                (releases / name / "tools").mkdir(parents=True)
+                (releases / name / "tools" / "lab-config-provenance.py").write_text(
+                    "# fixture\n", encoding="utf-8")
+                os.utime(releases / name, (stamp, stamp))
+            old = releases / "v-old"
+            result, output = _attest(td, [old / "tools" / "lab-config-provenance.py"], env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+            with mock.patch.dict(os.environ, env), ExitStack() as stack, \
+                    contextlib.redirect_stderr(io.StringIO()):
+                self._patch_cleanup(stack, distribution)
+                distribution._cleanup_releases(set())
+            self.assertTrue(old.is_dir(), "the attested release must survive cleanup")
+            verified = subprocess.run(
+                [sys.executable, str(P), "verify", "--attestation", str(output)],
+                env=env, text=True, capture_output=True)
+            self.assertEqual(verified.returncode, 0, verified.stderr)
+            self.assertNotIn("stale smoke input", verified.stderr)
+
+            # Control (the person chose not to revive old seals): without the
+            # reference line the same seal is pruned and verify refuses early.
+            (Path(td) / "state" / "dispatch" / "attestation-refs.jsonl").unlink()
+            for name, stamp in (("v-middle", 10), ("v-newest", 11)):
+                (releases / name / "tools").mkdir(parents=True, exist_ok=True)
+                (releases / name / "tools" / "lab-config-provenance.py").write_text(
+                    "# fixture\n", encoding="utf-8")
+                os.utime(releases / name, (stamp, stamp))
+            with mock.patch.dict(os.environ, env), ExitStack() as stack, \
+                    contextlib.redirect_stderr(io.StringIO()):
+                self._patch_cleanup(stack, distribution)
+                distribution._cleanup_releases(set())
+            self.assertFalse(old.exists())
+            refused = subprocess.run(
+                [sys.executable, str(P), "verify", "--attestation", str(output)],
+                env=env, text=True, capture_output=True)
+            self.assertEqual(refused.returncode, 65, refused.stderr)
+            self.assertIn("stale smoke input", refused.stderr)
+
 
 if __name__=="__main__": unittest.main()

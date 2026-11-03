@@ -387,10 +387,6 @@ def build_isolated_env(tmpdir: Path, repo_root: Path = ROOT) -> dict[str, str]:
     env["HEARTING_CAMPAIGN_TITLE_AUTO"] = "off"
     # ...nor the framed route's advisory prior-art scan, which calls a real model.
     env["HEARTING_PRIOR_ART"] = "off"
-    # User-facing text defaults to English, but the suites' regression inputs
-    # are the Korean screens; pin them to the existing language path (a suite
-    # that checks English text overrides this itself).
-    env["FLEET_NOW_LANG"] = "Korean"
     # Same for the memory exchange: no detached worker races the temp-dir cleanup;
     # the scheduler's own suite turns it back on.
     env["MEM_EXCHANGE_AUTO"] = "0"

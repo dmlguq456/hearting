@@ -107,6 +107,14 @@ class TidyCase(unittest.TestCase):
 
 class LegacyNativeMigrationAccessTest(TidyCase):
 
+    def setUp(self):
+        super().setUp()
+        # A bare state read in this class must resolve the fixture root, not the
+        # developer's live session-tidy state (D fail-fast).
+        self.iso_environment = self.iso.patched_environ()
+        self.iso_environment.__enter__()
+        self.addCleanup(self.iso_environment.__exit__, None, None, None)
+
     def test_later_exact_source_migrates_after_empty_ready_observations(self):
         sid = "late-known-source-same-sid"
         pane = "fixture:late-known-source"
@@ -1095,6 +1103,11 @@ class NativeSessionContinuityTest(unittest.TestCase):
     def setUp(self):
         self.iso = isolated_env()
         self.addCleanup(self.iso.cleanup)
+        # Bare state reads outside the explicit blocks below must still resolve
+        # the fixture root, not the developer's live session-tidy state.
+        self.iso_environment = self.iso.patched_environ()
+        self.iso_environment.__enter__()
+        self.addCleanup(self.iso_environment.__exit__, None, None, None)
         self.cwd = self.iso.root / "project"
         self.cwd.mkdir()
         self.state = self.iso.xdg_state / "hearting" / "session-tidy"
@@ -1917,6 +1930,13 @@ class TailFirstReadingTest(TidyCase):
 
 class CompactObservationTest(TidyCase):
     SID = "sid-compact"
+
+    def setUp(self):
+        super().setUp()
+        # `run_hook` reads the state root directly; keep it on the fixture root.
+        self.iso_environment = self.iso.patched_environ()
+        self.iso_environment.__enter__()
+        self.addCleanup(self.iso_environment.__exit__, None, None, None)
 
     def test_last_reply_priority_precedes_conflicting_summary(self):
         summary = "요약 원문: 마지막 요청은 전달되지 않았고 결과도 미완료입니다."
@@ -4296,6 +4316,17 @@ class ClearHelperTest(TidyCase):
         req = {"schema": clear.SCHEMA, "nonce": "0123456789abcdef", "status": "reserved",
                "seat": seat.as_dict(), "harness": "codex", "sid": "thread-A",
                "herdr_transport": {"socket_path": seat.socket_path}}
+        # 10-21 regression: a bare reservation write outside patched_environ must
+        # fail fast instead of landing in the runner's or developer's live state.
+        ambient_state = Path(os.environ.get("XDG_STATE_HOME")
+                             or str(Path.home() / ".local" / "state"))
+        home_state = Path.home() / ".local" / "state"
+        bare_paths = [ambient_state / "hearting" / "session-tidy" / "clear" / f"{seat.key}.json",
+                      home_state / "hearting" / "session-tidy" / "clear" / f"{seat.key}.json"]
+        with self.assertRaises(st.StateError):
+            clear._write_reservation(req)
+        for bare_path in bare_paths:
+            self.assertFalse(bare_path.exists(), bare_path)
         process = mock.Mock(pid=4321)
         # The reservation is written and read back under the same isolated state root.
         with self.iso.patched_environ(self.extra):
@@ -4824,6 +4855,11 @@ class SeatHandoverTest(TidyCase):
 
     def setUp(self):
         super().setUp()
+        # The handover helpers read the state root directly; keep every bare
+        # call in this class on the fixture root (D fail-fast).
+        self.iso_environment = self.iso.patched_environ({"HERDR_PANE_ID": PANE})
+        self.iso_environment.__enter__()
+        self.addCleanup(self.iso_environment.__exit__, None, None, None)
         # Cross-harness seat fixtures supply their own native observations;
         # the test process's real daemon ancestry is covered by
         # utilities/pane_ownership.test.py instead.
@@ -6529,9 +6565,13 @@ class SeatHandoverTest(TidyCase):
         self.assertGreaterEqual(len(partial_calls), 2)
         self.assertEqual(rows, [])
         self.assertEqual(self.handover.handover_rows(seat), [])
-        self.assertEqual(st.read_bytes(transition_ledger) or b"", before)
-        after_failed_write = st._read_ledger_lines(successor, include_physical_relations=False)
-        self.assertFalse(any(row.get("event") == "handover" for row in after_failed_write))
+        after_failed_write = st.read_bytes(transition_ledger) or b""
+        self.assertTrue(after_failed_write.startswith(before))
+        appended = [json.loads(line) for line in after_failed_write[len(before):].decode().splitlines() if line]
+        self.assertTrue(appended)          # the normal start path still records its own rows
+        self.assertNotIn("handover", {row.get("event") for row in appended}, appended)
+        after_failed_rows = st._read_ledger_lines(successor, include_physical_relations=False)
+        self.assertFalse(any(row.get("event") == "handover" for row in after_failed_rows))
         with self.iso.patched_environ({"HERDR_PANE_ID": pane}):
             holder = self.handover.resolved_steward_relations(
                 "claude", "sid-A", seat_key=seat.key)[0]["holder"]["sid"]
@@ -6571,9 +6611,13 @@ class SeatHandoverTest(TidyCase):
         self.assertEqual(len(synced), 1)
         self.assertGreater(synced[0], 0)
         self.assertEqual(rows, [])
-        self.assertEqual(st.read_bytes(transition_ledger) or b"", before)
-        after_failed_write = st._read_ledger_lines(successor, include_physical_relations=False)
-        self.assertFalse(any(row.get("event") == "handover" for row in after_failed_write))
+        after_failed_write = st.read_bytes(transition_ledger) or b""
+        self.assertTrue(after_failed_write.startswith(before))
+        appended = [json.loads(line) for line in after_failed_write[len(before):].decode().splitlines() if line]
+        self.assertTrue(appended)          # the normal start path still records its own rows
+        self.assertNotIn("handover", {row.get("event") for row in appended}, appended)
+        after_failed_rows = st._read_ledger_lines(successor, include_physical_relations=False)
+        self.assertFalse(any(row.get("event") == "handover" for row in after_failed_rows))
         with self.iso.patched_environ({"HERDR_PANE_ID": pane}):
             self.assertEqual(self.handover.resolved_steward_relations(
                 "claude", "sid-A", seat_key=seat.key)[0]["holder"]["sid"], "sid-A")

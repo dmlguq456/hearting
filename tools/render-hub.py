@@ -64,8 +64,8 @@ GOVERNANCE_PLACEHOLDER = "__HUB_GOVERNANCE_HTML__"
 # Governance strip — repo-relative (label, path) pairs. "CORE" stands in for the
 # family's CLAUDE-equivalent bootstrap doc: this repo has no top-level CLAUDE.md
 # (that file is an adapter-side projection outside the portable repo), so this maps
-# to core/CORE.md, the doc every adapter bootstrap reads first (see core/CORE.md
-# Source Order / adapters/claude/CLAUDE.md item 1). Fixed list — code-level curation,
+# to core/CORE.md, the first row of every adapter bootstrap's "Where to look"
+# table (core/fragments/bootstrap-body.md). Fixed list — code-level curation,
 # same allowance as the ARTIFACT_DIRS folder list below.
 GOVERNANCE_DOCS = (
     ("CORE", "core/CORE.md"),

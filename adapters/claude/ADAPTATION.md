@@ -23,7 +23,8 @@ selected specialization. Changed files, commands, logs, and findings remain in
 the canonical artifact; the child returns only artifact path, verdict, and a
 one-line blocker. Registered print-mode workers and session-tidy support use a
 fresh `CLAUDE_CONFIG_DIR` with the attach template, linked login and copied user
-guard hooks/permissions. `--disable-slash-commands` removes skills and commands;
+guard hooks/permissions. Claude reads user rules only from its config home
+(`rules/*.md`), so the home also gets read-only copies of the user's rule files. `--disable-slash-commands` removes skills and commands;
 `--strict-mcp-config` with an empty MCP configuration excludes connectors.
 The normal project/local and managed settings remain, as does the native system
 prompt. The resumed owner uses the same options on every turn. This headless

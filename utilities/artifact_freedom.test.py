@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import time
 import sys
 import unittest
 from unittest import mock
@@ -169,6 +170,82 @@ class ArtifactFreedomTest(FX.ProducerTestBase):
             self.assertEqual(P.finalize(self.root, cycle_id=first["cycle_id"])["cycle_state"], "completed")
             self.assertEqual(len(self.control_events(first, record_path.name)), count)
         self.next_work(first)
+
+    def test_deleted_runtime_record_reads_the_index_head_not_the_full_index(self):
+        first = self.finished()
+        P.cycle_record_path(self.root, first["cycle_id"]).unlink()
+        index = P.artifact_admission._index_path(self.root)
+        time.sleep(0.15)  # past the index settle margin, so its head projection is current
+        P.artifact_admission.load_index(self.root)  # an ordinary reader leaves the head
+        P.artifact_admission.clear_index_cache()
+        real = P._read_json
+        read = []
+        with mock.patch.object(P, "_read_json", side_effect=lambda path: read.append(Path(path)) or real(path)), \
+                mock.patch.object(P.artifact_admission, "load_index", side_effect=AssertionError("full index read")):
+            record = P.read_cycle_record(self.root, first["cycle_id"])
+        self.assertEqual(record["cycle_id"], first["cycle_id"])
+        self.assertEqual(record["manifest_digest"],
+                         P.artifact_admission.load_index_head(self.root).manifests[first["cycle_id"]]["manifest_digest"])
+        self.assertNotIn(index, read)
+
+    def test_reconcile_skips_quiet_unchanged_cycles_and_still_sees_a_later_edit(self):
+        cycles = [self.finished(), self.finished("second", "second")]
+        records = {item["cycle_id"]: P.read_cycle_record(self.root, item["cycle_id"]) for item in cycles}
+        earliest = min(records, key=lambda cid: (records[cid].get("started_on") or "", cid))
+        later = next(item for item in cycles if item["cycle_id"] != earliest)
+        later_record = P.cycle_record_path(self.root, later["cycle_id"])
+        memo = P.producer_dir(self.root) / P.CONTROL_MEMO_NAME
+        with mock.patch.object(P, "_CONTROL_MEMO_SETTLE_NS", -1):
+            P.reconcile_root(self.root)
+            self.assertIn(later["cycle_id"], json.loads(memo.read_text())["cycles"])
+            real = P._read_json
+            read = []
+            with mock.patch.object(P, "_read_json", side_effect=lambda path: read.append(Path(path)) or real(path)):
+                P.reconcile_root(self.root)
+            self.assertNotIn(later_record, read)  # the quiet, unchanged cycle is not read again
+            self.assertIn(P.cycle_record_path(self.root, earliest), read)  # the earliest also watches INDEX
+            path = Path(later["cycle_dir"]) / "manifest.json"
+            document = json.loads(path.read_text())
+            document["cycle"]["title"] = "edited after a quiet look"
+            path.write_text(json.dumps(document))
+            P.reconcile_root(self.root)
+            P.reconcile_root(self.root)
+        P.deliver_pending_history(self.root)
+        self.assertEqual(len(self.control_events(later, "manifest.json")), 1)
+        memo.write_text("not json")  # a broken memo only means every cycle is read
+        P.reconcile_root(self.root)
+        P.deliver_pending_history(self.root)
+        self.assertEqual(len(self.control_events(later, "manifest.json")), 1)
+
+    def test_begin_retry_looks_again_when_the_hand_change_look_was_skipped(self):
+        # The look's own lock wait can run out (skipped); the cycle must not begin before it finished.
+        first = self.finished()
+        old = Path(first["cycle_dir"])
+        old.rename(old.with_name("renamed-by-hand"))
+        route, route_file = self.route(slug="after-hand-move", campaign_key="freedom")
+        real_acquire, calls = P.artifact_admission._acquire_lock, []
+
+        def acquire(*args, **kwargs):
+            calls.append(1)
+            if len(calls) <= 2:  # the look's lock, then the begin's lock
+                raise P.artifact_admission.AdmissionBusy("busy")
+            return real_acquire(*args, **kwargs)
+
+        statuses, real_reconcile = [], P.reconcile_root
+
+        def reconcile(root, **kwargs):
+            result = real_reconcile(root, **kwargs)
+            statuses.append(result["status"])
+            return result
+
+        with mock.patch.object(P.artifact_admission, "_acquire_lock", acquire), \
+                mock.patch.object(P, "reconcile_root", reconcile):
+            begun = P._begin_waiting_for_admission(self.root, route_file=route_file,
+                                                   capability="autopilot-code", intensity="direct")
+        self.assertEqual(begun["status"], "begun")
+        self.assertEqual(statuses, ["skipped", "reconciled"])
+        self.assertEqual(P.read_cycle_record(self.root, first["cycle_id"])["locator"], "renamed-by-hand")
+        self.assertEqual(P.reconcile_root(self.root)["status"], "unchanged")
 
     def test_deleted_generated_manifest_and_binding_are_logged_without_restoring_payload(self):
         first = self.finished()
