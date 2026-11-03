@@ -151,15 +151,19 @@
    "ko": " · 마지막으로 읽은 값"
   },
   "fleet.memory.db_state": {
-   "en": "memory DB {state}",
+   "en": "memory database {state}",
    "ko": "메모리 DB {state}"
+  },
+  "fleet.memory.db_suffix": {
+   "en": " · database {state}",
+   "ko": " · DB {state}"
   },
   "fleet.memory.db_unknown": {
    "en": " · decisions and to-dos unknown",
    "ko": " · 결정·남은 일 모름"
   },
   "fleet.memory.decisions": {
-   "en": "decided",
+   "en": "decisions",
    "ko": "결정"
   },
   "fleet.memory.expand": {
@@ -211,7 +215,7 @@
    "ko": "프로젝트 {projects} · 오늘 결정 {decisions} · 진행 중 {doing}"
   },
   "fleet.memory.status_db": {
-   "en": "projects {projects} · memory DB {state}",
+   "en": "projects {projects} · memory database {state}",
    "ko": "프로젝트 {projects} · 메모리 DB {state}"
   },
   "fleet.models.tidy_shared": {

@@ -626,8 +626,8 @@ class ProjectMemoryAndCurrentTaskProjection(unittest.TestCase):
         unread = self.memory_vm({"state": "unavailable", "stale": False, "decisions_today": None,
                                  "doing": None, "order": ["repo"], "projects": {}})
         text = "\n".join(draw(unread, NavState(view="MEMORY"), 140, 45).text_rows())
-        self.assertIn("memory DB unavailable · decisions and to-dos unknown", text)
-        self.assertIn("projects 1 · memory DB unavailable", text)
+        self.assertIn("memory database unavailable · decisions and to-dos unknown", text)
+        self.assertIn("projects 1 · memory database unavailable", text)
         items = [["doing", "10-26", "doing task", "a"], ["waiting", "10-27", "waiting task", "b"],
                  ["open", "10-30", "open task", "c"]]
         vm = self.memory_vm({"state": "failed", "stale": True, "decisions_today": 1, "doing": 1,
@@ -639,10 +639,10 @@ class ProjectMemoryAndCurrentTaskProjection(unittest.TestCase):
         state = NavState(view="MEMORY")
         frame = draw(vm, state, 140, 45)
         text = "\n".join(frame.text_rows())
-        for expected in ("memory DB failed · last good values", "last change 21:36", "decided  ",
+        for expected in ("memory database failed · last good values", "last change 21:36", "decisions  11-02",
                          "the decision", "to do", "in progress 1 · to verify 1 · open on record 1+",
                          "▶ expand", "in progress  doing task", "recent", "recent change",
-                         "projects 1 · decisions today 1 · in progress 1 · DB failed"):
+                         "projects 1 · decisions today 1 · in progress 1 · database failed"):
             self.assertIn(expected, text)
         self.assertIsNone(__import__("re").search(r"[가-힣]", text), text)
         hit = next(item for item in frame.hits if item.action == ("fold", "memory:open", "repo"))

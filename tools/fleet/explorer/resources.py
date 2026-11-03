@@ -198,14 +198,20 @@ def memory_status(vm):
     if data.get("decisions_today") is None:
         return ui_text("fleet.memory.status_db", projects=len(order), state=state)
     return (ui_text("fleet.memory.status", projects=len(order), decisions=data.get("decisions_today"),
-                    doing=data.get("doing", "·")) + ("" if state == "success" else f" · DB {state}"))
+                    doing=data.get("doing", "·"))
+            + ("" if state == "success" else ui_text("fleet.memory.db_suffix", state=state)))
 
 
-def _memory_line(grid, x, y, right, label, when, text, key="soft", mark=None):
+def _memory_column(labels):
+    """Where a memory row's time starts: two cells past the widest label, never before x+12."""
+    return max(12, 3 + max((cell_width(label) for label in labels), default=0) + 2)
+
+
+def _memory_line(grid, x, y, right, label, when, text, key="soft", mark=None, column=12):
     if label:
         grid.put(x + 3, y, label, "label", limit=right)
-    grid.put(x + 12, y, "·" if when is None else str(when), "dim", limit=right)
-    cursor = x + 19
+    grid.put(x + column, y, "·" if when is None else str(when), "dim", limit=right)
+    cursor = x + column + 7
     if mark is not None:
         word, mark_key = mark
         cursor = grid.put(cursor, y, word, mark_key, limit=right) + 2
@@ -228,6 +234,9 @@ def draw_memory(grid: CellGrid, vm, state=None, x=34, y=3):
         grid.put(x + 1, y, ui_text("fleet.memory.no_projects"), "dim", limit=right)
         return
     opened = state.opened_for("memory:open", "") if state is not None else ""
+    labels = {key: ui_text(key)
+              for key in ("fleet.memory.decisions", "fleet.memory.open_work", "fleet.memory.recent")}
+    column = _memory_column(labels.values())
     for index, name in enumerate(order):
         if index:
             y = _group_sep(grid, x, use, y)
@@ -242,14 +251,14 @@ def draw_memory(grid: CellGrid, vm, state=None, x=34, y=3):
         y += 1
         for row_index, row in enumerate(tuple(project.get("decisions") or ())):
             when, text = (tuple(row) + (None,) * 2)[:2]
-            y = _memory_line(grid, x, y, right, ui_text("fleet.memory.decisions") if row_index == 0 else None,
-                             when, text)
+            y = _memory_line(grid, x, y, right, labels["fleet.memory.decisions"] if row_index == 0 else None,
+                             when, text, column=column)
         items = tuple(project.get("open") or ())
         if items:
             counts = project.get("counts") if isinstance(project.get("counts"), Mapping) else {}
             grid.add_hit(y, x, right, ("fold", "memory:open", name))
-            grid.put(x + 3, y, ui_text("fleet.memory.open_work"), "label", limit=right)
-            cursor = x + 12
+            grid.put(x + 3, y, labels["fleet.memory.open_work"], "label", limit=right)
+            cursor = x + column
             more = "+" if project.get("limited") else ""
             parts = [(ui_text("fleet.memory.count_doing", count=counts.get("doing", 0)), "g_spin_dim"),
                      (ui_text("fleet.memory.count_waiting", count=counts.get("waiting", 0)), "lvl_y"),
@@ -271,12 +280,12 @@ def draw_memory(grid: CellGrid, vm, state=None, x=34, y=3):
                 stage, when, text = (tuple(row) + (None,) * 3)[:3]
                 word = OPEN_STAGE_WORDS.get(stage)
                 word = (ui_text(word[0]), word[1]) if word else (str(stage), "dim")
-                y = _memory_line(grid, x, y, right, None, when, text, mark=word)
+                y = _memory_line(grid, x, y, right, None, when, text, mark=word, column=column)
         for row_index, row in enumerate(recent[:2]):
             when, action, _kind, text = (tuple(row) + (None,) * 4)[:4]
             saved = action == "saved"
-            y = _memory_line(grid, x, y, right, ui_text("fleet.memory.recent") if row_index == 0 else None,
-                             when, text,
+            y = _memory_line(grid, x, y, right, labels["fleet.memory.recent"] if row_index == 0 else None,
+                             when, text, column=column,
                              key="soft" if saved else "now_sub",
                              mark=("+", "done") if saved else ("·", "dim"))
 
