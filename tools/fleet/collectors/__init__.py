@@ -558,6 +558,13 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
                 job_key, "herdr", observed.get("last_error") if not observed.get("complete") else None)
     except Exception as exc:
         observations["herdr"] = _observation_health(job_key, "herdr", "%s: %s" % (type(exc).__name__, exc))
+    if not fast_first:
+        # aedd50: the tmux pane of sessions Herdr did not place (display only).
+        try:
+            from . import tmux as _tmux
+            _tmux.enrich(sessions)
+        except Exception:
+            pass
     for s in sessions:
         if s.harness == "claude" and enrichers.get("claude"):
             try:
