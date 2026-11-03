@@ -1909,7 +1909,8 @@ class OwnerTerminalPlacementReplayTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(jobs),
                                           "AGENT_ARTIFACT_ROOT": str(fixture.root)}):
             refused = T.settle_terminal_commit(request)
-            self.assertEqual((refused.result, refused.reason), ("recoverable", "producer-finalize-failed"), refused)
+            # The same files give the same refusal: it is the owner's (a person's) to fix.
+            self.assertEqual((refused.result, refused.reason), ("needs-owner", "producer-finalize-failed"), refused)
             attempts = T._commit_state_path(request).parent / "attempts"
             records = [json.loads(path.read_text(encoding="utf-8")) for path in attempts.glob("*.json")]
             record = next(row for row in records if row.get("reason") == "producer-finalize-failed")
@@ -1937,6 +1938,75 @@ class OwnerTerminalPlacementReplayTest(unittest.TestCase):
             self.assertIn("retries closure automatically", notice)
             self.assertEqual(supervision.receipt_digest(receipt), receipt_digest)
         self.assertEqual(bad.read_bytes(), before_bad)
+
+    def _invalid_output_owner(self):
+        from dispatch_completion_join import exact_attempt_row
+
+        fixture = PRODUCER_FIXTURE.TerminalTransactionIntegrationTest()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        route, route_file, jobs, owner, cycle, _artifact, request = fixture._prepare_fixture("codex")
+        evidence = Path(cycle["cycle_dir"]) / "artifacts" / "evidence" / "results"
+        evidence.mkdir(parents=True)
+        bad = evidence / "bad|name.txt"
+        bad.write_bytes(b"preserve invalid locator payload")
+        log = jobs.parent / "owner.jsonl"
+        text = f"artifact: {bad}\nverdict: PASS\nblocker: none"
+        log.write_text(json.dumps({"type": "item.completed", "item": {
+            "type": "agent_message", "text": text}}) + "\n" +
+            json.dumps({"type": "turn.completed"}) + "\n", encoding="utf-8")
+        jobs.write_text(jobs.read_text().replace("worker_type=owner",
+            f"attempt_schema_version=2,worker_type=owner,log_file={log},workflow_completion=runtime-v1"))
+        fixture._closed_owner(jobs, owner)
+        return fixture, jobs, request, bad, exact_attempt_row(jobs, owner).metadata
+
+    def _controller_passes(self, jobs, request, meta, passes):
+        """What the steward does each pass: settle only an owner whose completion is still pending."""
+        import artifact_producer
+        calls = []
+        real = artifact_producer.finalize_exact_cycle
+
+        def counted(*args, **kwargs):
+            calls.append(1)
+            return real(*args, **kwargs)
+
+        with mock.patch.object(artifact_producer, "finalize_exact_cycle", side_effect=counted):
+            for _ in range(passes):
+                if T.owner_completion_pending(jobs, "done", meta):
+                    T.settle_terminal_commit(request)
+        return len(calls)
+
+    def test_an_invalid_output_refusal_is_held_until_a_named_file_changes(self):
+        # W3 (2026-11-03): rt-a19fd722eb999f4c's settlement was refused 3,721 times for one
+        # file name, about every pass, each try reading the cycle and taking the root's lock.
+        fixture, jobs, request, bad, meta = self._invalid_output_owner()
+        with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(jobs),
+                                          "AGENT_ARTIFACT_ROOT": str(fixture.root)}):
+            self.assertEqual(self._controller_passes(jobs, request, meta, 3), 1)
+            state = T.owner_completion_state(jobs, "done", meta)
+            self.assertEqual((state.state, state.reason), ("blocked", "producer-finalize-refused"))
+            refusal = T.inspect_owner_completion(jobs, "done", meta)["last_refusal"]
+            self.assertEqual(refusal["count"], 1)
+            self.assertIn("bad|name.txt", refusal["detail"])
+            self.assertIn("Correct the reported locator", refusal["remediation"])
+            bad.rename(bad.with_name("bad-name.txt"))     # a person fixes the name
+            self.assertTrue(T.owner_completion_pending(jobs, "done", meta))
+            self.assertEqual(self._controller_passes(jobs, request, meta, 1), 1)
+            self.assertNotEqual(T.owner_completion_state(jobs, "done", meta).reason,
+                                "producer-finalize-refused")
+
+    def test_a_refusal_that_can_change_is_still_settled_again_each_pass(self):
+        import artifact_producer
+        fixture, jobs, request, bad, meta = self._invalid_output_owner()
+        bad.rename(bad.with_name("bad-name.txt"))
+        busy = artifact_producer.ProducerError("cycle-finalize-blocked-live-review", "live lease")
+        with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(jobs),
+                                          "AGENT_ARTIFACT_ROOT": str(fixture.root)}), \
+                mock.patch.object(artifact_producer, "finalize_exact_cycle", side_effect=busy) as finalize:
+            for _ in range(3):
+                if T.owner_completion_pending(jobs, "done", meta):
+                    T.settle_terminal_commit(request)
+        self.assertEqual(finalize.call_count, 3)
 
     def test_a_replayed_settlement_after_a_checkpoint_completes_for_every_harness(self):
         for harness in ("claude", "codex", "opencode"):
