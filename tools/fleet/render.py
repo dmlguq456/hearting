@@ -12609,6 +12609,11 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
                   governor=governor_snapshot, loading=(generation == 0), snapshot=snapshot)
     finally:
         if _EXPLORER_ENABLED:
+            # The screen guard's writer may still be sending a frame: these bytes go
+            # after it, and a terminal that stopped reading cannot hold the quit.
+            settle = getattr(stdscr, "settle", None)
+            if callable(settle):
+                settle()
             try:
                 os.write(sys.stdout.fileno(), b"\x1b[?1006l\x1b[?1002l")
             except (OSError, AttributeError):
