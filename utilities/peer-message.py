@@ -3806,6 +3806,9 @@ def retry_pending_codex(recipient, *, deadline=None):
         deliver_pending_codex(row["ref"], timeout=0.25)
 
 
+_LATE_CLAIM_WINDOW_S = 1.0
+
+
 def emit_peer_context(recipient, event=None, *, extra_context="", stream=None,
                       native_delivery=False, deadline=None):
     """Use an existing native context boundary, settling only exact Claude delivery.
@@ -3816,6 +3819,9 @@ def emit_peer_context(recipient, event=None, *, extra_context="", stream=None,
     successful flush that boundary is recipient consumption under SD-113. Exact
     receive validation and its existing writer still own the receipt/obligation
     transition. CLI rendering and failed flushes remain unreceived.
+
+    ``extra_context`` may be a callable; it runs after the claims, so the
+    caller's fallback text never takes time from exact delivery.
 
     ``deadline`` (``time.monotonic()``) bounds the work before the flush: a hook
     passes it so a slow disk costs at most that much of the user's prompt. Once
@@ -3831,12 +3837,21 @@ def emit_peer_context(recipient, event=None, *, extra_context="", stream=None,
     def expired():
         return deadline is not None and time.monotonic() >= deadline
 
+    def claim_limit():
+        # Each claim is settled after the flush (receipt writes with fsync), and
+        # a hook cancelled after a settle loses what it showed. When the budget is
+        # nearly spent the disk is slow, so take one row and leave the rest
+        # pending for the next boundary.
+        if deadline is not None and deadline - time.monotonic() < _LATE_CLAIM_WINDOW_S:
+            return 1
+        return 3
+
     if recipient["harness"] == "codex":
         retry_pending_codex(recipient, deadline=deadline)
     rows = list(_pending_rows(recipient=recipient, sender=recipient, deadline=deadline))
     if recipient["harness"] == "claude":
         for row in rows:
-            if len(claims) >= 3 or expired():
+            if len(claims) >= claim_limit() or expired():
                 break
             if not _same_transfer_session(pending_delivery_recipient(row), recipient):
                 continue
@@ -3888,6 +3903,13 @@ def emit_peer_context(recipient, event=None, *, extra_context="", stream=None,
         warnings.append(row["ref"])
         if len(warnings) >= 3:
             break
+    if callable(extra_context):
+        # A caller's own fallback text, built with whatever budget the exact
+        # deliveries above left over; its failure never strands their claims.
+        try:
+            extra_context = extra_context()
+        except Exception:  # noqa: BLE001
+            extra_context = ""
     if extra_context:
         context.append(extra_context)
     if not context:

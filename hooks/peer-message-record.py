@@ -43,8 +43,8 @@ _SWEEP_MAX = 5
 # Reading and claiming before the flush (the hook timeout is 10 s). A normal
 # prompt needs well under a second of it; a loaded disk stops here.
 _HOOK_BUDGET_S = 2.5
-# The watch sweep is the fallback carrier, so it may use only this much of the
-# budget and the exact peer-message delivery keeps the rest.
+# The watch sweep is the fallback carrier: it runs after the exact peer-message
+# claims and may use at most this much of what they left.
 _SWEEP_SHARE_S = 1.0
 # ACKs for receipts already shown. One left undone shows its line again on the
 # next prompt, which is better than a cancelled hook losing the whole context.
@@ -298,8 +298,8 @@ def sweep_undelivered(payload, deadline=None):
     behind it would silence the fallback forever (review M2).
     """
     session_id = payload.get("session_id")
-    if not session_id:
-        return []
+    if not session_id or (deadline is not None and time.monotonic() >= deadline):
+        return []  # Startup already spent the share: the receipts wait on disk.
     try:
         steward = _steward_module()
         if steward is None:
@@ -375,32 +375,41 @@ def main():
             handle_prompt(payload)
         except Exception:
             pass
-        rows = sweep_undelivered(
-            payload, deadline=min(_deadline(), time.monotonic() + _SWEEP_SHARE_S))
-        extra = ""
-        if rows:
-            # The only stdout this path ever writes, and only when something is
-            # actually pending. Written and flushed BEFORE the acks (review M2).
-            extra = "\n".join(
-                    ["[peer-steward] undelivered watch receipts:"]
-                    + [_typed_watch_line(row) for row in rows]
-                )
+        prompt = payload.get("prompt") or ""
         mod = _peer_message_module()
-        if mod and ("peer-from:" in (payload.get("prompt") or "")
-                    or "runtime-from:" in (payload.get("prompt") or "")
-                    or "cross-session-message" in (payload.get("prompt") or "")):
-            extra = "\n".join(filter(None, [extra, mod.receiver_guidance(
-                payload.get("prompt") or "",
-                {"harness": "claude", "session_id": payload.get("session_id")},
-                cwd=payload.get("cwd") or os.getcwd())]))
+        guidance = ""
+        if mod and ("peer-from:" in prompt or "runtime-from:" in prompt
+                    or "cross-session-message" in prompt):
+            guidance = mod.receiver_guidance(
+                prompt, {"harness": "claude", "session_id": payload.get("session_id")},
+                cwd=payload.get("cwd") or os.getcwd())
+        rows = []
+
+        def extra_context():
+            # The watch sweep is the fallback carrier (asyncRewake is the primary),
+            # so it runs after the exact peer-message claims, in what they left.
+            rows.extend(sweep_undelivered(
+                payload, deadline=min(_deadline(), time.monotonic() + _SWEEP_SHARE_S)))
+            sweep = ""
+            if rows:
+                # The only stdout this path ever writes, and only when something is
+                # actually pending. Written and flushed BEFORE the acks (review M2).
+                sweep = "\n".join(
+                    ["[peer-steward] undelivered watch receipts:"]
+                    + [_typed_watch_line(row) for row in rows])
+            return "\n".join(filter(None, [sweep, guidance]))
+
         if mod:
             mod.emit_peer_context({"harness": "claude", "session_id": payload.get("session_id")},
-                                  "UserPromptSubmit", extra_context=extra, native_delivery=True,
-                                  deadline=_deadline())
-        elif extra:
-            print(json.dumps({"hookSpecificOutput": {
-                "hookEventName": "UserPromptSubmit", "additionalContext": extra}}, ensure_ascii=False))
-            sys.stdout.flush()
+                                  "UserPromptSubmit", extra_context=extra_context,
+                                  native_delivery=True, deadline=_deadline())
+        else:
+            extra = extra_context()
+            if extra:
+                print(json.dumps({"hookSpecificOutput": {
+                    "hookEventName": "UserPromptSubmit", "additionalContext": extra}},
+                    ensure_ascii=False))
+                sys.stdout.flush()
         if rows:
             ack_rows(payload, rows, deadline=_deadline() + _ACK_ALLOWANCE_S)
 

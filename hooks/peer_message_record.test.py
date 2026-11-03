@@ -1007,6 +1007,27 @@ class BoundedPromptPathTest(_BaseTest):
         again, _elapsed = self._prompt_in_process(self._hook(), sid)
         self.assertEqual(again, "")
 
+    def test_a_nearly_spent_budget_claims_one_row_and_leaves_the_rest_pending(self):
+        sid = "sid-late-claims"
+        seeded = {self._seed_message(recipient_sid=sid, body=f"[steer] late body {index}")[1]
+                  for index in range(3)}
+        recipient = {"harness": "claude", "session_id": sid}
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            # Under a second left: each claim is settled after the flush, so only one.
+            peer_message.emit_peer_context(recipient, "UserPromptSubmit", stream=out,
+                                           native_delivery=True,
+                                           deadline=time.monotonic() + 0.95)
+        context = json.loads(out.getvalue())["hookSpecificOutput"]["additionalContext"]
+        self.assertEqual(context.count("late body"), 1)
+        received = {ref for ref in seeded if self._state(ref)[0] == "received"}
+        self.assertEqual(len(received), 1)
+        # The other two keep their state and the next ordinary boundary takes them.
+        later, _elapsed = self._prompt_in_process(self._hook(), sid)
+        self.assertEqual(json.loads(later)["hookSpecificOutput"]["additionalContext"]
+                         .count("late body"), 2)
+        self.assertEqual({ref for ref in seeded if self._state(ref)[0] == "received"}, seeded)
+
     def test_a_slow_store_costs_the_prompt_at_most_its_budget(self):
         sid = "sid-slow-store"
         text, ref = self._seed_message(recipient_sid=sid)
