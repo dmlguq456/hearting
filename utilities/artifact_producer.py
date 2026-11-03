@@ -2293,8 +2293,10 @@ def _begin_waiting_for_admission(root: Path, **kwargs: Any) -> Dict[str, Any]:
     deadline = time.monotonic() + OWNER_LAUNCH_ADMISSION_WAIT_SECONDS
     # A node begin never looks for hand changes, and neither does the launch binding: it only
     # resumes the cycle the same start's preparation began (and looked for) seconds before.
-    # Nor does a frame leg joining the cycle its live sibling leg's preparation began and looked
-    # for (`sibling_looked`); that preparation also handed the waiting history lines over.
+    # Nor does a frame leg joining the cycle of its live sibling leg (`sibling_looked`), whenever
+    # this route's later start launches it: the sibling's preparation looked the root over and
+    # handed the waiting history lines over before beginning this cycle. A hand change or a line
+    # since then is found by the next begin, listing or campaign close (reconcile is best effort).
     sibling_looked = bool(kwargs.pop("sibling_looked", False))
     looked = kwargs.get("node_id") is not None or bool(kwargs.get("resume_only")) or sibling_looked
     while True:
@@ -2358,8 +2360,9 @@ def prepare_route_artifact_env(route_file: Path, *, start: bool, jobs: Path,
 
     Start owns idempotent preparation. Readiness checks only read an existing
     cycle. No inherited cycle or 'latest' directory participates in selection.
-    `sibling_looked`: a live sibling leg of the same route prepared this cycle, so this
-    start does not walk the root for hand changes or waiting history lines again.
+    `sibling_looked`: a live sibling leg of the same route prepared this cycle (in this start
+    or an earlier one), so this preparation does not walk the root for hand changes or waiting
+    history lines again; the next begin, listing or campaign close does.
     """
     raw = _read_json(route_file)
     if not isinstance(raw, dict) or not raw.get("artifact_root"):
