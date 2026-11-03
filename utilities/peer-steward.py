@@ -10764,15 +10764,19 @@ def _runner_maintenance_pass(store):
         canonical = root == stable_state_root(os.environ).resolve()   # never a fixture's own root
         if (canonical and jobs.is_file()
                 and peer_obligations.runner_duty_due(state, MAINTENANCE_DUE_SECONDS)):
+            # Recorded first: a start that fails is not retried before the next due window.
+            peer_obligations.write_runner_duty_state(
+                root, "retention", {"last_pass_ns": time.time_ns()},
+                expected_root_identity=identity)
             child = subprocess.Popen(
                 [sys.executable, str(Path(__file__).resolve().parent / "dispatch_registry_archive.py"),
                  "retention", "--jobs", str(jobs)],
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 start_new_session=True, close_fds=True, cwd=str(root))
+            # It forks the passes off and exits at once, so this wait is short and leaves no zombie.
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                child.wait(timeout=10)
             result["retention"] = {"started": child.pid}
-            peer_obligations.write_runner_duty_state(
-                root, "retention", {"last_pass_ns": time.time_ns(), "pid": child.pid},
-                expected_root_identity=identity)
     except (OSError, ValueError, RuntimeError):
         pass
     return result

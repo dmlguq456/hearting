@@ -311,9 +311,13 @@ class RetentionPassesTest(unittest.TestCase):
                     raise OSError("broken")
             return mock.Mock(sweep_best_effort=sweep)
         modules = {name: module(name, fail=(name == "dispatch_log_retention")) for name in A.RETENTION_PASSES}
-        with mock.patch.object(importlib, "import_module", side_effect=lambda name: modules[name]):
+        with mock.patch.object(importlib, "import_module", side_effect=lambda name: modules[name]), \
+                mock.patch.object(A.os, "fork", return_value=0) as fork, \
+                mock.patch.object(A.os, "nice") as nice:
             A.retention_passes("/state/jobs.log")
-            self.assertEqual(A._main(["retention", "--jobs", "/state/jobs.log"]), 0)
+            self.assertEqual(A._main(["retention", "--jobs", "/state/jobs.log"]), 0)   # the grandchild
+        fork.assert_called_once_with()
+        nice.assert_called_once_with(10)
         expected = [(name, "/state/jobs.log") for name in A.RETENTION_PASSES]
         self.assertEqual(calls, expected * 2)
 

@@ -549,7 +549,16 @@ class ReconcileDutyTest(IsolatedCase):
         self.assertTrue(argv[1].endswith("utilities/dispatch_registry_archive.py"))
         self.assertEqual(argv[2:], ["retention", "--jobs", str(self.root / "jobs.log")])
         self.assertTrue(kwargs["start_new_session"])
-        self.assertEqual(peer_obligations.read_runner_duty_state(self.root, "retention")["pid"], 4242)
+        popen.return_value.wait.assert_called_with(timeout=10)   # its child exits at once: no zombie
+
+    def test_a_retention_start_that_fails_is_not_retried_before_its_due_window(self):
+        import dispatch_contract
+        with mock.patch.object(peer_steward.subprocess, "Popen", side_effect=OSError("no fork")) as popen, \
+                mock.patch.object(dispatch_contract, "stable_state_root", return_value=self.root):
+            peer_steward._runner_maintenance_pass(self.store)
+            peer_steward._runner_maintenance_pass(self.store)
+        self.assertEqual(len(self._retention_starts(popen)), 1)
+        self.assertTrue(peer_obligations.read_runner_duty_state(self.root, "retention")["last_pass_ns"])
 
     def test_maintenance_pass_never_starts_retention_for_a_fixture_root(self):
         with mock.patch.object(peer_steward.subprocess, "Popen") as popen:

@@ -599,7 +599,13 @@ def _main(argv=None) -> int:
         from dispatch_contract import stable_state_root
         jobs = stable_state_root(os.environ) / "jobs.log"
     if args.action == "retention":
-        retention_passes(jobs)   # started by the peer obligation runner, detached
+        # Started by the peer obligation runner: hand the passes to a grandchild so the
+        # runner reaps its child at once, and run them at a lower priority.
+        if os.fork():
+            os._exit(0)
+        with contextlib.suppress(OSError):
+            os.nice(10)
+        retention_passes(jobs)
         return 0
     print(f"restored={restore(jobs, args.id)}")
     return 0
