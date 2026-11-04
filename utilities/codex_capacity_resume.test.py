@@ -259,6 +259,16 @@ class CarrierTest(unittest.TestCase):
 
 
 class LaunchTest(unittest.TestCase):
+    def test_hook_launch_import_does_not_load_the_registered_supervisor_graph(self):
+        import subprocess
+        code = ("import sys; import codex_capacity_resume; "
+                "assert 'session_supervisor_decisions' not in sys.modules; "
+                "assert 'dispatch_stage_advance' not in sys.modules")
+        result = subprocess.run([sys.executable, "-c", code],
+            env={**os.environ, "PYTHONPATH": str(ROOT / "utilities")},
+            text=True, capture_output=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_launch_starts_one_detached_observer_for_the_exact_turn(self):
         with tempfile.TemporaryDirectory() as tmp:
             transcript = Path(tmp) / "rollout.jsonl"

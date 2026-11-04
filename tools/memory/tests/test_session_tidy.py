@@ -934,6 +934,18 @@ class DaemonCodexSeatTest(TidyCase):
         endpoint = str(kwargs.get("socket_path") or "")
         return pane if expected == (pane, endpoint) else ""
 
+    def test_terminal_less_foreground_runtime_does_not_search_other_panes(self):
+        caller = (os.getpid(), 1, 1, 0, -1, "foreground-start")
+        with self.library(), \
+             mock.patch.object(pane_ownership, "_caller_runtime", return_value=(caller, False)), \
+             mock.patch.object(st, "codex_pane_for_session",
+                               side_effect=AssertionError("unrelated pane discovery")), \
+             mock.patch.object(pane_ownership, "verified_pane",
+                               side_effect=AssertionError("terminal-less pane claim")):
+            seat = st.resolve_seat("codex", str(self.cwd), sid="foreground-exec", hook=True)
+        self.assertEqual(seat.kind, "project")
+        self.assertEqual(st.session_identity(seat), ("codex", "foreground-exec"))
+
     def prove(self, sid, pane, socket_path=""):
         self.proven[sid] = (pane, socket_path)
 

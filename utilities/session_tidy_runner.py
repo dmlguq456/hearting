@@ -75,7 +75,6 @@ if str(HERE) not in sys.path:
 
 import session_tidy as st  # noqa: E402
 import tidy_decisions as td  # noqa: E402
-import tidy_transcripts as tt  # noqa: E402
 try:  # ends a detached child with the test that started it; no-op outside tests
     from detached_lifetime import bind as end_with_test  # noqa: E402
 except ImportError:  # a partial tree without it (e.g. a fixture release): no record
@@ -509,6 +508,7 @@ class Bundle:
 
 
 def _target_sessions(item: dict, seat) -> list:
+    import tidy_transcripts as tt
     caller = {"harness": item["harness"], "sid": item["sid"], "role": "caller",
               "transcript": item.get("transcript") or ""}
     if not caller["transcript"]:
@@ -530,11 +530,13 @@ MAX_SILENT_HOPS = 16
 
 
 def _unread_entry(target: dict, chunk) -> dict:
+    import tidy_transcripts as tt
     return {"harness": target["harness"], "sid": target["sid"], "role": target["role"],
             "coverage": tt.describe_coverage(chunk), "blocked": chunk.blocked, "remaining": tt.unread_total(chunk)}
 
 
 def assemble(item: dict, batch: str, run_dir: Path) -> Bundle:
+    import tidy_transcripts as tt
     seat = st.physical_seat(st.seat_from_dict(item["seat"]))
     card_seat = _card_seat(item)
     project_key = st.project_key_for(item["cwd"])
@@ -960,6 +962,7 @@ def apply_actions(item: dict, run_dir: Path, bundle: Bundle) -> str:
 
 def advance_watermarks(bundle: Bundle) -> None:
     """Take the ranges this batch covered off the unread ones (and nothing more)."""
+    import tidy_transcripts as tt
     for entry in bundle.cursors:
         if entry.get("chunk") is not None:
             tt.mark_applied(entry["harness"], entry["sid"], entry["chunk"])

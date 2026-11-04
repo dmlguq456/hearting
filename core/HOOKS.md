@@ -6,6 +6,18 @@ checks to their own event model.
 
 ## Verification Layers
 
+Prompt discovery reuses code modules within its process and the existing compact
+lineage projection within a read pass. A recipient with no incoming edge or
+logical binding has only its own storage scope; a history notice with no confirmed incoming edge
+needs no full activity history. Claims and acknowledgements still observe current
+authority at their existing effect boundaries. These rules apply to all three
+adapters and introduce no additional persistent cache or input.
+Independent context probes may overlap within a prompt, preserving context
+order and committing their deferred consumption only after the outer output.
+A foreground runtime with no controlling terminal keeps its session identity
+without searching unrelated panes. Shared background services still resolve the
+exact foreground native binding; a terminal hint alone remains insufficient.
+
 Three distinct roles keep this contract honest. Keep the vocabulary separate —
 "guard" is the enforcement mechanism, not its test.
 

@@ -241,7 +241,7 @@ class PromptReceiptTest(unittest.TestCase):
 
         def run(emit, first=True):
             events = []
-            def card_context(_payload, _cwd, *, startup, human):
+            def card_context(_payload, _cwd, *, startup, human, read_context=None):
                 startup["due"] = first
                 if first:
                     human.append("history notice")

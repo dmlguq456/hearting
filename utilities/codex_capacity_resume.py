@@ -43,11 +43,11 @@ except ImportError:  # a partial tree without it (e.g. a fixture release): no re
         return child
 
 ROOT = Path(__file__).resolve().parents[1]
-import session_supervisor_decisions as supervisor_decisions
+from dispatch_attempt_policy import TRANSIENT_RETRY_DELAYS
 
 # Wait before the n-th consecutive no-progress continuation. Codex has already
 # spent any server Retry-After advice before it ends a turn on these errors.
-DELAYS = supervisor_decisions.TRANSIENT_RETRY_DELAYS
+DELAYS = TRANSIENT_RETRY_DELAYS
 POLL_SECONDS = 5.0
 MAX_WATCH_SECONDS = 12 * 3600
 LOCK_WAIT_SECONDS = 120.0
