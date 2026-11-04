@@ -24,6 +24,7 @@ import threading
 from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
+from runtime_observation import ProjectionCache, observe_once as _observe_once
 
 
 def _peer_message_module():
@@ -155,8 +156,17 @@ def _repository_key(cwd):
 _REGISTRY_READ_CACHE = None
 
 
-def _registry_sessions():
-    """Reuse native session metadata; no process, herdr or role probe."""
+def _registry_records(harness):
+    """One current metadata census shared by this pass's display consumers."""
+    from .. import session_registry
+    return _observed_registry_records(harness, session_registry._dir_for(harness),
+                                      session_registry.read)
+
+
+@_observe_once(immutable=True)
+def _observed_registry_records(harness, directory, reader):
+    """Owned read-only metadata; liveness still uses fresh process evidence."""
+    from types import MappingProxyType
     from .. import session_registry
     from . import dispatch
     global _REGISTRY_READ_CACHE
@@ -165,17 +175,25 @@ def _registry_sessions():
         if _REGISTRY_READ_CACHE is None:
             _REGISTRY_READ_CACHE = session_registry.PassiveReadCache()
         cache = _REGISTRY_READ_CACHE
+    try:
+        entries = os.listdir(directory)
+    except OSError:
+        return None
+    records = []
+    for entry in entries:
+        if entry.endswith('.json') and entry[:-5].isdigit():
+            record = reader(harness, int(entry[:-5]),
+                            **({'validation_cache': cache} if cache is not None else {}))
+            if record:
+                records.append(MappingProxyType(record))
+    return tuple(records)
+
+
+def _registry_sessions():
+    """Reuse native session metadata; no process, herdr or role probe."""
     rows = []
-    for harness in ("claude", "codex", "opencode"):
-        try:
-            entries = os.listdir(session_registry._dir_for(harness))
-        except OSError:
-            continue
-        for entry in entries:
-            if not entry.endswith(".json") or not entry[:-5].isdigit():
-                continue
-            record = session_registry.read(harness, int(entry[:-5]),
-                                           **({'validation_cache': cache} if cache is not None else {}))
+    for harness in ('claude', 'codex', 'opencode'):
+        for record in _registry_records(harness) or ():
             if record and record.get("sessionId") and record.get("cwd"):
                 rows.append(SimpleNamespace(harness=harness, session_id=record["sessionId"],
                                             cwd=record["cwd"], runtime_name=record.get("name")))
@@ -227,6 +245,15 @@ def _native_role_sessions(markers, rows, relations=()):
     conversation bodies, process state, or an inferred same-cwd identity.
     """
     from . import codex, opencode
+    from . import dispatch
+    scope = dispatch._COLLECTION_INPUTS.get()
+    cache = None
+    if scope is not None:
+        cache = scope.get(('native-role-cwds',))
+        if cache is None:
+            cache = scope[('native-role-cwds',)] = ProjectionCache(
+                max_entries=256, max_bytes=1024 * 1024)
+    policy = (codex._state_db, codex._home, opencode._db, sqlite3.connect)
     present = {key for row in rows for key in _session_keys(row)}
     wanted = set(markers)
     mod = _peer_message_module()
@@ -250,31 +277,48 @@ def _native_role_sessions(markers, rows, relations=()):
             if sid:
                 wanted.add((harness, sid))
     out = []
-    for harness, db, queries in (
-            ("codex", codex._state_db(codex._home()),
+    for harness, database, queries in (
+            ("codex", lambda: codex._state_db(codex._home()),
              ("SELECT cwd FROM threads WHERE id=?",)),
-            ("opencode", opencode._db(),
+            ("opencode", opencode._db,
              ("SELECT directory FROM session_v2 WHERE id=?",
               "SELECT directory FROM session WHERE id=?"))):
         ids = sorted({sid for h, sid in wanted if h == harness and sid
                       and (h, sid) not in present})
-        if not ids or not db:
+        found = {}
+        missing = []
+        for sid in ids:
+            key = (harness, sid, policy)
+            if cache is not None and key in cache:
+                found[sid] = cache[key]
+            else:
+                missing.append(sid)
+        if not ids:
             continue
         try:
-            with closing(sqlite3.connect(Path(db).absolute().as_uri() + "?mode=ro",
-                                         uri=True, timeout=0.2)) as con:
-                for sid in ids:
-                    for query in queries:
-                        try:
-                            result = con.execute(query, (sid,)).fetchone()
-                        except sqlite3.OperationalError:
-                            continue
-                        if result and isinstance(result[0], str) and result[0]:
-                            out.append(SimpleNamespace(harness=harness, session_id=sid,
-                                                       cwd=result[0]))
-                            break
+            db = database() if missing else None
+            if db:
+                with closing(sqlite3.connect(Path(db).absolute().as_uri() + "?mode=ro",
+                                             uri=True, timeout=0.2)) as con:
+                    for sid in missing:
+                        cwd = None
+                        observed = False
+                        for query in queries:
+                            try:
+                                result = con.execute(query, (sid,)).fetchone()
+                            except sqlite3.OperationalError:
+                                continue
+                            observed = True
+                            if result and isinstance(result[0], str) and result[0]:
+                                cwd = result[0]
+                                break
+                        found[sid] = cwd
+                        if cache is not None and observed:
+                            cache[(harness, sid, policy)] = cwd
         except (OSError, sqlite3.Error):
-            continue
+            pass
+        out.extend(SimpleNamespace(harness=harness, session_id=sid, cwd=found[sid])
+                   for sid in ids if found.get(sid))
     return out
 
 
@@ -580,13 +624,12 @@ class _EndObservation:
 
     def registry(self, harness):
         def read():
-            from .. import session_registry
             records = {}
-            for entry in os.listdir(session_registry._dir_for(harness)):
-                if not entry.endswith('.json') or not entry[:-5].isdigit():
-                    continue
-                record = session_registry.read(harness, int(entry[:-5]))
-                if record and record.get('sessionId'):
+            observed = _registry_records(harness)
+            if observed is None:
+                return None
+            for record in observed:
+                if record.get('sessionId'):
                     records.setdefault(record['sessionId'], record)
             return records
         return self._once(('registry', harness), read)
@@ -713,6 +756,13 @@ def _holder_name(harness, session_id, rows):
             if name:
                 return name
     try:
+        from . import dispatch
+        if dispatch._COLLECTION_INPUTS.get() is not None:
+            for record in _registry_records(harness) or ():
+                if record.get('sessionId') == session_id:
+                    name = record.get('name')
+                    return name if isinstance(name, str) and name else None
+            return None
         from .. import session_registry
         return session_registry.name_for_session_id(session_id, harness)
     except Exception:

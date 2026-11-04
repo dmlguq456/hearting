@@ -482,7 +482,8 @@ def _orphan_registry_rows(path, registry, *, read_only=False):
     with _PARSED_REGISTRY_CACHE_LOCK:
         native = getattr(getattr(converter, '__code__', None), 'co_filename', None)
         weight = (_registry_projection_charge(parsed, copies=8)
-                  if native == str(_ROOT / 'utilities' / 'dispatch-registry.py') else None)
+                  if isinstance(native, str) and os.path.realpath(native) ==
+                  str(_ROOT / 'utilities' / 'dispatch-registry.py') else None)
         _ORPHAN_ROW_PROJECTIONS.remember(key, (converter, parsed, converted, projection), weight=weight)
         if key in _ORPHAN_ROW_PROJECTIONS:
             _ORPHAN_ROW_PROJECTIONS.move_to_end(key)
@@ -4070,6 +4071,7 @@ def _scan_jobs_log(path, seen_slugs, seen_keys=None, registry_priority=0,
         meta = parsed_meta
         ts, status, repo, worktree, slug, pipe = fields
         row_age_min = (361 if key in expired and key not in alive_keys
+                       and meta.get('attempt_id') not in (canonical_attempts or ())
                        else _iso_elapsed_min(ts))
         afterglow = False
         dead_terminal_owner = False
@@ -4145,7 +4147,7 @@ def _scan_jobs_log(path, seen_slugs, seen_keys=None, registry_priority=0,
         # constructing thousands of already-expired owner objects first, while
         # preserving their registry-order deduplication effects. Quick grouping
         # still sees its historical rows, as in the original classifier.
-        if (not include_stall and dead_terminal_owner and (row_age_min or 0) > 360
+        if (not include_stall and not attempt_owned and dead_terminal_owner and (row_age_min or 0) > 360
                 and meta.get('intensity') != 'quick'):
             continue
         meta = dict(meta)

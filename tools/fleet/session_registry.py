@@ -212,6 +212,7 @@ def read(harness, pid, *, home=None, validation_cache=None):
         if validation_cache is not None:
             held = validation_cache.get(path, generation)
             if held is not None:
+                held['harness'] = harness  # a shared/aliased directory still declares its caller's harness
                 return held
         with open(path, encoding="utf-8") as handle:
             payload = json.load(handle)

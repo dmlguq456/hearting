@@ -23,6 +23,47 @@ from split_module_fixture import patch_split  # noqa: E402
 
 
 class Fleet2CollectionMemoTest(unittest.TestCase):
+    def test_native_role_metadata_is_shared_within_a_pass_and_fresh_next_pass(self):
+        from fleet.collectors import steward, opencode
+        import sqlite3
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory)/'state.sqlite'
+            with sqlite3.connect(database) as con:
+                con.execute('CREATE TABLE threads(id TEXT PRIMARY KEY, cwd TEXT)')
+            peer = SimpleNamespace(steward_evidence_targets=lambda marker: [])
+            with mock.patch.object(steward, '_peer_message_module', return_value=peer), mock.patch.object(
+                    codex, '_state_db', return_value=database) as discover, mock.patch.object(
+                    opencode, '_db', side_effect=AssertionError('unselected harness database')):
+                wanted = {('codex','new-session'): {}}
+                with dispatch.collection_read_scope():
+                    self.assertEqual(steward._native_role_sessions(wanted, []), [])
+                    with sqlite3.connect(database) as con:
+                        con.execute('INSERT INTO threads VALUES (?,?)', ('new-session','/repo'))
+                    self.assertEqual(steward._native_role_sessions(wanted, []), [])
+                    self.assertEqual(discover.call_count, 1)
+                with dispatch.collection_read_scope():
+                    self.assertEqual(steward._native_role_sessions(wanted, [])[0].cwd, '/repo')
+                self.assertEqual(discover.call_count, 2)
+                self.assertEqual(steward._native_role_sessions({('claude','other'): {}}, []), [])
+                self.assertEqual(discover.call_count, 2)
+
+    def test_display_and_end_proof_share_one_fresh_metadata_census(self):
+        from fleet.collectors import steward
+        from fleet import session_registry
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, '123.json').write_text(json.dumps({'sessionId': 'known', 'cwd': '/repo'}))
+            with mock.patch.object(session_registry, '_dir_for', return_value=directory), mock.patch.object(
+                    session_registry, 'read', wraps=session_registry.read) as reader:
+                with dispatch.collection_read_scope():
+                    steward._registry_sessions()
+                    before = reader.call_count
+                    self.assertEqual(steward.end_observation().registry('codex')['known']['cwd'], '/repo')
+                    self.assertEqual(reader.call_count, before)
+                Path(directory, '123.json').write_text(json.dumps({'sessionId': 'new', 'cwd': '/changed'}))
+                with dispatch.collection_read_scope():
+                    self.assertIn('new', steward.end_observation().registry('codex'))
+                    self.assertGreater(reader.call_count, before)
+
     def test_fresh_raw_bytes_share_passive_parses_but_keep_strict_readers_fresh(self):
         cache = session_tidy.LedgerParseCache()
         first = b'{"sid":"one","event":"start"}\n'

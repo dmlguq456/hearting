@@ -86,6 +86,13 @@ class TerminalRowMismatchCollectorTest(unittest.TestCase):
                                                          live_attempt_ids={'env-live'})
             self.assertEqual([vars(job) for job in fast], [vars(job) for job in slow])
             self.assertEqual(fast_bad, slow_bad)
+            with dispatch.collection_read_scope():
+                canonical, _bad = dispatch._scan_jobs_log(path, set(), include_stall=False,
+                                                           canonical_attempts={'expired-owner'})
+            # The merged collector needs this row before retention to reconcile
+            # its canonical proc twin, even though retention later drops it.
+            self.assertIn('expired-owner', {job.attempt_id for job in canonical})
+            self.assertEqual(next(job for job in canonical if job.attempt_id=='expired-owner').elapsed_min, 10080)
             self.assertEqual(next(job for job in fast if job.attempt_id=='old-live').elapsed_min, 10080)
             fixed += timedelta(minutes=100)
             with dispatch.collection_read_scope():
