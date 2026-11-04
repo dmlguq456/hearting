@@ -20,6 +20,8 @@ from fleet.collectors import interaction as interaction_collector  # noqa: E402
 from fleet.collectors import procscan  # noqa: E402
 from fleet.model import Session, classify_session  # noqa: E402
 from fleet.render import _interaction_badge  # noqa: E402
+sys.path.append(str(Path(__file__).resolve().parents[3] / "utilities"))  # split_module_fixture
+from split_module_fixture import patch_split  # noqa: E402
 
 
 class HumanGateWaitProjectionTest(unittest.TestCase):
@@ -118,7 +120,7 @@ class HumanGateEndToEndTest(unittest.TestCase):
             module = __import__("fleet.collectors." + name, fromlist=["enrich"])
             for attribute in ("enrich", "prepare_tick"):
                 if hasattr(module, attribute):
-                    patch = mock.patch.object(module, attribute, return_value=None)
+                    patch = patch_split(module, attribute, return_value=None)
                     patch.start()
                     self.addCleanup(patch.stop)
         from fleet.collectors import herdr

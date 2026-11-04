@@ -13,6 +13,9 @@ from tools.fleet.explorer.state import NavState
 from tools.fleet.explorer.system import usage_text
 from tools.fleet.explorer.tables import _harness_mix, _stage_hue, _stage_items, gauge_cells
 from tools.fleet.explorer.view_model import ExplorerViewModel, load_fixture
+import sys  # noqa: E402
+sys.path.append(str(Path(__file__).resolve().parents[3] / "utilities"))  # split_module_fixture
+from split_module_fixture import patch_split  # noqa: E402
 
 FIXTURES = Path(__file__).parent / "fixtures" / "explorer"
 
@@ -641,7 +644,7 @@ class ClaudeActualContract(unittest.TestCase):
                                         "_EXPLORER_PUBLISHED_MODEL": base, "_EXPLORER_MODEL": base,
                                         "_EXPLORER_RESULT": None, "_EXPLORER_REPLAY_ACTIVE": True,
                                         "_EXPLORER_SHOWN": False, "_EXPLORER_READINESS": {"ready": False}}.items():
-                        stack.enter_context(patch.object(render, name, value))
+                        stack.enter_context(patch_split(render, name, value))
                     stack.enter_context(patch.object(render, "_explorer_runtime", return_value=SimpleNamespace(publication_ready=lambda _r: False)))
                     stack.enter_context(patch.object(render, "_explorer_compose", return_value=None))
                     now = 12000 if entry is self.CHANGED else 10000 if entry is self.SUCCESS else 10200
@@ -680,7 +683,7 @@ class ClaudeActualContract(unittest.TestCase):
                               "layout": render._layout_mode(140), "fixed_end": 2, "body_start": 2,
                               "body_end": 3, "legend_start": 3, "fixed_priorities": {0: 1, 1: 1}}}
                 for name, value in values.items():
-                    stack.enter_context(patch.object(render, name, value))
+                    stack.enter_context(patch_split(render, name, value))
                 stack.enter_context(patch.object(render.time, "monotonic", return_value=10))
                 stack.enter_context(patch.object(render.time, "time", return_value=now))
                 stack.enter_context(patch.object(render, "_build_lines", side_effect=AssertionError("body rebuild")))

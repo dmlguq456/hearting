@@ -11,6 +11,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from fleet import render
 from fleet.collectors import memory
 from fleet.model import DispatchJob, Session
+sys.path.append(str(Path(__file__).resolve().parents[3] / "utilities"))  # split_module_fixture
+from split_module_fixture import patch_split  # noqa: E402
 
 
 def _text(lines):
@@ -76,7 +78,7 @@ class F63VisibilityTest(unittest.TestCase):
         self.assertNotIn("d2", owner_block)
 
     def test_dispatch_model_name_map_preserves_unknown(self):
-        with mock.patch.object(render, "_resolved_alias_models", return_value={}):
+        with patch_split(render, "_resolved_alias_models", return_value={}):
             self.assertEqual(render._dispatch_display_model("opus"), "Opus")
             self.assertEqual(render._job_display_model(DispatchJob(key="code", model="opus")), "Opus")
         self.assertEqual(render._job_display_model(DispatchJob(key="code", model="opus",

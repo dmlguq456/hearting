@@ -7,6 +7,8 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from fleet import render
+sys.path.append(str(Path(__file__).resolve().parents[3] / "utilities"))  # split_module_fixture
+from split_module_fixture import patch_split  # noqa: E402
 
 
 def owner(harness, tag):
@@ -20,7 +22,7 @@ class GPUOneLineTest(unittest.TestCase):
         self.addCleanup(setattr, render, "_COMPUTE_HOSTS_SET_AT", render._COMPUTE_HOSTS_SET_AT)
         self.addCleanup(setattr, render, "_FOLDABLE", render._FOLDABLE)
         render._ROUTE_FOLD = {render._GPU_FOLD_ALL: True}
-        self.tag = mock.patch.object(render, "_resolve_session_tag", side_effect=lambda h, sid: sid)
+        self.tag = patch_split(render, "_resolve_session_tag", side_effect=lambda h, sid: sid)
         self.tag.start()
         self.addCleanup(self.tag.stop)
         owners = [owner("codex", "bb")] * 3 + [owner("claude", "8e")]

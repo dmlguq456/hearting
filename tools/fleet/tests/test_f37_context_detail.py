@@ -19,6 +19,8 @@ from fleet.model import (  # noqa: E402
     ContextEvidence, ContextProjection, DispatchJob, ProgressProjection, Session,
     SubAgent, WorkProjection,
 )
+sys.path.append(str(Path(__file__).resolve().parents[3] / "utilities"))  # split_module_fixture
+from split_module_fixture import patch_split  # noqa: E402
 
 
 FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures", "route")
@@ -643,7 +645,7 @@ class ClaudeStreamSessionTest(unittest.TestCase):
                               self._assistant("sid-child", "<synthetic>", 160)])
         dispatch_collector._enrich_claude_stream_session(job)
         self.assertIsNone(job.resolved_model)
-        with mock.patch.object(render, "_resolved_alias_models", return_value={}):
+        with patch_split(render, "_resolved_alias_models", return_value={}):
             self.assertEqual(render._job_display_model(job), "Opus")
         self._write_log(job, [{"type": "system", "subtype": "init",
                               "session_id": "sid-child", "model": "claude-opus-5-5"},

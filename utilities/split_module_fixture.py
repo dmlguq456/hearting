@@ -8,6 +8,8 @@ same arguments as `mock.patch.object` and `mock.patch` and install the one
 replacement in the module and in every part that binds the same object --
 what a single patch did before the split. They work as context managers,
 decorators, and with `start()`/`stop()`, and nest like ordinary patches.
+`set_split(module, name, value)` is the plain assignment `module.name = value`
+with the same reach.
 """
 from __future__ import annotations
 
@@ -75,3 +77,13 @@ def split_patch(target, *args, **kwargs):
     patcher = mock.patch(target, *args, **kwargs)
     patcher.__class__ = _SplitPatch
     return patcher
+
+
+def set_split(module, name, value):
+    """`module.name = value`, also in every part that binds the current value."""
+    current = getattr(module, name, _MISSING)
+    if current is not _MISSING:
+        for part in split_parts(module):
+            if vars(part).get(name, _MISSING) is current:
+                setattr(part, name, value)
+    setattr(module, name, value)

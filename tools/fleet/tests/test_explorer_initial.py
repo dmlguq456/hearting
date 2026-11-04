@@ -5,6 +5,10 @@ from unittest import mock
 
 from tools.fleet.explorer.runtime import ExplorerRuntime
 from tools.fleet.explorer.view_model import ExplorerViewModel
+import sys  # noqa: E402
+from pathlib import Path  # noqa: E402
+sys.path.append(str(Path(__file__).resolve().parents[3] / "utilities"))  # split_module_fixture
+from split_module_fixture import patch_split  # noqa: E402
 
 # The loading word comes from tools/i18n/messages.json; these suites keep the Korean screen.
 _KOREAN = mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"})
@@ -284,7 +288,7 @@ class SelectedDetailPublication(unittest.TestCase):
                             "_EXPLORER_RESULT": None, "_EXPLORER_REPLAY_ACTIVE": False,
                             "_EXPLORER_ORDER": [], "_EXPLORER_SIZE": None,
                             "_EXPLORER_COMPOSE_MODEL": None, "_EXPLORER_GENERATION": 1}.items():
-            patch = mock.patch.object(render, name, value)
+            patch = patch_split(render, name, value)
             patch.start()
             self.addCleanup(patch.stop)
         patch = mock.patch.object(render, "_explorer_runtime", return_value=self.runtime)
