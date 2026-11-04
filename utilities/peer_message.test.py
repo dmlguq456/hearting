@@ -20,7 +20,7 @@ import unittest
 import threading
 from unittest import mock
 from pathlib import Path
-from split_module_fixture import patch_split
+from split_module_fixture import patch_split, set_split
 
 _HERE = Path(__file__).resolve().parent
 _SPEC = importlib.util.spec_from_file_location("peer_message", str(_HERE / "peer-message.py"))
@@ -3212,7 +3212,8 @@ class HandoffAcceptanceTest(_TmpRootMixin, unittest.TestCase):
         from types import SimpleNamespace
         self.runner = runner
         self.steward = runner._handoff_steward()
-        self.steward.peer_message = peer_message
+        self.addCleanup(set_split, self.steward, "peer_message", self.steward.peer_message)
+        set_split(self.steward, "peer_message", peer_message)
         self.sender = {"harness": "claude", "session_id": "predecessor", "name": "old"}
         self.recipient = {"harness": "codex", "session_id": "successor", "name": "new"}
         self.predecessor = {**self.sender, "pane": "w1:p1", "server": "default", "foreground": {"pid": 11, "start": "101"}}
@@ -3246,7 +3247,7 @@ class HandoffAcceptanceTest(_TmpRootMixin, unittest.TestCase):
             mock.patch.object(self.steward, "_retire_target", return_value=("idle", {k:v for k,v in self.successor.items() if k not in {"foreground", "server"}}, None, None)),
             mock.patch.object(self.steward, "_prompt_current_candidate", side_effect=current_candidate),
             mock.patch.object(self.steward, "_retire_foreground", return_value=self.successor["foreground"]),
-            mock.patch.object(self.steward, "_pid_identity_ok", return_value=True),
+            patch_split(self.steward, "_pid_identity_ok", return_value=True),
             mock.patch.object(self.steward.peer_obligations, "ObligationStore", return_value=self.store),
             mock.patch.object(self.steward.peer_obligations, "ensure_normal_runner"),
             mock.patch.object(self.steward, "_HERDR_SESSION", None)]
@@ -3447,7 +3448,7 @@ class HandoffAcceptanceTest(_TmpRootMixin, unittest.TestCase):
         self.assertNotIn("handoff accept", guidance)
 
         with mock.patch.object(session_tidy, "resolve_caller", return_value=self.caller), \
-             mock.patch.object(self.steward, "_pid_identity_ok", return_value=False):
+             patch_split(self.steward, "_pid_identity_ok", return_value=False):
             guidance = peer_message.receiver_guidance(self.text, self.recipient, cwd=str(self.tmp_root))
         self.assertNotIn("handoff accept", guidance)
         self.assertNotIn("acceptance", peer_message._read_pending(self.ref))
@@ -3764,7 +3765,7 @@ class HandoffAcceptanceTest(_TmpRootMixin, unittest.TestCase):
         outputs = []
         # This case exercises native identity rejection after the executable
         # prerequisite; it must not depend on Herdr being installed on CI.
-        with mock.patch.object(self.steward, "_herdr_missing", return_value=False), \
+        with patch_split(self.steward, "_herdr_missing", return_value=False), \
              mock.patch.object(self.steward, "_prompt_current_candidate",
                                return_value=(None, "target-identity-unverified")), \
              mock.patch.object(self.steward, "_herdr_prompt") as send, \
@@ -3779,7 +3780,7 @@ class HandoffAcceptanceTest(_TmpRootMixin, unittest.TestCase):
     def test_owner_peer_and_completion_without_herdr_remain_unavailable(self):
         args = self.steward.build_parser().parse_args(["prompt", "w1:p2", "owner report body"])
         outputs = []
-        with mock.patch.object(self.steward, "_herdr_missing", return_value=True), \
+        with patch_split(self.steward, "_herdr_missing", return_value=True), \
              mock.patch.object(self.steward, "_prompt_current_candidate") as identity, \
              mock.patch.object(self.steward, "_herdr_prompt") as send, \
              mock.patch("builtins.print", side_effect=lambda *a, **_k: outputs.append(" ".join(map(str, a)))):
@@ -4083,7 +4084,7 @@ class HandoffAcceptanceTest(_TmpRootMixin, unittest.TestCase):
                 self.assertNotIn("acceptance", peer_message._read_pending(self.ref))
                 self.assertEqual(self.store.list(), [])
         peer_message._save_pending(original)
-        with mock.patch.object(self.steward, "_pid_identity_ok", return_value=False):
+        with patch_split(self.steward, "_pid_identity_ok", return_value=False):
             with self.assertRaisesRegex(ValueError, "lifetime-unverified"):
                 self.runner.accept_handoff(self.ref, self.caller)
         self.assertEqual(self.store.list(), [])
@@ -4133,7 +4134,8 @@ class SupervisedHandoffTest(_TmpRootMixin, unittest.TestCase):
         import dispatch_seat_handover as handover
         self.tidy, self.runner, self.handover = tidy, runner, handover
         self.steward = runner._handoff_steward()
-        self.steward.peer_message = peer_message
+        self.addCleanup(set_split, self.steward, "peer_message", self.steward.peer_message)
+        set_split(self.steward, "peer_message", peer_message)
         self.p_seat = tidy.session_seat(tidy._pane_seat_of("w1:p1"), "claude", "predecessor")
         tidy.record_event(self.p_seat, "claude", "predecessor", "start", source="startup",
                           cwd=str(self.tmp_root), transcript=str(self.tmp_root / "source.jsonl"))
@@ -4209,9 +4211,9 @@ class SupervisedHandoffTest(_TmpRootMixin, unittest.TestCase):
                               side_effect=lambda pane, *a, **kw:
                               dict(self.identities[pane]["foreground"])),
             mock.patch.object(self.steward, "_retire_pane_info", return_value=None),
-            mock.patch.object(self.steward, "_pid_identity_ok", return_value=True),
+            patch_split(self.steward, "_pid_identity_ok", return_value=True),
             mock.patch.object(self.steward, "_native_opencode_turn", return_value=None),
-            mock.patch.object(self.steward, "_herdr_missing", return_value=False),
+            patch_split(self.steward, "_herdr_missing", return_value=False),
             mock.patch.object(self.steward, "_current_session_identity",
                               return_value=("supervisor", "claude")),
             mock.patch.object(self.steward, "_start_request", side_effect=start_request),

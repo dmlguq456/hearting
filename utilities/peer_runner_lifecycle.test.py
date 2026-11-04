@@ -28,6 +28,7 @@ sys.path.insert(0, str(ROOT / "tools" / "install"))
 import peer_obligations as obligations  # noqa: E402
 import dispatch_contract as contract  # noqa: E402
 import runtime_activation  # noqa: E402
+from split_module_fixture import patch_split  # noqa: E402
 
 _STEWARD_SPEC = importlib.util.spec_from_file_location(
     "peer_steward_under_runner_lifecycle_test", ROOT / "utilities/peer-steward.py")
@@ -951,9 +952,9 @@ console.log(JSON.stringify(calls[0]));
                                return_value=False), \
              mock.patch.object(peer_steward.herdr_observation,
                                "socket_path_for_endpoint", return_value=None), \
-             mock.patch.object(peer_steward, "_watch_terminal_from_view", return_value=None), \
-             mock.patch.object(peer_steward, "_herdr_missing", return_value=False), \
-             mock.patch.object(peer_steward, "subprocess", CapturingSubprocess()):
+             patch_split(peer_steward, "_watch_terminal_from_view", return_value=None), \
+             patch_split(peer_steward, "_herdr_missing", return_value=False), \
+             patch_split(peer_steward, "subprocess", CapturingSubprocess()):
             binding = obligations.managed_service_binding(host_a)
             self.assertEqual(binding, str(current))
             peer_steward._ensure_watch_observers(service_current=binding)
@@ -1202,14 +1203,14 @@ console.log(JSON.stringify(calls[0]));
         cpu_before = int(cpu_fields[11]) + int(cpu_fields[12])
         started = time.monotonic()
         try:
-            with mock.patch.object(peer_steward, "_watch_root", return_value=watch_root), \
-                 mock.patch.object(peer_steward, "_watch_entries", side_effect=count_watch_scan), \
-                 mock.patch.object(peer_steward, "_herdr_missing", return_value=False), \
+            with patch_split(peer_steward, "_watch_root", return_value=watch_root), \
+                 patch_split(peer_steward, "_watch_entries", side_effect=count_watch_scan), \
+                 patch_split(peer_steward, "_herdr_missing", return_value=False), \
                  mock.patch.object(peer_steward.herdr_observation,
                                    "socket_path_for_endpoint", return_value=None), \
                  mock.patch.object(peer_steward.herdr_observation,
                                    "pane_census", return_value=None), \
-                 mock.patch.object(peer_steward, "_watch_terminal_from_view", return_value=None), \
+                 patch_split(peer_steward, "_watch_terminal_from_view", return_value=None), \
                  mock.patch.object(batch, "_jobs_paths",
                                    side_effect=lambda jobs=None, strict=True: [
                                        Path(jobs).resolve(strict=False) if jobs else self.jobs.resolve()
@@ -1952,7 +1953,7 @@ console.log(JSON.stringify(calls[0]));
                  mock.patch.dict(os.environ, runner_env, clear=True), \
                  mock.patch.object(obligations, "exec_service_runner"), \
                  mock.patch.object(batch.subprocess, "Popen", side_effect=launch_current), \
-                 mock.patch.object(peer_steward, "time", runner_clock), \
+                 patch_split(peer_steward, "time", runner_clock), \
                  mock.patch.object(peer_steward, "_runner_maintenance_pass"):
                 # Global maintenance duties are covered by the reconcile suite;
                 # here they would only reach the fake clock and launch fixture.

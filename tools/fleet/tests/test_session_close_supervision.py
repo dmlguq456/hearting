@@ -37,6 +37,7 @@ import peer_obligations                                                 # noqa: 
 import session_tidy as tidy                                             # noqa: E402
 import steward_check as SC                                              # noqa: E402
 from fleet.collectors import codex, herdr, steward                      # noqa: E402
+from split_module_fixture import patch_split                            # noqa: E402
 
 # The patched module attribute replaces ``claude_session_census``; keep the real one.
 _REAL_CENSUS = claude_process_identity.claude_session_census
@@ -221,7 +222,7 @@ class CloseSupervisionBase(unittest.TestCase):
         """One re-arm pass over a single watch with spawning stubbed; returns (Popen, receipt)."""
         popen = mock.Mock(return_value=SimpleNamespace(pid=os.getpid()))
         with mock.patch.object(self.ps.subprocess, "Popen", popen), \
-                mock.patch.object(self.ps, "_herdr_missing", return_value=False):
+                patch_split(self.ps, "_herdr_missing", return_value=False):
             self.ps._ensure_watch_observers(entries=[(watch_id, arm)])
         root = Path(os.environ["AGENT_PEER_LEDGER_ROOT"]) / "peer-watches"
         receipt = root / f"{watch_id}.receipt.json"
