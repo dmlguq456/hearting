@@ -1165,13 +1165,20 @@ class AdapterV11Test(unittest.TestCase):
    with mock.patch.dict(os.environ,env,clear=True):
     stores=live.sessions_dirs_for("transport=headless","s",ROOT,root/"default",str(worktree),jobs=jobs)
    self.assertTrue({args.nested_codex_home/"sessions",other/"sessions",legacy/"sessions"} <= set(stores),stores)
-   moved=check(str(pointer))                              # what the child used to get
-   self.assertNotEqual(moved.returncode,0,moved.stdout)
-   self.assertIn("check=hearting:failed",moved.stdout)
+   # What the child used to get: the moved pointer. A worker home is checked against the release
+   # that built it (its worker-home.json source), so the owner's older home still passes.
+   moved=check(str(pointer))
+   self.assertEqual(moved.returncode,0,moved.stdout+moved.stderr)
+   self.assertIn("check=hearting:ok",moved.stdout)
+   # A home whose link was really broken still fails, with the check named and no traceback.
+   (Path(child["CODEX_HOME"])/"hearting").unlink()
+   broken=check(child["AGENT_HOME"])
+   self.assertNotEqual(broken.returncode,0,broken.stdout)
+   self.assertIn("check=hearting:failed",broken.stdout)
    # A projection failure now names its reason for the launcher's receipt.
    out=io.StringIO()
    with mock.patch.object(wrapper.subprocess,"run",return_value=subprocess.CompletedProcess(
-     [],1,moved.stdout,"")),contextlib.redirect_stdout(out):
+     [],1,broken.stdout,"")),contextlib.redirect_stdout(out):
     rc=wrapper.check_runtime_projection(str(worktree),False)
    self.assertEqual(rc,1)
    lines=out.getvalue().splitlines()
@@ -1182,6 +1189,121 @@ class AdapterV11Test(unittest.TestCase):
      [],69,"check=failed\nreason=codex-home-unset\n","")),contextlib.redirect_stdout(named):
     self.assertEqual(wrapper.check_runtime_projection(str(worktree),False),69)
    self.assertEqual([l for l in named.getvalue().splitlines() if l.startswith("reason=")],["reason=codex-home-unset"])
+ def old_release_owner_home(self, td, *, install_children=True):
+  """An owner home built on an older release, and a child start launched from it.
+
+  The old release is a symlink farm over this tree; `select_execution_root` is made to
+  choose this tree as the installed release, as a real runtime does after an update.
+  Returns the wrapper outcome and what the test needs to read back."""
+  root=Path(td); repo,art=self.fixture(root); jobs=root/"jobs.log"; logs=root/"logs"
+  fakebin=root/"bin"; fakebin.mkdir(); count=root/"child-count"
+  fake=fakebin/"codex"
+  fake.write_text(fake_shell("codex","printf 'child\n' >> \"$FAKE_CHILD_COUNT\"\n"),encoding="utf-8")
+  fake.chmod(0o755)
+  old=root/"releases"/"vOld"; old.mkdir(parents=True)
+  for entry in ROOT.iterdir():
+   if entry.name!=".git": (old/entry.name).symlink_to(entry)
+  source=root/"codex-source"; source.mkdir(); (source/"auth.json").write_text("{}\n",encoding="utf-8")
+  command=self.command("codex","start",repo,jobs,logs)
+  self.seed_parent(jobs,repo,harness="codex")
+  wrapper=self.load_wrapper("codex")
+  env={"PATH":str(fakebin)+os.pathsep+os.environ.get("PATH",""),"HOME":str(root/"home"),
+       "AGENT_ARTIFACT_ROOT":str(art),"AGENT_DISPATCH_JOBS":str(jobs),"AGENT_DISPATCH_CHILD":"1",
+       "AGENT_DISPATCH_ATTEMPT_ID":"att-parent-fixture","AGENT_DISPATCH_ALLOW_NAMESPACED_SPAWN":"1",
+       "XDG_STATE_HOME":str(root/"state"),"FAKE_CHILD_COUNT":str(count),
+       "CODEX_RUNTIME_PROJECTION_FAST":"1","CODEX_RUNTIME_PROJECTION_SKIP_CLI_DISCOVERY":"1",
+       "PYTHONDONTWRITEBYTECODE":"1"}
+  (root/"home").mkdir()
+  with mock.patch.dict(os.environ,{**env,"AGENT_HOME":str(ROOT),"CODEX_HOME":str(source)},clear=True):
+   owner_home=wrapper.prepare_nested_codex_home(repo,source,jobs=jobs,projection_root=old)
+  owner_before=(os.readlink(owner_home/"hearting"),sorted(p.name for p in owner_home.iterdir()))
+  resolution=wrapper.reconcile_launch_lifecycle(
+   wrapper.DETACHED,{"AGENT_DISPATCH_ALLOW_NAMESPACED_SPAWN":"1"},evidence={"lifecycle_selector_source":"host-like"})
+  import peer_obligations
+  buffer=io.StringIO(); errors=io.StringIO()
+  child_env={**env,"CODEX_HOME":str(owner_home),"AGENT_SESSION_ROLE":"worker","AGENT_HOME":str(old)}
+  with contextlib.ExitStack() as stack:
+   stack.enter_context(mock.patch.dict(os.environ,child_env,clear=True))
+   stack.enter_context(mock.patch.object(peer_obligations,"installed_release",return_value=ROOT))
+   stack.enter_context(mock.patch.object(wrapper,"reconcile_launch_lifecycle",return_value=resolution))
+   stack.enter_context(redirect_stdout(buffer)); stack.enter_context(contextlib.redirect_stderr(errors))
+   code=wrapper.main(["dispatch-headless.py",*command[2:]])
+  return SimpleNamespace(code=code,receipt=buffer.getvalue(),stderr=errors.getvalue(),jobs=jobs,count=count,
+                         old=old,owner_home=owner_home,owner_before=owner_before)
+
+ def test_an_old_release_owner_home_starts_a_child_on_the_installed_release(self):
+  with tempfile.TemporaryDirectory() as td:
+   try:
+    run=self.old_release_owner_home(td)
+    self.assertEqual(run.code,0,run.receipt+run.stderr)
+    self.assertIn("child_spawned=1",run.receipt)
+    self.assertNotIn("Traceback",run.stderr)
+    self.assertNotIn("reason=codex-runtime-projection-mismatch",run.receipt)
+    row=[l for l in run.jobs.read_text().splitlines() if "att-codex-fixture-0001" in l][-1]
+    meta=DC.parse_registry_metadata(row.split("\t")[5])
+    self.assertEqual(Path(meta["launch_home"]).resolve(),ROOT.resolve())
+    child_home=Path(meta["runtime_home"])
+    self.assertNotEqual(child_home,run.owner_home)
+    self.assertEqual(Path(os.path.realpath(child_home/"hearting")),ROOT.resolve())
+    self.assertEqual(Path(json.loads((child_home/"worker-home.json").read_text())["source"]).resolve(),ROOT.resolve())
+    # The owner's home is untouched: still linked to the older release, same entries.
+    self.assertEqual((os.readlink(run.owner_home/"hearting"),sorted(p.name for p in run.owner_home.iterdir())),
+                     run.owner_before)
+    self.assertEqual(Path(os.path.realpath(run.owner_home/"hearting")),run.old.resolve())
+   finally:
+    fixture_processes.reap(td)
+
+ def test_worker_home_projection_check_still_fails_a_broken_home(self):
+  # The projection check reads a worker home's own worker-home.json source; each way that home can be
+  # really wrong must still fail, name its check, and print no traceback.
+  with tempfile.TemporaryDirectory() as td:
+   root=Path(td); repo,art=self.fixture(root); jobs=root/"jobs.log"
+   source=root/"codex-source"; source.mkdir(); (source/"auth.json").write_text("{}\n",encoding="utf-8")
+   (root/"home").mkdir()
+   wrapper=self.load_wrapper("codex")
+   env={"PATH":os.environ.get("PATH",""),"HOME":str(root/"home"),"AGENT_DISPATCH_JOBS":str(jobs),
+        "PYTHONDONTWRITEBYTECODE":"1","XDG_STATE_HOME":str(root/"state")}
+   jobs.write_text("")
+   with mock.patch.dict(os.environ,{**env,"AGENT_HOME":str(ROOT),"CODEX_HOME":str(source)},clear=True):
+    built=wrapper.prepare_nested_codex_home(repo,source,jobs=jobs,projection_root=ROOT)
+   other=root/"releases"/"vOther"; other.mkdir(parents=True)
+   for entry in ROOT.iterdir():
+    if entry.name!=".git": (other/entry.name).symlink_to(entry)
+   def check(home):
+    return subprocess.run([str(ROOT/"adapters/codex/bin/check-runtime-projection.sh")],
+     env={**env,"AGENT_HOME":str(ROOT),"CODEX_HOME":str(home),"AGENT_SESSION_ROLE":"worker",
+          "CODEX_RUNTIME_PROJECTION_FAST":"1","CODEX_RUNTIME_PROJECTION_SKIP_CLI_DISCOVERY":"1"},
+     capture_output=True,text=True,check=False)
+   self.assertEqual(check(built).returncode,0)
+   def fresh(name):
+    copy=root/name; shutil.copytree(built,copy,symlinks=True); return copy
+   def edit_meta(home,**change):
+    path=home/"worker-home.json"; data=json.loads(path.read_text()); data.update(change)
+    path.write_text(json.dumps(data))
+   broken={}
+   home=fresh("no-link"); (home/"hearting").unlink(); broken["no-link"]=(home,"check=hearting:failed")
+   # worker-home.json no longer names a usable release: the check falls back to the caller's
+   # release and the home's own record fails its profile assertion.
+   home=fresh("source-missing"); edit_meta(home,source=str(root/"does-not-exist"))
+   broken["source-missing"]=(home,"check=agents-md:failed")
+   home=fresh("other-harness"); edit_meta(home,harness="claude")
+   broken["other-harness"]=(home,"check=agents-md:failed")
+   # AGENTS.md is a link into the shared profile template: replace the link, never write through it.
+   home=fresh("agents-md"); (home/"AGENTS.md").unlink(); (home/"AGENTS.md").write_text("not the worker profile\n")
+   broken["agents-md"]=(home,"check=agents-md:failed")
+   # `source` names a real release, but the home's link points at a different real release:
+   # the relaxation is link-verified, so this still fails.
+   home=fresh("link-elsewhere"); edit_meta(home,source=str(other))
+   broken["source-is-a-real-release-link-is-another"]=(home,"check=hearting:failed")
+   for name,(home,expected) in broken.items():
+    with self.subTest(broken=name):
+     result=check(home)
+     self.assertNotEqual(result.returncode,0,result.stdout)
+     self.assertIn("status=failed",result.stdout)
+     self.assertIn(expected,result.stdout)
+     self.assertNotIn("Traceback",result.stderr)
+     self.assertNotIn("AssertionError",result.stderr)
+
  def test_nested_codex_home_foreign_worktree_uses_existing_state_scope(self):
   with tempfile.TemporaryDirectory() as td:
    root=Path(td); source=root/"source"; source.mkdir(); worktree=root/"nas"; worktree.mkdir()
