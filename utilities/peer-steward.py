@@ -39,6 +39,7 @@ import argparse
 import contextlib
 import datetime
 import errno
+import functools
 import fcntl
 import hashlib
 import importlib.util
@@ -56,6 +57,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import secrets
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -4634,7 +4636,7 @@ def _prompt_foreground_proof(pane, harness, expected_sid):
 
 
 def _native_idle_prompt_guard(target, harness, expected_sid, expected_pane,
-                              expected_foreground=None):
+                              expected_foreground=None, fresh_ok=False):
     """Prove the exact idle Claude/OpenCode TUI and empty composer before one prompt send."""
     state, ident, _code, reason = _retire_target(target)
     if (reason or ident.get("harness") != harness
@@ -4645,11 +4647,16 @@ def _native_idle_prompt_guard(target, harness, expected_sid, expected_pane,
         require_process_session=True, target_observation=(state, ident))
     if current is None:
         return identity_error or "target-identity-unverified", None
-    if state not in ("idle", "done"):
+    # A Codex thread with no first turn has no state yet; its empty composer,
+    # checked below, is the evidence that it is waiting for input.
+    settled = ("idle", "done", "unknown") if fresh_ok else ("idle", "done")
+    if state not in settled:
         return "native-state-" + str(state), None
     current_state, current_pane = _agent_state(target)
-    if current_state not in ("idle", "done") or current_pane != expected_pane:
+    if current_state not in settled or current_pane != expected_pane:
         return "target-state-changed", None
+    if current_state == "unknown":
+        current_state, state = "idle", "idle"
     readiness = _pane_readiness(target, current_state, expected_harness=harness,
                                 expected_sid=expected_sid, expected_pane=expected_pane,
                                 purpose="input", target_observation=(current_state, ident),
@@ -5302,8 +5309,8 @@ def _flush_pending_for_target(target, t_harness, t_sid, entry_state, skip=None,
                     break
             restart_gate = (_codex_interrupt_start_gate(expected_pane)
                             if expected_pane else False)
-            result = peer_message.deliver_pending_codex(
-                row["ref"], timeout=0.25, start_interrupted=restart_gate)
+            result = _deliver_codex_pending(
+                row["ref"], expected_pane, timeout=0.25, start_interrupted=restart_gate)
             if result.get("status") == "received":
                 flushed += 1
         except (OSError, subprocess.SubprocessError, ValueError):
@@ -5653,8 +5660,8 @@ def _resume_message_obligation_scoped(duty, store, *, read_context=None):
             # composer. Without a rechecked pane there is no screen evidence.
             restart_gate = (_codex_interrupt_start_gate(expected_pane)
                             if expected_pane else False)
-            peer_message.deliver_pending_codex(
-                ref, timeout=0.25, start_interrupted=restart_gate)
+            _deliver_codex_pending(
+                ref, expected_pane, timeout=0.25, start_interrupted=restart_gate)
         try:
             current = read_pending()
         except (OSError, ValueError):
@@ -7779,16 +7786,18 @@ def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_bind
         else:
             try:
                 gate = _codex_interrupt_start_gate(target_pane or resolved_target)
-                result = peer_message.deliver_pending_codex(transfer_ref, start_interrupted=gate)
+                result = _deliver_codex_pending(transfer_ref, target_pane, timeout=None,
+                                                start_interrupted=gate)
                 outcome = "true" if result["status"] == "received" else (
                     "queued" if result["status"] == "queued" else "unverified")
                 reason = result.get("reason")
-                verify = ("native-steer-" if reason == "native-steer-accepted"
-                          else "native-queue-") + result["status"]
+                verify = ("native-first-input-submitted" if reason == "native-first-input-submitted"
+                          else ("native-steer-" if reason == "native-steer-accepted"
+                                else "native-queue-") + result["status"])
                 if outcome == "unverified" and str(reason).startswith("queue-rpc-refused:"):
-                    # A refused RPC sent nothing (a Codex thread not materialized
-                    # before its first message): the carrier still holds the row
-                    # and delivers it, so the receipt says queued, not unverified.
+                    # A refused RPC sent nothing and the pane first prompt could
+                    # not submit either (busy or unreadable composer): the carrier
+                    # still holds the row and retries it, so the receipt says queued.
                     held = peer_message._read_pending(transfer_ref) or {}
                     if held.get("state") in {"pending", "queued"} and not held.get("rpc_claim"):
                         outcome, verify = "queued", "native-queue-held"
@@ -7921,6 +7930,95 @@ def _read_screen(target):
     if proc.returncode != 0 or not (proc.stdout or "").strip():
         return None
     return _screen_lines(proc.stdout)
+
+
+_CODEX_UNMATERIALIZED = "not materialized yet"
+_CODEX_PASTE_BURST_SEC = 1.5
+_CODEX_FIRST_PROMPT_POLL_SEC = 4.0
+
+
+def _codex_first_prompt(ref, pane, sid):
+    """Submit one pending row through the pane for a Codex thread with no first turn yet.
+
+    The native queue cannot reach a thread until its first turn materializes it, so
+    that first message goes in as typed input: paste the body, let Codex's
+    paste-burst window pass, then Enter. The rollout file is the submission signal;
+    when it has not appeared, Enter is sent once more (the first can be taken as a
+    newline). Returns ``True`` once submitted, else ``None``.
+    """
+    if _codex_rollout_exists(sid):
+        return None
+    with peer_message.pending_lock(ref):
+        row = peer_message._read_pending(ref)
+        if not row or row.get("state") != "pending" or row.get("rpc_claim"):
+            return None
+        reason, _proof = _native_idle_prompt_guard(pane, "codex", sid, pane, fresh_ok=True)
+        if reason:
+            return None
+        from dispatch_contract import process_start_ticks
+        claim = {"token": secrets.token_hex(16), "pid": os.getpid(),
+                 "start": process_start_ticks(os.getpid())}
+        peer_message._save_pending(dict(row, state="unverified", rpc_claim=claim,
+                                        receipt="native-first-input-inflight"))
+    submitted = False
+    try:
+        if _pane_send(pane, "send-text", row["text"]):
+            for _attempt in range(2):
+                burst_end = time.monotonic() + _CODEX_PASTE_BURST_SEC
+                while time.monotonic() < burst_end:
+                    time.sleep(0.1)
+                if not _pane_send(pane, "send-keys", "enter"):
+                    break
+                deadline = time.monotonic() + _CODEX_FIRST_PROMPT_POLL_SEC
+                while time.monotonic() < deadline:
+                    submitted = _codex_rollout_exists(sid)
+                    if submitted:
+                        break
+                    time.sleep(0.25)
+                if submitted:
+                    break
+    except (OSError, subprocess.SubprocessError):
+        pass
+    with peer_message.pending_lock(ref):
+        current = peer_message._read_pending(ref)
+        if current and (current.get("rpc_claim") or {}).get("token") == claim["token"]:
+            peer_message._save_pending(
+                dict(current, state="queued", rpc_claim=None,
+                     receipt="native-first-input-submitted") if submitted else
+                dict(current, state="unverified", rpc_claim=None,
+                     receipt="native-first-input-unverified"))
+    return True if submitted else None
+
+
+def _deliver_codex_pending(ref, pane, *, timeout, start_interrupted):
+    """``deliver_pending_codex``, plus the pane first prompt for an unmaterialized thread.
+
+    The oldest pending row of that recipient goes first, so one submission
+    materializes the thread and every later row (this one included) keeps using
+    the native queue. A submitted row is ``queued`` and never delivered again.
+    """
+    deliver = functools.partial(peer_message.deliver_pending_codex,
+                                start_interrupted=start_interrupted,
+                                **({} if timeout is None else {"timeout": timeout}))
+    result = deliver(ref)
+    if (result.get("status") != "unverified" or not pane
+            or _CODEX_UNMATERIALIZED not in str(result.get("reason") or "")):
+        return result
+    row = peer_message._read_pending(ref) or {}
+    to = row.get("to") or {}
+    sid = to.get("session_id")
+    if row.get("state") != "pending" or to.get("harness") != "codex" or not sid:
+        return result
+    older = [item for item in peer_message._pending_rows()
+             if item.get("state") == "pending" and not item.get("rpc_claim")
+             and (item.get("to") or {}).get("session_id") == sid]
+    first = min(older, key=lambda item: (item.get("created") or 0, item["ref"]),
+                default=row)["ref"]
+    if _codex_first_prompt(first, pane, sid) is None:
+        return result
+    if first == ref:
+        return {"status": "queued", "reason": "native-first-input-submitted"}
+    return deliver(ref)
 
 
 def _codex_interrupt_start_gate(target):

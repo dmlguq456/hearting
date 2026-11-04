@@ -7289,12 +7289,91 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
         with mock.patch.object(peer_steward.shutil, "which", return_value="/usr/bin/herdr"), \
              mock.patch.object(peer_steward.subprocess, "run", side_effect=self._fake_run(payload, calls)), \
              mock.patch.object(peer_steward.peer_message, "deliver_pending_codex", return_value=refused), \
+             mock.patch.object(peer_steward, "_codex_first_prompt", return_value=None), \
              mock.patch("builtins.print") as printed:
             peer_steward.main(["prompt", "fresh", "[steer] first message not sent yet"])
         line = printed.call_args[0][0]
         self.assertIn("prompted=queued", line)
         self.assertIn("queue-rpc-refused:thread/turns/list", line)
         self.assertNotIn("prompted=unverified", line)
+
+    def _first_prompt_row(self, text="first message"):
+        sender = {"harness": "claude", "session_id": "sid-steward", "name": "s"}
+        recipient = {"harness": "codex", "session_id": "thread-new", "name": None,
+                     "pane_id": "w1:pX"}
+        _body, ref = peer_steward.peer_message.prepare_peer_message(
+            text, sender, recipient, defer=True, with_trailer=False, receipt="native-pending")
+        return ref
+
+    def _first_prompt_run(self, ref, rollout):
+        sent = []
+        guard = mock.patch.object(peer_steward, "_native_idle_prompt_guard",
+                                  return_value=(None, {}))
+        send = mock.patch.object(peer_steward, "_pane_send",
+                                 side_effect=lambda pane, op, value: sent.append((op, value)) or True)
+        with guard, send, mock.patch.object(peer_steward.time, "sleep"), \
+             mock.patch.object(peer_steward, "_codex_rollout_exists",
+                               side_effect=lambda _sid: rollout(sent)), \
+             mock.patch.object(peer_steward, "_CODEX_PASTE_BURST_SEC", 0), \
+             mock.patch.object(peer_steward, "_CODEX_FIRST_PROMPT_POLL_SEC", 0.02):
+            result = peer_steward._codex_first_prompt(ref, "w1:pX", "thread-new")
+        return result, sent
+
+    def test_unmaterialized_codex_thread_gets_pane_input_and_a_second_enter(self):
+        ref = self._first_prompt_row()
+        # The first Enter is swallowed as a newline; the second one submits.
+        result, sent = self._first_prompt_run(
+            ref, lambda sent: [op for op, _v in sent].count("send-keys") >= 2)
+        self.assertTrue(result)
+        self.assertEqual([op for op, _v in sent], ["send-text", "send-keys", "send-keys"])
+        row = peer_steward.peer_message._read_pending(ref)
+        self.assertEqual((row["state"], row["receipt"], row["rpc_claim"]),
+                         ("queued", "native-first-input-submitted", None))
+
+    def test_unmaterialized_thread_single_enter_when_the_first_one_submits(self):
+        ref = self._first_prompt_row()
+        result, sent = self._first_prompt_run(
+            ref, lambda sent: [op for op, _v in sent].count("send-keys") >= 1)
+        self.assertTrue(result)
+        self.assertEqual([op for op, _v in sent], ["send-text", "send-keys"])
+
+    def test_unsubmitted_first_prompt_leaves_the_row_for_the_carrier(self):
+        ref = self._first_prompt_row()
+        result, sent = self._first_prompt_run(ref, lambda _sent: False)
+        self.assertIsNone(result)
+        self.assertEqual(len(sent), 3)
+        self.assertEqual(peer_steward.peer_message._read_pending(ref)["state"], "unverified")
+
+    def test_materialized_thread_keeps_the_queue_path_and_never_types(self):
+        ref = self._first_prompt_row()
+        done = {"status": "queued", "reason": "native-queue-accepted"}
+        with mock.patch.object(peer_steward.peer_message, "deliver_pending_codex",
+                               return_value=done), \
+             mock.patch.object(peer_steward, "_pane_send") as send:
+            result = peer_steward._deliver_codex_pending(
+                ref, "w1:pX", timeout=1.0, start_interrupted=False)
+        self.assertEqual(result, done)
+        send.assert_not_called()
+
+    def test_a_submitted_first_prompt_is_not_delivered_again(self):
+        ref = self._first_prompt_row()
+        refused = {"status": "unverified", "reason":
+                   "queue-rpc-refused:thread/turns/list:-32600:thread is not materialized yet"}
+        with mock.patch.object(peer_steward.peer_message, "deliver_pending_codex",
+                               return_value=refused) as queue, \
+             mock.patch.object(peer_steward, "_codex_first_prompt", return_value=True) as first:
+            result = peer_steward._deliver_codex_pending(
+                ref, "w1:pX", timeout=1.0, start_interrupted=False)
+        self.assertEqual(result["reason"], "native-first-input-submitted")
+        first.assert_called_once_with(ref, "w1:pX", "thread-new")
+        self.assertEqual(queue.call_count, 1)
+        # A row that is no longer pending (already submitted) is never typed again.
+        peer_steward.peer_message._save_pending(
+            dict(peer_steward.peer_message._read_pending(ref), state="queued"))
+        with mock.patch.object(peer_steward, "_pane_send") as send, \
+             mock.patch.object(peer_steward, "_native_idle_prompt_guard", return_value=(None, {})):
+            self.assertIsNone(peer_steward._codex_first_prompt(ref, "w1:pX", "thread-new"))
+        send.assert_not_called()
 
     def test_same_sender_recipient_body_retry_reuses_the_same_ref(self):
         os.environ["CLAUDE_CODE_SESSION_ID"] = "sid-steward"
