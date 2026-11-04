@@ -313,6 +313,21 @@ class TmuxPeerStewardTest(unittest.TestCase):
             time.sleep(.05)
         return json.loads(out.read_text())
 
+    def test_tidy_enqueue_in_a_tmux_pane_books_the_automatic_clear(self):
+        self.transcript()
+        got = self.in_runtime(
+            "import json, os, session_tidy as st, session_tidy_clear as clear\n"
+            "from pathlib import Path\n"
+            "import io, contextlib\n"
+            "os.environ['CLAUDE_CODE_SESSION_ID'] = sid\n"
+            "os.environ['HERDR_PANE_ID'] = 'w9:p9'\n"   # a tmux server started under herdr inherits this
+            "buf = io.StringIO()\n"
+            "with contextlib.redirect_stdout(buf):\n"
+            "    st.main(['enqueue'])\n"
+            "Path(out).write_text(json.dumps(['pane', buf.getvalue()]))\n")
+        self.assertEqual(got[0], "pane")
+        self.assertTrue(str(got[1]).split()[-1:] == ["clear=scheduled"] or "clear=scheduled" in str(got[1]), got)
+
     def test_the_runtime_hook_gets_a_tmux_pane_seat(self):
         seat = self.in_runtime(
             "import json, os, session_tidy as st\n"
