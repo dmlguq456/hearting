@@ -190,6 +190,17 @@ utility-deferred	dispatch_completion_marker.test.py
 utility-deferred	dispatch_continuation_budget.py
 utility-deferred	dispatch_attempt_reference.py
 utility-deferred	dispatch_contract.py
+utility-deferred	dispatch_contract_base.py
+utility-deferred	dispatch_contract_delivery.py
+utility-deferred	dispatch_contract_gates.py
+utility-deferred	dispatch_contract_governor.py
+utility-deferred	dispatch_contract_launch.py
+utility-deferred	dispatch_contract_policy.py
+utility-deferred	dispatch_contract_process.py
+utility-deferred	dispatch_contract_registry.py
+utility-deferred	dispatch_contract_review.py
+utility-deferred	dispatch_contract_roots.py
+utility-deferred	dispatch_contract_rows.py
 utility-deferred	dispatch_contract.test.py
 utility-deferred	dispatch_degradation.py
 utility-deferred	dispatch_log_retention.py

@@ -40,6 +40,7 @@ import dispatch_contract as DC  # noqa: E402
 import fixture_processes  # noqa: E402
 sys.path.insert(0, str(ROOT / "tools" / "memory" / "tests"))
 from tidy_isolation import memory_fixture_env  # noqa: E402
+from split_module_fixture import patch_split  # noqa: E402
 
 
 # Completing nodes here must not launch detached open-cycle checkpoints into
@@ -488,9 +489,9 @@ class TestSupervisorAdvance(WorkflowFixture):
         request = terminal.TerminalCommitRequest(path, "att-parent", jobs, self.base)
         gates = {node: {"passed": passed} for node in WS.route_terminal_nodes(route)}
         with mock.patch.object(terminal, "_completion_request", return_value=request), \
-                mock.patch.object(terminal.dispatch_contract, "attempt_process_quiescence",
+                patch_split(terminal.dispatch_contract, "attempt_process_quiescence",
                                   return_value=terminal.dispatch_contract.ProcessQuiescence("quiescent", "fixture")), \
-                mock.patch.object(terminal, "_route_module", return_value=SimpleNamespace(
+                patch_split(terminal, "_route_module", return_value=SimpleNamespace(
                     terminal_gate_observation=lambda *a, **kw: gates)), \
                 mock.patch.object(terminal, "settle_terminal_commit",
                                   return_value=terminal.TerminalCommitResult("completed")) as commit, \
@@ -3655,8 +3656,8 @@ class TestLegacyPreviewGateRecovery(WorkflowFixture):
             with contextlib.redirect_stdout(output):
                 code = SUP.main(argv[2:])
             return subprocess.CompletedProcess(argv, code, output.getvalue(), "")
-        with mock.patch.object(DC, "completion_marker_is_current", return_value=True) as marker_check, \
-             mock.patch.object(DC, "completion_attempt_readiness", return_value=DC.AttemptReadiness("ready", "fixture")), \
+        with patch_split(DC, "completion_marker_is_current", return_value=True) as marker_check, \
+             patch_split(DC, "completion_attempt_readiness", return_value=DC.AttemptReadiness("ready", "fixture")), \
              mock.patch.object(DC.subprocess, "run", side_effect=gate_transaction) as transaction:
             detail = DC.recover_preview_gate_after_refusal(str(path), "verify", "start", ROOT, jobs, error)
             self.assertIn("preview_gate_recovery=blocked", detail)
@@ -3701,8 +3702,8 @@ class TestLegacyPreviewGateRecovery(WorkflowFixture):
                     return subprocess.CompletedProcess(argv, 64, "", str(exc))
             return subprocess.CompletedProcess(argv, code, output.getvalue(), "")
         error = DC.DispatchContractError("human-gate-not-raised", "preview-disposition: old route has no record")
-        with mock.patch.object(DC, "completion_marker_is_current", return_value=True), \
-             mock.patch.object(DC, "completion_attempt_readiness", return_value=DC.AttemptReadiness("ready", "fixture")), \
+        with patch_split(DC, "completion_marker_is_current", return_value=True), \
+             patch_split(DC, "completion_attempt_readiness", return_value=DC.AttemptReadiness("ready", "fixture")), \
              mock.patch.object(DC.subprocess, "run", side_effect=gate_transaction):
             detail = DC.recover_preview_gate_after_refusal(str(path), "verify", "start", ROOT, jobs, error)
             self.assertIn("preview_gate_recovery=unavailable", detail)
@@ -3769,8 +3770,8 @@ class TestInteractiveFrameGate(WorkflowFixture):
         with mock.patch.dict(os.environ, {session_key: "test-depth0", "AGENT_DISPATCH_CALLER_HARNESS": harness,
                 "AGENT_DISPATCH_ATTEMPT_ID": "", "AGENT_DISPATCH_REGISTERED_WORKER": ""}, clear=True), \
              mock.patch.object(SUP.HUMAN_GATE, "probe_consumer") as probe_consumer, \
-             mock.patch.object(DC, "completion_marker_is_current", return_value=True), \
-             mock.patch.object(DC, "completion_attempt_readiness", return_value=DC.AttemptReadiness("ready", "fixture")):
+             patch_split(DC, "completion_marker_is_current", return_value=True), \
+             patch_split(DC, "completion_attempt_readiness", return_value=DC.AttemptReadiness("ready", "fixture")):
             kwargs = dict(route_path=path, release_authority="depth-0", interview=True, questions=1)
             record_path, created = SUP.create_gate_delivery(route, "frame-review", str(artifact), jobs, 0, **kwargs)
             self.assertTrue(created)

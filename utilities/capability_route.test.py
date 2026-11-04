@@ -16,6 +16,7 @@ FLEET_ROUTE=importlib.util.module_from_spec(FLEET_S); FLEET_S.loader.exec_module
 sys.path.insert(0,str(P.parent))
 import dispatch_contract as D
 import dispatch_runtime_support as RUNTIME_SUPPORT
+from split_module_fixture import patch_split
 ALL=["atomic-outcome","known-scope","no-shared-contract","no-resource-run","no-artifact-handoff","no-independent-verifier","focused-verification"]
 
 DD_CONFIG_A="""schema_version: 1
@@ -4274,8 +4275,8 @@ class TestContinuation(unittest.TestCase):
            "current_content_digest":"sha256:"+hashlib.sha256(evidence.read_bytes()).hexdigest(),
            "placement_sha256":"a"*64,"manifest_sha256":"b"*64}
     with mock.patch.object(R,"inspect_terminal_attempt",return_value=terminal), \
-         mock.patch.object(R,"attempt_process_quiescence",return_value=mock.Mock(state="quiescent")), \
-         mock.patch.object(R,"process_namespace_identity",return_value=namespace), \
+         patch_split(R,"attempt_process_quiescence",return_value=mock.Mock(state="quiescent")), \
+         patch_split(R,"process_namespace_identity",return_value=namespace), \
          mock.patch("artifact_producer.placed_output_proof",return_value=proof):
      original_bytes=evidence.read_bytes()
      original_row=jobs.read_bytes()
@@ -4297,7 +4298,7 @@ class TestContinuation(unittest.TestCase):
        self.assertFalse(list(publications[0].glob("execute*.json")))
        self.assertFalse(publications[1].exists())
      evidence.write_bytes(original_bytes)
-     with mock.patch.object(R,"_atomic_registry_replace",side_effect=OSError("interrupted")):
+     with patch_split(R,"_atomic_registry_replace",side_effect=OSError("interrupted")):
       with self.assertRaises(OSError):
        R.complete_node(source,node,node["id"],evidence,jobs=jobs,attempt_id=attempt)
      self.assertEqual(R.parse_registry_metadata(jobs.read_text().split("\t",5)[5])["note"],"dead-invalid-envelope")
@@ -4323,24 +4324,24 @@ class TestContinuation(unittest.TestCase):
     for change in ({"failure_class":"fail"},{"route_hash":"sha256:"+"0"*64},{}):
      row({**meta,**change})
      with mock.patch.object(R,"inspect_terminal_attempt",return_value=terminal), \
-          mock.patch.object(R,"attempt_process_quiescence",return_value=mock.Mock(state="quiescent")), \
-          mock.patch.object(R,"process_namespace_identity",return_value=namespace), \
+          patch_split(R,"attempt_process_quiescence",return_value=mock.Mock(state="quiescent")), \
+          patch_split(R,"process_namespace_identity",return_value=namespace), \
           mock.patch("artifact_producer.placed_output_proof",return_value=None if not change else proof):
       with self.assertRaises(ValueError):
        R.complete_node(source,node,node["id"],evidence,jobs=jobs,attempt_id=attempt)
     for verdict in ("FAIL","BLOCKED"):
      row(meta)
      with mock.patch.object(R,"inspect_terminal_attempt",return_value={**terminal,"verdict":verdict}), \
-          mock.patch.object(R,"attempt_process_quiescence",return_value=mock.Mock(state="quiescent")), \
-          mock.patch.object(R,"process_namespace_identity",return_value=namespace), \
+          patch_split(R,"attempt_process_quiescence",return_value=mock.Mock(state="quiescent")), \
+          patch_split(R,"process_namespace_identity",return_value=namespace), \
           mock.patch("artifact_producer.placed_output_proof",return_value=proof):
       with self.assertRaises(ValueError):
        R.complete_node(source,node,node["id"],evidence,jobs=jobs,attempt_id=attempt)
     row(meta)
     jobs.write_text(jobs.read_text()+jobs.read_text().replace(attempt,"att-newer-attempt"))
     with mock.patch.object(R,"inspect_terminal_attempt",return_value=terminal), \
-         mock.patch.object(R,"attempt_process_quiescence",return_value=mock.Mock(state="quiescent")), \
-         mock.patch.object(R,"process_namespace_identity",return_value=namespace), \
+         patch_split(R,"attempt_process_quiescence",return_value=mock.Mock(state="quiescent")), \
+         patch_split(R,"process_namespace_identity",return_value=namespace), \
          mock.patch("artifact_producer.placed_output_proof",return_value=proof):
      with self.assertRaises(ValueError):
       R.complete_node(source,node,node["id"],evidence,jobs=jobs,attempt_id=attempt)
@@ -5332,7 +5333,7 @@ class RevisedAncestorSuccessorTest(unittest.TestCase):
   with tempfile.TemporaryDirectory() as tmp:
    root=Path(tmp)/".agent_reports"
    source,prior,begun,evidence=self._revised_fixture(root)
-   with mock.patch.object(review_input,"_route_module",return_value=R):
+   with patch_split(review_input,"_route_module",return_value=R):
     successor=R.build_continuation_route(
      prior,resume_from_node="plan-check",requested_boundary="plan-check",
      reason="review revised plan",artifact_root=root,
@@ -5382,7 +5383,7 @@ class RevisedAncestorSuccessorTest(unittest.TestCase):
                     successor["nodes"][0]["completion_gate"],jobs=self._jobs)["passed"])
     D.completion_marker_gate(str(successor_path),"execute","dry-run",
                              Path(self._tmp_home.name),self._jobs)
-    with mock.patch.object(
+    with patch_split(
        D,"attempt_process_quiescence",
        return_value=D.ProcessQuiescence("quiescent","fixture-owner-ended"),
     ):
@@ -5448,7 +5449,7 @@ class RevisedAncestorSuccessorTest(unittest.TestCase):
   with tempfile.TemporaryDirectory() as tmp:
    source,prior,_begun,_evidence=self._revised_fixture(Path(tmp)/".agent_reports")
    for state in ("live","unverifiable"):
-    with self.subTest(state=state),mock.patch.object(R,"attempt_process_quiescence",
+    with self.subTest(state=state),patch_split(R,"attempt_process_quiescence",
           return_value=D.ProcessQuiescence(state,"fixture")):
      with self.assertRaisesRegex(ValueError,"ancestor-revision-source-owner-not-quiescent"):
       R.build_continuation_route(prior,resume_from_node="plan-check",
@@ -5945,7 +5946,9 @@ class SourceCensusTest(unittest.TestCase):
     self.generic_visit(node)
 
   offenders=[]
-  for relative in ("utilities/capability-route.py","utilities/dispatch_contract.py"):
+  # dispatch_contract.py is split into dispatch_contract_*.py siblings; read them all.
+  contract_parts=tuple(sorted(f"utilities/{path.name}" for path in (P.parents[1]/"utilities").glob("dispatch_contract_*.py")))
+  for relative in ("utilities/capability-route.py","utilities/dispatch_contract.py",*contract_parts):
    path=P.parents[1]/relative
    file_tree=ast.parse(path.read_text(encoding="utf-8"))
    visitor=EvidenceDigestVisitor(); visitor.visit(file_tree)
@@ -9257,10 +9260,10 @@ class OwnerRegisteredCompletionTest(unittest.TestCase):
    # is isolated so this fixture never claims anything about host processes.
    for process,state in ((D.ProcessQuiescence("quiescent","fixture"),"ready"),
                          (D.ProcessQuiescence("live","fixture"),"draining")):
-    with mock.patch.object(D,"attempt_process_quiescence",return_value=process) as probe:
+    with patch_split(D,"attempt_process_quiescence",return_value=process) as probe:
      self.assertEqual(D.completion_attempt_readiness(route,node,marker,self.jobs).state,state)
      probe.assert_called_once()
-  with mock.patch.object(D,"attempt_process_quiescence",
+  with patch_split(D,"attempt_process_quiescence",
                         return_value=D.ProcessQuiescence("quiescent","fixture")):
    exact=R.terminal_gate_observation(route,jobs=self.jobs,exact_terminal=True)[node["id"]]
   self.assertTrue(exact["passed"],exact)
@@ -9281,7 +9284,7 @@ class OwnerRegisteredCompletionTest(unittest.TestCase):
   output=io.StringIO()
   with mock.patch.object(sys,"argv",command),contextlib.redirect_stdout(output):
    R.main()
-  with mock.patch.object(D,"attempt_process_quiescence",
+  with patch_split(D,"attempt_process_quiescence",
                         return_value=D.ProcessQuiescence("quiescent","fixture")):
    exact=R.terminal_gate_observation(route,jobs=self.jobs,exact_terminal=True)[node["id"]]
   self.assertTrue(exact["passed"],exact)
@@ -9291,7 +9294,7 @@ class OwnerRegisteredCompletionTest(unittest.TestCase):
   request=R.dispatch_terminal_commit.TerminalCommitRequest(
    path,"att-terminal-owner",self.jobs,Path(route["artifact_root"]))
   with mock.patch.object(R.dispatch_terminal_commit,"_completion_request",return_value=request), \
-       mock.patch.object(D,"attempt_process_quiescence",
+       patch_split(D,"attempt_process_quiescence",
                          return_value=D.ProcessQuiescence("quiescent","fixture")):
    state=R.dispatch_terminal_commit.owner_completion_state(self.jobs,"done",metadata)
   self.assertNotEqual(state.state,"blocked",state)
@@ -9536,7 +9539,7 @@ class OwnerNodeBoundTerminalTest(unittest.TestCase):
  def observe(self,*rows,route=None):
   self.jobs.write_text("".join(r+"\n" for r in rows))
   route=route or self.route
-  with mock.patch.object(R,"attempt_process_quiescence",return_value=mock.Mock(state="quiescent")), \
+  with patch_split(R,"attempt_process_quiescence",return_value=mock.Mock(state="quiescent")), \
        mock.patch.object(R,"owner_terminal_prerequisites",return_value={}):
    return R.terminal_gate_observation(route,jobs=self.jobs,exact_terminal=True)["one-shot"]
 
@@ -10907,7 +10910,7 @@ class ProducerRevisionAdmissionTest(unittest.TestCase):
    revised_bytes=(json.dumps(revised,sort_keys=True)+"\n").encode()
    (directory/"plan.2.json").write_bytes(revised_bytes)
    (directory/"plan.json").write_bytes(revised_bytes)
-   with mock.patch.object(R,"gate_currency",return_value=SimpleNamespace(state="current",reason="")):
+   with patch_split(R,"gate_currency",return_value=SimpleNamespace(state="current",reason="")):
     first=R.producer_revision_admission(route,route["nodes"][:2],jobs)
     again=R.producer_revision_admission(route,route["nodes"][:2],jobs)
     self.assertTrue(first["managed"])
@@ -10923,7 +10926,7 @@ class ProducerRevisionAdmissionTest(unittest.TestCase):
    bad_bytes=(json.dumps(bad,sort_keys=True)+"\n").encode()
    (directory/"plan.2.json").write_bytes(bad_bytes)
    (directory/"plan.json").write_bytes(bad_bytes)
-   with mock.patch.object(R,"gate_currency",return_value=SimpleNamespace(state="current",reason="")), \
+   with patch_split(R,"gate_currency",return_value=SimpleNamespace(state="current",reason="")), \
         self.assertRaisesRegex(ValueError,"producer-revision-basis-unverified"):
     R.producer_revision_admission(route,route["nodes"][:2],jobs)
 

@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import dispatch_replacement as R
 import dispatch_replacement_batch as RB
 import review_round_cap as ROUND
+from split_module_fixture import patch_split
 
 
 def load(name, filename):
@@ -136,7 +137,7 @@ class ReplacementBatchTest(unittest.TestCase):
             stack.enter_context(mock.patch.object(BATCH, 'resolve_agent_home', return_value=self.base))
             stack.enter_context(mock.patch.object(BATCH, 'resolve_global_registry', return_value=SimpleNamespace(path=self.jobs)))
             stack.enter_context(mock.patch.object(BATCH, 'resolve_live_parent_attempt'))
-            stack.enter_context(mock.patch.object(BATCH, 'completion_marker_gate'))
+            stack.enter_context(patch_split(BATCH, 'completion_marker_gate'))
             stack.enter_context(mock.patch.object(BATCH.subprocess, 'check_output', return_value=str(self.base)))
             reserve = stack.enter_context(mock.patch.object(BATCH, 'reserve_batch', return_value=['b'*32]))
             stack.enter_context(mock.patch.object(BATCH, 'cancel_unclaimed'))

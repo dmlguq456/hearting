@@ -21,6 +21,7 @@ sys.path.insert(0, str(HERE))
 import dispatch_contract as D
 from codex_dispatch_terminal import inspect_terminal_attempt
 from recovery_evidence import observe_attempt
+from split_module_fixture import patch_split
 
 spec = importlib.util.spec_from_file_location("recovery_registry", HERE / "dispatch-registry.py")
 REGISTRY = importlib.util.module_from_spec(spec)
@@ -51,7 +52,7 @@ class RecoveryEvidenceTest(unittest.TestCase):
         # The host's unrelated protected processes can make a real /proc walk
         # incomplete. Supply the existing observer's exact empty scan while
         # retaining real PID/start/group observation and real registry writes.
-        self.scan = mock.patch.object(D, "attempt_tagged_descendants", return_value=D.ProcessGroupObservation("empty", ()))
+        self.scan = patch_split(D, "attempt_tagged_descendants", return_value=D.ProcessGroupObservation("empty", ()))
         self.scan.start()
         self.addCleanup(self.scan.stop)
         self.addCleanup(self.temp.cleanup)
@@ -195,7 +196,7 @@ class RecoveryEvidenceTest(unittest.TestCase):
         view = observe_attempt("open", self.metadata, worktree=self.base)
         self.assertEqual(view.process.state, "quiescent")
         self.assertIn("pid-reused", view.process.reason)
-        with mock.patch.object(D, "attempt_tagged_descendants", return_value=D.ProcessGroupObservation("populated", ((4242, "10", "S"),))):
+        with patch_split(D, "attempt_tagged_descendants", return_value=D.ProcessGroupObservation("populated", ((4242, "10", "S"),))):
             view = observe_attempt("open", self.metadata, worktree=self.base)
             self.assertEqual((view.process.state, view.decision.action), ("live", "wait"))
             result = self.reconcile(apply=True, only_exact_dead=True)
@@ -204,9 +205,9 @@ class RecoveryEvidenceTest(unittest.TestCase):
 
     def test_inaccessible_namespace_preserves_unknown(self):
         self.write_row(pid_ns="pid:[9999999999]", pid_observer_ns="pid:[9999999999]")
-        with mock.patch.object(D, "authoritative_process_identities", return_value=[]), \
-                mock.patch.object(D, "namespace_gone", return_value="present"), \
-                mock.patch.object(D, "attempt_tagged_descendants", return_value=D.ProcessGroupObservation("unverifiable", (), "observer-namespace-mismatch")):
+        with patch_split(D, "authoritative_process_identities", return_value=[]), \
+                patch_split(D, "namespace_gone", return_value="present"), \
+                patch_split(D, "attempt_tagged_descendants", return_value=D.ProcessGroupObservation("unverifiable", (), "observer-namespace-mismatch")):
             view = observe_attempt("open", self.metadata, worktree=self.base)
             result = self.reconcile(apply=True, only_exact_dead=True)
         self.assertEqual((view.process.state, view.decision.action), ("unverifiable", "recover"))
@@ -243,9 +244,9 @@ class RecoveryEvidenceTest(unittest.TestCase):
         )
         # This is the namespace recorded by the real row. A fresh proof is
         # supplied by that namespace; it is never rewritten into the registry.
-        with mock.patch.object(D, "process_namespace_identity", return_value="pid:[4026531836]"), \
-                mock.patch.object(D, "_proc_observation", return_value=("missing", "", "")), \
-                mock.patch.object(D, "process_group_observation", return_value=D.ProcessGroupObservation("empty", ())):
+        with patch_split(D, "process_namespace_identity", return_value="pid:[4026531836]"), \
+                patch_split(D, "_proc_observation", return_value=("missing", "", "")), \
+                patch_split(D, "process_group_observation", return_value=D.ProcessGroupObservation("empty", ())):
             before = self.jobs.read_bytes()
             self.assertEqual(self.reconcile()["decisions"][0]["category"], "exact-dead")
             self.assertEqual(D.existing_attempt_launch_state(self.jobs, self.metadata["attempt_id"])[0], "existing-dead")

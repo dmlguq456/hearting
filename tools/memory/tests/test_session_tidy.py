@@ -44,6 +44,8 @@ import session_tidy_clear as clear  # noqa: E402
 import session_tidy_runner as runner  # noqa: E402
 import tidy_transcripts as tt  # noqa: E402
 from test_tidy_isolation import FIXTURES, FIXTURE_NOW, load_opencode_fixture  # noqa: E402
+sys.path.append(str(Path(__file__).resolve().parents[3] / "utilities"))  # split_module_fixture
+from split_module_fixture import patch_split  # noqa: E402
 
 TIDY = ROOT / "utilities" / "session_tidy.py"
 DAY = 86400
@@ -1153,7 +1155,7 @@ class NativeSessionContinuityTest(unittest.TestCase):
         process = lambda pid: (int(pid), 1, int(pid), 1, int(pid), {
             42101: "start-a", 42102: "start-b", 42103: "restart-a"}.get(int(pid), "unknown-start"))
         patchers = (
-            mock.patch.object(pane_ownership, "_registered_worker", return_value=False),
+            patch_split(pane_ownership, "_registered_worker", return_value=False),
             mock.patch.object(pane_ownership, "_caller_runtime",
                               return_value=((os.getpid(), 1, 1, 1, 1, "caller"), True)),
             mock.patch.object(pane_ownership, "codex_tui_process_bindings",

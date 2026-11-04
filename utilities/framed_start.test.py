@@ -29,6 +29,7 @@ os.environ["FLEET_NOW_LANG"] = "Korean"
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent / "tools"))
+from split_module_fixture import split_patch  # noqa: E402
 
 
 def _load(name, filename):
@@ -2182,7 +2183,7 @@ def driver(context_path, crash_at):
 
     interview = json.loads(Path(context["interview"]).read_text(encoding="utf-8"))
     answers = json.loads(Path(context["answers"]).read_text(encoding="utf-8"))
-    with mock.patch("dispatch_contract.completion_marker_gate"), \
+    with split_patch("dispatch_contract.completion_marker_gate"), \
             mock.patch.object(W, "_route_cli", side_effect=in_process_cli), \
             mock.patch.object(R, "proposal_readiness", side_effect=readiness), \
             mock.patch.object(R, "prepare_isolated_worktree", side_effect=prepare), \

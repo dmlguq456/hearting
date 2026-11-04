@@ -22,6 +22,7 @@ import dispatch_contract as D
 import dispatch_replacement as R
 import work_start as W
 from dispatch_completion_join import CurrentDeliveryState
+from split_module_fixture import patch_split
 os.environ.setdefault("HEARTING_CAPACITY_PROBE_CLI", os.devnull)  # never ask a real Claude login
 
 LIMITED = "resets 2099-01-01 00:00 (UTC)"
@@ -58,7 +59,7 @@ class CapacityResumeTest(unittest.TestCase):
                     "root_route_id": "rt-root", "node": "__owner__" if m.get("worker_type") == "owner" else m["route_node"]}),
                 mock.patch.object(R, "_reuse_snapshot", return_value={
                     "completed": [], "cycle_id": "cyc", "producer_id": "prod", "gates": []}),
-                mock.patch.object(D, "attempt_process_quiescence", side_effect=self.quiescence),
+                patch_split(D, "attempt_process_quiescence", side_effect=self.quiescence),
                 mock.patch.object(D, "resolve_attempt_cleanup", side_effect=self.cleanup),
                 mock.patch("artifact_producer.prepare_route_artifact_env", return_value={})):
             patcher.start()

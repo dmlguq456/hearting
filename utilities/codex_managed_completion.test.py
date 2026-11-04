@@ -17,6 +17,7 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 from typing import Any
+from split_module_fixture import patch_split
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -285,7 +286,7 @@ class ParentLifetimeStopTest(unittest.TestCase):
     def test_capture_binds_one_native_tui_process_start(self):
         binding = {key: value for key, value in self.binding.items() if key != "pid_namespace"}
         with mock.patch("pane_ownership.codex_tui_process_bindings", return_value=[binding]), \
-             mock.patch.object(self.module, "process_namespace_identity", side_effect=["ns", "ns"]):
+             patch_split(self.module, "process_namespace_identity", side_effect=["ns", "ns"]):
             self.assertEqual(self.module.capture_parent_lifetime(self.args), self.binding)
 
     def _unbound_args(self):
@@ -294,7 +295,7 @@ class ParentLifetimeStopTest(unittest.TestCase):
 
     def test_unbound_lifetime_without_session_tui_or_successor_ends_the_observer(self):
         args = self._unbound_args()
-        with mock.patch.object(self.module, "process_namespace_identity", return_value="ns"), \
+        with patch_split(self.module, "process_namespace_identity", return_value="ns"), \
              mock.patch("pane_ownership.codex_tui_processes_for_session", return_value=[]), \
              mock.patch.object(self.module, "_confirmed_parent_successor", return_value=""):
             self.assertEqual(self.module.parent_session_stop_reason(args, {"att-child"}),
@@ -304,7 +305,7 @@ class ParentLifetimeStopTest(unittest.TestCase):
     def test_unbound_lifetime_binds_the_one_session_tui_and_keeps_observing(self):
         args = self._unbound_args()
         tui = {"pid": 77, "pid_start": "9", "session_id": SESSION}
-        with mock.patch.object(self.module, "process_namespace_identity", return_value="ns"), \
+        with patch_split(self.module, "process_namespace_identity", return_value="ns"), \
              mock.patch("pane_ownership.codex_tui_processes_for_session", return_value=[tui]):
             self.assertEqual(self.module.parent_session_stop_reason(args, {"att-child"}), "")
         self.assertEqual(args.parent_lifetime, {**tui, "pid_namespace": "ns"})
@@ -319,7 +320,7 @@ class ParentLifetimeStopTest(unittest.TestCase):
                                  namespace=None),
         }.items():
             with self.subTest(label), \
-                 mock.patch.object(self.module, "process_namespace_identity",
+                 patch_split(self.module, "process_namespace_identity",
                                    return_value=patches["namespace"]), \
                  mock.patch("pane_ownership.codex_tui_processes_for_session", patches["tui"]):
                 args = self._unbound_args()
@@ -328,7 +329,7 @@ class ParentLifetimeStopTest(unittest.TestCase):
 
     def test_unbound_lifetime_with_unreadable_handover_evidence_keeps_the_duty(self):
         args = self._unbound_args()
-        with mock.patch.object(self.module, "process_namespace_identity", return_value="ns"), \
+        with patch_split(self.module, "process_namespace_identity", return_value="ns"), \
              mock.patch("pane_ownership.codex_tui_processes_for_session", return_value=[]), \
              mock.patch.object(self.module, "_confirmed_parent_successor",
                                side_effect=OSError("registry")):
@@ -350,13 +351,13 @@ class ParentLifetimeStopTest(unittest.TestCase):
         ask.assert_called_once_with(args.jobs, SESSION, {"att-child"}, current_session="x")
 
     def test_live_exact_parent_does_not_trigger_observer_exit(self):
-        with mock.patch.object(self.module, "process_namespace_identity", return_value="ns"), \
+        with patch_split(self.module, "process_namespace_identity", return_value="ns"), \
              mock.patch.object(self.module, "_parent_proc_state", return_value=("live", "456")), \
              mock.patch("pane_ownership._native_session", return_value=SESSION):
             self.assertEqual(self.module.parent_session_stop_reason(self.args, {"att-child"}), "")
 
     def test_proven_parent_exit_stops_only_without_a_bound_successor(self):
-        with mock.patch.object(self.module, "process_namespace_identity", return_value="ns"), \
+        with patch_split(self.module, "process_namespace_identity", return_value="ns"), \
              mock.patch.object(self.module, "_parent_proc_state", return_value=("gone", None)), \
              mock.patch("pane_ownership.codex_tui_processes_for_session", return_value=[]), \
              mock.patch.object(self.module, "_confirmed_parent_successor", return_value=""):
@@ -364,7 +365,7 @@ class ParentLifetimeStopTest(unittest.TestCase):
                              self.module.PARENT_SESSION_ENDED)
 
     def test_confirmed_attempt_successor_keeps_the_obligation(self):
-        with mock.patch.object(self.module, "process_namespace_identity", return_value="ns"), \
+        with patch_split(self.module, "process_namespace_identity", return_value="ns"), \
              mock.patch.object(self.module, "_parent_proc_state", return_value=("gone", None)), \
              mock.patch("pane_ownership.codex_tui_processes_for_session", return_value=[]), \
              mock.patch.object(self.module, "_confirmed_parent_successor", return_value="successor"):

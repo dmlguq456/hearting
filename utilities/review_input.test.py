@@ -16,6 +16,7 @@ from unittest import mock
 
 import dispatch_contract as DC
 import review_input as R
+from split_module_fixture import patch_split
 
 
 class ReviewInputTest(unittest.TestCase):
@@ -243,13 +244,13 @@ class ReviewInputTest(unittest.TestCase):
         marker_path = self.root / 'completion' / self.route['route_id'] / 'plan.json'
         marker_path.parent.mkdir(parents=True)
         marker_path.write_text(json.dumps(marker))
-        with mock.patch.object(DC, 'resolve_dispatch_state_root', return_value=self.root), \
-                mock.patch.object(DC, 'completion_marker_is_current', return_value=True):
+        with patch_split(DC, 'resolve_dispatch_state_root', return_value=self.root), \
+                patch_split(DC, 'completion_marker_is_current', return_value=True):
             auto = R.resolve_input(route, self.node, self.jobs)
             self.assertEqual(auto, R.resolve_input(route, self.node, self.jobs, self.evidence))
             self.assertEqual(auto['producer']['attempt_id'], 'att-plan')
-        with mock.patch.object(DC, 'resolve_dispatch_state_root', return_value=self.root), \
-                mock.patch.object(DC, 'completion_marker_is_current', return_value=False):
+        with patch_split(DC, 'resolve_dispatch_state_root', return_value=self.root), \
+                patch_split(DC, 'completion_marker_is_current', return_value=False):
             self.assert_reason('reviewed-evidence-producer-unproven', R.resolve_input,
                                route, self.node, self.jobs)
 
@@ -260,7 +261,7 @@ class ReviewInputTest(unittest.TestCase):
         self.route['nodes'].append({'id': 'plan'})
         self.route_file.write_text(json.dumps(self.route))
         args = self.args(attempt_id='att-replacement', automatic_retry_of='att-review')
-        with mock.patch.object(DC, 'completion_marker_is_current', side_effect=AssertionError('must not rebind')):
+        with patch_split(DC, 'completion_marker_is_current', side_effect=AssertionError('must not rebind')):
             R.prepare_request(args)
             digest = DC.parse_registry_metadata(R.registration_fragment(args))[R.KEY]
         meta = dict(self.meta, attempt_id='att-replacement', **{R.KEY: digest})
@@ -414,10 +415,10 @@ class ReviewInputTest(unittest.TestCase):
         route_file.write_text(json.dumps(route))
         unrecorded = SimpleNamespace(state='revised-unrecorded', reason='completion-evidence-revised-unrecorded',
                                      next_action=None)
-        with mock.patch.object(DC, 'dispatch_state_roots', return_value=(agent_home,)), \
-                mock.patch.object(DC, '_launch_completion_input'), \
-                mock.patch.object(DC, 'completion_marker_is_current', return_value=False), \
-                mock.patch.object(DC, 'gate_currency', return_value=unrecorded):
+        with patch_split(DC, 'dispatch_state_roots', return_value=(agent_home,)), \
+                patch_split(DC, '_launch_completion_input'), \
+                patch_split(DC, 'completion_marker_is_current', return_value=False), \
+                patch_split(DC, 'gate_currency', return_value=unrecorded):
             self.assert_reason('completion-evidence-revised-unrecorded', DC.completion_marker_gate,
                                str(route_file), 'plan-check', 'start', agent_home, self.jobs)
 
@@ -452,7 +453,7 @@ class ReviewInputTest(unittest.TestCase):
                 stack.enter_context(mock.patch.dict(os.environ,environment,clear=True))
                 stack.enter_context(mock.patch.object(wrapper,'resolve_artifact_root',return_value=str(self.root)))
                 stack.enter_context(mock.patch.object(wrapper,'validate_route_record',side_effect=lambda args:setattr(args,'route_validation',{}) or 0))
-                stack.enter_context(mock.patch.object(wrapper,'completion_marker_gate'))
+                stack.enter_context(patch_split(wrapper,'completion_marker_gate'))
                 stack.enter_context(mock.patch.object(wrapper,'headless_attempt_policy',return_value={
                     'fallback_hop':'same-harness-headless','fallback_ordinal':1,'quick':False,
                     'terminal_attempt_limit':None,'replacement_attempt_limit':0,'replacement_notes':frozenset()}))

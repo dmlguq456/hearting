@@ -29,6 +29,7 @@ ROOT = FIX.ROOT
 import dispatch_resource_wait as WAIT
 import dispatch_contract as DC
 import route_authority as RA
+from split_module_fixture import patch_split
 
 
 V3532_READ_ARMED_SOURCE = '''def read_armed(ledger):
@@ -835,7 +836,7 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
                 'checked': True, 'missing': [], 'reason': 'artifacts-present'})
             with mock.patch('review_input.preview_request_admission', return_value=None), \
                  mock.patch('subprocess.check_output', return_value=str(self.base)), \
-                 mock.patch.object(DC, 'canonical_repository_identity', return_value='fixture-repository'), \
+                 patch_split(DC, 'canonical_repository_identity', return_value='fixture-repository'), \
                  mock.patch.object(RR, 'compute_execution_observation', return_value={
                      'state': 'quiescent', 'reason': 'fixture-remote-empty'}):
                 self.assertIsNone(RA.completion_gate(
@@ -2304,7 +2305,7 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
             self.assertTrue(SUP.admit_owner_successor_start(route, 'run-verify', jobs, owner, 'same-native'))
             marker = SUP.route_module().completion_dir(route['route_id'], jobs=jobs) / 'full-run.json'
             before = marker.read_bytes(), (output / 'run.json').read_bytes(), ledger.journal_path.read_bytes()
-            with mock.patch.object(INPUT, 'supervisor_lease_is_held', return_value=False):
+            with patch_split(INPUT, 'supervisor_lease_is_held', return_value=False):
                 with self.assertRaisesRegex(SUP.SupervisorError, 'resource-owner-input-unavailable'):
                     SUP.admit_owner_successor_start(route, 'run-verify', jobs, owner, 'same-native')
             INPUT.submit(jobs, owner, 'apply this correction before continuing', 'pending-operation-correction')

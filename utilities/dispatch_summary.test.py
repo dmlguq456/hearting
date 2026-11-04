@@ -20,6 +20,7 @@ sys.path[:0] = [str(ROOT / "utilities"), str(ROOT / "tools")]
 import dispatch_summary as S  # noqa: E402
 import dispatch_contract as D  # noqa: E402
 from fleet import titles  # noqa: E402
+from split_module_fixture import patch_split  # noqa: E402
 
 warnings.filterwarnings("ignore", category=ResourceWarning)
 
@@ -127,13 +128,13 @@ class DispatchSummaryTest(unittest.TestCase):
                     finally:
                         provider.kill()
                         provider.wait(timeout=5)
-            with mock.patch.object(S, "process_namespace_identity", return_value="pid:[other]"), \
-                    mock.patch.object(S, "_current_observer_is_host_like", return_value=False):
+            with patch_split(S, "process_namespace_identity", return_value="pid:[other]"), \
+                    patch_split(S, "_current_observer_is_host_like", return_value=False):
                 self.assertEqual(S.home_consumer_evidence(metadata),
                                  ("unknown", "provider-scan-namespace-unverifiable"))
             # A host-like reader walks every PID namespace: the extinct recorded
             # namespace is no obstacle, and absence is decided by the argv scan.
-            with mock.patch.object(S, "_current_observer_is_host_like", return_value=True):
+            with patch_split(S, "_current_observer_is_host_like", return_value=True):
                 stale = {**metadata, "summary_owner_pid_observer_ns": "pid:[4026534399]"}
                 original_state = state_path.read_text()
                 state_path.write_text(json.dumps({
@@ -149,7 +150,7 @@ class DispatchSummaryTest(unittest.TestCase):
                 finally:
                     provider.kill()
                     provider.wait(timeout=5)
-            with mock.patch.object(S, "_current_observer_is_host_like", return_value=False):
+            with patch_split(S, "_current_observer_is_host_like", return_value=False):
                 self.assertEqual(S.home_consumer_evidence(stale),
                                  ("unknown", "provider-scan-namespace-unverifiable"))
             state_path.write_text(original_state)
@@ -590,7 +591,7 @@ class DispatchSummaryTest(unittest.TestCase):
                 return {"pid_start": "owner-start"}
 
             with mock.patch.object(S.subprocess, "Popen", side_effect=fake_popen), \
-                    mock.patch.object(S, "process_launch_identity", side_effect=fake_identity):
+                    patch_split(S, "process_launch_identity", side_effect=fake_identity):
                 S.launch_summary_owner(
                     attempt_id=attempt, harness="codex", transcript=log,
                     target_pid=worker.pid, target_start=start, prompt_path=prompt,

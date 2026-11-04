@@ -15,6 +15,7 @@ import dispatch_contract as DC
 import dispatch_owner_input as INPUT
 import dispatch_replacement as REPLACE
 import route_parent_close as CLOSE
+from split_module_fixture import patch_split
 
 spec = importlib.util.spec_from_file_location('owner_resource_fixture', HERE / 'route_parent_close.test.py')
 FIXTURE = importlib.util.module_from_spec(spec)
@@ -200,8 +201,8 @@ class PreservedTagObservationTest(unittest.TestCase):
             preserved = {(123, '200')}
             with mock.patch.object(Path, 'iterdir', side_effect=lambda: iter(entries)), \
                  mock.patch.object(Path, 'read_bytes', denied), \
-                 mock.patch.object(DC, '_tag_access_observation', return_value=('201', 'same-uid-unobservable')), \
-                 mock.patch.object(DC, 'attempt_scan_namespace_authority', return_value=True):
+                 patch_split(DC, '_tag_access_observation', return_value=('201', 'same-uid-unobservable')), \
+                 patch_split(DC, 'attempt_scan_namespace_authority', return_value=True):
                 scan = DC.scan_process_table()
                 self.assertEqual(DC.attempt_tagged_descendants(meta).state, 'populated')
                 for cached in (False, True):
@@ -215,7 +216,7 @@ class PreservedTagObservationTest(unittest.TestCase):
                         finally: DC._PROCESS_TABLE_SCAN.reset(token)
             for reason, authority in (('malformed', True), ('', False)):
                 scan = DC.ProcessTableScan({'att-fixture': ((123,'200','S'),)}, {}, incomplete_reason=reason)
-                with mock.patch.object(DC, 'attempt_scan_namespace_authority', return_value=authority):
+                with patch_split(DC, 'attempt_scan_namespace_authority', return_value=authority):
                     result = DC._tagged_descendants_from_scan(scan, meta, 'att-fixture', preserved=preserved)
                     self.assertEqual(result.state, 'unverifiable')
 

@@ -8,6 +8,7 @@ sys.path.insert(0,str(ROOT/'utilities'))
 spec=importlib.util.spec_from_file_location('preview_fallback_fixture',ROOT/'utilities/stage_dispatch_fallback.test.py')
 fixture=importlib.util.module_from_spec(spec);spec.loader.exec_module(fixture)
 import review_input
+from split_module_fixture import patch_split
 
 class WrapperPreviewTest(unittest.TestCase):
  def setUp(self):
@@ -70,7 +71,7 @@ class WrapperPreviewTest(unittest.TestCase):
         'quiescent' if prior_quiescent else 'unverifiable',
         'fixture-group-empty' if prior_quiescent else 'process-identity-missing')
       return original_observer(meta, **kwargs)
-     stack.enter_context(mock.patch.object(review_input.DC,'attempt_process_quiescence',side_effect=observe))
+     stack.enter_context(patch_split(review_input.DC,'attempt_process_quiescence',side_effect=observe))
      stack.enter_context(mock.patch.object(w,'validate_route_record',side_effect=lambda args:setattr(args,'route_validation',{}) or 0))
      stack.enter_context(mock.patch.object(w,'headless_attempt_policy',return_value={
       'fallback_hop':'same-harness-headless','fallback_ordinal':1,'quick':False,

@@ -1769,6 +1769,7 @@ class RegistryConfirmArmTest(unittest.TestCase):
 
 
 import dispatch_contract as D  # noqa: E402
+from split_module_fixture import patch_split  # noqa: E402
 import dispatch_completion_join as JOIN  # noqa: E402
 
 
@@ -2608,7 +2609,7 @@ class RuntimeDeathSuccessorTest(CarrierOneClaimGateTest):
             side_effect=lambda route, meta: {"root_route_id": route["route_id"], "node": "owner"}))
         self.enterContext(mock.patch.object(replacement, "_reuse_snapshot",
                                             side_effect=lambda *a, **k: self.reuse))
-        self.enterContext(mock.patch.object(D, "attempt_process_quiescence",
+        self.enterContext(patch_split(D, "attempt_process_quiescence",
             return_value=SimpleNamespace(state="quiescent", reason="process-absent")))
         self.enterContext(mock.patch.object(D, "resolve_attempt_cleanup",
                                             return_value={"settled": True}))

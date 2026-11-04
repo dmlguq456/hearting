@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT / 'utilities'))
 import dispatch_contract as contract
 import dispatch_pending_delivery as pending
 import dispatch_session_sweep as sweep
+from split_module_fixture import patch_split
 spec = importlib.util.spec_from_file_location('queue_prompt_hook', ROOT / 'adapters/codex/hooks/userprompt-lifecycle.py')
 hook = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = hook
@@ -148,7 +149,7 @@ class PromptReceiptTest(unittest.TestCase):
                 receipt_digest=pending._canonical_receipt_digest(receipt), row_revisions={'att-exact': 'rev'})
             pending.claim(root, 'native-parent', did, claim_owner='failed-carrier', lease_seconds=60)
             pending.release_claim(root, 'native-parent', did, claim_owner='failed-carrier')
-            with mock.patch.object(contract, 'dispatch_state_roots', return_value=[root]):
+            with patch_split(contract, 'dispatch_state_roots', return_value=[root]):
                 self.assertEqual(hook.native_queue_prompt_receipts('sibling'), ([], []))
                 batches, texts = hook.native_queue_prompt_receipts('native-parent')
             self.assertIn('att-exact', texts[0])

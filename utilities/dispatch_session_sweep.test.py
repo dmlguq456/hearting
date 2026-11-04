@@ -26,7 +26,7 @@ import time
 import unittest
 from unittest import mock
 from types import SimpleNamespace
-from split_module_fixture import patch_split  # noqa: E402
+from split_module_fixture import patch_split, split_patch  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
@@ -499,7 +499,7 @@ class SweepTest(IsolatedRootMixin, unittest.TestCase):
                 observed.append((output.flushed, PD.read(self.root, "parent", notice["delivery_id"])["state"]))
             begin = time.monotonic()
             with mock.patch.object(HOOK, "resolve_agent_home", return_value=ROOT), \
-                 mock.patch.object(HOOK, "dispatch_state_roots", return_value=(self.root, self.root)), \
+                 patch_split(HOOK, "dispatch_state_roots", return_value=(self.root, self.root)), \
                  mock.patch.object(HOOK, "request_obligation_reconciliation", side_effect=recovery), \
                  mock.patch.object(terminal, "owner_completion_pending", side_effect=AssertionError("heavy selection")) as full, \
                  mock.patch.object(terminal, "inspect_owner_completion", side_effect=AssertionError("heavy render")) as inspect, \
@@ -528,7 +528,7 @@ class SweepTest(IsolatedRootMixin, unittest.TestCase):
             observed.append((output.flushed, delivery_id in output.getvalue(),
                              PD.read(self.root, "sess-owner", delivery_id)["state"]))
         with mock.patch.object(hook, "resolve_agent_home", return_value=ROOT), \
-             mock.patch.object(hook, "dispatch_state_roots", return_value=(self.root,)), \
+             patch_split(hook, "dispatch_state_roots", return_value=(self.root,)), \
              mock.patch("peer_obligations.request_obligation_recovery", side_effect=recovery) as request, \
              mock.patch("dispatch_batch_obligations.ensure_observers") as expensive, \
              mock.patch.dict(os.environ, {"AGENT_SESSION_ROLE": "worker", "AGENT_DISPATCH_DEPTH": "2"}), \
@@ -573,7 +573,7 @@ class SweepTest(IsolatedRootMixin, unittest.TestCase):
                 monotonic_ns=lambda: next(ticks, start + int(elapsed_seconds * 1e9)))
             output = io.StringIO()
             with mock.patch.object(HOOK, "resolve_agent_home", return_value=ROOT), \
-                 mock.patch.object(HOOK, "dispatch_state_roots", return_value=(self.root,)), \
+                 patch_split(HOOK, "dispatch_state_roots", return_value=(self.root,)), \
                  mock.patch.object(HOOK, "time", clock), \
                  contextlib.redirect_stdout(output):
                 self.assertEqual(HOOK._process_session(
@@ -630,7 +630,7 @@ class SweepTest(IsolatedRootMixin, unittest.TestCase):
     def test_sessionstart_activation_leaves_one_recovery_request_to_hook_finally(self):
         self.root.mkdir(parents=True, exist_ok=True)
         with mock.patch.object(HOOK, "resolve_agent_home", return_value=ROOT), \
-             mock.patch.object(HOOK, "dispatch_state_roots", return_value=(self.root,)), \
+             patch_split(HOOK, "dispatch_state_roots", return_value=(self.root,)), \
              mock.patch.object(HOOK, "activate", return_value=[]) as activate, \
              mock.patch.object(HOOK, "request_obligation_reconciliation") as request, \
              mock.patch("sys.stdin", io.StringIO(json.dumps({
@@ -676,7 +676,7 @@ class SweepTest(IsolatedRootMixin, unittest.TestCase):
                    "transcript_path": str(transcript)}
         output = io.StringIO()
         with mock.patch.object(HOOK, "resolve_agent_home", return_value=ROOT), \
-             mock.patch.object(HOOK, "dispatch_state_roots", return_value=(self.root,)), \
+             patch_split(HOOK, "dispatch_state_roots", return_value=(self.root,)), \
              mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(runtime_home)}), \
              contextlib.redirect_stdout(output):
             self.assertEqual(HOOK._process_session(payload, "sess-owner"), 0)
@@ -685,7 +685,7 @@ class SweepTest(IsolatedRootMixin, unittest.TestCase):
         self.assertEqual((exact["state"], exact["attempts"]), ("acked", 1))
         replay = io.StringIO()
         with mock.patch.object(HOOK, "resolve_agent_home", return_value=ROOT), \
-             mock.patch.object(HOOK, "dispatch_state_roots", return_value=(self.root,)), \
+             patch_split(HOOK, "dispatch_state_roots", return_value=(self.root,)), \
              mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(runtime_home)}), \
              contextlib.redirect_stdout(replay):
             self.assertEqual(HOOK._process_session(payload, "sess-owner"), 0)
@@ -718,7 +718,7 @@ class SweepTest(IsolatedRootMixin, unittest.TestCase):
         did = "delivery-" + "a" * 32
         output = io.StringIO()
         with mock.patch.object(HOOK, "resolve_agent_home", return_value=ROOT), \
-             mock.patch.object(HOOK, "dispatch_state_roots", return_value=(self.root,)), \
+             patch_split(HOOK, "dispatch_state_roots", return_value=(self.root,)), \
              mock.patch("dispatch_notice_state.project_parent_close",
                         side_effect=_project_settled_close), \
              contextlib.redirect_stdout(output):
@@ -1267,7 +1267,7 @@ class SweepTest(IsolatedRootMixin, unittest.TestCase):
         self._seed()
         output = io.StringIO()
         with mock.patch.object(HOOK, "resolve_agent_home", return_value=self.root.parent), \
-             mock.patch.object(HOOK, "dispatch_state_roots", return_value=(self.root,)), \
+             patch_split(HOOK, "dispatch_state_roots", return_value=(self.root,)), \
              mock.patch.object(HOOK, "request_obligation_reconciliation"), \
              mock.patch("sys.stdin", io.StringIO(json.dumps({
                  "session_id": "sess-owner", "hook_event_name": "UserPromptSubmit",
@@ -1456,7 +1456,7 @@ class SweepTest(IsolatedRootMixin, unittest.TestCase):
         self.root.mkdir(parents=True, exist_ok=True)
         output = io.StringIO()
         with mock.patch.object(HOOK, "resolve_agent_home", return_value=self.root.parent), \
-             mock.patch.object(HOOK, "dispatch_state_roots", return_value=(self.root,)), \
+             patch_split(HOOK, "dispatch_state_roots", return_value=(self.root,)), \
              mock.patch.object(HOOK, "sweep_deliver", return_value=([], 0)), \
              mock.patch.object(HOOK, "request_obligation_reconciliation") as request, \
              mock.patch("sys.stdin", io.StringIO(json.dumps({
@@ -1472,7 +1472,7 @@ class SweepTest(IsolatedRootMixin, unittest.TestCase):
         for source in ("startup", "resume"):
             output = io.StringIO()
             with mock.patch.object(HOOK, "resolve_agent_home", return_value=self.root.parent), \
-                 mock.patch.object(HOOK, "dispatch_state_roots", return_value=(self.root,)), \
+                 patch_split(HOOK, "dispatch_state_roots", return_value=(self.root,)), \
                  mock.patch.object(HOOK, "request_obligation_reconciliation"), \
                  mock.patch("sys.stdin", io.StringIO(json.dumps({"session_id": "sess-owner",
                      "hook_event_name": "SessionStart", "source": source}))), \
@@ -1526,7 +1526,7 @@ class SweepTest(IsolatedRootMixin, unittest.TestCase):
                 mock.patch.object(bridge, "forget_shown_candidates"), \
                 mock.patch.object(bridge, "card_context", return_value=("", "", None)), \
                 mock.patch.object(bridge, "local_evidence_context", return_value=""), \
-                mock.patch.object(dispatch_contract, "dispatch_state_roots", return_value=[self.root]), \
+                patch_split(dispatch_contract, "dispatch_state_roots", return_value=[self.root]), \
                 mock.patch.object(dispatch_contract, "resolve_agent_home", return_value=ROOT), \
                 mock.patch.object(peer_obligations, "retain_registered_completion") as retain, \
                 mock.patch.object(bridge, "request_lifecycle_recovery") as request, \
@@ -2654,7 +2654,7 @@ try {
 
     def test_batch_delivery_bounds_process_walks_and_batch_resolutions(self):
         ready_ids = self.seed_cycle_batch(materialize_second=True, member_count=24)
-        with mock.patch("dispatch_contract.attempt_process_quiescence",
+        with split_patch("dispatch_contract.attempt_process_quiescence",
                         wraps=__import__("dispatch_contract").attempt_process_quiescence) as walks, \
              mock.patch("dispatch_notice_state.resolve_delivery_batch",
                         wraps=__import__("dispatch_notice_state").resolve_delivery_batch) as resolves:
@@ -2675,7 +2675,7 @@ try {
                     fields[1] = "running"
             changed.append("\t".join(fields))
         jobs.write_text("\n".join(changed) + "\n", encoding="utf-8")
-        with mock.patch("dispatch_contract.attempt_process_quiescence",
+        with split_patch("dispatch_contract.attempt_process_quiescence",
                         return_value=SimpleNamespace(state="live")) as walks:
             held_records, _ = SWEEP.sweep_deliver(self.root, "opencode-turn", self.SID)
         self.assertEqual(held_records, [])
@@ -3816,7 +3816,7 @@ class ActivationDispatchReconcileTest(IsolatedRootMixin, unittest.TestCase):
         secondary = self.root.parent / "secondary-dispatch"
         secondary.mkdir()
         with mock.patch("dispatch_contract.resolve_agent_home", return_value=self.root.parent), \
-             mock.patch("dispatch_contract.dispatch_state_roots", return_value=(self.root, secondary)), \
+             split_patch("dispatch_contract.dispatch_state_roots", return_value=(self.root, secondary)), \
              mock.patch.object(SWEEP, "addressed_records", return_value=([], 0)), \
              mock.patch("dispatch_completion_join.reconcile_pending_delivery") as reconcile, \
              mock.patch("dispatch_batch_obligations.ensure_observers") as ensure, \
@@ -3830,7 +3830,7 @@ class ActivationDispatchReconcileTest(IsolatedRootMixin, unittest.TestCase):
     def test_canonical_activation_without_jobs_does_not_request_recovery(self):
         self.root.mkdir(parents=True, exist_ok=True)
         with mock.patch("dispatch_contract.resolve_agent_home", return_value=self.root.parent), \
-             mock.patch("dispatch_contract.dispatch_state_roots", return_value=(self.root,)), \
+             split_patch("dispatch_contract.dispatch_state_roots", return_value=(self.root,)), \
              mock.patch.object(SWEEP, "addressed_records", return_value=([], 0)), \
              mock.patch("peer_obligations.request_obligation_recovery") as request:
             SWEEP.activate(self.root, "claude-parent-runtime", "sid-no-jobs")
@@ -3894,7 +3894,7 @@ class ActivationDispatchReconcileTest(IsolatedRootMixin, unittest.TestCase):
         other_duty_id, _other_record = OBLIGATIONS.create(other_args)
 
         with mock.patch("dispatch_contract.resolve_agent_home", return_value=self.root.parent), \
-             mock.patch("dispatch_contract.dispatch_state_roots", return_value=(self.root, secondary)), \
+             split_patch("dispatch_contract.dispatch_state_roots", return_value=(self.root, secondary)), \
              mock.patch.object(SWEEP, "addressed_records", return_value=([], 0)), \
              mock.patch("dispatch_completion_join.reconcile_pending_delivery") as reconcile, \
              mock.patch("dispatch_completion_join.materialize_after_terminal_close") as settle, \
@@ -3922,7 +3922,7 @@ class AdapterRecoveryRequestTest(IsolatedRootMixin, unittest.TestCase):
              mock.patch.object(bridge, "card_context", return_value=("fixture context", "", None)), \
              mock.patch.object(bridge, "local_evidence_context", return_value=""), \
              mock.patch.object(dispatch_contract, "resolve_agent_home", return_value=ROOT), \
-             mock.patch.object(dispatch_contract, "dispatch_state_roots",
+             patch_split(dispatch_contract, "dispatch_state_roots",
                                side_effect=RuntimeError("state roots unavailable")), \
              mock.patch.object(bridge, "request_lifecycle_recovery") as request, \
              mock.patch.dict(sys.modules, {

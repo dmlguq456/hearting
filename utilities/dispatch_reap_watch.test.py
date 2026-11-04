@@ -13,6 +13,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
 import dispatch_contract as D
+from split_module_fixture import patch_split
 
 WATCH = ROOT / "utilities" / "dispatch-reap-watch.py"
 CURRENT = (
@@ -432,7 +433,7 @@ class DispatchReapWatchTest(unittest.TestCase):
             with mock.patch.object(CLOSE, '_signal') as send:
                 CLOSE.reap_terminal_descendants(jobs, fields)
                 send.assert_not_called()
-                with mock.patch.object(D, 'attempt_scan_namespace_authority', return_value=False):
+                with patch_split(D, 'attempt_scan_namespace_authority', return_value=False):
                     CLOSE.reap_terminal_descendants(jobs, fields)
                 send.assert_not_called()
             self.assertIsNone(proc.poll())

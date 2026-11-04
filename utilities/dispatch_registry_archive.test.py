@@ -16,6 +16,7 @@ sys.path.insert(0, str(HERE))
 
 import dispatch_registry_archive as A  # noqa: E402
 import dispatch_registry_inventory as I  # noqa: E402
+from split_module_fixture import patch_split  # noqa: E402
 
 DAY = 86400 * 1_000_000_000
 NOW = 1_800_000_000 * 1_000_000_000
@@ -270,7 +271,7 @@ class RaceAndCrashTest(Fixture):
             routes = real(*args, **kwargs)
             self.assertEqual(A.sweep(self.jobs, now_ns=NOW, force=True)["removed"], 2)
             return routes
-        with mock.patch.object(D, "_launch_cancellation_routes", side_effect=prepare_then_archive):
+        with patch_split(D, "_launch_cancellation_routes", side_effect=prepare_then_archive):
             self.assertTrue(D.claim_attempt_row(self.jobs, "att-new", new))
         self.assertEqual([line.split("\t")[4] for line in self.live()], ["slug-att-c1", "no-route"])
         # Only moved settled rows are forgiven: any other change still refuses.
