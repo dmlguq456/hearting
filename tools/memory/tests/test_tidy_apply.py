@@ -454,7 +454,8 @@ class UnconfirmedWriteTest(TidyApplyCase):
         import session_tidy_runner as runner
         applied = runner.applied_writes(self.state / "runs" / batch)
         self.assertEqual(applied, (expect_done, 1))
-        line = runner.failure_line("apply stopped: OSError: journal flush failed", batch, applied)
+        with self.iso.patched_environ():          # the suite's Korean declaration (tidy_isolation)
+            line = runner.failure_line("apply stopped: OSError: journal flush failed", batch, applied)
         self.assertNotIn("그대로", line)
         self.assertIn(f"되돌리기: mem tidy-undo {batch}", line)
 

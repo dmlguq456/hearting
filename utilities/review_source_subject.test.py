@@ -125,7 +125,7 @@ class SourceSubjectTest(unittest.TestCase):
                 raise SUBJECT.SourceSubjectError("repository-status-unavailable")
             return original_git(root, *args, **kwargs)
 
-        with mock.patch.object(SUBJECT, "_git", side_effect=without_status):
+        with patch_split(SUBJECT, "_git", side_effect=without_status):
             current = self.observe()
         self.assertEqual(current["digest"], before["digest"])
         self.assertEqual(current["manifest"], before["manifest"])

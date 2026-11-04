@@ -324,14 +324,14 @@ class OwnerGrantStartTest(unittest.TestCase):
                 wraps=wrapper.route_authority.bind_launch_access))
             if release_pair is not None:
                 source_root, sealed_root = release_pair
-                stack.enter_context(mock.patch.object(wrapper, "ROOT", source_root))
+                stack.enter_context(patch_split(wrapper, "ROOT", source_root))
 
                 def simulate_exec(executable, vector):
                     exec_calls.append((executable, list(vector)))
                     target = Path(vector[1])
                     if not target.is_file():
                         raise AssertionError("sealed release wrapper is missing")
-                    with mock.patch.object(wrapper, "ROOT", sealed_root):
+                    with patch_split(wrapper, "ROOT", sealed_root):
                         nested_result = wrapper.main([str(target), *vector[2:]])
                     raise SimulatedExec(nested_result)
 

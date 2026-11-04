@@ -16,6 +16,7 @@ from unittest import mock
 
 from dispatch_degradation import record_degradation
 import dispatch_stage_advance as SA
+from split_module_fixture import patch_split
 
 TOOLS = os.path.dirname(os.path.dirname(os.path.abspath(__file__))) + "/tools"
 if TOOLS not in sys.path:
@@ -595,7 +596,7 @@ class SD110LedgerIsolationTest(unittest.TestCase):
                 "attempt_id": "att-a-0001",
                 "evidence": {"path": "/tmp/fixture-artifact.md", "state": "verified"},
             }), encoding="utf-8")
-            with mock.patch.object(
+            with patch_split(
                 SA.ROUTE, "completion_dir", return_value=marker_dir
             ), mock.patch.object(
                 SA, "gate_evidence", return_value=("verdict: PASS", None)

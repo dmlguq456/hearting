@@ -1652,7 +1652,7 @@ class WorkStartTest(unittest.TestCase):
                    "child_harness": "codex", "status": "supported", "launch_authority": "conductor",
                    "checked_worktree": self.tmp.name}
         self.ready = self.released = True
-        with mock.patch.object(module, "_compose_readiness", return_value={"tuples": [checked]}) as probe, \
+        with patch_split(module, "_compose_readiness", return_value={"tuples": [checked]}) as probe, \
              mock.patch.object(RA, "caller_identity", return_value=("claude", "parent")):
             first = self.start()
             second = self.start()
@@ -3305,8 +3305,8 @@ class CorrectAnswerContinuationTest(unittest.TestCase):
                 mock.patch.object(W, "start_work", side_effect=start_work), \
                 mock.patch.object(W, "_rows", return_value={current: ("done", {"note": "dead-worker-blocked"})}), \
                 mock.patch("dispatch_replacement._route", return_value=(self.route_path, {})), \
-                mock.patch.object(self.router, "verify_route", side_effect=lambda route, *a, **k: route), \
-                mock.patch.object(self.router, "_record_route_chain"):
+                patch_split(self.router, "verify_route", side_effect=lambda route, *a, **k: route), \
+                patch_split(self.router, "_record_route_chain"):
             code = self.router.main()
         return code, json.loads(out.getvalue()), calls, submit
 

@@ -29,6 +29,7 @@ from unittest import mock
 
 import dispatch_contract as D
 import replica_batch_contract as M
+from split_module_fixture import patch_split
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = Path(__file__).with_name('test-fixtures')
@@ -247,7 +248,7 @@ class LegacyRouteCompatibilityTest(unittest.TestCase):
         registry["unrelated_current_edit"]={"value":True}
         _,_,route=self.fixture("standard")
         with mock.patch.object(R.TOPO,"load_registry",return_value=registry), \
-             mock.patch.object(R,"unit_catalog_digest",side_effect=AssertionError("current units read")):
+             patch_split(R,"unit_catalog_digest",side_effect=AssertionError("current units read")):
             R.verify_route(route)
         self.assertEqual(self.jobs.read_text(),"")
 
@@ -412,7 +413,7 @@ class LegacyDesignRegistryBasisTest(unittest.TestCase):
             with mock.patch.dict(os.environ, {
                     "AGENT_HOME": str(ROOT), "AGENT_DISPATCH_JOBS": str(jobs),
                     "AGENT_ARTIFACT_ROOT": str(artifact_root),
-            }, clear=False), mock.patch.object(R, "_compose_readiness", return_value=readiness):
+            }, clear=False), patch_split(R, "_compose_readiness", return_value=readiness):
                 route = R.compose_route(
                     capability="autopilot-design", capability_mode="default", shape="staged",
                     graph="build,visual-verify,critic-review,handoff", slug="legacy-composed-fixture",

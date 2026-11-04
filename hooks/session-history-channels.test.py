@@ -23,6 +23,7 @@ spec.loader.exec_module(codex)
 
 
 class HistoryChannelTests(unittest.TestCase):
+    @patch.dict("os.environ", {"FLEET_NOW_LANG": "Korean"})   # Korean notice words
     def test_person_notice_uses_confirmed_predecessor_and_omits_path(self):
         lineage = [{"harness": "claude", "sid": "new", "relation": "confirmed",
                     "predecessor": {"harness": "claude", "sid": "old"}},

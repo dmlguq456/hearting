@@ -1114,7 +1114,7 @@ class DispatchOwnerRewakeTest(unittest.TestCase):
         self.assertIn(str(sealed_home), harvest_line)
 
         with mock.patch.dict(os.environ, {"AGENT_HOME": str(new_release)}, clear=False), \
-             mock.patch.object(JOIN, "ROOT", new_release):
+             patch_split(JOIN, "ROOT", new_release):
             action = JOIN.classify_supervised_shell_command(
                 base=new_release,
                 command=harvest_line.strip(),

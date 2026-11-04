@@ -923,7 +923,7 @@ class CompletionMarkerTest(unittest.TestCase):
             route, route_path, evidence, directory = self._consumed_incident_route("route-consumed-restore.json")
             nodes = {node["id"]: node for node in route["nodes"]}
             # The pre-fix writer: the same revise without the consumer proof.
-            with mock.patch.object(ROUTE, "_revision_consumers", return_value={}):
+            with patch_split(ROUTE, "_revision_consumers", return_value={}):
                 old = ROUTE.publish_revision_locked(
                     route, "plan", evidence, basis="owner-correction", reason="fixture: old writer",
                     author_attempt_id="att-old-writer", jobs=self.jobs)
@@ -962,7 +962,7 @@ class CompletionMarkerTest(unittest.TestCase):
     def test_restore_keeps_a_tombstone_whose_own_evidence_changed(self):
         with mock.patch.dict(os.environ, {**self.base_env()}, clear=True):
             route, _route_path, evidence, directory = self._consumed_incident_route("route-consumed-own-edit.json")
-            with mock.patch.object(ROUTE, "_revision_consumers", return_value={}):
+            with patch_split(ROUTE, "_revision_consumers", return_value={}):
                 ROUTE.publish_revision_locked(
                     route, "plan", evidence, basis="owner-correction", reason="fixture: old writer",
                     author_attempt_id="att-old-writer", jobs=self.jobs)
@@ -2684,7 +2684,7 @@ class CompletionMarkerTest(unittest.TestCase):
                 if Path(path) == target:
                     raise OSError("fixture crash after immutable history")
                 return write(path, value)
-            with mock.patch.object(ROUTE, "atomic_write", side_effect=crash_after_history):
+            with patch_split(ROUTE, "atomic_write", side_effect=crash_after_history):
                 with self.assertRaisesRegex(OSError, "fixture crash"):
                     ROUTE.complete_node(route, node, node["id"], memo, self.jobs, "att-source-review-r2")
             self.assertFalse(target.exists())
@@ -3810,11 +3810,11 @@ class RevisionConsumerProofTest(unittest.TestCase):
         import artifact_producer
         import review_source_subject
         proof = self.consumers()
-        with mock.patch.object(ROUTE, "completion_dir", lambda _route_id, jobs=None: self.directory), \
+        with patch_split(ROUTE, "completion_dir", lambda _route_id, jobs=None: self.directory), \
                 patch_split(ROUTE, "gate_currency", return_value=D.GateCurrency("current", "fixture")), \
                 patch_split(ROUTE, "evidence_digest", return_value="new-digest"), \
-                mock.patch.object(ROUTE, "_revision_consumers", return_value=proof), \
-                mock.patch.object(ROUTE, "revision_basis_verdict", return_value={"basis": "user-direction"}), \
+                patch_split(ROUTE, "_revision_consumers", return_value=proof), \
+                patch_split(ROUTE, "revision_basis_verdict", return_value={"basis": "user-direction"}), \
                 mock.patch.object(artifact_producer, "require_cycle_output", return_value=object()), \
                 mock.patch.object(review_source_subject, "marker_subject", return_value=None):
             published = ROUTE.publish_revision_locked(
@@ -3873,9 +3873,9 @@ class ConsumedTombstoneRestoreTest(unittest.TestCase):
     def restore(self):
         gate = lambda _route, _node, _path, marker=None, **_kw: D.GateCurrency(
             "superseded" if (marker or {}).get("state") == "superseded-by-upstream-revision" else "current", "fixture")
-        with mock.patch.object(ROUTE, "completion_dir", self.module.completion_dir), \
+        with patch_split(ROUTE, "completion_dir", self.module.completion_dir), \
                 patch_split(ROUTE, "gate_currency", side_effect=gate), \
-                mock.patch.object(ROUTE, "_revision_consumers", return_value={"downstream": self.proof}):
+                patch_split(ROUTE, "_revision_consumers", return_value={"downstream": self.proof}):
             return ROUTE.restore_consumed_tombstones(self.route, jobs=self.jobs)
 
     def test_restores_once_and_second_call_is_idempotent(self):
@@ -3893,13 +3893,13 @@ class ConsumedTombstoneRestoreTest(unittest.TestCase):
             if Path(path) == self.directory / "downstream.json":
                 raise OSError("fixture canonical write interruption")
             return original_atomic(path, payload)
-        with mock.patch.object(ROUTE, "atomic_write", side_effect=fail_once):
+        with patch_split(ROUTE, "atomic_write", side_effect=fail_once):
             first = self.restore()
         self.assertTrue(first["errors"])
         self.assertEqual(json.loads((self.directory / "downstream.json").read_text())["sequence"], 2)
-        with mock.patch.object(ROUTE, "completion_dir", self.module.completion_dir), \
+        with patch_split(ROUTE, "completion_dir", self.module.completion_dir), \
                 patch_split(ROUTE, "gate_currency", side_effect=lambda *_a, **_kw: D.GateCurrency("current", "fixture")), \
-                mock.patch.object(ROUTE, "_revision_consumers", return_value={"downstream": self.proof}), \
+                patch_split(ROUTE, "_revision_consumers", return_value={"downstream": self.proof}), \
                 split_patch("dispatch_contract._marker_schema_identity_ok", return_value=(True, None)):
             second = ROUTE.restore_consumed_tombstones(self.route, jobs=self.jobs)
         self.assertEqual(second["restored"][0]["resumed"], True)
@@ -3912,12 +3912,12 @@ class ConsumedTombstoneRestoreTest(unittest.TestCase):
             if Path(path) == self.directory / "downstream.json":
                 raise OSError("fixture canonical write interruption")
             return original_atomic(path, payload)
-        with mock.patch.object(ROUTE, "atomic_write", side_effect=fail_once):
+        with patch_split(ROUTE, "atomic_write", side_effect=fail_once):
             self.restore()
         canonical_before = (self.directory / "downstream.json").read_bytes()
-        with mock.patch.object(ROUTE, "completion_dir", self.module.completion_dir), \
+        with patch_split(ROUTE, "completion_dir", self.module.completion_dir), \
                 patch_split(ROUTE, "gate_currency", return_value=D.GateCurrency("current", "fixture")), \
-                mock.patch.object(ROUTE, "_revision_consumers", return_value={}):
+                patch_split(ROUTE, "_revision_consumers", return_value={}):
             result = ROUTE.restore_consumed_tombstones(self.route, jobs=self.jobs)
         self.assertIn("pending-restore-unproven:downstream", result["errors"])
         self.assertEqual((self.directory / "downstream.json").read_bytes(), canonical_before)
@@ -3928,15 +3928,15 @@ class ConsumedTombstoneRestoreTest(unittest.TestCase):
             if Path(path) == self.directory / "downstream.json":
                 raise OSError("fixture canonical write interruption")
             return original_atomic(path, payload)
-        with mock.patch.object(ROUTE, "atomic_write", side_effect=fail_once):
+        with patch_split(ROUTE, "atomic_write", side_effect=fail_once):
             self.restore()
         revised_upstream = {**self.upstream, "sequence": 3,
                             "revision": {**self.upstream["revision"], "of_sequence": 2}}
         self._write("upstream.3.json", revised_upstream)
         self._write("upstream.json", revised_upstream)
-        with mock.patch.object(ROUTE, "completion_dir", self.module.completion_dir), \
+        with patch_split(ROUTE, "completion_dir", self.module.completion_dir), \
                 patch_split(ROUTE, "gate_currency", return_value=D.GateCurrency("current", "fixture")), \
-                mock.patch.object(ROUTE, "_revision_consumers", return_value={"downstream": self.proof}):
+                patch_split(ROUTE, "_revision_consumers", return_value={"downstream": self.proof}):
             result = ROUTE.restore_consumed_tombstones(self.route, jobs=self.jobs)
         self.assertIn("pending-restore-unproven:downstream", result["errors"])
         self.assertEqual(json.loads((self.directory / "downstream.json").read_text())["sequence"], 2)
@@ -3948,17 +3948,17 @@ class ConsumedTombstoneRestoreTest(unittest.TestCase):
             if Path(path) == self.directory / "leaf.json":
                 raise OSError("fixture second-node interruption")
             return original_atomic(path, payload)
-        with mock.patch.object(ROUTE, "completion_dir", self.module.completion_dir), \
+        with patch_split(ROUTE, "completion_dir", self.module.completion_dir), \
                 patch_split(ROUTE, "gate_currency", side_effect=lambda _r, _n, _p, marker=None, **_kw:
                     D.GateCurrency("superseded" if (marker or {}).get("state") == "superseded-by-upstream-revision" else "current", "fixture")), \
-                mock.patch.object(ROUTE, "_revision_consumers", return_value=both), \
-                mock.patch.object(ROUTE, "atomic_write", side_effect=fail_leaf):
+                patch_split(ROUTE, "_revision_consumers", return_value=both), \
+                patch_split(ROUTE, "atomic_write", side_effect=fail_leaf):
             first = ROUTE.restore_consumed_tombstones(self.route, jobs=self.jobs)
         self.assertEqual(json.loads((self.directory / "downstream.json").read_text())["sequence"], 3)
         self.assertEqual(json.loads((self.directory / "leaf.json").read_text())["sequence"], 2)
-        with mock.patch.object(ROUTE, "completion_dir", self.module.completion_dir), \
+        with patch_split(ROUTE, "completion_dir", self.module.completion_dir), \
                 patch_split(ROUTE, "gate_currency", return_value=D.GateCurrency("current", "fixture")), \
-                mock.patch.object(ROUTE, "_revision_consumers", return_value={"leaf": both["leaf"]}), \
+                patch_split(ROUTE, "_revision_consumers", return_value={"leaf": both["leaf"]}), \
                 split_patch("dispatch_contract._marker_schema_identity_ok", return_value=(True, None)):
             second = ROUTE.restore_consumed_tombstones(self.route, jobs=self.jobs)
         self.assertIn("upstream@2:OSError", first["errors"][0])
@@ -3971,7 +3971,7 @@ class ConsumedTombstoneRestoreTest(unittest.TestCase):
             if Path(path) == self.directory / "downstream.json":
                 raise OSError("fixture canonical write interruption")
             return original_atomic(path, payload)
-        with mock.patch.object(ROUTE, "atomic_write", side_effect=fail_once):
+        with patch_split(ROUTE, "atomic_write", side_effect=fail_once):
             self.restore()
         orphan_path = self.directory / "downstream.3.json"
         for field, value in (("sequence", 4), ("route_id", "rt-wrong"),
@@ -3984,9 +3984,9 @@ class ConsumedTombstoneRestoreTest(unittest.TestCase):
                     orphan[field] = value
                 orphan_path.write_text(json.dumps(orphan, indent=2) + "\n")
                 before = (self.directory / "downstream.json").read_bytes()
-                with mock.patch.object(ROUTE, "completion_dir", self.module.completion_dir), \
+                with patch_split(ROUTE, "completion_dir", self.module.completion_dir), \
                         patch_split(ROUTE, "gate_currency", return_value=D.GateCurrency("current", "fixture")), \
-                        mock.patch.object(ROUTE, "_revision_consumers", return_value={"downstream": self.proof}), \
+                        patch_split(ROUTE, "_revision_consumers", return_value={"downstream": self.proof}), \
                         split_patch("dispatch_contract._marker_schema_identity_ok", return_value=(True, None)):
                     result = ROUTE.restore_consumed_tombstones(self.route, jobs=self.jobs)
                 self.assertIn("pending-restore-invalid:downstream", result["errors"][-1])

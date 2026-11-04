@@ -101,6 +101,8 @@ COMPACT_CARD_BODY_MAX_BYTES = (COMPACT_SUMMARY_MAX_BYTES + COMPACT_RECENT_MAX_BY
 INJECTION_MAX_BYTES = 2400
 MEMORY_REFS_MAX = 8                 # "참고할 기억" (card layer B): records listed
 MEMORY_REFS_BYTES = 1200            # ... and the bytes their lines may take
+# The Korean form of tools/i18n/messages.json "tidy.card.first_reply" (the injected text reads the
+# catalog); kept here because the bundled-card floor below is sized from it, the longer form.
 CARD_FIRST_REPLY_GUIDANCE = (
     "[첫 답] 이 카드로 이어받은 첫 답 맨 앞에, 도구 호출 전에, 사용자의 언어로 "
     "'하던 일 · 남은 일 · 다음 할 일' 세 머리말을 써서 5줄 안팎 요약을 한 번 보여 준 뒤 "
@@ -2478,10 +2480,11 @@ def _compact_body(compact: dict) -> str:
     post_recent = str(compact.get("recent_post", recent) or "")
     source = _cut_bytes(_normalize_body(str(compact.get("source") or compact.get("transcript") or "")),
                         COMPACT_METADATA_MAX_BYTES)[0]
-    partial_note = "\n[최근 대화의 일부만 보존됨; 원본 기록을 확인하세요.]" if compact.get("recent_partial") else ""
-    footer = ("\n\n[압축 뒤 이어진 대화]" + partial_note + "\n" + post_recent) if post_recent \
+    t = _ui_translator()
+    partial_note = "\n" + t("tidy.compact.partial") if compact.get("recent_partial") else ""
+    footer = ("\n\n" + t("tidy.compact.after") + partial_note + "\n" + post_recent) if post_recent \
         else ("\n\n" + partial_note.strip()) if partial_note else ""
-    preserved_footer = ("\n\n[요약 뒤 그대로 남은 대화]\n" + preserved) if preserved else ""
+    preserved_footer = ("\n\n" + t("tidy.compact.preserved") + "\n" + preserved) if preserved else ""
     reply = compact.get("last_reply") if isinstance(compact.get("last_reply"), dict) else {}
     reply_line = ""
     if reply.get("first_line"):
@@ -2494,12 +2497,11 @@ def _compact_body(compact: dict) -> str:
             kst = instant.astimezone(datetime.timezone(datetime.timedelta(hours=9))).strftime("%Y-%m-%d %H:%M:%S KST")
             when = f"{utc} / {kst}"
         except (ValueError, OverflowError):
-            when = timestamp or "시각 미상"
-        reply_line = f"압축 직전 마지막 답 ({when}): {str(reply['first_line'])[:1024]}\n\n"
-    caution = "\n\n이 요약이 보지 못한 최근 대화가 있을 수 있습니다. 이어서 진행하기 전에 확인하세요."
-    path = f"\n원본 대화 기록: {source}" if source else "\n원본 대화 기록 경로를 확인할 수 없습니다."
-    reply_priority = ("위 마지막 답과 요약 뒤 그대로 남은 대화를 요약의 미전달·미완료 "
-                      "서술보다 우선하세요.\n\n") if reply_line else ""
+            when = timestamp or t("tidy.compact.no_time")
+        reply_line = t("tidy.compact.last_reply", when=when, line=str(reply["first_line"])[:1024]) + "\n\n"
+    caution = "\n\n" + t("tidy.compact.caution")
+    path = "\n" + (t("tidy.compact.source", source=source) if source else t("tidy.compact.no_source"))
+    reply_priority = (t("tidy.compact.reply_first") + "\n\n") if reply_line else ""
     result = reply_line + reply_priority + summary_text + caution + path + preserved_footer + footer
     if len(result.encode("utf-8")) > COMPACT_CARD_BODY_MAX_BYTES:
         raise ValueError("compact card exceeds bounded size")
@@ -2923,53 +2925,53 @@ def _appeared_after(sessions: dict, harness: str, sid: str, author_key: tuple[st
     return bool(me and me["first_seen"] > author["last_seen"])
 
 
-def _ago(seconds: float) -> str:
+def _ago(seconds: float, t=None) -> str:
+    t = t or _ui_translator()
     seconds = max(0, int(seconds))
     if seconds < 90:
-        return "방금"
-    if seconds < 3600:
-        return f"{seconds // 60}분 전"
-    if seconds < 172800:
-        return f"{seconds // 3600}시간 전"
-    return f"{seconds // 86400}일 전"
+        return t("tidy.ago.now")
+    count, unit = ((seconds // 60, "minute") if seconds < 3600 else
+                   (seconds // 3600, "hour") if seconds < 172800 else (seconds // 86400, "day"))
+    return t(f"tidy.ago.{unit}" if count == 1 else f"tidy.ago.{unit}s", count=count)
 
 
-def previous_transcript_line(harness: str, sid: str, location) -> str:
+def previous_transcript_line(harness: str, sid: str, location, t=None) -> str:
     """The one "이전 대화" line shared by card injection and a supervisor handoff.
 
     The 320-byte rule is the existing rendering: a longer path becomes
     ``경로 생략`` instead of an unbounded absolute path. ``location`` is the
     transcript dict produced by ``_lineage_transcript``.
     """
+    t = t or _ui_translator()
     if not isinstance(location, dict):
         location = {}
     status = str(location.get("status") or "missing")
     path = str(location.get("path") or "")
     if status == "available" and path:
         if len(path.encode("utf-8")) > 320:
-            path = "경로 생략"
+            path = t("tidy.card.path_omitted")
         detail = path
     else:
-        detail = "읽기 불가" if status == "unreadable" else "없음"
-    return f"이전 대화: {harness} {sid[:8]} · 원문 {detail}"
+        detail = t("tidy.card.transcript_unreadable" if status == "unreadable" else "tidy.card.transcript_none")
+    return t("tidy.card.previous", harness=harness, sid=sid[:8], detail=detail)
 
 
 def build_card_injection(card: dict, card_path: Path, now: float, cap: int,
                          previous_transcript: Optional[dict] = None) -> str:
     """Card text within ``cap`` UTF-8 bytes; guidance is part of the fixed header."""
+    t = _ui_translator()
     stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(float(card.get("authored_at_epoch") or now)))
-    prefix = (f"[세션 카드] 같은 자리에서 이어받는 작업 카드 — 작성 {stamp} "
-              f"({_ago(now - float(card.get('authored_at_epoch') or now))})")
+    prefix = t("tidy.card.prefix", stamp=stamp, ago=_ago(now - float(card.get("authored_at_epoch") or now), t))
     identity = f" · {_card_author_label(card)}"
-    header = f"{prefix}{identity}\n{CARD_FIRST_REPLY_GUIDANCE}"
-    footer = f"카드 전문: {card_path}"
+    header = f"{prefix}{identity}\n{t('tidy.card.first_reply', fields='·'.join(CARD_FIXED_FIELDS))}"
+    footer = t("tidy.card.full_card", path=card_path)
     previous_line = ""
     if isinstance(previous_transcript, dict):
         previous_line = previous_transcript_line(
             str(previous_transcript.get("harness") or ""),
             str(previous_transcript.get("sid") or ""),
-            previous_transcript.get("transcript"))
-    cut_note = "…(이하 생략)"
+            previous_transcript.get("transcript"), t)
+    cut_note = t("tidy.card.cut")
     body = card.get("body", "")
     fixed = (len(header.encode("utf-8")) + len(footer.encode("utf-8")) + 2
              + (len(previous_line.encode("utf-8")) + 1 if previous_line else 0))
@@ -3013,10 +3015,11 @@ def build_human_history_notice(seat: Seat, harness: str, sid: str, *, env=None) 
     previous = _confirmed_predecessor(lineage, harness, sid)
     if not previous:
         return ""
+    t = _ui_translator()
     transcript_info = previous.get("transcript") or {}
     state = transcript_info.get("status", "missing")
-    availability = {"available": "원문 있음", "missing": "원문 없음", "expired": "원문 없음",
-                    "unreadable": "원문 읽기 불가"}.get(state, "원문 읽기 불가")
+    availability = t({"available": "tidy.history.available", "missing": "tidy.history.missing",
+                      "expired": "tidy.history.missing"}.get(state, "tidy.history.unreadable"))
     pane = str(env.get("HERDR_ACTIVE_PANE_ID") or env.get("HERDR_PANE_ID") or "")
     socket = str(env.get("HERDR_SOCKET_PATH") or "")
     key_available = False
@@ -3031,8 +3034,8 @@ def build_human_history_notice(seat: Seat, harness: str, sid: str, *, env=None) 
         except Exception:
             pass
     action = key_label if key_available else "hearting run session_history"
-    return (f"이전 대화 열기: {action} · {previous.get('harness', harness)} "
-            f"{str(previous.get('sid', ''))[:8]} · {availability}")
+    return t("tidy.history.open", action=action, harness=previous.get("harness", harness),
+             sid=str(previous.get("sid", ""))[:8], availability=availability)
 
 
 def run_hook(*args, **kwargs) -> str:
@@ -3297,7 +3300,8 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
                     notice_ids.add(item.get("id"))
         notice_block = ""
         if notices:
-            notice_block = "\n".join(f"[정리 결과] {n['text']}" for n in notices)
+            t = _ui_translator()
+            notice_block = "\n".join(t("tidy.notice.result", text=n["text"]) for n in notices)
             notice_block = _cut_bytes(notice_block, NOTICE_MAX_BYTES)[0]
             parts.append(notice_block)
         card_seat = seat

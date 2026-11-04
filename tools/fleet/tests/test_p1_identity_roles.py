@@ -14,6 +14,8 @@ from fleet import model, projection, process_identity
 from fleet.collectors import claude, codex, herdr, procscan
 from fleet.model import Session, DispatchJob
 from test_process_identity import FakeClaudeProc
+sys.path.append(str(Path(__file__).resolve().parents[3] / "utilities"))  # split_module_fixture
+from split_module_fixture import patch_split  # noqa: E402
 
 
 class NativeBackgroundChainTest(unittest.TestCase):
@@ -376,7 +378,7 @@ class CurrentSessionTest(unittest.TestCase):
         def save(_path, body):
             rows[:] = [json.loads(line) for line in body.decode().splitlines()]
         with mock.patch.object(session_tidy, "_read_ledger_lines", side_effect=lambda _seat: rows[:]), \
-                mock.patch.object(session_tidy, "atomic_write", side_effect=save), \
+                patch_split(session_tidy, "atomic_write", side_effect=save), \
                 mock.patch.object(session_tidy, "LEDGER_FOLD_LINES", 1), \
                 mock.patch.object(session_tidy, "LEDGER_KEEP_RAW", 1), \
                 mock.patch("fleet.gitinfo.resolve_gitdir", side_effect=lambda cwd: (None, cwd)):
