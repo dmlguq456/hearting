@@ -2303,6 +2303,7 @@ def _signature(info):
 
 def _read(path: Path, root: Path):
     """One regular, root-contained file; reject links, swaps and growing reads."""
+    from resource_run_registry import passive_parent_identity
     path = path.absolute()
     if ".." in path.parts:
         raise ValueError("path-traversal")
@@ -2312,10 +2313,14 @@ def _read(path: Path, root: Path):
     for part in (None, *relative.parts):
         if part is not None:
             current = current / part
-        info = current.lstat()
-        if stat.S_ISLNK(info.st_mode):
+        if current == path:
+            info = current.lstat()
+            device, inode, mode = info.st_dev, info.st_ino, info.st_mode
+        else:
+            device, inode, mode = passive_parent_identity(current)
+        if stat.S_ISLNK(mode):
             raise ValueError("progress-link")
-        parents.append((current, info.st_dev, info.st_ino))
+        parents.append((current, device, inode))
     fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
     with os.fdopen(fd, "rb") as stream:
         first = os.fstat(stream.fileno())

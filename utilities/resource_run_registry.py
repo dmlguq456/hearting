@@ -120,6 +120,25 @@ def passive_read_active():
     return _PASSIVE_READ.get() is not None
 
 
+def passive_parent_identity(path):
+    """Share initial directory observations; callers still close with fresh stats."""
+    scope = _PASSIVE_READ.get()
+    reads = scope.get('parent-identities') if scope is not None else None
+    if scope is not None and reads is None:
+        from runtime_observation import ProjectionCache
+        reads = scope['parent-identities'] = ProjectionCache(max_entries=1024, max_bytes=512 * 1024)
+    key = (os.fspath(path), Path.lstat)
+    if reads is not None and key in reads:
+        reads.move_to_end(key)
+        return reads[key]
+    info = path.lstat()
+    identity = (info.st_dev, info.st_ino, info.st_mode)
+    if reads is not None:
+        from runtime_observation import retained_size
+        reads.remember(key, identity, weight=retained_size((key, identity)) + 128)
+    return identity
+
+
 def passive_handle(key, load):
     scope = _PASSIVE_READ.get()
     if scope is None:
