@@ -17,6 +17,8 @@ from fleet import collectors, details, herdr_projection, projection, render, ses
 from fleet.collectors import dispatch, herdr, procscan, resource_runs, usage_cache
 from fleet.model import DispatchJob, ResourceJob, Session
 from fleet.refresh import LiveSnapshot
+sys.path.append(str(Path(__file__).resolve().parents[3] / "utilities"))  # split_module_fixture
+from split_module_fixture import patch_split  # noqa: E402
 
 
 class PaneFailures(unittest.TestCase):
@@ -298,7 +300,7 @@ class PaneMetadata(unittest.TestCase):
             stack.enter_context(mock.patch.object(herdr_projection, "_formatter_overrides", return_value=(None, None)))
             stack.enter_context(mock.patch.object(herdr_projection, "session_title", return_value="Existing subject"))
             writer = stack.enter_context(mock.patch.object(herdr_projection, "_send_projection", autospec=True))
-            forbidden = [stack.enter_context(mock.patch.object(owner, name, side_effect=AssertionError(name)))
+            forbidden = [stack.enter_context(patch_split(owner, name, side_effect=AssertionError(name)))
                          for owner, name in ((herdr_projection, "_report"),
                              (herdr_projection, "_session_lifecycle"), (herdr_projection, "_assign_observed_tag"),
                              (session_tags, "assign"), (session_tags, "assign_observed"))]

@@ -20,6 +20,8 @@ from fleet import render  # noqa: E402
 from fleet import collectors  # noqa: E402
 from fleet.collectors import peer_messages  # noqa: E402
 from fleet.model import Session  # noqa: E402
+sys.path.append(str(Path(__file__).resolve().parents[3] / "utilities"))  # split_module_fixture
+from split_module_fixture import patch_split  # noqa: E402
 
 # `utilities/peer-message.py` is hyphenated (not `import`able by name); loaded the
 # same way its own test suite (utilities/peer_message.test.py) does.
@@ -616,7 +618,7 @@ class PeerEndpointLabelTest(unittest.TestCase):
     def test_an_unusable_name_falls_through_to_the_short_id(self):
         # Only when no tag can be resolved for the peer — a resolvable tag outranks both,
         # which is what keeps one relation from changing shape between ticks.
-        with mock.patch.object(render, "_resolve_session_tag", return_value=None):
+        with patch_split(render, "_resolve_session_tag", return_value=None):
             segs = render._peer_endpoint_segs(
                 "claude", "7a001534-ea46-4a67-971b-199c586889e2",
                 "uds:/run/user/1002/cc-socks/2952102.sock", {})
@@ -642,13 +644,13 @@ class PeerRepoLabelsTest(unittest.TestCase):
                 segs = render._peer_endpoint_segs(harness, sid, None,
                     {(harness, sid): "42"}, repos)
                 self.assertEqual(render._plain(segs), repos[harness, sid] + " [42]")
-        with mock.patch.object(render, "_resolve_session_tag", return_value=None):
+        with patch_split(render, "_resolve_session_tag", return_value=None):
             segs = render._peer_endpoint_segs("codex", "same-id", None, {}, repos)
         self.assertEqual(render._plain(segs), "hearting:same-id")
 
     def test_missing_repo_and_narrow_width_preserve_tag_and_relation(self):
         entry = {"to_harness": "codex", "to_session_id": "same-id", "age_min": 0}
-        with mock.patch.object(render, "_resolve_session_tag", return_value="42"):
+        with patch_split(render, "_resolve_session_tag", return_value="42"):
             for width in (30, 60, 168):
                 rows = render._peer_link_strip(sent=entry, term_width=width,
                     repo_by_key={("claude", "same-id"): "foreign"})
@@ -666,7 +668,7 @@ class PeerRepoLabelsTest(unittest.TestCase):
         first.peer_last_sent = {"to_harness": "opencode", "to_session_id": "prior-two"}
         with mock.patch.object(render, "_peer_link_strip",
                                side_effect=AssertionError("legacy peer strip rendered")), \
-                mock.patch.object(render, "_resolve_session_tag",
+                patch_split(render, "_resolve_session_tag",
                                   side_effect=AssertionError("peer tag resolver called")), \
                 mock.patch.object(render, "_gpu_session_resources", return_value={}), \
                 mock.patch.object(render, "_fresh_compute_hosts", return_value=({}, 0)):
@@ -688,7 +690,7 @@ class PeerEndpointOneShapeTest(unittest.TestCase):
     def test_a_session_id_always_produces_the_badge_shape(self):
         # Off-board peers resolve their own tag, so a session does not change shape when it
         # scrolls off screen.
-        with mock.patch.object(render, "_resolve_session_tag", return_value="3a"):
+        with patch_split(render, "_resolve_session_tag", return_value="3a"):
             for name in ("a8e66aa4a25f5d807", "wB:p5", "kws-net-67", None,
                          "Claude Code 사용량 리셋 및 감독 인수인계"):
                 with self.subTest(name=name):
@@ -696,17 +698,17 @@ class PeerEndpointOneShapeTest(unittest.TestCase):
                     self.assertEqual("".join(t for t, _ in segs), "[3a]")
 
     def test_an_on_board_badge_beats_the_resolver(self):
-        with mock.patch.object(render, "_resolve_session_tag", side_effect=AssertionError):
+        with patch_split(render, "_resolve_session_tag", side_effect=AssertionError):
             segs = render._peer_endpoint_segs("claude", "sid-1", "x", {("claude", "sid-1"): "67"})
         self.assertEqual("".join(t for t, _ in segs), "[67]")
 
     def test_a_resolver_failure_never_breaks_the_row(self):
-        with mock.patch.object(render, "_resolve_session_tag", side_effect=OSError("boom")):
+        with patch_split(render, "_resolve_session_tag", side_effect=OSError("boom")):
             segs = render._peer_endpoint_segs("claude", "sid-1", "kws-net-67", {})
         self.assertEqual("".join(t for t, _ in segs), "kws-net-67")
 
     def test_machine_values_are_never_shown_as_a_name(self):
-        with mock.patch.object(render, "_resolve_session_tag", return_value=None):
+        with patch_split(render, "_resolve_session_tag", return_value=None):
             for name in ("a8e66aa4a25f5d807",                      # bare hex id
                          "wB:p5",                                   # a pane, not a session
                          "uds:/run/user/1002/cc-socks/2952102.sock",
@@ -719,7 +721,7 @@ class PeerEndpointOneShapeTest(unittest.TestCase):
     def test_a_long_real_name_is_clipped_not_discarded(self):
         # `fleet-stall-codex-parity-10` is a real name that happens to be long; a clipped
         # real name beats falling through to `claude:a8e66aa4`.
-        with mock.patch.object(render, "_resolve_session_tag", return_value=None):
+        with patch_split(render, "_resolve_session_tag", return_value=None):
             segs = render._peer_endpoint_segs("claude", None, "fleet-stall-codex-parity-10", {})
         shown = "".join(t for t, _ in segs)
         self.assertTrue(shown.startswith("fleet-stall-codex-parity"), shown)

@@ -4075,7 +4075,7 @@ else
 fi
 
 # --- d1/d2 depth text tokens must never re-enter the render surface.
-d1d2=$(cd "$ROOT" && grep -n "'d1'\|\"d1\"\|'d2'\|\"d2\"" tools/fleet/render.py 2>/dev/null)
+d1d2=$(cd "$ROOT" && grep -n "'d1'\|\"d1\"\|'d2'\|\"d2\"" tools/fleet/render.py tools/fleet/render_*.py 2>/dev/null)
 if [ -z "$d1d2" ]; then
   ok "no d1/d2 depth text tokens in tools/fleet/render.py"
 else

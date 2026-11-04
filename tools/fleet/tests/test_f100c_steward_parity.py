@@ -25,6 +25,8 @@ from fleet import render                                          # noqa: E402
 from fleet import herdr_projection                                # noqa: E402
 from fleet.model import Session                                   # noqa: E402
 from fleet.collectors import steward                              # noqa: E402
+sys.path.append(str(Path(__file__).resolve().parents[3] / "utilities"))  # split_module_fixture
+from split_module_fixture import patch_split  # noqa: E402
 
 
 def _text(segs):
@@ -145,7 +147,7 @@ class StewardChipTest(unittest.TestCase):
         self.assertEqual(render._dw("⚑"), 1)
         measure = render._dw
         for width in (1, 2):
-            with mock.patch.object(render, "_dw", side_effect=lambda text: width if text == "⚑" else measure(text)):
+            with patch_split(render, "_dw", side_effect=lambda text: width if text == "⚑" else measure(text)):
                 marked = render._under_id_connector(original, "⚑", "tag_steward")
                 self.assertEqual(sum(render._dw(t) for t, _ in marked[:-1]), 8)
                 self.assertEqual(sum(render._dw(t) for t, _ in marked), 14)

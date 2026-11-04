@@ -13,6 +13,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from fleet import render
 from fleet.collectors import peer_messages
 from fleet.model import DispatchJob, Session, SubAgent
+from pathlib import Path  # noqa: E402
+sys.path.append(str(Path(__file__).resolve().parents[3] / "utilities"))  # split_module_fixture
+from split_module_fixture import patch_split  # noqa: E402
 
 _GOLDEN_DIR = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "fixtures", "connection_layer")
@@ -80,13 +83,13 @@ class PeerEndpointLabelTest(unittest.TestCase):
     # `[3a] codex` here — a test failing on live state rather than on the behavior it names.
 
     def test_offscreen_endpoint_falls_back_to_the_ledger_name(self):
-        with mock.patch.object(render, "_resolve_session_tag", return_value=None):
+        with patch_split(render, "_resolve_session_tag", return_value=None):
             text = self._label({}, name="peer-test-codex")
         self.assertIn("peer-test-codex", text)
         self.assertNotIn(self._SID, text)
 
     def test_nameless_offscreen_endpoint_keeps_short_prefix_without_repo_evidence(self):
-        with mock.patch.object(render, "_resolve_session_tag", return_value=None):
+        with patch_split(render, "_resolve_session_tag", return_value=None):
             text = self._label({})
         self.assertIn("01a084f7", text)
         self.assertNotIn(self._SID, text)
@@ -94,7 +97,7 @@ class PeerEndpointLabelTest(unittest.TestCase):
     def test_an_offscreen_endpoint_still_gets_its_badge_when_one_resolves(self):
         # The point of resolving off-board: one session keeps one shape whether or not it
         # happens to be on screen this tick.
-        with mock.patch.object(render, "_resolve_session_tag", return_value="3a"):
+        with patch_split(render, "_resolve_session_tag", return_value="3a"):
             text = self._label({}, name="peer-test-codex")
         self.assertIn("[3a]", text)
 
@@ -322,7 +325,7 @@ class RelationLineBudgetTest(unittest.TestCase):
         recv = {"from_session_id": "sC", "from_name": "peerC", "kind": "handoff",
                 "age_min": 2}
         tags = {("", "sB"): "b0", ("", "sC"): "c0"}
-        with mock.patch.object(render, "_resolve_session_tag", return_value=None):
+        with patch_split(render, "_resolve_session_tag", return_value=None):
             segs = render._peer_link_strip(sent, recv, tags, term_width=46,
                 repo_by_key={("", "sB"): "repoB", ("", "sC"): "repoC"})[0]
         text = _text(segs)

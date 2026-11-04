@@ -8,11 +8,12 @@ same arguments as `mock.patch.object` and `mock.patch` and install the one
 replacement in the module and in every part that binds the same object --
 what a single patch did before the split. They work as context managers,
 decorators, and with `start()`/`stop()`, and nest like ordinary patches.
+`set_split(module, name, value)` is the plain assignment `module.name = value`
+with the same reach.
 """
 from __future__ import annotations
 
 import sys
-from pathlib import Path
 from unittest import mock
 
 _MISSING = object()
@@ -21,23 +22,26 @@ _MISSING = object()
 def split_parts(module):
     """The loaded parts of `module` (whatever name `module` was loaded under).
 
-    A part is a `<stem>_*.py` module beside it (`-` in the stem read as `_`) whose docstring says
+    A part is a loaded module named `<stem>_*` (`-` in the stem read as `_`;
+    for a package module, the last name component) whose docstring says
     "Split out of `<stem>.py`"; other modules with a common prefix (for example
-    `artifact_locator_amendment.py` beside `artifact_locator.py`) are not parts.
+    `artifact_locator_amendment` beside `artifact_locator`) are not parts.
+    Only names and docstrings are read -- never the filesystem, which a test
+    may have patched (for example `os.readlink`) while it enters a patch.
     """
     file = getattr(module, "__file__", None)
-    if not file:
+    if not isinstance(file, str) or not file:
         return []
-    path = Path(file).resolve()
-    # `capability-route.py` has parts named `capability_route_*.py`.
-    prefix, marker = path.stem.replace("-", "_") + "_", f"Split out of `{path.name}`"
+    name = file.replace("\\", "/").rpartition("/")[2]
+    stem = name[:-3] if name.endswith(".py") else name
+    prefix, marker = stem.replace("-", "_") + "_", f"Split out of `{name}`"
     found = []
     for loaded in list(sys.modules.values()):
-        other_file = getattr(loaded, "__file__", None)
-        if loaded is module or not other_file:
+        if loaded is None or loaded is module:
             continue
-        other = Path(other_file).resolve()
-        if other.parent == path.parent and other.stem.startswith(prefix) and marker in (loaded.__doc__ or ""):
+        short = str(getattr(loaded, "__name__", "")).rpartition(".")[2]
+        doc = getattr(loaded, "__doc__", None)
+        if short.startswith(prefix) and isinstance(doc, str) and marker in doc:
             found.append(loaded)
     return sorted(found, key=lambda loaded: loaded.__name__)
 
@@ -73,3 +77,13 @@ def split_patch(target, *args, **kwargs):
     patcher = mock.patch(target, *args, **kwargs)
     patcher.__class__ = _SplitPatch
     return patcher
+
+
+def set_split(module, name, value):
+    """`module.name = value`, also in every part that binds the current value."""
+    current = getattr(module, name, _MISSING)
+    if current is not _MISSING:
+        for part in split_parts(module):
+            if vars(part).get(name, _MISSING) is current:
+                setattr(part, name, value)
+    setattr(module, name, value)

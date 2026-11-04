@@ -10,6 +10,8 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from fleet import display_snapshot, render
+sys.path.append(str(Path(__file__).resolve().parents[3] / "utilities"))  # split_module_fixture
+from split_module_fixture import patch_split  # noqa: E402
 
 
 def owner(harness="codex", sid="sid-one"):
@@ -33,7 +35,7 @@ class GPUSessionLabelsTest(unittest.TestCase):
         render._ROUTE_FOLD = {render._GPU_FOLD_ALL: True}
         self.tags = {("codex", "sid-one"): "a1", ("codex", "sid-two"): "b2",
                      ("claude", "sid-one"): "c3", ("opencode", "sid-one"): "d4"}
-        tag = mock.patch.object(render, "_resolve_session_tag",
+        tag = patch_split(render, "_resolve_session_tag",
                                 side_effect=lambda h, sid: self.tags.get((h, sid)))
         tag.start()
         self.addCleanup(tag.stop)
