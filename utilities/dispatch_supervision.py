@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from contextvars import ContextVar
+from collections import OrderedDict
+import threading
 import hashlib
 import glob
 import fcntl
@@ -48,6 +50,38 @@ class StopWaiting(RuntimeError):
 
 
 _ROUTE_ATTENTION_READ = ContextVar("supervision_route_attention_read", default=None)
+_PASSIVE_ROUTE_DOCUMENTS = OrderedDict()
+_PASSIVE_ROUTE_LOCK = threading.RLock()
+
+
+def _read_route_document(path):
+    """Borrow only pure JSON/hash work; no dynamic advisory result is cached."""
+    if _ROUTE_ATTENTION_READ.get() is None:
+        return json.loads(path.read_text(encoding='utf-8')), None
+    def signature():
+        st = path.stat()
+        return (st.st_dev, st.st_ino, st.st_mode, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+    key, before = str(path), signature()
+    with _PASSIVE_ROUTE_LOCK:
+        previous = _PASSIVE_ROUTE_DOCUMENTS.get(key)
+        if previous is not None and previous['signature'] == before:
+            _PASSIVE_ROUTE_DOCUMENTS.move_to_end(key)
+            return previous['document'], previous
+    document = json.loads(path.read_text(encoding='utf-8'))
+    entry = {'signature': before, 'document': document, 'hash': None}
+    if before == signature() and before[3] <= 1024 * 1024:
+        with _PASSIVE_ROUTE_LOCK:
+            _PASSIVE_ROUTE_DOCUMENTS[key] = entry
+            _PASSIVE_ROUTE_DOCUMENTS.move_to_end(key)
+            while (len(_PASSIVE_ROUTE_DOCUMENTS) > 128
+                   or sum(value['signature'][3] for value in _PASSIVE_ROUTE_DOCUMENTS.values()) > 16 * 1024 * 1024):
+                _PASSIVE_ROUTE_DOCUMENTS.popitem(last=False)
+    return document, entry
+
+
+def passive_read_context():
+    """The current display scan's context; None outside its explicit scope."""
+    return _ROUTE_ATTENTION_READ.get()
 
 
 @contextmanager
@@ -81,7 +115,7 @@ def scoped_file_signature(metadata, worktree=""):
         if cycle_root not in roots:
             roots.append(cycle_root)
         try:
-            route = json.loads(route_file.read_text(encoding="utf-8"))
+            route, _entry = _read_route_document(route_file)
             node = next((item for item in route.get("nodes", [])
                          if item.get("id") == metadata.get("route_node")), {})
             declared.extend(str(item) for item in node.get("outputs", []))
@@ -364,11 +398,17 @@ def _route_needs_attention(metadata, jobs, now):
         if (not route_path.is_absolute() or route_path.is_symlink() or not route_path.is_file()
                 or not expected_route_id or not expected_route_hash):
             return None
-        route = json.loads(route_path.read_text(encoding="utf-8"))
+        route, cached_route = _read_route_document(route_path)
         from route_identity import route_hash
         if (route.get("route_id") != expected_route_id
-                or route.get("route_hash") != expected_route_hash
-                or route_hash(route) != expected_route_hash):
+                or route.get("route_hash") != expected_route_hash):
+            return None
+        actual_hash = cached_route.get('hash') if cached_route is not None else None
+        if actual_hash is None:
+            actual_hash = route_hash(route)
+            if cached_route is not None:
+                cached_route['hash'] = actual_hash
+        if actual_hash != expected_route_hash:
             return None
         route_node = metadata.get("route_node")
         if (route_node and route_node != "_owner"

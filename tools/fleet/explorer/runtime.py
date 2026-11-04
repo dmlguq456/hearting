@@ -69,7 +69,8 @@ class ExplorerRuntime:
         if CellGrid.default_trace is not None:
             return frame.draw(model, state, cols, rows, beat=beat)
         values = tuple(chrome._clock_freshness(model.clock) if item.name == "clock"
-                       else getattr(model, item.name) for item in fields(model))
+                       else getattr(model, item.name) for item in fields(model)
+                       if item.name not in {"source_records", "ordering", "readiness"})
         # NavState deliberately omits the private question editor from equality.
         # Snapshot it too, so a draft edit or response is painted immediately.
         inputs = (values, state, freeze(state.question_overlay), cols, rows, beat)

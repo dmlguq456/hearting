@@ -39,8 +39,44 @@ _ORDER_KEYS = frozenset({"saved", "repo_keys", "session_keys", "tag_keys",
                          "repo_by_tag", "tags_by_key", "tag_cycle"})
 
 
-def freeze(value):
-    """Recursively freeze JSON-like data without inventing defaults."""
+_UNOBSERVED = object()
+
+
+def freeze(value, previous=_UNOBSERVED):
+    """Freeze JSON-like data, optionally sharing a previously frozen value."""
+    if previous is not _UNOBSERVED:
+        if value is previous:
+            return previous
+        if isinstance(value, Mapping) and isinstance(previous, Mapping):
+            if len(value) == len(previous):
+                changed = None
+                for (key, item), (old_key, old_item) in zip(value.items(), previous.items()):
+                    key = str(key)
+                    if key != old_key:
+                        break
+                    current = freeze(item, old_item)
+                    if current is not old_item:
+                        if changed is None:
+                            changed = dict(previous)
+                        changed[key] = current
+                else:
+                    return previous if changed is None else MappingProxyType(changed)
+            return MappingProxyType({str(key): freeze(item, previous.get(str(key), _UNOBSERVED))
+                                     for key, item in value.items()})
+        if isinstance(value, (list, tuple)) and isinstance(previous, tuple):
+            if len(value) == len(previous):
+                changed = None
+                for index, (item, old_item) in enumerate(zip(value, previous)):
+                    current = freeze(item, old_item)
+                    if current is not old_item and changed is None:
+                        changed = list(previous[:index])
+                    if changed is not None:
+                        changed.append(current)
+                return previous if changed is None else tuple(changed)
+            return tuple(freeze(item, previous[index] if index < len(previous) else _UNOBSERVED)
+                         for index, item in enumerate(value))
+        if type(value) is type(previous) and type(value) in (str, int, float, bool, bytes, type(None)):
+            return previous if value == previous else value
     if isinstance(value, Mapping):
         return MappingProxyType({str(key): freeze(item) for key, item in value.items()})
     if isinstance(value, (list, tuple)):
@@ -282,17 +318,20 @@ class ExplorerViewModel:
             item = getattr(self, name)
             if name in changes and changes[name] is not item:
                 changed = {} if name == "peer_edges" and changes[name] is None else changes[name]
-                item = freeze(changed)
+                item = freeze(changed, item)
             object.__setattr__(value, name, item)
         return value
 
     @classmethod
-    def from_mapping(cls, value):
+    def from_mapping(cls, value, *, previous=None):
         if isinstance(value, cls):
             return value
         if not isinstance(value, Mapping):
             raise TypeError("view model must be a mapping or ExplorerViewModel")
         known = {field.name for field in fields(cls)}
+        if type(previous) is cls:
+            return previous.with_updates(**{
+                field.name: value.get(field.name, field.default) for field in fields(cls)})
         return cls(**{key: value[key] for key in known if key in value})
 
     def to_mapping(self):

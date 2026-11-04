@@ -104,15 +104,17 @@ def _claude_shaped_argv(argv: list[str]) -> bool:
 
 def _runtime_identity(proc: Path):
     """Read process ownership and argv; disappeared processes are not candidates."""
+    process_path = os.fspath(proc)
     try:
         process_uid = proc.stat().st_uid
-        stat_text = (proc / "stat").read_text(encoding="ascii")
+        with open(process_path + "/stat", encoding="ascii") as source:
+            stat_text = source.read()
         start = _proc_start(stat_text)
     except FileNotFoundError:
         return None
     try:
-        argv = [item.decode("utf-8", "replace")
-                for item in (proc / "cmdline").read_bytes().split(b"\0") if item]
+        with open(process_path + "/cmdline", "rb") as source:
+            argv = [item.decode("utf-8", "replace") for item in source.read().split(b"\0") if item]
     except FileNotFoundError:
         return None
     try:

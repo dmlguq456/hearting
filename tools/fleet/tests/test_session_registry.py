@@ -75,6 +75,26 @@ class ConstantsTest(unittest.TestCase):
 
 
 class ReadWriteRoundTripTest(_RegistryDirMixin, unittest.TestCase):
+    def test_passive_parse_reuse_preserves_fresh_default_and_file_safety(self):
+        session_registry.write('codex', 41, dict(sessionId='old', cwd='/repo'))
+        path = Path(session_registry.registry_path('codex', 41))
+        cache = session_registry.PassiveReadCache()
+        with mock.patch.object(session_registry.json, 'load', wraps=json.load) as parse:
+            first = session_registry.read('codex', 41, validation_cache=cache)
+            first['cwd'] = '/caller-mutation'
+            again = session_registry.read('codex', 41, validation_cache=cache)
+            self.assertEqual(again['cwd'], '/repo')
+            self.assertEqual(parse.call_count, 1)
+            self.assertEqual(session_registry.read('codex', 41), again)
+            self.assertEqual(parse.call_count, 2)
+            replacement = path.with_suffix('.new')
+            replacement.write_text(json.dumps(dict(sessionId='new', cwd='/repo')))
+            replacement.replace(path)
+            self.assertEqual(session_registry.read('codex', 41, validation_cache=cache)['sessionId'], 'new')
+            path.rename(replacement)
+            path.symlink_to(replacement)
+            self.assertIsNone(session_registry.read('codex', 41, validation_cache=cache))
+
     def test_round_trip(self):
         session_registry.write("codex", 4242, {"cwd": "/repo", "status": "busy"})
         record = session_registry.read("codex", 4242)

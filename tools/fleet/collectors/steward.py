@@ -18,7 +18,9 @@ relations still require metadata confirming the same repository; foreign and
 unknown targets remain communication only.
 """
 import os
+import copy
 import sqlite3
+import threading
 from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
@@ -51,7 +53,65 @@ def read_markers():
         return {}
 
 
+_RELATIONS_OBSERVATION = None
+_RELATIONS_LOCK = threading.RLock()
+
+
+def _relations_generation():
+    import dispatch_seat_handover as handover
+    mod = _peer_message_module()
+    if mod is None:
+        raise ValueError('steward-reader-unavailable')
+    roots, _source = mod.steward_marker_roots()
+    paths = []
+    from . import dispatch
+    for root in roots:
+        directory = Path(root) / 'peer-steward'
+        try:
+            directories = sorted(directory.iterdir())
+        except FileNotFoundError:
+            paths.append((os.fspath(directory), None))
+            continue
+        paths.append((os.fspath(directory), dispatch._stat_stamp(directory)))
+        for child in directories:
+            if child.name == 'obligations' or not child.is_dir():
+                continue
+            paths.append((os.fspath(child), dispatch._stat_stamp(child)))
+            paths.extend((os.fspath(path), dispatch._stat_stamp(path))
+                         for path in sorted(child.glob('*.json')))
+    tidy = handover._st()
+    return (tuple(paths), handover._snapshot_signature(),
+            handover._lineage_signature(tidy.state_root() / 'sessions'),
+            mod.read_steward_markers, mod.steward_evidence_targets,
+            handover.resolved_steward_relations, handover._role_states,
+            handover._transition_rows, handover.read_snapshot, tidy.read_bytes,
+            tidy._read_ledger_lines, Path.read_text, Path.open)
+
+
 def read_relations():
+    from . import dispatch
+    if dispatch._COLLECTION_INPUTS.get() is None:
+        return _read_relations_uncached()
+    global _RELATIONS_OBSERVATION
+    try:
+        before = _relations_generation()
+        with _RELATIONS_LOCK:
+            held = _RELATIONS_OBSERVATION
+            if held is not None and held[0] == before:
+                return copy.deepcopy(held[1])
+    except (ImportError, OSError, TypeError, ValueError):
+        return _read_relations_uncached()
+    value = _read_relations_uncached()
+    try:
+        if value and before == _relations_generation():
+            with _RELATIONS_LOCK:
+                _RELATIONS_OBSERVATION = (before, copy.deepcopy(value))
+    except (ImportError, OSError, TypeError, ValueError):
+        pass
+    return value
+
+
+def _read_relations_uncached():
     """Read confirmed current holders without projecting a marker onto a successor SID."""
     try:
         import sys
@@ -78,15 +138,33 @@ def _session_keys(sess):
 
 def _repository_key(cwd):
     from ..gitinfo import resolve_gitdir
+    from . import dispatch
+    scope = dispatch._COLLECTION_INPUTS.get()
+    key = ('steward-repository', cwd, resolve_gitdir)
+    if scope is not None and key in scope:
+        return scope[key]
     try:
-        return resolve_gitdir(cwd)[1] if cwd else None
+        value = resolve_gitdir(cwd)[1] if cwd else None
     except (OSError, ValueError, TypeError):
-        return None
+        value = None
+    if scope is not None:
+        scope[key] = value
+    return value
+
+
+_REGISTRY_READ_CACHE = None
 
 
 def _registry_sessions():
     """Reuse native session metadata; no process, herdr or role probe."""
     from .. import session_registry
+    from . import dispatch
+    global _REGISTRY_READ_CACHE
+    cache = None
+    if dispatch._COLLECTION_INPUTS.get() is not None:
+        if _REGISTRY_READ_CACHE is None:
+            _REGISTRY_READ_CACHE = session_registry.PassiveReadCache()
+        cache = _REGISTRY_READ_CACHE
     rows = []
     for harness in ("claude", "codex", "opencode"):
         try:
@@ -96,7 +174,8 @@ def _registry_sessions():
         for entry in entries:
             if not entry.endswith(".json") or not entry[:-5].isdigit():
                 continue
-            record = session_registry.read(harness, int(entry[:-5]))
+            record = session_registry.read(harness, int(entry[:-5]),
+                                           **({'validation_cache': cache} if cache is not None else {}))
             if record and record.get("sessionId") and record.get("cwd"):
                 rows.append(SimpleNamespace(harness=harness, session_id=record["sessionId"],
                                             cwd=record["cwd"], runtime_name=record.get("name")))
@@ -448,7 +527,9 @@ def _steward_limit():
         return _DEFAULT_MAX_SUPERVISORS
 
 
-def _registry_record(harness, session_id):
+def _registry_record(harness, session_id, observation=None):
+    if isinstance(observation, _EndObservation):
+        return (observation.registry(harness) or {}).get(session_id)
     from .. import session_registry
     try:
         entries = os.listdir(session_registry._dir_for(harness))
@@ -496,6 +577,19 @@ class _EndObservation:
     def opencode(self):
         from . import opencode
         return self._once("opencode", opencode.session_visibility)
+
+    def registry(self, harness):
+        def read():
+            from .. import session_registry
+            records = {}
+            for entry in os.listdir(session_registry._dir_for(harness)):
+                if not entry.endswith('.json') or not entry[:-5].isdigit():
+                    continue
+                record = session_registry.read(harness, int(entry[:-5]))
+                if record and record.get('sessionId'):
+                    records.setdefault(record['sessionId'], record)
+            return records
+        return self._once(('registry', harness), read)
 
 
 def end_observation():
@@ -573,10 +667,10 @@ def session_liveness(harness, session_id, *, agents=None, observation=None):
         proof = _process_proof(harness, session_id, observation)
         if proof == "live":
             return "live"
-        if proof == "ended" and _registry_record(harness, session_id) is None:
+        if proof == "ended" and _registry_record(harness, session_id, observation) is None:
             return "ended"
     try:
-        record = _registry_record(harness, session_id)
+        record = _registry_record(harness, session_id, observation)
         if record is None:
             return "unknown"
         pid = record.get("pid")

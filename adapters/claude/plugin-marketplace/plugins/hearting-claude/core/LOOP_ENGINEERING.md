@@ -510,6 +510,28 @@ An unchanged cell frame already held by the same terminal window needs only
 its animated runs repainted. Geometry, attributes and stale/live changes redraw
 the whole frame; input geometry and terminal refresh still advance on every wake.
 
+Fleet may reuse pure display conversions and validations while every observed
+file generation, membership and validator they depend on agrees. Changed rows
+are processed again; a complete-line append can reuse its prefix, and replacement,
+truncation, unsafe paths and unavailable reads invalidate the affected result.
+Caches stay bounded by entries and bytes, with only current source generations.
+Read-only consumers may borrow owned immutable-by-convention projections;
+ordinary mutable providers and callers retain their defensive copies. Previously
+published graphs must remain unchanged when a later generation is folded.
+
+Process, recipient, progress, completion and clock judgments remain current.
+Passive display reuse does not enter strict authority readers or writer/controller
+paths. Shared path/metadata observations and safe directory descriptors belong to
+one scan and are released with it. Existing dead-owner retention may run before
+advisory reads for rows it already excludes, preserving output and precedence.
+These changes reduce actual repeated work without changing collection periods,
+cooldown, retention or archival policy, adding persistent state or new gates.
+An immutable display model may share unchanged subtrees with its predecessor;
+fresh action and readiness metadata still belong to the current observation.
+Cell-frame reuse depends on values consumed by the renderer, not provenance
+or ordering metadata that the current interaction model owns separately.
+Registry replacement may retain exact-field row conversions from its predecessor.
+
 ## Basis and current scope
 
 These principles condense the completion standard the user repeatedly corrected
