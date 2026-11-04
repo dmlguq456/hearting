@@ -126,7 +126,7 @@ def passive_parent_identity(path):
     reads = scope.get('parent-identities') if scope is not None else None
     if scope is not None and reads is None:
         from runtime_observation import ProjectionCache
-        reads = scope['parent-identities'] = ProjectionCache(max_entries=1024, max_bytes=512 * 1024)
+        reads = scope['parent-identities'] = ProjectionCache(max_entries=1024, max_bytes=384 * 1024)
     key = (os.fspath(path), Path.lstat)
     if reads is not None and key in reads:
         reads.move_to_end(key)
