@@ -337,6 +337,27 @@ def dispatch_command(
 BATCH_REGISTRATION_INCOMPLETE = "subsession-batch-registration-incomplete"
 
 
+def _close_row_as_never_started(jobs: Path, attempt_id: str, note: str, *, require_open: bool = False) -> bool:
+    """Close a row whose lock-time state proves it never started, and say so.
+
+    The evidence is the one `close_refused_chain_rows` writes for the serial path
+    (it also closes `running` rows and skips the parent-close and teardown-claim
+    vetoes, so it cannot stand in for these two callers), so a replacement owner
+    reads a parallel row and a serial row the same way. A row that does not pass
+    the strict proof returns False and is left to the caller's wider close."""
+    from dispatch_contract import SUBSESSION_CHAIN_REFUSAL_CLASSIFIER, attempt_row_never_started
+
+    def proves_never_started(fields: list[str]) -> bool:
+        return (not require_open or fields[1] == "open") and attempt_row_never_started(fields)
+
+    return close_attempt_row_if(jobs, attempt_id, note, proves_never_started, evidence={
+        "launch_outcome": "never-launched",
+        "failure_class": "cancelled",
+        "classifier_source": SUBSESSION_CHAIN_REFUSAL_CLASSIFIER,
+        "reconcile_reason": note,
+    })
+
+
 def _cancel_registered_row(jobs: Path, attempt_id: str) -> int:
     """Mark one already-registered, never-started child row terminal so the
     all-or-nothing receipt below is not contradicted by a live registry row.
@@ -345,6 +366,8 @@ def _cancel_registered_row(jobs: Path, attempt_id: str) -> int:
     batch refusal is the caller's answer either way."""
 
     try:
+        if _close_row_as_never_started(jobs, attempt_id, BATCH_REGISTRATION_INCOMPLETE):
+            return 1
         return 1 if close_attempt_row(jobs, attempt_id, BATCH_REGISTRATION_INCOMPLETE) else 0
     except (DispatchContractError, OSError):
         return 0
@@ -362,6 +385,11 @@ def _close_unclaimed_row(jobs: Path, attempt_id: str) -> int:
         return fields[1] == "open" and parse_registry_metadata(fields[5]).get("launch_claimed") == "0"
 
     try:
+        # Only a row that passes the strict proof says "never started" in its
+        # evidence; a pid-bearing unclaimed row still closes, as before, so the
+        # join does not wait on it, but it is not called unstarted.
+        if _close_row_as_never_started(jobs, attempt_id, BATCH_START_FAILED, require_open=True):
+            return 1
         return 1 if close_attempt_row_if(jobs, attempt_id, BATCH_START_FAILED, never_claimed) else 0
     except (DispatchContractError, OSError):
         return 0

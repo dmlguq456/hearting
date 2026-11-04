@@ -18,7 +18,6 @@ from stage_session_contract import StageSessionError, load_manifest, sealed_poin
 from dispatch_contract import (  # noqa: E402
     DispatchContractError,
     GOVERNOR_RESERVATION_ENV,
-    close_attempt_row,
     close_refused_chain_rows,
     probe_owner_supervision,
     SupervisionProbe,
@@ -395,11 +394,7 @@ def main() -> int:
                     ).cancelled)
                 else:
                     for attempt_id in registered_attempt_ids:
-                        try:
-                            if close_attempt_row(Path(args.jobs), attempt_id, SUBDIVISION_ADMISSION.BATCH_REGISTRATION_INCOMPLETE):
-                                cancelled += 1
-                        except (DispatchContractError, OSError):
-                            pass
+                        cancelled += SUBDIVISION_ADMISSION._cancel_registered_row(Path(args.jobs), attempt_id)
                 print(json.dumps({
                     "schema_version": 1, "state": "subdivision-batch-refused",
                     "chain_id": manifest["chain_id"],

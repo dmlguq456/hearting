@@ -595,6 +595,89 @@ class FailedStartClosesUnclaimedRowTest(AdmissionFixture):
         self.assertEqual(self._status(jobs, "att-claimed"), "open")
         self.assertIn(f"note={SUBDIV.BATCH_START_FAILED}", jobs.read_text())
 
+    def _meta(self, jobs: Path, attempt: str) -> dict:
+        line = next(l for l in jobs.read_text().splitlines() if f"attempt_id={attempt}," in l + ",")
+        return SUBDIV.parse_registry_metadata(line.split("\t")[5])
+
+    def test_closed_unstarted_rows_record_never_launched(self):
+        import dispatch_contract as D
+
+        jobs = self.base / "jobs.log"
+        rows = [
+            self._row("att-start", "0"), self._row("att-reg", "0"), self._row("att-claimed", "1"),
+            self._row("att-pid", "0") + ",pid=4242,pid_start=77",
+            self._row("att-running", "0").replace("\topen\t", "\trunning\t", 1),
+        ]
+        jobs.write_text("\n".join(rows) + "\n")
+        self.assertEqual(SUBDIV._close_unclaimed_row(jobs, "att-start"), 1)
+        self.assertEqual(SUBDIV._cancel_registered_row(jobs, "att-reg"), 1)
+        for attempt, note in (("att-start", SUBDIV.BATCH_START_FAILED), ("att-reg", SUBDIV.BATCH_REGISTRATION_INCOMPLETE)):
+            with self.subTest(closed=attempt):
+                meta = self._meta(jobs, attempt)
+                self.assertEqual(self._status(jobs, attempt), "done")
+                self.assertEqual(meta["note"], note)
+                self.assertEqual(meta["launch_outcome"], "never-launched")
+                self.assertEqual(meta["failure_class"], "cancelled")
+                self.assertEqual(meta["reconcile_reason"], note)
+                # The same evidence the serial refusal path writes.
+                self.assertEqual(meta["classifier_source"], D.SUBSESSION_CHAIN_REFUSAL_CLASSIFIER)
+                verdict = D.attempt_process_quiescence(meta, terminal_receipt=True)
+                self.assertEqual((verdict.state, verdict.reason), ("quiescent", "never-launched"))
+                line = next(l for l in jobs.read_text().splitlines() if f"attempt_id={attempt}," in l + ",")
+                self.assertTrue(D.attempt_row_terminal_never_started(line.split("\t")))
+
+        # A row that fails the strict proof still closes where it did before, without
+        # claiming it never started; a claimed or running row is left alone by the start path.
+        self.assertEqual(SUBDIV._close_unclaimed_row(jobs, "att-pid"), 1)
+        meta = self._meta(jobs, "att-pid")
+        self.assertEqual(self._status(jobs, "att-pid"), "done")
+        self.assertEqual(meta["note"], SUBDIV.BATCH_START_FAILED)
+        self.assertNotIn("launch_outcome", meta)
+        self.assertNotIn("classifier_source", meta)
+        self.assertEqual(SUBDIV._close_unclaimed_row(jobs, "att-claimed"), 0)
+        self.assertEqual(self._status(jobs, "att-claimed"), "open")
+        self.assertEqual(SUBDIV._close_unclaimed_row(jobs, "att-running"), 0)
+        self.assertEqual(self._status(jobs, "att-running"), "running")
+        # The registration-incomplete close keeps closing any open row, claimed or not.
+        self.assertEqual(SUBDIV._cancel_registered_row(jobs, "att-claimed"), 1)
+        meta = self._meta(jobs, "att-claimed")
+        self.assertEqual(meta["note"], SUBDIV.BATCH_REGISTRATION_INCOMPLETE)
+        self.assertNotIn("launch_outcome", meta)
+
+    def test_parallel_registration_failure_rows_are_quiescent_through_start_admitted_batch(self):
+        import dispatch_contract as D
+
+        admission = StartAdmittedBatchPartialFailureTest._admission(self, 3)
+        jobs = self.base / "jobs.log"
+        jobs.write_text("")
+
+        def fake_run(cmd, env):
+            action = cmd[cmd.index("--action") + 1]
+            slug = cmd[cmd.index("--slug") + 1]
+            session = next(row for row in admission.sessions if row["slug"] == slug)
+            if action == "register" and slug == "slice-3":
+                return subprocess.CompletedProcess(cmd, 65, "", "register-failed")
+            with jobs.open("a", encoding="utf-8") as handle:
+                handle.write(self._row(session["attempt_id"], "0") + "\n")
+            return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+        with mock.patch.object(SUBDIV, "terminal_claim_observation", return_value=None), \
+             mock.patch.object(SUBDIV, "dispatch_command",
+                               side_effect=lambda manifest, session, action, parent, jobs:
+                               ["x", "--action", action, "--slug", session["slug"]]):
+            results = SUBDIV.start_admitted_batch(
+                admission, parent="owner", jobs=jobs,
+                governor_reservation_env="AGENT_DISPATCH_GOVERNOR_RESERVATION", run=fake_run)
+        self.assertEqual([row["cancelled"] for row in results], [1, 1, 0])
+        for session in admission.sessions[:2]:
+            with self.subTest(slice=session["slug"]):
+                meta = self._meta(jobs, session["attempt_id"])
+                self.assertEqual(self._status(jobs, session["attempt_id"]), "done")
+                self.assertEqual(meta["note"], SUBDIV.BATCH_REGISTRATION_INCOMPLETE)
+                self.assertEqual(meta["launch_outcome"], "never-launched")
+                verdict = D.attempt_process_quiescence(meta, terminal_receipt=True)
+                self.assertEqual((verdict.state, verdict.reason), ("quiescent", "never-launched"))
+
     def test_raised_starts_return_per_slice_results_and_preserve_claimed_live_row(self):
         admission = StartAdmittedBatchPartialFailureTest._admission(self, 3)
         jobs = self.base / "jobs.log"
