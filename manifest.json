@@ -917,13 +917,6 @@
       "hard_block": false
     },
     {
-      "slug": "hook__dispatch-session-sweep.py__SessionStart",
-      "name": "dispatch-session-sweep.py",
-      "mono": "dispatch-session-sweep.py",
-      "event": "SessionStart",
-      "hard_block": false
-    },
-    {
       "slug": "hook__herdr-agent-state__SessionStart",
       "name": "herdr-agent-state session",
       "mono": "herdr-agent-state",
@@ -934,13 +927,6 @@
       "slug": "hook__herdr-session-projection.py__SessionStart",
       "name": "herdr-session-projection.py",
       "mono": "herdr-session-projection.py",
-      "event": "SessionStart",
-      "hard_block": false
-    },
-    {
-      "slug": "hook__local-evidence-inject__SessionStart",
-      "name": "local-evidence-inject",
-      "mono": "local-evidence-inject",
       "event": "SessionStart",
       "hard_block": false
     },

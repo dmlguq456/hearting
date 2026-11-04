@@ -85,8 +85,8 @@ const runtimeStatusBySession = new Map()
 //   * memoryBySession — session memory briefing, computed once per session and
 //     re-emitted on every call so it persists the way Claude's SessionStart
 //     additionalContext does.
-//   * localEvidenceBySession — artifact-root presence probe, computed once per
-//     session for the same reason: the block is byte-identical between turns
+//   * localEvidenceBySession — artifact-root presence probe, computed at the
+//     first chat.message, then replayed: the block is byte-identical between turns
 //     because only a newly written artifact changes it, so recomputing it per
 //     turn bought nothing and spent ~360 tokens a turn.
 //   * turnContextBySession — { turn, blocks } for the capsule candidate probe
@@ -3025,6 +3025,9 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
     spawnSummary(eventSid, "initial")
     await projectPane(eventSid, ctx)
     const prompt = promptText(output)
+    if (eventSid && !localEvidenceBySession.has(sid)) {
+      localEvidenceBySession.set(sid, collectPreflight("local-evidence", [baseDir(ctx)]))
+    }
     const turn = input.messageID || output?.message?.id || ""
     if (prompt) promptBySession.set(sid, prompt)
     peerGuidanceBySession.delete(sid)
@@ -3091,9 +3094,6 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
     }
     appendContext(output, memoryBySession.get(sid))
 
-    if (!localEvidenceBySession.has(sid)) {
-      localEvidenceBySession.set(sid, collectPreflight("local-evidence", [cwd]))
-    }
     appendContext(output, localEvidenceBySession.get(sid))
     appendContext(output, cardBySession.get(sid)?.text)
     appendContext(output, peerGuidanceBySession.get(sid))

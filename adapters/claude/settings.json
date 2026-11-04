@@ -274,26 +274,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh \"${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/run-hook.sh\" bash local-evidence-inject.sh",
-            "timeout": 5
-          }
-        ]
-      },
-      {
-        "hooks": [
-          {
-            "type": "command",
             "command": "sh \"${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/run-hook.sh\" bash session-card-inject.sh",
             "timeout": 5
-          }
-        ]
-      },
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "sh \"${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/run-hook.sh\" python3 dispatch-session-sweep.py",
-            "timeout": 10
           }
         ]
       },

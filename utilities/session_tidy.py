@@ -1282,6 +1282,8 @@ def _summarize_sessions(rows) -> dict[tuple[str, str], dict]:
             row["cwd"] = item["cwd"]
         if item.get("event") == "compact" or item.get("source") == "compact":
             row["last_compact_at"] = max(row["last_compact_at"], ts)
+        if item.get("event") == "start":
+            row["last_start_at"] = max(row.get("last_start_at", 0), ts)
     return out
 
 
@@ -2683,7 +2685,12 @@ def apply_deferred(entries) -> int:
             continue
         try:
             kind = entry.get("kind")
-            if kind in ("card-consumed", "memory-consumed"):
+            if kind == "startup-context":
+                data = read_json(path)
+                data = dict(data) if isinstance(data, dict) else {}
+                data.update(schema=SCHEMA, startup_context=entry.get("receipt"))
+                atomic_write_json(path, data)
+            elif kind in ("card-consumed", "memory-consumed"):
                 data = read_json(path)
                 data = dict(data) if isinstance(data, dict) else {}
                 if kind == "card-consumed":
@@ -3068,6 +3075,7 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
               compact_summary: str = "", compact_context: Optional[dict] = None,
               prompt_text: str = "", emit_human: Optional[Callable[[str], None]] = None,
               human_only: bool = False,
+              render_context: bool = True, startup_context: Optional[dict] = None,
               deferred: Optional[list] = None, _closed: Optional[list] = None,
               human_deadline: Optional[float] = None) -> str:
     """Record the session, and print the card / notices it is due exactly once.
@@ -3146,7 +3154,7 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
             if event == "start":
                 session_tidy_runner.reconcile_reservation_queue(seat)
     answer_wait_lines = []
-    if event in ("start", "prompt"):
+    if render_context and event in ("start", "prompt"):
         with contextlib.suppress(BaseException):
             utilities = str(Path(__file__).resolve().parent)
             if utilities not in sys.path:
@@ -3280,7 +3288,23 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
                 predecessor = _confirmed_clear_predecessor(seat, harness, sid)
                 if predecessor:
                     _closed.append(predecessor)
+        if not render_context:
+            return ""
         epoch = int(row.get("epoch", 0) or 0)
+        if startup_context is not None and event == "prompt":
+            # Reuse the existing consumption file and deferred commit boundary:
+            # a failed outer render leaves this first-prompt probe due.
+            start_at = (prior or {}).get("last_start_at", 0)
+            receipt = f"{_receipt(harness, sid, epoch)}:start:{start_at}"
+            consumed = read_json(_consumed_path(seat))
+            consumed = consumed if isinstance(consumed, dict) else {}
+            startup_context["due"] = consumed.get("startup_context") != receipt
+            if startup_context["due"]:
+                entry = {"kind": "startup-context", "path": str(_consumed_path(seat)), "receipt": receipt}
+                if deferred is not None:
+                    deferred.append(entry)
+                else:
+                    apply_deferred([entry])
         parts: list[str] = []
         lineage = []
         predecessor = None
@@ -3399,7 +3423,7 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
         # lineage (every seat ledger, about half of a 1 s start). Past
         # ``human_deadline`` (monotonic) a loaded start leaves it out so the
         # card itself still reaches the session inside the hook's limit.
-        if event == "start" and emit_human and (
+        if (event == "start" or (event == "prompt" and (startup_context or {}).get("due"))) and emit_human and (
                 human_deadline is None or time.monotonic() < human_deadline):
             with contextlib.suppress(BaseException):
                 notice = build_human_history_notice(seat, harness, sid, env=env)
@@ -4155,16 +4179,20 @@ def cmd_hook(args) -> int:
                 transcript = payload.get("transcript") or payload.get("transcript_path")
                 if isinstance(transcript, str) and transcript:
                     compact_context["transcript"] = transcript
+        startup_context = {}
         result = run_hook(args.harness, args.event, sid, source=args.source or "", transcript=args.transcript or "",
                           cwd=args.cwd or os.getcwd(), reread=args.reread,
                           emit=(emitted.append if output_format == "json" else _emit_stdout),
                           emit_human=human.append,
                           human_only=getattr(args, "human_only", False),
+                          startup_context=startup_context,
                           phase=args.phase, compact_summary=summary, compact_context=compact_context,
                           prompt_text=prompt_text, deferred=deferred)
         if output_format == "json":
             payload = {"additionalContext": "\n".join(emitted),
                        "humanNotice": "\n".join(human)}
+            if startup_context:
+                payload["initialPrompt"] = bool(startup_context.get("due"))
             if deferred is not None:
                 payload["deferredConsumed"] = deferred
                 deferred = None

@@ -1515,7 +1515,7 @@ class SweepTest(IsolatedRootMixin, unittest.TestCase):
             self.assertEqual(SWEEP.record_jobs(self.root, {"receipt": {"kind": "human-gate"}}), jobs)
             self.assertIn(str(jobs), SWEEP.delivery_context([(self.root, [record])]))
 
-    def test_codex_session_start_reconnects_without_acknowledging_context(self):
+    def test_codex_session_start_requests_recovery_without_rendering_or_consuming(self):
         self._seed(recipient_kind="codex-native-queue")
         bridge = _load("activation_codex_bridge", ROOT / "adapters/codex/hooks/sessionstart-lifecycle.py")
         import dispatch_contract, peer_obligations
@@ -1524,8 +1524,7 @@ class SweepTest(IsolatedRootMixin, unittest.TestCase):
         with mock.patch.object(bridge, "load_payload", return_value={"session_id": "sess-owner",
                 "source": "resume"}), mock.patch.object(bridge, "is_worker_session", return_value=False), \
                 mock.patch.object(bridge, "forget_shown_candidates"), \
-                mock.patch.object(bridge, "card_context", return_value=("", "", None)), \
-                mock.patch.object(bridge, "local_evidence_context", return_value=""), \
+                mock.patch("session_tidy.run_hook") as record, \
                 patch_split(dispatch_contract, "dispatch_state_roots", return_value=[self.root]), \
                 mock.patch.object(dispatch_contract, "resolve_agent_home", return_value=ROOT), \
                 mock.patch.object(peer_obligations, "retain_registered_completion") as retain, \
@@ -1533,8 +1532,9 @@ class SweepTest(IsolatedRootMixin, unittest.TestCase):
                 mock.patch.dict(sys.modules, {"herdr_session_projection": SimpleNamespace(project=lambda *a, **k: None)}), \
                 mock.patch.object(bridge.sys, "stdout", out):
             self.assertEqual(bridge.main(), 0)
-        self.assertIn("att-0000000000000000000000000000bbbb", out.getvalue())
-        retain.assert_called_once()
+        self.assertEqual(out.getvalue(), "")
+        retain.assert_not_called()
+        self.assertFalse(record.call_args.kwargs["render_context"])
         request.assert_called_once_with()
         self.assertEqual(PD.read(self.root, "sess-owner", before["delivery_id"]), before)
 
@@ -3911,7 +3911,7 @@ class ActivationDispatchReconcileTest(IsolatedRootMixin, unittest.TestCase):
 
 
 class AdapterRecoveryRequestTest(IsolatedRootMixin, unittest.TestCase):
-    def test_codex_sessionstart_keeps_recovery_owner_when_root_resolution_raises(self):
+    def test_codex_sessionstart_keeps_recovery_owner_when_lifecycle_record_raises(self):
         bridge = _load("codex_sessionstart_root_error_test",
                        ROOT / "adapters/codex/hooks/sessionstart-lifecycle.py")
         import dispatch_contract
@@ -3919,8 +3919,7 @@ class AdapterRecoveryRequestTest(IsolatedRootMixin, unittest.TestCase):
         output = io.StringIO()
         with mock.patch.object(bridge, "load_payload", return_value={"session_id": "codex-root-error"}), \
              mock.patch.object(bridge, "is_worker_session", return_value=False), \
-             mock.patch.object(bridge, "card_context", return_value=("fixture context", "", None)), \
-             mock.patch.object(bridge, "local_evidence_context", return_value=""), \
+             mock.patch("session_tidy.run_hook", side_effect=RuntimeError("lifecycle unavailable")), \
              mock.patch.object(dispatch_contract, "resolve_agent_home", return_value=ROOT), \
              patch_split(dispatch_contract, "dispatch_state_roots",
                                side_effect=RuntimeError("state roots unavailable")), \
@@ -3930,8 +3929,7 @@ class AdapterRecoveryRequestTest(IsolatedRootMixin, unittest.TestCase):
              }), contextlib.redirect_stdout(output):
             self.assertEqual(bridge.main(), 0)
         request.assert_called_once_with()
-        payload = json.loads(output.getvalue())
-        self.assertIn("fixture context", payload["hookSpecificOutput"]["additionalContext"])
+        self.assertEqual(output.getvalue(), "")
 
     def test_codex_worker_prompt_and_sessionstart_request_recovery_without_main_context(self):
         prompt = _load("codex_userprompt_recovery_test",
@@ -3955,12 +3953,12 @@ class AdapterRecoveryRequestTest(IsolatedRootMixin, unittest.TestCase):
         with mock.patch.dict(os.environ, worker_env), \
              mock.patch.object(peer_obligations, "request_obligation_recovery") as request_start, \
              mock.patch.object(sessionstart, "run_preflight", side_effect=AssertionError("main memory path")), \
-             mock.patch.object(sessionstart, "local_evidence_context",
-                               side_effect=AssertionError("main context path")), \
+             mock.patch("session_tidy.run_hook") as record_start, \
              mock.patch("sys.stdin", io.StringIO(json.dumps({"session_id": "codex-worker"}))), \
              contextlib.redirect_stdout(io.StringIO()) as output:
             self.assertEqual(sessionstart.main(), 0)
         request_start.assert_called_once_with(lifecycle_root=ROOT)
+        record_start.assert_not_called()
         self.assertEqual(output.getvalue(), "")
 
     def test_claude_sessionstart_requests_recovery_before_missing_root_return(self):
@@ -3972,7 +3970,7 @@ class AdapterRecoveryRequestTest(IsolatedRootMixin, unittest.TestCase):
             self.assertEqual(HOOK.main(), 0)
         request.assert_called_once_with(lifecycle_root=ROOT)
 
-    def test_actual_codex_sessionstart_outputs_context_before_detached_slow_recovery_without_ack(self):
+    def test_actual_codex_sessionstart_defers_context_and_recovers_without_ack(self):
         self.root.mkdir(parents=True, exist_ok=True)
         (self.root / "jobs.log").touch()
         delivery_id = "delivery-" + "d" * 32
@@ -3990,10 +3988,7 @@ class AdapterRecoveryRequestTest(IsolatedRootMixin, unittest.TestCase):
             capture_output=True, text=True, env=env, cwd=str(ROOT), timeout=10,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        payload = json.loads(result.stdout)
-        self.assertEqual(payload["hookSpecificOutput"]["hookEventName"], "SessionStart")
-        context = payload["hookSpecificOutput"]["additionalContext"]
-        self.assertIn("att-0000000000000000000000000000bbbb", context)
+        self.assertEqual(result.stdout, "")
         self.assertEqual(PD.read(self.root, "sess-owner", delivery_id)["state"], "pending")
         snapshot.write_text(result.stdout, encoding="utf-8")
         request_rows = _read_jsonl_after(self, requests)
@@ -4005,7 +4000,7 @@ class AdapterRecoveryRequestTest(IsolatedRootMixin, unittest.TestCase):
         self.assertEqual(body_rows[0]["state"], "pending")
         self.assertEqual(body_rows[0]["snapshot"], result.stdout)
 
-    def test_actual_codex_sessionstart_requests_once_after_context_without_root_jobs_or_sid(self):
+    def test_actual_codex_sessionstart_requests_once_without_context_root_jobs_or_sid(self):
         for case, sid, root_exists, seed_record in (
             ("missing-root", "codex-no-root", False, False),
             ("missing-jobs", "codex-no-jobs", True, True),
@@ -4050,10 +4045,7 @@ class AdapterRecoveryRequestTest(IsolatedRootMixin, unittest.TestCase):
                     env=env, cwd=str(ROOT), timeout=10,
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
-                emitted = json.loads(result.stdout)
-                self.assertEqual(emitted["hookSpecificOutput"]["hookEventName"], "SessionStart")
-                context = emitted["hookSpecificOutput"]["additionalContext"]
-                self.assertIn("fixture SessionStart context", context)
+                self.assertEqual(result.stdout, "")
                 snapshot.write_text(result.stdout, encoding="utf-8")
                 request_rows = _read_jsonl_after(self, requests)
                 self.assertEqual(len(request_rows), 1, request_rows)
@@ -4062,7 +4054,6 @@ class AdapterRecoveryRequestTest(IsolatedRootMixin, unittest.TestCase):
                 body_rows = _read_jsonl_after(self, bodies)
                 self.assertEqual(body_rows[0]["snapshot"], result.stdout)
                 if seed_record:
-                    self.assertIn("att-0000000000000000000000000000bbbb", context)
                     self.assertEqual(PD.read(dispatch_root, sid, delivery_id)["state"], "pending")
 
     def test_opencode_worker_init_and_session_created_use_shared_recovery_entry(self):

@@ -46,6 +46,7 @@ def text(key):
 contexts = []
 human = []
 deferred = []
+startup = {"due": event == "prompt"}
 def emit(context):
     contexts.append(context)
 try:
@@ -56,10 +57,28 @@ try:
         "claude", event, sid, source=text("source"),
         transcript=text("transcript_path"), cwd=text("cwd") or os.getcwd(), emit=emit,
         emit_human=human.append, deferred=deferred,
+        render_context=event == "prompt", startup_context=startup,
         prompt_text=text("prompt"),
         **({"human_deadline": started + budget} if budget is not None else {}))
 except Exception:
     pass
+if event == "start":
+    try:
+        from peer_obligations import request_obligation_recovery
+        request_obligation_recovery(lifecycle_root=os.environ.get("AGENT_HOME"))
+    except Exception:
+        pass
+if startup.get("due"):
+    try:
+        import subprocess
+        result = subprocess.run(
+            [os.path.join(os.environ["HOOK_DIR"], "local-evidence-inject.sh"),
+             "--cwd", text("cwd") or os.getcwd(), "--format", "text"],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5)
+        if result.returncode == 0 and result.stdout.strip():
+            contexts.append(result.stdout.strip())
+    except Exception:
+        pass
 notice = ""
 try:
     from context_alert import claude_notice
