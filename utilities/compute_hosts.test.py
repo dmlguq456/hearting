@@ -1155,7 +1155,7 @@ class ComputeHostsTest(unittest.TestCase):
                                             "hostname": "MGPU-A1"}))
             self.assertFalse(module.is_self({"ssh_host": "203.0.113.9",
                                              "hostname": ["workstation",
-                                                          "cnn"]}))
+                                                          "gpu"]}))
             self.assertFalse(module.is_self({"ssh_host": "203.0.113.9",
                                              "hostname": "mgpu-a10"}))
             self.assertFalse(module.is_self({"ssh_host": "203.0.113.9",
@@ -1611,8 +1611,8 @@ class ComputeHostsTest(unittest.TestCase):
             log.write_text("Epoch 3/200\nTRAIN: 50% loss=0.5\n")
             with log.open("ab") as output:
                 run_proc = launch_fixture(
-                    {**clean, "HEARTING_COMPUTE_RUN_ID": "cnn-run-7",
-                     "HEARTING_COMPUTE_HOST": "cnn"}, stdout=output)
+                    {**clean, "HEARTING_COMPUTE_RUN_ID": "gpu-run-7",
+                     "HEARTING_COMPUTE_HOST": "gpu"}, stdout=output)
             ambiguous_proc = launch_fixture(
                 {**clean, "CODEX_THREAD_ID": "same-session-token",
                  "CLAUDE_CODE_SESSION_ID": "same-session-token"})
@@ -1660,7 +1660,7 @@ class ComputeHostsTest(unittest.TestCase):
         self.assertEqual(len(first["processes"]), 2)
         by_pid = {row["pid"]: row for row in first["processes"]}
         self.assertEqual(by_pid[run_proc.pid]["owner"]["kind"], "run")
-        self.assertEqual(by_pid[run_proc.pid]["owner"]["label"], "run:cnn-run-7")
+        self.assertEqual(by_pid[run_proc.pid]["owner"]["label"], "run:gpu-run-7")
         self.assertEqual(by_pid[run_proc.pid]["proc_start"], proc_starts[run_proc.pid])
         self.assertIsNone(by_pid[ambiguous_proc.pid]["owner"])
         self.assertEqual(by_pid[ambiguous_proc.pid]["attribution_reason"],
@@ -1870,12 +1870,12 @@ class ComputeHostsTest(unittest.TestCase):
             gpu_pid = int(gpu_pid_file.read_text())
             claimed = self.run_tool(
                 "claim", "here", str(process.pid), "--harness", "codex",
-                "--session", "f11a0486-c090-4098-aeb0-0fd6d79f8d0c", "--json",
+                "--session", "100000ae-0000-4000-8000-0000000000bd", "--json",
             )
             self.assertEqual(claimed.returncode, 0, claimed.stderr)
             claim = json.loads(claimed.stdout)
             self.assertEqual(claim["root_pid"], process.pid)
-            self.assertEqual(claim["owner"]["label"], "codex:f11a0486")
+            self.assertEqual(claim["owner"]["label"], "codex:100000ae")
             outside_claimed = self.run_tool(
                 "claim", "here", str(os.getpid()), "--harness", "claude",
                 "--session", "outside-run-group", "--json",
@@ -1889,9 +1889,9 @@ class ComputeHostsTest(unittest.TestCase):
             def claim_with(env):
                 return subprocess.run([sys.executable, str(TOOL), "claim", "here", str(process.pid), "--json"],
                                       text=True, capture_output=True, env=env)
-            defaulted = claim_with({**bare, "CODEX_THREAD_ID": "f11a0486-c090-4098-aeb0-0fd6d79f8d0c"})
+            defaulted = claim_with({**bare, "CODEX_THREAD_ID": "100000ae-0000-4000-8000-0000000000bd"})
             self.assertEqual(defaulted.returncode, 0, defaulted.stderr)
-            self.assertEqual(json.loads(defaulted.stdout)["owner"]["label"], "codex:f11a0486")
+            self.assertEqual(json.loads(defaulted.stdout)["owner"]["label"], "codex:100000ae")
             alone = claim_with(bare)
             self.assertNotEqual(alone.returncode, 0)
             self.assertIn("--session", alone.stderr)
@@ -1959,7 +1959,7 @@ class ComputeHostsTest(unittest.TestCase):
         self.assertEqual(owner["id"], "managed-run")
         session_owner = process["session_owner"]
         self.assertEqual(session_owner["kind"], "session")
-        self.assertEqual(session_owner["label"], "codex:f11a0486")
+        self.assertEqual(session_owner["label"], "codex:100000ae")
         self.assertEqual(session_owner["source"], "persistent-claim+ancestry")
         for rejected in (stale_payload, reused_payload):
             rejected_owner = rejected["gpus"][0]["processes"][0]["session_owner"]
@@ -2117,7 +2117,7 @@ class ComputeHostsTest(unittest.TestCase):
         module = load_module()
         config = {"run_root": self.run_root}
         run_ids = ("xgpu-b-20261024-193701-ami-tf-a1-historical-parity",
-                   "xgpu-b-20261024-191238-ami-leg2-e1-recovery",
+                   "fixture-compute-run",
                    "just-created")
         for run_id in run_ids:
             run_dir = self.run_root / run_id
@@ -2534,7 +2534,7 @@ class LauncherProvenanceTest(unittest.TestCase):
         unreferenced = add_entry("v3.1", now - 15 * 86400)
         referenced = add_entry("v3.2", now - 20 * 86400)
         current = add_entry("v3.3", now - 30 * 86400)
-        for name in ("ami-eval-smoke-20261020", "asr-coresidence-20261007"):
+        for name in ("fixture-item-0280", "asr-coresidence-20261007"):
             (self.run_root / name).mkdir(parents=True)
         local_only = self.run_root / "old-local-path-run"
         local_only.mkdir()

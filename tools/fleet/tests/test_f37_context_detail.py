@@ -1230,7 +1230,7 @@ for line in sys.stdin:
         self.assertIsNone(job.exec_tool)
 
     def test_depth2_raw_exec_joins_exact_projected_rollout_context(self):
-        thread_id = "019fd56f-1e8a-77f0-9964-dc8cba43d344"
+        thread_id = "01000006-0000-7000-8000-00000000000b"
         self._write_rollout(thread_id)
         job = self._job()
         with open(job._log_file, "w", encoding="utf-8") as stream:
@@ -1248,7 +1248,7 @@ for line in sys.stdin:
         self.assertIsNone(job._context_evidence)
 
     def test_depth2_duplicate_projected_rollouts_fail_closed(self):
-        thread_id = "019fd56f-1e8a-77f0-9964-dc8cba43d344"
+        thread_id = "01000006-0000-7000-8000-00000000000b"
         self._write_rollout(thread_id)
         second = os.path.join(self.worktree, ".dispatch", "codex-home")
         self._write_rollout(thread_id, home=second)

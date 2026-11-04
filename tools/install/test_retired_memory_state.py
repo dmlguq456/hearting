@@ -14,13 +14,13 @@ import retired_memory_state as retired  # noqa: E402
 
 STALE = (
     ".distill-state-0a1b2c3d-1111-2222-3333-444455556666",
-    ".distill-state-ses_f6b5dbfccffetI7z3sqjrkxtho",
+    ".distill-state-ses_fixture00000000000000000027",
     ".turn-state-0a1b2c3d-1111-2222-3333-444455556666",
     ".codex-turn-state-0a1b2c3d-1111-2222-3333-444455556666",
     ".distill-err-0a1b2c3d-1111-2222-3333-444455556666",
     ".distill-err-periodic-ebb01fce1f",
     ".distill-failures.log",
-    ".opencode-distill-stamp-ses_f5f1effe7eM36wup0mukiS",
+    ".opencode-distill-stamp-ses_fixture00000000000000000026",
     ".codex-distill-out-abc",
     ".codex-distill-prompt-abc",
 )

@@ -119,7 +119,7 @@ class WorkTitlesTest(unittest.TestCase):
         self.assertEqual(result['name'], 'fleet freshness p2')
 
     def test_resource_and_gpu_use_same_title(self):
-        child = model.ResourceJob(run_id='mgpu-a1-20261008-203517-css-AMI8var-v3',
+        child = model.ResourceJob(run_id='fixture-run-0670',
                                   node='train', liveness='working')
         child.display_title = '환경별 모델 비교'
         rows = render._resource_child_rows(self.job(), children=[child])

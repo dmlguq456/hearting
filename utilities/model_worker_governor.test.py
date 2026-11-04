@@ -177,7 +177,7 @@ def _legacy_migration_return(root):
 
 
 class PreviousBootAdmissionTest(unittest.TestCase):
-    old = '83f954bc-4963-4dfa-9f2f-c8f3597900a6'
+    old = '10000094-0000-4000-8000-0000000000a3'
 
     def seed(self, root, current):
         old = {**current, 'boot_id': self.old}

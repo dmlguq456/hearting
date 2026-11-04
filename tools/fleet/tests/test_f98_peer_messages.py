@@ -324,7 +324,7 @@ class CollectorTest(unittest.TestCase):
         self.assertNotEqual(last_recv["from_name"], "sid-b-display")
         # The sender has no ledger name here, and an unnamed sender stays unnamed: the
         # collector used to paste the raw session id into the display-name slot, which is
-        # how `← 01a084f7-63f2-7961-ae60-6fc2d8e60fc2` reached the board (2026-09-09).
+        # how `← 0100000b-0000-7000-8000-000000000013` reached the board (2026-09-09).
         # The exact id stays in its own field for the join; naming is the renderer's job.
         self.assertIsNone(last_recv["from_name"])
         self.assertEqual(last_recv["from_session_id"], "sid-a")
@@ -427,8 +427,8 @@ class ResumedSessionJoinTest(unittest.TestCase):
         """`--fork-session` leaves the parent running under its own row; adopting its id
         would hand the parent's messages to the child."""
         from fleet import collectors
-        parent_sid = "6044eb9f-7983-4c41-9b86-0bb2b70638fa"
-        child = self._session(session_id="01a084f7-63f2-7961-ae60-6fc2d8e60fc2")
+        parent_sid = "10000087-0000-4000-8000-000000000096"
+        child = self._session(session_id="0100000b-0000-7000-8000-000000000013")
         parent = self._session(session_id=parent_sid)
         parent.pid = 2
         with mock.patch("fleet.session_registry.session_aliases", return_value=[parent_sid]):
@@ -634,17 +634,17 @@ class StateRootsPeerPromotionTest(unittest.TestCase):
 class PeerEndpointLabelTest(unittest.TestCase):
     """The name slot holds whatever the sender wrote; the board must not print machine text.
 
-    Measured on the live board: `✉ → uds:/run/user/1002/cc-socks/2952102.sock` came from a
+    Measured on the live board: `✉ → uds:/run/user/1000/fixture-sockets/1234.sock` came from a
     real ledger record whose `to.name` was a socket address. That names nothing a person can
-    look up — worse than the `claude:7a001534` fallback, because it is the same
+    look up — worse than the `claude:1000008b` fallback, because it is the same
     non-information dressed as a name.
     """
 
     def test_machine_addresses_are_not_treated_as_names(self):
-        for value in ("uds:/run/user/1002/cc-socks/2952102.sock",
+        for value in ("uds:/run/user/1000/fixture-sockets/1234.sock",
                       "/tmp/whatever.sock",
                       "http://example/x",
-                      "01a084f7-63f2-7961-ae60-6fc2d8e60fc2",  # raw session id in the name slot
+                      "0100000b-0000-7000-8000-000000000013",  # raw session id in the name slot
                       "", "   ", None, 42):
             with self.subTest(value=value):
                 self.assertFalse(render._peer_name_is_readable(value))
@@ -664,9 +664,9 @@ class PeerEndpointLabelTest(unittest.TestCase):
         # which is what keeps one relation from changing shape between ticks.
         with patch_split(render, "_resolve_session_tag", return_value=None):
             segs = render._peer_endpoint_segs(
-                "claude", "7a001534-ea46-4a67-971b-199c586889e2",
-                "uds:/run/user/1002/cc-socks/2952102.sock", {})
-        self.assertEqual("".join(t for t, _ in segs), "7a001534")
+                "claude", "1000008b-0000-4000-8000-00000000009a",
+                "uds:/run/user/1000/fixture-sockets/1234.sock", {})
+        self.assertEqual("".join(t for t, _ in segs), "1000008b")
 
     def test_an_unusable_name_with_no_id_falls_back_to_the_harness(self):
         segs = render._peer_endpoint_segs("claude", None, "/tmp/x.sock", {})
@@ -674,8 +674,8 @@ class PeerEndpointLabelTest(unittest.TestCase):
 
     def test_an_on_screen_peer_still_wins_over_every_fallback(self):
         segs = render._peer_endpoint_segs(
-            "claude", "7a001534-ea46-4a67-971b-199c586889e2", "/tmp/x.sock",
-            {("claude", "7a001534-ea46-4a67-971b-199c586889e2"): "46"})
+            "claude", "1000008b-0000-4000-8000-00000000009a", "/tmp/x.sock",
+            {("claude", "1000008b-0000-4000-8000-00000000009a"): "46"})
         self.assertEqual("".join(t for t, _ in segs), "[46]")
 
 
@@ -755,8 +755,8 @@ class PeerEndpointOneShapeTest(unittest.TestCase):
         with patch_split(render, "_resolve_session_tag", return_value=None):
             for name in ("a8e66aa4a25f5d807",                      # bare hex id
                          "wB:p5",                                   # a pane, not a session
-                         "uds:/run/user/1002/cc-socks/2952102.sock",
-                         "01a084f7-63f2-7961-ae60-6fc2d8e60fc2",
+                         "uds:/run/user/1000/fixture-sockets/1234.sock",
+                         "0100000b-0000-7000-8000-000000000013",
                          "Claude Code 사용량 리셋 및 감독 인수인계"):   # a title, not a name
                 with self.subTest(name=name):
                     segs = render._peer_endpoint_segs("claude", None, name, {})

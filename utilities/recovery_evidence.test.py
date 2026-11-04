@@ -213,7 +213,7 @@ class RecoveryEvidenceTest(unittest.TestCase):
         self.assertEqual((view.process.state, view.decision.action), ("unverifiable", "recover"))
         self.assertEqual(result["closed"], 0)
 
-    def test_taslp_summary_without_group_observer_remains_unknown(self):
+    def test_study_summary_without_group_observer_remains_unknown(self):
         # The report's summary omitted the stored group/observer fields. Keep
         # that abbreviated evidence intact rather than inventing missing data.
         self.metadata.update(pid="1920575", pid_start="595755203", pid_ns="pid:[4026531836]")
@@ -234,7 +234,7 @@ class RecoveryEvidenceTest(unittest.TestCase):
         self.assertEqual(caught.exception.reason, "prior-attempt-unverifiable")
         self.assertEqual(self.jobs.read_bytes(), before)
 
-    def test_taslp_original_review_smoke_row_closes_and_can_resume(self):
+    def test_study_original_review_smoke_row_closes_and_can_resume(self):
         self.write_row(
             attempt_id="att-d331a2c57af2ae157be9f82eab5abeca004b88775f0044ed",
             route_id="rt-b97a60012576904a", route_node="eval-smoke", worker_type="review",

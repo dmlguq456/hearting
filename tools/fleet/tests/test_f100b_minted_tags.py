@@ -20,11 +20,11 @@ from fleet.model import Session                                   # noqa: E402
 from fleet.session_handle import derived_tag, minted_tag          # noqa: E402
 
 
-# Measured 2026-09-03 from `herdr agent list` / `~/.codex/session_index.jsonl`: a Codex
-# thread id is a UUIDv7, so every live one shares the `01` prefix.
-_CODEX_IDS = ("01a064d8-e0e6-7ac2-97df-877c380ce013",
-              "01a05f31-2b7c-7d51-9f0e-3c1a7b44e902",
-              "01a06122-90aa-7b0c-8e77-5d2f9c0311ab")
+# Synthetic UUIDv7-shaped thread IDs preserve the shared `01` prefix that made
+# truncation unsuitable for assigning distinct session badges.
+_CODEX_IDS = ("01000009-0000-7000-8000-00000000000f",
+              "01000007-0000-7000-8000-00000000000d",
+              "01000008-0000-7000-8000-00000000000e")
 _OPENCODE_IDS = ("ses_7f3a19c2b0004e11", "ses_1c9d4400ff21ae03")
 
 
@@ -42,7 +42,7 @@ class MintedTagTest(unittest.TestCase):
                          minted_tag("  %s  " % _CODEX_IDS[0]))
 
     def test_missing_or_non_string_ids_yield_none(self):
-        for sid in (None, "", "   ", 1234, b"01a064d8", ("01",)):
+        for sid in (None, "", "   ", 1234, b"01000009", ("01",)):
             with self.subTest(sid=sid):
                 self.assertIsNone(minted_tag(sid))
 
@@ -52,8 +52,8 @@ class MintedTagTest(unittest.TestCase):
         self.assertEqual(len({minted_tag(sid) for sid in _CODEX_IDS}), len(_CODEX_IDS))
 
     def test_ids_that_differ_late_still_separate(self):
-        a = "01a064d8-e0e6-7ac2-97df-877c380ce013"
-        b = "01a064d8-e0e6-7ac2-97df-877c380ce014"
+        a = "01000009-0000-7000-8000-00000000000f"
+        b = "01000009-0000-7000-8000-000000000010"
         self.assertNotEqual(minted_tag(a), minted_tag(b))
 
     def test_spread_over_the_available_values(self):

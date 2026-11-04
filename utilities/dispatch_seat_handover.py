@@ -258,7 +258,14 @@ def _build_compact_lineage_graph(directory: Path, read_context=None):
         if reusable is not None:
             compact_rows[filename] = reusable
             continue
-        contents[filename] = _observed_ledger_bytes(directory / filename, file_generation)
+        raw = _observed_ledger_bytes(directory / filename, file_generation)
+        rows = _st()._read_ledger_lines(_st().Seat("pane", Path(filename).stem), raw=raw)
+        if not getattr(rows, "usable", True):
+            raise OSError("lineage-ledger-unavailable")
+        # Changed ledgers need a fresh readable observation, but activity rows
+        # need not flow through the relation graph's repeated normalization.
+        compact_rows[filename] = [(index, rows[index])
+                                  for index in sorted(_compact_row_indexes(rows))]
     if not _observation_holds((location, files, generation), _lineage_signature(directory)):
         raise OSError("lineage-observation-changed")
     graph = _build_lineage_graph_uncached((location, files, generation), contents,
@@ -846,7 +853,14 @@ def _peer_message():
     if spec is None or spec.loader is None:
         raise ImportError("peer-message-reader-unavailable")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    # Watch resolution calls this for each retained message. Cache code, never
+    # its state reads: every call below still opens the current arm and ledger.
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(spec.name, None)
+        raise
     return module
 
 
@@ -2044,6 +2058,14 @@ def storage_recipients(session: str, env=None, harness: Optional[str] = None, *,
                 return scopes({}, False)
             graph = _pass_lineage_graph(context)
             observed["edges"] = tuple(getattr(graph, "edges", ()) or ())
+            vertex = (harness, session)
+            if (harness and not any(target == vertex for _origin, target in graph.seat_edges)
+                    and not any((name, target) == vertex for name, _origin, target in graph.edges)
+                    and not any((row.get("harness"), row.get("sid")) == vertex
+                                for row in graph.binding_rows.values())):
+                # Activity rows alone grant no inherited scope. Every confirmed
+                # successor or logical holder occurs in an edge or binding row.
+                return scopes({}, True)
             candidates = set(graph.ledger_keys)
             owed = {}
             complete = True

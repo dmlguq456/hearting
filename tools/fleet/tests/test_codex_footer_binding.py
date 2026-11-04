@@ -23,10 +23,10 @@ from split_module_fixture import patch_split  # noqa: E402
 _RUN = subprocess.run  # setUp replaces subprocess.run with the herdr double
 
 
-THREAD_A = "01a133d1-5d32-7581-ac0c-c2dccaa26b4f"
-THREAD_B = "01a1336e-9aa6-75e2-80fc-cca13b79b1e3"
-THREAD_C = "01a133d1-5d32-7581-ac0c-c2dccaa26b4c"
-TREE_ROOT = "01a12d62-4ef3-7363-8d6a-9e12a26d250f"
+THREAD_A = "0100002d-0000-7000-8000-000000000039"
+THREAD_B = "0100002c-0000-7000-8000-000000000037"
+THREAD_C = "0100002d-0000-7000-8000-000000000038"
+TREE_ROOT = "01000029-0000-7000-8000-000000000034"
 OLD_NS = 1792000000000000000  # an older session's hook-time nanosecond seq
 CLEAR_NOW = 1793262080.5  # binary-exact, so the recorded microsecond seq is exact
 CLEAR_US = 1793262080500000

@@ -19,11 +19,11 @@ def owner(harness="codex", sid="sid-one"):
             "label": "run:vacant-shared-epoch99-long-run-id"}
 
 
-def session(harness="codex", sid="sid-one", name="TASLP 메인", alias=None,
+def session(harness="codex", sid="sid-one", name="Study 메인", alias=None,
            session_aliases=None, gpu_aliases=None, tag=None):
     return SimpleNamespace(harness=harness, session_id=sid, runtime_name=name,
                            _herdr_name=alias, title="beta0 noaux epoch99",
-                           registry_name="vacant", slug="shared", cwd="/work/TASLP-wt/epoch99",
+                           registry_name="vacant", slug="shared", cwd="/work/Study-wt/epoch99",
                            session_aliases=list(session_aliases or ()),
                            _gpu_session_aliases=list(gpu_aliases or ()), session_tag=tag)
 
@@ -47,7 +47,7 @@ class GPUSessionLabelsTest(unittest.TestCase):
         self.gpu = {"index": 0, "name": "NVIDIA RTX 6000 Ada Generation",
                     "utilization_gpu_pct": 100, "memory_used_mib": 8192,
                     "memory_total_mib": 49152, "processes": [self.process], "reservations": []}
-        self.host = {"host": "cnn", "reachable": True, "gpus": [self.gpu]}
+        self.host = {"host": "gpu", "reachable": True, "gpus": [self.gpu]}
         self.snapshot = {"configured": True, "hosts": [self.host]}
 
     def rows(self, sessions=(), width=200):
@@ -60,7 +60,7 @@ class GPUSessionLabelsTest(unittest.TestCase):
         line = self.rows([session()])[2]
         self.assertIn("working", line)
         self.assertIn("▸ 3", line)
-        self.assertEqual(line.count("TASLP 메인 [a1]"), 1)
+        self.assertEqual(line.count("Study 메인 [a1]"), 1)
         for forbidden in ("vacant", "shared", "epoch99", "beta0", "run:", "×"):
             self.assertNotIn(forbidden, line)
         self.assertEqual(json.dumps(self.snapshot, sort_keys=True), before)
@@ -69,7 +69,7 @@ class GPUSessionLabelsTest(unittest.TestCase):
         self.gpu["processes"] += [dict(self.process, pid=702),
                                   dict(self.process, pid=703, session_owner=owner(sid="sid-two"))]
         line = self.rows([session(), session(sid="sid-two", name="평가 담당")])[2]
-        self.assertEqual(line.count("TASLP 메인 [a1]"), 1)
+        self.assertEqual(line.count("Study 메인 [a1]"), 1)
         self.assertEqual(line.count("평가 담당 [b2]"), 1)
         self.assertIn("▸ 3", line)
 
@@ -82,23 +82,23 @@ class GPUSessionLabelsTest(unittest.TestCase):
                 self.assertIn("미귀속", line)
                 self.assertIn("working", line)
                 self.assertNotIn("idle", line)
-                self.assertNotIn("TASLP", line)
+                self.assertNotIn("Study", line)
                 self.assertNotIn("vacant", line)
 
     def test_exact_session_without_collected_name_uses_tag_without_workload_fallback(self):
         for sessions in ([], [session(name=None)]):
             with self.subTest(sessions=sessions):
                 line = self.rows(sessions)[2]
-                self.assertIn("TASLP [a1]" if sessions else "[a1]", line)
+                self.assertIn("Study [a1]" if sessions else "[a1]", line)
                 self.assertNotIn("codex", line)
                 for forbidden in ("vacant", "shared", "epoch99", "beta0", "sid-one"):
                     self.assertNotIn(forbidden, line)
 
     def test_verified_alias_is_used_and_explicit_name_has_priority(self):
-        self.assertEqual(render._gpu_session_label(owner(), [session(name=None, alias="taslp-main-cx")]),
-                         ("taslp-main-cx [a1]", "[a1]"))
+        self.assertEqual(render._gpu_session_label(owner(), [session(name=None, alias="study-main-cx")]),
+                         ("study-main-cx [a1]", "[a1]"))
         self.assertEqual(render._gpu_session_label(owner(), [session(alias="herdr alias")])[0],
-                         "TASLP 메인 [a1]")
+                         "Study 메인 [a1]")
         self.assertEqual(render._gpu_session_label(owner(), [session(sid="sid-two", name="foreign")])[0],
                          "[a1]")
 
@@ -132,7 +132,7 @@ class GPUSessionLabelsTest(unittest.TestCase):
             with self.subTest(harness=harness):
                 self.assertEqual(render._gpu_session_label(owner(harness), [
                     session(harness, name=None), session("foreign", name=None)]),
-                    ("TASLP [%s]" % tag, "[%s]" % tag))
+                    ("Study [%s]" % tag, "[%s]" % tag))
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp) / "actual-repo"
             gitdir = repo / ".git" / "worktrees" / "branch"
@@ -151,7 +151,7 @@ class GPUSessionLabelsTest(unittest.TestCase):
     def test_no_tag_uses_short_id_and_observed_repo_not_harness(self):
         row = session(sid="abcdefgh-one", name=None)
         self.assertEqual(render._gpu_session_label(owner(sid=row.session_id), [row]),
-                         ("TASLP abcdefgh", "abcdefgh"))
+                         ("Study abcdefgh", "abcdefgh"))
         row.cwd = ""
         self.assertEqual(render._gpu_session_label(owner(sid=row.session_id), [row])[0], "abcdefgh")
 
@@ -189,7 +189,7 @@ class GPUSessionLabelsTest(unittest.TestCase):
                                     "started_at": 1728000000, "task": "training detail"}]
         before = copy.deepcopy(self.snapshot)
         line = self.rows([session()])[3]
-        self.assertIn("TASLP 메인 [a1]", line)
+        self.assertIn("Study 메인 [a1]", line)
         self.assertIn("train_beta0.py", line)
         self.assertIn("--epochs 99", line)
         self.assertNotIn("run:", line)
@@ -203,7 +203,7 @@ class GPUSessionLabelsTest(unittest.TestCase):
         line = self.rows([session()])[2]
         self.assertIn("idle", line)
         self.assertNotIn("미귀속", line)
-        self.assertNotIn("TASLP", line)
+        self.assertNotIn("Study", line)
         self.gpu["processes"] = [dict(self.process, session_owner=None,
                                       gpu_placement="visible-device-access")]
         self.gpu["observation_source"] = "proc-fallback"

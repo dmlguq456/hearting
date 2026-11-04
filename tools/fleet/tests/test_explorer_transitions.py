@@ -502,7 +502,7 @@ class ModelTransitions(unittest.TestCase):
         self.assertEqual(effects, ())
 
 
-E8_SID = "5ed20fe8-499b-4490-a87f-f492612948cf"
+E8_SID = "10000086-0000-4000-8000-000000000095"
 
 
 def _e8_view_model():
@@ -517,7 +517,7 @@ def _e8_view_model():
         {"harness": "claude", "sid": "bbf14dfc", "at": "10-28 08:40", "kind": "new",
          "connection": "new session · no handover record", "note": None, "card": True, "detail": True,
          "title": "before the clear"},
-        {"harness": "claude", "sid": "5ed20fe8", "at": "now", "kind": "new",
+        {"harness": "claude", "sid": "10000086", "at": "now", "kind": "new",
          "connection": "clear · new session took over", "note": None, "card": False, "detail": True,
          "title": "current generation"}])
     data["seats"] = list(data["seats"]) + [

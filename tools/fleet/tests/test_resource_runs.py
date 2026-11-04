@@ -84,7 +84,7 @@ class ResourceRunFleetTest(unittest.TestCase):
 
     def test_gpu_commands_remain_visible_without_training_or_lab_summary(self):
         snapshot = {"configured": True, "hosts": [{
-            "host": "cnn", "reachable": True, "gpus": [{
+            "host": "gpu", "reachable": True, "gpus": [{
                 "index": 0, "name": "NVIDIA RTX 4090", "util_pct": 42,
                 "memory_used_mib": 12288, "memory_total_mib": 24576,
                 "processes": [{"pid": 42, "proc_start": "11",

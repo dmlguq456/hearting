@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import base64, contextlib, copy, hashlib, importlib.util, io, json, os, re, shutil, signal, subprocess, sys, tempfile, threading, time, unittest
+import base64, contextlib, copy, hashlib, importlib.util, io, json, os, re, shlex, shutil, signal, subprocess, sys, tempfile, threading, time, unittest
 from pathlib import Path
 from unittest import mock
 
@@ -10209,14 +10209,77 @@ class RouteChainWriterTest(ComposeRouteTest):
    self.assertIn("route_chain_written=1 harness=opencode",err)
    self.assertEqual([line["route_id"] for line in self.RC.read_tail("opencode","sid-oc")],
                     [route["route_id"]])
- def test_tmp_artifact_root_without_explicit_dir_is_not_recorded(self):
+ def test_tmp_artifact_root_records_the_session_in_its_default_state_root(self):
   with mock.patch.dict(os.environ,{"CLAUDE_CODE_SESSION_ID":"sid-tmp","AGENT_DISPATCH_ATTEMPT_ID":"",
                                    "AGENT_HOME":str(R.ROOT)}):
    os.environ.pop("FLEET_ROUTE_CHAIN_DIR",None)
-   route=self.compose(artifact_root=tempfile.gettempdir())
-   err=self._emit(route,tempfile.gettempdir())
-   self.assertIn("reason=tmp-artifact-root",err)
-   os.environ["FLEET_ROUTE_CHAIN_DIR"]=self._rc_tmp.name   # restore for addCleanup symmetry
+   with tempfile.TemporaryDirectory() as tmp:
+    route=self.compose(artifact_root=tmp,campaign_key="temporary-work")
+    err=self._emit(route,tmp)
+    self.assertIn("route_chain_written=1 harness=claude",err)
+    self.assertEqual(R._session_campaign_key(tmp),"temporary-work")
+    self.assertIsNone(R._session_campaign_key(str(Path(tmp)/"another-root")))
+
+ def test_second_turn_from_primary_inherits_its_finished_worktree_campaign_in_each_harness(self):
+  # Real CLI compose/start/finish, including the primary -> prepared worktree hop.
+  # No FLEET_ROUTE_CHAIN_DIR override: the old /tmp exemption lost this selection.
+  for harness,key in (("claude","CLAUDE_CODE_SESSION_ID"),("codex","CODEX_THREAD_ID"),
+                      ("opencode","OPENCODE_SESSION_ID")):
+   with self.subTest(harness=harness), tempfile.TemporaryDirectory() as tmp:
+    root=Path(tmp); project=root/"repo"; project.mkdir()
+    subprocess.run(["git","init","-q",str(project)],check=True)
+    subprocess.run(["git","-C",str(project),"-c","user.name=Fixture","-c",
+                    "user.email=fixture@example.invalid","commit","--allow-empty","-qm","init"],check=True)
+    env={**os.environ,"HOME":str(root/"home"),"XDG_STATE_HOME":str(root/"state"),
+         "XDG_DATA_HOME":str(root/"data"),"AGENT_HOME":str(R.ROOT),
+         "HEARTING_WORKFLOW_GROUP_REVIEW":"off","HEARTING_CAMPAIGN_TITLE_AUTO":"off"}
+    for name in (*self._identity_guard,"FLEET_ROUTE_CHAIN_DIR"):
+     env.pop(name,None)
+    env[key]="two-turn-session"
+    artifacts=project/".agent_reports"; jobs=root/"jobs.log"
+    task=root/"task.txt"; task.write_text("Make the approved local fix and run its focused tests.")
+    def cli(*args,environment=env):
+     return subprocess.run([sys.executable,str(P),*args],env=environment,cwd=project,
+                           capture_output=True,text=True,timeout=90)
+    def compose(slug,*extra,environment=env):
+     return cli("compose","--shape","direct","--slug",slug,"--cwd",str(project),
+                "--artifact-root",str(artifacts),"--jobs",str(jobs),
+                "--prompt-file",str(task),*extra,environment=environment)
+    first=compose("first-fix","--start")
+    self.assertEqual(first.returncode,0,first.stdout+first.stderr)
+    started=json.loads(first.stdout)
+    self.assertIn("route_chain_written=1",first.stderr)
+    self.assertNotEqual(started["worktree"]["cwd"],str(project))
+    self.assertEqual(json.loads(Path(started["receipt_file"]).read_text())["receipt"]["runtime"],
+                     started["runtime"])
+    known=subprocess.run([*shlex.split(started["runtime"]["run_command"]),"capability-route","--help"],
+                         env=env,capture_output=True,text=True,timeout=30)
+    self.assertEqual(known.returncode,0,known.stderr)
+    evidence=root/"evidence.txt"; evidence.write_text("Fixture inline work and focused verification complete.")
+    finished=cli("finish","--route",started["route_file"],"--evidence",str(evidence),
+                 "--summary-file",str(evidence))
+    self.assertEqual(finished.returncode,0,finished.stdout+finished.stderr)
+    # Another active stream in the root cannot override this session's choice.
+    other=artifacts/"campaigns"/"2026-11-01_other"; other.mkdir()
+    (other/"campaign.json").write_text(json.dumps({"campaign_id":"camp_"+"9"*32,"key":"other",
+     "title":"other","goal":"separate work","state":"active","cycles":[],"created_on":"2026-11-01T00:00:00Z"}))
+    second=compose("second-fix","--start")
+    self.assertEqual(second.returncode,0,second.stdout+second.stderr)
+    continued=json.loads(second.stdout)
+    self.assertIn("campaign_key_default=repo source=this-session-latest-route",second.stderr)
+    route=json.loads(Path(continued["route_file"]).read_text())
+    self.assertEqual(route["campaign_key"],"repo")
+    self.assertEqual(continued["artifact_env"]["AGENT_ARTIFACT_CAMPAIGN_ID"],
+                     started["artifact_env"]["AGENT_ARTIFACT_CAMPAIGN_ID"])
+    self.assertNotEqual(continued["artifact_env"]["AGENT_ARTIFACT_CYCLE_ID"],
+                        started["artifact_env"]["AGENT_ARTIFACT_CYCLE_ID"])
+    for extra,expected in ((("--campaign-key","other"),"other"),(("--unassigned",),None)):
+     explicit=compose("explicit-choice",*extra,"--explain")
+     self.assertEqual(explicit.returncode,0,explicit.stdout+explicit.stderr)
+     self.assertEqual(json.loads(explicit.stdout)["campaign"]["key"],expected)
+    stranger=compose("foreign-session","--explain",environment={**env,key:"another-session"})
+    self.assertNotEqual(stranger.returncode,0)
+    self.assertIn("compose-campaign-key-required",stranger.stderr)
  def test_codex_thread_id_records_codex_ledger(self):
   with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
     os.environ,{"CODEX_THREAD_ID":"sid-codex","AGENT_DISPATCH_ATTEMPT_ID":"",
@@ -10238,14 +10301,14 @@ class RouteChainWriterTest(ComposeRouteTest):
  def test_compose_records_codex_ledger_in_claude_started_daemon_env(self):
   # A Codex thread served by the shared daemon that a Claude tool shell started: its tool
   # commands carry the thread id AND the starter's Claude session id (the SR_ModelA incident).
-  env=self._tool_shell_env("claude","codex","01a0f6a2-785d-7503-bb78-368d1a1eaab1")
+  env=self._tool_shell_env("claude","codex","01000012-0000-7000-8000-00000000001a")
   with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
     os.environ,{**env,"AGENT_DISPATCH_ATTEMPT_ID":"","AGENT_HOME":str(R.ROOT)}):
    route=self.compose(artifact_root=tmp)
    err=self._emit(route,tmp)
    self.assertIn("route_chain_written=1 harness=codex",err)
    self.assertNotIn("reason=no-identity",err)
-   self.assertEqual([line["route_id"] for line in self.RC.read_tail("codex","01a0f6a2-785d-7503-bb78-368d1a1eaab1")],
+   self.assertEqual([line["route_id"] for line in self.RC.read_tail("codex","01000012-0000-7000-8000-00000000001a")],
                     [route["route_id"]])
    self.assertEqual(self.RC.read_tail("claude","parent-sid-claude"),[])
  def test_compose_never_records_claude_when_the_codex_block_is_not_installed(self):
@@ -10257,7 +10320,7 @@ class RouteChainWriterTest(ComposeRouteTest):
   import harness_tool_env as E
   try:
    inherited=E.daemon_started_from(E.tool_shell_env("claude",{},"parent-sid-claude"))
-   env=E.tool_shell_env("codex",inherited,"01a0f6a2-785d-7503-bb78-368d1a1eaab1",installed=False)
+   env=E.tool_shell_env("codex",inherited,"01000012-0000-7000-8000-00000000001a",installed=False)
   except E.ToolMissing as exc:
    self.skipTest(str(exc))
   with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
@@ -10267,7 +10330,7 @@ class RouteChainWriterTest(ComposeRouteTest):
    self.assertIn("route_chain_written=0",err)
    self.assertNotIn("harness=claude",err)
    self.assertEqual(self.RC.read_tail("claude","parent-sid-claude"),[])
-   self.assertEqual(self.RC.read_tail("codex","01a0f6a2-785d-7503-bb78-368d1a1eaab1"),[])
+   self.assertEqual(self.RC.read_tail("codex","01000012-0000-7000-8000-00000000001a"),[])
  def test_compose_caller_follows_tool_shell_harness(self):
   from dispatch_parent_completion import default_parent_harness
   for parent,child in (("claude","codex"),("codex","claude"),("claude","opencode"),("opencode","codex")):

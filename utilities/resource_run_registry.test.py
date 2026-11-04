@@ -246,9 +246,9 @@ class ResourceRegistryTest(unittest.TestCase):
                 self.assertEqual(diagnostics[0]["path"], str(source))
 
     def test_boot_change_is_host_bound_and_rejects_reused_pid(self):
-        current = {'boot_id': '67138871-1a60-467f-b9dc-d46749025baa', 'boot_host': 'local'}
+        current = {'boot_id': '10000088-0000-4000-8000-000000000097', 'boot_host': 'local'}
         row = {'pid': 123, 'starttime': '42', 'command_hash': 'hash',
-               'boot_id': '83f954bc-4963-4dfa-9f2f-c8f3597900a6', 'boot_host': 'local'}
+               'boot_id': '10000094-0000-4000-8000-0000000000a3', 'boot_host': 'local'}
         with mock.patch.object(registry, 'boot_identity', return_value=current):
             self.assertEqual(registry.classify_identity(row, lambda _: row), ('exited', None, 'host-reboot'))
             for changes in ({'boot_host': 'foreign'}, {'boot_id': current['boot_id']},
@@ -256,8 +256,8 @@ class ResourceRegistryTest(unittest.TestCase):
                 self.assertIsNone(registry.reboot_evidence({**row, **changes}))
 
     def test_shared_previous_boot_proof_requires_host_or_local_journal(self):
-        current = {'boot_id': '67138871-1a60-467f-b9dc-d46749025baa', 'boot_host': 'local'}
-        previous = '83f954bc-4963-4dfa-9f2f-c8f3597900a6'
+        current = {'boot_id': '10000088-0000-4000-8000-000000000097', 'boot_host': 'local'}
+        previous = '10000094-0000-4000-8000-0000000000a3'
         with mock.patch.object(registry, 'boot_identity', return_value=current), \
                 mock.patch.object(registry, 'local_boot_history', return_value={previous, current['boot_id']}) as history:
             self.assertIsNotNone(registry.previous_boot_evidence({'boot_id': previous, 'boot_host': 'local'}))
@@ -270,7 +270,7 @@ class ResourceRegistryTest(unittest.TestCase):
                 self.assertIsNone(registry.previous_boot_evidence({'boot_id': previous}))
 
     def test_legacy_boot_reset_requires_all_existing_launch_coordinates(self):
-        current, previous = '67138871-1a60-467f-b9dc-d46749025baa', '83f954bc-4963-4dfa-9f2f-c8f3597900a6'
+        current, previous = '10000088-0000-4000-8000-000000000097', '10000094-0000-4000-8000-0000000000a3'
         row = {'resource_policy': 'supervised-owner', 'started_at': 50, 'starttime': '10000', 'owner_wait': {'bound': True},
                'pid_namespace': os.readlink('/proc/self/ns/pid')}
         with mock.patch.object(registry, '_boot_epoch', return_value=100), \
@@ -306,11 +306,11 @@ class ResourceRegistryTest(unittest.TestCase):
             state = root / '.runtime/model-worker-governor/state.json'
             state.parent.mkdir(parents=True)
             identity = {'pid': 123, 'starttime': '456', 'pid_namespace': int(namespace[5:-1]),
-                        'boot_id': '83f954bc-4963-4dfa-9f2f-c8f3597900a6'}
+                        'boot_id': '10000094-0000-4000-8000-0000000000a3'}
             state.write_text(json.dumps({'claims': {'token': {'claimant_identity': identity}}}))
             self.assertEqual(registry.legacy_resource_boot(row), identity['boot_id'])
             state.write_text(json.dumps({'claims': {'token': {'claimant_identity': identity},
-                'ambiguous': {'claimant_identity': {**identity, 'boot_id': '67138871-1a60-467f-b9dc-d46749025baa'}}}}))
+                'ambiguous': {'claimant_identity': {**identity, 'boot_id': '10000088-0000-4000-8000-000000000097'}}}}))
             self.assertIsNone(registry.legacy_resource_boot(row))
             state.write_text(json.dumps({'claims': {'token': {'claimant_identity': identity}}}))
             for change in ({'owner_pid': 124}, {'owner_start': '457'}, {'route_hash': 'foreign'},
@@ -322,7 +322,7 @@ class ResourceRegistryTest(unittest.TestCase):
 
     def test_local_journal_requires_current_boot_and_never_uses_unreadable_history(self):
         from types import SimpleNamespace
-        current, previous = '67138871-1a60-467f-b9dc-d46749025baa', '83f954bc-4963-4dfa-9f2f-c8f3597900a6'
+        current, previous = '10000088-0000-4000-8000-000000000097', '10000094-0000-4000-8000-0000000000a3'
         output = f'-1 {previous.replace("-", "")} previous\n0 {current.replace("-", "")} current\n'
         for code, stdout, expected in ((0, output, {current, previous}),
                                        (0, output.splitlines()[0], set()), (1, output, set())):

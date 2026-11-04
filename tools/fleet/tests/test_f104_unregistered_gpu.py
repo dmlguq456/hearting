@@ -184,20 +184,20 @@ class UnregisteredGpuRowTest(UnregisteredGpuTestBase):
         self.assertEqual(json.dumps(quoted, sort_keys=True), original_quoted)
 
     def test_long_argv_tail_survives_available_width(self):
-        # Original case (C-PR176 live observation on cnn): a long env python
+        # Original case (C-PR176 live observation on gpu): a long env python
         # plus a long script path with no --run-id/--name/--config identifier.
         # Path prefixes must not hide the script, even in the narrower row.
         entry = compute_hosts.unregistered_gpu(_snapshot((0, [_process(
             command="/home/example/Project_Zoo/Project-C_artifacts/envs/"
-                     "private_cnn_cu128_20261006/bin/python "
+                     "private_gpu_cu128_20261006/bin/python "
                      "/home/example/Project_Zoo/Project-C_artifacts/envs/"
-                     "private_cnn_train.py",
+                     "private_gpu_train.py",
             used_memory_mib=4915, elapsed_s=8 * 3600 + 47 * 60,
         )])))[0]
         original = json.dumps(entry, sort_keys=True)
         wide = render._plain(render._gpu_work_row(entry, 168))
         self.assertLessEqual(render._dw(wide), 168)
-        self.assertIn("python private_cnn_train.py", wide)
+        self.assertIn("python private_gpu_train.py", wide)
         self.assertNotIn("…", wide)
         # Identifier-based labels (M6/config) keep their existing short form.
         m6 = render._plain(render._gpu_work_row(
@@ -207,30 +207,30 @@ class UnregisteredGpuRowTest(UnregisteredGpuTestBase):
         narrow = render._plain(render._gpu_work_row(entry, 60))
         self.assertLessEqual(render._dw(narrow), 60)
         self.assertIn("GPU mgpu-a1:0", narrow)
-        self.assertIn("private_cnn_train.py", narrow)
+        self.assertIn("private_gpu_train.py", narrow)
         self.assertEqual(json.dumps(entry, sort_keys=True), original)
 
     def test_multi_gpu_process_is_one_row_and_dispatch_section_only(self):
         shared = _process(used_memory_mib=9604)
-        snapshot = _snapshot((0, [shared]), (1, [dict(shared)]), host="cnn", is_self=False)
+        snapshot = _snapshot((0, [shared]), (1, [dict(shared)]), host="gpu", is_self=False)
         entries = compute_hosts.unregistered_gpu(snapshot)
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0]["gpu_indexes"], [0, 1])
         self.assertEqual(entries[0]["used_memory_mib"], 19208)
         text = self.lines(snapshot)
-        rows = [line for line in text if "GPU cnn:0,1" in line]
+        rows = [line for line in text if "GPU gpu:0,1" in line]
         self.assertEqual(len(rows), 1)
         self.assertIn("19 GB", rows[0])
         self.assertNotIn("● GPU", "\n".join(self.lines(snapshot, section="fleet")))
 
     def test_remote_runs_and_unattached_processes_share_one_compact_card_strip(self):
-        cnn = _snapshot((0, [_process(pid=500, command="python train.py --config UMA_7ch_fix_2spk_v2_1.yaml",
+        gpu = _snapshot((0, [_process(pid=500, command="python train.py --config UMA_7ch_fix_2spk_v2_1.yaml",
                                      owner={"kind": "run", "label": "run:one"})]),
                         (1, [_process(pid=600, command="python train.py --config AMI_8ch_varying_0_3spk_v2_rirfix.yaml",
                                      owner={"kind": "run", "label": "run:two"})]),
-                        host="cnn", is_self=False)
+                        host="gpu", is_self=False)
         moving = _snapshot((1, [_process(pid=700, command="python train.py --config 1ch_fix_2spk_v2.yaml")]))
-        snapshot = {**cnn, "hosts": cnn["hosts"] + moving["hosts"]}
+        snapshot = {**gpu, "hosts": gpu["hosts"] + moving["hosts"]}
         original = json.dumps(snapshot, sort_keys=True)
         entries = compute_hosts.unregistered_gpu(snapshot)
         self.assertEqual(len(entries), 3)
@@ -242,7 +242,7 @@ class UnregisteredGpuRowTest(UnregisteredGpuTestBase):
                 self.assertTrue(all(render._dw(row) <= width for row in rows))
                 joined = "\n".join(rows)
                 if width >= 60:
-                    for identity in ("GPU cnn:0", "GPU cnn:1", "GPU mgpu-a1:1"):
+                    for identity in ("GPU gpu:0", "GPU gpu:1", "GPU mgpu-a1:1"):
                         self.assertIn(identity, joined)
                 if width >= 60:
                     self.assertIn("UMA_7ch_fix_2spk_v2_1", joined)

@@ -672,16 +672,24 @@ if AGENT_DISPATCH_JOBS="$TMP/codex-env-jobs.log" \
 else
   bad "codex harvest and liveness should keep using the selected shared registry"
 fi
-if "$CODEX" dispatch --dry-run --worktree "$TMP/repo" --slug codex-inherit-model --capability autopilot-code --mode dev --qa standard --prompt-text "do work" --inherit-model-settings --jobs "$TMP/codex-inherit-model.log" >"$TMP/codex_inherit_model.out" 2>"$TMP/codex_inherit_model.err"; then
-  bad "codex dispatch wrapper should reject unprovable model inheritance"
+# Inheritance is refused only when the selected policy declares main-only
+# models. An operator's complete legacy copy may legitimately omit that key.
+CODEX_INHERIT_POLICY_HOME="$TMP/codex-inherit-policy"
+mkdir -p "$CODEX_INHERIT_POLICY_HOME/agent-config"
+sed '/^CFG_MAIN_SESSION_ONLY_MODELS=/d' "$ROOT/adapters/codex/config/models.conf" \
+  > "$CODEX_INHERIT_POLICY_HOME/agent-config/models.conf"
+printf '\nCFG_MAIN_SESSION_ONLY_MODELS="fixture-main-only"\n' \
+  >> "$CODEX_INHERIT_POLICY_HOME/agent-config/models.conf"
+if HEARTING_MODEL_CONFIG_HOME="$CODEX_INHERIT_POLICY_HOME" "$CODEX" dispatch --dry-run --worktree "$TMP/repo" --slug codex-inherit-model --capability autopilot-code --mode dev --qa standard --prompt-text "do work" --inherit-model-settings --jobs "$TMP/codex-inherit-model.log" >"$TMP/codex_inherit_model.out" 2>"$TMP/codex_inherit_model.err"; then
+  bad "codex dispatch wrapper should reject inheritance under a declared main-only policy"
 else
   rc=$?
   if [ "$rc" -eq 64 ] \
     && grep -q '^reason=headless-model-inheritance-ineligible$' "$TMP/codex_inherit_model.out" \
     && [ ! -e "$TMP/codex-inherit-model.log" ]; then
-    ok "codex dispatch wrapper rejects unprovable model inheritance"
+    ok "codex dispatch wrapper rejects inheritance under a declared main-only policy"
   else
-    bad "codex dispatch wrapper should reject unprovable model inheritance cleanly"
+    bad "codex dispatch wrapper should reject inheritance under a declared main-only policy cleanly"
   fi
 fi
 if "$CODEX" dispatch --dry-run --worktree "$TMP/repo" --slug codex-bad-cap --capability nope-capability --mode dev --qa standard --prompt-text "do work" --jobs "$TMP/codex-bad-cap.log" >"$TMP/codex_bad_cap.out" 2>"$TMP/codex_bad_cap.err"; then
@@ -1636,13 +1644,17 @@ if command -v codex >/dev/null 2>&1; then
     [ -d "$d" ] || continue
     ln -s "$d" "$TMP/codex_home/skills/$(basename "$d")"
   done
+  # Entry routers remain on disk for explicit invocation. Prompt-input renders
+  # the implicit catalog, so use a model-support Skill as its positive control.
   if CODEX_HOME="$TMP/codex_home" codex debug prompt-input 'autopilot-code' >"$TMP/codex_skills.out" 2>"$TMP/codex_skills.err" \
-    && grep -q -- '- autopilot-code:' "$TMP/codex_skills.out" \
-    && grep -q 'Use when source code must be implemented' "$TMP/codex_skills.out" \
+    && grep -q -- '- session-tidy:' "$TMP/codex_skills.out" \
+    && ! grep -q -- '- autopilot-code:' "$TMP/codex_skills.out" \
+    && [ -f "$TMP/codex_home/skills/autopilot-code/SKILL.md" ] \
+    && grep -Eq '^[[:space:]]*allow_implicit_invocation:[[:space:]]*false([[:space:]]|$)' "$TMP/codex_home/skills/autopilot-code/agents/openai.yaml" \
     && ! grep -q '/.claude/skills' "$TMP/codex_skills.out"; then
-    ok "codex native skill projection is discoverable without Claude skill paths"
+    ok "codex native discovery keeps entry routers explicit-only and support Skills visible"
   else
-    bad "codex native skill projection should be discoverable without Claude skill paths"
+    bad "codex native discovery should retain explicit entry routers without listing them implicitly"
   fi
 else
   ok "codex native skill runtime discovery skipped (codex not installed)"
@@ -1658,11 +1670,14 @@ if command -v codex >/dev/null 2>&1; then
     && grep -q '"pluginId": "hearting-codex@hearting"' "$TMP/codex_plugin_list.out" \
     && CODEX_HOME="$TMP/codex_plugin_home" codex plugin add hearting-codex@hearting --json >"$TMP/codex_plugin_add.out" 2>"$TMP/codex_plugin_add.err" \
     && CODEX_HOME="$TMP/codex_plugin_home" codex debug prompt-input 'autopilot-code' >"$TMP/codex_plugin_prompt.out" 2>"$TMP/codex_plugin_prompt.err" \
-    && grep -q -- '- hearting-codex:autopilot-code:' "$TMP/codex_plugin_prompt.out" \
+    && grep -q -- '- hearting-codex:session-tidy:' "$TMP/codex_plugin_prompt.out" \
+    && ! grep -q -- '- hearting-codex:autopilot-code:' "$TMP/codex_plugin_prompt.out" \
+    && [ -f "$ROOT/codex_setting/codex-plugin-marketplace/plugins/hearting-codex/skills/autopilot-code/SKILL.md" ] \
+    && grep -Eq '^[[:space:]]*allow_implicit_invocation:[[:space:]]*false([[:space:]]|$)' "$ROOT/codex_setting/codex-plugin-marketplace/plugins/hearting-codex/skills/autopilot-code/agents/openai.yaml" \
     && ! grep -q 'adapters/claude/skills' "$TMP/codex_plugin_prompt.out"; then
-    ok "codex native plugin projection is installable and discovers generated skills"
+    ok "codex native plugin discovery keeps entry routers explicit-only and support Skills visible"
   else
-    bad "codex native plugin projection should be installable and discover generated skills"
+    bad "codex native plugin discovery should retain explicit entry routers without listing them implicitly"
   fi
 else
   ok "codex native plugin runtime discovery skipped (codex not installed)"

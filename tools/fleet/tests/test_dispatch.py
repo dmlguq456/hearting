@@ -947,7 +947,7 @@ class InstalledRuntimeRegistryTest(unittest.TestCase):
                 f.write(
                     "2026-07-29T08:49:46+00:00\topen\trepo\t%s\tmanaged-child\t"
                     "capability=autopilot-code,harness=claude,dispatch_depth=1,"
-                    "parent_sid=019facc9-fe83-7480-89f6-9e64fbebf0ca,"
+                    "parent_sid=01000005-0000-7000-8000-000000000008,"
                     "attempt_id=att-installed00001\n" % tmp
                 )
             agent_jobs = os.path.join(tmp, "agent_setting", ".dispatch", "jobs.log")

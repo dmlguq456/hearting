@@ -219,9 +219,9 @@ def _peer_name_is_readable(name):
     """True when the ledger's `name` is something a person can act on.
 
     The name slot is whatever the sending side wrote, and older send paths put machine
-    addresses in it — the board printed `✉ → uds:/run/user/1002/cc-socks/2952102.sock`
+    addresses in it — the board printed `✉ → uds:/run/user/1000/fixture-sockets/1234.sock`
     from a real record. A transport address or a bare session id names nothing the user
-    can look up, so it is worse than the `claude:01a084f7` fallback: it is the same
+    can look up, so it is worse than the `claude:0100000b` fallback: it is the same
     non-information, but longer and pretending to be a name.
 
     Deliberately a small denylist, not a guess at what a "real" name looks like: session
@@ -262,7 +262,7 @@ def _peer_endpoint_segs(harness, session_id, name, tag_by_key, repo_by_key=None)
 
     `hearting [46]` when that session's repository is observed — the badge is the thing
     the user can actually look up. Otherwise the ledger's own display name, and only then
-    the short session ID. Never the full session id: `← 01a084f7-63f2-7961-ae60-6fc2d8e60fc2`
+    the short session ID. Never the full session id: `← 0100000b-0000-7000-8000-000000000013`
     is what the board printed before this (the collector used to paste the raw id into the
     name slot), and it names nothing a person can act on.
     """

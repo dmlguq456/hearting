@@ -30,7 +30,7 @@ from fleet import route_chain as RC  # noqa: E402
 SIDS = {
     "claude": "c0c0c0c0-1111-4111-8111-aaaaaaaaaaaa",
     "codex": "d0d0d0d0-2222-4222-8222-bbbbbbbbbbbb",
-    "opencode": "ses_eeeeeeeeeeeeeeeeee",
+    "opencode": "ses_fixture00000000000000000025",
 }
 
 

@@ -2739,16 +2739,16 @@ class TestGateSubjectNotCaller(WorkflowFixture):
 
     def test_a_registered_worker_may_not_name_the_releaser(self):
         """Finding #4: enforcement compared against the literal "user" only, so
-        `--by shinuh` from a headless owner recorded that name."""
+        `--by operator-a` from a headless owner recorded that name."""
         _route, path = self.two_stage_route(human_gate="frame-review")
         self.block_gate(path, "frame-review")
         env = {"AGENT_DISPATCH_REGISTERED_WORKER": "1"}
-        for label in ("user", "shinuh", "headless-owner"):
+        for label in ("user", "operator-a", "headless-owner"):
             with self.subTest(label=label), mock.patch.dict(os.environ, env):
                 with self.assertRaises(SUP.SupervisorError) as caught:
                     SUP.resolved_released_by("headless-owner", label)
                 self.assertIn("gate-release-actor-refused", str(caught.exception))
-        self.assertEqual(SUP.resolved_released_by("user", "shinuh"), "shinuh")
+        self.assertEqual(SUP.resolved_released_by("user", "operator-a"), "operator-a")
         self.assertEqual(SUP.resolved_released_by("headless-owner", None),
                          "headless-owner")
 
@@ -3133,7 +3133,7 @@ class TestGateSubjectNotCaller(WorkflowFixture):
         with mock.patch.dict(os.environ, {"AGENT_DISPATCH_REGISTERED_WORKER": "1"}):
             for kind in ("user", "supervisor", "automatic", "unknown"):
                 answer, _ = self._answers(interview, actor_kind=kind)
-                for label in ("user", "shinuh", "supervisor", "automatic"):
+                for label in ("user", "operator-a", "supervisor", "automatic"):
                     with self.subTest(kind=kind, label=label):
                         with self.assertRaisesRegex(SUP.SupervisorError, "gate-release-actor-refused"):
                             SUP.main(["release", "--route", str(path), "--gate", "frame-review", "--decision", "proceed",

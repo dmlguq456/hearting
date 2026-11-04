@@ -10,7 +10,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,6 +28,40 @@ spec.loader.exec_module(codex)
 
 
 class HistoryChannelTests(unittest.TestCase):
+    def test_independent_probes_overlap_but_context_and_receipt_keep_their_order(self):
+        together = threading.Barrier(4, timeout=3)
+        receipt = {"candidate": "pending until output"}
+        def preflight(kind, _cwd):
+            together.wait()
+            return kind
+        def candidate(*_args):
+            together.wait()
+            return "candidate", receipt
+        def budget(*_args):
+            together.wait()
+            return "budget"
+        with patch.object(codex, "run_preflight", side_effect=preflight), \
+             patch.object(codex, "candidate_context", side_effect=candidate), \
+             patch.object(codex, "token_budget_context", side_effect=budget):
+            parts, deferred = codex.prompt_probe_context({}, "/fixture", "sid", startup_due=True)
+        self.assertEqual(parts, ["local-evidence", "candidate", "briefing", "budget"])
+        self.assertIs(deferred, receipt)
+
+    def test_notice_without_a_confirmed_incoming_edge_skips_full_history(self):
+        import dispatch_seat_handover as handover
+        for harness in ("claude", "codex", "opencode"):
+            seat = session_tidy.Seat("pane", "key", "pane", harness)
+            for edges, unresolved in (((), frozenset()),
+                    (((harness, "old", "new"), (harness, "old", "fork")),
+                     frozenset({(harness, "old")}))):
+                graph = SimpleNamespace(edges=edges, unresolved=unresolved)
+                with patch.object(handover, "_pass_lineage_graph", return_value=graph) as observe, \
+                     patch.object(session_tidy, "_lineage_history_index",
+                                  side_effect=AssertionError("full activity history")):
+                    self.assertEqual(session_tidy.build_human_history_notice(
+                        seat, harness, "new", env={}), "")
+                self.assertTrue(observe.call_args.args[0].compact_lineage)
+
     @patch.dict("os.environ", {"FLEET_NOW_LANG": "Korean"})   # Korean notice words
     def test_person_notice_uses_confirmed_predecessor_and_omits_path(self):
         lineage = [{"harness": "claude", "sid": "new", "relation": "confirmed",

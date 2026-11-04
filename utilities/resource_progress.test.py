@@ -315,7 +315,7 @@ class ResourceProgressTest(unittest.TestCase):
 class ResourceProgressProductionTest(unittest.TestCase):
     """Bridge arms[].production: local unwrap vs remote-origin guard.
 
-    Mirrors project-c.canonical-resource-bridge/v1 (cnn T/B arms): child
+    Mirrors project-c.canonical-resource-bridge/v1 (gpu T/B arms): child
     identity/directory/config live inside arm["production"] with an explicit
     host. Remote-origin arms must never be resolved in local /proc and their
     metadata alone never proves live/done.
@@ -363,7 +363,7 @@ class ResourceProgressProductionTest(unittest.TestCase):
         return {"capacity": "T", "state": "training-updates",
                 "run_id": "local-20261006-t",
                 "production": {
-                    "schema": "project-c.cnn-production/v1",
+                    "schema": "project-c.gpu-production/v1",
                     "capacity": "T", "gpu_index": 0,
                     "directory": str(self.directory),
                     "config_sha256": self.digest, "state": "training-updates",
@@ -373,23 +373,23 @@ class ResourceProgressProductionTest(unittest.TestCase):
                                          "cmdline_sha256": "b" * 64}}}
 
     def remote_arm(self, pid=3945450, start=565464077, capacity="T", gpu=0,
-                   run="t_baseline_20261006", receipt_host="cnn"):
+                   run="t_baseline_20261006", receipt_host="gpu"):
         return {"capacity": capacity, "state": "training-updates",
-                "run_id": "cnn-20261006-015922-tf-canonical-%s-scratch400k-a1"
+                "run_id": "gpu-20261006-015922-tf-canonical-%s-scratch400k-a1"
                           % capacity.lower(),
                 "compute_host_receipt": {
                     "host": receipt_host, "gpus": str(gpu),
-                    "run_id": "cnn-20261006-015922-tf-canonical-%s-scratch400k-a1"
+                    "run_id": "gpu-20261006-015922-tf-canonical-%s-scratch400k-a1"
                               % capacity.lower()},
                 "production": {
-                    "schema": "project-c.cnn-production/v1", "host": "cnn",
+                    "schema": "project-c.gpu-production/v1", "host": "gpu",
                     "capacity": capacity, "gpu_index": gpu,
                     "directory": "/home/example/Project_Zoo/Project-C_artifacts"
-                                 "/cnn_canonical_20261006/recovery-a1/%s/runs/%s"
+                                 "/gpu_canonical_20261006/recovery-a1/%s/runs/%s"
                                  % (capacity.lower(), run),
                     "config_sha256": "9" * 64, "state": "training-updates",
                     "run_name": run,
-                    "compute_run_id": "cnn-20261006-015922-tf-canonical-%s-scratch400k-a1"
+                    "compute_run_id": "gpu-20261006-015922-tf-canonical-%s-scratch400k-a1"
                                       % capacity.lower(),
                     "wrapper_identity": {"pid": 3945423, "starttime": 565463952,
                                          "cmdline_sha256": "c" * 64},
@@ -417,7 +417,7 @@ class ResourceProgressProductionTest(unittest.TestCase):
         self.assertNotIn(3945423, self.lookups)
         # Receipt-only host marks remote origin too.
         arm = self.local_nested()
-        arm["compute_host_receipt"] = {"host": "cnn"}
+        arm["compute_host_receipt"] = {"host": "gpu"}
         arm["production"] = {**arm["production"],
                              "process_identity": {"pid": 3945450, "starttime": 565464077,
                                                   "cmdline_sha256": "d" * 64}}
@@ -452,7 +452,7 @@ class ResourceProgressProductionTest(unittest.TestCase):
                "directory": str(self.directory), "config_sha256": self.digest,
                "process_identity": {"pid": 42, "starttime": 11,
                                     "cmdline_sha256": "b" * 64},
-               "compute_host_receipt": {"host": "cnn", "gpus": "0"}}
+               "compute_host_receipt": {"host": "gpu", "gpus": "0"}}
         self.assertIsNone(self.collect({"arms": [arm]}))
         self.assertEqual(self.lookups, [4])
         self.assertNotIn(42, self.lookups)
@@ -465,7 +465,7 @@ class ResourceProgressProductionTest(unittest.TestCase):
 class RemoteCandidatesTest(unittest.TestCase):
     """Display-only remote arms: multi-arm join input, never liveness proof.
 
-    Mirrors the cnn T/B bridge: producer identity/directory/config live in
+    Mirrors the gpu T/B bridge: producer identity/directory/config live in
     arm["production"] with an explicit host, progress/config files stay
     hash-checked, and no local /proc lookup can occur (no reader exists).
     """
@@ -487,7 +487,7 @@ class RemoteCandidatesTest(unittest.TestCase):
         self.run = {"pid": 4, "starttime": "10", "command_hash": "a" * 64,
                     "process_group": 4, "cwd": str(self.repo)}
 
-    def arm(self, capacity="T", pid=3945450, start=565464077, host="cnn",
+    def arm(self, capacity="T", pid=3945450, start=565464077, host="gpu",
             run="t_baseline_20261006", gpu=0, attempt=67117, successful=67096,
             skipped=21, loss=0.00985, set_config=True):
         directory = self.root / ("runs-%s" % capacity.lower()) / run
@@ -498,14 +498,14 @@ class RemoteCandidatesTest(unittest.TestCase):
         os.utime(directory / "progress.json", (self.now - 600, self.now - 600))
         config_sha = self.digest if set_config else "0" * 64
         return {"capacity": capacity, "state": "training-updates",
-                "run_id": "cnn-20261006-%s" % capacity.lower(),
+                "run_id": "gpu-20261006-%s" % capacity.lower(),
                 "compute_host_receipt": {"host": host},
                 "production": {
-                    "schema": "project-c.cnn-production/v1", "host": host,
+                    "schema": "project-c.gpu-production/v1", "host": host,
                     "capacity": capacity, "gpu_index": gpu,
                     "directory": str(directory), "config_sha256": config_sha,
                     "state": "training-updates", "run_name": run,
-                    "compute_run_id": "cnn-20261006-%s" % capacity.lower(),
+                    "compute_run_id": "gpu-20261006-%s" % capacity.lower(),
                     "command": ["/bin/project-c-train", "--config", str(self.config)],
                     "process_identity": {"pid": pid, "starttime": start,
                                          "cmdline_sha256": "d" * 64}}}
@@ -528,7 +528,7 @@ class RemoteCandidatesTest(unittest.TestCase):
         self.assertEqual(by_cap["T"]["loss_kind"], "last-batch")
         for item in found:
             self.assertTrue(item["remote"])
-            self.assertEqual(item["host"], "cnn")
+            self.assertEqual(item["host"], "gpu")
             self.assertEqual(item["config_ref"], "config:scratch_t.json")
             self.assertIsNotNone(item["production_origin"])
 
@@ -554,7 +554,7 @@ class RemoteCandidatesTest(unittest.TestCase):
                           run="b_baseline_20261006", gpu=1)
         found = self.collect_remote({"arms": [first, second]})
         self.assertEqual([(item["host"], item["pid"]) for item in found],
-                         [("cnn", 42), ("mgpu-a1", 42)])
+                         [("gpu", 42), ("mgpu-a1", 42)])
 
 
 class DeclaredResourceProgressTest(unittest.TestCase):
@@ -1289,7 +1289,7 @@ class ExperimentObservationTest(unittest.TestCase):
                              {f"arm-{index:02d}" for index in range(13)})
             self.assertEqual(len(record["metrics"]), 13)
 
-    def test_whamr_nine_epoch_json_runs_identify_five_eta_over_plan(self):
+    def test_dataset_nine_epoch_json_runs_identify_five_eta_over_plan(self):
         outcomes = []
         for index in range(9):
             with tempfile.TemporaryDirectory() as tmp:

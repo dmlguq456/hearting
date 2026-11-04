@@ -702,7 +702,7 @@ def retain_receiving_turn(batches: list[tuple[Path, list[dict]]], session_id: st
 def sweep_deliver(
     root: Path, recipient_kind: str, session_id: str, *, now_ns: int | None = None,
     native_evidence: dict | None = None, receipt_observer=None,
-    notice_context=None, deadline_ns: int | None = None,
+    notice_context=None, deadline_ns: int | None = None, read_context=None,
 ) -> tuple[list[dict], int]:
     """Claude carrier 2 -- deliver, not merely refuse (2026-08-29 decision,
     supersedes the A-21 "surface nothing" slice for Claude).
@@ -735,7 +735,7 @@ def sweep_deliver(
     notice_context = notice_context or NoticeReadContext()
     # One discovery context for the whole pass; the post-claim effect section
     # opens its own per group (a claim is an effect boundary).
-    discovery_context = PeerReadContext(compact_lineage=True)
+    discovery_context = read_context or PeerReadContext(compact_lineage=True)
     claimed: list[dict] = []
     addressed, entry_count = addressed_records(
         root, recipient_kind, session_id, read_context=discovery_context,

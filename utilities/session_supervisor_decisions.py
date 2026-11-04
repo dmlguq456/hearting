@@ -31,7 +31,7 @@ from foreground_activity import ActivityWindow as OwnerTurnActivity  # noqa: F40
 
 # Registered supervisors share the bounded, no-progress transient retry chain
 # used by the interactive Codex capacity continuation.
-TRANSIENT_RETRY_DELAYS = (60, 120, 240, 480, 960)
+from dispatch_attempt_policy import TRANSIENT_RETRY_DELAYS
 
 
 def transient_retry_delay(error_info: object, failures: int, *, registered: bool = True) -> int | None:

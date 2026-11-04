@@ -17,7 +17,7 @@ This is the portable capability contract for `session-tidy`. It defines runtime-
 
 Whenever a seat card is injected, its fixed header instructs the receiving session to
 start its first reply, before any tool call, with one summary in the user's language,
-about five lines beginning with `원래 목표`, then `진행 중 · 기다리는 결정 · 다음 할 일 · 관련`. Preserve `사용자 요구 원문 발췌` with its date and `요구사항·PRD 위치` with the current-requirements section, followed by `오늘 한 일` and `사용자 지시`.
+about five lines beginning with `원래 목표`, then `진행 중 · 기다리는 결정 · 다음 할 일 · 관련 세션`. Preserve dated `사용자 요구 원문 발췌` and `요구사항·PRD 위치` verbatim; read their card-history source when the bounded card refers to it.
 If the user first gives a different instruction instead of continuing, skip the summary
 and follow only that instruction. This guidance survives body truncation within the
 2,400-byte injection limit, including bundled memory references; it is absent from
@@ -79,10 +79,10 @@ auto-compaction and restores its prior value on uninstall.
 
 When an exact native identity is available, each session keeps its own card independently of the current project or pane seat; one session never replaces another's card. A different native identity receives a card or result only through the existing confirmed lineage and receipt rules. Calls without an exact identity retain the shared project fallback behavior, with author checks and no inferred recipient.
 
-The main-authored card starts with the original goal, then work in progress, waiting decisions, the next step and related references. It preserves dated original user wording and the related PRD location. Preserve the fixed fields `사용자 요구 원문 발췌` (with its date) and `요구사항·PRD 위치` below them, then add "오늘 한 일"
-(today's work, with PR/version/result pointers) and "사용자 지시" (brief user
-quotations marked finished, remaining or deferred), within about 90 lines.
-Write it from the conversation the main session already holds.
+The main-authored card follows the single Card Format below, using the
+conversation it already holds. The core comes first; an automatically selected
+module follows. Dated user wording and PRD locations remain verbatim, including
+in the existing card history when they exceed the bounded display.
 
 A manually invoked tidy writes its handoff card and queues memory work in one
 tool call (`utilities/session_tidy.py tidy`), followed by the command's short
@@ -182,44 +182,81 @@ with `--no-clear --handoff <name>`. The successor retires the predecessor only
 after its ACK and the predecessor's final idle result, using the existing
 `peer-steward.py retire <predecessor>` flow.
 
-Write the card yourself in the user's language, using the conversation you
-already hold. Keep the four continuation fields first: work in progress,
-decisions waiting, the next step, and related paths, PRs and sessions. Add
-"today's work" and "user instructions" below them, keeping the whole card
-within about 90 lines. Summarize today's work in a few lines and point to the
-PR, installed version or result file. Quote each user instruction briefly and
-mark it finished, remaining or deferred. The start preview remains the bounded
-beginning of the card; read the full file for the rest. The memory worker's
-"partly read" line describes its separate conversation input, not this card.
-When naming work in any of those existing fields, keep the source description
-and the comparison condition that distinguishes it, then add the original
-identifier as a reference. Preserve document/revision and checkpoint links
-when they affect meaning. When referencing a session in the existing related or
-other card fields, retain its confirmed Fleet number together with the observed
-pane and full exact native SID. Leave an unknown number, pane or SID unknown;
-do not fill it from a hash or another session. Record failed, interrupted and unfinished work in
-the same fields with its actual status and next action; do not guess what an
-unexplained identifier means.
+Write the card yourself in the user's language from the conversation already
+held, using the Card Format below. Do not add a classification turn or ask the
+user which format to use. Before real work, reread the complete card, any full
+source it references in card-history, and the PRD current-requirements section.
+Preserve the original goal and dated user wording across generations; append
+new wording without re-summarizing and remove only what the user replaces.
 
-Keep the dated original user wording and PRD location verbatim across generations:
-append to the prior card without re-summarizing those fixed fields, and remove an
-item only when the user replaces it. Before the first real work in a resumed
-session, reread the full card and the referenced PRD current-requirements section;
-this is context reading, not a new gate.
+### Card Format
 
-Example fields (use the user's language):
+This block is the single format definition used by the shared writer and the
+three generated adapter instructions. It is embedded contract data, not a new
+operator configuration. Labels in the user's language may use the read aliases.
+The core's order is fixed. Confirmed responsibility takes precedence over the
+main route capability, which takes precedence over an unambiguous work-folder
+hint; uncertainty selects no module. The same card-writing response makes the
+choice from context already known. No classifier call, question, required input,
+role authority, or adapter-specific rule is introduced.
 
-```text
-원래 목표: …
-진행 중: …
-기다리는 결정: …
-다음 할 일: …
-관련: …
-사용자 요구 원문 발췌: "…" (YYYY-MM-DD)
-요구사항·PRD 위치: <path> — 현재 요구사항
-오늘 한 일: … (PR·설치 버전·결과 파일)
-사용자 지시: "…" — 끝남 / 남음 / 보류
+```json session-card-format
+{
+  "core": [
+    {"id": "original_goal", "label": "원래 목표", "aliases": ["Original goal"]},
+    {"id": "in_progress", "label": "진행 중", "aliases": ["Work in progress", "In progress"]},
+    {"id": "waiting_decisions", "label": "기다리는 결정", "aliases": ["Decisions waiting", "Waiting decisions"]},
+    {"id": "next_actions", "label": "다음 할 일", "aliases": ["Next steps", "Next actions"]},
+    {"id": "related", "label": "관련 세션", "aliases": ["관련", "Related sessions", "Related"]}
+  ],
+  "preserved": [
+    {"id": "user_request_quote", "label": "사용자 요구 원문 발췌", "aliases": ["Original user wording", "User request quotes"]},
+    {"id": "requirements_prd_location", "label": "요구사항·PRD 위치", "aliases": ["Requirements / PRD location", "PRD location"]}
+  ],
+  "legacy": [
+    {"id": "today", "label": "오늘 한 일", "aliases": ["Today's work"]},
+    {"id": "user_instructions", "label": "사용자 지시", "aliases": ["User instructions"]}
+  ],
+  "selection_order": ["confirmed_role", "main_route_capability", "work_folder"],
+  "modules": [
+    {"id": "supervision", "label": "지휘·감독", "roles": ["supervision", "supervisor", "steward", "지휘", "감독"], "capabilities": [], "folders": [], "keep": "assignee/session, route, last verified state/time, result path, next action"},
+    {"id": "publication", "label": "출판·릴리스", "roles": ["publication", "release", "publisher", "출판", "릴리스"], "capabilities": ["autopilot-ship"], "folders": ["releases"], "keep": "pending PR/head/CI run, dependency order, approved merge/install scope, installed version/receipt, queue path"},
+    {"id": "code", "label": "코드 구현", "roles": ["code", "implementation", "developer", "코드", "구현"], "capabilities": ["autopilot-code"], "folders": [], "keep": "repo/worktree/branch/head, dirty/conflict state, change goal, verified tests/failures, PR/CI reference"},
+    {"id": "research", "label": "연구·실험", "roles": ["research", "experiment", "researcher", "연구", "실험"], "capabilities": ["autopilot-research", "autopilot-lab"], "folders": ["research", "experiments"], "keep": "run/host/GPU/state, config/checkpoint, input/truth/scoring conditions and paths, metrics/units, unknowns"},
+    {"id": "document", "label": "문서 작성", "roles": ["document", "writer", "editor", "문서", "작성"], "capabilities": ["autopilot-draft", "autopilot-refine", "autopilot-apply"], "folders": ["documents", "papers"], "keep": "audience, current deliverable/revision/source, tracked changes, remaining sections/evidence, delivery state/time"},
+    {"id": "operations", "label": "운영", "roles": ["operations", "operator", "운영"], "capabilities": [], "folders": ["ops"], "keep": "service/host/version, last run/failure/cost/usage time, next action/hold conditions, relevant backup/restore path"}
+  ]
+}
 ```
+
+Put only the chosen module after the five core sections, followed by the dated
+user-request excerpts and PRD location. Unknown work uses the core plus any
+existing preserved excerpts/PRD; it invents no module or missing facts. Keep
+unique instructions, restrictions, unresolved obligations and failed/interrupted
+work with its actual next action. Keep the source description and comparison
+condition before its identifier, and observed session number, pane and exact
+native ID together. Unknown identity stays unknown and grants no authority.
+Completed chronology is a reference to an existing result or card history,
+not another narrative copy. Mark the latest verified result and its time;
+do not carry an old 'not reported' status over a preserved delivered reply.
+
+The general card body stays within 8,192 UTF-8 bytes. Overflow is kept as the
+same generation's complete original in the existing `card-history/<card>/`
+JSON record before the bounded latest card is written. The latest card names
+that exact source. Never replace that full source with its bounded copy on the
+next write. Preserve every core heading and every recognized preserved/module/legacy
+heading present in the source, including user instructions. Reserve these
+sections first and divide content space fairly: satisfy short sections in full,
+then share their unused space among the remaining sections. A large original
+goal never consumes the working state, decisions, next action or instructions
+budget. Retain whole sections or complete lines within each share, with an
+explicit source reference for the rest. A single oversized quote/path line moves intact to that
+source; never split a word, UTF-8 character, path, or line to fill space. A field
+not present in the original is unknown, not invented. Existing history retention
+continues to apply. Old nine-section cards remain readable, including `관련`,
+`오늘 한 일` and `사용자 지시`; no migration or new state store is required.
+The 2,400-byte injection remains a preview with its full-card location and uses
+complete lines too; this changes neither its event nor idle scheduling/compaction.
 
 Continue with the existing enqueue and handoff flow. An ordinary peer message or card grants no successor authority and has no session-tidy accept command. A confirmed same-seat clear continues through the existing seat snapshot and handover ledger without peer acceptance. For a typed cross-seat session-tidy handoff, read the card and referenced documents, then use only the exact receiver command supplied in the sealed handoff body. Explicit acceptance revalidates the native receiver, replays the existing logical record, and retains reply and retirement separately; it does not infer reading from delivery. The retained reply and predecessor retire keep their existing duties and exact identities. Delivery, queue consumption and ACK are receipt facts, not acceptance; the original requester, predecessor, successor, and completion storage identities remain unchanged.
 

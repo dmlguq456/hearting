@@ -245,7 +245,7 @@ class OwnerInputTest(unittest.TestCase):
         import dispatch_completion_join as join
         I._path(self.jobs, self.attempt).unlink()
         self.jobs.write_text(self.jobs.read_text().rstrip() +
-            ",parent_sid=01a0971c-b5b2-7a62-ab10-0dfb6d2b4e79,"
+            ",parent_sid=0100000c-0000-7000-8000-000000000014,"
             "parent_completion_delivery=codex-managed-gateway,managed_sealed_batch_id=batch-test\n")
         control = I.OwnerInput(self.jobs, self.attempt, 'thread-1', 'codex-active-turn', self.events.append)
         I.submit(self.jobs, self.attempt, 'preserve this correction')
@@ -268,7 +268,7 @@ class OwnerInputTest(unittest.TestCase):
         jobs = child_root/'jobs.log'
         lease = supervisor_lease_path(jobs, self.attempt)
         jobs.write_text(FIXTURE.owner_row(lease).rstrip() +
-            ",parent_sid=01a0971c-b5b2-7a62-ab10-0dfb6d2b4e79,"
+            ",parent_sid=0100000c-0000-7000-8000-000000000014,"
             "parent_completion_delivery=codex-managed-gateway,managed_sealed_batch_id=batch-test\n")
         script = child_root/'consumer.py'
         script.write_text("""import sys
@@ -593,7 +593,7 @@ class RegisteredOwnerInputTest(unittest.TestCase):
 
     def test_consumer_that_attached_and_died_stores_for_parent_recovery(self):
         self.jobs.write_text(self.jobs.read_text().rstrip() +
-            ",parent_sid=01a0971c-b5b2-7a62-ab10-0dfb6d2b4e79,"
+            ",parent_sid=0100000c-0000-7000-8000-000000000014,"
             "parent_completion_delivery=codex-managed-gateway,managed_sealed_batch_id=batch-test\n")
         I.initialize_owner_input(self.jobs, self.attempt, 'codex-active-turn')
         with hold_supervisor_lease(self.jobs, self.attempt, self.lease):
@@ -626,7 +626,7 @@ class RegisteredOwnerInputTest(unittest.TestCase):
 
     def test_non_parent_stores_once_and_leaves_existing_parent_notice(self):
         self.jobs.write_text(self.jobs.read_text().rstrip() +
-            ",parent_sid=01a0971c-b5b2-7a62-ab10-0dfb6d2b4e79,"
+            ",parent_sid=0100000c-0000-7000-8000-000000000014,"
             "parent_completion_delivery=codex-managed-gateway,managed_sealed_batch_id=batch-test\n")
         I.initialize_owner_input(self.jobs, self.attempt, 'codex-active-turn')
         I.OwnerInput(self.jobs, self.attempt, 'thread-1', 'codex-active-turn', self.events.append)
@@ -645,7 +645,7 @@ class RegisteredOwnerInputTest(unittest.TestCase):
     def test_an_unreadable_lineage_keeps_the_correction_queued_without_naming_another_parent(self):
         # RV-OWNS-TRI: unknown is neither the parent nor "awaiting" another one.
         self.jobs.write_text(self.jobs.read_text().rstrip() +
-            ",parent_sid=01a0971c-b5b2-7a62-ab10-0dfb6d2b4e79,"
+            ",parent_sid=0100000c-0000-7000-8000-000000000014,"
             "parent_completion_delivery=codex-managed-gateway,managed_sealed_batch_id=batch-test\n")
         I.initialize_owner_input(self.jobs, self.attempt, 'codex-active-turn')
         I.OwnerInput(self.jobs, self.attempt, 'thread-1', 'codex-active-turn', self.events.append)

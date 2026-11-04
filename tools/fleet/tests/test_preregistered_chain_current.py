@@ -26,7 +26,7 @@ from fleet.tests.snapshot_fixture import build_observed_lines  # noqa: E402
 
 ROUTE = "rt-e65b4565910c72de"
 OWNER = "att-167e32cca4f62d9f51b2de31e353ed24"
-PARENT_SID = "3eb4d557-c10c-4e06-8ac0-ec291acd7a27"
+PARENT_SID = "1000007c-0000-4000-8000-00000000008b"
 WT = "/home/example/hearting-wt/fleet2-explorer-r13"
 COMMON = (
     "capability=autopilot-code,capability_mode=dev,qa=standard,intensity=standard,"

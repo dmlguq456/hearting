@@ -128,8 +128,9 @@ def _peer_ledger_root(diagnostics=None):
 
 
 def _agent_home():
-    from . import dispatch
-    return dispatch._registry_home()
+    from dispatch_contract import resolve_agent_home
+    return (os.environ.get("AGENT_HOME") or os.environ.get("CLAUDE_HOME")
+            or str(resolve_agent_home()))
 
 
 def _runtime_ledger_roots(diagnostics=None):
@@ -138,9 +139,12 @@ def _runtime_ledger_roots(diagnostics=None):
     2026-09-03), so a Codex/OpenCode receiver's `notice` lands in that runtime's ledger,
     not in the stable per-user root the Claude side writes to. The board reads all of
     them; existence-gated, so a runtime that was never activated adds nothing."""
-    from . import dispatch as _dispatch
     out = []
-    for home in (_dispatch._codex_home(), _dispatch._proj_home(), _dispatch._opencode_config_home()):
+    # Root discovery is also on the prompt path. It needs runtime locations,
+    # not the Fleet dispatch collector and its entire supervisor dependency graph.
+    for home in (os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex"),
+                 os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude"),
+                 os.path.expanduser("~/.config/opencode")):
         if not home:
             continue
         root = os.path.join(home, ".harness", "dispatch")
@@ -582,7 +586,7 @@ def collect(state_roots=None, *, include_health=False):
         Never the raw session id. A codex→claude transfer record carries
         ``from.name: null`` (measured 2026-09-09), and the old fallback pasted the
         36-character id into the name slot, which is what put
-        `← 01a084f7-63f2-7961-ae60-6fc2d8e60fc2` on the board. Naming an unnamed peer
+        `← 0100000b-0000-7000-8000-000000000013` on the board. Naming an unnamed peer
         is the renderer's job — it can see the tag of a row the collector cannot.
         """
         name = _clean_from_name(block.get("name"))

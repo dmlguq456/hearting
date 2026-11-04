@@ -65,9 +65,9 @@ class StripContractTest(unittest.TestCase):
 class PeerEndpointLabelTest(unittest.TestCase):
     """The label ladder: on-screen tag → ledger name → `<harness>:<sid8>`. A full raw
     session id is never a label (user 2026-09-09 saw
-    `← 01a084f7-63f2-7961-ae60-6fc2d8e60fc2` on the board)."""
+    `← 0100000b-0000-7000-8000-000000000013` on the board)."""
 
-    _SID = "01a084f7-63f2-7961-ae60-6fc2d8e60fc2"
+    _SID = "0100000b-0000-7000-8000-000000000013"
 
     def _label(self, tag_by_key, name=None):
         entry = {"from_harness": "codex", "from_session_id": self._SID,
@@ -91,7 +91,7 @@ class PeerEndpointLabelTest(unittest.TestCase):
     def test_nameless_offscreen_endpoint_keeps_short_prefix_without_repo_evidence(self):
         with patch_split(render, "_resolve_session_tag", return_value=None):
             text = self._label({})
-        self.assertIn("01a084f7", text)
+        self.assertIn("0100000b", text)
         self.assertNotIn(self._SID, text)
 
     def test_an_offscreen_endpoint_still_gets_its_badge_when_one_resolves(self):

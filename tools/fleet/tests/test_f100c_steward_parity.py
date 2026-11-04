@@ -575,7 +575,7 @@ class StewardCollectorTest(unittest.TestCase):
         # Measured 2026-10-27: supervisor 1b watched Herdr OpenCode panes, but Fleet read those
         # processes without a native session id, so the steward rule found no target and Herdr's
         # flag and Fleet disagreed. The rule itself is unchanged: an exact sid and cwd are enough.
-        sid = "ses_e8516db7dffedMkTbhlkto5vgo"
+        sid = "ses_fixture00000000000000000001"
         markers = {("claude", "steward"): {"session_id": "steward", "targets": {
             sid: {"harness": "opencode", "session_id": sid, "name": "w", "kind": "watch",
                   "ts": "1", "source": "watch"}}}}
@@ -685,21 +685,15 @@ class RuntimeLedgerRootsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             old = dict(os.environ)
             try:
-                codex = os.path.join(tmp, "codex"); oc = os.path.join(tmp, "oc"); cl = os.path.join(tmp, "cl")
+                codex = os.path.join(tmp, "codex"); oc = os.path.join(tmp, ".config", "opencode"); cl = os.path.join(tmp, "cl")
                 os.makedirs(os.path.join(codex, ".harness", "dispatch", "peer-messages"))
                 os.makedirs(os.path.join(oc, ".harness", "dispatch", "peer-steward"))
                 os.makedirs(cl)                                   # activated, no ledger yet
                 os.environ["CODEX_HOME"] = codex
                 os.environ["CLAUDE_CONFIG_DIR"] = cl
                 os.environ["HOME"] = tmp
-                from fleet.collectors import dispatch as _d
-                real = _d._opencode_config_home
-                _d._opencode_config_home = lambda: oc
-                try:
-                    roots = peer_messages._runtime_ledger_roots()
-                    all_roots = peer_messages._state_roots()
-                finally:
-                    _d._opencode_config_home = real
+                roots = peer_messages._runtime_ledger_roots()
+                all_roots = peer_messages._state_roots()
                 self.assertEqual(roots, [os.path.join(codex, ".harness", "dispatch"),
                                          os.path.join(oc, ".harness", "dispatch")])
                 self.assertTrue(set(roots) <= set(all_roots))

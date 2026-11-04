@@ -1204,6 +1204,7 @@ class FramedStartTest(FramedBase):
 
         launcher, seen = self._overlap_launcher(after_alternative=unlaunched)
         overlapped = W.start_work(self.route, self.path, self.jobs, run=launcher)
+        self.assertIn("runtime", overlapped)
         self.assertEqual(seen["alternative saw the first return"], False)
         nodes = [c[c.index("--route-node") + 1] for c in self.calls]
         self.assertEqual(nodes, FRAME_IDS)                          # each leg launched once, no duplicate

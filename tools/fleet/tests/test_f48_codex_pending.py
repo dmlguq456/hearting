@@ -196,7 +196,7 @@ class CodexPendingTest(unittest.TestCase):
         self.write(self.event("task_started"), self.async_call(), self.accepted(),
                    self.event("task_complete"))
         self.assertEqual(codex._tail_pending_request_user_input(self.path)["call_id"], "async")
-        self.append(self.user_prompt("3b21a49f-2a77-4c1d-9a0e-5d3f6a7b8c90"))
+        self.append(self.user_prompt("10000078-0000-4000-8000-000000000087"))
         self.assertIsNone(codex._tail_pending_request_user_input(self.path))
 
     def test_completion_delivery_prompt_keeps_async_question(self):
@@ -205,13 +205,13 @@ class CodexPendingTest(unittest.TestCase):
         self.assertEqual(codex._tail_pending_request_user_input(self.path)["call_id"], "async")
 
     def test_prompt_before_question_in_same_turn_does_not_clear_it(self):
-        self.write(self.user_prompt("3b21a49f-2a77-4c1d-9a0e-5d3f6a7b8c90"),
+        self.write(self.user_prompt("10000078-0000-4000-8000-000000000087"),
                    self.event("task_started"), self.async_call(), self.accepted())
         self.assertEqual(codex._tail_pending_request_user_input(self.path)["call_id"], "async")
 
     def test_structured_reply_prompt_clears_only_the_answered_index(self):
         self.write(self.async_call(count=2), self.accepted(),
-                   self.user_prompt("3b21a49f-2a77-4c1d-9a0e-5d3f6a7b8c90", self.reply_text(0)),
+                   self.user_prompt("10000078-0000-4000-8000-000000000087", self.reply_text(0)),
                    self.reply(index=0))
         self.assertEqual(codex._tail_pending_request_user_input(self.path)["call_id"], "async")
         pending = codex._LIFECYCLE_CACHE[os.path.realpath(self.path)].pending_calls
@@ -224,12 +224,12 @@ class CodexPendingTest(unittest.TestCase):
 
     def test_prompt_leaves_a_blocking_call_to_its_own_rules(self):
         self.write(self.event("task_started"), self.call("blocking"),
-                   self.user_prompt("3b21a49f-2a77-4c1d-9a0e-5d3f6a7b8c90"))
+                   self.user_prompt("10000078-0000-4000-8000-000000000087"))
         self.assertEqual(codex._tail_pending_request_user_input(self.path)["call_id"], "blocking")
 
     def test_prompt_clear_keeps_no_typed_content(self):
         self.write(self.async_call(), self.accepted(),
-                   self.user_prompt("3b21a49f-2a77-4c1d-9a0e-5d3f6a7b8c90"))
+                   self.user_prompt("10000078-0000-4000-8000-000000000087"))
         codex._tail_pending_request_user_input(self.path)
         self.assertNotIn("PRIVATE", repr(codex._LIFECYCLE_CACHE[os.path.realpath(self.path)].pending_calls))
 

@@ -1856,7 +1856,7 @@ class SameHostForegroundStageReceiptTest(RegistryFixtureTestCase):
  def test_claude_prompt_suggestion_preserves_recovery_and_writer_reentry(self):
   self.claude_log()
   suggestion={'type':'prompt_suggestion','suggestion':'Review the result',
-              'uuid':'123e4567-e89b-12d3-a456-426614174000',
+              'uuid':'1000006b-0000-1000-8000-000000000079',
               'session_id':'claude-fixture-session'}
   self.log.write_text(self.log.read_text()+json.dumps(suggestion)+'\n')
   before=self.jobs.read_bytes()
@@ -1870,7 +1870,7 @@ class SameHostForegroundStageReceiptTest(RegistryFixtureTestCase):
 
  def test_claude_unrecognized_tail_never_recovers_or_reenters_completion_writer(self):
   suggestion={'type':'prompt_suggestion','suggestion':'Review the result',
-              'uuid':'123e4567-e89b-12d3-a456-426614174000',
+              'uuid':'1000006b-0000-1000-8000-000000000079',
               'session_id':'claude-fixture-session'}
   self.claude_log();result=json.loads(self.log.read_text())
   tails=['{"type":"prompt_suggestion"',json.dumps({'type':'assistant'}),

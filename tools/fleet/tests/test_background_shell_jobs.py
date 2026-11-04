@@ -499,9 +499,9 @@ class BackgroundShellJobsTests(unittest.TestCase):
                     now=shell_jobs.parse_time("2026-10-20T00:00:05Z")), [])
 
     def test_claude_native_session_binding_and_trusted_task_notifications(self):
-        path = self.root / "054aa76e-7697-468f-b91c-783e9bd8fd01.jsonl"
-        sid = "054aa76e-7697-468f-b91c-783e9bd8fd01"
-        runtime_sid = "81c65afa-e494-43ba-ab98-9650ed4c9e49"
+        path = self.root / "10000063-0000-4000-8000-000000000071.jsonl"
+        sid = "10000063-0000-4000-8000-000000000071"
+        runtime_sid = "10000091-0000-4000-8000-0000000000a0"
         task_a, task_b, task_c, task_d = (
             "task-native-a", "task-native-b", "task-native-c", "task-native-d")
         call_a, call_b, call_c, call_d = (

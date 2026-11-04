@@ -208,7 +208,7 @@ class GpuProcessAndResourceRenderTest(unittest.TestCase):
         self.snapshot = {
             "configured": True,
             "hosts": [{
-                "host": "cnn", "reachable": True, "cpu_utilization_pct": 10,
+                "host": "gpu", "reachable": True, "cpu_utilization_pct": 10,
                 "cpu_count": 16, "gpus": [{
                     "index": 0, "name": "NVIDIA A100", "utilization_gpu_pct": 80,
                     "memory_used_mib": 12288, "memory_total_mib": 40960,
@@ -265,7 +265,7 @@ class GpuProcessAndResourceRenderTest(unittest.TestCase):
         resources = render._gpu_session_resources(self.snapshot)
         linked = render._gpu_resources_for_session(self.session, resources)
         self.assertEqual([(row["host"], row["index"]) for row in linked],
-                         [("cnn", 0), ("cnn", 1)])
+                         [("gpu", 0), ("gpu", 1)])
         self.assertEqual(linked[0]["process_count"], 2)
         self.assertEqual(linked[0]["used_memory_mib"], 12288)
         self.assertTrue(all(not row["processes"] for row in linked))
@@ -438,7 +438,7 @@ class GpuProcessAndResourceRenderTest(unittest.TestCase):
             {"pid": 6, "proc_start": None, "command": "python reused.py --name reused",
              "owner": claimed, "session_owner": claimed},
         ]
-        snapshot = {"configured": True, "hosts": [{"host": "cnn", "gpus": [
+        snapshot = {"configured": True, "hosts": [{"host": "gpu", "gpus": [
             {"index": 0, "processes": processes},
         ]}]}
         linked = render._gpu_resources_for_session(
@@ -446,7 +446,7 @@ class GpuProcessAndResourceRenderTest(unittest.TestCase):
         self.assertEqual(len(linked), 1)
         self.assertEqual(len(linked[0]["processes"]), 2)
         text = render._plain(render._gpu_resource_strip(linked, term_width=168)[0])
-        self.assertIn("GPU cnn:0 (M6 train, unknown_eval)", text)
+        self.assertIn("GPU gpu:0 (M6 train, unknown_eval)", text)
         for absent in ("registered", "ambiguous", "wrong", "reused", "unknown_eval train"):
             self.assertNotIn(absent, text)
         self.assertEqual(render._gpu_process_label("python train.py --engine_mode eval --config other.yaml"),
@@ -582,8 +582,8 @@ class GpuProcessAndResourceRenderTest(unittest.TestCase):
             row = render._gpu_resource_strip(linked, term_width=width)[0]
             text = render._plain(row)
             self.assertLessEqual(render._dw(text), width)
-            self.assertTrue(text.startswith(render._SUBAGENT_IND + "● GPU cnn:0"))
-            self.assertIn("GPU cnn:1", text)
+            self.assertTrue(text.startswith(render._SUBAGENT_IND + "● GPU gpu:0"))
+            self.assertIn("GPU gpu:1", text)
             self.assertNotIn("⚡", text)
             self.assertNotIn("▣", text)
             self.assertNotIn(" proc", text)
@@ -602,7 +602,7 @@ class GpuProcessAndResourceRenderTest(unittest.TestCase):
         off = render._gpu_resource_strip(linked, term_width=168)[0]
         self.assertEqual(on[1], ("●", "g_work"))
         self.assertEqual(off[1], ("●", "g_work_off"))
-        self.assertIn(("GPU cnn:0", "name_dim"), on)
+        self.assertIn(("GPU gpu:0", "name_dim"), on)
         self.assertIn((" · 12 GB", "dim"), on)
 
     def test_gpu_model_families_are_stable_dim_color_keys(self):
@@ -675,9 +675,9 @@ class GpuProcessAndResourceRenderTest(unittest.TestCase):
         for lines in (group, process):
             text = [render._plain(line) for line in lines if line]
             sub_at = next(index for index, line in enumerate(text) if "⚡explorer" in line)
-            gpu_at = next(index for index, line in enumerate(text) if "● GPU cnn:0" in line)
+            gpu_at = next(index for index, line in enumerate(text) if "● GPU gpu:0" in line)
             self.assertLess(sub_at, gpu_at)
-            self.assertEqual(sum("● GPU cnn:0" in line for line in text), 1)
+            self.assertEqual(sum("● GPU gpu:0" in line for line in text), 1)
 
     def test_missing_visible_session_leaves_only_upper_process_view(self):
         lines = render._build_process_lines([], [], {}, 0, None, 100, "wide")

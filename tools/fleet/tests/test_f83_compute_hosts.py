@@ -107,7 +107,7 @@ class ComputeHostCollectorTest(unittest.TestCase):
         payload = {
             "run_root": "/runs",
             "hosts": [{
-                "host": "cnn", "reachable": True, "observed_at": 12.0,
+                "host": "gpu", "reachable": True, "observed_at": 12.0,
                 "cpu_count": 4, "cpu_utilization_pct": 25,
                 "cpu_thread_utilization_pct": [0, 75, 0, 25],
                 "memory_used_mib": 8192, "memory_total_mib": 32768,
@@ -284,7 +284,7 @@ class ComputeHostRenderTest(unittest.TestCase):
                      "processes": [{"pid": 4, "used_memory_mib": 1024,
                                     "command": "python shell.py", "owner": None}]},
                 ]},
-                {"host": "cnn", "self": False, "reachable": True,
+                {"host": "gpu", "self": False, "reachable": True,
                  "cpu_utilization_pct": 8, "cpu_count": 24, "load": "0.4 0.3 0.2",
                  "cpu_thread_utilization_pct": [0] * 24,
                  "memory_used_mib": 28672, "memory_total_mib": 32768,
@@ -349,13 +349,13 @@ class ComputeHostRenderTest(unittest.TestCase):
         self.assertIn(("MEM ", "lvl_g_dim"), base_row)
         self.assertIn(("16/64GB", "lvl_g_dim"), base_row)
         self.assertIn(("SWP ", "lvl_g_dim"), base_row)
-        cnn_row = next(row for row in render._compute_host_rows(168)
-                       if "◇ cnn" in render._plain(row))
-        self.assertIn(("CPU ", "dim"), cnn_row)
-        self.assertIn(("MEM ", "lvl_r_dim"), cnn_row)
-        self.assertIn(("28/32GB", "lvl_r_dim"), cnn_row)
-        self.assertIn(("SWP ", "lvl_y_dim"), cnn_row)
-        self.assertIn(("5/8GB", "lvl_y_dim"), cnn_row)
+        gpu_row = next(row for row in render._compute_host_rows(168)
+                       if "◇ gpu" in render._plain(row))
+        self.assertIn(("CPU ", "dim"), gpu_row)
+        self.assertIn(("MEM ", "lvl_r_dim"), gpu_row)
+        self.assertIn(("28/32GB", "lvl_r_dim"), gpu_row)
+        self.assertIn(("SWP ", "lvl_y_dim"), gpu_row)
+        self.assertIn(("5/8GB", "lvl_y_dim"), gpu_row)
         unknown_cpu_row = next(row for row in render._compute_host_rows(168)
                                if "◇ cpu" in render._plain(row))
         self.assertIn(("CPU ", "dim"), unknown_cpu_row)
@@ -368,10 +368,10 @@ class ComputeHostRenderTest(unittest.TestCase):
             "processes": [{
                 "pid": 7,
                 "owner": {"kind": "session", "harness": "claude",
-                          "id": "f11a0486-c090-4fea-86be-c8097817761e",
-                          "label": "claude:f11a0486"},
+                          "id": "100000ae-0000-4000-8000-0000000000be",
+                          "label": "claude:100000ae"},
                 "session_owner": {"kind": "session", "harness": "claude",
-                                  "id": "f11a0486-c090-4fea-86be-c8097817761e"},
+                                  "id": "100000ae-0000-4000-8000-0000000000be"},
             }],
         }
         text = render._plain(render._gpu_token(gpu, 141, show_name=True))
@@ -379,7 +379,7 @@ class ComputeHostRenderTest(unittest.TestCase):
         self.assertIn("RTX 6000 Ada Gen.", text)
         self.assertIn(("RTX 6000 Ada Gen. ", "gpu_rtx6000_active"),
                       render._gpu_token(gpu, 141, show_name=True))
-        self.assertNotIn("CL/f11a0486", text)
+        self.assertNotIn("CL/100000ae", text)
         self.assertNotIn("↳", text)
         self.assertNotIn("g1", text)
 

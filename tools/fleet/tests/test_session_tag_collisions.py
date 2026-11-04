@@ -256,8 +256,8 @@ class SessionTagCollisionTest(unittest.TestCase):
         self.assertIsNone(resolve_tag("codex", missing))
 
     def test_uuid_creation_order_for_pre_install_herdr_pair(self):
-        older = "01a1223d-621b-7908-8399-1f234f623c79"
-        newer = "01a1223f-5bfb-7dca-b092-a1db86a2d707"
+        older = "01000020-0000-7000-8000-00000000002b"
+        newer = "01000021-0000-7000-8000-00000000002c"
         self.assertLess(session_tags._started("codex", older), session_tags._started("codex", newer))
 
     def test_capacity_exhaustion_keeps_existing_256_assignments(self):

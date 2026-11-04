@@ -541,12 +541,12 @@ class ManagedGatewayRegistryTest(unittest.TestCase):
 class ResumeAliasTest(unittest.TestCase):
     """Prior session ids a resume/fork left behind, derived from the live process's own
     argv. Measured 2026-09-09: pid 2979449 ran
-    `… --session-id 6044eb9f-… --fork-session --resume …/2b091520-….jsonl`, and the peer
+    `… --session-id 10000087-… --fork-session --resume …/10000072-….jsonl`, and the peer
     ledger held that conversation's receipts under BOTH ids — the older one carrying the
     sender identity the newer one lacked. Nothing on disk records the equivalence."""
 
-    _NEW = "6044eb9f-7983-4c41-9b86-0bb2b70638fa"
-    _OLD = "2b091520-0afd-4334-a04f-4511d4debf6e"
+    _NEW = "10000087-0000-4000-8000-000000000096"
+    _OLD = "10000072-0000-4000-8000-000000000080"
 
     def test_resume_path_stem_becomes_an_alias(self):
         argv = ["claude", "--session-id", self._NEW, "--fork-session",

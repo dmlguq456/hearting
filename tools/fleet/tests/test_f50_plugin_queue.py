@@ -24,7 +24,7 @@ from fleet.model import DispatchJob, Session  # noqa: E402
 from fleet.collectors import codex_companion as cc  # noqa: E402
 from fleet.collectors.dispatch import DONE_AFTERGLOW_MIN  # noqa: E402
 
-_SID = "201f59a8-21e7-4778-9f6f-c1b56c24e7ff"
+_SID = "1000006f-0000-4000-8000-00000000007d"
 
 
 def _iso(minutes_ago):

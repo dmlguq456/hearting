@@ -55,7 +55,7 @@ class CodexPaneWaitTest(unittest.TestCase):
         self.assertFalse(hasattr(opencode, "prepare_tick"))
 
     def test_cold_full_prepare_wait_can_attach_current_pane_sid(self):
-        sid = "01a0c233-96b3-7cf3-871b-7beb1fc71679"
+        sid = "0100000d-0000-7000-8000-00000000013c"
         session = SimpleNamespace(harness="codex", pid=123, proc_start="start-1", cwd="/work",
                                   app_server=False, managed_dir=None, is_child=False, session_id=None)
         with tempfile.TemporaryDirectory() as tmp, \
@@ -73,7 +73,7 @@ class CodexPaneWaitTest(unittest.TestCase):
     def test_exact_pid_start_and_current_thread_proof_gate_pane_identity(self):
         import pane_ownership
 
-        sid = "01a0c233-96b3-7cf3-871b-7beb1fc71679"
+        sid = "0100000d-0000-7000-8000-00000000013c"
         session = SimpleNamespace(pid=123, proc_start="start-1", cwd="/work")
         panes = [{"pane_id": "w1:p1", "agent": "codex", "cwd": "/work"}]
         process_info = {"foreground_process_group_id": 123,
@@ -114,7 +114,7 @@ class CodexPaneWaitTest(unittest.TestCase):
     def test_current_thread_uses_only_the_exact_pane_candidate(self):
         import pane_ownership
 
-        sid = "01a0c233-96b3-7cf3-871b-7beb1fc71679"
+        sid = "0100000d-0000-7000-8000-00000000013c"
         session = SimpleNamespace(pid=123, proc_start="start-1", cwd="/work")
         panes = [{"pane_id": "w1:p1", "agent": "codex", "cwd": "/work"},
                  {"pane_id": "w1:p2", "agent": "codex", "cwd": "/work"}]
@@ -146,7 +146,7 @@ class CodexPaneWaitTest(unittest.TestCase):
         current.assert_not_called()
 
     def test_warm_fast_tick_reuses_sid_without_a_second_pane_read(self):
-        sid = "01a0c233-96b3-7cf3-871b-7beb1fc71679"
+        sid = "0100000d-0000-7000-8000-00000000013c"
         session = SimpleNamespace(pid=123, proc_start="start-1", cwd="/work")
         panes = [{"pane_id": "w1:p1", "agent": "codex", "cwd": "/work"}]
         evidence = herdr.PaneEvidence((set(), {123}, {}), complete=True)
