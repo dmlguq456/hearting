@@ -3987,8 +3987,10 @@ check_language_neutrality_contract() {
     fail_msg "headless worker prompts must not impose a fixed report locale"
   fi
 
-  if grep -Fq 'def auto_recall' tools/memory/mem.py \
-    || grep -Fq '"--auto"' tools/memory/mem.py \
+  # mem.py and the modules it is split into (tools/memory/mem_*.py, "Split out of `mem.py`").
+  mem_sources="tools/memory/mem.py $(grep -l 'Split out of `mem.py`' tools/memory/mem_*.py 2>/dev/null | tr '\n' ' ')"
+  if cat $mem_sources | grep -Fq 'def auto_recall' \
+    || cat $mem_sources | grep -Fq '"--auto"' \
     || grep -Fq 'run_preflight("recall"' adapters/codex/hooks/userprompt-lifecycle.py \
     || grep -Fq 'collectPreflight("recall"' adapters/opencode/plugins/hearting-guards.js \
     || ! grep -Fq 'mem-recall-inject.sh' adapters/claude/settings.json \
@@ -4001,9 +4003,9 @@ check_language_neutrality_contract() {
     || ! grep -Fq 'Memory follows D-40: the acting agent decides storing, retrieval, promotion, merge, and pruning.' core/DESIGN_PRINCIPLES.md \
     || ! grep -Fq 'tools/memory/recall.sh' adapters/codex/bin/preflight.sh \
     || ! grep -Fq 'tools/memory/recall.sh' adapters/opencode/bin/preflight.sh \
-    || ! grep -Fq 'CANDIDATE_MAX_RESULTS = 6' tools/memory/mem.py \
-    || ! grep -Fq 'CANDIDATE_MAX_UTF8_BYTES = 2400' tools/memory/mem.py \
-    || ! grep -Fq 'records_capsule_fts' tools/memory/mem.py; then
+    || ! cat $mem_sources | grep -Fq 'CANDIDATE_MAX_RESULTS = 6' \
+    || ! cat $mem_sources | grep -Fq 'CANDIDATE_MAX_UTF8_BYTES = 2400' \
+    || ! cat $mem_sources | grep -Fq 'records_capsule_fts'; then
     fail_msg "memory semantics must remain agent-owned while capsule candidates and same-turn opportunity are enforced mechanically"
   fi
 

@@ -131,9 +131,10 @@ class TurnFailed(SupervisorError):
     post-exit log reader calls on the identical logged row.
     """
 
-    def __init__(self, payload: dict[str, Any]) -> None:
+    def __init__(self, payload: dict[str, Any], *, progressed: bool = False) -> None:
         super().__init__("app-server-turn-failed")
         self.payload = payload
+        self.progressed = progressed
 
 
 def _normalize_codex_error_info(raw: Any) -> Any:
@@ -922,7 +923,7 @@ def resource_sandbox_command(args, row):
                      "network_access": bool(args.network_access)}
 
 
-def run_turn(
+def _run_turn_once(
     server: AppServer,
     *,
     thread_id: str,
@@ -987,6 +988,7 @@ def run_turn(
     final_text: str | None = None
     final_item: dict[str, Any] | None = None
     turn_error: dict[str, Any] | None = None
+    progressed = False
     server.owner_turn_activity = activity
     try:
         while True:
@@ -1031,6 +1033,8 @@ def run_turn(
             if method == "item/completed" and event_params.get("turnId") == turn_id:
                 raw_item = event_params.get("item")
                 if isinstance(raw_item, dict):
+                    if raw_item.get("type") in {"commandExecution", "fileChange", "mcpToolCall"}:
+                        progressed = True
                     if event_params.get("threadId") == thread_id and feedback is not None:
                         feedback.consider(thread_id, turn_id, raw_item)
                     item = normalize_item(raw_item)
@@ -1057,7 +1061,7 @@ def run_turn(
                     )
                     payload = _turn_failed_payload(turn_id, error)
                     emit(payload)
-                    raise TurnFailed(payload)
+                    raise TurnFailed(payload, progressed=progressed)
                 if control is not None:
                     control.completed(turn_id)
                 if feedback is not None:
@@ -1066,6 +1070,53 @@ def run_turn(
     finally:
         if server.owner_turn_activity is activity:
             server.owner_turn_activity = None
+
+
+def run_turn(server: AppServer, *, thread_id: str, prompt: str,
+             args: argparse.Namespace, activity=None, clock=time.monotonic,
+             sleep=time.sleep):
+    """Run a turn with the shared bounded retry policy on the same thread."""
+    failures = 0
+    current_prompt = prompt
+    while True:
+        try:
+            return _run_turn_once(server, thread_id=thread_id, prompt=current_prompt,
+                                  args=args, activity=activity)
+        except TurnFailed as exc:
+            info = exc.payload.get("codex_error_info")
+            if exc.progressed:
+                failures = 0
+                retry_index = 0
+                current_prompt = (prompt + "\nA previous turn completed real work before a transient "
+                                  "service interruption. Inspect its results and continue from there.")
+            else:
+                retry_index = failures
+            delay = DECISIONS.transient_retry_delay(info, retry_index, registered=True)
+            if delay is None:
+                raise
+            turn_id = str(exc.payload.get("turn_id") or "")
+            if not exc.progressed:
+                failures += 1
+            started = clock()
+            deadline = started + delay
+            common = {"parent_attempt_id": getattr(args, "parent_attempt_id", ""),
+                      "thread_id": thread_id, "turn_id": turn_id,
+                      "reason_code": "transient-capacity", "ordinal": retry_index + 1,
+                      "deadline_monotonic": deadline}
+            emit({"type": "dispatch.supervisor.transient-wait.started", **common})
+            while clock() < deadline:
+                process = getattr(server, "process", None)
+                if process is not None and process.poll() is not None:
+                    raise SupervisorError("transient-retry-server-exited")
+                control = getattr(args, "owner_input", None)
+                if control is not None and control.pending():
+                    current_prompt = control.prepare(current_prompt)
+                    break
+                if activity is not None and activity.expired():
+                    raise SupervisorError("transient-retry-owner-idle-expired")
+                sleep(min(0.25, max(0.0, deadline - clock())))
+            emit({"type": "dispatch.supervisor.transient-wait.ended", **common,
+                  "outcome": "owner-input" if clock() < deadline else "deadline"})
 
 _apply_notice = DECISIONS.apply_notice
 
