@@ -14787,7 +14787,7 @@ class SessionNoticeProgressRaceTest(_TmpRootMixin, unittest.TestCase):
                 (peer_steward.peer_obligations, "request_dispatch_reconciliation", False),
                 (dispatch_contract, "process_start_ticks", "100001"),
                 (dispatch_contract, "process_identity_disposition", "live")):
-            patch = mock.patch.object(module, name, return_value=value)
+            patch = patch_split(module, name, return_value=value)
             patch.start()
             self.addCleanup(patch.stop)
         super().setUp()
@@ -19480,7 +19480,7 @@ class SessionNoticePriorityTest(_TmpRootMixin, unittest.TestCase):
                 (peer_steward.peer_obligations, "request_dispatch_reconciliation", False),
                 (dispatch_contract, "process_start_ticks", "100001"),
                 (dispatch_contract, "process_identity_disposition", "live")):
-            patch = mock.patch.object(module, name, return_value=value)
+            patch = patch_split(module, name, return_value=value)
             patch.start()
             self.addCleanup(patch.stop)
         super().setUp()
