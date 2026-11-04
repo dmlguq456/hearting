@@ -558,16 +558,23 @@ def _strip_report_verification(snapshot):
 
 
 def _copy_for_enrichment(snapshot, *, required_only):
-    """Copy only the mutable required-detail graph for the first completion pass."""
-    if not required_only:
-        return copy.deepcopy(snapshot)
+    """Isolate mutable detail rows without cloning the read-only host/history census."""
     value = copy.copy(snapshot)
     # Required projection reads resource rows and attaches them to copied jobs,
     # but does not mutate the resource observations. Keep those immutable rows
     # shared so a large host census is not deep-copied just to enrich a few jobs.
-    memo = {id(resource): resource for resource in (snapshot.resources or ())}
-    value.sessions, value.jobs, value.route_entities = copy.deepcopy(
-        (snapshot.sessions, snapshot.jobs, snapshot.route_entities), memo)
+    if required_only:
+        memo = {id(resource): resource for resource in (snapshot.resources or ())}
+        value.sessions, value.jobs, value.route_entities = copy.deepcopy(
+            (snapshot.sessions, snapshot.jobs, snapshot.route_entities), memo)
+    else:
+        # Optional titles mutate resources and pane metadata as well as session/job
+        # rows. Copy them together to preserve aliases (job.resource_children).
+        # node_evidence, usage, memory and display observations are only read;
+        # enrichment replaces fields such as degradations rather than editing them.
+        (value.sessions, value.jobs, value.route_entities, value.resources,
+         value.tag_metadata) = copy.deepcopy((snapshot.sessions, snapshot.jobs,
+            snapshot.route_entities, snapshot.resources, snapshot.tag_metadata))
     value.observations = dict(snapshot.observations or {})
     return value
 

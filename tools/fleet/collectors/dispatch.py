@@ -135,11 +135,13 @@ def collection_read_scope():
     """Bound ledger and Codex identity reuse to one Fleet collection pass."""
     from contextlib import ExitStack
     import session_tidy
+    import dispatch_supervision
     from . import codex
 
     with ExitStack() as stack:
         stack.enter_context(session_tidy.seat_ledger_read_scope())
         stack.enter_context(codex.daemon_identity_read_scope())
+        stack.enter_context(dispatch_supervision.route_attention_read_scope())
         yield
 
 

@@ -92,6 +92,24 @@ class Fleet2DetailContinuationBoundaryTests(unittest.TestCase):
         self.assertNotIn("required-details", original.observations)
         self.assertIsNone(resource.display_title)
 
+    def test_optional_copy_isolates_titles_but_reuses_read_only_observations(self):
+        resource = SimpleNamespace(parent_attempt_id="attempt-route-1", display_title=None)
+        job = _job("route-1")
+        job.resource_children = [resource]
+        evidence = {"route-1": {"execute": {"attempt_history": [{"status": "open"}]}}}
+        original = LiveSnapshot(jobs=[job], resources=[resource], node_evidence=evidence,
+                                tag_metadata=[{"agent": "codex"}], memory={"count": 1})
+        copied = details._copy_for_enrichment(original, required_only=False)
+        self.assertIs(copied.node_evidence, evidence)
+        self.assertIs(copied.memory, original.memory)
+        self.assertIs(copied.jobs[0].resource_children[0], copied.resources[0])
+        copied.resources[0].display_title = "new title"
+        copied.tag_metadata[0]["agent"] = "claude"
+        copied.jobs[0].title = "new job title"
+        self.assertIsNone(resource.display_title)
+        self.assertEqual(original.tag_metadata[0]["agent"], "codex")
+        self.assertNotEqual(original.jobs[0].title, "new job title")
+
     def test_changed_or_missing_neighbourhood_proof_rejects_the_row(self):
         previous = _snapshot({"route-1": {"execute": {"revision": 1}}})
         current = _snapshot({"route-1": {"execute": {"revision": 2}}})

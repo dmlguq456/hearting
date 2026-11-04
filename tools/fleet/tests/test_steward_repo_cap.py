@@ -184,6 +184,27 @@ class RepoSupervisionTest(_RepoFixture, unittest.TestCase):
             steward.enrich(rows, markers={})
             self.assertEqual(steward.last_supervision(), {})
 
+    def test_board_resolves_each_holder_once_and_reobserves_the_next_pass(self):
+        rows = [self.row("s1", self.primary), self.row("s2", self.linked),
+                self.row("s3", self.other)]
+        relations = [_relation(s) for s in ("s1", "s2", "s3", "s1")]
+        with mock.patch.object(steward, "repository_for_session",
+                               wraps=steward.repository_for_session) as repository, \
+                mock.patch.object(steward, "_role_winners", wraps=steward._role_winners) as roles, \
+                mock.patch.object(steward, "_context_rows", wraps=steward._context_rows) as context:
+            first = steward.supervision_by_repository(rows, limit=2, markers={},
+                                                       relations=relations, agents=[])
+            self.assertEqual(repository.call_count, 3)
+            self.assertEqual(roles.call_count, 1)
+            self.assertEqual(context.call_count, 1)
+            rows[2].cwd = str(self.primary)
+            second = steward.supervision_by_repository(rows, limit=2, markers={},
+                                                        relations=relations, agents=[])
+            self.assertEqual(repository.call_count, 6)
+            self.assertEqual(roles.call_count, 2)
+        self.assertEqual(first[self.key]["counted"], 2)
+        self.assertEqual(second[self.key]["counted"], 3)
+
 
 class SessionLivenessTest(_RepoFixture, unittest.TestCase):
     def test_herdr_row_means_live(self):
