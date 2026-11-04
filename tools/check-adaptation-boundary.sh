@@ -1719,7 +1719,7 @@ check_codex_native_skill_projection() {
         fail_msg "$skill must keep entry-router procedure detail out of the dispatch-depth-0 projection"
       fi
       if ! grep -Fq 'Present the intent card' "$skill" \
-        || ! grep -Fq 'dispatch-depth-1 owner reads it' "$skill" \
+        || ! grep -Fq 'Registered owners read only' "$skill" \
         || ! grep -Fq 'stage workers read only their assigned contracts' "$skill"; then
         fail_msg "$skill must project the confirmation and owner/worker context boundary"
       fi
@@ -1734,7 +1734,7 @@ check_codex_native_skill_projection() {
     fi
   done
   if ! grep -Fq 'Present the intent card' adapters/codex/skills/autopilot-code/SKILL.md \
-    || ! grep -Fq 'dispatch-depth-1 owner reads it' adapters/codex/skills/autopilot-code/SKILL.md \
+    || ! grep -Fq 'Registered owners read only' adapters/codex/skills/autopilot-code/SKILL.md \
     || grep -Fq '## Projected Portable Details' adapters/codex/skills/autopilot-code/SKILL.md; then
     fail_msg "Codex autopilot-code entry projection must stay compact and delegate contract reading"
   fi
@@ -1837,7 +1837,7 @@ check_codex_native_plugin_entry_skill() {
     return
   fi
   if ! grep -Fq 'Present the intent card' "$skill" \
-    || ! grep -Fq 'dispatch-depth-1 owner reads it' "$skill" \
+    || ! grep -Fq 'Registered owners read only' "$skill" \
     || grep -Fq '## Projected Portable Details' "$skill"; then
     fail_msg "Codex native plugin autopilot-code entry projection must stay compact"
   fi
@@ -2688,7 +2688,7 @@ check_opencode_native_skill_projection() {
         fail_msg "$skill must keep entry-router procedure detail out of the dispatch-depth-0 projection"
       fi
       if ! grep -Fq 'Present the intent card' "$skill" \
-        || ! grep -Fq 'dispatch-depth-1 owner reads it' "$skill" \
+        || ! grep -Fq 'Registered owners read only' "$skill" \
         || ! grep -Fq 'stage workers read only their assigned contracts' "$skill"; then
         fail_msg "$skill must project the confirmation and owner/worker context boundary"
       fi
