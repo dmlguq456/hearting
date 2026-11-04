@@ -3581,9 +3581,8 @@ def cancel_message_obligation(ref, *, duty_id, expected_revision, identity,
 
 
 def _ordinary_receiver_guidance():
-    return ("Give immediate results once; for delayed work, send one short receipt, then use the registered continuation. "
-            "No-reply notices need none. Put condition/result and needed decision/blocker first; keep operational details in evidence. "
-            "Review exact results and do approved follow-through. Receipt/queue/ACK is not execution.")
+    return ("Peer request: answer once; for delayed work send one short receipt, "
+            "then continue in the registered continuation.")
 
 
 def _exact_receiver_evidence(ref, transfer, pending, recipient, *, roots=None):

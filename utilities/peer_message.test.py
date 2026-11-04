@@ -195,6 +195,43 @@ class PeerMessageTest(_TmpRootMixin, unittest.TestCase):
         self.assertEqual(notices[0]["from"]["harness"], "runtime")
         self.assertEqual(notices[0]["producer_binding"], producer)
 
+    def test_runtime_completion_prompt_gets_no_memory_candidates(self):
+        recipient = {"harness": "codex", "session_id": "runtime-recipient"}
+        sender = {"harness": "runtime", "session_id": None, "name": "Hearting runtime"}
+        duty_id = "registered-batch-" + "a" * 32
+        refs = [duty_id, "att-runtime-completion", "delivery-runtime-completion"]
+        producer = {
+            "schema": peer_message._RUNTIME_PRODUCER_SCHEMA,
+            "duty_id": duty_id, "jobs": str(self.jobs_path),
+            "attempt_id": refs[1], "carrier": "codex-native-queue",
+            "delivery_id": refs[2], "receipt_digest": "b" * 64,
+            "recipient": recipient, "route_id": "rt-runtime", "route_node": "execute",
+        }
+        body = "[notice] zebrafish completion"
+        text, _ref = peer_message.prepare_peer_message(
+            body, sender, recipient, defer=True, refs=refs,
+            producer_binding=producer, receipt="native-pending")
+        root = Path(__file__).resolve().parents[1]
+        store = self.tmp_root / "mem-store"
+        store.mkdir()
+        env = dict(os.environ, MEM_STORE=str(store), AGENT_HOME=str(root),
+                   MEM_RECALL_EVENTS=str(self.tmp_root / "events.jsonl"),
+                   MEM_RECALL_RECEIPTS=str(self.tmp_root / "receipts"))
+        env.pop("AGENT_SESSION_ROLE", None)
+        subprocess.run([sys.executable, str(root / "tools/memory/mem.py"), "add", "durable",
+                        "decision", "zebrafish completion body", "--headline", "Zebrafish lead"],
+                       cwd=str(self.tmp_root), env=env, check=True, capture_output=True)
+
+        def candidates(prompt):
+            return subprocess.run(
+                ["bash", str(root / "hooks/mem-recall-inject.sh"), "--prompt", prompt,
+                 "--cwd", str(self.tmp_root), "--session-id", recipient["session_id"],
+                 "--runtime", "codex", "--format", "text"],
+                cwd=str(root), env=env, text=True, capture_output=True, check=True).stdout
+
+        self.assertIn("Zebrafish lead", candidates("zebrafish completion"))
+        self.assertEqual(candidates(text), "")
+
     def test_runtime_sender_without_a_registered_producer_binding_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "runtime-producer-binding-required"):
             peer_message.prepare_peer_message(
