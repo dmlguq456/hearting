@@ -3677,6 +3677,127 @@ class CompletionMarkerTest(unittest.TestCase):
             parent.kill()
             parent.wait(timeout=5)
 
+    # Parallel slices of one chain: real route, real markers, real gate, real launch fence.
+    SLICE_FILES = [{"files": [f"utilities/slice_{n}.py"]} for n in (1, 2, 3)]
+
+    def register_slices(self, rp, route, chain):
+        """Register three parallel slice rows of `chain`; returns their attempt ids."""
+        axes = ("attempt_schema_version=2,dispatch_depth=2,transport=headless,"
+                "execution_surface=registered-headless,registered_worker=1,"
+                "fallback_hop=same-harness-headless,harness=codex,capability=autopilot-code")
+        ids = []
+        for n in (1, 2, 3):
+            aid = f"att-{chain[4:]}-s{n}"
+            brief = self.base / f"{chain}-s{n}.brief.md"
+            brief.write_text("brief\n", encoding="utf-8")
+            meta = (f"{axes},attempt_id={aid},route_id={route['route_id']},route_hash={route['route_hash']},"
+                    f"route_node=execute,route_file={rp},subsession_id=ss-{chain[4:]}-s{n},stage_authority=0,"
+                    f"session_chain_id={chain},subsession_index={n},subsession_count=3,subsession_mode=parallel,"
+                    f"subsession_purpose=planned,phase_brief={brief},phase_brief_sha256={'0' * 64},"
+                    f"state_ledger={self.base / 'ledger.yaml'},fixed_files_sha256={'0' * 64},"
+                    f"narrow_verify_sha256={'0' * 64},expected_round_trips=2,batch_group={chain},parallel_group={chain}")
+            with mock.patch.dict(os.environ, {**self.base_env(), "AGENT_DISPATCH_ATTEMPT_ID": ""}, clear=True):
+                self.assertTrue(D.claim_attempt_row(
+                    self.jobs, aid, f"fixture\topen\t{self.repo}\t{self.repo}\tslice-{n}\t{meta}"))
+            ids.append(aid)
+        return ids
+
+    def launch_slices(self, rp, ids):
+        """Start every attempt of `ids` at once. Returns {attempt: "started" | refusal reason}."""
+        import threading
+        barrier = threading.Barrier(len(ids))
+        outcome, children = {}, []
+
+        def spawn_for(aid):
+            def start(gate_fd):
+                proc = subprocess.Popen(
+                    [sys.executable, str(ROOT / "utilities/launch-fence.py"),
+                     "--parent-pid", str(os.getpid()), "--gate-fd", str(gate_fd), "--",
+                     sys.executable, "-c", f"from pathlib import Path; Path({str(self.base / ('payload-' + aid))!r}).write_text('ran')"],
+                    pass_fds=(gate_fd,), start_new_session=True,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                children.append(proc)
+                return proc
+            return start
+
+        def run(aid):
+            waited = []
+
+            def preclaim(lines):
+                D.completion_marker_gate(str(rp), "execute", "start", self.agent_home, self.jobs,
+                                         registry_lines=lines, attempt_id=aid)
+                if not waited:  # every leg has read its inputs before any leg commits
+                    waited.append(True)
+                    barrier.wait(30)
+            preclaim._dispatch_registry_scoped = True
+            preclaim._dispatch_registry_nodes = frozenset({"plan-check"})
+            try:
+                D.spawn_claimed_attempt(self.jobs, aid, parent_binding=None, preclaim=preclaim, spawn=spawn_for(aid))
+                outcome[aid] = "started"
+            except D.DispatchContractError as exc:
+                outcome[aid] = exc.reason
+                barrier.abort()
+            except threading.BrokenBarrierError:
+                outcome[aid] = "barrier-broken"
+
+        env = {**self.base_env(), "AGENT_DISPATCH_ATTEMPT_ID": ""}
+        with mock.patch.dict(os.environ, env, clear=True):
+            threads = [threading.Thread(target=run, args=(aid,)) for aid in ids]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(60)
+        for child in children:
+            child.wait(timeout=15)
+        return outcome
+
+    def route_with_markers(self):
+        route = self.compile_route(intensity="standard")
+        rp = self.write_route(route, "route.json")
+        for node_id in ("plan", "plan-check"):
+            evidence = self.base / f"{node_id}.md"
+            evidence.write_text(f"{node_id}\n", encoding="utf-8")
+            done = self.complete(rp, node_id, evidence)
+            self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        return route, rp
+
+    def test_three_parallel_slices_start_together_behind_real_markers(self):
+        import subdivision_batch_admission as SUBDIV
+        route, rp = self.route_with_markers()
+        chain = SUBDIV.slice_chain_id(route["route_id"], "execute", self.SLICE_FILES, owner_attempt_id="")
+        ids = self.register_slices(rp, route, chain)
+        outcome = self.launch_slices(rp, ids)
+        self.assertEqual(outcome, {aid: "started" for aid in ids})
+        for aid in ids:
+            self.assertTrue((self.base / f"payload-{aid}").exists(), aid)
+
+    def test_a_refused_slice_set_restarts_under_the_next_generation(self):
+        import subdivision_batch_admission as SUBDIV
+        route, rp = self.route_with_markers()
+        args = (route["route_id"], "execute", self.SLICE_FILES)
+        with mock.patch.dict(os.environ, {"AGENT_DISPATCH_ATTEMPT_ID": ""}):
+            first_chain = SUBDIV.current_slice_chain_id(*args, self.jobs)
+            self.assertEqual(first_chain, SUBDIV.slice_chain_id(*args))
+            first_ids = self.register_slices(rp, route, first_chain)
+            marker = self.stable_dispatch / "completion" / route["route_id"] / "plan-check.json"
+            kept = marker.read_bytes()
+            marker.unlink()
+            refused = self.launch_slices(rp, first_ids)
+            self.assertEqual(set(refused.values()), {"completion-marker-missing"}, refused)
+            for aid in first_ids:
+                self.assertEqual(SUBDIV._close_unclaimed_row(self.jobs, aid), 1)
+            marker.write_bytes(kept)
+
+            second_chain = SUBDIV.current_slice_chain_id(*args, self.jobs)
+            self.assertEqual(second_chain, SUBDIV.slice_chain_id(*args, generation=1))
+            self.assertNotEqual(second_chain, first_chain)
+            second_ids = self.register_slices(rp, route, second_chain)
+            self.assertFalse(set(second_ids) & set(first_ids))
+            restarted = self.launch_slices(rp, second_ids)
+            self.assertEqual(restarted, {aid: "started" for aid in second_ids})
+            # Registered and started, the set keeps its id: asking again changes nothing.
+            self.assertEqual(SUBDIV.current_slice_chain_id(*args, self.jobs), second_chain)
+
 
 class RevisionConsumerProofTest(unittest.TestCase):
     def setUp(self):

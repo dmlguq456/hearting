@@ -819,6 +819,58 @@ class PlanSlicesBriefAndAdapterTest(unittest.TestCase):
                 [row["attempt_id"] for row in manifest_b["sessions"]],
             )
 
+    def test_refused_chain_moves_to_the_next_generation_and_stays_stable_otherwise(self):
+        def row(status, attempt, chain, meta):
+            return (f"2026-11-04T00:00:00Z\t{status}\t/repo\t/repo\tslice\tattempt_id={attempt},"
+                    f"session_chain_id={chain},subsession_mode=parallel,{meta}")
+
+        legacy = "launch_claimed=0,note=subsession-batch-start-failed"
+        current = ("launch_claimed=0,note=subsession-batch-registration-incomplete,"
+                   "launch_outcome=never-launched,failure_class=cancelled")
+        claimed_then_refused = "launch_claimed=1,note=subsession-batch-start-failed,launch_outcome=never-launched"
+        ran = "launch_claimed=1,launch_started=1,pid=4242,pid_start=77,note=subsession-batch-start-failed"
+        with tempfile.TemporaryDirectory() as td, mock.patch.dict(os.environ, {}, clear=True):
+            root = Path(td)
+            jobs = root / "jobs.log"
+            args = ("rt-b", "execute", self.SLICES)
+            generation0 = SUBDIV.slice_chain_id(*args)
+            generation1 = SUBDIV.slice_chain_id(*args, generation=1)
+            generation2 = SUBDIV.slice_chain_id(*args, generation=2)
+            self.assertEqual(len({generation0, generation1, generation2}), 3)
+            self.assertEqual(SUBDIV.current_slice_chain_id(*args, root / "absent.log"), generation0)
+            jobs.write_text("")
+            self.assertEqual(SUBDIV.current_slice_chain_id(*args, jobs), generation0)
+            cases = (
+                ("legacy shape", [row("done", "att-1", generation0, legacy), row("done", "att-2", generation0, legacy)], generation1),
+                ("current shape", [row("done", "att-1", generation0, current), row("cancelled", "att-2", generation0, current)], generation1),
+                ("claim fence closed, never launched", [row("done", "att-1", generation0, claimed_then_refused), row("done", "att-2", generation0, current)], generation1),
+                ("an open row", [row("done", "att-1", generation0, current), row("open", "att-2", generation0, "launch_claimed=0")], generation0),
+                ("a started row", [row("done", "att-1", generation0, current), row("done", "att-2", generation0, ran)], generation0),
+                ("another chain's rows", [row("done", "att-1", "ssc-execute-other", current)], generation0),
+                ("two refused generations", [row("done", "att-1", generation0, current), row("done", "att-2", generation1, legacy)], generation2),
+            )
+            for name, rows, expected in cases:
+                with self.subTest(name):
+                    jobs.write_text("\n".join(rows) + "\n")
+                    self.assertEqual(SUBDIV.current_slice_chain_id(*args, jobs), expected)
+
+            # plan_slices names the same chain, and the next generation mints its own session ids.
+            os.environ["AGENT_DISPATCH_ATTEMPT_ID"] = "att-owner-a"
+            owner_generation0 = SUBDIV.slice_chain_id(*args)
+            owner_generation1 = SUBDIV.slice_chain_id(*args, generation=1)
+            for name in ("first", "refused"):
+                (root / name).mkdir()
+            (root / "first" / "jobs.log").write_text("")
+            (root / "refused" / "jobs.log").write_text(row("done", "att-1", owner_generation0, current) + "\n")
+            first, manifest_first, _plan, _wt = self._plan(root / "first", self.SLICES)
+            again, manifest_again, _plan, _wt = self._plan(root / "refused", self.SLICES)
+            self.assertEqual(first["chain_id"], owner_generation0)
+            self.assertEqual(again["chain_id"], owner_generation1)
+            self.assertEqual(again["chain_id"], SUBDIV.current_slice_chain_id(*args, root / "refused" / "jobs.log"))
+            self.assertNotEqual(
+                [row["attempt_id"] for row in manifest_first["sessions"]],
+                [row["attempt_id"] for row in manifest_again["sessions"]])
+
     def test_slice_adapter_follows_route_allocation_without_pin(self):
         def adapters(loader, env, slices=None):
             with tempfile.TemporaryDirectory() as td, mock.patch.object(SUBDIV, "_load_sibling", loader), \

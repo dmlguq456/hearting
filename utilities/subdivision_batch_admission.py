@@ -642,12 +642,14 @@ def _default_slice_worktree(sealed_cwd: Path) -> Path:
 
 
 def slice_chain_id(route_id: str, node_id: str, slices: list[dict[str, Any]],
-                   *, owner_attempt_id: str | None = None) -> str:
+                   *, owner_attempt_id: str | None = None, generation: int = 0) -> str:
     """Return the stable chain identity for this owner and exact slice set.
 
     Replacement owners get their own attempt namespace so a later `--slices`
     launch cannot overwrite the prior owner's manifest or slice receipts.
     Lower-level callers without an owner retain the historical identity.
+    Generation 0 is that identity; a later generation names the same slice set
+    again after every earlier chain was refused before any slice ran.
     """
     if owner_attempt_id is None:
         owner_attempt_id = os.environ.get("AGENT_DISPATCH_ATTEMPT_ID")
@@ -659,12 +661,63 @@ def slice_chain_id(route_id: str, node_id: str, slices: list[dict[str, Any]],
     seed_parts = [route_id, node_id, fixed_files]
     if owner_attempt_id:
         seed_parts.append(owner_attempt_id)
+    if generation:
+        seed_parts.append({"generation": generation})
     seed = json.dumps(
         seed_parts,
         sort_keys=True, separators=(",", ":"),
     ).encode("utf-8")
     digest = hashlib.sha256(seed).hexdigest()[:12]
     return f"ssc-{node_id}-{digest}"
+
+
+def _chain_never_started(lines: list[str], chain_id: str) -> bool:
+    """True when the chain has rows and every one is terminal with no sign of a start.
+
+    This is deliberately broader than the quiescence rule for a row closed by the
+    batch-start or batch-registration notes: that rule has to name one row's note to
+    trust it, while this answers for the whole chain and fires only when every row
+    of it qualifies, so a chain with one open, claimed or started row is never moved.
+    """
+    from dispatch_contract import attempt_row_never_started
+    from dispatch_replacement import never_started
+
+    chain = []
+    for line in lines:
+        fields = line.split("\t")
+        if len(fields) != 6 or chain_id not in fields[5]:
+            continue
+        meta = parse_registry_metadata(fields[5])
+        if meta.get("session_chain_id") == chain_id:
+            chain.append((fields, meta))
+    return bool(chain) and all(
+        fields[1] in {"done", "cancelled", "killed"}
+        and (attempt_row_never_started(fields) or never_started(fields[1], meta))
+        for fields, meta in chain)
+
+
+def current_slice_chain_id(route_id: str, node_id: str, slices: list[dict[str, Any]],
+                           jobs: Path | None, *, owner_attempt_id: str | None = None) -> str:
+    """The stable chain id, moved past every generation refused before any slice ran.
+
+    A refused set leaves closed rows under its id, and registering the same slices
+    again would meet them. Only a chain whose every row is closed without a start
+    moves on; an open, claimed or started row keeps the id, so a running or
+    partly started set stays idempotent. With no registry to read the id is
+    generation 0, the id before this lookup existed.
+    """
+    try:
+        registry = Path(jobs) if jobs is not None else Path(resolve_global_registry(ROOT, None, 2, "check").path)
+        lines = registry.read_text(encoding="utf-8", errors="replace").splitlines()
+    except (DispatchContractError, OSError):
+        lines = []
+    generation = 0
+    while True:
+        chain_id = slice_chain_id(route_id, node_id, slices, owner_attempt_id=owner_attempt_id,
+                                  generation=generation)
+        if not _chain_never_started(lines, chain_id):
+            return chain_id
+        generation += 1
 
 
 def plan_slices(
@@ -712,7 +765,7 @@ def plan_slices(
     def fixed_of(item):
         return item.get("files", item.get("fixed_files")) if isinstance(item, dict) else None
 
-    chain_id = slice_chain_id(str(route.get("route_id") or ""), node_id, slices)
+    chain_id = current_slice_chain_id(str(route.get("route_id") or ""), node_id, slices, jobs)
     allocated = None
     sessions = []
     briefs = []
