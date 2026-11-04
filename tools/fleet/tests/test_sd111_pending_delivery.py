@@ -961,8 +961,8 @@ class RenderWordLanguage(unittest.TestCase):
                                                         "install": {"version": "v9"}}})
         for language, words, keys in (
                 ("Korean", " · 받을 세션 없음 2", "종료 선택 · ↑↓ 이동 · x 종료 요청 · Esc 취소 · q 끝"),
-                ("English", " · no receiving session 2",
-                 "kill selection · ↑↓ move · x request kill · Esc cancel · q quit")):
+                ("English", " · 2 with no session to receive",
+                 "pick what to kill · ↑↓ move · x kill · Esc cancel · q quit")):
             with self.subTest(language=language), mock.patch.dict(os.environ, {"FLEET_NOW_LANG": language}), \
                     mock.patch.object(render, "_PROMPT", None), mock.patch.object(render, "_SELECT_MODE", True):
                 self.assertEqual(render._delivery_pending_rows({"pending": 3, "no_recipient": 2}),
