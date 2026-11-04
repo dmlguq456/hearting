@@ -33,7 +33,7 @@ peer_steward = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(peer_steward)
 
 OLD = "3c1d2e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f"
-NEW = "7e6d5c4b-3a29-4180-9f7e-6d5c4b3a2918"
+NEW = "1000008f-0000-4000-8000-00000000009e"
 
 _FAKE_CLAUDE = r'''
 import json, os, sys, termios, tty

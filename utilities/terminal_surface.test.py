@@ -1318,7 +1318,7 @@ class TmuxAgentTerminalTest(_IsolatedMixin, unittest.TestCase):
         self.assertIsNone(self.surface.process_info("w1:p0"))
 
     def test_agent_reads_harness_session_and_the_runtime_turn_record(self):
-        sid = "0f6d1b9e-4a47-4c26-9a1e-6f5f2a3d7c10"
+        sid = "10000068-0000-4000-8000-000000000076"
         pid = self.start_runtime(sid, "idle")
         agent = self.surface.agent(self.pane)["result"]["agent"]
         self.assertEqual((agent["pane_id"], agent["agent"], agent["pid"], agent["agent_status"]),
@@ -1429,7 +1429,7 @@ class TmuxAgentTerminalTest(_IsolatedMixin, unittest.TestCase):
         self.assertIsNone(self.surface.read_visible("%999"))
 
     def test_wait_agent_returns_on_the_wanted_state_or_times_out(self):
-        sid = "5a0c6c1e-0b3b-4e0d-8a55-2f0c1b7d9e21"
+        sid = "10000085-0000-4000-8000-000000000094"
         pid = self.start_runtime(sid, "busy")
         registry = Path(os.environ["HOME"]) / ".claude" / "sessions" / f"{pid}.json"
         self.assertEqual(self.surface.wait_agent(self.pane, ("idle",), 300), {"error": {"code": "timeout"}})

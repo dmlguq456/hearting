@@ -606,7 +606,7 @@ class MetricSourcesTest(unittest.TestCase):
         sibling.mkdir()
         (sibling / "unrelated.md").write_text("foreign sibling context\n")
         registry = root / "resource-runs.json"
-        run_id = "ami-leg2__leg2-run-config__8ec838ee14c4__a8"
+        run_id = "fixture-run-0068__a8"
         registry.write_text(json.dumps({"runs": {run_id: {
             "run_id": run_id, "started_at": 1}}}) + "\n")
         for index in range(4):
@@ -739,7 +739,7 @@ class MetricSourcesTest(unittest.TestCase):
         bundle = root / "selected-bundle"
         bundle.mkdir(parents=True)
         registry = root / "resource-runs.json"
-        run_id = "ami-leg2__leg2-run-config__8ec838ee14c4__a8"
+        run_id = "fixture-run-0068__a8"
         registry.write_text(json.dumps({"runs": {run_id: {
             "run_id": run_id, "started_at": 1}}}) + "\n")
         for index in range(4):
@@ -850,7 +850,7 @@ class MetricSourcesTest(unittest.TestCase):
         root = self.root / "flat-root-cached-prefix-mutation"
         root.mkdir()
         registry = root / "resource-runs.json"
-        run_id = "ami-leg2__leg2-run-config__8ec838ee14c4__a8"
+        run_id = "fixture-run-0068__a8"
         registry.write_text(json.dumps({"runs": {run_id: {
             "run_id": run_id, "row_key": "run", "started_at": 1}}}) + "\n")
         (root / "entry.json").write_text(json.dumps({
@@ -989,17 +989,17 @@ class MetricSourcesTest(unittest.TestCase):
         bundle = root / "r2-launch-a8"
         bundle.mkdir(parents=True)
         registry = root / "resource-runs.json"
-        run_id = "ami-leg2__leg2-run-config__8ec838ee14c4__a8"
+        run_id = "fixture-run-0068__a8"
         registry.write_text(json.dumps({"runs": {run_id: {
             "run_id": run_id, "row_key": "run", "started_at": 1,
             "log": str(self.root / "eval-run-r2-a8.log")}}}) + "\n")
         (self.root / "eval-run-r2-a8.log").write_text("fixture log identity\n")
 
         admitted = {"admitted": True, "shared_admission": {
-            "authorized_run_id": "smoke__config-bundle__8a9d8619aed3"},
+            "authorized_run_id": "fixture-run-0929"},
             "snapshot": {"t": 100}}
         denied = {"admitted": False, "shared_admission": {
-            "authorized_run_id": "smoke__config-bundle__8a9d8619aed3"},
+            "authorized_run_id": "fixture-run-0929"},
             "preceding_evaluation_leases": [{"run_id": "preceding-run",
                 "task": "evaluation"}], "snapshot": {"t": 101},
             "reasons": ["other evaluation has priority"]}
@@ -1009,7 +1009,7 @@ class MetricSourcesTest(unittest.TestCase):
         for index in range(8):
             value = {"admitted": index % 2 == 0,
                 "shared_admission": {"authorized_run_id":
-                    "smoke__config-bundle__8a9d8619aed3"},
+                    "fixture-run-0929"},
                 "snapshot": {"t": 200 + index}, "padding": "x" * 1200}
             (bundle / f"admission-005{index + 1}-00.json").write_text(
                 json.dumps(value))
@@ -1084,15 +1084,15 @@ class MetricSourcesTest(unittest.TestCase):
         self.assertNotIn("admission-run-binding-ambiguous", result["warnings"])
 
     def test_shared_admission_lease_of_the_authorizing_run_is_not_a_foreign_identity(self):
-        # Shape copied from ami-leg2 r2-launch-a7: each sample's shared_admission
+        # Synthetic shared-admission shape: each sample's shared_admission
         # names the smoke run whose GPU lease it shares, with that run's pid and
         # start time. That reference must not make the bundle ambiguous.
         root = self.root / "raw-results"
         bundle = root / "r2-launch-a7"
         bundle.mkdir(parents=True)
-        run_id = "ami-leg2__leg2-run-config__8ec838ee14c4__a7"
-        smoke = "smoke__config-bundle__8a9d8619aed3"
-        lease = {"gpus": ["0"], "host": "moving4", "pid": 2087782,
+        run_id = "fixture-run-0068__a7"
+        smoke = "fixture-run-0929"
+        lease = {"gpus": ["0"], "host": "gpu-host-a", "pid": 2087782,
                  "pid_namespace": "pid:[4026531836]", "run_id": smoke, "share": True,
                  "started_at": 1792840758.0865579, "starttime": "121090704",
                  "state": "S", "task": smoke, "token": "t" * 32}
@@ -1126,12 +1126,12 @@ class MetricSourcesTest(unittest.TestCase):
     def test_authorizing_run_named_only_in_shared_admission_is_not_bound_to_the_bundle(self):
         # Before the fix the smoke run's lease inside shared_admission was read as a
         # run identity, so an observer of the smoke run took another evaluation's
-        # admission samples (ami-leg2 raw-results/admission, 681 files) as its own.
+        # admission samples (synthetic raw-results/admission bundle) as its own.
         root = self.root / "raw-results"
         bundle = root / "admission"
         bundle.mkdir(parents=True)
-        smoke = "smoke__config-bundle__8a9d8619aed3"
-        lease = {"host": "moving4", "pid": 2087782, "run_id": smoke,
+        smoke = "fixture-run-0929"
+        lease = {"host": "gpu-host-a", "pid": 2087782, "run_id": smoke,
                  "started_at": 1792840758.0865579, "starttime": "121090704",
                  "state": "S", "task": smoke}
         for index in range(4):

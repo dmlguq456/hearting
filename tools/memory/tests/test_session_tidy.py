@@ -6759,8 +6759,8 @@ class StewardMirrorTest(TidyCase):
         peer_reader.start()
         self.addCleanup(peer_reader.stop)
         self.physical = "8ab8e633a26a786454f8"
-        self.origin = "380d69d1-7eac-44a4-9fe9-486ffcf6336d"
-        self.holder = "bdae4343-0565-45eb-bda1-488767caf45e"
+        self.origin = "10000075-0000-4000-8000-000000000084"
+        self.holder = "100000a2-0000-4000-8000-0000000000b1"
         self.logical = st._native_session_key("claude", self.holder)
         self.role = {
             "seat_key": self.physical, "generation": "b4bb143c5bc92d9c4d1d54b841a0c509",

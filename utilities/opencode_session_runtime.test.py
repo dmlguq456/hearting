@@ -757,7 +757,7 @@ import dispatch_resource_wait as RESOURCE
 import dispatch_contract as CONTRACT
 import owner_route_binding as OWNER
 sys.stdin.read()
-session = 'ses_ee3219f52ffe32c72Oe1nJNaxc'
+session = 'ses_fixture00000000000000000023'
 def event(kind, **values):
  print(json.dumps(dict(type=kind, sessionID=session, **values)), flush=True)
 event('step_start', part={})
@@ -803,7 +803,7 @@ event('step_finish', part={'reason':'stop'})
                                                 FAKE_UTILITIES=str(ROOT / 'utilities')))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         owner = json.loads((f.base / 'resource-owner.json').read_text())
-        self.assertEqual(owner['session_id'], 'ses_ee3219f52ffe32c72Oe1nJNaxc')
+        self.assertEqual(owner['session_id'], 'ses_fixture00000000000000000023')
         self.assertEqual(owner['parent_attempt_id'], fixture.PARENT)
 
 

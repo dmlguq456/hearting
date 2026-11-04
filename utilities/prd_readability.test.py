@@ -23,7 +23,7 @@ ROUTE = "rt-b890afc55528891c"
 REVISION = "rrev_" + "b85d2c7ab61dde803251145c739ed26c"
 CYCLE = "cyc_" + "d7d135750ccb23b131334aaf9bc909f0"
 ATTEMPT = "att-" + "b47208f4df4340818d96f4348d9d4cb6"
-UUID = "6db11f8d-2458-4a7a-a3fd-99f531be7a53"
+UUID = "1000008a-0000-4000-8000-000000000099"
 
 
 def doc(block=("- one item",), body=("## 1. Common", "", "Plain text."), title="# Title", gap=("",)):

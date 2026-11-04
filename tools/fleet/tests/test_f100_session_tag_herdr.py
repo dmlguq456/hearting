@@ -273,7 +273,7 @@ class HerdrCollectorTest(unittest.TestCase):
         self.assertEqual(calls, [["herdr", "pane", "process-info", "--pane", "w2:p4"]])  # agent panes only
 
     def test_codex_thread_uses_foreground_process_identity_not_pane_metadata(self):
-        sid = "01a0e579-d313-7be1-af70-de4ed1194e49"
+        sid = "01000011-0000-7000-8000-000000000019"
         panes = [
             {"pane_id": "wB:p0", "agent": None, "cwd": "/project",
              "agent_session": {"agent": "codex", "value": sid}},

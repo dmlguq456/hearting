@@ -219,7 +219,7 @@ class ExecutionAccessTest(unittest.TestCase):
             network={
                 "required": True,
                 "reason": "bounded connect",
-                "hosts": ["CNN.example:00022", "[2001:0DB8::1]:00443"],
+                "hosts": ["GPU.example:00022", "[2001:0DB8::1]:00443"],
             },
             justification={},
         )
@@ -228,23 +228,23 @@ class ExecutionAccessTest(unittest.TestCase):
             network={
                 "required": True,
                 "reason": "bounded connect",
-                "hosts": ["cnn.example:22", "[2001:db8::1]:443"],
+                "hosts": ["gpu.example:22", "[2001:db8::1]:443"],
             },
             justification={},
         )
         self.assertEqual(
-            ("[2001:db8::1]:443", "cnn.example:22"), first.network_hosts
+            ("[2001:db8::1]:443", "gpu.example:22"), first.network_hosts
         )
         self.assertEqual(first.request_sha256, second.request_sha256)
 
         for host in (
-            "cnn.example:ssh",
-            "cnn.example:",
-            "cnn.example:+22",
-            "cnn.example:-22",
-            "cnn.example:０２２",
-            "cnn.example:0",
-            "cnn.example:65536",
+            "gpu.example:ssh",
+            "gpu.example:",
+            "gpu.example:+22",
+            "gpu.example:-22",
+            "gpu.example:０２２",
+            "gpu.example:0",
+            "gpu.example:65536",
             ":22",
             "[2001:db8::1]:",
             "[2001:db8::1]:ssh",

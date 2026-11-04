@@ -347,7 +347,7 @@ class SessionPageDialogue(unittest.TestCase):
         from unittest import mock
         from tools.fleet.explorer import focus
         from tools.fleet.explorer.types import FocusRequest
-        current = "5ed20fe8-499b-4490-a87f-f492612948cf"
+        current = "10000086-0000-4000-8000-000000000095"
         compacted = "7dcee068-0000-4000-8000-000000000001"
         cleared = "bbf14dfc-0000-4000-8000-000000000002"
 

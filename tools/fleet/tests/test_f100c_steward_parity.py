@@ -575,7 +575,7 @@ class StewardCollectorTest(unittest.TestCase):
         # Measured 2026-10-27: supervisor 1b watched Herdr OpenCode panes, but Fleet read those
         # processes without a native session id, so the steward rule found no target and Herdr's
         # flag and Fleet disagreed. The rule itself is unchanged: an exact sid and cwd are enough.
-        sid = "ses_e8516db7dffedMkTbhlkto5vgo"
+        sid = "ses_fixture00000000000000000001"
         markers = {("claude", "steward"): {"session_id": "steward", "targets": {
             sid: {"harness": "opencode", "session_id": sid, "name": "w", "kind": "watch",
                   "ts": "1", "source": "watch"}}}}

@@ -284,7 +284,7 @@ class JobFailures(unittest.TestCase):
 
 class PaneMetadata(unittest.TestCase):
     def test_derived_claude_idle_metadata_is_repaired_by_existing_detail_path(self):
-        sid = "1d334a90-4214-4d30-a3ad-4c0b20f1ca28"
+        sid = "1000006d-0000-4000-8000-00000000007b"
         observed = {"agent": "claude", "pane_id": "idle-pane", "agent_status": "idle",
                     "revision": 0, "agent_session": {"kind": "id", "agent": "claude", "value": sid}}
         with tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:

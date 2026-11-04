@@ -410,7 +410,7 @@ class CensusHeaderTests(unittest.TestCase):
         from tools.fleet.explorer.state import NavState
 
         hosts = [{"mark": "⌂", "name": "gpu-a"},
-                 {"mark": "◇", "name": "cnn"}, {"mark": "◇", "name": "gpu-b"},
+                 {"mark": "◇", "name": "gpu"}, {"mark": "◇", "name": "gpu-b"},
                  {"mark": "◇", "name": "gpu-legacy"}, {"mark": "◇", "name": "gpu-c"}]
         states = ["working"] * 15 + ["idle"] * 2 + ["blocked"]
         version, freshness = "v3.50.3-20-gad247e2b6", "02:38"
@@ -471,7 +471,7 @@ class CensusHeaderTests(unittest.TestCase):
         from tools.fleet.explorer.state import NavState
 
         host_name = "trainer-west-gpu-node-01"
-        hosts = [{"mark": "⌂", "name": host_name}, {"mark": "◇", "name": "cnn"},
+        hosts = [{"mark": "⌂", "name": host_name}, {"mark": "◇", "name": "gpu"},
                  {"mark": "◇", "name": "gpu-b"}, {"mark": "◇", "name": "gpu-legacy"},
                  {"mark": "◇", "name": "gpu-c"}]
         version, freshness = "v3.50.3-20-gad247e2b6", "02:38"
@@ -603,7 +603,7 @@ class CensusHeaderTests(unittest.TestCase):
         from tools.fleet.explorer.state import NavState
 
         version, freshness = "v3.50.3-20-gad247e2界6", "02:38"
-        hosts = [{"mark": "⌂", "name": "moving界4"}, {"mark": "◇", "name": "cnn"},
+        hosts = [{"mark": "⌂", "name": "moving界4"}, {"mark": "◇", "name": "gpu"},
                  {"mark": "◇", "name": "gpu-b"}, {"mark": "◇", "name": "gpu-legacy"},
                  {"mark": "◇", "name": "gpu-c"}]
         vm = self._header_vm(session_states=["working"] * 15 + ["idle"] * 2 + ["blocked"],

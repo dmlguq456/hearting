@@ -188,8 +188,8 @@ class RegistryMetadataCacheTest(unittest.TestCase):
 class PreviousBootQuiescenceTest(unittest.TestCase):
  def test_exact_retained_identity_uses_shared_host_proof_before_pid_reuse(self):
   import resource_run_registry as R
-  old='83f954bc-4963-4dfa-9f2f-c8f3597900a6'
-  current={'boot_id':'67138871-1a60-467f-b9dc-d46749025baa','boot_host':'local'}
+  old='10000094-0000-4000-8000-0000000000a3'
+  current={'boot_id':'10000088-0000-4000-8000-000000000097','boot_host':'local'}
   with tempfile.TemporaryDirectory() as td:
    metadata={'artifact_root':td,'pid':'123','pid_start':'456','pid_ns':'pid:[789]'}
    state=Path(td)/'.runtime/model-worker-governor/state.json';state.parent.mkdir(parents=True)

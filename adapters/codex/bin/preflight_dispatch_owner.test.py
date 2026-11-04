@@ -114,7 +114,7 @@ class PreflightDispatchOwnerTest(unittest.TestCase):
                 ]
                 env = {
                     **self.env,
-                    "CODEX_THREAD_ID": "01a0dc8c-18ad-7853-8a0f-69222f4d7888",
+                    "CODEX_THREAD_ID": "0100000e-0000-7000-8000-000000000016",
                     "AGENT_DISPATCH_CALLER_HARNESS": "codex",
                     "AGENT_DISPATCH_CURRENT_HARNESS": "codex",
                     "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
@@ -127,7 +127,7 @@ class PreflightDispatchOwnerTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, output)
                 self.assertIn(f"adapter={adapter}", output)
                 self.assertNotIn("managed-entry-required", output)
-                self.assertIn("parent_session_id=01a0dc8c-18ad-7853-8a0f-69222f4d7888", output)
+                self.assertIn("parent_session_id=0100000e-0000-7000-8000-000000000016", output)
                 self.assertIn("status=dry-run", output)
                 self.assertIn("child_spawned=0", output)
                 self.assertEqual(jobs.read_text(encoding="utf-8"), "")
