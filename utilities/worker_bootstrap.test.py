@@ -1204,20 +1204,24 @@ class OwnerRouteStepsPromptTest(unittest.TestCase):
         self.assertEqual(command, W.route_start_command(self.root / "route with space.json", "plan"))
         self.assertNotIn("--jobs", command)
         self.assertNotIn("--prompt-file", command)
-        self.assertIn("Optional: add --prompt-file <path>", text)
+        self.assertIn("Use each node's printed start command", text)
         help_text = subprocess.run([sys.executable, argv[1], "--help"], text=True, capture_output=True).stdout
         for flag in ("--route", "--node", "--start"):
             self.assertIn(flag, help_text)
 
     def test_outputs_share_one_absolute_prefix_and_owner_nodes_have_no_command(self):
         text = self.steps()
-        self.assertEqual(text.count(self.output_dir), text.count(f"Outputs under {self.output_dir}/:") + text.count(f"--evidence {self.output_dir}/plan.md"))
+        self.assertIn(f"--evidence {self.output_dir}/plan.md", text)
+        self.assertIn(f"--evidence {self.output_dir}/_internal/plan_reviews/round_1.md", text)
         self.assertIn(f"Outputs under {self.output_dir}/:\n1. plan → plan.md, checklist.md\n", text)
         self.assertIn("2. plan-check after plan → _internal/plan_reviews/round_1.md\n", text)
         self.assertIn("3. execute after plan-check → source-diff, dev_logs/**\n", text)
         self.assertIn("4. report after execute [you run it yourself] → final_report.md\n", text)
-        self.assertEqual(text.count("--node plan-check"), 0)
-        self.assertEqual(text.count("--start`"), 1)
+        self.assertEqual(text.count("--node plan-check"), 2)
+        self.assertEqual(text.count("--start`"), 3)
+        self.assertNotIn("--node report", text)
+        for node in ("plan", "plan-check", "execute"):
+            self.assertIn(W.route_start_command(self.root / "route with space.json", node), text)
 
     def test_inline_completion_command_is_concrete_with_the_first_evidence_file(self):
         text = self.steps()
@@ -1253,6 +1257,15 @@ class OwnerRouteStepsPromptTest(unittest.TestCase):
         route["nodes"][0]["parallel_group"] = "g1"
         self.assertIn("1. plan (parallel group g1) → plan.md", self.steps(route))
 
+    def test_subdivision_gets_an_exact_slices_command_without_owner_flag_assembly(self):
+        route = steps_route()
+        route["nodes"][2]["subdivision"] = {"max_slices": 4}
+        text = self.steps(route)
+        command = re.search(r"If the plan declares slices, use: `([^`]+)`", text).group(1)
+        self.assertEqual(shlex.split(command)[2:],
+            ["--parallel-group", "execute", "--slices", f"{self.output_dir}/plan.md", "--start"])
+        self.assertIn("single-session-required returns to this node's ordinary start command", text)
+
     def test_nothing_without_a_dispatchable_stage_a_route_or_an_owner(self):
         self.assertEqual(self.steps(steps_route(nodes=[])), "")
         owner_only = steps_route()
@@ -1269,17 +1282,25 @@ class OwnerRouteStepsPromptTest(unittest.TestCase):
         args = self.owner(path)
         text = W.assignment_prompt(args, "Fix it", {"AGENT_ARTIFACT_OUTPUT_DIR": self.output_dir})
         self.assertEqual(text.count("Route steps (sealed route rt-steps"), 1)
-        self.assertEqual(text.count("complete --inline"), 1)
+        self.assertEqual(text.count("complete --inline"), 3)
         self.assertNotIn("A declared stage (", text)
         self.assertIn("Assignment:\nFix it\n\n", text)
 
     def test_contract_read_line_points_an_owner_at_the_block(self):
+        owners = []
         for harness in ("claude", "codex", "opencode"):
             owner = W.contract_read_prompt(SimpleNamespace(worker_type="owner", assigned_contract="autopilot-code"), harness)
-            self.assertIn("Route steps carry the exact start commands", owner)
+            owners.append(owner)
+            self.assertIn("capabilities/autopilot-code/references/owner-execution.md", owner)
+            self.assertIn("Route steps and the latest receipt print", owner)
+            self.assertIn("never assemble a runtime command yourself", owner)
+            self.assertNotIn("SKILL.md", owner)
+            self.assertNotIn("OPERATIONS.md", owner)
+            self.assertNotIn("dev-pipeline.md", owner)
             stage = W.contract_read_prompt(SimpleNamespace(worker_type="stage", assigned_contract="autopilot-code",
                                                            completion_gate=None), harness)
             self.assertNotIn("Route steps", stage)
+        self.assertEqual(len(set(owners)), 1)
 
     def test_a_space_in_the_route_path_is_quoted(self):
         command = W.route_start_command("/a b/route.json", "plan")

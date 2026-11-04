@@ -1,5 +1,7 @@
 # autopilot-refine
 
+Read only this file for owner procedure. Run only the runtime commands your Route steps and the latest receipt print; never assemble a runtime command yourself. Read another reference or `core/` only when a receipt or Route step names that section. Named task inputs and artifacts remain inputs to read; policy cross-references below are lookup locations, not additional required reading.
+
 Post-creation refinement entrypoint for existing document and research artifacts. Preserve snapshots and change history while correcting or updating content. This file defines major/minor routing, invocation forms, and stage contracts; load a reference only when its detailed procedure is needed.
 
 > **Output convention**: Follow CONVENTIONS §5 (`<agent-home>/core/CONVENTIONS.md#5-skill-output-convention--t1t2t3`). Store modern document and research snapshots under `_internal/versions/v{N}/`; recognize legacy sibling `_v{N}.md` snapshots when already present. The route write guard and `utilities/artifact-snapshot.py` own version allocation and exact pre-image copying.
@@ -32,7 +34,7 @@ Explicit options override automatic classification:
 - `--review-only` inspects and previews without applying.
 - Explicit `/autopilot-refine` enters the refinement flow; default to `quick` when no intensity is supplied.
 
-Read `versioning-and-modes.md` for the exact minor-log format and major-version behavior.
+Only when a receipt or Route step names it, read `versioning-and-modes.md` for the exact minor-log format and major-version behavior.
 
 ## Verification Rigor
 
@@ -69,7 +71,7 @@ Resolve `<artifact-root>`: CONVENTIONS §5.1 (`<agent-home>/core/CONVENTIONS.md#
 
 ## Process
 
-After artifact resolution, run Stages A-E. Read `process-stages.md` for complete orchestration.
+After artifact resolution, run Stages A-E. Load `process-stages.md` only when a receipt or Route step names it.
 
 1. **Artifact Resolution**: fuzzy-match the target and detect its type.
 2. **Stage A — Discover structure**: inspect the artifact tree, identify `cards/*` for research or `strategy/` and `draft/` for documents, and narrow the affected files with search.
@@ -81,11 +83,11 @@ After artifact resolution, run Stages A-E. Read `process-stages.md` for complete
 
 ## Reference Index
 
-| File | When to load (mandatory) | Content |
+| File | Load policy | Content |
 |---|---|---|
-| `versioning-and-modes.md` | When deciding or executing a major refinement | Minor-log format, major behavior, split rationale, adversarial propagation, default mode forms, STRUCT halt, and tunable constants |
-| `process-stages.md` | During execution (required) | Artifact resolution and complete Stage A-E orchestration, detectors, preview, apply/versioning, and memo form |
-| `examples-and-constraints.md` | For invocation examples, constraints, or post-apply decisions | Examples, prefer-gap-over-wrong-fill constraints, when-not-to-use guidance, and checklist |
+| `versioning-and-modes.md` | Only when a receipt or Route step names it | Minor-log format, major behavior, split rationale, adversarial propagation, default mode forms, STRUCT halt, and tunable constants |
+| `process-stages.md` | Only when a receipt or Route step names it | Artifact resolution and complete Stage A-E orchestration, detectors, preview, apply/versioning, and memo form |
+| `examples-and-constraints.md` | Only when a receipt or Route step names it | Examples, prefer-gap-over-wrong-fill constraints, when-not-to-use guidance, and checklist |
 
 ## Artifact Producer Lifecycle (W7C)
 

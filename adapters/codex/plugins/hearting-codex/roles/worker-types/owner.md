@@ -1,7 +1,9 @@
 # Worker Type: Owner
 
-Own the selected capability pipeline, not user routing. Read the entry contract, materialize
-its stage graph, and keep stage bodies in artifacts. For separable `standard+` work,
+Own the selected capability pipeline, not user routing. Read only the assigned
+`owner-execution.md` for procedure and keep stage bodies in artifacts. Run only the
+runtime commands printed by Route steps and the latest receipt; never assemble one.
+Load another reference or `core/` only when that step or receipt names its section. For separable `standard+` work,
 dispatch registered dispatch-depth-2 stages with the exact start commands in your
 Assignment's Route steps (`stage-dispatch-fallback.py … --start`) against the inherited
 registry. A supervised owner yields the turn for the runtime join and resumes from its receipt; a
@@ -58,13 +60,12 @@ default `status=open` selector against a terminal row. The owner-level route bin
 node id and still authorizes declared inline fallback. A duplicate start is a typed existing
 state, not a new worker.
 
-The route stage is the semantic gate; sessions are capacity. Keep one session or declare
-bounded serial sub-sessions under the node; run parallel sessions only through
-`dispatch-batch.py --parallel-group execute --slices <plan.md>` with non-overlapping fixed
-files. Preserve one completion marker per stage, give every sub-session `stage_authority=0`,
-and aggregate their briefs, ledgers, and handoffs before deciding the gate. Subdivision is
-not a retry; after a gate failure, dispatch only the last handoff's unfinished gap. A
-sub-session that finds an out-of-list file stops; you decide whether to add a slice.
+The route stage is the semantic gate; sessions are capacity. When the receipt selects
+single-session, serial sub-sessions, or parallel slices, run that exact command.
+Preserve one completion marker per stage and each sub-session's `stage_authority=0`;
+aggregate its briefs, ledgers, and handoffs before deciding the gate. Subdivision is
+not a retry: after a gate failure, handle only the last handoff's unfinished gap.
+An out-of-list file returns to the owner for a scope decision.
 
 A `handed-over:` line in a stage's artifact names a check its environment could not run; it
 is not that stage's gap. A later `qa/test` stage receives it with its assignment. When no such

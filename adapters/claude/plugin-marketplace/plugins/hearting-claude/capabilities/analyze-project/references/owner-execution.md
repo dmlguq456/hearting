@@ -1,5 +1,7 @@
 # analyze-project
 
+Read only this file for owner procedure. Run only the runtime commands your Route steps and the latest receipt print; never assemble a runtime command yourself. Read another reference or `core/` only when a receipt or Route step names that section. Named task inputs and artifacts remain inputs to read; policy cross-references below are lookup locations, not additional required reading.
+
 Upfront analysis entrypoint. Structure primary code, paper, and document materials for downstream capabilities such as `autopilot-code`, `autopilot-lab`, `autopilot-draft`, and `autopilot-research`. This file defines routing and mode contracts; load the relevant reference only when its detailed procedure or template is needed.
 
 ## Routing Boundary
@@ -130,12 +132,12 @@ Once the selected mode's analysis directory and QA evidence are durable, evaluat
 
 ## Reference Index
 
-| File | When to load (mandatory) | Content |
+| File | Load policy | Content |
 |---|---|---|
-| `mode-code.md` | When running `--mode code` (required) | Phase 0 incremental/full branch and `_last_run.yaml` schema; Phase 1 codebase analysis; Phase 2 documentation and required Interface Reference sections; Phase 3 project-instruction update; Phase 3.5 templates for the four lab inputs; Phase 4 coverage verification; Phase 5 QA verification |
-| `mode-paper.md` | When running `--mode paper` (required) | Complete `research/research-survey` dispatch prompt: inputs, §0 complete own-paper analysis, §1-6 reference survey, `00_overview_and_constraints.md` structure, and post-analysis steps |
-| `mode-doc.md` | When running `--mode doc` (required) | Phase 1 input-scope resolution and classification heuristics; Phase 2 per-category delegation prompt for reviewers, formats, samples, and miscellaneous input plus `00_overview.md`; Phase 3 verification |
-| `outputs-and-integration.md` | When finalizing output structure or selecting follow-up capabilities | Standard output structure by mode, integration rules for `autopilot-code`, `autopilot-lab`, `autopilot-draft`, and `autopilot-research`, and a typical workflow |
+| `mode-code.md` | Only when a receipt or Route step names it | Phase 0 incremental/full branch and `_last_run.yaml` schema; Phase 1 codebase analysis; Phase 2 documentation and required Interface Reference sections; Phase 3 project-instruction update; Phase 3.5 templates for the four lab inputs; Phase 4 coverage verification; Phase 5 QA verification |
+| `mode-paper.md` | Only when a receipt or Route step names it | Complete `research/research-survey` dispatch prompt: inputs, §0 complete own-paper analysis, §1-6 reference survey, `00_overview_and_constraints.md` structure, and post-analysis steps |
+| `mode-doc.md` | Only when a receipt or Route step names it | Phase 1 input-scope resolution and classification heuristics; Phase 2 per-category delegation prompt for reviewers, formats, samples, and miscellaneous input plus `00_overview.md`; Phase 3 verification |
+| `outputs-and-integration.md` | Only when a receipt or Route step names it | Standard output structure by mode, integration rules for `autopilot-code`, `autopilot-lab`, `autopilot-draft`, and `autopilot-research`, and a typical workflow |
 
 ## Artifact Producer Lifecycle (W7C)
 

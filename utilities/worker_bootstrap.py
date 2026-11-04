@@ -857,16 +857,15 @@ def owner_route_steps_prompt(args, environ) -> str:
         lines.append(f"Start now: `{route_start_command(route_file, first)}`")
     elif ready:
         lines.append("Ready now: " + ", ".join(ready))
-    lines.append("Start each next node the same way (its --node) once every depends_on node is finished; "
+    lines.append("Use each node's printed start command once every depends_on node is finished; "
                  "a start for a node already started or finished returns a typed existing state, so follow its "
-                 "required_action. Optional: add --prompt-file <path> for stage-specific instructions.")
+                 "required_action. Keep stage-specific instructions in named task artifacts.")
     inline_node = first or stages[0]["id"]
     evidence = node_first_evidence(route, inline_node, output_dir)
     lines.append("Run a stage yourself only when its start is refused or returns an inline verdict: write its "
                  "outputs, then publish its marker with "
-                 f"`{inline_complete_command(inline_node, evidence)}` (other nodes: their id and first listed file as "
-                 + ("--evidence" if evidence else "--evidence when the stage produced a cycle file")
-                 + "). Without the marker the route never settles.")
+                 f"`{inline_complete_command(inline_node, evidence)}`. "
+                 "Other stages have their own printed completion command below.")
     lines.append(f"Outputs under {str(output_dir).rstrip('/')}/:" if output_dir else
                  "Outputs (cycle unbound; names are relative to the cycle output directory the runtime binds):")
     for number, node in enumerate(order, 1):
@@ -876,6 +875,20 @@ def owner_route_steps_prompt(args, environ) -> str:
         tags += "" if _dispatchable_stage(node) else " [you run it yourself]"
         outs = ", ".join(str(o) for o in node.get("outputs") or ()) or "-"
         lines.append(f"{number}. {node['id']}{tags} → {outs}")
+        if _dispatchable_stage(node):
+            if node["id"] != first:
+                lines.append(f"   Start: `{route_start_command(route_file, node['id'])}`")
+            if node["id"] != inline_node:
+                evidence = node_first_evidence(route, node["id"], output_dir)
+                lines.append(f"   If run inline: `{inline_complete_command(node['id'], evidence)}`")
+            plan_input = next((name for name in node.get("inputs") or []
+                               if isinstance(name, str) and Path(name).name == "plan.md"), None)
+            if node.get("subdivision") and plan_input and output_dir:
+                plan_path = _resolved_paths(output_dir, [plan_input])[0]
+                command = shlex.join(["python3", str(Path(__file__).with_name("dispatch-batch.py").resolve()),
+                                      "--parallel-group", node["id"], "--slices", plan_path, "--start"])
+                lines.append(f"   If the plan declares slices, use: `{command}`; "
+                             "single-session-required returns to this node's ordinary start command.")
     return "\n".join(lines) + "\n\n"
 
 
@@ -1827,6 +1840,11 @@ def contract_read_prompt(args, harness: str) -> str:
     if args.worker_type == "frame":
         return ("- Your frame unit contract is already included above. Read its named inputs within "
                 "the requested scope; no owner capability Skill or full harness bootstrap is needed.\n")
+    if args.worker_type == "owner":
+        return (f"- Read only `capabilities/{args.assigned_contract}/references/owner-execution.md`. "
+                "Run only the commands your Route steps and the latest receipt print; "
+                "never assemble a runtime command yourself. Read another reference or `core/` "
+                "only when a receipt names that section.\n")
     if harness == "codex":
         line = (f"- Read only $AGENT_HOME/adapters/codex/skills/{args.assigned_contract}/SKILL.md; "
                 "the typed bootstrap above already contains the exact portable unit persona.\n")
@@ -1836,9 +1854,6 @@ def contract_read_prompt(args, harness: str) -> str:
     else:
         line = (f"- Read only the assigned {args.assigned_contract} Skill/mode and named artifact inputs. "
                 "Project instruction auto-load is not treated as physically masked; do not manually load a full harness bootstrap.\n")
-    if args.worker_type == "owner":
-        line += ("- Your Assignment's Route steps carry the exact start commands, output paths, and entry-gate state; "
-                 "consult the contract only for a stage-specific decision they do not answer.\n")
     return line + _report_reference_line(args)
 
 

@@ -119,7 +119,7 @@ This role separation is distinct from the T1/T2/T3 artifact visibility tiers in 
 Primary entry capabilities add a load-phase boundary to that separation. A
 compact pre-approval router exposes only manifest-owned routing metadata and a
 single owner edge. After route approval, the selected capability owner loads
-the portable owner contract and materializes the stage graph; an assigned
+only `capabilities/<entry>/references/owner-execution.md` and follows the printed Route steps; an assigned
 stage worker loads only its stage contract. Parent-invoked and model-support
 Skills are not primary-router candidates.
 
@@ -245,7 +245,7 @@ Efficiency is not corner cutting. Reduce duplicated orchestrator reasoning, not 
   envelope: artifact path, `PASS|FAIL|BLOCKED`, and a one-line blocker. Changed
   files, commands, logs, findings, and reasoning stay in the artifact; worker
   output is a machine handoff, not a user-facing report.
-- At `standard+`, the dispatch-depth-1 owner reads the selected entry contract and
+- At `standard+`, the dispatch-depth-1 owner reads only its `owner-execution.md` reference and
   extends file-only handoff to dispatch-depth-2 stages. Each plan, execute, test, and
   report worker reads only its stage contract and writes a complete artifact
   for the next stage. Main retains route, state, artifact paths, and verdicts;

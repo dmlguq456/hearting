@@ -1,5 +1,7 @@
 # autopilot-ship
 
+Read only this file for owner procedure. Run only the runtime commands your Route steps and the latest receipt print; never assemble a runtime command yourself. Read another reference or `core/` only when a receipt or Route step names that section. Named task inputs and artifacts remain inputs to read; policy cross-references below are lookup locations, not additional required reading.
+
 Select the purpose first: `--mode package` prepares an archive from existing
 artifacts using the package procedure below. Omitted mode or `--mode default`
 keeps the deployment/release procedure and its `spec/ship.md` record. Package
@@ -174,7 +176,7 @@ Review the prepared record and its decisions with the user. They may Continue, R
 
 Report the `spec/ship.md` path, selected shipping path, gate evidence, and the next user-owned action. Keep a success-only report concise.
 
-Read [references/examples.md](examples.md) for initial-setup, environment-update, and domain-connection examples.
+Only when a receipt or Route step names it, read [references/examples.md](examples.md) for initial-setup, environment-update, and domain-connection examples.
 
 ## Task
 
