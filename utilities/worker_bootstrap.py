@@ -862,7 +862,7 @@ def owner_route_steps_prompt(args, environ) -> str:
                  "required_action. Keep stage-specific instructions in named task artifacts.")
     inline_node = first or stages[0]["id"]
     evidence = node_first_evidence(route, inline_node, output_dir)
-    lines.append("Run a stage yourself only when its start is refused or returns an inline verdict: write its "
+    lines.append("Run a stage yourself only when the latest receipt authorizes inline execution: write its "
                  "outputs, then publish its marker with "
                  f"`{inline_complete_command(inline_node, evidence)}`. "
                  "Other stages have their own printed completion command below.")
