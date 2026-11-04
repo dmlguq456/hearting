@@ -3692,13 +3692,13 @@ def _registry_evidence_for_path(path, rows):
             "registry_order": registry_order,
             **attempt_contract,
         }
-    # Account for the lazy string that detail keys will retain too. Once
-    # published, route graphs and their fingerprints are immutable.
-    for evidence in path_result.values():
-        evidence.fingerprint()
     with _PARSED_REGISTRY_CACHE_LOCK:
         native = all(getattr(getattr(fn, '__code__', None), 'co_filename', None) == __file__
                      for fn in functions)
+        if not native:
+            # Exact custom-graph accounting includes its later memoized string.
+            for evidence in path_result.values():
+                evidence.fingerprint()
         weight = _registry_projection_charge(rows, copies=4) if native else None
         _REGISTRY_EVIDENCE_CACHE.remember(key, (rows, functions, path_result, path_attempts), weight=weight)
         if key in _REGISTRY_EVIDENCE_CACHE:
