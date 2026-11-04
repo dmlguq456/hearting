@@ -74,6 +74,7 @@ shared-utility-deferred	retained_review_completion.py
 shared-utility-deferred	review_watchdog.py
 shared-utility-deferred	session_tidy_idle.py
 shared-utility-deferred	session_tidy_policy.py
+shared-utility-deferred	session_card_format.py
 shared-utility-deferred	session_history.py
 shared-utility-deferred	route_parent_close.py
 shared-utility-deferred	route_plan.py

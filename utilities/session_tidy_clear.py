@@ -490,10 +490,15 @@ def validate_idle_request(path, nonce: Optional[str] = None, *, now: Optional[fl
     return req, ""
 
 
-def reply_card_guide(nonce: str, t=None) -> str:
+def reply_card_guide(nonce: str, t=None, context: Optional[dict] = None) -> str:
     t = t or st._ui_translator()
     begin, end = st.reply_card_markers(nonce)
-    return t("tidy.request.card_guide", begin=begin, end=end, fields=" → ".join(st.CARD_FIELDS),
+    context = context or {}
+    guide = st.card_format.writing_guide(
+        role=str(context.get("role") or ""),
+        capability=str(context.get("capability") or ""),
+        cwd=str(context.get("cwd") or ""))
+    return guide + t("tidy.request.card_guide", begin=begin, end=end, fields=" → ".join(st.CARD_FIELDS),
              fixed="·".join(st.CARD_FIXED_FIELDS))
 
 
@@ -526,8 +531,8 @@ def idle_card_request_text(req: dict) -> str:
     t = st._ui_translator()
     nonce = str(req.get("nonce") or "")
     if req.get("origin") == "compact":
-        return t("tidy.request.compact", guide=reply_card_guide(nonce, t), nonce=nonce)
-    return t("tidy.request.idle", terms=idle_tidy_terms(req, t=t), guide=reply_card_guide(nonce, t), nonce=nonce)
+        return t("tidy.request.compact", guide=reply_card_guide(nonce, t, req), nonce=nonce)
+    return t("tidy.request.idle", terms=idle_tidy_terms(req, t=t), guide=reply_card_guide(nonce, t, req), nonce=nonce)
 
 
 def claim_idle_card_request(path, nonce: Optional[str] = None):

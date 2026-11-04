@@ -691,7 +691,7 @@ class CardConsumeTest(TidyCase):
             st.write_notice(seat, "정리 결과: 새 기록 3건. 되돌리기: mem tidy-undo b1", author_harness="claude", author_sid="sid-A")
         got = self.hook("claude", "start", "sid-B")
         self.assertLessEqual(len(got.encode("utf-8")), st.INJECTION_MAX_BYTES)
-        self.assertIn("이하 생략", got)
+        self.assertTrue("이하 생략" in got or "원문 참조:" in got)
         self.assertIn(str(self.state / "cards"), got)
         self.assertIn("[정리 결과]", got)
 
@@ -2459,13 +2459,13 @@ class MemoryLayerTest(TidyCase):
                             got = st.run_hook(harness, "start", receiver, cwd=str(self.cwd))
                             self.assertEqual(got.count(guidance), 1)
                             self.assertIn(guidance, got.splitlines())
-                            self.assertLess(got.index(guidance), got.index("진행 중: 카드 시험"))
+                            self.assertLess(got.index(guidance), got.index("카드 시험"))
                             self.assertIn("카드 전문:", got)
                             self.assertLessEqual(len(got.encode("utf-8")), 2400)
                             replay = self.hook(harness, "prompt", receiver, "--reread", pane=pane)
                             self.assertEqual(replay, got + "\n")
                             self.assertLessEqual(len(replay.encode("utf-8")), 2400)
-                            self.assertEqual("이하 생략" in got, long_body)
+                            self.assertEqual("이하 생략" in got or "원문 참조:" in got, long_body)
                             self.assertEqual("[참고할 기억]" in got, bundled)
                             self.assertEqual(st.run_hook(harness, "prompt", receiver, cwd=str(self.cwd)), "")
                             late_refs = st.update_memory_refs(seat, **self.refs(batch="late-B"))
@@ -3779,8 +3779,8 @@ class TidyOneCallTest(TidyCase):
 
     def test_the_automatic_requests_ask_for_one_marked_reply(self):
         self.assertEqual(st.CARD_FIELDS, (
-            "원래 목표", "진행 중", "기다리는 결정", "다음 할 일", "관련",
-            "사용자 요구 원문 발췌", "요구사항·PRD 위치", "오늘 한 일", "사용자 지시",
+            "원래 목표", "진행 중", "기다리는 결정", "다음 할 일", "관련 세션",
+            "사용자 요구 원문 발췌", "요구사항·PRD 위치",
         ))
         for origin in ("idle", "compact"):
             text = clear.idle_card_request_text({"nonce": "n1", "origin": origin})
@@ -3854,6 +3854,108 @@ class CardContractTest(TidyCase):
             self.assertLessEqual(len(output.encode("utf-8")), 2400)
             self.assertLess(output.index("원래 목표:"), output.index("진행 중:"))
             self.assertIn("다른 지시를 먼저 주면 요약을 생략", output)
+
+    def test_format_uses_confirmed_role_before_route_and_folder(self):
+        choose = st.card_format.select_module
+        self.assertEqual(choose(role="supervisor", capability="autopilot-code",
+                                cwd="/project/research")["id"], "supervision")
+        self.assertEqual(choose(role="publication", capability="autopilot-lab")["id"], "publication")
+        self.assertEqual(choose(capability="autopilot-code", cwd="/project/research")["id"], "code")
+        self.assertEqual(choose(cwd="/project/experiments")["id"], "research")
+        self.assertIsNone(choose(role="unknown", cwd="/project/cairn"))
+        self.assertIsNone(choose(cwd="/project/research/documents"))
+        guide = clear.reply_card_guide("nonce", context={"role": "supervisor", "capability": "autopilot-code"})
+        self.assertIn("supervision:", guide)
+        self.assertNotIn("research:", guide)
+        folder_guide = clear.reply_card_guide("nonce", context={"cwd": "/project/ops"})
+        self.assertIn("Work-folder hint only: operations.", folder_guide)
+        self.assertIn("supervision:", folder_guide)
+        self.assertIn("if unknown, core only", clear.reply_card_guide("nonce"))
+
+    def test_unknown_format_keeps_core_without_inventing_a_module(self):
+        body = "\n".join(f"## {f['label']}\n미확정" for f in st.card_format.policy()["core"])
+        self.card("sid-A", body)
+        latest = json.loads(next((self.state / "cards").glob("*.json")).read_text())
+        self.assertEqual(latest["body"], body)
+        for module in st.card_format.policy()["modules"]:
+            self.assertNotIn("## " + module["label"], latest["body"])
+
+    def test_overflow_keeps_core_and_whole_korean_lines_with_full_history(self):
+        quote = '[2026-11-04] "긴 원문과 의미를 그대로 보존한다"'
+        long_path = "/원래/자료/" + "아주긴경로/" * 1300 + "final.json"
+        original = ("## 원래 목표\n" + "긴목표" * 5000 + "\n"
+                    "## 진행 중\n결과 확인\n## 기다리는 결정\n없음\n"
+                    "## 다음 할 일\n원본 읽기\n## 관련 세션\n미확인\n"
+                    "## 연구·실험\n" + long_path + "\n"
+                    "## 사용자 요구 원문 발췌\n" + quote + "\n"
+                    "## 요구사항·PRD 위치\n" + long_path)
+        self.card("sid-A", original)
+        latest_path = next((self.state / "cards").glob("*.json"))
+        latest = json.loads(latest_path.read_text())
+        bounded = latest["body"]
+        self.assertLessEqual(len(bounded.encode()), 8192)
+        self.assert_fields_in_order(bounded, st.CARD_FIELDS)
+        for f in st.CARD_FIELDS:
+            self.assertIn("## " + f + "\n", bounded)
+        self.assertIn(quote, bounded)
+        self.assertIn("## 연구·실험\n", bounded)
+        source = Path(latest["source_history"])
+        self.assertEqual(source.parent.parent, self.state / "card-history")
+        self.assertEqual(json.loads(source.read_text())["body"], original)
+        self.assertIn(str(source), bounded)
+        # The oversized path exists verbatim in history, never as a broken prefix.
+        self.assertNotIn("/원래/자료/", bounded)
+        self.card("sid-A", "진행 중: 다음 카드")
+        self.assertEqual(json.loads(source.read_text())["body"], original)
+
+    def test_overflow_uses_complete_sections_then_line_boundaries(self):
+        lines = ["- 실제 결과 경로 /자료/실험/결과-%03d.json" % i for i in range(300)]
+        original = ("## 원래 목표\n원래 목표 원문\n## 진행 중\n" + "\n".join(lines) +
+                    "\n## 기다리는 결정\n없음\n## 다음 할 일\n실패 결과 확인\n"
+                    "## 관련\n옛 칸 이름도 읽음\n## 사용자 지시\n미해결 제한 보존")
+        self.card("sid-A", original)
+        latest = json.loads(next((self.state / "cards").glob("*.json")).read_text())
+        self.assertLessEqual(len(latest["body"].encode()), 8192)
+        for line in latest["body"].splitlines():
+            if line.startswith("- 실제"):
+                self.assertIn(line, lines)
+        self.assertIn("## 관련 세션\n옛 칸 이름도 읽음", latest["body"])
+        self.assertEqual(json.loads(Path(latest["source_history"]).read_text())["body"], original)
+
+    def test_overflow_repeated_modules_do_not_displace_the_core(self):
+        body = "原文" + ("\n## research\nmetric 1, path /data/result.json" * 1000)
+        bounded = st.card_format.bounded_body(body, 8192, "/history/00000001.json")
+        self.assertLessEqual(len(bounded.encode()), 8192)
+        self.assertEqual(bounded.count("## research\n"), 1)
+        for f in st.card_format.policy()["core"]:
+            self.assertIn("## " + f["aliases"][0] + "\n", bounded)
+
+    def test_quoted_markdown_headings_are_not_card_sections(self):
+        quoted = "```markdown\n## 진행 중\n사용자가 인용한 예시\n```"
+        text = "## 진행 중\n실제 현재 상태\n## 사용자 요구 원문 발췌\n" + quoted
+        parsed = st.card_format._sections(text)
+        self.assertEqual([p[2] for p in parsed if p[0] == "in_progress"], ["실제 현재 상태"])
+        self.assertEqual([p[2] for p in parsed if p[0] == "user_request_quote"], [quoted])
+
+    def test_overflow_history_failure_preserves_latest_card(self):
+        self.card("sid-A", "진행 중: 유지할 카드")
+        latest_path = next((self.state / "cards").glob("*.json"))
+        previous = latest_path.read_bytes()
+        card = json.loads(previous)
+        seat = st.Seat(**{k:v for k,v in card["seat"].items() if k in st.Seat.__dataclass_fields__})
+        with self.library(), mock.patch.object(st, "atomic_write_json", side_effect=OSError("no space")):
+            with self.assertRaises(OSError):
+                st.write_card(seat, "claude", "sid-A", "원문" * 10000, cwd=str(self.cwd))
+        self.assertEqual(latest_path.read_bytes(), previous)
+
+    def test_injection_never_cuts_an_oversized_quote_or_path_line(self):
+        card = {"body": "## 원래 목표\n" + "/한국어/원문/" * 1000 + "file.json\n## 진행 중\n대기",
+                "authored_at_epoch": 1}
+        injection = st.build_card_injection(card, Path("/cards/full.md"), 2, 2400)
+        self.assertLessEqual(len(injection.encode()), 2400)
+        self.assertIn("/cards/full.md", injection)
+        self.assertEqual(st.card_format.complete_lines("  /path/with a space \nnext", 24), "  /path/with a space ")
+        self.assertNotIn("/한국어/원문/", injection)
 
     def test_two_card_generations_preserve_fixed_fields_quotes_and_prd_location(self):
         gen0 = (
