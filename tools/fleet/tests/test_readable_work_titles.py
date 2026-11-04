@@ -18,6 +18,21 @@ ROOT = 'root_' + 'c' * 32
 
 
 class WorkTitlesTest(unittest.TestCase):
+    def test_legacy_title_is_observed_once_per_pass_and_reader(self):
+        value=['original']
+        reader=mock.Mock(side_effect=lambda root,campaign:(value[0],False))
+        with dispatch.collection_read_scope():
+            self.assertEqual(dispatch._observed_legacy_campaign_title('/root','camp',reader),'original')
+            value[0]='updated'
+            self.assertEqual(dispatch._observed_legacy_campaign_title('/root','camp',reader),'original')
+            reader.assert_called_once()
+            other=mock.Mock(return_value=('other-reader',False))
+            self.assertEqual(dispatch._observed_legacy_campaign_title('/root','camp',other),'other-reader')
+        with dispatch.collection_read_scope():
+            self.assertEqual(dispatch._observed_legacy_campaign_title('/root','camp',reader),'updated')
+        value[0]='standalone'
+        self.assertEqual(dispatch._observed_legacy_campaign_title('/root','camp',reader),'standalone')
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

@@ -5286,6 +5286,12 @@ _CYCLE_RECORD_CACHE = {}         # path -> (stat stamp, parsed cycle record or N
 _TITLE_VALIDATION_CACHE = None
 
 
+@observe_once(immutable=True)
+def _observed_legacy_campaign_title(root, campaign, reader):
+    """Many cycle labels share one current legacy declaration in this pass."""
+    return reader(root, campaign)[0]
+
+
 def _read_cycle_record(path):
     try:
         with open(path, encoding="utf-8") as fh:
