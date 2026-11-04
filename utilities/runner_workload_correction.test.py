@@ -28,6 +28,7 @@ import dispatch_pending_delivery  # noqa: E402
 import peer_obligations  # noqa: E402
 from dispatch_contract import process_namespace_identity  # noqa: E402
 from peer_read_context import PeerReadContext  # noqa: E402
+from split_module_fixture import patch_split  # noqa: E402
 
 _STEWARD_SPEC = importlib.util.spec_from_file_location(
     "runner_workload_correction_peer_steward", ROOT / "utilities/peer-steward.py")
@@ -1085,7 +1086,7 @@ class RunnerWorkloadCorrectionTest(unittest.TestCase):
                 patchers = (
                     mock.patch.object(peer_message, "steward_marker_roots", side_effect=checked_roots),
                     mock.patch.object(peer_message, "peer_state_root", side_effect=checked_state_root),
-                    mock.patch.object(peer_steward, "_watch_root", side_effect=checked_watch_root),
+                    patch_split(peer_steward, "_watch_root", side_effect=checked_watch_root),
                     mock.patch.object(dispatch_batch_obligations, "_jobs_paths",
                                       side_effect=checked_jobs_paths),
                     mock.patch.object(dispatch_batch_obligations, "_observer_root",

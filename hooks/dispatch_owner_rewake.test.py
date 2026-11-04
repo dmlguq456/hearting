@@ -2381,7 +2381,7 @@ class CarrierOneClaimGateTest(unittest.TestCase):
             if changed_pane:
                 # The real courier must refuse before sealing any payload if
                 # its own target read no longer matches the retained identity.
-                with mock.patch.object(steward, "_herdr_missing", return_value=False), \
+                with patch_split(steward, "_herdr_missing", return_value=False), \
                         mock.patch.object(steward, "_resolve_prompt_target", return_value=({
                             "harness": "claude", "session_id": "stranger", "pane": "w1:p9",
                             "name": "stranger", "state": "idle"}, None, ["w1:p9"])), \

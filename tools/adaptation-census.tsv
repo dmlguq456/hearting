@@ -276,6 +276,11 @@ utility-deferred	parent_next_directive.py
 utility-deferred	preflight-doctor-cause.sh
 utility-deferred	peer-message.py
 utility-deferred	peer-steward.py
+utility-deferred	peer_steward_base.py
+utility-deferred	peer_steward_duties.py
+utility-deferred	peer_steward_native.py
+utility-deferred	peer_steward_status.py
+utility-deferred	peer_steward_watch.py
 utility-deferred	peer_obligations.py
 utility-deferred	peer_read_context.py
 utility-deferred	registered_parent_park.test.py
