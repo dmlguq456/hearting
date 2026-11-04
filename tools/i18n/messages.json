@@ -782,6 +782,34 @@
    "en": "current-session (tier not recorded)",
    "ko": "current-session(등급 미기록)"
   },
+  "tidy.ago.day": {
+   "en": "{count} day ago",
+   "ko": "{count}일 전"
+  },
+  "tidy.ago.days": {
+   "en": "{count} days ago",
+   "ko": "{count}일 전"
+  },
+  "tidy.ago.hour": {
+   "en": "{count} hour ago",
+   "ko": "{count}시간 전"
+  },
+  "tidy.ago.hours": {
+   "en": "{count} hours ago",
+   "ko": "{count}시간 전"
+  },
+  "tidy.ago.minute": {
+   "en": "{count} minute ago",
+   "ko": "{count}분 전"
+  },
+  "tidy.ago.minutes": {
+   "en": "{count} minutes ago",
+   "ko": "{count}분 전"
+  },
+  "tidy.ago.now": {
+   "en": "just now",
+   "ko": "방금"
+  },
   "tidy.apply.added": {
    "en": "added {count}",
    "ko": "추가 {count}"
@@ -829,6 +857,386 @@
   "tidy.apply.updated": {
    "en": "updated {count}",
    "ko": "갱신 {count}"
+  },
+  "tidy.card.cut": {
+   "en": "…(rest omitted)",
+   "ko": "…(이하 생략)"
+  },
+  "tidy.card.first_reply": {
+   "en": "[First reply] At the very start of the first reply that continues from this card, before any tool call, show once a summary of about five lines in the user's language under three headings: what was being done · what remains · what comes next; then continue. If the user gives another instruction before saying to continue, skip the summary and follow only that instruction. In the summary, give each item's source description and distinguishing condition first, then its original number. Before the first real work, reread the card's {fields} and the PRD section they point to. Keep unfinished and interrupted states with their next action, and do not guess identifiers whose meaning is not confirmed.",
+   "ko": "[첫 답] 이 카드로 이어받은 첫 답 맨 앞에, 도구 호출 전에, 사용자의 언어로 '하던 일 · 남은 일 · 다음 할 일' 세 머리말을 써서 5줄 안팎 요약을 한 번 보여 준 뒤 이어서 하세요. 사용자가 이어서하기 대신 다른 지시를 먼저 주면 요약을 생략하고 그 지시만 따르세요. 요약에는 대상의 원천 설명과 구별 조건을 먼저 쓰고 원래 번호를 덧붙이세요. 첫 실작업 전에 카드의 {fields}와 그 칸이 가리키는 PRD 절을 다시 읽으세요. 미완료·중단 상태와 다음 행동을 유지하고, 뜻이 확인되지 않은 식별자는 추측하지 마세요."
+  },
+  "tidy.card.full_card": {
+   "en": "Full card: {path}",
+   "ko": "카드 전문: {path}"
+  },
+  "tidy.card.path_omitted": {
+   "en": "path omitted",
+   "ko": "경로 생략"
+  },
+  "tidy.card.prefix": {
+   "en": "[Session card] Work card handed on in this seat — written {stamp} ({ago})",
+   "ko": "[세션 카드] 같은 자리에서 이어받는 작업 카드 — 작성 {stamp} ({ago})"
+  },
+  "tidy.card.previous": {
+   "en": "Earlier conversation: {harness} {sid} · transcript {detail}",
+   "ko": "이전 대화: {harness} {sid} · 원문 {detail}"
+  },
+  "tidy.card.transcript_none": {
+   "en": "none",
+   "ko": "없음"
+  },
+  "tidy.card.transcript_unreadable": {
+   "en": "unreadable",
+   "ko": "읽기 불가"
+  },
+  "tidy.clear.auto_unverified": {
+   "en": "[tidy] The automatic tidy's window switch was not confirmed.",
+   "ko": "[정리] 자동 정리의 창 전환을 확인하지 못했습니다."
+  },
+  "tidy.clear.compact_failed": {
+   "en": "[tidy] Background agents were running, so the tidy tried /compact, but it failed ({why}). Run /compact if needed (or /clear once all agents are done).{kept}",
+   "ko": "[정리] 백그라운드 에이전트가 있어 /compact로 정리하려 했지만 실패했습니다({why}). 필요하면 /compact 하세요(에이전트가 모두 끝난 뒤라면 /clear도 됩니다).{kept}"
+  },
+  "tidy.clear.compact_skipped": {
+   "en": "[tidy] Background agents were running, so the tidy was to use /compact, but it did not ({why}). Run /compact if needed (or /clear once all agents are done).{kept}",
+   "ko": "[정리] 백그라운드 에이전트가 있어 /compact로 정리하려 했지만 하지 않았습니다({why}). 필요하면 /compact 하세요(에이전트가 모두 끝난 뒤라면 /clear도 됩니다).{kept}"
+  },
+  "tidy.clear.compact_unverified": {
+   "en": "[tidy] Background agents were running, so /compact was sent, but the compaction was not confirmed. Check the window and run /compact if it did not compact.{kept}",
+   "ko": "[정리] 백그라운드 에이전트가 있어 /compact를 보냈지만 압축을 확인하지 못했습니다. 창 상태를 확인하고 압축되지 않았으면 /compact 하세요.{kept}"
+  },
+  "tidy.clear.failed": {
+   "en": "[tidy] Clearing the window failed ({why}). Run {hint} if needed.{kept}",
+   "ko": "[정리] 창 비우기에 실패했습니다({why}). 필요하면 {hint} 하세요.{kept}"
+  },
+  "tidy.clear.idle_not_sent": {
+   "en": "[tidy] The automatic idle tidy request was not sent ({why}). Nothing was typed into this window; it is tried again after the next input from a person once the conditions hold. {terms}",
+   "ko": "[정리] 자동 유휴 정리 요청을 보내지 않았습니다({why}). 이 창에는 아무것도 입력하지 않았고, 다음 사람 입력 뒤 조건이 맞으면 다시 시도합니다. {terms}"
+  },
+  "tidy.clear.idle_sent_unverified": {
+   "en": "[tidy] The automatic idle tidy request was sent, but the window switch was not confirmed ({why}). {terms}",
+   "ko": "[정리] 자동 유휴 정리 요청은 보냈지만 창 전환을 확인하지 못했습니다({why}). {terms}"
+  },
+  "tidy.clear.kept": {
+   "en": " The card is saved; after {hint} the new window receives it.",
+   "ko": " 카드는 저장돼 있어 {hint} 하면 새 창이 카드를 받습니다."
+  },
+  "tidy.clear.kept_compact": {
+   "en": " The card is saved; this session receives it after the compaction.",
+   "ko": " 카드는 저장돼 있어 압축 뒤 이 세션이 받습니다."
+  },
+  "tidy.clear.skipped": {
+   "en": "[tidy] The window was not cleared automatically ({why}). Run {hint} if needed.{kept}",
+   "ko": "[정리] 창을 자동으로 비우지 않았습니다({why}). 필요하면 {hint} 하세요.{kept}"
+  },
+  "tidy.clear.unverified": {
+   "en": "[tidy] Clearing the window was requested, but its result was not confirmed. Check the window and run {hint} if needed.{kept}",
+   "ko": "[정리] 창 비우기를 요청했지만 결과를 확인하지 못했습니다. 창 상태를 확인하고 필요하면 {hint} 하세요.{kept}"
+  },
+  "tidy.compact.after": {
+   "en": "[Conversation after the compaction]",
+   "ko": "[압축 뒤 이어진 대화]"
+  },
+  "tidy.compact.caution": {
+   "en": "Recent conversation this summary did not see may exist. Check before you continue.",
+   "ko": "이 요약이 보지 못한 최근 대화가 있을 수 있습니다. 이어서 진행하기 전에 확인하세요."
+  },
+  "tidy.compact.last_reply": {
+   "en": "Last reply before the compaction ({when}): {line}",
+   "ko": "압축 직전 마지막 답 ({when}): {line}"
+  },
+  "tidy.compact.no_source": {
+   "en": "The original conversation record's path is not known.",
+   "ko": "원본 대화 기록 경로를 확인할 수 없습니다."
+  },
+  "tidy.compact.no_time": {
+   "en": "time unknown",
+   "ko": "시각 미상"
+  },
+  "tidy.compact.partial": {
+   "en": "[Only part of the recent conversation was kept; check the original record.]",
+   "ko": "[최근 대화의 일부만 보존됨; 원본 기록을 확인하세요.]"
+  },
+  "tidy.compact.preserved": {
+   "en": "[Conversation kept as is after the summary]",
+   "ko": "[요약 뒤 그대로 남은 대화]"
+  },
+  "tidy.compact.reply_first": {
+   "en": "Give the last reply above and the conversation kept after the summary priority over what the summary says was not yet delivered or finished.",
+   "ko": "위 마지막 답과 요약 뒤 그대로 남은 대화를 요약의 미전달·미완료 서술보다 우선하세요."
+  },
+  "tidy.compact.source": {
+   "en": "Original conversation record: {source}",
+   "ko": "원본 대화 기록: {source}"
+  },
+  "tidy.continue.failed": {
+   "en": "[tidy] The window was cleared, but {said} could not be typed ({why}). To continue, type {said}.",
+   "ko": "[정리] 창은 비웠지만 {said}를 넣지 못했습니다({why}). 이어서 하려면 {said}라고 입력하세요."
+  },
+  "tidy.continue.not_idle": {
+   "en": "the new session did not start waiting for input",
+   "ko": "새 세션이 입력 대기 상태가 되지 않았습니다"
+  },
+  "tidy.continue.skipped": {
+   "en": "[tidy] The window was cleared, but {said} was not typed ({why}). To continue, type {said}.",
+   "ko": "[정리] 창은 비웠지만 {said}를 넣지 않았습니다({why}). 이어서 하려면 {said}라고 입력하세요."
+  },
+  "tidy.continue.status_unverified": {
+   "en": "[tidy] The automatic status summary was not confirmed. Waiting for the next input.",
+   "ko": "[정리] 자동 현황 안내를 확인하지 못했습니다. 다음 입력을 기다립니다."
+  },
+  "tidy.continue.unverified": {
+   "en": "[tidy] {said} was typed into the new session, but its delivery was not confirmed. If nothing happened, type {said}.",
+   "ko": "[정리] 새 세션에 {said}를 넣었지만 전달을 확인하지 못했습니다. 진행되지 않았다면 {said}라고 입력하세요."
+  },
+  "tidy.history.available": {
+   "en": "transcript available",
+   "ko": "원문 있음"
+  },
+  "tidy.history.missing": {
+   "en": "no transcript",
+   "ko": "원문 없음"
+  },
+  "tidy.history.open": {
+   "en": "Open the earlier conversation: {action} · {harness} {sid} · {availability}",
+   "ko": "이전 대화 열기: {action} · {harness} {sid} · {availability}"
+  },
+  "tidy.history.unreadable": {
+   "en": "transcript unreadable",
+   "ko": "원문 읽기 불가"
+  },
+  "tidy.hold.agent-not-found": {
+   "en": "the window was not found",
+   "ko": "창을 찾지 못했습니다"
+  },
+  "tidy.hold.arrival-not-observed": {
+   "en": "it was not confirmed that the command arrived",
+   "ko": "명령이 도착했는지 확인하지 못했습니다"
+  },
+  "tidy.hold.card-changed": {
+   "en": "the card was written again",
+   "ko": "카드가 다시 쓰였습니다"
+  },
+  "tidy.hold.card-not-delivered": {
+   "en": "the new session did not receive the card",
+   "ko": "새 세션이 카드를 받지 못했습니다"
+  },
+  "tidy.hold.card-taken": {
+   "en": "the card was already handed to another session",
+   "ko": "카드가 이미 다른 세션에 전달됐습니다"
+  },
+  "tidy.hold.clear-in-flight": {
+   "en": "a window clear is already being sent",
+   "ko": "이미 창 비우기를 전송 중입니다"
+  },
+  "tidy.hold.compact-timeout": {
+   "en": "it was not confirmed within 3 hours that the work after the compaction finished",
+   "ko": "압축 뒤 작업이 끝났는지 3시간 안에 확인되지 않았습니다"
+  },
+  "tidy.hold.draft": {
+   "en": "the input box holds unsent text",
+   "ko": "입력창에 쓰던 글이 있습니다"
+  },
+  "tidy.hold.draft-unknown": {
+   "en": "it is not known whether the input box is empty",
+   "ko": "입력창이 비어 있는지 알 수 없습니다"
+  },
+  "tidy.hold.expired": {
+   "en": "the booked time passed",
+   "ko": "예약 시간이 지났습니다"
+  },
+  "tidy.hold.form-open": {
+   "en": "a choice or confirmation dialog is open",
+   "ko": "선택·확인 창이 열려 있습니다"
+  },
+  "tidy.hold.herdr-not-found": {
+   "en": "herdr was not found",
+   "ko": "herdr를 찾지 못했습니다"
+  },
+  "tidy.hold.idle-card-not-accepted": {
+   "en": "the idle tidy card was not accepted",
+   "ko": "유휴 정리 카드를 접수하지 못했습니다"
+  },
+  "tidy.hold.native-attach-unavailable": {
+   "en": "the session's own connection could not be opened",
+   "ko": "세션 전용 연결을 열지 못했습니다"
+  },
+  "tidy.hold.new-input": {
+   "en": "there was new input",
+   "ko": "새 입력이 있었습니다"
+  },
+  "tidy.hold.new-session-unknown": {
+   "en": "the new session could not be confirmed",
+   "ko": "새 세션을 확인하지 못했습니다"
+  },
+  "tidy.hold.not-idle-native": {
+   "en": "the session is not waiting for input",
+   "ko": "세션이 입력 대기 상태가 아닙니다"
+  },
+  "tidy.hold.pane-in-mode": {
+   "en": "the window is in tmux copy or selection mode",
+   "ko": "창이 tmux 복사·선택 모드에 있습니다"
+  },
+  "tidy.hold.pane-input-off": {
+   "en": "the window's tmux input is off",
+   "ko": "창의 tmux 입력이 꺼져 있습니다"
+  },
+  "tidy.hold.pane-synchronized": {
+   "en": "the window has tmux synchronized input (synchronize-panes) on",
+   "ko": "창이 tmux 동시 입력(synchronize-panes) 상태입니다"
+  },
+  "tidy.hold.partial-send": {
+   "en": "it was not confirmed that the command was typed in full",
+   "ko": "명령 입력이 끝났는지 확인하지 못했습니다"
+  },
+  "tidy.hold.screen-unknown": {
+   "en": "the screen could not be read",
+   "ko": "화면을 읽지 못했습니다"
+  },
+  "tidy.hold.target-changed": {
+   "en": "the session in that seat changed",
+   "ko": "그 자리의 세션이 바뀌었습니다"
+  },
+  "tidy.hold.timeout": {
+   "en": "the window did not wait for input within 10 minutes",
+   "ko": "10분 안에 입력 대기 상태가 되지 않았습니다"
+  },
+  "tidy.hold.unknown": {
+   "en": "reason unknown",
+   "ko": "알 수 없음"
+  },
+  "tidy.hold.usage-unknown": {
+   "en": "the current input tokens could not be read",
+   "ko": "현재 입력 토큰을 확인하지 못했습니다"
+  },
+  "tidy.idle.off": {
+   "en": "To turn it off, put {{\"idle\": {{\"enabled\": false}}}} in {path}.",
+   "ko": "끄려면 {path}에 {{\"idle\": {{\"enabled\": false}}}}를 두세요."
+  },
+  "tidy.idle.request": {
+   "en": "This request is sent {when}. Once the card arrives, this window is cleared and only a short status is shown. {off}",
+   "ko": "{when} 이 요청을 보냅니다. 카드를 받으면 이 창을 비우고 현황만 짧게 보여 줍니다. {off}"
+  },
+  "tidy.idle.request_claude": {
+   "en": "This request is sent {when}. Once the card arrives, this window is cleared (with /compact instead of /clear while background agents run) and only a short status is shown. {off}",
+   "ko": "{when} 이 요청을 보냅니다. 카드를 받으면 이 창을 비우고(백그라운드 에이전트가 있으면 /clear 대신 /compact) 현황만 짧게 보여 줍니다. {off}"
+  },
+  "tidy.idle.result": {
+   "en": "Automatic idle tidy runs {when}. {off}",
+   "ko": "자동 유휴 정리는 {when} 동작합니다. {off}"
+  },
+  "tidy.idle.result_claude": {
+   "en": "Automatic idle tidy runs {when}; while background agents run it compacts with /compact instead of clearing the window. {off}",
+   "ko": "자동 유휴 정리는 {when} 동작하고, 백그라운드 에이전트가 있으면 창을 비우는 대신 /compact로 압축합니다. {off}"
+  },
+  "tidy.idle.wait_minute": {
+   "en": "about {count} minute",
+   "ko": "약 {count}분"
+  },
+  "tidy.idle.wait_minutes": {
+   "en": "about {count} minutes",
+   "ko": "약 {count}분"
+  },
+  "tidy.idle.when": {
+   "en": "only when the last request's input is at least {amount} tokens, the turn ended {wait} ago with no input from a person since, the screen is idle, the input box is empty and no question or confirmation dialog is open",
+   "ko": "마지막 요청 입력이 {amount} 토큰 이상이고, 턴이 끝난 뒤 사람 입력 없이 {wait}이 지났고, 화면이 쉬는 중이며 입력창이 비어 있고 질문·확인 창이 열려 있지 않을 때만"
+  },
+  "tidy.idle_wait.draft": {
+   "en": "the input box held unsent text",
+   "ko": "입력창에 쓰던 글이 있었습니다"
+  },
+  "tidy.idle_wait.draft-unknown": {
+   "en": "it was not known whether the input box was empty",
+   "ko": "입력창이 비어 있는지 알 수 없었습니다"
+  },
+  "tidy.idle_wait.expired": {
+   "en": "no moment to send it came within the booked time",
+   "ko": "보낼 수 있는 때가 예약 시간 안에 오지 않았습니다"
+  },
+  "tidy.idle_wait.form-open": {
+   "en": "a question or confirmation dialog was open",
+   "ko": "질문·확인 창이 열려 있었습니다"
+  },
+  "tidy.idle_wait.not_idle": {
+   "en": "the screen was not idle",
+   "ko": "화면이 쉬는 중이 아니었습니다"
+  },
+  "tidy.idle_wait.screen-unknown": {
+   "en": "the screen could not be read",
+   "ko": "화면을 읽지 못했습니다"
+  },
+  "tidy.notice.result": {
+   "en": "[tidy result] {text}",
+   "ko": "[정리 결과] {text}"
+  },
+  "tidy.request.card_guide": {
+   "en": "Use no Skill, instructions or tools, and finish in a single reply. Make its first line exactly {begin} and its last line exactly {end}; between them write the card body in the user's language, within 90 lines, in this order: {fields}. Carry the previous card's {fixed} forward as they are; do not summarize them again. Keep dated quotes of the user's own words, and append new material without summarizing it again. Remove only items the user replaced. Reread the whole card and the PRD before real work. When an existing field such as related names a session, record its confirmed Fleet number together with the observed pane and the full native SID, and leave an unknown number, pane or SID as unconfirmed. When the turn ends, Hearting saves this reply as the card and queues the memory tidy. ",
+   "ko": "Skill·지침·도구를 쓰지 말고 답 하나로 끝내세요. 답의 첫 줄은 정확히 {begin}, 마지막 줄은 정확히 {end} 로 쓰고, 그 사이에 카드 본문을 다음 순서로 사용자의 언어로 90줄 이내로 씁니다: {fields}. 이전 카드의 {fixed}은 다시 요약하지 말고 그대로 이어받으세요. 날짜 있는 사용자 원문 인용을 보존하고, 새 내용은 다시 요약하지 말고 이어 붙이세요. 사용자가 대체한 항목만 제거하세요. 실제 작업 전에 카드 전체와 PRD를 다시 읽으세요. 관련 등 기존 칸에서 세션을 적을 때 확정 Fleet 번호와 관측 pane·전체 native SID를 함께 남기고, 모르는 번호·pane·SID는 미확인으로 두세요. 턴이 끝나면 하팅이 이 답을 카드로 저장하고 기억 정리를 접수합니다. "
+  },
+  "tidy.request.compact": {
+   "en": "This is a card request after an automatic compaction. Write the session-tidy card from this conversation only. {guide}Do not write an empty summary or start the next task. When this request is done, the booked steps take care of clearing the window and continuing. Request id: {nonce}",
+   "ko": "자동 압축 뒤 카드 작성 요청입니다. 지금까지의 이 대화만 바탕으로 session-tidy 카드를 쓰세요. {guide}빈 요약을 만들거나 다음 작업을 시작하지 마세요. 이 요청이 끝나면 창 비우기와 이어서하기는 예약된 기존 절차가 처리합니다. 요청 식별자: {nonce}"
+  },
+  "tidy.request.idle": {
+   "en": "This is an automatic idle tidy request. {terms} Write the session-tidy card from this conversation only. {guide}Do not start or continue other work; when the reply is done, wait for the next input. Request id: {nonce}",
+   "ko": "자동 유휴 정리 요청입니다. {terms} 지금까지의 이 대화만 바탕으로 session-tidy 카드를 쓰세요. {guide}별도 작업을 시작하거나 이어서 하지 말고, 답을 마치면 다음 입력을 기다리세요. 요청 식별자: {nonce}"
+  },
+  "tidy.runner.done": {
+   "en": "tidy finished.",
+   "ko": "정리를 마쳤습니다."
+  },
+  "tidy.runner.landed": {
+   "en": "{count} applied",
+   "ko": "{count}건 반영"
+  },
+  "tidy.runner.landed_unconfirmed": {
+   "en": ", {count} not confirmed",
+   "ko": ", {count}건은 반영 여부 불명"
+  },
+  "tidy.runner.landed_unknown": {
+   "en": "whether anything landed is not confirmed",
+   "ko": "반영 여부를 확인하지 못했습니다"
+  },
+  "tidy.runner.not_finished": {
+   "en": "[tidy] The memory tidy did not finish. The card and existing memory are unchanged, and it continues in the next tidy. (reason: {reason})",
+   "ko": "[정리] 기억 정리를 끝내지 못했습니다. 카드와 기존 기억은 그대로이고 다음 정리 때 이어서 처리됩니다. (사유: {reason})"
+  },
+  "tidy.runner.nothing_in_range": {
+   "en": "[tidy] Nothing to tidy in the part that was read · {note}",
+   "ko": "[정리] 읽은 범위에는 정리할 대화가 없었습니다 · {note}"
+  },
+  "tidy.runner.nothing_new": {
+   "en": "[tidy] No new conversation to tidy.",
+   "ko": "[정리] 새로 정리할 대화가 없습니다."
+  },
+  "tidy.runner.over_limit": {
+   "en": "proposals over the limit are looked at again in the next tidy",
+   "ko": "상한을 넘은 제안은 다음 정리에서 다시 봅니다"
+  },
+  "tidy.runner.partial": {
+   "en": "partly read ({why}{coverage}){more} — the earlier part continues in the next tidy",
+   "ko": "일부만 읽음({why}{coverage}){more} — 앞부분은 다음 정리에서 계속"
+  },
+  "tidy.runner.partial_blocked": {
+   "en": "up to the open question, ",
+   "ko": "열린 질문 앞까지, "
+  },
+  "tidy.runner.partial_more": {
+   "en": " · other records also partly read: {count}",
+   "ko": " 외 기록 {count}개도 일부만 읽음"
+  },
+  "tidy.runner.still_working": {
+   "en": "Previous session still working: {harness} {sid} is still doing its work. The old window closes once that work ends.",
+   "ko": "앞 세션 작업 중: {harness} {sid}는 아직 하던 일을 진행 중입니다. 옛 창은 그 일이 끝난 뒤 닫힙니다."
+  },
+  "tidy.runner.stopped": {
+   "en": "[tidy] The memory tidy stopped partway ({landed}). The rest continues in the next tidy. (reason: {reason}) — undo: mem tidy-undo {batch}",
+   "ko": "[정리] 기억 정리가 중간에 멈췄습니다({landed}). 나머지는 다음 정리 때 이어서 처리됩니다. (사유: {reason}) — 되돌리기: mem tidy-undo {batch}"
+  },
+  "tidy.runner.unreadable": {
+   "en": "could not read the conversation record ({reason})",
+   "ko": "대화 기록을 읽지 못했습니다({reason})"
   },
   "tidy.say.accepted": {
    "en": "The card and memory tidy are accepted. The window-clear result will be reported in one line on your next input.",

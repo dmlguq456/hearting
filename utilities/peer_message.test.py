@@ -4378,6 +4378,7 @@ class SupervisedHandoffTest(_TmpRootMixin, unittest.TestCase):
                          ("claude", "predecessor"))
         self.assertEqual(row["handoff"]["target"], "w1:p1")
 
+    @mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"})   # Korean card words
     def test_missing_card_with_a_transcript_seals_the_previous_conversation_line(self):
         self._register_job()
         self._advance(2)
@@ -4398,6 +4399,7 @@ class SupervisedHandoffTest(_TmpRootMixin, unittest.TestCase):
         self.assertEqual(code, 0, accepted)
         self.assertIn("retire=reserved", accepted)
 
+    @mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"})   # Korean card words
     def test_stale_card_with_a_transcript_keeps_the_old_body_and_seals_at_the_frontier(self):
         self._register_job()
         card = self._write_source_card("진행 중: 오래된 카드", prompt_seq=0)
@@ -4481,6 +4483,7 @@ class SupervisedHandoffTest(_TmpRootMixin, unittest.TestCase):
         self.assertEqual(self._pending_count(), before_pending)
         self.assertEqual(self.store.list(), before_duties)
 
+    @mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"})   # Korean card words
     def test_working_source_is_handed_over_immediately_with_the_working_line(self):
         self._register_job()
         self.states["w1:p1"] = "working"

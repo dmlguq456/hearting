@@ -149,6 +149,7 @@ class IdleObserverTests(unittest.TestCase):
         self.assertIn("아무것도 입력하지 않았고", text)
         self.assertNotIn("창 전환을 확인하지 못했습니다", text)
 
+    @mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"})   # Korean notice words
     def test_an_idle_result_line_tells_sent_from_not_sent(self):
         sent = {"origin": "idle", "harness": "claude", "idle_request": {"state": "sent"}}
         self.assertIn("요청은 보냈지만 창 전환을 확인하지 못했습니다",

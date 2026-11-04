@@ -601,10 +601,11 @@ def coverage_note(bundle: Bundle) -> str:
     """"일부만 읽음(범위)" when part of a record was left unread, else ""; never reads as "nothing to tidy"."""
     if not bundle.unread:
         return ""
+    t = st._ui_translator()
     first = bundle.unread[0]
-    more = f" 외 기록 {len(bundle.unread) - 1}개도 일부만 읽음" if len(bundle.unread) > 1 else ""
-    why = "열린 질문 앞까지, " if first.get("blocked") else ""
-    return f"일부만 읽음({why}{first['coverage']}){more} — 앞부분은 다음 정리에서 계속"
+    more = t("tidy.runner.partial_more", count=len(bundle.unread) - 1) if len(bundle.unread) > 1 else ""
+    why = t("tidy.runner.partial_blocked") if first.get("blocked") else ""
+    return t("tidy.runner.partial", why=why, coverage=first["coverage"], more=more)
 
 
 # ---------------------------------------------------------------------------
@@ -952,7 +953,7 @@ def apply_actions(item: dict, run_dir: Path, bundle: Bundle) -> str:
     if done.returncode != 0:
         detail = summary or (done.stderr.strip().splitlines() or ["apply failed"])[-1]
         raise RunnerFailure(detail.removeprefix("[tidy]").strip())
-    return summary or "[tidy] 정리를 마쳤습니다."
+    return summary or "[tidy] " + st._ui_translator()("tidy.runner.done")
 
 
 def advance_watermarks(bundle: Bundle) -> None:
@@ -1054,24 +1055,32 @@ def publish_memory(item: dict, batch: str, run_dir: Path, bundle: Optional[Bundl
                               source_generation=item.get("card_generation"))
 
 
+def _undo_cut(line: str) -> tuple:
+    """``(text, " — <undo hint>")``: the apply summary ends with the undo command in either language."""
+    at = line.rfind("mem tidy-undo")
+    cut = line.rfind(" — ", 0, at) if at >= 0 else -1
+    return (line[:cut], line[cut:]) if cut >= 0 else (line, "")
+
+
 def failure_line(reason: str, batch: str = "", applied: tuple = (0, 0)) -> str:
-    reason = " ".join(str(reason).split(" — 되돌리기")[0].split())[:80]
+    reason = " ".join(_undo_cut(str(reason))[0].split())[:80]
+    t = st._ui_translator()
     done, unconfirmed = applied
     if batch and (done or unconfirmed):
         # Something may have landed: say so and keep the undo command; never claim memory is untouched.
-        landed = ("반영 여부를 확인하지 못했습니다" if unconfirmed < 0
-                  else f"{done}건 반영" + (f", {unconfirmed}건은 반영 여부 불명" if unconfirmed else ""))
-        return (f"[정리] 기억 정리가 중간에 멈췄습니다({landed}). 나머지는 다음 정리 때 이어서 처리됩니다. "
-                f"(사유: {reason}) — 되돌리기: mem tidy-undo {batch}")
-    return f"[정리] 기억 정리를 끝내지 못했습니다. 카드와 기존 기억은 그대로이고 다음 정리 때 이어서 처리됩니다. (사유: {reason})"
+        landed = (t("tidy.runner.landed_unknown") if unconfirmed < 0
+                  else t("tidy.runner.landed", count=done)
+                  + (t("tidy.runner.landed_unconfirmed", count=unconfirmed) if unconfirmed else ""))
+        return t("tidy.runner.stopped", landed=landed, reason=reason, batch=batch)
+    return t("tidy.runner.not_finished", reason=reason)
 
 
 def _with_coverage(line: str, note: str) -> str:
     """Put the coverage note before the undo command so a cut never takes the undo away."""
     if not note:
         return line
-    head, sep, undo = line.partition(" — 되돌리기")
-    return f"{head} · {note}{sep}{undo}"
+    head, undo = _undo_cut(line)
+    return f"{head} · {note}{undo}"
 
 
 def process_item(item: dict) -> None:
@@ -1088,13 +1097,14 @@ def process_item(item: dict) -> None:
         bundle = assemble(item, batch, run_dir)
         if bundle.empty and bundle.unreadable:
             # A record that could not be read says nothing about what is in it.
-            raise RunnerFailure("대화 기록을 읽지 못했습니다(" + str(bundle.unreadable[0].get("reason", "unreadable")) + ")")
+            raise RunnerFailure(st._ui_translator()("tidy.runner.unreadable",
+                                                    reason=bundle.unreadable[0].get("reason", "unreadable")))
         if bundle.empty:
             # The notice goes first: a terminal status means "the notice was left".
             note = coverage_note(bundle)
             # Unread ranges left means the read part had nothing to tidy, never "nothing new".
-            notify(item, f"[정리] 읽은 범위에는 정리할 대화가 없었습니다 · {note}" if note
-                   else "[정리] 새로 정리할 대화가 없습니다.")
+            notify(item, st._ui_translator()("tidy.runner.nothing_in_range", note=note) if note
+                   else st._ui_translator()("tidy.runner.nothing_new"))
             set_status(item, "notified", result="nothing-in-range" if note else "nothing-new")
             finished = True
             return
@@ -1110,7 +1120,7 @@ def process_item(item: dict) -> None:
         over = int(result.get("discarded_over_budget") or 0) if isinstance(result, dict) else 0
         if over:
             # Proposals beyond the batch's ten were dropped: that conversation is read again next time.
-            line = _with_coverage(line, "상한을 넘은 제안은 다음 정리에서 다시 봅니다")
+            line = _with_coverage(line, st._ui_translator()("tidy.runner.over_limit"))
         else:
             advance_watermarks(bundle)
             line = _with_coverage(line, coverage_note(bundle))
@@ -1616,8 +1626,7 @@ def _supervised_card_plan(seat, harness, sid, *, state):
     card_seq = card_seq if type(card_seq) is int and card_seq >= 0 else None
     working_line = ""
     if state == "working":
-        working_line = (f"앞 세션 작업 중: {harness} {sid[:8]}는 아직 하던 일을 진행 중입니다. "
-                        "옛 창은 그 일이 끝난 뒤 닫힙니다.")
+        working_line = st._ui_translator()("tidy.runner.still_working", harness=harness, sid=sid[:8])
     previous_line = st.previous_transcript_line(harness, sid, transcript) if attached else ""
     if not card_ok:
         if not attached:
