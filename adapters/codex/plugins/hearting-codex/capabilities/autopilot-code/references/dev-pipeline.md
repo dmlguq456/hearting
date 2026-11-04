@@ -102,8 +102,11 @@ call liveness, inspect raw child output, or do parallel work while parked.
 Obey the launch receipt: `parent_next=end-turn` yields; `parent_next=bounded-wait`
 runs the printed `parent_next_command` once.
 
-After judging a stage's artifact contract complete, publish its captured exact-attempt completion before
-dispatching the next stage. The completion transaction writes the immutable marker/link and
+For a supervised (runtime-v1) owner, the completion join writes a registered child's marker
+(`dispatch_completion_join.py`, idempotent per exact attempt); call `complete` directly only for
+inline stages and sub-session manifests, and never mark a routed row `done` first. The command
+below is that direct form: after judging the stage's artifact contract complete, publish its
+captured exact-attempt completion before dispatching the next stage. The completion transaction writes the immutable marker/link and
 closes only that attempt row; never mark a routed row `done` first:
 
 ```bash

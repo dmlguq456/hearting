@@ -3,9 +3,9 @@
 This is an OpenCode adapter router, auto-loaded as `AGENTS.md` from the global
 OpenCode config home. It is deliberately not also listed in the
 `opencode.json(c)` `instructions` array: that would deliver the same bootstrap
-twice (`core/ADAPTATION.md §6.1`). The semantic hierarchy is
-`core/capabilities/roles -> {Claude, Codex, OpenCode}`; adapters are siblings.
-Edit portable sources first.
+twice (`core/ADAPTATION.md §6.1`). Hierarchy:
+`core/capabilities/roles -> {Claude, Codex, OpenCode}`; adapters are siblings;
+edit portable sources first.
 
 The harness root is the active `AGENT_HOME` (shared `utilities/agent-home.sh`
 fallback), including an explicitly activated checkout; never guess another
@@ -111,17 +111,15 @@ dispatch depth, model role, tests, safety, or validation.
 
 ## Where to look
 
-| Need | Read |
-|---|---|
-| Layers, harness root, artifact root | `core/CORE.md` |
-| Routing §0.2, entry card §0.4, report §0.5, completion §0.6 | `core/WORKFLOW.md` |
-| Intensity, QA, model roles, artifacts, Skills | `core/CONVENTIONS.md` |
-| Git, worktrees, dispatch, receipts §5.10a, frame questions §5.10b, continuation §5.12, other sessions §5.14 | `core/OPERATIONS.md` |
-| Memory | `core/MEMORY.md` |
-| Capabilities, roles, modes | `capabilities/README.md`, `roles/README.md`, `roles/MODES.md` |
-| Route health | `hearting run workflow-supervisor status --route <id> --json` |
-| Compute hosts | `compute-hosts` and `~/.config/hearting/compute-hosts.yaml`; `run` receipts include GPU headroom |
-| This runtime's commands and edge cases | the adapter `README.md` and `ADAPTATION.md` named below |
+- Layers, harness root, artifact root: `core/CORE.md`
+- Routing §0.2, entry card §0.4, report §0.5, completion §0.6: `core/WORKFLOW.md`
+- Intensity, QA, model roles, artifacts, Skills: `core/CONVENTIONS.md`
+- Git, worktrees, dispatch, receipts §5.10a, frame questions §5.10b, continuation §5.12, other sessions §5.14: `core/OPERATIONS.md`
+- Memory: `core/MEMORY.md`
+- Capabilities, roles, modes: `capabilities/README.md`, `roles/README.md`, `roles/MODES.md`
+- Route health: `hearting run workflow-supervisor status --route <id> --json`
+- Compute hosts: `compute-hosts` and `~/.config/hearting/compute-hosts.yaml`; `run` receipts include GPU headroom
+- This runtime's commands and edge cases: the adapter `README.md` and `ADAPTATION.md`
 
 Resolve the artifact root with `utilities/artifact-root.sh`; linked worktrees
 write the primary checkout's `.agent_reports/`, and legacy `.claude_reports/`
@@ -163,14 +161,5 @@ Portable behavior contract = `roles/response-policy.md`.
   server without that carrier gets `bounded-wait`.
 - Before delegating to a native subagent, check it against its
   `opencode_setting/opencode-agents` file and the runtime's current agent list.
-- If the memory prompt hook is unavailable, record `recall` or `skip` with
-  `preflight.sh recall-gate <cwd> ...`.
-- Command surface, tool checks, native projections, and edge cases:
-  `adapters/opencode/README.md` (Session Command Reference) and
-  `adapters/opencode/ADAPTATION.md`.
-
-## Compatibility Boundary
-
-Claude/Codex files are sibling references, not OpenCode bootstrap input. Map
-portable meaning from `core/`, `capabilities/`, and `roles/` to OpenCode
-permissions, tools, lifecycle, agents, commands, Skills, and plugins.
+- Command surface, tool checks, native projections, edge cases: see Session
+  Command Reference.
