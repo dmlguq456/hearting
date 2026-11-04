@@ -974,8 +974,6 @@ _EXPECTED_WRITER_CENSUS = {
     ("artifact_campaign.py", "_commit_event"): "incremental",
     ("artifact_campaign.py", "_materialize"): "incremental",
     ("artifact_campaign.py", "supersede_locked"): "incremental",
-    ("artifact_cutover.py", "seal_legacy_cycle"): "out-of-band-legacy",
-    ("artifact_cutover.py", "adopt_campaign"): "out-of-band-legacy",
 }
 
 

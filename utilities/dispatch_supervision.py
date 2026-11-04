@@ -180,6 +180,63 @@ def runtime_tool_progress(metadata, previous=None):
     return latest
 
 
+def _transient_retry_wait_active(metadata, attempt_id):
+    """Recognize only a live, exact-attempt bounded Codex transport wait."""
+    raw_path = metadata.get("log_file", "")
+    if not raw_path or not Path(raw_path).is_absolute():
+        return False
+    try:
+        with Path(raw_path).open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            start = max(0, handle.tell() - 1024 * 1024)
+            handle.seek(start)
+            if start:
+                handle.readline()
+            lines = handle.read(1024 * 1024).splitlines()
+    except OSError:
+        return False
+    active = None
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except (ValueError, UnicodeDecodeError):
+            continue
+        if not isinstance(row, dict):
+            continue
+        kind = row.get("type")
+        if kind == "dispatch.supervisor.transient-wait.started":
+            if (metadata.get("harness") == "codex"
+                    and row.get("parent_attempt_id") == attempt_id
+                    and isinstance(row.get("thread_id"), str) and row.get("thread_id")
+                    and isinstance(row.get("turn_id"), str) and row.get("turn_id")
+                    and row.get("reason_code") == "transient-capacity"
+                    and isinstance(row.get("ordinal"), int)
+                    and not isinstance(row.get("ordinal"), bool)
+                    and 1 <= row["ordinal"] <= 5):
+                try:
+                    deadline = float(row.get("deadline_monotonic"))
+                except (TypeError, ValueError, OverflowError):
+                    active = None
+                    continue
+                active = ((row.get("thread_id"), row.get("turn_id"), deadline)
+                          if math.isfinite(deadline) and deadline - time.monotonic() <= 960
+                          else None)
+            else:
+                active = None
+        elif kind in {"dispatch.supervisor.transient-wait.ended",
+                      "dispatch.supervisor.turn.started", "turn.completed",
+                      "dispatch.supervisor.error"}:
+            if active is not None:
+                if (kind == "dispatch.supervisor.transient-wait.ended"
+                        and row.get("parent_attempt_id") == attempt_id
+                        and row.get("thread_id") == active[0]
+                        and row.get("turn_id") == active[1]):
+                    active = None
+                elif kind != "dispatch.supervisor.transient-wait.ended":
+                    active = None
+    return active is not None and time.monotonic() < active[2]
+
+
 def verification_process_digest(pid):
     """Hash the exact live argv without trusting the lease's copied command."""
     try:
@@ -523,6 +580,8 @@ def update_attempt_stall_observation(jobs, attempt_id, *, now=None,
             observation_state, reason = "active", "owned-child-executing"
         elif execution.state == "unknown":
             observation_state, reason = "unknown", execution.reason or "execution-unverifiable"
+        elif execution.state == "present" and _transient_retry_wait_active(metadata, attempt_id):
+            observation_state, reason = "waiting", "registered-transient-capacity-backoff"
         elif tool_active:
             observation_state, reason = "active", "native-tool-active"
         elif quiet >= max_quiet_windows:
