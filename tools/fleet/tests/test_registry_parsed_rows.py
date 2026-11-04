@@ -12,6 +12,41 @@ from fleet.collectors import dispatch
 
 
 class ParsedRegistryRowsTest(unittest.TestCase):
+    def test_metadata_converter_change_invalidates_an_unchanged_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'jobs.log'
+            path.write_text('t\topen\t/r\t/w\tjob\tattempt_id=original\n')
+            with dispatch._dispatch_registry_cache.registry_read_scope():
+                original = dispatch.parsed_registry_rows(path)
+            with mock.patch.object(dispatch, '_registry_record_metadata',
+                                   return_value={'attempt_id': 'new-policy'}) as convert:
+                with dispatch._dispatch_registry_cache.registry_read_scope():
+                    updated = dispatch.parsed_registry_rows(path)
+                self.assertEqual(convert.call_count, 1)
+                self.assertEqual(updated[0][2]['attempt_id'], 'new-policy')
+                self.assertEqual(original[0][2]['attempt_id'], 'original')
+
+    def test_atomic_row_replacement_reuses_unchanged_metadata_conversions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'jobs.log'
+            lines = [f't\topen\t/r\t/w\tjob-{i}\tattempt_id=att-{i}\n' for i in range(100)]
+            path.write_text(''.join(lines))
+            with mock.patch.object(dispatch, '_registry_record_metadata',
+                                   wraps=dispatch._registry_record_metadata) as convert:
+                with dispatch._dispatch_registry_cache.registry_read_scope():
+                    original = dispatch.parsed_registry_rows(path)
+                self.assertEqual(convert.call_count, 100)
+                replacement = path.with_suffix('.new')
+                lines[-1] = lines[-1].replace('\topen\t', '\tdone\t')
+                replacement.write_text(''.join(lines))
+                replacement.replace(path)
+                with dispatch._dispatch_registry_cache.registry_read_scope():
+                    current = dispatch.parsed_registry_rows(path)
+                self.assertEqual(convert.call_count, 101)
+                self.assertIs(current[0][2], original[0][2])
+                self.assertEqual(current[-1][1][1], 'done')
+                self.assertEqual(original[-1][1][1], 'open')
+
     def test_unchanged_pinned_rows_need_no_historical_text_reconstruction(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'jobs.log'
@@ -455,10 +490,10 @@ class ParsedRegistryRowsTest(unittest.TestCase):
                 third = dispatch.parsed_registry_rows(path)
             self.assertIsNot(first, third)
             self.assertEqual(
-                dispatch._parse_pipe_meta_cached.cache_info().misses, first_misses + 1)
+                dispatch._parse_pipe_meta_cached.cache_info().misses, first_misses)
             self.assertEqual(len(third), 2)
             self.assertEqual(third[-1][0], 3)
-            self.assertEqual(third[0], first[0])
+            self.assertIs(third[0], first[0])
 
     def test_registry_order_keeps_physical_zero_based_line_positions(self):
         dispatch._parse_pipe_meta_cached.cache_clear()
@@ -499,7 +534,7 @@ class ParsedRegistryRowsTest(unittest.TestCase):
                 self.assertEqual(
                     [row[1][4] for row in rows], [f"slug{i}" for i in range(index + 1)])
                 self.assertEqual(
-                    dispatch._parse_pipe_meta_cached.cache_info().misses, misses + index)
+                    dispatch._parse_pipe_meta_cached.cache_info().misses, misses)
 
     def test_cache_is_isolated_by_path_and_file_generation(self):
         dispatch._parse_pipe_meta_cached.cache_clear()

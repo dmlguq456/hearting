@@ -530,6 +530,7 @@ An immutable display model may share unchanged subtrees with its predecessor;
 fresh action and readiness metadata still belong to the current observation.
 Cell-frame reuse depends on values consumed by the renderer, not provenance
 or ordering metadata that the current interaction model owns separately.
+Registry replacement may retain exact-field row conversions from its predecessor.
 
 ## Basis and current scope
 

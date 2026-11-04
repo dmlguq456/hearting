@@ -29,6 +29,19 @@ import dispatch_pending_delivery as pending_delivery  # noqa: E402
 
 
 class DeliveryDocumentReuseTest(unittest.TestCase):
+    def test_count_only_intents_do_not_need_recipient_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            jobs = root / 'jobs.log'
+            jobs.write_text('t\tdone\t/r\t/w\tjob\tattempt_id=att-one,delivery_intent=1,'
+                            'delivery_id=delivery-one,parent_sid=parent\n')
+            with mock.patch.object(dispatch, 'dispatch_state_root', return_value=root), \
+                    mock.patch.object(dispatch._dispatch_registry_cache.RegistryView, 'handover_attempt',
+                                      side_effect=AssertionError('count-only recipient lookup')):
+                counts = dispatch._pending_delivery_counts([jobs])
+            self.assertEqual(counts, dict(pending=1, expired=0, retained_batch_duties=0,
+                                          no_recipient=None))
+
     def test_unchanged_optional_counts_skip_collector_and_changes_reopen_it(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

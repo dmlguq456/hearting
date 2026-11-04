@@ -258,6 +258,7 @@ _PARSED_REGISTRY_ROWS = OrderedDict()
 _PARSED_REGISTRY_INDEXES = OrderedDict()
 _PARSED_REGISTRY_LINE_COUNTS = {}
 _PARSED_REGISTRY_SEGMENTS = {}
+_PARSED_REGISTRY_SOURCES = {}
 _PARSED_REGISTRY_DIAGNOSTICS = OrderedDict()
 _PARSED_REGISTRY_PATH_ORDER = OrderedDict()
 _PARSED_REGISTRY_ROWS_LIMIT = 32
@@ -284,7 +285,7 @@ def _drop_registry_path_locked(absolute):
     """Release every parsed-cache reference owned by one registry path."""
     for cache in (_PARSED_REGISTRY_ROWS, _PARSED_REGISTRY_INDEXES,
                   _PARSED_REGISTRY_LINE_COUNTS, _PARSED_REGISTRY_SEGMENTS,
-                  _PARSED_REGISTRY_DIAGNOSTICS):
+                  _PARSED_REGISTRY_DIAGNOSTICS, _PARSED_REGISTRY_SOURCES):
         for key in tuple(cache):
             if key[0] == absolute:
                 cache.pop(key, None)
@@ -342,6 +343,8 @@ def _cached_registry_rows(path, generation):
             return False, None
         if key not in _PARSED_REGISTRY_ROWS:
             return False, None
+        if _PARSED_REGISTRY_SOURCES.get(key) != _registry_parse_sources():
+            return False, None
         _PARSED_REGISTRY_ROWS.move_to_end(key)
         if key in _PARSED_REGISTRY_DIAGNOSTICS:
             _PARSED_REGISTRY_DIAGNOSTICS.move_to_end(key)
@@ -368,6 +371,8 @@ def _registry_prefix_snapshot(path, generation, segments):
                     or candidate_generation[2] >= generation[2]):
                 continue
             old_segments = _PARSED_REGISTRY_SEGMENTS.get(candidate)
+            if _PARSED_REGISTRY_SOURCES.get(candidate) != _registry_parse_sources():
+                continue
             if (old_segments is None or len(old_segments) > len(new_segments)
                     or not all(old is new for old, new in zip(old_segments, new_segments))):
                 continue
@@ -517,7 +522,8 @@ def _remember_parsed_registry_rows(path, generation, rows, complete_count,
     with _PARSED_REGISTRY_CACHE_LOCK:
         if not _registry_generation_is_current(absolute, generation):
             return result
-        if key in _PARSED_REGISTRY_ROWS:
+        if (key in _PARSED_REGISTRY_ROWS
+                and _PARSED_REGISTRY_SOURCES.get(key) == _registry_parse_sources()):
             _PARSED_REGISTRY_ROWS.move_to_end(key)
             _touch_registry_path_locked(absolute, key)
             return _PARSED_REGISTRY_ROWS[key]
@@ -525,6 +531,7 @@ def _remember_parsed_registry_rows(path, generation, rows, complete_count,
         _PARSED_REGISTRY_ROWS[key] = result
         _PARSED_REGISTRY_LINE_COUNTS[key] = complete_count
         _PARSED_REGISTRY_SEGMENTS[key] = tuple(segments) if segments is not None else None
+        _PARSED_REGISTRY_SOURCES[key] = _registry_parse_sources()
         _PARSED_REGISTRY_DIAGNOSTICS[key] = (None, malformed)
         _touch_registry_path_locked(absolute, key)
         _trim_registry_path_order_locked()
@@ -580,6 +587,12 @@ def _registry_record_metadata(record):
             metadata[key] = " ".join(value.split())
     metadata["_name"] = _strip_autopilot_prefix(metadata.get("capability"))
     return metadata
+
+
+def _registry_parse_sources():
+    return (_registry_record_metadata, _registry_metadata_analysis, _parse_pipe_meta,
+            _parse_pipe_meta_cached, _strip_autopilot_prefix,
+            _dispatch_registry_cache.RegistryRecord.completion_metadata)
 
 
 def _index_registry_rows_by_attempt(rows):
@@ -651,9 +664,26 @@ def _build_registry_derived_index(rows):
 
 def _parse_registry_view(path, view, generation):
     """Adapt already parsed immutable records without splitting the same rows again."""
-    rows = tuple((record.order, record.fields,
-                  MappingProxyType(_registry_record_metadata(record)))
-                 for record in view.records)
+    absolute = os.path.abspath(os.fspath(path))
+    with _PARSED_REGISTRY_CACHE_LOCK:
+        previous = _PARSED_REGISTRY_PATH_ORDER.get(absolute)
+        old_rows = (_PARSED_REGISTRY_ROWS.get(previous, ())
+                    if _PARSED_REGISTRY_SOURCES.get(previous) == _registry_parse_sources() else ())
+    # A replacement carries a new file generation; exact fields still prove
+    # an unchanged row conversion, independently of its new physical order.
+    by_fields = {row[1]: row for row in old_rows}
+    rows = []
+    for record in view.records:
+        old = (by_fields.get(record.fields)
+               if type(record) is _dispatch_registry_cache.RegistryRecord else None)
+        if old is not None and old[0] == record.order:
+            rows.append(old)
+            continue
+        if old is None:
+            metadata = MappingProxyType(_registry_record_metadata(record))
+        else:
+            metadata = old[2]
+        rows.append((record.order, record.fields, metadata))
     complete_count = view.line_count - int(view.has_partial_tail)
     malformed = sum(1 for segment in view._segments
                     for _order, line in segment.malformed_lines if line.strip())
@@ -681,6 +711,9 @@ def parsed_registry_rows(path):
                     if diagnostic_key in _PARSED_REGISTRY_DIAGNOSTICS:
                         _PARSED_REGISTRY_DIAGNOSTICS.move_to_end(diagnostic_key)
                         return cached
+            if (current._prefix_reuse_eligible and not current.has_partial_tail
+                    and not current.has_invalid_utf8):
+                return _parse_registry_view(path, current, current_generation)
         except (OSError, ValueError):
             pass
     lines = _pinned_registry_lines(path)
@@ -4631,6 +4664,7 @@ def _pending_delivery_counts_uncached(paths, *, session_observation=None):
     # resolution. Equal delivery identities in other roots can have different
     # authority; numeric deduplication must not hide those observations.
     intent_rows = []
+    intent_views = {}
     registry_unknown = False
     unavailable_registries = set()
     for path in paths:
@@ -4642,6 +4676,7 @@ def _pending_delivery_counts_uncached(paths, *, session_observation=None):
             unavailable_registries.add(path)
             continue
         registry_unknown |= bool(view.completeness_reason)
+        intent_views[path] = view
         # A stamped intent survives later metadata updates. Its original
         # delivery/storage identity stays fixed; authority uses the current row.
         # Reuse this exact generation's display parse instead of tokenizing
@@ -4652,8 +4687,7 @@ def _pending_delivery_counts_uncached(paths, *, session_observation=None):
             if len(fields) == 6:
                 parsed = (*parsed, (None, fields, _parse_pipe_meta(fields[5] or "")))
         for observed in _delivery_intents(path, parsed):
-            current = view.handover_attempt(observed.get("attempt_id"))
-            intent_rows.append((path, observed, current[1] if current else None))
+            intent_rows.append((path, observed))
 
     pending = 0
     expired = 0
@@ -4883,7 +4917,7 @@ def _pending_delivery_counts_uncached(paths, *, session_observation=None):
 
     unmaterialized = set()
     seen_intent_authority = {}
-    for path, observed, meta in intent_rows:
+    for path, observed in intent_rows:
         parent_sid, delivery_id = observed.get("parent_sid"), observed.get("delivery_id")
         if parent_sid and delivery_id:
             recipient_digest = hashlib.sha256(parent_sid.encode("utf-8")).hexdigest()
@@ -4898,6 +4932,8 @@ def _pending_delivery_counts_uncached(paths, *, session_observation=None):
             continue
         if no_recipient is None:
             continue
+        current = intent_views[path].handover_attempt(observed.get("attempt_id"))
+        meta = current[1] if current else None
         try:
             from dispatch_seat_handover import _effective, _registered_parent_harness, eligible_row, route_identity
             if (not delivery_id or not delivery_id.startswith("delivery-")
