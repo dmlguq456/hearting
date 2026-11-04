@@ -1163,8 +1163,8 @@ check_codex_bin_wrappers() {
     || ! grep -Fq 'parent_completion_harvested' adapters/codex/bin/dispatch-harvest.py \
     || grep -Fq 'register_parent_stop_attempt(args, jobs)' adapters/codex/bin/dispatch-headless.py \
     || grep -Fq 'sys.stdout.write(result.stdout)' adapters/codex/hooks/sessionend-lifecycle.py \
-    || ! grep -Fq 'run_preflight("briefing"' adapters/codex/hooks/userprompt-lifecycle.py \
-    || ! grep -Fq 'token_budget_context(current_cwd, sid)' adapters/codex/hooks/userprompt-lifecycle.py \
+    || ! grep -Fq 'probes.submit(run_preflight, "briefing", current_cwd)' adapters/codex/hooks/userprompt-lifecycle.py \
+    || ! grep -Fq 'probes.submit(token_budget_context, current_cwd, sid)' adapters/codex/hooks/userprompt-lifecycle.py \
     || ! grep -Fq 'record_accounting(sid, event, adapter="codex")' adapters/codex/hooks/userprompt-lifecycle.py \
     || ! grep -Fq 'timeout_seconds=token_budget_timeout()' adapters/codex/hooks/userprompt-lifecycle.py \
     || ! grep -Fq 'CODEX_TOKEN_BUDGET_HOOK_TIMEOUT_SECONDS' adapters/codex/hooks/userprompt-lifecycle.py \

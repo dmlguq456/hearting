@@ -787,6 +787,12 @@ def resolve_seat(harness: Optional[str], cwd=None, env=None, sid: Optional[str] 
         steps = {"caller": "codex" if caller is not None else "none", "service": bool(service),
                  "thread_env": "absent" if not thread else ("same" if thread == sid else "other"),
                  "pane_hint": bool(pane), "binding": "not-tried"}
+        if caller is not None and not service and not caller[3]:
+            # This foreground runtime has no controlling terminal. Its native
+            # session state still applies, but no physical pane can own it.
+            # A shared service is different: its caller can have an exact TUI.
+            pane = ""
+            endpoint_unproven = True
         if caller is not None and service:
             binding = codex_caller_binding(sid, environ=env, from_hook=hook)
             steps["binding"] = "found" if binding else "none"
@@ -1454,7 +1460,8 @@ def _lineage_history_index(ledgers):
     return rows, sessions, session_ledgers, summaries
 
 
-def seat_lineage(seat: Seat, *, harness=None, sid=None, read_context=None) -> list[dict]:
+def seat_lineage(seat: Seat, *, harness=None, sid=None, read_context=None,
+                 predecessor_only=False) -> list[dict]:
     """Project this seat's history and confirmed relatives from the shared graph."""
     physical = physical_seat(seat)
     logical_harness, logical_sid = session_identity(seat)
@@ -1463,6 +1470,26 @@ def seat_lineage(seat: Seat, *, harness=None, sid=None, read_context=None) -> li
         harness = harness or logical_harness or None
     wanted = (str(harness or ""), str(sid or ""))
     graph = None
+    if predecessor_only and all(wanted):
+        # A startup notice needs full history only when a confirmed incoming
+        # edge exists. Use the existing compact relation reader for that
+        # question; detailed history still uses every activity row below.
+        from peer_read_context import PeerReadContext
+        import dispatch_seat_handover
+        try:
+            compact = dispatch_seat_handover._pass_lineage_graph(
+                read_context or PeerReadContext(compact_lineage=True))
+        except (OSError, ValueError, TypeError):
+            return []  # unavailable authority cannot confirm a predecessor
+        origins = {origin for name, origin, target in compact.edges
+                   if (name, target) == wanted}
+        if len(origins) != 1 or wanted in compact.unresolved:
+            return []
+        origin = next(iter(origins))
+        if ((wanted[0], origin) in compact.unresolved
+                or sum(name == wanted[0] and source == origin
+                       for name, source, _target in compact.edges) != 1):
+            return []
     if read_context is not None and getattr(read_context, "compact_lineage", False):
         # Compact rows carry relation rows only; this projection summarizes every
         # row for history. Observe normally rather than silently narrowing it.
@@ -3062,10 +3089,12 @@ def build_card_injection(card: dict, card_path: Path, now: float, cap: int,
 HUMAN_NOTICE_BUDGET_SECONDS = 2.0
 
 
-def build_human_history_notice(seat: Seat, harness: str, sid: str, *, env=None) -> str:
+def build_human_history_notice(seat: Seat, harness: str, sid: str, *, env=None,
+                              read_context=None) -> str:
     """Build a person-only predecessor notice without adding it to model context."""
     env = os.environ if env is None else env
-    lineage = seat_lineage(seat, harness=harness, sid=sid)
+    lineage = seat_lineage(seat, harness=harness, sid=sid, predecessor_only=True,
+                           read_context=read_context)
     previous = _confirmed_predecessor(lineage, harness, sid)
     if not previous:
         return ""
@@ -3117,7 +3146,7 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
               human_only: bool = False,
               render_context: bool = True, startup_context: Optional[dict] = None,
               deferred: Optional[list] = None, _closed: Optional[list] = None,
-              human_deadline: Optional[float] = None) -> str:
+              human_deadline: Optional[float] = None, read_context=None) -> str:
     """Record the session, and print the card / notices it is due exactly once.
 
     Returns the text that was emitted ("" for none). The receipt is written only
@@ -3156,7 +3185,8 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
     if human_only:
         if event == "start" and emit_human:
             with contextlib.suppress(BaseException):
-                notice = build_human_history_notice(seat, harness, sid, env=env)
+                notice = build_human_history_notice(seat, harness, sid, env=env,
+                                                    read_context=read_context)
                 if notice:
                     emit_human(notice)
         return ""
@@ -3471,7 +3501,8 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
         if (event == "start" or (event == "prompt" and (startup_context or {}).get("due"))) and emit_human and (
                 human_deadline is None or time.monotonic() < human_deadline):
             with contextlib.suppress(BaseException):
-                notice = build_human_history_notice(seat, harness, sid, env=env)
+                notice = build_human_history_notice(seat, harness, sid, env=env,
+                                                    read_context=read_context)
                 if notice:
                     emit_human(notice)
         if not text:
