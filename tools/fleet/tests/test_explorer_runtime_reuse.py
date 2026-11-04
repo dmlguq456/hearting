@@ -10,6 +10,61 @@ from tools.fleet.explorer.view_model import ExplorerViewModel
 
 
 class ExplorerRuntimeReuseTests(unittest.TestCase):
+    def test_bulk_fill_preserves_clipping_virtual_extents_and_trace(self):
+        from tools.fleet.explorer.frame import _PageGrid
+        from tools.fleet.explorer.grid import CellGrid
+        trace = []
+        with patch.object(CellGrid, 'default_trace', trace):
+            grid = _PageGrid(6,12,2,keep_rows=(4,6))
+        grid.fill(-3,4,4,'.','head',236)
+        self.assertEqual(grid._cells[4], [('.', 'section_head',236)]*4+[(' ',None,None)]*2)
+        self.assertEqual(grid.cells[4][::-2], grid._cells[4][::-2])
+        self.assertEqual(grid.cells[2][::-1], [(' ',None,None)]*6)
+        self.assertEqual(grid.last_content_row,4)
+        grid.fill(0,2,5)
+        grid.fill(0,3,6)
+        self.assertNotIn(6,grid._cells)
+        self.assertEqual(grid.last_content_row,4)
+        grid.fill(0,3,6,tint=0)
+        self.assertEqual(grid.last_content_row,6)
+        self.assertNotIn(6,grid._cells)
+        grid.fill(4,3,5,'x')
+        self.assertEqual(len(grid._cells[5]),6)
+        self.assertEqual(grid._cells[5],[(' ',None,None)]*6)
+        grid.fill(0,6,7,'#','dim')
+        self.assertEqual(grid.last_content_row,6)
+        self.assertEqual(grid._cells[7],[('#','dim',None)]*6)
+        grid.fill(0,6,99,'x')
+        self.assertEqual(len(trace),6)
+        grid.cells[5][1:5:2] = [('x',None,None),('y','dim',None)]
+        self.assertEqual(grid._cells[5][1:5:2],[('x',None,None),('y','dim',None)])
+        with self.assertRaises(ValueError):
+            grid.cells[5][1:5] = [('x',None,None)]
+        plain=CellGrid(5,1)
+        plain.fill(0,-2,0,'x')
+        self.assertEqual(plain.rows_text(),('     ',))
+        plain.fill(-2,3,0,'x','head')
+        self.assertEqual(plain.rows_text(),('xxx  ',))
+
+    def test_overview_reuses_cells_when_only_unrendered_detail_records_change(self):
+        from tools.fleet.explorer import frame
+        from tools.fleet.explorer.state import NavState
+        from tools.fleet.explorer.view_model import load_fixture
+        model=load_fixture(Path(__file__).parent/'fixtures'/'explorer'/'view_model.json')
+        changed=model.with_updates(nodes=({'id':'changed'},),cards=({'text':'changed'},),
+                                   dialogue=({'body':'changed'},),answered=({'id':'changed'},))
+        tag=model.sessions[0].get('tag') if model.sessions else ''
+        for cols,rows in ((80,45),(140,45),(274,85),(410,84)):
+            for state in (NavState(),NavState(usage_open=True),NavState(opened=tag),
+                          NavState(scroll=(('pane',4),('tree',2)))):
+                with self.subTest(cols=cols,state=state):
+                    runtime=ExplorerRuntime()
+                    original=runtime.draw_frame(model,state,cols,rows)
+                    with patch.object(frame,'draw',wraps=frame.draw) as draw:
+                        self.assertIs(runtime.draw_frame(changed,state,cols,rows),original)
+                    draw.assert_not_called()
+                    self.assertEqual(original,frame.draw(changed,state,cols,rows))
+
     def test_unchanged_model_update_keeps_the_published_instance(self):
         original = ExplorerViewModel.from_mapping({'sessions': [{'tag': 'a'}]})
         self.assertIs(original.with_updates(sessions=[{'tag': 'a'}]), original)

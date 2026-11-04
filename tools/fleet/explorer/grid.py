@@ -134,8 +134,15 @@ class CellGrid:
         style = normalize_style(key, tint)
         if self.trace is not None:
             self.trace.append(("fill", y, lo, hi, glyph))
-        for x in range(lo, hi):
-            self.cells[y][x] = (glyph, style[0], style[1])
+        if lo >= hi:
+            return
+        row = self.cells[y]
+        cell = (glyph, style[0], style[1])
+        if type(row) is list:
+            row[lo:hi] = [cell] * (hi - lo)
+        else:
+            for x in range(lo, hi):
+                row[x] = cell
 
     def mark_moved(self):
         """Tell a recording test that cells were copied wholesale (their owners no longer apply)."""

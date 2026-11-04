@@ -68,8 +68,12 @@ class ExplorerRuntime:
 
         if CellGrid.default_trace is not None:
             return frame.draw(model, state, cols, rows, beat=beat)
+        # The overview page and common chrome do not consume these detail
+        # records. Their current values still belong to the interaction model.
+        hidden = ({'nodes', 'cards', 'dialogue', 'answered'}
+                  if state.view == 'OVERVIEW' and state.scope == '-' else ())
         values = tuple(chrome._clock_freshness(model.clock) if item.name == "clock"
-                       else getattr(model, item.name) for item in fields(model)
+                       else None if item.name in hidden else getattr(model, item.name) for item in fields(model)
                        if item.name not in {"source_records", "ordering", "readiness"})
         # NavState deliberately omits the private question editor from equality.
         # Snapshot it too, so a draft edit or response is painted immediately.
