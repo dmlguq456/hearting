@@ -1110,6 +1110,10 @@
    "en": "the current input tokens could not be read",
    "ko": "현재 입력 토큰을 확인하지 못했습니다"
   },
+  "tidy.idle.completed": {
+   "en": "Idle tidy: card saved, conversation compacted",
+   "ko": "쉬는 동안 정리: 카드 저장, 대화 압축"
+  },
   "tidy.idle.off": {
    "en": "To turn it off, put {{\"idle\": {{\"enabled\": false}}}} in {path}.",
    "ko": "끄려면 {path}에 {{\"idle\": {{\"enabled\": false}}}}를 두세요."
@@ -1313,10 +1317,6 @@
   "wait.title": {
    "en": "◑ answer needed",
    "ko": "◑답변 필요"
-  },
-  "tidy.idle.completed": {
-   "en": "Idle tidy: card saved, conversation compacted",
-   "ko": "쉬는 동안 정리: 카드 저장, 대화 압축"
   }
  }
 }

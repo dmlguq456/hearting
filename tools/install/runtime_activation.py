@@ -2021,7 +2021,7 @@ def _claude_settings_health(
         missing = True
     elif config["statusLine"] != desired_values["statusLine"]:
         conflicts.append("statusLine")
-    if config.get("idleCompaction") is not False:
+    if "idleCompaction" in source and config.get("idleCompaction") is not False:
         missing = True
     if "autoMemoryEnabled" not in config:
         missing = True
