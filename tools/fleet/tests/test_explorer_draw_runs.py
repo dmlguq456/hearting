@@ -46,7 +46,7 @@ class Screen:
 
 def per_cell(screen, frame, stale):
     """The painting before this change, one addstr per cell, as the reference."""
-    spin = render._SPIN[0]
+    spin = render._SPIN[int(render.time.time() * 10) % len(render._SPIN)]
     for y, row in enumerate(frame.cells[:screen.rows]):
         for x, (glyph, key, tint) in enumerate(row[:screen.cols]):
             if glyph == "":
@@ -60,6 +60,30 @@ def per_cell(screen, frame, stale):
 
 
 class DrawRunsTest(unittest.TestCase):
+    def test_same_window_repaints_only_animation_and_still_refreshes_input_geometry(self):
+        frame = draw(ef.demo_model(detail=True), NavState(), 140, 45)
+        screen = Screen(45, 140)
+        with mock.patch.object(render, "_EXPLORER_DRAW_CACHE", None), \
+                mock.patch.object(render, "_explorer_hit_geometry") as hit, \
+                mock.patch.object(render, "_key_attr", return_value=0), \
+                mock.patch.object(render.time, "time", return_value=0.0):
+            render._draw_explorer_frame(screen, frame, None)
+            full = screen.calls
+            with mock.patch.object(render.time, "time", return_value=0.1):
+                reference = Screen(45, 140)
+                per_cell(reference, frame, False)
+                render._draw_explorer_frame(screen, frame, None)
+            self.assertEqual(screen.cells, reference.cells)
+            self.assertLess(screen.calls - full, full // 4)
+            self.assertEqual(hit.call_count, 2)
+            with mock.patch.object(render, "_key_attr", return_value=1):
+                before = screen.calls
+                render._draw_explorer_frame(screen, frame, None)
+                self.assertEqual(screen.calls - before, full)
+            before = screen.calls
+            render._draw_explorer_frame(screen, frame, None, stale=True)
+            self.assertEqual(screen.calls - before, full)
+
     def test_unchanged_frame_reuses_runs_but_spinner_dim_and_resize_stay_live(self):
         frame = draw(ef.demo_model(detail=True), NavState(), 140, 45)
         with mock.patch.object(render, "_EXPLORER_PAINT_CACHE", None), \

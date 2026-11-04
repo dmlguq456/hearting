@@ -493,6 +493,22 @@ approval or recovery step.
 Completed cache-writer threads and their generation deduplication history stay
 bounded in a long-running viewer. Live writes remain owned; the existing on-disk
 observation ordering still protects newer saved screens.
+The input loop derives requests only for the open view; OVERVIEW does not rebuild
+the session detail index just to poll pane metadata. Updating one immutable view
+model field reuses the other already frozen fields. A failed observation save is
+attempted once for that generation; the next complete observation retries without
+turning each input wake into another serialization and writer launch.
+Detail enrichment copies the rows it mutates, including optional resource titles
+and pane metadata; read-only history and host observations stay shared. A board's
+repository supervision counts reuse one holder/role observation within that pass,
+then read afresh on the next pass, including the grant path.
+Fleet's read-only stall-advisory scan also shares one existing lineage read
+context for the pass. Parent session and harness come from one recipient
+resolution, and the next pass observes lineage again; no delivery or mutation
+inherits this display observation.
+An unchanged cell frame already held by the same terminal window needs only
+its animated runs repainted. Geometry, attributes and stale/live changes redraw
+the whole frame; input geometry and terminal refresh still advance on every wake.
 
 ## Basis and current scope
 

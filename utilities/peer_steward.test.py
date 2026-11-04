@@ -10954,7 +10954,8 @@ class IdleCardRequestTest(_TmpRootMixin, unittest.TestCase):
                 "sid": sid, "cwd": str(self.tmp_root), "card_generation": card["generation"],
                 "prompt_seq": 0, "origin": "idle", "followup_kind": "status-only",
                 "snapshot_state": "ready", "idle": {"identity": "idle-event", "due_at": now - 1,
-                                                          "tokens": 200000, "min_tokens": 200000}})
+                                                          "tokens": 200000, "min_tokens": 200000,
+                                                          "compaction": clear.compaction_position(seat, harness, sid)}})
         return seat, clear.reservation_path(seat.key)
 
     def invoke(self, req, *, looks=None, prompt_reply=None):
@@ -10972,12 +10973,26 @@ class IdleCardRequestTest(_TmpRootMixin, unittest.TestCase):
             return 0, {}
 
         self.seat_obj = self.st.seat_from_dict(req["seat"])
+        import session_tidy_idle
         with patch_split(peer_steward, "_herdr_missing", return_value=False), \
+             mock.patch.object(session_tidy_idle, "_tokens_and_provider", return_value=(200000,"","")), \
              mock.patch.object(peer_steward, "_clear_look", side_effect=looks or [(None, agent, [])] * 3), \
              mock.patch.object(peer_steward, "_herdr_prompt", side_effect=prompt) as send, \
              mock.patch.object(peer_steward, "_record"), mock.patch("builtins.print") as output:
             rc = peer_steward.cmd_idle_card_request(args)
         return rc, output.call_args[0][0], send
+
+    def test_busy_draft_and_question_never_type_an_idle_request_in_any_harness(self):
+        for harness in ("claude", "codex", "opencode"):
+            for reason in ("not-idle-working", "draft", "form-open"):
+                with self.subTest(harness=harness, reason=reason):
+                    seat, _path = self.booking(harness=harness, pane="idle:" + harness + reason)
+                    req = self.clear.read_reservation(seat.key)
+                    # A blocked look must return before the native writer or any claim.
+                    rc, line, send = self.invoke(req, looks=[(reason, {}, [])])
+                    send.assert_not_called()
+                    self.assertNotEqual(rc, 0)
+                    self.assertNotIn("idle_request", self.clear.read_reservation(seat.key))
 
     def test_claimed_request_sends_once_and_needs_the_exact_prompt_arrival_receipt(self):
         seat, path = self.booking()

@@ -1975,6 +1975,12 @@ def main(argv: list[str] | None = None) -> int:
                     }
                 )
             return 0 if terminal.failure_class == "pass" else 3
+    except RESOURCE_WAIT.ParentDeployWaitBlocked as exc:
+        from dispatch_supervisor_terminal import classify_parent_deploy_wait_blocked
+        terminal = classify_parent_deploy_wait_blocked(str(exc))
+        if not reconcile(args, terminal):
+            return 70
+        return 3
     except (DispatchContractError, JoinContractError, SupervisorError) as exc:
         lease_exit = (type(exc), exc, exc.__traceback__)
         if restart and control is None:

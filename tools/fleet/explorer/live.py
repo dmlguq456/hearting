@@ -2019,7 +2019,6 @@ def _usage_records(snapshot, session_rows, now):
 
 def current_claude_usage(model, snapshot, now):
     """Rebind only Claude usage at precomputed/replay and pending-draw boundaries."""
-    from dataclasses import replace
 
     def claude(row):
         return (row.get("harness") == "claude" or row.get("key") == "hb_claude"
@@ -2044,7 +2043,7 @@ def current_claude_usage(model, snapshot, now):
     if row is not None and not replaced:
         usage.insert(0, row)
     if (replaced or row is not None) and tuple(usage) != model.usage:
-        return replace(model, usage=usage)
+        return model.with_updates(usage=usage)
     return model
 
 
@@ -2677,7 +2676,6 @@ def selected_detail(model, detail, *, peer_model=None):
     """Apply local selected reads to a complete base, preserving its rows and ordering."""
     if model is None:
         return model
-    from dataclasses import replace
     from .view_model import freeze
     provenance = model.source_records or {}
     bindings = dict(provenance.get("_detail_bindings", {}))
@@ -2700,7 +2698,7 @@ def selected_detail(model, detail, *, peer_model=None):
                 observation = dict(observation, last_good=bool(observation.get("last_good") or
                     prior.get("state") == "success" or prior.get("last_good")))
             provenance = {**provenance, "_peer_observed_at": candidate_sources.get("_peer_observed_at")}
-            model = replace(model, **changes, system=freeze({**(model.system or {}),
+            model = model.with_updates(**changes, system=freeze({**(model.system or {}),
                             "peer_observation": observation}), source_records=provenance)
     if detail is None:
         return model
@@ -2769,7 +2767,7 @@ def selected_detail(model, detail, *, peer_model=None):
             feed = list(other_events) + _registry_events(focus, tag)
             feed.sort(key=lambda item: -item[0])
             events = tuple(freeze(event) for _epoch, event in feed[:5])
-    return replace(model, sessions=tuple(freeze(row) for row in rows),
+    return model.with_updates(sessions=rows,
                    seats=tuple(freeze(row) for row in old_seats + seat_rows),
                    generations=freeze(new_generations), cards=freeze(new_cards),
                    dialogue=freeze(old_dialogue), attempts=freeze(raw) if raw is not None else model.attempts,
@@ -2784,7 +2782,6 @@ def reorder_view_model(model, effects):
     """Reorder the displayed identities after their ordering effect succeeded."""
     if model is None or not isinstance(model.ordering, Mapping):
         return model
-    from dataclasses import replace
     from . import order
     ordering = dict(model.ordering)
     saved = {"repos": list(ordering.get("repo_keys", ())),
@@ -2797,7 +2794,7 @@ def reorder_view_model(model, effects):
     ordered = order.reconcile_order(saved, model.repos, rows)
     ordering.update(saved=saved, repo_keys=ordered["repo_order"], session_keys=ordered["session_order"],
                     tag_cycle=["session:" + row["tag"] for row in ordered["sessions"]])
-    return replace(model, repos=tuple(ordered["repos"]), sessions=tuple(ordered["sessions"]), ordering=ordering)
+    return model.with_updates(repos=tuple(ordered["repos"]), sessions=tuple(ordered["sessions"]), ordering=ordering)
 
 
 def _stamp(epoch, now):

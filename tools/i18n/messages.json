@@ -1110,13 +1110,17 @@
    "en": "the current input tokens could not be read",
    "ko": "현재 입력 토큰을 확인하지 못했습니다"
   },
+  "tidy.idle.completed": {
+   "en": "Idle tidy: card saved, conversation compacted",
+   "ko": "쉬는 동안 정리: 카드 저장, 대화 압축"
+  },
   "tidy.idle.off": {
    "en": "To turn it off, put {{\"idle\": {{\"enabled\": false}}}} in {path}.",
    "ko": "끄려면 {path}에 {{\"idle\": {{\"enabled\": false}}}}를 두세요."
   },
   "tidy.idle.request": {
-   "en": "This request is sent {when}. Once the card arrives, this window is cleared and only a short status is shown. {off}",
-   "ko": "{when} 이 요청을 보냅니다. 카드를 받으면 이 창을 비우고 현황만 짧게 보여 줍니다. {off}"
+   "en": "Write one handoff card from this conversation. Hearting saves it, then compacts the conversation and waits for user input.",
+   "ko": "지금까지의 대화로 카드 답변 하나만 작성하세요. 하팅이 저장한 뒤 대화를 압축하며, 다음 사용자 입력을 기다립니다."
   },
   "tidy.idle.request_claude": {
    "en": "This request is sent {when}. Once the card arrives, this window is cleared (with /compact instead of /clear while background agents run) and only a short status is shown. {off}",

@@ -36,6 +36,58 @@ except ImportError:  # a partial tree without it (e.g. a fixture release): no re
 SCHEMA = "ship-parent-deploy/v1"
 
 
+def owner_input(jobs, attempt):
+    from dispatch_owner_input import inspect, InputError
+    try:
+        return inspect(Path(jobs), attempt)
+    except (InputError, JoinContractError, OSError, ValueError):
+        return {}
+
+
+def parked_request(jobs, attempt, request_digest):
+    from dispatch_completion_join import read_supervisor_phase_state
+    path = DC.dispatch_state_root(Path(jobs)) / "supervisor-state" / (attempt + ".json")
+    state = read_supervisor_phase_state(path, attempt)
+    return bool(state and state.phase == "parked" and
+                (state.resource or {}).get("parent_deploy") == request_digest)
+
+
+def waiting_request(args, control):
+    """An exact open request held by the current supervised owner, including replacements."""
+    route_file = getattr(args, "route_file", "")
+    if not route_file:
+        return None
+    jobs = Path(args.jobs)
+    attempt = args.parent_attempt_id
+    request_path, result_path = paths(jobs, args.route_id)
+    if not request_path.exists():
+        return None
+    value, _ = load_request(request_path)
+    cr = DC._route_module()
+    if cr._current_owner_attempt(jobs, value["owner_attempt_id"]) != attempt:
+        return None
+    row = exact_attempt_row(jobs, attempt)
+    actual_file, route = _route(jobs, attempt, row.metadata)
+    if (row.status not in {"open", "running"}
+            or row.metadata.get("worker_type") != "owner"
+            or row.metadata.get("registered_worker") != "1"
+            or (value["route_id"], value["route_hash"], value["route_file"]) !=
+               (args.route_id, args.route_hash, str(Path(route_file).resolve()))
+            or (route["route_id"], route["route_hash"], str(actual_file.resolve())) !=
+               (value["route_id"], value["route_hash"], value["route_file"])):
+        raise ValueError("parent-deploy-owner-binding-changed")
+    channel = owner_input(jobs, attempt)
+    if not (channel.get("accepting") and channel.get("supervisor_live")
+            and channel.get("thread_id") == control.thread_id):
+        raise ValueError("parent-deploy-owner-input-unavailable")
+    # Keep a parked request through result publication: the result is durable
+    # before its correction is submitted, so that small window is still a wait.
+    if (result_path.exists() and read(result_path).get("state") != "running"
+            and not parked_request(jobs, attempt, value["request_digest"])):
+        return None
+    return value
+
+
 def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
@@ -105,6 +157,9 @@ def context(jobs, attempt, *, owner_prepare=False):
         raise ValueError("parent-deploy-approved-ship-scope-required")
     node = nodes[0]
     facts = {} if owner_prepare else {"actor": authority.caller_identity()[1]}
+    channel = owner_input(jobs, current)
+    if channel.get("supervisor_live") and channel.get("accepting"):
+        facts["reachable"] = True
     decision = authority.decide_continuation(route, action="owner", jobs=Path(jobs),
                                              owner_attempt_id=attempt, facts=facts)
     if not ((decision.allowed and decision.next_action == "handback")
@@ -242,9 +297,27 @@ def prepare(jobs, attempt, command_file):
         value["request_digest"] = digest(value)
         value["parent_availability"] = availability
         write(request_path, value)
-    return {"state": "prepared", "request": str(request_path), **value,
-            "run_command": shlex.join([sys.executable, str(Path(__file__).resolve().with_name("ship-parent-deploy.py")),
-                                       "run", "--request", str(request_path)])}
+    run_command = shlex.join([sys.executable, str(Path(__file__).resolve().with_name("ship-parent-deploy.py")),
+                             "run", "--request", str(request_path)])
+    from session_notice import notify
+    try:
+        notice = notify(meta.get("parent_harness"), meta.get("parent_sid"), jobs=jobs,
+               key="parent-deploy-" + value["request_digest"], subject="ship deploy ready",
+               text=f"route {route['route_id']}: {run_command} --check, then {run_command}",
+               required_action="run-parent-deploy", route_id=route["route_id"],
+               lineage={"kind": "attempt-parent", "harness": meta["parent_harness"],
+                        "session_id": meta["parent_sid"], "attempt_id": current})
+    except (OSError, ValueError):
+        notice = None
+    channel = owner_input(jobs, current)
+    runtime_wait = bool(notice and channel.get("supervisor_live") and channel.get("accepting"))
+    return {"state": "prepared" if notice else "blocked", "request": str(request_path), **value,
+            "run_command": run_command, "runtime_wait": runtime_wait,
+            **({"reason": "parent-deploy-notice-unavailable"} if not notice else {}),
+            "next_step": ("Finish readiness reviews, then yield runtime_wait: registered-children."
+                          if runtime_wait else
+                          "Use the ordinary BLOCKED handoff with this request and run_command; "
+                          "the actual parent checks and executes it, then uses the printed correction_command.")}
 
 
 def load_request(path):
@@ -389,8 +462,18 @@ def publish(value, result, result_path):
         raise ValueError("parent-deploy-record-conflict")
     existing["parent_deploy"] = result
     write(target, existing)
-    return {"state": result["state"], "result": str(result_path), "deploy_record": str(target),
-            "correction_command": handback(value, result_path)}
+    correction = handback(value, result_path)
+    reply = {"state": result["state"], "result": str(result_path), "deploy_record": str(target),
+             "correction_command": correction}
+    current = DC._route_module()._current_owner_attempt(Path(value["jobs"]), value["owner_attempt_id"])
+    channel = owner_input(value["jobs"], current)
+    if (parked_request(value["jobs"], current, value["request_digest"])
+            and channel.get("supervisor_live") and channel.get("accepting")):
+        # The same idempotent correct command follows replacement lineage. A
+        # failed delivery retains the command; it never retries deployment.
+        sent = subprocess.run(shlex.split(correction), text=True, capture_output=True)
+        reply["owner_resume"] = {"submitted": sent.returncode == 0, "exit_code": sent.returncode}
+    return reply
 
 
 def run(request_path, *, check=False):
