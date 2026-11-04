@@ -139,40 +139,23 @@ def candidate_context(payload: dict[str, Any], current_cwd: str, sid: str) -> tu
             value.get("deferredCandidateReceipt"))
 
 
-def card_context(payload: dict[str, Any], current_cwd: str) -> tuple[str, Any]:
-    """Session card / tidy notice due at this prompt; needs no prompt text or candidate.
-
-    JSON mode hands back the consumption receipts instead of writing them, so
-    they are committed only after the outer hook's final output exists.
-    """
+def card_context(payload: dict[str, Any], current_cwd: str, *, startup=None, human=None) -> tuple[str, Any]:
+    """Render through the shared hook, committing receipts after the outer output."""
     sid = interaction_session_id(payload)
     if not sid or not SESSION_TIDY.is_file():
         return "", None
-    command = [sys.executable, str(SESSION_TIDY), "hook", "--harness", "codex",
-               "--event", "prompt", "--session-id", sid, "--cwd", current_cwd,
-               "--format", "json"]
-    transcript = nested_string(payload, "transcript_path", "transcriptPath")
-    if transcript:
-        command += ["--transcript", transcript]
+    contexts, deferred = [], []
     try:
-        result = subprocess.run(
-            command, cwd=str(ROOT), env=os.environ.copy(), text=True,
-            input=json.dumps({"prompt": nested_string(payload, "prompt")}),
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=4, check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
+        import session_tidy
+        session_tidy.run_hook(
+            "codex", "prompt", sid, cwd=current_cwd,
+            transcript=nested_string(payload, "transcript_path", "transcriptPath"),
+            prompt_text=nested_string(payload, "prompt"), emit=contexts.append,
+            emit_human=human.append if human is not None else None,
+            startup_context=startup if startup is not None else {}, deferred=deferred)
+    except Exception:
         return "", None
-    if result.returncode != 0:
-        return "", None
-    try:
-        value = json.loads(result.stdout)
-    except (TypeError, ValueError):
-        return "", None
-    if not isinstance(value, dict):
-        return "", None
-    context = value.get("additionalContext")
-    return (context if isinstance(context, str) else "",
-            value.get("deferredConsumed"))
+    return "\n".join(contexts), deferred
 
 
 def run_preflight_result(*args: str, timeout_seconds: float | None = None,
@@ -555,7 +538,9 @@ def main() -> int:
 
     # The card hook runs first: it is where a cleared window's successor is recorded, and the
     # receipts a predecessor left for it are swept only once that is known.
-    card, card_deferred = card_context(payload, current_cwd)
+    startup = {"due": True}  # a failed card lookup must not suppress the evidence probe
+    human_notices = []
+    card, card_deferred = card_context(payload, current_cwd, startup=startup, human=human_notices)
     batches = []
     ackable = set()
     try:
@@ -577,6 +562,8 @@ def main() -> int:
         parts.append(peer.receiver_guidance(current_prompt,
             {"harness": "codex", "session_id": interaction_sid}, cwd=current_cwd))
     parts.append(card)
+    if startup.get("due"):
+        parts.append(run_preflight("local-evidence", current_cwd))
     candidate, candidate_deferred = candidate_context(payload, current_cwd, sid)
     parts.append(candidate)
     parts.append(run_preflight("briefing", current_cwd))
@@ -585,7 +572,8 @@ def main() -> int:
     parts.append(token_budget_context(current_cwd, sid))
     if context_notice:
         parts.append(context_notice)
-    emit_context("UserPromptSubmit", parts, system_message=context_notice)
+    emit_context("UserPromptSubmit", parts,
+                 system_message="\n".join(human_notices + ([context_notice] if context_notice else [])))
     # Commit candidate/card consumption only after the context above actually
     # rendered, and before the existing native-queue ack does the same for its
     # records. A timeout or render error before this point leaves the same

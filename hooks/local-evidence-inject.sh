@@ -5,11 +5,9 @@
 # newest entry points. Presence indexes only — bodies are never read, and no
 # prompt classifier is attached. Fail-open: every failure is zero context.
 #
-# Session-start surface, not per-prompt. The block is byte-identical between
-# prompts — only a newly written artifact changes it — so injecting it every
-# turn spent ~360 tokens per turn re-stating the same paths. A start event that
-# also fires on resume/clear/compact re-seats it whenever the context that held
-# it is gone, which is the only case a repeat was buying.
+# Adapters run this presence probe on the first prompt after a session start.
+# They commit that once-only delivery with the existing prompt-context receipt;
+# subsequent prompts reuse the context without repeating this probe.
 set -u
 
 HOOK_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd)"

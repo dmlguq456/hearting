@@ -253,6 +253,10 @@ Efficiency is not corner cutting. Reduce duplicated orchestrator reasoning, not 
   improve the artifact schema instead of passing conversation history.
 - Waiting and harvesting are part of the deterministic flow only when the parent runtime owns either a checked session supervisor or an explicitly entered single-ingress gateway. Registered standard+ conductors yield while their supervisor joins the exact child batch outside the model. A managed interactive Codex session stays conversational while its gateway serializes manual input and one bounded typed completion receipt; its control-only sidecar owns neither the upstream connection nor approvals. Parent runtime chooses the wake adapter independently of child runtime. Hooks must not simulate wake by blocking Stop, parking all tools, or creating a synthetic user turn. When atomic idle claim, durable idempotency, or approval routing cannot be proved, `dispatch-wait`/later-turn harvest is a disclosed finite fallback and ambiguous sends fail closed. `OPERATIONS §5.10` owns the runtime details.
 - Reduce fixed input before squeezing output: keep always-loaded bootstraps as routers, expose Skill detail progressively, prevent duplicate discovery, and keep ordinary hooks silent. `ADAPTATION §6.1` owns the measurable budgets.
+  Session start records identity, projection and lifecycle recovery. The first
+  prompt renders the session card, pending deliveries and local evidence once;
+  start does not render or consume that same prompt context. Preserve clear,
+  resume and compact lineage while deferring those reads to the receiving prompt.
 - Worker pruning follows the same rule: one minimal kernel, one worker-type
   fragment, and only the assigned capability/stage contract. Runtime-owned
   project-instruction inheritance is reported separately from harness-controlled

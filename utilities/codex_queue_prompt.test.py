@@ -239,8 +239,19 @@ class PromptReceiptTest(unittest.TestCase):
         projection = types.ModuleType("herdr_session_projection")
         projection.project = lambda *a, **kw: None
 
-        def run(emit):
+        def run(emit, first=True):
             events = []
+            def card_context(_payload, _cwd, *, startup, human):
+                startup["due"] = first
+                if first:
+                    human.append("history notice")
+                return "card", card_pending
+            def render(event, parts, **kw):
+                self.assertEqual(event, "UserPromptSubmit")
+                self.assertEqual([p for p in parts if p],
+                                 ["receipt", "card"] + (["local evidence"] if first else []) + ["candidate"])
+                self.assertEqual(kw["system_message"], "history notice" if first else "")
+                emit(event, parts, **kw)
             with mock.patch.dict(sys.modules, {"context_alert": context_alert, "fleet": fleet,
                                                "herdr_session_projection": projection}), \
                  mock.patch.object(hook, "is_worker_session", return_value=False), \
@@ -251,13 +262,14 @@ class PromptReceiptTest(unittest.TestCase):
                  mock.patch.object(hook, "retry_pending_peer"), \
                  mock.patch.object(hook, "launch_trigger"), \
                  mock.patch.object(hook, "sd111_first_prompt_sweep"), \
-                 mock.patch.object(hook, "card_context", return_value=("card", card_pending)), \
-                 mock.patch.object(hook, "native_queue_prompt_receipts", return_value=([], [])), \
+                 mock.patch.object(hook, "card_context", side_effect=card_context), \
+                 mock.patch.object(hook, "native_queue_prompt_receipts", return_value=([], ["receipt"])), \
                  mock.patch.object(hook, "candidate_context",
                                    return_value=("candidate", candidate_pending)), \
-                 mock.patch.object(hook, "run_preflight", return_value=""), \
+                 mock.patch.object(hook, "run_preflight", side_effect=lambda name, *a:
+                                   "local evidence" if name == "local-evidence" else ""), \
                  mock.patch.object(hook, "token_budget_context", return_value=""), \
-                 mock.patch.object(hook, "emit_context", side_effect=emit), \
+                 mock.patch.object(hook, "emit_context", side_effect=render), \
                  mock.patch.object(session_tidy, "apply_deferred",
                                    side_effect=lambda *a: events.append("card")) as card_apply, \
                  mock.patch.object(mem, "apply_candidate_receipt",
@@ -269,6 +281,7 @@ class PromptReceiptTest(unittest.TestCase):
         self.assertEqual(events, ["card", "candidate"])
         self.assertEqual(card_apply.call_args.args[0], card_pending)
         self.assertEqual(mem_apply.call_args.args[0], candidate_pending)
+        self.assertEqual(run(lambda *a, **kw: None, first=False)[0], ["card", "candidate"])
 
         def broken(*_args, **_kwargs):
             raise BrokenPipeError("render failed")

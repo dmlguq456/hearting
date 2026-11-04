@@ -276,7 +276,6 @@ class AliasReceive(unittest.TestCase):
                       "adapters/codex/hooks/sessionstart-lifecycle.py")
         pane, a, b = "fixture:codex-start-seat", "start-input-A", "start-input-B"
         base_env = {"HERDR_PANE_ID": pane, "AGENT_DISPATCH_CALLER_HARNESS": "codex"}
-        commands = []
         with mock.patch.object(pane_ownership, "_caller_runtime", return_value=(None, False)), \
              mock.patch.object(pane_ownership, "verified_pane", side_effect=lambda value, *a, **k: value or ""), \
              mock.patch.object(pane_ownership, "current_codex_thread_for_caller", return_value=None):
@@ -293,24 +292,17 @@ class AliasReceive(unittest.TestCase):
                         seat, "codex", a, jobs=self.state / "jobs.log"), 0)
 
             with mock.patch.dict(os.environ, {**base_env, "CODEX_THREAD_ID": b}):
-                def confirmed_start(argv, **kwargs):
-                    commands.append(list(argv))
-                    self.assertIn("--harness", argv)
-                    self.assertIn("codex", argv)
-                    self.assertIn("--event", argv)
-                    self.assertIn("start", argv)
-                    self.assertIn("--session-id", argv)
-                    self.assertIn(b, argv)
-                    self.assertIn("--source", argv)
-                    self.assertIn("clear", argv)
-                    session_tidy.run_hook("codex", "start", b, source="clear",
-                                           cwd=str(ROOT), env=os.environ)
-                    return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
-
-                with mock.patch.object(hook.subprocess, "run", side_effect=confirmed_start):
-                    self.assertEqual(hook.card_context(
-                        {"session_id": b, "source": "clear"}, str(ROOT)), ("", "", None))
-                self.assertEqual(len(commands), 1)
+                with mock.patch.object(hook, "load_payload", return_value={
+                        "session_id": b, "source": "clear", "cwd": str(ROOT)}), \
+                     mock.patch.object(hook, "is_worker_session", return_value=False), \
+                     mock.patch.object(hook, "request_lifecycle_recovery"), \
+                     mock.patch.dict(sys.modules, {"herdr_session_projection": mock.Mock()}), \
+                     mock.patch.object(session_tidy, "run_hook", wraps=session_tidy.run_hook) as record:
+                    self.assertEqual(hook.main(), 0)
+                record.assert_called_once()
+                self.assertEqual(record.call_args.args, ("codex", "start", b))
+                self.assertEqual(record.call_args.kwargs["source"], "clear")
+                self.assertFalse(record.call_args.kwargs["render_context"])
                 rows = handover.handover_rows(seat)
                 self.assertEqual([(row["from"], row["sid"]) for row in rows], [(a, b)])
                 self.assertEqual(handover.resolved_steward_relations(

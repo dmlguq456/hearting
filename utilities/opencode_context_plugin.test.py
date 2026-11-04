@@ -30,6 +30,59 @@ def fixture_tempdir(stack, *, prefix):
 
 
 class OpenCodeContextPluginTest(unittest.TestCase):
+    def test_first_prompt_owns_card_and_evidence_and_auxiliary_calls_only_replay(self):
+        with tempfile.TemporaryDirectory(prefix="opencode-first-prompt-") as raw:
+            script = '''import assert from "node:assert/strict";
+import childProcess from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
+import { pathToFileURL } from "node:url";
+const calls = [];
+childProcess.spawnSync = (command, args) => {
+  calls.push(args);
+  if (args.includes("local-evidence")) return { status: 0, stdout: "same local evidence" };
+  if (args.includes("--event") && args.includes("prompt"))
+    return { status: 0, stdout: JSON.stringify({additionalContext: "same card", deferredConsumed: []}) };
+  return { status: 0, stdout: "", stderr: "" };
+};
+childProcess.spawn = () => ({on() {}, unref() {}, stdin: {end() {}}});
+syncBuiltinESMExports();
+const { AgentHarnessGuards } = await import(pathToFileURL(process.env.PLUGIN_PATH));
+const hooks = await AgentHarnessGuards({directory: process.env.HOME, worktree: process.env.HOME,
+  client: {}}, {initialize: false});
+const sid = "first-prompt-only";
+const probes = () => calls.filter(a => a.includes("local-evidence")).length;
+const cards = () => calls.filter(a => a.includes("--event") && !a.includes("--human-only"));
+await hooks.event({event: {type: "session.created", properties: {info: {id: sid}}}});
+const title = {system: []};
+await hooks["experimental.chat.system.transform"]({sessionID: sid, model: {}}, title);
+assert.equal(probes(), 0);
+assert.equal(cards().length, 0);
+const turn = id => hooks["chat.message"]({sessionID: sid, messageID: id},
+  {parts: [{type: "text", text: "hi"}]});
+await turn("m1");
+assert.equal(probes(), 1);
+assert.equal(cards().length, 1);
+for (let i = 0; i < 2; i++) {
+  const output = {system: []};
+  await hooks["experimental.chat.system.transform"]({sessionID: sid, model: {}}, output);
+  assert.ok(output.system.includes("same local evidence"));
+  assert.ok(output.system.includes("same card"));
+}
+await turn("m2");
+assert.equal(probes(), 1);
+assert.ok(cards().every(a => a[a.indexOf("--event") + 1] === "prompt"));
+hooks.dispose?.({silent: true});
+'''
+            env = {**os.environ, "PLUGIN_PATH": str(ROOT / "adapters/opencode/plugins/hearting-guards.js"),
+                   "HOME": raw, "XDG_CONFIG_HOME": str(Path(raw) / ".config"),
+                   "XDG_DATA_HOME": str(Path(raw) / ".data"), "XDG_STATE_HOME": str(Path(raw) / ".state"),
+                   "AGENT_HOME": str(ROOT), "AGENT_SESSION_ROLE": "", "AGENT_DISPATCH_CHILD": "",
+                   "AGENT_DISPATCH_DEPTH": "", "OPENCODE_DISPATCH_SLUG": "", "FLEET_TITLE_REFRESH": "",
+                   "HERDR_PANE_ID": ""}
+            result = subprocess.run([NODE, "--input-type=module", "-e", script], cwd=ROOT,
+                                    env=env, text=True, capture_output=True, timeout=15)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_runtime_completion_uses_the_existing_opencode_prompt_and_history_path(self):
         if not NODE:
             self.skipTest("node is unavailable")
