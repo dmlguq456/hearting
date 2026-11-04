@@ -3854,10 +3854,11 @@ def _scan_registry_evidence(paths):
         path_result, path_attempts = _registry_evidence_for_path(path, rows)
         proof = _registry_rows_proof(path, rows)
         pieces.append(((type(path), os.fspath(path)), proof, path_result, path_attempts))
-    signature = (tuple((key, proof.token) for key, proof, _result, _attempts in pieces),
-                 frozenset(_TERMINAL_REGISTRY_STATUSES), _registry_evidence_for_path)
+    signature = ((tuple((key, proof.token) for key, proof, _result, _attempts in pieces),
+                  frozenset(_TERMINAL_REGISTRY_STATUSES), _registry_evidence_for_path)
+                 if all(proof.owned for _key, proof, _result, _attempts in pieces) else None)
     with _PARSED_REGISTRY_CACHE_LOCK:
-        cached = _REGISTRY_MERGED_CACHE.get(signature)
+        cached = _REGISTRY_MERGED_CACHE.get(signature) if signature is not None else None
         if cached is not None:
             # Callers own the outer mappings, as before. Their immutable
             # per-route histories already have producer ownership.

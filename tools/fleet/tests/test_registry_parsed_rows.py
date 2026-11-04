@@ -62,6 +62,13 @@ class ParsedRegistryRowsTest(unittest.TestCase):
                 self.assertFalse(dispatch._REGISTRY_MERGED_CACHE)
             second.unlink()
             self.assertNotIn('test', read([first,second])[0]['rt'])
+            # Unretained input rows may have unhashable metadata; they still
+            # produce the current result, without entering the borrowed cache.
+            with mock.patch.object(dispatch, '_PARSED_REGISTRY_RAW_BYTES_LIMIT', 1):
+                dispatch._drop_registry_path_locked(str(first))
+                unretained = read([first])
+                self.assertEqual(unretained[0]['rt']['work']['status'], 'running')
+                self.assertFalse(dispatch._REGISTRY_MERGED_CACHE)
 
     def test_source_eviction_releases_borrowed_native_projections_and_metadata(self):
         import gc
