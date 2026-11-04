@@ -793,7 +793,7 @@ if PATH="$TMP/codex-stubbin:$PATH" AGENT_HOME="$ROOT" CODEX_HOME="$TMP/codex_hea
   && grep -q 'route_state: validated dispatch metadata' "$codex_start_prompt" \
   && grep -q 'Read only `capabilities/autopilot-code/references/owner-execution.md`' "$codex_start_prompt" \
   && ! grep -q 'Read `adapters/codex/skills/autopilot-code/SKILL.md`' "$codex_start_prompt" \
-  && grep -q 'preflight.sh qa-policy standard code' "$codex_start_prompt" \
+  && grep -q 'Run only the commands your Route steps and the latest receipt print' "$codex_start_prompt" \
   && grep -q 'dispatch registered dispatch-depth-2 stages with the exact start commands' "$codex_start_prompt" \
   && grep -q 'nested work' "$codex_start_prompt"; then
   for _ in $(seq 1 20); do
