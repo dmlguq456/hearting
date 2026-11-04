@@ -529,11 +529,14 @@ def main() -> int:
         )
         # Codex runs no Stop hook when a turn fails; this turn's own observer
         # continues it after a transient model-capacity failure.
-        try:
-            from codex_capacity_resume import launch as launch_capacity_resume
-            launch_capacity_resume(payload)
-        except Exception:
-            pass
+        # The observer already requires this exact native turn field. Avoid
+        # loading its supervisor graph for payloads on which launch is a no-op.
+        if first_string(payload, "turn_id"):
+            try:
+                from codex_capacity_resume import launch as launch_capacity_resume
+                launch_capacity_resume(payload)
+            except Exception:
+                pass
     sd111_first_prompt_sweep(sid)
 
     # The card hook runs first: it is where a cleared window's successor is recorded, and the
