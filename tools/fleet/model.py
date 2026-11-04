@@ -551,6 +551,13 @@ class Session:
     # herdr answered and this (id-verified) session is not in its list; None = no
     # evidence either way (herdr absent/unreachable, or an unverified-id harness).
     herdr_attached: Optional[bool] = None
+    # aedd50 — where this session's pane sits, display only: Herdr
+    # `<workspace>:<tab>·<pane>` or tmux `<session>:<window>.<pane>`, and which
+    # multiplexer that is. `pane_corner` is set on a `⚑` pane alone: whether it is
+    # its tab's top-left pane (what `hearting run pane tidy` arranges); None = unread.
+    pane_location: Optional[str] = None
+    multiplexer: Optional[str] = None
+    pane_corner: Optional[bool] = None
     # F-100c — steward flag (depth −1 role): True when this session's marker (under the
     # dispatch state root's `peer-steward/`) holds role evidence — `steward on`
     # (source=explicit), a `wait`/`watch` that observed a real target (source=watch) or a

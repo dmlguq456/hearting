@@ -1451,6 +1451,30 @@ class TmuxAgentTerminalTest(_IsolatedMixin, unittest.TestCase):
         self.assertEqual(ts.caller_tmux_pane({"TMUX_PANE": "%4"}), ("", None))
         self.assertEqual(ts.caller_tmux_pane({"TMUX": "/s,1,0", "TMUX_PANE": "w1:p0"}), ("", None))
 
+    def test_notify_is_one_literal_status_message_on_attached_clients_only(self):
+        self.assertFalse(self.surface.notify("hearting-question nobody attached"))
+        if not shutil.which("script"):
+            self.skipTest("script is not installed")
+        # The client attaches to a session of its own, so no key it might pass reaches the shell pane.
+        self.tmux("new-session", "-d", "-s", "viewer", "-x", "120", "-y", "30", "sleep 600")
+        out = self.root / "client.out"
+        client = subprocess.Popen(
+            ["script", "-qfc", shlex.join(["tmux", "-S", str(self.socket), "attach", "-t", "viewer"]), str(out)],
+            env=dict(self.env, TERM="xterm-256color"), stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(lambda: (client.kill(), client.wait(timeout=10), client.stdin.close()))
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not self.tmux("list-clients", "-F", "#{client_name}").stdout.strip():
+            time.sleep(.1)
+        before = self.tmux("list-panes", "-a", "-F", "#{pane_id} #{pane_title} #{pane_active}").stdout
+        self.assertTrue(self.surface.notify("hearting-question #{pane_id} 100%"))
+        while time.monotonic() < deadline and b"hearting-question #{pane_id} 100%" not in out.read_bytes():
+            time.sleep(.1)
+        self.assertIn(b"hearting-question #{pane_id} 100%", out.read_bytes())
+        # Display only: no pane, title or focus changed.
+        self.assertEqual(self.tmux("list-panes", "-a", "-F", "#{pane_id} #{pane_title} #{pane_active}").stdout,
+                         before)
+
     def test_verified_pane_proves_the_runtime_in_its_own_tmux_pane_only(self):
         sid = "9b2f3c4d-5e6f-4a1b-8c2d-3e4f5a6b7c8d"
         out = self.root / "verified.json"

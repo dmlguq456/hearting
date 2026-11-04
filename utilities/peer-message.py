@@ -4027,6 +4027,14 @@ def retry_receiver_idle(recipient, *, peer=True, permission=None):
     already computed instead of walking process identity a second time.
     """
     pane = os.environ.get("HERDR_PANE_ID")
+    tmux = False
+    if not pane:
+        # Outside Herdr the tmux pane this callback runs in is the same kind of hint.
+        try:
+            from terminal_surface import caller_tmux_pane
+            pane, tmux = caller_tmux_pane()[0], True
+        except Exception:
+            return
     if not pane or recipient.get("harness") not in {"claude", "opencode"}:
         return
     try:
@@ -4035,7 +4043,8 @@ def retry_receiver_idle(recipient, *, peer=True, permission=None):
             sys.path.insert(0, tools)
         if permission is None:
             from fleet.herdr_projection import may_report
-            permission = may_report(recipient["harness"], recipient.get("session_id"))
+            permission = may_report(recipient["harness"], recipient.get("session_id"),
+                                    pane_id=pane if tmux else None)
         if not permission:
             return
         _peer_steward_module().receiver_idle(recipient, pane, peer=peer)

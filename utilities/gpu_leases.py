@@ -19,6 +19,11 @@ import sys
 import tempfile
 import time
 import uuid
+try:  # ends a detached child with the test that started it; no-op outside tests
+    from detached_lifetime import bind as end_with_test
+except ImportError:  # a partial tree without it (e.g. a fixture release): no record
+    def end_with_test(child):
+        return child
 
 
 class GPUUnavailable(ValueError):
@@ -661,8 +666,8 @@ def launch_compute(options, payload_source):
             tmux_transport = {"kind": "hearting-tmux-v1", "server": server_name}
         else:
             with open(os.devnull, "rb") as stdin, open(os.devnull, "ab") as output:
-                subprocess.Popen(["python3", "-c", script], stdin=stdin, stdout=output,
-                                 stderr=output, start_new_session=True, cwd=launch_cwd)
+                end_with_test(subprocess.Popen(["python3", "-c", script], stdin=stdin, stdout=output,
+                                 stderr=output, start_new_session=True, cwd=launch_cwd))
             tmux_transport = {"kind": "nohup-v1"}
         # The launcher remains the pending holder until its wrapper is bound.
         # A dead launcher can never let an unbound wrapper start a payload.

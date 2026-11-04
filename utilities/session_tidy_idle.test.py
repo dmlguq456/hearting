@@ -113,6 +113,49 @@ class IdleObserverTests(unittest.TestCase):
         self.assertIn("/compact", texts["claude"])            # only Claude windows compact for agents
         self.assertNotIn("/compact", texts["codex"] + texts["opencode"] + failed)
 
+    def test_an_open_question_form_types_nothing_and_says_so_when_the_window_ends(self):
+        # 11-04 07:42-07:47 (v3.76.0, a window with an open AskUserQuestion form): every look
+        # answered queued/form-open, nothing was typed, and the expired booking used to say
+        # "창 전환을 확인하지 못했습니다" as if something had been tried.
+        clock = [1000.0]
+        looks = []
+
+        def look(_path, _nonce, _pane):
+            looks.append(clock[0])
+            return {"accepted": "queued", "reason": "form-open"}
+
+        def wait(seconds):
+            clock[0] += max(float(seconds), 1.0)
+        with self.iso.patched_environ(self.extra), \
+                mock.patch.object(clear, "herdr_command", return_value=str(self.iso.root / "fake-herdr")), \
+                mock.patch.object(clear, "_start_helper", return_value=12345), \
+                mock.patch.object(st, "now_epoch", side_effect=lambda: clock[0]), \
+                mock.patch.object(clear, "_run_idle_card_request", side_effect=look):
+            self.assertEqual(self.observe_claude(now=1000), "booking=scheduled")
+            seat = st.resolve_seat("claude", str(self.cwd), sid="sid-A")
+            booking = clear.read_reservation(seat.key)
+            steward = mock.Mock(return_value={"cleared": "true", "new_session": "sid-B"})
+            outcome = clear.run_helper(seat.key, booking["nonce"], wait=lambda *_a: "idle",
+                                       steward=steward, continuer=mock.Mock(), sleep=wait)
+            held = clear.read_reservation(seat.key)
+            notices = st.read_json(st._notices_path(seat)) or {}
+        text = "\n".join(item.get("text", "") for item in notices.get("items", []))
+        self.assertEqual(outcome, "skipped")
+        self.assertGreater(len(looks), 10)                       # looked again and again, never typed
+        steward.assert_not_called()
+        self.assertNotIn("idle_request", held)                    # no request was ever claimed
+        self.assertEqual((held["status"], held["reason"]), ("skipped", "form-open"))
+        self.assertIn("요청을 보내지 않았습니다(질문·확인 창이 열려 있었습니다)", text)
+        self.assertIn("아무것도 입력하지 않았고", text)
+        self.assertNotIn("창 전환을 확인하지 못했습니다", text)
+
+    def test_an_idle_result_line_tells_sent_from_not_sent(self):
+        sent = {"origin": "idle", "harness": "claude", "idle_request": {"state": "sent"}}
+        self.assertIn("요청은 보냈지만 창 전환을 확인하지 못했습니다",
+                      clear._idle_notice_text(sent, "arrival-not-observed"))
+        self.assertEqual(clear._idle_notice_text({"origin": "idle"}, "new-input"), "")   # the person typed
+        self.assertIn("화면이 쉬는 중이 아니었습니다", clear._idle_notice_text({"origin": "idle"}, "not-idle-working"))
+
     def test_threshold_unknown_and_worker_signals_fail_closed(self):
         with self.iso.patched_environ(self.extra), mock.patch.object(clear, "herdr_command", return_value="fake"), \
              mock.patch.object(clear, "_start_helper", return_value=12345):

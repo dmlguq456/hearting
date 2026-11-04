@@ -60,6 +60,11 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+try:  # ends a detached child with the test that started it; no-op outside tests
+    from detached_lifetime import bind as end_with_test
+except ImportError:  # a partial tree without it (e.g. a fixture release): no record
+    def end_with_test(child):
+        return child
 
 ROOT = Path(__file__).resolve().parents[1]
 MAX_SLEEP_SECONDS = 7 * 24 * 3600
@@ -204,9 +209,9 @@ def arm(result: dict, route_file, jobs, *, environ=None, spawn=subprocess.Popen,
         return None
     log = path.with_suffix(".log")
     with open(os.devnull, "rb") as stdin, log.open("ab") as out:
-        spawn([sys.executable, str(Path(__file__).resolve()), "run", "--record", str(path)],
+        end_with_test(spawn([sys.executable, str(Path(__file__).resolve()), "run", "--record", str(path)],
               stdin=stdin, stdout=out, stderr=subprocess.STDOUT, env={**env, CHAIN_ENV: str(chain + 1)},
-              start_new_session=True, close_fds=True)
+              start_new_session=True, close_fds=True))
     return {"record": str(path), "resume_at": retry_at, "state": "armed", "cause": cause}
 
 

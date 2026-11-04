@@ -175,6 +175,27 @@ def _tidy_order(layout, caller):
     return [first] + [p for p in ids if p != first]
 
 
+def supervisor_corner(layout, marks):
+    """``(pane, top_left)`` for a tab's supervisor, as ``pane tidy`` would order it.
+
+    ``marks`` maps a pane id to its headers (display agent, title). The supervisor is
+    the first pane in reading order whose header carries ``⚑``; ``top_left`` says
+    whether it already is the top-left pane. None when no pane is marked or the
+    geometry does not read as a tiling. Read only.
+    """
+    try:
+        panes = _reading(layout)
+    except _TidyError:
+        return None
+    for pane in panes:
+        headers = marks.get(pane["pane_id"]) or ()
+        if isinstance(headers, str):
+            headers = (headers,)
+        if any(_SUPERVISOR.match(str(text or "")) for text in headers):
+            return pane["pane_id"], pane["pane_id"] == panes[0]["pane_id"]
+    return None
+
+
 def _shell_record(info):
     from pane_ownership import _process
     record = _process(info.get("shell_pid")) if isinstance(info, dict) else None
@@ -870,6 +891,26 @@ class TmuxSurface:
     def answers(self):
         return self._tmux("display-message", "-p", "#{pid}") is not None
 
+    def notify(self, text, *, seconds=10):
+        """Show ``text`` once on every client attached to this server; display only.
+
+        Herdr's ``notification show`` counterpart: a status-line message, so nothing is
+        typed and no pane, focus, title or option changes. ``#`` is doubled so a
+        question is never read as a tmux format. True when a client was there to show it.
+        """
+        rows = self._rows(1, "list-clients", "-F", "#{client_name}")
+        message = str(text or "").replace("#", "##")
+        if not rows or not message:
+            return False
+        shown = False
+        for (client,) in rows[:16]:
+            ok = self._tmux("display-message", "-c", client, "-d", int(seconds * 1000),
+                            "--", message) is not None
+            if not ok:  # tmux before 3.2 has no -d; its own display-time applies
+                ok = self._tmux("display-message", "-c", client, "--", message) is not None
+            shown = ok or shown
+        return shown
+
     def agent(self, pane, *, table=None):
         """``herdr agent get``'s payload for one tmux pane; None when tmux cannot answer.
 
@@ -889,10 +930,34 @@ class TmuxSurface:
         session_id = _process_session(harness, pid, pane, self)
         agent = {"pane_id": pane, "agent": harness, "pid": pid,
                  "agent_status": native_turn(harness, pid, session_id) if session_id else "unknown",
-                 "name": None, "cwd": _cwd(pid)}
+                 "name": self._started_name(pane, pid), "cwd": _cwd(pid)}
         if session_id:
             agent["agent_session"] = {"kind": "id", "value": session_id}
         return {"result": {"type": "agent_info", "agent": agent}}
+
+    def _started_name(self, pane, pid):
+        """The name ``peer-steward start`` gave this exact runtime process, else None.
+
+        The name is bound to the runtime's PID and start time, so a later program in
+        the same pane never inherits it.
+        """
+        from pane_ownership import _process
+        found = self._describe(pane, "#{@hearting_name}", "#{@hearting_name_pid}")
+        live = _process(pid)
+        if not found or not found[0] or not live or found[1] != f"{pid}:{live[5]}":
+            return None
+        return found[0]
+
+    def name_started(self, pane, pid, name):
+        """Bind ``name`` to the runtime ``pid`` now in ``pane`` (pane options only)."""
+        from pane_ownership import _process
+        live = _process(pid)
+        return bool(live) and self.annotate(pane, None, {"name": str(name),
+                                                         "name_pid": f"{pid}:{live[5]}"})
+
+    def close(self, pane):
+        target = self._target(pane)
+        return target is not None and self._tmux("kill-pane", "-t", target) is not None
 
     def agents(self):
         """``herdr agent list``'s payload over every pane of this tmux server."""

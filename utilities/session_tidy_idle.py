@@ -11,6 +11,11 @@ import sqlite3
 import subprocess
 import sys
 from typing import Any
+try:  # ends a detached child with the test that started it; no-op outside tests
+    from detached_lifetime import bind as end_with_test
+except ImportError:  # a partial tree without it (e.g. a fixture release): no record
+    def end_with_test(child):
+        return child
 
 try:
     import tomllib
@@ -358,9 +363,9 @@ def launch_observer(harness: str, payload: dict, *, environ=None, popen=None) ->
                 child_env[key] = str(environ[key])
         command = [sys.executable, str(Path(__file__).resolve()), "--harness", harness]
         spawn = subprocess.Popen if popen is None else popen
-        spawn(command, stdin=payload_fd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        end_with_test(spawn(command, stdin=payload_fd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
               close_fds=True, pass_fds=(payload_fd,), start_new_session=True,
-              env=child_env, cwd=str(ROOT))
+              env=child_env, cwd=str(ROOT)))
         return True
     except (OSError, subprocess.SubprocessError, BrokenPipeError, ValueError, TypeError):
         return False

@@ -134,6 +134,18 @@ def runtime_identity():
     return ("codex", None) if codex_seen else (None, None)
 
 
+def _end_with_test(child):
+    """End a detached ``child`` with the test that started it (utilities/detached_lifetime.py)."""
+    utilities = str(Path(__file__).resolve().parents[2] / "utilities")
+    if utilities not in sys.path:
+        sys.path.append(utilities)
+    try:
+        from detached_lifetime import bind
+    except ImportError:
+        return child
+    return bind(child)
+
+
 def verified_pane(pane, harness, session_id=None, **kwargs):
     utilities = str(Path(__file__).resolve().parents[2] / "utilities")
     if utilities not in sys.path:
@@ -501,8 +513,8 @@ def _defer_until_proven(session_id: str, report_session: bool, *,
     if session_start_source is not None:
         command += ["--session-start-source", session_start_source]
     try:
-        subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL, start_new_session=True)
+        _end_with_test(subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True))
     except Exception:
         pass
 
@@ -693,6 +705,14 @@ def project(harness: str, session_id: str, *, pane_id=None, worker=None,
     if observation is not None:
         observation.update(schema="hearting-pane-observation-v1", reason="not-attempted",
                            session_report="not-attempted", metadata_report="not-attempted")
+    if not pane and not (harness == "codex" and _in_shared_codex_service()):
+        # Without a Herdr pane, the tmux pane this runtime's hook runs in is the same
+        # kind of hint for all three harnesses; may_report below proves it. A shared
+        # Codex service inherited some other pane's environment, so it gets none.
+        pane = caller_tmux_pane()
+    if _is_tmux_pane(pane):
+        return _project_tmux(harness, session_id, pane, worker=worker, observation=observation,
+                             permission=permission, display_relations=display_relations)
     if not shutil.which("herdr"):
         if observation is not None:
             observation["reason"] = "herdr-unavailable"
@@ -770,6 +790,55 @@ def project(harness: str, session_id: str, *, pane_id=None, worker=None,
     if display_relations:
         lifecycle["display_relations"] = True
     _report(harness, session_id, pane, report_session, **lifecycle)
+    return True
+
+
+def _is_tmux_pane(pane) -> bool:
+    utilities = str(Path(__file__).resolve().parents[2] / "utilities")
+    if utilities not in sys.path:
+        sys.path.insert(0, utilities)
+    from terminal_surface import is_tmux_pane
+    return is_tmux_pane(pane)
+
+
+def caller_tmux_pane() -> str:
+    """``$TMUX_PANE`` when this process runs inside tmux; a hint for ``may_report``, never proof."""
+    utilities = str(Path(__file__).resolve().parents[2] / "utilities")
+    if utilities not in sys.path:
+        sys.path.insert(0, utilities)
+    from terminal_surface import caller_tmux_pane as hint
+    return hint()[0]
+
+
+def _project_tmux(harness, session_id, pane, *, worker=None, observation=None,
+                  permission=None, display_relations=False) -> bool:
+    """The same header on a tmux pane: its pane title and the ``@hearting_title`` option.
+
+    tmux has no session record to report, so only the header goes out, after the same
+    ``may_report`` proof for that pane. A program that sets its own terminal title can
+    replace the pane title later; the option keeps Hearting's text for a border format.
+    """
+    allowed = (may_report(harness, session_id, worker=worker, pane_id=pane)
+               if permission is None else bool(permission))
+    if not allowed:
+        if observation is not None:
+            observation["reason"] = "guard-refused"
+        return True
+    command = _metadata_command("tmux", harness, session_id, pane, display_relations=display_relations)
+    header = command[command.index("--title") + 1] if "--title" in command else ""
+    ok = False
+    try:
+        from terminal_surface import pane_surface
+        surface = pane_surface(pane)
+        # One tmux pane id per server: name the pane as every other reader does.
+        pane = (surface.address(pane) if surface is not None else None) or pane
+        ok = bool(header and surface is not None and surface.annotate(pane, header, {"title": header}))
+    except Exception:
+        ok = False
+    _assign_observed_tag(harness, session_id, pane)
+    if observation is not None:
+        observation["metadata_report"] = "exit0" if ok else "nonzero"
+        observation["reason"] = "report-attempts-finished"
     return True
 
 

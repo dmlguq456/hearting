@@ -23,6 +23,11 @@ from decimal import Decimal, InvalidOperation
 import urllib.error
 import urllib.parse
 import urllib.request
+try:  # ends a detached child with the test that started it; no-op outside tests
+    from detached_lifetime import bind as end_with_test
+except ImportError:  # a partial tree without it (e.g. a fixture release): no record
+    def end_with_test(child):
+        return child
 
 
 _MARKER = re.compile(r"^\s*\[(?:답변 필요|결정 필요)\]\s*(.*)$")
@@ -3530,10 +3535,11 @@ def _ensure_producer():
         os.close(fd)
         return False
     try:
-        subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--refresh-cache", "--lock-fd", str(fd)],
+        end_with_test(subprocess.Popen(
+                         [sys.executable, str(Path(__file__).resolve()), "--refresh-cache", "--lock-fd", str(fd)],
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL, close_fds=True, pass_fds=(fd,),
-                         start_new_session=True)
+                         start_new_session=True))
     except (OSError, subprocess.SubprocessError):
         os.close(fd)
         return False
@@ -3577,13 +3583,109 @@ def _claim_notification(item_id: str, boundary: str):
     return path, fd
 
 
+def _desktop_notifier():
+    """``notify-send`` when this process sits in a graphical session with its bus.
+
+    A bare SSH or CI login has neither a display nor a session bus, and there
+    notify-send would only fail or wait, so it is not tried at all.
+    """
+    executable = shutil.which("notify-send")
+    if not executable or not (os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY")):
+        return None
+    if not (os.environ.get("DBUS_SESSION_BUS_ADDRESS")
+            or Path("/run/user/%d/bus" % os.getuid()).exists()):
+        return None
+    return executable
+
+
+def _tmux_server() -> str | None:
+    """The tmux server this process runs inside (``$TMUX``), while its socket is there.
+
+    An installed tmux nobody runs Hearting in is no notifier: the detached producer
+    would otherwise stay up to the 6 h reminder with nobody to show it to.
+    """
+    socket = str(os.environ.get("TMUX") or "").split(",", 1)[0].strip()
+    if not socket or not shutil.which("tmux"):
+        return None
+    try:
+        return socket if stat.S_ISSOCK(os.stat(socket).st_mode) else None
+    except OSError:
+        return None
+
+
+def _notification_available() -> bool:
+    return bool(shutil.which("herdr") or _tmux_server() or _desktop_notifier())
+
+
+def _quiet_run(argv, timeout=5) -> bool:
+    try:
+        return subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL, timeout=timeout,
+                              check=False).returncode == 0
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return False
+
+
+def _tmux_notify(text: str) -> bool:
+    """Every client of the tmux server this process runs inside (``$TMUX``)."""
+    socket = _tmux_server()
+    if not socket:
+        return False
+    try:
+        here = str(Path(__file__).resolve().parent)
+        if here not in sys.path:
+            sys.path.insert(0, here)
+        from terminal_surface import TmuxSurface
+
+        def bounded(argv):
+            return subprocess.run(argv, capture_output=True, text=True, timeout=3,
+                                  stdin=subprocess.DEVNULL, check=False)
+        return TmuxSurface(runner=bounded, socket=socket).notify(text)
+    except Exception:
+        return False
+
+
+def _show_elsewhere(title: str, body: str) -> bool:
+    """tmux clients and the desktop: display only, bounded, never a typed input."""
+    shown = _tmux_notify(title + ": " + body)
+    desktop = _desktop_notifier()
+    if desktop:
+        shown = _quiet_run([desktop, "-a", "Hearting", "--", title, body]) or shown
+    return shown
+
+
+def _show_once_elsewhere(item_id: str, boundary: str, title: str, body: str) -> None:
+    """After a failed Herdr call: the same reminder on tmux and the desktop, once.
+
+    Its own marker keeps that display single while Herdr itself is retried on every
+    refresh, exactly as before; nothing shown leaves no marker, so it can show later.
+    """
+    claim = _claim_notification(item_id, boundary + "\0elsewhere")
+    if claim is None:
+        return
+    marker, fd = claim
+    try:
+        os.write(fd, (boundary + "\n").encode())
+        os.fchmod(fd, 0o600)
+    finally:
+        os.close(fd)
+    if not _show_elsewhere(title, body):
+        marker.unlink(missing_ok=True)
+
+
 def _notify_item(item: dict, *, boundary: str, sound: bool = False) -> bool:
-    executable = shutil.which("herdr")
-    if not executable:
+    """Herdr's notification; without Herdr, tmux clients and the desktop.
+
+    The producer that calls this runs detached, so no session or hook waits on it.
+    When Herdr's call fails, its marker is released so the next refresh tries Herdr
+    again, and the same reminder is shown once on tmux and the desktop meanwhile.
+    """
+    if not _notification_available():
         return False
     claim = None
     try:
-        claim = _claim_notification(str(item.get("id") or ""), boundary)
+        item_id = str(item.get("id") or "")
+        claim = _claim_notification(item_id, boundary)
         if claim is None:
             return True
         marker, fd = claim
@@ -3594,12 +3696,16 @@ def _notify_item(item: dict, *, boundary: str, sound: bool = False) -> bool:
         question = _clean(item.get("question") or "사용자 답 대기")
         age = max(0, int((time.time() - float(item.get("since") or time.time())) // 3600))
         title = "◑답변 필요" + (" · %dh" % age if boundary in {"1h", "6h"} else "")
-        command = [executable, "notification", "show", title, "--body", question or "사용자 답 대기"]
-        if sound:
-            command.extend(("--sound", "request"))
-        result = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL, timeout=5, check=False)
-        if result.returncode == 0:
+        body = question or "사용자 답 대기"
+        herdr = shutil.which("herdr")
+        if herdr:
+            command = [herdr, "notification", "show", title, "--body", body]
+            if sound:
+                command.extend(("--sound", "request"))
+            if _quiet_run(command):
+                return True
+            _show_once_elsewhere(item_id, boundary, title, body)
+        elif _show_elsewhere(title, body):
             return True
         marker.unlink(missing_ok=True)
         return False
@@ -3669,7 +3775,7 @@ def _producer_loop(fd: int) -> None:
                 demand = 0
             cached = _read_cache(now=now, max_age=float("inf")) or {}
             boundary = _notification_delay(cached.get("items", ()), now,
-                                           enabled=bool(shutil.which("herdr")))
+                                           enabled=_notification_available())
             idle = now - demand
             if idle >= 600 and boundary is None:
                 try:

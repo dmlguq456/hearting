@@ -27,6 +27,11 @@ from dispatch_completion_join import exact_attempt_row, JoinContractError
 from dispatch_lifecycle import pid_namespace_evidence
 from dispatch_replacement import _route
 import route_authority as authority
+try:  # ends a detached child with the test that started it; no-op outside tests
+    from detached_lifetime import bind as end_with_test
+except ImportError:  # a partial tree without it (e.g. a fixture release): no record
+    def end_with_test(child):
+        return child
 
 SCHEMA = "ship-parent-deploy/v1"
 
@@ -440,6 +445,7 @@ def run(request_path, *, check=False):
                     raise InterruptedError("parent-deploy-interrupted")
                 proc = subprocess.Popen(cmd["argv"], cwd=cmd["cwd"], stdout=output,
                                         stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
+                end_with_test(proc)
                 start = DC.process_start_ticks(proc.pid)
                 result.update(pid=proc.pid, pid_start=start, pgid=proc.pid)
                 write(result_path, result)

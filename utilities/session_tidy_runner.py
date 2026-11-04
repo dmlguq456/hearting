@@ -76,6 +76,11 @@ if str(HERE) not in sys.path:
 import session_tidy as st  # noqa: E402
 import tidy_decisions as td  # noqa: E402
 import tidy_transcripts as tt  # noqa: E402
+try:  # ends a detached child with the test that started it; no-op outside tests
+    from detached_lifetime import bind as end_with_test  # noqa: E402
+except ImportError:  # a partial tree without it (e.g. a fixture release): no record
+    def end_with_test(child):
+        return child
 
 SCHEMA = 1
 UNIT = "ops/session-tidy-memory"
@@ -115,7 +120,8 @@ WORKER_HARNESS = {"claude": "claude", "codex": "codex", "opencode": "claude"}
 
 UNFINISHED = ("queued", "waiting-lock", "assembling", "dispatching", "waiting-worker", "validating", "applying")
 ENV_DROP_KEYS = ("AGENT_SESSION_ROLE", "FLEET_TITLE_REFRESH", "MEM_DISTILL", "CLAUDE_CODE_SESSION_ID",
-                 "CLAUDE_SESSION_ID", "CODEX_THREAD_ID", "CODEX_SESSION_ID", "OPENCODE_SESSION_ID")
+                 "CLAUDE_SESSION_ID", "CODEX_THREAD_ID", "CODEX_SESSION_ID", "OPENCODE_SESSION_ID",
+                 "TMUX_PANE")   # $TMUX (the server) stays: a tmux seat is reached through it
 ENV_DROP_PREFIXES = ("AGENT_DISPATCH_", "OPENCODE_DISPATCH", "AGENT_ROUTE_", "AGENT_ARTIFACT_", "HERDR_")
 
 
@@ -356,6 +362,7 @@ def start_detached(qid: str) -> int:
         [sys.executable, str(Path(__file__).resolve()), "run", "--queue-id", qid],
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         close_fds=True, start_new_session=True, env=clean_env(), cwd=str(st.ensure_dir(st.state_root())))
+    end_with_test(proc)
     return proc.pid
 
 

@@ -54,6 +54,11 @@ sys.path.insert(0, str(_UTILITIES_DIR))
 from dispatch_contract import (pidfd_open, process_start_ticks, resolve_agent_home,
                                resolve_dispatch_state_root)  # noqa: E402
 from parent_next_directive import steward_fields  # noqa: E402
+try:  # ends a detached child with the test that started it; no-op outside tests
+    from detached_lifetime import bind as end_with_test  # noqa: E402
+except ImportError:  # a partial tree without it (e.g. a fixture release): no record
+    def end_with_test(child):
+        return child
 import peer_obligations  # noqa: E402
 import shared_readiness  # noqa: E402
 import dispatch_batch_obligations  # noqa: E402
@@ -152,10 +157,19 @@ def _project_of(cwd):
 
 def _caller_pane():
     """The common live ownership judgment, never the inherited pane label."""
-    from pane_ownership import verified_pane
     sid, harness = _current_session_identity()
-    return verified_pane(os.environ.get("HERDR_PANE_ID", ""), harness, sid,
+    return _verified_caller_pane(harness, sid)
+
+
+def _verified_caller_pane(harness, sid):
+    """The caller's own Herdr pane, else (no Herdr pane hint) its own tmux pane, proven live."""
+    from pane_ownership import verified_pane
+    pane = verified_pane(os.environ.get("HERDR_PANE_ID", ""), harness, sid,
                          server=_HERDR_SESSION)
+    if pane or os.environ.get("HERDR_PANE_ID"):
+        return pane
+    tmux_pane, socket = terminal_surface.caller_tmux_pane()
+    return verified_pane(tmux_pane, harness, sid, tmux=socket) if tmux_pane else ""
 
 
 def _caller_is_claude():
@@ -220,14 +234,18 @@ def _resolve_target(target):
     herdr reports an id for Claude (UUID) and Codex (thread id), none for OpenCode
     (measured 2026-09-03) — so an OpenCode target keeps session_id=None and the pane
     pid probe in Fleet's herdr collector is what joins it."""
-    if _herdr_missing():
+    tmux = _tmux_surface(target)
+    if tmux is not None:
+        payload = tmux.agent(target)
+    elif _surface_missing(target):
         return None, None, None
-    try:
-        proc = subprocess.run(_herdr_argv("agent", "get", target), capture_output=True,
-                              text=True, timeout=5)
-        payload = json.loads(proc.stdout or "")
-    except Exception:
-        return None, None, None
+    else:
+        try:
+            proc = subprocess.run(_herdr_argv("agent", "get", target), capture_output=True,
+                                  text=True, timeout=5)
+            payload = json.loads(proc.stdout or "")
+        except Exception:
+            return None, None, None
     agent = (payload.get("result") or {}).get("agent") if isinstance(payload, dict) else None
     if not isinstance(agent, dict):
         return None, None, None
@@ -241,7 +259,15 @@ _PROMPT_HARNESSES = {"claude", "codex", "opencode"}
 
 
 def _prompt_agent_inventory():
-    """Read the selected herdr endpoint's complete agent inventory, or explain why not."""
+    """Read the selected herdr endpoint's complete agent inventory, or explain why not.
+
+    Without herdr, the tmux server this process runs in answers the same shape."""
+    tmux = _tmux_inventory()
+    if tmux is not None:
+        payload = tmux.agents()
+        if payload is None:
+            return None, "tmux-agent-list-unavailable"
+        return payload["result"]["agents"], None
     if _herdr_missing():
         return None, "herdr-not-found"
     try:
@@ -426,8 +452,9 @@ def _prompt_inventory_panes(agents):
 def _prompt_candidate_snapshot(target, *, wanted_tag=None):
     """Discover address candidates before proving their exact native identities."""
     agents, inventory_error = _prompt_agent_inventory()
-    census = herdr_observation.pane_census(session=_HERDR_SESSION)
     endpoint = herdr_observation.endpoint_name(_HERDR_SESSION)
+    census = (_tmux_census(agents, endpoint) if _tmux_inventory() is not None
+              else herdr_observation.pane_census(session=_HERDR_SESSION))
     if census is None:
         return None, "pane-census-unavailable", sorted(_prompt_inventory_panes(agents))
     panes = getattr(census, "panes", None)
@@ -615,7 +642,8 @@ def _resolve_prompt_target(target):
         return None, "target-not-found", []
     tag_match = _PROMPT_TAG_ADDRESS.fullmatch(target)
     is_tag = tag_match is not None
-    is_pane = not is_tag and ":" in target and not any(char.isspace() for char in target)
+    is_pane = ((not is_tag and ":" in target and not any(char.isspace() for char in target))
+               or terminal_surface.is_tmux_pane(target))
 
     if is_pane:
         candidate, reason = _prompt_current_candidate(target)
@@ -789,13 +817,74 @@ def _unavailable(reason):
     return 4
 
 
+def _tmux_surface(target):
+    """The tmux server answering for a tmux pane id (``%N``), else None.
+
+    Herdr targets keep their own calls unchanged; only the pane id selects tmux, so
+    a tmux pane is never addressed through Herdr or the reverse."""
+    if not terminal_surface.is_tmux_pane(target):
+        return None
+    return terminal_surface.pane_surface(target)
+
+
+def _tmux_input_refusal(target):
+    """For a tmux pane: why typed input must not reach it now (a tmux mode, synchronized
+    panes, input off), else None. Herdr targets are unaffected."""
+    tmux = _tmux_surface(target)
+    return tmux.input_refusal(target) if tmux is not None else None
+
+
+_TMUX_INPUT_WAIT = frozenset({"pane-in-mode", "pane-synchronized", "pane-input-off", "pane-state-unknown"})
+
+
+def _tmux_target_address(target):
+    """A bare tmux pane id names a pane on this caller's server: carry that server with it."""
+    if not terminal_surface.is_tmux_pane(target) or terminal_surface.tmux_address(target)[1]:
+        return target
+    tmux = _tmux_surface(target)
+    return (tmux.address(target) if tmux is not None else None) or target
+
+
+def _surface_missing(target):
+    """The terminal that would answer for ``target`` is not installed."""
+    if terminal_surface.is_tmux_pane(target):
+        return shutil.which("tmux") is None
+    return _herdr_missing()
+
+
+def _tmux_inventory():
+    """Without herdr: the tmux server this process runs in (else tmux's default), when it answers."""
+    if not _herdr_missing() or not shutil.which("tmux"):
+        return None
+    surface = terminal_surface.TmuxSurface(socket=terminal_surface.tmux_socket())
+    return surface if surface.answers() else None
+
+
+def _tmux_census(agents, endpoint):
+    """A complete pane census from one tmux agent inventory, in Herdr's census shape."""
+    from types import SimpleNamespace
+    if not isinstance(agents, list):
+        return None
+    panes = tuple({"pane_id": agent.get("pane_id"), "agent": agent.get("agent"),
+                   "agent_session": agent.get("agent_session"), "cwd": agent.get("cwd")}
+                  for agent in agents if isinstance(agent, dict))
+    return SimpleNamespace(panes=panes, complete=True, endpoint=endpoint)
+
+
 def _run_herdr_wait(target, until, timeout_ms):
+    global _LAST_HERDR_EXIT
+    if terminal_surface.is_tmux_pane(target):
+        _LAST_HERDR_EXIT = None
+        tmux = _tmux_surface(target)
+        payload = tmux.wait_agent(target, tuple(until or ()), timeout_ms) if tmux else None
+        if isinstance(payload, dict):
+            _LAST_HERDR_EXIT = 1 if payload.get("error") else 0
+        return payload
     cmd = _herdr_argv("agent", "wait", target)
     for state in until or []:
         cmd += ["--until", state]
     if timeout_ms is not None:
         cmd += ["--timeout", str(timeout_ms)]
-    global _LAST_HERDR_EXIT
     _LAST_HERDR_EXIT = None
     try:
         # A wedged herdr socket must not hang the caller past its own bound
@@ -915,7 +1004,7 @@ def _mark_observed(to_harness, to_session_id, to_name, from_identity=None, *, pa
 
 
 def cmd_wait(args):
-    target = args.target
+    target = args.target = _tmux_target_address(args.target)
     # S6: one record at wait start, append-only, never updated on return. F-100c: the
     # target is resolved through herdr first so the record carries an exact session id
     # (Fleet joins sent/recv and the `←` subtitle on it), the name being only a label.
@@ -923,8 +1012,9 @@ def cmd_wait(args):
     _record(to_harness=t_harness or "unknown", to_name=target, kind="watch", ref=args.ref,
             to_session_id=t_sid)
 
-    if _herdr_missing():
-        return _unavailable("herdr-not-found")
+    if _surface_missing(target):
+        return _unavailable("tmux-not-found" if terminal_surface.is_tmux_pane(target)
+                            else "herdr-not-found")
 
     payload = _run_herdr_wait(target, args.until, args.timeout)
     state, agent, code, reason = _interpret_payload(payload, target)
@@ -1102,11 +1192,14 @@ def _pane_is_managed(pane):
     entry sets that variable for its CHILDREN, not for itself.
     """
     try:
-        proc = subprocess.run(_herdr_argv("pane", "process-info", "--pane", pane),
-                              capture_output=True, text=True, timeout=5)
-        payload = json.loads(proc.stdout or "")
-        info = (payload.get("result") or {}).get("process_info") or {}
-        processes = info.get("foreground_processes") or []
+        if terminal_surface.is_tmux_pane(pane):
+            processes = (_retire_pane_info(pane) or {}).get("foreground_processes") or []
+        else:
+            proc = subprocess.run(_herdr_argv("pane", "process-info", "--pane", pane),
+                                  capture_output=True, text=True, timeout=5)
+            payload = json.loads(proc.stdout or "")
+            info = (payload.get("result") or {}).get("process_info") or {}
+            processes = info.get("foreground_processes") or []
     except Exception:
         return None
     for process in processes:
@@ -1205,7 +1298,58 @@ def _start_shell_identity(pane):
     return (info["shell_pid"], start) if start else None
 
 
+def _pane_send(pane, operation, value):
+    """One retire keystroke (`send-text` text or `send-keys` key) to ``pane``; True when accepted.
+
+    A tmux pane takes it through its surface, which refuses a pane in a tmux mode,
+    with input off or with synchronized neighbours; Herdr keeps its own call.
+    """
+    if terminal_surface.is_tmux_pane(pane):
+        tmux = _tmux_surface(pane)
+        if tmux is None:
+            return False
+        if operation == "send-text":
+            return tmux.send_text(pane, value)
+        key = {"enter": "Enter", "ctrl+d": "C-d"}.get(str(value).lower())
+        return bool(key) and tmux.send_keys(pane, key)
+    sent = subprocess.run(_herdr_argv("pane", operation, pane, value),
+                          capture_output=True, text=True, timeout=5)
+    if (sent.stdout or sent.stderr).strip():
+        try:
+            payload = json.loads(sent.stdout or sent.stderr)
+            if not isinstance(payload, dict) or payload.get("error"):
+                return False
+        except ValueError:
+            return False
+    return sent.returncode == 0
+
+
+def _dialog_send(pane, operation, value):
+    """One answer to Claude's exit-time dialog. Herdr's call keeps its old shape (its
+    answer was never read); a refused tmux keystroke stops the dialog as a send error."""
+    if terminal_surface.is_tmux_pane(pane):
+        if not _pane_send(pane, operation, value):
+            raise OSError("tmux input refused")
+        return
+    subprocess.run(_herdr_argv("pane", operation, pane, value),
+                   capture_output=True, text=True, timeout=5)
+
+
+def _tmux_named_pane(target):
+    """Without Herdr: the one tmux pane whose started runtime carries ``target`` as its name."""
+    if terminal_surface.is_tmux_pane(target):
+        return target
+    tmux = _tmux_inventory()
+    payload = tmux.agents() if tmux is not None else None
+    found = [agent.get("pane_id") for agent in ((payload or {}).get("result") or {}).get("agents") or ()
+             if isinstance(agent, dict) and agent.get("name") == target]
+    return found[0] if len(found) == 1 else target
+
+
 def _close_pane(pane):
+    if terminal_surface.is_tmux_pane(pane):
+        tmux = _tmux_surface(pane)
+        return bool(tmux is not None and tmux.close(pane))
     try:
         proc = subprocess.run(_herdr_argv("pane", "close", pane),
                               capture_output=True, text=True, timeout=5)
@@ -1936,7 +2080,8 @@ def cmd_start(args, *, retain_failure=True):
         print(result, end="")
     # No herdr is not a failed attempt: a retry cannot succeed either, so no retained
     # notice asks this session to repeat it. The one printed line is the whole answer.
-    if code != 0 and retain_failure and "reason=herdr-not-found" not in result:
+    if (code != 0 and retain_failure and "reason=herdr-not-found" not in result
+            and "reason=tmux-not-found" not in result):
         try:
             _retain_start_failure(requester, requested, vars(args), result)
         except (OSError, ValueError, KeyError, TypeError):
@@ -1956,6 +2101,8 @@ def _start_request(args):
     args.start_request.update(beside=args.beside,
                               project_workspace=getattr(args, "project_workspace", None),
                               project_hint=os.environ.get("HERDR_PANE_ID", ""))
+    if terminal_surface.is_tmux_pane(args.beside or args.pane or ""):
+        return _start_tmux_request(args)
     workspace = (args.beside.split(":")[0] if args.beside else
                  getattr(args, "project_workspace", None))
     if workspace and not args.cwd:
@@ -1971,6 +2118,222 @@ def _start_request(args):
     # A second start then reads the new layout instead of splitting the old cell.
     with terminal_surface.workspace_lock(_herdr_surface(), workspace):
         return _start_in_pane(args)
+
+
+# A typed tmux launch has no native start receipt: the runtime must show itself in the
+# pane (its foreground process, then its own session record) within this bound.
+_TMUX_START_SECONDS = 30
+
+
+def _start_tmux_request(args):
+    """`start` beside a tmux pane, or in a given empty tmux shell, under the session claim."""
+    surface = _tmux_surface(args.beside or args.pane)
+    if surface is None or not surface.answers():
+        print(f"started=false reason=tmux-not-found agent={args.kind} name={args.name} pane=- "
+              "detail=tmux 서버에 닿지 못했습니다. 이 일은 지금 세션에서 이어서 하세요")
+        return 4
+    if args.beside and not args.cwd:
+        try:
+            args.cwd = str(INSTALL_PATHS.primary_checkout(os.getcwd()))
+        except OSError:
+            args.cwd = None
+    if args.cwd:
+        args.start_request["cwd"] = os.path.realpath(os.path.expanduser(str(args.cwd)))
+    args.start_request["server"] = "tmux:" + (surface.socket or "default")
+    workspace = surface.workspace_of(args.beside or args.pane)
+    if not workspace:
+        print(f"started=false reason=pane-layout-unavailable agent={args.kind} name={args.name} "
+              f"pane={args.pane or '-'}")
+        return 1
+    with terminal_surface.workspace_lock(surface, workspace):
+        return _start_in_tmux(args, surface)
+
+
+def _tmux_shell_identity(surface, pane):
+    """``(shell pid, start)`` when the pane's shell alone holds its terminal, else None."""
+    info = surface.process_info(pane)
+    if (not info or info["foreground_process_group_id"] != info["shell_pid"]
+            or [item.get("pid") for item in info["foreground_processes"]] != [info["shell_pid"]]):
+        return None
+    start = _proc_start_ticks(info["shell_pid"])
+    return (info["shell_pid"], start) if start else None
+
+
+def _tmux_ready_shell(surface, pane, cwd, deadline):
+    """``(shell, screen, None)`` once the pane's own shell sits at an empty prompt.
+
+    The same shell must hold the terminal, show a prompt and show the same screen
+    twice in a row (an initializing prompt may still redraw); ``cwd`` must match when
+    given. Anything else until ``deadline`` is ``(…, reason)``: nothing is typed.
+    """
+    shell, previous = None, None
+    while time.monotonic() < deadline:
+        if _tmux_agent(surface, pane) is not None:
+            return shell, None, "pane-occupied"
+        current = _tmux_shell_identity(surface, pane)
+        if shell is None:
+            shell = current
+        elif current is not None and current != shell:
+            return shell, None, "beside-shell-changed"
+        screen = surface.read_visible(pane) if current is not None else None
+        refusal = surface.input_refusal(pane) if current is not None else None
+        if refusal:
+            # A mode, input-off or synchronized window: nothing may be typed, so say so now.
+            return shell, (screen if current == shell else None), refusal
+        ready = (current is not None and surface.empty_shell(pane)
+                 and (cwd is None or _proc_cwd(current[0]) == cwd))
+        if ready and screen and screen == previous:
+            return shell, screen, None
+        previous = screen if ready else None
+        time.sleep(min(.1, max(0, deadline - time.monotonic())))
+    return shell, None, "beside-shell-readiness-timeout"
+
+
+def _tmux_agent(surface, pane):
+    payload = surface.agent(pane)
+    agent = ((payload or {}).get("result") or {}).get("agent")
+    return agent if isinstance(agent, dict) else None
+
+
+def _tmux_launch_line(args, cd=None):
+    """One shell line: the managed launcher first on PATH, then the runtime itself."""
+    mode = args.permission_mode or _default_permission_mode()
+    words = list(_PERMISSION_FLAGS.get(args.kind, [])) if mode == "bypass" else []
+    if args.cwd and _CWD_FLAG.get(args.kind):
+        words += [_CWD_FLAG[args.kind], os.path.realpath(os.path.expanduser(str(args.cwd)))]
+    if args.kind == "opencode" and args.cwd:
+        words.append(os.path.realpath(os.path.expanduser(str(args.cwd))))
+    words += list(getattr(args, "agent_args", None) or [])
+    parts = []
+    if cd:
+        parts.append("cd -- " + shlex.quote(cd))
+    directory = _managed_ingress_dir(args.kind)
+    if directory:
+        parts.append('export PATH=%s:"$PATH"' % shlex.quote(directory))
+    scoped = _opencode_tui_scoped_config() if args.kind == "opencode" else None
+    if scoped:
+        parts.append("export OPENCODE_TUI_CONFIG=${OPENCODE_TUI_CONFIG:-%s}" % shlex.quote(scoped))
+    parts.append(shlex.join([args.kind, *words]))
+    return " && ".join(parts), mode
+
+
+def _start_in_tmux(args, surface):
+    """Open the pane, type the launch line once into its proven shell, observe the runtime.
+
+    Placement is the shared `open_pane` (inside the reference pane's window). The one
+    typed line goes only into a shell this start opened or the caller named, after
+    the same shell shows the same empty prompt twice and the pane takes keys alone
+    (no copy mode, no synchronize-panes). A pane this start opened is closed only
+    while that shell still shows that screen; after the line was typed it is kept.
+    """
+    pane_cwd = (os.path.realpath(os.path.expanduser(str(args.cwd))) if args.cwd else None)
+    cwd_note = f" cwd={pane_cwd}" if pane_cwd else ""
+    if pane_cwd and not os.path.isdir(pane_cwd):
+        print(f"started=false reason=cwd-not-a-directory agent={args.kind} name={args.name} "
+              f"pane={args.pane or '-'}{cwd_note}")
+        return 1
+    created = False
+    shell = screen = None
+
+    def cleanup():
+        if not created:
+            return ""
+        result = "retained"
+        if (shell is not None and screen is not None and _tmux_agent(surface, args.pane) is None
+                and _tmux_shell_identity(surface, args.pane) == shell
+                and surface.read_visible(args.pane) == screen):
+            result = "closed" if surface.close(args.pane) else "close-failed"
+        args.pane_cleanup = result
+        return f" pane_cleanup={result}"
+
+    def refuse(reason, extra=""):
+        print(f"started=false reason={reason} agent={args.kind} name={args.name} "
+              f"pane={args.pane or '-'}{cwd_note}{extra}")
+        return 1
+
+    if args.pane:
+        args.pane = surface.address(args.pane) or args.pane
+        existing = _tmux_agent(surface, args.pane)
+        if existing is not None:
+            if (existing.get("agent") != args.kind or existing.get("name") not in (None, args.name)
+                    or (pane_cwd and os.path.realpath(str(existing.get("cwd") or "")) != pane_cwd)):
+                return refuse("pane-occupied")
+            # The retained-pane reuse command after a late start: adopt, never type.
+            return _tmux_started(args, surface, existing, "observed-pane", cwd_note)
+    else:
+        opened = terminal_surface.open_pane(
+            near=terminal_surface.Near(surface, pane=args.beside, same_tab=True), cwd=pane_cwd)
+        if opened.pane is None:
+            return refuse(opened.notes[0] if opened.notes else "pane-layout-unavailable",
+                          f" beside={args.beside}")
+        args.pane, created = surface.address(opened.pane) or opened.pane, opened.placement != "reuse"
+    shell, screen, reason = _tmux_ready_shell(
+        surface, args.pane, pane_cwd if created else None,
+        time.monotonic() + _BESIDE_READY_SECONDS)
+    if reason:
+        return refuse(reason, cleanup())
+    line, _mode = _tmux_launch_line(args, None if created else pane_cwd)
+    if (_tmux_shell_identity(surface, args.pane) != shell
+            or surface.read_visible(args.pane) != screen):
+        return refuse("beside-shell-changed", cleanup())
+    # The surface's one typed input: refused in a tmux mode, with input off or with
+    # synchronized panes (it would reach the neighbours), rechecked before Enter.
+    rc, payload = surface.prompt(args.pane, line)
+    if rc is None:
+        reason = ((payload or {}).get("error") or {}).get("reason") or "tmux-launch-not-started"
+        return refuse(reason, cleanup())
+    # The runtime process proves the start; its own session record usually follows
+    # within seconds (an OpenCode or a not-yet-prompted Codex may have none to show).
+    deadline = time.monotonic() + _TMUX_START_SECONDS
+    agent, seen = None, None
+    while time.monotonic() < deadline:
+        agent = _tmux_agent(surface, args.pane)
+        if agent is not None and agent.get("agent") == args.kind and seen is None:
+            seen = time.monotonic()
+        if agent is not None and (agent.get("agent") != args.kind or agent.get("agent_session")
+                                  or (seen is not None and time.monotonic() - seen >= 5)):
+            break
+        time.sleep(.2)
+    if agent is None or agent.get("agent") != args.kind:
+        retry = ["hearting", "run", "peer-steward", "start", args.name, "--kind", args.kind,
+                 "--pane", args.pane]
+        if pane_cwd:
+            retry += ["--cwd", pane_cwd]
+        if args.permission_mode:
+            retry += ["--permission-mode", args.permission_mode]
+        if getattr(args, "agent_args", None):
+            retry += ["--"] + list(args.agent_args)
+        reason = "tmux-start-failed" if rc else "tmux-start-unobserved"
+        return refuse(reason, " pane_cleanup=retained reuse_command=" + shlex.quote(shlex.join(retry)))
+    return _tmux_started(args, surface, agent, None, cwd_note)
+
+
+def _tmux_started(args, surface, agent, start_verify, cwd_note):
+    sid = peer_message.usable_session_id((agent.get("agent_session") or {}).get("value"))
+    mode = args.permission_mode or _default_permission_mode()
+    if type(agent.get("pid")) is int:
+        surface.name_started(args.pane, agent["pid"], args.name)
+    if sid:
+        try:
+            peer_message._session_handle()  # Make the shared tools package importable.
+            from fleet.session_tags import assign_observed
+            assign_observed(args.kind, sid, pane_id=args.pane)
+        except Exception:
+            pass
+    _mark_started(args, sid, mode)
+    if getattr(args, "beside", None) and args.pane != args.beside:
+        _mark_seat_successor(args.pane, args.beside, args.kind, sid)
+    trust_wait = _native_trust_reason(args.kind, _read_screen(args.pane))
+    managed = "-"
+    if _MANAGED_INGRESS.get(args.kind):
+        verdict = _pane_is_managed(args.pane)
+        managed = "unknown" if verdict is None else str(verdict).lower()
+    print(f"started=true agent={args.kind} name={args.name} pane={args.pane} "
+          f"permission_mode={mode} session_id={sid or '-'} managed={managed}"
+          + (f" ready=false reason={trust_wait}" if trust_wait else "")
+          + cwd_note + " surface=tmux"
+          + (f" start_verify={start_verify}" if start_verify else ""))
+    return 0
 
 
 def _start_in_pane(args):
@@ -2253,6 +2616,11 @@ def _retire_process_record(pid):
 
 
 def _retire_pane_info(pane, timeout=5, *, server=None):
+    if terminal_surface.is_tmux_pane(pane):
+        tmux = _tmux_surface(pane)
+        info = tmux.process_info(pane) if tmux else None
+        return info if (isinstance(info, dict) and info.get("pane_id") == pane
+                        and info.get("foreground_processes")) else None
     try:
         argv = (_herdr_argv("pane", "process-info", "--pane", pane) if server is None else
                 ["herdr"] + ([] if server == "default" else ["--session", server])
@@ -2824,7 +3192,12 @@ def cmd_retire(args):
                               detail, pending, duty_id=duty_id)
 
     if _herdr_missing():
-        return finish("herdr-not-found")
+        # Without Herdr a tmux pane (or the name `start` gave its runtime) is the target.
+        target = _tmux_named_pane(target)
+        if not terminal_surface.is_tmux_pane(target):
+            return finish("herdr-not-found")
+        if _surface_missing(target):
+            return finish("tmux-not-found")
     state, ident, _, reason = _retire_target(target)
     if not isinstance(ident.get("pane"), str) or ident["pane"] in {"", "-"}:
         # The pane may be gone while the accepted request still proves the
@@ -2917,6 +3290,11 @@ def cmd_retire(args):
     screen_reason = (_native_trust_reason(harness, lines) or _screen_ready(harness, lines)) if lines else "screen-unavailable"
     if screen_reason:
         return finish(screen_reason, pending=True)
+    # A tmux pane in a mode, with input off or synchronized takes no keys: nothing is
+    # sent, so the duty stays waiting and a later retire or its runner tries again.
+    refusal = _tmux_input_refusal(pane)
+    if refusal:
+        return finish(refusal + "-wait", pending=True)
     claimed = store.claim_phase(
         duty_id, {"waiting"}, "exit-requested", state="pending",
         extra={"foreground": identity, "reason": "normal-exit-requested"})
@@ -2924,19 +3302,17 @@ def cmd_retire(args):
         return finish("retire-duty-already-claimed", pending=True)
     duty = claimed
     try:
-        for operation, value in _RETIRE_ACTIONS[harness]:
+        for index, (operation, value) in enumerate(_RETIRE_ACTIONS[harness]):
             if _retire_foreground(pane, harness) != identity:
                 return finish("foreground-changed", pending=True)
-            sent = subprocess.run(_herdr_argv("pane", operation, pane, value),
-                                  capture_output=True, text=True, timeout=5)
-            send_error = False
-            if (sent.stdout or sent.stderr).strip():
-                try:
-                    payload = json.loads(sent.stdout or sent.stderr)
-                    send_error = not isinstance(payload, dict) or bool(payload.get("error"))
-                except ValueError:
-                    send_error = True
-            if sent.returncode or send_error:
+            if not _pane_send(pane, operation, value):
+                # tmux refused the first keystroke itself: nothing reached the pane,
+                # so the exit was not requested after all. Anything later stays unknown.
+                refusal = _tmux_input_refusal(pane) if index == 0 else None
+                if refusal and store.claim_phase(
+                        duty_id, {"exit-requested"}, "waiting", state="pending",
+                        extra={"reason": refusal + "-wait"}) is not None:
+                    return finish(refusal + "-wait", pending=True)
                 return finish("exit-send-unknown", pending=True)
     except (OSError, subprocess.SubprocessError):
         return finish("exit-send-unknown", pending=True)
@@ -2962,7 +3338,8 @@ def cmd_retire(args):
         return 0
 
     try:
-        socket_path = herdr_observation.socket_path_for_endpoint(_HERDR_SESSION or "default")
+        socket_path = (None if terminal_surface.is_tmux_pane(pane) else
+                       herdr_observation.socket_path_for_endpoint(_HERDR_SESSION or "default"))
         if socket_path:
             event_transport = herdr_observation.ObservationTransport(
                 _HERDR_SESSION or "default", socket_path,
@@ -3117,13 +3494,11 @@ def _retire_claude_background_confirm(target, pane, harness, ident, identity, fi
     if current_tasks is None:
         return finish(screen_block or "agent-still-running", pending=True)
     try:
-        subprocess.run(_herdr_argv("pane", "send-text", pane, "1"),
-                       capture_output=True, text=True, timeout=5)
+        _dialog_send(pane, "send-text", "1")
         current_tasks, screen_block = observed_dialog()
         if current_tasks is None:
             return finish(screen_block or "agent-still-running", pending=True)
-        subprocess.run(_herdr_argv("pane", "send-keys", pane, "enter"),
-                       capture_output=True, text=True, timeout=5)
+        _dialog_send(pane, "send-keys", "enter")
     except (OSError, subprocess.SubprocessError):
         return finish("exit-send-failed", pending=True)
     deadline = time.monotonic() + _RETIRE_SECONDS
@@ -3144,13 +3519,11 @@ def _retire_claude_background_confirm(target, pane, harness, ident, identity, fi
     if current_tasks is None:
         return finish(screen_block or "agent-still-running", pending=True)
     try:
-        subprocess.run(_herdr_argv("pane", "send-text", pane, "3"),
-                       capture_output=True, text=True, timeout=5)
+        _dialog_send(pane, "send-text", "3")
         current_tasks, screen_block = observed_dialog()
         if current_tasks is None:
             return finish(screen_block or "agent-still-running", pending=True)
-        subprocess.run(_herdr_argv("pane", "send-keys", pane, "enter"),
-                       capture_output=True, text=True, timeout=5)
+        _dialog_send(pane, "send-keys", "enter")
     except (OSError, subprocess.SubprocessError):
         return finish("agent-still-running", pending=True)
     return finish("retire-declined-background-work" + (stopped or ""), pending=True)
@@ -4032,6 +4405,9 @@ def _herdr_get_timeout():
 
 
 def _run_herdr_get(target, *, server=None):
+    if terminal_surface.is_tmux_pane(target):
+        tmux = _tmux_surface(target)
+        return tmux.agent(target) if tmux else None
     if server is None:
         argv = _herdr_argv("agent", "get", target)
         env = None
@@ -4713,6 +5089,7 @@ def cmd_watch(args):
                     start_new_session=True, close_fds=True, pass_fds=(lock_fd,), cwd=str(root),
                     env=_herdr_env_for_server(server),
                 )
+                end_with_test(proc)
             finally:
                 signal.pthread_sigmask(signal.SIG_SETMASK, watcher_signal_mask)
         except (OSError, subprocess.SubprocessError) as exc:
@@ -5845,6 +6222,7 @@ def _spawn_watch_observer(watch_id, arm, *, service_current=None,
                     start_new_session=True, close_fds=True, pass_fds=(lock_fd,),
                     cwd=str(paths.arm.parent), env=env,
                 )
+                end_with_test(proc)
             finally:
                 signal.pthread_sigmask(signal.SIG_SETMASK, watcher_signal_mask)
         finally:
@@ -6513,6 +6891,8 @@ def _herdr_prompt(target, text, *, wait, timeout_ms, start_aware=False):
     ordinary native-submission call sites ask for that distinction; the plain
     call keeps the existing single-shot contract for every other caller.
     """
+    if terminal_surface.is_tmux_pane(target):
+        return _tmux_prompt(target, text, wait=wait, timeout_ms=timeout_ms, start_aware=start_aware)
     cmd = _herdr_argv("agent", "prompt", target, text)
     if wait:
         cmd += ["--wait", "--until", "working", "--timeout", str(timeout_ms)]
@@ -6528,6 +6908,22 @@ def _herdr_prompt(target, text, *, wait, timeout_ms, start_aware=False):
     except subprocess.SubprocessError:
         return None, None
     return proc.returncode, _herdr_prompt_payload(proc.stdout, proc.stderr)
+
+
+def _tmux_prompt(target, text, *, wait, timeout_ms, start_aware=False):
+    """`_herdr_prompt` for a tmux pane: one paste and Enter, then (``wait``) the turn start."""
+    tmux = _tmux_surface(target)
+    if tmux is None:
+        return None, ({"error": {"code": "herdr-not-started"}} if start_aware else None)
+    rc, payload = tmux.prompt(target, text)
+    if rc is None:
+        return None, (payload if start_aware else None)
+    if rc != 0 or not wait:
+        return rc, payload
+    waited = tmux.wait_agent(target, ("working",), timeout_ms)
+    if isinstance(waited, dict) and waited.get("result"):
+        return 0, waited
+    return 1, waited if isinstance(waited, dict) else {"error": {"code": "timeout"}}
 
 
 def _prompt_foreground(pane, harness, *, info=None):
@@ -6595,6 +6991,9 @@ def _native_idle_prompt_guard(target, harness, expected_sid, expected_pane,
         return "foreground-unverified", None
     if expected_foreground is not None and proof != expected_foreground:
         return "target-process-changed", None
+    refusal = _tmux_input_refusal(expected_pane)
+    if refusal:
+        return refusal, None
     lines = _read_screen(expected_pane)
     if lines is None:
         return "screen-unavailable", None
@@ -6655,6 +7054,9 @@ def _sidless_idle_prompt_guard(target, expected_harness, expected_pane,
     if expected_foreground is not None and not peer_message.first_input_process_matches(
             expected_foreground, proof):
         return "target-process-changed", None
+    refusal = _tmux_input_refusal(expected_pane)
+    if refusal:
+        return refusal, None
     lines = _read_screen(expected_pane)
     if lines is None:
         return "screen-unavailable", None
@@ -6776,6 +7178,10 @@ def _form_open(target):
 
 
 def _blocking_screen_for_target(target, harness, *, window=15):
+    if terminal_surface.is_tmux_pane(target):
+        tmux = _tmux_surface(target)
+        return _blocking_screen(harness, _screen_lines((tmux.read_visible(target) if tmux else "") or ""),
+                                window=window)
     try:
         proc = subprocess.run(_herdr_argv("agent", "read", target, "--source", "visible"),
                               capture_output=True, text=True, timeout=_herdr_get_timeout())
@@ -11324,6 +11730,7 @@ def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_bind
     if not body.strip():
         print("prompted=false reason=empty-body")
         return 1
+    args.target = _tmux_target_address(args.target)
 
     body = body.rstrip("\n")
     if producer_binding is not None and sender is not None:
@@ -11343,7 +11750,7 @@ def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_bind
         from_identity = (from_sid, from_harness, _project_of(os.getcwd()))
         from_name = _from_name(from_harness, from_sid)
     relay_pane = (sender or {}).get("pane") or ""
-    if _herdr_missing():
+    if _surface_missing(args.target) and _tmux_inventory() is None:
         resolved, resolve_error, candidate_panes = None, "herdr-not-found", []
     elif resolved_recipient is None:
         resolved, resolve_error, candidate_panes = _resolve_prompt_target(args.target)
@@ -11411,9 +11818,7 @@ def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_bind
             sender_row["pane_id"] = relay_pane
     elif from_sid and from_harness in {"claude", "codex", "opencode"}:
         try:
-            from pane_ownership import verified_pane
-            sender_pane = verified_pane(os.environ.get("HERDR_PANE_ID", ""),
-                                        from_harness, from_sid, server=_HERDR_SESSION)
+            sender_pane = _verified_caller_pane(from_harness, from_sid)
             if sender_pane:
                 sender_row["pane_id"] = sender_pane
         except Exception:
@@ -11738,6 +12143,10 @@ def _codex_rollout_exists(thread_id):
 
 def _read_screen(target):
     """The visible pane (ANSI) as screen lines, or None when it could not be read."""
+    if terminal_surface.is_tmux_pane(target):
+        tmux = _tmux_surface(target)
+        text = tmux.read_visible(target, ansi=True) if tmux else None
+        return _screen_lines(text) if text and text.strip() else None
     try:
         proc = subprocess.run(_herdr_argv("agent", "read", target, "--source", "visible", "--format", "ansi"),
                               capture_output=True, text=True, errors="replace", timeout=_herdr_get_timeout())
@@ -11780,10 +12189,13 @@ def _process_session(pane, harness):
     window would otherwise never clear it. Shared Codex callers use CODEX_THREAD_ID;
     pane_ownership resolves that thread to its foreground TUI."""
     try:
-        proc = subprocess.run(_herdr_argv("pane", "process-info", "--pane", pane),
-                              capture_output=True, text=True, timeout=_herdr_get_timeout())
-        payload = json.loads(proc.stdout or "")
-        processes = ((payload.get("result") or {}).get("process_info") or {}).get("foreground_processes") or []
+        if terminal_surface.is_tmux_pane(pane):
+            processes = (_retire_pane_info(pane) or {}).get("foreground_processes") or []
+        else:
+            proc = subprocess.run(_herdr_argv("pane", "process-info", "--pane", pane),
+                                  capture_output=True, text=True, timeout=_herdr_get_timeout())
+            payload = json.loads(proc.stdout or "")
+            processes = ((payload.get("result") or {}).get("process_info") or {}).get("foreground_processes") or []
     except Exception:
         return None
     if harness == "codex":
@@ -11898,6 +12310,9 @@ def _clear_look(target, req):
         return "form-open", agent, None
     if state not in ("idle", "done"):
         return f"not-idle-{state}", agent, None
+    refusal = _tmux_input_refusal(target)
+    if refusal:
+        return refusal, agent, None
     lines = _read_screen(target)
     if lines is None:
         return "screen-unknown", agent, None
@@ -12061,8 +12476,9 @@ def cmd_clear(args):
     req, why = clear.validate_request(args.request, args.nonce)
     if req and (req.get("seat") or {}).get("kind") == "native":
         return _native_tidy_command(args, req, continuing=False)
-    if _herdr_missing():
-        print("cleared=failed reason=herdr-not-found")
+    if _surface_missing(args.target):
+        print("cleared=failed reason=" + ("tmux-not-found" if terminal_surface.is_tmux_pane(args.target)
+                                          else "herdr-not-found"))
         return _CLEAR_EXIT["failed"]
     req, why = clear.validate_request(args.request, args.nonce)
     if req is None:
@@ -12162,8 +12578,9 @@ def cmd_idle_card_request(args):
         from session_tidy_native import idle_card_request
         verdict = idle_card_request(req, str(path), args.nonce, screen_ready=_screen_ready)
         return finish(verdict.get("accepted", "failed"), verdict.get("reason", ""))
-    if _herdr_missing():
-        return finish("failed", "herdr-not-found")
+    if _surface_missing(args.target):
+        return finish("failed", "tmux-not-found" if terminal_surface.is_tmux_pane(args.target)
+                      else "herdr-not-found")
     if seat.get("kind") != "pane" or seat.get("pane") != args.target:
         return finish("skipped", "target-changed")
 
@@ -12184,7 +12601,7 @@ def cmd_idle_card_request(args):
     if not reason and not exact_session(agent):
         reason = "target-changed"
     if reason:
-        queued = reason in {"draft", "draft-unknown", "form-open", "screen-unknown"} \
+        queued = reason in {"draft", "draft-unknown", "form-open", "screen-unknown", *_TMUX_INPUT_WAIT} \
             or reason.startswith("not-idle-")
         return finish("queued" if queued else _look_outcome(reason), reason)
     req, why = clear.validate_idle_request(path, args.nonce)
@@ -12194,7 +12611,7 @@ def cmd_idle_card_request(args):
     if not reason and not exact_session(agent):
         reason = "target-changed"
     if reason:
-        queued = reason in {"draft", "draft-unknown", "form-open", "screen-unknown"} \
+        queued = reason in {"draft", "draft-unknown", "form-open", "screen-unknown", *_TMUX_INPUT_WAIT} \
             or reason.startswith("not-idle-")
         return finish("queued" if queued else _look_outcome(reason), reason)
     claim, why = clear.claim_idle_card_request(path, args.nonce)
@@ -12205,7 +12622,7 @@ def cmd_idle_card_request(args):
         reason = "target-changed"
     if reason:
         clear.release_unsent_idle_request(claim)
-        queued = reason in {"draft", "draft-unknown", "form-open", "screen-unknown"} \
+        queued = reason in {"draft", "draft-unknown", "form-open", "screen-unknown", *_TMUX_INPUT_WAIT} \
             or reason.startswith("not-idle-")
         return finish("queued" if queued else _look_outcome(reason), reason)
     checked, why = clear.validate_idle_request(path, args.nonce, _sending_claim=claim.get("idle_request"))
@@ -12295,8 +12712,9 @@ def cmd_continue(args):
     req, why = clear.validate_continue(args.request, args.nonce)
     if req and (req.get("seat") or {}).get("kind") == "native":
         return _native_tidy_command(args, req, continuing=True)
-    if _herdr_missing():
-        print("continued=failed reason=herdr-not-found")
+    if _surface_missing(args.target):
+        print("continued=failed reason=" + ("tmux-not-found" if terminal_surface.is_tmux_pane(args.target)
+                                            else "herdr-not-found"))
         return _CLEAR_EXIT["failed"]
     req, why = clear.validate_continue(args.request, args.nonce)
     if req is None:
