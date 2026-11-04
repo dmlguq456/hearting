@@ -7115,7 +7115,8 @@ class HistoricalReviewSelfDispositionTest(InlineStageCompletionRecipeTest):
    command=output/"prepared-command.json"
    command.write_text(json.dumps({"argv":[sys.executable,str(script)],"cwd":str(repo),"inputs":pins}))
    with mock.patch.dict(os.environ,{"AGENT_DISPATCH_ATTEMPT_ID":"att-owner"}):
-    self.prepared=ship_parent_deploy.prepare(self.jobs,"att-owner",command)
+    with mock.patch("session_notice._retain"):
+     self.prepared=ship_parent_deploy.prepare(self.jobs,"att-owner",command)
    if provenance_blocked:
     # prepare retains this historical creator across owner replacements.
     # Seed the public retained-request condition before the original review;

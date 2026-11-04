@@ -160,8 +160,10 @@ The owner or its actual interactive parent may prepare it. Preparation also
 records whether that parent is on the host; a parent preparation before readiness
 reviews supplies executor availability, not a deployment or review PASS. Give
 the exact request to the existing independent readiness reviews and finish them
-within their existing ceilings. While waiting for parent execution the owner
-uses its ordinary BLOCKED handoff. If upgrading an older owner or parent runtime, name the
+within their existing ceilings. Preparation notifies the actual parent with the
+printed check and run commands. A supervised owner waits with
+`runtime_wait: registered-children`; the runtime delivers the deployment result
+through the existing correction channel and resumes post-deploy verification. If upgrading an older owner or parent runtime, name the
 installed utility's absolute path in its existing correction; do not rewrite
 the sealed owner environment.
 

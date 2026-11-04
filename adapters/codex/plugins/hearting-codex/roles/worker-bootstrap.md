@@ -62,7 +62,8 @@ artifact: <canonical path | ->
 verdict: PASS | FAIL | BLOCKED
 blocker: none | <one line>
 
-A supervised owner's intermediate child-registration or resource-wait turn
+A supervised owner's intermediate child-registration, resource-wait, or
+parent-deploy-request turn
 instead ends with the standalone line `runtime_wait: registered-children`.
 The three-line handoff applies only to the terminal final response, never to
 that intermediate wait turn.

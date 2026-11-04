@@ -758,6 +758,27 @@ def wait(args, path, control, delivered, emit, *, sleep=time.sleep):
     """Scan every exact resource and deliver one ready receipt through the existing outbox."""
     correction = "Continue the same work using the pending user correction; preserve the resource request."
 
+    import ship_parent_deploy
+    deployment = ship_parent_deploy.waiting_request(args, control)
+    if deployment is not None:
+        state = JOIN.read_supervisor_phase_state(path, args.parent_attempt_id)
+        resource = dict(state.resource or {}) if state else {}
+        if resource and resource.get("session_id") != control.thread_id:
+            raise JOIN.JoinContractError("resource-native-session-changed")
+        resource = resource or {"session_id": control.thread_id, "delivered": [], "outbox": None}
+        resource["parent_deploy"] = deployment["request_digest"]
+        _write(path, args.parent_attempt_id, delivered, resource, "parked")
+        emit({"type": "dispatch.supervisor.parent-deploy-parked",
+              "parent_attempt_id": args.parent_attempt_id, "route_id": args.route_id})
+        while True:
+            if control.pending():
+                resource.pop("parent_deploy", None)
+                _write(path, args.parent_attempt_id, delivered, resource, "running-turn")
+                return "Continue the same ship work using the pending correction; read the parent deployment result."
+            if ship_parent_deploy.waiting_request(args, control) is None:
+                return None
+            sleep(1)
+
     def look(observation):
         """An unobserved holder is looked at again on the next poll, never read as "nothing"."""
         while True:

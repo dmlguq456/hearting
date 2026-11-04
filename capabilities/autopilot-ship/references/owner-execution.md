@@ -32,6 +32,16 @@ plan/check and verification rigor within that work. Stop when the verified
 archive is ready; do not continue into the deployment procedure below, invoke
 security/release reviews, install, deploy, or expand the sample/model list.
 
+## Parent deployment wait
+
+When the route uses `ship-parent-deploy`, run the receipt's preparation command
+and finish the existing readiness reviews. Preparation notifies the actual
+parent with the check and run commands. A supervised owner yields
+`runtime_wait: registered-children` while that request is open. The runtime
+delivers the result through the existing correction channel; read it, complete
+the deploy stage on success, and continue post-deploy verification. The owner
+never executes the parent command, and deployment is never retried automatically.
+
 ## Default deployment/release procedure
 
 Prepare application deployment and release setup. Accumulate the current shipping contract in `<artifact-root>/spec/ship.md` under the three-tier output convention (`<agent-home>/core/CONVENTIONS.md#5-skill-output-convention--t1t2t3`).

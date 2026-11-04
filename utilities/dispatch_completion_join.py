@@ -1687,7 +1687,9 @@ class SupervisorState:
 
 def valid_resource_state(value: object) -> bool:
     """Separate resource delivery; never manufacture model attempts."""
-    if not isinstance(value, dict) or set(value) != {"session_id", "delivered", "outbox"}:
+    if (not isinstance(value, dict)
+            or set(value).difference({"parent_deploy"}) != {"session_id", "delivered", "outbox"}
+            or ("parent_deploy" in value and not re_fullmatch_digest(value["parent_deploy"]))):
         return False
     delivered = value["delivered"]
     if (not isinstance(value["session_id"], str) or not _safe_identity(value["session_id"])
