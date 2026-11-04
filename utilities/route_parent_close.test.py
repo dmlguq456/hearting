@@ -31,6 +31,7 @@ import resource_run_registry as RR
 import work_start
 sys.path.insert(0, str(HERE.parent / "tools"))
 import fixture_processes
+from split_module_fixture import patch_split
 
 
 def load(name, filename):
@@ -1044,7 +1045,7 @@ class ParentCloseTest(unittest.TestCase):
                     crash_once["remaining"] = False
                     kwargs["crash_after_manifest"] = True
                 return original_finalize(root, **kwargs)
-            with mock.patch.object(PRODUCER, "finalize", side_effect=interrupt_historical_refresh):
+            with patch_split(PRODUCER, "finalize", side_effect=interrupt_historical_refresh):
                 interrupted = TERMINAL.settle_owner_completion(
                     fixture.jobs, "done", exact_attempt_row(fixture.jobs, final_owner["attempt_id"]).metadata)
             self.assertEqual(interrupted.result, "recoverable", interrupted)

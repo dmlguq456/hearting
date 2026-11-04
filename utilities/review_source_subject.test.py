@@ -259,8 +259,8 @@ class SourceSubjectTest(unittest.TestCase):
 
     def test_design_review_uses_same_sealed_build_subject_and_excludes_review_output(self):
         route, visual, critic, output, cycle, producer = self._design_fixture()
-        with mock.patch.object(producer, "route_cycle_for", return_value=cycle), \
-             mock.patch.object(producer, "cycle_dir", return_value=output.parent):
+        with patch_split(producer, "route_cycle_for", return_value=cycle), \
+             patch_split(producer, "cycle_dir", return_value=output.parent):
             before = SUBJECT.observe(route, visual)
             self.assertEqual(SUBJECT.observe(route, critic)["digest"], before["digest"])
             self.assertEqual(before["family"], "design-build")
@@ -278,8 +278,8 @@ class SourceSubjectTest(unittest.TestCase):
     def test_literal_legacy_design_build_scopes_are_observed_without_rewriting_them(self):
         route, visual, _critic, output, cycle, producer = self._design_fixture(legacy=True)
         self.assertIn("designs/<cycle>/02_tokens/**", route["nodes"][0]["write_scope"])
-        with mock.patch.object(producer, "route_cycle_for", return_value=cycle), \
-             mock.patch.object(producer, "cycle_dir", return_value=output.parent):
+        with patch_split(producer, "route_cycle_for", return_value=cycle), \
+             patch_split(producer, "cycle_dir", return_value=output.parent):
             subject = SUBJECT.observe(route, visual)
         self.assertTrue(any(item["path"].startswith("designs/<cycle>/")
                             for item in subject["manifest"]))
@@ -331,8 +331,8 @@ class SourceSubjectTest(unittest.TestCase):
             with jobs.open("a", encoding="utf-8") as stream:
                 stream.write(row + "\n")
             return SUBJECT.read_binding(jobs, metadata)
-        with mock.patch.object(producer, "route_cycle_for", return_value=cycle), \
-             mock.patch.object(producer, "cycle_dir", return_value=output.parent):
+        with patch_split(producer, "route_cycle_for", return_value=cycle), \
+             patch_split(producer, "cycle_dir", return_value=output.parent):
             a1 = register("att-design-A1")
             (output / "designs/02_tokens/tokens.json").write_bytes(b'{"color":"green"}\n')
             _b = register("att-design-B")  # no completion marker for B
