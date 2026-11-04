@@ -80,6 +80,38 @@ def _legacy_epoch_run(base, name_pad=100):
 
 
 class ResourceProgressTest(unittest.TestCase):
+    @unittest.skipUnless(hasattr(os, 'O_PATH'), 'requires directory descriptors')
+    def test_passive_public_reads_reuse_safe_directory_and_close_it(self):
+        import resource_run_registry as registry
+        root = self.root / 'public-artifacts'
+        directory = root / 'resource-runs'
+        directory.mkdir(parents=True)
+        path = directory / 'run-a.json'
+        path.write_text(json.dumps({'run_id': 'run-a', 'value': 1}))
+        cache = registry.ResourceReadCache()
+        with registry.passive_read_scope(cache), \
+                mock.patch.object(progress, '_json', wraps=progress._json) as parse:
+            self.assertEqual(progress.read_public_run_record(root, 'run-a')['value'], 1)
+            self.assertEqual(progress.read_public_run_record(root, 'run-a')['value'], 1)
+            self.assertEqual(parse.call_count, 1)
+            held = registry.passive_handle(('public-directory', str(root)), lambda: None)
+            fd = held.fd
+            replacement = directory / 'replacement.json'
+            replacement.write_text(json.dumps({'run_id': 'run-a', 'value': 2}))
+            os.replace(replacement, path)
+            self.assertEqual(progress.read_public_run_record(root, 'run-a')['value'], 2)
+            self.assertEqual(parse.call_count, 2)
+            foreign = self.root / 'foreign-public'
+            foreign.mkdir()
+            (foreign / 'run-b.json').write_text(json.dumps({'run_id': 'run-b', 'value': 'foreign'}))
+            directory.rename(root / 'old-resource-runs')
+            directory.symlink_to(foreign, target_is_directory=True)
+            self.assertIsNone(progress.read_public_run_record(root, 'run-b'))
+        with self.assertRaises(OSError):
+            os.fstat(fd)
+        with registry.passive_read_scope(cache):
+            self.assertIsNone(progress.read_public_run_record(root, 'run-a'))
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)

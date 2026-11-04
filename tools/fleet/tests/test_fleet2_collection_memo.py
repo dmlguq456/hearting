@@ -23,6 +23,67 @@ from split_module_fixture import patch_split  # noqa: E402
 
 
 class Fleet2CollectionMemoTest(unittest.TestCase):
+    def test_passive_ledger_generation_skips_reads_and_observes_replace_and_symlink(self):
+        cache = session_tidy.LedgerParseCache()
+        with self._state_root(), mock.patch.object(
+                session_tidy, 'read_bytes', wraps=session_tidy.read_bytes) as read:
+            def scan():
+                with session_tidy.seat_ledger_read_scope(cache):
+                    return session_tidy._read_ledger_lines(self.seat)
+            self.assertEqual(scan(), scan())
+            self.assertEqual(read.call_count, 1)
+            stamp = self.path.stat()
+            replacement = self.path.with_suffix('.new')
+            replacement.write_text(json.dumps({'sid': 'new'}) + '\n')
+            os.utime(replacement, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+            replacement.replace(self.path)
+            self.assertEqual([row['sid'] for row in scan()], ['new'])
+            self.assertEqual(read.call_count, 2)
+            self.path.rename(replacement)
+            self.path.symlink_to(replacement)
+            self.assertFalse(scan().usable)
+            self.assertEqual(read.call_count, 3)
+            self.path.unlink()
+            self.assertFalse(scan().usable)
+
+    def test_passive_ledger_cache_reuses_bytes_and_append_but_returns_isolated_rows(self):
+        cache = session_tidy.LedgerParseCache()
+        with self._state_root(), mock.patch.object(session_tidy, '_parse_ledger_lines',
+                                wraps=session_tidy._parse_ledger_lines) as parse:
+            with session_tidy.seat_ledger_read_scope(cache):
+                first = session_tidy._read_ledger_lines(self.seat)
+            first[0]['details']['label'] = 'caller mutation'
+            with session_tidy.seat_ledger_read_scope(cache):
+                again = session_tidy._read_ledger_lines(self.seat)
+            self.assertEqual(parse.call_count, 1)
+            self.assertEqual(again[0]['details']['label'], 'original')
+            suffix = json.dumps({'sid': 'second', 'event': 'start'}) + '\n'
+            with self.path.open('a') as handle:
+                handle.write(suffix)
+            with session_tidy.seat_ledger_read_scope(cache):
+                appended = session_tidy._read_ledger_lines(self.seat)
+            self.assertEqual(parse.call_args.args[0], suffix.encode())
+            self.assertEqual([row['sid'] for row in appended], ['first', 'second'])
+            self.path.write_text(json.dumps({'sid': 'replacement'}) + '\n')
+            with session_tidy.seat_ledger_read_scope(cache):
+                replaced = session_tidy._read_ledger_lines(self.seat)
+            self.assertEqual([row['sid'] for row in replaced], ['replacement'])
+            with session_tidy.seat_ledger_read_scope(cache):
+                session_tidy._read_ledger_lines(self.seat, strict=True)
+            self.assertTrue(parse.call_args.kwargs.get('strict'))
+
+    def test_row_state_root_resolution_is_shared_only_for_one_pass(self):
+        job = SimpleNamespace(_launch_home='/home/fixture', _registry_path='/state/jobs.log')
+        with mock.patch.object(dispatch, 'dispatch_state_roots',
+                               side_effect=[(Path('/one'),), (Path('/two'),)]) as resolve:
+            with dispatch.collection_read_scope():
+                self.assertEqual(dispatch._row_state_roots(job), ('/one',))
+                self.assertEqual(dispatch._row_state_roots(job), ('/one',))
+            self.assertEqual(resolve.call_count, 1)
+            with dispatch.collection_read_scope():
+                self.assertEqual(dispatch._row_state_roots(job), ('/two',))
+            self.assertEqual(resolve.call_count, 2)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

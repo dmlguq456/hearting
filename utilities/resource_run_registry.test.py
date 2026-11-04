@@ -15,6 +15,36 @@ import resource_run_registry as registry
 
 
 class ResourceRegistryTest(unittest.TestCase):
+    def test_passive_route_parse_reuses_generation_and_rechecks_identity_and_clock(self):
+        cache = registry.ResourceReadCache()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'route.json'
+            path.write_text(json.dumps(dict(route_id='rt-original')))
+            row = dict(route=str(path), route_id='rt-original', started_at=100)
+            with mock.patch.object(registry, 'classify_identity',
+                                   side_effect=[('working', None, 'live'), ('exited', None, 'gone')]) as identity, \
+                    mock.patch('resource_progress.read_progress', return_value=None), \
+                    mock.patch('resource_progress.collect', return_value=None), \
+                    mock.patch('resource_progress.remote_candidates', return_value=[]), \
+                    mock.patch('resource_placement.observe', return_value=None):
+                with registry.passive_read_scope(cache):
+                    first = registry.normalize_run('run-a', row, path, now=160)
+                with registry.passive_read_scope(cache):
+                    second = registry.normalize_run('run-a', row, path, now=220)
+                self.assertEqual(first['liveness'], 'working')
+                self.assertEqual(first['elapsed_min'], 1)
+                self.assertEqual(second['liveness'], 'exited')
+                self.assertEqual(identity.call_count, 2)
+            with mock.patch.object(registry.json, 'loads', wraps=json.loads) as parse:
+                self.assertEqual(cache.route_document(path), dict(route_id='rt-original'))
+                self.assertEqual(cache.route_document(path), dict(route_id='rt-original'))
+                self.assertEqual(parse.call_count, 1)
+                replacement = path.with_suffix('.new')
+                replacement.write_text(json.dumps(dict(route_id='rt-replaced')))
+                replacement.replace(path)
+                self.assertEqual(cache.route_document(path), dict(route_id='rt-replaced'))
+                self.assertEqual(parse.call_count, 2)
+
     def test_compute_identity_requires_output_receipt_but_keeps_stable_format(self):
         execution = {"kind": "compute-hosts", "run_id": "compute-1",
                      "meta_sha256": "m" * 64, "exit_sha256": "e" * 64,

@@ -14,6 +14,10 @@ import time
 import uuid
 import functools
 import subprocess
+import threading
+from collections import OrderedDict
+from contextlib import contextmanager, suppress
+from contextvars import ContextVar
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -24,6 +28,104 @@ INDEX_SCHEMA = 1
 REGISTRY_SCHEMA = 1
 IDENTITY_KEYS = ("pid", "starttime", "command_hash")
 _LEGACY_RESOURCE_IDENTITY_CACHE: dict[str, tuple[tuple[str, int, int], dict[str, list[dict]]]] = {}
+_PASSIVE_READ = ContextVar("resource_passive_read", default=None)
+
+
+class ResourceReadCache:
+    """Pure parses for the read-only Fleet observer, never writer-owned documents."""
+
+    def __init__(self):
+        self.entries, self.bytes = OrderedDict(), 0
+        self.generations = {}
+        self.hits = self.misses = 0
+        self.lock = threading.RLock()
+
+    def read(self, key, raw, dependencies, load):
+        with self.lock:
+            previous = self.entries.get(key)
+            if (previous is not None and previous[0] == raw
+                    and len(previous[1]) == len(dependencies)
+                    and all(a is b for a, b in zip(previous[1], dependencies))):
+                self.entries.move_to_end(key)
+                self.hits += 1
+                return previous[2]
+        self.misses += 1
+        value = load()
+        with self.lock:
+            old = self.entries.pop(key, None)
+            self.generations.pop(key, None)
+            if old is not None:
+                self.bytes -= len(old[0])
+            if len(raw) <= 4 * 1024 * 1024:
+                self.entries[key] = (raw, dependencies, value)
+                self.bytes += len(raw)
+            while len(self.entries) > 4096 or self.bytes > 32 * 1024 * 1024:
+                _key, old = self.entries.popitem(last=False)
+                self.generations.pop(_key, None)
+                self.bytes -= len(old[0])
+        return value
+
+    def route_document(self, path):
+        key = ('route-document', os.fspath(path))
+        info = path.stat()
+        generation = (info.st_dev, info.st_ino, info.st_mode, info.st_size,
+                      info.st_mtime_ns, info.st_ctime_ns, Path.read_text, json.loads)
+        with self.lock:
+            previous = self.entries.get(key)
+            if previous is not None and self.generations.get(key) == generation:
+                self.entries.move_to_end(key)
+                return previous[2]
+        raw = path.read_text(encoding='utf-8')
+        value = self.read(key, raw.encode('utf-8'), (json.loads,), lambda: json.loads(raw))
+        after = path.stat()
+        if generation[:6] == (after.st_dev, after.st_ino, after.st_mode, after.st_size,
+                              after.st_mtime_ns, after.st_ctime_ns):
+            with self.lock:
+                previous = self.entries.get(key)
+                if previous is not None and previous[2] is value:
+                    self.generations[key] = generation
+        return value
+
+
+@contextmanager
+def passive_read_scope(cache):
+    scope = {'cache': cache, 'memo': {}, 'handles': {}}
+    token = _PASSIVE_READ.set(scope)
+    try:
+        yield
+    finally:
+        for handle in scope['handles'].values():
+            if handle is not None:
+                with suppress(OSError):
+                    handle.close()
+        _PASSIVE_READ.reset(token)
+
+
+def passive_parse(key, raw, dependencies, load):
+    scope = _PASSIVE_READ.get()
+    return scope['cache'].read(key, raw, dependencies, load) if scope is not None else load()
+
+
+def passive_memo(key, load):
+    scope = _PASSIVE_READ.get()
+    if scope is None:
+        return load()
+    if key not in scope['memo']:
+        scope['memo'][key] = load()
+    return scope['memo'][key]
+
+
+def passive_read_active():
+    return _PASSIVE_READ.get() is not None
+
+
+def passive_handle(key, load):
+    scope = _PASSIVE_READ.get()
+    if scope is None:
+        return None
+    if key not in scope['handles']:
+        scope['handles'][key] = load()
+    return scope['handles'][key]
 
 
 def agent_home() -> Path:
@@ -81,6 +183,10 @@ def launched_identity(proc, attempts: int = 20, delay: float = 0.01) -> dict | N
 
 
 def boot_identity() -> dict:
+    return dict(passive_memo('boot-identity', _read_boot_identity))
+
+
+def _read_boot_identity() -> dict:
     """Bind new local resource identities to their host and kernel lifetime."""
     try:
         boot = str(uuid.UUID(Path('/proc/sys/kernel/random/boot_id').read_text().strip()))
@@ -667,6 +773,10 @@ def read_registry_source(path: Path) -> tuple[dict, bytes | None]:
 
 
 def _boot_epoch() -> float | None:
+    return passive_memo('boot-epoch', _read_boot_epoch)
+
+
+def _read_boot_epoch() -> float | None:
     try:
         for line in Path("/proc/stat").read_text(encoding="utf-8").splitlines():
             if line.startswith("btime "):
@@ -736,7 +846,10 @@ def normalize_run(run_id: str, run: dict, registry: Path, identity_reader=proc_i
         try:
             route_path = Path(run["route"])
             if route_path.is_absolute() and not route_path.is_symlink():
-                route_doc = json.loads(route_path.read_text(encoding="utf-8"))
+                scope = _PASSIVE_READ.get()
+                route_doc = (passive_memo(('route-document', os.fspath(route_path)),
+                             lambda: scope['cache'].route_document(route_path)) if scope is not None
+                             else json.loads(route_path.read_text(encoding="utf-8")))
                 if (not run.get("route_id") or route_doc.get("route_id") == run.get("route_id")):
                     artifact_root = route_doc.get("artifact_root")
         except (OSError, ValueError, TypeError):
@@ -925,7 +1038,8 @@ def scan(index_path=None, identity_reader=proc_identity, now=None,
                 diagnostics.append({"kind": "missing-registry", "path": str(registry),
                                     "reason": "registered-path-absent", "blocking": False})
                 continue
-            payload = strict_json_loads(data)
+            payload = passive_parse(('registry', str(registry)), data,
+                                    (strict_json_loads,), lambda: strict_json_loads(data))
             runs = payload.get("runs") if isinstance(payload, dict) else None
             if payload.get("schema_version") != REGISTRY_SCHEMA or not isinstance(runs, dict):
                 raise ValueError("invalid-registry-schema")

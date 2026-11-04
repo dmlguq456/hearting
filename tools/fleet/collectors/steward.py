@@ -78,10 +78,18 @@ def _session_keys(sess):
 
 def _repository_key(cwd):
     from ..gitinfo import resolve_gitdir
+    from . import dispatch
+    scope = dispatch._COLLECTION_INPUTS.get()
+    key = ('steward-repository', cwd, resolve_gitdir)
+    if scope is not None and key in scope:
+        return scope[key]
     try:
-        return resolve_gitdir(cwd)[1] if cwd else None
+        value = resolve_gitdir(cwd)[1] if cwd else None
     except (OSError, ValueError, TypeError):
-        return None
+        value = None
+    if scope is not None:
+        scope[key] = value
+    return value
 
 
 def _registry_sessions():
@@ -448,7 +456,9 @@ def _steward_limit():
         return _DEFAULT_MAX_SUPERVISORS
 
 
-def _registry_record(harness, session_id):
+def _registry_record(harness, session_id, observation=None):
+    if isinstance(observation, _EndObservation):
+        return (observation.registry(harness) or {}).get(session_id)
     from .. import session_registry
     try:
         entries = os.listdir(session_registry._dir_for(harness))
@@ -496,6 +506,19 @@ class _EndObservation:
     def opencode(self):
         from . import opencode
         return self._once("opencode", opencode.session_visibility)
+
+    def registry(self, harness):
+        def read():
+            from .. import session_registry
+            records = {}
+            for entry in os.listdir(session_registry._dir_for(harness)):
+                if not entry.endswith('.json') or not entry[:-5].isdigit():
+                    continue
+                record = session_registry.read(harness, int(entry[:-5]))
+                if record and record.get('sessionId'):
+                    records.setdefault(record['sessionId'], record)
+            return records
+        return self._once(('registry', harness), read)
 
 
 def end_observation():
@@ -573,10 +596,10 @@ def session_liveness(harness, session_id, *, agents=None, observation=None):
         proof = _process_proof(harness, session_id, observation)
         if proof == "live":
             return "live"
-        if proof == "ended" and _registry_record(harness, session_id) is None:
+        if proof == "ended" and _registry_record(harness, session_id, observation) is None:
             return "ended"
     try:
-        record = _registry_record(harness, session_id)
+        record = _registry_record(harness, session_id, observation)
         if record is None:
             return "unknown"
         pid = record.get("pid")

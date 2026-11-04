@@ -39,6 +39,8 @@ keeps the accepted handover pending instead of treating unknown ownership as emp
 """
 
 from __future__ import annotations
+from collections import OrderedDict
+import threading
 
 import contextlib
 from dataclasses import dataclass, replace
@@ -746,6 +748,61 @@ def _bindings_readable(bindings):
         for binding in bindings)
 
 
+def _snapshot_data_usable(data):
+    seat = data.get('seat') if isinstance(data, dict) else None
+    return (isinstance(seat, dict) and bool(seat.get('key'))
+            and seat.get('kind') in {'pane', 'native', 'project'}
+            and isinstance(data['from'].get('sid'), str) and bool(data['from']['sid'])
+            and _bindings_readable(data.get('bindings')))
+
+
+_PASSIVE_SNAPSHOT_SEATS = OrderedDict()
+_PASSIVE_SNAPSHOT_LOCK = threading.RLock()
+
+
+def _snapshot_seat_keys():
+    from dispatch_supervision import passive_read_context
+    if passive_read_context() is None:
+        return {str(snapshot['seat']['key']) for snapshot in _all_snapshots()}
+    directory = _snapshot_dir()
+    try:
+        with os.scandir(directory) as entries:
+            names = sorted(entry.name for entry in entries if entry.name.endswith('.json'))
+    except FileNotFoundError:
+        return set()
+    keys = set()
+    for name in names:
+        path = directory / name
+        if path.is_symlink() or not path.is_file():
+            raise ValueError('handover-snapshot-unsafe')
+        def signature():
+            st = path.stat()
+            return (st.st_dev, st.st_ino, st.st_mode, st.st_size, st.st_mtime_ns,
+                    st.st_ctime_ns, read_snapshot, _snapshot_data_usable, SCHEMA)
+        before = signature()
+        key = str(path)
+        with _PASSIVE_SNAPSHOT_LOCK:
+            held = _PASSIVE_SNAPSHOT_SEATS.get(key)
+            if held is not None and held[0] == before:
+                _PASSIVE_SNAPSHOT_SEATS.move_to_end(key)
+                seat_key = held[1]
+            else:
+                held = None
+        if held is None:
+            data = read_snapshot(path.stem)
+            seat_key = str(data['seat']['key']) if _snapshot_data_usable(data) else None
+            if before == signature() and (seat_key is None or len(seat_key) <= 4096):
+                with _PASSIVE_SNAPSHOT_LOCK:
+                    _PASSIVE_SNAPSHOT_SEATS[key] = (before, seat_key)
+                    _PASSIVE_SNAPSHOT_SEATS.move_to_end(key)
+                    while len(_PASSIVE_SNAPSHOT_SEATS) > 128:
+                        _PASSIVE_SNAPSHOT_SEATS.popitem(last=False)
+        if seat_key is None:
+            raise ValueError('handover-snapshot-invalid')
+        keys.add(seat_key)
+    return keys
+
+
 def _all_snapshots_uncached() -> list[dict]:
     try:
         with os.scandir(_snapshot_dir()) as entries:
@@ -758,11 +815,7 @@ def _all_snapshots_uncached() -> list[dict]:
         if path.is_symlink() or not path.is_file():
             raise ValueError("handover-snapshot-unsafe")
         data = read_snapshot(path.stem)
-        seat = data.get("seat") if isinstance(data, dict) else None
-        if (not isinstance(seat, dict) or not seat.get("key")
-                or seat.get("kind") not in {"pane", "native", "project"}
-                or not isinstance(data["from"].get("sid"), str) or not data["from"]["sid"]
-                or not _bindings_readable(data.get("bindings"))):
+        if not _snapshot_data_usable(data):
             raise ValueError("handover-snapshot-invalid")
         out.append(data)
     return out
@@ -853,10 +906,23 @@ def _role_transition_matches(identity: tuple, relation: dict) -> bool:
 
 
 def _current_roles(states: dict) -> dict:
+    eligible = {identity: _role_transition_matches(identity, relation)
+                for identity, relation in states.items()}
+    groups = {}
+    unhashable = object()
+    generation_key = {}
+    for identity, relation in states.items():
+        generation = relation.get('generation')
+        try:
+            hash(generation)
+        except TypeError:
+            generation = unhashable
+        generation_key[identity] = generation
+        if eligible[identity]:
+            groups.setdefault(generation, []).append(relation)
     return {identity: relation for identity, relation in states.items()
-            if not (_role_transition_matches(identity, relation)
-                    and any(_role_transition_matches(other_id, other) and _role_follows(relation, other)
-                            for other_id, other in states.items()))}
+            if not (eligible[identity] and any(_role_follows(relation, other)
+                    for other in groups.get(generation_key[identity], ())))}
 
 
 def _role_actor(relation: dict, harness: str, sid: str) -> bool:
@@ -940,8 +1006,7 @@ def resolved_steward_relations(harness: Optional[str] = None, sid: Optional[str]
         if seat_key is not None:
             rows = _transition_rows(seat_key)
         else:
-            keys = {str(snapshot["seat"]["key"]) for snapshot in _all_snapshots()
-                    if isinstance(snapshot.get("seat"), dict) and snapshot["seat"].get("key")}
+            keys = _snapshot_seat_keys()
             legacy_marker = False
             for marker in markers.values():
                 key = marker.get("seat_key") if isinstance(marker, dict) else None

@@ -28,6 +28,25 @@ from fleet.collectors import dispatch, procscan  # noqa: E402
 import dispatch_pending_delivery as pending_delivery  # noqa: E402
 
 
+class DeliveryDocumentReuseTest(unittest.TestCase):
+    def test_unchanged_parse_is_reused_but_replace_and_deletion_are_observed(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / 'record.json'
+            path.write_text(json.dumps(dict(state='pending')))
+            with mock.patch.object(dispatch.json, 'loads', wraps=json.loads) as parse:
+                self.assertEqual(dispatch._delivery_document(path), dict(state='pending'))
+                self.assertEqual(dispatch._delivery_document(path), dict(state='pending'))
+                self.assertEqual(parse.call_count, 1)
+                replacement = path.with_suffix('.new')
+                replacement.write_text(json.dumps(dict(state='acked')))
+                replacement.replace(path)
+                self.assertEqual(dispatch._delivery_document(path), dict(state='acked'))
+                self.assertEqual(parse.call_count, 2)
+                path.unlink()
+                with self.assertRaises(FileNotFoundError):
+                    dispatch._delivery_document(path)
+
+
 def _record(**overrides):
     receipt = {
         "schema_version": 2,

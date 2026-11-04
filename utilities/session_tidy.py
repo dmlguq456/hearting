@@ -860,18 +860,22 @@ def _note_seat_fallback(harness: str, sid: str, steps: dict) -> None:
 
 _LEDGER_READ_SCOPE = contextvars.ContextVar("session_tidy_ledger_read_scope", default=None)
 _LEDGER_READ_ONLY = contextvars.ContextVar("session_tidy_ledger_read_only", default=False)
+_LEDGER_PARSE_SCOPE = contextvars.ContextVar("session_tidy_ledger_parse_scope", default=None)
 _NATIVE_ADDRESS_READ_SCOPE = contextvars.ContextVar("session_tidy_native_address_scope", default=None)
 
 
 @contextlib.contextmanager
-def seat_ledger_read_scope():
+def seat_ledger_read_scope(parse_cache=None):
     """Share parsed ledger rows within one read pass, with nested scope reuse."""
     active = _LEDGER_READ_SCOPE.get()
     token = _LEDGER_READ_SCOPE.set(active if active is not None else {})
+    parse_token = (_LEDGER_PARSE_SCOPE.set(parse_cache) if parse_cache is not None else None)
     try:
         yield
     finally:
         _LEDGER_READ_SCOPE.reset(token)
+        if parse_token is not None:
+            _LEDGER_PARSE_SCOPE.reset(parse_token)
 
 
 @contextlib.contextmanager
@@ -909,6 +913,84 @@ def _native_ledger_path(seat: Seat) -> Path:
 class _LedgerLines(list):
     """Legacy row list with observation health for authority readers."""
     usable = True
+
+
+class LedgerParseCache:
+    """Bounded disposable parses for passive scans; observed bytes stay authoritative."""
+
+    def __init__(self):
+        from collections import OrderedDict
+        self.entries = OrderedDict()
+        self.generations = {}
+        self.bytes = 0
+        self.lock = threading.RLock()
+
+    def read(self, path, reader, parser, *, read_only=False):
+        key = os.fspath(path)
+        def generation():
+            info = path.lstat()
+            if not stat.S_ISREG(info.st_mode):
+                return None
+            return (info.st_dev, info.st_ino, info.st_mode, info.st_size,
+                    info.st_mtime_ns, info.st_ctime_ns, reader, parser)
+        try:
+            before = generation()
+        except OSError:
+            before = None
+        with self.lock:
+            held = self.entries.get(key)
+            raw = (held[1] if held is not None and before is not None
+                   and self.generations.get(key) == before else None)
+        if raw is None:
+            raw = reader(path)
+        rows = self.parse(path, raw, parser, read_only=read_only)
+        try:
+            after = generation()
+        except OSError:
+            after = None
+        with self.lock:
+            held = self.entries.get(key)
+            if (held is not None and held[0] is parser and held[1] == raw
+                    and before is not None and before == after):
+                self.generations[key] = before
+            else:
+                self.generations.pop(key, None)
+        return rows
+
+    def parse(self, path, raw, parser, *, read_only=False):
+        key = os.fspath(path)
+        with self.lock:
+            previous = self.entries.get(key)
+        if previous is not None and previous[0] is parser and previous[1] == raw:
+            rows = previous[2]
+        elif (previous is not None and previous[0] is parser
+              and isinstance(raw, bytes) and isinstance(previous[1], bytes)
+              and (not previous[1] or previous[1].endswith(b"\n"))
+              and raw.startswith(previous[1])):
+            suffix = parser(raw[len(previous[1]):])
+            rows = _LedgerLines([*previous[2], *suffix])
+            rows.usable = previous[2].usable and suffix.usable
+        else:
+            rows = parser(raw)
+        size = len(raw or b"")
+        with self.lock:
+            old = self.entries.pop(key, None)
+            self.generations.pop(key, None)
+            if old is not None:
+                self.bytes -= len(old[1] or b"")
+            if size <= 2 * 1024 * 1024:
+                self.entries[key] = (parser, raw, rows)
+                self.bytes += size
+            while len(self.entries) > 2048 or self.bytes > 32 * 1024 * 1024:
+                _key, retired = self.entries.popitem(last=False)
+                self.generations.pop(_key, None)
+                self.bytes -= len(retired[1] or b"")
+        if not read_only:
+            return copy.deepcopy(rows)
+        # Physical relation joins may extend the list, never its row records.
+        value = _LedgerLines(rows)
+        value.usable = rows.usable
+        return value
 
 
 def _handover_origin(row) -> Optional[tuple[str, str]]:
@@ -1017,6 +1099,9 @@ def _read_ledger_lines(seat: Seat, *, include_physical_relations: bool = True,
         return cached if read_only else copy.deepcopy(cached)
 
     def parse(source):
+        cache = _LEDGER_PARSE_SCOPE.get() if not strict else None
+        if cache is not None:
+            return cache.read(source, read_bytes, _parse_ledger_lines, read_only=read_only)
         if strict:
             _reject_symlink(source)
             try:
@@ -1025,7 +1110,8 @@ def _read_ledger_lines(seat: Seat, *, include_physical_relations: bool = True,
                 observed = b""
         else:
             observed = read_bytes(source)
-        rows = _parse_ledger_lines(observed, strict=True) if strict else _parse_ledger_lines(observed)
+        rows = (_parse_ledger_lines(observed, strict=True)
+                if strict else _parse_ledger_lines(observed))
         if strict and not rows.usable:
             raise ValueError("seat-ledger-schema-invalid")
         return rows

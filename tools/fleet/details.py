@@ -80,7 +80,9 @@ def state_key(snapshot):
     resources = tuple((r.run_id, r.parent_attempt_id, r.liveness,
                        r.route_id, r.route_hash, r.route_node, r.node,
                        r.pid, r.starttime, r.command_hash, r.exit_code, r.route_file, r.route) for r in snapshot.resources)
-    evidence = {rid: json.dumps(value, sort_keys=True, default=str)
+    from .collectors.dispatch import RegistryRouteEvidence
+    evidence = {rid: (value.fingerprint() if isinstance(value, RegistryRouteEvidence)
+                     else json.dumps(value, sort_keys=True, default=str))
                 for rid, value in snapshot.node_evidence.items()}
     return {"rows": rows, "resources": resources, "evidence": evidence,
             "activity": {identity(row): _activity(row) for row in snapshot.sessions + snapshot.jobs}}

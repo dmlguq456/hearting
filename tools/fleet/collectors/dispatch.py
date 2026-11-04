@@ -16,6 +16,7 @@ live_stage() derives the real pipeline stage from plans/*_<slug>/ artifacts (por
 statusline.sh:131-171) so the label reflects live progress, not the static argv.
 """
 import contextlib
+from contextvars import ContextVar
 import functools
 from collections import OrderedDict
 import json
@@ -130,6 +131,10 @@ def _pinned_registry_lines(path):
         return None
 
 
+_COLLECTION_INPUTS = ContextVar("fleet_collection_inputs", default=None)
+_LEDGER_PARSE_CACHE = None
+
+
 @contextlib.contextmanager
 def collection_read_scope():
     """Bound ledger and Codex identity reuse to one Fleet collection pass."""
@@ -137,12 +142,20 @@ def collection_read_scope():
     import session_tidy
     import dispatch_supervision
     from . import codex
+    global _LEDGER_PARSE_CACHE
+    if _LEDGER_PARSE_CACHE is None:
+        _LEDGER_PARSE_CACHE = session_tidy.LedgerParseCache()
 
-    with ExitStack() as stack:
-        stack.enter_context(session_tidy.seat_ledger_read_scope())
-        stack.enter_context(codex.daemon_identity_read_scope())
-        stack.enter_context(dispatch_supervision.route_attention_read_scope())
-        yield
+    token = _COLLECTION_INPUTS.set({}) if _COLLECTION_INPUTS.get() is None else None
+    try:
+        with ExitStack() as stack:
+            stack.enter_context(session_tidy.seat_ledger_read_scope(_LEDGER_PARSE_CACHE))
+            stack.enter_context(codex.daemon_identity_read_scope())
+            stack.enter_context(dispatch_supervision.route_attention_read_scope())
+            yield
+    finally:
+        if token is not None:
+            _COLLECTION_INPUTS.reset(token)
 
 
 def _managed_parent_dir(sidecar_log):
@@ -374,10 +387,24 @@ def _raise_registry_read_error(path, *, ignore_missing=False):
         raise error
 
 
-def _orphan_registry_rows(path, registry):
+_ORPHAN_ROW_PROJECTIONS = OrderedDict()
+
+
+def _orphan_registry_rows(path, registry, *, read_only=False):
     """Adapt parsed rows to dispatch-registry's established row contract."""
     parsed = parsed_registry_rows(path)
     _raise_registry_read_error(path, ignore_missing=True)
+    key = os.path.abspath(os.fspath(path))
+    converter = registry._row_from_fields
+    with _PARSED_REGISTRY_CACHE_LOCK:
+        held = _ORPHAN_ROW_PROJECTIONS.get(key)
+    if held is not None and held[0] is converter and held[1] is parsed:
+        if read_only:
+            return held[3]
+        return [dict(row, meta=dict(row["meta"])) for _fields, row in held[2].values()
+                if row is not None]
+    previous = held[2] if held is not None and held[0] is converter else {}
+    converted = {}
     raw_records = iter(())
     if _dispatch_registry_cache.registry_scope_active():
         try:
@@ -389,6 +416,12 @@ def _orphan_registry_rows(path, registry):
     record = next(raw_records, None)
     rows = []
     for physical_order, fields, parsed_meta in parsed:
+        old = previous.get(physical_order)
+        if old is not None and old[0] == fields:
+            converted[physical_order] = old
+            if old[1] is not None:
+                rows.append(old[1])
+            continue
         while record is not None and record.order < physical_order:
             record = next(raw_records, None)
         if (record is not None and record.order == physical_order
@@ -399,6 +432,7 @@ def _orphan_registry_rows(path, registry):
             raw_meta = record.completion_metadata()
             row = registry._row_from_fields(
                 physical_order, fields, meta=raw_meta, meta_owned=True)
+            converted[physical_order] = (fields, row)
             record = next(raw_records, None)
             if row is not None:
                 rows.append(row)
@@ -417,9 +451,16 @@ def _orphan_registry_rows(path, registry):
         row = registry._row_from_fields(
             physical_order, fields, meta=meta, meta_owned=simple,
         )
+        converted[physical_order] = (fields, row)
         if row is not None:
             rows.append(row)
-    return rows
+    projection = tuple(rows)
+    with _PARSED_REGISTRY_CACHE_LOCK:
+        _ORPHAN_ROW_PROJECTIONS[key] = (converter, parsed, converted, projection)
+        _ORPHAN_ROW_PROJECTIONS.move_to_end(key)
+        while len(_ORPHAN_ROW_PROJECTIONS) > _PARSED_REGISTRY_ROWS_LIMIT:
+            _ORPHAN_ROW_PROJECTIONS.popitem(last=False)
+    return projection if read_only else [dict(row, meta=dict(row["meta"])) for row in rows]
 
 
 _ORPHAN_ROWS_PASS_CACHE_LIMIT = 128
@@ -432,7 +473,8 @@ def _orphan_registry_rows_for_pass(path, registry, cache):
     key = os.path.abspath(os.fspath(path))
     if key in cache:
         return cache[key]
-    rows = _orphan_registry_rows(path, registry)
+    # These two internal classifiers only inspect rows and never publish them.
+    rows = _orphan_registry_rows(path, registry, read_only=True)
     if len(cache) < _ORPHAN_ROWS_PASS_CACHE_LIMIT:
         cache[key] = rows
     return rows
@@ -762,10 +804,17 @@ def _dispatch_mode_axes(meta, worker_type=None, unit=None):
 
 
 def _pid_namespace_identity(pid="self"):
+    observed = _COLLECTION_INPUTS.get() if pid == "self" else None
+    key = ("pid-namespace",)
+    if observed is not None and key in observed:
+        return observed[key]
     try:
-        return os.readlink("/proc/%s/ns/pid" % pid)
+        value = os.readlink("/proc/%s/ns/pid" % pid)
     except OSError:
-        return None
+        value = None
+    if observed is not None:
+        observed[key] = value
+    return value
 
 
 def _authoritative_registry_pid(meta):
@@ -1004,7 +1053,7 @@ _TERMINAL_ENVELOPE_CACHE = {}    # path -> (stat stamp, observed)
 
 def _stat_stamp(path):
     st = os.stat(path)
-    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
 
 
 def _stat_memo(cache, path, read):
@@ -1047,6 +1096,18 @@ def _read_codex_transcript_cwd(path):
 
 
 def _row_state_roots(job=None, agent_home=None):
+    """Reuse path resolution within this passive scan, never across scans."""
+    observed = _COLLECTION_INPUTS.get()
+    if observed is None:
+        return _read_row_state_roots(job, agent_home)
+    key = (str(agent_home or getattr(job, "_launch_home", None) or ""),
+           str(getattr(job, "_registry_path", None) or ""))
+    if key not in observed:
+        observed[key] = _read_row_state_roots(job, agent_home)
+    return observed[key]
+
+
+def _read_row_state_roots(job=None, agent_home=None):
     """Return mutable dispatch-state roots for one registry row.
 
     The row's registry parent is canonical. ``launch_home/.dispatch`` is a
@@ -3352,6 +3413,145 @@ def _iso_to_epoch(ts):
     return dt.timestamp()
 
 
+_REGISTRY_EVIDENCE_CACHE = OrderedDict()
+
+
+class RegistryRouteEvidence(dict):
+    """Producer-owned history, unchanged after publication (updates copy it)."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._fingerprint = None
+
+    def fingerprint(self):
+        if self._fingerprint is None:
+            self._fingerprint = json.dumps(self, sort_keys=True, default=str)
+        return self._fingerprint
+
+
+class RegistryEvidence(dict):
+    """A published registry graph whose route histories have copy-on-write ownership."""
+
+
+def _registry_evidence_for_path(path, rows):
+    """Fold only appended records, without mutating any published history graph."""
+    key = (type(path), os.fspath(path))
+    functions = (_attempt_contract, _infer_harness, _attempt_attention, _iso_to_epoch)
+    with _PARSED_REGISTRY_CACHE_LOCK:
+        held = _REGISTRY_EVIDENCE_CACHE.get(key)
+    same_functions = held is not None and all(a is b for a, b in zip(functions, held[1]))
+    if same_functions and held[0] is rows:
+        return held[2], held[3]
+    prefix = (same_functions and len(rows) >= len(held[0])
+              and all(old is new or old == new for old, new in zip(held[0], rows)))
+    path_result = dict(held[2]) if prefix else {}
+    path_attempts = dict(held[3]) if prefix else {}
+    suffix = rows[len(held[0]):] if prefix else rows
+    changed_routes, changed_nodes = set(), set()
+    for registry_order, fields, parsed_meta in suffix:
+        # Parsed metadata is immutable and every consumer below is read-only.
+        # Avoid copying every key/value in the large registry for this pass.
+        meta = parsed_meta
+        ts, status, _repo, _worktree, slug, pipe = fields
+        route_id = meta.get("route_id")
+        route_node = meta.get("route_node")
+        attempt_id = meta.get("attempt_id")
+        if not attempt_id and (not route_id or not route_node):
+            continue
+        attempt_contract = _attempt_contract(meta)
+        harness = _infer_harness(meta, slug) if attempt_id else None
+        if not route_id or not route_node:
+            continue
+        pid_s = meta.get("pid")
+        pid = int(pid_s) if (pid_s or "").isdigit() else None
+        attention_reason = _attempt_attention(meta)
+        if route_id not in changed_routes:
+            path_result[route_id] = RegistryRouteEvidence(path_result.get(route_id, {}))
+            changed_routes.add(route_id)
+        if (route_id, route_node) not in changed_nodes:
+            node = dict(path_result[route_id].get(route_node, {}))
+            node["attempt_history"] = list(node.get("attempt_history", ()))
+            path_result[route_id][route_node] = node
+            changed_nodes.add((route_id, route_node))
+        node_evidence = path_result[route_id][route_node]
+        node_evidence.setdefault("attempt_history", []).append({
+            "attempt_id": attempt_id,
+            "status": status,
+            "pid": pid,
+            "dispatch_depth": attempt_contract["dispatch_depth"],
+            "transport": attempt_contract["transport"],
+            "execution_surface": attempt_contract["execution_surface"],
+            "registered_worker": attempt_contract["registered_worker"],
+            "fallback_hop": attempt_contract["fallback_hop"],
+            "contract_status": attempt_contract["attempt_contract_status"],
+            "parent_attempt_id": meta.get("parent_attempt_id"),
+            "note": meta.get("note"),
+            "registry_order": registry_order,
+            "attention_reason": attention_reason,
+        })
+        # route_file/route_hash/parent name WHERE the sealed record lives and who the
+        # conductor is — raw registry fields, independent of whether this particular
+        # attempt row's OWN dispatch-contract metadata validates as "current". Gating
+        # them behind attempt-contract validity silently defeated the code-test
+        # verification.md §10 fix for any legacy-schema terminal row: route.
+        # resolve_records() found no route_file at all, so a fully-finished route with a
+        # perfectly valid sealed record still degraded to an unresolved view.
+        node_evidence.update({
+            "route_file": meta.get("route_file"),
+            "route_hash": meta.get("route_hash"),
+            "parent": meta.get("parent") or meta.get("parent_slug"),
+            # F-88 gap correction (2026-08-29): keep the exact owner
+            # generation and the row's stable registry position after the
+            # live child disappears.  Fleet can then retain a verified
+            # successor route between stage attempts without relying on a
+            # reused display slug or on terminal-update time.
+            "parent_attempt_id": meta.get("parent_attempt_id"),
+            "registry_order": registry_order,
+            # Keep route-owned state identity after the live row disappears.
+            # A standalone Fleet must not fall back to its ambient registry
+            # when resolving a terminal-only route's completion markers.
+            "_registry_path": path,
+            "attempt_id": attempt_id,
+            "attention_reason": (attention_reason
+                                 if attempt_contract["attempt_contract_status"] == "current"
+                                 else None),
+        })
+        if attempt_contract["attempt_contract_status"] != "current":
+            continue
+        node_evidence.update({
+            "status": status, "slug": slug, "ts": _iso_to_epoch(ts),
+            "pid": pid,
+            "harness": harness if harness is not None else _infer_harness(meta, slug),
+            "model": meta.get("model"),
+            "effort": meta.get("effort") or meta.get("reasoning"),
+            "completion_gate": meta.get("completion_gate"),
+            "note": meta.get("note"),
+        })
+    latest = {}
+    for registry_order, fields, meta in suffix:
+        if meta.get("attempt_id"):
+            latest[meta["attempt_id"]] = (registry_order, fields, meta)
+    for attempt_id, (registry_order, fields, meta) in latest.items():
+        _ts, status, _repo, _worktree, slug, _pipe = fields
+        attempt_contract = _attempt_contract(meta)
+        path_attempts[attempt_id] = {
+            "attempt_id": attempt_id,
+            "status": status,
+            "route_id": meta.get("route_id"),
+            "route_node": meta.get("route_node"),
+            "harness": _infer_harness(meta, slug),
+            "slug": slug,
+            "registry_order": registry_order,
+            **attempt_contract,
+        }
+    with _PARSED_REGISTRY_CACHE_LOCK:
+        _REGISTRY_EVIDENCE_CACHE[key] = (rows, functions, path_result, path_attempts)
+        _REGISTRY_EVIDENCE_CACHE.move_to_end(key)
+        while len(_REGISTRY_EVIDENCE_CACHE) > _PARSED_REGISTRY_ROWS_LIMIT:
+            _REGISTRY_EVIDENCE_CACHE.popitem(last=False)
+    return path_result, path_attempts
+
+
 def _scan_registry_evidence(paths):
     """Return terminal-surviving route evidence and an exact-attempt drain index.
 
@@ -3363,7 +3563,7 @@ def _scan_registry_evidence(paths):
 
     The return shape is ``(route_nodes, terminal_registered_attempts)``.
     """
-    result = {}
+    result = RegistryEvidence()
     latest_attempts = {}
     if isinstance(paths, (str, bytes, os.PathLike)):
         paths = [paths]
@@ -3371,100 +3571,17 @@ def _scan_registry_evidence(paths):
         path_result = {}
         path_attempts = {}
         rows = parsed_registry_rows(path)
-        derived = _registry_derived_index(path, rows)
-        for registry_order, fields, parsed_meta in rows:
-            # Parsed metadata is immutable and every consumer below is read-only.
-            # Avoid copying every key/value in the large registry for this pass.
-            meta = parsed_meta
-            ts, status, _repo, _worktree, slug, pipe = fields
-            route_id = meta.get("route_id")
-            route_node = meta.get("route_node")
-            attempt_id = meta.get("attempt_id")
-            if not attempt_id and (not route_id or not route_node):
-                continue
-            attempt_contract = _attempt_contract(meta)
-            harness = _infer_harness(meta, slug) if attempt_id else None
-            if not route_id or not route_node:
-                continue
-            pid_s = meta.get("pid")
-            pid = int(pid_s) if (pid_s or "").isdigit() else None
-            attention_reason = _attempt_attention(meta)
-            node_evidence = path_result.setdefault(route_id, {}).setdefault(
-                route_node, {}
-            )
-            node_evidence.setdefault("attempt_history", []).append({
-                "attempt_id": attempt_id,
-                "status": status,
-                "pid": pid,
-                "dispatch_depth": attempt_contract["dispatch_depth"],
-                "transport": attempt_contract["transport"],
-                "execution_surface": attempt_contract["execution_surface"],
-                "registered_worker": attempt_contract["registered_worker"],
-                "fallback_hop": attempt_contract["fallback_hop"],
-                "contract_status": attempt_contract["attempt_contract_status"],
-                "parent_attempt_id": meta.get("parent_attempt_id"),
-                "note": meta.get("note"),
-                "registry_order": registry_order,
-                "attention_reason": attention_reason,
-            })
-            # route_file/route_hash/parent name WHERE the sealed record lives and who the
-            # conductor is — raw registry fields, independent of whether this particular
-            # attempt row's OWN dispatch-contract metadata validates as "current". Gating
-            # them behind attempt-contract validity silently defeated the code-test
-            # verification.md §10 fix for any legacy-schema terminal row: route.
-            # resolve_records() found no route_file at all, so a fully-finished route with a
-            # perfectly valid sealed record still degraded to an unresolved view.
-            node_evidence.update({
-                "route_file": meta.get("route_file"),
-                "route_hash": meta.get("route_hash"),
-                "parent": meta.get("parent") or meta.get("parent_slug"),
-                # F-88 gap correction (2026-08-29): keep the exact owner
-                # generation and the row's stable registry position after the
-                # live child disappears.  Fleet can then retain a verified
-                # successor route between stage attempts without relying on a
-                # reused display slug or on terminal-update time.
-                "parent_attempt_id": meta.get("parent_attempt_id"),
-                "registry_order": registry_order,
-                # Keep route-owned state identity after the live row disappears.
-                # A standalone Fleet must not fall back to its ambient registry
-                # when resolving a terminal-only route's completion markers.
-                "_registry_path": path,
-                "attempt_id": attempt_id,
-                "attention_reason": (attention_reason
-                                     if attempt_contract["attempt_contract_status"] == "current"
-                                     else None),
-            })
-            if attempt_contract["attempt_contract_status"] != "current":
-                continue
-            node_evidence.update({
-                "status": status, "slug": slug, "ts": _iso_to_epoch(ts),
-                "pid": pid,
-                "harness": harness if harness is not None else _infer_harness(meta, slug),
-                "model": meta.get("model"),
-                "effort": meta.get("effort") or meta.get("reasoning"),
-                "completion_gate": meta.get("completion_gate"),
-                "note": meta.get("note"),
-            })
-        for attempt_id, (registry_order, fields, meta) in derived["latest_by_attempt"].items():
-            _ts, status, _repo, _worktree, slug, _pipe = fields
-            attempt_contract = _attempt_contract(meta)
-            path_attempts[attempt_id] = {
-                "attempt_id": attempt_id,
-                "status": status,
-                "route_id": meta.get("route_id"),
-                "route_node": meta.get("route_node"),
-                "harness": _infer_harness(meta, slug),
-                "slug": slug,
-                "registry_order": registry_order,
-                **attempt_contract,
-            }
+        path_result, path_attempts = _registry_evidence_for_path(path, rows)
         # Candidate paths are precedence-ordered (canonical first). Preserve
         # last-occurrence-wins inside each file, but never let a later legacy
         # registry overwrite canonical terminal evidence or attempt identity.
         for route_id, nodes in path_result.items():
-            target = result.setdefault(route_id, {})
-            for route_node, evidence in nodes.items():
-                target.setdefault(route_node, evidence)
+            if route_id not in result:
+                result[route_id] = nodes
+            elif any(node not in result[route_id] for node in nodes):
+                target = result[route_id] = RegistryRouteEvidence(result[route_id])
+                for route_node, evidence in nodes.items():
+                    target.setdefault(route_node, evidence)
         for attempt_id, evidence in path_attempts.items():
             latest_attempts.setdefault(attempt_id, evidence)
 
@@ -3734,24 +3851,34 @@ def _validated_split_registry_paths(canonical_paths, observed=None, session_rows
 
 
 # --- source (b): jobs.log tolerant merge ---
-def _iso_elapsed_min(ts):
+@functools.lru_cache(maxsize=8192)
+def _iso_elapsed_start(ts, parser):
     try:
         raw = ts.strip()
         # Registry rows stamp `…Z`; fromisoformat only learned that suffix in 3.11.
         if raw.endswith("Z"):
             raw = raw[:-1] + "+00:00"
-        dt = datetime.fromisoformat(raw)
+        dt = parser.fromisoformat(raw)
     except Exception:
         return None
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _iso_elapsed_min(ts):
+    if not isinstance(ts, str):
+        return None
+    dt = _iso_elapsed_start(ts, datetime)
+    if dt is None:
+        return None
     return max(0, int((datetime.now(timezone.utc) - dt).total_seconds() // 60))
 
 
 def _scan_jobs_log(path, seen_slugs, seen_keys=None, registry_priority=0,
                     live_attempt_ids=None, canonical_attempts=None,
                     proc_attempts_by_slug=None, proc_pid_identities=None,
-                    seen_attempts=None, allowed_attempt_ids=None):
+                    seen_attempts=None, allowed_attempt_ids=None, include_stall=True):
     jobs = []
     malformed = 0
     seen_attempts = set() if seen_attempts is None else seen_attempts
@@ -3782,7 +3909,7 @@ def _scan_jobs_log(path, seen_slugs, seen_keys=None, registry_priority=0,
         if (allowed_attempt_ids is not None
                 and parsed_meta.get("attempt_id") not in allowed_attempt_ids):
             continue
-        meta = dict(parsed_meta)
+        meta = parsed_meta
         ts, status, repo, worktree, slug, pipe = fields
         row_age_min = _iso_elapsed_min(ts)
         afterglow = False
@@ -3854,6 +3981,7 @@ def _scan_jobs_log(path, seen_slugs, seen_keys=None, registry_priority=0,
             continue                          # this attempt already emitted from another registry root
         seen_attempts.add(key)
         seen_slugs.add(slug)                  # kept: legacy rows without attempt_id still need it
+        meta = dict(meta)
         attempt_contract = _attempt_contract(meta)
         pname = meta.get("_name") or repo or "job"
         # _parse_pipe_meta already strips any `autopilot-` prefix on a successful parse; this
@@ -3948,10 +4076,8 @@ def _scan_jobs_log(path, seen_slugs, seen_keys=None, registry_priority=0,
         job._registered_only = row_is_registered_only(status, meta)
         job._context_execution_started_at = _iso_to_epoch(ts)
         job.attention_reason = _attempt_attention(meta)
-        job.stall_observation = _attempt_stall_attention(job)
-        if job.stall_observation and not job.attention_reason:
-            job.attention_reason = ("attempt-stalled" if job.stall_observation.get("state") == "stalled"
-                                    else "attempt-check")
+        if include_stall:
+            _attach_stall_observation(job)
         job._registry_repo = repo
         job._registry_worktree = cwd
         jobs.append(job)
@@ -3992,6 +4118,13 @@ def _scan_jobs_log(path, seen_slugs, seen_keys=None, registry_priority=0,
             for job in group:
                 job.attempt_contract_status = "invalid:quick-multiple-live"
     return jobs, malformed
+
+
+def _attach_stall_observation(job):
+    job.stall_observation = _attempt_stall_attention(job)
+    if job.stall_observation and not job.attention_reason:
+        job.attention_reason = ("attempt-stalled" if job.stall_observation.get("state") == "stalled"
+                                else "attempt-check")
 
 
 def _jobs_log_fields(paths, *, slugs=None, attempts=None):
@@ -4130,7 +4263,7 @@ def _orphan_registry_module():
 
 def _dead_terminal_owner_row(status, meta):
     """F-83: a `done` dispatch-depth-1 owner row whose closure was a typed death."""
-    if status != "done" or not isinstance(meta, dict):
+    if status != "done" or not isinstance(meta, (dict, MappingProxyType)):
         return False
     if meta.get("worker_type") != "owner":
         return False
@@ -4329,6 +4462,54 @@ def _annotate_orphan_conductors(jobs, now, jobs_path=None, *, orphan_rows_cache=
             j.resume_boundary = boundary or "-"
 
 
+_DELIVERY_DOCUMENTS = OrderedDict()
+_DELIVERY_DOCUMENT_BYTES = 0
+_DELIVERY_INTENTS = OrderedDict()
+
+
+def _delivery_document(path):
+    """Reuse a pure display document only while its observed generation agrees."""
+    global _DELIVERY_DOCUMENT_BYTES
+    before = _stat_stamp(path)
+    key = os.fspath(path)
+    with _PARSED_REGISTRY_CACHE_LOCK:
+        held = _DELIVERY_DOCUMENTS.get(key)
+        if (held is not None and held[0] == before
+                and held[1] == (json.loads, Path.read_text)):
+            _DELIVERY_DOCUMENTS.move_to_end(key)
+            return held[3]
+    raw = path.read_text(encoding="utf-8")
+    value = json.loads(raw)
+    if before == _stat_stamp(path):
+        size = len(raw.encode("utf-8"))
+        with _PARSED_REGISTRY_CACHE_LOCK:
+            old = _DELIVERY_DOCUMENTS.pop(key, None)
+            if old is not None:
+                _DELIVERY_DOCUMENT_BYTES -= old[2]
+            if size <= 1024 * 1024:
+                _DELIVERY_DOCUMENTS[key] = (before, (json.loads, Path.read_text), size, value)
+                _DELIVERY_DOCUMENT_BYTES += size
+            while len(_DELIVERY_DOCUMENTS) > 4096 or _DELIVERY_DOCUMENT_BYTES > 16 * 1024 * 1024:
+                _key, old = _DELIVERY_DOCUMENTS.popitem(last=False)
+                _DELIVERY_DOCUMENT_BYTES -= old[2]
+    return value
+
+
+def _delivery_intents(path, parsed):
+    key = os.fspath(path)
+    with _PARSED_REGISTRY_CACHE_LOCK:
+        held = _DELIVERY_INTENTS.get(key)
+        if held is not None and held[0] is parsed:
+            return held[1]
+    intents = tuple(meta for _order, _fields, meta in parsed if meta.get("delivery_intent") == "1")
+    with _PARSED_REGISTRY_CACHE_LOCK:
+        _DELIVERY_INTENTS[key] = (parsed, intents)
+        _DELIVERY_INTENTS.move_to_end(key)
+        while len(_DELIVERY_INTENTS) > 32:
+            _DELIVERY_INTENTS.popitem(last=False)
+    return intents
+
+
 def _pending_delivery_counts(paths, *, session_observation=None):
     """SD-111 P6: read-only pending/expired visibility. Never transitions
     any state -- it mirrors the `dispatch_completion_join.reconcile_pending_delivery()`
@@ -4382,10 +4563,9 @@ def _pending_delivery_counts(paths, *, session_observation=None):
             fields = view.lines[-1].split("\t")
             if len(fields) == 6:
                 parsed = (*parsed, (None, fields, _parse_pipe_meta(fields[5] or "")))
-        for _order, _fields, observed in parsed:
-            if observed.get("delivery_intent") == "1":
-                current = view.handover_attempt(observed.get("attempt_id"))
-                intent_rows.append((path, observed, current[1] if current else None))
+        for observed in _delivery_intents(path, parsed):
+            current = view.handover_attempt(observed.get("attempt_id"))
+            intent_rows.append((path, observed, current[1] if current else None))
 
     pending = 0
     expired = 0
@@ -4462,7 +4642,7 @@ def _pending_delivery_counts(paths, *, session_observation=None):
             try:
                 if duty_file.is_symlink():
                     continue
-                duty = json.loads(duty_file.read_text(encoding="utf-8"))
+                duty = _delivery_document(duty_file)
             except (OSError, ValueError):
                 continue
             if isinstance(duty, dict) and duty.get("state") in {
@@ -4493,7 +4673,7 @@ def _pending_delivery_counts(paths, *, session_observation=None):
             no_recipient_unknown = True
         for record_file in record_files:
             try:
-                record = json.loads(record_file.read_text(encoding="utf-8"))
+                record = _delivery_document(record_file)
             except (OSError, ValueError):
                 no_recipient_unknown = True
                 continue
@@ -4707,6 +4887,7 @@ def _label_route_id(job):
 
 
 _CYCLE_RECORD_CACHE = {}         # path -> (stat stamp, parsed cycle record or None)
+_TITLE_VALIDATION_CACHE = None
 
 
 def _read_cycle_record(path):
@@ -4722,13 +4903,63 @@ def _read_cycle_hints(path):
     try:
         import directory_record_index
         held = directory_record_index._load(Path(path))
-        return held["groups"] if held is not None else {}
+        return held if held is not None else {}
     except (ImportError, OSError, TypeError, ValueError):
         return {}
 
 
 _CYCLE_LABEL_INVENTORIES = {}  # root -> (directory stamp, names, next offset)
 _CYCLE_ROUTE_PATHS = {}       # (root, route id) -> exact observed cycle path
+
+
+_CYCLE_ROUTE_INVENTORIES = OrderedDict()
+
+
+def _cycle_inventory_matches(root, directory, wanted, projection, read_json):
+    """Reuse classifications of unchanged atomic records, reading at most 200 changes."""
+    import directory_record_index as index
+    listing = index._listing(Path(directory), ())
+    entries = {name: value for name, value in _CYCLE_ROUTE_INVENTORIES.get(root, {}).items()
+               if name in listing}
+    # Even a stale complete producer index can identify the unchanged files;
+    # one new publication need not force every old payload through JSON again.
+    known_listing = projection.get('listing', {})
+    if isinstance(known_listing, dict):
+        inverse = {}
+        for rid, names in projection.get('groups', {}).items():
+            for name in names:
+                inverse.setdefault(name, []).append(rid)
+        for name, inode in known_listing.items():
+            if (listing.get(name) == inode
+                    and (name not in entries or entries[name][0] != inode)):
+                entries[name] = (inode, tuple(inverse.get(name, ())), True)
+    names = sorted(listing)
+    pending = [name for name in names if name not in entries
+               or entries[name][0] != listing[name] or not entries[name][2]]
+    previous = _CYCLE_LABEL_INVENTORIES.get(root)
+    offset = previous[2] % len(pending) if previous and pending else 0
+    batch = (pending[offset:] + pending[:offset])[:200]
+    for name in batch:
+        record = read_json(os.path.join(directory, name))
+        entries[name] = (listing[name], tuple(index.cycle_keys(name, record)), record is not None)
+    _CYCLE_LABEL_INVENTORIES[root] = (None, names,
+        (offset + len(batch)) % len(pending) if pending else 0)
+    found = {}
+    for name in names:
+        value = entries.get(name)
+        if (value is None or value[0] != listing[name] or not value[2]
+                or not wanted.intersection(value[1])):
+            continue
+        path = os.path.join(directory, name)
+        record = read_json(path)
+        entries[name] = (listing[name], tuple(index.cycle_keys(name, record)), record is not None)
+        if isinstance(record, dict) and record.get('route_id') in wanted:
+            found.setdefault(record['route_id'], (path, record))
+    _CYCLE_ROUTE_INVENTORIES[root] = entries
+    _CYCLE_ROUTE_INVENTORIES.move_to_end(root)
+    while len(_CYCLE_ROUTE_INVENTORIES) > 32:
+        _CYCLE_ROUTE_INVENTORIES.popitem(last=False)
+    return found
 
 
 def _campaign_labels(jobs):
@@ -4745,13 +4976,20 @@ def _campaign_labels_read(jobs):
     reads at most 200 records per pass, and continues on the next detail tick.
     Never stat every historical record merely to select that bounded batch.
     """
-    from ..work_titles import cycle_title
+    from ..work_titles import cycle_title, TitleReadCache
+    global _TITLE_VALIDATION_CACHE
+    if _TITLE_VALIDATION_CACHE is None:
+        _TITLE_VALIDATION_CACHE = TitleReadCache()
     # Install-follow may preserve a prior collector cache. Retire only the full
     # admission documents that this display reader no longer uses.
     for path in list(_CYCLE_RECORD_CACHE):
         if os.fspath(path).endswith(os.path.join(".runtime", "artifact-admission", "v1", "index.json")):
             _CYCLE_RECORD_CACHE.pop(path, None)
-    read_json = lambda path: _stat_memo(_CYCLE_RECORD_CACHE, path, _read_cycle_record)
+    observed = {}
+    def read_json(path):
+        if path not in observed:
+            observed[path] = _stat_memo(_CYCLE_RECORD_CACHE, path, _read_cycle_record)
+        return observed[path]
     by_root = {}
     for job in jobs:
         rid, root = _label_route_id(job), getattr(job, "artifact_root", None)
@@ -4762,7 +5000,8 @@ def _campaign_labels_read(jobs):
         cycles_dir = os.path.join(root, ".runtime", "artifact-producer", "v1", "cycles")
         remaining = set(route_ids)
         hint_path = os.path.join(cycles_dir, ".cycle-routes-index.json")
-        hints = _stat_memo(_CYCLE_RECORD_CACHE, hint_path, _read_cycle_hints) or {}
+        projection = _stat_memo(_CYCLE_RECORD_CACHE, hint_path, _read_cycle_hints) or {}
+        hints = projection.get("groups", projection)
         for rid in route_ids:
             for name in hints.get(rid, ()):
                 path = os.path.join(cycles_dir, name)
@@ -4774,35 +5013,29 @@ def _campaign_labels_read(jobs):
             if path:
                 rec = _stat_memo(_CYCLE_RECORD_CACHE, path, _read_cycle_record)
                 if isinstance(rec, dict) and rec.get("route_id") == rid:
-                    titles[(root, rid)] = cycle_title(root, rec, read_json)
+                    titles[(root, rid)] = cycle_title(root, rec, read_json,
+                                                    validation_cache=_TITLE_VALIDATION_CACHE)
                     remaining.discard(rid)
                 else:
                     _CYCLE_ROUTE_PATHS.pop((root, rid), None)
+        if remaining and isinstance(projection.get("listing"), dict):
+            # The existing index protocol binds filenames/inodes to their
+            # atomic publications. Selected records above are still read;
+            # unchanged negative locators need no historical-record sweep.
+            try:
+                import directory_record_index
+                if directory_record_index._listing(Path(cycles_dir), ()) == projection["listing"]:
+                    remaining.intersection_update(hints)
+            except (OSError, ValueError, TypeError):
+                pass
         if not remaining:
             continue
         try:
-            stamp = _stat_stamp(cycles_dir)
-            inventory = _CYCLE_LABEL_INVENTORIES.get(root)
-            # Finish the bounded inventory before accepting a changed directory.
-            # A producer adding files each tick must not reset us to the first
-            # 200 names forever. The next completed sweep sees all new names.
-            if not inventory or (inventory[0] != stamp and inventory[2] == 0):
-                names = sorted(name for name in os.listdir(cycles_dir)
-                               if name.endswith(".json") and not name.startswith("."))
-                inventory = (stamp, names, 0)
-            stamp, names, offset = inventory
-            batch = names[offset:offset + 200]
-            _CYCLE_LABEL_INVENTORIES[root] = (stamp, names, 0 if offset + 200 >= len(names) else offset + 200)
-            for name in batch:
-                path = os.path.join(cycles_dir, name)
-                rec = _stat_memo(_CYCLE_RECORD_CACHE, path, _read_cycle_record)
-                if not isinstance(rec, dict):
-                    continue
-                rid = rec.get("route_id")
-                if rid in remaining:
-                    _CYCLE_ROUTE_PATHS[(root, rid)] = path
-                    titles[(root, rid)] = cycle_title(root, rec, read_json)
-                    remaining.discard(rid)
+            matches = _cycle_inventory_matches(root, cycles_dir, remaining, projection, read_json)
+            for rid, (path, rec) in matches.items():
+                _CYCLE_ROUTE_PATHS[(root, rid)] = path
+                titles[(root, rid)] = cycle_title(root, rec, read_json,
+                                                validation_cache=_TITLE_VALIDATION_CACHE)
         except (OSError, TypeError, ValueError):
             continue
     for job in jobs:
@@ -4920,6 +5153,7 @@ def _collect(jobs_path=None, harness_filter=None, session_rows=(), fast_first=Fa
             proc_attempts_by_slug=proc_attempts_by_slug,
             proc_pid_identities=proc_pid_identities,
             seen_attempts=seen_attempts,
+            include_stall=False,
             **({"allowed_attempt_ids": split_registries[path]} if path in split_registries else {}),
         )
         if path in split_registries:
@@ -4944,11 +5178,15 @@ def _collect(jobs_path=None, harness_filter=None, session_rows=(), fast_first=Fa
                 twin._proc_liveness = getattr(job, "liveness", None)
         proc_jobs = kept_proc
     jobs = proc_jobs + log_jobs
+    registry_objects = {id(job) for job in log_jobs}
     # F-83 retention uses registry/route evidence, never stream telemetry. Apply
     # that existing rule before any location/title/log reads for discarded owners.
     jobs = _retain_dead_terminal_owners(
         jobs, time.time(), jobs_path=jobs_path,
         orphan_rows_cache=orphan_rows_cache)
+    for job in jobs:
+        if id(job) in registry_objects:
+            _attach_stall_observation(job)
     # The first display can perform native reads too. Admission is nonblocking;
     # a failed mark leaves the row on its already collected observations.
     for j in jobs:

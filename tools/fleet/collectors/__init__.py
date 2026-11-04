@@ -88,7 +88,8 @@ def _parent_read_context():
         sys.path.insert(0, utilities)
     try:
         from peer_read_context import PeerReadContext
-        return PeerReadContext()
+        from dispatch_supervision import passive_read_context
+        return passive_read_context() or PeerReadContext()
     except ImportError:
         return None
 
@@ -892,7 +893,9 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
                     job.interaction_observations.extend(values)
         # Capture the collector's output at its boundary, never in render or
         # from the independent detail worker. Older readers keep the attributes.
-        node_evidence = copy.deepcopy(getattr(dispatch.collect, "last_route_nodes", {}) or {})
+        evidence = getattr(dispatch.collect, "last_route_nodes", {})
+        node_evidence = (evidence if isinstance(evidence, dispatch.RegistryEvidence)
+                         else copy.deepcopy(evidence or {}))
         degradations = copy.deepcopy(getattr(dispatch.collect, "last_degradations", {}) or {})
         pending_delivery = copy.deepcopy(getattr(dispatch.collect, "last_pending_delivery", None))
         malformed = getattr(dispatch.collect, "last_malformed", 0)
@@ -900,7 +903,9 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
         job_error = "%s: %s" % (type(exc).__name__, str(exc)[:160])
         if previous is not None:
             jobs = copy.deepcopy(previous.jobs)
-            node_evidence = copy.deepcopy(previous.node_evidence)
+            node_evidence = (previous.node_evidence
+                if isinstance(previous.node_evidence, dispatch.RegistryEvidence)
+                else copy.deepcopy(previous.node_evidence))
             degradations = copy.deepcopy(previous.degradations)
             pending_delivery, malformed = previous.pending_delivery, previous.malformed
             for job in jobs:

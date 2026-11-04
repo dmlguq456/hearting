@@ -750,7 +750,9 @@ def _observation_state_path(run, registry, row_key, *, create=True):
     try:
         from resource_run_registry import agent_home
         from dispatch_contract import resolve_dispatch_state_root
-        state_root = resolve_dispatch_state_root(agent_home(), explicit_jobs=jobs)
+        from resource_run_registry import passive_memo
+        state_root = passive_memo(('observation-root', str(jobs or '')),
+            lambda: resolve_dispatch_state_root(agent_home(), explicit_jobs=jobs))
     except (OSError, ValueError, TypeError, RuntimeError):
         state_root = Path(os.environ.get("AGENT_RUNTIME_DIR") or
                           (Path.home() / ".cache" / "hearting"))
@@ -1556,7 +1558,9 @@ def _read_observation_state(path):
                != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
             or (current.st_dev, current.st_ino) != (before.st_dev, before.st_ino)):
         raise ValueError("observation-state-changed")
-    return _restore_special_numbers(_json(raw))
+    from resource_run_registry import passive_parse
+    return passive_parse(('observation', str(path)), raw, (_json, _restore_special_numbers),
+                         lambda: _restore_special_numbers(_json(raw)))
 
 
 def read_experiment_observation(run, registry, row_key):
@@ -2103,7 +2107,72 @@ def write_public_run_record(artifact_root, run_id, record):
                 pass
 
 
+class _PublicRunDirectory:
+    def __init__(self, fd, path):
+        self.fd, self.path = fd, path
+
+    def close(self):
+        fd, self.fd = self.fd, None
+        if fd is not None:
+            os.close(fd)
+
+
+def _open_public_directory(artifact_root):
+    """Bind every ancestor without following a link, once for this passive scan."""
+    path = public_record_path(artifact_root, 'read-root-probe')
+    if path is None:
+        return None
+    flags = os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    fd = os.open(path.anchor, flags)
+    try:
+        for part in path.parent.parts[1:]:
+            child = os.open(part, flags, dir_fd=fd)
+            os.close(fd)
+            fd = child
+        return _PublicRunDirectory(fd, path.parent)
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _read_public_in_scan(artifact_root, run_id):
+    from resource_run_registry import passive_handle, passive_parse
+    if not isinstance(run_id, str) or not _SAFE_RUN_ID.fullmatch(run_id):
+        return None
+    def directory():
+        try:
+            return _open_public_directory(artifact_root)
+        except (OSError, ValueError, TypeError, RuntimeError):
+            return None
+    held = passive_handle(('public-directory', str(artifact_root)), directory)
+    if held is None:
+        return None
+    name = run_id + '.json'
+    fd = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC,
+                 dir_fd=held.fd)
+    with os.fdopen(fd, 'rb') as source:
+        before = os.fstat(source.fileno())
+        if not stat.S_ISREG(before.st_mode) or before.st_size > MAX_PUBLIC_RUN_RECORD_BYTES:
+            return None
+        raw = source.read(MAX_PUBLIC_RUN_RECORD_BYTES + 1)
+        after = os.fstat(source.fileno())
+    current = os.stat(name, dir_fd=held.fd, follow_symlinks=False)
+    signature = lambda st: (st.st_dev, st.st_ino, st.st_mode, st.st_size,
+                            st.st_mtime_ns, st.st_ctime_ns)
+    if (len(raw) > MAX_PUBLIC_RUN_RECORD_BYTES or signature(before) != signature(after)
+            or signature(after) != signature(current)):
+        return None
+    value = passive_parse(('public', str(held.path / name)), raw, (_json,), lambda: _json(raw))
+    return value if value.get('run_id') == run_id else None
+
+
 def read_public_run_record(artifact_root, run_id):
+    from resource_run_registry import passive_read_active
+    if passive_read_active() and hasattr(os, 'O_PATH'):
+        try:
+            return _read_public_in_scan(artifact_root, run_id)
+        except (OSError, ValueError, TypeError, KeyError):
+            return None
     path = public_record_path(artifact_root, run_id)
     if path is None:
         return None
@@ -2126,7 +2195,8 @@ def read_public_run_record(artifact_root, run_id):
                 or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
                 != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)):
             return None
-        value = _json(raw)
+        from resource_run_registry import passive_parse
+        value = passive_parse(('public', str(path)), raw, (_json,), lambda: _json(raw))
         return value if value.get("run_id") == run_id else None
     except (OSError, ValueError, TypeError, KeyError):
         return None

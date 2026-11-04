@@ -20,6 +20,16 @@ _ROW = ("2026-07-19T00:00:00Z\tdone\t/r\t/w\t{slug}\t"
 
 
 class DeadTerminalOwnerTest(unittest.TestCase):
+    def test_expired_owner_uses_existing_retention_without_stall_receipt_reads(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = os.path.join(td, 'home')
+            rf = self._route(td, 'rt-old')
+            row = _ROW.format(slug='old', rid='rt-old', rf=rf,
+                              att='att-old', note='dead-runtime')
+            with mock.patch.object(dispatch, '_attempt_stall_attention',
+                                   side_effect=AssertionError('excluded owner queried its receipt')):
+                self.assertEqual(self._collect(td, home, [row]), [])
+
     def test_repeated_lineage_sources_are_memoized_within_one_retention_pass(self):
         path = "/dispatch/jobs.log"
         route_file = "/routes/shared.json"
