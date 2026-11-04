@@ -2,6 +2,7 @@
 # GENERATED METADATA — edit harness-manifest.json, then run tools/generate.py.
 description: "Use when documents need factual, structural, stylistic, or review-driven correction; preserve history. Owns revision; default preset. Not for new documents, empirical work, or evaluation/result reporting (lab)."
 argument-hint: "\"<prompt>\" [--intensity direct|quick|standard|strong|thorough|adversarial] [--review-only | --memo <file>] [--confirm] [--no-fact-check] [--no-style-audit]"
+disable-model-invocation: true
 metadata:
   group: entry
   fam: doc

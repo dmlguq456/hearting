@@ -60,6 +60,27 @@ def per_cell(screen, frame, stale):
 
 
 class DrawRunsTest(unittest.TestCase):
+    def test_unchanged_frame_reuses_runs_but_spinner_dim_and_resize_stay_live(self):
+        frame = draw(ef.demo_model(detail=True), NavState(), 140, 45)
+        with mock.patch.object(render, "_EXPLORER_PAINT_CACHE", None), \
+                mock.patch.object(render, "_explorer_hit_geometry"), \
+                mock.patch.object(render, "_key_attr", return_value=0):
+            first = Screen(45, 140)
+            render._draw_explorer_frame(first, frame, None)
+            compiled = render._EXPLORER_PAINT_CACHE
+            with mock.patch.object(grid, "run_safe", side_effect=AssertionError("recompiled")), \
+                    mock.patch.object(render.time, "time", return_value=0.5):
+                live, stale = Screen(45, 140), Screen(45, 140)
+                render._draw_explorer_frame(live, frame, None)
+                render._draw_explorer_frame(stale, frame, None, stale=True)
+                self.assertIs(render._EXPLORER_PAINT_CACHE, compiled)
+            reference = Screen(45, 140)
+            with mock.patch.object(render.time, "time", return_value=0.0):
+                per_cell(reference, frame, True)
+            self.assertEqual(stale.cells, reference.cells)
+            render._draw_explorer_frame(Screen(24, 80), frame, None)
+            self.assertIsNot(render._EXPLORER_PAINT_CACHE, compiled)
+
     def test_runs_paint_the_same_cells_with_far_fewer_writes(self):
         model = ef.demo_model(detail=True)
         states = (NavState(), NavState(view="ROUTES", title="ROUTES"),

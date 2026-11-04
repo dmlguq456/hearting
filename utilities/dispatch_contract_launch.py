@@ -531,6 +531,14 @@ def _launch_dependencies(lines, fields, callbacks=(), reads=None, parsed=None):
         nodes.update(getattr(callback, "_dispatch_registry_nodes", ()))
     rows = (parsed or _RegistryParse()).rows(lines)
     selected = set()
+    # Parallel slices of one chain own disjoint files and start side by side: a
+    # sibling's claim or process identity changes nothing this launch consumed. A
+    # marker that consumed the chain, this attempt's own lineage and a serial chain
+    # stay pinned.
+    own_chain = metadata.get("session_chain_id", "") if metadata.get("subsession_mode") == "parallel" else ""
+    if reads and own_chain in reads["groups"]:
+        own_chain = ""
+    own_lineage = frozenset(attempts)
     # Include ancestors and successors even when an adopted parent has moved
     # to a different route or worktree. This is an in-memory closure only.
     changed = True
@@ -540,6 +548,14 @@ def _launch_dependencies(lines, fields, callbacks=(), reads=None, parsed=None):
             if entry is None:
                 continue
             candidate, meta = entry
+            # A sibling is left out before any link test: the marker read adds this
+            # node to the scope, which would pin every row of the chain again.
+            if (own_chain and meta.get("session_chain_id") == own_chain
+                    and meta.get("subsession_mode") == "parallel"
+                    and meta.get("attempt_id") not in own_lineage
+                    and not any(meta.get(k) in own_lineage for k in (
+                        "automatic_retry_of", "prior_attempt_id", "replacement_original_attempt_id"))):
+                continue
             same_worktree = candidate[2:4] == fields[2:4]
             # A different node's ordinary registration/start/completion does
             # not change this admission. In particular, parallel batch legs

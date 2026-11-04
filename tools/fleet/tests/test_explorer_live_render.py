@@ -645,7 +645,8 @@ class ClaudeActualContract(unittest.TestCase):
                                         "_EXPLORER_RESULT": None, "_EXPLORER_REPLAY_ACTIVE": True,
                                         "_EXPLORER_SHOWN": False, "_EXPLORER_READINESS": {"ready": False}}.items():
                         stack.enter_context(patch_split(render, name, value))
-                    stack.enter_context(patch.object(render, "_explorer_runtime", return_value=SimpleNamespace(publication_ready=lambda _r: False)))
+                    stack.enter_context(patch.object(render, "_explorer_runtime", return_value=SimpleNamespace(
+                        publication_ready=lambda _r: False, draw_frame=draw)))
                     stack.enter_context(patch.object(render, "_explorer_compose", return_value=None))
                     now = 12000 if entry is self.CHANGED else 10000 if entry is self.SUCCESS else 10200
                     stack.enter_context(patch.object(render.time, "time", return_value=now))
@@ -726,7 +727,8 @@ class HeaderCallerFallback(unittest.TestCase):
 
     @staticmethod
     def runtime():
-        return SimpleNamespace(prepare=lambda snapshot, detail, *, vm, generation, now: (vm, {}))
+        return SimpleNamespace(prepare=lambda snapshot, detail, *, vm, generation, now: (vm, {}),
+                               draw_frame=draw)
 
     def test_live_compose_keeps_source_host_and_draws_bounded_valid_header(self):
         from tools.fleet import render

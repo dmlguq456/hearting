@@ -32,6 +32,21 @@ real() { readlink -f "$1" 2>/dev/null || true; }
 worker_home=0
 if [ "${AGENT_SESSION_ROLE:-}" = worker ] && [ -f "$CODEX_HOME/worker-home.json" ]; then
   worker_home=1
+  # A worker home is linked to the release that built it, which a later child
+  # launch of this owner may no longer run on (OPERATIONS 5.9a). Validate it
+  # against that release; the `hearting` link below still has to point there.
+  home_release=$(python3 - "$CODEX_HOME" <<'PY' 2>/dev/null || true
+import json, pathlib, sys
+meta = json.loads((pathlib.Path(sys.argv[1]) / 'worker-home.json').read_text())
+root = pathlib.Path(meta['source'])
+if meta.get('harness') == 'codex' and root.is_absolute() and (root / 'core' / 'CORE.md').is_file():
+    print(root)
+PY
+  )
+  if [ -n "$home_release" ]; then
+    AGENT_HOME=$home_release
+    S="$AGENT_HOME/codex_setting"
+  fi
 fi
 
 # The portable runtime activator projects the full capability set per-file. Its
@@ -99,7 +114,7 @@ expect_link() {  # <linkpath> <expected-target> <checkname>
 
 expect_link "$CODEX_HOME/hearting"            "$AGENT_HOME"                  hearting
 if [ "$worker_home" -eq 1 ]; then
-  if python3 - "$CODEX_HOME" "$AGENT_HOME" <<'PY'
+  if python3 - "$CODEX_HOME" "$AGENT_HOME" <<'PY' 2>/dev/null
 import json, pathlib, sys
 home, root = map(pathlib.Path, sys.argv[1:])
 meta = json.loads((home / 'worker-home.json').read_text())

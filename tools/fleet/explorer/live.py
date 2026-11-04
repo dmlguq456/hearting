@@ -2043,7 +2043,9 @@ def current_claude_usage(model, snapshot, now):
             usage.append(old)
     if row is not None and not replaced:
         usage.insert(0, row)
-    return replace(model, usage=usage) if replaced or row is not None else model
+    if (replaced or row is not None) and tuple(usage) != model.usage:
+        return replace(model, usage=usage)
+    return model
 
 
 def _clock_stamp(ts):

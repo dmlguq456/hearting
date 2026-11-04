@@ -101,7 +101,7 @@ def _instructions_path():
 
 
 def _skills_path():
-    return str(paths.resolve_source("opencode_setting/opencode-skills"))
+    return str(paths.runtime_home("opencode") / "skills")
 
 
 def _digest(path):

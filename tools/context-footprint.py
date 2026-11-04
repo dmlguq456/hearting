@@ -286,15 +286,18 @@ def main() -> int:
     print(f"surface=unit-catalog bytes={modes_total} path={modes_dir.relative_to(root)}")
 
     print("\n[skill-metadata]")
-    # Measure the projected set: stage-only skills are not in the main session's list.
+    # Measure the implicit list: stage-only skills are not projected and entry routers are
+    # explicit-only (Codex/Claude flag, OpenCode drops them), so neither is in the model's list.
     sys.path.insert(0, str(root / "tools"))
     import harness_manifest
-    hidden = harness_manifest.main_hidden_skill_names(
-        harness_manifest.load(root / "harness-manifest.json", validate_manifest=False))
+    _manifest = harness_manifest.load(root / "harness-manifest.json", validate_manifest=False)
+    hidden = (harness_manifest.main_hidden_skill_names(_manifest)
+              | harness_manifest.explicit_only_skill_names(_manifest))
     codex_local, codex_local_path, codex_local_count, codex_local_names = skill_meta(
         root / "adapters/codex/skills", exclude=hidden)
     codex_plugin, codex_plugin_path, codex_plugin_count, codex_plugin_names = skill_meta(
-        root / "adapters/codex/plugins/hearting-codex/skills", "hearting-codex:"
+        root / "adapters/codex/plugins/hearting-codex/skills", "hearting-codex:",
+        exclude=hidden,
     )
     opencode, opencode_path, opencode_count, _ = skill_meta(root / "adapters/opencode/skills", exclude=hidden)
     claude, claude_path, claude_count, _ = skill_meta(root / "adapters/claude/skills", exclude=hidden)
