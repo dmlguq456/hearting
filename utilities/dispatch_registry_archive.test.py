@@ -180,6 +180,24 @@ class SelectionAndLosslessTest(Fixture):
         (markers / "execute.att-s1.json").write_text("{}")
         self.assertEqual(A.sweep(self.jobs, now_ns=NOW, force=True)["removed"], 1)
 
+    def test_a_day_old_claim_temp_is_removed_and_nothing_else(self):
+        self.write(list(self.registry().values()))
+        def make(name, age_s, data=b"x" * 10):
+            path = self.root / name
+            path.write_bytes(data)
+            os.utime(path, ns=(NOW - age_s * 1_000_000_000,) * 2)
+            return path
+        old = make(".jobs.log.claim-old", 2 * 86400)
+        fresh = make(".jobs.log.claim-fresh", 60)
+        other = make(".jobs.log.other", 9 * 86400)
+        target = make("target", 9 * 86400)
+        link = self.root / ".jobs.log.claim-link"
+        link.symlink_to(target)
+        result = A.sweep(self.jobs, now_ns=NOW, force=True)
+        self.assertEqual((result["claim_temps_removed"], result["claim_temps_bytes"]), (1, 10))
+        self.assertFalse(old.exists())
+        self.assertTrue(fresh.exists() and other.exists() and target.exists() and link.is_symlink())
+
     def test_a_pass_runs_once_per_due_window(self):
         self.write(list(self.registry().values()))
         A.sweep(self.jobs, now_ns=NOW, force=True)
