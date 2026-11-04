@@ -6341,6 +6341,60 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
             result = peer_steward._resolve_prompt_target("[3e]")
         self.assertEqual(result[1:], ("fleet-tag-ambiguous", ["w1:pA", "w1:pB"]))
 
+    def _resolve_bare(self, rows, tags, addresses):
+        self._set_inventory(rows)
+        with mock.patch.object(peer_steward, "_prompt_agent_inventory",
+                               return_value=(rows, None)), \
+             mock.patch.object(peer_steward, "_retire_target", side_effect=self._target_for), \
+             mock.patch.object(peer_steward, "_retire_pane_info", side_effect=self._pane_info_for), \
+             mock.patch.object(peer_steward, "_prompt_fleet_tag",
+                               side_effect=lambda _harness, sid, **_kw: (tags.get(sid), None)):
+            return [peer_steward._resolve_prompt_target(address) for address in addresses]
+
+    def test_bare_fleet_number_resolves_as_tag_only_when_no_name_matches(self):
+        # Agents and reports call sessions by their Fleet number without brackets
+        # (W7, 11-03: three `prompt e8` failures with target-name-not-found).
+        rows = [self._inventory_row(sid="sid-a", name="alpha", pane="w1:pA")]
+        lower, upper = self._resolve_bare(rows, {"sid-a": "3e"}, ("3e", "3E"))
+        for result in (lower, upper):
+            self.assertIsNone(result[1])
+            self.assertEqual((result[0]["session_id"], result[0]["pane"]), ("sid-a", "w1:pA"))
+
+    def test_bare_fleet_number_keeps_name_precedence_and_ambiguity(self):
+        named = self._resolve_bare(
+            [self._inventory_row(sid="sid-a", name="3e", pane="w1:pA"),
+             self._inventory_row(harness="codex", sid="sid-b", name="beta", pane="w1:pB")],
+            {"sid-a": "7a", "sid-b": "3e"}, ("3e",))[0]
+        self.assertIsNone(named[1])
+        self.assertEqual(named[0]["pane"], "w1:pA", "an exact name wins over a Fleet tag")
+        ambiguous = self._resolve_bare(
+            [self._inventory_row(sid="sid-a", name="alpha", pane="w1:pA"),
+             self._inventory_row(harness="codex", sid="sid-b", name="beta", pane="w1:pB")],
+            {"sid-a": "3e", "sid-b": "3e"}, ("3e",))[0]
+        self.assertEqual(ambiguous[1:], ("fleet-tag-ambiguous", ["w1:pA", "w1:pB"]))
+        missing = self._resolve_bare(
+            [self._inventory_row(sid="sid-a", name="alpha", pane="w1:pA")],
+            {"sid-a": "7a"}, ("3e",))[0]
+        self.assertEqual(missing[1:], ("fleet-tag-not-found", []))
+
+    def test_bare_fleet_number_does_not_fall_back_past_an_uncertain_name_stage(self):
+        row = self._inventory_row(sid="sid-a", name="alpha", pane="w1:pA")
+        self._set_inventory([row])
+        with mock.patch.object(peer_steward.herdr_observation, "pane_census", return_value=None), \
+             mock.patch.object(peer_steward, "_prompt_agent_inventory",
+                               return_value=([row], None)), \
+             mock.patch.object(peer_steward, "_prompt_fleet_tag",
+                               return_value=("3e", None)) as tag:
+            result = peer_steward._resolve_prompt_target("3e")
+        self.assertEqual(result[1:], ("pane-census-unavailable", ["w1:pA"]))
+        tag.assert_not_called()
+
+    def test_non_fleet_number_shapes_stay_names(self):
+        rows = [self._inventory_row(sid="sid-a", name="alpha", pane="w1:pA")]
+        results = self._resolve_bare(rows, {"sid-a": "3e"}, ("3g", "abc", "[3e", "3e]"))
+        self.assertEqual([result[1:] for result in results],
+                         [("target-name-not-found", [])] * 4)
+
     def test_prompt_process_identity_rejects_conflicting_foreground_claims(self):
         self._native_sid_by_pid.update({51001: "sid-first", 51002: "sid-second"})
         info = {"pane_id": "w1:pX", "foreground_processes": [

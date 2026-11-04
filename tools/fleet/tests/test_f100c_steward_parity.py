@@ -430,6 +430,42 @@ class StewardCollectorTest(unittest.TestCase):
         self.assertEqual(local.steward_parents[0]["session_id"], "self")
         self.assertIsNone(foreign.steward_parents)
 
+    def test_foreign_only_holder_shows_no_flag_in_fleet_or_pane_title(self):
+        # W7 [b6]: a marker plus an unreleased holder relation whose targets all live in
+        # another repository is communication, not a role. Fleet and the pane title
+        # (live and runner-published reads) agree on no flag; a same-repository target
+        # in the same shape flags on both, so the agreement is not vacuous.
+        for harness in ("claude", "codex", "opencode"):
+            for target_cwd, expected in (("/foreign", False), ("/x", True)):
+                with self.subTest(harness=harness, target_cwd=target_cwd):
+                    holder = Session(harness=harness, pid=1, session_id="holder", cwd="/x")
+                    targets = [Session(harness="claude", pid=2 + index, session_id=sid,
+                                       cwd=target_cwd)
+                               for index, sid in enumerate(("t1", "t2"))]
+                    claims = {target.session_id: {
+                        "harness": "claude", "session_id": target.session_id,
+                        "name": target.session_id, "kind": "watch", "source": "watch"}
+                        for target in targets}
+                    markers = {(harness, "holder"): {"session_id": "holder",
+                                                     "targets": claims}}
+                    relation = {"generation": "g", "seat_key": "seat",
+                                "origin": {"harness": harness, "sid": "holder"},
+                                "holder": {"harness": harness, "sid": "holder"},
+                                "targets": list(claims.values()), "lineage": [],
+                                "released": False}
+                    self.registry.return_value = [holder, *targets]
+                    with mock.patch.object(steward, "read_markers", return_value=markers), \
+                         mock.patch.object(steward, "read_relations", return_value=[relation]), \
+                         mock.patch.object(herdr_projection, "_published_steward_relations",
+                                           return_value=[relation]), \
+                         mock.patch("fleet.collectors.herdr._clear_gpu_session_aliases",
+                                    return_value=[]):
+                        steward.enrich([holder, *targets])
+                        self.assertIs(bool(holder.steward), expected)
+                        self.assertIs(herdr_projection.is_steward(harness, "holder"), expected)
+                        self.assertIs(herdr_projection.is_steward(
+                            harness, "holder", published_only=True), expected)
+
     def test_many_session_refresh_reads_relation_ledger_once_and_keeps_exact_lineage(self):
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "utilities"))
         import dispatch_seat_handover as handover
