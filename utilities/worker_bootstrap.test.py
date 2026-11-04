@@ -1266,6 +1266,34 @@ class OwnerRouteStepsPromptTest(unittest.TestCase):
             ["--parallel-group", "execute", "--slices", f"{self.output_dir}/plan.md", "--start"])
         self.assertIn("single-session-required returns to this node's ordinary start command", text)
 
+    def test_owner_arbitration_prints_bound_command_and_realized_leg_count(self):
+        route = steps_route()
+        anchor = route["nodes"][1]
+        anchor.update(kind="review-worker", parallel_group="plan-check", parallel_leg_index=0)
+        route["nodes"].insert(2, {**anchor, "id": "plan-check-aux", "parallel_leg_index": 1,
+                                 "leg_class": "auxiliary"})
+        text = self.steps(route)
+        command = re.search(r"then run: `([^`]+)`", text).group(1)
+        self.assertEqual(shlex.split(command)[2:], ["arbitrate", "--route",
+            str(self.root / "route with space.json"), "--group", "plan-check", "--evidence",
+            f"{self.output_dir}/_internal/plan-check-owner-merge.md"])
+        self.assertIn("after every leg completes", text)
+        self.assertIn("auxiliary_findings_considered with exactly 1 dispositions", text)
+        self.assertNotIn("then run:", self.steps())
+        self.assertNotIn("then run:", self.steps(route, environ={}))
+
+    def test_node_arbitration_keeps_completion_evidence_with_the_declared_arbiter(self):
+        route = steps_route()
+        anchor = route["nodes"][0]
+        anchor.update(kind="pipeline-stage", parallel_group="plan", parallel_leg_index=0)
+        route["nodes"].insert(1, {**anchor, "id": "plan-aux", "parallel_leg_index": 1,
+                                 "leg_class": "auxiliary"})
+        route["nodes"][2].update(kind="review-worker", depends_on=["plan", "plan-aux"])
+        text = self.steps(route)
+        self.assertIn("in arbiter node plan-check's own completion evidence", text)
+        self.assertIn("the owner does not run arbitrate for this group", text)
+        self.assertNotIn("then run:", text)
+
     def test_nothing_without_a_dispatchable_stage_a_route_or_an_owner(self):
         self.assertEqual(self.steps(steps_route(nodes=[])), "")
         owner_only = steps_route()

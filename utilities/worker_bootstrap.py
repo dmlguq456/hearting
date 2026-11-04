@@ -889,6 +889,25 @@ def owner_route_steps_prompt(args, environ) -> str:
                                       "--parallel-group", node["id"], "--slices", plan_path, "--start"])
                 lines.append(f"   If the plan declares slices, use: `{command}`; "
                              "single-session-required returns to this node's ordinary start command.")
+    import capability_route_base as route_base
+    for group in route_base._realized_group_ids(route):
+        auxiliary = route_base._realized_auxiliary_nodes(route, group)
+        if not auxiliary:
+            continue
+        try:
+            kind, arbiter = route_base._resolve_auxiliary_arbiter(route, group)
+        except ValueError:
+            continue  # malformed routes retain the runtime's existing typed refusal
+        obligation = (f"{group}: after every leg completes, read all findings and record "
+                      f"auxiliary_findings_considered with exactly {len(auxiliary)} dispositions")
+        if kind == route_base.AUXILIARY_ARBITER_OWNER_MERGE and output_dir:
+            memo = str(Path(output_dir) / "_internal" / f"{route_base._safe_group_id(group)}-owner-merge.md")
+            command = shlex.join(["python3", str(Path(__file__).with_name("capability-route.py").resolve()),
+                                  "arbitrate", "--route", str(route_file), "--group", group, "--evidence", memo])
+            lines.append(f"{obligation} in `{memo}`, then run: `{command}`.")
+        elif kind == route_base.AUXILIARY_ARBITER_NODE:
+            lines.append(f"{obligation} in arbiter node {arbiter}'s own completion evidence; "
+                         "the owner does not run arbitrate for this group.")
     return "\n".join(lines) + "\n\n"
 
 
