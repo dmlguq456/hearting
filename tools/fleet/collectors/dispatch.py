@@ -668,6 +668,21 @@ def parsed_registry_rows(path):
     callers read the path once. Metadata uses the existing pipe parser so current
     legacy and key/value forms retain their established meaning.
     """
+    # Observe the pinned generation before asking for its text. Unchanged rows
+    # and their diagnostics need no reconstruction of every historical raw line.
+    if _dispatch_registry_cache.registry_scope_active():
+        try:
+            current = _dispatch_registry_cache.current_registry_view(Path(path))
+            current_generation = tuple(current.signature)
+            found, cached = _cached_registry_rows(path, current_generation)
+            diagnostic_key = _registry_diagnostic_key(path, current_generation)
+            if found:
+                with _PARSED_REGISTRY_CACHE_LOCK:
+                    if diagnostic_key in _PARSED_REGISTRY_DIAGNOSTICS:
+                        _PARSED_REGISTRY_DIAGNOSTICS.move_to_end(diagnostic_key)
+                        return cached
+        except (OSError, ValueError):
+            pass
     lines = _pinned_registry_lines(path)
     generation = None
     view = None
@@ -1052,7 +1067,10 @@ _TERMINAL_ENVELOPE_CACHE = {}    # path -> (stat stamp, observed)
 
 
 def _stat_stamp(path):
-    st = os.stat(path)
+    return _stat_info_stamp(os.stat(path))
+
+
+def _stat_info_stamp(st):
     return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
 
 
@@ -4534,17 +4552,25 @@ def _delivery_counts_generation(paths):
                 continue
             if not stat.S_ISDIR(info.st_mode):
                 raise ValueError('delivery-directory-unusable')
-            inputs.append((os.fspath(directory), _stat_stamp(directory)))
+            inputs.append((os.fspath(directory), _stat_info_stamp(info)))
             if pattern is not None:
-                files = sorted(directory.glob(pattern))[:limit]
+                with os.scandir(directory) as entries:
+                    files = sorted((entry for entry in entries
+                                    if entry.name.startswith('batch-') and entry.name.endswith('.json')),
+                                   key=lambda entry: entry.name)[:limit]
             else:
                 files = []
-                for child in sorted(directory.iterdir()):
-                    if stat.S_ISDIR(child.stat().st_mode):
-                        inputs.append((os.fspath(child), _stat_stamp(child)))
-                        files.extend(sorted(path for path in child.iterdir() if path.suffix == '.json'))
-            inputs.extend((os.fspath(path), _stat_stamp(path)) for path in files)
-    inputs.append((Path.read_text, Path.stat, Path.iterdir, json.loads,
+                with os.scandir(directory) as entries:
+                    children = sorted(entries, key=lambda entry: entry.name)
+                for child in children:
+                    child_info = child.stat()
+                    if stat.S_ISDIR(child_info.st_mode):
+                        inputs.append((child.path, _stat_info_stamp(child_info)))
+                        with os.scandir(child.path) as entries:
+                            files.extend(sorted((entry for entry in entries if entry.name.endswith('.json')),
+                                                key=lambda entry: entry.name))
+            inputs.extend((entry.path, _stat_info_stamp(entry.stat())) for entry in files)
+    inputs.append((Path.read_text, Path.stat, Path.iterdir, os.scandir, json.loads,
                    parsed_registry_rows, _pending_delivery_counts_uncached))
     return tuple(inputs), tuple(parsed)
 

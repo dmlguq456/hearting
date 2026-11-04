@@ -12,6 +12,26 @@ from fleet.collectors import dispatch
 
 
 class ParsedRegistryRowsTest(unittest.TestCase):
+    def test_unchanged_pinned_rows_need_no_historical_text_reconstruction(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'jobs.log'
+            row = 't\topen\t/repo\t/work\tslug\tattempt_id=att-one\n'
+            path.write_text(row)
+            with dispatch._dispatch_registry_cache.registry_read_scope():
+                initial = dispatch.parsed_registry_rows(path)
+            with mock.patch.object(dispatch._dispatch_registry_cache.RegistryRecord, 'raw',
+                                   new_callable=mock.PropertyMock,
+                                   side_effect=AssertionError('rebuilt historical raw row')):
+                with dispatch._dispatch_registry_cache.registry_read_scope():
+                    self.assertIs(dispatch.parsed_registry_rows(path), initial)
+                    self.assertEqual(dispatch._registry_diagnostics(path), (None, 0))
+            with path.open('a') as handle:
+                handle.write(row.replace('att-one', 'att-two'))
+            with dispatch._dispatch_registry_cache.registry_read_scope():
+                appended = dispatch.parsed_registry_rows(path)
+            self.assertEqual([meta['attempt_id'] for _order, _fields, meta in appended],
+                             ['att-one', 'att-two'])
+
     def test_route_evidence_reuses_generation_and_folds_append_without_mutating_publication(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'jobs.log'
