@@ -486,6 +486,21 @@ class WorkerBootstrapTest(unittest.TestCase):
         self.assertNotIn("memory lifecycle", contract)
         self.assertNotIn("worker-terminal-contract:", W.render_worker_bootstrap(ROOT, "stage"))
 
+    def test_a_registered_worker_ends_blocked_instead_of_asking_a_native_question(self):
+        # No supervisor reads a registered worker's native question tool, so the one way a
+        # worker asks a person is the blocker line of its terminal response.
+        for worker_type in ("owner", "stage", "review", "support", "frame"):
+            with self.subTest(worker_type=worker_type):
+                rendered = W.render_worker_bootstrap(ROOT, worker_type)
+                self.assertIn("native question tool", rendered)
+                self.assertIn("`accepted`", rendered)
+                self.assertIn("blocker line", rendered)
+                self.assertIn("`BLOCKED`", rendered)
+        contract = W.worker_terminal_contract(ROOT)
+        self.assertIn("native question tool", contract)
+        self.assertIn(W.handoff_template(), contract)
+        self.assertIn("runtime_wait: registered-children", contract)
+
     def test_task_publication_scope_stays_with_the_approved_owner(self):
         owner = W.render_worker_bootstrap(ROOT, "owner")
         self.assertIn("When the sealed entry scope is `complete`", owner)

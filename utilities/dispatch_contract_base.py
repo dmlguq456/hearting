@@ -1295,6 +1295,12 @@ def diagnostic_token(value: object, limit: int = 160) -> str:
     return value if re.fullmatch(r"[A-Za-z0-9._:/-]*", value) else ""
 
 
+# The one line the projection check reports for a failed link: `check=<name>:failed
+# reason=<token>` (the token may name the expected release path), or `exit-<n>`.
+_PROJECTION_DETAIL = re.compile(
+    r"check=[A-Za-z0-9._:-]{1,64}:failed reason=[A-Za-z0-9._:/-]{1,240}|exit-[0-9]{1,3}")
+
+
 def candidate_detail(reason: str, value: object) -> str:
     """Only finite local facts may persist; unknown free text is omitted."""
     if not isinstance(value, str):
@@ -1303,6 +1309,8 @@ def candidate_detail(reason: str, value: object) -> str:
         return value
     if reason == "unsafe-git-state" and value.startswith("detached HEAD in "):
         return "detached HEAD"
+    if reason == "codex-runtime-projection-mismatch" and _PROJECTION_DETAIL.fullmatch(value):
+        return value
     return "[detail omitted]"
 
 

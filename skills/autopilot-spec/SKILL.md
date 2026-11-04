@@ -2,6 +2,7 @@
 # GENERATED METADATA — edit harness-manifest.json, then run tools/generate.py.
 description: "Use when product requirements, architecture, evaluation policy, or another blueprint must be created or materially updated before implementation. Owns specification; default preset. Not for implementing an already-approved specification or for editing unrelated documents."
 argument-hint: "<task description> [--mode auto|app|library|api|cli|research|update (comma-separated for multiple)] [--intensity direct|quick|standard|strong|thorough|adversarial] [--user-refine]"
+disable-model-invocation: true
 metadata:
   group: entry
   fam: code
