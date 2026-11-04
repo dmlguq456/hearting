@@ -29,7 +29,7 @@ os.environ["FLEET_NOW_LANG"] = "Korean"
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent / "tools"))
-from split_module_fixture import split_patch  # noqa: E402
+from split_module_fixture import patch_split, split_patch  # noqa: E402
 
 
 def _load(name, filename):
@@ -824,7 +824,7 @@ class FirstLegPreparationFailureRetryTest(SourceRepoStartBase):
                 return subprocess.CompletedProcess(["git", *args], 128, "", f"injected {failure} failure")
             return real(cwd, *args)
 
-        with mock.patch.object(R, "_worktree_git", side_effect=fail_once):
+        with patch_split(R, "_worktree_git", side_effect=fail_once):
             failed = self.settle()
         self.assertTrue(injected["done"])
         self.assertEqual(failed["reason"], "first-leg-preparation-failed", failed)
@@ -888,7 +888,7 @@ class FirstLegPreparationFailureRetryTest(SourceRepoStartBase):
             return real(cwd, *args)
 
         from dispatch_notice_state import closed_outcome
-        with mock.patch.object(R, "_worktree_git", side_effect=no_new_fetch), \
+        with patch_split(R, "_worktree_git", side_effect=no_new_fetch), \
                 mock.patch.object(W, "_recorded_interview", side_effect=AssertionError("successor re-interviewed")):
             advanced = self.settle(closed=closed_outcome(Path(self.path), self.route))
         self.assertEqual(advanced["plan_advanced"]["leg"], 1)
@@ -927,8 +927,8 @@ class FirstLegPreparationFailureRetryTest(SourceRepoStartBase):
             self.assertNotIn(args[:1], (("ls-remote",), ("fetch",)))
             return real(cwd, *args)
 
-        with mock.patch.object(R, "_compose_readiness", side_effect=readiness), \
-                mock.patch.object(R, "_worktree_git", side_effect=no_new_fetch), \
+        with patch_split(R, "_compose_readiness", side_effect=readiness), \
+                patch_split(R, "_worktree_git", side_effect=no_new_fetch), \
                 mock.patch.object(W, "start_work", side_effect=start), mock.patch.object(sys, "argv", cli_argv):
             self.assertEqual(R.main(), 0)
         self.assertEqual(len(starts), 1)
@@ -970,7 +970,7 @@ class FrameAllocationInheritanceTest(SourceRepoStartBase):
             self.assertNotEqual(args[:2], ("worktree", "add"))
             return real(cwd, *args)
 
-        with mock.patch.object(R, "_worktree_git", side_effect=no_new_allocation):
+        with patch_split(R, "_worktree_git", side_effect=no_new_allocation):
             result = self.settle()
         self.assertTrue(result["owner_started"], result)
         self.assertEqual(R.prepare_isolated_worktree.call_count, 0)
@@ -1614,7 +1614,7 @@ class SelectionPinInheritanceTest(PinnedStartBase):
         self.set_briefs(CODE_STAGED, CODE_STAGED)
         self.set_interview({"legs": [CODE_STAGED]})
         before = self.path.read_bytes()
-        with mock.patch.object(R, "_pin_change_probe", return_value=([], [])), \
+        with patch_split(R, "_pin_change_probe", return_value=([], [])), \
                 mock.patch.object(RA, "caller_identity", return_value=("claude", "parent")):
             changed = R._change_pins(self.route, self.jobs, ["owner=codex", "worker=codex"])
         self.assertTrue(changed["changed"])
@@ -1622,7 +1622,7 @@ class SelectionPinInheritanceTest(PinnedStartBase):
         # conductor too. Keep that probe independent of installed CLIs.
         checked = {"tuples": [T.nested("codex", "codex")],
                    "candidates": T.registered_headless()["candidates"]}
-        with mock.patch.object(R, "_compose_readiness", return_value=checked) as probe:
+        with patch_split(R, "_compose_readiness", return_value=checked) as probe:
             result = self.settle()
         self.assertEqual(probe.call_args.args[2], "codex")
         leg = self.first_leg()
@@ -1707,14 +1707,14 @@ class SelectionPinInheritanceTest(PinnedStartBase):
 
     def test_the_readiness_probe_asks_about_a_pinned_harness_even_if_the_user_policy_left_it_out(self):
         seen = []
-        with mock.patch.object(R, "_compose_default_children", return_value=("codex",)), \
-                mock.patch.object(R, "_compose_readiness",
+        with patch_split(R, "_compose_default_children", return_value=("codex",)), \
+                patch_split(R, "_compose_readiness",
                                   side_effect=lambda *a, **kw: seen.append((a[3], kw.get("owner_harnesses"))) or {"tuples": [], "candidates": []}):
             REAL_PROPOSAL_READINESS(self.route, self.jobs)
         self.assertEqual(len(seen), 1)
         self.assertEqual(seen[0][1], ("codex",))
-        with mock.patch.object(R, "_compose_default_children", wraps=R._compose_default_children) as children, \
-                mock.patch.object(R, "_compose_readiness", return_value={"tuples": [], "candidates": []}):
+        with patch_split(R, "_compose_default_children", wraps=R._compose_default_children) as children, \
+                patch_split(R, "_compose_readiness", return_value={"tuples": [], "candidates": []}):
             REAL_PROPOSAL_READINESS(self.route, self.jobs)
         self.assertIn(mock.call(self.pins_sealed_on_frame()), children.call_args_list)
 
@@ -1741,7 +1741,7 @@ class CatalogueInputTest(F.FramedBase):
     def test_recipe_internal_and_quick_frames_get_the_same_unit_prompt_and_catalogue(self):
         for shape, graph in (("staged", None), ("solo", None)):
             # A recipe's own frame pair: as a preset compile seals it (and compose did before decided shapes).
-            with self.subTest(shape), mock.patch.object(R, "DECIDED_SHAPES", ()):
+            with self.subTest(shape), patch_split(R, "DECIDED_SHAPES", ()):
                 route = R.compose_route(
                     capability="autopilot-code", capability_mode=None, shape=shape, graph=graph, slug="frames",
                     cwd=R.ROOT, artifact_root=self.root, spec_read="fixture", campaign_key="k",

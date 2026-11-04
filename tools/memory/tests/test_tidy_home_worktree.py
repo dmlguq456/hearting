@@ -22,6 +22,8 @@ sys.path.insert(0, str(ROOT / "utilities"))
 
 from tidy_isolation import isolated_env  # noqa: E402
 import session_tidy_runner as runner  # noqa: E402
+sys.path.append(str(Path(__file__).resolve().parents[3] / "utilities"))  # split_module_fixture
+from split_module_fixture import patch_split  # noqa: E402
 
 
 def git(path: Path, *args: str) -> subprocess.CompletedProcess:
@@ -37,7 +39,7 @@ class HomeWorktreeTest(unittest.TestCase):
         self.plain.mkdir()
         self.release = self.iso.root / "release"             # stands in for an immutable managed release root
         self.release.mkdir()
-        patch = mock.patch.object(runner, "ROOT", self.release)
+        patch = patch_split(runner, "ROOT", self.release)
         patch.start()
         self.addCleanup(patch.stop)
 
@@ -58,7 +60,7 @@ class HomeWorktreeTest(unittest.TestCase):
         checkout = self.iso.root / "checkout"
         checkout.mkdir()
         self.assertEqual(git(checkout, "init", "-q").returncode, 0)
-        with mock.patch.object(runner, "ROOT", checkout), self.iso.patched_environ():
+        with patch_split(runner, "ROOT", checkout), self.iso.patched_environ():
             self.assertEqual(runner._git_worktree(str(self.plain)), str(checkout))
             self.assertFalse(self.expected().exists())
 
@@ -85,7 +87,7 @@ class HomeWorktreeTest(unittest.TestCase):
     def test_the_artifact_root_is_the_home_worktrees_own(self):
         with self.iso.patched_environ():
             home = Path(runner.home_worktree())
-        with mock.patch.object(runner, "ROOT", ROOT):        # the real artifact-root.sh
+        with patch_split(runner, "ROOT", ROOT):        # the real artifact-root.sh
             self.assertEqual(runner.artifact_root_for(str(home)), home / ".agent_reports")
 
     def test_a_home_worktree_that_cannot_be_made_ends_the_tidy_with_one_line(self):

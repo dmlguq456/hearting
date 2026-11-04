@@ -73,7 +73,7 @@ class GpuOwnerResourceStartTest(unittest.TestCase):
 
     def compose(self):
         with mock.patch.dict(os.environ, self.f.env, clear=True), \
-             mock.patch.object(self.r, "_compose_readiness", side_effect=self.readiness):
+             patch_split(self.r, "_compose_readiness", side_effect=self.readiness):
             route = self.r.compose_route(capability="autopilot-lab", capability_mode="setup",
                 shape="staged", graph=None, slug="gpu-normal-start", cwd=str(self.f.worktree),
                 artifact_root=str(self.f.artifacts), signals=["gpu"], spec_read="fixture",

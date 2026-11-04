@@ -28,7 +28,7 @@ os.environ["FLEET_NOW_LANG"] = "Korean"
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent / "tools"))
-from split_module_fixture import split_patch  # noqa: E402
+from split_module_fixture import patch_split, split_patch  # noqa: E402
 
 
 def _load(name, filename):
@@ -993,7 +993,7 @@ class TerminalCompletionGateTest(FramedBase):
         node = other["nodes"][0]
         evidence = Path(self._tmp.name) / "evidence.txt"
         evidence.write_text("x", encoding="utf-8")
-        with mock.patch.object(R, "_complete_framed_terminal", side_effect=AssertionError("framed path")):
+        with patch_split(R, "_complete_framed_terminal", side_effect=AssertionError("framed path")):
             try:
                 marker, row = R.complete_node(other, node, node["id"], evidence)
             except ValueError as exc:   # the ordinary path may refuse for its own reasons, never the framed one
@@ -1055,7 +1055,7 @@ class FramedStartTest(FramedBase):
         for target, kwargs in (
                 (W, {"default_parent_session_id": {"return_value": "parent"}}),):
             for name, options in kwargs.items():
-                patch = mock.patch.object(target, name, **options)
+                patch = patch_split(target, name, **options)
                 patch.start()
                 self.addCleanup(patch.stop)
         for name, options in (
@@ -1065,7 +1065,7 @@ class FramedStartTest(FramedBase):
                 ("owner_frame_launch_gate", {"side_effect": self.owner_gate}),
                 ("current_delivery_state", {"side_effect": self.delivery}),
                 ("frame_interview_step", {"side_effect": self.interview_step})):
-            patch = mock.patch.object(W, name, **options)
+            patch = patch_split(W, name, **options)
             patch.start()
             self.addCleanup(patch.stop)
         patch = split_patch("dispatch_contract.completion_marker_gate")

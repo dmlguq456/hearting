@@ -35,6 +35,7 @@ import session_tidy as tidy  # noqa: E402
 import session_tidy_clear as clear  # noqa: E402
 from peer_read_context import PeerReadContext  # noqa: E402
 from harness_capabilities import HARNESSES  # noqa: E402
+from split_module_fixture import patch_split  # noqa: E402
 
 
 class IsolatedCase(unittest.TestCase):
@@ -470,7 +471,10 @@ class ScopeBudgetTest(IsolatedCase):
         self.assertTrue(PeerReadContext(compact_lineage=True).compact_lineage)
         # The runner, Fleet readers and the courier keep their full observations;
         # only the sweep's effect groups opt in, and that file is not pinned here.
-        for relative in ("utilities/peer-steward.py",
+        steward_parts = [f"utilities/{path.name}"
+                         for path in sorted((ROOT / "utilities").glob("peer_steward_*.py"))
+                         if "Split out of `peer-steward.py`" in path.read_text(encoding="utf-8")]
+        for relative in ("utilities/peer-steward.py", *steward_parts,
                          "tools/fleet/collectors/dispatch.py",
                          "tools/fleet/collectors/__init__.py",
                          "utilities/dispatch_lineage_observation.test.py"):
@@ -618,7 +622,7 @@ class CompactLineageEquivalenceTest(IsolatedCase):
         path = inbox.inbox_path(self.dispatch_root, "claude", "C")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(old))
-        with mock.patch.object(steward, "_live_recipients", return_value={("claude", "C")}):
+        with patch_split(steward, "_live_recipients", return_value={("claude", "C")}):
             result = steward._prefill_live_inboxes(self.dispatch_root, deadline_ns=time.monotonic_ns() + 10**10)
         self.assertEqual(result["written"], 1)
         refreshed = inbox.read_inbox(self.dispatch_root, "claude", "C")

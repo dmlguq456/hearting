@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from unittest import mock
 
 from model_profile import load_config, resolve_profile
-from split_module_fixture import split_patch  # noqa: E402
+from split_module_fixture import patch_split, split_patch  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -2087,7 +2087,7 @@ class OwnerAllocationRouteChainTest(unittest.TestCase):
                             "DISPATCH_DEFAULTS_CONFIG": str(config),
                             "AGENT_DISPATCH_CALLER_HARNESS": caller}), clear=True), \
                          mock.patch.object(importlib.util, "module_from_spec", side_effect=fixture_module), \
-                         mock.patch.object(ROUTE, "_compose_default_children", return_value=self.HARNESSES):
+                         patch_split(ROUTE, "_compose_default_children", return_value=self.HARNESSES):
                         route = ROUTE.compose_route(capability="autopilot-code", capability_mode="dev",
                             shape="staged", graph="execute,test,report", slug="chain-" + caller,
                             cwd=ROOT, artifact_root=base, jobs=jobs, children=list(self.HARNESSES),
@@ -2109,7 +2109,7 @@ class OwnerAllocationRouteChainTest(unittest.TestCase):
             with mock.patch.dict(os.environ, _isolated_env({
                     "AGENT_DISPATCH_JOBS": str(jobs), "DISPATCH_DEFAULTS_CONFIG": str(config)}), clear=True), \
                  mock.patch.object(importlib.util, "module_from_spec", side_effect=fixture_module), \
-                 mock.patch.object(ROUTE, "_compose_default_children", return_value=self.HARNESSES):
+                 patch_split(ROUTE, "_compose_default_children", return_value=self.HARNESSES):
                 route = ROUTE.compose_route(capability="autopilot-code", capability_mode="dev",
                     shape="staged", graph="execute,test,report", slug="chain-d3", cwd=ROOT,
                     artifact_root=base, jobs=jobs, children=list(self.HARNESSES), parent_harness="opencode",

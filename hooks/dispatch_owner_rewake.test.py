@@ -26,6 +26,8 @@ from unittest import mock
 MODULE_PATH = Path(__file__).with_name("dispatch-owner-rewake.py")
 ROOT = MODULE_PATH.parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
+sys.path.append(str(Path(__file__).resolve().parents[1] / "utilities"))  # split_module_fixture
+from split_module_fixture import patch_split  # noqa: E402
 # A holder that is provably dead *from this process's own PID namespace*:
 # pid 4194304 is above Linux's pid_max, so `/proc/<pid>` never exists, and
 # the namespace is ours so the hook may judge it (a holder recorded from
@@ -1112,7 +1114,7 @@ class DispatchOwnerRewakeTest(unittest.TestCase):
         self.assertIn(str(sealed_home), harvest_line)
 
         with mock.patch.dict(os.environ, {"AGENT_HOME": str(new_release)}, clear=False), \
-             mock.patch.object(JOIN, "ROOT", new_release):
+             patch_split(JOIN, "ROOT", new_release):
             action = JOIN.classify_supervised_shell_command(
                 base=new_release,
                 command=harvest_line.strip(),
@@ -2379,7 +2381,7 @@ class CarrierOneClaimGateTest(unittest.TestCase):
             if changed_pane:
                 # The real courier must refuse before sealing any payload if
                 # its own target read no longer matches the retained identity.
-                with mock.patch.object(steward, "_herdr_missing", return_value=False), \
+                with patch_split(steward, "_herdr_missing", return_value=False), \
                         mock.patch.object(steward, "_resolve_prompt_target", return_value=({
                             "harness": "claude", "session_id": "stranger", "pane": "w1:p9",
                             "name": "stranger", "state": "idle"}, None, ["w1:p9"])), \

@@ -24,6 +24,7 @@ SPEC = importlib.util.spec_from_file_location("route_for_source_worktree", HERE 
 R = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(R)
 import work_start as W  # noqa: E402
+from split_module_fixture import patch_split  # noqa: E402
 
 
 def git(cwd, *args):
@@ -104,7 +105,7 @@ class SourceWorktreeFixture(unittest.TestCase):
         self.real_start_work = W.start_work
         self.probe_cwds = []
         self.prep_argv = None
-        self._readiness_patch = mock.patch.object(
+        self._readiness_patch = patch_split(
             R, "_compose_readiness", side_effect=self.readiness)
         self._readiness_patch.start()
         self.addCleanup(self._readiness_patch.stop)
@@ -183,7 +184,7 @@ class SourceWorktreeFixture(unittest.TestCase):
                 return subprocess.CompletedProcess(["git", *args], 128, "", f"injected {failure} failure")
             return real(cwd, *args)
 
-        with mock.patch.object(R, "_worktree_git", side_effect=fail_once), self.assertRaisesRegex(
+        with patch_split(R, "_worktree_git", side_effect=fail_once), self.assertRaisesRegex(
                 ValueError, "source-worktree-preparation-failed"):
             self.main(argv)
         self.assertTrue(injected["done"])
@@ -255,7 +256,7 @@ class FramedStartPolicyTest(SourceWorktreeFixture):
             calls.append(args)
             return real(cwd, *args)
 
-        with mock.patch.object(R, "_worktree_git", side_effect=record):
+        with patch_split(R, "_worktree_git", side_effect=record):
             result = R.prepare_isolated_worktree(linked, "framed-merged", artifact_root=self.artifact_root,
                                                  preparation_key={"test": "merged"}, framed_start=True)
         self.assertEqual(result["state"], "created")
@@ -265,7 +266,7 @@ class FramedStartPolicyTest(SourceWorktreeFixture):
 
     def test_explicit_linked_checkout_keeps_approved_meaning_without_fetch(self):
         linked = self.linked_at("explicit-linked", git(self.writer, "rev-parse", "HEAD~1"))
-        with mock.patch.object(R, "_remote_default_base", side_effect=AssertionError("explicit cwd is approved")):
+        with patch_split(R, "_remote_default_base", side_effect=AssertionError("explicit cwd is approved")):
             result = R.prepare_isolated_worktree(linked, "explicit", artifact_root=self.artifact_root,
                                                  preparation_key={"test": "explicit"},
                                                  explicitly_approved=True, framed_start=True)
@@ -300,7 +301,7 @@ class FramedStartPolicyTest(SourceWorktreeFixture):
 
         notice = io.StringIO()
         with mock.patch.object(sys, "argv", argv), mock.patch.object(W, "start_work", side_effect=start), \
-                mock.patch.object(R, "_compose_readiness", side_effect=readiness), \
+                patch_split(R, "_compose_readiness", side_effect=readiness), \
                 contextlib.redirect_stderr(notice):
             self.assertEqual(R.main(), 0)
         route, = started
@@ -339,7 +340,7 @@ class FramedStartPolicyTest(SourceWorktreeFixture):
             return {"state": "running", "owner_started": True, "launches": []}
 
         notice = io.StringIO()
-        with mock.patch.object(R, "_worktree_git", side_effect=fail_fetch), \
+        with patch_split(R, "_worktree_git", side_effect=fail_fetch), \
                 mock.patch.object(sys, "argv", argv), \
                 mock.patch.object(W, "start_work", side_effect=start), \
                 contextlib.redirect_stderr(notice):
@@ -505,7 +506,7 @@ class ComposeStartPreparationRetryTest(SourceWorktreeFixture):
             calls.append(args)
             return real_git(cwd, *args)
 
-        with mock.patch.object(R, "_worktree_git", side_effect=record_git):
+        with patch_split(R, "_worktree_git", side_effect=record_git):
             self.assertEqual(self.main(self.argv()), 0)
         route, _ = self.start_calls[0]
         self.assertEqual(git(route["cwd"], "rev-parse", "HEAD"), git(self.primary, "rev-parse", "HEAD"))
@@ -515,7 +516,7 @@ class ComposeStartPreparationRetryTest(SourceWorktreeFixture):
         allocated = route["cwd"]
 
         calls.clear()
-        with mock.patch.object(R, "_worktree_git", side_effect=record_git):
+        with patch_split(R, "_worktree_git", side_effect=record_git):
             self.assertEqual(self.main(self.argv()), 0)
         self.assertEqual(len(self.route_files()), 1)
         self.assertEqual(self.start_calls[-1][0]["cwd"], allocated)
@@ -551,7 +552,7 @@ class ComposeStartPreparationRetryTest(SourceWorktreeFixture):
                 raise OSError("simulated interruption after worktree add")
             return real_atomic_write(path, payload)
 
-        with mock.patch.object(R, "atomic_write", side_effect=interrupt_after_add), self.assertRaisesRegex(
+        with patch_split(R, "atomic_write", side_effect=interrupt_after_add), self.assertRaisesRegex(
                 ValueError, "source-worktree-preparation-failed"):
             self.main(argv)
         self.assertTrue(interrupted["done"])
@@ -571,7 +572,7 @@ class ComposeStartPreparationRetryTest(SourceWorktreeFixture):
             self.assertNotEqual(args[:2], ("worktree", "add"))
             return real_git(cwd, *args)
 
-        with mock.patch.object(R, "_worktree_git", side_effect=no_second_allocation):
+        with patch_split(R, "_worktree_git", side_effect=no_second_allocation):
             self.assertEqual(self.main(argv), 0)
         self.assertEqual(self.primary_fingerprint(), before)
         self.assertEqual(len(self.route_files()), 1)
@@ -604,7 +605,7 @@ class ComposeStartPreparationRetryTest(SourceWorktreeFixture):
                 "--cwd", str(self.primary), "--artifact-root", str(self.artifact_root), "--unassigned",
                 "--jobs", str(self.jobs), "--spec-read", "fixture"]
         real = R._worktree_git
-        with mock.patch.object(R, "_worktree_git", side_effect=AssertionError("preview must not prepare")), \
+        with patch_split(R, "_worktree_git", side_effect=AssertionError("preview must not prepare")), \
                 mock.patch.object(sys, "argv", argv):
             self.assertEqual(R.main(), 0)
         self.assertEqual(self.start_calls, [])
@@ -615,7 +616,7 @@ class ComposeStartPreparationRetryTest(SourceWorktreeFixture):
                 "--shape", "solo", "--capability", "autopilot-code", "--prompt-file", str(self.prompt),
                 "--cwd", str(self.primary), "--artifact-root", str(self.artifact_root), "--unassigned",
                 "--jobs", str(self.jobs), "--spec-read", "fixture"]
-        with mock.patch.object(R, "_worktree_git", side_effect=AssertionError("non-start compose must not prepare")), \
+        with patch_split(R, "_worktree_git", side_effect=AssertionError("non-start compose must not prepare")), \
                 mock.patch.object(sys, "argv", argv):
             self.assertEqual(R.main(), 0)
         self.assertEqual(self.start_calls, [])
@@ -662,7 +663,7 @@ class ComposeStartPreparationRetryTest(SourceWorktreeFixture):
                 return subprocess.CompletedProcess(["git", *args], 128, "", "explicit fixture failure")
             return real_git(cwd, *args)
 
-        with mock.patch.object(R, "_worktree_git", side_effect=explicit_add_failure), \
+        with patch_split(R, "_worktree_git", side_effect=explicit_add_failure), \
                 self.assertRaisesRegex(ValueError, "source-worktree-preparation-failed"):
             self.main(self.argv())
         record_file, = (self.artifact_root / ".runtime" / "worktree-preparation").glob("*.json")
@@ -686,7 +687,7 @@ class ComposeStartPreparationRetryTest(SourceWorktreeFixture):
                 return interrupted
             return real_git(cwd, *args)
 
-        with mock.patch.object(R, "_worktree_git", side_effect=uncertain_add), \
+        with patch_split(R, "_worktree_git", side_effect=uncertain_add), \
                 self.assertRaisesRegex(ValueError, "source-worktree-preparation-failed"):
             self.main(self.argv())
         record_file, = (self.artifact_root / ".runtime" / "worktree-preparation").glob("*.json")
@@ -743,7 +744,7 @@ class ComposeStartPreparationRetryTest(SourceWorktreeFixture):
                 git(cwd, "branch", "-f", branch, moved)
             return real_git(cwd, *args)
 
-        with mock.patch.object(R, "_worktree_git", side_effect=move_before_cas):
+        with patch_split(R, "_worktree_git", side_effect=move_before_cas):
             result = R._cleanup_failed_worktree_branch(self.primary, branch, base)
         self.assertEqual((result["state"], result["reason"]), ("preserved", "compare-and-swap-refused"))
         self.assertEqual(git(self.primary, "rev-parse", f"refs/heads/{branch}"), moved)
@@ -774,7 +775,7 @@ class Sha256PreparationTest(SourceWorktreeFixture):
                     ["git", *args], 128, "", "simulated worktree add failure")
             return real_git(cwd, *args)
 
-        with mock.patch.object(R, "_worktree_git", side_effect=fail_after_ref_allocation), \
+        with patch_split(R, "_worktree_git", side_effect=fail_after_ref_allocation), \
                 self.assertRaisesRegex(ValueError, "source-worktree-preparation-failed"):
             self.main(argv)
         self.assertEqual(self.primary_fingerprint(), before)
@@ -796,7 +797,7 @@ class Sha256PreparationTest(SourceWorktreeFixture):
                 resumed_adds.append(args)
             return real_git(cwd, *args)
 
-        with mock.patch.object(R, "_worktree_git", side_effect=resume_existing_branch):
+        with patch_split(R, "_worktree_git", side_effect=resume_existing_branch):
             self.assertEqual(self.main(argv), 0)
         self.assertEqual(len(resumed_adds), 1)
         route_file, = self.route_files()
@@ -819,7 +820,7 @@ class PreparationObservationTest(SourceWorktreeFixture):
             calls.append(args)
             return real(cwd, *args)
 
-        with mock.patch.object(R, "_worktree_git", side_effect=observe):
+        with patch_split(R, "_worktree_git", side_effect=observe):
             made = R.prepare_isolated_worktree(self.primary, "same-tip", artifact_root=self.artifact_root)
         self.assertEqual(made["state"], "created", made)
         self.assertEqual(made["base_sha"], self.remote_sha)
@@ -836,14 +837,14 @@ class PreparationObservationTest(SourceWorktreeFixture):
         linked = self.primary.parent / "linked"
         git(self.primary, "worktree", "add", "-q", "-b", "linked", str(linked))
         real = R._worktree_git
-        with mock.patch.object(R, "_worktree_git", wraps=real) as observed:
+        with patch_split(R, "_worktree_git", wraps=real) as observed:
             made = R.prepare_isolated_worktree(linked, "from-linked", artifact_root=self.artifact_root)
         self.assertEqual(made["state"], "created", made)
         self.assertEqual(sum(c.args[1:] == ("worktree", "list", "--porcelain")
                              for c in observed.call_args_list), 1)
 
     def test_changed_tip_fetches_and_pins_current_remote(self):
-        with mock.patch.object(R, "_worktree_git", wraps=R._worktree_git) as observed:
+        with patch_split(R, "_worktree_git", wraps=R._worktree_git) as observed:
             made = R.prepare_isolated_worktree(self.primary, "changed-tip", artifact_root=self.artifact_root)
         self.assertEqual(made["state"], "created", made)
         self.assertEqual(made["base_sha"], self.remote_sha)
@@ -865,7 +866,7 @@ class PreparationObservationTest(SourceWorktreeFixture):
                 return subprocess.CompletedProcess([], 128, "", "fixture missing-object fetch refused")
             return real(cwd, *args)
 
-        with mock.patch.object(R, "_worktree_git", side_effect=fail_fetch):
+        with patch_split(R, "_worktree_git", side_effect=fail_fetch):
             result = R.prepare_isolated_worktree(self.primary, "missing-blob", artifact_root=self.artifact_root)
         self.assertEqual(result["reason"], "remote-default-fetch-failed", result)
         self.assertEqual(sum(a[0] == "fetch" for a in calls), 1)
@@ -880,7 +881,7 @@ class PreparationObservationTest(SourceWorktreeFixture):
                 return subprocess.CompletedProcess([], 0, "ref: refs/heads/main\tHEAD\n", "")
             return real(cwd, *args)
 
-        with mock.patch.object(R, "_worktree_git", side_effect=no_oid) as observed:
+        with patch_split(R, "_worktree_git", side_effect=no_oid) as observed:
             base, reason, _ = R._remote_default_base(self.primary)
         self.assertIsNone(reason)
         self.assertEqual(base["sha"], self.remote_sha)
@@ -900,10 +901,10 @@ class PreparationObservationTest(SourceWorktreeFixture):
                 result.git_uncertain = True
             return result
 
-        with mock.patch.object(R, "_worktree_git", side_effect=partial_add):
+        with patch_split(R, "_worktree_git", side_effect=partial_add):
             failed = R.prepare_isolated_worktree(self.primary, "partial", artifact_root=self.artifact_root)
         self.assertEqual(failed["state"], "failed", failed)
-        with mock.patch.object(R, "_remote_default_base", side_effect=AssertionError("reserved identity")):
+        with patch_split(R, "_remote_default_base", side_effect=AssertionError("reserved identity")):
             retry = R.prepare_isolated_worktree(self.primary, "partial", artifact_root=self.artifact_root)
         self.assertEqual(retry["reason"], "preparation-identity-conflict", retry)
         record, = (self.artifact_root / ".runtime/worktree-preparation").glob("*.json")
@@ -919,7 +920,7 @@ class PreparationObservationTest(SourceWorktreeFixture):
             return real(cwd, *args)
 
         before = git(self.primary, "for-each-ref", "--format=%(refname)")
-        with mock.patch.object(R, "_worktree_git", side_effect=interrupted), self.assertRaises(KeyboardInterrupt):
+        with patch_split(R, "_worktree_git", side_effect=interrupted), self.assertRaises(KeyboardInterrupt):
             R.prepare_isolated_worktree(self.primary, "cancelled", artifact_root=self.artifact_root)
         self.assertEqual(git(self.primary, "for-each-ref", "--format=%(refname)"), before)
         self.assertEqual(list((self.artifact_root / ".runtime/worktree-preparation").glob("*.json")), [])
@@ -982,7 +983,7 @@ class GitRefNamespacePreparationTest(SourceWorktreeFixture):
 
         local_sha = git(self.primary, "rev-parse", "HEAD")
         preparations = ({"request": "parallel request one"}, {"request": "parallel request two"})
-        with mock.patch.object(R, "_remote_default_base",
+        with patch_split(R, "_remote_default_base",
                                return_value=({"branch": "main", "sha": local_sha}, None, None)):
             with ThreadPoolExecutor(max_workers=2) as pool:
                 results = list(pool.map(
@@ -1009,7 +1010,7 @@ class GitRefNamespacePreparationTest(SourceWorktreeFixture):
                 self.assertEqual(added.returncode, 0, added.stderr)
             return real(cwd, *args)
 
-        with mock.patch.object(R, "_worktree_git", side_effect=attach_between_scan_and_cas):
+        with patch_split(R, "_worktree_git", side_effect=attach_between_scan_and_cas):
             removed = R._release_owned_branch(self.primary, branch, local_sha)
 
         self.assertFalse(removed)

@@ -338,7 +338,7 @@ class ReaderCompatibilityTest(Fixture):
         spec = importlib.util.spec_from_file_location("capability_route_archive", HERE / "capability-route.py")
         route = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(route)
-        with mock.patch.object(route, "_route_chain_module", return_value=None):
+        with patch_split(route, "_route_chain_module", return_value=None):
             self.assertEqual(route.resolve_route_argument("rt-00000000000000a1", self.jobs), route_file)
             self.assertEqual(route.attempt_route_file("att-a1", self.jobs), route_file)
         local = self.root.parent / "local-jobs.log"

@@ -72,7 +72,7 @@ class ReplacementBatchTest(unittest.TestCase):
         self.addCleanup(proof.stop)
         batch = mock.patch.object(RB, '_batch', return_value=BATCH)
         batch.start(); self.addCleanup(batch.stop)
-        evidence = mock.patch.object(BATCH.ROUTE_MODULE, '_continuation_reused_evidence',
+        evidence = patch_split(BATCH.ROUTE_MODULE, '_continuation_reused_evidence',
                                     return_value=(self.partial['realized_peer_set'][0], None))
         evidence.start(); self.addCleanup(evidence.stop)
 
@@ -99,7 +99,7 @@ class ReplacementBatchTest(unittest.TestCase):
             RB.command(self.jobs, self.record, self.source, self.replay)
 
     def test_pending_peer_does_not_create_replacement_evidence(self):
-        with mock.patch.object(BATCH.ROUTE_MODULE, '_continuation_reused_evidence',
+        with patch_split(BATCH.ROUTE_MODULE, '_continuation_reused_evidence',
                                side_effect=ValueError('peer-still-live')):
             with self.assertRaisesRegex(R.DC.DispatchContractError, 'peer-still-live'):
                 RB.command(self.jobs, self.record, self.source, self.replay)
@@ -108,7 +108,7 @@ class ReplacementBatchTest(unittest.TestCase):
     def test_reentry_peer_drift_refuses(self):
         self.evidence()
         changed = dict(self.partial['realized_peer_set'][0], marker_digest='sha256:'+'7'*64)
-        with mock.patch.object(BATCH.ROUTE_MODULE, '_continuation_reused_evidence', return_value=(changed, None)):
+        with patch_split(BATCH.ROUTE_MODULE, '_continuation_reused_evidence', return_value=(changed, None)):
             with self.assertRaises(R.DC.DispatchContractError):
                 RB.command(self.jobs, self.record, self.source, self.replay)
 

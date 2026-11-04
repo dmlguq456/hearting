@@ -995,7 +995,7 @@ class FallbackTest(unittest.TestCase):
   evidence=self.art/"fixture-plan.md"
   evidence.write_text("Fixture plan input.\n")
   with mock.patch.dict(os.environ,self.launch_roots_env()), \
-       mock.patch.object(R,"_launch_open_cycle_checkpoint"):
+       patch_split(R,"_launch_open_cycle_checkpoint"):
    R.complete_node(route,plan,"plan",evidence,attempt_id="att-fixture-plan",
      explicit_attempt_metadata={"attempt_schema_version":2,"dispatch_depth":2,
        "transport":"headless","execution_surface":"inline",
@@ -1226,7 +1226,7 @@ class FallbackTest(unittest.TestCase):
     "registered_worker":"1","fallback_hop":"same-harness-headless",
    }
    with mock.patch.dict(os.environ,self.launch_roots_env()), \
-        mock.patch.object(R,"_launch_open_cycle_checkpoint"):
+        patch_split(R,"_launch_open_cycle_checkpoint"):
     R.complete_node(source,node,node["id"],evidence,attempt_id=attempt_id,
                     explicit_attempt_metadata=metadata)
    jobs=self.jobs

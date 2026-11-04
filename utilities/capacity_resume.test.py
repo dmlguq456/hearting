@@ -155,7 +155,7 @@ class CapacityResumeTest(unittest.TestCase):
     def seal_under(self, home):
         """Re-seal the source owner's input as an older installed release."""
         (R._directory(self.jobs) / "inputs" / "att-owner.json").unlink()
-        with mock.patch.object(R, "ROOT", home):
+        with patch_split(R, "ROOT", home):
             args = SimpleNamespace(attempt_id="att-owner", jobs_path=self.jobs, worktree=str(self.root),
                                    route_id="rt-cap", route_node="owner", model="old-model", model_profile="deep",
                                    replacement_input_argv=["--start", "--attempt-id", "att-owner", "--prompt-text", "the raw task"])
@@ -406,7 +406,7 @@ class CapacityResumeTest(unittest.TestCase):
         self.assertEqual(pending["reason"], "replacement-launch-timeout", result)
         replacement = self.replacement_id()
         self.assertEqual(self.rows()[replacement][1]["launch_claimed"], "0")
-        with mock.patch.object(R, "ROOT", self.root / "newer-release"):
+        with patch_split(R, "ROOT", self.root / "newer-release"):
             result = W.start_work(self.route, self.path, self.jobs, run=self.claiming_launcher(False))
         self.assertEqual(result["state"], "running", result)
         self.assertEqual(self.replacement_id(), replacement)
@@ -541,7 +541,7 @@ class CapacityResumeTest(unittest.TestCase):
                             R.exhausted_attention(self.jobs, previous, self.rows()[previous][1])
                             history = [(path, path.read_bytes()) for path in
                                 R._directory(self.jobs).joinpath("attention").rglob("*.json")]
-                        with mock.patch.object(R, "ROOT", self.root / "installed-new-release"):
+                        with patch_split(R, "ROOT", self.root / "installed-new-release"):
                             result = self.start()
                         self.assertEqual(result["state"], "running", result)
                         self.assertEqual((len(self.calls), len(self.claims())), (count, count))

@@ -21,6 +21,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
 import session_tidy as st  # noqa: E402
 import session_tidy_runner as runner  # noqa: E402
+sys.path.append(str(Path(__file__).resolve().parents[1] / "utilities"))  # split_module_fixture
+from split_module_fixture import patch_split  # noqa: E402
 
 # Markers a dispatched test runner inherits; a main-session case must not see them.
 WORKER_MARKERS = ("AGENT_SESSION_ROLE", "AGENT_DISPATCH_CHILD", "AGENT_DISPATCH_DEPTH",
@@ -305,7 +307,7 @@ class CompactHookTest(unittest.TestCase):
 
         with mock.patch.object(clear, "herdr_command", return_value="/bin/true"), \
              mock.patch.object(clear, "_start_helper", return_value=4321), \
-             mock.patch.object(st, "atomic_write", side_effect=fail_text):
+             patch_split(st, "atomic_write", side_effect=fail_text):
             st.run_hook("claude", "compact", "sid-main", phase="after", compact_summary="new summary",
                         compact_context={"trigger": "auto"}, cwd=str(self.cwd), env=self.env, now=1000)
         self.assertEqual(st.read_latest_card(self.session_seat("sid-main"))["generation"], previous["generation"])

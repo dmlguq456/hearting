@@ -318,7 +318,7 @@ class SourceSubjectIntegrationTest(unittest.TestCase):
             'failure_scope': 'none', 'codex_command': 'ok',
             'retry_on_isolated_worktree': 0,
         }
-        with mock.patch.object(ROUTE_WRITER, '_compose_readiness', return_value={
+        with patch_split(ROUTE_WRITER, '_compose_readiness', return_value={
                 'tuples': [checked], 'candidates': [{
                     'harness': 'codex', 'transport': 'headless',
                     'surface': 'registered-headless', 'status': 'supported',
@@ -1669,7 +1669,7 @@ class SourceSubjectIntegrationTest(unittest.TestCase):
                 raise OSError("injected publication interruption")
             return original_atomic(path, payload)
 
-        with mock.patch.object(ROUTE_WRITER, "atomic_write", side_effect=interrupt):
+        with patch_split(ROUTE_WRITER, "atomic_write", side_effect=interrupt):
             with self.assertRaisesRegex(OSError, "injected publication interruption"):
                 ROUTE_WRITER._publish_completion_locked(
                     self.route, node, "execute", evidence, jobs=self.jobs,
@@ -1792,10 +1792,10 @@ class UpstreamOrderTest(unittest.TestCase):
         child = {**self.route, "route_id": "rt-continuation0001", "route_hash": "sha256:" + "c" * 64,
                  "continuation_contract_version": 1, "source_route_id": self.route["route_id"]}
         import route_lineage
-        with mock.patch.object(route_lineage, "verified_route_lineage", return_value=[child, self.route]):
+        with patch_split(route_lineage, "verified_route_lineage", return_value=[child, self.route]):
             self.assertEqual(DC.reopened_output_path(child, self.get_node("report"), self.jobs, self.artifact_root),
                              str(report.with_name("audit-report.r3.md")))
-        with mock.patch.object(route_lineage, "verified_route_lineage",
+        with patch_split(route_lineage, "verified_route_lineage",
                                side_effect=route_lineage.RouteLineageError("route-lineage-unverified")):
             self.assertIsNone(DC.reopened_output_path(child, self.get_node("report"), self.jobs, self.artifact_root))
         # Another reopening: the sealed file is still an earlier marker's evidence, so the next revision
