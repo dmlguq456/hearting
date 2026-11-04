@@ -3353,7 +3353,9 @@ name or tag is a search key, including when it comes from a historical seat or
 registry alias; it does not prove current identity. Resolution keeps the
 selected endpoint, canonical pane, harness, and current session ID together
 through readiness, identity rechecks, native delivery, deferred resume, and the
-ledger. The original address remains a bounded diagnostic label.
+ledger. The original address remains a bounded diagnostic label. A bare two-hex
+Fleet number (`e8`) is first a name; only when that name search completes with
+no match does it resolve as the `[e8]` tag.
 
 Prompt resolution distinguishes a complete no-match (`not-found`), multiple
 current matches or a name/tag collision (`ambiguous`), and observations that

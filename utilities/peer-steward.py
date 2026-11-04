@@ -255,6 +255,7 @@ def _resolve_target(target):
 
 
 _PROMPT_TAG_ADDRESS = re.compile(r"^\[([0-9a-f]{2})\]$", re.IGNORECASE)
+_PROMPT_BARE_TAG_ADDRESS = re.compile(r"^[0-9a-f]{2}$", re.IGNORECASE)
 _PROMPT_HARNESSES = {"claude", "codex", "opencode"}
 
 
@@ -637,7 +638,17 @@ def _resolve_prompt_target(target):
     Names are matched against the complete selected-endpoint inventory, Fleet tags use
     the shared tag definition against current process identities, and pane IDs retain
     their direct meaning. Every success is pinned to a pane for all later guards/carriers.
+    A bare two-hex Fleet number (``e8``) is a name first; only when the name stage
+    settles on no match does it resolve as the bracketed tag ``[e8]``.
     """
+    result = _resolve_prompt_address(target)
+    if (result[1] == "target-name-not-found" and isinstance(target, str)
+            and _PROMPT_BARE_TAG_ADDRESS.fullmatch(target)):
+        return _resolve_prompt_address("[" + target + "]")
+    return result
+
+
+def _resolve_prompt_address(target):
     if not isinstance(target, str) or not target:
         return None, "target-not-found", []
     tag_match = _PROMPT_TAG_ADDRESS.fullmatch(target)
