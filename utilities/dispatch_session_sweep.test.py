@@ -4154,7 +4154,7 @@ hooks.dispose();
 
 
 class DetachedCommonRecoveryTest(IsolatedRootMixin, unittest.TestCase):
-    def test_real_detached_common_entry_reconnects_the_same_pending_batch_after_hook_exit(self):
+    def test_real_sessionstart_reconnects_the_same_pending_batch_without_a_prompt(self):
         jobs_path = self.root / "jobs.log"
         jobs_path.parent.mkdir(parents=True, exist_ok=True)
         jobs_path.write_text("".join(
@@ -4189,8 +4189,9 @@ class DetachedCommonRecoveryTest(IsolatedRootMixin, unittest.TestCase):
                 continue
             target = fixture_utilities / source.name
             target.symlink_to(source, target_is_directory=source.is_dir())
-        shutil.copyfile(ROOT / "hooks/dispatch-session-sweep.py",
-                        lifecycle_root / "hooks/dispatch-session-sweep.py")
+        fixture_start = lifecycle_root / "adapters/codex/hooks/sessionstart-lifecycle.py"
+        fixture_start.parent.mkdir(parents=True)
+        shutil.copyfile(ROOT / "adapters/codex/hooks/sessionstart-lifecycle.py", fixture_start)
         wrapper_pid_file = self.root.parent / "common-entry.pid"
         wrapper_env_file = self.root.parent / "common-entry-env.json"
         exec_marker = self.root.parent / "common-entry-exec.ns"
@@ -4215,10 +4216,10 @@ class DetachedCommonRecoveryTest(IsolatedRootMixin, unittest.TestCase):
         harness.write_text(
             "import importlib.util,json,os,sys\n"
             "from pathlib import Path\n"
-            f"hook_path=Path({str(lifecycle_root / 'hooks/dispatch-session-sweep.py')!r})\n"
+            f"hook_path=Path({str(fixture_start)!r})\n"
             f"sys.path.insert(0,{str(lifecycle_root / 'utilities')!r})\n"
             "spec=importlib.util.spec_from_file_location('r6_hook',hook_path); hook=importlib.util.module_from_spec(spec); spec.loader.exec_module(hook)\n"
-            "sys.stdin=__import__('io').StringIO(json.dumps({'session_id':'fixture-session','hook_event_name':'UserPromptSubmit'}))\n"
+            "sys.stdin=__import__('io').StringIO(json.dumps({'session_id':'fixture-session','hook_event_name':'SessionStart','source':'startup'}))\n"
             "raise SystemExit(hook.main())\n",
             encoding="utf-8",
         )
@@ -4288,7 +4289,7 @@ class DetachedCommonRecoveryTest(IsolatedRootMixin, unittest.TestCase):
             self.assertIn(b"codex-managed-completion.py", cmdline)
             self.assertIn(b"--resume-obligation", cmdline)
             self.assertNotIn(b"dispatch-headless", cmdline)
-            self.assertTrue(output == b"" or output.endswith(b"\n"))
+            self.assertEqual(output, b"", "startup recovery must not render pending prompt context")
         finally:
             for pid in (observer_pid, wrapper_pid):
                 if pid is not None:
