@@ -64,6 +64,25 @@ def _rec(from_sid, to_sid=None, to_name=None, kind="steer", summary="hi",
 
 
 class CollectorTest(unittest.TestCase):
+    def test_whole_output_reuse_tracks_age_duties_and_replacement(self):
+        from fleet.collectors import peer_messages as pm
+        from unittest import mock
+        records = [(0.0, {'kind': 'steer', 'from': {'harness': 'claude', 'session_id': 'a'},
+                          'to': {'harness': 'codex', 'session_id': 'b'}})]
+        with mock.patch.object(pm, '_OUTPUT_OBSERVATION', None), mock.patch.object(
+                pm, '_project_records', wraps=pm._project_records) as project:
+            first = pm._peer_result(records, {}, 0.0, reuse=True)
+            first['by_session'][('codex', 'b')]['recv_1h'] = -1
+            self.assertEqual(pm._peer_result(records, {}, 59.0, reuse=True)['by_session'][('codex','b')]['recv_1h'], 1)
+            self.assertEqual(project.call_count, 1)
+            self.assertEqual(pm._peer_result(records, {}, 60.0, reuse=True)['by_session'][('codex','b')]['last_recv']['age_min'], 1)
+            self.assertEqual(project.call_count, 1)
+            pm._peer_result(records, {('codex','b'): [{'kind':'watch','age_min':0}]}, 60.0, reuse=True)
+            self.assertEqual(project.call_count, 1)
+            replacement = [(0.0, {**records[0][1], 'kind': 'notice'})]
+            pm._peer_result(replacement, {}, 60.0, reuse=True)
+            self.assertEqual(project.call_count, 2)
+
     def test_old_prepared_files_reopen_when_clock_moves_backwards(self):
         from fleet.collectors import dispatch
         now = time.time()

@@ -59,6 +59,42 @@ def _proc_start(value):
 
 
 class TerminalRowMismatchCollectorTest(unittest.TestCase):
+    def test_generation_selection_matches_full_scan_and_keeps_old_live_age(self):
+        from pathlib import Path
+        from fleet.collectors import procscan
+        live_start = procscan.read_proc_start(os.getpid())
+        fixed = datetime(2026, 11, 5, 1, 0, tzinfo=timezone.utc)
+        class Clock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return fixed if tz is not None else fixed.replace(tzinfo=None)
+        def row(age, state, slug, extra=''):
+            stamp = (fixed-timedelta(minutes=age)).isoformat()
+            return '\t'.join((stamp, state, 'repo', '-', slug,
+                'capability=code,harness=codex,attempt_id='+slug+extra))+'\n'
+        rows = [row(0, 'open', 'open'), row(10080, 'done', 'old-live',
+                    ',pid='+str(os.getpid())+',pid_start='+live_start),
+                row(10080, 'done', 'expired-owner',
+                    ',worker_type=owner,dispatch_depth=1,note=dead-runtime-exit'),
+                row(2, 'done', 'afterglow'), row(10080, 'killed', 'env-live')]
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(dispatch, 'datetime', Clock):
+            path = Path(directory)/'jobs.log';path.write_text(''.join(rows))
+            slow, slow_bad = dispatch._scan_jobs_log(path, set(), include_stall=False,
+                                                     live_attempt_ids={'env-live'})
+            with dispatch.collection_read_scope():
+                fast, fast_bad = dispatch._scan_jobs_log(path, set(), include_stall=False,
+                                                         live_attempt_ids={'env-live'})
+            self.assertEqual([vars(job) for job in fast], [vars(job) for job in slow])
+            self.assertEqual(fast_bad, slow_bad)
+            self.assertEqual(next(job for job in fast if job.attempt_id=='old-live').elapsed_min, 10080)
+            fixed += timedelta(minutes=100)
+            with dispatch.collection_read_scope():
+                later, _bad = dispatch._scan_jobs_log(path, set(), include_stall=False,
+                                                      live_attempt_ids=set())
+            self.assertNotIn('afterglow', {job.attempt_id for job in later})
+            self.assertNotIn('env-live', {job.attempt_id for job in later})
+            self.assertIn('old-live', {job.attempt_id for job in later})
+
     def test_done_row_with_live_recorded_pid_survives(self):
         with _proc_start("777"):
             jobs, malformed = _scan([_row("done", "lying-done", 30, _PIPE)])

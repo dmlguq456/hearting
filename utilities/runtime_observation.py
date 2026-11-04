@@ -16,9 +16,135 @@ from pathlib import Path
 import threading
 import time
 from typing import Callable, Hashable, Iterable, TypeVar
+from contextlib import contextmanager
+from contextvars import ContextVar
+import copy
+import functools
+import sys
+from collections.abc import Mapping
 
 
 T = TypeVar("T")
+
+
+def retained_size(value, limit=None):
+    """Size one owned built-in projection graph, counting shared children once.
+
+    Functions/modules referenced as policy identities do not own their globals.
+    The traversal is bounded too: an oversized candidate stops at the limit.
+    """
+    seen, pending, total = set(), [value], 0
+    while pending:
+        item = pending.pop()
+        if id(item) in seen:
+            continue
+        seen.add(id(item))
+        total += sys.getsizeof(item)
+        if limit is not None and total > limit:
+            return total
+        if isinstance(item, Mapping):
+            pending.extend(item.keys())
+            pending.extend(item.values())
+            attributes = getattr(item, '__dict__', None)
+            if attributes:
+                pending.append(attributes)
+        elif isinstance(item, (list, tuple, set, frozenset)):
+            pending.extend(item)
+    return total
+
+
+class ProjectionCache(OrderedDict):
+    """LRU ownership of pure projections with entry and retained-byte bounds."""
+
+    def __init__(self, max_entries=32, max_bytes=512 * 1024 * 1024):
+        super().__init__()
+        self.max_entries, self.max_bytes = max_entries, max_bytes
+        self.weights, self.bytes = {}, 0
+
+    def __setitem__(self, key, value):
+        self.pop(key, None)
+        weight = retained_size((key, value), self.max_bytes)
+        if weight > self.max_bytes:
+            return
+        super().__setitem__(key, value)
+        self.weights[key] = weight
+        self.bytes += weight
+        while len(self) > self.max_entries or self.bytes > self.max_bytes:
+            self.popitem(last=False)
+
+    def pop(self, key, default=None):
+        self.bytes -= self.weights.pop(key, 0)
+        return super().pop(key, default)
+
+    def __delitem__(self, key):
+        super().__delitem__(key)
+        self.bytes -= self.weights.pop(key)
+
+    def popitem(self, last=True):
+        key, value = super().popitem(last=last)
+        self.bytes -= self.weights.pop(key)
+        return key, value
+
+    def clear(self):
+        super().clear()
+        self.weights.clear()
+        self.bytes = 0
+
+
+_PASS_READS = ContextVar("pass_observations", default=None)
+
+
+def observation_scope_active():
+    return _PASS_READS.get() is not None
+
+
+@contextmanager
+def observation_read_scope():
+    """Share fresh reads only within this pass, never across control operations."""
+    if _PASS_READS.get() is not None:
+        yield
+        return
+    token = _PASS_READS.set([OrderedDict(), 0])
+    try:
+        yield
+    finally:
+        _PASS_READS.reset(token)
+
+
+def observe_once(reader=None, *, immutable=False):
+    """Bound repeated passive reads to 4096 entries / 8 MiB per pass.
+
+    Outside an explicit scope this is the original fresh reader. Exceptions
+    remain fresh, and mutable results are never shared with another caller.
+    """
+    if reader is None:
+        return lambda target: observe_once(target, immutable=immutable)
+    clone = (lambda value: value) if immutable else copy.deepcopy
+    @functools.wraps(reader)
+    def read(*args, **kwargs):
+        scope = _PASS_READS.get()
+        if scope is None:
+            return reader(*args, **kwargs)
+        key = (reader, args, tuple(sorted(kwargs.items())))
+        try:
+            hash(key)
+        except TypeError:
+            return reader(*args, **kwargs)
+        entries = scope[0]
+        if key in entries:
+            value, _weight = entries[key]
+            entries.move_to_end(key)
+            return clone(value)
+        value = reader(*args, **kwargs)
+        weight = len(repr((args, kwargs, value)).encode('utf-8', errors='replace'))
+        if weight <= 1024 * 1024:
+            entries[key] = (clone(value), weight)
+            scope[1] += weight
+            while len(entries) > 4096 or scope[1] > 8 * 1024 * 1024:
+                _key, (_value, removed) = entries.popitem(last=False)
+                scope[1] -= removed
+        return value
+    return read
 
 
 @dataclass(frozen=True)

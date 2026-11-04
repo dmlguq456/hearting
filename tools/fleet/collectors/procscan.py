@@ -17,6 +17,7 @@ _UTILITIES = str(Path(__file__).resolve().parents[3] / "utilities")
 if _UTILITIES not in sys.path:
     sys.path.insert(0, _UTILITIES)
 import claude_process_identity  # noqa: E402
+from runtime_observation import observe_once, observation_scope_active  # noqa: E402
 
 HARNESSES = ("claude", "codex", "opencode")
 _DELETED = " (deleted)"
@@ -129,6 +130,7 @@ def _user_ps_args(columns):
     return ["ps", "-u", uid, "-o", columns]
 
 
+@observe_once
 def _read_cwd(pid):
     """(resolved cwd, orphan?) — orphan = /proc/<pid>/cwd symlink ended in ' (deleted)'."""
     try:
@@ -140,6 +142,7 @@ def _read_cwd(pid):
     return target, False
 
 
+@observe_once
 def read_environ(pid):
     """/proc/<pid>/environ → dict[str,str] (or {} on failure). pid: int or str. Read-only, same-user only."""
     try:
@@ -264,6 +267,7 @@ def codex_effective_cwd(argv, observed_cwd, launch_cwd=None):
         return observed_cwd
 
 
+@observe_once
 def _read_argv(pid):
     try:
         with open("/proc/%d/cmdline" % int(pid), "rb") as handle:
@@ -272,6 +276,17 @@ def _read_argv(pid):
         return []
 
 
+@observe_once(immutable=True)
+def _visible_pids():
+    """A fresh membership observation for the current passive collection pass."""
+    try:
+        with os.scandir('/proc') as entries:
+            return frozenset(int(entry.name) for entry in entries if entry.name.isdigit())
+    except OSError:
+        return None
+
+
+@observe_once
 def read_proc_start(pid):
     """Live /proc/<pid>/stat field 22 (starttime) as a str, else None.
 
@@ -283,6 +298,13 @@ def read_proc_start(pid):
     authoritative governor's process identity rule. Windows / unreadable /proc →
     None (tolerate: callers treat None as "no evidence").
     """
+    if observation_scope_active():
+        pids = _visible_pids()
+        try:
+            if pids is not None and int(pid) not in pids:
+                return None
+        except (TypeError, ValueError):
+            return None
     try:
         with open("/proc/%s/stat" % pid) as f:
             data = f.read()
@@ -295,6 +317,9 @@ def read_proc_start(pid):
         return rest[19]           # field 22 = index 19 after (pid, comm) are consumed
     except (ValueError, IndexError):
         return None
+
+
+_NATIVE_START_READER = read_proc_start
 
 
 def is_terminal_state(pid):
@@ -319,6 +344,7 @@ _PROVENANCE_COMMS = (
 )
 
 
+@observe_once
 def _ppid_of(pid):
     try:
         with open("/proc/%s/stat" % pid) as f:
@@ -328,6 +354,7 @@ def _ppid_of(pid):
         return None
 
 
+@observe_once
 def _comm_of(pid):
     try:
         with open("/proc/%s/comm" % pid) as f:
@@ -350,6 +377,7 @@ def initial_pid_namespace():
         return False
 
 
+@observe_once
 def boot_time():
     """Kernel boot time (epoch seconds) from /proc/stat, or None."""
     try:
@@ -398,6 +426,7 @@ def provenance(pid, max_depth=6):
     return nearest
 
 
+@observe_once
 def _ps_lines():
     # COLUMNS pinned huge: Claude Code injects terminal width into the statusline env and
     # ps truncates args= to COLUMNS, which would break argv matching downstream

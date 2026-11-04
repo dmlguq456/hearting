@@ -62,6 +62,7 @@ from dispatch_completion_join import read_supervisor_phase_state, read_join_obse
 from dispatch_subsession_advance import row_is_registered_only  # noqa: E402
 from dispatch_attempt_policy import decide_attempt, terminal_conflict_pending  # noqa: E402
 import dispatch_registry_cache as _dispatch_registry_cache  # noqa: E402
+from runtime_observation import ProjectionCache  # noqa: E402
 from codex_dispatch_terminal import terminal_envelope_observed  # noqa: E402
 from claude_project_dir import encode_project_dir  # noqa: E402
 from attempt_view import owned_attempt_log_path as _shared_owned_attempt_log_path  # noqa: E402
@@ -142,6 +143,7 @@ def collection_read_scope():
     import session_tidy
     import dispatch_supervision
     from . import codex
+    from runtime_observation import observation_read_scope
     global _LEDGER_PARSE_CACHE
     if _LEDGER_PARSE_CACHE is None:
         _LEDGER_PARSE_CACHE = session_tidy.LedgerParseCache()
@@ -149,6 +151,7 @@ def collection_read_scope():
     token = _COLLECTION_INPUTS.set({}) if _COLLECTION_INPUTS.get() is None else None
     try:
         with ExitStack() as stack:
+            stack.enter_context(observation_read_scope())
             stack.enter_context(session_tidy.seat_ledger_read_scope(_LEDGER_PARSE_CACHE))
             stack.enter_context(codex.daemon_identity_read_scope())
             stack.enter_context(dispatch_supervision.route_attention_read_scope())
@@ -262,6 +265,7 @@ _PARSED_REGISTRY_SOURCES = {}
 _PARSED_REGISTRY_DIAGNOSTICS = OrderedDict()
 _PARSED_REGISTRY_PATH_ORDER = OrderedDict()
 _PARSED_REGISTRY_ROWS_LIMIT = 32
+_PARSED_REGISTRY_RAW_BYTES_LIMIT = 128 * 1024 * 1024
 _PARSED_REGISTRY_CACHE_LOCK = threading.RLock()
 
 
@@ -298,7 +302,11 @@ def _touch_registry_path_locked(absolute, key):
 
 
 def _trim_registry_path_order_locked():
-    while len(_PARSED_REGISTRY_PATH_ORDER) > _PARSED_REGISTRY_ROWS_LIMIT:
+    def source_bytes():
+        return sum(key[1][2] for key in _PARSED_REGISTRY_PATH_ORDER.values()
+                   if isinstance(key[1], tuple) and len(key[1]) >= 3)
+    while (len(_PARSED_REGISTRY_PATH_ORDER) > _PARSED_REGISTRY_ROWS_LIMIT
+           or source_bytes() > _PARSED_REGISTRY_RAW_BYTES_LIMIT):
         absolute, _key = _PARSED_REGISTRY_PATH_ORDER.popitem(last=False)
         _drop_registry_path_locked(absolute)
 
@@ -392,7 +400,7 @@ def _raise_registry_read_error(path, *, ignore_missing=False):
         raise error
 
 
-_ORPHAN_ROW_PROJECTIONS = OrderedDict()
+_ORPHAN_ROW_PROJECTIONS = ProjectionCache()
 
 
 def _orphan_registry_rows(path, registry, *, read_only=False):
@@ -654,6 +662,7 @@ def _build_registry_derived_index(rows):
             job_order.append(key)
         latest_jobs[key] = (registry_order, fields, metadata)
     return MappingProxyType({
+        "token": object(),
         "job_order": tuple(job_order),
         "latest_jobs": MappingProxyType(latest_jobs),
         "all_by_attempt": MappingProxyType(
@@ -917,6 +926,79 @@ def _terminal_row_process_alive(meta, live_attempt_ids=None):
             return True
     attempt = meta.get("attempt_id")
     return bool(attempt and live_attempt_ids and attempt in live_attempt_ids)
+
+
+_NATIVE_TERMINAL_PROOF = _terminal_row_process_alive
+_JOB_SELECTION_CACHE = ProjectionCache(max_entries=32, max_bytes=32 * 1024 * 1024)
+
+
+def _job_selection(derived, live_attempt_ids, *, include_stall):
+    """Reuse the whole generation's selection index, observing PID/time afresh."""
+    if (_COLLECTION_INPUTS.get() is None
+            or 'token' not in derived
+            or _terminal_row_process_alive is not _NATIVE_TERMINAL_PROOF
+            or procscan.read_proc_start is not getattr(procscan, '_NATIVE_START_READER', None)):
+        return derived['job_order'], None, (), None
+    visible = procscan._visible_pids()
+    if visible is None:
+        return derived['job_order'], None, (), None
+    namespace = _pid_namespace_identity()
+    policy = (_authoritative_registry_pid, _dead_terminal_owner_row,
+              _iso_elapsed_start, datetime)
+    key = (derived['token'], namespace, policy)
+    with _PARSED_REGISTRY_CACHE_LOCK:
+        compiled = _JOB_SELECTION_CACHE.get(key)
+        if compiled is not None:
+            _JOB_SELECTION_CACHE.move_to_end(key)
+    if compiled is None:
+        fixed, dated, dead_dates, pids, attempts, identities, positions = set(), [], [], {}, {}, {}, {}
+        for position, job_key in enumerate(derived['job_order']):
+            _order, fields, meta = derived['latest_jobs'][job_key]
+            positions[job_key] = position
+            identity = _authoritative_registry_pid(meta)
+            identities[job_key] = identity
+            status = fields[1]
+            if status in ('open', 'running'):
+                fixed.add(job_key)
+                continue
+            pid, start, _source = identity
+            if pid and start:
+                pids.setdefault(pid, []).append((job_key, str(start)))
+            if meta.get('attempt_id'):
+                attempts.setdefault(meta['attempt_id'], []).append(job_key)
+            stamp = _iso_elapsed_start(fields[0], datetime) if isinstance(fields[0], str) else None
+            if _dead_terminal_owner_row(status, meta):
+                fixed.add(job_key)
+                if stamp is not None and meta.get('intensity') != 'quick':
+                    dead_dates.append((stamp, position, job_key))
+            elif status == 'done' and stamp is not None:
+                dated.append((stamp, position, job_key))
+        compiled = dict(fixed=frozenset(fixed), dated=tuple(sorted(dated)),
+                        dead_dates=tuple(sorted(dead_dates)), pids=pids, attempts=attempts,
+                        identities=identities, positions=positions)
+        with _PARSED_REGISTRY_CACHE_LOCK:
+            _JOB_SELECTION_CACHE[key] = compiled
+    alive = set()
+    for pid in compiled['pids'].keys() & visible:
+        start = procscan.read_proc_start(pid)
+        if start:
+            alive.update(job_key for job_key, expected in compiled['pids'][pid]
+                         if str(start) == expected)
+    for attempt in live_attempt_ids or ():
+        alive.update(compiled['attempts'].get(attempt, ()))
+    from bisect import bisect_right
+    from datetime import timedelta
+    clock = datetime.now(timezone.utc)
+    first_recent = bisect_right(compiled['dated'], clock - timedelta(minutes=DONE_AFTERGLOW_MIN + 1),
+                                key=lambda row: row[0])
+    candidates = compiled['fixed'] | alive | {
+        row[2] for row in compiled['dated'][first_recent:]}
+    expired = ()
+    if not include_stall:
+        last_expired = bisect_right(compiled['dead_dates'], clock - timedelta(minutes=361),
+                                    key=lambda row: row[0])
+        expired = {row[2] for row in compiled['dead_dates'][:last_expired]}
+    return sorted(candidates, key=compiled['positions'].__getitem__), alive, expired, compiled['identities']
 
 
 def _live_attempt_ids():
@@ -3464,7 +3546,7 @@ def _iso_to_epoch(ts):
     return dt.timestamp()
 
 
-_REGISTRY_EVIDENCE_CACHE = OrderedDict()
+_REGISTRY_EVIDENCE_CACHE = ProjectionCache()
 
 
 class RegistryRouteEvidence(dict):
@@ -3595,6 +3677,10 @@ def _registry_evidence_for_path(path, rows):
             "registry_order": registry_order,
             **attempt_contract,
         }
+    # Account for the lazy string that detail keys will retain too. Once
+    # published, route graphs and their fingerprints are immutable.
+    for evidence in path_result.values():
+        evidence.fingerprint()
     with _PARSED_REGISTRY_CACHE_LOCK:
         _REGISTRY_EVIDENCE_CACHE[key] = (rows, functions, path_result, path_attempts)
         _REGISTRY_EVIDENCE_CACHE.move_to_end(key)
@@ -3955,14 +4041,17 @@ def _scan_jobs_log(path, seen_slugs, seen_keys=None, registry_priority=0,
     # behaviour is byte-identical.
     derived = _registry_derived_index(path, rows)
     latest = derived["latest_jobs"]
-    for key in derived["job_order"]:
+    selected, alive_keys, expired, observed_identities = _job_selection(
+        derived, live_attempt_ids, include_stall=include_stall)
+    for key in selected:
         registry_order, fields, parsed_meta = latest[key]
         if (allowed_attempt_ids is not None
                 and parsed_meta.get("attempt_id") not in allowed_attempt_ids):
             continue
         meta = parsed_meta
         ts, status, repo, worktree, slug, pipe = fields
-        row_age_min = _iso_elapsed_min(ts)
+        row_age_min = (361 if key in expired and key not in alive_keys
+                       else _iso_elapsed_min(ts))
         afterglow = False
         dead_terminal_owner = False
         row_terminal_mismatch = False
@@ -3973,8 +4062,8 @@ def _scan_jobs_log(path, seen_slugs, seen_keys=None, registry_priority=0,
             # closed a multi-turn codex attempt at its first turn.completed; the worker ran
             # on for hours while the session row hid as a dispatch child and the job row
             # dropped as done — the whole dispatch vanished from the screen).
-            if _terminal_row_process_alive(meta,
-                                           live_attempt_ids=live_attempt_ids):
+            if ((key in alive_keys) if alive_keys is not None else
+                    _terminal_row_process_alive(meta, live_attempt_ids=live_attempt_ids)):
                 row_terminal_mismatch = True
             # F-46: `done` within the afterglow window survives as a display-only row
             # (status stays the verbatim registry word `done`; `afterglow=True` is the
@@ -4001,7 +4090,8 @@ def _scan_jobs_log(path, seen_slugs, seen_keys=None, registry_priority=0,
         # proc twin. Without this the proc row's guessed identity won the display.
         attempt_owned = bool(row_attempt and canonical_attempts is not None
                              and row_attempt in canonical_attempts)
-        _registry_pid_tuple = _authoritative_registry_pid(meta)
+        _registry_pid_tuple = (observed_identities[key] if observed_identities is not None
+                               else _authoritative_registry_pid(meta))
         registry_pid_identity = _registry_pid_tuple[:2]
         # F-97e: a registry row is the twin of a proc row only when they are the SAME job.
         # Evidence, strongest first: same attempt id (attempt_owned), same authoritative
@@ -4032,6 +4122,13 @@ def _scan_jobs_log(path, seen_slugs, seen_keys=None, registry_priority=0,
             continue                          # this attempt already emitted from another registry root
         seen_attempts.add(key)
         seen_slugs.add(slug)                  # kept: legacy rows without attempt_id still need it
+        # The merged observer will apply F-83's existing six-hour bound. Avoid
+        # constructing thousands of already-expired owner objects first, while
+        # preserving their registry-order deduplication effects. Quick grouping
+        # still sees its historical rows, as in the original classifier.
+        if (not include_stall and dead_terminal_owner and (row_age_min or 0) > 360
+                and meta.get('intensity') != 'quick'):
+            continue
         meta = dict(meta)
         attempt_contract = _attempt_contract(meta)
         pname = meta.get("_name") or repo or "job"

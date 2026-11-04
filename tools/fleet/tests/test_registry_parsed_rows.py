@@ -12,6 +12,22 @@ from fleet.collectors import dispatch
 
 
 class ParsedRegistryRowsTest(unittest.TestCase):
+    def test_source_byte_limit_evicts_all_references_of_the_old_path(self):
+        import tempfile
+        from unittest import mock
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as directory:
+            first, second = Path(directory)/'first.log', Path(directory)/'second.log'
+            raw = 't\tdone\t/r\t/w\ta\tattempt_id=one\n'
+            first.write_text(raw); second.write_text(raw.replace('one', 'two'))
+            with mock.patch.object(dispatch, '_PARSED_REGISTRY_RAW_BYTES_LIMIT', len(raw)+1):
+                dispatch.parsed_registry_rows(first)
+                dispatch.parsed_registry_rows(second)
+                for cache in (dispatch._PARSED_REGISTRY_ROWS, dispatch._PARSED_REGISTRY_SEGMENTS,
+                              dispatch._PARSED_REGISTRY_INDEXES):
+                    self.assertFalse(any(key[0] == str(first) for key in cache))
+                self.assertTrue(any(key[0] == str(second) for key in dispatch._PARSED_REGISTRY_ROWS))
+
     def test_metadata_converter_change_invalidates_an_unchanged_file(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'jobs.log'

@@ -313,13 +313,18 @@ class ExplorerViewModel:
         unknown = changes.keys() - known
         if unknown:
             raise TypeError("unknown view model fields: " + ", ".join(sorted(unknown)))
+        updated = {}
+        for name, changed in changes.items():
+            old = getattr(self, name)
+            changed = {} if name == "peer_edges" and changed is None else changed
+            item = freeze(changed, old)
+            if item is not old:
+                updated[name] = item
+        if not updated:
+            return self
         value = object.__new__(type(self))
         for name in known:
-            item = getattr(self, name)
-            if name in changes and changes[name] is not item:
-                changed = {} if name == "peer_edges" and changes[name] is None else changes[name]
-                item = freeze(changed, item)
-            object.__setattr__(value, name, item)
+            object.__setattr__(value, name, updated.get(name, getattr(self, name)))
         return value
 
     @classmethod

@@ -14,6 +14,85 @@ from runtime_observation import (ObservationContext, file_generation,
                                 stable_read_bytes)  # noqa: E402
 
 
+class PassObservationTest(unittest.TestCase):
+    def test_pass_shares_reads_and_next_pass_observes_again(self):
+        from runtime_observation import observation_read_scope, observe_once
+        observed = []
+        @observe_once
+        def read(pid):
+            observed.append(pid)
+            return {'pid': pid, 'identity': len(observed)}
+        with observation_read_scope():
+            first = read(42)
+            first['identity'] = 'caller mutation'
+            with observation_read_scope():
+                self.assertEqual(read(42)['identity'], 1)
+        with observation_read_scope():
+            self.assertEqual(read(42)['identity'], 2)
+        self.assertEqual(read(42)['identity'], 3)
+        self.assertEqual(read(42)['identity'], 4)
+
+    def test_fault_is_not_reused_as_negative_evidence(self):
+        from runtime_observation import observation_read_scope, observe_once
+        calls = []
+        @observe_once
+        def read():
+            calls.append(1)
+            if len(calls) == 1:
+                raise OSError('transient observation fault')
+            return 'fresh identity'
+        with observation_read_scope():
+            with self.assertRaises(OSError):
+                read()
+            self.assertEqual(read(), 'fresh identity')
+        self.assertEqual(len(calls), 2)
+
+    def test_large_observations_do_not_remain_in_the_pass_cache(self):
+        from runtime_observation import observation_read_scope, observe_once, _PASS_READS
+        @observe_once(immutable=True)
+        def read(number):
+            return str(number) + 'x' * (512 * 1024)
+        with observation_read_scope():
+            for number in range(30):
+                read(number)
+            entries, weight = _PASS_READS.get()
+            self.assertLessEqual(weight, 8 * 1024 * 1024)
+            self.assertLess(len(entries), 30)
+        self.assertIsNone(_PASS_READS.get())
+
+
+class ProjectionOwnershipTest(unittest.TestCase):
+    def test_byte_limit_releases_old_graphs_and_rejects_oversized_graph(self):
+        from runtime_observation import ProjectionCache
+        import weakref, gc
+        class Payload(dict):
+            pass
+        cache = ProjectionCache(max_entries=32, max_bytes=64 * 1024)
+        refs = []
+        for number in range(8):
+            value = Payload(text=str(number) + 'x' * (32 * 1024))
+            refs.append(weakref.ref(value))
+            cache[number] = value
+        del value
+        gc.collect()
+        self.assertLessEqual(cache.bytes, cache.max_bytes)
+        self.assertLessEqual(sum(ref() is not None for ref in refs), 1)
+        cache['oversized'] = {'text': 'x' * (128 * 1024)}
+        self.assertNotIn('oversized', cache)
+        cache.clear()
+        self.assertEqual(cache.bytes, 0)
+        self.assertFalse(cache.weights)
+
+    def test_replacement_and_delete_release_byte_accounting(self):
+        from runtime_observation import ProjectionCache, retained_size
+        cache = ProjectionCache(max_entries=2, max_bytes=1024)
+        cache['one'] = {'x': 1}
+        cache['one'] = {'x': 2}
+        self.assertEqual(cache.bytes, retained_size(('one', {'x': 2})))
+        del cache['one']
+        self.assertEqual(cache.bytes, 0)
+
+
 class ObservationContextTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

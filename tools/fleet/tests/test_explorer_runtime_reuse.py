@@ -10,6 +10,14 @@ from tools.fleet.explorer.view_model import ExplorerViewModel
 
 
 class ExplorerRuntimeReuseTests(unittest.TestCase):
+    def test_unchanged_model_update_keeps_the_published_instance(self):
+        original = ExplorerViewModel.from_mapping({'sessions': [{'tag': 'a'}]})
+        self.assertIs(original.with_updates(sessions=[{'tag': 'a'}]), original)
+        self.assertIs(ExplorerViewModel.from_mapping(original.to_mapping(), previous=original), original)
+        changed = original.with_updates(sessions=[{'tag': 'b'}])
+        self.assertIsNot(changed, original)
+        self.assertEqual(original.sessions[0]['tag'], 'a')
+
     def test_changed_models_share_unchanged_subtrees_and_keep_fresh_metadata(self):
         from tools.fleet.explorer.view_model import freeze, thaw
         old = ExplorerViewModel(sessions=({'tag': 'a', 'progress': {'count': 1}},
