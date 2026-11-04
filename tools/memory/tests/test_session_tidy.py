@@ -7730,11 +7730,11 @@ class CardWordLanguage(unittest.TestCase):
             cont = clear._continue_notice_text("failed", "not-idle-native")
             request = clear.idle_card_request_text({"nonce": "n9", "origin": "idle", "harness": "codex",
                                                     "idle": {"min_tokens": 300000, "wait_seconds": 60}})
-        self.assertEqual(failed, "[Tidy] Clearing the window failed (the window was not found). Run /clear if "
+        self.assertEqual(failed, "[tidy] Clearing the window failed (the window was not found). Run /clear if "
                                  "needed. The card is saved; after /clear the new window receives it.")
-        self.assertEqual(kept, "[Tidy] The window was not cleared automatically (the card was already handed "
+        self.assertEqual(kept, "[tidy] The window was not cleared automatically (the card was already handed "
                                "to another session). Run /new if needed.")
-        self.assertEqual(cont, '[Tidy] The window was cleared, but "이어서해" could not be typed (the new session '
+        self.assertEqual(cont, '[tidy] The window was cleared, but "이어서해" could not be typed (the new session '
                                'did not start waiting for input). To continue, type "이어서해".')
         self.assertTrue(request.startswith("This is an automatic idle tidy request. This request is sent only "
                                            "when the last request's input is at least 300,000 tokens, the turn "
@@ -7749,7 +7749,7 @@ class CardWordLanguage(unittest.TestCase):
             stopped = runner.failure_line("boom", "b1", (2, 1))
             line = runner._with_coverage("[tidy] batch b1: added 1 — undo: mem tidy-undo b1", note)
         self.assertEqual(note, "partly read (10-20%) — the earlier part continues in the next tidy")
-        self.assertEqual(stopped, "[Tidy] The memory tidy stopped partway (2 applied, 1 not confirmed). The rest "
+        self.assertEqual(stopped, "[tidy] The memory tidy stopped partway (2 applied, 1 not confirmed). The rest "
                                   "continues in the next tidy. (reason: boom) — undo: mem tidy-undo b1")
         self.assertEqual(line, "[tidy] batch b1: added 1 · " + note + " — undo: mem tidy-undo b1")
 

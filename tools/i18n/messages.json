@@ -891,31 +891,31 @@
    "ko": "읽기 불가"
   },
   "tidy.clear.auto_unverified": {
-   "en": "[Tidy] The automatic tidy's window switch was not confirmed.",
+   "en": "[tidy] The automatic tidy's window switch was not confirmed.",
    "ko": "[정리] 자동 정리의 창 전환을 확인하지 못했습니다."
   },
   "tidy.clear.compact_failed": {
-   "en": "[Tidy] Background agents were running, so the tidy tried /compact, but it failed ({why}). Run /compact if needed (or /clear once all agents are done).{kept}",
+   "en": "[tidy] Background agents were running, so the tidy tried /compact, but it failed ({why}). Run /compact if needed (or /clear once all agents are done).{kept}",
    "ko": "[정리] 백그라운드 에이전트가 있어 /compact로 정리하려 했지만 실패했습니다({why}). 필요하면 /compact 하세요(에이전트가 모두 끝난 뒤라면 /clear도 됩니다).{kept}"
   },
   "tidy.clear.compact_skipped": {
-   "en": "[Tidy] Background agents were running, so the tidy was to use /compact, but it did not ({why}). Run /compact if needed (or /clear once all agents are done).{kept}",
+   "en": "[tidy] Background agents were running, so the tidy was to use /compact, but it did not ({why}). Run /compact if needed (or /clear once all agents are done).{kept}",
    "ko": "[정리] 백그라운드 에이전트가 있어 /compact로 정리하려 했지만 하지 않았습니다({why}). 필요하면 /compact 하세요(에이전트가 모두 끝난 뒤라면 /clear도 됩니다).{kept}"
   },
   "tidy.clear.compact_unverified": {
-   "en": "[Tidy] Background agents were running, so /compact was sent, but the compaction was not confirmed. Check the window and run /compact if it did not compact.{kept}",
+   "en": "[tidy] Background agents were running, so /compact was sent, but the compaction was not confirmed. Check the window and run /compact if it did not compact.{kept}",
    "ko": "[정리] 백그라운드 에이전트가 있어 /compact를 보냈지만 압축을 확인하지 못했습니다. 창 상태를 확인하고 압축되지 않았으면 /compact 하세요.{kept}"
   },
   "tidy.clear.failed": {
-   "en": "[Tidy] Clearing the window failed ({why}). Run {hint} if needed.{kept}",
+   "en": "[tidy] Clearing the window failed ({why}). Run {hint} if needed.{kept}",
    "ko": "[정리] 창 비우기에 실패했습니다({why}). 필요하면 {hint} 하세요.{kept}"
   },
   "tidy.clear.idle_not_sent": {
-   "en": "[Tidy] The automatic idle tidy request was not sent ({why}). Nothing was typed into this window; it is tried again after the next input from a person once the conditions hold. {terms}",
+   "en": "[tidy] The automatic idle tidy request was not sent ({why}). Nothing was typed into this window; it is tried again after the next input from a person once the conditions hold. {terms}",
    "ko": "[정리] 자동 유휴 정리 요청을 보내지 않았습니다({why}). 이 창에는 아무것도 입력하지 않았고, 다음 사람 입력 뒤 조건이 맞으면 다시 시도합니다. {terms}"
   },
   "tidy.clear.idle_sent_unverified": {
-   "en": "[Tidy] The automatic idle tidy request was sent, but the window switch was not confirmed ({why}). {terms}",
+   "en": "[tidy] The automatic idle tidy request was sent, but the window switch was not confirmed ({why}). {terms}",
    "ko": "[정리] 자동 유휴 정리 요청은 보냈지만 창 전환을 확인하지 못했습니다({why}). {terms}"
   },
   "tidy.clear.kept": {
@@ -927,11 +927,11 @@
    "ko": " 카드는 저장돼 있어 압축 뒤 이 세션이 받습니다."
   },
   "tidy.clear.skipped": {
-   "en": "[Tidy] The window was not cleared automatically ({why}). Run {hint} if needed.{kept}",
+   "en": "[tidy] The window was not cleared automatically ({why}). Run {hint} if needed.{kept}",
    "ko": "[정리] 창을 자동으로 비우지 않았습니다({why}). 필요하면 {hint} 하세요.{kept}"
   },
   "tidy.clear.unverified": {
-   "en": "[Tidy] Clearing the window was requested, but its result was not confirmed. Check the window and run {hint} if needed.{kept}",
+   "en": "[tidy] Clearing the window was requested, but its result was not confirmed. Check the window and run {hint} if needed.{kept}",
    "ko": "[정리] 창 비우기를 요청했지만 결과를 확인하지 못했습니다. 창 상태를 확인하고 필요하면 {hint} 하세요.{kept}"
   },
   "tidy.compact.after": {
@@ -971,7 +971,7 @@
    "ko": "원본 대화 기록: {source}"
   },
   "tidy.continue.failed": {
-   "en": "[Tidy] The window was cleared, but {said} could not be typed ({why}). To continue, type {said}.",
+   "en": "[tidy] The window was cleared, but {said} could not be typed ({why}). To continue, type {said}.",
    "ko": "[정리] 창은 비웠지만 {said}를 넣지 못했습니다({why}). 이어서 하려면 {said}라고 입력하세요."
   },
   "tidy.continue.not_idle": {
@@ -979,15 +979,15 @@
    "ko": "새 세션이 입력 대기 상태가 되지 않았습니다"
   },
   "tidy.continue.skipped": {
-   "en": "[Tidy] The window was cleared, but {said} was not typed ({why}). To continue, type {said}.",
+   "en": "[tidy] The window was cleared, but {said} was not typed ({why}). To continue, type {said}.",
    "ko": "[정리] 창은 비웠지만 {said}를 넣지 않았습니다({why}). 이어서 하려면 {said}라고 입력하세요."
   },
   "tidy.continue.status_unverified": {
-   "en": "[Tidy] The automatic status summary was not confirmed. Waiting for the next input.",
+   "en": "[tidy] The automatic status summary was not confirmed. Waiting for the next input.",
    "ko": "[정리] 자동 현황 안내를 확인하지 못했습니다. 다음 입력을 기다립니다."
   },
   "tidy.continue.unverified": {
-   "en": "[Tidy] {said} was typed into the new session, but its delivery was not confirmed. If nothing happened, type {said}.",
+   "en": "[tidy] {said} was typed into the new session, but its delivery was not confirmed. If nothing happened, type {said}.",
    "ko": "[정리] 새 세션에 {said}를 넣었지만 전달을 확인하지 못했습니다. 진행되지 않았다면 {said}라고 입력하세요."
   },
   "tidy.history.available": {
@@ -1167,7 +1167,7 @@
    "ko": "화면을 읽지 못했습니다"
   },
   "tidy.notice.result": {
-   "en": "[Tidy result] {text}",
+   "en": "[tidy result] {text}",
    "ko": "[정리 결과] {text}"
   },
   "tidy.request.card_guide": {
@@ -1199,15 +1199,15 @@
    "ko": "반영 여부를 확인하지 못했습니다"
   },
   "tidy.runner.not_finished": {
-   "en": "[Tidy] The memory tidy did not finish. The card and existing memory are unchanged, and it continues in the next tidy. (reason: {reason})",
+   "en": "[tidy] The memory tidy did not finish. The card and existing memory are unchanged, and it continues in the next tidy. (reason: {reason})",
    "ko": "[정리] 기억 정리를 끝내지 못했습니다. 카드와 기존 기억은 그대로이고 다음 정리 때 이어서 처리됩니다. (사유: {reason})"
   },
   "tidy.runner.nothing_in_range": {
-   "en": "[Tidy] Nothing to tidy in the part that was read · {note}",
+   "en": "[tidy] Nothing to tidy in the part that was read · {note}",
    "ko": "[정리] 읽은 범위에는 정리할 대화가 없었습니다 · {note}"
   },
   "tidy.runner.nothing_new": {
-   "en": "[Tidy] No new conversation to tidy.",
+   "en": "[tidy] No new conversation to tidy.",
    "ko": "[정리] 새로 정리할 대화가 없습니다."
   },
   "tidy.runner.over_limit": {
@@ -1231,7 +1231,7 @@
    "ko": "앞 세션 작업 중: {harness} {sid}는 아직 하던 일을 진행 중입니다. 옛 창은 그 일이 끝난 뒤 닫힙니다."
   },
   "tidy.runner.stopped": {
-   "en": "[Tidy] The memory tidy stopped partway ({landed}). The rest continues in the next tidy. (reason: {reason}) — undo: mem tidy-undo {batch}",
+   "en": "[tidy] The memory tidy stopped partway ({landed}). The rest continues in the next tidy. (reason: {reason}) — undo: mem tidy-undo {batch}",
    "ko": "[정리] 기억 정리가 중간에 멈췄습니다({landed}). 나머지는 다음 정리 때 이어서 처리됩니다. (사유: {reason}) — 되돌리기: mem tidy-undo {batch}"
   },
   "tidy.runner.unreadable": {
