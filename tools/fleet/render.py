@@ -196,6 +196,15 @@ from .render_input import (  # noqa: F401
     _getmouse_event, _getmouse_xy, _MOUSE_HINT_MIN_WIDTH, _PROCESS_HINT_MIN_WIDTH,
     _prompt_button_segs, _prompt_hit_boxes, _prompt_segs, _prompt_variants,
 )
+
+# Moved classes report the module they were defined in before the split, so
+# tracebacks, reprs and pickles read as before (`<package>.render.<Class>`).
+for _moved_class in (
+    _CursesInput, _ExplorerView, _LiveOrderState, _PeerTagMap,
+):
+    if _moved_class.__module__.rpartition(".")[2].startswith("render_"):
+        _moved_class.__module__ = __name__
+del _moved_class
                            # wide 1-line grid now needs room for the options column too, so the
                            # dead-zone between the old 110 cutoff and wide's real ~138-col need
                            # is gone — 2-line cards are the PRIMARY layout, wide 1-line is rare)
