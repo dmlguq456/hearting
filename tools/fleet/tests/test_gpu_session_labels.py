@@ -71,6 +71,7 @@ class GPUSessionLabelsTest(unittest.TestCase):
         self.assertEqual(line.count("평가 담당 [b2]"), 1)
         self.assertIn("▸ 3", line)
 
+    @mock.patch.dict("os.environ", {"FLEET_NOW_LANG": "Korean"})   # Korean screen words
     def test_unbound_or_invalid_session_is_unattributed_while_gpu_remains_working(self):
         for claim in (None, owner("unknown"), {"kind": "session", "harness": "codex", "id": ""}):
             with self.subTest(claim=claim):
@@ -194,6 +195,7 @@ class GPUSessionLabelsTest(unittest.TestCase):
         self.assertNotIn("training detail", line)
         self.assertEqual(self.snapshot, before)
 
+    @mock.patch.dict("os.environ", {"FLEET_NOW_LANG": "Korean"})   # Korean screen words
     def test_idle_and_unknown_metrics_do_not_acquire_false_session_owners(self):
         self.gpu["processes"] = []
         line = self.rows([session()])[2]
@@ -207,6 +209,15 @@ class GPUSessionLabelsTest(unittest.TestCase):
         self.assertIn("UTIL/VRAM unknown", line)
         self.assertIn("미귀속", line)
         self.assertNotIn("idle", line)
+
+    def test_unattributed_reads_in_english_without_a_korean_declaration(self):
+        self.gpu["processes"] = [dict(self.process, session_owner=None,
+                                      gpu_placement="visible-device-access")]
+        self.gpu["observation_source"] = "proc-fallback"
+        with mock.patch.dict("os.environ", {"FLEET_NOW_LANG": "English"}):
+            line = self.rows([session()])[2]
+        self.assertIn("unattributed", line)
+        self.assertNotIn("미귀속", line)
 
     def test_long_expanded_alias_keeps_exact_tag_and_observed_script(self):
         render._ROUTE_FOLD = {render._GPU_FOLD_ALL: False}

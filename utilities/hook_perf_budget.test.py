@@ -166,13 +166,12 @@ _LINEAGE_WALKS = (
     ":1635) and 3 compact graph loads that list it twice each (:253, :264); every listing "
     "lstats every ledger, so stat calls go 12.9k -> 23.5k - removed by the follow-up that "
     "lets the sweep's effect boundaries share one lineage observation")
-_REWAKE = (
-    "hooks/dispatch-owner-rewake.py:413 - the registry scan's PeerReadContext has no "
-    "compact_lineage, so utilities/dispatch_seat_handover.py:197-198 reads every handover "
-    "snapshot and ledger on every {event} (660 -> 1,320 ledger opens), and "
-    "utilities/dispatch_seat_handover.py:668 resolves the jobs path again for every registry "
-    "row (:1643, through owns at hooks/dispatch-owner-rewake.py:423), so stat calls double "
-    "with the owner rows - removed by the rewake compact_lineage follow-up")
+_REWAKE_LISTINGS = (
+    "utilities/dispatch_seat_handover.py:104 - the rewake scan reads the published compact "
+    "rows and resolves its jobs path once (no ledger opens and no per-row path walk since "
+    "HL-13), but its one pinned lineage observation and the compact graph check still list "
+    "the lineage four times and lstat every ledger, so stat calls go 2.9k -> 5.5k - removed by "
+    "the lineage-observation follow-up that detects writer changes without an lstat per ledger")
 # Cases that grow with unrelated state today, with the rule(s) each breaks and
 # the evidence. This is a ratchet, not an allowance: an entry must still break
 # exactly its listed rules (a fix that makes one pass fails the test until the
@@ -182,8 +181,8 @@ KNOWN_GROWTH = {
     "prompt-two": (("stats",), _LINEAGE_WALKS),
     "prompt-stale": (("stats",), _LINEAGE_WALKS),
     "prompt-runner": (("stats",), _LINEAGE_WALKS),
-    "rewake-bash": (("growth", "stats"), _REWAKE.format(event="Bash call")),
-    "rewake-stop": (("growth", "stats"), _REWAKE.format(event="Stop")),
+    "rewake-bash": (("stats",), _REWAKE_LISTINGS),
+    "rewake-stop": (("stats",), _REWAKE_LISTINGS),
 }
 # The peer-module scans each case reaches; a renamed scan function would run
 # with its 2.5 s deadline again, so the lift itself is asserted.

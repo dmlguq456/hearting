@@ -523,6 +523,50 @@ def description(row):
     return "%s · %s · %s" % (owner_label(row.get("owner")), row.get("task", "?"), when)
 
 
+def ui_translator():
+    """The shared UI-text catalog (English by default, Korean when declared).
+
+    Admission and probe output never fail over their words: without a readable catalog a line
+    names its fields instead.
+    """
+    try:
+        import importlib.util
+        path = Path(__file__).resolve().parents[1] / "tools" / "i18n" / "ui_text.py"
+        spec = importlib.util.spec_from_file_location("ui_text", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.translator()
+    except Exception:  # noqa: BLE001 -- a missing or broken catalog must not change admission
+        return _plain_text
+
+
+def _plain_text(message, /, **fields):
+    if fields:
+        return "; ".join(f"{name}={value}" for name, value in fields.items())
+    return message.rsplit(".", 1)[-1].replace("_", " ")
+
+
+def gpu_status_text(status, t=None):
+    """The GPU-health line for a reader, drawn from the probe's fields.
+
+    ``summary`` stays in the payload as the probing host wrote it: an older reader or another
+    host's release prints that field, so it is data here, not screen text.
+    """
+    if not isinstance(status, dict):
+        return ""
+    count = status.get("running_count")
+    if "code" not in status or type(count) is not int:
+        return str(status.get("summary") or "")
+    t = t or ui_translator()
+    text = t("compute.gpu_unavailable")
+    if status.get("code") == "nvml-driver-mismatch":
+        text += t("compute.driver_mismatch", library=status.get("library_version") or t("compute.unknown"),
+                  module=status.get("module_version") or t("compute.unknown"))
+    if status.get("reboot_required"):
+        text += t("compute.reboot_needed")
+    return text + t("compute.running", count=count)
+
+
 def select(observation, leases, requested=None, share=False):
     if requested in {"", "-1"}:
         return []  # explicit CPU-only
@@ -531,10 +575,11 @@ def select(observation, leases, requested=None, share=False):
             or any(g.get("observation_source") for g in observation.get("gpus", []))):
         status = observation.get("gpu_status") or {}
         if status.get("summary"):
+            t = ui_translator()
             occupied = sorted({str(g["index"]) for g in observation.get("gpus", [])
                                if g.get("processes")}, key=int)
-            suffix = " · 장치 점유 " + ", ".join("GPU " + d for d in occupied) if occupied else ""
-            raise GPUUnavailable(status["summary"] + suffix + " · 새 GPU 실행 예약 불가")
+            suffix = t("compute.occupied", devices=", ".join("GPU " + d for d in occupied)) if occupied else ""
+            raise GPUUnavailable(gpu_status_text(status, t) + suffix + t("compute.no_new_run"))
         raise GPUUnavailable("GPU availability unknown: %s" % (observation.get("detail") or "probe unavailable"))
     gpus = {str(g["index"]): g for g in observation.get("gpus", [])}
     if not gpus and requested is None:
