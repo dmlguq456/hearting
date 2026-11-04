@@ -42,7 +42,12 @@ def retained_size(value, limit=None):
         total += sys.getsizeof(item)
         if limit is not None and total > limit:
             return total
-        if isinstance(item, Mapping):
+        storage = getattr(type(item), '_projection_storage', None)
+        if isinstance(storage, property):
+            # The accessor can return a temporary tuple of stored children.
+            # Its container is not retained; only those real children are.
+            pending.extend(storage.__get__(item, type(item)))
+        elif isinstance(item, Mapping):
             pending.extend(item.keys())
             pending.extend(item.values())
             attributes = getattr(item, '__dict__', None)
@@ -60,6 +65,7 @@ class ProjectionCache(OrderedDict):
         super().__init__()
         self.max_entries, self.max_bytes = max_entries, max_bytes
         self.weights, self.bytes = {}, 0
+        self.admissions = self.evictions = self.rejections = 0
 
     def __setitem__(self, key, value):
         self.remember(key, value)
@@ -70,10 +76,12 @@ class ProjectionCache(OrderedDict):
         if weight is None:
             weight = retained_size((key, value), self.max_bytes)
         if weight > self.max_bytes:
+            self.rejections += 1
             return
         super().__setitem__(key, value)
         self.weights[key] = weight
         self.bytes += weight
+        self.admissions += 1
         while len(self) > self.max_entries or self.bytes > self.max_bytes:
             self.popitem(last=False)
 
@@ -88,6 +96,7 @@ class ProjectionCache(OrderedDict):
     def popitem(self, last=True):
         key, value = super().popitem(last=last)
         self.bytes -= self.weights.pop(key)
+        self.evictions += 1
         return key, value
 
     def clear(self):

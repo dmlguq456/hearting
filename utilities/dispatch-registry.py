@@ -16,6 +16,7 @@ import stat
 import sys
 import time
 import uuid
+from collections.abc import Mapping
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "utilities")]
@@ -125,7 +126,39 @@ def parse_meta(pipe):
     return dict(part.split("=", 1) for part in pipe.split(",") if "=" in part)
 
 
-def _row_from_fields(order, fields, *, meta=None, meta_owned=False):
+class _ReadOnlyRegistryRow(Mapping):
+    """A passive row with the same text view, without retaining joined history.
+
+    Most historical rows are classified by status and metadata alone. A single
+    non-ASCII field can widen the entire joined line, so keeping that string for
+    every row needlessly duplicates a large registry. Control readers continue
+    to receive ordinary dictionaries; passive classifiers can request this view.
+    """
+
+    __slots__ = ("_values", "_fields")
+
+    def __init__(self, values, fields):
+        self._values, self._fields = values, tuple(fields)
+
+    def __getitem__(self, key):
+        return "\t".join(self._fields) if key == "raw" else self._values[key]
+
+    def __iter__(self):
+        for key in self._values:
+            if key == "legacy_read_only":
+                yield "raw"
+            yield key
+
+    def __len__(self):
+        return len(self._values) + 1
+
+    @property
+    def _projection_storage(self):
+        # Byte accounting inspects stored objects, without materializing raw.
+        return self._values, self._fields
+
+
+def _row_from_fields(order, fields, *, meta=None, meta_owned=False, defer_raw=False):
     """Build the established row contract from an already split six-field line."""
     if len(fields) != 6:
         return None
@@ -148,10 +181,15 @@ def _row_from_fields(order, fields, *, meta=None, meta_owned=False):
             validate_attempt_metadata(meta)
         except DispatchContractError as exc:
             contract_status = f"invalid:{exc.reason}"
-    return {"order": order, "timestamp": fields[0], "status": fields[1],
+    values = {"order": order, "timestamp": fields[0], "status": fields[1],
             "repo": fields[2], "worktree": fields[3], "slug": fields[4],
-            "pipe": fields[5], "meta": meta, "raw": "\t".join(fields),
-            "legacy_read_only": legacy, "attempt_contract_status": contract_status}
+            "pipe": fields[5], "meta": meta}
+    if not defer_raw:
+        values["raw"] = "\t".join(fields)
+    values.update(legacy_read_only=legacy, attempt_contract_status=contract_status)
+    if defer_raw:
+        return _ReadOnlyRegistryRow(values, fields)
+    return values
 
 
 def read_rows(jobs, *, lines=None):

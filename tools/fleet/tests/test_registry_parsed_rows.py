@@ -12,6 +12,108 @@ from fleet.collectors import dispatch
 
 
 class ParsedRegistryRowsTest(unittest.TestCase):
+    def test_source_eviction_releases_borrowed_native_projections_and_metadata(self):
+        import gc
+        import weakref
+        class Metadata(dict):
+            pass
+        references = []
+        def convert(record):
+            value = Metadata(dispatch._parse_pipe_meta(record.fields[5]))
+            references.append(weakref.ref(value))
+            return value
+        registry = dispatch._orphan_registry_module()
+        raw = 't\tdone\t/r\t/w\tone\tattempt_id=one,route_id=rt,route_node=work\n'
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(dispatch, '_registry_record_metadata', side_effect=convert), \
+                mock.patch.object(dispatch, '_PARSED_REGISTRY_RAW_BYTES_LIMIT', len(raw)+1):
+            first, second = Path(directory)/'first', Path(directory)/'second'
+            first.write_text(raw)
+            second.write_text(raw.replace('one', 'two'))
+            with dispatch._dispatch_registry_cache.registry_read_scope():
+                dispatch._orphan_registry_rows(first, registry, read_only=True)
+                dispatch._scan_registry_evidence([first])
+            self.assertIn(str(first), dispatch._ORPHAN_ROW_PROJECTIONS)
+            dispatch.parsed_registry_rows(second)
+            gc.collect()
+            self.assertNotIn(str(first), dispatch._ORPHAN_ROW_PROJECTIONS)
+            self.assertFalse(any(os.path.abspath(key[1]) == str(first)
+                                 for key in dispatch._REGISTRY_EVIDENCE_CACHE))
+            self.assertIsNone(references[0]())
+
+    def test_source_replacement_charges_removed_rows_before_reusing_the_cache(self):
+        from runtime_observation import ProjectionCache
+        registry = dispatch._orphan_registry_module()
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(dispatch, '_ORPHAN_ROW_PROJECTIONS', ProjectionCache(max_bytes=65536)):
+            path = Path(directory)/'jobs.log'
+            path.write_text('t\tdone\t/r\t/w\tone\tattempt_id=one,note=' + 'x'*100000 + '\n')
+            with dispatch._dispatch_registry_cache.registry_read_scope():
+                dispatch._orphan_registry_rows(path, registry, read_only=True)
+            self.assertIn(str(path), dispatch._ORPHAN_ROW_PROJECTIONS)
+            path.write_text('')
+            with dispatch._dispatch_registry_cache.registry_read_scope():
+                dispatch.parsed_registry_rows(path)
+            self.assertNotIn(str(path), dispatch._ORPHAN_ROW_PROJECTIONS)
+            self.assertEqual(dispatch._ORPHAN_ROW_PROJECTIONS.rejections, 1)
+
+    def test_fingerprint_budget_does_not_change_a_published_history(self):
+        from runtime_observation import ProjectionCache
+        evidence = dispatch.RegistryRouteEvidence(work={'note': '한글' * 100})
+        expected = dispatch.json.dumps(evidence, sort_keys=True, default=str)
+        with mock.patch.object(dispatch, '_REGISTRY_FINGERPRINT_CACHE', ProjectionCache(max_bytes=1)):
+            self.assertEqual(evidence.fingerprint(), expected)
+            self.assertEqual(evidence.fingerprint(), expected)
+            self.assertFalse(dispatch._REGISTRY_FINGERPRINT_CACHE)
+            self.assertEqual(dispatch._REGISTRY_FINGERPRINT_CACHE.rejections, 2)
+
+    def test_passive_rows_defer_wide_raw_text_without_changing_the_mapping(self):
+        registry = dispatch._orphan_registry_module()
+        fields = ('t', 'done', '/repo', '/work', '한글🙂',
+                  'note=' + 'x' * 100000 + ',attempt_id=att-one')
+        eager = registry._row_from_fields(3, fields)
+        passive = registry._row_from_fields(3, fields, defer_raw=True)
+        self.assertIs(type(eager), dict)
+        self.assertNotIn('raw', passive._values)
+        self.assertEqual(list(passive), list(eager))
+        self.assertEqual(dict(passive), eager)
+        self.assertEqual(passive.get('raw'), eager['raw'])
+        self.assertNotIn('raw', passive._values)  # reads do not grow the cache
+        self.assertEqual(registry.classify(passive, None, {}),
+                         registry.classify(eager, None, {}))
+        from runtime_observation import retained_size
+        self.assertLess(retained_size(passive), retained_size(eager) // 2)
+        with self.assertRaises(TypeError):
+            passive['status'] = 'running'
+
+    def test_native_passive_adapter_borrows_rows_but_public_adapter_returns_dicts(self):
+        registry = dispatch._orphan_registry_module()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'jobs.log'
+            path.write_text('t\tdone\t/r\t/w\t한글\tattempt_id=one,note=hello\n')
+            with dispatch._dispatch_registry_cache.registry_read_scope():
+                passive = dispatch._orphan_registry_rows(path, registry, read_only=True)
+                public = dispatch._orphan_registry_rows(path, registry)
+            self.assertNotIn('raw', passive[0]._values)
+            self.assertIs(type(public[0]), dict)
+            self.assertEqual(dict(passive[0]), public[0])
+            public[0]['meta']['note'] = 'changed by caller'
+            self.assertEqual(passive[0]['meta']['note'], 'hello')
+
+    def test_native_adapter_shares_equal_text_but_preserves_raw_whitespace(self):
+        registry = dispatch._orphan_registry_module()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'jobs.log'
+            path.write_text('t\tdone\t/r\t/w\tone\tattempt_id=one,note=single spaces\n'
+                            't\tdone\t/r\t/w\ttwo\tattempt_id=two,note=double  spaces\n')
+            with dispatch._dispatch_registry_cache.registry_read_scope():
+                parsed = dispatch.parsed_registry_rows(path)
+                passive = dispatch._orphan_registry_rows(path, registry, read_only=True)
+            self.assertIs(passive[0]['meta']['note'], parsed[0][2]['note'])
+            self.assertEqual(parsed[1][2]['note'], 'double spaces')
+            self.assertEqual(passive[1]['meta']['note'], 'double  spaces')
+            self.assertEqual([dict(row) for row in passive], registry.read_rows(path))
+
     def test_oversized_reuse_entries_leave_the_current_observation_usable(self):
         from types import SimpleNamespace
         from runtime_observation import ProjectionCache

@@ -62,7 +62,7 @@ from dispatch_completion_join import read_supervisor_phase_state, read_join_obse
 from dispatch_subsession_advance import row_is_registered_only  # noqa: E402
 from dispatch_attempt_policy import decide_attempt, terminal_conflict_pending  # noqa: E402
 import dispatch_registry_cache as _dispatch_registry_cache  # noqa: E402
-from runtime_observation import ProjectionCache  # noqa: E402
+from runtime_observation import ProjectionCache, retained_size  # noqa: E402
 from codex_dispatch_terminal import terminal_envelope_observed  # noqa: E402
 from claude_project_dir import encode_project_dir  # noqa: E402
 from attempt_view import owned_attempt_log_path as _shared_owned_attempt_log_path  # noqa: E402
@@ -262,10 +262,11 @@ _PARSED_REGISTRY_INDEXES = OrderedDict()
 _PARSED_REGISTRY_LINE_COUNTS = {}
 _PARSED_REGISTRY_SEGMENTS = {}
 _PARSED_REGISTRY_SOURCES = {}
+_PARSED_REGISTRY_PROOFS = {}
 _PARSED_REGISTRY_DIAGNOSTICS = OrderedDict()
 _PARSED_REGISTRY_PATH_ORDER = OrderedDict()
 _PARSED_REGISTRY_ROWS_LIMIT = 32
-_PARSED_REGISTRY_RAW_BYTES_LIMIT = 128 * 1024 * 1024
+_PARSED_REGISTRY_RAW_BYTES_LIMIT = 112 * 1024 * 1024
 _PARSED_REGISTRY_CACHE_LOCK = threading.RLock()
 
 
@@ -285,15 +286,21 @@ def _registry_generation_is_current(path, generation):
                               info.st_mtime_ns, info.st_ctime_ns)
 
 
-def _drop_registry_path_locked(absolute):
+def _drop_registry_path_locked(absolute, *, preserve_projections=False):
     """Release every parsed-cache reference owned by one registry path."""
     for cache in (_PARSED_REGISTRY_ROWS, _PARSED_REGISTRY_INDEXES,
                   _PARSED_REGISTRY_LINE_COUNTS, _PARSED_REGISTRY_SEGMENTS,
-                  _PARSED_REGISTRY_DIAGNOSTICS, _PARSED_REGISTRY_SOURCES):
+                  _PARSED_REGISTRY_DIAGNOSTICS, _PARSED_REGISTRY_SOURCES,
+                  _PARSED_REGISTRY_PROOFS):
         for key in tuple(cache):
             if key[0] == absolute:
                 cache.pop(key, None)
     _PARSED_REGISTRY_PATH_ORDER.pop(absolute, None)
+    if not preserve_projections:
+        _ORPHAN_ROW_PROJECTIONS.pop(absolute, None)
+        for key in tuple(_REGISTRY_EVIDENCE_CACHE):
+            if os.path.abspath(key[1]) == absolute:
+                _REGISTRY_EVIDENCE_CACHE.pop(key, None)
 
 
 def _touch_registry_path_locked(absolute, key):
@@ -400,18 +407,81 @@ def _raise_registry_read_error(path, *, ignore_missing=False):
         raise error
 
 
-_ORPHAN_ROW_PROJECTIONS = ProjectionCache(max_bytes=640 * 1024 * 1024)
+_ORPHAN_ROW_PROJECTIONS = ProjectionCache(max_bytes=80 * 1024 * 1024)
 
 
-def _registry_projection_charge(rows, *, copies):
-    """Bound native schema copies without traversing every child a second time.
+class _RegistryRowsProof:
+    """Identity and append proof without retaining the parsed metadata graph."""
+    __slots__ = ('token', 'rows', 'policy', 'owned')
 
-    Charge repeated text at its Python string size and 8 KiB of fixed container
-    overhead per row. This is a conservative retention estimate, not RSS.
-    Custom converters retain the exact graph walk instead.
+    def __init__(self, rows, policy=None):
+        self.owned = policy is not None
+        self.token = object() if self.owned else rows
+        self.policy = policy
+        self.rows = (tuple((order, hashlib.sha256('\t'.join(fields).encode('utf-8')).digest())
+                           for order, fields, _meta in rows) if self.owned else rows)
+
+    @property
+    def _projection_storage(self):
+        return self.token, self.rows, self.policy
+
+
+def _registry_rows_proof(path, rows):
+    absolute = os.path.abspath(os.fspath(path))
+    with _PARSED_REGISTRY_CACHE_LOCK:
+        key = _PARSED_REGISTRY_PATH_ORDER.get(absolute)
+        if key is not None and _PARSED_REGISTRY_ROWS.get(key) is rows:
+            proof = _PARSED_REGISTRY_PROOFS.get(key)
+            if proof is None:
+                proof = _RegistryRowsProof(rows, _PARSED_REGISTRY_SOURCES[key])
+                _PARSED_REGISTRY_PROOFS[key] = proof
+            return proof
+    return _RegistryRowsProof(rows)
+
+
+def _native_registry_converter(converter):
+    filename = getattr(getattr(converter, '__code__', None), 'co_filename', None)
+    return (isinstance(filename, str) and os.path.realpath(filename) ==
+            str(_ROOT / 'utilities' / 'dispatch-registry.py'))
+
+
+def _orphan_projection_charge(parsed, converted, projection, proof):
+    """Charge native-owned tables/text, borrowing only the retained input graph.
+
+    Source eviction releases these projections too. A replacement recharges
+    the old projection against its new input before allowing row reuse, so a
+    removed row's formerly shared strings become owned bytes immediately.
+    Flat native row metadata needs no recursive walk over the history graph.
     """
-    return (copies * sum(sys.getsizeof(field) for _order, fields, _meta in rows
-                         for field in fields) + 8192 * len(rows))
+    source = {order: (fields, meta) for order, fields, meta in parsed}
+    charge = retained_size(proof) + sys.getsizeof(converted) + sys.getsizeof(projection) + 1024
+    field_names = dict(timestamp=0, status=1, repo=2, worktree=3, slug=4, pipe=5)
+    for order, held in converted.items():
+        fields, row = held
+        input_fields, input_meta = source.get(order, ((), {}))
+        charge += sys.getsizeof(order) + sys.getsizeof(held)
+        if fields is not input_fields:
+            charge += sys.getsizeof(fields)
+            charge += sum(sys.getsizeof(value) for index, value in enumerate(fields)
+                          if index >= len(input_fields) or value is not input_fields[index])
+        if row is None:
+            continue
+        values = row._values
+        charge += sys.getsizeof(row) + sys.getsizeof(values)
+        source_keys = {name: name for name in input_meta}
+        for name, value in values.items():
+            charge += sys.getsizeof(name)
+            if name == 'meta':
+                charge += sys.getsizeof(value)
+                for key, text in value.items():
+                    if source_keys.get(key) is not key:
+                        charge += sys.getsizeof(key)
+                    if input_meta.get(key) is not text:
+                        charge += sys.getsizeof(text)
+            elif name not in field_names or (len(input_fields) <= field_names[name]
+                                              or value is not input_fields[field_names[name]]):
+                charge += sys.getsizeof(value)
+    return charge
 
 
 def _orphan_registry_rows(path, registry, *, read_only=False):
@@ -420,9 +490,12 @@ def _orphan_registry_rows(path, registry, *, read_only=False):
     _raise_registry_read_error(path, ignore_missing=True)
     key = os.path.abspath(os.fspath(path))
     converter = registry._row_from_fields
+    native = _native_registry_converter(converter)
+    converter_options = {'defer_raw': True} if native else {}
+    proof = _registry_rows_proof(path, parsed)
     with _PARSED_REGISTRY_CACHE_LOCK:
         held = _ORPHAN_ROW_PROJECTIONS.get(key)
-    if held is not None and held[0] is converter and held[1] is parsed:
+    if held is not None and held[0] is converter and held[1].token is proof.token:
         if read_only:
             return held[3]
         return [dict(row, meta=dict(row["meta"])) for _fields, row in held[2].values()
@@ -454,8 +527,18 @@ def _orphan_registry_rows(path, registry, *, read_only=False):
             # Fleet's display normalization. Transfer its fresh dict directly;
             # _row_from_fields still owns schema validation and row construction.
             raw_meta = record.completion_metadata()
+            # The comma parser and display parser agree on most strings. Keep
+            # the exact raw values where whitespace normalization differs, but
+            # borrow equal immutable keys/values instead of retaining a second
+            # copy of the whole history after the parser's small LRU has moved on.
+            parsed_keys = {name: name for name in parsed_meta}
+            raw_meta = {parsed_keys.get(name, name):
+                        (parsed_meta[name] if name in parsed_meta
+                         and parsed_meta[name] == value else value)
+                        for name, value in raw_meta.items()}
             row = registry._row_from_fields(
-                physical_order, fields, meta=raw_meta, meta_owned=True)
+                physical_order, fields, meta=raw_meta, meta_owned=True,
+                **converter_options)
             converted[physical_order] = (fields, row)
             record = next(raw_records, None)
             if row is not None:
@@ -474,17 +557,16 @@ def _orphan_registry_rows(path, registry, *, read_only=False):
             meta.pop("_name", None)
         row = registry._row_from_fields(
             physical_order, fields, meta=meta, meta_owned=simple,
+            **converter_options,
         )
         converted[physical_order] = (fields, row)
         if row is not None:
             rows.append(row)
     projection = tuple(rows)
     with _PARSED_REGISTRY_CACHE_LOCK:
-        native = getattr(getattr(converter, '__code__', None), 'co_filename', None)
-        weight = (_registry_projection_charge(parsed, copies=8)
-                  if isinstance(native, str) and os.path.realpath(native) ==
-                  str(_ROOT / 'utilities' / 'dispatch-registry.py') else None)
-        _ORPHAN_ROW_PROJECTIONS.remember(key, (converter, parsed, converted, projection), weight=weight)
+        weight = (_orphan_projection_charge(parsed, converted, projection, proof)
+                  if native and proof.owned else None)
+        _ORPHAN_ROW_PROJECTIONS.remember(key, (converter, proof, converted, projection), weight=weight)
         if key in _ORPHAN_ROW_PROJECTIONS:
             _ORPHAN_ROW_PROJECTIONS.move_to_end(key)
         while len(_ORPHAN_ROW_PROJECTIONS) > _PARSED_REGISTRY_ROWS_LIMIT:
@@ -551,12 +633,16 @@ def _remember_parsed_registry_rows(path, generation, rows, complete_count,
             _PARSED_REGISTRY_ROWS.move_to_end(key)
             _touch_registry_path_locked(absolute, key)
             return _PARSED_REGISTRY_ROWS[key]
-        _drop_registry_path_locked(absolute)
+        _drop_registry_path_locked(absolute, preserve_projections=True)
         _PARSED_REGISTRY_ROWS[key] = result
         _PARSED_REGISTRY_LINE_COUNTS[key] = complete_count
         _PARSED_REGISTRY_SEGMENTS[key] = tuple(segments) if segments is not None else None
         _PARSED_REGISTRY_SOURCES[key] = _registry_parse_sources()
         _PARSED_REGISTRY_DIAGNOSTICS[key] = (None, malformed)
+        held = _ORPHAN_ROW_PROJECTIONS.get(absolute)
+        if held is not None and held[1].owned and _native_registry_converter(held[0]):
+            _ORPHAN_ROW_PROJECTIONS.remember(absolute, held, weight=
+                _orphan_projection_charge(result, held[2], held[3], held[1]))
         _touch_registry_path_locked(absolute, key)
         _trim_registry_path_order_locked()
         return result
@@ -665,11 +751,15 @@ def _build_registry_derived_index(rows):
     job_order = []
     all_by_attempt = {}
     latest_by_attempt = {}
+    children_by_parent = {}
     for registry_order, fields, metadata in rows:
         attempt_id = metadata.get("attempt_id")
         if attempt_id:
             all_by_attempt.setdefault(attempt_id, []).append((fields, metadata))
             latest_by_attempt[attempt_id] = (registry_order, fields, metadata)
+            parent = metadata.get('parent_attempt_id')
+            if parent:
+                children_by_parent.setdefault(parent, set()).add(attempt_id)
         if not "\t".join(fields).strip():
             continue
         slug = fields[4]
@@ -683,6 +773,10 @@ def _build_registry_derived_index(rows):
         "latest_jobs": MappingProxyType(latest_jobs),
         "all_by_attempt": MappingProxyType(
             {attempt: tuple(items) for attempt, items in all_by_attempt.items()}),
+        "attempt_positions": MappingProxyType(
+            {attempt: position for position, attempt in enumerate(all_by_attempt)}),
+        "children_by_parent": MappingProxyType(
+            {parent: frozenset(attempts) for parent, attempts in children_by_parent.items()}),
         "latest_by_attempt": MappingProxyType(latest_by_attempt),
     })
 
@@ -945,7 +1039,7 @@ def _terminal_row_process_alive(meta, live_attempt_ids=None):
 
 
 _NATIVE_TERMINAL_PROOF = _terminal_row_process_alive
-_JOB_SELECTION_CACHE = ProjectionCache(max_entries=32, max_bytes=32 * 1024 * 1024)
+_JOB_SELECTION_CACHE = ProjectionCache(max_entries=32, max_bytes=12 * 1024 * 1024)
 
 
 def _job_selection(derived, live_attempt_ids, *, include_stall):
@@ -1645,19 +1739,24 @@ def _parent_extinction_rows(paths, parent_ids=None):
             parsed = parsed_registry_rows(path)
         except OSError:
             continue
-        per_path = _registry_derived_index(path, parsed)["all_by_attempt"]
-        for attempt_id, evidence in per_path.items():
+        derived = _registry_derived_index(path, parsed)
+        per_path = derived["all_by_attempt"]
+        candidates = per_path
+        if parent_ids is not None:
+            selected = set(parent_ids).intersection(per_path)
+            for parent in parent_ids:
+                selected.update(derived['children_by_parent'].get(parent, ()))
+            candidates = sorted(selected, key=derived['attempt_positions'].__getitem__)
+        for attempt_id in candidates:
             if attempt_id in seen:
                 continue
-            seen.add(attempt_id)
+            evidence = per_path[attempt_id]
             # The resolver reads only the exact parent and its siblings for
             # route conflicts. Keep every duplicate of those attempts, with
             # first-registry precedence even for attempts excluded here.
-            if (parent_ids is not None and attempt_id not in parent_ids
-                    and not any(meta.get("parent_attempt_id") in parent_ids
-                                for _fields, meta in evidence)):
-                continue
             rows[attempt_id] = tuple((fields, dict(meta)) for fields, meta in evidence)
+        # Even an unselected earlier record owns precedence over a later file.
+        seen.update(per_path)
     return tuple(item for evidence in rows.values() for item in evidence)
 
 
@@ -3562,7 +3661,8 @@ def _iso_to_epoch(ts):
     return dt.timestamp()
 
 
-_REGISTRY_EVIDENCE_CACHE = ProjectionCache(max_bytes=384 * 1024 * 1024)
+_REGISTRY_EVIDENCE_CACHE = ProjectionCache(max_bytes=64 * 1024 * 1024)
+_REGISTRY_FINGERPRINT_CACHE = ProjectionCache(max_entries=8192, max_bytes=4 * 1024 * 1024)
 
 
 class RegistryRouteEvidence(dict):
@@ -3570,12 +3670,19 @@ class RegistryRouteEvidence(dict):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._fingerprint = None
+        self._fingerprint_token = object()
 
     def fingerprint(self):
-        if self._fingerprint is None:
-            self._fingerprint = json.dumps(self, sort_keys=True, default=str)
-        return self._fingerprint
+        with _PARSED_REGISTRY_CACHE_LOCK:
+            held = _REGISTRY_FINGERPRINT_CACHE.get(self._fingerprint_token)
+            if held is not None:
+                _REGISTRY_FINGERPRINT_CACHE.move_to_end(self._fingerprint_token)
+                return held
+        value = json.dumps(self, sort_keys=True, default=str)
+        with _PARSED_REGISTRY_CACHE_LOCK:
+            _REGISTRY_FINGERPRINT_CACHE.remember(self._fingerprint_token, value,
+                                               weight=sys.getsizeof(value) + 128)
+        return value
 
 
 class RegistryEvidence(dict):
@@ -3586,16 +3693,18 @@ def _registry_evidence_for_path(path, rows):
     """Fold only appended records, without mutating any published history graph."""
     key = (type(path), os.fspath(path))
     functions = (_attempt_contract, _infer_harness, _attempt_attention, _iso_to_epoch)
+    proof = _registry_rows_proof(path, rows)
     with _PARSED_REGISTRY_CACHE_LOCK:
         held = _REGISTRY_EVIDENCE_CACHE.get(key)
     same_functions = held is not None and all(a is b for a, b in zip(functions, held[1]))
-    if same_functions and held[0] is rows:
+    if same_functions and held[0].token is proof.token:
         return held[2], held[3]
-    prefix = (same_functions and len(rows) >= len(held[0])
-              and all(old is new or old == new for old, new in zip(held[0], rows)))
+    prefix = (same_functions and held[0].owned == proof.owned
+              and held[0].policy == proof.policy and len(rows) >= len(held[0].rows)
+              and all(old is new or old == new for old, new in zip(held[0].rows, proof.rows)))
     path_result = dict(held[2]) if prefix else {}
     path_attempts = dict(held[3]) if prefix else {}
-    suffix = rows[len(held[0]):] if prefix else rows
+    suffix = rows[len(held[0].rows):] if prefix else rows
     changed_routes, changed_nodes = set(), set()
     for registry_order, fields, parsed_meta in suffix:
         # Parsed metadata is immutable and every consumer below is read-only.
@@ -3694,14 +3803,7 @@ def _registry_evidence_for_path(path, rows):
             **attempt_contract,
         }
     with _PARSED_REGISTRY_CACHE_LOCK:
-        native = all(getattr(getattr(fn, '__code__', None), 'co_filename', None) == __file__
-                     for fn in functions)
-        if not native:
-            # Exact custom-graph accounting includes its later memoized string.
-            for evidence in path_result.values():
-                evidence.fingerprint()
-        weight = _registry_projection_charge(rows, copies=4) if native else None
-        _REGISTRY_EVIDENCE_CACHE.remember(key, (rows, functions, path_result, path_attempts), weight=weight)
+        _REGISTRY_EVIDENCE_CACHE.remember(key, (proof, functions, path_result, path_attempts))
         if key in _REGISTRY_EVIDENCE_CACHE:
             _REGISTRY_EVIDENCE_CACHE.move_to_end(key)
         while len(_REGISTRY_EVIDENCE_CACHE) > _PARSED_REGISTRY_ROWS_LIMIT:

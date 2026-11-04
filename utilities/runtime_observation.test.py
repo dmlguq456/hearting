@@ -75,6 +75,13 @@ class PassObservationTest(unittest.TestCase):
 
 
 class ProjectionOwnershipTest(unittest.TestCase):
+    def test_policy_mocks_do_not_fabricate_projection_storage(self):
+        from runtime_observation import retained_size
+        from unittest.mock import Mock
+        value = Mock()
+        self.assertEqual(retained_size(value), sys.getsizeof(value))
+        self.assertEqual(value.mock_calls, [])
+
     def test_byte_limit_releases_old_graphs_and_rejects_oversized_graph(self):
         from runtime_observation import ProjectionCache
         import weakref, gc
@@ -95,6 +102,15 @@ class ProjectionOwnershipTest(unittest.TestCase):
         cache.clear()
         self.assertEqual(cache.bytes, 0)
         self.assertFalse(cache.weights)
+
+    def test_projection_admission_counters_expose_capacity_churn(self):
+        from runtime_observation import ProjectionCache
+        cache = ProjectionCache(max_entries=2, max_bytes=10)
+        cache.remember('a', 1, weight=6)
+        cache.remember('b', 2, weight=6)
+        cache.remember('large', 3, weight=11)
+        self.assertEqual((cache.admissions, cache.evictions, cache.rejections), (2, 1, 1))
+        self.assertEqual(list(cache), ['b'])
 
     def test_replacement_and_delete_release_byte_accounting(self):
         from runtime_observation import ProjectionCache, retained_size

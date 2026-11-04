@@ -15,6 +15,7 @@ import uuid
 import functools
 import subprocess
 import threading
+import copy
 from collections import OrderedDict
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
@@ -242,7 +243,29 @@ def recorded_governor_identity(worker: dict) -> dict | None:
         return None
     try:
         path = Path(worker['artifact_root']) / '.runtime/model-worker-governor/state.json'
-        state = json.loads(path.read_text())
+        if passive_read_active():
+            # Many historical resources name the same owner/claim journal.
+            # Observe its text afresh once per scan, then reuse only its pure
+            # parse when those bytes and the parser are unchanged.
+            scope = _PASSIVE_READ.get()
+            reads = scope.get('governor-text')
+            if reads is None:
+                from runtime_observation import ProjectionCache
+                reads = scope['governor-text'] = ProjectionCache(max_entries=32, max_bytes=2 * 1024 * 1024)
+            key = (str(path), Path.read_text)
+            observed = reads.get(key)
+            if observed is None:
+                raw = path.read_text()
+                observed = raw, raw.encode('utf-8')
+                reads.remember(key, observed, weight=sum(map(sys.getsizeof, observed))
+                               + sys.getsizeof(key) + sys.getsizeof(key[0]) + 128)
+            else:
+                reads.move_to_end(key)
+            raw, encoded = observed
+            state = passive_parse(('governor-document', str(path)), encoded,
+                                  (json.loads,), lambda: json.loads(raw))
+        else:
+            state = json.loads(path.read_text())
         identities = {}
         for claim in state.get('claims', {}).values():
             identity = claim.get('claimant_identity') or {}
@@ -262,7 +285,8 @@ def recorded_governor_identity(worker: dict) -> dict | None:
                 identities[(boot, identity.get('boot_host'))] = {**identity, 'boot_id': boot}
         if len(identities) > 1:
             return {'boot_id': None}
-        return next(iter(identities.values())) if identities else None
+        value = next(iter(identities.values())) if identities else None
+        return copy.deepcopy(value) if passive_read_active() else value
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return None
 
@@ -285,7 +309,6 @@ def legacy_resource_identity(run: dict) -> dict | None:
             # Strict read_text() refused damaged text; the pinned lines are its decode.
             if pinned_view.has_invalid_utf8:
                 return None
-            pinned_lines = dispatch_registry_cache.registry_text_lines(jobs_path)
             signature = (path, *pinned_view.signature)
         else:
             try:
@@ -309,12 +332,16 @@ def legacy_resource_identity(run: dict) -> dict | None:
             if signature is not None:
                 _LEGACY_RESOURCE_IDENTITY_CACHE[path] = (signature, owners_by_attempt)
         if pinned_view is not None and aid and aid not in owners_by_attempt:
-            # The pinned pass already holds every line. Parse only rows that can
-            # name this attempt, not the whole registry's metadata on each append.
+            # Inspect already split fields only on a miss. Materializing every
+            # historical raw line before the cache lookup copied the complete
+            # registry even when this exact owner's generation was unchanged.
             needle = 'attempt_id=' + aid
+            field_rows = ((record.fields for record in pinned_view.records)
+                          if pinned_view._prefix_reuse_eligible and not pinned_view.has_partial_tail
+                          else (line.split('\t') for line in
+                                dispatch_registry_cache.registry_text_lines(jobs_path)))
             owners_by_attempt[aid] = [
-                meta for line in pinned_lines if needle in line
-                for fields in (line.split('\t'),) if len(fields) == 6
+                meta for fields in field_rows if len(fields) == 6 and needle in fields[5]
                 for meta in (parse_registry_metadata(fields[5]),)
                 if meta.get('attempt_id') == aid]
         owners = owners_by_attempt.get(aid, [])
@@ -354,7 +381,8 @@ def reboot_evidence(run: dict) -> dict | None:
         return None
     try:
         boot = _boot_epoch()
-        uptime = float(Path('/proc/uptime').read_text().split()[0])
+        uptime = passive_memo(('resource-uptime', Path.read_text),
+                              lambda: float(Path('/proc/uptime').read_text().split()[0]))
         start, launched = int(run['starttime']), float(run['started_at'])
         if (boot and 0 < launched < boot and start > uptime * os.sysconf('SC_CLK_TCK')
                 and run.get('pid_namespace') == os.readlink('/proc/self/ns/pid')):
