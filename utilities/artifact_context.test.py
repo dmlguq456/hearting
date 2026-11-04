@@ -16,6 +16,7 @@ import artifact_producer as P
 import dispatch_terminal_commit as T
 import dispatch_completion_join as JOIN
 import codex_dispatch_terminal as terminal
+from split_module_fixture import patch_split
 
 _PRODUCER_FIXTURE_SPEC = importlib.util.spec_from_file_location(
     "producer_fixture_for_terminal_artifact_context", Path(__file__).with_name("artifact_producer.test.py"))
@@ -46,9 +47,9 @@ class ArtifactContextTest(unittest.TestCase):
         values = {"AGENT_ARTIFACT_ROOT": str(self.root), "AGENT_ROUTE_NODE": "test",
                   "AGENT_DISPATCH_WORKTREE": str(self.source)}
         values.update(env or {})
-        with mock.patch.object(P, "load_route", return_value=self.route), \
-             mock.patch.object(P, "route_cycle_for", return_value=self.cycle), \
-             mock.patch.object(P, "cycle_dir", return_value=self.root / "fixture-cycle"):
+        with patch_split(P, "load_route", return_value=self.route), \
+             patch_split(P, "route_cycle_for", return_value=self.cycle), \
+             patch_split(P, "cycle_dir", return_value=self.root / "fixture-cycle"):
             return C.resolve_context(route=self.route, environ=values, **kwargs)
 
     def test_role_selection_uses_exact_declared_output_and_scope(self):
@@ -226,17 +227,17 @@ class ArtifactContextTest(unittest.TestCase):
         values = {"AGENT_ARTIFACT_ROOT": str(self.root), "AGENT_ROUTE_NODE": "test",
                   "AGENT_DISPATCH_WORKTREE": str(self.source),
                   "AGENT_ARTIFACT_CYCLE_ID": "cyc_stale"}
-        with mock.patch.object(P, "load_route", return_value=self.route), \
-             mock.patch.object(P, "route_cycle_for", return_value=None):
+        with patch_split(P, "load_route", return_value=self.route), \
+             patch_split(P, "route_cycle_for", return_value=None):
             with self.assertRaisesRegex(C.ArtifactContextError, "artifact-cycle-unbound"):
                 C.resolve_context(route=self.route, environ=values)
 
     def test_explicit_node_cannot_reselect_a_different_bound_node(self):
         values = {"AGENT_ARTIFACT_ROOT": str(self.root), "AGENT_ROUTE_NODE": "test",
                   "AGENT_DISPATCH_WORKTREE": str(self.source)}
-        with mock.patch.object(P, "load_route", return_value=self.route), \
-             mock.patch.object(P, "route_cycle_for", return_value=self.cycle), \
-             mock.patch.object(P, "cycle_dir", return_value=self.root / "fixture-cycle"):
+        with patch_split(P, "load_route", return_value=self.route), \
+             patch_split(P, "route_cycle_for", return_value=self.cycle), \
+             patch_split(P, "cycle_dir", return_value=self.root / "fixture-cycle"):
             with self.assertRaisesRegex(C.ArtifactContextError, "route-node-mismatch"):
                 C.resolve_context(route=self.route, environ=values, node_id="other")
 
@@ -246,11 +247,11 @@ class ArtifactContextTest(unittest.TestCase):
         admission = mock.Mock(allow=True)
         values = {"AGENT_ARTIFACT_ROOT": str(self.root), "AGENT_ROUTE_NODE": "test",
                   "AGENT_DISPATCH_WORKTREE": str(self.source), "AGENT_ARTIFACT_CYCLE_ID": "cyc_old"}
-        with mock.patch.object(P, "load_route", return_value=self.route), \
-             mock.patch.object(P, "route_cycle_for") as route_cycle, \
-             mock.patch.object(P, "read_cycle_record", return_value=bound), \
-             mock.patch.object(P, "cycle_route_admission", return_value=admission), \
-             mock.patch.object(P, "cycle_dir", return_value=self.root / "owner-cycle"), \
+        with patch_split(P, "load_route", return_value=self.route), \
+             patch_split(P, "route_cycle_for") as route_cycle, \
+             patch_split(P, "read_cycle_record", return_value=bound), \
+             patch_split(P, "cycle_route_admission", return_value=admission), \
+             patch_split(P, "cycle_dir", return_value=self.root / "owner-cycle"), \
              mock.patch("dispatch_terminal_commit.load_producer_binding", return_value=loaded):
             context = C.resolve_context(route=self.route, environ=values, parent_attempt_id="att_owner")
         self.assertEqual(context.cycle_record["cycle_id"], "cyc_owner")
@@ -267,9 +268,9 @@ class ArtifactContextTest(unittest.TestCase):
             "AGENT_DISPATCH_ATTEMPT_ID": "att_review", "AGENT_DISPATCH_UNIT": "qa/code-review",
             "AGENT_REVIEW_OUTPUT": str(output), "AGENT_REVIEW_CYCLE_ID": review["cycle_id"],
             "AGENT_REVIEW_PRODUCER_ID": review["producer_id"]}
-        with mock.patch.object(P, "load_route", return_value=self.route), \
-             mock.patch.object(P, "read_cycle_record", return_value=review), \
-             mock.patch.object(P, "cycle_dir", return_value=self.root / "fixture-cycle"), \
+        with patch_split(P, "load_route", return_value=self.route), \
+             patch_split(P, "read_cycle_record", return_value=review), \
+             patch_split(P, "cycle_dir", return_value=self.root / "fixture-cycle"), \
              mock.patch("dispatch_contract.validate_review_output_binding", return_value={
                  "cycle_id": review["cycle_id"], "producer_id": review["producer_id"],
                  "output_path": str(output)}):
@@ -431,7 +432,7 @@ class BoundTerminalArtifactTest(PRODUCER_FIXTURE.ProducerTestBase):
         explicit.write_bytes(canonical.read_bytes())
         canonical.rename(saved)
         try:
-            with mock.patch.object(P, "route_cycle_for", return_value=None):
+            with patch_split(P, "route_cycle_for", return_value=None):
                 context = C.resolve_context(
                     route=self.route, route_file=explicit,
                     environ={"AGENT_DISPATCH_WORKTREE": str(self.source)},

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import importlib.util, json, os, subprocess, sys, tempfile, time, unittest
 from pathlib import Path
+from split_module_fixture import patch_split
 
 ROOT=Path(__file__).resolve().parents[1]
 def load(name,path):
@@ -439,7 +440,7 @@ class CycleLayoutTest(unittest.TestCase):
   (latest_spec/"b/prd.md").write_text("# B\nlatest\n")
   winner=self._publish_components(l,lf,lb)
   before=self.P._spec_bytes(spec)
-  with mock.patch.object(self.P,"_commit_shared",side_effect=RuntimeError("post-publish interruption")):
+  with patch_split(self.P,"_commit_shared",side_effect=RuntimeError("post-publish interruption")):
    with self.assertRaises(RuntimeError):self._publish_components(r,f,b)
   record=self.P.read_cycle_record(self.artifact,b["cycle_id"])
   manifest=self.P._record_cycle_manifest_path(self.artifact,record); manifest_before=manifest.read_bytes()

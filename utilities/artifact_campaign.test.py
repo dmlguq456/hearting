@@ -21,6 +21,7 @@ import artifact_manifest as M
 
 spec_path = Path(__file__).with_name("artifact_producer.test.py")
 import importlib.util
+from split_module_fixture import patch_split
 spec = importlib.util.spec_from_file_location("campaign_producer_fixture", spec_path)
 F = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(F)
@@ -274,17 +275,17 @@ class CampaignTest(F.ProducerTestBase):
         for i in range(3):
             for j in range(4):
                 self._begin(key=f"census-{i}", slug=f"census-{i}-{j}")
-        with mock.patch.object(P, "read_cycle_record", wraps=P.read_cycle_record) as reads:
+        with patch_split(P, "read_cycle_record", wraps=P.read_cycle_record) as reads:
             rich = P.list_campaign_summaries(self.root, active_only=False)
         count = sum(row["cycle_count"] for row in rich)
         self.assertEqual(reads.call_count, count)
         self.assertEqual(count, 13)
-        with mock.patch.object(P, "read_cycle_record", side_effect=AssertionError("shallow cycle census")), \
+        with patch_split(P, "read_cycle_record", side_effect=AssertionError("shallow cycle census")), \
                 mock.patch.object(P.artifact_campaign, "campaign_state", wraps=P.artifact_campaign.campaign_state) as folds:
             shallow = P.list_campaign_summaries(self.root, active_only=False, include_dispositions=False)
         self.assertEqual(folds.call_count, 4)
         self.assertEqual(shallow, rich)
-        with mock.patch.object(P, "read_cycle_record", return_value={"disposition": {"kind": "discarded"}}):
+        with patch_split(P, "read_cycle_record", return_value={"disposition": {"kind": "discarded"}}):
             marked = P.list_campaign_summaries(self.root, active_only=False)
         self.assertTrue(all(row["all_set_aside"] and row["dispositions"] == {"discarded": row["cycle_count"]}
                             for row in marked))

@@ -22,6 +22,7 @@ import dispatch_contract as DC  # noqa: E402
 import review_round_cap as CAP  # noqa: E402
 import review_source_subject as SUBJECT  # noqa: E402
 from route_identity import route_hash, route_id_from_hash  # noqa: E402
+from split_module_fixture import patch_split  # noqa: E402
 
 
 def _load(name: str, relative: str):
@@ -70,8 +71,8 @@ class SourceSubjectIntegrationTest(unittest.TestCase):
             path.write_bytes(data)
         cycle = {"campaign_id": "camp_fixture", "cycle_id": "cyc_fixture",
                  "route_id": self.route["route_id"]}
-        with mock.patch.object(artifact_producer, "route_cycle_for", return_value=cycle), \
-             mock.patch.object(artifact_producer, "cycle_dir", return_value=cycle_dir):
+        with patch_split(artifact_producer, "route_cycle_for", return_value=cycle), \
+             patch_split(artifact_producer, "cycle_dir", return_value=cycle_dir):
             _first_meta, first = self.complete_review("att-design-A1")
             self.complete_review("att-design-A2")
             same = self.admission()

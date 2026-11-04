@@ -28,6 +28,7 @@ import artifact_producer as P  # noqa: E402
 import artifact_workflow_group_review as R  # noqa: E402
 import artifact_workflow_groups as W  # noqa: E402
 import campaign_title_repair as repair  # noqa: E402
+from split_module_fixture import patch_split  # noqa: E402
 
 _SPEC = importlib.util.spec_from_file_location(
     "workflow_group_review_producer_fixture", Path(__file__).with_name("artifact_producer.test.py"))
@@ -1085,7 +1086,7 @@ class UnifiedReviewTest(ReviewBase):
                 raise OSError("injected disk failure")
             return real(path, data, mode)
 
-        with mock.patch.object(P, "_write_atomic", side_effect=failing):
+        with patch_split(P, "_write_atomic", side_effect=failing):
             report = self.report(R.sweep(self.root, cycles=[self.a1["cycle_id"]],
                                          invoke=Recorder(self.new_group_reply(self.a1["cycle_id"]))))
         self.assertEqual((report["status"], report["failure_class"]), ("failed", "apply-failed"))
