@@ -1266,12 +1266,15 @@ class NativeSessionContinuityTest(unittest.TestCase):
                         compact_context={"trigger": "auto", "turn_id": f"turn-{sid}",
                                          "event_id": f"event-{sid}"},
                         transcript=str(transcript), cwd=str(self.cwd), env=os.environ, now=5000)
-                self.assertTrue(result.startswith(expected), result)
+                self.assertEqual(result, "")
             with self.iso.patched_environ(self.environment(None)):
                 items = runner.list_items()
         by_sid = {item["sid"]: item for item in items}
-        self.assertEqual({sid: int(item.get("card_generation", 0) or 0)
-                          for sid, item in by_sid.items()}, {self.A: 1, self.B: 28})
+        self.assertEqual(by_sid, {})  # Native compaction creates no new tidy queue.
+        # Explicit memory work still tests native-card addressing independently of compaction.
+        with self.iso.patched_environ(self.environment(None)):
+            by_sid = {sid: runner.enqueue_item(seat, "codex", sid, str(self.cwd), start=False)
+                      for sid, seat in ((self.A, seat_a), (self.B, seat_b))}
         clear_files = list((self.state / "clear").glob("*.json")) if (self.state / "clear").exists() else []
         self.assertEqual(clear_files, [])  # no exact physical binding: no clear/card-request booking
 
@@ -1376,7 +1379,7 @@ class NativeSessionContinuityTest(unittest.TestCase):
                     compact_context={"trigger": "auto", "turn_id": "turn-consumed",
                                      "event_id": "event-consumed"},
                     transcript=str(transcript), cwd=str(self.cwd), env=os.environ, now=5000)
-                self.assertTrue(outcome.startswith("booking=queue-only"), outcome)
+                self.assertEqual(outcome, "")
                 self.assertEqual(st.run_hook("codex", "prompt", self.A, cwd=str(self.cwd),
                                              env=os.environ, now=5001), "")
             self.assertEqual(st.read_bytes(st._consumed_path(logical)), legacy_receipt)
@@ -2018,17 +2021,6 @@ class CompactObservationTest(TidyCase):
         self.assertIn(summary, body)
         self.assertIn("[assistant] 요약 뒤 남은 확인 기록", body)
 
-    def test_compact_instructions_conditionally_account_for_preserved_tail(self):
-        instructions = st.COMPACT_CARD_INSTRUCTIONS
-        self.assertIn("may remain verbatim", instructions)
-        self.assertIn("Do not infer that an omitted request or reply was undelivered", instructions)
-        self.assertIn("which last turn this summary covers", instructions)
-        self.assertIn("preserved transcript needs checking", instructions)
-        self.assertIn("Do not assume a later turn is visible or available", instructions)
-        claude_before = st.run_hook("claude", "compact", self.SID, phase="before")
-        opencode_before = st.run_hook("opencode", "compact", self.SID, phase="before")
-        self.assertEqual(claude_before, instructions)
-        self.assertEqual(opencode_before, instructions)
 
     def test_no_last_reply_has_no_last_reply_priority(self):
         summary = "요약 원문: 작업 중입니다."
@@ -2302,630 +2294,8 @@ class CodexCompactObservationTest(TidyCase):
         self.assertEqual(tt.compact_observation("codex", self.SID, str(replacement), anchor)["state"], "unknown")
 
 
-class CodexCompactBridgeTest(TidyCase):
-    SID = "codex-compact-main"
-
-    def setUp(self):
-        super().setUp()
-        self.seat = st.session_seat(
-            st.Seat("pane", "a" * 32, pane=PANE, harness="codex", project_key="fixture"),
-            "codex", self.SID)
-        self.resolve = mock.patch.object(st, "resolve_seat", return_value=self.seat)
-        self.resolve.start()
-        self.addCleanup(self.resolve.stop)
-        self.env = self.iso.env({"HERDR_PANE_ID": PANE})
-        self.env_patch = mock.patch.dict(os.environ, self.env, clear=True)
-        self.env_patch.start()
-        self.addCleanup(self.env_patch.stop)
-
-    def rollout(self):
-        path = self.iso.root / f"rollout-{self.SID}.jsonl"
-        with path.open("wb") as handle:
-            handle.write((json.dumps({"type": "session_meta", "payload": {
-                "id": self.SID, "cwd": str(self.cwd), "source": {"kind": "cli"}}}) + "\n").encode())
-            handle.write((json.dumps({"type": "response_item", "payload": {
-                "type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "compacted"}]}})
-                + "\n").encode())
-        return path
-
-    def test_automatic_remote_v2_requests_a_real_card_then_queues_snapshots_clears_and_continues_once(self):
-        import dispatch_seat_handover as handover
-
-        path = self.rollout()
-        requests, clears, continues = [], [], []
-
-        def request(pathname, nonce, target):
-            requests.append((target, nonce))
-            claim, reason = clear.claim_idle_card_request(pathname, nonce)
-            self.assertIsNotNone(claim, reason)
-            prompt = clear.idle_card_request_text(claim)
-            self.assertIn("자동 압축 뒤 카드 작성 요청", prompt)
-            self.assertNotIn("이어서해", prompt)
-            self.assertEqual(st.run_hook("codex", "prompt", self.SID, cwd=str(self.cwd),
-                                         env=self.env, prompt_text=prompt), "")
-            with st.seat_lock(self.seat.key):
-                st.write_card(self.seat, "codex", self.SID,
-                              "진행 중: 실제 main 카드\n다음 할 일: 다음 입력을 기다림",
-                              cwd=str(self.cwd), prompt_seq=st.read_prompt_seq(self.seat))
-            args = SimpleNamespace(harness="codex", session_id=self.SID, cwd=str(self.cwd),
-                                   no_clear=False, no_continue=False)
-            with mock.patch.object(st, "resolve_caller", return_value=(self.seat, "codex", self.SID)), \
-                    contextlib.redirect_stdout(io.StringIO()):
-                self.assertEqual(st.cmd_enqueue(args), 0)
-            self.assertTrue(clear.finish_idle_card_request(claim, accepted=True))
-            return {"accepted": "true"}
-
-        def clear_once(*_args):
-            clears.append(1)
-            return {"cleared": "true", "new_session": "codex-successor"}
-
-        def continue_once(*_args):
-            continues.append(1)
-            return {"continued": "true"}
-
-        with self.iso.patched_environ({"HERDR_PANE_ID": PANE}), \
-                mock.patch.object(clear, "herdr_command", return_value="/bin/true"), \
-                mock.patch.object(clear, "_start_helper", return_value=4321), \
-                mock.patch.object(clear, "_helper_is_live", return_value=True), \
-                mock.patch.object(clear, "_run_idle_card_request", side_effect=request), \
-                mock.patch.object(clear, "_prepare_handover_snapshot", wraps=clear._prepare_handover_snapshot), \
-                mock.patch.object(handover, "collect_snapshot_bindings", return_value=[]), \
-                mock.patch.object(handover, "publish_snapshot_locked", return_value=0), \
-                mock.patch.object(runner, "start_detached", return_value=9876), \
-                mock.patch.object(clear, "validate_continue", side_effect=lambda p, n: (clear.read_reservation(self.seat.key), "")):
-            result = st.run_hook("codex", "compact", self.SID, phase="after", compact_summary="",
-                                 compact_context={"trigger": "auto", "turn_id": "turn-compact-1",
-                                                  "event_id": "compact-event-1"},
-                                 transcript=str(path), cwd=str(self.cwd), env=self.env)
-            self.assertEqual(result, "booking=scheduled")
-            booking = clear.read_reservation(self.seat.key)
-            self.assertTrue(booking["compact"]["card_request_required"])
-            self.assertEqual(booking["memory_state"], "queued")
-            self.assertEqual(runner.read_item(booking["queue_id"])["operation_id"], booking["operation_id"])
-            with path.open("ab") as handle:
-                handle.write((json.dumps({"type": "event_msg", "payload": {
-                    "type": "task_complete", "turn_id": "turn-compact-1"}}) + "\n").encode())
-            result = clear.run_helper(self.seat.key, booking["nonce"], wait=lambda *_: "idle",
-                                      steward=clear_once, continuer=continue_once, sleep=lambda _delay: None)
-
-        self.assertEqual(result, "continued")
-        self.assertEqual(requests, [(PANE, booking["nonce"])])
-        self.assertEqual((len(clears), len(continues)), (1, 1))
-        accepted = clear.read_reservation(self.seat.key)
-        self.assertEqual((accepted["origin"], accepted["status"], accepted["followup_kind"]),
-                         ("compact", "cleared", "continue"))
-        self.assertEqual(accepted["snapshot_state"], "ready")
-        self.assertEqual(accepted["continued"]["state"], "sent")
-        card = st.read_latest_card(self.seat)
-        self.assertEqual(card["body"], "진행 중: 실제 main 카드\n다음 할 일: 다음 입력을 기다림")
-        queue = runner.read_item(accepted["queue_id"])
-        self.assertEqual(queue["operation_id"], accepted["operation_id"])
-        self.assertEqual(int(queue.get("card_generation", 0) or 0), accepted["acceptance"]["source_generation"])
-        self.assertEqual(accepted["acceptance"]["card_generation"], card["generation"])
-
-    def test_a_marked_reply_card_is_taken_at_turn_end_with_the_same_queue_clear_and_continue(self):
-        import dispatch_seat_handover as handover
-
-        path = self.rollout()
-        requests, clears, continues = [], [], []
-
-        def request(pathname, nonce, target):
-            requests.append((target, nonce))
-            claim, reason = clear.claim_idle_card_request(pathname, nonce)
-            self.assertIsNotNone(claim, reason)
-            prompt = clear.idle_card_request_text(claim)
-            self.assertIn("자동 압축 뒤 카드 작성 요청", prompt)
-            self.assertNotIn("이어서해", prompt)
-            self.assertEqual(st.run_hook("codex", "prompt", self.SID, cwd=str(self.cwd),
-                                         env=self.env, prompt_text=prompt), "")
-            self.assertTrue(clear.finish_idle_card_request(claim, accepted=True))
-            begin, end = st.reply_card_markers(claim["nonce"])
-            self.assertIn(begin, prompt)
-            self.assertIn(end, prompt)
-            # The session answers with the card only; the turn-end observer takes it.
-            self.assertEqual(st.accept_reply_card("codex", self.SID, str(self.cwd), "그냥 답"), "reply-card=none")
-            reply = f"{begin}\n진행 중: 실제 main 카드\n다음 할 일: 다음 입력을 기다림\n{end}"
-            self.assertEqual(st.accept_reply_card("codex", self.SID, str(self.cwd), reply[:-3]),
-                             "reply-card=none reason=unmarked")                       # cut off
-            line = st.accept_reply_card("codex", self.SID, str(self.cwd), reply)
-            self.assertTrue(line.startswith("reply-card=accepted enqueue="), line)
-            self.assertTrue(line.endswith("clear=scheduled"), line)
-            self.assertEqual(st.accept_reply_card("codex", self.SID, str(self.cwd), reply),
-                             "reply-card=skipped reason=already-accepted")            # Stop seen twice
-            return {"accepted": "true"}
-
-        def clear_once(*_args):
-            clears.append(1)
-            return {"cleared": "true", "new_session": "codex-successor"}
-
-        def continue_once(*_args):
-            continues.append(1)
-            return {"continued": "true"}
-
-        with self.iso.patched_environ({"HERDR_PANE_ID": PANE}), \
-                mock.patch.object(clear, "herdr_command", return_value="/bin/true"), \
-                mock.patch.object(clear, "_start_helper", return_value=4321), \
-                mock.patch.object(clear, "_helper_is_live", return_value=True), \
-                mock.patch.object(clear, "_run_idle_card_request", side_effect=request), \
-                mock.patch.object(clear, "_prepare_handover_snapshot", wraps=clear._prepare_handover_snapshot), \
-                mock.patch.object(handover, "collect_snapshot_bindings", return_value=[]), \
-                mock.patch.object(handover, "publish_snapshot_locked", return_value=0), \
-                mock.patch.object(runner, "start_detached", return_value=9876), \
-                mock.patch.object(clear, "validate_continue", side_effect=lambda p, n: (clear.read_reservation(self.seat.key), "")):
-            result = st.run_hook("codex", "compact", self.SID, phase="after", compact_summary="",
-                                 compact_context={"trigger": "auto", "turn_id": "turn-compact-1",
-                                                  "event_id": "compact-event-1"},
-                                 transcript=str(path), cwd=str(self.cwd), env=self.env)
-            self.assertEqual(result, "booking=scheduled")
-            booking = clear.read_reservation(self.seat.key)
-            self.assertTrue(booking["compact"]["card_request_required"])
-            self.assertEqual(booking["memory_state"], "queued")
-            self.assertEqual(runner.read_item(booking["queue_id"])["operation_id"], booking["operation_id"])
-            with path.open("ab") as handle:
-                handle.write((json.dumps({"type": "event_msg", "payload": {
-                    "type": "task_complete", "turn_id": "turn-compact-1"}}) + "\n").encode())
-            result = clear.run_helper(self.seat.key, booking["nonce"], wait=lambda *_: "idle",
-                                      steward=clear_once, continuer=continue_once, sleep=lambda _delay: None)
-
-        self.assertEqual(result, "continued")
-        self.assertEqual(requests, [(PANE, booking["nonce"])])
-        self.assertEqual((len(clears), len(continues)), (1, 1))
-        accepted = clear.read_reservation(self.seat.key)
-        self.assertEqual((accepted["origin"], accepted["status"], accepted["followup_kind"]),
-                         ("compact", "cleared", "continue"))
-        self.assertEqual(accepted["snapshot_state"], "ready")
-        self.assertEqual(accepted["continued"]["state"], "sent")
-        card = st.read_latest_card(self.seat)
-        self.assertEqual(card["body"], "진행 중: 실제 main 카드\n다음 할 일: 다음 입력을 기다림")
-        queue = runner.read_item(accepted["queue_id"])
-        self.assertEqual(queue["operation_id"], accepted["operation_id"])
-        self.assertEqual(int(queue.get("card_generation", 0) or 0), accepted["acceptance"]["source_generation"])
-        self.assertEqual(accepted["acceptance"]["card_generation"], card["generation"])
-
-    def test_auto_compact_persists_same_operation_queue_before_card_request_and_after_cancel(self):
-        path = self.rollout()
-        starts = []
-
-        def start_once(*args, **kwargs):
-            starts.append((args, kwargs))
-            return None if len(starts) == 1 else 9876
-
-        with self.iso.patched_environ({"HERDR_PANE_ID": PANE}), \
-                mock.patch.object(clear, "herdr_command", return_value="/bin/true"), \
-                mock.patch.object(clear, "_start_helper", return_value=4321), \
-                mock.patch.object(runner, "start_detached", side_effect=start_once):
-            result = st.run_hook("codex", "compact", self.SID, phase="after", compact_summary="",
-                                 compact_context={"trigger": "auto", "turn_id": "turn-early-queue",
-                                                  "event_id": "compact-early-queue"},
-                                 transcript=str(path), cwd=str(self.cwd), env=self.env)
-            self.assertEqual(result, "booking=scheduled")
-            booking = clear.read_reservation(self.seat.key)
-            queue_id = booking["queue_id"]
-            item = runner.read_item(queue_id)
-            self.assertIsNotNone(item, "card-request booking has no durable memory queue row")
-            operation_id = booking["operation_id"]
-            self.assertEqual((item["operation_id"], item["id"]), (operation_id, queue_id))
-
-            st.run_hook("codex", "prompt", self.SID, cwd=str(self.cwd), env=self.env,
-                        prompt_text="new user input cancels the card request")
-            cancelled = clear.read_reservation(self.seat.key)
-            self.assertEqual(cancelled["status"], "cancelled")
-            retained = runner.read_item(queue_id)
-            self.assertIsNotNone(retained)
-            self.assertEqual((retained["id"], retained["operation_id"]), (queue_id, operation_id))
-            self.assertGreaterEqual(len(starts), 2, "normal prompt reconciliation did not restart the same queue")
-
-    def _accepted_compact_booking(self, tag="legacy"):
-        path = self.rollout()
-        with self.iso.patched_environ({"HERDR_PANE_ID": PANE}), \
-                mock.patch.object(clear, "herdr_command", return_value="/bin/true"), \
-                mock.patch.object(clear, "_start_helper", return_value=4321), \
-                mock.patch.object(runner, "start_detached", return_value=9876):
-            result = st.run_hook("codex", "compact", self.SID, phase="after", compact_summary="",
-                                 compact_context={"trigger": "auto", "turn_id": "turn-" + tag,
-                                                  "event_id": "compact-" + tag},
-                                 transcript=str(path), cwd=str(self.cwd), env=self.env)
-            self.assertEqual(result, "booking=scheduled")
-            booking = clear.read_reservation(self.seat.key)
-            booking["compact"]["turn_end_observed"] = True
-            booking.pop("acceptance", None)
-            booking.pop("source_card_generation", None)
-            booking["memory_state"] = "awaiting-card"
-            clear._write_reservation(booking)
-
-            queue = runner.read_item(booking["queue_id"])
-            source_generation = queue.get("card_generation")
-            queue.pop("operation_id", None)  # legacy queue row remains addressable by its stable ID
-            runner.write_item(queue)
-            claim, reason = clear.claim_idle_card_request(clear.reservation_path(self.seat.key), booking["nonce"])
-            self.assertEqual(reason, "")
-            st.run_hook("codex", "prompt", self.SID, cwd=str(self.cwd), env=self.env,
-                        prompt_text=clear.idle_card_request_text(claim))
-            self.assertTrue(clear.finish_idle_card_request(claim, accepted=True))
-            with st.seat_lock(self.seat.key):
-                st.write_card(self.seat, "codex", self.SID, "실제 compact 카드", cwd=str(self.cwd),
-                              prompt_seq=st.read_prompt_seq(self.seat))
-            args = SimpleNamespace(harness="codex", session_id=self.SID, cwd=str(self.cwd),
-                                   no_clear=False, no_continue=False)
-            with mock.patch.object(st, "resolve_caller", return_value=(self.seat, "codex", self.SID)), \
-                    contextlib.redirect_stdout(io.StringIO()):
-                self.assertEqual(st.cmd_enqueue(args), 0)
-
-            accepted = clear.read_reservation(self.seat.key)
-            accepted_queue = runner.read_item(booking["queue_id"])
-            self.assertEqual(accepted["acceptance"]["schema"], 1)
-            self.assertEqual(accepted_queue.get("card_generation"), source_generation)
-            self.assertEqual(accepted_queue["operation_id"], accepted["operation_id"])
-            valid, reason = clear.validate_request(clear.reservation_path(self.seat.key), booking["nonce"])
-            self.assertIsNotNone(valid, reason)
-
-            return accepted
-
-    def test_old_booking_and_queue_can_be_accepted_but_partial_relation_cannot_clear(self):
-        accepted = booking = self._accepted_compact_booking()
-        with self.iso.patched_environ({"HERDR_PANE_ID": PANE}):
-            accepted.pop("acceptance")
-            clear._write_reservation(accepted)
-            recovered, reason = clear.validate_request(clear.reservation_path(self.seat.key), booking["nonce"])
-            self.assertIsNotNone(recovered, reason)
-            queue_path = runner._item_path(booking["queue_id"])
-            queue_bytes = queue_path.read_bytes()
-            queue_path.write_text('{unreadable')
-            unreadable, reason = clear.validate_request(clear.reservation_path(self.seat.key), booking["nonce"])
-            self.assertIsNone(unreadable)
-            self.assertEqual(reason, "idle-card-observation-unavailable")
-            self.assertEqual(clear.read_reservation(self.seat.key)["status"], "reserved")
-            queue_path.write_bytes(queue_bytes)
-            accepted["acceptance"] = {"schema": 1, "nonce": booking["nonce"], "queue_id": booking["queue_id"]}
-            clear._write_reservation(accepted)
-            invalid, reason = clear.validate_request(clear.reservation_path(self.seat.key), booking["nonce"])
-            self.assertIsNone(invalid)
-            self.assertEqual(reason, "idle-card-not-accepted")
-            retained = runner.read_item(booking["queue_id"])
-            self.assertEqual((retained["id"], retained["operation_id"]),
-                             (booking["queue_id"], accepted["operation_id"]))
-
-    def test_public_validation_and_helper_reobserve_unavailable_sources_at_each_boundary(self):
-        import dispatch_seat_handover as handover
-        sources = ("card", "queue", "frontier", "frontier-schema", "frontier-utf8")
-        for phase in ("snapshot", "compact-wait", "final-validation", "writer"):
-            for source in sources:
-                tag = phase + "-" + source
-                with self.subTest(phase=phase, source=source):
-                    booking = self._accepted_compact_booking(tag)
-                    path = clear.reservation_path(self.seat.key)
-                    if phase != "snapshot":
-                        self.assertTrue(clear._prepare_handover_snapshot(booking))
-                    source_path = (st.card_json_path(self.seat) if source == "card" else
-                                   runner._item_path(booking["queue_id"]) if source == "queue" else
-                                   st._prompt_seq_path(self.seat))
-                    original = source_path.read_bytes()
-                    damaged = [False]
-                    calls, pauses = [], []
-                    identity = {key: booking[key] for key in ("nonce", "operation_id", "queue_id")}
-                    token = booking["idle_request"]["token"]
-                    def damage():
-                        if damaged[0]:
-                            return
-                        damaged[0] = True
-                        source_path.write_bytes(b'{"schema":1,"seq":"unknown"}' if source == "frontier-schema"
-                                                else b'\xff' if source in {"card", "frontier-utf8"} else b'{damaged')
-                        checked, why = clear.validate_request(path, booking["nonce"])
-                        self.assertIsNone(checked)
-                        self.assertEqual(why, "idle-card-observation-unavailable")
-                    def restore(delay):
-                        pauses.append(delay)
-                        held = clear.read_reservation(self.seat.key)
-                        self.assertEqual({key: held[key] for key in identity}, identity)
-                        self.assertEqual(held["idle_request"]["token"], token)
-                        self.assertEqual(held["status"], "reserved")
-                        self.assertEqual(calls, [])
-                        source_path.write_bytes(original)
-                    def wait(*_args):
-                        if phase == "final-validation":
-                            damage()
-                        return "idle"
-                    def steward(pathname, nonce, _pane):
-                        if phase == "writer":
-                            damage()
-                        claimed, why = clear.claim_clear(pathname, nonce)
-                        if claimed is None:
-                            return {"cleared": "skipped", "reason": why}
-                        calls.append(("clear", claimed["clear_claim"]["token"]))
-                        return {"cleared": "true", "new_session": "successor-" + tag}
-                    def continuer(pathname, nonce, _pane):
-                        claimed, why = clear.claim_continue(pathname, nonce)
-                        self.assertIsNotNone(claimed, why)
-                        calls.append(("continue", claimed["continued"]["claim_id"]))
-                        return {"continued": "true", "claim_id": claimed["continued"]["claim_id"]}
-                    if phase in {"snapshot", "compact-wait"}:
-                        damage()
-                    try:
-                        result = clear.run_helper(self.seat.key, booking["nonce"], wait=wait,
-                                                  steward=steward, continuer=continuer, sleep=restore)
-                    finally:
-                        source_path.write_bytes(original)
-                    self.assertEqual(result, "continued")
-                    self.assertEqual([call[0] for call in calls], ["clear", "continue"])
-                    self.assertIn(len(pauses), (1, 2) if phase == "snapshot" else (1,))
-                    held = clear.read_reservation(self.seat.key)
-                    self.assertEqual({key: held[key] for key in identity}, identity)
-                    self.assertEqual(held["idle_request"]["token"], token)
-                    self.assertEqual(held["clear_claim"]["token"], calls[0][1])
-                    self.assertEqual(clear.run_helper(self.seat.key, booking["nonce"], sleep=restore), "superseded")
-
-    def test_relation_reread_keeps_unavailable_frontier_and_continue_recovers_after_clear(self):
-        booking = self._accepted_compact_booking("relation-reread")
-        path = clear.reservation_path(self.seat.key)
-        frontier = st._prompt_seq_path(self.seat)
-        original = frontier.read_bytes()
-        read_json = st.read_json
-        reads = []
-        def read(pathname):
-            data = read_json(pathname)
-            if pathname == frontier:
-                reads.append(1)
-                if len(reads) == 1:
-                    frontier.write_bytes(b'\xff')
-            return data
-        try:
-            with mock.patch.object(st, "read_json", side_effect=read):
-                self.assertEqual(clear.validate_request(path, booking["nonce"])[1],
-                                 "idle-card-observation-unavailable")
-        finally:
-            frontier.write_bytes(original)
-        card_path = st.card_json_path(self.seat)
-        card_bytes = card_path.read_bytes()
-        effects, pauses = [], []
-        def steward(pathname, nonce, _pane):
-            claim, why = clear.claim_clear(pathname, nonce)
-            self.assertIsNotNone(claim, why)
-            effects.append("clear")
-            card_path.write_bytes(b'\xff')
-            return {"cleared": "true", "new_session": "recovered-continue"}
-        def restore(delay):
-            pauses.append(delay)
-            held = clear.read_reservation(self.seat.key)
-            self.assertEqual(held["status"], "cleared")
-            self.assertEqual(held["continued"]["state"], "pending")
-            self.assertEqual(effects, ["clear"])
-            card_path.write_bytes(card_bytes)
-        def continuer(pathname, nonce, _pane):
-            claim, why = clear.claim_continue(pathname, nonce)
-            self.assertIsNotNone(claim, why)
-            effects.append("continue")
-            return {"continued": "true", "claim_id": claim["continued"]["claim_id"]}
-        self.assertEqual(clear.run_helper(self.seat.key, booking["nonce"], wait=lambda *_: "idle",
-                                         steward=steward, continuer=continuer, sleep=restore), "continued")
-        self.assertEqual(effects, ["clear", "continue"])
-        self.assertEqual(len(pauses), 1)
-        held = clear.read_reservation(self.seat.key)
-        self.assertEqual((held["nonce"], held["queue_id"], held["operation_id"]),
-                         (booking["nonce"], booking["queue_id"], booking["operation_id"]))
-
-    def test_unavailable_observation_expires_without_extending_booking_or_accepting_native_request(self):
-        booking = self._accepted_compact_booking("expired-read")
-        path = clear.reservation_path(self.seat.key)
-        clock = [st.now_epoch()]
-        booking["deadline"] = clock[0] + 2
-        clear._write_reservation(booking)
-        st.card_json_path(self.seat).write_bytes(b'\xff')
-        def sleep(delay):
-            clock[0] += delay
-        with mock.patch.object(st, "now_epoch", side_effect=lambda: clock[0]), \
-             mock.patch.object(clear, "_run_steward") as effect:
-            result = clear.run_helper(self.seat.key, booking["nonce"], sleep=sleep)
-        self.assertEqual(result, "skipped")
-        effect.assert_not_called()
-        self.assertEqual(clear.read_reservation(self.seat.key)["deadline"], booking["deadline"])
-        booking = self._accepted_compact_booking("unaccepted-read")
-        booking["idle_request"]["state"] = "unverified"
-        clear._write_reservation(booking)
-        self.assertEqual(clear.validate_request(path, booking["nonce"])[1], "idle-card-not-accepted")
-        with mock.patch.object(clear, "_run_steward") as effect:
-            self.assertEqual(clear.run_helper(self.seat.key, booking["nonce"], sleep=sleep), "unverified")
-        effect.assert_not_called()
-
-    def test_real_card_replacement_and_new_input_still_stop_clear(self):
-        for change in ("card", "prompt"):
-            with self.subTest(change=change):
-                booking = self._accepted_compact_booking("replaced-" + change)
-                if change == "card":
-                    st.write_card(self.seat, "codex", self.SID, "new unsaved work", cwd=str(self.cwd),
-                                  prompt_seq=st.read_prompt_seq(self.seat))
-                else:
-                    st.bump_prompt_seq(self.seat, "codex", self.SID, st.now_epoch())
-                self.assertEqual(clear.validate_request(clear.reservation_path(self.seat.key), booking["nonce"])[1],
-                                 "card-changed" if change == "card" else "new-input")
-                with mock.patch.object(clear, "_run_steward") as effect:
-                    self.assertEqual(clear.run_helper(self.seat.key, booking["nonce"], sleep=lambda _: None), "skipped")
-                effect.assert_not_called()
-
-    def test_manual_unknown_or_unidentified_codex_compaction_stays_queue_only(self):
-        path = self.rollout()
-        with self.iso.patched_environ({"HERDR_PANE_ID": PANE}), \
-                mock.patch.object(runner, "start_detached", return_value=9876):
-            for trigger, turn_id, expected in (("manual", "turn-1", "trigger-manual"),
-                                               ("unknown", "turn-1", "trigger-unknown"),
-                                               ("auto", "", "turn-identity-unknown")):
-                result = st.run_hook("codex", "compact", self.SID, phase="after", compact_summary="",
-                                     compact_context={"trigger": trigger, "turn_id": turn_id},
-                                     transcript=str(path), cwd=str(self.cwd), env=self.env)
-                self.assertIn(f"reason={expected}", result)
-                self.assertIsNone(clear.read_reservation(self.seat.key))
-                clear.cancel(self.seat)
-
-    def test_new_real_prompt_cancels_the_old_compact_request_and_replay_does_not_resurrect_it(self):
-        path = self.rollout()
-        context = {"trigger": "auto", "turn_id": "turn-cancel", "event_id": "compact-cancel"}
-        with self.iso.patched_environ({"HERDR_PANE_ID": PANE}), \
-                mock.patch.object(clear, "herdr_command", return_value="/bin/true"), \
-                mock.patch.object(clear, "_start_helper", return_value=4321), \
-                mock.patch.object(runner, "start_detached", return_value=9876), \
-                mock.patch.object(clear, "_run_idle_card_request") as request:
-            result = st.run_hook("codex", "compact", self.SID, phase="after", compact_summary="",
-                                 compact_context=context, transcript=str(path), cwd=str(self.cwd), env=self.env)
-            self.assertEqual(result, "booking=scheduled")
-            self.assertEqual(st.run_hook("codex", "prompt", self.SID, cwd=str(self.cwd), env=self.env,
-                                         prompt_text="실제 새 입력"), "")
-            held = clear.read_reservation(self.seat.key)
-            self.assertEqual((held["status"], held["reason"]), ("cancelled", "new-input"))
-            replay = st.run_hook("codex", "compact", self.SID, phase="after", compact_summary="",
-                                 compact_context=context, transcript=str(path), cwd=str(self.cwd), env=self.env)
-        self.assertEqual(replay, "booking=off")
-        request.assert_not_called()
-        self.assertEqual(clear.read_reservation(self.seat.key)["status"], "cancelled")
-
-    def test_uncertain_card_request_is_terminal_and_never_retried(self):
-        path = self.rollout()
-        calls = []
-
-        def uncertain(pathname, nonce, _target):
-            calls.append(1)
-            claim, reason = clear.claim_idle_card_request(pathname, nonce)
-            self.assertIsNotNone(claim, reason)
-            self.assertFalse(clear.finish_idle_card_request(claim, accepted=False, reason="partial-send"))
-            return {"accepted": "unverified", "reason": "partial-send"}
-
-        with self.iso.patched_environ({"HERDR_PANE_ID": PANE}), \
-                mock.patch.object(clear, "herdr_command", return_value="/bin/true"), \
-                mock.patch.object(clear, "_start_helper", return_value=4321), \
-                mock.patch.object(runner, "start_detached", return_value=9876), \
-                mock.patch.object(clear, "_run_idle_card_request", side_effect=uncertain):
-            st.run_hook("codex", "compact", self.SID, phase="after", compact_summary="",
-                        compact_context={"trigger": "auto", "turn_id": "turn-uncertain",
-                                         "event_id": "compact-uncertain"},
-                        transcript=str(path), cwd=str(self.cwd), env=self.env)
-            booking = clear.read_reservation(self.seat.key)
-            with path.open("ab") as handle:
-                handle.write((json.dumps({"type": "event_msg", "payload": {
-                    "type": "task_complete", "turn_id": "turn-uncertain"}}) + "\n").encode())
-            first = clear.run_helper(self.seat.key, booking["nonce"], wait=lambda *_: "idle",
-                                     steward=lambda *_: self.fail("uncertain send must not clear"),
-                                     sleep=lambda _delay: None)
-            second = clear.run_helper(self.seat.key, booking["nonce"], wait=lambda *_: "idle",
-                                      steward=lambda *_: self.fail("terminal booking must not retry"),
-                                      sleep=lambda _delay: None)
-        self.assertEqual(first, "unverified")
-        self.assertEqual(second, "superseded")
-        self.assertEqual(len(calls), 1)
-        self.assertEqual(clear.read_reservation(self.seat.key)["status"], "unverified")
 
 
-class CompactProgressRecoveryTest(TidyCase):
-    SID = "claude-compact-recovery"
-
-    def setUp(self):
-        super().setUp()
-        self.seat = st.Seat("pane", "b" * 32, pane=PANE, harness="claude", project_key="fixture")
-        self.resolve = mock.patch.object(
-            st, "resolve_seat",
-            side_effect=lambda harness, cwd=None, env=None, sid=None, source="", **_kwargs:
-                st.session_seat(self.seat, harness or "claude", sid or ""))
-        self.resolve.start()
-        self.addCleanup(self.resolve.stop)
-        self.env = self.iso.env({"HERDR_PANE_ID": PANE})
-        self.env_patch = mock.patch.dict(os.environ, self.env, clear=True)
-        self.env_patch.start()
-        self.addCleanup(self.env_patch.stop)
-
-    def test_durable_queue_survives_booking_lock_failure_then_one_apply_and_one_clear_resume(self):
-        import session_tidy_idle
-        import dispatch_seat_handover as handover
-
-        path = self.iso.root / f"{self.SID}.jsonl"
-        rows = [
-            {"type": "user", "uuid": "u1", "message": {"content": [{"type": "text", "text": "start"}]}},
-            {"type": "assistant", "uuid": "a1", "message": {"stop_reason": "tool_use",
-                "content": [{"type": "text", "text": "working"}]}},
-            {"type": "assistant", "uuid": "compact-summary", "isCompactSummary": True,
-             "compactMetadata": {"trigger": "auto"},
-             "message": {"content": [{"type": "text", "text": "compact summary"}]}},
-        ]
-        path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
-        real_schedule = clear.schedule_for_enqueue
-        schedule_calls = []
-
-        def fail_once(*args, **kwargs):
-            schedule_calls.append(1)
-            if len(schedule_calls) == 1:
-                raise BlockingIOError("synthetic lock contention")
-            return real_schedule(*args, **kwargs)
-
-        starts = []
-        def runner_start(_qid):
-            starts.append(_qid)
-            if len(starts) == 1:
-                raise OSError("synthetic runner start failure")
-            return 4242
-
-        with self.iso.patched_environ({"HERDR_PANE_ID": PANE}), \
-                mock.patch.object(clear, "herdr_command", return_value="/bin/true"), \
-                mock.patch.object(clear, "_start_helper", return_value=4343) as helper_start, \
-                mock.patch.object(clear, "schedule_for_enqueue", side_effect=fail_once), \
-                mock.patch.object(runner, "start_detached", side_effect=runner_start):
-            first = st.run_hook("claude", "compact", self.SID, phase="after", compact_summary="compact summary",
-                                compact_context={"trigger": "auto", "summary_id": "compact-summary-id"},
-                                transcript=str(path), cwd=str(self.cwd), env=self.env)
-            self.assertIn("booking=pending reason=reservation-write-BlockingIOError", first)
-            self.assertIn("runner-start=OSError", first)
-            queued = runner.list_items()
-            self.assertEqual(len(queued), 1)
-            qid = queued[0]["id"]
-            operation_id = queued[0]["operation_id"]
-            self.assertEqual(queued[0]["status"], "queued")
-            self.assertIsNone(clear.read_reservation(self.seat.key))
-
-            with path.open("ab") as handle:
-                handle.write((json.dumps({"type": "assistant", "uuid": "a2",
-                    "message": {"stop_reason": "end_turn", "content": [{"type": "text", "text": "done"}]}})
-                    + "\n").encode())
-            recovered = session_tidy_idle.observe_payload("claude", {
-                "hook_event_name": "Stop", "session_id": self.SID, "cwd": str(self.cwd),
-                "transcript_path": str(path),
-            })
-            self.assertEqual(recovered, "booking=scheduled")
-            booking = clear.read_reservation(self.seat.key)
-            self.assertEqual((booking["queue_id"], booking["operation_id"]), (qid, operation_id))
-            self.assertEqual(len(runner.list_items()), 1)
-            self.assertEqual(starts, [qid, qid])
-            helper_start.assert_called_once()
-
-            apply_calls = []
-            bundle = SimpleNamespace(empty=False, unreadable=[], exchange=self.iso.root / "exchange")
-            with mock.patch.object(runner, "assemble", return_value=bundle), \
-                    mock.patch.object(runner, "prepare_exchange", return_value=str(self.iso.root / "exchange")), \
-                    mock.patch.object(runner, "dispatch_worker", return_value={"attempt_id": "attempt"}), \
-                    mock.patch.object(runner, "wait_worker"), \
-                    mock.patch.object(runner, "validate_actions"), \
-                    mock.patch.object(runner, "apply_actions", side_effect=lambda item, run_dir, _bundle:
-                                      apply_calls.append(run_dir.name) or "applied"), \
-                    mock.patch.object(runner, "advance_watermarks"), \
-                    mock.patch.object(runner, "publish_memory"), \
-                    mock.patch.object(runner, "notify"), \
-                    mock.patch.object(runner, "coverage_note", return_value=""), \
-                    mock.patch.object(runner, "remove_exchange"):
-                runner.run(qid)
-                runner.run(qid)
-            self.assertEqual(apply_calls, [qid])
-            self.assertEqual(runner.read_item(qid)["batch"], qid)
-
-            clears, continues = [], []
-            def clear_once(*_args):
-                clears.append(1)
-                return {"cleared": "true", "new_session": "claude-successor"}
-            def continue_once(*_args):
-                continues.append(1)
-                return {"continued": "true"}
-            with mock.patch.object(handover, "collect_snapshot_bindings", return_value=[]), \
-                    mock.patch.object(handover, "publish_snapshot_locked", return_value=0):
-                result = clear.run_helper(self.seat.key, booking["nonce"], wait=lambda *_: "idle",
-                                          steward=clear_once, continuer=continue_once,
-                                          sleep=lambda _delay: None)
-            self.assertEqual(result, "continued")
-            self.assertEqual((len(clears), len(continues)), (1, 1))
-            finished = clear.read_reservation(self.seat.key)
-            self.assertEqual((finished["status"], finished["continued"]["state"]), ("cleared", "sent"))
 
 
 class OpenCodeCompactObservationTest(TidyCase):
@@ -3059,82 +2429,6 @@ class OpenCodeCompactObservationTest(TidyCase):
             self.assertEqual(clear.compact_observation(held)["state"], "unknown")   # no anchor/idle: never ready
 
 
-    def test_matching_auto_compact_and_post_booking_idle_observation_clear_once(self):
-        import dispatch_seat_handover as handover
-        base_time = 1_800_000_000_000
-        con = sqlite3.connect(self.iso.opencode_db)
-        self.addCleanup(con.close)
-        self.message(con, "compact-parent", {"role": "user", "time": {"created": base_time}}, base_time)
-        self.part(con, "compact-part", "compact-parent", {"type": "compaction", "auto": True,
-                                                            "tail_start_id": "compact-parent"}, base_time)
-        self.message(con, "summary", {"role": "assistant", "summary": True,
-                                        "parentID": "compact-parent", "time": {"created": base_time + 1}}, base_time + 1)
-        self.part(con, "summary-text", "summary", {"type": "text", "text": "요약 전문"}, base_time + 1)
-        self.message(con, "user-current", {"role": "user", "time": {"created": base_time + 2}}, base_time + 2)
-        self.part(con, "user-text", "user-current", {"type": "text", "text": "요청"}, base_time + 2)
-        self.message(con, "assistant-current", {"role": "assistant", "parentID": "user-current",
-                                                  "finish": "stop", "time": {"created": base_time + 3}}, base_time + 3)
-        self.part(con, "assistant-text", "assistant-current", {"type": "text", "text": "새 세션에서 볼 결론"},
-                  base_time + 3)
-        con.commit()
-
-        fake_herdr = self.iso.root / "fake-herdr"
-        fake_herdr.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-        fake_herdr.chmod(0o755)
-        extra = {"HERDR_PANE_ID": PANE, "HEARTING_TIDY_TEST_ROOT": str(self.iso.root),
-                 "HEARTING_TIDY_HERDR": str(fake_herdr)}
-        context = {"trigger": "auto", "identity": "opencode-e2e", "transcript": str(self.iso.opencode_db),
-                   "summary_id": "summary", "parent_id": "compact-parent",
-                   "tail_start_id": "compact-parent", "compaction_part_id": "compact-part"}
-        with self.iso.patched_environ(extra), mock.patch.object(clear, "_start_helper", return_value=1), \
-                mock.patch.object(clear, "herdr_command", return_value=str(fake_herdr)):
-            seat = st.resolve_seat("opencode", str(self.cwd), sid=self.SID)
-            with st.seat_lock(seat.key):
-                st.write_card(seat, "opencode", self.SID, "요약 전문", cwd=str(self.cwd),
-                              prompt_seq=st.read_prompt_seq(seat), origin="runtime-compact",
-                              compact_context=context)
-            clear.schedule_for_enqueue(seat, "opencode", self.SID, str(self.cwd), compact_context=context)
-            req = clear.read_reservation(seat.key)
-            stale = st.run_hook("opencode", "runtime-status", self.SID, cwd=str(self.cwd),
-                                compact_context={"status": "idle",
-                                                 "observed_at": (req["created"] - 5) * 1000},
-                                env=os.environ)
-            self.assertEqual(stale, "")
-            held = clear.read_reservation(seat.key)
-            self.assertNotIn("runtime_status", held)
-            self.assertEqual(clear.compact_observation(held)["state"], "pending")
-            snapshot_calls, send_calls = [], []
-            idle_events, observations = [], []
-
-            def observe_new_idle(_seconds):
-                idle_events.append(st.run_hook(
-                    "opencode", "runtime-status", self.SID, cwd=str(self.cwd),
-                    compact_context={"status": "idle", "observed_at": (req["created"] + 1) * 1000},
-                    env=os.environ))
-                accepted = clear.read_reservation(seat.key)
-                observations.append((accepted["runtime_status"], clear.compact_observation(accepted)["state"]))
-
-            with mock.patch.object(handover, "publish_snapshot_locked",
-                                   side_effect=lambda *a, **k: snapshot_calls.append(1) or 1):
-                result = clear.run_helper(
-                    seat.key, req["nonce"], wait=lambda *_a: "idle",
-                    steward=lambda *_a: send_calls.append("clear") or {
-                        "cleared": "true", "new_session": "sid-next"},
-                    continuer=lambda *_a: send_calls.append("continue") or {"continued": "true"},
-                    sleep=observe_new_idle)
-            with self.iso.patched_environ():
-                saved = st.read_latest_card(seat)
-        self.assertEqual(result, "continued")
-        self.assertEqual(send_calls, ["clear", "continue"])
-        self.assertEqual(idle_events, ["booking=pending"])
-        self.assertEqual(len(observations), 1)
-        runtime_status, observation_state = observations[0]
-        self.assertEqual((runtime_status["sid"], runtime_status["status"]), (self.SID, "idle"))
-        self.assertGreater(runtime_status["observed_at"], req["created"])
-        self.assertEqual(observation_state, "ready")
-        self.assertEqual(snapshot_calls, [1])
-        self.assertIn("새 세션에서 볼 결론", saved["body"])
-        self.assertIn(str(self.iso.opencode_db), saved["body"])
 
 
 class MemoryLayerTest(TidyCase):
@@ -3779,25 +3073,6 @@ class ConsumedClearLineageRegressionTest(TidyCase):
                             for row in st._read_ledger_lines(self.seat)))
         return item
 
-    def test_same_compact_resume_in_another_pane_keeps_queue_without_clear(self):
-        item = self.handed_over()
-        # A failed continuation does not undo the already consumed clear.
-        req = clear.read_reservation(self.seat.key)
-        req["continued"] = {"state": "failed", "reason": "agent-not-found"}
-        clear._write_reservation(req)
-        self.helpers.reset_mock()
-        self.starts.reset_mock()
-        with self.library({"HERDR_PANE_ID": PANE_BESIDE}):
-            moved = st.resolve_seat("claude", str(self.cwd), sid="source-A")
-            self.assertNotEqual(moved.key, self.seat.key)
-            st.run_hook("claude", "start", "source-A", source="resume", cwd=str(self.cwd), env=os.environ)
-            result = st.reconcile_compact_frontier("claude", "source-A", str(self.cwd), env=os.environ)
-            self.assertIn("session-handed-over", result)
-            self.assertIsNone(clear.read_reservation(moved.key))
-            self.assertEqual([entry["id"] for entry in runner.list_items()], [item["id"]])
-            self.assertTrue(self.starts.called)
-            self.helpers.assert_not_called()
-            self.assertEqual(self.handover.lineage_graph().edges, (("claude", "source-A", "successor-B"),))
 
     def test_terminal_booking_replay_and_missing_booking_cannot_create_second_clear(self):
         self.handed_over()
@@ -3879,8 +3154,7 @@ class ConsumedClearLineageRegressionTest(TidyCase):
 class ClearBookingLineageRaceTest(TidyCase):
     """Booking mutations and lifecycle edges share the seat -> lineage order."""
 
-    CASES = ("idle", "codex-new", "codex-update", "enqueue", "compact-new",
-             "compact-update", "idle-accept")
+    CASES = ("idle", "enqueue", "compact-new", "compact-update", "idle-accept")
 
     def setUp(self):
         super().setUp()
@@ -3910,9 +3184,6 @@ class ClearBookingLineageRaceTest(TidyCase):
                 with mock.patch.object(st, "resolve_seat", return_value=seat):
                     return clear.observe_idle_event(harness, sid, str(self.cwd), event_id="race-turn",
                                                     tokens=200000, now=10)
-        elif harness == "codex":
-            def book():
-                return clear.schedule_compact_card_request(seat, harness, sid, str(self.cwd), context, now=10)
         else:
             def book():
                 return st._enqueue_tidy(seat, harness, sid, str(self.cwd),
@@ -4847,131 +4118,10 @@ class ClearHelperTest(TidyCase):
         self.assertIn("10분", self.notices(seat)[0])
         self.assertIn("/clear", self.notices(seat)[0])
 
-    def test_full_compact_false_idle_waits_for_end_turn_then_clears_and_enriches_same_card(self):
-        import dispatch_seat_handover as handover
-        seat, req, transcript = self.compact_booked()
-        def owner_row(attempt):
-            meta = {"attempt_id": attempt, "parent_sid": "sid-A", "parent_harness": "claude",
-                    "dispatch_depth": "1", "worker_type": "owner", "route_id": "rt-1",
-                    "route_hash": "sha256:aa", "route_node": "execute", "route_file": "/tmp/rt-1.json"}
-            return "2026-10-15T00:00:00Z\topen\t/w\t/w\tslug\t" + ",".join(
-                f"{key}={value}" for key, value in meta.items())
-        self.jobs.write_text(owner_row("att-before") + "\n", encoding="utf-8")
-        calls, snapshots, slept = [], [], []
 
-        def wait(_pane, _timeout):
-            calls.append("wait")
-            return "idle"                    # herdr's compact-time idle is deliberately false
 
-        def finish_turn():
-            if not slept:
-                with transcript.open("a", encoding="utf-8") as handle:
-                    handle.write(json.dumps({"type": "assistant", "uuid": "a-final",
-                                             "message": {"stop_reason": "end_turn", "content": [
-                                                 {"type": "text", "text": "최종 결과: 끝"}]}}) + "\n")
-                with self.jobs.open("a", encoding="utf-8") as handle:
-                    handle.write(owner_row("att-after") + "\n")
-            slept.append(True)
 
-        real_snapshot = handover.publish_snapshot_locked
-        def snapshot(*args, **kwargs):
-            snapshots.append(1)
-            return real_snapshot(*args, **kwargs)
-        with self.iso.patched_environ(self.extra), mock.patch.object(handover, "publish_snapshot_locked",
-                                                                       side_effect=snapshot):
-            outcome = clear.run_helper(
-                seat.key, req["nonce"], wait=wait,
-                steward=lambda *_a: calls.append("clear") or {"cleared": "true", "new_session": "sid-B"},
-                continuer=lambda *_a: calls.append("continue") or {"continued": "true"},
-                sleep=lambda _s: finish_turn())
-        self.assertEqual(outcome, "continued")
-        self.assertEqual(calls, ["wait", "wait", "clear", "continue"])
-        self.assertEqual(snapshots, [1])
-        with self.iso.patched_environ(self.extra):
-            snap = handover.read_snapshot(seat.key)
-        self.assertEqual([binding["attempt"] for binding in snap["bindings"]], ["att-before", "att-after"])
-        with self.iso.patched_environ():
-            card = self.card_for_booking(seat, req)
-        self.assertEqual(card["generation"], req["card_generation"])
-        self.assertIn("최종 결과: 끝", card["body"])
-        self.assertEqual(card["compact"]["summary"], "full compact summary")
 
-    def test_compact_wait_exceeds_ten_minutes_but_stays_inside_three_hour_deadline(self):
-        seat, req, transcript = self.compact_booked()
-        now = [req["created"]]
-        calls = []
-
-        def advance(_seconds):
-            now[0] += 601
-            with transcript.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps({"type": "assistant", "uuid": "a-late",
-                                         "message": {"stop_reason": "end_turn", "content": [
-                                             {"type": "text", "text": "600초 뒤 완료"}]}}) + "\n")
-
-        with self.iso.patched_environ(self.extra), mock.patch.object(st, "now_epoch", side_effect=lambda: now[0]):
-            outcome = clear.run_helper(
-                seat.key, req["nonce"], wait=lambda *_a: calls.append("wait") or "idle",
-                steward=lambda *_a: calls.append("clear") or {"cleared": "true", "new_session": "sid-B"},
-                continuer=lambda *_a: {"continued": "true"}, sleep=advance)
-        self.assertEqual(outcome, "continued")
-        self.assertGreater(now[0] - req["created"], 600)
-        self.assertLess(now[0] - req["created"], clear.COMPACT_CLEAR_DEADLINE_SEC)
-        self.assertEqual(calls, ["wait", "wait", "clear"])
-
-    def test_compact_three_hour_expiry_never_calls_steward(self):
-        seat, req, _transcript = self.compact_booked()
-        now = [req["created"]]
-        calls = []
-
-        def advance(_seconds):
-            now[0] = req["deadline"] + 1
-
-        with self.iso.patched_environ(self.extra), mock.patch.object(st, "now_epoch", side_effect=lambda: now[0]):
-            outcome = clear.run_helper(seat.key, req["nonce"], wait=lambda *_a: "idle",
-                                       steward=lambda *_a: calls.append("clear") or {"cleared": "true"},
-                                       sleep=advance)
-        self.assertEqual(outcome, "skipped")
-        self.assertEqual(calls, [])
-        notice = self.notices(seat)[0]
-        self.assertIn("자동 정리", notice)
-        self.assertNotIn("/clear", notice)
-        self.assertNotIn("이어서해", notice)
-
-    def test_false_idle_polls_with_bounded_sleeps_and_a_replaced_booking_stops_without_a_send(self):
-        seat, req, _transcript = self.compact_booked()
-        sleeps, calls = [], []
-
-        def sleep(seconds):
-            sleeps.append(seconds)
-            if len(sleeps) == 5:                     # a newer tidy replaces the booking mid-wait
-                clear.schedule_for_enqueue(seat, "claude", "sid-A", str(self.cwd))
-
-        with self.iso.patched_environ(self.extra), mock.patch.object(clear, "_start_helper", return_value=1):
-            outcome = clear.run_helper(seat.key, req["nonce"], wait=lambda *_a: calls.append("wait") or "idle",
-                                       steward=lambda *_a: calls.append("clear") or {"cleared": "true"},
-                                       sleep=sleep)
-        self.assertEqual(outcome, "superseded")
-        self.assertEqual(calls, ["wait"] * 5)
-        self.assertTrue(all(0 < value <= clear.COMPACT_POLL_SEC for value in sleeps))
-
-    def test_recent_tail_refresh_failure_keeps_the_complete_summary_and_still_clears(self):
-        seat, req, transcript = self.compact_booked()
-        with transcript.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps({"type": "assistant", "uuid": "a-final", "message": {
-                "stop_reason": "end_turn", "content": [{"type": "text", "text": "끝"}]}}) + "\n")
-        calls = []
-        with self.iso.patched_environ(self.extra), \
-                mock.patch.object(st, "update_compact_card_locked", side_effect=OSError("fixture")):
-            outcome = clear.run_helper(seat.key, req["nonce"], wait=lambda *_a: "idle",
-                                       steward=lambda *_a: calls.append("clear") or {
-                                           "cleared": "true", "new_session": "sid-B"},
-                                       continuer=lambda *_a: calls.append("continue") or {"continued": "true"},
-                                       sleep=lambda _s: None)
-        self.assertEqual((outcome, calls), ("continued", ["clear", "continue"]))
-        with self.iso.patched_environ():
-            card = self.card_for_booking(seat, req)
-        self.assertEqual(card["generation"], req["card_generation"])
-        self.assertEqual(card["compact"]["summary"], "full compact summary")
 
     def test_a_prompt_that_arrives_before_idle_cancels_the_clear(self):
         seat, req = self.booked()
@@ -5410,12 +4560,12 @@ class BackgroundAgentCompactTest(TidyCase):
                                     compact_summary="자동 요약", compact_context={"trigger": "manual"}))
             return {"cleared": "unverified", "reason": "compact-pending"}
         self.assertEqual(self.run_helper(seat, req, compacted), "continued")
-        self.assertEqual(hook, ["booking=skipped reason=tidy-compact"])
+        self.assertEqual(hook, [""])
         with self.iso.patched_environ(self.extra):
             self.assertEqual([item["id"] for item in runner.list_items()], queue_before)
             self.assertEqual(st.read_latest_card(caller)["generation"], generation)
             held = clear.read_reservation(seat.key)
-        self.assertEqual(held["compact_event"]["queue_id"], req["queue_id"])
+        self.assertEqual(held["queue_id"], req["queue_id"])
         self.assertEqual(self.calls[-1], ("continue", "sid-A"))
 
     def test_an_unconfirmed_compact_is_not_continued_and_not_retyped(self):
@@ -7780,9 +6930,8 @@ class CardWordLanguage(unittest.TestCase):
                                "to another session). Run /new if needed.")
         self.assertEqual(cont, '[tidy] The window was cleared, but "이어서해" could not be typed (the new session '
                                'did not start waiting for input). To continue, type "이어서해".')
-        self.assertTrue(request.startswith("This is an automatic idle tidy request. This request is sent only "
-                                           "when the last request's input is at least 300,000 tokens, the turn "
-                                           "ended about 1 minute ago"), request)
+        self.assertTrue(request.startswith("This is an automatic idle tidy request. Write one handoff card"), request)
+        self.assertNotIn("/clear", request)
         self.assertTrue(request.endswith("Request id: n9"), request)
         self.assertIsNone(re.search(r"[가-힣]", request.replace(" → ".join(st.CARD_FIELDS), "")
                                     .replace("·".join(st.CARD_FIXED_FIELDS), "")), request)

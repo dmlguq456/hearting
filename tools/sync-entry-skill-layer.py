@@ -42,9 +42,9 @@ before approval.
 
 ## Post-approval owner contract
 
-After approval, direct/quick sessions and the `standard+` dispatch-depth-1 owner load
-`capabilities/{identifier}.md`, then use the Reference Index below. Assigned
-stage workers load only their assigned stage contracts.
+{harness_manifest.entry_read_instruction(identifier)}
+The other entry-router steps apply to the main session. A registered owner uses
+only its Route steps and the latest receipt for runtime commands.
 
 ## Reference Index
 

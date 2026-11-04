@@ -71,8 +71,6 @@ const designPattern = /(designs?\/|\/design\/|spec\/design|preview\.html$|slides
 const promptBySession = new Map()
 const turnBySession = new Map()
 const sessionInfoById = new Map()
-const compactStartedBySession = new Map()
-const compactStatusUntil = new Map()
 const runtimeStatusBySession = new Map()
 // Prompt-lifecycle context that must stay visible for every model call of a
 // session, not just its first one. OpenCode has no Claude-style
@@ -499,15 +497,7 @@ function observeCompactRuntimeStatus(ctx, sid, status) {
   const observedAt = Date.now()
   runtimeStatusBySession.set(sid, { status: normalized, observedAt })
   recordNativeTurnStatus(ctx, sid, normalized)
-  const until = compactStatusUntil.get(sid) || 0
-  if (until <= observedAt) {
-    compactStatusUntil.delete(sid)
-    return
-  }
-  const result = runCompactHook("runtime-status", {
-    sessionID: sid, cwd: baseDir(ctx), status: normalized, observed_at: observedAt,
-  })
-  if (result !== "booking=pending") compactStatusUntil.delete(sid)
+
 }
 
 function recordNativeTurnStatus(ctx, sid, status) {
@@ -539,21 +529,6 @@ function recordNativeTurnStatus(ctx, sid, status) {
   } catch {}
 }
 
-async function currentCompactRuntimeStatus(ctx, sid) {
-  if (typeof ctx.client?.session?.status !== "function") return ""
-  const controller = new AbortController()
-  let timer
-  try {
-    const result = await Promise.race([
-      ctx.client.session.status({ signal: controller.signal }),
-      new Promise((resolve) => { timer = setTimeout(() => { controller.abort(); resolve(null) }, 500) }),
-    ])
-    const data = sdkResponseData(result)
-    const value = data?.[sid] || data?.status?.[sid]
-    if (value == null) return ""
-    return typeof value === "string" ? value : String(value?.type || "")
-  } catch { return "" } finally { clearTimeout(timer) }
-}
 
 function compactInfoTime(info) {
   const value = Number(info?.time?.created || info?.time?.updated || 0)
@@ -607,70 +582,26 @@ function isCompactSubSession() {
 }
 
 async function beforeCompact(ctx, input, output) {
-  const sid = input?.sessionID || input?.sessionId || ""
-  if (isCompactSubSession()) {
-    runWorkerState("compact-before", input || {})
-    return
-  }
-  if (!sid || isWorkerSession()) return
-  const info = await compactSessionInfo(ctx, sid)
-  if (!info || info.parentID) return
-  // The summary message is created after this hook returns (session/compaction.ts),
-  // so a completed summary created at or after this time belongs to this compaction.
-  compactStartedBySession.set(sid, Date.now())
-  const instructions = runCompactHook("compact-before", { ...input, worker: false })
-  if (instructions && output && typeof output === "object") {
-    if (!Array.isArray(output.context)) output.context = output.context ? [String(output.context)] : []
-    output.context.push(instructions)
-  }
+  if (isCompactSubSession()) runWorkerState("compact-before", input || {})
+  // Native summaries receive no main-session tidy instructions.
 }
 
 async function afterCompact(ctx, event) {
   const sid = event?.properties?.sessionID || ""
-  if (isCompactSubSession()) {
-    runWorkerState("compact-after", event || {})
-    return
-  }
+  if (isCompactSubSession()) { runWorkerState("compact-after", event || {}); return }
   if (!sid || isWorkerSession()) return
-  const started = compactStartedBySession.get(sid)
-  compactStartedBySession.delete(sid)
   const info = await compactSessionInfo(ctx, sid)
-  // Unknown identity: count the compaction in the ledger only, as before; no card or tidy.
-  if (!info) { collectCard("compact", sid, baseDir(ctx)); return }
-  if (info.parentID) return
-  let summary = ""
-  if (started) {
-    const rows = await compactMessages(ctx, sid)
-    const latest = completedSummary(rows, sid)
-    if (latest && compactInfoTime(latest) >= started) {
-      summary = (rows.find((row) => row?.info?.id === latest.id)?.parts || [])
-        .filter((part) => part?.type === "text" && typeof part.text === "string")
-        .map((part) => part.text).join("\n")
-      const parentID = String(latest.parentID || "")
-      const parent = rows.find((row) => row?.info?.id === parentID)
-      const compaction = (parent?.parts || []).find((part) => part?.type === "compaction")
-      const auto = typeof compaction?.auto === "boolean" ? compaction.auto
-        : typeof compaction?.data?.auto === "boolean" ? compaction.data.auto : null
-      const trigger = auto === true ? "auto" : auto === false ? "manual" : "unknown"
-      const tailStartID = String(compaction?.tail_start_id || compaction?.data?.tail_start_id || parentID)
-      const booking = runCompactHook("compact-after", {
-        sessionID: sid, cwd: baseDir(ctx), worker: false, summary, trigger,
-        summary_id: String(latest.id || ""), parent_id: parentID,
-        tail_start_id: tailStartID, compaction_part_id: String(compaction?.id || ""),
-      })
-      if (trigger === "auto" && booking === "booking=scheduled") {
-        compactStatusUntil.set(sid, Date.now() + 3 * 60 * 60 * 1000)
-      }
-      const status = compactStatusUntil.get(sid)
-      if (status && status > Date.now()) {
-        const current = await currentCompactRuntimeStatus(ctx, sid)
-        if (current) observeCompactRuntimeStatus(ctx, sid, current)
-      }
-      return
+  if (info?.parentID) return
+  const result = runCompactHook("compact-after", { sessionID: sid, cwd: baseDir(ctx), worker: false })
+  try {
+    const emitted = JSON.parse(result || "{}")
+    if (emitted.systemMessage) {
+      showContextAlert(ctx, emitted.systemMessage)
+      commitDeferred(sessionTidy, "_apply-deferred", emitted.deferredConsumed)
     }
-  }
-  runCompactHook("compact-after", { sessionID: sid, cwd: baseDir(ctx), worker: false, summary, trigger: "unknown" })
+  } catch {}
 }
+
 
 // One native launch event and one publisher belong to this module/process, not
 // to a directory-scoped plugin constructor. worker.reload recreates those contexts.
@@ -3009,7 +2940,6 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
         peerGuidanceBySession.delete(sid)
         contextAlertBySession.delete(sid)
         paneProjectionRetryAt.delete(sid)
-        compactStatusUntil.delete(sid)
         runtimeStatusBySession.delete(sid)
         pendingPeerStatus.delete(sid)
         invalidatePaneOrigin(sid)

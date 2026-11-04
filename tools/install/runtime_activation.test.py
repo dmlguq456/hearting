@@ -2000,6 +2000,33 @@ class NativeContextLifecycleTest(unittest.TestCase):
         self.assertEqual(config, seed)
         self.assertEqual(backup, seed)
 
+    def test_claude_idle_compaction_is_managed_and_its_exact_baseline_is_restored(self):
+        for baseline in (None, True, False):
+            with self.subTest(baseline=baseline), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                source = Path(__file__).resolve().parents[2]
+                with fixture_env.patched_environment(root / "fixture", source):
+                    home = activation.paths.runtime_home("claude")
+                    home.mkdir(parents=True, exist_ok=True)
+                    config = home / "settings.json"
+                    original = {"autoCompactEnabled": True, "userOption": "keep"}
+                    if baseline is not None:
+                        original["idleCompaction"] = baseline
+                    config.write_text(json.dumps(original))
+                    activation.activate("claude", "linked", str(source))
+                    activation.refresh("claude")
+                    installed = json.loads(config.read_text())
+                    self.assertIs(installed["idleCompaction"], False)
+                    self.assertIs(installed["autoCompactEnabled"], True)
+                    activation.deactivate("claude")
+                    restored = json.loads(config.read_text())
+                    self.assertIs(restored["autoCompactEnabled"], True)
+                    self.assertEqual(restored["userOption"], "keep")
+                    if baseline is None:
+                        self.assertNotIn("idleCompaction", restored)
+                    else:
+                        self.assertIs(restored["idleCompaction"], baseline)
+
     def test_claude_clean_home_drops_the_added_window(self):
         config, _ = self._lifecycle("claude")
         env = json.loads(config).get("env", {})

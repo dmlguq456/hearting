@@ -102,17 +102,39 @@ class Fleet2CollectionMemoTest(unittest.TestCase):
             self.assertEqual(read.call_count, 2)
 
     def test_dispatch_collection_scope_composes_and_resets_read_scopes(self):
+        import dispatch_supervision
         with self._state_root():
             with dispatch.collection_read_scope():
                 seat_scope = session_tidy._LEDGER_READ_SCOPE.get()
                 identity_scope = codex._DAEMON_IDENTITY_SCOPE.get()
+                route_scope = dispatch_supervision._ROUTE_ATTENTION_READ.get()
                 self.assertIsNotNone(seat_scope)
                 self.assertIsNotNone(identity_scope)
+                self.assertIsNotNone(route_scope)
                 with dispatch.collection_read_scope():
                     self.assertIs(session_tidy._LEDGER_READ_SCOPE.get(), seat_scope)
                     self.assertIs(codex._DAEMON_IDENTITY_SCOPE.get(), identity_scope)
+                    self.assertIs(dispatch_supervision._ROUTE_ATTENTION_READ.get(), route_scope)
             self.assertIsNone(session_tidy._LEDGER_READ_SCOPE.get())
             self.assertIsNone(codex._DAEMON_IDENTITY_SCOPE.get())
+            self.assertIsNone(dispatch_supervision._ROUTE_ATTENTION_READ.get())
+
+    def test_stall_lineage_reuses_one_graph_but_not_the_next_scan(self):
+        import dispatch_seat_handover as handover
+        import dispatch_supervision as supervision
+        graphs = (object(), object())
+        with self._state_root(), \
+                mock.patch.object(handover, "_lineage_signature", return_value=("observed",)) as signature, \
+                mock.patch.object(handover, "lineage_graph", side_effect=graphs) as read:
+            with dispatch.collection_read_scope():
+                context = supervision._ROUTE_ATTENTION_READ.get()
+                for _ in range(100):
+                    self.assertIs(handover._pass_lineage_graph(context), graphs[0])
+            self.assertEqual(read.call_count, 1)
+            self.assertEqual(signature.call_count, 1)
+            with dispatch.collection_read_scope():
+                self.assertIs(handover._pass_lineage_graph(supervision._ROUTE_ATTENTION_READ.get()), graphs[1])
+            self.assertEqual(read.call_count, 2)
 
     def test_registry_malformed_diagnostics_reuse_append_prefix_count(self):
         path = self.root / "jobs.log"

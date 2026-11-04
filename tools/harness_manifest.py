@@ -115,6 +115,13 @@ def render_procedure_index(identifier: str, root: Path | None = None) -> str:
         f"{rows}\n"
     )
 
+
+def entry_read_instruction(identifier: str) -> str:
+    """Entry Skill steps guide the main session; registered owners have one read path."""
+    return (f"Main session only: after approval, read `capabilities/{identifier}.md`. "
+            f"Registered owners read only `capabilities/{identifier}/references/owner-execution.md`; "
+            "stage workers read only their assigned contracts.")
+
 def skill_capabilities(manifest: dict) -> dict:
     """The capabilities that project as Skills and native commands: every class except compiler-internal.
 

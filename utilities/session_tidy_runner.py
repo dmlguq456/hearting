@@ -283,7 +283,7 @@ def _start_queued(item: dict) -> dict:
 
 def enqueue_item(seat: "st.Seat", harness: str, sid: str, cwd: str, transcript: str = "", *,
                  operation_id: Optional[str] = None, queue_id: Optional[str] = None,
-                 start: bool = True) -> dict:
+                 start: bool = True, origin: str = "") -> dict:
     """Durably enqueue one memory operation, optionally idempotent across hook retries.
 
     ``operation_id`` is used by automatic compact/idle events. Re-observing that event returns
@@ -309,6 +309,8 @@ def enqueue_item(seat: "st.Seat", harness: str, sid: str, cwd: str, transcript: 
     item = {"schema": SCHEMA, "id": queue_id or new_id(), "created": _now(), "status": "queued", "updated": _now(),
             "seat": queue_seat.as_dict(), "harness": harness, "sid": sid, "cwd": cwd, "transcript": transcript,
             "attempts": 0}
+    if origin == "idle":
+        item["origin"] = "idle"
     if operation_id:
         item["operation_id"] = operation_id
     with contextlib.suppress(BaseException):
@@ -966,6 +968,8 @@ def advance_watermarks(bundle: Bundle) -> None:
 
 
 def notify(item: dict, text: str) -> None:
+    if item.get("origin") == "idle":
+        return  # Idle completion has one card+compaction notice, no memory-work details.
     with contextlib.suppress(BaseException):
         stable = str(item.get("id") or item.get("operation_id") or "")
         st.write_notice(_card_seat(item), text, author_harness=item["harness"],
