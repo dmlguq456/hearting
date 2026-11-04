@@ -17,6 +17,10 @@ sys.path.insert(0, str(ROOT / "tools"))
 import harness_manifest
 
 
+# Entry routers are started by name (`$skill`); keep them out of the model's implicit list.
+EXPLICIT_ONLY_POLICY = "policy:\n  allow_implicit_invocation: false\n"
+
+
 def contract_rows(text: str) -> dict[str, str]:
     rows: dict[str, str] = {}
     for raw in text.splitlines():
@@ -173,10 +177,13 @@ def main() -> int:
 
     manifest = harness_manifest.load()
     expected: dict[Path, str] = {}
+    explicit_only = harness_manifest.explicit_only_skill_names(manifest)
     for identifier, spec in harness_manifest.skill_capabilities(manifest).items():
         capability_file = CAPABILITIES / f"{identifier}.md"
         identifier, body = render(identifier, spec, capability_file)
         expected[OUT / identifier / "SKILL.md"] = body
+        if identifier in explicit_only:
+            expected[OUT / identifier / "agents" / "openai.yaml"] = EXPLICIT_ONLY_POLICY
 
     stale: list[str] = []
     for path, body in expected.items():
@@ -187,17 +194,18 @@ def main() -> int:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(body, encoding="utf-8")
 
-    existing = sorted(OUT.glob("*/SKILL.md")) if OUT.exists() else []
+    existing = sorted(OUT.glob("*/SKILL.md")) + sorted(OUT.glob("*/agents/openai.yaml")) if OUT.exists() else []
     extras = [path for path in existing if path not in expected]
     if args.check:
         stale.extend(str(path.relative_to(ROOT)) for path in extras)
     else:
         for path in extras:
             path.unlink()
-            try:
-                path.parent.rmdir()
-            except OSError:
-                pass
+            for parent in (path.parent, path.parent.parent):
+                try:
+                    parent.rmdir()
+                except OSError:
+                    pass
 
     if stale:
         print("Codex native skill projections are stale:", file=sys.stderr)

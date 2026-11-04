@@ -2,6 +2,7 @@
 # GENERATED METADATA — edit harness-manifest.json, then run tools/generate.py.
 description: "Use when a new document has an independent audience and document goal. Owns document; default preset. Not for experiment reports (lab), existing-document edits, or code."
 argument-hint: "<task description> [--mode paper|presentation|doc] [--intensity direct|quick|standard|strong|thorough|adversarial] [--user-refine] [--no-clarify] [--from analyze|strategy|strategy-refine|draft|draft-refine|finalize]"
+disable-model-invocation: true
 metadata:
   group: entry
   fam: doc

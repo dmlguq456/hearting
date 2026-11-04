@@ -2,6 +2,7 @@
 # GENERATED METADATA — edit harness-manifest.json, then run tools/generate.py.
 description: "Use when the user asks to analyze existing code, a paper, or a document and no usable persistent analysis exists, or to refresh stale analysis; default initial analysis to persistent output. Owns analysis; default preset. Not for conversational, read-only, or no-file analysis; orientation, context recovery, status, experiments, external research, source changes, or completed-work audits."
 argument-hint: "[--mode code|paper|doc] [<scope/target/input-folder>] [--skip-qa]"
+disable-model-invocation: true
 metadata:
   group: pre
   fam: pre

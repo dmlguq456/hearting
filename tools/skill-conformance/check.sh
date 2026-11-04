@@ -154,7 +154,13 @@ for skills_dir in "$@"; do
         [ "$top_level_exclusion" = "Y" ] || { echo "FAIL: $name is parent-invoked but top-level exclusion is missing ($skills_dir)"; fail=1; }
         ;;
       entry-router)
-        [ "$disable" = "false" ] || { echo "FAIL: $name is entry-router but disable_model=$disable ($skills_dir)"; fail=1; }
+        # Explicit-only: Claude-form trees carry disable-model-invocation; Codex and OpenCode
+        # trees keep frontmatter free of it (Codex uses agents/openai.yaml, OpenCode its commands).
+        if [ "$native_generated" -eq 0 ]; then
+          [ "$disable" = "true" ] || { echo "FAIL: $name is entry-router but disable_model=$disable ($skills_dir)"; fail=1; }
+        else
+          [ "$disable" = "false" ] || { echo "FAIL: $name is entry-router but disable_model=$disable ($skills_dir)"; fail=1; }
+        fi
         [ "$use_when" = "Y" ] || { echo "FAIL: $name is entry-router but use_when=$use_when ($skills_dir)"; fail=1; }
         [ "$not_for" = "Y" ] || { echo "FAIL: $name is entry-router but exclusion boundary is missing ($skills_dir)"; fail=1; }
         ;;
@@ -181,7 +187,7 @@ EOF
 
   while IFS= read -r name; do
     [ -z "$name" ] && continue
-    if [ "${policy_class[$name]:-}" != "user-only" ]; then
+    if [ "${policy_class[$name]:-}" != "user-only" ] && [ "${policy_class[$name]:-}" != "entry-router" ]; then
       echo "FAIL: unexpected disable-model-invocation=true without user-only classification: $name ($skills_dir)"
       fail=1
     fi

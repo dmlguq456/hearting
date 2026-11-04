@@ -2,6 +2,7 @@
 # GENERATED METADATA — edit harness-manifest.json, then run tools/generate.py.
 description: "Use when an approved cheatsheet or patching guide must be applied to the real source artifact and the applied result verified. Owns applied artifact; default preset. Not for drafting or refining the cheatsheet, or for unrelated source implementation."
 argument-hint: "\"<cheatsheet hint / task>\" [--target latex] [--source <path-to-real-source>] [--isolation branch|worktree] [--from preflight|apply|verify|handback]"
+disable-model-invocation: true
 metadata:
   group: entry
   fam: doc

@@ -2,6 +2,7 @@
 # GENERATED METADATA — edit harness-manifest.json, then run tools/generate.py.
 description: "Use when durable cross-project user preferences must be inferred from coding, writing, or analysis evidence and stored as a profile. Owns profile; default preset. Not for one-project context recovery, casual preference acknowledgment, or ordinary task execution."
 argument-hint: "<aspect> [--source <path>] [--mode init|update] [--from discover|analyze|verify|qa|output|summary] [--user-refine]"
+disable-model-invocation: true
 metadata:
   group: pre
   fam: pre

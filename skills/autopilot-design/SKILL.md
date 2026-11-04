@@ -2,6 +2,7 @@
 # GENERATED METADATA — edit harness-manifest.json, then run tools/generate.py.
 description: "Use when a visual product surface needs references, design tokens, components or mockups, review, and development handoff. Owns design; default preset. Not for implementing an already-approved design in code or for document prose work."
 argument-hint: "<design task or app path> [--scope ui|webapp|slide|icon|diagram|mixed] [--artifact standalone|project] [--from <phase>] [--intensity direct|quick|standard|strong|thorough|adversarial]"
+disable-model-invocation: true
 metadata:
   group: entry
   fam: design

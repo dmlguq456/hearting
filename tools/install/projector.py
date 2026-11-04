@@ -14,11 +14,14 @@ from pathlib import Path
 import paths
 
 
-def main_hidden_skills(root=None):
-    """Stage-only skill names withheld from the main session's native skill list.
+def main_hidden_skills(root=None, rule="main_hidden_skill_names"):
+    """Skill names withheld from a runtime's native skill list.
 
-    Reads the canonical manifest of ``root`` (default: the agent home). A missing or
-    unreadable manifest hides nothing, so a partial tree still projects every skill.
+    ``rule`` names a ``harness_manifest`` selector: ``main_hidden_skill_names`` (stage-only
+    skills, withheld everywhere) or ``explicit_only_skill_names`` (entry routers, withheld
+    only where the runtime has no explicit-only switch). Reads the canonical manifest of
+    ``root`` (default: the agent home). A missing or unreadable manifest hides nothing, so a
+    partial tree still projects every skill.
     """
     tools = str(Path(__file__).resolve().parents[1])
     if tools not in sys.path:
@@ -28,7 +31,7 @@ def main_hidden_skills(root=None):
         manifest = harness_manifest.load(
             (Path(root) if root else paths.agent_home()) / "harness-manifest.json",
             validate_manifest=False)
-        return harness_manifest.main_hidden_skill_names(manifest)
+        return getattr(harness_manifest, rule)(manifest)
     except (harness_manifest.ManifestError, KeyError, OSError):
         return set()
 
@@ -478,6 +481,17 @@ _OPENCODE_TABLE = (
     }]
     + [
         {
+            # OpenCode has no explicit-only switch: entry routers are reached through the
+            # native commands below, so they stay out of the skill list.
+            "action": "symlink_glob",
+            "source_dir": "opencode_setting/opencode-skills",
+            "dest_subdir": "skills",
+            "pattern": "*",
+            "native_leaf": True,
+            "exclude_main_hidden": True,
+            "exclude_explicit_only": True,
+        },
+        {
             "action": "symlink_glob",
             "source_dir": "opencode_setting/opencode-agents",
             "dest_subdir": "agent",
@@ -580,7 +594,9 @@ def _expand(table, runtime, scope):
             if not source_dir.exists():
                 # A missing source directory produces no entries and is not an error.
                 continue
-            hidden = main_hidden_skills() if item.get("exclude_main_hidden") else ()
+            hidden = set(main_hidden_skills()) if item.get("exclude_main_hidden") else set()
+            if item.get("exclude_explicit_only"):
+                hidden |= main_hidden_skills(rule="explicit_only_skill_names")
             for match in sorted(source_dir.glob(item["pattern"])):
                 if match.name in item.get("exclude", ()) or match.name in hidden:
                     continue
