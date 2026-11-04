@@ -410,7 +410,10 @@ def _session_owner_states(
     # every row against one observation of the lineage directory, as the sweep
     # does: without the pin each `owns` listed and stat'ed every session ledger
     # again, ~1,600 rows x ~660 ledgers = ~8s of CPU per Bash call (2026-11-03).
-    read_context = PeerReadContext()
+    # Ownership reads relation rows only, so the scan uses the runner-published
+    # compact rows for unchanged ledgers, as the sweep's discovery does, instead
+    # of reading every handover snapshot and ledger on each Bash call and Stop.
+    read_context = PeerReadContext(compact_lineage=True)
     rows: list[tuple[str, float, str]] = []
     with read_context.pinned_lineage():
         for attempt_id, (stamp, status, metadata) in latest.items():
