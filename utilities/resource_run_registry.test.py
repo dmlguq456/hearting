@@ -443,10 +443,15 @@ class ResourceRegistryTest(unittest.TestCase):
                 pass
 
     def test_an_unrelated_process_exiting_mid_scan_does_not_hold_a_drained_group(self):
-        leader = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
-        identity = registry.launched_identity(leader)
+        # Hold the fixture until its identity is observed. A zero-work child
+        # can exit before the first /proc read under ordinary scheduling.
+        leader = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.buffer.read()"],
+                                  stdin=subprocess.PIPE, start_new_session=True)
+        try:
+            identity = registry.launched_identity(leader)
+        finally:
+            leader.communicate(timeout=5)
         self.assertIsNotNone(identity)
-        leader.wait(timeout=5)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         sentinel = Path(temporary.name) / "run.exit"
