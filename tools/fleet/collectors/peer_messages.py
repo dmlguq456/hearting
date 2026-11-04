@@ -523,6 +523,8 @@ def _pending_obligations(roots, now, diagnostics=None):
 
 _OUTPUT_OBSERVATION = None
 _OUTPUT_LOCK = threading.RLock()
+_OUTPUT_MAX_BYTES = 96 * 1024
+_OUTPUT_STATS = {'hits': 0, 'loads': 0, 'rejections': 0}
 
 
 def _project_records(records, now, clocks):
@@ -652,15 +654,19 @@ def _peer_result(records, pending_duties, now, *, reuse=False, source_tokens=Non
         with _OUTPUT_LOCK:
             if _OUTPUT_OBSERVATION is not None and _OUTPUT_OBSERVATION[0] == signature:
                 held = _OUTPUT_OBSERVATION
+                _OUTPUT_STATS['hits'] += 1
     if held is None:
         clocks = {}
         by_session = _project_records(records, now, clocks)
         if reuse:
             with _OUTPUT_LOCK:
+                _OUTPUT_STATS['loads'] += 1
+                admitted = retained_size((signature, clocks, by_session), _OUTPUT_MAX_BYTES) <= _OUTPUT_MAX_BYTES
+                if not admitted:
+                    _OUTPUT_STATS['rejections'] += 1
                 _OUTPUT_OBSERVATION = (((copy.deepcopy(signature[0]), *signature[1:]) if source_tokens is None else signature,
                                         clocks, copy.deepcopy(by_session))
-                                       if retained_size((signature, clocks, by_session),
-                                                        1024 * 1024) <= 1024 * 1024 else None)
+                                       if admitted else None)
     else:
         clocks, by_session = held[1], copy.deepcopy(held[2])
     for (key, direction), ts in clocks.items():

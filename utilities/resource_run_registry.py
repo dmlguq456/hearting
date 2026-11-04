@@ -251,7 +251,7 @@ def recorded_governor_identity(worker: dict) -> dict | None:
             reads = scope.get('governor-text')
             if reads is None:
                 from runtime_observation import ProjectionCache
-                reads = scope['governor-text'] = ProjectionCache(max_entries=32, max_bytes=2 * 1024 * 1024)
+                reads = scope['governor-text'] = ProjectionCache(max_entries=32, max_bytes=1024 * 1024)
             key = (str(path), Path.read_text)
             observed = reads.get(key)
             if observed is None:

@@ -3661,8 +3661,8 @@ def _iso_to_epoch(ts):
     return dt.timestamp()
 
 
-_REGISTRY_EVIDENCE_CACHE = ProjectionCache(max_bytes=64 * 1024 * 1024)
-_REGISTRY_FINGERPRINT_CACHE = ProjectionCache(max_entries=8192, max_bytes=4 * 1024 * 1024)
+_REGISTRY_EVIDENCE_CACHE = ProjectionCache(max_bytes=48 * 1024 * 1024)
+_REGISTRY_FINGERPRINT_CACHE = ProjectionCache(max_entries=16384, max_bytes=16 * 1024 * 1024)
 
 
 class RegistryRouteEvidence(dict):

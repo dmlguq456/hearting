@@ -55,6 +55,9 @@ def retained_size(value, limit=None):
                 pending.append(attributes)
         elif isinstance(item, (list, tuple, set, frozenset)):
             pending.extend(item)
+            attributes = getattr(item, '__dict__', None)
+            if attributes:
+                pending.append(attributes)
     return total
 
 
@@ -106,6 +109,7 @@ class ProjectionCache(OrderedDict):
 
 
 _PASS_READS = ContextVar("pass_observations", default=None)
+_PASS_READ_BYTES = 768 * 1024
 
 
 def observation_scope_active():
@@ -126,7 +130,7 @@ def observation_read_scope():
 
 
 def observe_once(reader=None, *, immutable=False):
-    """Bound repeated passive reads to 4096 entries / 8 MiB per pass.
+    """Bound repeated passive reads to 4096 entries / 768 KiB per pass.
 
     Outside an explicit scope this is the original fresh reader. Exceptions
     remain fresh, and mutable results are never shared with another caller.
@@ -154,11 +158,11 @@ def observe_once(reader=None, *, immutable=False):
             entries.move_to_end(key)
             return clone(value)
         value = reader(*args, **kwargs)
-        weight = len(repr((args, kwargs, value)).encode('utf-8', errors='replace'))
-        if weight <= 1024 * 1024:
+        weight = retained_size((key, value), _PASS_READ_BYTES) + 128
+        if weight <= _PASS_READ_BYTES:
             entries[key] = (clone(value), weight)
             scope[1] += weight
-            while len(entries) > 4096 or scope[1] > 8 * 1024 * 1024:
+            while len(entries) > 4096 or scope[1] > _PASS_READ_BYTES:
                 _key, (_value, removed) = entries.popitem(last=False)
                 scope[1] -= removed
         return value

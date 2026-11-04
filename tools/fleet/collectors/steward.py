@@ -24,7 +24,7 @@ import threading
 from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
-from runtime_observation import ProjectionCache, observe_once as _observe_once
+from runtime_observation import ProjectionCache, retained_size, observe_once as _observe_once
 
 
 def _peer_message_module():
@@ -252,7 +252,7 @@ def _native_role_sessions(markers, rows, relations=()):
         cache = scope.get(('native-role-cwds',))
         if cache is None:
             cache = scope[('native-role-cwds',)] = ProjectionCache(
-                max_entries=256, max_bytes=1024 * 1024)
+                max_entries=256, max_bytes=80 * 1024)
     policy = (codex._state_db, codex._home, opencode._db, sqlite3.connect)
     present = {key for row in rows for key in _session_keys(row)}
     wanted = set(markers)
@@ -314,7 +314,10 @@ def _native_role_sessions(markers, rows, relations=()):
                                 break
                         found[sid] = cwd
                         if cache is not None and observed:
-                            cache[(harness, sid, policy)] = cwd
+                            # Policy functions are shared module identities,
+                            # rather than new owned objects for every SID.
+                            cache.remember((harness, sid, policy), cwd,
+                                           weight=retained_size((harness, sid, cwd)) + 128)
         except (OSError, sqlite3.Error):
             pass
         out.extend(SimpleNamespace(harness=harness, session_id=sid, cwd=found[sid])

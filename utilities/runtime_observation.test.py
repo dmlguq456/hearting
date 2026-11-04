@@ -61,7 +61,7 @@ class PassObservationTest(unittest.TestCase):
         self.assertEqual(len(calls), 2)
 
     def test_large_observations_do_not_remain_in_the_pass_cache(self):
-        from runtime_observation import observation_read_scope, observe_once, _PASS_READS
+        from runtime_observation import observation_read_scope, observe_once, _PASS_READS, _PASS_READ_BYTES
         @observe_once(immutable=True)
         def read(number):
             return str(number) + 'x' * (512 * 1024)
@@ -69,7 +69,7 @@ class PassObservationTest(unittest.TestCase):
             for number in range(30):
                 read(number)
             entries, weight = _PASS_READS.get()
-            self.assertLessEqual(weight, 8 * 1024 * 1024)
+            self.assertLessEqual(weight, _PASS_READ_BYTES)
             self.assertLess(len(entries), 30)
         self.assertIsNone(_PASS_READS.get())
 
