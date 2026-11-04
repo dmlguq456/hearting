@@ -606,7 +606,8 @@ def replace_managed_observer(pid: int, pid_start: str | None, lock_path: str | P
         return False
 
 
-def _exec_in_release(source_root: Path, target_root: Path, argv, *, keep_fds=()) -> bool:
+def _exec_in_release(source_root: Path, target_root: Path, argv, *, keep_fds=(),
+                     before_exec=None) -> bool:
     """Replace this process with ``argv`` on another release of the same install.
 
     PID, start time, session and the listed descriptors stay; the environment
@@ -614,11 +615,18 @@ def _exec_in_release(source_root: Path, target_root: Path, argv, *, keep_fds=())
     release moves to the same place in the new one so nothing keeps naming the
     old tree. Preparation and the exec itself fail the same way: whatever was
     changed is restored and the caller keeps running its own code.
+
+    ``before_exec`` runs once, after the target environment is prepared and
+    before the descriptors and working directory are handed over. Nothing it
+    retires is retired for a handoff that failed earlier; when the exec then
+    fails the caller restores what the callback retired.
     """
     restore = []
     previous_cwd = None
     try:
         child_env = _service_exec_environment(source_root, target_root)
+        if before_exec is not None:
+            before_exec()
         for fd in keep_fds:
             restore.append((fd, os.get_inheritable(fd)))
             os.set_inheritable(fd, True)
@@ -714,8 +722,15 @@ def follow_installed_release(script: str | Path, arguments: Iterable[str], *, ro
 
 
 def exec_service_runner(lock_fd: int, state_root: str | Path, service_current: str | Path,
-                        *, herdr_session: str | None = None) -> bool:
-    """Replace this process with the same-install runner while retaining its flock."""
+                        *, herdr_session: str | None = None, before_exec=None) -> bool:
+    """Replace this process with the same-install runner while retaining its flock.
+
+    ``before_exec`` runs only after a replacement target is selected and the
+    target's environment is prepared, just before the descriptors and working
+    directory are handed over and the exec itself; when that then fails the
+    caller restores what it retired. A pass that finds no replacement never
+    calls it.
+    """
     try:
         source_root = _code_root().resolve(strict=True)
         binding = validate_service_binding(service_current, root=source_root)
@@ -736,7 +751,8 @@ def exec_service_runner(lock_fd: int, state_root: str | Path, service_current: s
     # Selection, strict root resolution and environment preparation are all
     # pre-exec work. Any OSError there is the same unsuccessful handoff as an
     # execve error: this process keeps its lock and retries on its next pass.
-    return _exec_in_release(source_root, target_root, argv, keep_fds=(lock_fd,))
+    return _exec_in_release(source_root, target_root, argv, keep_fds=(lock_fd,),
+                            before_exec=before_exec)
 
 
 def _runner_control_payload(service_current: str | Path, *, root=None) -> bytes | None:

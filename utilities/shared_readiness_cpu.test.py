@@ -1310,7 +1310,7 @@ for owner_count, terminal_count in cell_specs:
 
 def settled(jobs, *_args, **_kwargs):
     proof_calls[str(Path(jobs).resolve())] += 1
-    return False
+    return dispatch_terminal_commit.CompletionState("complete")
 
 def exact_dependency(jobs, _status, metadata):
     base = dependency_roots[str(Path(jobs).resolve())]
@@ -1324,7 +1324,7 @@ else:
     dependency_patch = mock.patch.object(batch, "_pending_owner_settlements",
         wraps=batch._pending_owner_settlements)
 
-with mock.patch.object(dispatch_terminal_commit, "owner_completion_pending",
+with mock.patch.object(dispatch_terminal_commit, "owner_completion_state",
                        side_effect=settled), dependency_patch:
     for case in cases.values():
         batch._resume_owner_settlements(case["jobs"], context=case["context"])
