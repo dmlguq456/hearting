@@ -10,6 +10,9 @@ from tools.fleet.explorer.input import ExplorerInput
 from tools.fleet.explorer.state import NavState, reduce
 from tools.fleet.explorer.view_model import load_fixture
 from tools.fleet.tests.test_explorer_peers import SEPARATOR, _arrow_glyph_delta, _card_boxes
+import sys  # noqa: E402
+sys.path.append(str(Path(__file__).resolve().parents[3] / "utilities"))  # split_module_fixture
+from split_module_fixture import patch_split  # noqa: E402
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "explorer"
 # transitions.json holds frames captured from a Korean screen; screen words now come from
@@ -344,7 +347,7 @@ class CoreTransitions(unittest.TestCase):
         fake_curses = SimpleNamespace(KEY_MOUSE=999, BUTTON4_PRESSED=64,
                                       BUTTON5_PRESSED=128, BUTTON1_PRESSED=2,
                                       BUTTON1_CLICKED=4, BUTTON1_RELEASED=8)
-        with mock.patch.object(render, "curses", fake_curses), \
+        with patch_split(render, "curses", fake_curses), \
                 mock.patch.object(render, "_EXPLORER_STATE", state), \
                 mock.patch.object(render, "_EXPLORER_FRAME", frame), \
                 mock.patch.object(render, "_EXPLORER_MODEL", vm), \
@@ -651,7 +654,7 @@ class SessionOpenPath(unittest.TestCase):
                                       BUTTON1_PRESSED=2, BUTTON1_CLICKED=4, BUTTON1_RELEASED=8)
         model = SimpleNamespace(ordering={"repo_by_tag": self.ordering["repo_by_tag"]})
         current = {"value": True}
-        with mock.patch.object(render, "curses", fake_curses), \
+        with patch_split(render, "curses", fake_curses), \
                 mock.patch.object(render, "_EXPLORER_STATE", NavState(scope="repo:" + self.repo)), \
                 mock.patch.object(render, "_EXPLORER_FRAME", frame), \
                 mock.patch.object(render, "_EXPLORER_MODEL", model), \

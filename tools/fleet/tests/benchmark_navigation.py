@@ -34,6 +34,8 @@ import threading
 import time
 import tracemalloc
 from pathlib import Path
+sys.path.append(str(Path(__file__).resolve().parents[3] / "utilities"))  # split_module_fixture
+from split_module_fixture import set_split  # noqa: E402
 
 
 SCRIPT = Path(__file__).resolve()
@@ -1772,7 +1774,8 @@ def _counted_build(render, sessions, width, iterations):
         return orig_tag(*args, **kwargs)
 
     render.project_of, model.project_of = project, model_project
-    gitinfo.resolve_gitdir, render._resolve_session_tag = gitdir, tag
+    gitinfo.resolve_gitdir = gitdir
+    set_split(render, "_resolve_session_tag", tag)
     memory = {"periodic_curate": {"total": 1, "current_cwd": "/tmp/navigation-curator"}}
     display = _display_snapshot(sessions, memory=memory)
     display_project_calls = counters["display_project_of"]
@@ -1793,7 +1796,8 @@ def _counted_build(render, sessions, width, iterations):
     finally:
         tracemalloc.stop()
         render.project_of, model.project_of = orig_project, orig_model_project
-        gitinfo.resolve_gitdir, render._resolve_session_tag = orig_gitdir, orig_tag
+        gitinfo.resolve_gitdir = orig_gitdir
+        set_split(render, "_resolve_session_tag", orig_tag)
     return {"sessions": len(sessions), "width": width, "iterations": iterations,
             "wall_median_ms": statistics.median(samples) / 1e6,
             "wall_max_ms": max(samples) / 1e6,
@@ -2012,7 +2016,7 @@ def _pty_child(source_tree, fixture_path, telemetry_fd, width, mode):
 
     curses.doupdate = flush
     render.project_of, model.project_of = project, model_project
-    render._resolve_session_tag = tag
+    set_split(render, "_resolve_session_tag", tag)
     render._build_lines, render._draw = build, draw
     render._CursesInput.read = read
     render._handle_select_key, render._handle_base_key = select_key, base_key

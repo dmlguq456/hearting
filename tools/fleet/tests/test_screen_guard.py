@@ -20,6 +20,8 @@ from unittest import mock
 TOOLS = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(TOOLS))
 from fleet import install_follow, screen_guard  # noqa: E402
+sys.path.append(str(Path(__file__).resolve().parents[3] / "utilities"))  # split_module_fixture
+from split_module_fixture import set_split  # noqa: E402
 
 # Screen words come from tools/i18n/messages.json. These suites keep the Korean words byte for
 # byte under a Korean declaration (the real-terminal child gets the same declaration).
@@ -500,7 +502,7 @@ def _explorer_child(directory, old, data, state):
     from fleet import fleet as fleet_main, render
     from fleet.refresh import LiveSnapshot
 
-    render._collect_memory_observed = lambda include_backlog=False: (None, "absent")
+    set_split(render, "_collect_memory_observed", lambda include_backlog=False: (None, "absent"))
     render._collect_governor = lambda: None
     render.set_explorer_mode(True)
     collects = [0]

@@ -11,6 +11,9 @@ from tools.fleet.explorer.frame import CellFrame
 from tools.fleet.explorer.runtime import ExplorerRuntime
 from tools.fleet.explorer.view_model import ExplorerViewModel
 from tools.fleet import render
+import sys  # noqa: E402
+sys.path.append(str(Path(__file__).resolve().parents[3] / "utilities"))  # split_module_fixture
+from split_module_fixture import patch_split  # noqa: E402
 
 
 def complete_readiness(at=100.0, generation=3):
@@ -185,7 +188,7 @@ class PersistedReplayTests(unittest.TestCase):
 
         screen = Screen()
         frame = CellFrame(((('⠏', 'spin', None),),), (), 1, 1)
-        with patch.object(render, "_SPIN", tuple("abc")), patch.object(render.time, "time", return_value=0.1):
+        with patch_split(render, "_SPIN", tuple("abc")), patch_split(render.time, "time", return_value=0.1):
             render._draw_explorer_frame(screen, frame, object(), stale=True)
             self.assertEqual(screen.writes[0][0], "⠏")
             if getattr(render.curses, "A_DIM", 0):

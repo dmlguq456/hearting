@@ -13,6 +13,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from fleet import render                                     # noqa: E402
 from fleet.model import DispatchJob, WorkProjection           # noqa: E402
+from pathlib import Path  # noqa: E402
+sys.path.append(str(Path(__file__).resolve().parents[3] / "utilities"))  # split_module_fixture
+from split_module_fixture import set_split  # noqa: E402
 
 
 def _job(key="code", worker_role="code-execute", stage="exec", slug="myslug", depth=1,
@@ -37,12 +40,12 @@ class StageZoneCapTest(unittest.TestCase):
         try:
             j = _job(key="code", worker_role=None, stage="test", slug="s")
             wide = render._dispatch_stage_segs(j, j.key, j.stage, j.slug, working=True)
-            render._STAGE_ZONE_MAX = 14
+            set_split(render, "_STAGE_ZONE_MAX", 14)
             narrow = render._dispatch_stage_segs(j, j.key, j.stage, j.slug, working=True)
             self.assertLess(_segs_width(narrow), _segs_width(wide))
             self.assertLessEqual(_segs_width(narrow), 14)
         finally:
-            render._STAGE_ZONE_MAX = prev
+            set_split(render, "_STAGE_ZONE_MAX", prev)
 
     def test_stage_zone_never_exceeds_the_cap(self):
         # every (key, stage) combo across every known pipeline, at every stage index.
@@ -83,13 +86,13 @@ class StageZoneCapTest(unittest.TestCase):
         """SD-F2 — the active stage is the LAST thing dropped, never the first."""
         prev = render._STAGE_ZONE_MAX
         try:
-            render._STAGE_ZONE_MAX = 12   # too tight for the full 3-stage breadcrumb
+            set_split(render, "_STAGE_ZONE_MAX", 12)   # too tight for the full 3-stage breadcrumb
             j = _job(key="code", worker_role=None, stage="test", slug="s")
             segs = render._dispatch_stage_segs(j, j.key, j.stage, j.slug, working=True)
             joined = "".join(t for t, _k in segs)
             self.assertIn("test", joined, "활성 스테이지가 드롭됐다")
         finally:
-            render._STAGE_ZONE_MAX = prev
+            set_split(render, "_STAGE_ZONE_MAX", prev)
 
     def test_168_no_overflow_is_structural_not_incidental(self):
         """★ D3's thesis — an artificially long role-suffix (unbounded in principle) must
