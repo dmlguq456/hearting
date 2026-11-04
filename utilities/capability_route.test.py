@@ -2515,6 +2515,23 @@ class TestRoute(unittest.TestCase):
    with self.assertRaisesRegex(ValueError,"route-close-outside-canonical-or-legacy"):
     R.close_route(route,outside,commit="5"*40)
    self.assertFalse(R.outcome_path(outside).exists())
+ def test_close_after_project_folder_rename_uses_current_canonical_root(self):
+  # Recorded artifact root no longer exists (folder renamed); the route sits in the
+  # current folder's canonical routes dir -> closes. A route elsewhere stays refused.
+  route=R.compile_route(**self.args())
+  with tempfile.TemporaryDirectory() as tmp:
+   new_root=Path(tmp)/"Refiner"/".agent_reports"; route=dict(route)
+   route["artifact_root"]=str(Path(tmp)/"Rehancer"/".agent_reports")
+   inside=R.canonical_route_path(new_root,route["route_id"]); inside.parent.mkdir(parents=True)
+   inside.write_text(json.dumps(route),encoding="utf-8")
+   rogue=new_root/"nested"/"rogue-route.json"; rogue.parent.mkdir(parents=True)
+   rogue.write_text(json.dumps(route),encoding="utf-8")
+   with mock.patch.dict(os.environ,{"AGENT_ARTIFACT_ROOT":str(new_root)}):
+    with self.assertRaisesRegex(ValueError,"route-close-outside-canonical-or-legacy"):
+     R.close_route(route,rogue,commit="7"*40)
+    outcome,created=R.close_route(route,inside,commit="7"*40,summary="moved close",allow_unproven=True)
+   self.assertTrue(created)
+   self.assertTrue(R.outcome_path(inside).is_file())
  def test_route_copy_outside_root_closes_canonical_same_identity(self):
   # Hand-built shape: a route passed by a copy's path closes the one canonical record of the same route.
   route=R.compile_route(**self.args())

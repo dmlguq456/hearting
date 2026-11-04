@@ -111,6 +111,9 @@ no shim is installed at the harness root. Export `AGENT_HOME` to the installed
 root for release behavior, or to a checkout/worktree to use that tree as the
 active runtime.
 
+If the memory prompt hook is unavailable, record `recall` or `skip` with
+`preflight.sh recall-gate <cwd> ...`.
+
 | Need | Command |
 |---|---|
 | lifecycle/workflow | `preflight.sh prompt-signal`, `preflight.sh briefing`, `preflight.sh worklog` |
@@ -200,7 +203,7 @@ projected; it does not copy Codex token-budget hooks or mutate runtime config.
 | design post-write verification | `core/HOOKS.md` defines the invariant; run `adapters/opencode/bin/preflight.sh design <file>` after design HTML writes |
 | design visual harness | Tool-contract check: `adapters/opencode/bin/preflight.sh visual-harness <file.html>` runs the adapter-owned render/screenshot/console wrapper. Inspect the reported screenshot before claiming visual completion. Do not project Claude Design MCP files into OpenCode |
 | memory injection | OpenCode plugin system transform runs `adapters/opencode/bin/preflight.sh memory [cwd]` once per session and re-emits the cached block on every model call, because a system-transform block only lives for the one call it decorates; run it manually when plugins are unavailable |
-| memory candidate exposure and deeper retrieval | OpenCode captures the current user prompt in plugin memory, runs `preflight.sh candidates` once for that turn, and re-emits the result on every model call of the turn (see ADAPTATION "Delivery channel"). The result is capsule-only, active current-project/global, and bounded to six headlines/IDs and 2,400 UTF-8 bytes. The same-turn message ID flows into the mutation gate. The prompt is never written to disk and is dropped at `session.deleted`. The model decides relevance and reads full records; explicit `recall` remains available for deeper search and `recall-gate` for hook recovery |
+| memory candidate exposure and deeper retrieval | OpenCode captures the current user prompt in plugin memory, runs `preflight.sh candidates` once for that turn, and re-emits the result on every model call of the turn (see ADAPTATION "Delivery channel"). The result is capsule-only, active current-project/global, and bounded to six headlines/IDs and 1,200 UTF-8 bytes. The same-turn message ID flows into the mutation gate. The prompt is never written to disk and is dropped at `session.deleted`. The model decides relevance and reads full records; explicit `recall` remains available for deeper search and `recall-gate` for hook recovery |
 | oncall briefing injection | OpenCode plugin system transform runs `adapters/opencode/bin/preflight.sh briefing [cwd]`; run it manually when plugins are unavailable |
 | loop guidance | `adapters/opencode/bin/preflight.sh loop-info <oncall|note|study|drill|runtime-watch>` reports whether a loop has an OpenCode manual contract, unsupported executable projection, or missing native implementation; `note` is application-owned and the harness exposes only the optional app-neutral `artifact-sink` port |
 | capability mapping | `adapters/opencode/bin/preflight.sh capability-info <capability>` reports OpenCode's native Skill/command realization and instruction-only or tool-contract status; root Skill compatibility references are not projected and report `compat_reference=not-projected` |

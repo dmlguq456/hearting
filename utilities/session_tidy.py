@@ -810,10 +810,17 @@ def resolve_seat(harness: Optional[str], cwd=None, env=None, sid: Optional[str] 
         hint = pane
         pane = verified_pane(pane, harness, sid, executable=_herdr_executable(),
                              server=server, socket_path=socket_path)
+        tmux_hint = terminal_tmux_pane(env)
+        if not pane and tmux_hint and tmux_hint != hint:
+            # A tmux server started under herdr hands its panes a herdr pane id that is not
+            # theirs; the pane's own tmux hint gets the same live proof.
+            hint, pane = tmux_hint, verified_pane(tmux_hint, harness, sid, executable=_herdr_executable(),
+                                                  server=server, socket_path=socket_path)
         if steps:
             steps.update(pane_hint=steps["pane_hint"] or bool(hint), verified_pane=pane or "")
     if pane:
-        endpoint = _endpoint_scope(env if live_caller else {})
+        from terminal_surface import is_tmux_pane
+        endpoint = "" if is_tmux_pane(pane) else _endpoint_scope(env if live_caller else {})
         key = _digest("pane", endpoint, pane) if endpoint else _digest("pane", pane)
         return session_seat(Seat("pane", key, pane, harness or "", "", endpoint=endpoint),
                             harness or "", sid or "")

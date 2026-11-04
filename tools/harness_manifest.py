@@ -125,6 +125,17 @@ def skill_capabilities(manifest: dict) -> dict:
             if spec["invocation"]["class"] != "compiler-internal"}
 
 
+def main_hidden_skill_names(manifest: dict) -> set[str]:
+    """Skills kept out of the main session's native skill list.
+
+    Stage skills (`parent-invoked`) are read by path by dispatched stage workers, and a
+    `compiler-internal` capability has no Skill at all, so neither belongs in the list that
+    every main-session request carries. Their `adapters/*/skills/<name>/SKILL.md` stay generated.
+    """
+    return {name for name, spec in manifest["capabilities"].items()
+            if spec["invocation"]["class"] in ("parent-invoked", "compiler-internal")}
+
+
 def _expect(condition: bool, message: str) -> None:
     if not condition:
         raise ManifestError(message)

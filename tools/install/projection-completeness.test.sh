@@ -85,6 +85,9 @@ manifest = json.load(open(root / "harness-manifest.json"))
 # A compiler-internal capability is documented but never projected as a Skill or command.
 capabilities = len([s for s in manifest["capabilities"].values()
                     if s["invocation"]["class"] != "compiler-internal"])
+# Stage-only (parent-invoked) skills are withheld from the main native skill list.
+skills = len([s for s in manifest["capabilities"].values()
+              if s["invocation"]["class"] not in ("compiler-internal", "parent-invoked")])
 modes = len([m for m in manifest["modes"] if not m.split("/")[-1].startswith("_")])
 
 
@@ -107,12 +110,13 @@ catalogs = {runtime: catalog(runtime) for runtime in ("claude", "codex", "openco
 if len(set(map(frozenset, catalogs.values()))) != 1:
     raise SystemExit(f"native agent catalogs diverge across adapters: {catalogs}")
 agents = len(set(manifest["kernel"]["agents"]) | catalogs["claude"])
-print(f"{capabilities} {agents} {modes}")
+print(f"{capabilities} {agents} {modes} {skills}")
 PY
 )
 EXPECTED_CAPABILITIES=$(echo "$EXPECT" | cut -d' ' -f1)
 EXPECTED_AGENTS=$(echo "$EXPECT" | cut -d' ' -f2)
 EXPECTED_MODES=$(echo "$EXPECT" | cut -d' ' -f3)
+EXPECTED_SKILLS=$(echo "$EXPECT" | cut -d' ' -f4)
 
 # assert_projection <linked|packaged> — both modes share _desired_entries, so
 # every runtime must expose the identical manifest-derived counts in either.
@@ -181,9 +185,9 @@ PY
   grep -q 'check=managed-launcher:retired required=0' "$TMP/$mode-native-projection.log" \
     || fail "$mode still requires a managed launcher"
 
-  test "$(count_dirs "$HOME/.codex/skills")" = "$EXPECTED_CAPABILITIES" || fail "$mode Codex skill count"
-  test "$(count_dirs "$HOME/.claude/skills")" = "$EXPECTED_CAPABILITIES" || fail "$mode Claude skill count"
-  test "$(count_dirs "$HOME/.config/opencode/skills")" = "$EXPECTED_CAPABILITIES" || fail "$mode OpenCode skill count"
+  test "$(count_dirs "$HOME/.codex/skills")" = "$EXPECTED_SKILLS" || fail "$mode Codex skill count"
+  test "$(count_dirs "$HOME/.claude/skills")" = "$EXPECTED_SKILLS" || fail "$mode Claude skill count"
+  test "$(count_dirs "$HOME/.config/opencode/skills")" = "$EXPECTED_SKILLS" || fail "$mode OpenCode skill count"
   test "$(count_dirs "$HOME/.config/opencode/commands")" = "$EXPECTED_CAPABILITIES" || fail "$mode OpenCode command count"
 
   # Kernel helpers (memory-scout) plus the native subagent type catalog;
@@ -405,7 +409,7 @@ row = json.load(open(sys.argv[1]))
 assert "profile" not in row, row
 assert row["freshness"] == "fresh", row
 PY
-test "$(count_dirs "$HOME/.codex/skills")" = "$EXPECTED_CAPABILITIES" \
+test "$(count_dirs "$HOME/.codex/skills")" = "$EXPECTED_SKILLS" \
   || fail "legacy activation refresh did not restore the full capability projection"
 
 # [C6.11] The same six-key fixture must also survive the activation *update*
@@ -429,7 +433,7 @@ legacy_keys = {
 assert not (legacy_keys & set(state)), state
 assert isinstance(state.get("activated_projection_digest"), str) and state["activated_projection_digest"], state
 PY
-test "$(count_dirs "$HOME/.codex/skills")" = "$EXPECTED_CAPABILITIES" \
+test "$(count_dirs "$HOME/.codex/skills")" = "$EXPECTED_SKILLS" \
   || fail "activation update did not restore the full capability projection"
 
 # Activation never accepts the legacy project scope. `install` no longer
