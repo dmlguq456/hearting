@@ -32,6 +32,7 @@ import sys
 import threading
 import time
 from types import MappingProxyType
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -473,7 +474,7 @@ def _orphan_projection_charge(parsed, converted, projection, proof):
         if row is None:
             continue
         values = row._values
-        charge += sys.getsizeof(row) + sys.getsizeof(values)
+        charge += sys.getsizeof(row) + sys.getsizeof(values) + 256
         source_keys = {name: name for name in input_meta}
         for name, value in values.items():
             charge += sys.getsizeof(name)
@@ -524,6 +525,18 @@ def _orphan_registry_rows(path, registry, *, read_only=False):
             converted[physical_order] = old
             if old[1] is not None:
                 rows.append(old[1])
+            continue
+        if isinstance(parsed_meta, RegistryMetadata):
+            # Reconstruct the comma-parser view from the same owned strings.
+            # Re-reading the small native parse LRU in historical order evicted
+            # its earlier rows and split the whole registry a second time.
+            raw_meta = parsed_meta.raw_copy()
+            row = registry._row_from_fields(
+                physical_order, fields, meta=raw_meta, meta_owned=True,
+                **converter_options)
+            converted[physical_order] = (fields, row)
+            if row is not None:
+                rows.append(row)
             continue
         while record is not None and record.order < physical_order:
             record = next(raw_records, None)
@@ -690,6 +703,41 @@ def _registry_metadata_needs_legacy_parser(raw):
     return _registry_metadata_analysis(raw)[0]
 
 
+class RegistryMetadata(Mapping):
+    """One normalized view with the exact raw differences retained alongside it."""
+    __slots__ = ('_values', '_raw_overrides', 'get')
+
+    def __init__(self, values, raw_overrides):
+        self._values, self._raw_overrides = values, raw_overrides
+        self.get = values.get
+
+    def __getitem__(self, key):
+        return self._values[key]
+
+    def __iter__(self):
+        return iter(self._values)
+
+    def __len__(self):
+        return len(self._values)
+
+    def __repr__(self):
+        return 'mappingproxy(' + repr(self._values) + ')'
+
+    def copy(self):
+        return self._values.copy()
+
+    def raw_copy(self):
+        raw = self._values.copy()
+        if '_name' not in self._raw_overrides:
+            raw.pop('_name', None)
+        raw.update(self._raw_overrides)
+        return raw
+
+    @property
+    def _projection_storage(self):
+        return self._values, self._raw_overrides, self.get
+
+
 def _registry_record_metadata(record):
     """Reuse the pinned registry's parsed key/value metadata when formats agree."""
     raw = record.fields[5] or ""
@@ -697,12 +745,16 @@ def _registry_record_metadata(record):
     if needs_legacy:
         return _parse_pipe_meta(raw)
     metadata = record.completion_metadata()
+    raw_overrides = {'_name': metadata['_name']} if '_name' in metadata else {}
     for key in whitespace_keys:
         value = metadata.get(key)
         if value is not None:
-            metadata[key] = " ".join(value.split())
+            normalized = " ".join(value.split())
+            if normalized != value:
+                raw_overrides[key] = value
+                metadata[key] = normalized
     metadata["_name"] = _strip_autopilot_prefix(metadata.get("capability"))
-    return metadata
+    return RegistryMetadata(metadata, raw_overrides)
 
 
 def _registry_parse_sources():
@@ -805,7 +857,9 @@ def _parse_registry_view(path, view, generation):
             rows.append(old)
             continue
         if old is None:
-            metadata = MappingProxyType(_registry_record_metadata(record))
+            metadata = _registry_record_metadata(record)
+            if not isinstance(metadata, RegistryMetadata):
+                metadata = MappingProxyType(metadata)
         else:
             metadata = old[2]
         rows.append((record.order, record.fields, metadata))

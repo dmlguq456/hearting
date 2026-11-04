@@ -12,6 +12,41 @@ from fleet.collectors import dispatch
 
 
 class ParsedRegistryRowsTest(unittest.TestCase):
+    def test_raw_adapter_reuses_normalized_source_without_a_second_comma_parse(self):
+        registry=dispatch._orphan_registry_module()
+        native=dispatch._dispatch_registry_cache.RegistryRecord
+        original=native.completion_metadata
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(native,'completion_metadata',autospec=True,side_effect=original) as parse:
+            path=Path(directory)/'jobs.log'
+            path.write_text('t\tdone\t/r\t/w\tone\tattempt_id=one,note=single spaces\n'
+                            't\tdone\t/r\t/w\ttwo\tattempt_id=two,note=double  spaces,_name=raw name\n')
+            with dispatch._dispatch_registry_cache.registry_read_scope():
+                parsed=dispatch.parsed_registry_rows(path)
+                calls=parse.call_count
+                rows=dispatch._orphan_registry_rows(path,registry,read_only=True)
+                self.assertEqual(parse.call_count,calls)
+            self.assertIsInstance(parsed[0][2],dispatch.RegistryMetadata)
+            self.assertEqual(parsed[1][2]['note'],'double spaces')
+            self.assertEqual(rows[1]['meta']['note'],'double  spaces')
+            self.assertEqual(rows[1]['meta']['_name'],'raw name')
+            copy=parsed[1][2].raw_copy();copy['note']='caller mutation'
+            self.assertEqual(parsed[1][2].raw_copy()['note'],'double  spaces')
+            self.assertEqual([dict(row)for row in rows],registry.read_rows(path))
+
+    def test_terminal_passive_rows_skip_unused_schema_work_but_keep_exact_status(self):
+        registry=dispatch._orphan_registry_module()
+        fields=('t','done','/r','/w','closed','attempt_schema_version=2,dispatch_depth=99')
+        expected=registry._row_from_fields(0,fields)
+        with mock.patch.object(registry,'validate_attempt_metadata',wraps=registry.validate_attempt_metadata) as verify:
+            passive=registry._row_from_fields(0,fields,defer_raw=True)
+            self.assertEqual(registry.classify(passive,None,{}),('terminal','cleanup-check-required',None))
+            verify.assert_not_called()
+            self.assertEqual(passive['attempt_contract_status'],expected['attempt_contract_status'])
+            self.assertEqual(dict(passive),expected)
+            self.assertEqual(list(passive),list(expected))
+            verify.assert_called_once()
+
     def test_attempt_record_shares_only_one_pass_and_one_authoritative_root(self):
         from types import SimpleNamespace
         with tempfile.TemporaryDirectory() as directory:

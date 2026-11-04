@@ -133,29 +133,57 @@ class _ReadOnlyRegistryRow(Mapping):
     non-ASCII field can widen the entire joined line, so keeping that string for
     every row needlessly duplicates a large registry. Control readers continue
     to receive ordinary dictionaries; passive classifiers can request this view.
+    Terminal rows need no schema judgment unless a consumer asks for it; the
+    established status value is then computed exactly, with bounded retention.
     """
 
-    __slots__ = ("_values", "_fields")
+    __slots__ = ("_values", "_fields", "_contract_status")
 
     def __init__(self, values, fields):
         self._values, self._fields = values, tuple(fields)
+        self._contract_status = None
 
     def __getitem__(self, key):
-        return "\t".join(self._fields) if key == "raw" else self._values[key]
+        if key == "raw":
+            return "\t".join(self._fields)
+        if key == "attempt_contract_status":
+            if self._contract_status is not None:
+                return self._contract_status
+            value = _row_contract_status(self._values['meta'])
+            # Account a small status slot up front; unusually large diagnostics
+            # remain exact return values without growing the retained projection.
+            if sys.getsizeof(value) <= 256:
+                self._contract_status = value
+            return value
+        return self._values[key]
 
     def __iter__(self):
         for key in self._values:
             if key == "legacy_read_only":
                 yield "raw"
             yield key
+        yield 'attempt_contract_status'
 
     def __len__(self):
-        return len(self._values) + 1
+        return len(self._values) + 2
 
     @property
     def _projection_storage(self):
         # Byte accounting inspects stored objects, without materializing raw.
-        return self._values, self._fields
+        return self._values, self._fields, self._contract_status
+
+
+def _row_contract_status(meta):
+    raw_schema = meta.get('attempt_schema_version')
+    if raw_schema in (None, '', '1'):
+        return 'legacy-read-only'
+    if raw_schema != '2':
+        return 'invalid:attempt-schema-version'
+    try:
+        validate_attempt_metadata(meta)
+    except DispatchContractError as exc:
+        return f'invalid:{exc.reason}'
+    return 'current'
 
 
 def _row_from_fields(order, fields, *, meta=None, meta_owned=False, defer_raw=False):
@@ -171,24 +199,15 @@ def _row_from_fields(order, fields, *, meta=None, meta_owned=False, defer_raw=Fa
         meta = dict(meta)
     raw_schema = meta.get("attempt_schema_version")
     legacy = raw_schema in (None, "", "1")
-    contract_status = (
-        "legacy-read-only" if legacy
-        else "current" if raw_schema == "2"
-        else "invalid:attempt-schema-version"
-    )
-    if contract_status == "current":
-        try:
-            validate_attempt_metadata(meta)
-        except DispatchContractError as exc:
-            contract_status = f"invalid:{exc.reason}"
     values = {"order": order, "timestamp": fields[0], "status": fields[1],
             "repo": fields[2], "worktree": fields[3], "slug": fields[4],
             "pipe": fields[5], "meta": meta}
     if not defer_raw:
         values["raw"] = "\t".join(fields)
-    values.update(legacy_read_only=legacy, attempt_contract_status=contract_status)
+    values['legacy_read_only'] = legacy
     if defer_raw:
         return _ReadOnlyRegistryRow(values, fields)
+    values['attempt_contract_status'] = _row_contract_status(meta)
     return values
 
 

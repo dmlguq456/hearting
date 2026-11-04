@@ -42,7 +42,17 @@ def retained_size(value, limit=None):
         total += sys.getsizeof(item)
         if limit is not None and total > limit:
             return total
-        storage = getattr(type(item), '_projection_storage', None)
+        kind = type(item)
+        if kind in (str, bytes, int, float, bool, type(None)):
+            continue
+        if kind is dict:
+            pending.extend(item.keys())
+            pending.extend(item.values())
+            continue
+        if kind in (list, tuple, set, frozenset):
+            pending.extend(item)
+            continue
+        storage = getattr(kind, '_projection_storage', None)
         if isinstance(storage, property):
             # The accessor can return a temporary tuple of stored children.
             # Its container is not retained; only those real children are.
