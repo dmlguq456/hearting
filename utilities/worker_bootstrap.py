@@ -1699,7 +1699,7 @@ def _linked_slice_source_worktree(args, route) -> Path | None:
 def worker_ending_prompt(*, supervised_owner: bool = False) -> str:
     """One ending rule for every adapter; supervised wait turns are nonterminal."""
     wait = (
-        "End an intermediate child-registration, resource-wait, or parent-deploy-request turn only with the "
+        "End an intermediate child-registration or resource-wait turn only with the "
         "standalone line `runtime_wait: registered-children`, without a three-line handoff. "
         if supervised_owner else ""
     )

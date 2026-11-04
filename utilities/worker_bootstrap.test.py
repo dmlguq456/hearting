@@ -996,7 +996,7 @@ class WorkerEndingPromptTest(unittest.TestCase):
         "handoff as the entire message — no summary sentence before it, nothing after it.\n"
     )
     WAIT = (
-        "End an intermediate child-registration, resource-wait, or parent-deploy-request turn only with the "
+        "End an intermediate child-registration or resource-wait turn only with the "
         "standalone line `runtime_wait: registered-children`, without a three-line handoff. "
     )
 
