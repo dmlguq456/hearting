@@ -1654,8 +1654,9 @@ def resolve_recipient(question, *, metadata=None, jobs=None, session="", harness
             if not registered or jobs is None or not eligible_row(metadata):
                 current, current_harness, disposition = registered, original_harness, "self"
             else:
+                jobs_key = read_context.jobs_key(jobs) if read_context is not None else _jobs_key(jobs)
                 current, current_harness, disposition = _lineage_holder(graph,
-                    (_jobs_key(jobs), *route_identity(metadata)), registered, original_harness)
+                    (jobs_key, *route_identity(metadata)), registered, original_harness)
         else:
             raise ValueError("unknown-recipient-question")
         if disposition == "unresolved":
