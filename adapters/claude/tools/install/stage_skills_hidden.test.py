@@ -1,0 +1,1 @@
+../../../../tools/install/stage_skills_hidden.test.py

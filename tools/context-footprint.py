@@ -60,6 +60,7 @@ def load_baseline(path: Path) -> dict[str, int]:
 
 def skill_meta(
     base: Path, prefix: str = "", selected: set[str] | None = None,
+    exclude: set[str] = frozenset(),
 ) -> tuple[int, int, int, set[str]]:
     normalized_total = 0
     local_path_total = 0
@@ -68,12 +69,15 @@ def skill_meta(
     for skill in sorted(base.glob("*/SKILL.md")):
         if selected is not None and skill.parent.name not in selected:
             continue
+        if skill.parent.name in exclude:
+            continue
         text = skill.read_text(encoding="utf-8", errors="ignore")
         name_match = re.search(r"^name:\s*(.+)$", text, re.M)
         desc_match = re.search(r"^description:\s*(.+)$", text, re.M)
-        if not name_match or not desc_match:
+        if not desc_match:
             continue
-        name = name_match.group(1).strip().strip('"')
+        # Claude skills omit `name:` (the directory name is the skill name).
+        name = name_match.group(1).strip().strip('"') if name_match else skill.parent.name
         desc = desc_match.group(1).strip().strip('"')
         names.add(name)
         count += 1
@@ -282,12 +286,18 @@ def main() -> int:
     print(f"surface=unit-catalog bytes={modes_total} path={modes_dir.relative_to(root)}")
 
     print("\n[skill-metadata]")
-    codex_local, codex_local_path, codex_local_count, codex_local_names = skill_meta(root / "adapters/codex/skills")
+    # Measure the projected set: stage-only skills are not in the main session's list.
+    sys.path.insert(0, str(root / "tools"))
+    import harness_manifest
+    hidden = harness_manifest.main_hidden_skill_names(
+        harness_manifest.load(root / "harness-manifest.json", validate_manifest=False))
+    codex_local, codex_local_path, codex_local_count, codex_local_names = skill_meta(
+        root / "adapters/codex/skills", exclude=hidden)
     codex_plugin, codex_plugin_path, codex_plugin_count, codex_plugin_names = skill_meta(
         root / "adapters/codex/plugins/hearting-codex/skills", "hearting-codex:"
     )
-    opencode, opencode_path, opencode_count, _ = skill_meta(root / "adapters/opencode/skills")
-    claude, claude_path, claude_count, _ = skill_meta(root / "adapters/claude/skills")
+    opencode, opencode_path, opencode_count, _ = skill_meta(root / "adapters/opencode/skills", exclude=hidden)
+    claude, claude_path, claude_count, _ = skill_meta(root / "adapters/claude/skills", exclude=hidden)
     print(f"surface=codex-local items={codex_local_count} baseline_chars={codex_local} local_path_chars={codex_local_path}")
     print(f"surface=codex-plugin items={codex_plugin_count} baseline_chars={codex_plugin} local_path_chars={codex_plugin_path}")
     print(f"surface=opencode items={opencode_count} baseline_chars={opencode} local_path_chars={opencode_path}")

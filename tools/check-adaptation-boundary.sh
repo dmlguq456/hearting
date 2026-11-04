@@ -1278,7 +1278,7 @@ check_codex_bin_wrappers() {
     || ! grep -Fq 'verification-runner' capabilities/code-test.md \
     || ! grep -Fq 'test_logs/' adapters/codex/skills/code-test/SKILL.md \
     || ! grep -Fq '`code-report` alone updates `pipeline_summary.md`' adapters/codex/skills/code-test/SKILL.md \
-    || ! grep -Fq 'verification-runner' adapters/codex/plugins/hearting-codex/skills/code-test/SKILL.md; then
+    || ! grep -Fq 'verification-runner' adapters/codex/skills/code-test/SKILL.md; then
     fail_msg "code-test portable spec and Codex projections must describe the verification-runner contract"
   fi
   if ! grep -Fq 'compat_reference=not-projected' adapters/codex/bin/capability-map.sh \
