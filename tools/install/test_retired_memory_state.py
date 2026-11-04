@@ -106,7 +106,10 @@ class RetiredMemoryStateTest(unittest.TestCase):
 
     def test_nothing_current_reads_or_writes_a_retired_name(self):
         root = Path(__file__).resolve().parents[2]
-        live = [root / "tools/memory/mem.py", *(root / "hooks").glob("*.sh"),
+        # mem.py and the modules it is split into (tools/memory/mem_*.py, "Split out of `mem.py`").
+        mem_parts = [path for path in sorted((root / "tools/memory").glob("mem_*.py"))
+                     if "Split out of `mem.py`" in path.read_text(encoding="utf-8")]
+        live = [root / "tools/memory/mem.py", *mem_parts, *(root / "hooks").glob("*.sh"),
                 *(root / "hooks").glob("*.py"), *(root / "adapters/codex/hooks").glob("*.py"),
                 *(root / "adapters/codex/bin").glob("*.sh"),
                 *(root / "adapters/opencode/bin").glob("*.sh"),
