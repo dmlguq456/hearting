@@ -3606,6 +3606,7 @@ def _draw_explorer(stdscr, snapshot, frame=None):
 
 _EXPLORER_PAINT_CACHE = None
 _EXPLORER_DRAW_CACHE = None
+_EXPLORER_PAINT_ROW_MAX_BYTES = 40 * 1024
 
 
 def _explorer_paint_runs(frame, height, width):
@@ -3629,7 +3630,7 @@ def _explorer_paint_runs(frame, height, width):
         if previous is not None and previous[0] == visible:
             runs.extend(previous[1])
             charge = getsizeof(previous[1]) + 128 + (getsizeof(visible) if visible is not row else 0)
-            if row_bytes + charge <= 64 * 1024:
+            if row_bytes + charge <= _EXPLORER_PAINT_ROW_MAX_BYTES:
                 compiled_rows[y] = (visible, previous[1])
                 row_bytes += charge
             continue
@@ -3653,7 +3654,7 @@ def _explorer_paint_runs(frame, height, width):
                             for offset, glyph in enumerate(glyphs) if glyph)
         row_runs = tuple(runs[first_run:])
         charge = getsizeof(row_runs) + 128 + (getsizeof(visible) if visible is not row else 0)
-        if row_bytes + charge <= 64 * 1024:
+        if row_bytes + charge <= _EXPLORER_PAINT_ROW_MAX_BYTES:
             compiled_rows[y] = (visible, row_runs)
             row_bytes += charge
     result = tuple(runs)
