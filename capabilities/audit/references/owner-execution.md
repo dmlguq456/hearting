@@ -1,5 +1,7 @@
 # audit
 
+Read only this file for owner procedure. Run only the runtime commands your Route steps and the latest receipt print; never assemble a runtime command yourself. Read another reference or `core/` only when a receipt or Route step names that section. Named task inputs and artifacts remain inputs to read; policy cross-references below are lookup locations, not additional required reading.
+
 Read-oriented post-run inspection entrypoint for artifacts and pipelines. Diagnose drift, inconsistency, and omissions by detecting type, selecting scope, ingesting the P1 baseline, linting selected aspects, and reporting findings. This file defines routing and stage contracts; load the relevant reference only when its detailed procedure or template is needed.
 
 > **Output folder convention**: CONVENTIONS.md §5 (`<agent-home>/core/CONVENTIONS.md#5-skill-output-convention--t1t2t3`) (3-tier). Do not modify the audited artifact during inspection; write only an audit report at `{artifact_dir}/_internal/audit/audit_{YYYY-MM-DDTHHMM}.md`.
@@ -66,7 +68,7 @@ chat locale.
 
 ## Process
 
-Run `Stage A → B (B.1/B.2) → B.5 → C → D (D.5)` in order. The references below preserve the procedures, signal tables, lint definitions, templates, and prompts; read a stage's reference before executing it.
+Run `Stage A → B (B.1/B.2) → B.5 → C → D (D.5)` in order. The references below preserve the procedures, signal tables, lint definitions, templates, and prompts; read a stage's reference only when its Route step or receipt names it.
 
 | Stage | Content | Reference |
 |---|---|---|
@@ -94,12 +96,12 @@ Run `Stage A → B (B.1/B.2) → B.5 → C → D (D.5)` in order. The references
 
 ## Reference Index
 
-| File | When to load (mandatory) | Content |
+| File | Load policy | Content |
 |---|---|---|
-| `scope-and-baseline.md` | Every invocation, before Stages A-B.5 (required) | Artifact-type detection, effective-scope signals and mappings, and minor-log baseline ingestion with P1 diffing, cross-correlation, and chat output |
-| `aspect-lints.md` | When running Stage C | Pre-checks for `--no-fact-check`; document fact/style/structure/cross-reference/coverage lints; research consistency/tier/coverage/cross-card lints; plan test/lint/code-review/TODO/implementation/semantic-deterministic checks |
-| `report-and-autofix.md` | When running Stages D-E | Report template, `editorial/polish` unit polish, chat format, and auto-fix chain conditions, prompt, dispatch, logging, and rationale |
-| `examples-and-checklist.md` | For invocation examples or follow-up after `--report-only` | Examples and the post-audit checklist |
+| `scope-and-baseline.md` | Only when a receipt or Route step names it | Artifact-type detection, effective-scope signals and mappings, and minor-log baseline ingestion with P1 diffing, cross-correlation, and chat output |
+| `aspect-lints.md` | Only when a receipt or Route step names it | Pre-checks for `--no-fact-check`; document fact/style/structure/cross-reference/coverage lints; research consistency/tier/coverage/cross-card lints; plan test/lint/code-review/TODO/implementation/semantic-deterministic checks |
+| `report-and-autofix.md` | Only when a receipt or Route step names it | Report template, `editorial/polish` unit polish, chat format, and auto-fix chain conditions, prompt, dispatch, logging, and rationale |
+| `examples-and-checklist.md` | Only when a receipt or Route step names it | Examples and the post-audit checklist |
 
 ## Artifact Producer Lifecycle (W7C)
 

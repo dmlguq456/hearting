@@ -1,5 +1,7 @@
 # autopilot-lab
 
+Read only this file for owner procedure. Run only the runtime commands your Route steps and the latest receipt print; never assemble a runtime command yourself. Read another reference or `core/` only when a receipt or Route step names that section. Named task inputs and artifacts remain inputs to read; policy cross-references below are lookup locations, not additional required reading.
+
 > **Output location**: `<artifact-root>/experiments/` under the CONVENTIONS §5 (`<agent-home>/core/CONVENTIONS.md#5-skill-output-convention--t1t2t3`) 3-tier layout. Keep one `_RUNLOG` timeline and append one directory per experiment.
 
 ## Purpose
@@ -20,14 +22,14 @@ Heavy training and evaluation use the selected compute environment, cluster, GPU
 
 ## Reference Index
 
-| File | When to load (mandatory) | Content |
+| File | Load policy | Content |
 |---|---|---|
-| `auto-load-context.md` | Every invocation, Step 0 (required) | Context loading from project conventions, optional user-profile conventions, `_RUNLOG`, parent or prior experiments, similar models, and readiness checks |
-| `data-contract.md` | When writing machine-readable logs, `run.json`, dispatch data, or `report/` | Append-only `metrics.jsonl`, lifecycle manifest, parent-lineage source of truth, terminal dispatch event, and iframe report contract |
-| `config-provenance.md` | Before a full run or when reviewing config lineage | Resolution, sealing, manifest verification, smoke binding, and promotion handoff |
-| `setup-procedure.md` | `--mode setup` or auto→setup | S1 spec and review, S2 scaffold and logger, S3 run guidance, `_RUNLOG` pending state, `run.json` birth record, and smoke/debug options; its step table maps S1–S3 to part ids (`capability-route.py stages --capability autopilot-lab` is the stage list) |
-| `eval-procedure.md` | `--mode eval` or auto→eval | E1 eval spec, E2 execution guidance, E3 analysis, figures, paper comparison, `REPORT.md`, `STORY.md`, `_RUNLOG` completion, `run.json` finalization, and dispatch event; its step table maps E1–E3 to part ids, including the optional `eval-spec`, `eval-smoke`, and `diagnose` parts |
-| `outputs-and-examples.md` | When resolving output layout, graduation, handoff, return format, or examples | Supported experiment layouts, `pipeline_state.yaml`, graduation to spec/code, optional continuity notes, return format, and worked examples |
+| `auto-load-context.md` | Only when a receipt or Route step names it | Context loading from project conventions, optional user-profile conventions, `_RUNLOG`, parent or prior experiments, similar models, and readiness checks |
+| `data-contract.md` | Only when a receipt or Route step names it | Append-only `metrics.jsonl`, lifecycle manifest, parent-lineage source of truth, terminal dispatch event, and iframe report contract |
+| `config-provenance.md` | Only when a receipt or Route step names it | Resolution, sealing, manifest verification, smoke binding, and promotion handoff |
+| `setup-procedure.md` | Only when a receipt or Route step names it | S1 spec and review, S2 scaffold and logger, S3 run guidance, `_RUNLOG` pending state, `run.json` birth record, and smoke/debug options; its step table maps S1–S3 to part ids (`capability-route.py stages --capability autopilot-lab` is the stage list) |
+| `eval-procedure.md` | Only when a receipt or Route step names it | E1 eval spec, E2 execution guidance, E3 analysis, figures, paper comparison, `REPORT.md`, `STORY.md`, `_RUNLOG` completion, `run.json` finalization, and dispatch event; its step table maps E1–E3 to part ids, including the optional `eval-spec`, `eval-smoke`, and `diagnose` parts |
+| `outputs-and-examples.md` | Only when a receipt or Route step names it | Supported experiment layouts, `pipeline_state.yaml`, graduation to spec/code, optional continuity notes, return format, and worked examples |
 
 ## Workflow Position
 

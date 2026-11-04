@@ -25,8 +25,11 @@ Each capability has:
 
 For each manifest `entry-router`, discovery and execution are separate
 surfaces. The compact pre-approval router carries routing metadata; after
-approval, the selected portable capability contract and the procedure references listed by the shared projection govern execution. Assigned stage workers read only their stage
-contracts. Parent-invoked and model-support capabilities never enter the
+approval, the main session reads the selected portable capability contract.
+Registered owners read only `capabilities/<capability>/references/owner-execution.md`
+and run the runtime commands printed by Route steps and the latest receipt.
+Other references load only when a step or receipt names their section.
+Assigned stage workers read only their stage contracts. Parent-invoked and model-support capabilities never enter the
 primary-router candidate set.
 
 Autopilot entry capabilities additionally follow `core/CONVENTIONS.md §1`:
