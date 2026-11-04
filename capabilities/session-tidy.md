@@ -244,9 +244,13 @@ The general card body stays within 8,192 UTF-8 bytes. Overflow is kept as the
 same generation's complete original in the existing `card-history/<card>/`
 JSON record before the bounded latest card is written. The latest card names
 that exact source. Never replace that full source with its bounded copy on the
-next write. Preserve every core heading and preserved-field heading: retain a
-whole section when it fits, otherwise only complete lines with an explicit
-source reference. A single oversized quote/path line moves intact to that
+next write. Preserve every core heading and every recognized preserved/module/legacy
+heading present in the source, including user instructions. Reserve these
+sections first and divide content space fairly: satisfy short sections in full,
+then share their unused space among the remaining sections. A large original
+goal never consumes the working state, decisions, next action or instructions
+budget. Retain whole sections or complete lines within each share, with an
+explicit source reference for the rest. A single oversized quote/path line moves intact to that
 source; never split a word, UTF-8 character, path, or line to fill space. A field
 not present in the original is unknown, not invented. Existing history retention
 continues to apply. Old nine-section cards remain readable, including `관련`,

@@ -3922,6 +3922,54 @@ class CardContractTest(TidyCase):
         self.assertIn("## 관련 세션\n옛 칸 이름도 읽음", latest["body"])
         self.assertEqual(json.loads(Path(latest["source_history"]).read_text())["body"], original)
 
+    def test_large_legacy_card_shares_space_across_all_seven_fields(self):
+        fields = st.card_format.policy()["core"] + st.card_format.policy()["legacy"]
+        contents = {}
+        for field in fields:
+            marker = f"- {field['id']} 핵심 내용은 계속 유지"
+            details = [f"- {field['id']} 상세 {i:03d}: 완료 전 확인할 경로 /자료/{i:03d}.json"
+                       for i in range(100)]
+            contents[field["id"]] = [marker, *details]
+        original = "\n\n".join(f"## {field['label']}\n" + "\n".join(contents[field["id"]])
+                                for field in fields)
+        self.assertTrue(all(len("\n".join(lines).encode()) > 5000
+                            for lines in contents.values()))
+        self.card("sid-A", original)
+        latest = json.loads(next((self.state / "cards").glob("*.json")).read_text())
+        self.assertLessEqual(len(latest["body"].encode()), 8192)
+        sections = {key: body for key, _, body in st.card_format._sections(latest["body"])}
+        for field in fields:
+            with self.subTest(field=field["id"]):
+                lines = sections[field["id"]].splitlines()
+                self.assertIn(contents[field["id"]][0], lines)
+                self.assertGreaterEqual(len(set(lines).intersection(contents[field["id"]][1:])), 10)
+                self.assertLess(len(sections[field["id"]].encode()), 2000)
+        source = Path(latest["source_history"])
+        self.assertEqual(json.loads(source.read_text())["body"], original)
+        self.assertIn(str(source), latest["body"])
+
+    def test_short_fields_finish_before_unused_space_returns_to_long_fields(self):
+        goal = [f"- 목표 상세 {i:03d}: /자료/목표-{i:03d}.json" for i in range(200)]
+        progress = [f"- 현재 상세 {i:03d}: /자료/현재-{i:03d}.json" for i in range(200)]
+        short = {"waiting_decisions": "사용자의 검토 결정을 기다림",
+                 "next_actions": "실패한 경로부터 다시 확인",
+                 "related": "b6 (wB:pAX)",
+                 "user_instructions": "[2026-11-04] 원본을 덮어쓰지 말 것"}
+        original = ("## 원래 목표\n" + "\n".join(goal) +
+                    "\n## 진행 중\n" + "\n".join(progress) +
+                    "\n## 기다리는 결정\n" + short["waiting_decisions"] +
+                    "\n## 다음 할 일\n" + short["next_actions"] +
+                    "\n## 관련 세션\n" + short["related"] +
+                    "\n## 사용자 지시\n" + short["user_instructions"])
+        bounded = st.card_format.bounded_body(original, 8192, "/history/00000001.json")
+        self.assertLessEqual(len(bounded.encode()), 8192)
+        sections = {key: body for key, _, body in st.card_format._sections(bounded)}
+        for key, value in short.items():
+            self.assertEqual(sections[key].split("\n\n원문 참조:", 1)[0], value)
+        for key, lines in (("original_goal", goal), ("in_progress", progress)):
+            self.assertGreater(len(sections[key].encode()), 3000)
+            self.assertTrue(set(sections[key].splitlines()) - {"원문 참조"} <= set(lines))
+
     def test_overflow_repeated_modules_do_not_displace_the_core(self):
         body = "原文" + ("\n## research\nmetric 1, path /data/result.json" * 1000)
         bounded = st.card_format.bounded_body(body, 8192, "/history/00000001.json")

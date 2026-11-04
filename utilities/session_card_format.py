@@ -109,6 +109,23 @@ def _sections(text: str) -> list[tuple[str, str, str]]:
     return result
 
 
+def _fair_budget(demands: dict[int, int], available: int) -> dict[int, int]:
+    """Max-min shares: finish short fields, redistribute to unfinished fields."""
+    result = {key: 0 for key in demands}
+    pending = {key: value for key, value in demands.items() if value > 0}
+    while pending:
+        share, extra = divmod(available, len(pending))
+        small = [key for key, value in pending.items() if value <= share]
+        if not small:
+            for n, key in enumerate(pending):
+                result[key] = share + (n < extra)
+            break
+        for key in small:
+            result[key] = pending.pop(key)
+            available -= result[key]
+    return result
+
+
 def bounded_body(text: str, limit: int, source: str = "") -> str:
     """Preserve core slots and complete lines, referencing the unabridged history."""
     if len(text.encode("utf-8")) <= limit:
@@ -116,9 +133,10 @@ def bounded_body(text: str, limit: int, source: str = "") -> str:
     rules = policy()
     sections = _sections(text)
     korean = any("가" <= c <= "힣" for c in text)
-    known = {f["id"]: f["label"] if korean else f["aliases"][0] for f in fields()}
+    known = {f["id"]: f["label"] if korean else f["aliases"][0] for f in fields() + rules["legacy"]}
     required = list(rules["core"])
     required += [f for f in rules["preserved"] if any(s[0] == f["id"] for s in sections)]
+    required += [f for f in rules["legacy"] if any(s[0] == f["id"] for s in sections)]
     required_ids = {f["id"] for f in required}
     ordered = []
     # Preserve every core slot. A missing value is not an inferred fact.
@@ -152,23 +170,45 @@ def bounded_body(text: str, limit: int, source: str = "") -> str:
     # even the fixed skeleton fits comfortably in the existing 8 KiB allowance.
     if len(joined().encode("utf-8")) > limit:
         return complete_lines(text, limit)
-    for i, (key, title, body, present) in enumerate(ordered):
-        if not present:
-            continue
+    def pack(i: int, quota: int) -> str:
+        key, title, body, _ = ordered[i]
         head = f"## {known.get(key, title)}\n" if title or key in known else ""
-        previous = rendered[i]
-        candidate = head + body
-        rendered[i] = candidate
-        if len(joined().encode("utf-8")) <= limit:
-            continue
-        rendered[i] = previous
-        # A required slot reserves its reference while optional sections are
-        # omitted unless at least one complete content line can fit.
-        room = limit - len(joined().encode("utf-8")) + len(previous.encode("utf-8"))
-        room -= len((head + "\n" + note).encode("utf-8"))
+        full = head + body
+        if len(full.encode("utf-8")) <= quota:
+            return full
+        room = quota - len((head + "\n" + note).encode("utf-8"))
         prefix = complete_lines(body, max(0, room))
-        if prefix:
-            rendered[i] = head + prefix + "\n" + note
-            if len(joined().encode("utf-8")) > limit:
-                rendered[i] = previous
+        return head + prefix + "\n" + note if prefix else rendered[i]
+
+    protected = [i for i, (key, _, _, present) in enumerate(ordered)
+                 if present and key in required_ids]
+    # Short values may cost less than the reserved reference; finish them first.
+    for i in protected:
+        rendered[i] = pack(i, len(rendered[i].encode("utf-8")))
+    while True:
+        room = limit - len(joined().encode("utf-8"))
+        demands = {}
+        for i in protected:
+            key, title, body, _ = ordered[i]
+            full = f"## {known.get(key, title)}\n" + body
+            demands[i] = max(0, len(full.encode("utf-8")) - len(rendered[i].encode("utf-8")))
+        if room <= 0 or not any(demands.values()):
+            break
+        changed = False
+        for i, extra in _fair_budget(demands, room).items():
+            candidate = pack(i, len(rendered[i].encode("utf-8")) + extra)
+            if candidate != rendered[i]:
+                rendered[i] = candidate
+                changed = True
+        # Whole-line granularity can leave a small remainder no field can use.
+        if not changed:
+            break
+    # Only after continuation fields get their shares may miscellaneous history
+    # use the remaining space. Its complete original is already in the archive.
+    for i, (key, _, _, present) in enumerate(ordered):
+        if not present or key in required_ids:
+            continue
+        room = limit - len(joined().encode("utf-8")) - 2
+        if room > 0:
+            rendered[i] = pack(i, room)
     return joined()
