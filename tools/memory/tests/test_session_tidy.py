@@ -483,6 +483,48 @@ class CardWriteTest(TidyCase):
 
 class CardConsumeTest(TidyCase):
 
+    def test_lifecycle_only_start_defers_the_same_card_until_first_prompt(self):
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness), self.library():
+                sid = f"phase-{harness}"
+                self.card(sid, f"card-{harness}", harness=harness)
+                sent, deferred, startup = [], [], {}
+                with mock.patch.object(st, "read_latest_card", wraps=st.read_latest_card) as read:
+                    st.run_hook(harness, "start", sid, source="compact", cwd=str(self.cwd),
+                                render_context=False, emit=sent.append, deferred=deferred)
+                    read.assert_not_called()
+                self.assertEqual(sent, [])
+                self.assertEqual(deferred, [])
+                st.run_hook(harness, "prompt", sid, cwd=str(self.cwd), emit=sent.append,
+                            deferred=deferred, startup_context=startup)
+                self.assertTrue(startup["due"])
+                self.assertIn(f"card-{harness}", "\n".join(sent))
+                again = {}
+                st.run_hook(harness, "prompt", sid, cwd=str(self.cwd), deferred=[], startup_context=again)
+                self.assertTrue(again["due"], "unrendered context must remain due")
+                st.apply_deferred(deferred)
+                settled, after = {}, []
+                st.run_hook(harness, "prompt", sid, cwd=str(self.cwd), emit=after.append,
+                            deferred=[], startup_context=settled)
+                self.assertFalse(settled["due"])
+                self.assertEqual(after, [])
+
+    def test_first_prompt_probe_rearms_on_resume_and_compact_without_a_new_file(self):
+        with self.library():
+            sid = "phase-resume"
+            for source in ("startup", "resume", "compact"):
+                st.run_hook("codex", "start", sid, source=source, cwd=str(self.cwd), render_context=False)
+                deferred, startup = [], {}
+                st.run_hook("codex", "prompt", sid, cwd=str(self.cwd),
+                            deferred=deferred, startup_context=startup)
+                self.assertTrue(startup["due"], source)
+                st.apply_deferred(deferred)
+                settled = {}
+                st.run_hook("codex", "prompt", sid, cwd=str(self.cwd),
+                            deferred=[], startup_context=settled)
+                self.assertFalse(settled["due"], source)
+            self.assertEqual(len(list((self.state / "consumed").glob("*.json"))), 1)
+
     def test_confirmed_successor_migrates_the_exact_legacy_pane_card_once(self):
         predecessor, successor = "legacy-pane-predecessor", "confirmed-pane-successor"
         source = st.Seat("pane", st._digest("pane", PANE), pane=PANE, harness="claude")

@@ -4,7 +4,9 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -17,8 +19,9 @@ sys.path.insert(0, str(ROOT / "tools/install"))
 import session_tidy
 
 spec = importlib.util.spec_from_file_location(
-    "codex_sessionstart", ROOT / "adapters/codex/hooks/sessionstart-lifecycle.py")
+    "codex_prompt_history", ROOT / "adapters/codex/hooks/userprompt-lifecycle.py")
 codex = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = codex
 spec.loader.exec_module(codex)
 
 
@@ -49,17 +52,53 @@ class HistoryChannelTests(unittest.TestCase):
     def test_codex_places_notice_outside_additional_context(self):
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
-            codex.emit_context("SessionStart", ["MODEL-CARD"], "PERSON-NOTICE")
+            codex.emit_context("UserPromptSubmit", ["MODEL-CARD"], system_message="PERSON-NOTICE")
         payload = json.loads(output.getvalue())
         self.assertEqual(payload["hookSpecificOutput"]["additionalContext"], "MODEL-CARD")
         self.assertEqual(payload["systemMessage"], "PERSON-NOTICE")
 
-    def test_codex_card_bridge_parses_separate_fields(self):
-        payload = {"additionalContext": "MODEL-CARD", "humanNotice": "PERSON-NOTICE"}
-        result = subprocess.CompletedProcess([], 0, json.dumps(payload), "")
-        with patch.object(codex.subprocess, "run", return_value=result):
-            card, human, deferred = codex.card_context({"session_id": "sid"}, "/fixture")
-        self.assertEqual((card, human, deferred), ("MODEL-CARD", "PERSON-NOTICE", None))
+    def test_codex_prompt_card_bridge_keeps_separate_fields(self):
+        human, startup = [], {}
+        receipt = {"kind": "startup-context", "receipt": "fixture"}
+        def shared_hook(*args, **kwargs):
+            self.assertEqual(args, ("codex", "prompt", "sid"))
+            kwargs["emit"]("MODEL-CARD")
+            kwargs["emit_human"]("PERSON-NOTICE")
+            kwargs["startup_context"]["due"] = True
+            kwargs["deferred"].append(receipt)
+        with patch.object(session_tidy, "run_hook", side_effect=shared_hook):
+            card, deferred = codex.card_context({"session_id": "sid"}, "/fixture",
+                                                 human=human, startup=startup)
+        self.assertEqual((card, human, deferred), ("MODEL-CARD", ["PERSON-NOTICE"], [receipt]))
+        self.assertTrue(startup["due"])
+
+    def test_slow_claude_evidence_probe_does_not_lose_the_prepared_card(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            hooks = root / "hooks"
+            utilities = root / "utilities"
+            hooks.mkdir(); utilities.mkdir()
+            shutil.copyfile(ROOT / "hooks/session-card-inject.sh", hooks / "card.sh")
+            (utilities / "session_tidy.py").write_text(
+                'HUMAN_NOTICE_BUDGET_SECONDS = 2.0\n'
+                'def run_hook(*a, **kw):\n'
+                '    kw["emit"]("PREPARED-CARD")\n'
+                '    kw["startup_context"]["due"] = True\n'
+                'def apply_deferred(entries): pass\n')
+            probe = hooks / "local-evidence-inject.sh"
+            probe.write_text('#!/bin/sh\nexec python3 -c "import time; time.sleep(6)"\n')
+            probe.chmod(0o755)
+            env = {**os.environ, "AGENT_HOME": str(root)}
+            for key in ("AGENT_SESSION_ROLE", "AGENT_DISPATCH_CHILD", "AGENT_DISPATCH_DEPTH",
+                        "OPENCODE_DISPATCH_SLUG", "FLEET_TITLE_REFRESH", "MEM_DISTILL"):
+                env.pop(key, None)
+            result = subprocess.run(["bash", str(hooks / "card.sh")], env=env,
+                input=json.dumps({"hook_event_name": "UserPromptSubmit", "session_id": "fixture",
+                                  "cwd": directory, "prompt": "hi"}),
+                text=True, capture_output=True, timeout=2.5)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"],
+                             "PREPARED-CARD")
 
     def test_human_only_lookup_leaves_ledger_and_receipts_untouched(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -121,12 +160,13 @@ const fakeSpawnSync = (command, args, options) => {
     const notice = sid === "late" && count === 2 ? "NOTICE-APPEARED" : ""
     return { status: 0, stdout: JSON.stringify({ humanNotice: notice }), stderr: "" }
   }
-  return childProcess.spawnSync(command, args, options)
+  return { status: 0, stdout: "", stderr: "" }
 }
 globalThis.__historyNoticeFakeSpawnSync = fakeSpawnSync
+globalThis.__historyNoticeFakeSpawn = () => ({ on() {}, unref() {}, stdin: { end() {} } })
 let source = readFileSync("adapters/opencode/plugins/hearting-guards.js", "utf8")
 source = source.replace('import { spawnSync, spawn } from "node:child_process"',
-  'import childProcess from "node:child_process"\nconst spawn = childProcess.spawn\nconst spawnSync = globalThis.__historyNoticeFakeSpawnSync')
+  'const spawn = globalThis.__historyNoticeFakeSpawn\nconst spawnSync = globalThis.__historyNoticeFakeSpawnSync')
 source = source.replace('const pluginDir = path.dirname(fileURLToPath(import.meta.url))',
   'const pluginDir = path.join(process.cwd(), "adapters/opencode/plugins")')
 const { AgentHarnessGuards } = await import("data:text/javascript;base64," + Buffer.from(source).toString("base64"))

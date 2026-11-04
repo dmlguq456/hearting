@@ -240,12 +240,14 @@ P=$(proj claude-basic)
 write_card claude author-A "$P" "CARD-MARK-claude01"
 confirm_successor claude author-A claude-B "$P"
 claude_hook SessionStart claude-B "$P" startup > "$TMP/c1.out"
-context_of "$TMP/c1.out" > "$TMP/c1.ctx"
-if has "$TMP/c1.ctx" CARD-MARK-claude01 && grep -Fq '"hookEventName": "SessionStart"' "$TMP/c1.out"; then
-  ok "claude: a new session's start receives the card once"
-else bad "claude: new session start should receive the card"; fi
+[ ! -s "$TMP/c1.out" ] && ok "claude: start records lifecycle without consuming the card" \
+  || bad "claude: start must defer card context"
 claude_hook UserPromptSubmit claude-B "$P" > "$TMP/c2.out"
-[ ! -s "$TMP/c2.out" ] && ok "claude: the same session's next prompt gets no second copy" \
+context_of "$TMP/c2.out" | grep -Fq CARD-MARK-claude01 \
+  && ok "claude: the first prompt receives the unchanged card" \
+  || bad "claude: first prompt must receive the card"
+claude_hook UserPromptSubmit claude-B "$P" > "$TMP/c2b.out"
+[ ! -s "$TMP/c2b.out" ] && ok "claude: later prompt gets no second copy" \
   || bad "claude: card must be consumed once"
 
 P=$(proj claude-author)
@@ -254,11 +256,14 @@ claude_hook UserPromptSubmit author-A "$P" > "$TMP/c3.out"
 [ ! -s "$TMP/c3.out" ] && ok "claude: the authoring session's ordinary prompt gets nothing" \
   || bad "claude: author's ordinary prompt must not consume the card"
 claude_hook SessionStart author-A "$P" compact > "$TMP/c4.out"
-context_of "$TMP/c4.out" | grep -Fq CARD-MARK-claude02 \
-  && ok "claude: the authoring session receives the card once after compact" \
-  || bad "claude: author should receive the card after compact"
+[ ! -s "$TMP/c4.out" ] && ok "claude: compact start defers context to the first prompt" \
+  || bad "claude: compact start must defer the card"
 claude_hook UserPromptSubmit author-A "$P" > "$TMP/c4b.out"
-[ ! -s "$TMP/c4b.out" ] && ok "claude: no repeat after the post-compact delivery" \
+context_of "$TMP/c4b.out" | grep -Fq CARD-MARK-claude02 \
+  && ok "claude: the first post-compact prompt receives the card" \
+  || bad "claude: first post-compact prompt must receive the card"
+claude_hook UserPromptSubmit author-A "$P" > "$TMP/c4c.out"
+[ ! -s "$TMP/c4c.out" ] && ok "claude: no repeat after post-compact delivery" \
   || bad "claude: post-compact delivery must be once"
 
 P=$(proj claude-nocard)
@@ -277,7 +282,8 @@ PY
 AGENT_SESSION_ROLE=worker "$CLAUDE_HOOK" < "$TMP/w.payload" > "$TMP/w1.out"
 AGENT_DISPATCH_DEPTH=2 "$CLAUDE_HOOK" < "$TMP/w.payload" > "$TMP/w2.out"
 confirm_successor claude author-A claude-M "$P"
-claude_hook SessionStart claude-M "$P" startup > "$TMP/w3.out"
+claude_hook SessionStart claude-M "$P" startup > "$TMP/w3-start.out"
+claude_hook UserPromptSubmit claude-M "$P" > "$TMP/w3.out"
 if [ ! -s "$TMP/w1.out" ] && [ ! -s "$TMP/w2.out" ] && context_of "$TMP/w3.out" | grep -Fq CARD-MARK-worker; then
   ok "claude: a worker receives nothing and does not consume the card"
 else bad "claude: worker must not receive or consume the card"; fi
@@ -343,22 +349,26 @@ PY
 P=$(proj codex-start)
 write_card codex author-A "$P" "CARD-MARK-codex01"
 confirm_successor codex author-A codex-B "$P"
-codex_run "$CODEX_START" SessionStart codex-B "$P" startup > "$TMP/x1.out"   # CODEX_SESSION_MEMORY_INJECT unset
-if context_of "$TMP/x1.out" | grep -Fq CARD-MARK-codex01; then
-  ok "codex SessionStart: the card arrives with CODEX_SESSION_MEMORY_INJECT off"
-else bad "codex SessionStart: card must not need the memory opt-in"; fi
+codex_run "$CODEX_START" SessionStart codex-B "$P" startup > "$TMP/x1.out"
+[ ! -s "$TMP/x1.out" ] && ok "codex: start defers the card" || bad "codex: start must be silent"
+codex_run "$CODEX_PROMPT" UserPromptSubmit codex-B "$P" "" "hi" > "$TMP/x1p.out"
+context_of "$TMP/x1p.out" | grep -Fq CARD-MARK-codex01 \
+  && ok "codex: first prompt receives the card with memory opt-in off" \
+  || bad "codex: first prompt must receive the card"
 codex_run "$CODEX_START" SessionStart codex-B "$P" resume > "$TMP/x1b.out"
-context_of "$TMP/x1b.out" | grep -Fq CARD-MARK-codex01 \
-  && bad "codex SessionStart: consumed card must not repeat" \
-  || ok "codex SessionStart: a consumed card does not repeat"
+[ ! -s "$TMP/x1b.out" ] && ok "codex: resume keeps lifecycle-only start" || bad "codex: resume must defer context"
 
 P=$(proj codex-start-on)
 write_card codex author-A "$P" "CARD-MARK-codex02"
 confirm_successor codex author-A codex-C "$P"
-if CODEX_SESSION_MEMORY_INJECT=1 codex_run "$CODEX_START" SessionStart codex-C "$P" startup > "$TMP/x2.out" \
-  && context_of "$TMP/x2.out" | grep -Fq CARD-MARK-codex02; then
-  ok "codex SessionStart: the card arrives with the memory opt-in on too"
-else bad "codex SessionStart: card with opt-in on"; fi
+CODEX_SESSION_MEMORY_INJECT=1 codex_run "$CODEX_START" SessionStart codex-C "$P" startup > "$TMP/x2.out"
+context_of "$TMP/x2.out" | grep -Fq CARD-MARK-codex02 \
+  && bad "codex: memory opt-in must not consume the card at start" \
+  || ok "codex: memory opt-in keeps card deferred"
+codex_run "$CODEX_PROMPT" UserPromptSubmit codex-C "$P" "" "hi" > "$TMP/x2p.out"
+context_of "$TMP/x2p.out" | grep -Fq CARD-MARK-codex02 \
+  && ok "codex: first prompt gets the card with memory opt-in on" \
+  || bad "codex: first prompt must still get the card"
 
 P=$(proj codex-prompt)
 write_card codex author-A "$P" "CARD-MARK-codex03"

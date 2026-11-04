@@ -334,6 +334,55 @@ class RetiredHookMigrationTests(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
+    def test_upgrade_retires_only_owned_startup_probes_in_claude_and_codex(self):
+        from drivers import claude, codex
+        for runtime, driver, filename in (("claude", claude, "settings.json"), ("codex", codex, "hooks.json")):
+            with self.subTest(runtime=runtime), tempfile.TemporaryDirectory() as tmp:
+                home = Path(tmp)
+                commands = [
+                    'sh "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/run-hook.sh" local-evidence-inject',
+                    'python3 "$AGENT_HOME/hooks/dispatch-session-sweep.py"',
+                    'bash "$HOME/.claude/hooks/local-evidence-inject.sh"',
+                    'sh "$root/adapters/codex/hooks/run-hook.sh" dispatch-session-sweep',
+                ]
+                owned = [{"type": "command", "command": c} for c in commands]
+                user = {"type": "command", "command": "bash /user/hooks/local-evidence-inject.sh"}
+                source = {"custom": "keep", "hooks": {
+                    "SessionStart": [{"matcher": "*", "hooks": owned + [user]}],
+                    "UserPromptSubmit": [{"hooks": owned + [user]}],
+                }}
+                path = home / filename
+                path.write_text(json.dumps(source))
+                with mock.patch.object(driver.paths, "runtime_home", return_value=home), \
+                     mock.patch.object(driver.projector, "plan", return_value={runtime: []}):
+                    before = path.read_bytes()
+                    driver.install(dry_run=True)
+                    self.assertEqual(path.read_bytes(), before)
+                    self.assertFalse(driver.install()["blocked"])
+                    result = json.loads(path.read_text())
+                    self.assertEqual(result["hooks"]["SessionStart"][0]["hooks"], [user])
+                    self.assertEqual(result["hooks"]["UserPromptSubmit"], source["hooks"]["UserPromptSubmit"])
+                    self.assertEqual(result["custom"], "keep")
+                    once = path.read_bytes()
+                    driver.install()
+                    self.assertEqual(path.read_bytes(), once)
+
+    def test_copy_once_upgrade_without_activation_manifest_retires_startup_only(self):
+        helper = ClaudeManagedSettingsTests()
+        with tempfile.TemporaryDirectory() as tmp:
+            source, home = helper._fixture(tmp)
+            command = {"type": "command", "command":
+                       'sh "$HOME/.claude/hooks/run-hook.sh" python3 dispatch-session-sweep.py'}
+            helper._write_user_settings(home, {"theme": "keep", "hooks": {
+                "SessionStart": [{"hooks": [command]}],
+                "UserPromptSubmit": [{"hooks": [command]}]}})
+            with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(home)}):
+                runtime_activation._merge_claude_settings(source, None)
+            result = helper._read_user_settings(home)
+            self.assertNotIn(command, [h for g in result["hooks"]["SessionStart"] for h in g["hooks"]])
+            self.assertEqual(result["hooks"]["UserPromptSubmit"], [{"hooks": [command]}])
+            self.assertEqual(result["theme"], "keep")
+
     def test_upgrade_prunes_every_retired_hook_and_preserves_user_settings(self):
         import claude_settings_config as settings
         from drivers import claude, codex
