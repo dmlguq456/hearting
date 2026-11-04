@@ -36,6 +36,11 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+try:  # ends a detached child with the test that started it; no-op outside tests
+    from detached_lifetime import bind as end_with_test
+except ImportError:  # a partial tree without it (e.g. a fixture release): no record
+    def end_with_test(child):
+        return child
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -98,9 +103,9 @@ def launch(payload: dict, *, environ=None, popen=None) -> bool:
             pass
     spawn = subprocess.Popen if popen is None else popen
     try:
-        spawn(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        end_with_test(spawn(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
               stderr=subprocess.DEVNULL, close_fds=True, start_new_session=True,
-              cwd=str(ROOT), env=dict(os.environ if environ is None else environ))
+              cwd=str(ROOT), env=dict(os.environ if environ is None else environ)))
     except (OSError, subprocess.SubprocessError, ValueError):
         return False
     return True

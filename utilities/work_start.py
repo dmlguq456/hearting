@@ -37,6 +37,11 @@ from execution_access import ExecutionAccessError, prepare_task_request
 import owner_write_advisory as OWNER_WRITE_ADVISORY
 import route_plan as RP
 import resource_resume as RESOURCE_RESUME
+try:  # ends a detached child with the test that started it; no-op outside tests
+    from detached_lifetime import bind as end_with_test
+except ImportError:  # a partial tree without it (e.g. a fixture release): no record
+    def end_with_test(child):
+        return child
 
 ROOT = Path(__file__).resolve().parents[1]
 _ROUTE_MODULE = None
@@ -128,6 +133,7 @@ def _start_prior_art(route, task):
              "--cwd", str(cwd), "--out", str(out)],
             stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=str(cwd),
             env={**os.environ, "AGENT_SESSION_ROLE": "worker"}, start_new_session=True)
+        end_with_test(child)
     except (OSError, ValueError):
         with contextlib.suppress(OSError):
             marker.unlink()   # nothing runs, so the frame prompt has nothing to wait for

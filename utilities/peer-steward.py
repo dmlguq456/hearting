@@ -54,6 +54,11 @@ sys.path.insert(0, str(_UTILITIES_DIR))
 from dispatch_contract import (pidfd_open, process_start_ticks, resolve_agent_home,
                                resolve_dispatch_state_root)  # noqa: E402
 from parent_next_directive import steward_fields  # noqa: E402
+try:  # ends a detached child with the test that started it; no-op outside tests
+    from detached_lifetime import bind as end_with_test  # noqa: E402
+except ImportError:  # a partial tree without it (e.g. a fixture release): no record
+    def end_with_test(child):
+        return child
 import peer_obligations  # noqa: E402
 import shared_readiness  # noqa: E402
 import dispatch_batch_obligations  # noqa: E402
@@ -5084,6 +5089,7 @@ def cmd_watch(args):
                     start_new_session=True, close_fds=True, pass_fds=(lock_fd,), cwd=str(root),
                     env=_herdr_env_for_server(server),
                 )
+                end_with_test(proc)
             finally:
                 signal.pthread_sigmask(signal.SIG_SETMASK, watcher_signal_mask)
         except (OSError, subprocess.SubprocessError) as exc:
@@ -6216,6 +6222,7 @@ def _spawn_watch_observer(watch_id, arm, *, service_current=None,
                     start_new_session=True, close_fds=True, pass_fds=(lock_fd,),
                     cwd=str(paths.arm.parent), env=env,
                 )
+                end_with_test(proc)
             finally:
                 signal.pthread_sigmask(signal.SIG_SETMASK, watcher_signal_mask)
         finally:

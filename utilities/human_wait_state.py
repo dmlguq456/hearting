@@ -23,6 +23,11 @@ from decimal import Decimal, InvalidOperation
 import urllib.error
 import urllib.parse
 import urllib.request
+try:  # ends a detached child with the test that started it; no-op outside tests
+    from detached_lifetime import bind as end_with_test
+except ImportError:  # a partial tree without it (e.g. a fixture release): no record
+    def end_with_test(child):
+        return child
 
 
 _MARKER = re.compile(r"^\s*\[(?:답변 필요|결정 필요)\]\s*(.*)$")
@@ -3530,10 +3535,11 @@ def _ensure_producer():
         os.close(fd)
         return False
     try:
-        subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--refresh-cache", "--lock-fd", str(fd)],
+        end_with_test(subprocess.Popen(
+                         [sys.executable, str(Path(__file__).resolve()), "--refresh-cache", "--lock-fd", str(fd)],
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL, close_fds=True, pass_fds=(fd,),
-                         start_new_session=True)
+                         start_new_session=True))
     except (OSError, subprocess.SubprocessError):
         os.close(fd)
         return False

@@ -134,6 +134,18 @@ def runtime_identity():
     return ("codex", None) if codex_seen else (None, None)
 
 
+def _end_with_test(child):
+    """End a detached ``child`` with the test that started it (utilities/detached_lifetime.py)."""
+    utilities = str(Path(__file__).resolve().parents[2] / "utilities")
+    if utilities not in sys.path:
+        sys.path.append(utilities)
+    try:
+        from detached_lifetime import bind
+    except ImportError:
+        return child
+    return bind(child)
+
+
 def verified_pane(pane, harness, session_id=None, **kwargs):
     utilities = str(Path(__file__).resolve().parents[2] / "utilities")
     if utilities not in sys.path:
@@ -501,8 +513,8 @@ def _defer_until_proven(session_id: str, report_session: bool, *,
     if session_start_source is not None:
         command += ["--session-start-source", session_start_source]
     try:
-        subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL, start_new_session=True)
+        _end_with_test(subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True))
     except Exception:
         pass
 

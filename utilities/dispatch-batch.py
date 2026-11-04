@@ -44,6 +44,11 @@ from dispatch_contract import (  # noqa: E402
     validate_dispatch_log_dir,
 )
 from governor_identity import IdentityCaptureError, create_witness  # noqa: E402
+try:  # ends a detached child with the test that started it; no-op outside tests
+    from detached_lifetime import bind as end_with_test  # noqa: E402
+except ImportError:  # a partial tree without it (e.g. a fixture release): no record
+    def end_with_test(child):
+        return child
 from dispatch_lifecycle import (  # noqa: E402
     FOREGROUND_NOTICE,
     FOREGROUND_SCOPED,
@@ -3859,6 +3864,7 @@ def main(argv: list[str] | None = None) -> int:
                     stderr=subprocess.PIPE,
                     start_new_session=True,
                 )
+                end_with_test(proc)
                 relay.add(proc)
                 processes.append((leg, token, proc))
             except OSError:
