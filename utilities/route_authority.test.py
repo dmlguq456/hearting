@@ -717,7 +717,7 @@ class OwnerPinChangeTest(unittest.TestCase):
         with mock.patch.dict(os.environ, self.isolated_env(), clear=True), \
              mock.patch.object(RA, "caller_identity", return_value=caller), \
              mock.patch.object(work_start, "_rows", return_value=rows), \
-             mock.patch.object(router, "_compose_readiness", return_value=probe) as readiness:
+             patch_split(router, "_compose_readiness", return_value=probe) as readiness:
             result = router._change_pins(self.route, Path(self.temp.name) / "jobs.log", values)
         return result, readiness
 
@@ -1787,7 +1787,7 @@ class AccessChangeTest(unittest.TestCase):
         with mock.patch.dict(os.environ, extra), \
              mock.patch.object(RA, "caller_identity", return_value=caller), \
              mock.patch.object(work_start, "_rows", return_value=rows), \
-             mock.patch.object(router, "_turn_peer_source", return_value="unattributed"):
+             patch_split(router, "_turn_peer_source", return_value="unattributed"):
             if not env:
                 os.environ.pop("AGENT_DISPATCH_EXECUTION_ACCESS_FILE", None)
             return router._record_access_change(self.route, self.jobs)

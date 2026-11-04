@@ -300,7 +300,7 @@ class RetainedReviewTest(unittest.TestCase):
         def interrupted(path,value):
             if Path(path)==self.directory/f"{self.node['id']}.json":raise OSError("interrupted canonical replace")
             return original(path,value)
-        with mock.patch.object(route_module,"atomic_write",side_effect=interrupted):
+        with patch_split(route_module,"atomic_write",side_effect=interrupted):
             with self.assertRaises(OSError):self.apply()
         self.assertEqual(D.gate_currency(self.route,self.node,self.directory/f"{self.node['id']}.json",jobs=self.f.jobs).reason,"completion-evidence-verdict-not-pass")
         self.assertEqual(self.preview()["recovery_state"],"publication-pending")

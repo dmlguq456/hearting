@@ -4375,7 +4375,7 @@ class DispatchContractTest(unittest.TestCase):
     self.assertEqual(caught.exception.reason,"auxiliary-arbitration-missing")
     # the same group, but its arbiter cannot be resolved at all
     route_module=D._route_module()
-    with mock.patch.object(route_module,"owner_merge_auxiliary_groups",
+    with patch_split(route_module,"owner_merge_auxiliary_groups",
                            return_value={"plan-check":
                                          "auxiliary-arbiter-ambiguous:plan-check:a,b"}):
      with self.assertRaises(D.DispatchContractError) as caught:

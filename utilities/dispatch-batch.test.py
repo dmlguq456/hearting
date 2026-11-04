@@ -2152,7 +2152,7 @@ class DispatchBatchTest(unittest.TestCase):
             if one_sided_revision:
                 # The canonical reader's proved supersession affects one leg;
                 # batch must still apply its existing full-group round policy.
-                stack.enter_context(mock.patch.object(BATCH.DISPATCH_NODE.ROUTE,
+                stack.enter_context(patch_split(BATCH.DISPATCH_NODE.ROUTE,
                     "_dependency_revisions", return_value=[{"supersedes": [self.legs()[0]["attempt_id"]]}]))
             for name, value in (("load_route", self.route), ("resolve_agent_home", self.base),
                                 ("resolve_global_registry", SimpleNamespace(path=self.jobs)),

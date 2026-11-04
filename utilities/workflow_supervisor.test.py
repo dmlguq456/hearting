@@ -521,7 +521,7 @@ class TestSupervisorAdvance(WorkflowFixture):
             return None
 
         with mock.patch.object(SUP.RESOURCE_RESUME, "route_selected", return_value=True), \
-                mock.patch.object(route_module, "write_completion_marker", side_effect=capture):
+                patch_split(route_module, "write_completion_marker", side_effect=capture):
             result = SUP.poll_once(route, ledger)
         self.assertEqual(result[0]["action"], "advanced")
         self.assertEqual(marker_calls, [mapped_output])
@@ -1482,9 +1482,9 @@ class TestStatusProjection(WorkflowFixture):
             "FLEET_ROUTE_CHAIN_DIR": str(self.base / "route-chain"),
         }))
         self.enterContext(mock.patch.object(SUP, "route_module", return_value=ROUTE))
-        self.enterContext(mock.patch.object(ROUTE, "_compose_artifact_root",
+        self.enterContext(patch_split(ROUTE, "_compose_artifact_root",
                                            return_value=str(self.artifact_root)))
-        self.enterContext(mock.patch.object(ROUTE, "_route_chain_module", return_value=None))
+        self.enterContext(patch_split(ROUTE, "_route_chain_module", return_value=None))
 
     def test_closed_exact_terminal_projects_complete_without_writing_journal_or_registry(self):
         route, path = self.two_stage_route(route_id="rt-0123456789abcdef")
@@ -1510,7 +1510,7 @@ class TestStatusProjection(WorkflowFixture):
         for value in (str(path), route["route_id"]):
             status_out = io.StringIO()
             with mock.patch.object(SUP, "terminal_gate_state", return_value=gates), \
-                 mock.patch.object(ROUTE, "resolve_route_argument",
+                 patch_split(ROUTE, "resolve_route_argument",
                                    wraps=ROUTE.resolve_route_argument) as resolve, \
                  contextlib.redirect_stdout(status_out):
                 self.assertEqual(SUP.cmd_status(SimpleNamespace(
@@ -1561,7 +1561,7 @@ class TestStatusProjection(WorkflowFixture):
                                                    "AGENT_WORKFLOW_ROOT": str(self.base / "wrong")}):
                     for value in (str(path), route["route_id"]):
                         output = io.StringIO()
-                        with mock.patch.object(ROUTE, "resolve_route_argument",
+                        with patch_split(ROUTE, "resolve_route_argument",
                                                wraps=ROUTE.resolve_route_argument) as resolve, \
                              contextlib.redirect_stdout(output):
                             self.assertEqual(SUP.cmd_status(SimpleNamespace(
@@ -4950,7 +4950,7 @@ class TestComputePollObservationBoundary(WorkflowFixture):
         route_module = SUP.route_module()
         node = WS.route_node(route, "run")
         before = ledger.journal_path.read_bytes()
-        with mock.patch.object(route_module, "_continuation_source_jobs", return_value=jobs):
+        with patch_split(route_module, "_continuation_source_jobs", return_value=jobs):
             result, _ = route_module._continuation_reused_evidence(route, node)
         self.assertIsNone(result["terminal_attempt_id"])
         evidence = ledger.read_only_state()["nodes"]["run"]["evidence"]
@@ -4960,7 +4960,7 @@ class TestComputePollObservationBoundary(WorkflowFixture):
         document = json.loads(registry.read_text())
         document["runs"]["fixture-resource"]["execution"]["meta_sha256"] = "changed"
         registry.write_text(json.dumps(document))
-        with mock.patch.object(route_module, "_continuation_source_jobs", return_value=jobs):
+        with patch_split(route_module, "_continuation_source_jobs", return_value=jobs):
             with self.assertRaises(ValueError):
                 route_module._continuation_reused_evidence(route, node)
 

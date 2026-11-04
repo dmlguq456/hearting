@@ -1499,7 +1499,7 @@ class CurrentDesignPeerSelectionTest(unittest.TestCase):
                 # keep its scope on the registered group and handoff gates.
                 with mock.patch.object(PRODUCER, "require_cycle_output", return_value=None), \
                      patch_split(ROUTE, "dispatch_state_roots", return_value=[state]), \
-                     mock.patch.object(ROUTE, "resolve_agent_home", return_value=agent_home):
+                     patch_split(ROUTE, "resolve_agent_home", return_value=agent_home):
                     handoff_marker = ROUTE._publish_completion_locked(
                         route, handoff, "handoff", handoff_evidence,
                         attempt_id=handoff_attempt, attempt_metadata=handoff_metadata, jobs=jobs)
@@ -1535,7 +1535,7 @@ class AdmissionSelectionFixture(unittest.TestCase):
         for rows, revisions, state, next_required, verdicts in scenarios:
             with self.subTest(state=state, rows=rows), \
                  mock.patch.object(NODE, "prior_round_attempts", return_value=rows), \
-                 mock.patch.object(NODE.ROUTE, "_dependency_revisions", return_value=revisions):
+                 patch_split(NODE.ROUTE, "_dependency_revisions", return_value=revisions):
                 admission = NODE.admit_round(route, node, Path("unused"), record_auto_revisions=False)
                 self.assertEqual(admission.budget.state, state)
                 self.assertEqual(admission.budget.verdict_rounds, verdicts)
@@ -1547,7 +1547,7 @@ class AdmissionSelectionFixture(unittest.TestCase):
                                   ("arbitrary-hidden", frozenset(("successor",)))):
             rows = [row("successor", logical_round_attempt_ids=members)]
             with mock.patch.object(NODE, "prior_round_attempts", return_value=rows), \
-                 mock.patch.object(NODE.ROUTE, "_dependency_revisions", return_value=[]):
+                 patch_split(NODE.ROUTE, "_dependency_revisions", return_value=[]):
                 admission = NODE.admit_round(route, node, Path("unused"), record_auto_revisions=False)
             self.assertEqual(admission.physical_attempt_ids, expected)
             self.assertEqual(admission.prior_attempt_ids, frozenset(("successor",)))

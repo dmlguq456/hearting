@@ -55,7 +55,7 @@ class QuiescenceTest(unittest.TestCase):
         else:
             # A quick route carries its frame pair here, as one sealed before decided shapes
             # compiled without it does (and as a preset compile still does).
-            frames = mock.patch.object(Q.ROUTES, "DECIDED_SHAPES", ()) if quick else contextlib.nullcontext()
+            frames = patch_split(Q.ROUTES, "DECIDED_SHAPES", ()) if quick else contextlib.nullcontext()
             with frames:
                 route = Q.ROUTES.compose_route(
                     capability="autopilot-code",

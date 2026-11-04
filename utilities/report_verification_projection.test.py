@@ -185,13 +185,13 @@ class ProjectionFixture(unittest.TestCase):
                                               return_value=SimpleNamespace(ok=True)))
         stack.enter_context(mock.patch.object(artifact_manifest, "manifest_digest",
                                               return_value="sha256:" + "0" * 64))
-        stack.enter_context(mock.patch.object(artifact_lifecycle, "canonical_route_path",
+        stack.enter_context(patch_split(artifact_lifecycle, "canonical_route_path",
                                               return_value=self.route_path))
         stack.enter_context(mock.patch.object(
             artifact_lifecycle, "bind_existing_runtime_route",
             side_effect=lambda *_a, **_kw: (object(), self.route)))
-        stack.enter_context(mock.patch.object(route_identity, "route_hash", return_value=ROUTE_HASH))
-        stack.enter_context(mock.patch.object(route_lineage, "verified_route_lineage", return_value=[self.route]))
+        stack.enter_context(patch_split(route_identity, "route_hash", return_value=ROUTE_HASH))
+        stack.enter_context(patch_split(route_lineage, "verified_route_lineage", return_value=[self.route]))
         stack.enter_context(mock.patch.object(artifact_lifecycle, "read_manifest_snapshots", return_value=[]))
         stack.enter_context(mock.patch.object(
             artifact_lifecycle, "evaluate_cycle_completion",
@@ -512,8 +512,8 @@ class ClosedFindingTests(ProjectionFixture):
         self.document["routes"][0]["route_hash"] = self.route["route_hash"]
         self.route_path.write_bytes(encoded(self.route))
         (self.cycle / "manifest.json").write_bytes(encoded(self.document))
-        with mock.patch.object(
-                route_identity, "route_hash", REAL_ROUTE_HASH), mock.patch.object(
+        with patch_split(
+                route_identity, "route_hash", REAL_ROUTE_HASH), patch_split(
                 route_lineage, "verified_route_lineage", REAL_LINEAGE):
             self.assertEqual(len(REAL_LINEAGE(self.route)), 2)
             with self.assertRaises(route_lineage.RouteLineageError):

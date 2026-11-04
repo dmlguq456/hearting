@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT / "utilities"))
 import model_profile as P
 import model_config as C
 import replica_batch_contract as B
+from split_module_fixture import patch_split
 
 
 def load(name, file):
@@ -525,7 +526,7 @@ class TopExceptionRoute(unittest.TestCase):
         forged["route_id"] = "rt-" + forged["route_hash"].split(":", 1)[1][:16]
         # the profile-contract check (selection vs node) is muted so the
         # owner-node equality check is the one under test (review R2 M1)
-        with mock.patch.object(R, "_verify_profile_contract"), \
+        with patch_split(R, "_verify_profile_contract"), \
              self.assertRaisesRegex(ValueError, "owner node one-shot profile differs from owner_model_profile"):
             R.verify_route(forged, R.ROOT)
 

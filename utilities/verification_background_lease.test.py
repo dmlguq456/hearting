@@ -19,6 +19,7 @@ LEASE = HERE / "verification-background-lease.py"
 sys.path.insert(0, str(HERE))
 import foreground_activity as ACTIVITY
 import owner_route_binding as OWNER_BINDING
+from split_module_fixture import patch_split
 spec = importlib.util.spec_from_file_location("verification_background_lease", LEASE)
 L = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(L)
@@ -561,7 +562,7 @@ raise SystemExit(lease.main(["--timeout","20","--",*{command!r}]))
                 with mock.patch.dict(os.environ, {
                     "AGENT_DISPATCH_ATTEMPT_ID": attempt,
                     "AGENT_DISPATCH_JOBS": str(jobs),
-                }), mock.patch.object(OWNER_BINDING.ROUTE, "verify_route",
+                }), patch_split(OWNER_BINDING.ROUTE, "verify_route",
                                       side_effect=lambda raw, **_kwargs: raw), \
                      mock.patch.object(L, "wait_within_budget", side_effect=inspect_from_wait):
                     status = L.main(["--timeout", "3", "--", *command])
@@ -592,7 +593,7 @@ raise SystemExit(lease.main(["--timeout","20","--",*{command!r}]))
             with mock.patch.dict(os.environ, {
                 "AGENT_DISPATCH_ATTEMPT_ID": attempt,
                 "AGENT_DISPATCH_JOBS": str(jobs),
-            }), mock.patch.object(OWNER_BINDING.ROUTE, "verify_route",
+            }), patch_split(OWNER_BINDING.ROUTE, "verify_route",
                                   side_effect=lambda raw, **_kwargs: raw):
                 self.assertIsNone(L.lease_context(["python3", "verify"], 10))
 

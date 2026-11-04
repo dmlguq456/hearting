@@ -16,6 +16,7 @@ from unittest import mock
 
 import owner_write_advisory as A
 import work_start as W
+from split_module_fixture import patch_split
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -151,8 +152,8 @@ class OwnerWriteAdvisoryTest(unittest.TestCase):
 
     def test_compose_card_receipt_do_not_mutate_route(self):
         before = copy.deepcopy(self.route)
-        with mock.patch.object(R, "compose_campaign_selection", return_value={}), \
-             mock.patch.object(R, "_compose_campaign_line", return_value="campaign fixture"):
+        with patch_split(R, "compose_campaign_selection", return_value={}), \
+             patch_split(R, "_compose_campaign_line", return_value="campaign fixture"):
             card = R.compose_card(self.route)
             receipt = R.compose_receipt(self.route, self.root / "route.json")
         self.assertIn(receipt["advisories"][0]["message"], card)
@@ -168,9 +169,9 @@ class OwnerWriteAdvisoryTest(unittest.TestCase):
                 "--cwd", str(self.primary), "--artifact-root", str(self.root / "artifacts")]), \
              mock.patch.object(R, "compose_route", return_value=self.route), \
              mock.patch.object(R, "_resolve_compose_plan", return_value=(None, None)), \
-             mock.patch.object(R, "compose_campaign_selection", return_value={}), \
-             mock.patch.object(R, "_compose_campaign_line", return_value="campaign fixture"), \
-             mock.patch.object(R, "_emit_compiled_route") as emit, \
+             patch_split(R, "compose_campaign_selection", return_value={}), \
+             patch_split(R, "_compose_campaign_line", return_value="campaign fixture"), \
+             patch_split(R, "_emit_compiled_route") as emit, \
              contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(R.main(), 0)
         emit.assert_not_called()
@@ -239,12 +240,12 @@ class OwnerWriteAdvisoryTest(unittest.TestCase):
                  mock.patch.object(R, "compose_route", return_value=self.route), \
                  mock.patch.object(R, "prepare_isolated_worktree",
                                    return_value={"state": "reused", "cwd": str(self.primary)}), \
-                 mock.patch.object(R, "verify_route", return_value=self.route), \
-                 mock.patch.object(R, "_record_route_chain"), \
+                 patch_split(R, "verify_route", return_value=self.route), \
+                 patch_split(R, "_record_route_chain"), \
                  mock.patch.object(R, "_resolve_compose_plan", return_value=(None, None)), \
-                 mock.patch.object(R, "compose_campaign_selection", return_value={}), \
-                 mock.patch.object(R, "_compose_campaign_line", return_value="campaign fixture"), \
-                 mock.patch.object(R, "_emit_compiled_route", return_value=path), \
+                 patch_split(R, "compose_campaign_selection", return_value={}), \
+                 patch_split(R, "_compose_campaign_line", return_value="campaign fixture"), \
+                 patch_split(R, "_emit_compiled_route", return_value=path), \
                  mock.patch.object(W, "_advance", side_effect=advance), \
                  mock.patch("start_receipt.save", side_effect=lambda result, jobs: result), \
                  contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):

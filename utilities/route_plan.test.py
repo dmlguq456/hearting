@@ -23,6 +23,7 @@ os.environ["FLEET_NOW_LANG"] = "Korean"
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent / "tools"))
+from split_module_fixture import patch_split  # noqa: E402
 
 
 def _load(name, filename):
@@ -409,9 +410,9 @@ class ProposalValidationTest(ValidationBase):
     def test_validation_writes_nothing_starts_nothing_and_records_no_route_chain_line(self):
         path = self.write_brief([CODE_STAGED, DIRECT, {"capability": "autopilot-code", "shape": "solo"}])
         before, rows = self.tree(), self.jobs.read_text()
-        with mock.patch.object(R, "_record_route_chain", side_effect=AssertionError("ledger line")), \
-                mock.patch.object(R, "_emit_compiled_route", side_effect=AssertionError("published")), \
-                mock.patch.object(R, "write_once", side_effect=AssertionError("written")), \
+        with patch_split(R, "_record_route_chain", side_effect=AssertionError("ledger line")), \
+                patch_split(R, "_emit_compiled_route", side_effect=AssertionError("published")), \
+                patch_split(R, "write_once", side_effect=AssertionError("written")), \
                 mock.patch.object(P, "begin", side_effect=AssertionError("producer")), \
                 mock.patch.object(P, "prepare_route_artifact_env", side_effect=AssertionError("producer env")), \
                 mock.patch("work_start.start_work", side_effect=AssertionError("started")):
@@ -701,7 +702,7 @@ class RoutePlanCompileTest(PlanFixture):
         self.assertEqual(verified["route_plan"]["index"], 1)
 
     def test_a_staged_route_without_a_graph_is_the_recipe_order_minus_frame_nodes(self):
-        with mock.patch.object(R, "DECIDED_SHAPES", ()):     # the recipe as sealed before decided shapes
+        with patch_split(R, "DECIDED_SHAPES", ()):     # the recipe as sealed before decided shapes
             framed_recipe = self.leg()
         plain = self.leg()
         planned = self.leg(route_plan=self.binding(1))
@@ -725,7 +726,7 @@ class RoutePlanCompileTest(PlanFixture):
         R.verify_route(json.loads(json.dumps(planned)), R.ROOT)
 
     def test_a_solo_route_runs_its_one_shot_without_the_quick_frame_bootstrap(self):
-        with mock.patch.object(R, "DECIDED_SHAPES", ()):
+        with patch_split(R, "DECIDED_SHAPES", ()):
             self.assertEqual([n["id"] for n in self.leg(shape="solo")["nodes"]], ["frame", "frame-alternative", "one-shot"])
         plain = self.leg(shape="solo")
         planned = self.leg(shape="solo", route_plan=self.binding(1))
@@ -1081,7 +1082,7 @@ class SelectionPinFilteredTopModelTest(PinnedPlanFixture):
     PINS = ["worker=claude:opus@high", "frame=claude:opus@high"]
 
     def setUp(self):
-        patch = mock.patch.object(R, "_main_session_only_models", return_value="opus")
+        patch = patch_split(R, "_main_session_only_models", return_value="opus")
         patch.start()
         self.addCleanup(patch.stop)
         super().setUp()
@@ -1128,7 +1129,9 @@ class PinnedFourReceiptSurfacesTest(PinnedPlanFixture):
 
     def test_the_other_receipt_surfaces_read_through_the_same_projection(self):
         for name in ("capability-route.py", "dispatch_completion_join.py", "inline_finish.py", "work_start.py"):
-            text = (HERE / name).read_text(encoding="utf-8")
+            # capability-route.py is split into capability_route_*.py parts; read them all.
+            parts = sorted(HERE.glob(name[:-3].replace("-", "_") + "_*.py")) if name == "capability-route.py" else []
+            text = "\n".join(path.read_text(encoding="utf-8") for path in (HERE / name, *parts))
             self.assertRegex(text, r"next_leg_for_route\(", name)
             self.assertNotIn("compose_argv(", text, name)
 

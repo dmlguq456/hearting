@@ -7,6 +7,7 @@ from pathlib import Path
 import threading
 import unittest
 from unittest import mock
+from split_module_fixture import patch_split
 
 
 def load(name, filename):
@@ -350,9 +351,9 @@ class CorrectionTest(unittest.TestCase):
                         if Path(path).name == "release-review.json" and "reviewer_disposition" in payload and boundary == "before-replace": launch()
                         return real_atomic(path, payload)
                     with mock.patch.dict(os.environ, {"AGENT_DISPATCH_ATTEMPT_ID": "att-owner"}), \
-                         mock.patch.object(R, "_exclusive_lock", side_effect=observed_lock), \
-                         mock.patch.object(R, "write_once", side_effect=once), \
-                         mock.patch.object(R, "atomic_write", side_effect=atomic):
+                         patch_split(R, "_exclusive_lock", side_effect=observed_lock), \
+                         patch_split(R, "write_once", side_effect=once), \
+                         patch_split(R, "atomic_write", side_effect=atomic):
                         marker = f.replay(entrance)
                         self.assertEqual(marker["sequence"], 2)
                         self.assertTrue(finished.wait(10), "revision deadlocked")
@@ -375,7 +376,7 @@ class CorrectionTest(unittest.TestCase):
                             result = real_once(path, payload)
                             if "reviewer_disposition" in payload: raise RuntimeError("interrupted")
                             return result
-                        with mock.patch.object(R, "write_once", side_effect=crash), self.assertRaisesRegex(RuntimeError, "interrupted"):
+                        with patch_split(R, "write_once", side_effect=crash), self.assertRaisesRegex(RuntimeError, "interrupted"):
                             f.replay(entrance)
                     with mock.patch.dict(os.environ, {"AGENT_DISPATCH_ATTEMPT_ID": "att-owner"}): self.revise(f, node, evidence)
                     self.assert_tombstone(f)
@@ -392,7 +393,7 @@ class CorrectionTest(unittest.TestCase):
         # The source-epoch integrity check can see the edited head (canonical no
         # longer equals its history) before the final origin check; either refusal
         # leaves the perturbed head in place.
-        with mock.patch.object(R, "write_once", side_effect=perturb), \
+        with patch_split(R, "write_once", side_effect=perturb), \
                 self.assertRaisesRegex(ValueError, "origin-drift|terminal-artifact-mismatch"):
             f.replay()
         self.assertEqual(json.loads(canonical.read_text()), changed)
@@ -418,7 +419,7 @@ class CorrectionTest(unittest.TestCase):
                     try: f.replay(entrance)
                     except BaseException as exc: errors.append(exc)
                 with mock.patch.dict(os.environ, {'AGENT_DISPATCH_ATTEMPT_ID': 'att-owner'}), \
-                     mock.patch.object(R, 'atomic_write', side_effect=atomic):
+                     patch_split(R, 'atomic_write', side_effect=atomic):
                     upstream = threading.Thread(target=revise, daemon=True); upstream.start()
                     self.assertTrue(held.wait(5))
                     downstream = threading.Thread(target=replay, daemon=True); downstream.start()
@@ -466,7 +467,7 @@ class CorrectionTest(unittest.TestCase):
             result = real_once(path, payload)
             if "reviewer_disposition" in payload: raise RuntimeError("interrupted")
             return result
-        with mock.patch.object(f.cr, "write_once", side_effect=crash), self.assertRaisesRegex(RuntimeError, "interrupted"):
+        with patch_split(f.cr, "write_once", side_effect=crash), self.assertRaisesRegex(RuntimeError, "interrupted"):
             f.f.replay()
         pending = json.loads((f.f.directory / "release-review.2.json").read_text())
         self.assertEqual(pending["reviewer_disposition"]["actor"], "att-owner")
