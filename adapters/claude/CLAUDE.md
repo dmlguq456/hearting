@@ -149,4 +149,7 @@ Portable behavior contract = `roles/response-policy.md`.
 - A Codex job the openai-codex plugin detaches runs in the plugin's own queue,
   not in `jobs.log` (Fleet shows it read-only); send Codex work that needs
   tracking or gates through registered dispatch.
-- Hooks, statusline, Skills projection, and edge cases: see those files.
+- If the memory prompt hook is unavailable, record `recall` or `skip` with
+  `mem recall-gate`.
+- Hooks, statusline, Skills projection, and edge cases:
+  `adapters/claude/README.md` and `adapters/claude/ADAPTATION.md`.

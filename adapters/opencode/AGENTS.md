@@ -161,5 +161,7 @@ Portable behavior contract = `roles/response-policy.md`.
   server without that carrier gets `bounded-wait`.
 - Before delegating to a native subagent, check it against its
   `opencode_setting/opencode-agents` file and the runtime's current agent list.
-- Command surface, tool checks, native projections, edge cases: see Session
-  Command Reference.
+- If the memory prompt hook is unavailable, record `recall` or `skip` with
+  `preflight.sh recall-gate <cwd> ...`.
+- Command surface, tool checks, native projections, edge cases:
+  `adapters/opencode/README.md` (Session Command Reference).

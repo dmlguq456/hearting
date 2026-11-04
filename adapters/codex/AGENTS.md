@@ -158,5 +158,7 @@ Portable behavior contract = `roles/response-policy.md`.
 - Use native subagents only after `preflight.sh subagent-info --check`.
 - Do not edit runtime-owned credentials, sessions, logs, caches, databases,
   or `$CODEX_HOME/config.toml`.
-- Command surface, tool checks, hook trust, token budget, edge cases: see
-  Session Command Reference. Command output is authoritative.
+- If the memory prompt hook is unavailable, record `recall` or `skip` with
+  `preflight.sh recall-gate <cwd> ...`.
+- Command surface, tool checks, hook trust, token budget, edge cases:
+  `adapters/codex/README.md` (Session Command Reference). Command output is authoritative.
