@@ -427,6 +427,35 @@ def _pass(jobs: Path, root: Path, state: dict, now_ns: int) -> dict:
     return {"archived": written, "rows": len(lines), **result}
 
 
+CLAIM_TEMP_AGE_NS = 24 * 3600 * 1_000_000_000
+
+
+def _stale_claim_temps(jobs: Path, now_ns: int) -> dict:
+    """Best effort: remove `.jobs.log.claim-*` rewrite temps a killed writer left in the
+    registry directory. A live rewrite holds its temp for well under a second and never
+    commits it, so an old one is only a dead full-size copy of rows jobs.log already holds."""
+    removed = size = 0
+    try:
+        prefix = f".{jobs.name}.claim-"
+        uid = os.getuid()
+        with os.scandir(jobs.parent) as entries:
+            found = [entry for entry in entries if entry.name.startswith(prefix)]
+        for entry in found:
+            try:
+                info = entry.stat(follow_symlinks=False)
+                if (not entry.is_file(follow_symlinks=False) or info.st_uid != uid
+                        or now_ns - info.st_mtime_ns <= CLAIM_TEMP_AGE_NS):
+                    continue
+                os.unlink(entry.path)
+                removed += 1
+                size += info.st_size
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return {"claim_temps_removed": removed, "claim_temps_bytes": size} if removed else {}
+
+
 def _read_state(root: Path) -> dict:
     try:
         value = json.loads((root / STATE_NAME).read_text(encoding="utf-8"))
@@ -474,6 +503,7 @@ def sweep(jobs, *, now_ns=None, force=False) -> dict:
             result = _pass(jobs, root, state, now_ns)
         except Exception as exc:  # noqa: BLE001 -- kept in the state, where a later look finds it
             result = {"skipped": "error", "error": type(exc).__name__, "detail": str(exc)[:200]}
+        result = {**result, **_stale_claim_temps(jobs, now_ns)}
         state["last_result"] = result
         _write_state(root, state)
         return result
