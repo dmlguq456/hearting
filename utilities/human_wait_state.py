@@ -52,6 +52,22 @@ OLDER_AFTER = 72 * 3600
 OWNER_STATES = ("live", "successor", "none", "unknown")
 
 
+def ui_translator():
+    """The shared UI-text catalog (English by default, Korean when declared).
+
+    A notification never fails over its words: without a readable catalog it names the key.
+    """
+    try:
+        import importlib.util
+        path = Path(__file__).resolve().parents[1] / "tools" / "i18n" / "ui_text.py"
+        spec = importlib.util.spec_from_file_location("ui_text", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.translator()
+    except Exception:  # noqa: BLE001 -- a missing or broken catalog must not stop a reminder
+        return lambda message, /, **fields: message.rsplit(".", 1)[-1].replace("_", " ")
+
+
 def wait_fold(since, now, *, owner_state=None):
     """Why a wait is not current: ``"ownerless"``, ``"older"``, or ``None`` (current).
 
@@ -3693,10 +3709,11 @@ def _notify_item(item: dict, *, boundary: str, sound: bool = False) -> bool:
         os.fchmod(fd, 0o600)
         os.close(fd)
         claim = (marker, None)
-        question = _clean(item.get("question") or "사용자 답 대기")
+        t = ui_translator()
+        question = _clean(item.get("question") or t("wait.no_question"))
         age = max(0, int((time.time() - float(item.get("since") or time.time())) // 3600))
-        title = "◑답변 필요" + (" · %dh" % age if boundary in {"1h", "6h"} else "")
-        body = question or "사용자 답 대기"
+        title = t("wait.title") + (" · %dh" % age if boundary in {"1h", "6h"} else "")
+        body = question or t("wait.no_question")
         herdr = shutil.which("herdr")
         if herdr:
             command = [herdr, "notification", "show", title, "--body", body]
