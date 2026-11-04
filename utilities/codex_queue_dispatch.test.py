@@ -61,14 +61,14 @@ class QueueDispatchTest(unittest.TestCase):
             with mock.patch.object(QUEUE.subprocess, "Popen", return_value=fake) as popen:
                 launched = QUEUE.launch_codex_queue_completion_sidecar(
                     jobs=jobs,
-                    parent_session_id="01a0dc8c-18ad-7853-8a0f-69222f4d7888",
+                    parent_session_id="0100000e-0000-7000-8000-000000000016",
                     attempt_ids={"att-one", "att-two"},
                     environ={"CODEX_HOME": str(root), "AGENT_CODEX_QUEUE_COMPLETION_TIMEOUT": "60"},
                 )
             command = popen.call_args.args[0]
             self.assertIn("--queue-socket", command)
             self.assertIn("--parent-session-id", command)
-            self.assertIn("01a0dc8c-18ad-7853-8a0f-69222f4d7888", command)
+            self.assertIn("0100000e-0000-7000-8000-000000000016", command)
             self.assertIn("att-one", command)
             self.assertIn("att-two", command)
             self.assertNotIn("--control-socket", command)
@@ -82,7 +82,7 @@ class QueueDispatchTest(unittest.TestCase):
             jobs = root / "jobs.log"
             jobs.write_text("", encoding="utf-8")
             for thread, attempts in (("not-a-thread", {"att"}),
-                                     ("01a0dc8c-18ad-7853-8a0f-69222f4d7888",
+                                     ("0100000e-0000-7000-8000-000000000016",
                                       {f"att-{i}" for i in range(5)})):
                 with self.subTest(thread=thread, count=len(attempts)), \
                      self.assertRaises(QUEUE.ManagedDispatchError):

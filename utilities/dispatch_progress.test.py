@@ -101,7 +101,7 @@ class ProgressTest(unittest.TestCase):
         from claude_project_dir import encode_project_dir
         cwd = self.base / "owner-worktree"; cwd.mkdir()
         runtime_home = self.base / "worker-home"
-        session = "085a89c5-3951-4b87-a9c2-c98cd6e97616"
+        session = "10000064-0000-4000-8000-000000000072"
         receipt = self.base / "owner.claude.jsonl"
         receipt.write_text("".join(json.dumps(row) + "\n" for row in (
             {"type": "dispatch.supervisor.session", "parent_attempt_id": self.attempt,

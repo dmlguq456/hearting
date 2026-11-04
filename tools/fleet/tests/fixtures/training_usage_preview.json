@@ -19,7 +19,7 @@
     }
   ],
   "codex_usage": {
-    "thread_id": "019fd56f-1e8a-77f0-9964-dc8cba43d344",
+    "thread_id": "01000006-0000-7000-8000-00000000000b",
     "turn_id": "turn-usage-preview",
     "wire_token_usage": {
       "last": {"totalTokens": 100000},
@@ -34,8 +34,8 @@
     },
     "parent_window_for_denial_case": 256000,
     "mixed_thread_ids_for_denial_case": [
-      "019fd56f-1e8a-77f0-9964-dc8cba43d344",
-      "019fd56f-1e8a-77f0-9964-dc8cba43d345"
+      "01000006-0000-7000-8000-00000000000b",
+      "01000006-0000-7000-8000-00000000000c"
     ]
   }
 }

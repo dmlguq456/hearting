@@ -87,7 +87,7 @@ class AliasReceive(unittest.TestCase):
         })
         self.env.start()
         self.addCleanup(self.env.stop)
-        self.sender = {"harness": "codex", "session_id": "01a07b2b-9108-7110-bd41-93b7ade4d9c4", "name": "동명"}
+        self.sender = {"harness": "codex", "session_id": "0100000a-0000-7000-8000-000000000012", "name": "동명"}
         self.recipient = {"harness": "codex", "session_id": "recipient-a"}
 
     def prepare(self, body="검증할 실제 본문", sender=None, recipient=None):

@@ -103,7 +103,7 @@ class NVMLFallbackTest(unittest.TestCase):
         payload = json.loads(output.getvalue())
         # Exercise the real host JSON normalization too.
         with mock.patch.object(CH, "remote", return_value=subprocess.CompletedProcess([], 0, json.dumps(payload), "")):
-            return CH.probe_host("cnn", {"ssh_host": "local"}, ssh_session_bridges=[])
+            return CH.probe_host("gpu", {"ssh_host": "local"}, ssh_session_bridges=[])
 
     def test_managed_runs_remain_visible_with_unknown_nvml_values(self):
         host = self.probe()
@@ -237,7 +237,7 @@ class NVMLFallbackTest(unittest.TestCase):
     def test_admission_refuses_unknown_measurement_even_with_share(self):
         host = self.probe()
         with mock.patch.object(CH, "probe_host", return_value=host):
-            observation = CH._run_gpu_observation("cnn", {"ssh_host": "local"})
+            observation = CH._run_gpu_observation("gpu", {"ssh_host": "local"})
         self.assertEqual(observation["gpu_status"], host["gpu_status"])
         for requested in (None, "0", "1"):
             for share in (False, True):
@@ -249,13 +249,13 @@ class NVMLFallbackTest(unittest.TestCase):
     def test_probe_human_output_uses_summary_and_keeps_raw_error_in_json(self):
         host = self.probe()
         from types import SimpleNamespace
-        config = {"hosts": {"cnn": {"ssh_host": "local"}}, "run_root": self.root}
+        config = {"hosts": {"gpu": {"ssh_host": "local"}}, "run_root": self.root}
         for as_json in (True, False):
             output, warning = io.StringIO(), io.StringIO()
             with mock.patch.object(CH, "load_config", return_value=config), \
                     mock.patch.object(CH, "_probe_selected", return_value=[host]), \
                     contextlib.redirect_stdout(output), contextlib.redirect_stderr(warning):
-                self.assertEqual(CH.cmd_probe(SimpleNamespace(hosts=["cnn"], json=as_json)), 0)
+                self.assertEqual(CH.cmd_probe(SimpleNamespace(hosts=["gpu"], json=as_json)), 0)
             self.assertNotIn("Failed to initialize", warning.getvalue())
             if as_json:
                 self.assertIn("Failed to initialize", json.loads(output.getvalue())[0]["detail"])
@@ -321,7 +321,7 @@ class NVMLFallbackTest(unittest.TestCase):
         original, mtime = state.read_bytes(), state.stat().st_mtime_ns
         with mock.patch.object(gpu_leases, "state_path", return_value=state), \
                 mock.patch.object(CH, "remote", return_value=subprocess.CompletedProcess([], 0, '{"gpus":[]}', "")) as remote:
-            CH.probe_host("cnn", {"ssh_host": "local"}, ssh_session_bridges=[])
+            CH.probe_host("gpu", {"ssh_host": "local"}, ssh_session_bridges=[])
         # Execute the actual composed script, including its embedded lease API.
         host = self.probe(script=remote.call_args.args[1])
         self.assertTrue(all(not g["reservations"] for g in host["gpus"]))

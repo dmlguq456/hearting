@@ -509,7 +509,7 @@ def collect(state_roots=None, *, include_health=False):
         Never the raw session id. A codex→claude transfer record carries
         ``from.name: null`` (measured 2026-09-09), and the old fallback pasted the
         36-character id into the name slot, which is what put
-        `← 01a084f7-63f2-7961-ae60-6fc2d8e60fc2` on the board. Naming an unnamed peer
+        `← 0100000b-0000-7000-8000-000000000013` on the board. Naming an unnamed peer
         is the renderer's job — it can see the tag of a row the collector cannot.
         """
         name = _clean_from_name(block.get("name"))

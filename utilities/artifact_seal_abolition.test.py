@@ -1276,9 +1276,9 @@ class B1RefreshTest(B1RefreshBase):
                                  expected_binding=binding)["status"], "already-sealed")
 
     # -- A28-3 -----------------------------------------------------------
-    def test_b1_taslp_25_plus26_modified4_and_noop(self):
+    def test_b1_study_25_plus26_modified4_and_noop(self):
         files = {f"plans/cycle/declared_{i:02d}.md": f"declared {i}\n".encode() for i in range(25)}
-        result = self.closed("b1-taslp", files)
+        result = self.closed("b1-study", files)
         cycle_id = result["cycle_id"]
         before = json.loads(self.manifest_path(result).read_text(encoding="utf-8"))
         raw_before = self.manifest_path(result).read_bytes()

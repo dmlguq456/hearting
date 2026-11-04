@@ -928,7 +928,7 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
         request_path = self.base / f'{name}-request.json'
         admission_dir = self.base / f'{name}-admission'
         admission_dir.mkdir(parents=True, exist_ok=True)
-        bridge_path = self.base / f'{name}-remote-production-bridge-var-rir512.py'
+        bridge_path = self.base / f'{name}-fixture-item-0982.py'
         parser_path = ROOT / 'utilities' / 'compute-hosts.py'
         bridge_path.write_text(
             'import importlib.util, json, subprocess, sys\n'
@@ -1426,7 +1426,7 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
         old = data['runs']['fixture-run']
         Path(old['sentinel']).unlink()
         old.update(status='running', workflow_state='RUNNING', exit_code=None,
-                   boot_id='83f954bc-4963-4dfa-9f2f-c8f3597900a6', boot_host='local')
+                   boot_id='10000094-0000-4000-8000-0000000000a3', boot_host='local')
         data['runs']['fixture-run'] = old
         registry.write_text(json.dumps(data))
         checkpoint = self.base / 'checkpoint'
@@ -4204,7 +4204,7 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
             'config_sha256', 'data_lock_sha256', 'gpu_smoke_sha256', 'bridge_sha256'})
         self.assertEqual(binding['payload']['environment_sha256'].__len__(), 64)
 
-        bridge = self.base / 'bridge-var-remote-production-bridge-var-rir512.py'
+        bridge = self.base / 'bridge-var-fixture-item-0982.py'
         bridge_bytes = bridge.read_bytes()
         bridge.write_text(bridge.read_text() + '# changed after selection\n')
         self.assertIsNone(SUP.runner().resource_operation_binding(

@@ -716,7 +716,7 @@ class HeaderCallerFallback(unittest.TestCase):
             "version": "v3.50.3-20-gad247e2b6", "install_method": "unmanaged"})
         snapshot.usage_snapshots = {"codex": {"payload": {"rl_5h": 20, "rl_7d": 30},
                                                "observed_at": 2_000_000_000}}
-        names = ("trainer-west-gpu-node-01", "cnn", "xgpu-b", "lgpu-c", "gpu-c")
+        names = ("trainer-west-gpu-node-01", "gpu", "xgpu-b", "lgpu-c", "gpu-c")
         snapshot.compute_hosts = {"hosts": [
             {"host": name, "self": index == 0, "reachable": True, "cpu_count": 4,
              "cpu_utilization_pct": 25, "memory_total_mib": 8192,

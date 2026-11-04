@@ -2579,7 +2579,7 @@ class StewardRecoveryIntegrationTest(unittest.TestCase):
     def test_fleet_cancelled_child_no_longer_keeps_parent_pane_unknown(self):
         from dispatch_contract import ObservedAttemptLiveness
         attempt = "att-f3daf5ab6f9a367410542ca045fd243d"
-        sid = "01a13de1-42a4-7e81-b64f-05839c030e39"
+        sid = "01000039-0000-7000-8000-000000000045"
         metadata = {"attempt_schema_version": "2", "attempt_id": attempt,
                     "harness": "opencode", "worker_type": "frame", "route_node": "frame",
                     "dispatch_depth": "1", "parent_sid": sid, "launch_started": "1",

@@ -3684,8 +3684,8 @@ def resolved_released_by(actor_kind, requested):
     """`released_by` for this release, refusing a registered worker's own label.
 
     The first cut only compared the requested value against the literal
-    `"user"`, so `--by shinuh` from a headless owner recorded
-    `released_by=shinuh` and only `actor_kind` still betrayed it — the exact
+    `"user"`, so `--by operator-a` from a headless owner recorded
+    `released_by=operator-a` and only `actor_kind` still betrayed it — the exact
     indistinguishability contract (d) exists to prevent. A registered worker now
     may not name the releaser at all; its label is derived.
     """

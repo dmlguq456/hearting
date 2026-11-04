@@ -978,7 +978,7 @@ class UsableSessionIdTest(_TmpRootMixin, unittest.TestCase):
     """
 
     def test_real_ids_pass_through_unchanged(self):
-        for sid in ("841d1f64-0cff-4c16-8578-e874a45a2bb6", "01a064d8-e0e6-7ac2-97df-877c380ce013",
+        for sid in ("10000095-0000-4000-8000-0000000000a4", "01000009-0000-7000-8000-00000000000f",
                     "ses_7f3a19c2b0004e11", "sid-a"):
             with self.subTest(sid=sid):
                 self.assertEqual(peer_message.usable_session_id(sid), sid)
@@ -1001,8 +1001,8 @@ class UsableSessionIdTest(_TmpRootMixin, unittest.TestCase):
 
     def test_trailer_parse_keeps_a_real_id(self):
         parsed = peer_message.parse_peer_trailer(
-            "body\n(peer-from: claude 841d1f64-0cff-4c16-8578-e874a45a2bb6 hearting-18)")
-        self.assertEqual(parsed["session_id"], "841d1f64-0cff-4c16-8578-e874a45a2bb6")
+            "body\n(peer-from: claude 10000095-0000-4000-8000-0000000000a4 hearting-18)")
+        self.assertEqual(parsed["session_id"], "10000095-0000-4000-8000-0000000000a4")
 
     def test_the_module_own_absent_marker_round_trips_as_absent(self):
         """`peer_trailer` writes `-` when it has no id; parsing it back must not mint one."""
@@ -3623,9 +3623,9 @@ class HandoffAcceptanceTest(_TmpRootMixin, unittest.TestCase):
     def test_registered_parent_same_seat_holder_then_codex_acceptance_keeps_original_storage(self):
         import session_tidy
         import dispatch_seat_handover as handover
-        registered = "92144f29-855c-45ec-9256-d303a1943d04"
-        intermediate = "e3250355-411d-410f-9f19-cbd3e4b5077c"
-        successor_sid = "01a17511-79d4-7ef0-ab19-12e4163d9d6c"
+        registered = "10000099-0000-4000-8000-0000000000a8"
+        intermediate = "100000aa-0000-4000-8000-0000000000b9"
+        successor_sid = "01000057-0000-7000-8000-000000000065"
         parent_pane, successor_pane = "wX:pA", "wX:pB"
         meta = {"attempt_id": "att-sr-lineage", "dispatch_depth": "1", "worker_type": "owner",
                 "parent_sid": registered, "parent_harness": "claude",

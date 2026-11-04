@@ -15,7 +15,7 @@ from tools.fleet.herdr_projection import compose
 from tools.fleet import render
 from tools.fleet.session_handle import current_session_subject, minted_tag
 
-CODEX_SID = "01a0c233-96b3-7cf3-871b-7beb1fc71679"   # a rollout name must end in a uuid
+CODEX_SID = "0100000d-0000-7000-8000-00000000013c"   # a rollout name must end in a uuid
 
 
 def codex_sid(path):
@@ -546,7 +546,7 @@ class RuntimeProjectionTest(unittest.TestCase):
 
     def test_fdless_embedded_tui_without_daemon_loader_stays_unknown(self):
         from fleet.collectors import codex, procscan
-        sid = "0f5d1a7e-5b1c-4d2e-9f3a-2b6c8d0e1f47"
+        sid = "10000067-0000-4000-8000-000000000075"
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             bindir, _log = self.stub(root)

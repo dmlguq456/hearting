@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Policy replay of actual 1010–1011 records; full-path replay uses the private snapshot.
 
-The bundle is a field projection of frozen routes/rows/markers, with original
-SHA256 provenance. It contains no invented attempt, verdict or process result.
+The bundle is an anonymized field projection of frozen routes/rows/markers,
+with synthetic workload paths and session IDs. SHA256 fields retain source
+provenance; attempt, verdict and process-result relationships are preserved.
 No provider, project writer or live dispatch registry is used by this suite.
 """
 import json
@@ -70,7 +71,7 @@ class IncidentReplay(unittest.TestCase):
 
     def test_497_known_gpu_not_started_is_returned_to_the_same_owner(self):
         runs = [r for source in self.data["resources"].values() for r in source["data"]["runs"].values()
-                if "table6-c" in r["run_id"]]
+                if r["run_id"] in ('fixture-run-0949', 'fixture-run-0949__a1')]
         self.assertTrue(runs)
         for row in runs:
             self.assertTrue(resource_never_started(row))

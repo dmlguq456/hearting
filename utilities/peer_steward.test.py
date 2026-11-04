@@ -1651,7 +1651,7 @@ class SharedDaemonCodexStartTest(_TmpRootMixin, unittest.TestCase):
                 self.assertEqual(typed.count("--no-daemon"), args.count("--no-daemon"))
 
     def test_resume_and_fork_targets_are_forwarded_without_reshaping(self):
-        thread = "01a0fa57-7f0e-7eb0-bffe-1d56df94e90c"
+        thread = "01000013-0000-7000-8000-00000000001b"
         for args in (["resume", thread], ["fork", thread]):
             with self.subTest(args=args):
                 _out, command = self._start(args)
@@ -10447,8 +10447,8 @@ CODEX_FORM = "Permission required\n ❯ 1. Allow once\n   2. Always allow\n Esc 
 OPENCODE_HOME_BLANK = "\n" * 12 + "  /path/to/project:main\n\n"     # 1.18.34: nothing but the cwd line
 OPENCODE_HOME = "\n\n  ┃  Ask anything... \"Fix broken tests\"\n  ┃\n  ┃  Build auto · Model OpenCode Go\n  ╹▀▀▀▀▀\n"
 NO_BOX = "just some output\nwith no prompt box at all\n"
-OLD_T = "01a0fbf0-3ad5-7501-9838-eb440504686e"
-NEW_T = "01a0fbf0-d65e-7041-9744-c8f5300f35a3"
+OLD_T = "01000014-0000-7000-8000-00000000001e"
+NEW_T = "01000014-0000-7000-8000-00000000001f"
 
 
 def codex_screen(footer):
@@ -10840,15 +10840,15 @@ class ClearTest(_TmpRootMixin, unittest.TestCase):
         self.assertEqual(len(world.typed()), 1)
 
     def test_only_the_complete_last_status_line_field_is_current_identity(self):
-        other = "01a0fbf0-aaaa-7bbb-8ccc-dddddddddddd"
+        other = "01000014-aaaa-7bbb-8ccc-dddddddddddd"
         st = self.st
         seat = st.Seat("pane", st._digest("pane", "w1:pX"), "w1:pX", "codex", "")
         with st.seat_lock(seat.key):
             st.record_event(seat, "codex", other, "prompt", cwd="/w", now=time.time() - 300)
         cases = ((f"proj · {NEW_T} · Fix it", f"proj · {NEW_T} · Fix it", "already shown", False),
-                 ("proj · Fix it", f"proj · {NEW_T} · 01a0fbf0-eeee-7fff-8000-111111111111",
+                 ("proj · Fix it", f"proj · {NEW_T} · 01000014-eeee-7fff-8000-111111111111",
                   "earlier UUID does not override last", True),
-                 ("proj · Fix it", "proj · Context 0% used · 01a0fbf0-d65e-7041-9744-c8f5300f…",
+                 ("proj · Fix it", "proj · Context 0% used · 01000014-d65e-7041-9744-c8f5300f…",
                   "cut id", False),
                  (f"proj · {OLD_T}", f"proj · {OLD_T} · {NEW_T}",
                   "last field wins over earlier UUID", True),
@@ -13709,11 +13709,11 @@ class DeferredRetireHandoverTest(_TmpRootMixin, unittest.TestCase):
     def test_two_installed_legacy_requests_reconcile_from_their_exact_preacceptance_marks(self):
         cases = (
             ("retire-407ed2a6eef9409ac778fe003ca67d19", "wB:p8S",
-             "165a3725-d811-4cfa-b553-a15417c86b31",
-             "01a17279-6706-7553-8779-33a8494ea126", "wB:p99"),
+             "1000006c-0000-4000-8000-00000000007a",
+             "01000054-0000-7000-8000-000000000062", "wB:p99"),
             ("retire-8a1db76365414b3c02603500d366c97f", "wB:p8Z",
-             "10812155-0099-4d99-ab90-5df3e90a9936",
-             "01a17279-5310-7dd1-83be-6a50b70f2e2a", "wB:p98"),
+             "1000006a-0000-4000-8000-000000000078",
+             "01000054-0000-7000-8000-000000000061", "wB:p98"),
         )
         for duty_id, predecessor_pane, predecessor_sid, successor_sid, successor_pane in cases:
             with self.subTest(target=predecessor_pane), tempfile.TemporaryDirectory() as root, \

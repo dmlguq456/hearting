@@ -28,7 +28,7 @@ from fleet.collectors import codex, herdr, procscan  # noqa: E402
 from fleet.model import Session  # noqa: E402
 from fleet.session_tags import assign_observed  # noqa: E402
 
-_SID = "019facc9-fe83-7480-89f6-9e64fbebf0ca"
+_SID = "01000005-0000-7000-8000-000000000008"
 _REAL_LISTDIR = os.listdir
 _REAL_READLINK = os.readlink
 
@@ -143,7 +143,7 @@ class ManagedCodexAttributionTest(unittest.TestCase):
             home, cwd = os.path.join(tmp, "dot-codex"), os.path.join(tmp, "project")
             os.makedirs(cwd)
             first = _make_rollout(home, cwd)
-            second = _make_rollout(home, cwd, sid="019facc9-fe83-7480-89f6-9e64fbebf0cb")
+            second = _make_rollout(home, cwd, sid="01000005-0000-7000-8000-000000000009")
             stub = _FdStub({100: [first, second]})
             with mock.patch.object(codex.os, "listdir", side_effect=stub.listdir), \
                  mock.patch.object(codex.os, "readlink", side_effect=stub.readlink):
@@ -172,8 +172,8 @@ class ManagedCodexAttributionTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             home, cwd = os.path.join(tmp, "dot-codex"), os.path.join(tmp, "project")
             os.makedirs(cwd)
-            old_sid = "019facc9-fe83-7480-89f6-9e64fbebf0cb"
-            new_sid = "019facc9-fe83-7480-89f6-9e64fbebf0cc"
+            old_sid = "01000005-0000-7000-8000-000000000009"
+            new_sid = "01000005-0000-7000-8000-00000000000a"
             old = _make_rollout(home, cwd, old_sid)
             new = _make_rollout(home, cwd, new_sid)
             for path, active, window in ((old, 80, 100), (new, 30, 200)):
@@ -198,8 +198,8 @@ class ManagedCodexAttributionTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             home, cwd = os.path.join(tmp, "dot-codex"), os.path.join(tmp, "project")
             os.makedirs(cwd)
-            main_sid = "019facc9-fe83-7480-89f6-9e64fbebf0cb"
-            sub_sid = "019facc9-fe83-7480-89f6-9e64fbebf0cc"
+            main_sid = "01000005-0000-7000-8000-000000000009"
+            sub_sid = "01000005-0000-7000-8000-00000000000a"
             main = _make_rollout(home, cwd, main_sid)
             sub = _make_rollout(home, cwd, sub_sid)
             with open(sub, "w", encoding="utf-8") as handle:
@@ -217,8 +217,8 @@ class ManagedCodexAttributionTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             home, cwd = os.path.join(tmp, "dot-codex"), os.path.join(tmp, "project")
             os.makedirs(cwd)
-            old_sid = "019facc9-fe83-7480-89f6-9e64fbebf0cb"
-            new_sid = "019facc9-fe83-7480-89f6-9e64fbebf0cc"
+            old_sid = "01000005-0000-7000-8000-000000000009"
+            new_sid = "01000005-0000-7000-8000-00000000000a"
             old = _make_rollout(home, cwd, old_sid)
             with open(old, "a", encoding="utf-8") as handle:
                 handle.write(json.dumps({"payload": {"type": "token_count", "info": {
@@ -242,7 +242,7 @@ class ManagedCodexAttributionTest(unittest.TestCase):
             os.makedirs(cwd)
             _make_rollout(home, cwd)
             tui = _session(200, cwd, None)
-            other_sid = "019facc9-fe83-7480-89f6-9e64fbebf0cb"
+            other_sid = "01000005-0000-7000-8000-000000000009"
             with mock.patch.object(herdr, "codex_pane_sessions", return_value={200: other_sid}), \
                  mock.patch.object(procscan, "read_environ", return_value={}):
                 tick = self._prepare([tui], {200: []}, home)
