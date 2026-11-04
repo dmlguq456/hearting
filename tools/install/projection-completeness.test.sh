@@ -88,6 +88,9 @@ capabilities = len([s for s in manifest["capabilities"].values()
 # Stage-only (parent-invoked) skills are withheld from the main native skill list.
 skills = len([s for s in manifest["capabilities"].values()
               if s["invocation"]["class"] not in ("compiler-internal", "parent-invoked")])
+# OpenCode has no explicit-only switch, so entry routers also leave its skill projection.
+oc_skills = skills - len([s for s in manifest["capabilities"].values()
+                          if s["invocation"]["class"] == "entry-router"])
 modes = len([m for m in manifest["modes"] if not m.split("/")[-1].startswith("_")])
 
 
@@ -110,13 +113,14 @@ catalogs = {runtime: catalog(runtime) for runtime in ("claude", "codex", "openco
 if len(set(map(frozenset, catalogs.values()))) != 1:
     raise SystemExit(f"native agent catalogs diverge across adapters: {catalogs}")
 agents = len(set(manifest["kernel"]["agents"]) | catalogs["claude"])
-print(f"{capabilities} {agents} {modes} {skills}")
+print(f"{capabilities} {agents} {modes} {skills} {oc_skills}")
 PY
 )
 EXPECTED_CAPABILITIES=$(echo "$EXPECT" | cut -d' ' -f1)
 EXPECTED_AGENTS=$(echo "$EXPECT" | cut -d' ' -f2)
 EXPECTED_MODES=$(echo "$EXPECT" | cut -d' ' -f3)
 EXPECTED_SKILLS=$(echo "$EXPECT" | cut -d' ' -f4)
+EXPECTED_OC_SKILLS=$(echo "$EXPECT" | cut -d' ' -f5)
 
 # assert_projection <linked|packaged> — both modes share _desired_entries, so
 # every runtime must expose the identical manifest-derived counts in either.
@@ -187,7 +191,7 @@ PY
 
   test "$(count_dirs "$HOME/.codex/skills")" = "$EXPECTED_SKILLS" || fail "$mode Codex skill count"
   test "$(count_dirs "$HOME/.claude/skills")" = "$EXPECTED_SKILLS" || fail "$mode Claude skill count"
-  test "$(count_dirs "$HOME/.config/opencode/skills")" = "$EXPECTED_SKILLS" || fail "$mode OpenCode skill count"
+  test "$(count_dirs "$HOME/.config/opencode/skills")" = "$EXPECTED_OC_SKILLS" || fail "$mode OpenCode skill count"
   test "$(count_dirs "$HOME/.config/opencode/commands")" = "$EXPECTED_CAPABILITIES" || fail "$mode OpenCode command count"
 
   # Kernel helpers (memory-scout) plus the native subagent type catalog;
