@@ -2,6 +2,7 @@
 # GENERATED METADATA — edit harness-manifest.json, then run tools/generate.py.
 description: "Use when a task needs a durable survey of new academic, technology, or market evidence before downstream specification or production. Owns research; default preset. Not for repository-only project analysis, a simple factual lookup, or work already grounded by sufficient current evidence."
 argument-hint: "<query> [--mode academic|technology|market] [--depth shallow|medium|deep] [--intensity direct|quick|standard|strong|thorough|adversarial] [--no-clarify] [--no-figures] [--from search|analyze|report]"
+disable-model-invocation: true
 metadata:
   group: entry
   fam: pre

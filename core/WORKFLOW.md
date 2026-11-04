@@ -719,7 +719,7 @@ Before approval, choose from compact manifest routing metadata and §0.2; do not
 load the full entry Skill body or its references merely to propose a route. At
 `standard+`, the dispatch-depth-1 owner reads the selected capability contract and each
 dispatch-depth-2 worker reads only its stage contract. `direct` or `quick` acting
-sessions read the detail they need after approval. If a runtime automatically
+sessions read `capabilities/<name>.md` directly after approval; the entry Skill is explicit-only. If a runtime automatically
 injects a selected Skill body into main, do not duplicate that read; record the
 runtime limitation rather than claiming total-token savings.
 

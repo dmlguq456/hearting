@@ -224,7 +224,10 @@ when it does not, or none can be resolved, does the launch keep the release its
 parent tree inherited. The wrapper chooses before registry, lock, or child-launch
 work, re-executing the chosen release's harness wrapper with the original
 argument vector and `AGENT_HOME` set to its real path, so admission runs once on
-that code. A runtime-owned long-lived observer follows the same rule at its own
+that code. An owner's Codex home stays linked to the release that built it, so
+the projection check validates a worker home against its own `worker-home.json`
+source; the child builds its own home on the chosen release. A runtime-owned
+long-lived observer follows the same rule at its own
 checkpoint boundary, before it projects or delivers and while it holds its duty
 lease: the completion observer hands the lease to the installed release's
 observer. A detached helper that can outlive its work, such as the per-attempt

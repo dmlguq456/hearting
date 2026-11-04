@@ -7305,44 +7305,61 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
             text, sender, recipient, defer=True, with_trailer=False, receipt="native-pending")
         return ref
 
-    def _first_prompt_run(self, ref, rollout):
+    def _first_prompt_run(self, ref, holds, prompt=(0, {"result": {"type": "prompt"}})):
+        """`holds(enters)` is the composer state after that many Enters (None unreadable)."""
         sent = []
         guard = mock.patch.object(peer_steward, "_native_idle_prompt_guard",
                                   return_value=(None, {}))
         send = mock.patch.object(peer_steward, "_pane_send",
                                  side_effect=lambda pane, op, value: sent.append((op, value)) or True)
-        with guard, send, mock.patch.object(peer_steward.time, "sleep"), \
-             mock.patch.object(peer_steward, "_codex_rollout_exists",
-                               side_effect=lambda _sid: rollout(sent)), \
-             mock.patch.object(peer_steward, "_CODEX_PASTE_BURST_SEC", 0), \
-             mock.patch.object(peer_steward, "_CODEX_FIRST_PROMPT_POLL_SEC", 0.02):
+        typed = mock.patch.object(peer_steward, "_herdr_prompt", return_value=prompt)
+        with guard, send, typed as prompted, mock.patch.object(peer_steward.time, "sleep"), \
+             mock.patch.object(peer_steward, "_codex_rollout_exists", return_value=False), \
+             mock.patch.object(peer_steward, "_codex_composer_holds_text",
+                               side_effect=lambda _pane: holds(len(sent))), \
+             mock.patch.object(peer_steward, "_CODEX_FIRST_PROMPT_POLL_SEC", 0.02), \
+             mock.patch.object(peer_steward, "_CODEX_ENTER_GAP_SEC", 0):
             result = peer_steward._codex_first_prompt(ref, "w1:pX", "thread-new")
-        return result, sent
+        return result, sent, prompted
 
-    def test_unmaterialized_codex_thread_gets_pane_input_and_a_second_enter(self):
+    def test_unmaterialized_codex_thread_is_prompted_once_and_enter_repeats_while_text_stays(self):
         ref = self._first_prompt_row()
-        # The first Enter is swallowed as a newline; the second one submits.
-        result, sent = self._first_prompt_run(
-            ref, lambda sent: [op for op, _v in sent].count("send-keys") >= 2)
+        # The host prompt left the text in the composer; the second Enter submits.
+        result, sent, prompted = self._first_prompt_run(ref, lambda enters: enters < 2)
         self.assertTrue(result)
-        self.assertEqual([op for op, _v in sent], ["send-text", "send-keys", "send-keys"])
+        self.assertEqual(sent, [("send-keys", "Enter")] * 2)
+        prompted.assert_called_once()
+        self.assertEqual(prompted.call_args[0][:2], ("w1:pX", "first message"))
         row = peer_steward.peer_message._read_pending(ref)
         self.assertEqual((row["state"], row["receipt"], row["rpc_claim"]),
                          ("queued", "native-first-input-submitted", None))
 
-    def test_unmaterialized_thread_single_enter_when_the_first_one_submits(self):
+    def test_unmaterialized_thread_sends_no_enter_when_the_prompt_submits(self):
         ref = self._first_prompt_row()
-        result, sent = self._first_prompt_run(
-            ref, lambda sent: [op for op, _v in sent].count("send-keys") >= 1)
+        result, sent, _prompted = self._first_prompt_run(ref, lambda _enters: False)
         self.assertTrue(result)
-        self.assertEqual([op for op, _v in sent], ["send-text", "send-keys"])
+        self.assertEqual(sent, [])
+
+    def test_unreadable_composer_never_gets_a_blind_enter(self):
+        ref = self._first_prompt_row()
+        result, sent, _prompted = self._first_prompt_run(ref, lambda _enters: None)
+        self.assertIsNone(result)
+        self.assertEqual(sent, [])
+        self.assertEqual(peer_steward.peer_message._read_pending(ref)["state"], "unverified")
 
     def test_unsubmitted_first_prompt_leaves_the_row_for_the_carrier(self):
         ref = self._first_prompt_row()
-        result, sent = self._first_prompt_run(ref, lambda _sent: False)
+        result, sent, _prompted = self._first_prompt_run(ref, lambda _enters: True)
         self.assertIsNone(result)
-        self.assertEqual(len(sent), 3)
+        self.assertEqual(len(sent), peer_steward._CODEX_FIRST_ENTER_RETRIES)
         self.assertEqual(peer_steward.peer_message._read_pending(ref)["state"], "unverified")
+
+    def test_a_refused_host_prompt_presses_no_enter(self):
+        ref = self._first_prompt_row()
+        result, sent, _prompted = self._first_prompt_run(
+            ref, lambda _enters: True, prompt=(1, {"error": {"code": "x"}}))
+        self.assertIsNone(result)
+        self.assertEqual(sent, [])
 
     def test_materialized_thread_keeps_the_queue_path_and_never_types(self):
         ref = self._first_prompt_row()

@@ -1278,7 +1278,7 @@ check_codex_bin_wrappers() {
     || ! grep -Fq 'verification-runner' capabilities/code-test.md \
     || ! grep -Fq 'test_logs/' adapters/codex/skills/code-test/SKILL.md \
     || ! grep -Fq '`code-report` alone updates `pipeline_summary.md`' adapters/codex/skills/code-test/SKILL.md \
-    || ! grep -Fq 'verification-runner' adapters/codex/plugins/hearting-codex/skills/code-test/SKILL.md; then
+    || ! grep -Fq 'verification-runner' adapters/codex/skills/code-test/SKILL.md; then
     fail_msg "code-test portable spec and Codex projections must describe the verification-runner contract"
   fi
   if ! grep -Fq 'compat_reference=not-projected' adapters/codex/bin/capability-map.sh \
@@ -4004,7 +4004,7 @@ check_language_neutrality_contract() {
     || ! grep -Fq 'tools/memory/recall.sh' adapters/codex/bin/preflight.sh \
     || ! grep -Fq 'tools/memory/recall.sh' adapters/opencode/bin/preflight.sh \
     || ! cat $mem_sources | grep -Fq 'CANDIDATE_MAX_RESULTS = 6' \
-    || ! cat $mem_sources | grep -Fq 'CANDIDATE_MAX_UTF8_BYTES = 2400' \
+    || ! cat $mem_sources | grep -Fq 'CANDIDATE_MAX_UTF8_BYTES = 1200' \
     || ! cat $mem_sources | grep -Fq 'records_capsule_fts'; then
     fail_msg "memory semantics must remain agent-owned while capsule candidates and same-turn opportunity are enforced mechanically"
   fi

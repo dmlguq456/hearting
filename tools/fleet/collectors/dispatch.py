@@ -493,23 +493,20 @@ def _registry_metadata_analysis(raw):
     if ("(" in raw or eq_pos < 0
             or (colon_pos >= 0 and colon_pos < eq_pos)):
         return True, ()
-    if _REGISTRY_METADATA_MISSING_EQUALS_RE.search(raw):
-        return True, ()
     whitespace_keys = set()
-    for match in _REGISTRY_METADATA_WHITESPACE_RUN_RE.finditer(raw):
-        start, end = match.span()
-        field_start = raw.rfind(",", 0, start) + 1
-        field_end = raw.find(",", start)
-        if field_end < 0:
-            field_end = len(raw)
-        field_eq = raw.find("=", field_start, field_end)
-        if field_eq < 0 or start < field_eq or start == field_eq + 1:
+    for part in raw.split(","):
+        field_eq = part.find("=")
+        if field_eq < 0:
             return True, ()
-        next_eq = raw.find("=", end, field_end)
-        if (next_eq >= 0
-                and not _REGISTRY_METADATA_WHITESPACE_RE.search(raw, end, next_eq)):
+        match = _REGISTRY_METADATA_WHITESPACE_RUN_RE.search(part)
+        if match is None:
+            continue
+        # Inspect each field once, not once per word in a long value. Any
+        # later '=' has a final whitespace run before it, so the legacy
+        # tokenizer would interpret it as a new field rather than a value.
+        if match.start() <= field_eq + 1 or part.find("=", match.end()) >= 0:
             return True, ()
-        whitespace_keys.add(raw[field_start:field_eq])
+        whitespace_keys.add(part[:field_eq])
     return False, tuple(whitespace_keys)
 
 
@@ -1421,14 +1418,16 @@ def _attempt_stall_attention(job):
     return result
 
 
-def _parent_extinction_rows(paths):
+def _parent_extinction_rows(paths, parent_ids=None):
     """Read one bounded registry snapshot for exact parent-proof lookups.
 
     The first registry containing an attempt owns that attempt, but duplicate
     rows inside that registry remain visible so the proof resolver can reject
     ambiguity instead of silently selecting the last row.
     """
-    rows = {}
+    if parent_ids is not None and not parent_ids:
+        return ()
+    rows, seen = {}, set()
     for path in paths:
         try:
             parsed = parsed_registry_rows(path)
@@ -1436,7 +1435,17 @@ def _parent_extinction_rows(paths):
             continue
         per_path = _registry_derived_index(path, parsed)["all_by_attempt"]
         for attempt_id, evidence in per_path.items():
-            rows.setdefault(attempt_id, tuple((fields, dict(meta)) for fields, meta in evidence))
+            if attempt_id in seen:
+                continue
+            seen.add(attempt_id)
+            # The resolver reads only the exact parent and its siblings for
+            # route conflicts. Keep every duplicate of those attempts, with
+            # first-registry precedence even for attempts excluded here.
+            if (parent_ids is not None and attempt_id not in parent_ids
+                    and not any(meta.get("parent_attempt_id") in parent_ids
+                                for _fields, meta in evidence)):
+                continue
+            rows[attempt_id] = tuple((fields, dict(meta)) for fields, meta in evidence)
     return tuple(item for evidence in rows.values() for item in evidence)
 
 
@@ -3983,7 +3992,7 @@ def _scan_jobs_log(path, seen_slugs, seen_keys=None, registry_priority=0,
     return jobs, malformed
 
 
-def _jobs_log_fields(paths):
+def _jobs_log_fields(paths, *, slugs=None, attempts=None):
     """Return slug and exact-attempt metadata indexes from jobs.log.
 
     The slug index preserves the legacy latest-row-wins behavior.  The attempt
@@ -4006,14 +4015,17 @@ def _jobs_log_fields(paths):
             raise error
         path_attempts = {}
         for _order, fields, parsed_meta in rows:
-            if not "\t".join(fields).strip():
-                continue
             slug = fields[4]
+            attempt_id = parsed_meta.get("attempt_id")
+            want_slug = slugs is None or slug in slugs
+            want_attempt = attempts is None or attempt_id in attempts
+            if not (want_slug or want_attempt) or not any(field.strip() for field in fields):
+                continue
             value = dict(parsed_meta)
             value["_registry_path"] = path
-            path_fields[slug] = value
-            attempt_id = value.get("attempt_id")
-            if attempt_id:
+            if want_slug:
+                path_fields[slug] = value
+            if want_attempt and attempt_id:
                 path_attempts[attempt_id] = value
         for slug, value in path_fields.items():
             if slug not in fields_by_slug:
@@ -4352,21 +4364,25 @@ def _pending_delivery_counts(paths, *, session_observation=None):
     unavailable_registries = set()
     for path in paths:
         try:
-            view = _dispatch_registry_cache.registry_view(Path(path))
+            with _dispatch_registry_cache.registry_read_scope():
+                view = _dispatch_registry_cache.registry_view(Path(path))
+                parsed = parsed_registry_rows(path)
         except OSError:
             unavailable_registries.add(path)
             continue
         registry_unknown |= bool(view.completeness_reason)
-        latest = view.handover_latest()
         # A stamped intent survives later metadata updates. Its original
         # delivery/storage identity stays fixed; authority uses the current row.
-        for line in view.lines:
-            fields = line.split("\t")
-            if len(fields) != 6:
-                continue
-            observed = _parse_pipe_meta(fields[5] or "")
+        # Reuse this exact generation's display parse instead of tokenizing
+        # the whole historical registry again on every optional-detail pass.
+        # Preserve the old intent reader's handling of an incomplete final row.
+        if view.has_partial_tail and view.lines:
+            fields = view.lines[-1].split("\t")
+            if len(fields) == 6:
+                parsed = (*parsed, (None, fields, _parse_pipe_meta(fields[5] or "")))
+        for _order, _fields, observed in parsed:
             if observed.get("delivery_intent") == "1":
-                current = latest.get(observed.get("attempt_id"))
+                current = view.handover_attempt(observed.get("attempt_id"))
                 intent_rows.append((path, observed, current[1] if current else None))
 
     pending = 0
@@ -4949,7 +4965,9 @@ def _collect(jobs_path=None, harness_filter=None, session_rows=(), fast_first=Fa
             and not all((j.owner_route_file, j.owner_route_id, j.owner_route_hash)))
         for j in proc_jobs
     ):
-        log_fields, attempt_fields = _jobs_log_fields(paths)
+        log_fields, attempt_fields = _jobs_log_fields(
+            paths, slugs={job.slug for job in proc_jobs if job.slug},
+            attempts={job.attempt_id for job in proc_jobs if job.attempt_id})
         for j in proc_jobs:
             if j.slug:
                 metadata = log_fields.get(j.slug, {})
@@ -5014,7 +5032,10 @@ def _collect(jobs_path=None, harness_filter=None, session_rows=(), fast_first=Fa
                 j.model = _claude_job_model(str(pid), j.cwd)
                 j.stage = None
     now = time.time()
-    parent_rows = _parent_extinction_rows(paths)
+    parent_ids = {str(meta.get("parent_attempt_id") or "") for job in jobs
+                  if job.dispatch_depth == 2
+                  and isinstance(meta := getattr(job, "_registry_metadata", None), dict)} - {""}
+    parent_rows = _parent_extinction_rows(paths, parent_ids)
     for j in jobs:
         metadata = getattr(j, "_registry_metadata", None)
         if not isinstance(metadata, dict) or j.dispatch_depth != 2:
@@ -5125,6 +5146,10 @@ def collect(jobs_path=None, harness_filter=None, session_rows=(), fast_first=Fal
             stack.enter_context(artifact_reader.read_scope(_ARTIFACT_READ_CACHE))
         stack.enter_context(artifact_producer.artifact_index_observation_scope())
         stack.enter_context(_dispatch_registry_cache.registry_read_scope())
+        # Stall advisories ask the same process questions as liveness below.
+        # Include them in the existing observe-only pass, rather than walking
+        # every process again for each notice before the old inner scope starts.
+        stack.enter_context(process_table_scan_scope())
         return _collect(*args)
 
 

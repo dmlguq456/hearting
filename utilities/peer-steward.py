@@ -7933,18 +7933,50 @@ def _read_screen(target):
 
 
 _CODEX_UNMATERIALIZED = "not materialized yet"
-_CODEX_PASTE_BURST_SEC = 1.5
 _CODEX_FIRST_PROMPT_POLL_SEC = 4.0
+_CODEX_FIRST_ENTER_RETRIES = 3
+_CODEX_ENTER_GAP_SEC = 2.0
+
+
+def _codex_composer_holds_text(pane):
+    """True when the pane's Codex input box is readable and still holds typed text;
+    False when it is empty or a turn took it; None when the screen cannot be read."""
+    lines = _read_screen(pane)
+    if not lines:
+        return None
+    return _screen_ready("codex", lines) == "draft"
+
+
+def _codex_first_prompt_submitted(pane, sid):
+    """The first prompt was taken: the receiving Codex's composer emptied (its own screen,
+    valid for any CODEX_HOME), or a rollout for the thread exists in this steward's home."""
+    return _codex_composer_holds_text(pane) is False or _codex_rollout_exists(sid)
+
+
+def _codex_wait_first_submitted(pane, sid, seconds):
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if _codex_first_prompt_submitted(pane, sid):
+            return True
+        time.sleep(0.25)
+    return _codex_first_prompt_submitted(pane, sid)
+
+
+def _codex_settle(seconds):
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        time.sleep(0.1)
 
 
 def _codex_first_prompt(ref, pane, sid):
     """Submit one pending row through the pane for a Codex thread with no first turn yet.
 
     The native queue cannot reach a thread until its first turn materializes it, so
-    that first message goes in as typed input: paste the body, let Codex's
-    paste-burst window pass, then Enter. The rollout file is the submission signal;
-    when it has not appeared, Enter is sent once more (the first can be taken as a
-    newline). Returns ``True`` once submitted, else ``None``.
+    that first message goes in as pane input through the host's own prompt call (herdr
+    `agent prompt`; tmux bracketed paste plus a separate Enter), not as raw typed text
+    followed by Enter, which Codex can take as a paste burst and keep as a newline. The
+    submission signal is the composer emptying; Enter is repeated only while the
+    composer still holds the text. Returns ``True`` once submitted, else ``None``.
     """
     if _codex_rollout_exists(sid):
         return None
@@ -7962,21 +7994,17 @@ def _codex_first_prompt(ref, pane, sid):
                                         receipt="native-first-input-inflight"))
     submitted = False
     try:
-        if _pane_send(pane, "send-text", row["text"]):
-            for _attempt in range(2):
-                burst_end = time.monotonic() + _CODEX_PASTE_BURST_SEC
-                while time.monotonic() < burst_end:
-                    time.sleep(0.1)
-                if not _pane_send(pane, "send-keys", "enter"):
-                    break
-                deadline = time.monotonic() + _CODEX_FIRST_PROMPT_POLL_SEC
-                while time.monotonic() < deadline:
-                    submitted = _codex_rollout_exists(sid)
-                    if submitted:
-                        break
-                    time.sleep(0.25)
-                if submitted:
-                    break
+        code, payload = _herdr_prompt(pane, row["text"], wait=False, timeout_ms=5000)
+        typed = code == 0 and not (isinstance(payload, dict) and payload.get("error"))
+        for enters in range(_CODEX_FIRST_ENTER_RETRIES + 1 if typed else 0):
+            submitted = _codex_wait_first_submitted(pane, sid, _CODEX_FIRST_PROMPT_POLL_SEC)
+            # An unreadable screen proves nothing: never press Enter blind.
+            if (submitted or enters >= _CODEX_FIRST_ENTER_RETRIES
+                    or _codex_composer_holds_text(pane) is not True):
+                break
+            _codex_settle(_CODEX_ENTER_GAP_SEC)
+            if not _pane_send(pane, "send-keys", "Enter"):
+                break
     except (OSError, subprocess.SubprocessError):
         pass
     with peer_message.pending_lock(ref):

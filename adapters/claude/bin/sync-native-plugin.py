@@ -45,6 +45,13 @@ MARKETPLACE_ROOT = ADAPTER / "plugin-marketplace"
 MARKETPLACE = MARKETPLACE_ROOT / ".claude-plugin" / "marketplace.json"
 PLUGIN_ROOT = MARKETPLACE_ROOT / "plugins" / PLUGIN_NAME
 SKILLS = ADAPTER / "skills"
+# Stage skills stay in adapters/claude/skills (workers read them by path) but are not
+# copied into the plugin, so they never enter the main session's skill list.
+HIDDEN = harness_manifest.main_hidden_skill_names(harness_manifest.load(ROOT / "harness-manifest.json"))
+
+
+def plugin_skill_sources() -> list[Path]:
+    return [skill for skill in sorted(SKILLS.glob("*/SKILL.md")) if skill.parent.name not in HIDDEN]
 AGENTS = ADAPTER / "agents"
 HOOKS_SOURCE = ROOT / "hooks"
 UTILITIES_SOURCE = ROOT / "utilities"
@@ -200,7 +207,7 @@ def sync() -> None:
     plugin_skills = PLUGIN_ROOT / "skills"
     if plugin_skills.exists() or plugin_skills.is_symlink():
         shutil.rmtree(plugin_skills)
-    shutil.copytree(SKILLS, plugin_skills)
+    shutil.copytree(SKILLS, plugin_skills, ignore=shutil.ignore_patterns(*sorted(HIDDEN)))
 
     plugin_agents = PLUGIN_ROOT / "agents"
     if plugin_agents.exists() or plugin_agents.is_symlink():
@@ -267,9 +274,9 @@ def check() -> int:
 
     # skills: per-skill SKILL.md byte-compare + excess-file detection.
     expected_skills = {
-        PLUGIN_ROOT / "skills" / skill.relative_to(SKILLS) for skill in SKILLS.glob("*/SKILL.md")
+        PLUGIN_ROOT / "skills" / skill.relative_to(SKILLS) for skill in plugin_skill_sources()
     }
-    for skill in sorted(SKILLS.glob("*/SKILL.md")):
+    for skill in plugin_skill_sources():
         plugin_skill = PLUGIN_ROOT / "skills" / skill.relative_to(SKILLS)
         if not plugin_skill.exists() or plugin_skill.read_bytes() != skill.read_bytes():
             stale.append(str(plugin_skill.relative_to(ROOT)))

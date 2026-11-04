@@ -50,6 +50,21 @@ def dispatch_defaults_config_text(text):
 
 
 class FallbackTest(unittest.TestCase):
+ def test_projection_mismatch_detail_reaches_failures_and_candidate_outcomes(self):
+  reason="codex-runtime-projection-mismatch"
+  for detail in ("check=hearting:failed reason=expected-symlink-to:/r/v3.70.0","exit-1"):
+   with self.subTest(detail=detail):
+    rows=F.CandidateOutcomes(); failures=[]
+    F._failed_attempt(rows,failures,1,"codex/headless","att-projection",1,reason,detail)
+    self.assertEqual(failures[0]["detail"],detail)
+    self.assertEqual(failures[0]["reason"],reason)
+    self.assertEqual(rows[0]["detail"],detail)
+    self.assertEqual(F._last_failure_fields(failures)["last_direct_failure_detail"],detail)
+  rows=F.CandidateOutcomes(); failures=[]
+  F._failed_attempt(rows,failures,1,"codex/headless","att-projection",1,reason,
+                    "check=hearting:failed reason=PROMPT_FIXTURE_SENTINEL secret")
+  self.assertEqual(failures[0]["detail"],"[detail omitted]")
+  self.assertEqual(rows[0]["detail"],"[detail omitted]")
  def test_spawn_wait_default_does_not_extend_launch_receipt_observation(self):
   self.assertEqual(F.DIRECT_TIMEOUT_DEFAULT,300.0)
   args=SimpleNamespace(direct_timeout=300.0,progress_window_seconds=300.0,

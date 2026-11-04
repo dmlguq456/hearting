@@ -75,4 +75,8 @@ authority, input or runtime state, or assigned items left unfinished; the
 blocker line names what remains. A producing stage's handed-over check is not
 one of its unfinished items. `artifact: -` is allowed only for atomic read-only support
 with no durable output.
+
+No one reads a registered worker's native question tool, and its `accepted` result is
+not delivery. A decision only a person can make goes on the blocker line of a `BLOCKED`
+final response; finish the work that does not depend on it first.
 <!-- worker-terminal-contract:end -->

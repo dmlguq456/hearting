@@ -918,6 +918,7 @@ def _linked_entries(
                 source_root / "adapters/codex/skills",
                 home / "skills",
                 "skill",
+                exclude=projector.main_hidden_skills(source_root),
             )
         )
         entries.extend(_native_agent_entries(runtime, source_root, home)[0])
@@ -953,6 +954,7 @@ def _linked_entries(
                 source_root / "adapters/claude/skills",
                 home / "skills",
                 "skill",
+                exclude=projector.main_hidden_skills(source_root),
             )
         )
         entries.extend(_native_agent_entries(runtime, source_root, home)[0])
@@ -981,6 +983,8 @@ def _linked_entries(
                 source_root / "adapters/opencode/skills",
                 home / "skills",
                 "skill",
+                exclude=(projector.main_hidden_skills(source_root)
+                         | projector.main_hidden_skills(source_root, "explicit_only_skill_names")),
             )
         )
         entries.extend(_native_agent_entries(runtime, source_root, home)[0])

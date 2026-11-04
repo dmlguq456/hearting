@@ -723,9 +723,20 @@ triggers such as `Use when needed` and `Use when invoking the portable ...
 capability` fail conformance. `disable-model-invocation: true` is a hard boundary
 that also blocks programmatic Skill calls and subagent preload, not a
 recommendation-strength knob. `user-invocable: false` controls menu exposure
-separately. The 13 current parent-invoked sub-Skills remain model-invoked but
-identify their owning parent and top-level exclusion; model-support Skills are
-model-visible helpers, not primary entry candidates. `DESIGN_PRINCIPLES §10`
+separately. The 13 current parent-invoked sub-Skills are not projected into the main
+session's native Skill list (`harness_manifest.main_hidden_skill_names`); stage
+workers read their `adapters/*/skills/<name>/SKILL.md` by path, and each still
+identifies its owning parent and top-level exclusion. The 12 entry-router
+Skills are explicit-only (`harness_manifest.explicit_only_skill_names`): the
+person starts them by name (Codex `$name`, Claude `/name`, OpenCode `/name`
+command) or the main session reaches them through `hearting run
+capability-route compose`, but their name and description are not in the model's
+per-request Skill list. Codex sets `policy.allow_implicit_invocation: false` in
+`agents/openai.yaml`, Claude sets `disable-model-invocation: true`, and OpenCode,
+which has no such switch, drops them from its Skill projection and keeps the
+native command. Model-support Skills (`session-tidy`,
+`artifact-projection-read`) stay model-visible helpers, not primary entry
+candidates. `DESIGN_PRINCIPLES §10`
 owns the qualitative design tenets.
 
 The conformance gate enumerates the portable capability domain and checks every

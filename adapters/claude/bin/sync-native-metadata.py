@@ -31,11 +31,15 @@ def generated_frontmatter(identifier: str, spec: dict) -> str:
     invocation = spec["invocation"]
     description = f"{invocation['use_when']} {invocation['not_for']}"
     modes = json.dumps(spec["modes"], ensure_ascii=False)
+    # Entry routers are started by name (`/name`); the model does not pick them itself.
+    explicit_only = (
+        "disable-model-invocation: true\n" if invocation["class"] == "entry-router" else ""
+    )
     return f"""---
 # GENERATED METADATA — edit harness-manifest.json, then run tools/generate.py.
 description: {quoted(description)}
 argument-hint: {quoted(spec["argument_shape"])}
-metadata:
+{explicit_only}metadata:
   group: {spec["group"]}
   fam: {spec["family"]}
   invocation_class: {invocation["class"]}
