@@ -2815,8 +2815,8 @@ def start_work(route, path, jobs, *, wait=False, interview=None, answers=None,
     advanced = _advance_plan(route, jobs, result, run=run, sleep=sleep, clock=clock)
     if advanced is not result:
         return advanced          # the next leg's own start already armed its own resume
-    from start_receipt import save
-    return save(_arm_capacity_resume(result, path, jobs), jobs)
+    from start_receipt import runtime_commands, save
+    return save({**_arm_capacity_resume(result, path, jobs), "runtime": runtime_commands(ROOT)}, jobs)
 
 
 def _arm_capacity_resume(result, path, jobs):

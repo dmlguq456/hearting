@@ -404,7 +404,9 @@ budget and start approval) and writing under
 For execution, use `compose --campaign-key <stream> --start --prompt-file
 <task>` with no `--shape` for framed work or an explicit decided shape. Use
 `--shape direct` only for one atomic, reversible inline change. The slug comes from the task; the
-campaign defaults to this session's latest stream in the same artifact root,
+campaign defaults to this session's latest stream in the same artifact root
+(including temporary directories and returning from a prepared worktree to
+the primary checkout; another session or artifact root supplies no default),
 else to the one active stream of the routes sealed for this folder, and otherwise
 is an existing or new stream key, `--parent-cycle`, or an explicit `--unassigned`
 (the refusal names this folder's streams first, then the root's active keys; a
@@ -518,6 +520,11 @@ or `--registered-headless-evidence` from the parent, exactly like `compile`.
 The stderr `[경로]` notice (§0.4) keeps the campaign choice observed before
 compose starts, and accompanies an admitted first leg. A no-wait snapshot is
 pending; only an elapsed bounded wait is a timeout.
+
+Start receipts include `runtime.run_command` and, when that adapter provides
+one, `runtime.preflight_command`, using the already resolved harness root.
+Reuse those prefixes without rediscovering the installation; `capability-info`
+and tool availability checks retain their existing meaning.
 
 ### 0.3. Pre-Execution Gate for Long-Running Work
 

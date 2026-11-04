@@ -1204,14 +1204,6 @@ def _record_route_chain(route, route_file, event, *, plan=None, plan_source=None
             print("route_chain_written=0 reason=no-identity", file=sys.stderr)
             return
         harness, sid, depth, by_attempt = identity
-        if not os.environ.get("FLEET_ROUTE_CHAIN_DIR"):
-            artifact_root = route.get("artifact_root")
-            if isinstance(artifact_root, str) and artifact_root:
-                real_root = os.path.realpath(artifact_root)
-                real_tmp = os.path.realpath(tempfile.gettempdir())
-                if real_root == real_tmp or real_root.startswith(real_tmp + os.sep):
-                    print("route_chain_written=0 reason=tmp-artifact-root", file=sys.stderr)
-                    return
         if event == "start" and any(
             line.get("route_id") == route.get("route_id")
             for line in rc.read_tail(harness, sid)

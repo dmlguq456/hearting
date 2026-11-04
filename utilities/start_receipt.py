@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shlex
 import sys
 import tempfile
 import time
@@ -15,6 +16,20 @@ import uuid
 
 from dispatch_contract import resolve_agent_home, resolve_dispatch_state_root
 from session_identity import identity
+
+
+def runtime_commands(agent_home):
+    """Reuse the known launcher/root; paths are guidance, never capability checks."""
+    from parent_next_directive import command_home, entrypoint
+
+    result = {"agent_home": command_home(agent_home),
+              "run_command": shlex.join(["sh", entrypoint(agent_home, "tools/install/harness.sh"), "run"])}
+    who = identity()
+    if who.known and who.harness in {"claude", "codex", "opencode"}:
+        relative = f"adapters/{who.harness}/bin/preflight.sh"
+        if (Path(agent_home) / relative).is_file():
+            result["preflight_command"] = shlex.join(["sh", entrypoint(agent_home, relative)])
+    return result
 
 
 def _directory(jobs=None):

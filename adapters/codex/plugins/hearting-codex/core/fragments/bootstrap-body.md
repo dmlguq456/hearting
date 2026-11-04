@@ -46,9 +46,10 @@ capability-route compose`:
 hearting run capability-route compose --start --prompt-file <task> [--shape direct]
 ```
 
-`hearting run <utility>` uses `AGENT_HOME` when set, else the installed
-release. Other flags are hints, except a shape the person or an earlier frame
-already decided: honor it, and use `--shape staged --graph <stage,…>` for
+Reuse the start receipt's `runtime` command prefixes; they already resolve
+the installation. `hearting run <utility>` uses `AGENT_HOME` when set, else the
+installed release. Other flags are hints, except a shape the person or an
+earlier frame already decided: honor it, and use `--shape staged --graph <stage,…>` for
 stages the person named (§0.2.1). A refusal names what to add, such as
 `--campaign-key`. For a user's material request that is not yet approved,
 present the §0.4 intent card before starting (진행 / 수정 / 중단); a

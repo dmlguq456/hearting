@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import shlex
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -61,6 +62,37 @@ class StartReceiptTest(unittest.TestCase):
         self.assertEqual(saved['parent_next'], self.result['parent_next'])
         self.assertTrue(Path(saved['receipt_file']).is_file())
         self.assertEqual(receipt.context('codex', 'own', self.jobs), '')
+
+    def test_known_runtime_commands_run_with_spaces_and_no_path_discovery(self):
+        # The shared launcher exists for all adapters; Claude has no preflight.sh.
+        import shutil
+        runtime = Path(self.tmp.name) / 'runtime with spaces'
+        runtime.mkdir()
+        (runtime / 'tools/install').mkdir(parents=True)
+        shutil.copy2(ROOT / 'tools/install/harness.sh', runtime / 'tools/install/harness.sh')
+        (runtime / 'utilities').mkdir()
+        (runtime / 'utilities/fixture.py').write_text('print("known-runtime")\n')
+        for harness in ('claude', 'codex', 'opencode'):
+            preflight = runtime / f'adapters/{harness}/bin/preflight.sh'
+            if (ROOT / f'adapters/{harness}/bin/preflight.sh').is_file():
+                preflight.parent.mkdir(parents=True)
+                preflight.write_text('echo known-preflight\n')
+            with self.subTest(harness=harness), patch.object(receipt, 'identity',
+                    return_value=SessionIdentity(harness, 'own', 'test', 'sole')):
+                commands = receipt.runtime_commands(runtime)
+                env = {**os.environ, 'AGENT_HOME': str(runtime)}
+                ran = subprocess.run([*shlex.split(commands['run_command']), 'fixture'],
+                                     env=env, capture_output=True, text=True, check=True)
+                self.assertEqual(ran.stdout, 'known-runtime\n')
+                self.assertEqual(commands['agent_home'], str(runtime))
+                if preflight.is_file():
+                    ran = subprocess.run(shlex.split(commands['preflight_command']),
+                                         capture_output=True, text=True, check=True)
+                    self.assertEqual(ran.stdout, 'known-preflight\n')
+                else:
+                    self.assertNotIn('preflight_command', commands)
+        with patch.object(receipt, 'identity', return_value=SessionIdentity()):
+            self.assertNotIn('preflight_command', receipt.runtime_commands(runtime))
 
     def test_native_hook_json_and_opencode_text_read_same_saved_value(self):
         for harness in ('claude', 'codex', 'opencode'):
