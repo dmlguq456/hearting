@@ -1068,7 +1068,7 @@ class WorkerEndingPromptTest(unittest.TestCase):
                 # even when the adapter's trailing ending is correctly gated.
                 compact = " ".join(prompt.split())
                 self.assertIn(
-                    "For a supervised owner, end a child-registration or resource-wait turn with only",
+                    "For a supervised owner, end a child-registration, resource-wait, or parent-deploy-request turn with only",
                     compact,
                 )
                 self.assertIn("polling fallback waits synchronously in the current turn.", compact)

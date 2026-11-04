@@ -383,6 +383,30 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
                          ["os-sandbox", "os-sandbox", "os-sandbox"])
         self.assertEqual(effective.read_bytes(), original)
 
+    def test_parent_deploy_wait_failure_ends_blocked_without_a_recovery_lease(self):
+        import io
+        self.jobs.write_text(owner_row(self.lease))
+        module = load_supervisor_module()
+        class Server:
+            process = None
+            def __init__(self, *args, **kwargs): pass
+            def request(self, method, params):
+                return {"thread": {"id": "thread-1"}}
+            def notification(self, *args): pass
+            def close(self): pass
+        events = []
+        with mock.patch.object(module, "AppServer", Server), \
+             mock.patch.object(module, "run_turn", return_value=("runtime_wait: registered-children", None)), \
+             mock.patch.object(module.RESOURCE_WAIT, "wait", side_effect=
+                module.RESOURCE_WAIT.ParentDeployWaitBlocked("parent-deploy-wait-timeout")), \
+             mock.patch.object(module, "reconcile", return_value=True) as reconcile, \
+             mock.patch.object(module, "emit", side_effect=events.append), \
+             mock.patch("sys.stdin", io.StringIO("wait for the approved parent deploy")):
+            self.assertEqual(module.main(self.command()[2:]), 3)
+        self.assertEqual(reconcile.call_args.args[1].failure_class, "blocked")
+        self.assertFalse(self.lease.exists())
+        self.assertEqual(reconcile.call_args.args[1].terminal_event, "dispatch.supervisor.terminal")
+
     def command(self, *, broken_app: Path | None = None,
                 model_context_window: str | None = None) -> list[str]:
         app = broken_app or self.app

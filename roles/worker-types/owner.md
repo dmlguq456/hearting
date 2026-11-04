@@ -8,7 +8,7 @@ registry. A supervised owner yields the turn for the runtime join and resumes fr
 reported polling fallback waits synchronously in the current turn.
 
 An owner joins a route-bound resource once its runner receipt confirms payload release
-and a ready supervisor. For a supervised owner, end a child-registration or resource-wait turn with only
+and a ready supervisor. For a supervised owner, end a child-registration, resource-wait, or parent-deploy-request turn with only
 `runtime_wait: registered-children` on one line, without the three-line handoff, which belongs
 to the terminal final response. Never wait for training inside a Bash/model
 turn: yield after the receipt. The resource's typed result resumes this owner and records

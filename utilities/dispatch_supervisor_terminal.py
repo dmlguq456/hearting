@@ -445,6 +445,12 @@ def classify_supervisor_error(
     )
 
 
+def classify_parent_deploy_wait_blocked(reason: str) -> SupervisorTerminal:
+    """The typed parent's wait ended without an execution judgment."""
+    return SupervisorTerminal("dead-worker-blocked", "blocked",
+        "dispatch.supervisor.terminal", reason[:240].replace(",", ";"), "3")
+
+
 def classify_supervisor_attention_terminal(runtime: str, reason: str) -> SupervisorTerminal:
     """A supervisor <-> guard contract failure: no admitted command satisfies
     a receipt the supervisor is about to (or has just) prescribed (D2a proof).
