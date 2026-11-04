@@ -897,6 +897,14 @@
   "tidy.undo.takedown_failed": {
    "en": "could not take {record} out of use: {error}",
    "ko": "{record} 내리기 실패: {error}"
+  },
+  "wait.no_question": {
+   "en": "waiting for the user's answer",
+   "ko": "사용자 답 대기"
+  },
+  "wait.title": {
+   "en": "◑ answer needed",
+   "ko": "◑답변 필요"
   }
  }
 }
