@@ -340,6 +340,16 @@ class TmuxPeerStewardTest(unittest.TestCase):
             time.sleep(.05)
         return json.loads(out.read_text())
 
+    def test_an_inherited_herdr_pane_id_does_not_hide_the_tmux_pane_seat(self):
+        # A tmux server started under herdr hands its panes a herdr pane id that is not theirs.
+        seat = self.in_runtime(
+            "import json, os, session_tidy as st, session_tidy_clear as clear\n"
+            "from pathlib import Path\n"
+            "os.environ['HERDR_PANE_ID'] = 'w9:p9'\n"
+            "seat = st.resolve_seat('claude', os.getcwd(), os.environ, sid)\n"
+            "Path(out).write_text(json.dumps([seat.kind, seat.pane, bool(clear.pane_command(seat.pane))]))\n")
+        self.assertEqual(seat, ["pane", self.address, True])
+
     def test_the_runtime_hook_gets_a_tmux_pane_seat(self):
         seat = self.in_runtime(
             "import json, os, session_tidy as st\n"
