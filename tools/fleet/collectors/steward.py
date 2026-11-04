@@ -18,7 +18,9 @@ relations still require metadata confirming the same repository; foreign and
 unknown targets remain communication only.
 """
 import os
+import copy
 import sqlite3
+import threading
 from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
@@ -51,7 +53,65 @@ def read_markers():
         return {}
 
 
+_RELATIONS_OBSERVATION = None
+_RELATIONS_LOCK = threading.RLock()
+
+
+def _relations_generation():
+    import dispatch_seat_handover as handover
+    mod = _peer_message_module()
+    if mod is None:
+        raise ValueError('steward-reader-unavailable')
+    roots, _source = mod.steward_marker_roots()
+    paths = []
+    from . import dispatch
+    for root in roots:
+        directory = Path(root) / 'peer-steward'
+        try:
+            directories = sorted(directory.iterdir())
+        except FileNotFoundError:
+            paths.append((os.fspath(directory), None))
+            continue
+        paths.append((os.fspath(directory), dispatch._stat_stamp(directory)))
+        for child in directories:
+            if child.name == 'obligations' or not child.is_dir():
+                continue
+            paths.append((os.fspath(child), dispatch._stat_stamp(child)))
+            paths.extend((os.fspath(path), dispatch._stat_stamp(path))
+                         for path in sorted(child.glob('*.json')))
+    tidy = handover._st()
+    return (tuple(paths), handover._snapshot_signature(),
+            handover._lineage_signature(tidy.state_root() / 'sessions'),
+            mod.read_steward_markers, mod.steward_evidence_targets,
+            handover.resolved_steward_relations, handover._role_states,
+            handover._transition_rows, handover.read_snapshot, tidy.read_bytes,
+            tidy._read_ledger_lines, Path.read_text, Path.open)
+
+
 def read_relations():
+    from . import dispatch
+    if dispatch._COLLECTION_INPUTS.get() is None:
+        return _read_relations_uncached()
+    global _RELATIONS_OBSERVATION
+    try:
+        before = _relations_generation()
+        with _RELATIONS_LOCK:
+            held = _RELATIONS_OBSERVATION
+            if held is not None and held[0] == before:
+                return copy.deepcopy(held[1])
+    except (ImportError, OSError, TypeError, ValueError):
+        return _read_relations_uncached()
+    value = _read_relations_uncached()
+    try:
+        if value and before == _relations_generation():
+            with _RELATIONS_LOCK:
+                _RELATIONS_OBSERVATION = (before, copy.deepcopy(value))
+    except (ImportError, OSError, TypeError, ValueError):
+        pass
+    return value
+
+
+def _read_relations_uncached():
     """Read confirmed current holders without projecting a marker onto a successor SID."""
     try:
         import sys

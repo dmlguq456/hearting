@@ -4510,7 +4510,69 @@ def _delivery_intents(path, parsed):
     return intents
 
 
+_DELIVERY_COUNTS_CACHE = None
+
+
+def _delivery_counts_generation(paths):
+    """Inputs of the optional count-only projection; no recipient authority is reused."""
+    inputs, parsed = [], []
+    for path in paths:
+        rows = parsed_registry_rows(path)
+        _raise_registry_read_error(path)
+        parsed.append(rows)
+        inputs.append((os.fspath(path), id(rows)))
+    roots = tuple(dict.fromkeys(dispatch_state_root(path) for path in paths))
+    for root in roots:
+        inputs.append(os.fspath(root))
+        for directory, pattern, limit in (
+                (root / 'supervisor-state' / 'obligations', 'batch-*.json', 128),
+                (root / 'pending-delivery', None, None)):
+            try:
+                info = directory.stat()
+            except FileNotFoundError:
+                inputs.append((os.fspath(directory), None))
+                continue
+            if not stat.S_ISDIR(info.st_mode):
+                raise ValueError('delivery-directory-unusable')
+            inputs.append((os.fspath(directory), _stat_stamp(directory)))
+            if pattern is not None:
+                files = sorted(directory.glob(pattern))[:limit]
+            else:
+                files = []
+                for child in sorted(directory.iterdir()):
+                    if stat.S_ISDIR(child.stat().st_mode):
+                        inputs.append((os.fspath(child), _stat_stamp(child)))
+                        files.extend(sorted(path for path in child.iterdir() if path.suffix == '.json'))
+            inputs.extend((os.fspath(path), _stat_stamp(path)) for path in files)
+    inputs.append((Path.read_text, Path.stat, Path.iterdir, json.loads,
+                   parsed_registry_rows, _pending_delivery_counts_uncached))
+    return tuple(inputs), tuple(parsed)
+
+
 def _pending_delivery_counts(paths, *, session_observation=None):
+    global _DELIVERY_COUNTS_CACHE
+    if session_observation is not None or _COLLECTION_INPUTS.get() is None:
+        return _pending_delivery_counts_uncached(paths, session_observation=session_observation)
+    try:
+        before, held_inputs = _delivery_counts_generation(paths)
+        with _PARSED_REGISTRY_CACHE_LOCK:
+            held = _DELIVERY_COUNTS_CACHE
+            if held is not None and held[0] == before:
+                return dict(held[2])
+    except (OSError, TypeError, ValueError):
+        return _pending_delivery_counts_uncached(paths)
+    value = _pending_delivery_counts_uncached(paths)
+    try:
+        after, _inputs = _delivery_counts_generation(paths)
+        if before == after:
+            with _PARSED_REGISTRY_CACHE_LOCK:
+                _DELIVERY_COUNTS_CACHE = (before, held_inputs, dict(value))
+    except (OSError, TypeError, ValueError):
+        pass
+    return value
+
+
+def _pending_delivery_counts_uncached(paths, *, session_observation=None):
     """SD-111 P6: read-only pending/expired visibility. Never transitions
     any state -- it mirrors the `dispatch_completion_join.reconcile_pending_delivery()`
     enumeration pattern (`pending_root.glob("*/*.json")`) and validates

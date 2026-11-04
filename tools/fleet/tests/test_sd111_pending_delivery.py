@@ -29,6 +29,40 @@ import dispatch_pending_delivery as pending_delivery  # noqa: E402
 
 
 class DeliveryDocumentReuseTest(unittest.TestCase):
+    def test_unchanged_optional_counts_skip_collector_and_changes_reopen_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            jobs = root / 'jobs.log'
+            jobs.write_text('')
+            recipient = root / 'pending-delivery' / 'recipient'
+            recipient.mkdir(parents=True)
+            record = recipient / 'delivery.json'
+            record.write_text(json.dumps(dict(state='pending')))
+            with mock.patch.object(dispatch, 'dispatch_state_root', return_value=root), \
+                    mock.patch.object(dispatch, '_pending_delivery_counts_uncached',
+                                      wraps=dispatch._pending_delivery_counts_uncached) as collect:
+                with dispatch.collection_read_scope():
+                    first = dispatch._pending_delivery_counts([jobs])
+                first['pending'] = 999
+                with dispatch.collection_read_scope():
+                    again = dispatch._pending_delivery_counts([jobs])
+                self.assertEqual(again['pending'], 1)
+                self.assertEqual(collect.call_count, 1)
+                record.write_text(json.dumps(dict(state='expired')))
+                with dispatch.collection_read_scope():
+                    changed = dispatch._pending_delivery_counts([jobs])
+                self.assertEqual(changed['pending'], 0)
+                self.assertEqual(changed['expired'], 1)
+                self.assertEqual(collect.call_count, 2)
+                record.unlink()
+                with dispatch.collection_read_scope():
+                    removed = dispatch._pending_delivery_counts([jobs])
+                self.assertEqual(removed['expired'], 0)
+                self.assertEqual(collect.call_count, 3)
+                with dispatch.collection_read_scope():
+                    dispatch._pending_delivery_counts([jobs], session_observation={})
+                self.assertEqual(collect.call_count, 4)
+
     def test_unchanged_parse_is_reused_but_replace_and_deletion_are_observed(self):
         with tempfile.TemporaryDirectory() as root:
             path = Path(root) / 'record.json'

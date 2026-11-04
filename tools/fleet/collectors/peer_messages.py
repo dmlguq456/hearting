@@ -6,6 +6,9 @@ feeds stays at its snapshot default so the rendered board is byte-identical to a
 pre-SD-122 board.
 """
 import importlib.util
+import copy
+import threading
+from collections import OrderedDict
 from itertools import islice
 import json
 import os
@@ -29,6 +32,41 @@ _PENDING_DUTY_STATES = {"pending", "unknown", "delivery-pending", "cleanup-pendi
 _REF_TRAILER_RE = re.compile(r"\s*;\s*ref=[0-9a-f]{32}\s*$")
 
 _peer_message_module = None
+
+
+class _PassiveParseCache:
+    def __init__(self):
+        self.entries, self.bytes = OrderedDict(), 0
+        self.lock = threading.RLock()
+
+    def read(self, key, generation, now, load):
+        with self.lock:
+            held = self.entries.get(key)
+            if held is not None and held[0] == generation and now >= held[2].observed_at:
+                self.entries.move_to_end(key)
+                return held[2]
+        value = load()
+        size = value.byte_size
+        with self.lock:
+            old = self.entries.pop(key, None)
+            if old is not None:
+                self.bytes -= old[1]
+            if value.cacheable and size <= 4 * _TAIL_BYTES:
+                self.entries[key] = (generation, size, value)
+                self.bytes += size
+            while len(self.entries) > 4096 or self.bytes > 32 * 1024 * 1024:
+                _key, old = self.entries.popitem(last=False)
+                self.bytes -= old[1]
+        return value
+
+
+_PASSIVE_PARSE_CACHE = _PassiveParseCache()
+
+
+def _file_generation(path):
+    info = os.stat(path)
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_size,
+            info.st_mtime_ns, info.st_ctime_ns)
 
 
 def _clean_from_name(name):
@@ -213,6 +251,71 @@ def _parse_ts(ts):
         return datetime.fromisoformat(raw).timestamp()
     except Exception:
         return None
+
+
+def _record_shape_valid(rec):
+    malformed_record = False
+    for field in ("from", "to", "delivery"):
+        value = rec.get(field)
+        if value is not None and not isinstance(value, dict):
+            malformed_record = True
+            break
+    if not malformed_record:
+        for field in ("from", "to"):
+            endpoint = rec.get(field) or {}
+            sid = endpoint.get("session_id")
+            if sid is not None and not isinstance(sid, str):
+                malformed_record = True
+                break
+    if not isinstance(rec.get("kind"), str):
+        malformed_record = True
+    delivery = rec.get("delivery") or {}
+    status = delivery.get("status") or ""
+    if not isinstance(status, str):
+        malformed_record = True
+    return not malformed_record
+
+
+def _prepared_ledger(path, now, cache):
+    generation = None
+    if cache is not None:
+        try:
+            generation = (_file_generation(path), _tail_lines, json.loads,
+                          _parse_ts, _record_shape_valid, open, os.path.getsize)
+        except OSError:
+            pass
+
+    def load():
+        diagnostics, rows = [], []
+        malformed, size = 0, 128
+        for line in _tail_lines(path, diagnostics):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except Exception:
+                rec = None
+            if not isinstance(rec, dict):
+                malformed += 1
+                _note_diagnostic(diagnostics, 'parse_peer_record', 'MalformedRecord')
+                continue
+            ts = _parse_ts(rec.get('ts', ''))
+            if ts is None:
+                _note_diagnostic(diagnostics, 'parse_peer_record', 'InvalidTimestamp')
+                continue
+            # Old valid timestamps cannot re-enter this window unless the clock
+            # moves backwards, which invalidates this file's prepared result.
+            if (now - ts) > _WINDOW_SECONDS:
+                continue
+            rows.append((ts, rec if _record_shape_valid(rec) else None))
+            size += len(line) * 4
+        return SimpleNamespace(observed_at=now, records=tuple(rows), malformed=malformed,
+            diagnostics=tuple(diagnostics), byte_size=size,
+            cacheable=not any(item['operation'] == 'read_peer_ledger' for item in diagnostics))
+
+    return (cache.read(path, generation, now, load)
+            if cache is not None and generation is not None else load())
 
 
 def _bounded_duty_paths(root, limit, diagnostics=None):
@@ -419,6 +522,8 @@ def collect(state_roots=None, *, include_health=False):
     malformed = 0
     now = time.time()
     diagnostics = []
+    from . import dispatch
+    cache = _PASSIVE_PARSE_CACHE if dispatch._COLLECTION_INPUTS.get() is not None else None
     if state_roots is None:
         try:
             roots = tuple(_state_roots(diagnostics))
@@ -444,47 +549,15 @@ def collect(state_roots=None, *, include_health=False):
         except OSError as exc:
             _note_diagnostic(diagnostics, "resolve_peer_path", exc)
             continue
-        for line in _tail_lines(path, diagnostics):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rec = json.loads(line)
-            except Exception:
-                malformed += 1
-                _note_diagnostic(diagnostics, "parse_peer_record", "MalformedRecord")
-                continue
-            if not isinstance(rec, dict):
-                malformed += 1
-                _note_diagnostic(diagnostics, "parse_peer_record", "MalformedRecord")
-                continue
-            ts = _parse_ts(rec.get("ts", ""))
-            if ts is None:
-                _note_diagnostic(diagnostics, "parse_peer_record", "InvalidTimestamp")
-                continue
+        prepared = _prepared_ledger(path, now, cache)
+        malformed += prepared.malformed
+        for item in prepared.diagnostics:
+            _note_diagnostic(diagnostics, item['operation'], item['error'])
+        for ts, rec in prepared.records:
             if (now - ts) > _WINDOW_SECONDS:
                 continue
-            malformed_record = False
-            for field in ("from", "to", "delivery"):
-                value = rec.get(field)
-                if value is not None and not isinstance(value, dict):
-                    malformed_record = True
-                    break
-            if not malformed_record:
-                for field in ("from", "to"):
-                    endpoint = rec.get(field) or {}
-                    sid = endpoint.get("session_id")
-                    if sid is not None and not isinstance(sid, str):
-                        malformed_record = True
-                        break
-            if not isinstance(rec.get("kind"), str):
-                malformed_record = True
-            delivery = rec.get("delivery") or {}
-            status = delivery.get("status") or ""
-            if not isinstance(status, str):
-                malformed_record = True
-            if malformed_record:
-                _note_diagnostic(diagnostics, "parse_peer_record", "MalformedRecord")
+            if rec is None:
+                _note_diagnostic(diagnostics, 'parse_peer_record', 'MalformedRecord')
                 continue
             records.append((ts, rec))
 
@@ -609,7 +682,8 @@ def collect(state_roots=None, *, include_health=False):
         state = "failed"
     collect.last_diagnostics = list(diagnostics)
     collect.last_malformed = malformed
-    result = {"records": [rec for _ts, rec in records], "by_session": by_session}
+    result = {"records": (copy.deepcopy([rec for _ts, rec in records]) if cache is not None
+                          else [rec for _ts, rec in records]), "by_session": by_session}
     if include_health:
         return result, SimpleNamespace(state=state, diagnostics=tuple(diagnostics))
     return result

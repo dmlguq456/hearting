@@ -23,6 +23,50 @@ from split_module_fixture import patch_split  # noqa: E402
 
 
 class Fleet2CollectionMemoTest(unittest.TestCase):
+    def test_steward_relation_output_reuse_observes_marker_and_ledger_changes(self):
+        from fleet.collectors import steward
+        import dispatch_seat_handover as handover
+        marker_dir = self.root / 'peer-steward' / 'codex'
+        marker_dir.mkdir(parents=True)
+        marker_path = marker_dir / 'holder.json'
+        marker = dict(session_id='holder', harness='codex', seat_key='fixture', generation='gen',
+                      targets={'self': dict(source='explicit', kind='explicit', harness='unknown', name='-')})
+        marker_path.write_text(json.dumps(marker))
+        def markers(_roots):
+            return {('codex', 'holder'): json.loads(marker_path.read_text())}
+        pm = SimpleNamespace(steward_marker_roots=lambda: ([self.root], 'fixture'),
+                             read_steward_markers=markers,
+                             steward_evidence_targets=lambda value: list(value['targets'].values()))
+        with patch_split(session_tidy, 'state_root', return_value=self.root), \
+                mock.patch.object(steward, '_peer_message_module', return_value=pm), \
+                mock.patch.object(handover, '_peer_message', return_value=pm):
+            expected = steward.read_relations()
+            self.assertEqual(len(expected), 1)
+            with mock.patch.object(handover, 'resolved_steward_relations',
+                                   wraps=handover.resolved_steward_relations) as read:
+                with dispatch.collection_read_scope():
+                    first = steward.read_relations()
+                first[0]['holder']['sid'] = 'caller mutation'
+                with dispatch.collection_read_scope():
+                    self.assertEqual(steward.read_relations(), expected)
+                self.assertEqual(read.call_count, 1)
+                marker['generation'] = 'new-generation'
+                marker_path.write_text(json.dumps(marker))
+                with dispatch.collection_read_scope():
+                    changed = steward.read_relations()
+                self.assertEqual(changed[0]['generation'], 'new-generation')
+                self.assertEqual(read.call_count, 2)
+                ledger = self.root / 'sessions' / 'fixture.jsonl'
+                ledger.parent.mkdir(exist_ok=True)
+                ledger.write_text(json.dumps(dict(event='steward-release', sid='holder', harness='codex',
+                                                   generation='new-generation', seat_key='fixture')) + '\n')
+                with dispatch.collection_read_scope():
+                    released = steward.read_relations()
+                self.assertTrue(released[0]['released'])
+                self.assertEqual(read.call_count, 3)
+                self.assertEqual(released, steward.read_relations())
+                self.assertEqual(read.call_count, 4)
+
     def test_passive_ledger_generation_skips_reads_and_observes_replace_and_symlink(self):
         cache = session_tidy.LedgerParseCache()
         with self._state_root(), mock.patch.object(

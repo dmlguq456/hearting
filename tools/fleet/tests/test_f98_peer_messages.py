@@ -64,6 +64,50 @@ def _rec(from_sid, to_sid=None, to_name=None, kind="steer", summary="hi",
 
 
 class CollectorTest(unittest.TestCase):
+    def test_old_prepared_files_reopen_when_clock_moves_backwards(self):
+        from fleet.collectors import dispatch
+        now = time.time()
+        with tempfile.TemporaryDirectory() as root:
+            _write_ledger(root, 'sender', [_rec('sender', 'receiver', minutes_ago=25 * 60)])
+            with mock.patch.object(peer_messages.time, 'time', return_value=now), dispatch.collection_read_scope():
+                self.assertEqual(peer_messages.collect(state_roots=[root])['records'], [])
+            with mock.patch.object(peer_messages.time, 'time', return_value=now - 2 * 3600):
+                expected = peer_messages.collect(state_roots=[root])
+                self.assertEqual(len(expected['records']), 1)
+                with dispatch.collection_read_scope():
+                    self.assertEqual(peer_messages.collect(state_roots=[root]), expected)
+
+    def test_passive_generation_reuse_matches_fresh_clock_and_file_oracle(self):
+        from fleet.collectors import dispatch
+        now = time.time()
+        with tempfile.TemporaryDirectory() as root:
+            path = _write_ledger(root, 'sender', [_rec('sender', 'receiver', minutes_ago=60)])
+            with mock.patch.object(peer_messages.time, 'time', return_value=now):
+                expected = peer_messages.collect(state_roots=[root])
+                with dispatch.collection_read_scope(), mock.patch.object(
+                        peer_messages.json, 'loads', wraps=json.loads) as parse:
+                    first = peer_messages.collect(state_roots=[root])
+                    count = parse.call_count
+                    first['records'][0]['kind'] = 'caller mutation'
+                    second = peer_messages.collect(state_roots=[root])
+                    self.assertEqual(parse.call_count, count)
+                    self.assertEqual(second, expected)
+            with mock.patch.object(peer_messages.time, 'time', return_value=now + 120):
+                expected = peer_messages.collect(state_roots=[root])
+                with dispatch.collection_read_scope():
+                    self.assertEqual(peer_messages.collect(state_roots=[root]), expected)
+                self.assertEqual(expected['by_session'][('claude', 'sender')]['sent_1h'], 0)
+            replacement = Path(path).with_suffix('.new')
+            replacement.write_text(json.dumps(_rec('replacement', 'receiver')) + '\n')
+            replacement.replace(path)
+            expected = peer_messages.collect(state_roots=[root])
+            with dispatch.collection_read_scope():
+                self.assertEqual(peer_messages.collect(state_roots=[root]), expected)
+            Path(path).unlink()
+            with dispatch.collection_read_scope():
+                self.assertEqual(peer_messages.collect(state_roots=[root]),
+                                 {'records': [], 'by_session': {}})
+
     def test_health_success_for_missing_ledger_and_default_shape_stays_mapping(self):
         with tempfile.TemporaryDirectory() as tmp:
             legacy = peer_messages.collect(state_roots=[tmp])
