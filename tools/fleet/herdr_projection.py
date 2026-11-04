@@ -883,7 +883,7 @@ def _metadata_command(herdr, harness, session_id, pane, *, display_relations=Fal
         waiting_ids = set(waits.get("by_session", {}).get((harness, session_id), ()))
         if any(item.get("id") in waiting_ids and not item.get("stale")
                for item in waits.get("items", ())):
-            shown_title = "◑답변 필요 " + shown_title
+            shown_title = human_wait_state.ui_translator()("wait.title") + " " + shown_title
     except Exception:
         pass
     # Herdr replaces the whole metadata record, so send both fields together.

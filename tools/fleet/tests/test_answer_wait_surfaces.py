@@ -269,6 +269,7 @@ class AnswerWaitSurfaceTests(unittest.TestCase):
         self.assertTrue(human_wait_state.publish_cache(partial))
         self.assertEqual(human_wait_state.cached_count("claude", "sid-a", now=101), (-1, 1))
 
+    @mock.patch.dict("os.environ", {"FLEET_NOW_LANG": "Korean"})   # Korean notification words
     def test_herdr_title_prefix_uses_the_shared_session_projection(self):
         with mock.patch.object(herdr_projection, "session_title", return_value="기존 제목"), \
              mock.patch.object(herdr_projection, "_formatter_overrides", return_value=(None, None)), \
@@ -281,6 +282,15 @@ class AnswerWaitSurfaceTests(unittest.TestCase):
         title = command[command.index("--title") + 1]
         self.assertIn("◑답변 필요", title)
         self.assertIn("기존 제목", title)
+        with mock.patch.dict("os.environ", {"FLEET_NOW_LANG": "English"}), \
+             mock.patch.object(herdr_projection, "session_title", return_value="title"), \
+             mock.patch.object(herdr_projection, "_formatter_overrides", return_value=(None, None)), \
+             mock.patch.object(herdr_projection, "compose", return_value=("claude", "title")), \
+             mock.patch("human_wait_state.cached_view", return_value={
+                 "items": self.result()["items"],
+                 "by_session": {("claude", "sid-a"): ["S4:fixture"]}}):
+            command = herdr_projection._metadata_command("herdr", "claude", "sid-a", "pane-a")
+        self.assertIn("◑ answer needed title", command[command.index("--title") + 1])
 
     def test_explorer_projects_safe_current_and_older_waits_and_counts_unattributed(self):
         from fleet.explorer.frame import draw

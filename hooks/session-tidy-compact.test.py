@@ -59,7 +59,7 @@ class CompactHookTest(unittest.TestCase):
         self.state = self.root / "state"
         self.cwd = self.root / "project"
         self.cwd.mkdir()
-        self.env = {"XDG_STATE_HOME": str(self.state)}
+        self.env = {"XDG_STATE_HOME": str(self.state), "FLEET_NOW_LANG": "Korean"}   # Korean card words
         envpatch = mock.patch.dict("os.environ", self.env)
         envpatch.start()
         self.addCleanup(envpatch.stop)
