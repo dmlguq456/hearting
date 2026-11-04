@@ -601,6 +601,21 @@ def _promote_historical_false_outcome(route, route_file, existing, raw, *, jobs=
         atomic_write(target, promoted)
     return promoted, True
 
+def _moved_root_canonical_location(route, route_file):
+    """True when the recorded artifact root is gone (project folder renamed) and the
+    route file sits in the canonical routes dir of the current folder's artifact root."""
+    if Path(route["artifact_root"]).exists():
+        return False
+    try:
+        script=Path(__file__).resolve().parent/"artifact-root.sh"
+        out=subprocess.run(["sh",str(script),os.getcwd()],text=True,capture_output=True,check=False)
+        lines=(out.stdout or "").strip().splitlines()
+        if out.returncode!=0 or not lines:
+            return False
+        return Path(route_file).resolve().parent==canonical_routes_dir(lines[-1])
+    except (OSError,ValueError):
+        return False
+
 def close_route(route, route_file, commit=None, summary=None, publication=None,
                 allow_unproven=True, jobs=None, expected_terminal_marker_digest=None,
                 terminal_commit_id=None, expected_owner_attempt_id=None,
@@ -631,6 +646,8 @@ def close_route(route, route_file, commit=None, summary=None, publication=None,
     # four legacy locations stay closeable read-only (that's how open records
     # left over from before D-2 get resolved); everywhere else is rejected.
     location=classify_route_location(route_file,route["artifact_root"])
+    if location == "outside" and _moved_root_canonical_location(route,route_file):
+        location="canonical"
     if location != "canonical" and location not in _LEGACY_LOCATIONS:
         # A copy of the route kept elsewhere closes the one record of the same route (same id and
         # hash) under this artifact root; a route with no such record would write into another root.
