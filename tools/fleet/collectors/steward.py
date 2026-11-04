@@ -626,7 +626,7 @@ def _holder_name(harness, session_id, rows):
 
 
 def _repo_holders(repository_key, *, markers=None, relations=None, sessions=None, agents=None,
-                  observation=None, _rows=None):
+                  observation=None, _rows=None, _read=None):
     """Distinct current holders attributed to ``repository_key``.
 
     A holder belongs to the repository when its role shows there (``basis="role"``,
@@ -641,8 +641,10 @@ def _repo_holders(repository_key, *, markers=None, relations=None, sessions=None
     evidence = getattr(mod, "steward_evidence_targets", None) if mod is not None else None
     if evidence is None:
         return []
-    rows = _context_rows(markers, relations, sessions) if _rows is None else _rows
-    winners = _role_winners(markers, rows, evidence, relations)
+    rows = (_read["rows"] if _read is not None else
+            _context_rows(markers, relations, sessions) if _rows is None else _rows)
+    winners = (_read["winners"] if _read is not None else
+               _role_winners(markers, rows, evidence, relations))
     if agents is None:
         try:
             from . import herdr
@@ -658,7 +660,8 @@ def _repo_holders(repository_key, *, markers=None, relations=None, sessions=None
         sid = holder.get("sid")
         if not sid or (harness, sid) in seen:
             continue
-        row_repository = repository_for_session(harness, sid, sessions=rows)
+        row_repository = (_read["repositories"].get((harness, sid)) if _read is not None else
+                          repository_for_session(harness, sid, sessions=rows))
         basis = None
         if row_repository == repository_key and role_flag(
                 harness, sid, markers=markers, sessions=rows, _relations=relations,
@@ -682,13 +685,14 @@ def _repo_holders(repository_key, *, markers=None, relations=None, sessions=None
 
 
 def repo_supervision(cwd=None, *, repository_key=None, limit=None, markers=None, relations=None,
-                     sessions=None, agents=None, observation=None):
+                     sessions=None, agents=None, observation=None, _read=None):
     """The one count of current supervisors in a repository (linked worktrees fold
     into their primary). The grant limit and the Fleet display both call this."""
     key = repository_key or _repository_key(cwd)
     limit = _steward_limit() if limit is None else limit
     holders = _repo_holders(key, markers=markers, relations=relations, sessions=sessions,
                             agents=agents,
+                            _read=_read,
                             observation=end_observation() if observation is None else observation)
     counted = sum(1 for holder in holders if holder["counted"])
     return {"repository": Path(key).parent.name if key else None, "repository_key": key,
@@ -704,6 +708,10 @@ def supervision_by_repository(sessions=None, *, limit=None, markers=None, relati
     relations = read_relations() if relations is None else relations
     rows = _context_rows(markers, relations, sessions)
     observation = end_observation() if observation is None else observation
+    mod = _peer_message_module()
+    evidence = getattr(mod, "steward_evidence_targets", None) if mod is not None else None
+    read = {"rows": rows, "repositories": {},
+            "winners": _role_winners(markers, rows, evidence, relations) if evidence else {}}
     keys = set()
     for relation in relations:
         if relation.get("released") is True:
@@ -713,7 +721,10 @@ def supervision_by_repository(sessions=None, *, limit=None, markers=None, relati
         sid = holder.get("sid")
         if not sid:
             continue
-        key = repository_for_session(harness, sid, sessions=rows)
+        holder_key = (harness, sid)
+        if holder_key not in read["repositories"]:
+            read["repositories"][holder_key] = repository_for_session(harness, sid, sessions=rows)
+        key = read["repositories"][holder_key]
         if key is None:
             origin = relation.get("origin") or {}
             for owner in ((str(origin.get("harness") or "").lower(), origin.get("sid")), (harness, sid)):
@@ -725,7 +736,7 @@ def supervision_by_repository(sessions=None, *, limit=None, markers=None, relati
             keys.add(key)
     return {key: repo_supervision(repository_key=key, limit=limit, markers=markers,
                                   relations=relations, sessions=rows, agents=agents,
-                                  observation=observation)
+                                  observation=observation, _read=read)
             for key in sorted(keys)}
 
 

@@ -2920,8 +2920,9 @@ _EXPLORER_QUESTION_REFRESH_AT = 0.0
 
 def set_explorer_mode(enabled=True):
     """Select the cell-based Fleet explorer for live and once entry points."""
-    global _EXPLORER_ENABLED
+    global _EXPLORER_ENABLED, _EXPLORER_DRAW_CACHE
     _EXPLORER_ENABLED = bool(enabled)
+    _EXPLORER_DRAW_CACHE = None
 
 
 def _explorer_view(snapshot):
@@ -2998,10 +2999,14 @@ def _explorer_requests(snapshot, state, model):
     from .explorer import live
     from .explorer.types import FocusKey
     state = _explorer_state_for(state, 0)
-    snapshot = _explorer_lite_view(snapshot)
-    index = live.session_index(snapshot)
     kind, _, ident = str(state.scope or "-").partition(":")
     requests = {"panes": (FocusKey("*", "panes"), (), ())}
+    if kind not in {"session", "route", "repo"} and state.view not in {"HISTORY", "PEERS"}:
+        if state.view == "MODELS":
+            requests["models"] = (FocusKey("*", "models"), (), ())
+        return requests
+    snapshot = _explorer_lite_view(snapshot)
+    index = live.session_index(snapshot)
 
     def ref(tag):
         info = index.get(tag)
@@ -3214,7 +3219,6 @@ def _explorer_compose(snapshot, cols, rows, state=None, focus_result=None, last_
 
 def _explorer_frame_from_model(model, state, cols, rows, *, beat=1):
     """Redraw a frozen VM at current geometry with this process's validated install identity."""
-    from dataclasses import replace as _replace_model
     install = _HEARTING if isinstance(_HEARTING, dict) else {}
     identity = {
         "version": install.get("version") if isinstance(install.get("version"), str)
@@ -3224,7 +3228,7 @@ def _explorer_frame_from_model(model, state, cols, rows, *, beat=1):
     }
     if (not isinstance(model.hearting, Mapping)
             or any(model.hearting.get(key) != value for key, value in identity.items())):
-        model = _replace_model(model, hearting=identity)
+        model = model.with_updates(hearting=identity)
     return _explorer_runtime().draw_frame(
         model, _explorer_state_for(state, cols), cols, rows, beat=beat)
 
@@ -3600,6 +3604,7 @@ def _draw_explorer(stdscr, snapshot, frame=None):
 
 
 _EXPLORER_PAINT_CACHE = None
+_EXPLORER_DRAW_CACHE = None
 
 
 def _explorer_paint_runs(frame, height, width):
@@ -3636,22 +3641,34 @@ def _explorer_paint_runs(frame, height, width):
 
 
 def _draw_explorer_frame(stdscr, frame, snapshot, *, stale=False):
-    global _EXPLORER_FRAME
+    global _EXPLORER_FRAME, _EXPLORER_DRAW_CACHE
     _EXPLORER_FRAME = frame
     h, w = stdscr.getmaxyx()
-    stdscr.erase()
     # The composed frame keeps the approved still glyph; working marks turn here, like Fleet's.
     spin = _SPIN[int(time.time() * 10) % len(_SPIN)]
     if frame.cells:
         dim = getattr(curses, "A_DIM", 0) if stale else 0
         attrs = {}
-        for y, x, text, style in _explorer_paint_runs(frame, h, w):
-            attr = attrs.get(style)
-            if attr is None:
-                try:
-                    attr = attrs[style] = _key_attr(*style) | dim
-                except Exception:
-                    attr = attrs[style] = False
+        runs = _explorer_paint_runs(frame, h, w)
+        for style in dict.fromkeys(run[3] for run in runs):
+            try:
+                attrs[style] = _key_attr(*style) | dim
+            except Exception:
+                attrs[style] = False
+        previous = _EXPLORER_DRAW_CACHE
+        reuse = (previous is not None and previous[0] is stdscr and previous[1] is frame
+                 and previous[2:5] == (h, w, stale) and previous[5] == attrs
+                 and all(attr is not False for attr in attrs.values())
+                 and all(attr is not False for attr in previous[5].values()))
+        if reuse:
+            paint = previous[6]
+        else:
+            stdscr.erase()
+            paint = runs
+        animated = (previous[6] if reuse else tuple(run for run in runs
+                    if not stale and run[3][0] in _EXPLORER_SPIN_KEYS and "⠏" in run[2]))
+        for y, x, text, style in paint:
+            attr = attrs[style]
             if attr is False:
                 continue
             if not stale and style[0] in _EXPLORER_SPIN_KEYS and "⠏" in text:
@@ -3660,7 +3677,10 @@ def _draw_explorer_frame(stdscr, frame, snapshot, *, stale=False):
                 stdscr.addstr(y, x, text, attr)
             except Exception:
                 pass
+        _EXPLORER_DRAW_CACHE = (stdscr, frame, h, w, stale, attrs, animated)
     else:
+        _EXPLORER_DRAW_CACHE = None
+        stdscr.erase()
         for y, line in enumerate(frame.lines[:h]):
             try:
                 stdscr.addstr(y, 0, line)
@@ -6272,7 +6292,6 @@ def _draw(stdscr, sessions, jobs, section, malformed, memory=None, live_order=No
                                                    _EXPLORER_DETAIL_CONTINUATION)
             elif _EXPLORER_PUBLISHED_MODEL is not None:
                 from .explorer.live import selected_detail, current_claude_usage
-                from dataclasses import replace as _replace_model
                 base = _EXPLORER_PUBLISHED_MODEL
                 # Replay lacks exact live bindings; it remains responsive without guessing them.
                 shown = selected_detail(base, _EXPLORER_RESULT, peer_model=candidate_model)
@@ -6282,7 +6301,7 @@ def _draw(stdscr, sessions, jobs, section, malformed, memory=None, live_order=No
                 clock = time.time()
                 live_model = (shown if _EXPLORER_REPLAY_ACTIVE
                               or _clock_freshness(shown.clock) == _clock_freshness(clock)
-                              else _replace_model(shown, clock=clock))
+                              else shown.with_updates(clock=clock))
                 frame = _explorer_frame_from_model(live_model, state, w, h,
                                                    beat=1 if _EXPLORER_REPLAY_ACTIVE else int(_BLINK_ON))
                 _EXPLORER_SHOWN = True

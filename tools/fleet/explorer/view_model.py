@@ -271,6 +271,21 @@ class ExplorerViewModel:
         for field in fields(self):
             object.__setattr__(self, field.name, freeze(getattr(self, field.name)))
 
+    def with_updates(self, **changes):
+        """Freeze changed fields, sharing the rest of this deeply immutable model."""
+        known = {field.name for field in fields(self)}
+        unknown = changes.keys() - known
+        if unknown:
+            raise TypeError("unknown view model fields: " + ", ".join(sorted(unknown)))
+        value = object.__new__(type(self))
+        for name in known:
+            item = getattr(self, name)
+            if name in changes and changes[name] is not item:
+                changed = {} if name == "peer_edges" and changes[name] is None else changes[name]
+                item = freeze(changed)
+            object.__setattr__(value, name, item)
+        return value
+
     @classmethod
     def from_mapping(cls, value):
         if isinstance(value, cls):

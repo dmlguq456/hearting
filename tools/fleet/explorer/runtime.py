@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from collections import deque
-from dataclasses import fields, replace
+from dataclasses import fields
 import hashlib
 import json
 import math
@@ -47,6 +47,7 @@ class ExplorerRuntime:
         self._cached_continuation = None
         self._has_complete = False
         self._persisted_generations = deque(maxlen=64)
+        self._failed_generations = deque(maxlen=64)
         self._pending_generations = set()
         self._persist_lock = threading.Lock()
         self._writer_threads = []
@@ -302,7 +303,7 @@ class ExplorerRuntime:
                             str(row.get("tag", "")) for row in ordered_sessions},
             "tag_cycle": ["session:" + tag for tag in ordered_tags],
         }
-        return replace(model, repos=tuple(reconciled["repos"]),
+        return model.with_updates(repos=tuple(reconciled["repos"]),
                        sessions=tuple(ordered_sessions), ordering=replay_ordering)
 
     @staticmethod
@@ -383,13 +384,15 @@ class ExplorerRuntime:
         if token is None:
             return None
         with self._persist_lock:
-            if token in self._persisted_generations or token in self._pending_generations:
+            if (token in self._persisted_generations or token in self._pending_generations
+                    or token in self._failed_generations):
                 return None
             self._pending_generations.add(token)
         envelope = self._cache_envelope(vm, readiness, detail_continuation)
         if envelope is None:
             with self._persist_lock:
                 self._pending_generations.discard(token)
+                self._failed_generations.append(token)
             return None
         thread = threading.Thread(target=self._write_generation, args=(envelope, token),
                                   name="fleet2-observation-save", daemon=True)
@@ -404,11 +407,13 @@ class ExplorerRuntime:
         except (RuntimeError, OSError):
             with self._persist_lock:
                 self._pending_generations.discard(token)
+                self._failed_generations.append(token)
                 self._writer_threads.remove(thread)
             return None
         return thread
 
     def _write_generation(self, envelope, token):
+        written = False
         try:
             written = self._write_cache(envelope)
             if not written:
@@ -419,6 +424,8 @@ class ExplorerRuntime:
                     self._persisted_generations.append(token)
         finally:
             with self._persist_lock:
+                if not written:
+                    self._failed_generations.append(token)
                 self._pending_generations.discard(token)
 
     def wait_for_writes(self, timeout=None):
@@ -607,7 +614,7 @@ class ExplorerRuntime:
             sessions_value = tuple(ordered_sessions)
             if (tuple(model.repos) != repos_value or tuple(model.sessions) != sessions_value
                     or model.ordering != freeze(ordering)):
-                model = replace(model, repos=repos_value,
+                model = model.with_updates(repos=repos_value,
                                 sessions=sessions_value, ordering=ordering)
         except (AttributeError, TypeError, ValueError):
             # Preserve a valid frame if a third-party snapshot violates an optional

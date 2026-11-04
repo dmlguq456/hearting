@@ -10,6 +10,26 @@ from tools.fleet.explorer.view_model import ExplorerViewModel
 
 
 class ExplorerRuntimeReuseTests(unittest.TestCase):
+    def test_model_updates_freeze_changed_data_and_share_unchanged_fields(self):
+        from dataclasses import replace
+        from dataclasses import FrozenInstanceError
+
+        model = ExplorerViewModel(sessions=({"tag": "a", "nested": [1]},),
+                                  source_records={"private": {"rows": [1, 2, 3]}})
+        rows = [{"tag": "b", "nested": [2]}]
+        updated = model.with_updates(sessions=rows, clock=1000)
+        self.assertEqual(updated, replace(model, sessions=rows, clock=1000))
+        self.assertIs(updated.source_records, model.source_records)
+        self.assertIs(updated.routes, model.routes)
+        rows[0]["nested"].append(3)
+        self.assertEqual(updated.sessions[0]["nested"], (2,))
+        with self.assertRaises(TypeError):
+            updated.sessions[0]["tag"] = "changed"
+        with self.assertRaises(FrozenInstanceError):
+            updated.clock = 2000
+        with self.assertRaises(TypeError):
+            model.with_updates(unknown=1)
+
     def test_thousands_of_completed_saves_do_not_retain_thread_or_generation_history(self):
         import weakref
 
@@ -31,21 +51,22 @@ class ExplorerRuntimeReuseTests(unittest.TestCase):
             def join(self, _timeout):
                 pass
 
-        runtime = ExplorerRuntime()
-        model = ExplorerViewModel()
-        readiness = {"ready": True, "fully_fresh": True, "all_new": True}
-        with patch("tools.fleet.explorer.runtime.threading.Thread", CompletedThread), \
-                patch.object(runtime, "_cache_envelope", return_value={}), \
-                patch.object(runtime, "_write_cache", return_value=True):
-            for generation in range(5000):
-                current = {**readiness, "generation": generation, "observed_at": 1000 + generation}
-                runtime.persist_complete_async(model, current)
-                if generation == 100:
-                    warm_history = len(runtime._persisted_generations)
-            self.assertIsNone(runtime.persist_complete_async(model, current))
-        self.assertEqual(len(runtime._persisted_generations), warm_history)
-        self.assertLessEqual(sum(ref() is not None for ref in retained), 1)
-        self.assertEqual(len(runtime._pending_generations), 0)
+        for written in (True, False):
+            runtime = ExplorerRuntime()
+            model = ExplorerViewModel()
+            readiness = {"ready": True, "fully_fresh": True, "all_new": True}
+            with patch("tools.fleet.explorer.runtime.threading.Thread", CompletedThread), \
+                    patch.object(runtime, "_cache_envelope", return_value={}), \
+                    patch.object(runtime, "_write_cache", return_value=written):
+                for generation in range(5000):
+                    current = {**readiness, "generation": generation, "observed_at": 1000 + generation}
+                    runtime.persist_complete_async(model, current)
+                    if generation == 100:
+                        warm_history = len(runtime._persisted_generations) + len(runtime._failed_generations)
+                self.assertIsNone(runtime.persist_complete_async(model, current))
+            self.assertEqual(len(runtime._persisted_generations) + len(runtime._failed_generations), warm_history)
+            self.assertLessEqual(sum(ref() is not None for ref in retained), 1)
+            self.assertEqual(len(runtime._pending_generations), 0)
 
     def test_unchanged_live_usage_does_not_copy_the_whole_immutable_model(self):
         row = {"harness": "claude", "text": "claude", "windows": (("week", 40, None),)}
@@ -201,7 +222,7 @@ class ExplorerRuntimeReuseTests(unittest.TestCase):
             render._explorer_compose(snapshot, 140, 45, NavState(), render._EXPLORER_RESULT, now=1000)
             self.assertEqual(build.call_count, 3)
 
-    def test_persistence_deduplicates_before_serializing_and_retries_failed_write(self):
+    def test_persistence_deduplicates_failures_and_retries_the_next_generation(self):
         from tools.fleet.explorer.view_model import ExplorerViewModel
 
         readiness = {"ready": True, "fully_fresh": True, "all_new": True,
@@ -220,7 +241,10 @@ class ExplorerRuntimeReuseTests(unittest.TestCase):
         with patch.object(retry_runtime, "_write_cache", side_effect=(False, True)) as write:
             failed = retry_runtime.persist_complete_async(vm, readiness)
             failed.join(2)
-            recovered = retry_runtime.persist_complete_async(vm, readiness)
+            for _ in range(100):
+                self.assertIsNone(retry_runtime.persist_complete_async(vm, readiness))
+            recovered = retry_runtime.persist_complete_async(vm, {
+                **readiness, "generation": 2, "generation_identity": "g2", "observed_at": 1001.0})
             self.assertIsNotNone(recovered)
             recovered.join(2)
             self.assertEqual(write.call_count, 2)

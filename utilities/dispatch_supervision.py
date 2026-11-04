@@ -6,6 +6,8 @@ The existing pending-delivery queue owns a notice until a carrier accepts it.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
+from contextvars import ContextVar
 import hashlib
 import glob
 import fcntl
@@ -43,6 +45,25 @@ class SupervisionError(ValueError):
 
 class StopWaiting(RuntimeError):
     """Abort a managed wait without recording a delivery notice or row change."""
+
+
+_ROUTE_ATTENTION_READ = ContextVar("supervision_route_attention_read", default=None)
+
+
+@contextmanager
+def route_attention_read_scope():
+    """Reuse lineage only within one passive display scan, never across effects."""
+    if _ROUTE_ATTENTION_READ.get() is not None:
+        yield
+        return
+    from peer_read_context import PeerReadContext
+    context = PeerReadContext()
+    token = _ROUTE_ATTENTION_READ.set(context)
+    try:
+        with context.pinned_lineage():
+            yield
+    finally:
+        _ROUTE_ATTENTION_READ.reset(token)
 
 
 def scoped_file_signature(metadata, worktree=""):
@@ -354,9 +375,10 @@ def _route_needs_attention(metadata, jobs, now):
                 and not any(item.get("id") == route_node
                             for item in route.get("nodes", []) if isinstance(item, dict))):
             return None
-        from dispatch_seat_handover import effective_parent, effective_parent_harness
-        parent = effective_parent(metadata, jobs)
-        harness = effective_parent_harness(metadata, jobs)
+        from dispatch_seat_handover import resolve_recipient
+        recipient = resolve_recipient("job-holder", metadata=metadata, jobs=jobs,
+                                      read_context=_ROUTE_ATTENTION_READ.get())
+        parent, harness = recipient.session_id, recipient.harness
         if not parent or harness not in {"claude", "codex", "opencode"}:
             return None
         key = hashlib.sha256(f"{harness}\0{parent}".encode()).hexdigest()
