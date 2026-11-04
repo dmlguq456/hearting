@@ -78,27 +78,6 @@ class ObservationTest(peer._TmpRootMixin, unittest.TestCase):
             self.assertTrue(scopes.complete)
             self.assertIsNotNone(scopes.edges)
 
-    def test_changed_compact_ledger_retains_authority_without_activity_history(self):
-        import dispatch_recipient_inbox as inbox
-        _meta, _record, seat = self.handoff("compact-changed")
-        payload = handover.build_lineage_rows_payload()
-        inbox.write_lineage_rows(inbox.dispatch_inbox_root(jobs=self.jobs_path), payload)
-        path = tidy._ledger_path(seat)
-        with path.open("a") as stream:
-            for index in range(200):
-                stream.write(json.dumps({"event": "prompt", "harness": "claude",
-                    "sid": "compact-changed-Z", "ts": index + 10}) + "\n")
-        complete = handover.lineage_graph()
-        compact = handover.lineage_graph(read_context=PeerReadContext(compact_lineage=True))
-        for field in ("edges", "unresolved", "ledger_keys", "binding_rows",
-                      "seat_edges", "seat_unresolved", "binding_conflicts"):
-            self.assertEqual(getattr(compact, field), getattr(complete, field), field)
-        self.assertLess(sum(map(len, compact.ledger_rows.values())),
-                        sum(map(len, complete.ledger_rows.values())))
-        self.assertIn("compact-changed-A", dict(handover.storage_recipients(
-            "compact-changed-Z", harness="claude",
-            read_context=PeerReadContext(compact_lineage=True))))
-
     def test_watch_reader_loads_code_once_and_keeps_state_reads_live(self):
         previous = sys.modules.pop("peer_message", None)
         try:

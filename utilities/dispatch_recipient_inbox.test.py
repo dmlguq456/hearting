@@ -556,6 +556,20 @@ class CompactLineageEquivalenceTest(IsolatedCase):
     def publish(self):
         return handover.publish_lineage_rows(self.dispatch_root)
 
+    def test_changed_compact_ledger_retains_authority_without_activity_history(self):
+        self.fixture_graph()
+        self.publish()
+        path = tidy.state_root() / "sessions" / "seat-bound.jsonl"
+        with path.open("a") as stream:
+            for index in range(200):
+                stream.write(json.dumps({"event": "prompt", "harness": "claude",
+                    "sid": "claude-B", "ts": index + 100}) + "\n")
+        complete, compact = self.graphs()
+        self.assert_equivalent(complete, compact)
+        self.assertLess(len(compact.ledger_rows["seat-bound"]),
+                        len(complete.ledger_rows["seat-bound"]))
+        self.assertEqual(self.resolver_answers("full"), self.resolver_answers("compact"))
+
     def test_fork_bindings_hidden_fork_and_unreadable_recovery_match_full_projection(self):
         rows = [dict(event="succession", source="tidy-clear", harness="claude", sid=target,
                      ts=1, **{"from": origin})
