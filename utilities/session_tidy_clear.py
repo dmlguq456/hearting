@@ -768,6 +768,8 @@ def idle_context_for_enqueue(seat: "st.Seat", harness: str, sid: str) -> Optiona
     seat = st.session_seat(seat, harness, sid)
     req = read_reservation(seat.key)
     prompt = st.prompt_state(seat)
+    if prompt and prompt.get("source") == "real":
+        return None  # A later human request does not inherit the retained automatic request.
 
     def sequence(value, default):
         try:

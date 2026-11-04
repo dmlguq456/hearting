@@ -874,6 +874,32 @@ class UnifiedIdleTests(unittest.TestCase):
                     self.assertEqual(clear.observe_idle_event(harness, sid, str(self.cwd), event_id="new-work",
                                                               tokens=350000, now=clock[0]+2), "booking=scheduled")
 
+    def test_manual_tidy_after_idle_compaction_keeps_its_own_clear_flow(self):
+        import session_tidy_runner as runner
+        for harness in ("claude", "codex", "opencode"):
+            self.extra["HERDR_PANE_ID"] = "manual-after-idle:" + harness
+            clock = [1000.0]
+            with self.subTest(harness=harness), self.iso.patched_environ(self.extra), \
+                    mock.patch.object(clear, "_start_helper", return_value=12345), \
+                    mock.patch.object(runner, "start_detached", return_value=None), \
+                    mock.patch.object(st, "now_epoch", side_effect=lambda:clock[0]):
+                sid = "manual-after-" + harness
+                seat, req, _reply = self.accepted(harness, sid, clock)
+                claim, why = clear.claim_clear(clear.reservation_path(seat.key), req["nonce"])
+                self.assertEqual(why, "")
+                clock[0] += 1
+                st._run_compact_after(harness, sid, "", cwd=str(self.cwd), transcript="",
+                                      compact_context={}, env=os.environ, now=clock[0])
+                self.assertEqual(clear.read_reservation(seat.key)["status"], "compacted")
+                st.run_hook(harness, "prompt", sid, cwd=str(self.cwd), prompt_text="Tidy and clear now",
+                            now=clock[0]+1)
+                st.write_card(seat, harness, sid, "manual card", prompt_seq=st.read_prompt_seq(seat))
+                line, context = st._enqueue_caller((seat,harness,sid), str(self.cwd),
+                                                   no_clear=False, no_continue=True)
+                self.assertIsNone(context)
+                self.assertIn("clear=scheduled", line)
+                self.assertNotEqual(clear.read_reservation(seat.key).get("origin"), "idle")
+
     def test_transport_ack_without_native_boundary_is_not_success_and_never_resends(self):
         import session_tidy_runner as runner
         clock = [1000.0]
