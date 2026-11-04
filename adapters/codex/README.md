@@ -198,7 +198,8 @@ counts down for 60 seconds before submitting an empty answer. Typing or pasting
 cancels the countdown and the box waits for submit. Empty answers never satisfy
 a human decision gate; restate an open question at turn end and keep Fleet's
 ledger based `answer needed` indication active until a real answer is recorded.
-Use `request_user_input_async` only when the waiting tool is unavailable. Do not
+Use `request_user_input_async` only in an interactive session when the waiting
+tool is unavailable; a registered worker has no reader for either tool. Do not
 open repeated boxes or switch to Plan mode. The normal frame start
 receipt keeps `human_wait.question_block` and the existing interview artifact;
 empty/timeout/accepted responses return the same pending question without
