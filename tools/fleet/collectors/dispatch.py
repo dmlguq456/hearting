@@ -4637,7 +4637,7 @@ def _orphan_registry_module():
 
 def _dead_terminal_owner_row(status, meta):
     """F-83: a `done` dispatch-depth-1 owner row whose closure was a typed death."""
-    if status != "done" or not isinstance(meta, (dict, MappingProxyType)):
+    if status != "done" or not isinstance(meta, Mapping):
         return False
     if meta.get("worker_type") != "owner":
         return False
