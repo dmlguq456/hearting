@@ -3179,9 +3179,9 @@ def explorer_read_detail(snapshot, state):
 
 
 def _explorer_compose(snapshot, cols, rows, state=None, focus_result=None, last_good=None, now=None,
-                      providers=None):
+                      providers=None, draw_frame=True):
     """Project collected facts through the immutable view model into the cell renderer."""
-    from .explorer import frame as explorer_frame, live
+    from .explorer import live
     global _SELECTABLE, _EXPLORER_NAV_ROWS, _EXPLORER_STATE, _EXPLORER_ALL_ROWS
     global _EXPLORER_GENERATION, _EXPLORER_MODEL, _EXPLORER_READINESS, _EXPLORER_ORDER
     global _EXPLORER_COMPOSE_MODEL, _EXPLORER_COMPOSE_SNAPSHOT
@@ -3205,7 +3205,8 @@ def _explorer_compose(snapshot, cols, rows, state=None, focus_result=None, last_
     _EXPLORER_COMPOSE_MODEL = model
     _EXPLORER_READINESS = readiness
     _EXPLORER_MODEL = model
-    frame = explorer_frame.draw(model, state, cols, rows, beat=int(_BLINK_ON))
+    frame = (runtime.draw_frame(model, state, cols, rows, beat=int(_BLINK_ON))
+             if draw_frame else None)
     _EXPLORER_NAV_ROWS = _EXPLORER_ALL_ROWS = ()
     _SELECTABLE = []
     return frame
@@ -3213,7 +3214,6 @@ def _explorer_compose(snapshot, cols, rows, state=None, focus_result=None, last_
 
 def _explorer_frame_from_model(model, state, cols, rows, *, beat=1):
     """Redraw a frozen VM at current geometry with this process's validated install identity."""
-    from .explorer import frame as explorer_frame
     from dataclasses import replace as _replace_model
     install = _HEARTING if isinstance(_HEARTING, dict) else {}
     identity = {
@@ -3222,8 +3222,11 @@ def _explorer_frame_from_model(model, state, cols, rows, *, beat=1):
         "install_method": install.get("install_method") if isinstance(install.get("install_method"), str)
         and install.get("install_method") else "unmanaged",
     }
-    model = _replace_model(model, hearting=identity)
-    return explorer_frame.draw(model, _explorer_state_for(state, cols), cols, rows, beat=beat)
+    if (not isinstance(model.hearting, Mapping)
+            or any(model.hearting.get(key) != value for key, value in identity.items())):
+        model = _replace_model(model, hearting=identity)
+    return _explorer_runtime().draw_frame(
+        model, _explorer_state_for(state, cols), cols, rows, beat=beat)
 
 
 def _explorer_keys_provider(width):
@@ -3596,6 +3599,42 @@ def _draw_explorer(stdscr, snapshot, frame=None):
     _draw_explorer_frame(stdscr, frame, snapshot, stale=_EXPLORER_REPLAY_ACTIVE)
 
 
+_EXPLORER_PAINT_CACHE = None
+
+
+def _explorer_paint_runs(frame, height, width):
+    """Compile one immutable cell frame; animation and attributes stay live."""
+    from itertools import groupby
+    from operator import itemgetter
+    from .explorer.grid import cell_width, run_safe
+    global _EXPLORER_PAINT_CACHE
+    cached = _EXPLORER_PAINT_CACHE
+    if cached is not None and cached[0] is frame and cached[1:3] == (height, width):
+        return cached[3]
+    runs = []
+    for y, row in enumerate(frame.cells[:height]):
+        x = 0
+        for style, group in groupby(row[:width], key=itemgetter(1, 2)):
+            glyphs = [cell[0] for cell in group]
+            start, x = x, x + len(glyphs)
+            text = "".join(glyphs)
+            if not text:
+                continue
+            lead = 0
+            while glyphs[lead] == "":
+                lead += 1
+            if (len(text) == len(glyphs) - lead and text.isascii() and text.isprintable()) or (
+                    all(run_safe(char) for char in text)
+                    and sum(cell_width(char) for char in text) == len(glyphs) - lead):
+                runs.append((y, start + lead, text, style))
+            else:
+                runs.extend((y, start + offset, glyph, style)
+                            for offset, glyph in enumerate(glyphs) if glyph)
+    result = tuple(runs)
+    _EXPLORER_PAINT_CACHE = (frame, height, width, result)
+    return result
+
+
 def _draw_explorer_frame(stdscr, frame, snapshot, *, stale=False):
     global _EXPLORER_FRAME
     _EXPLORER_FRAME = frame
@@ -3604,52 +3643,23 @@ def _draw_explorer_frame(stdscr, frame, snapshot, *, stale=False):
     # The composed frame keeps the approved still glyph; working marks turn here, like Fleet's.
     spin = _SPIN[int(time.time() * 10) % len(_SPIN)]
     if frame.cells:
-        # One addstr per run of cells that share a style, not one per cell: a full screen
-        # is about ten thousand cells and is drawn ten times a second. A run is written in
-        # one call only when the terminal is sure to give every character the cells Fleet
-        # gave it; any other run is written cell by cell as before.
-        from itertools import groupby
-        from operator import itemgetter
-        from .explorer.grid import cell_width, run_safe
         dim = getattr(curses, "A_DIM", 0) if stale else 0
         attrs = {}
-        style_of = itemgetter(1, 2)
-        for y, row in enumerate(frame.cells[:h]):
-            x = 0
-            for style, group in groupby(row[:w], key=style_of):
-                glyphs = [cell[0] for cell in group]
-                start, x = x, x + len(glyphs)
-                text = "".join(glyphs)
-                if not text:
-                    continue
-                attr = attrs.get(style)
-                if attr is None:
-                    try:
-                        attr = attrs[style] = _key_attr(*style) | dim
-                    except Exception:
-                        attr = attrs[style] = False
-                if attr is False:
-                    continue
-                if not stale and style[0] in _EXPLORER_SPIN_KEYS and "⠏" in text:
-                    text = text.replace("⠏", spin)
-                    glyphs = [spin if glyph == "⠏" else glyph for glyph in glyphs]
-                lead = 0
-                while glyphs[lead] == "":
-                    lead += 1
-                if (len(text) == len(glyphs) - lead and text.isascii() and text.isprintable()) or (
-                        all(run_safe(char) for char in text)
-                        and sum(cell_width(char) for char in text) == len(glyphs) - lead):
-                    try:
-                        stdscr.addstr(y, start + lead, text, attr)
-                    except Exception:
-                        pass
-                    continue
-                for offset, glyph in enumerate(glyphs):
-                    if glyph:
-                        try:
-                            stdscr.addstr(y, start + offset, glyph, attr)
-                        except Exception:
-                            pass
+        for y, x, text, style in _explorer_paint_runs(frame, h, w):
+            attr = attrs.get(style)
+            if attr is None:
+                try:
+                    attr = attrs[style] = _key_attr(*style) | dim
+                except Exception:
+                    attr = attrs[style] = False
+            if attr is False:
+                continue
+            if not stale and style[0] in _EXPLORER_SPIN_KEYS and "⠏" in text:
+                text = text.replace("⠏", spin)
+            try:
+                stdscr.addstr(y, x, text, attr)
+            except Exception:
+                pass
     else:
         for y, line in enumerate(frame.lines[:h]):
             try:
@@ -6246,7 +6256,7 @@ def _draw(stdscr, sessions, jobs, section, malformed, memory=None, live_order=No
             frame = runtime.loading_frame(w, h)
         else:
             # Always advance the complete base, even while selected local data is available.
-            candidate_frame = _explorer_compose(current, w, h, state, _EXPLORER_RESULT)
+            _explorer_compose(current, w, h, state, _EXPLORER_RESULT, draw_frame=False)
             candidate_model = _EXPLORER_MODEL
             readiness = _EXPLORER_READINESS
             complete = runtime.publication_ready(readiness)
@@ -6256,7 +6266,7 @@ def _draw(stdscr, sessions, jobs, section, malformed, memory=None, live_order=No
                 _EXPLORER_MODEL = candidate_model
                 _EXPLORER_SHOWN = True
                 runtime.mark_published(readiness)
-                frame = candidate_frame
+                frame = runtime.draw_frame(candidate_model, state, w, h, beat=int(_BLINK_ON))
                 if runtime.all_new(readiness):
                     runtime.persist_complete_async(candidate_model, readiness,
                                                    _EXPLORER_DETAIL_CONTINUATION)
@@ -6268,7 +6278,11 @@ def _draw(stdscr, sessions, jobs, section, malformed, memory=None, live_order=No
                 shown = selected_detail(base, _EXPLORER_RESULT, peer_model=candidate_model)
                 shown = current_claude_usage(shown, current, time.time())
                 _EXPLORER_MODEL = shown
-                live_model = shown if _EXPLORER_REPLAY_ACTIVE else _replace_model(shown, clock=time.time())
+                from .explorer.chrome import _clock_freshness
+                clock = time.time()
+                live_model = (shown if _EXPLORER_REPLAY_ACTIVE
+                              or _clock_freshness(shown.clock) == _clock_freshness(clock)
+                              else _replace_model(shown, clock=clock))
                 frame = _explorer_frame_from_model(live_model, state, w, h,
                                                    beat=1 if _EXPLORER_REPLAY_ACTIVE else int(_BLINK_ON))
                 _EXPLORER_SHOWN = True

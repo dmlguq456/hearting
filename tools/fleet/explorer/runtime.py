@@ -7,7 +7,8 @@ the live adapter without moving I/O into the drawing code.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import replace
+from collections import deque
+from dataclasses import fields, replace
 import hashlib
 import json
 import math
@@ -45,10 +46,36 @@ class ExplorerRuntime:
         self._cache_path = None
         self._cached_continuation = None
         self._has_complete = False
-        self._persisted_generations = set()
+        self._persisted_generations = deque(maxlen=64)
         self._pending_generations = set()
         self._persist_lock = threading.Lock()
         self._writer_threads = []
+        self._frame_inputs = None
+        self._frame = None
+
+    def draw_frame(self, model, state, cols, rows, *, beat=1):
+        """Keep one immutable cell frame between changes to its visible inputs.
+
+        The 100 ms loop still paints spinners and reads keys. Rebuilding the
+        same grid needlessly allocates thousands of cells on each wake. The
+        clock is rendered only as HH:MM; pending snapshots advance its raw
+        timestamp on every wake without changing a displayed cell.
+        """
+        from . import chrome, frame
+        from .grid import CellGrid
+        from .view_model import freeze
+
+        if CellGrid.default_trace is not None:
+            return frame.draw(model, state, cols, rows, beat=beat)
+        values = tuple(chrome._clock_freshness(model.clock) if item.name == "clock"
+                       else getattr(model, item.name) for item in fields(model))
+        # NavState deliberately omits the private question editor from equality.
+        # Snapshot it too, so a draft edit or response is painted immediately.
+        inputs = (values, state, freeze(state.question_overlay), cols, rows, beat)
+        if inputs != self._frame_inputs:
+            rendered = frame.draw(model, state, cols, rows, beat=beat)
+            self._frame_inputs, self._frame = inputs, rendered
+        return self._frame
 
     @property
     def has_complete(self):
@@ -366,12 +393,18 @@ class ExplorerRuntime:
             return None
         thread = threading.Thread(target=self._write_generation, args=(envelope, token),
                                   name="fleet2-observation-save", daemon=True)
-        self._writer_threads.append(thread)
+        with self._persist_lock:
+            # Finished Thread objects otherwise accumulate for the viewer's
+            # entire lifetime. Preserve active and not-yet-started writers.
+            self._writer_threads = [held for held in self._writer_threads
+                                    if held.ident is None or held.is_alive()]
+            self._writer_threads.append(thread)
         try:
             thread.start()
         except (RuntimeError, OSError):
             with self._persist_lock:
                 self._pending_generations.discard(token)
+                self._writer_threads.remove(thread)
             return None
         return thread
 
@@ -383,7 +416,7 @@ class ExplorerRuntime:
                 written = existing is not None and existing.get("observed_at", 0) >= token[2]
             if written:
                 with self._persist_lock:
-                    self._persisted_generations.add(token)
+                    self._persisted_generations.append(token)
         finally:
             with self._persist_lock:
                 self._pending_generations.discard(token)
