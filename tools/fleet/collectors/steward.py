@@ -731,7 +731,7 @@ def session_liveness(harness, session_id, *, agents=None, observation=None):
     return "ended" if (not alive or match is False) else "live"
 
 
-def repository_for_session(harness, session_id, *, sessions=None):
+def repository_for_session(harness, session_id, *, sessions=None, _cwds_by_session=None):
     """Canonical repository key of one session, or ``None``. The cwd comes from the
     session's own row (herdr/registry/native metadata) and only when it is a single
     value; the process cwd is never a substitute."""
@@ -739,12 +739,37 @@ def repository_for_session(harness, session_id, *, sessions=None):
     if not session_id:
         return None
     rows = _projection_sessions() if sessions is None else list(sessions)
-    own = {(harness, session_id)}
-    cwds = {row.cwd for row in rows if getattr(row, "cwd", None) and own.intersection(_session_keys(row))}
-    if not cwds:
+    key = (harness, session_id)
+    indexed = _cwds_by_session is not None and key in _cwds_by_session
+    cwds = (set(_cwds_by_session[key]) if indexed else
+            {row.cwd for row in rows if getattr(row, "cwd", None) and key in _session_keys(row)})
+    if not cwds and not indexed:
         cwds = {row.cwd for row in _native_role_sessions({(harness, session_id): {}}, rows)
                 if row.harness == harness and row.session_id == session_id}
     return _repository_key(cwds.pop()) if len(cwds) == 1 else None
+
+
+def _repository_cwds_for_pass(holders, rows):
+    """Batch the same alias joins/native misses instead of rescanning per holder."""
+    wanted = set(holders)
+    if len(wanted) > 512:
+        return None
+    cwds = {key: set() for key in wanted}
+    for row in rows:
+        if getattr(row, 'cwd', None):
+            for key in _session_keys(row):
+                if key in cwds:
+                    cwds[key].add(row.cwd)
+    missing = {key: {} for key, directories in cwds.items() if not directories}
+    if missing:
+        for row in _native_role_sessions(missing, rows):
+            key = row.harness, row.session_id
+            if key in missing:
+                cwds[key].add(row.cwd)
+    index = ProjectionCache(max_entries=512, max_bytes=128 * 1024)
+    for key, directories in cwds.items():
+        index[key] = frozenset(directories)
+    return index
 
 
 def _context_rows(markers, relations, sessions):
@@ -859,6 +884,17 @@ def supervision_by_repository(sessions=None, *, limit=None, markers=None, relati
     evidence = getattr(mod, "steward_evidence_targets", None) if mod is not None else None
     read = {"rows": rows, "repositories": {},
             "winners": _role_winners(markers, rows, evidence, relations) if evidence else {}}
+    from . import dispatch
+    scope = dispatch._COLLECTION_INPUTS.get()
+    repository_options = {}
+    if scope is not None:
+        holders = {(str(holder.get('harness') or '').lower(), holder.get('sid'))
+                   for relation in relations if relation.get('released') is not True
+                   and (holder := relation.get('holder') or {}).get('sid')}
+        index = _repository_cwds_for_pass(holders, rows)
+        if index is not None:
+            repository_options['_cwds_by_session'] = index
+            scope[('steward-repository-cwds',)] = index
     keys = set()
     for relation in relations:
         if relation.get("released") is True:
@@ -870,7 +906,8 @@ def supervision_by_repository(sessions=None, *, limit=None, markers=None, relati
             continue
         holder_key = (harness, sid)
         if holder_key not in read["repositories"]:
-            read["repositories"][holder_key] = repository_for_session(harness, sid, sessions=rows)
+            read["repositories"][holder_key] = repository_for_session(
+                harness, sid, sessions=rows, **repository_options)
         key = read["repositories"][holder_key]
         if key is None:
             origin = relation.get("origin") or {}

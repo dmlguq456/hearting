@@ -165,6 +165,12 @@ class RepoSupervisionTest(_RepoFixture, unittest.TestCase):
         self.assertEqual({key: value["counted"] for key, value in board.items()},
                          {self.key: 2, steward._repository_key(str(self.other)): 1})
         self.assertEqual(board[self.key], self.census(rows, [_relation(s) for s in ("s1", "s2", "s3")]))
+        from fleet.collectors import dispatch
+        with dispatch.collection_read_scope():
+            indexed = steward.supervision_by_repository(
+                rows, limit=2, markers={}, relations=[_relation(s) for s in ('s1', 's2', 's3')],
+                agents=[])
+        self.assertEqual(indexed, board)
 
     def test_enrich_keeps_one_board_census_for_the_models_view(self):
         rows = [self.row("s1", self.primary), self.row("s3", self.other)]
@@ -741,6 +747,46 @@ class SameGenerationChainTest(_RepoFixture, unittest.TestCase):
 
 
 class RepositoryForSessionTest(_RepoFixture, unittest.TestCase):
+    def test_batched_alias_and_native_misses_match_individual_repository_reads(self):
+        from fleet.collectors import dispatch
+        rows = [self.row('resumed', self.primary), self.row('ambiguous', self.primary),
+                self.row('ambiguous', self.other)]
+        rows[0].session_aliases = ['before-resume']
+        rows[0]._gpu_session_aliases = ['gpu-alias']
+        requested = {('claude', sid) for sid in ('before-resume', 'gpu-alias', 'ambiguous')}
+        requested.update({('codex', 'native'), ('codex', 'missing')})
+        def native(markers, _rows):
+            return [SimpleNamespace(harness='codex', session_id='native', cwd=str(self.linked))]
+        with dispatch.collection_read_scope(), \
+                mock.patch.object(steward, '_native_role_sessions', side_effect=native) as source:
+            expected = {key: steward.repository_for_session(*key, sessions=rows) for key in requested}
+            source.reset_mock()
+            index = steward._repository_cwds_for_pass(requested, rows)
+            actual = {key: steward.repository_for_session(*key, sessions=rows, _cwds_by_session=index)
+                      for key in requested}
+            self.assertEqual(actual, expected)
+            self.assertEqual(source.call_count, 1)
+            self.assertIsNone(actual[('claude', 'ambiguous')])
+            self.assertIsNone(actual[('codex', 'missing')])
+            self.assertEqual(actual[('claude', 'before-resume')], self.key)
+            self.assertEqual(actual[('claude', 'gpu-alias')], self.key)
+            self.assertLessEqual(index.bytes, index.max_bytes)
+
+    def test_repository_index_overflow_falls_back_and_next_pass_rebuilds(self):
+        from runtime_observation import ProjectionCache
+        rows = [self.row('s1', self.primary)]
+        with mock.patch.object(steward, 'ProjectionCache', return_value=ProjectionCache(max_bytes=1)):
+            index = steward._repository_cwds_for_pass({('claude', 's1')}, rows)
+            self.assertFalse(index)
+            self.assertEqual(steward.repository_for_session('claude', 's1', sessions=rows,
+                                                           _cwds_by_session=index), self.key)
+        first = steward._repository_cwds_for_pass({('claude', 's1')}, rows)
+        rows[0].cwd = str(self.other)
+        second = steward._repository_cwds_for_pass({('claude', 's1')}, rows)
+        self.assertNotEqual(first[('claude', 's1')], second[('claude', 's1')])
+        self.assertIsNone(steward._repository_cwds_for_pass(
+            {('claude', str(i)) for i in range(513)}, rows))
+
     def test_linked_worktree_row_folds_to_the_primary_key(self):
         rows = [self.row("s1", self.linked)]
         self.assertEqual(steward.repository_for_session("claude", "s1", sessions=rows), self.key)
