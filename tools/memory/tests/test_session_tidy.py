@@ -44,6 +44,8 @@ import session_tidy_clear as clear  # noqa: E402
 import session_tidy_runner as runner  # noqa: E402
 import tidy_transcripts as tt  # noqa: E402
 from test_tidy_isolation import FIXTURES, FIXTURE_NOW, load_opencode_fixture  # noqa: E402
+sys.path.append(str(Path(__file__).resolve().parents[3] / "utilities"))  # split_module_fixture
+from split_module_fixture import patch_split  # noqa: E402
 
 TIDY = ROOT / "utilities" / "session_tidy.py"
 DAY = 86400
@@ -1153,7 +1155,7 @@ class NativeSessionContinuityTest(unittest.TestCase):
         process = lambda pid: (int(pid), 1, int(pid), 1, int(pid), {
             42101: "start-a", 42102: "start-b", 42103: "restart-a"}.get(int(pid), "unknown-start"))
         patchers = (
-            mock.patch.object(pane_ownership, "_registered_worker", return_value=False),
+            patch_split(pane_ownership, "_registered_worker", return_value=False),
             mock.patch.object(pane_ownership, "_caller_runtime",
                               return_value=((os.getpid(), 1, 1, 1, 1, "caller"), True)),
             mock.patch.object(pane_ownership, "codex_tui_process_bindings",
@@ -7706,6 +7708,80 @@ class CardExactIdentityTest(TidyCase):
             self.assertIn("관련 등 기존 칸", text)
             self.assertIn("미확인", text)
 
+
+
+class CardWordLanguage(unittest.TestCase):
+    """Injected card words read tools/i18n/messages.json: English unless Korean is declared."""
+
+    def test_korean_first_reply_guidance_is_the_constant(self):
+        with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"}):
+            guidance = st._ui_translator()("tidy.card.first_reply", fields="·".join(st.CARD_FIXED_FIELDS))
+        self.assertEqual(guidance, st.CARD_FIRST_REPLY_GUIDANCE)
+
+    def test_every_hold_reason_has_catalog_words_with_the_same_korean(self):
+        with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"}):
+            t = st._ui_translator()
+            for code, korean in clear.REASON_TEXT.items():
+                with self.subTest(code=code):
+                    self.assertEqual(t("tidy.hold." + code), korean)
+
+    def test_clear_notices_and_idle_request_in_english(self):
+        with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "English"}):
+            failed = clear._notice_text("failed", "agent-not-found", "claude")
+            kept = clear._notice_text("skipped", "card-taken", "opencode")
+            cont = clear._continue_notice_text("failed", "not-idle-native")
+            request = clear.idle_card_request_text({"nonce": "n9", "origin": "idle", "harness": "codex",
+                                                    "idle": {"min_tokens": 300000, "wait_seconds": 60}})
+        self.assertEqual(failed, "[tidy] Clearing the window failed (the window was not found). Run /clear if "
+                                 "needed. The card is saved; after /clear the new window receives it.")
+        self.assertEqual(kept, "[tidy] The window was not cleared automatically (the card was already handed "
+                               "to another session). Run /new if needed.")
+        self.assertEqual(cont, '[tidy] The window was cleared, but "이어서해" could not be typed (the new session '
+                               'did not start waiting for input). To continue, type "이어서해".')
+        self.assertTrue(request.startswith("This is an automatic idle tidy request. This request is sent only "
+                                           "when the last request's input is at least 300,000 tokens, the turn "
+                                           "ended about 1 minute ago"), request)
+        self.assertTrue(request.endswith("Request id: n9"), request)
+        self.assertIsNone(re.search(r"[가-힣]", request.replace(" → ".join(st.CARD_FIELDS), "")
+                                    .replace("·".join(st.CARD_FIXED_FIELDS), "")), request)
+
+    def test_runner_notices_in_english(self):
+        with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "English"}):
+            note = runner.coverage_note(SimpleNamespace(unread=[{"coverage": "10-20%"}]))
+            stopped = runner.failure_line("boom", "b1", (2, 1))
+            line = runner._with_coverage("[tidy] batch b1: added 1 — undo: mem tidy-undo b1", note)
+        self.assertEqual(note, "partly read (10-20%) — the earlier part continues in the next tidy")
+        self.assertEqual(stopped, "[tidy] The memory tidy stopped partway (2 applied, 1 not confirmed). The rest "
+                                  "continues in the next tidy. (reason: boom) — undo: mem tidy-undo b1")
+        self.assertEqual(line, "[tidy] batch b1: added 1 · " + note + " — undo: mem tidy-undo b1")
+
+    def test_card_injection_and_compact_body_in_english(self):
+        previous = {"harness": "claude", "sid": "a" * 36,
+                    "transcript": {"path": "/" + "x" * 400, "status": "available"}}
+        card = {"author": {"harness": "claude", "sid": "b" * 36}, "authored_at_epoch": 10,
+                "body": "body " * 1200}
+        with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "English"}):
+            text = st.build_card_injection(card, Path("/card.json"), 10 + 3 * 3600, 1600,
+                                           previous_transcript=previous)
+            ago = [st._ago(value) for value in (30, 95, 7200, 3 * 86400)]
+            body = st._compact_body({"summary": "S", "recent_post": "R", "recent_partial": True,
+                                     "last_reply": {"first_line": "done", "timestamp": "bad"}})
+        self.assertTrue(text.startswith("[Session card] Work card handed on in this seat — written "), text)
+        self.assertIn("(3 hours ago)", text)
+        self.assertIn("[First reply] At the very start of the first reply", text)
+        self.assertIn("Full card: /card.json", text)
+        self.assertIn("…(rest omitted)", text)
+        self.assertIn("Earlier conversation: claude aaaaaaaa · transcript path omitted", text)
+        self.assertIsNone(re.search(r"[가-힣]", text.replace("·".join(st.CARD_FIXED_FIELDS), "")), text)
+        self.assertLessEqual(len(text.encode("utf-8")), 1600)
+        self.assertEqual(ago, ["just now", "1 minute ago", "2 hours ago", "3 days ago"])
+        self.assertTrue(body.startswith("Last reply before the compaction (bad): done\n\n"), body)
+        for words in ("Recent conversation this summary did not see may exist.",
+                      "The original conversation record's path is not known.",
+                      "[Conversation after the compaction]",
+                      "[Only part of the recent conversation was kept; check the original record.]"):
+            self.assertIn(words, body)
+        self.assertIsNone(re.search(r"[가-힣]", body), body)
 
 
 if __name__ == "__main__":

@@ -40,6 +40,7 @@ import dispatch_contract as DC  # noqa: E402
 import fixture_processes  # noqa: E402
 sys.path.insert(0, str(ROOT / "tools" / "memory" / "tests"))
 from tidy_isolation import memory_fixture_env  # noqa: E402
+from split_module_fixture import patch_split  # noqa: E402
 
 
 # Completing nodes here must not launch detached open-cycle checkpoints into
@@ -488,9 +489,9 @@ class TestSupervisorAdvance(WorkflowFixture):
         request = terminal.TerminalCommitRequest(path, "att-parent", jobs, self.base)
         gates = {node: {"passed": passed} for node in WS.route_terminal_nodes(route)}
         with mock.patch.object(terminal, "_completion_request", return_value=request), \
-                mock.patch.object(terminal.dispatch_contract, "attempt_process_quiescence",
+                patch_split(terminal.dispatch_contract, "attempt_process_quiescence",
                                   return_value=terminal.dispatch_contract.ProcessQuiescence("quiescent", "fixture")), \
-                mock.patch.object(terminal, "_route_module", return_value=SimpleNamespace(
+                patch_split(terminal, "_route_module", return_value=SimpleNamespace(
                     terminal_gate_observation=lambda *a, **kw: gates)), \
                 mock.patch.object(terminal, "settle_terminal_commit",
                                   return_value=terminal.TerminalCommitResult("completed")) as commit, \
@@ -520,7 +521,7 @@ class TestSupervisorAdvance(WorkflowFixture):
             return None
 
         with mock.patch.object(SUP.RESOURCE_RESUME, "route_selected", return_value=True), \
-                mock.patch.object(route_module, "write_completion_marker", side_effect=capture):
+                patch_split(route_module, "write_completion_marker", side_effect=capture):
             result = SUP.poll_once(route, ledger)
         self.assertEqual(result[0]["action"], "advanced")
         self.assertEqual(marker_calls, [mapped_output])
@@ -1481,9 +1482,9 @@ class TestStatusProjection(WorkflowFixture):
             "FLEET_ROUTE_CHAIN_DIR": str(self.base / "route-chain"),
         }))
         self.enterContext(mock.patch.object(SUP, "route_module", return_value=ROUTE))
-        self.enterContext(mock.patch.object(ROUTE, "_compose_artifact_root",
+        self.enterContext(patch_split(ROUTE, "_compose_artifact_root",
                                            return_value=str(self.artifact_root)))
-        self.enterContext(mock.patch.object(ROUTE, "_route_chain_module", return_value=None))
+        self.enterContext(patch_split(ROUTE, "_route_chain_module", return_value=None))
 
     def test_closed_exact_terminal_projects_complete_without_writing_journal_or_registry(self):
         route, path = self.two_stage_route(route_id="rt-0123456789abcdef")
@@ -1509,7 +1510,7 @@ class TestStatusProjection(WorkflowFixture):
         for value in (str(path), route["route_id"]):
             status_out = io.StringIO()
             with mock.patch.object(SUP, "terminal_gate_state", return_value=gates), \
-                 mock.patch.object(ROUTE, "resolve_route_argument",
+                 patch_split(ROUTE, "resolve_route_argument",
                                    wraps=ROUTE.resolve_route_argument) as resolve, \
                  contextlib.redirect_stdout(status_out):
                 self.assertEqual(SUP.cmd_status(SimpleNamespace(
@@ -1560,7 +1561,7 @@ class TestStatusProjection(WorkflowFixture):
                                                    "AGENT_WORKFLOW_ROOT": str(self.base / "wrong")}):
                     for value in (str(path), route["route_id"]):
                         output = io.StringIO()
-                        with mock.patch.object(ROUTE, "resolve_route_argument",
+                        with patch_split(ROUTE, "resolve_route_argument",
                                                wraps=ROUTE.resolve_route_argument) as resolve, \
                              contextlib.redirect_stdout(output):
                             self.assertEqual(SUP.cmd_status(SimpleNamespace(
@@ -3655,8 +3656,8 @@ class TestLegacyPreviewGateRecovery(WorkflowFixture):
             with contextlib.redirect_stdout(output):
                 code = SUP.main(argv[2:])
             return subprocess.CompletedProcess(argv, code, output.getvalue(), "")
-        with mock.patch.object(DC, "completion_marker_is_current", return_value=True) as marker_check, \
-             mock.patch.object(DC, "completion_attempt_readiness", return_value=DC.AttemptReadiness("ready", "fixture")), \
+        with patch_split(DC, "completion_marker_is_current", return_value=True) as marker_check, \
+             patch_split(DC, "completion_attempt_readiness", return_value=DC.AttemptReadiness("ready", "fixture")), \
              mock.patch.object(DC.subprocess, "run", side_effect=gate_transaction) as transaction:
             detail = DC.recover_preview_gate_after_refusal(str(path), "verify", "start", ROOT, jobs, error)
             self.assertIn("preview_gate_recovery=blocked", detail)
@@ -3701,8 +3702,8 @@ class TestLegacyPreviewGateRecovery(WorkflowFixture):
                     return subprocess.CompletedProcess(argv, 64, "", str(exc))
             return subprocess.CompletedProcess(argv, code, output.getvalue(), "")
         error = DC.DispatchContractError("human-gate-not-raised", "preview-disposition: old route has no record")
-        with mock.patch.object(DC, "completion_marker_is_current", return_value=True), \
-             mock.patch.object(DC, "completion_attempt_readiness", return_value=DC.AttemptReadiness("ready", "fixture")), \
+        with patch_split(DC, "completion_marker_is_current", return_value=True), \
+             patch_split(DC, "completion_attempt_readiness", return_value=DC.AttemptReadiness("ready", "fixture")), \
              mock.patch.object(DC.subprocess, "run", side_effect=gate_transaction):
             detail = DC.recover_preview_gate_after_refusal(str(path), "verify", "start", ROOT, jobs, error)
             self.assertIn("preview_gate_recovery=unavailable", detail)
@@ -3769,8 +3770,8 @@ class TestInteractiveFrameGate(WorkflowFixture):
         with mock.patch.dict(os.environ, {session_key: "test-depth0", "AGENT_DISPATCH_CALLER_HARNESS": harness,
                 "AGENT_DISPATCH_ATTEMPT_ID": "", "AGENT_DISPATCH_REGISTERED_WORKER": ""}, clear=True), \
              mock.patch.object(SUP.HUMAN_GATE, "probe_consumer") as probe_consumer, \
-             mock.patch.object(DC, "completion_marker_is_current", return_value=True), \
-             mock.patch.object(DC, "completion_attempt_readiness", return_value=DC.AttemptReadiness("ready", "fixture")):
+             patch_split(DC, "completion_marker_is_current", return_value=True), \
+             patch_split(DC, "completion_attempt_readiness", return_value=DC.AttemptReadiness("ready", "fixture")):
             kwargs = dict(route_path=path, release_authority="depth-0", interview=True, questions=1)
             record_path, created = SUP.create_gate_delivery(route, "frame-review", str(artifact), jobs, 0, **kwargs)
             self.assertTrue(created)
@@ -4949,7 +4950,7 @@ class TestComputePollObservationBoundary(WorkflowFixture):
         route_module = SUP.route_module()
         node = WS.route_node(route, "run")
         before = ledger.journal_path.read_bytes()
-        with mock.patch.object(route_module, "_continuation_source_jobs", return_value=jobs):
+        with patch_split(route_module, "_continuation_source_jobs", return_value=jobs):
             result, _ = route_module._continuation_reused_evidence(route, node)
         self.assertIsNone(result["terminal_attempt_id"])
         evidence = ledger.read_only_state()["nodes"]["run"]["evidence"]
@@ -4959,7 +4960,7 @@ class TestComputePollObservationBoundary(WorkflowFixture):
         document = json.loads(registry.read_text())
         document["runs"]["fixture-resource"]["execution"]["meta_sha256"] = "changed"
         registry.write_text(json.dumps(document))
-        with mock.patch.object(route_module, "_continuation_source_jobs", return_value=jobs):
+        with patch_split(route_module, "_continuation_source_jobs", return_value=jobs):
             with self.assertRaises(ValueError):
                 route_module._continuation_reused_evidence(route, node)
 

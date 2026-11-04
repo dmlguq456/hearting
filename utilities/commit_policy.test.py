@@ -17,6 +17,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
 import commit_policy  # noqa: E402
+from split_module_fixture import split_patch  # noqa: E402
 
 HARNESSES = ("claude", "codex", "opencode")
 
@@ -74,7 +75,7 @@ class CommitPolicyTest(unittest.TestCase):
         for worker_type in ("owner", "stage", "frame"):
             args = self.args(worker_type, self.primary, route_file=route_file)
             with mock.patch.object(commit_policy, "git_operation_state", return_value=(None, False)), \
-                 mock.patch("dispatch_contract.validated_unversioned_route",
+                 split_patch("dispatch_contract.validated_unversioned_route",
                             return_value={"source_commit": "unversioned"}):
                 projection = commit_policy.runtime_permission_projection(args)
                 prompt = commit_policy.prompt_clause(args)

@@ -10,6 +10,7 @@ import threading
 import time
 import unittest
 from unittest import mock
+from split_module_fixture import patch_split
 
 P = Path(__file__).with_name("dispatch_lifecycle.py")
 SPEC = importlib.util.spec_from_file_location(
@@ -478,7 +479,7 @@ class LifecycleTest(unittest.TestCase):
                 os.kill(os.getpid(), signal.SIGTERM)
             return real_group_empty(pgid)
 
-        with mock.patch.object(L, "process_start_ticks", return_value="1"), \
+        with patch_split(L, "process_start_ticks", return_value="1"), \
              mock.patch.object(L, "_group_empty", side_effect=group_empty_with_signal), \
              mock.patch.object(L, "_terminate_group", return_value="signalled"):
             outcome = L.wait_foreground(proc, 2, poll_interval=0.01)
@@ -537,12 +538,12 @@ class LifecycleTest(unittest.TestCase):
 
     def test_unverifiable_group_is_never_reported_empty(self):
         observation = type("Observation", (), {"state": "unverifiable"})()
-        with mock.patch.object(L, "process_group_observation", return_value=observation):
+        with patch_split(L, "process_group_observation", return_value=observation):
             self.assertIsNone(L._group_empty(123))
 
     def test_missing_leader_has_no_numeric_group_signal_authority(self):
         proc = mock.Mock(pid=437)
-        with mock.patch.object(
+        with patch_split(
             L, "signal_exact_process_group", return_value="leader-gone"
         ) as exact, mock.patch.object(L.os, "killpg") as killpg:
             result = L._terminate_group(proc, signal.SIGTERM, "42")
@@ -552,7 +553,7 @@ class LifecycleTest(unittest.TestCase):
 
     def test_identity_unavailable_still_reaps_direct_child(self):
         proc = subprocess.Popen(["sleep", "60"], start_new_session=True)
-        with mock.patch.object(L, "process_start_ticks", return_value=None):
+        with patch_split(L, "process_start_ticks", return_value=None):
             outcome = L.wait_foreground(proc, 2)
         self.assertEqual(outcome.failure, "process-identity-unavailable")
         self.assertFalse(outcome.group_empty)

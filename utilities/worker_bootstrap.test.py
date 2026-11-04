@@ -783,7 +783,7 @@ class NodeScopeTest(unittest.TestCase):
                 args.worker_type = worker_type
                 with self.subTest(worker_type=worker_type), \
                      patch_split(AP, "load_route", wraps=AP.load_route) as route_loader, \
-                     mock.patch.object(DC, "validate_review_output_binding",
+                     patch_split(DC, "validate_review_output_binding",
                                        side_effect=validate_review_binding) as review_validator:
                     prompt = W.assignment_prompt(args, "prepare the child", parent_env)
 

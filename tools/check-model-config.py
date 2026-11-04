@@ -58,6 +58,7 @@ EXEMPT_SUBSTRINGS = (
     # landed. Everything else under tools/fleet/ is scanned like any other surface, so a
     # new execution pin there fails the guard instead of hiding behind "display only".
     "/tools/fleet/render.py",           # model-family -> color palette
+    "/tools/fleet/render_cells.py",     # the same palette, split out of render.py
     "/tools/fleet/demo.py",             # synthetic fixture rows
     "/tools/fleet/projection.py",       # display projection of collected values
     "/tools/fleet/collectors/claude.py",  # /api/oauth/usage bucket keys + their labels

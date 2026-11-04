@@ -438,6 +438,7 @@ class HumanWaitStateTests(unittest.TestCase):
         server.close()
         return path
 
+    @mock.patch.dict("os.environ", {"FLEET_NOW_LANG": "Korean"})   # Korean notification words
     def test_without_herdr_a_question_reaches_tmux_clients_and_the_desktop_once(self):
         env, log = self._fake_notifiers()
         env.update(DISPLAY=":0", DBUS_SESSION_BUS_ADDRESS="unix:path=/nonexistent")
@@ -453,6 +454,7 @@ class HumanWaitStateTests(unittest.TestCase):
             "notify-send [-a] [Hearting] [--] [◑답변 필요] [배포 #1 진행?]",
         ])
 
+    @mock.patch.dict("os.environ", {"FLEET_NOW_LANG": "Korean"})   # Korean notification words
     def test_failed_herdr_is_retried_while_tmux_shows_the_reminder_once(self):
         env, log = self._fake_notifiers(herdr_rc=1)
         item = {"id": "S4:fallback", "question": "확인", "since": 1}

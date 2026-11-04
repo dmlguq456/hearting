@@ -78,7 +78,7 @@ class ReplacementTest(unittest.TestCase):
         self.route_mock=mock.patch.object(R,'_route',return_value=(self.path,self.route));self.route_mock.start();self.addCleanup(self.route_mock.stop)
         self.logical=mock.patch.object(R,'_logical_key',side_effect=lambda r,m:{'root_route_id':'rt-root','node':'__owner__' if m.get('worker_type')=='owner' else m['route_node']});self.logical.start();self.addCleanup(self.logical.stop)
         self.reuse=mock.patch.object(R,'_reuse_snapshot',return_value={'completed':[],'cycle_id':'cyc-test','producer_id':'prod-test','gate_releases':[]});self.reuse.start();self.addCleanup(self.reuse.stop)
-        self.quiet=mock.patch.object(D,'attempt_process_quiescence',return_value=SimpleNamespace(state='quiescent',reason='process-absent'));self.quiet.start();self.addCleanup(self.quiet.stop)
+        self.quiet=patch_split(D,'attempt_process_quiescence',return_value=SimpleNamespace(state='quiescent',reason='process-absent'));self.quiet.start();self.addCleanup(self.quiet.stop)
         self.meta={'attempt_schema_version':'2','dispatch_depth':'1','transport':'headless',
              'execution_surface':'registered-headless','registered_worker':'1','fallback_hop':'same-harness-headless',
              'attempt_id':'att-source','route_id':'rt-test','route_hash':'sha256:test','route_node':'frame',
@@ -425,7 +425,7 @@ class ReplacementTest(unittest.TestCase):
 
     def test_live_or_unknown_never_claims(self):
         for state in ['live','unverifiable']:
-            with self.subTest(state=state),mock.patch.object(D,'attempt_process_quiescence',return_value=SimpleNamespace(state=state,reason='proof')):
+            with self.subTest(state=state),patch_split(D,'attempt_process_quiescence',return_value=SimpleNamespace(state=state,reason='proof')):
                 with self.assertRaisesRegex(D.DispatchContractError,'proof'):self.claim()
         self.assertFalse((R._directory(self.jobs)/'claims').exists())
 
@@ -462,7 +462,7 @@ class ReplacementTest(unittest.TestCase):
                 self.write(owner, status='done')
                 self.write(child, status=status, append=True)
                 rows = R._rows(self.jobs.read_text(encoding='utf-8').splitlines())
-                with mock.patch.object(D, 'attempt_process_quiescence',
+                with patch_split(D, 'attempt_process_quiescence',
                                        return_value=SimpleNamespace(state=state, reason='fixture-state')):
                     if blocked:
                         with self.assertRaises(D.DispatchContractError) as caught:
@@ -500,7 +500,7 @@ class ReplacementTest(unittest.TestCase):
         self.assertEqual(R.admission(self.jobs,lines,candidate),record)
         for change in [{'attempt_id':'att-invented'},{'parent_sid':'other'},{'route_hash':'sha256:other'}]:
             with self.subTest(change=change),self.assertRaises(D.DispatchContractError):R.admission(self.jobs,lines,{**candidate,**change})
-        with mock.patch.object(D,'attempt_process_quiescence',return_value=SimpleNamespace(state='live',reason='live-now')):
+        with patch_split(D,'attempt_process_quiescence',return_value=SimpleNamespace(state='live',reason='live-now')):
             with self.assertRaises(D.DispatchContractError):R.admission(self.jobs,lines,candidate)
 
     def test_round_membership_needs_reciprocal_rows_and_the_canonical_claim(self):
@@ -555,9 +555,9 @@ class ReplacementTest(unittest.TestCase):
         candidate.update(D.parse_registry_metadata(R.seal_launch_input(args,'codex','the raw task')))
         rows=[(['now','done'],meta) for _,meta in R._rows(self.jobs.read_text().splitlines()).values()]
         route_module=review_input._dispatch_node_module().ROUTE
-        patches=[mock.patch.object(route_module,'review_lineage_routes',side_effect=lambda route,node:[route]),
-                 mock.patch.object(route_module,'review_round_records',side_effect=lambda *args,**kw:rows),
-                 mock.patch.object(route_module,'_dependency_revisions',side_effect=lambda *args,**kw:[])]
+        patches=[patch_split(route_module,'review_lineage_routes',side_effect=lambda route,node:[route]),
+                 patch_split(route_module,'review_round_records',side_effect=lambda *args,**kw:rows),
+                 patch_split(route_module,'_dependency_revisions',side_effect=lambda *args,**kw:[])]
         with contextlib.ExitStack() as stack:
             for patch in patches: stack.enter_context(patch)
             with self.assertRaises(D.DispatchContractError) as failure:
@@ -600,19 +600,19 @@ class ReplacementTest(unittest.TestCase):
         first=R.seal_launch_input(args,'codex','the raw task')
         self.write({**self.meta,'attempt_id':'att-next','launch_claimed':'0',
                     **D.parse_registry_metadata(first)},'open',append=True)
-        with mock.patch.object(R,'ROOT',Path('/newer/release')):
+        with patch_split(R,'ROOT',Path('/newer/release')):
             second=R.seal_launch_input(args,'codex','the raw task')
         self.assertNotEqual(first,second)
         saved=json.loads((R._directory(self.jobs)/'inputs'/'att-next.json').read_text())
         self.assertEqual(saved['launch_home'],'/newer/release')
         self.assertEqual(',replacement_input_digest='+R._digest(saved),second)
         # Different work, or an attempt that already started, still conflicts.
-        with mock.patch.object(R,'ROOT',Path('/third/release')):
+        with patch_split(R,'ROOT',Path('/third/release')):
             with self.assertRaises(D.DispatchContractError) as caught:
                 R.seal_launch_input(args,'codex','changed task')
         self.assertEqual(caught.exception.reason,'replacement-record-conflict')
         self.write({**self.meta,'attempt_id':'att-next','launch_claimed':'1'},'open',append=True)
-        with mock.patch.object(R,'ROOT',Path('/third/release')):
+        with patch_split(R,'ROOT',Path('/third/release')):
             with self.assertRaises(D.DispatchContractError) as caught:
                 R.seal_launch_input(args,'codex','the raw task')
         self.assertEqual(caught.exception.reason,'replacement-record-conflict')
@@ -682,7 +682,7 @@ class ReplacementTest(unittest.TestCase):
         """Seal an attempt's input under a verified route and register it unstarted."""
         import execution_access as EA
         self.bind_fixture_route()
-        verify=mock.patch.object(D._route_module(),'verify_route',side_effect=lambda route,*a,**k:dict(route))
+        verify=patch_split(D._route_module(),'verify_route',side_effect=lambda route,*a,**k:dict(route))
         verify.start();self.addCleanup(verify.stop)
         work=self.root/'work';work.mkdir(exist_ok=True)
         (self.root/'work2').mkdir(exist_ok=True)
@@ -1279,7 +1279,7 @@ class ReplacementTest(unittest.TestCase):
     def test_quick_and_advanced_owner_route_lookup(self):
         current=self.root/'current.json';current.write_text(json.dumps(self.route))
         self.route_mock.stop()
-        with mock.patch.object(D,'_route_module',return_value=SimpleNamespace(verify_route=lambda route:None)):
+        with patch_split(D,'_route_module',return_value=SimpleNamespace(verify_route=lambda route:None)):
             with mock.patch('owner_route_binding.resolve_owner_route_lifecycle',return_value=(None,None)):
                 path,_=R._route(self.jobs,'att-source',{**self.meta,'worker_type':'owner','route_file':str(self.path)})
                 self.assertEqual(path,self.path)
@@ -2145,7 +2145,7 @@ class ReplacementTest(unittest.TestCase):
     def _authorized_as(self, caller, *, live=True, child='att-child'):
         rows=R._rows(self.jobs.read_text().splitlines())
         with mock.patch.dict(os.environ,{'AGENT_DISPATCH_ATTEMPT_ID':caller}), \
-                mock.patch.object(D,'_parent_liveness_evidence',return_value=(live,'fixture')):
+                patch_split(D,'_parent_liveness_evidence',return_value=(live,'fixture')):
             R._authorized(self.jobs,rows,rows[child][1])
 
     def test_depth2_replacement_parent_follows_launched_owner_lineage(self):
@@ -2245,7 +2245,7 @@ class ReplacementTest(unittest.TestCase):
     def test_sr_child_retry_preserves_process_and_semantic_result_refusals(self):
         child, candidate, _=self._sr_child_retry()
         for state in ('live', 'unverifiable'):
-            with self.subTest(state=state), mock.patch.object(
+            with self.subTest(state=state), patch_split(
                     D, 'attempt_process_quiescence',
                     return_value=SimpleNamespace(state=state, reason='fixture')):
                 with self.assertRaises(D.DispatchContractError) as caught:
@@ -2798,7 +2798,7 @@ class ReplacementTest(unittest.TestCase):
         self._successor(record,self.meta|{'worker_type':'owner'},'open')
         hold={'until_epoch':4102444800,'label':'2100-01-01T00:00:00Z'}
         with mock.patch('dispatch_capacity_evidence.harness_hold',return_value=hold), \
-             mock.patch.object(R,'ROOT',self.root/'newer-release'):
+             patch_split(R,'ROOT',self.root/'newer-release'):
             result=R.advance(self.jobs,'att-source',authority_check=lambda *_:True)
         self.assertEqual(result.get('state'),'running',result)
         self.assertEqual(result['attempt_id'],record['replacement_attempt_id'])
@@ -3327,8 +3327,8 @@ class ReplacementTest(unittest.TestCase):
         self.reuse.stop()
         stack = contextlib.ExitStack()
         self.addCleanup(stack.close)
-        stack.enter_context(mock.patch.object(D, 'gate_currency', side_effect=lambda *a, **k: currency[0]))
-        stack.enter_context(mock.patch.object(D, 'completion_attempt_readiness',
+        stack.enter_context(patch_split(D, 'gate_currency', side_effect=lambda *a, **k: currency[0]))
+        stack.enter_context(patch_split(D, 'completion_attempt_readiness',
                                               return_value=SimpleNamespace(state='ready')))
         stack.enter_context(mock.patch.object(R, '_gate_snapshot', return_value=[]))
         stack.enter_context(patch_split(artifact_producer, 'route_cycle_for', return_value={
@@ -3449,7 +3449,7 @@ class ReplacementTest(unittest.TestCase):
         with mock.patch('dispatch_attempt_policy.readable_result', return_value='PASS'):
             self.assertFalse(RA.runtime_owner_can_resume('done', meta))
         for state in ('live', 'unverifiable'):
-            with self.subTest(state=state), mock.patch.object(D, 'attempt_process_quiescence',
+            with self.subTest(state=state), patch_split(D, 'attempt_process_quiescence',
                     return_value=SimpleNamespace(state=state, reason='fixture')):
                 with self.assertRaisesRegex(Exception, 'owner-input-unavailable'):
                     self._answer()
@@ -3648,7 +3648,7 @@ class ReplacementTest(unittest.TestCase):
                       'parent_attempt_id': record['replacement_attempt_id'], 'note': ''}
         history = self.jobs.read_bytes()
         # This isolated claim fixture has one route; use the real registry census and admission.
-        with mock.patch.object(dispatch.ROUTE, 'review_lineage_routes', return_value=[self.route]):
+        with patch_split(dispatch.ROUTE, 'review_lineage_routes', return_value=[self.route]):
             for status in ('open', 'running'):
                 with self.subTest(status=status):
                     self.jobs.write_bytes(history)
@@ -3731,11 +3731,11 @@ class ReplacementTest(unittest.TestCase):
         self.reuse.stop()
         stack = contextlib.ExitStack()
         self.addCleanup(stack.close)
-        stack.enter_context(mock.patch.object(D, 'gate_currency', return_value=D.GateCurrency(
+        stack.enter_context(patch_split(D, 'gate_currency', return_value=D.GateCurrency(
             'current', 'completion-marker-verified')))
-        stack.enter_context(mock.patch.object(D, 'completion_attempt_readiness',
+        stack.enter_context(patch_split(D, 'completion_attempt_readiness',
                                               return_value=SimpleNamespace(state='ready')))
-        stack.enter_context(mock.patch.object(D, 'note_evidence_change'))
+        stack.enter_context(patch_split(D, 'note_evidence_change'))
         stack.enter_context(mock.patch.object(R, '_gate_snapshot', return_value=[]))
         stack.enter_context(patch_split(artifact_producer, 'route_cycle_for', return_value={
             'cycle_id': 'cyc-test', 'producer_id': 'prod-test'}))
@@ -3762,7 +3762,7 @@ class ReplacementTest(unittest.TestCase):
         dispatch = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = dispatch
         spec.loader.exec_module(dispatch)
-        with mock.patch.object(dispatch.ROUTE, 'review_lineage_routes', return_value=[self.route]):
+        with patch_split(dispatch.ROUTE, 'review_lineage_routes', return_value=[self.route]):
             budget = dispatch.admit_round(self.route, self.route['nodes'][0], self.jobs,
                                           record_auto_revisions=False).budget
         self.assertEqual((budget.state, budget.round_kind, budget.next_round), ('admit', 'first', 1))
@@ -3793,9 +3793,9 @@ class ReplacementTest(unittest.TestCase):
         self._real_reuse()
         lines = self.jobs.read_text().splitlines()
         stale = D.GateCurrency('superseded', 'completion-review-source-stale')
-        with mock.patch.object(D, 'gate_currency', side_effect=lambda route, node, *a, **k: (
+        with patch_split(D, 'gate_currency', side_effect=lambda route, node, *a, **k: (
                 stale if node['id'] == 'report' else D.GateCurrency('current', 'completion-marker-verified'))), \
-                mock.patch.object(D, 'completion_superseded', wraps=D.completion_superseded) as rule:
+                patch_split(D, 'completion_superseded', wraps=D.completion_superseded) as rule:
             snapshot = R._reuse_snapshot(self.jobs, self.route, lines)
         self.assertEqual([row['node'] for row in snapshot['completed']], ['inspect'])
         (reopened,) = snapshot['invalidated']
@@ -3803,7 +3803,7 @@ class ReplacementTest(unittest.TestCase):
                          ('report', 'superseded', None))
         self.assertGreaterEqual(rule.call_count, 2)
         # Not reopened, not reused as current: an integrity break keeps its refusal.
-        with mock.patch.object(D, 'gate_currency', return_value=D.GateCurrency(
+        with patch_split(D, 'gate_currency', return_value=D.GateCurrency(
                 'integrity-broken:history-conflict', 'completion-marker-unreadable')):
             with self.assertRaises(D.DispatchContractError):
                 R._reuse_snapshot(self.jobs, self.route, lines)
@@ -3811,7 +3811,7 @@ class ReplacementTest(unittest.TestCase):
         # Only the answered node shows the change: with gates on, the same change on an
         # unanswered node is still refused, which is not what this case is about.
         with mock.patch.object(R, '_answered_fail_verdicts', return_value={'inspect'}), \
-                mock.patch.object(D, 'gate_currency', side_effect=lambda route, node, *a, **k: D.GateCurrency(
+                patch_split(D, 'gate_currency', side_effect=lambda route, node, *a, **k: D.GateCurrency(
                     'revised-unrecorded', 'completion-evidence-revised-unrecorded')
                     if node['id'] == 'inspect' else D.GateCurrency('current', 'completion-marker-verified')):
             snapshot = R._reuse_snapshot(self.jobs, self.route, lines)
@@ -4442,7 +4442,7 @@ class ReplacementTest(unittest.TestCase):
         for state,expected in (('unverifiable',[('att-source',True)]),('live',[]),('quiescent',[])):
             calls.clear()
             rows=R._rows(self.jobs.read_text().splitlines())
-            with mock.patch.object(D,'attempt_process_quiescence',return_value=SimpleNamespace(state=state,reason='r')), \
+            with patch_split(D,'attempt_process_quiescence',return_value=SimpleNamespace(state=state,reason='r')), \
                  mock.patch.object(D,'resolve_attempt_cleanup',side_effect=lambda j,a,apply=False:calls.append((a,apply))):
                 R._settle_terminal_cleanup(self.jobs,rows,'att-source',rows['att-source'][1])
             self.assertEqual(calls,expected,state)
@@ -4753,9 +4753,9 @@ class ReplacementLaunchSafetyTest(unittest.TestCase):
                 'worker_type': 'stage', 'route_node': 'retained-peer', 'note': 'completed-marker',
                 'failure_class': '', 'launch_outcome': 'reaped-before-publish'}
         t.write(peer, append=True)
-        stack.enter_context(mock.patch.object(D._route_module(), 'completion_dir', return_value=completion))
-        stack.enter_context(mock.patch.object(D, 'gate_currency', return_value=D.GateCurrency('current', 'fixture-current')))
-        stack.enter_context(mock.patch.object(D, 'note_evidence_change'))
+        stack.enter_context(patch_split(D._route_module(), 'completion_dir', return_value=completion))
+        stack.enter_context(patch_split(D, 'gate_currency', return_value=D.GateCurrency('current', 'fixture-current')))
+        stack.enter_context(patch_split(D, 'note_evidence_change'))
         stack.enter_context(mock.patch.object(R, '_gate_snapshot', return_value=[]))
         stack.enter_context(patch_split(P, 'route_cycle_for', return_value={'cycle_id': 'cyc-test', 'producer_id': 'prod-test'}))
         stack.enter_context(patch_split(P, 'cycle_route_admission', return_value=SimpleNamespace(allow=True)))
@@ -5019,7 +5019,7 @@ class StageRecoveryProgressTest(unittest.TestCase):
             fixed_now = datetime.now(timezone.utc)
             start = (fixed_now - timedelta(minutes=5)).isoformat()
             jobs = root / 'jobs.log'; jobs.write_text('')
-            with mock.patch.object(D._route_module(), 'verify_route'), \
+            with patch_split(D._route_module(), 'verify_route'), \
                  mock.patch.object(artifact_context, 'resolve_context',
                                    return_value=SimpleNamespace(output_dir=output)):
                 for note in ('dead-timeout', 'dead-no-progress'):
@@ -5091,7 +5091,7 @@ class NonGitStageProgressTest(unittest.TestCase):
             route_path.write_text(json.dumps(route), encoding="utf-8")
             meta = {"worker_type": "stage", "route_node": "execute",
                     "route_file": str(route_path), "note": "dead-timeout"}
-            with mock.patch.object(D._route_module(), "verify_route"), \
+            with patch_split(D._route_module(), "verify_route"), \
                  mock.patch.object(artifact_context, "resolve_context",
                                    return_value=SimpleNamespace(output_dir=output)), \
                  mock.patch.object(R, "_git_readonly", side_effect=AssertionError("Git must not be probed")):
@@ -5135,11 +5135,11 @@ class ReplacementReuseCurrencyTest(unittest.TestCase):
         currency = lambda _route, node, _path, _marker, **_kwargs: D.GateCurrency(
             states[node["id"]][0], states[node["id"]][1])
         import artifact_producer
-        with mock.patch.object(D, "_route_module", return_value=module), \
-                mock.patch.object(D, "gate_currency", side_effect=currency), \
-                mock.patch.object(D, "completion_attempt_readiness",
+        with patch_split(D, "_route_module", return_value=module), \
+                patch_split(D, "gate_currency", side_effect=currency), \
+                patch_split(D, "completion_attempt_readiness",
                                   return_value=SimpleNamespace(state=readiness)), \
-                mock.patch.object(D, "note_evidence_change"), \
+                patch_split(D, "note_evidence_change"), \
                 mock.patch.object(R, "_gate_snapshot", return_value=[]), \
                 patch_split(artifact_producer, "route_cycle_for",
                                   return_value={"cycle_id": "cyc-reuse", "producer_id": "prod-reuse"}), \
@@ -5487,11 +5487,11 @@ class AnsweredFailVerdictReuseTest(unittest.TestCase):
             return D.GateCurrency(*self.states.get(node["id"], ("current", "completion-marker-verified")))
 
         import artifact_producer
-        with mock.patch.object(D, "_route_module", return_value=module), \
-                mock.patch.object(D, "gate_currency", side_effect=currency), \
-                mock.patch.object(D, "completion_attempt_readiness",
+        with patch_split(D, "_route_module", return_value=module), \
+                patch_split(D, "gate_currency", side_effect=currency), \
+                patch_split(D, "completion_attempt_readiness",
                                   return_value=SimpleNamespace(state=readiness)), \
-                mock.patch.object(D, "note_evidence_change") as noted, \
+                patch_split(D, "note_evidence_change") as noted, \
                 mock.patch.object(R, "_gate_snapshot", return_value=[]), \
                 patch_split(artifact_producer, "route_cycle_for",
                                   return_value={"cycle_id": "cyc-answered", "producer_id": "prod-answered"}), \
@@ -6373,7 +6373,7 @@ class ClosedNativeFrameCapacityRecoveryTest(unittest.TestCase):
     def test_live_or_unknown_process_proof_never_creates_a_claim(self):
         for state in ("live", "unverifiable"):
             with self.subTest(state=state), \
-                 mock.patch.object(D, "attempt_process_quiescence",
+                 patch_split(D, "attempt_process_quiescence",
                     return_value=SimpleNamespace(state=state, reason="fixture-" + state)), \
                  self.assertRaises(D.DispatchContractError):
                 self.claim()
@@ -6671,8 +6671,8 @@ class NamespaceExtinctDeathProofTest(unittest.TestCase):
                 return D.ProcessGroupObservation('empty')
             return D.ProcessGroupObservation('unverifiable', (), 'observer-namespace-mismatch')
         stack = __import__('contextlib').ExitStack()
-        stack.enter_context(mock.patch.object(D, 'namespace_gone', return_value=gone))
-        stack.enter_context(mock.patch.object(D, 'attempt_tagged_descendants', side_effect=probe))
+        stack.enter_context(patch_split(D, 'namespace_gone', return_value=gone))
+        stack.enter_context(patch_split(D, 'attempt_tagged_descendants', side_effect=probe))
         return stack
 
     def test_dead_namespace_absent_is_a_silent_death_with_an_exact_proof(self):

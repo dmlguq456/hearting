@@ -358,7 +358,9 @@ class DispatchV20ConformanceTest(unittest.TestCase):
         # and a gate receipt's `release_authority`; it keeps its spelling (7e36cb).
         # Qualifying the surrounding prose as dispatch depth is a separate,
         # deferred wording pass, not a contract this test enforces.
-        route = (ROOT / "utilities/capability-route.py").read_text(encoding="utf-8")
+        # capability-route.py is split into capability_route_*.py parts; read them all.
+        route = "\n".join(path.read_text(encoding="utf-8") for path in (
+            ROOT / "utilities/capability-route.py", *sorted((ROOT / "utilities").glob("capability_route_*.py"))))
         self.assertIn('"launch_authority":"depth-0"', route)
         receipt = (ROOT / "utilities/human_gate_receipt.py").read_text(encoding="utf-8")
         self.assertIn('RELEASE_AUTHORITIES = {"depth-0", "any"}', receipt)

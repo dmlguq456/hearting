@@ -19,6 +19,7 @@ import dispatch_contract as contract
 import dispatch_supervision as supervision
 import dispatch_pending_delivery as pending
 import dispatch_session_sweep as sweep
+from split_module_fixture import patch_split
 
 CURRENT = {"attempt_schema_version": "2", "dispatch_depth": "2", "transport": "headless",
            "execution_surface": "registered-headless", "registered_worker": "1",
@@ -49,7 +50,7 @@ class ResponsibilityTest(unittest.TestCase):
         from types import SimpleNamespace
         self.jobs.write_text(row("att-child", status="done", workflow_completion="runtime-v1"))
         with mock.patch("dispatch_notice_state.route_obligation_closed", return_value=True), \
-             mock.patch.object(contract, "observed_attempt_liveness",
+             patch_split(contract, "observed_attempt_liveness",
                                return_value=SimpleNamespace(process_state="live", process_reason="pid-live")), \
              mock.patch("codex_dispatch_terminal.terminal_envelope_observed", return_value=False):
             self.assertTrue(supervision._pending(
@@ -176,7 +177,7 @@ class ResponsibilityTest(unittest.TestCase):
         self.jobs.write_text(row("att-worker", **metadata))
         with mock.patch("dispatch_replacement._replacement_in_flight", return_value=False), \
              mock.patch("dispatch_replacement._plain_retry_successor", return_value=False), \
-             mock.patch.object(contract, "completion_marker_is_current", return_value=True):
+             patch_split(contract, "completion_marker_is_current", return_value=True):
             self.assertTrue(supervision._attempt_stall_superseded(self.jobs, "att-worker", metadata))
         with mock.patch("dispatch_replacement._replacement_in_flight", return_value=True), \
              mock.patch("dispatch_replacement._plain_retry_successor", return_value=False):
@@ -1030,8 +1031,8 @@ class NamespaceExtinctObligationTest(unittest.TestCase):
                 return contract.ProcessGroupObservation("empty")
             return contract.ProcessGroupObservation("unverifiable", (), "observer-namespace-mismatch")
 
-        with mock.patch.object(contract, "namespace_gone", return_value="extinct"), \
-                mock.patch.object(contract, "attempt_tagged_descendants", side_effect=probe):
+        with patch_split(contract, "namespace_gone", return_value="extinct"), \
+                patch_split(contract, "attempt_tagged_descendants", side_effect=probe):
             jobs.write_text(row("att-extinct", **namespace))
             rows = supervision._rows(jobs)
             meta = rows["att-extinct"][1]

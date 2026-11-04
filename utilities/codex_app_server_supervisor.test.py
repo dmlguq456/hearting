@@ -19,6 +19,7 @@ import textwrap
 from types import SimpleNamespace
 import unittest
 from unittest import mock
+from split_module_fixture import patch_split
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1602,9 +1603,9 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
                 return rendered
 
             with mock.patch.object(route_authority_module, "owns", return_value=True), \
-                 mock.patch.object(contract, "attempt_governed_process_quiescence",
+                 patch_split(contract, "attempt_governed_process_quiescence",
                                    return_value=contract.ProcessQuiescence("quiescent", "fixture")), \
-                 mock.patch.object(contract, "supervisor_lease_is_held", return_value=False), \
+                 patch_split(contract, "supervisor_lease_is_held", return_value=False), \
                  mock.patch.object(route_parent_close, "row_requested", return_value=False), \
                  mock.patch.object(route_parent_close, "owner_continuation_processes",
                                    return_value=(contract.ProcessQuiescence(

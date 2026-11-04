@@ -1166,7 +1166,7 @@ class RouteLivenessOwnerAdvanceTest(unittest.TestCase):
         current = C.OwnerRouteBinding("/r1.json", "rt-r1", "sha256:r1")
         with mock.patch.object(C, "resolve_owner_route_lifecycle",
                                return_value=(current, "owner-route-advance-current")), \
-             mock.patch.object(C.DISPATCH, "observed_attempt_liveness") as observed:
+             patch_split(C.DISPATCH, "observed_attempt_liveness") as observed:
             observed.return_value = mock.Mock(state="alive", reason="ok")
             result = C._route_liveness("rt-r1", attempts)
         self.assertEqual(result["state"], "alive")
@@ -1177,7 +1177,7 @@ class RouteLivenessOwnerAdvanceTest(unittest.TestCase):
         with mock.patch.object(
             C, "resolve_owner_route_lifecycle",
             return_value=(current, "owner-route-post-launch-attachment"),
-        ), mock.patch.object(C.DISPATCH, "observed_attempt_liveness") as observed:
+        ), patch_split(C.DISPATCH, "observed_attempt_liveness") as observed:
             observed.return_value = mock.Mock(state="alive", reason="ok")
             result = C._route_liveness("rt-r0", attempts)
         self.assertEqual(result["state"], "alive")
@@ -1202,7 +1202,7 @@ class RouteLivenessOwnerAdvanceTest(unittest.TestCase):
         anchor = C.OwnerRouteBinding("/r0.json", "rt-r0", "sha256:r0")
         with mock.patch.object(C, "resolve_owner_route_lifecycle",
                                return_value=(anchor, "owner-route-launch-binding")), \
-             mock.patch.object(C.DISPATCH, "observed_attempt_liveness") as observed:
+             patch_split(C.DISPATCH, "observed_attempt_liveness") as observed:
             observed.return_value = mock.Mock(state="alive", reason="ok")
             result = C._route_liveness("rt-r0", attempts)
         self.assertEqual(result["state"], "alive")

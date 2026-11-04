@@ -28,6 +28,7 @@ import dispatch_seat_handover as HANDOVER  # noqa: E402
 import opencode_runtime  # noqa: E402
 from execution_access import ExecutionAccessRequest  # noqa: E402
 from route_identity import route_hash  # noqa: E402
+from split_module_fixture import patch_split  # noqa: E402
 
 
 class RotatedFrameCapacityAuthorityTest(unittest.TestCase):
@@ -716,7 +717,7 @@ class OwnerPinChangeTest(unittest.TestCase):
         with mock.patch.dict(os.environ, self.isolated_env(), clear=True), \
              mock.patch.object(RA, "caller_identity", return_value=caller), \
              mock.patch.object(work_start, "_rows", return_value=rows), \
-             mock.patch.object(router, "_compose_readiness", return_value=probe) as readiness:
+             patch_split(router, "_compose_readiness", return_value=probe) as readiness:
             result = router._change_pins(self.route, Path(self.temp.name) / "jobs.log", values)
         return result, readiness
 
@@ -1076,11 +1077,11 @@ class Case4RetryLinkTest(unittest.TestCase):
                 ",".join(f"{k}={v}" for k, v in latest.items() if not k.startswith("_"))],
                 {**candidate, "automatic_retry_of": args.attempt_id}))
             for state in ("live", "unverifiable"):
-                with mock.patch.object(DC, "attempt_process_quiescence",
+                with patch_split(DC, "attempt_process_quiescence",
                                        return_value=SimpleNamespace(state=state)):
                     self.assertEqual(RA.retry_predecessor([latest], jobs=jobs, task=new), args.attempt_id)
             conflicted = {**latest, "terminal_conflict": "pending"}
-            with mock.patch.object(DC, "terminal_conflict_pending", return_value=True):
+            with patch_split(DC, "terminal_conflict_pending", return_value=True):
                 self.assertEqual(RA.retry_predecessor([conflicted], jobs=jobs, task=new), args.attempt_id)
             replacement._directory(jobs).joinpath("inputs", args.attempt_id + ".json").write_text("{}")
             self.assertEqual(RA.retry_predecessor([latest], jobs=jobs, task=new), args.attempt_id)
@@ -1099,7 +1100,7 @@ class Case4RetryLinkTest(unittest.TestCase):
             row.update(DC.parse_registry_metadata(
                 replacement.seal_launch_input(args, "codex", old_task)))
             changed = "Close historical/current conflict and actual DB parity."
-            with mock.patch.object(DC, "attempt_process_quiescence",
+            with patch_split(DC, "attempt_process_quiescence",
                                    return_value=SimpleNamespace(state="quiescent")):
                 self.assertTrue(RA.new_owner_request(row, jobs=jobs, task=changed))
                 self.assertFalse(RA.new_owner_request(row, jobs=jobs, task=old_task))
@@ -1111,7 +1112,7 @@ class Case4RetryLinkTest(unittest.TestCase):
                 self.assertFalse(RA.new_owner_request({**row, "terminal_conflict": "1"},
                                                       jobs=jobs, task=changed))
             for state in ("live", "unverifiable"):
-                with mock.patch.object(DC, "attempt_process_quiescence",
+                with patch_split(DC, "attempt_process_quiescence",
                                        return_value=SimpleNamespace(state=state)):
                     self.assertFalse(RA.new_owner_request(row, jobs=jobs, task=changed))
 
@@ -1786,7 +1787,7 @@ class AccessChangeTest(unittest.TestCase):
         with mock.patch.dict(os.environ, extra), \
              mock.patch.object(RA, "caller_identity", return_value=caller), \
              mock.patch.object(work_start, "_rows", return_value=rows), \
-             mock.patch.object(router, "_turn_peer_source", return_value="unattributed"):
+             patch_split(router, "_turn_peer_source", return_value="unattributed"):
             if not env:
                 os.environ.pop("AGENT_DISPATCH_EXECUTION_ACCESS_FILE", None)
             return router._record_access_change(self.route, self.jobs)

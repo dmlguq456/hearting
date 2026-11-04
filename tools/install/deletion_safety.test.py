@@ -25,6 +25,8 @@ import manifest  # noqa: E402
 import distribution  # noqa: E402
 import runtime_activation  # noqa: E402
 import safe_fs  # noqa: E402
+sys.path.append(str(Path(__file__).resolve().parents[2] / "utilities"))  # split_module_fixture
+from split_module_fixture import patch_split  # noqa: E402
 
 
 def _leaf_signature(path: Path) -> tuple[object, ...]:
@@ -731,7 +733,7 @@ class ReleaseHeldByLiveProcessTest(unittest.TestCase):
                          *live.iterdir()):
                 os.utime(path, (quiet, quiet))
             # The fixture root itself may sit deeper than production's walk depth.
-            with mock.patch.object(distribution, "state_root", return_value=state), \
+            with patch_split(distribution, "state_root", return_value=state), \
                     mock.patch.object(distribution, "data_root", return_value=data), \
                     mock.patch.object(distribution, "_ORPHAN_PYCACHE_DEPTH",
                                       len(base.parts) + 3):

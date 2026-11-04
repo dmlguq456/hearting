@@ -20,7 +20,7 @@ from types import SimpleNamespace
 
 import work_start as W
 from dispatch_completion_join import CurrentDeliveryState
-from split_module_fixture import patch_split
+from split_module_fixture import patch_split, split_patch
 
 
 def load(name, path):
@@ -55,7 +55,7 @@ class WorkStartTest(unittest.TestCase):
         self.join.start(); self.addCleanup(self.join.stop)
         self.gate = mock.patch.object(W, "owner_frame_launch_gate", side_effect=self.owner_gate)
         self.gate.start(); self.addCleanup(self.gate.stop)
-        self.pair = mock.patch.object(W, "completion_marker_gate")
+        self.pair = patch_split(W, "completion_marker_gate")
         self.pair.start(); self.addCleanup(self.pair.stop)
         self.current = mock.patch.object(W, "current_delivery_state", side_effect=self.delivery)
         self.current.start(); self.addCleanup(self.current.stop)
@@ -80,7 +80,7 @@ class WorkStartTest(unittest.TestCase):
             advanced.append(True)
             return {**result, "state": "ready"}
         with mock.patch("route_parent_close.intent", return_value=None), \
-                mock.patch.object(W, "_route_module", return_value=module), \
+                patch_split(W, "_route_module", return_value=module), \
                 mock.patch.object(W, "_advance", side_effect=advance), \
                 mock.patch.object(W, "_advance_plan", side_effect=lambda _route, _jobs, result, **kw: result), \
                 mock.patch.object(W, "_arm_capacity_resume", side_effect=lambda result, *_args: result), \
@@ -104,7 +104,7 @@ class WorkStartTest(unittest.TestCase):
         module = SimpleNamespace(resolve_route_argument=lambda *a: source_path,
                                  verify_route=lambda value: value,
                                  restore_consumed_tombstones=lambda *a, **kw: {"restored": [], "errors": []})
-        with mock.patch.object(W, "_route_module", return_value=module):
+        with patch_split(W, "_route_module", return_value=module):
             first = self.start()
             second = self.start()
         self.assertTrue(first["owner_started"])
@@ -906,7 +906,7 @@ class WorkStartTest(unittest.TestCase):
                               ('unverifiable', 'owner-process-unverifiable')):
             with self.subTest(state=state), \
                  mock.patch.object(W, 'join_selected_attempts', return_value={'state': 'timeout', 'children': []}), \
-                 mock.patch.object(D, 'attempt_process_quiescence',
+                 patch_split(D, 'attempt_process_quiescence',
                                    return_value=D.ProcessQuiescence(state, 'fixture')):
                 result = self.start()
                 self.assertEqual((result['state'], result['reason']), ('needs-attention', reason), result)
@@ -1220,7 +1220,7 @@ class WorkStartTest(unittest.TestCase):
                         side_effect=lambda r, m: {"root_route_id": "rt-root", "node": "__owner__"}), \
              mock.patch("dispatch_replacement._route", return_value=(self.path, self.route)), \
              mock.patch("dispatch_replacement._terminal_absent", side_effect=AssertionError("no log to read")), \
-             mock.patch("dispatch_contract.attempt_process_quiescence",
+             split_patch("dispatch_contract.attempt_process_quiescence",
                         return_value=SimpleNamespace(state="quiescent", reason="process-absent")), \
              mock.patch("dispatch_capacity_evidence.harness_hold", return_value=None), \
              mock.patch("dispatch_replacement_batch.command", return_value=None):
@@ -1652,7 +1652,7 @@ class WorkStartTest(unittest.TestCase):
                    "child_harness": "codex", "status": "supported", "launch_authority": "conductor",
                    "checked_worktree": self.tmp.name}
         self.ready = self.released = True
-        with mock.patch.object(module, "_compose_readiness", return_value={"tuples": [checked]}) as probe, \
+        with patch_split(module, "_compose_readiness", return_value={"tuples": [checked]}) as probe, \
              mock.patch.object(RA, "caller_identity", return_value=("claude", "parent")):
             first = self.start()
             second = self.start()
@@ -1970,7 +1970,7 @@ class WorkStartTest(unittest.TestCase):
                                              ({"consumer_recovery": "not-started:no-queued-correction"}, None)):
                 with self.subTest(replaced=replaced, recovery=recovery), \
                      mock.patch("route_parent_close.intent", return_value=None), \
-                     mock.patch.object(W, "_route_module", return_value=module), \
+                     patch_split(W, "_route_module", return_value=module), \
                      mock.patch.object(W, "continuation_work_request", return_value={}), \
                      mock.patch.object(W, "resume_command", return_value="resume"), \
                      mock.patch.object(inline_finish, "pending_state", return_value=None), \
@@ -3305,8 +3305,8 @@ class CorrectAnswerContinuationTest(unittest.TestCase):
                 mock.patch.object(W, "start_work", side_effect=start_work), \
                 mock.patch.object(W, "_rows", return_value={current: ("done", {"note": "dead-worker-blocked"})}), \
                 mock.patch("dispatch_replacement._route", return_value=(self.route_path, {})), \
-                mock.patch.object(self.router, "verify_route", side_effect=lambda route, *a, **k: route), \
-                mock.patch.object(self.router, "_record_route_chain"):
+                patch_split(self.router, "verify_route", side_effect=lambda route, *a, **k: route), \
+                patch_split(self.router, "_record_route_chain"):
             code = self.router.main()
         return code, json.loads(out.getvalue()), calls, submit
 
@@ -3419,10 +3419,10 @@ class NeverStartedReplacementNormalStartTest(unittest.TestCase):
         self.gate = mock.patch.object(W, "owner_frame_launch_gate", side_effect=self.owner_gate)
         self.gate.start()
         self.addCleanup(self.gate.stop)
-        self.pair = mock.patch.object(W, "completion_marker_gate")
+        self.pair = patch_split(W, "completion_marker_gate")
         self.pair.start()
         self.addCleanup(self.pair.stop)
-        self.seat_root = mock.patch.object(session_tidy, "state_root", return_value=self.root / "seat-state")
+        self.seat_root = patch_split(session_tidy, "state_root", return_value=self.root / "seat-state")
         self.seat_root.start()
         self.addCleanup(self.seat_root.stop)
 
@@ -3445,7 +3445,7 @@ class NeverStartedReplacementNormalStartTest(unittest.TestCase):
         self.owner_input = dispatch_owner_input
         self.replacement = dispatch_replacement
         self.contract = dispatch_contract
-        self.process_probe = mock.patch.object(
+        self.process_probe = patch_split(
             dispatch_contract, "attempt_process_quiescence", side_effect=self._fixture_quiescence)
         self.process_probe.start()
         self.addCleanup(self.process_probe.stop)
@@ -4842,7 +4842,7 @@ class ModernNeverStartedOwnerNormalStartTest(NeverStartedReplacementNormalStartT
         self._store(owner_b, "legacy correction 7", "input-b-7")
         before = len(self.launches)
 
-        with mock.patch.object(self.contract, "_settled_cleanup_receipt", return_value=False):
+        with patch_split(self.contract, "_settled_cleanup_receipt", return_value=False):
             receipt = self._cli_start()
 
         self.assertEqual(len(self.launches), before)

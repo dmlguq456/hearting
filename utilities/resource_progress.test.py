@@ -13,6 +13,7 @@ from unittest import mock
 
 import resource_progress as progress
 import resource_metric_sources as metric_sources
+from split_module_fixture import patch_split
 
 
 def _cairn_problems(record_path):
@@ -1605,7 +1606,7 @@ class ExperimentObservationTest(unittest.TestCase):
         import dispatch_seat_handover as handover
         import session_tidy as tidy
         from peer_obligations import _ordinary_notice_target
-        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(tidy, "state_root", return_value=Path(temporary)):
+        with tempfile.TemporaryDirectory() as temporary, patch_split(tidy, "state_root", return_value=Path(temporary)):
             identity = {"jobs": str(Path(temporary) / "jobs.log"), "storage_recipient": "sid-codex",
                         "lineage": {"kind": "provenance", "harness": "codex", "session_id": "sid-codex"}}
             self.assertEqual(handover.session_successor("sid-codex"), ("", ""))

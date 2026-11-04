@@ -3,6 +3,7 @@ import importlib.util, io, json, os, subprocess, sys, tempfile, time, unittest
 from types import SimpleNamespace
 from pathlib import Path
 from unittest import mock
+from split_module_fixture import patch_split
 os.environ.setdefault("HEARTING_CAPACITY_PROBE_CLI", os.devnull)  # never ask a real Claude login
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -994,7 +995,7 @@ class FallbackTest(unittest.TestCase):
   evidence=self.art/"fixture-plan.md"
   evidence.write_text("Fixture plan input.\n")
   with mock.patch.dict(os.environ,self.launch_roots_env()), \
-       mock.patch.object(R,"_launch_open_cycle_checkpoint"):
+       patch_split(R,"_launch_open_cycle_checkpoint"):
    R.complete_node(route,plan,"plan",evidence,attempt_id="att-fixture-plan",
      explicit_attempt_metadata={"attempt_schema_version":2,"dispatch_depth":2,
        "transport":"headless","execution_surface":"inline",
@@ -1079,8 +1080,8 @@ class FallbackTest(unittest.TestCase):
    with contextlib.redirect_stdout(out),contextlib.redirect_stderr(err):
     code=module.main(command[1:])
    return SimpleNamespace(returncode=code,stdout=out.getvalue(),stderr=err.getvalue())
-  with mock.patch.object(DC,"attempt_process_quiescence",side_effect=observe), \
-       mock.patch.object(F,"attempt_process_quiescence",side_effect=observe), \
+  with patch_split(DC,"attempt_process_quiescence",side_effect=observe), \
+       patch_split(F,"attempt_process_quiescence",side_effect=observe), \
        mock.patch.object(F,"run_wrapper",side_effect=wrapper):
    yield
  def run_observed_chain(self,path,attempts,*,state="quiescent"):
@@ -1225,7 +1226,7 @@ class FallbackTest(unittest.TestCase):
     "registered_worker":"1","fallback_hop":"same-harness-headless",
    }
    with mock.patch.dict(os.environ,self.launch_roots_env()), \
-        mock.patch.object(R,"_launch_open_cycle_checkpoint"):
+        patch_split(R,"_launch_open_cycle_checkpoint"):
     R.complete_node(source,node,node["id"],evidence,attempt_id=attempt_id,
                     explicit_attempt_metadata=metadata)
    jobs=self.jobs
@@ -1685,8 +1686,8 @@ class FallbackTest(unittest.TestCase):
          mock.patch.object(F,"ordered_fallback_hops",return_value=(hops,None)), \
          mock.patch.object(F,"attempt_identity",return_value=aid), \
          mock.patch.object(F,"run_wrapper",side_effect=refused), \
-         mock.patch.object(F,"attempt_process_quiescence",return_value=SimpleNamespace(state="quiescent")), \
-         mock.patch.object(DC,"attempt_process_quiescence",return_value=SimpleNamespace(state="quiescent")), \
+         patch_split(F,"attempt_process_quiescence",return_value=SimpleNamespace(state="quiescent")), \
+         patch_split(DC,"attempt_process_quiescence",return_value=SimpleNamespace(state="quiescent")), \
          contextlib.redirect_stdout(out):
      code=F._dispatch(F.LAUNCH_TUPLE.ReportOnlyObservation())
     receipt=self.cli_verdict(out.getvalue())
@@ -1789,7 +1790,7 @@ class FallbackTest(unittest.TestCase):
     self.jobs.write_text(
      f"2026-10-07T00:00:00Z\tdone\t{self.repo}\t{self.repo}\tstage\t"
      f"route_id=rt-own,route_node=execute,attempt_id=att-launched,worker_type=stage,note={note},failure_class={failure_class}\n")
-    with mock.patch.object(F,"attempt_process_quiescence",return_value=SimpleNamespace(state="quiescent",reason="process-absent")):
+    with patch_split(F,"attempt_process_quiescence",return_value=SimpleNamespace(state="quiescent",reason="process-absent")):
      state,fields=F.terminal_attempt_state(self.jobs,"rt-own","execute","att-launched")
     self.assertEqual((state,fields["review_verdict"],fields["note"]),("terminal",verdict,note))
     self.assertIsNotNone(F.finished_verdict_row(self.jobs,"rt-own","execute","att-launched"))
@@ -2292,7 +2293,7 @@ class FallbackTest(unittest.TestCase):
   self.assertEqual(state,"observed")
   self.assertEqual(fields["process_state"],"live")
   self.assertIsNone(proc.poll())
-  with mock.patch.object(F.subprocess,"run",side_effect=[seed,stale]), mock.patch.object(
+  with mock.patch.object(F.subprocess,"run",side_effect=[seed,stale]), patch_split(
        F,"attempt_process_quiescence",return_value=SimpleNamespace(state="unverifiable",reason="observer-unavailable")):
    state,fields=F.watch_launched_attempt(args,{"route_id":"rt-fixture"},{"id":"plan"},"att-settling",{})
   self.assertEqual(state,"fail-closed")
@@ -4178,7 +4179,7 @@ class FallbackTest(unittest.TestCase):
    cleanup=[]; calls=[]
    code,out,err=self.start(path,patches=(
     self.compiled_order(),
-    mock.patch.object(F,"attempt_process_quiescence",return_value=SimpleNamespace(state="quiescent",reason="namespace-extinct")),
+    patch_split(F,"attempt_process_quiescence",return_value=SimpleNamespace(state="quiescent",reason="namespace-extinct")),
     mock.patch("dispatch_completion_join.exact_attempt_row",side_effect=lambda jobs,attempt:SimpleNamespace(attempt_id=attempt)),
     mock.patch("dispatch_completion_join.reconcile_exact_dead_attempt",side_effect=reconcile),
     mock.patch("dispatch_completion_join.resolve_attempt_cleanup",side_effect=lambda jobs,attempt,apply=False:cleanup.append((attempt,apply))),
@@ -4198,7 +4199,7 @@ class FallbackTest(unittest.TestCase):
    calls=[]
    code,out,err=self.start(path,patches=(
     self.compiled_order(),
-    mock.patch.object(F,"attempt_process_quiescence",return_value=SimpleNamespace(state="live",reason="process-live")),
+    patch_split(F,"attempt_process_quiescence",return_value=SimpleNamespace(state="live",reason="process-live")),
     mock.patch("dispatch_completion_join.reconcile_exact_dead_attempt",side_effect=AssertionError("live row closed")),
     self.wrapper_run(calls,"check=ok\nstatus=start\nduplicate_attempt=1\nlaunch_state=existing-active\n"
                            "registered=0\nstarted=0\nchild_spawned=0\n"),
@@ -4216,7 +4217,7 @@ class FallbackTest(unittest.TestCase):
    calls=[]
    code,out,err=self.start(path,patches=(
     self.compiled_order(),
-    mock.patch.object(F,"attempt_process_quiescence",return_value=SimpleNamespace(state="quiescent",reason="namespace-extinct")),
+    patch_split(F,"attempt_process_quiescence",return_value=SimpleNamespace(state="quiescent",reason="namespace-extinct")),
     mock.patch("dispatch_completion_join.exact_attempt_row",side_effect=lambda jobs,attempt:SimpleNamespace(attempt_id=attempt)),
     mock.patch("dispatch_completion_join.reconcile_exact_dead_attempt",return_value={"closed":False,"reason":"still-live"}),
     mock.patch("dispatch_completion_join.resolve_attempt_cleanup",side_effect=AssertionError("not closed")),

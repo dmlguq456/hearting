@@ -25,6 +25,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
+from split_module_fixture import patch_split, split_patch  # noqa: E402
 
 _HERE = Path(__file__).resolve().parent
 # Real capture fixtures: codex-cli 0.162.1 via tmux capture-pane, 80x40 and
@@ -275,7 +276,7 @@ class CompletionConsumerCorrectionTest(_TmpRootMixin, unittest.TestCase):
                                             ("other-thread", False, "-")):
             with self.subTest(expected=expected), \
                  mock.patch.object(peer_steward, "_proven_session", return_value="proven-thread"), \
-                 mock.patch.object(peer_steward, "_proc_start_ticks", return_value="birth"), \
+                 patch_split(peer_steward, "_proc_start_ticks", return_value="birth"), \
                  mock.patch.object(obligations, "execution_attempts_for_processes", return_value=()), \
                  mock.patch.object(obligations, "bound_work_for_pane", return_value=((), "observed")), \
                  mock.patch.object(obligations, "pane_readiness", side_effect=lambda **kw: kw):
@@ -293,7 +294,7 @@ class CompletionConsumerCorrectionTest(_TmpRootMixin, unittest.TestCase):
         identity = {"harness": "codex", "session_id": "sid-peer", "pane": "w1:p9"}
         info = {"shell_pid": 101, "foreground_processes": []}
         with mock.patch.object(peer_steward, "_retire_pane_info", return_value=info), \
-             mock.patch.object(peer_steward, "_proc_start_ticks", return_value="22"), \
+             patch_split(peer_steward, "_proc_start_ticks", return_value="22"), \
              mock.patch.object(peer_steward.peer_obligations, "execution_attempts_for_processes",
                                return_value=()), \
              mock.patch.object(peer_steward.peer_obligations, "bound_work_for_pane",
@@ -376,7 +377,7 @@ class CompletionConsumerCorrectionTest(_TmpRootMixin, unittest.TestCase):
                 return getattr(real_time, name)
 
         clock = FixtureClock()
-        with mock.patch.object(peer_steward, "time", clock):
+        with patch_split(peer_steward, "time", clock):
             identity = {"harness": "codex", "session_id": "sid-peer", "pane": "w1:p9"}
             for process_state, native in (("live", "idle"), ("unverifiable", "done"), ("live", "working")):
                 with self.subTest(process_state=process_state, native=native):
@@ -476,12 +477,12 @@ class CompletionConsumerCorrectionTest(_TmpRootMixin, unittest.TestCase):
                                                "ObservationTransport", return_value=transport), \
                              mock.patch.object(peer_steward, "_runner_readiness_transport",
                                                return_value=runner_transport), \
-                             mock.patch.object(peer_steward, "_watch_terminal_from_view", return_value=None), \
+                             patch_split(peer_steward, "_watch_terminal_from_view", return_value=None), \
                              mock.patch.object(peer_steward.select, "select", side_effect=deliver_event), \
                              mock.patch.object(peer_steward, "_retire_target", return_value=(native, identity, 0, None)), \
                              mock.patch.object(peer_steward, "_retire_pane_info", return_value={
                                  "shell_pid": os.getpid(), "foreground_processes": []}), \
-                             mock.patch("dispatch_contract.observed_attempt_liveness", return_value=ObservedAttemptLiveness(
+                             split_patch("dispatch_contract.observed_attempt_liveness", return_value=ObservedAttemptLiveness(
                                  "alive" if process_state == "live" else "unverifiable", "fixture", process_state, "fixture")), \
                              mock.patch.object(peer_steward.peer_obligations,
                                                "ensure_normal_runner"), \
@@ -1612,7 +1613,7 @@ class SharedDaemonCodexStartTest(_TmpRootMixin, unittest.TestCase):
         output = io.StringIO()
         with mock.patch.object(peer_steward.shutil, "which", return_value="/usr/bin/herdr"), \
              mock.patch.object(peer_steward.subprocess, "run", side_effect=fake_run) as run_mock, \
-             mock.patch.object(peer_steward, "_managed_ingress_dir", return_value=None), \
+             patch_split(peer_steward, "_managed_ingress_dir", return_value=None), \
              mock.patch.object(peer_steward, "_pane_is_managed", return_value=False), \
              mock.patch.object(peer_steward, "_process_session", return_value=proof) as resolver, \
              contextlib.redirect_stdout(output):
@@ -1922,7 +1923,7 @@ class WatchPendingRegisteredWorkTest(_TmpRootMixin, unittest.TestCase):
         self._row()
         check = peer_steward._watch_registered_work_pending
         self.assertTrue(check(self._view(), self._expected(), "default"))
-        with mock.patch("dispatch_contract.observed_attempt_liveness", return_value=
+        with split_patch("dispatch_contract.observed_attempt_liveness", return_value=
                         ObservedAttemptLiveness("unverifiable", "fixture", "unverifiable", "fixture")):
             self.assertFalse(check(self._view(), self._expected(), "default"))
         self._row(status="done")
@@ -1975,8 +1976,8 @@ class WatcherIdentityTest(unittest.TestCase):
                    "steward": {"session_id": "steward-1"}, "watcher": {}}
             paths.arm.write_text(json.dumps(arm), encoding="utf-8")
             # An empty pid_start would make this live observer read as exited.
-            with mock.patch.object(peer_steward, "_proc_start_ticks", return_value=None), \
-                    mock.patch.object(peer_steward, "process_start_ticks", return_value=None):
+            with patch_split(peer_steward, "_proc_start_ticks", return_value=None), \
+                    patch_split(peer_steward, "process_start_ticks", return_value=None):
                 peer_steward._record_own_watch_identity(watch_id, paths, "default")
             self.assertEqual(json.loads(paths.arm.read_text())["watcher"], {})
 
@@ -2281,8 +2282,8 @@ class WatchArmTest(_WatchMixin, unittest.TestCase):
         def register_b():
             with mock.patch.dict(os.environ, env), \
                     mock.patch.object(peer_steward, "_run_herdr_get", side_effect=get_b), \
-                    mock.patch.object(peer_steward, "_open_lock", side_effect=tracked_open), \
-                    mock.patch.object(peer_steward, "_acquire_bounded", side_effect=staged_acquire), \
+                    patch_split(peer_steward, "_open_lock", side_effect=tracked_open), \
+                    patch_split(peer_steward, "_acquire_bounded", side_effect=staged_acquire), \
                     mock.patch.object(peer_steward.subprocess, "Popen", side_effect=tracked_popen), \
                     contextlib.redirect_stdout(output):
                 result["rc"] = peer_steward.main(["watch", "w1:p9"])
@@ -2467,8 +2468,8 @@ class WatchArmTest(_WatchMixin, unittest.TestCase):
 
                 with mock.patch.dict(os.environ, env), \
                         mock.patch.object(peer_steward, "_run_herdr_get", return_value=payload_b), \
-                        mock.patch.object(peer_steward, "_open_lock", side_effect=tracked_open), \
-                        mock.patch.object(peer_steward, "_acquire_bounded", side_effect=blocking_acquire), \
+                        patch_split(peer_steward, "_open_lock", side_effect=tracked_open), \
+                        patch_split(peer_steward, "_acquire_bounded", side_effect=blocking_acquire), \
                         mock.patch.object(peer_steward.subprocess, "Popen", side_effect=tracked_popen), \
                         mock.patch.object(peer_steward, "_write_terminal_watch_receipt",
                                           side_effect=capture_receipt), \
@@ -3187,11 +3188,14 @@ class WatchArmTest(_WatchMixin, unittest.TestCase):
             with self.subTest(source=forbidden):
                 self.assertTrue(violations(forbidden, bounded_ui=True))
 
-        for name in ("peer-steward.py", "../hooks/peer-steward-rewake.py"):
+        # peer-steward.py and the modules it is split into (peer_steward_*.py).
+        parts = [path.name for path in sorted(_HERE.glob("peer_steward_*.py"))
+                 if "Split out of `peer-steward.py`" in path.read_text()]
+        for name in ("peer-steward.py", *parts, "../hooks/peer-steward-rewake.py"):
             path = (_HERE / name).resolve()
             self.assertTrue(path.exists(), f"{name} missing")
             source = path.read_text()
-            self.assertEqual(violations(source, bounded_ui=name == "peer-steward.py"),
+            self.assertEqual(violations(source, bounded_ui=name != "../hooks/peer-steward-rewake.py"),
                              [], f"{path.name}: foreground waits are fixed-deadline and task observers are event-driven")
             if name == "peer-steward.py":
                 self.assertIn("delay = min(15.0, delay * 1.7)", source)
@@ -3232,13 +3236,13 @@ class WatcherReceiptTest(_WatchMixin, unittest.TestCase):
         )
         identity = {"server": "named", "pane": "w1:p1", "native_state": "idle"}
         try:
-            with mock.patch.object(peer_steward, "_watch_root", return_value=self.watch_root), \
+            with patch_split(peer_steward, "_watch_root", return_value=self.watch_root), \
                     mock.patch.object(peer_steward.peer_obligations, "ObligationStore",
                                       return_value=store), \
                     mock.patch.object(peer_steward, "_watch_timeout_remaining_ms",
                                       return_value=(30_000, "active")), \
                     mock.patch.object(peer_steward, "_terminal_watch_request", return_value=None), \
-                    mock.patch.object(peer_steward, "_watch_native_result_identity",
+                    patch_split(peer_steward, "_watch_native_result_identity",
                                       return_value=("match", "sid-a", "")), \
                     mock.patch.object(peer_steward, "_watch_readiness_identity",
                                       return_value=identity), \
@@ -3335,17 +3339,17 @@ class WatcherReceiptTest(_WatchMixin, unittest.TestCase):
             return write_observation(write_paths, value, **kwargs)
 
         try:
-            with mock.patch.object(peer_steward, "_watch_root", return_value=self.watch_root), \
+            with patch_split(peer_steward, "_watch_root", return_value=self.watch_root), \
                     mock.patch.object(peer_steward.peer_obligations, "ObligationStore",
                                       return_value=store), \
                     mock.patch.object(peer_steward, "_watch_timeout_remaining_ms",
                                       return_value=(30_000, "active")), \
                     mock.patch.object(peer_steward, "_terminal_watch_request", return_value=None), \
-                    mock.patch.object(peer_steward, "_watch_native_result_identity",
+                    patch_split(peer_steward, "_watch_native_result_identity",
                                       return_value=("match", "sid-a", "")), \
                     mock.patch.object(peer_steward, "_watch_readiness_identity",
                                       return_value=identity), \
-                    mock.patch.object(peer_steward, "_write_watch_observation",
+                    patch_split(peer_steward, "_write_watch_observation",
                                       side_effect=capture_observation), \
                     mock.patch.object(peer_steward.herdr_observation,
                                       "socket_path_for_endpoint", return_value=None), \
@@ -3641,9 +3645,9 @@ class WatchTerminalReconcileTest(unittest.TestCase):
         arm = {"watch_id": "seatless-live", "steward_seat": None,
                "steward": {"harness": "claude", "session_id": "recipient-sid"},
                "watcher": {"pid": 123, "pid_start": "456"}}
-        with mock.patch.object(peer_steward, "_watch_root", return_value=root), \
-             mock.patch.object(peer_steward, "_watch_entries", return_value=[("seatless-live", arm)]), \
-             mock.patch.object(peer_steward, "_watcher_present", return_value=True):
+        with patch_split(peer_steward, "_watch_root", return_value=root), \
+             patch_split(peer_steward, "_watch_entries", return_value=[("seatless-live", arm)]), \
+             patch_split(peer_steward, "_watcher_present", return_value=True):
             self.assertTrue(peer_steward._watch_reconciliation_needed(entries=[("seatless-live", arm)]))
 
     def test_server_rearm_drops_a_socket_path_bound_to_another_endpoint(self):
@@ -3718,12 +3722,12 @@ class WatchTerminalReconcileTest(unittest.TestCase):
                 def close(self):
                     pass
 
-            with mock.patch.object(peer_steward, "_watch_root", return_value=root), \
+            with patch_split(peer_steward, "_watch_root", return_value=root), \
                  mock.patch.object(peer_steward.herdr_observation,
                                    "socket_path_for_endpoint", return_value="/fixture.sock"), \
                  mock.patch.object(peer_steward.herdr_observation,
                                    "ObservationTransport", return_value=Transport()), \
-                 mock.patch.object(peer_steward, "_watcher_present", return_value=False), \
+                 patch_split(peer_steward, "_watcher_present", return_value=False), \
                  mock.patch.object(peer_steward, "_spawn_watch_observer") as spawn:
                 peer_steward._ensure_watch_observers()
                 spawn.assert_not_called()
@@ -3748,18 +3752,18 @@ class WatchTerminalReconcileTest(unittest.TestCase):
             binding = "/fixture/managed/current"
             required = peer_steward._watch_observer_duty_argv(
                 watch_id, arm, rearm_generation=0, timeout_before_refs=True)
-            with mock.patch.object(peer_steward, "_watch_root", return_value=root), \
-                 mock.patch.object(peer_steward, "_watch_entries", return_value=[(watch_id, arm)]), \
+            with patch_split(peer_steward, "_watch_root", return_value=root), \
+                 patch_split(peer_steward, "_watch_entries", return_value=[(watch_id, arm)]), \
                  mock.patch.object(peer_steward, "_settle_terminal_watch_if_unobserved",
                                    return_value=False), \
-                 mock.patch.object(peer_steward, "_watcher_present", side_effect=[True, False]), \
+                 patch_split(peer_steward, "_watcher_present", side_effect=[True, False]), \
                  mock.patch.object(peer_steward.peer_obligations, "validate_service_binding",
                                    return_value=binding), \
                  mock.patch.object(peer_steward.peer_obligations,
                                    "replace_managed_observer", return_value="replaced") as replace, \
                  mock.patch.object(peer_steward.herdr_observation,
                                    "socket_path_for_endpoint", return_value=None), \
-                 mock.patch.object(peer_steward, "_watch_terminal_from_view", return_value=None), \
+                 patch_split(peer_steward, "_watch_terminal_from_view", return_value=None), \
                  mock.patch.object(peer_steward, "_spawn_watch_observer") as spawn:
                 peer_steward._ensure_watch_observers(service_current=binding)
             replace.assert_called_once_with(
@@ -3813,7 +3817,7 @@ class ClosedWatchBeforeRearmTest(unittest.TestCase):
                 (handover, "_chain_end",
                  lambda graph, harness, sid: self.chain.get((harness, sid), (sid, "self"))),
                 (handover, "lineage_graph", lambda *a, **k: object())):
-            patcher = mock.patch.object(target, name, side_effect=replacement)
+            patcher = patch_split(target, name, side_effect=replacement)
             patcher.start()
             self.addCleanup(patcher.stop)
         spawn = mock.patch.object(peer_steward, "_spawn_watch_observer")
@@ -3885,7 +3889,7 @@ class ClosedWatchBeforeRearmTest(unittest.TestCase):
         fd = os.open(self.paths.lock, os.O_CREAT | os.O_RDWR, 0o600)
         self.addCleanup(os.close, fd)
         fcntl.flock(fd, fcntl.LOCK_EX)
-        with mock.patch.object(peer_steward, "_wake_watch_observer", return_value=True) as wake:
+        with patch_split(peer_steward, "_wake_watch_observer", return_value=True) as wake:
             self.assertIsNone(self.run_pass())
         wake.assert_called_once()
         observation = json.loads(self.paths.observation.read_text())
@@ -3946,7 +3950,7 @@ class RetireReleasesClosedSessionTest(unittest.TestCase):
                "agent": {"harness": "codex", "session_id": "sid-t", "pane": "w1:p2"}}
         paths = peer_steward._watch_paths("exited-1", root)
         paths.arm.write_text(json.dumps(arm), encoding="utf-8")
-        with mock.patch.object(peer_steward, "_watch_root", return_value=root):
+        with patch_split(peer_steward, "_watch_root", return_value=root):
             self.assertTrue(peer_steward.settle_steward_exited_watch("exited-1"))
             self.assertTrue(peer_steward.settle_steward_exited_watch("exited-1"))
             self.assertFalse(peer_steward.settle_steward_exited_watch("no-such-watch"))
@@ -5252,7 +5256,7 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
              mock.patch.object(procscan.claude_process_identity, "observe_process", return_value=None), \
              mock.patch.object(peer_steward, "_retire_target", side_effect=target), \
              mock.patch.object(peer_steward, "_retire_pane_info", return_value=info), \
-             mock.patch.object(peer_steward, "_retire_process_record", return_value=foreground), \
+             patch_split(peer_steward, "_retire_process_record", return_value=foreground), \
              mock.patch.object(peer_steward, "_prompt_foreground", return_value=foreground), \
              mock.patch.object(peer_steward, "_agent_state",
                                side_effect=lambda _: (observation["state"], pane)), \
@@ -6844,7 +6848,7 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
                 return sender_ns if str(path) == "/proc/self/ns/pid" else target_ns
             with mock.patch.object(peer_steward, "_retire_pane_info", return_value=info), \
                  mock.patch.object(peer_steward, "_prompt_foreground", return_value={"pid": pid, "start": "123"}), \
-                 mock.patch.object(peer_steward, "_proc_start_ticks", side_effect=starts), \
+                 patch_split(peer_steward, "_proc_start_ticks", side_effect=starts), \
                  mock.patch.object(peer_steward, "_prompt_process_session", side_effect=[(sid, None) for sid in session_ids]), \
                  mock.patch.object(peer_steward.os, "readlink", side_effect=readlink):
                 return peer_steward._prompt_foreground_proof("w1:pX", "claude", "sid-child")
@@ -7700,8 +7704,11 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
     def test_source_has_no_general_prompt_observation_or_no_verify_bypass(self):
         source = (_HERE / "../utilities/peer-steward.py").resolve().read_text()
         start = source.index("def cmd_prompt(")
-        end = source.index("# --- clear:", start)
-        prompt = source[start:end]
+        # The function itself: the "# --- clear:" section that followed it moved to
+        # peer_steward_duties.py when this file was split.
+        import ast
+        prompt = next(ast.get_source_segment(source, node) for node in ast.parse(source).body
+                      if isinstance(node, ast.FunctionDef) and node.name == "cmd_prompt")
         for obsolete in ("_prompt_box", "_verify_after_send", "_transcript_arrival",
                          "_prompt_input_reason", "no_verify", "state-flip"):
             self.assertNotIn(obsolete, prompt)
@@ -8073,7 +8080,7 @@ class ObligationStartupTest(_TmpRootMixin, unittest.TestCase):
                     self.assertGreaterEqual(len(passes), 3,
                         "a callback could otherwise take this lease and discard the live owner's caches")
                 return real_flock(fd, operation)
-            with mock.patch.object(peer_steward, "_external_obligation_snapshot", return_value={}), \
+            with patch_split(peer_steward, "_external_obligation_snapshot", return_value={}), \
                  mock.patch.object(peer_steward, "_external_obligation_signature", side_effect=signature), \
                  mock.patch.object(peer_steward, "_external_obligation_snapshot_unchanged", return_value=True), \
                  mock.patch.object(peer_steward, "_reconcile_external_obligations", side_effect=reconcile), \
@@ -8148,7 +8155,7 @@ class ObligationStartupTest(_TmpRootMixin, unittest.TestCase):
                  mock.patch.object(peer_steward.peer_message, "_read_pending",
                                    return_value={"state": "queued"}) as transfer_lookup, \
                  mock.patch.object(peer_steward, "cmd_prompt", side_effect=courier), \
-                 mock.patch.object(peer_steward, "_external_obligation_snapshot",
+                 patch_split(peer_steward, "_external_obligation_snapshot",
                                    return_value={}), \
                  mock.patch.object(peer_steward, "_external_obligation_signature",
                                    return_value=()), \
@@ -8330,7 +8337,7 @@ class ObligationStartupTest(_TmpRootMixin, unittest.TestCase):
 
         with mock.patch.object(peer_steward.peer_obligations,
                                "peer_state_root", return_value=state_root), \
-             mock.patch.object(peer_steward, "_acquire_ensure_obligations_lock",
+             patch_split(peer_steward, "_acquire_ensure_obligations_lock",
                                side_effect=replace_before_lock), \
              mock.patch.object(peer_steward.peer_obligations,
                                "ensure_normal_runner") as runner:
@@ -8629,7 +8636,7 @@ class ObligationStartupTest(_TmpRootMixin, unittest.TestCase):
                     peer_steward.dispatch_batch_obligations,
                     "OwnerSettlementReadContext", side_effect=make_context), \
                  mock.patch.object(peer_steward, "_runner_readiness_loop"), \
-                 mock.patch.object(peer_steward, "_external_obligation_snapshot",
+                 patch_split(peer_steward, "_external_obligation_snapshot",
                                    return_value={"jobs_stamps": {}}), \
                  mock.patch.object(peer_steward, "_external_obligation_signature",
                                    return_value=((), ())), \
@@ -8789,11 +8796,11 @@ class ObligationStartupTest(_TmpRootMixin, unittest.TestCase):
 
         try:
             real_flock(lock.fileno(), fcntl.LOCK_EX)
-            with mock.patch.object(peer_steward, "_watch_root", return_value=watch_root), \
+            with patch_split(peer_steward, "_watch_root", return_value=watch_root), \
                  mock.patch.object(batch, "_jobs_paths", side_effect=lambda jobs=None, strict=True: [
                     Path(jobs).resolve(strict=False) if jobs else self.jobs_path.resolve()
                  ]), \
-                 mock.patch.object(peer_steward, "_external_obligation_snapshot",
+                 patch_split(peer_steward, "_external_obligation_snapshot",
                                    side_effect=count_snapshot), \
                  mock.patch.object(peer_steward, "_reconcile_external_obligations"), \
                  mock.patch.object(peer_steward.peer_obligations,
@@ -8823,7 +8830,7 @@ class ObligationStartupTest(_TmpRootMixin, unittest.TestCase):
         root.mkdir()
         batch_root = batch._root(self.jobs_path)
         batch_root.mkdir(parents=True)
-        with mock.patch.object(peer_steward, "_watch_root", return_value=root), \
+        with patch_split(peer_steward, "_watch_root", return_value=root), \
              mock.patch.object(batch, "_jobs_paths", return_value=[self.jobs_path.resolve()]):
             stable = peer_steward._external_obligation_snapshot()
             self.assertTrue(stable["watch_cacheable"])
@@ -8848,7 +8855,7 @@ class ObligationStartupTest(_TmpRootMixin, unittest.TestCase):
                     created.append(watch_id)
                 return entries
 
-            with mock.patch.object(peer_steward, "_watch_entries", side_effect=scan_then_create):
+            with patch_split(peer_steward, "_watch_entries", side_effect=scan_then_create):
                 stale = peer_steward._external_obligation_snapshot()
                 self.assertFalse(stale["watch_cacheable"])
                 self.assertEqual(stale["watches"], ())
@@ -8942,19 +8949,19 @@ class ObligationStartupTest(_TmpRootMixin, unittest.TestCase):
                     {"watch_id": watch_created[0], "state": "synthetic-complete"})
 
         try:
-            with mock.patch.object(peer_steward, "_watch_root", return_value=watch_root), \
-                 mock.patch.object(peer_steward, "_watch_entries",
+            with patch_split(peer_steward, "_watch_root", return_value=watch_root), \
+                 patch_split(peer_steward, "_watch_entries",
                                    side_effect=scan_watch_then_accept), \
                  mock.patch.object(batch, "_jobs_paths", return_value=[self.jobs_path.resolve()]), \
                  mock.patch.object(batch, "_read_only_records", side_effect=scan_then_accept), \
-                 mock.patch.object(peer_steward, "_external_obligation_snapshot",
+                 patch_split(peer_steward, "_external_obligation_snapshot",
                                    side_effect=count_snapshot), \
                  mock.patch.object(peer_steward.peer_obligations, "exec_service_runner",
                                    return_value=False), \
                  mock.patch.object(peer_steward, "_settle_terminal_watch_if_unobserved",
                                    return_value=False), \
-                 mock.patch.object(peer_steward, "_herdr_missing", return_value=False), \
-                 mock.patch.object(peer_steward, "_watch_terminal_from_view", return_value=None), \
+                 patch_split(peer_steward, "_herdr_missing", return_value=False), \
+                 patch_split(peer_steward, "_watch_terminal_from_view", return_value=None), \
                  mock.patch.object(peer_steward.herdr_observation,
                                    "socket_path_for_endpoint", return_value=None), \
                  mock.patch.object(batch.subprocess, "Popen", side_effect=launch), \
@@ -9049,7 +9056,7 @@ class ObligationStartupTest(_TmpRootMixin, unittest.TestCase):
             "test_batch_created_between_scan_and_stamp_is_reclaimed_by_runner")
         with mock.patch.object(batch, "pending_observer_snapshot",
                                side_effect=legacy_batch_snapshot), \
-             mock.patch.object(peer_steward, "_external_obligation_snapshot",
+             patch_split(peer_steward, "_external_obligation_snapshot",
                                side_effect=legacy_external_snapshot):
             regression.run(result)
 
@@ -9993,8 +10000,8 @@ class CodexPromptGateAndPeerStatusTest(_TmpRootMixin, unittest.TestCase):
                 return {"data": [turn] if turn else []}
             raise AssertionError("status used a write rpc: " + method)
         for patcher in (
-                mock.patch.object(peer_steward, "_watch_root", return_value=self.watch_root),
-                mock.patch.object(peer_steward, "_watch_entries", return_value=[]),
+                patch_split(peer_steward, "_watch_root", return_value=self.watch_root),
+                patch_split(peer_steward, "_watch_entries", return_value=[]),
                 mock.patch.object(peer_steward, "_current_session_identity",
                                   return_value=("sender-session", "claude")),
                 mock.patch("codex_queue_dispatch.resolve_queue_socket", return_value="fixture-socket"),
@@ -10220,7 +10227,7 @@ class UndeliveredWatchSweepReadsTest(_TmpRootMixin, unittest.TestCase):
             return steward_read(path)
 
         with mock.patch.object(self.tidy, "read_bytes", side_effect=read_bytes), \
-                mock.patch.object(peer_steward, "_read_json", side_effect=read_json):
+                patch_split(peer_steward, "_read_json", side_effect=read_json):
             rows = peer_steward.undelivered_watch_rows()
         ledgers = sum(1 for path in reads if path.suffix == ".jsonl")
         watch_files = sum(1 for path in reads if path.parent == self.root)
@@ -10829,7 +10836,7 @@ class IdleCardRequestTest(_TmpRootMixin, unittest.TestCase):
             return 0, {}
 
         self.seat_obj = self.st.seat_from_dict(req["seat"])
-        with mock.patch.object(peer_steward, "_herdr_missing", return_value=False), \
+        with patch_split(peer_steward, "_herdr_missing", return_value=False), \
              mock.patch.object(peer_steward, "_clear_look", side_effect=looks or [(None, agent, [])] * 3), \
              mock.patch.object(peer_steward, "_herdr_prompt", side_effect=prompt) as send, \
              mock.patch.object(peer_steward, "_record"), mock.patch("builtins.print") as output:
@@ -10840,7 +10847,7 @@ class IdleCardRequestTest(_TmpRootMixin, unittest.TestCase):
         seat, path = self.booking()
         self.seat_obj = seat
         req = self.clear.read_reservation(seat.key)
-        with mock.patch.object(peer_steward, "_herdr_missing", return_value=False), \
+        with patch_split(peer_steward, "_herdr_missing", return_value=False), \
              mock.patch.object(peer_steward, "_clear_look", return_value=(None,
                  {"pane": seat.pane, "harness": "claude", "session_id": "sid-A"}, [])), \
              mock.patch.object(peer_steward, "_record"), mock.patch("builtins.print") as output, \
@@ -11636,7 +11643,7 @@ class BesideStartTest(_TmpRootMixin, unittest.TestCase):
         import shlex
         with contextlib.ExitStack() as patches:
             patches.enter_context(mock.patch.object(peer_steward, "_current_session_identity", return_value=("original-controller", "codex")))
-            patches.enter_context(mock.patch.object(peer_steward, "_herdr_missing", return_value=False))
+            patches.enter_context(patch_split(peer_steward, "_herdr_missing", return_value=False))
             patches.enter_context(mock.patch.object(terminal_surface, "open_pane", return_value=terminal_surface.PaneResult("herdr", "w1:pNew", "split")))
             patches.enter_context(mock.patch.object(peer_steward.subprocess, "run", side_effect=OSError("start unavailable")))
             patches.enter_context(mock.patch.object(peer_steward, "_start_shell_identity", return_value=(101, "700")))
@@ -11663,7 +11670,7 @@ class BesideStartTest(_TmpRootMixin, unittest.TestCase):
                                                      (2, None, "native refused"))):
             with self.subTest(rc=rc), \
                  mock.patch.object(peer_steward, "_current_session_identity", return_value=("original-controller", "codex")), \
-                 mock.patch.object(peer_steward, "_herdr_missing", return_value=False), \
+                 patch_split(peer_steward, "_herdr_missing", return_value=False), \
                  mock.patch.object(terminal_surface, "open_pane", return_value=terminal_surface.PaneResult("herdr", "w1:pNew", "split")), \
                  mock.patch.object(peer_steward.subprocess, "run", return_value=subprocess.CompletedProcess([], rc, json.dumps(stdout) if stdout else "", stderr)), \
                  mock.patch.object(peer_steward, "_start_shell_identity", return_value=(101, "700")), \
@@ -11856,9 +11863,9 @@ class BesideStartTest(_TmpRootMixin, unittest.TestCase):
 
         with mock.patch.object(peer_steward.shutil, "which", return_value="herdr"), \
              mock.patch.object(peer_steward.subprocess, "run", side_effect=run), \
-             mock.patch.object(peer_steward, "_managed_ingress_dir", return_value=None), \
-             mock.patch.object(peer_steward, "_proc_start_ticks", return_value="700"), \
-             mock.patch.object(peer_steward, "_proc_cwd", side_effect=lambda pid:
+             patch_split(peer_steward, "_managed_ingress_dir", return_value=None), \
+             patch_split(peer_steward, "_proc_start_ticks", return_value="700"), \
+             patch_split(peer_steward, "_proc_cwd", side_effect=lambda pid:
                                cwd if clock["now"] >= .2 else "/previous"), \
              mock.patch.object(peer_steward.time, "monotonic", side_effect=lambda: clock["now"]), \
              mock.patch.object(peer_steward.time, "sleep", side_effect=lambda seconds:
@@ -11906,9 +11913,9 @@ class BesideStartTest(_TmpRootMixin, unittest.TestCase):
 
                 with mock.patch.object(peer_steward.shutil, "which", return_value="herdr"), \
                      mock.patch.object(peer_steward.subprocess, "run", side_effect=run), \
-                     mock.patch.object(peer_steward, "_proc_start_ticks", return_value="700"), \
-                     mock.patch.object(peer_steward, "_proc_cwd", return_value=cwd), \
-                     mock.patch.object(peer_steward, "_managed_ingress_dir", return_value=None), \
+                     patch_split(peer_steward, "_proc_start_ticks", return_value="700"), \
+                     patch_split(peer_steward, "_proc_cwd", return_value=cwd), \
+                     patch_split(peer_steward, "_managed_ingress_dir", return_value=None), \
                      mock.patch.object(peer_steward, "_ensure_pane_ingress", return_value=None), \
                      mock.patch.object(peer_steward, "_export_opencode_tui_scoped", return_value="missing"), \
                      mock.patch.object(peer_steward, "_start_shell_snapshot", return_value="stable prompt"), \
@@ -11934,7 +11941,7 @@ class BesideStartTest(_TmpRootMixin, unittest.TestCase):
                 "foreground_processes": [{"pid": 101}, {"pid": 202}]}
         with mock.patch.object(peer_steward, "_pane_has_agent", return_value=None), \
              mock.patch.object(peer_steward, "_retire_pane_info", return_value=info), \
-             mock.patch.object(peer_steward, "_proc_start_ticks", side_effect=["700", "701"]), \
+             patch_split(peer_steward, "_proc_start_ticks", side_effect=["700", "701"]), \
              mock.patch.object(peer_steward, "_start_shell_identity", return_value=None), \
              mock.patch.object(peer_steward.time, "sleep"), \
              mock.patch.object(peer_steward, "_wait_for_shell_prompt") as prompt:
@@ -11963,8 +11970,8 @@ class BesideStartTest(_TmpRootMixin, unittest.TestCase):
         with mock.patch.object(peer_steward.shutil, "which", return_value="herdr"), \
              mock.patch.object(peer_steward.subprocess, "run", side_effect=run), \
              mock.patch.object(peer_steward, "_BESIDE_READY_SECONDS", .1), \
-             mock.patch.object(peer_steward, "_proc_start_ticks", return_value="700"), \
-             mock.patch.object(peer_steward, "_proc_cwd", return_value="/previous"), \
+             patch_split(peer_steward, "_proc_start_ticks", return_value="700"), \
+             patch_split(peer_steward, "_proc_cwd", return_value="/previous"), \
              mock.patch.object(peer_steward.time, "monotonic", side_effect=lambda: clock["now"]), \
              mock.patch.object(peer_steward.time, "sleep", side_effect=lambda seconds:
                                clock.update(now=clock["now"] + seconds)), \
@@ -12047,7 +12054,7 @@ class BesideStartTest(_TmpRootMixin, unittest.TestCase):
              mock.patch.object(peer_steward, "_start_shell_snapshot", return_value="recorded screen"), \
              mock.patch.object(peer_steward, "_start_shell_identity", return_value=(101, "700")), \
              mock.patch.object(peer_steward, "_pane_has_agent", return_value=None), \
-             mock.patch.object(peer_steward, "_proc_start_ticks", return_value="700"), \
+             patch_split(peer_steward, "_proc_start_ticks", return_value="700"), \
              mock.patch.object(peer_steward, "_start_pane_screen", return_value="recorded screen"), \
              mock.patch("builtins.print") as printed:
             peer_steward.main(["start", "too-long", "--kind", "claude", "--beside", "w1:pOld"])
@@ -12067,7 +12074,7 @@ class BesideStartTest(_TmpRootMixin, unittest.TestCase):
             with self.subTest(occupied=occupied, shell=shell, prompt=prompt), \
                  mock.patch.object(peer_steward, "_pane_has_agent", return_value=occupied), \
                  mock.patch.object(peer_steward, "_start_shell_identity", return_value=shell), \
-                 mock.patch.object(peer_steward, "_proc_start_ticks", return_value="701" if shell == (101, "701") else "700"), \
+                 patch_split(peer_steward, "_proc_start_ticks", return_value="701" if shell == (101, "701") else "700"), \
                  mock.patch.object(peer_steward, "_retire_pane_info", return_value=None if shell is None else {"shell_pid": 101}), \
                  mock.patch.object(peer_steward, "_start_pane_screen", return_value="recorded screen" if prompt else "changed screen"), \
                  mock.patch.object(peer_steward.time, "monotonic", side_effect=lambda: next(clock)), \
@@ -12094,7 +12101,7 @@ class BesideStartTest(_TmpRootMixin, unittest.TestCase):
     def test_failed_fresh_start_waits_for_same_shell_then_closes_once(self):
         clock = iter(range(20))
         with mock.patch.object(peer_steward, "_pane_has_agent", return_value=None), \
-             mock.patch.object(peer_steward, "_proc_start_ticks", return_value="700"), \
+             patch_split(peer_steward, "_proc_start_ticks", return_value="700"), \
              mock.patch.object(peer_steward, "_retire_pane_info", return_value={"shell_pid": 101}), \
              mock.patch.object(peer_steward, "_start_shell_identity", side_effect=[None, (101, "700"), (101, "700")]), \
              mock.patch.object(peer_steward, "_start_pane_screen", return_value="recorded screen"), \
@@ -12146,7 +12153,7 @@ class BesideStartTest(_TmpRootMixin, unittest.TestCase):
         for recorded, current in cases:
             with self.subTest(current=current), \
                  mock.patch.object(peer_steward, "_pane_has_agent", return_value=None), \
-                 mock.patch.object(peer_steward, "_proc_start_ticks", return_value="700"), \
+                 patch_split(peer_steward, "_proc_start_ticks", return_value="700"), \
                  mock.patch.object(peer_steward, "_retire_pane_info", return_value={"shell_pid": 101}), \
                  mock.patch.object(peer_steward, "_start_shell_identity", return_value=(101, "700")), \
                  mock.patch.object(peer_steward, "_start_pane_screen", return_value=current), \
@@ -12179,7 +12186,7 @@ class BesideStartTest(_TmpRootMixin, unittest.TestCase):
              mock.patch.object(peer_steward, "_wait_for_created_shell", return_value=(None, (101, "700"))), \
              mock.patch.object(peer_steward, "_pane_has_agent", return_value=None), \
              mock.patch.object(peer_steward, "_start_shell_identity", return_value=(101, "700")), \
-             mock.patch.object(peer_steward, "_proc_start_ticks", return_value="700"), \
+             patch_split(peer_steward, "_proc_start_ticks", return_value="700"), \
              mock.patch.object(peer_steward, "_retire_pane_info", return_value={"shell_pid": 101}), \
              mock.patch.object(peer_steward, "_start_pane_screen", side_effect=read), \
              mock.patch.object(peer_steward.time, "monotonic", side_effect=lambda: next(clock)), \
@@ -12422,8 +12429,8 @@ class RetireTest(_TmpRootMixin, unittest.TestCase):
             self.assertFalse(peer_steward._retire_zombie_matches(4242, "800"))
 
         duty = {"intent": {"identity": {"foreground": {"pid": 4242, "start": "800"}}}}
-        with mock.patch.object(peer_steward, "_retire_process_record", return_value=None), \
-             mock.patch.object(peer_steward, "_retire_zombie_matches", return_value=True):
+        with patch_split(peer_steward, "_retire_process_record", return_value=None), \
+             patch_split(peer_steward, "_retire_zombie_matches", return_value=True):
             self.assertEqual(peer_steward._retire_subject_state(duty), "gone")
 
     def test_exact_opencode_native_status_overrides_stale_herdr_state(self):
@@ -12526,9 +12533,9 @@ class RetireTest(_TmpRootMixin, unittest.TestCase):
         try:
             with mock.patch.object(peer_steward.shutil, "which", return_value="herdr"), \
                  mock.patch.object(peer_steward.subprocess, "run", side_effect=run), \
-                 mock.patch.object(peer_steward, "_retire_process_record",
+                 patch_split(peer_steward, "_retire_process_record",
                                    return_value={"start": "800", "group": 4242, "argv": [world.harness]}), \
-                 mock.patch.object(peer_steward, "_proc_start_ticks",
+                 patch_split(peer_steward, "_proc_start_ticks",
                                    side_effect=lambda pid: "700" if pid == 101 else "800"), \
                  mock.patch.object(peer_steward.os, "stat", side_effect=stat), \
                  mock.patch.object(peer_steward, "_seat_handover", return_value=None), \
@@ -12638,7 +12645,7 @@ class RetireTest(_TmpRootMixin, unittest.TestCase):
         self.jobs_path.write_text(f"2026-10-09T00:00:00Z\topen\trepo\t-\tslug\t{meta}\n")
         for state, reason in (("live", "bound-registered-work-pending"),
                               ("unverifiable", "bound-registered-work-unknown")):
-            with self.subTest(process_state=state), mock.patch(
+            with self.subTest(process_state=state), split_patch(
                     "dispatch_contract.observed_attempt_liveness",
                     return_value=ObservedAttemptLiveness(
                         "alive" if state == "live" else "unverifiable", "fixture", state, "fixture")):
@@ -12683,9 +12690,9 @@ class RetireTest(_TmpRootMixin, unittest.TestCase):
 
         with mock.patch.object(peer_steward.shutil, "which", return_value="herdr"), \
              mock.patch.object(peer_steward.subprocess, "run", side_effect=world.run), \
-             mock.patch.object(peer_steward, "_retire_process_record", return_value=(record if record is not None else
+             patch_split(peer_steward, "_retire_process_record", return_value=(record if record is not None else
                               {"start": "800", "group": 4242, "argv": [world.harness]})), \
-             mock.patch.object(peer_steward, "_proc_start_ticks", side_effect=lambda pid: "700" if pid == 101 else "800"), \
+             patch_split(peer_steward, "_proc_start_ticks", side_effect=lambda pid: "700" if pid == 101 else "800"), \
              mock.patch.object(peer_steward.peer_obligations, "ensure_normal_runner", return_value=False), \
              mock.patch.object(peer_steward.os, "stat", side_effect=stat), \
              mock.patch.object(peer_steward.time, "monotonic", side_effect=lambda: next(clock)), \
@@ -12722,10 +12729,10 @@ class RetireTest(_TmpRootMixin, unittest.TestCase):
         try:
             with mock.patch.object(peer_steward.shutil, "which", return_value="herdr"), \
                  mock.patch.object(peer_steward.subprocess, "run", side_effect=world.run), \
-                 mock.patch.object(peer_steward, "_retire_process_record",
+                 patch_split(peer_steward, "_retire_process_record",
                                    return_value={"start": "800", "group": 4242,
                                                  "argv": [world.harness]}), \
-                 mock.patch.object(peer_steward, "_proc_start_ticks",
+                 patch_split(peer_steward, "_proc_start_ticks",
                                    side_effect=lambda pid: "700" if pid == 101 else "800"), \
                  mock.patch.object(peer_steward.os, "stat", side_effect=stat), \
                  mock.patch.object(peer_steward, "_seat_handover", return_value=None), \
@@ -12798,7 +12805,7 @@ class RetireTest(_TmpRootMixin, unittest.TestCase):
                     return original_stat(path, *args, **kwargs)
 
                 record = {"start": "900", "group": 4242, "argv": ["codex"]} if reused else None
-                with mock.patch.object(peer_steward, "_retire_process_record", return_value=record), \
+                with patch_split(peer_steward, "_retire_process_record", return_value=record), \
                      mock.patch.object(peer_steward.os, "stat", side_effect=stat), \
                      mock.patch.object(peer_steward.subprocess, "run", side_effect=world.run), \
                      mock.patch.object(peer_steward, "_seat_handover") as handover:
@@ -12825,8 +12832,8 @@ class RetireTest(_TmpRootMixin, unittest.TestCase):
                         raise PermissionError(path)
                     return original_stat(path, *args, **kwargs)
 
-                with mock.patch.object(peer_steward, "_retire_process_record", return_value=None), \
-                     mock.patch.object(peer_steward, "_proc_start_ticks", return_value=None), \
+                with patch_split(peer_steward, "_retire_process_record", return_value=None), \
+                     patch_split(peer_steward, "_proc_start_ticks", return_value=None), \
                      mock.patch.object(peer_steward.os, "stat", side_effect=stat), \
                      mock.patch.object(peer_steward.subprocess, "run", side_effect=world.run):
                     world.status = "idle"
@@ -12874,8 +12881,8 @@ class RetireTest(_TmpRootMixin, unittest.TestCase):
         self.retire(world)
         store = peer_steward.peer_obligations.ObligationStore()
         duty = store.list()[0]
-        with mock.patch.object(peer_steward, "_retire_process_record", return_value=None), \
-             mock.patch.object(peer_steward, "_proc_start_ticks", return_value="900"), \
+        with patch_split(peer_steward, "_retire_process_record", return_value=None), \
+             patch_split(peer_steward, "_proc_start_ticks", return_value="900"), \
              mock.patch.object(peer_steward.subprocess, "run", side_effect=world.run):
             peer_steward._resume_retire_obligation(duty, store)
         self.assertEqual(world.actions(), [])
@@ -12892,9 +12899,9 @@ class RetireTest(_TmpRootMixin, unittest.TestCase):
                                   extra={"foreground": duty["intent"]["identity"]["foreground"]})
                 world.sid, world.status = "new-sid", "idle"
                 with mock.patch.object(peer_steward.subprocess, "run", side_effect=world.run), \
-                     mock.patch.object(peer_steward, "_retire_process_record",
+                     patch_split(peer_steward, "_retire_process_record",
                                        return_value={"start": "900", "group": 4242, "argv": ["codex"]}), \
-                     mock.patch.object(peer_steward, "_proc_start_ticks",
+                     patch_split(peer_steward, "_proc_start_ticks",
                                        side_effect=lambda pid: "700" if pid == 101 else "900"), \
                      mock.patch.object(peer_steward, "_seat_handover") as handover:
                     peer_steward._resume_retire_obligation(store.get(duty["id"]), store)
@@ -12911,7 +12918,7 @@ class RetireTest(_TmpRootMixin, unittest.TestCase):
         self.jobs_path.write_text(f"2026-10-09T00:00:00Z\topen\trepo\t-\tslug\t{meta}\n")
         world = _RetireWorld(sid=None)
         with mock.patch.object(peer_steward, "_proven_session", return_value="thread-real"), \
-             mock.patch("dispatch_contract.observed_attempt_liveness",
+             split_patch("dispatch_contract.observed_attempt_liveness",
                         return_value=ObservedAttemptLiveness("alive", "fixture", "live", "fixture")):
             rc, line = self.retire(world)
         self.assertIn("retired=false reason=bound-registered-work-pending", line)
@@ -13252,19 +13259,19 @@ class RetireTest(_TmpRootMixin, unittest.TestCase):
     def test_shell_return_requires_original_birth_and_absent_predecessor(self):
         identity = {"pid": 4242, "start": "800", "shell_pid": 101, "shell_start": "700"}
         info = {"shell_pid": 101, "foreground_process_group_id": 101, "foreground_processes": [{"pid": 101}]}
-        with mock.patch.object(peer_steward, "_proc_start_ticks", return_value="701"):
+        with patch_split(peer_steward, "_proc_start_ticks", return_value="701"):
             self.assertFalse(peer_steward._retire_shell_returned(info, identity))
         for error in (None, PermissionError()):
-            with mock.patch.object(peer_steward, "_proc_start_ticks", side_effect=lambda pid: "700" if pid == 101 else "800"), \
+            with patch_split(peer_steward, "_proc_start_ticks", side_effect=lambda pid: "700" if pid == 101 else "800"), \
                  mock.patch.object(peer_steward.os, "stat", return_value=object(), side_effect=error):
                 self.assertFalse(peer_steward._retire_shell_returned(info, identity))
-        with mock.patch.object(peer_steward, "_proc_start_ticks", return_value="700"), \
+        with patch_split(peer_steward, "_proc_start_ticks", return_value="700"), \
              mock.patch.object(peer_steward.os, "stat", side_effect=FileNotFoundError()):
             self.assertTrue(peer_steward._retire_shell_returned(info, identity))
 
         for birth, expected in (("800", False), ("801", True), (None, False)):
             with self.subTest(birth=birth), \
-                 mock.patch.object(peer_steward, "_proc_start_ticks", side_effect=lambda pid: "700" if pid == 101 else birth), \
+                 patch_split(peer_steward, "_proc_start_ticks", side_effect=lambda pid: "700" if pid == 101 else birth), \
                  mock.patch.object(peer_steward.os, "stat", return_value=object()):
                 self.assertEqual(peer_steward._retire_shell_returned(info, identity), expected)
 
@@ -13276,7 +13283,7 @@ class RetireTest(_TmpRootMixin, unittest.TestCase):
             with self.subTest(birth=birth, namespaces=namespaces, read_error=read_error), \
                  mock.patch.object(peer_steward.Path, "read_text", return_value=stat, side_effect=read_error), \
                  mock.patch.object(peer_steward.Path, "read_bytes", return_value=b"codex\0"), \
-                 mock.patch.object(peer_steward, "_proc_start_ticks", return_value=birth), \
+                 patch_split(peer_steward, "_proc_start_ticks", return_value=birth), \
                  mock.patch.object(peer_steward.os, "readlink", side_effect=namespaces):
                 result = peer_steward._retire_process_record(4242)
                 if birth == "800" and namespaces == ["pid:[1]", "pid:[1]"]:
@@ -13304,7 +13311,7 @@ class DeferredRetireHandoverTest(_TmpRootMixin, unittest.TestCase):
                     candidate = {"pane": "w1:pNew", "harness": successor,
                                  "session_id": "new-sid"}
                     old = dict(duty["intent"]["identity"])
-                    with mock.patch.object(peer_steward, "_retire_subject_state", return_value=subject), \
+                    with patch_split(peer_steward, "_retire_subject_state", return_value=subject), \
                          mock.patch.object(peer_steward, "_prompt_current_candidate",
                                            return_value=(candidate, None)), \
                          mock.patch.object(peer_steward, "_retire_target",
@@ -13345,7 +13352,7 @@ class DeferredRetireHandoverTest(_TmpRootMixin, unittest.TestCase):
                         mark["successor"]["session_id"] = "other-sid"
                     path.write_text(json.dumps(mark))
                 candidate = {"pane": "w1:pNew", "harness": "opencode", "session_id": "new-sid"}
-                with mock.patch.object(peer_steward, "_retire_subject_state", return_value="unknown"), \
+                with patch_split(peer_steward, "_retire_subject_state", return_value="unknown"), \
                      mock.patch.object(peer_steward, "_prompt_current_candidate", return_value=(
                          None if changed == "unverified" else candidate,
                          "target-identity-unverified" if changed == "unverified" else None)), \
@@ -13446,7 +13453,7 @@ class DeferredRetireHandoverTest(_TmpRootMixin, unittest.TestCase):
                         "XDG_STATE_HOME": root}):
                     store, duty = self.booking(predecessor, successor)
                     with mock.patch.object(peer_steward, "_caller_pane", return_value="w9:pObserver"), \
-                         mock.patch.object(peer_steward, "_retire_subject_state", return_value="gone"), \
+                         patch_split(peer_steward, "_retire_subject_state", return_value="gone"), \
                          mock.patch.object(pane_ownership, "verified_pane", return_value=""), \
                          mock.patch.object(peer_steward.subprocess, "run") as native:
                         peer_steward._resume_retire_obligation(duty, store)
@@ -13469,7 +13476,7 @@ class DeferredRetireHandoverTest(_TmpRootMixin, unittest.TestCase):
                 duty = store.claim_phase(duty["id"], {"waiting"}, phase,
                                          extra={"foreground": duty["intent"]["identity"]["foreground"]})
                 with mock.patch.object(peer_steward, "_retire_pane_info", return_value=None), \
-                     mock.patch.object(peer_steward, "_retire_subject_state", return_value="gone"), \
+                     patch_split(peer_steward, "_retire_subject_state", return_value="gone"), \
                      mock.patch.object(peer_steward.subprocess, "run") as native:
                     peer_steward._resume_retire_obligation(duty, store)
                     native.assert_not_called()
@@ -13484,7 +13491,7 @@ class DeferredRetireHandoverTest(_TmpRootMixin, unittest.TestCase):
         with mock.patch.object(peer_steward, "_caller_pane", return_value="w9:pObserver"), \
              mock.patch.object(peer_steward, "_retire_pane_info", return_value=info), \
              mock.patch.object(peer_steward, "_retire_shell_returned", return_value=True), \
-             mock.patch.object(peer_steward, "_proc_start_ticks", return_value="700"), \
+             patch_split(peer_steward, "_proc_start_ticks", return_value="700"), \
              mock.patch.object(peer_steward, "_close_pane", return_value=True) as close:
             peer_steward._finish_retire_cleanup(store, duty, duty["intent"]["identity"], foreground)
         close.assert_called_once_with("w1:pOld")
@@ -13498,7 +13505,7 @@ class DeferredRetireHandoverTest(_TmpRootMixin, unittest.TestCase):
                 "harness": "-", "name": "old", "pane": "-", "session_id": "-"}, 1, "pane-unverified")), \
              mock.patch.object(peer_steward, "_current_session_identity", return_value=("new-sid", "opencode")), \
              mock.patch.object(peer_steward, "_caller_pane", return_value="w1:pNew"), \
-             mock.patch.object(peer_steward, "_herdr_missing", return_value=False), \
+             patch_split(peer_steward, "_herdr_missing", return_value=False), \
              mock.patch.object(peer_steward.subprocess, "run") as native:
             self.assertEqual(peer_steward.cmd_retire(SimpleNamespace(target="old")), 0)
             native.assert_not_called()
@@ -13635,7 +13642,7 @@ class DeferredRetireHandoverTest(_TmpRootMixin, unittest.TestCase):
         with mock.patch.object(peer_steward, "_retire_target", side_effect=target), \
              mock.patch.object(peer_steward, "_current_session_identity", return_value=("new-sid", "opencode")), \
              mock.patch.object(peer_steward, "_caller_pane", return_value="w1:pNew"), \
-             mock.patch.object(peer_steward, "_herdr_missing", return_value=False), \
+             patch_split(peer_steward, "_herdr_missing", return_value=False), \
              self._legacy_identity_patches()[1], self._legacy_identity_patches()[2], \
              mock.patch.object(peer_steward, "_request_watch_terminal", return_value=0), \
              contextlib.redirect_stdout(io.StringIO()):
@@ -13709,13 +13716,13 @@ class DeferredRetireHandoverTest(_TmpRootMixin, unittest.TestCase):
                 "harness": "-", "name": "old", "pane": "-", "session_id": "-"}, 1, "pane-unverified")), \
              mock.patch.object(peer_steward, "_current_session_identity", return_value=("later-sid", "opencode")), \
              mock.patch.object(peer_steward, "_caller_pane", return_value="w1:pNew"), \
-             mock.patch.object(peer_steward, "_herdr_missing", return_value=False):
+             patch_split(peer_steward, "_herdr_missing", return_value=False):
             self.assertEqual(peer_steward.cmd_retire(SimpleNamespace(target="old")), 1)
         self.assert_authority("old-sid")
 
     def test_cancelled_or_unknown_lifetime_grants_nothing(self):
         store, duty = self.booking()
-        with mock.patch.object(peer_steward, "_retire_subject_state", return_value="unknown"):
+        with patch_split(peer_steward, "_retire_subject_state", return_value="unknown"):
             peer_steward._resume_retire_obligation(duty, store)
         self.assert_authority("old-sid")
         cancelled = store.update(duty["id"], state="cancelled")
@@ -13833,7 +13840,7 @@ class RetireTerminalFollowupRegressionTest(_TmpRootMixin, unittest.TestCase):
         requester_mark.touch()
         predecessor_mark = self.tmp_root / "predecessor-successor.json"
         paths = {"w1:pRequester": requester_mark, "w1:pPredecessor": predecessor_mark}
-        with mock.patch.object(peer_steward, "_seat_successor_path",
+        with patch_split(peer_steward, "_seat_successor_path",
                                side_effect=lambda pane: paths[pane]), \
              mock.patch.object(peer_steward, "_request_watch_terminal", return_value=0):
             result = peer_steward._mark_completed_retire_followup(
@@ -13849,7 +13856,7 @@ class RetireTerminalFollowupRegressionTest(_TmpRootMixin, unittest.TestCase):
         predecessor_mark = self.tmp_root / "predecessor-successor.json"
         predecessor_mark.touch()
         paths = {"w1:pRequester": requester_mark, "w1:pPredecessor": predecessor_mark}
-        with mock.patch.object(peer_steward, "_seat_successor_path",
+        with patch_split(peer_steward, "_seat_successor_path",
                                side_effect=lambda pane: paths[pane]) as path, \
              mock.patch.object(peer_steward, "_request_watch_terminal", return_value=0):
             self.assertTrue(peer_steward._retire_followup_ready(
@@ -13861,7 +13868,7 @@ class RetireTerminalFollowupRegressionTest(_TmpRootMixin, unittest.TestCase):
             def lstat():
                 raise PermissionError("fixture denies lstat")
 
-        with mock.patch.object(peer_steward, "_seat_successor_path",
+        with patch_split(peer_steward, "_seat_successor_path",
                                return_value=UnreadableMark()), \
              mock.patch.object(peer_steward, "_request_watch_terminal", return_value=0):
             self.assertFalse(peer_steward._retire_followup_ready(
@@ -13875,7 +13882,7 @@ class RetireTerminalFollowupRegressionTest(_TmpRootMixin, unittest.TestCase):
                 duty, identity, "target-already-gone", None, defer_if_missing=True))
 
         store, duty, identity = self.completed_duty()
-        with mock.patch.object(peer_steward, "_seat_successor_path",
+        with patch_split(peer_steward, "_seat_successor_path",
                                return_value=self.tmp_root / "missing-successor.json"), \
              mock.patch.object(peer_steward, "_request_watch_terminal", return_value=0):
             self.assertFalse(peer_steward._retire_followup_ready(
@@ -13884,7 +13891,7 @@ class RetireTerminalFollowupRegressionTest(_TmpRootMixin, unittest.TestCase):
     def test_failed_terminal_watch_request_stays_active_until_retry_succeeds(self):
         store, duty, identity = self.completed_duty()
         watch = mock.Mock(side_effect=[OSError("terminal-watch write failed"), 0])
-        with mock.patch.object(peer_steward, "_seat_successor_path",
+        with patch_split(peer_steward, "_seat_successor_path",
                                return_value=self.tmp_root / "absent-successor.json"), \
              mock.patch.object(peer_steward, "_request_watch_terminal", watch):
             pending = peer_steward._mark_completed_retire_followup(
@@ -13915,8 +13922,8 @@ class RetireTerminalFollowupRegressionTest(_TmpRootMixin, unittest.TestCase):
                     raise PermissionError("fixture denies watch-root enumeration")
             return real_scandir(path)
 
-        with mock.patch.object(peer_steward, "_watch_root", return_value=watch_root), \
-             mock.patch.object(peer_steward, "_seat_successor_path",
+        with patch_split(peer_steward, "_watch_root", return_value=watch_root), \
+             patch_split(peer_steward, "_seat_successor_path",
                                return_value=absent_successor), \
              mock.patch.object(peer_steward.os, "scandir",
                                side_effect=fail_first_watch_scan):
@@ -13948,8 +13955,8 @@ class RetireTerminalFollowupRegressionTest(_TmpRootMixin, unittest.TestCase):
         self.assertEqual(raised.exception.errno, errno.ELOOP)
 
         absent_successor = self.tmp_root / "absent-successor.json"
-        with mock.patch.object(peer_steward, "_watch_root", return_value=watch_root), \
-             mock.patch.object(peer_steward, "_seat_successor_path",
+        with patch_split(peer_steward, "_watch_root", return_value=watch_root), \
+             patch_split(peer_steward, "_seat_successor_path",
                                return_value=absent_successor):
             pending = peer_steward._mark_completed_retire_followup(
                 store, duty, identity, "completed-retire", "none")
@@ -14053,7 +14060,7 @@ class SessionNoticeIntegrationCorrectionTest(_TmpRootMixin, unittest.TestCase):
         with mock.patch.object(peer_steward.subprocess, "run", return_value=SimpleNamespace(
                     returncode=0, stdout=json.dumps(inventory))), \
              mock.patch.object(peer_steward, "_resolve_target", return_value=("claude", sid, "fixture")), \
-             mock.patch.object(peer_steward, "_herdr_missing", return_value=False), \
+             patch_split(peer_steward, "_herdr_missing", return_value=False), \
              mock.patch.object(peer_steward, "_resolve_prompt_target", return_value=(resolved, None, [])), \
              mock.patch.object(peer_steward, "_pane_readiness",
                  side_effect=readiness or (lambda *a, **kw: SimpleNamespace(state="ready"))), \
@@ -14417,7 +14424,7 @@ class SessionNoticeIntegrationCorrectionTest(_TmpRootMixin, unittest.TestCase):
                  mock.patch.object(peer_steward, "_HERDR_SESSION", "runner-endpoint"), \
                  mock.patch.object(peer_steward, "_runner_readiness_loop", side_effect=readiness), \
                  mock.patch.object(peer_steward, "_resume_registered_obligation", side_effect=registered_resume), \
-                 mock.patch.object(peer_steward, "_external_obligation_snapshot", return_value={}), \
+                 patch_split(peer_steward, "_external_obligation_snapshot", return_value={}), \
                  mock.patch.object(peer_steward, "_external_obligation_signature", return_value=()), \
                  mock.patch.object(peer_steward, "_external_obligation_snapshot_unchanged", return_value=True), \
                  mock.patch.object(peer_steward, "_reconcile_external_obligations"), \
@@ -14786,7 +14793,7 @@ class SessionNoticeProgressRaceTest(_TmpRootMixin, unittest.TestCase):
                 (peer_steward.peer_obligations, "request_dispatch_reconciliation", False),
                 (dispatch_contract, "process_start_ticks", "100001"),
                 (dispatch_contract, "process_identity_disposition", "live")):
-            patch = mock.patch.object(module, name, return_value=value)
+            patch = patch_split(module, name, return_value=value)
             patch.start()
             self.addCleanup(patch.stop)
         super().setUp()
@@ -15388,7 +15395,7 @@ class RegisteredUnknownRetryTest(_TmpRootMixin, unittest.TestCase):
                 retry_state = {}
                 with mock.patch.object(peer_steward.time, "monotonic", return_value=100.0), \
                         mock.patch.object(peer_steward.subprocess, "run", side_effect=native_observation), \
-                        mock.patch.object(peer_steward, "_herdr_missing", return_value=False), \
+                        patch_split(peer_steward, "_herdr_missing", return_value=False), \
                         mock.patch.object(peer_steward, "_retire_pane_info", return_value={
                             "pane_id": seat.pane, "foreground_processes": []}), \
                         mock.patch.object(peer_steward, "_prompt_process_session",
@@ -15859,8 +15866,8 @@ class ClosedParentNativeHandoverTest(_TmpRootMixin, unittest.TestCase):
             return object() if str(path) == f"/proc/{self.PID}" else real_stat(path, *args, **kw)
         for birth in ("800", None):
             with self.subTest(birth=birth), \
-                 mock.patch.object(peer_steward, "_retire_process_record", return_value=None), \
-                 mock.patch.object(peer_steward, "_proc_start_ticks", return_value=birth), \
+                 patch_split(peer_steward, "_retire_process_record", return_value=None), \
+                 patch_split(peer_steward, "_proc_start_ticks", return_value=birth), \
                  mock.patch.object(peer_steward.os, "stat", side_effect=proc_stat):
                 self.assert_refused()
         for change in ({"pid": True}, {"pid": 0}, {"start": None}, {"start": "801"},
@@ -15870,7 +15877,7 @@ class ClosedParentNativeHandoverTest(_TmpRootMixin, unittest.TestCase):
                 duty["intent"]["identity"]["foreground"].update(change)
                 self.assert_refused(duty)
         # Reuse is proof of the OLD lifetime's end, never a source for its SID.
-        with mock.patch.object(peer_steward, "_retire_process_record", return_value={"start": "801"}):
+        with patch_split(peer_steward, "_retire_process_record", return_value={"start": "801"}):
             self.replay()
         self.assertTrue(self.handover.owns(self.meta, self.SUCCESSOR, self.jobs_path))
 
@@ -16001,7 +16008,7 @@ class ClosedParentNativeHandoverTest(_TmpRootMixin, unittest.TestCase):
                 "harness": "-", "name": "old", "pane": "-", "session_id": "-"}, 1, "pane-unverified")), \
              mock.patch.object(peer_steward, "_current_session_identity", return_value=(self.SUCCESSOR, "codex")), \
              mock.patch.object(peer_steward, "_caller_pane", return_value="w1:pNew"), \
-             mock.patch.object(peer_steward, "_herdr_missing", return_value=False), \
+             patch_split(peer_steward, "_herdr_missing", return_value=False), \
              mock.patch.object(peer_steward.subprocess, "run", side_effect=AssertionError("transport")):
             self.assertEqual(peer_steward.cmd_retire(SimpleNamespace(target="w1:pOld")), 0)
         self.assertTrue(self.handover.owns(self.meta, self.SUCCESSOR, self.jobs_path))
@@ -16326,7 +16333,7 @@ class ObservedStartTest(_TmpRootMixin, unittest.TestCase):
                                 ("_read_screen", None), ("_pane_is_managed", False),
                                 ("_process_session", "observed-sid" if kind == "codex" else None),
                                 ("_current_session_identity", ("parent-sid", "claude"))):
-                stack.enter_context(mock.patch.object(peer_steward, name, return_value=value))
+                stack.enter_context(patch_split(peer_steward, name, return_value=value))
             stack.enter_context(mock.patch.object(peer_steward.subprocess, "run", side_effect=world))
             stack.enter_context(mock.patch.object(peer_steward.time, "monotonic", side_effect=lambda: world.clock))
             stack.enter_context(mock.patch.object(peer_steward.time, "sleep", side_effect=world.sleep))
@@ -16593,7 +16600,7 @@ class NativeReceivingTurnRecoveryTest(_TmpRootMixin, unittest.TestCase):
              mock.patch.object(join, "pending_record_identity",
                                return_value=("rt-native", "execute", "att-owner")), \
              mock.patch("dispatch_seat_handover.effective_parent", return_value=sid), \
-             mock.patch("dispatch_contract.terminal_conflict_pending", return_value=False), \
+             split_patch("dispatch_contract.terminal_conflict_pending", return_value=False), \
              mock.patch.object(codex_queue_dispatch, "resolve_queue_socket", return_value=Path("/tmp/fixture.sock")), \
              mock.patch.object(codex_queue_delivery, "read_exact_turn",
                                side_effect=[native_turn, native_turn]) as read_turn, \
@@ -17402,7 +17409,7 @@ class WatchReceiptLockBudgetTest(_TmpRootMixin, unittest.TestCase):
                                   return_value={"shell_pid": os.getpid(),
                                                 "foreground_processes": []}), \
                 mock.patch.object(peer_steward, "_pane_readiness", side_effect=ready), \
-                mock.patch.object(peer_steward, "_wake_watch_observer", wake), \
+                patch_split(peer_steward, "_wake_watch_observer", wake), \
                 mock.patch.object(peer_steward.shared_readiness,
                                   "publish_target_projection", return_value=False):
             return peer_steward._publish_watch_readiness(
@@ -17507,8 +17514,8 @@ class WatchReceiptLockBudgetTest(_TmpRootMixin, unittest.TestCase):
 
         real_seat_lock = dispatch_seat_handover.readiness_transition_lock
         with self._holder("seat"):
-            with mock.patch.object(peer_steward, "time", clock), \
-                    mock.patch.object(peer_steward, "fcntl", _LocalFcntl()), \
+            with patch_split(peer_steward, "time", clock), \
+                    patch_split(peer_steward, "fcntl", _LocalFcntl()), \
                     mock.patch.object(
                         dispatch_seat_handover, "readiness_transition_lock",
                         wraps=real_seat_lock) as seat_lock:
@@ -17770,7 +17777,7 @@ class WatchReceiptLockBudgetTest(_TmpRootMixin, unittest.TestCase):
                 mock.patch.object(peer_steward, "_retire_pane_info", return_value={
                     "shell_pid": os.getpid(), "foreground_processes": []}), \
                 mock.patch.object(peer_steward, "_pane_readiness", side_effect=ready) as classify, \
-                mock.patch.object(peer_steward, "_wake_watch_observer", return_value=True):
+                patch_split(peer_steward, "_wake_watch_observer", return_value=True):
             result = peer_steward._publish_watch_readiness(
                 self.store, {"watch_root": self.watch_root,
                              "watches": ((self.watch_id, self.arm),)},
@@ -17836,7 +17843,7 @@ class WatchReceiptLockBudgetTest(_TmpRootMixin, unittest.TestCase):
                                   return_value=transport), \
                 mock.patch.object(peer_steward, "_retire_target") as cli_read, \
                 mock.patch.object(peer_steward, "_retire_pane_info", return_value=None), \
-                mock.patch.object(peer_steward, "_wake_watch_observer", return_value=True):
+                patch_split(peer_steward, "_wake_watch_observer", return_value=True):
             peer_steward._publish_watch_readiness(
                 self.store, {"watch_root": self.watch_root,
                              "watches": ((self.watch_id, self.arm),)},
@@ -17859,7 +17866,7 @@ class WatchReceiptLockBudgetTest(_TmpRootMixin, unittest.TestCase):
                     4, "herdr-protocol-error")), \
                 mock.patch.object(peer_steward, "_retire_pane_info", return_value=None), \
                 mock.patch.object(peer_steward, "_pane_readiness") as classify, \
-                mock.patch.object(peer_steward, "_wake_watch_observer", return_value=True):
+                patch_split(peer_steward, "_wake_watch_observer", return_value=True):
             peer_steward._publish_watch_readiness(
                 self.store, {"watch_root": self.watch_root,
                              "watches": ((self.watch_id, self.arm),)},
@@ -18276,7 +18283,7 @@ class SharedReadinessRunnerTest(unittest.TestCase):
                             "shell_pid": os.getpid(), "foreground_processes": []}), \
                         mock.patch.object(peer_steward, "_pane_readiness",
                                           return_value=fresh_authority) as fresh_check, \
-                        mock.patch.object(peer_steward, "_wake_watch_observer",
+                        patch_split(peer_steward, "_wake_watch_observer",
                                           return_value=True):
                     peer_steward._publish_watch_readiness(
                         store, snapshot, read_context=read_context, incarnation=incarnation)
@@ -18383,7 +18390,7 @@ class SharedReadinessRunnerTest(unittest.TestCase):
                         "shell_pid": os.getpid(), "foreground_processes": []}), \
                     mock.patch.object(peer_steward, "_pane_readiness",
                                       side_effect=(ready, pending)) as check, \
-                    mock.patch.object(peer_steward, "_wake_watch_observer",
+                    patch_split(peer_steward, "_wake_watch_observer",
                                       return_value=True):
                 peer_steward._publish_watch_readiness(
                     store, {"watch_root": watch_root, "watches": ((watch_id, arm),)},
@@ -18650,7 +18657,7 @@ class SharedReadinessRunnerTest(unittest.TestCase):
                                     "shell_pid": os.getpid(), "foreground_processes": []}), \
                                 mock.patch.object(peer_steward.peer_obligations,
                                     "execution_attempts_for_processes", return_value=(owner,)), \
-                                mock.patch.object(peer_steward,
+                                patch_split(peer_steward,
                                     "_wake_watch_observer", return_value=True):
                             peer_steward._publish_watch_readiness(
                                 store, snapshot,
@@ -18886,7 +18893,7 @@ class SharedReadinessRunnerTest(unittest.TestCase):
                                 "shell_pid": os.getpid(), "foreground_processes": []}), \
                             mock.patch.object(peer_steward.peer_obligations,
                                 "execution_attempts_for_processes", return_value=(owner,)), \
-                            mock.patch.object(peer_steward, "_write_json_atomic",
+                            patch_split(peer_steward, "_write_json_atomic",
                                               side_effect=blocked_receipt_write), \
                             mock.patch.object(dispatch_registry_cache, "registry_view",
                                 side_effect=reject_registry_reparse), \
@@ -19479,7 +19486,7 @@ class SessionNoticePriorityTest(_TmpRootMixin, unittest.TestCase):
                 (peer_steward.peer_obligations, "request_dispatch_reconciliation", False),
                 (dispatch_contract, "process_start_ticks", "100001"),
                 (dispatch_contract, "process_identity_disposition", "live")):
-            patch = mock.patch.object(module, name, return_value=value)
+            patch = patch_split(module, name, return_value=value)
             patch.start()
             self.addCleanup(patch.stop)
         super().setUp()

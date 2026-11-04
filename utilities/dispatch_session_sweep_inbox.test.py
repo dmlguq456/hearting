@@ -48,6 +48,7 @@ import dispatch_session_sweep as SWEEP  # noqa: E402
 import dispatch_seat_handover as HANDOVER  # noqa: E402
 import session_tidy as TIDY  # noqa: E402
 from peer_read_context import PeerReadContext  # noqa: E402
+from split_module_fixture import patch_split  # noqa: E402
 
 _STEWARD_SPEC = importlib.util.spec_from_file_location(
     "peer_steward_sweep_inbox_test", str(HERE / "peer-steward.py"))
@@ -379,7 +380,7 @@ def write_succession(case, attempts, *, bump: bool, harness: str = "claude"):
 
 
 def run_runner_prefill(case):
-    with mock.patch.object(STEWARD, "_live_recipients",
+    with patch_split(STEWARD, "_live_recipients",
                            return_value={("claude", SESSION)}):
         return STEWARD._prefill_live_inboxes(
             case.root, deadline_ns=time.monotonic_ns() + 30_000_000_000)

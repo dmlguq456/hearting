@@ -38,6 +38,7 @@ import peer_obligations  # noqa: E402
 import session_notice  # noqa: E402
 import session_tidy as tidy  # noqa: E402
 from route_identity import route_hash  # noqa: E402
+from split_module_fixture import patch_split  # noqa: E402
 
 
 def _notice(harness, sid, *, key, subject, text, jobs,
@@ -144,7 +145,7 @@ class IsolatedCase(unittest.TestCase):
                                    returncode=0, stdout=json.dumps(inventory))), \
              mock.patch.object(peer_steward, "_resolve_target",
                                return_value=("claude", sid, "fixture")), \
-             mock.patch.object(peer_steward, "_herdr_missing", return_value=False), \
+             patch_split(peer_steward, "_herdr_missing", return_value=False), \
              mock.patch.object(peer_steward, "_resolve_prompt_target",
                                return_value=(resolved, None, [])), \
              mock.patch.object(peer_steward, "_pane_readiness",
@@ -537,7 +538,7 @@ class ReconcileDutyTest(IsolatedCase):
         # retention passes (registry archive included) itself, detached, for its own root.
         import dispatch_contract
         with mock.patch.object(peer_steward.subprocess, "Popen") as popen, \
-                mock.patch.object(dispatch_contract, "stable_state_root", return_value=self.root):
+                patch_split(dispatch_contract, "stable_state_root", return_value=self.root):
             popen.return_value.pid = 4242
             first = peer_steward._runner_maintenance_pass(self.store)
             second = peer_steward._runner_maintenance_pass(self.store)
@@ -554,7 +555,7 @@ class ReconcileDutyTest(IsolatedCase):
     def test_a_retention_start_that_fails_is_not_retried_before_its_due_window(self):
         import dispatch_contract
         with mock.patch.object(peer_steward.subprocess, "Popen", side_effect=OSError("no fork")) as popen, \
-                mock.patch.object(dispatch_contract, "stable_state_root", return_value=self.root):
+                patch_split(dispatch_contract, "stable_state_root", return_value=self.root):
             peer_steward._runner_maintenance_pass(self.store)
             peer_steward._runner_maintenance_pass(self.store)
         self.assertEqual(len(self._retention_starts(popen)), 1)
@@ -770,7 +771,7 @@ class PeerHistoryCursorTest(IsolatedCase):
         self._received("b" * 32, now - 8 * 86400)
         self._received("c" * 32, now - 8 * 86400)
         clock = iter([0, 5])
-        with mock.patch.object(peer_steward, "time",
+        with patch_split(peer_steward, "time",
                                SimpleNamespace(time=lambda: now,
                                                monotonic_ns=lambda: next(clock))):
             cut = peer_steward._prune_received_peer_history(now=now, deadline_ns=3)
@@ -778,7 +779,7 @@ class PeerHistoryCursorTest(IsolatedCase):
         self.assertEqual(cut["examined"], 1)
         self.assertEqual(cut["cursor"], "a" * 32 + ".json")
         self.assertFalse(first.exists())
-        with mock.patch.object(peer_steward, "time",
+        with patch_split(peer_steward, "time",
                                SimpleNamespace(time=lambda: now,
                                                monotonic_ns=lambda: 0)):
             rest = peer_steward._prune_received_peer_history(
@@ -861,7 +862,7 @@ class PeerHistoryCleanupTest(IsolatedCase):
         ticks = itertools.count()
         clock = SimpleNamespace(time=lambda: now, monotonic_ns=lambda: next(ticks))
         cursor, passes, removed = None, 0, 0
-        with mock.patch.object(peer_steward, "time", clock):
+        with patch_split(peer_steward, "time", clock):
             while passes < 20:
                 passes += 1
                 counts = peer_steward._prune_received_peer_history(
@@ -1047,7 +1048,7 @@ class InboxPrefillTest(IsolatedCase):
                          jobs=self.jobs)
         self.edge("A", "B")
         deadline = time.monotonic_ns() + 30 * 1_000_000_000
-        with mock.patch.object(peer_steward, "_live_recipients",
+        with patch_split(peer_steward, "_live_recipients",
                                return_value={("claude", "B")}):
             result = peer_steward._prefill_live_inboxes(self.root, deadline_ns=deadline)
         self.assertEqual(result["written"], 1)
@@ -1061,7 +1062,7 @@ class InboxPrefillTest(IsolatedCase):
         # A new record in a named scope makes the inbox stale; prefill repairs it.
         _notice("claude", "A", key="open-2", subject="n2", text="t2", jobs=self.jobs)
         self.assertFalse(inbox.is_current(payload, self.root))
-        with mock.patch.object(peer_steward, "_live_recipients",
+        with patch_split(peer_steward, "_live_recipients",
                                return_value={("claude", "B")}):
             peer_steward._prefill_live_inboxes(self.root, deadline_ns=deadline)
         self.assertTrue(inbox.is_current(inbox.read_inbox(self.root, "claude", "B"),
@@ -1108,7 +1109,7 @@ class InboxPrefillTest(IsolatedCase):
         notice = _notice("opencode", "B", key="oc-open-1", subject="n", text="t",
                          jobs=self.jobs)
         self.assertEqual(inbox.read_edge_generation(self.root), 0)
-        with mock.patch.object(peer_steward, "_live_recipients",
+        with patch_split(peer_steward, "_live_recipients",
                                return_value={("opencode", "B")}):
             result = peer_steward._runner_maintenance_pass(self.store)
         self.assertIn("inbox", result)
@@ -1124,7 +1125,7 @@ class InboxPrefillTest(IsolatedCase):
         _notice("claude", "A", key="open-1", subject="n", text="t", jobs=self.jobs)
         self.edge("A", "B")
         deadline = time.monotonic_ns() + 30 * 1_000_000_000
-        with mock.patch.object(peer_steward, "_live_recipients",
+        with patch_split(peer_steward, "_live_recipients",
                                return_value={("claude", "B")}):
             first = peer_steward._prefill_live_inboxes(self.root, deadline_ns=deadline)
         self.assertEqual(first["written"], 1)
@@ -1136,7 +1137,7 @@ class InboxPrefillTest(IsolatedCase):
         self.assertEqual(inbox.read_edge_generation(self.root), 0)
         # The hook's current path is stat-only, so it still trusts what it has.
         self.assertTrue(inbox.is_current(recorded, self.root))
-        with mock.patch.object(peer_steward, "_live_recipients",
+        with patch_split(peer_steward, "_live_recipients",
                                return_value={("claude", "B")}):
             second = peer_steward._prefill_live_inboxes(self.root, deadline_ns=deadline)
         self.assertEqual(second["written"], 1)
@@ -1187,9 +1188,9 @@ class InboxPrefillTest(IsolatedCase):
 
         started = time.monotonic()
         with mock.patch.object(handover, "lineage_graph", side_effect=slow_graph), \
-                mock.patch.object(peer_steward, "_live_recipients",
+                patch_split(peer_steward, "_live_recipients",
                                   return_value={("claude", "B"), ("claude", "C")}), \
-                mock.patch.object(peer_steward, "_prefill_recipient_inbox",
+                patch_split(peer_steward, "_prefill_recipient_inbox",
                                   side_effect=AssertionError("prefill after deadline")):
             result = peer_steward._prefill_live_inboxes(
                 self.root, deadline_ns=time.monotonic_ns() + 40_000_000)

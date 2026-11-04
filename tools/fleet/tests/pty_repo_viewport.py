@@ -26,6 +26,8 @@ from pathlib import Path
 TOOLS_DIR = Path(__file__).resolve().parents[2]
 REPO_ROOT = TOOLS_DIR.parent
 sys.path.insert(0, str(TOOLS_DIR))
+sys.path.append(str(Path(__file__).resolve().parents[3] / "utilities"))  # split_module_fixture
+from split_module_fixture import set_split  # noqa: E402
 
 
 def _utc():
@@ -354,7 +356,7 @@ def _child_main(evidence_dir, explorer=False, refresh_interval=20.0):
         event("native-mouse-read", x=value[0], y=value[1], bstate=int(value[2] or 0))
         return value
 
-    render._getmouse_event = capture_getmouse
+    set_split(render, "_getmouse_event", capture_getmouse)
     original_input_read = render._CursesInput.read
 
     def capture_input_read(input_reader, stdscr, *args, **kwargs):

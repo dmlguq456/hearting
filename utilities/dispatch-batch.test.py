@@ -18,6 +18,7 @@ import time
 import unittest
 os.environ.setdefault("HEARTING_CAPACITY_PROBE_CLI", os.devnull)  # never ask a real Claude login
 from unittest import mock
+from split_module_fixture import patch_split, split_patch  # noqa: E402
 
 
 PATH = Path(__file__).with_name("dispatch-batch.py")
@@ -128,7 +129,7 @@ class PairModelProposalTest(unittest.TestCase):
             with mock.patch.dict(os.environ, {"AGENT_MODEL_GOVERNOR_RESERVATION_TOKEN": "token-fixture"}), \
                  mock.patch("dispatch_contract.replica_batch_expectation", return_value={}), \
                  mock.patch("dispatch_contract.resolve_model_governor_root", return_value=base / "governor"), \
-                 mock.patch("dispatch_contract._governor_json", return_value={"state": "unclaimed", "batch_manifest": manifest}), \
+                 split_patch("dispatch_contract._governor_json", return_value={"state": "unclaimed", "batch_manifest": manifest}), \
                  mock.patch("route_authority.require_batch_reservation"), \
                  mock.patch("replica_batch_contract.verify_manifest", return_value=(manifest, "digest", {})), \
                  mock.patch("dispatch_capacity_evidence.usage_states", return_value={"claude": "ok"}):
@@ -682,7 +683,7 @@ class DispatchBatchTest(unittest.TestCase):
                 return_value={"managed": True, "generation": token, "pending": True,
                               "current_attempt_ids": {}}))
             stack.enter_context(mock.patch.object(BATCH, "resolve_live_parent_attempt"))
-            stack.enter_context(mock.patch.object(BATCH, "completion_marker_gate"))
+            stack.enter_context(patch_split(BATCH, "completion_marker_gate"))
             stack.enter_context(mock.patch.object(BATCH, "cancel_unclaimed"))
             stack.enter_context(mock.patch.object(BATCH.subprocess, "check_output", return_value=str(self.base)))
             stack.enter_context(mock.patch.object(BATCH.subprocess, "Popen", side_effect=FakeProcess))
@@ -945,7 +946,7 @@ class DispatchBatchTest(unittest.TestCase):
                         BATCH, "assign_harnesses", return_value=(assignments, "cross-harness", {})))
                     stack.enter_context(mock.patch.object(BATCH, "reserve_batch", return_value=["a" * 32, "b" * 32]))
                     stack.enter_context(mock.patch.object(BATCH, "resolve_live_parent_attempt"))
-                    stack.enter_context(mock.patch.object(BATCH, "completion_marker_gate"))
+                    stack.enter_context(patch_split(BATCH, "completion_marker_gate"))
                     stack.enter_context(mock.patch.object(BATCH, "cancel_unclaimed"))
                     stack.enter_context(mock.patch.object(
                         BATCH.subprocess, "check_output", return_value=str(marker_fixture.agent_home)))
@@ -1156,7 +1157,7 @@ class DispatchBatchTest(unittest.TestCase):
         for state, expected in (("live", "prior-attempt-still-live"),
                                 ("unverifiable", "prior-attempt-unverifiable"),
                                 ("quiescent", "round-unsettled")):
-            with self.subTest(state=state), mock.patch.object(
+            with self.subTest(state=state), patch_split(
                     BATCH, "attempt_process_quiescence",
                     return_value=SimpleNamespace(state=state, reason="fixture-observation")):
                 with self.assertRaises(BATCH.BatchError) as caught:
@@ -1301,7 +1302,7 @@ class DispatchBatchTest(unittest.TestCase):
             stack.enter_context(mock.patch.object(BATCH, "resolve_agent_home", return_value=self.base))
             stack.enter_context(mock.patch.object(BATCH, "resolve_global_registry", return_value=SimpleNamespace(path=self.jobs)))
             stack.enter_context(mock.patch.object(BATCH, "resolve_live_parent_attempt"))
-            stack.enter_context(mock.patch.object(BATCH, "completion_marker_gate"))
+            stack.enter_context(patch_split(BATCH, "completion_marker_gate"))
             stack.enter_context(mock.patch.object(BATCH.subprocess, "check_output", return_value=str(self.base)))
             stack.enter_context(mock.patch.object(BATCH.DISPATCH_NODE, "resolve_checked_tuple", side_effect=resolve_side_effect))
             rank = stack.enter_context(mock.patch.object(BATCH, "assign_harnesses", side_effect=AssertionError("must reuse sealed placement")))
@@ -1373,7 +1374,7 @@ class DispatchBatchTest(unittest.TestCase):
                 stack.enter_context(mock.patch.object(BATCH, "resolve_global_registry",
                     return_value=SimpleNamespace(path=self.jobs)))
                 stack.enter_context(mock.patch.object(BATCH, "resolve_live_parent_attempt"))
-                stack.enter_context(mock.patch.object(BATCH, "completion_marker_gate"))
+                stack.enter_context(patch_split(BATCH, "completion_marker_gate"))
                 stack.enter_context(mock.patch.object(BATCH.subprocess, "check_output",
                     return_value=str(self.base)))
                 stack.enter_context(mock.patch.object(BATCH, "assign_harnesses",
@@ -1505,7 +1506,7 @@ class DispatchBatchTest(unittest.TestCase):
             stack.enter_context(mock.patch.object(BATCH, "resolve_agent_home", return_value=self.base))
             stack.enter_context(mock.patch.object(BATCH, "resolve_global_registry", return_value=SimpleNamespace(path=self.jobs)))
             stack.enter_context(mock.patch.object(BATCH, "resolve_live_parent_attempt"))
-            stack.enter_context(mock.patch.object(BATCH, "completion_marker_gate"))
+            stack.enter_context(patch_split(BATCH, "completion_marker_gate"))
             stack.enter_context(mock.patch.object(BATCH.subprocess, "check_output", return_value=str(self.base)))
             reserve = stack.enter_context(mock.patch.object(BATCH, "reserve_batch"))
             popen = stack.enter_context(mock.patch.object(BATCH.subprocess, "Popen"))
@@ -1589,7 +1590,7 @@ class DispatchBatchTest(unittest.TestCase):
         config=self.base/"d5-history.yaml"
         config.write_text((ROOT/"profiles/dispatch-defaults.yaml").read_text().replace("  enabled: [claude, codex, opencode]","  enabled: [claude, opencode]"))
         with mock.patch.dict(os.environ,{"DISPATCH_DEFAULTS_CONFIG":str(config)}), \
-             mock.patch.object(BATCH,"partial_source_rows",return_value=rows), mock.patch.object(BATCH,"validate_attempt_metadata"):
+             mock.patch.object(BATCH,"partial_source_rows",return_value=rows), patch_split(BATCH,"validate_attempt_metadata"):
             got=BATCH.partial_source_assignments(self.jobs,route,nodes,{},parent)
             payload={"manifest":{"members":[{"route_node":n['id'],"harness":h,"fallback_hop":hop,"fallback_ordinal":ordinal} for n,h,hop,ordinal in got]}}
             self.assertEqual(BATCH.prior_batch_assignments(payload,route,nodes,parent),got)
@@ -1744,7 +1745,7 @@ class DispatchBatchTest(unittest.TestCase):
             stack.enter_context(mock.patch.object(
                 BATCH, "resolve_global_registry", return_value=SimpleNamespace(path=self.jobs)))
             stack.enter_context(mock.patch.object(BATCH, "resolve_live_parent_attempt"))
-            stack.enter_context(mock.patch.object(BATCH, "completion_marker_gate"))
+            stack.enter_context(patch_split(BATCH, "completion_marker_gate"))
             stack.enter_context(mock.patch.object(
                 BATCH.subprocess, "check_output", return_value=str(self.base)))
             reserve = stack.enter_context(mock.patch.object(
@@ -1931,7 +1932,7 @@ class DispatchBatchTest(unittest.TestCase):
             stack.enter_context(mock.patch.object(BATCH, "resolve_agent_home", return_value=self.base))
             stack.enter_context(mock.patch.object(BATCH, "resolve_global_registry", return_value=SimpleNamespace(path=self.jobs)))
             stack.enter_context(mock.patch.object(BATCH, "resolve_live_parent_attempt"))
-            gate = stack.enter_context(mock.patch.object(BATCH, "completion_marker_gate"))
+            gate = stack.enter_context(patch_split(BATCH, "completion_marker_gate"))
             stack.enter_context(mock.patch.object(BATCH.subprocess, "check_output", return_value=str(self.base)))
             reserve = stack.enter_context(mock.patch.object(
                 BATCH, "reserve_batch", return_value=["b" * 32]
@@ -2151,7 +2152,7 @@ class DispatchBatchTest(unittest.TestCase):
             if one_sided_revision:
                 # The canonical reader's proved supersession affects one leg;
                 # batch must still apply its existing full-group round policy.
-                stack.enter_context(mock.patch.object(BATCH.DISPATCH_NODE.ROUTE,
+                stack.enter_context(patch_split(BATCH.DISPATCH_NODE.ROUTE,
                     "_dependency_revisions", return_value=[{"supersedes": [self.legs()[0]["attempt_id"]]}]))
             for name, value in (("load_route", self.route), ("resolve_agent_home", self.base),
                                 ("resolve_global_registry", SimpleNamespace(path=self.jobs)),
@@ -2159,7 +2160,7 @@ class DispatchBatchTest(unittest.TestCase):
                                 ("reserve_batch", ["a" * 32, "b" * 32])):
                 stack.enter_context(mock.patch.object(BATCH, name, return_value=value))
             stack.enter_context(mock.patch.object(BATCH, "resolve_live_parent_attempt"))
-            stack.enter_context(mock.patch.object(BATCH, "completion_marker_gate"))
+            stack.enter_context(patch_split(BATCH, "completion_marker_gate"))
             stack.enter_context(mock.patch.object(BATCH, "cancel_unclaimed"))
             stack.enter_context(mock.patch.object(BATCH.subprocess, "check_output", return_value=str(self.base)))
             process = stack.enter_context(mock.patch.object(BATCH.subprocess, "Popen", side_effect=spawn))
@@ -2221,8 +2222,8 @@ class DispatchBatchTest(unittest.TestCase):
 
     def test_successful_capped_review_group_replay_reuses_its_attempts(self):
         self._configure_lab_review()
-        with mock.patch.object(BATCH, "completion_marker_is_current", return_value=True), \
-             mock.patch.object(BATCH, "completion_attempt_readiness", return_value=SimpleNamespace(state="ready")):
+        with patch_split(BATCH, "completion_marker_is_current", return_value=True), \
+             patch_split(BATCH, "completion_attempt_readiness", return_value=SimpleNamespace(state="ready")):
             self._assert_duplicate_batch_state(completed=True)
 
     def _assert_exhausted_replay_readiness(self, state, reason, code):
@@ -2231,8 +2232,8 @@ class DispatchBatchTest(unittest.TestCase):
         self.route["continuation_budget"] = {"review_round_cap": 1}
         import route_identity
         self.route["route_hash"] = route_identity.route_hash(self.route)
-        with mock.patch.object(BATCH, "completion_marker_is_current", return_value=state != "unsettled"), \
-             mock.patch.object(BATCH, "completion_attempt_readiness",
+        with patch_split(BATCH, "completion_marker_is_current", return_value=state != "unsettled"), \
+             patch_split(BATCH, "completion_attempt_readiness",
                  return_value=SimpleNamespace(state=state, reason="attempt-descendant-" + state)):
             self._assert_duplicate_batch_state(completed=True, refusal=(code, reason))
 
@@ -3372,7 +3373,7 @@ class DispatchBatchTest(unittest.TestCase):
             stack.enter_context(mock.patch.object(BATCH, "resolve_agent_home", return_value=self.base))
             stack.enter_context(mock.patch.object(BATCH, "resolve_global_registry", return_value=SimpleNamespace(path=self.jobs)))
             stack.enter_context(mock.patch.object(BATCH, "resolve_live_parent_attempt"))
-            stack.enter_context(mock.patch.object(BATCH, "completion_marker_gate"))
+            stack.enter_context(patch_split(BATCH, "completion_marker_gate"))
             stack.enter_context(mock.patch.object(BATCH.subprocess, "check_output", return_value=str(self.base)))
             stack.enter_context(mock.patch.dict(os.environ, {
                 "AGENT_DISPATCH_SELF_SLUG": "owner",
@@ -3544,7 +3545,7 @@ class DispatchBatchTest(unittest.TestCase):
             stack.enter_context(mock.patch.object(BATCH, "resolve_agent_home", return_value=self.base))
             stack.enter_context(mock.patch.object(BATCH, "resolve_global_registry", return_value=SimpleNamespace(path=self.jobs)))
             stack.enter_context(mock.patch.object(BATCH, "resolve_live_parent_attempt"))
-            stack.enter_context(mock.patch.object(BATCH, "completion_marker_gate"))
+            stack.enter_context(patch_split(BATCH, "completion_marker_gate"))
             stack.enter_context(mock.patch.object(BATCH.subprocess, "check_output", return_value=str(self.base)))
             stack.enter_context(mock.patch.object(BATCH, "reserve_batch", side_effect=BATCH.BatchError("model-worker-governor-denied")))
             popen = stack.enter_context(mock.patch.object(BATCH.subprocess, "Popen"))
@@ -3620,7 +3621,7 @@ class DispatchBatchTest(unittest.TestCase):
         stack.enter_context(mock.patch.object(BATCH, "resolve_agent_home", return_value=self.base))
         stack.enter_context(mock.patch.object(BATCH, "resolve_global_registry", return_value=SimpleNamespace(path=self.jobs)))
         stack.enter_context(mock.patch.object(BATCH, "resolve_live_parent_attempt"))
-        stack.enter_context(mock.patch.object(BATCH, "completion_marker_gate"))
+        stack.enter_context(patch_split(BATCH, "completion_marker_gate"))
         stack.enter_context(mock.patch.object(BATCH.subprocess, "check_output", return_value=str(self.base)))
         stack.enter_context(mock.patch.object(BATCH, "reserve_batch", side_effect=BATCH.BatchError("governor-atomic-admission-shortfall", "rolling model-worker start budget reached")))
         popen = stack.enter_context(mock.patch.object(BATCH.subprocess, "Popen"))
@@ -3666,7 +3667,7 @@ class DispatchBatchTest(unittest.TestCase):
             stack.enter_context(mock.patch.object(BATCH, "resolve_agent_home", return_value=self.base))
             stack.enter_context(mock.patch.object(BATCH, "resolve_global_registry", return_value=SimpleNamespace(path=self.jobs)))
             stack.enter_context(mock.patch.object(BATCH, "resolve_live_parent_attempt"))
-            stack.enter_context(mock.patch.object(BATCH, "completion_marker_gate"))
+            stack.enter_context(patch_split(BATCH, "completion_marker_gate"))
             stack.enter_context(mock.patch.object(BATCH.subprocess, "check_output", return_value=str(self.base)))
             stack.enter_context(mock.patch.object(BATCH, "reserve_batch", return_value=["a" * 32, "b" * 32]))
             stack.enter_context(mock.patch.object(BATCH, "cancel_unclaimed"))
@@ -3737,7 +3738,7 @@ class DispatchBatchTest(unittest.TestCase):
                 BATCH, "resolve_global_registry", return_value=SimpleNamespace(path=self.jobs)
             ))
             stack.enter_context(mock.patch.object(BATCH, "resolve_live_parent_attempt"))
-            stack.enter_context(mock.patch.object(BATCH, "completion_marker_gate"))
+            stack.enter_context(patch_split(BATCH, "completion_marker_gate"))
             stack.enter_context(mock.patch.object(
                 BATCH.subprocess, "check_output", return_value=str(self.base)
             ))
@@ -3828,7 +3829,7 @@ class DispatchBatchTest(unittest.TestCase):
             stack.enter_context(mock.patch.object(BATCH, "resolve_agent_home", return_value=self.base))
             stack.enter_context(mock.patch.object(BATCH, "resolve_global_registry", return_value=SimpleNamespace(path=self.jobs)))
             stack.enter_context(mock.patch.object(BATCH, "resolve_live_parent_attempt"))
-            stack.enter_context(mock.patch.object(BATCH, "completion_marker_gate"))
+            stack.enter_context(patch_split(BATCH, "completion_marker_gate"))
             stack.enter_context(mock.patch.object(BATCH.subprocess, "check_output", return_value=str(self.base)))
             stack.enter_context(mock.patch.object(BATCH, "reserve_batch", return_value=["a" * 32, "b" * 32]))
             stack.enter_context(mock.patch.object(BATCH, "cancel_unclaimed"))
@@ -3942,8 +3943,8 @@ class DispatchBatchTest(unittest.TestCase):
         self._assert_duplicate_batch_state()
 
     def test_sd160_completed_row_only_batch_reuses_exact_manifest_without_spawn(self):
-        with mock.patch.object(BATCH, "completion_marker_is_current", return_value=True), \
-             mock.patch.object(BATCH, "completion_attempt_readiness", return_value=SimpleNamespace(state="ready")):
+        with patch_split(BATCH, "completion_marker_is_current", return_value=True), \
+             patch_split(BATCH, "completion_attempt_readiness", return_value=SimpleNamespace(state="ready")):
             self._assert_duplicate_batch_state(completed=True)
 
     def _assert_duplicate_batch_state(self, *, completed=False, refusal=None):
@@ -3968,7 +3969,7 @@ class DispatchBatchTest(unittest.TestCase):
             stack.enter_context(mock.patch.object(BATCH, "resolve_agent_home", return_value=self.base))
             stack.enter_context(mock.patch.object(BATCH, "resolve_global_registry", return_value=SimpleNamespace(path=self.jobs)))
             stack.enter_context(mock.patch.object(BATCH, "resolve_live_parent_attempt"))
-            stack.enter_context(mock.patch.object(BATCH, "completion_marker_gate"))
+            stack.enter_context(patch_split(BATCH, "completion_marker_gate"))
             stack.enter_context(mock.patch.object(BATCH.subprocess, "check_output", return_value=str(self.base)))
             reserve = stack.enter_context(mock.patch.object(BATCH, "reserve_batch"))
             stack.enter_context(mock.patch.object(BATCH, "cancel_unclaimed"))
@@ -4021,7 +4022,7 @@ class DispatchBatchTest(unittest.TestCase):
             stack.enter_context(mock.patch.object(BATCH, "resolve_agent_home", return_value=self.base))
             stack.enter_context(mock.patch.object(BATCH, "resolve_global_registry", return_value=SimpleNamespace(path=self.jobs)))
             stack.enter_context(mock.patch.object(BATCH, "resolve_live_parent_attempt"))
-            stack.enter_context(mock.patch.object(BATCH, "completion_marker_gate"))
+            stack.enter_context(patch_split(BATCH, "completion_marker_gate"))
             stack.enter_context(mock.patch.object(BATCH.subprocess, "check_output", return_value=str(self.base)))
             reserve = stack.enter_context(mock.patch.object(BATCH, "reserve_batch"))
             popen = stack.enter_context(mock.patch.object(BATCH.subprocess, "Popen"))
@@ -4076,7 +4077,7 @@ class DispatchBatchTest(unittest.TestCase):
             stack.enter_context(mock.patch.object(BATCH, "resolve_agent_home", return_value=self.base))
             stack.enter_context(mock.patch.object(BATCH, "resolve_global_registry", return_value=SimpleNamespace(path=self.jobs)))
             stack.enter_context(mock.patch.object(BATCH, "resolve_live_parent_attempt"))
-            stack.enter_context(mock.patch.object(BATCH, "completion_marker_gate"))
+            stack.enter_context(patch_split(BATCH, "completion_marker_gate"))
             stack.enter_context(mock.patch.object(BATCH.subprocess, "check_output", return_value=str(self.base)))
             popen = stack.enter_context(mock.patch.object(BATCH.subprocess, "Popen"))
             stack.enter_context(mock.patch.dict(os.environ, {
@@ -4118,7 +4119,7 @@ class DispatchBatchTest(unittest.TestCase):
             stack.enter_context(mock.patch.object(BATCH, "resolve_agent_home", return_value=self.base))
             stack.enter_context(mock.patch.object(BATCH, "resolve_global_registry", return_value=SimpleNamespace(path=self.jobs)))
             stack.enter_context(mock.patch.object(BATCH, "resolve_live_parent_attempt"))
-            stack.enter_context(mock.patch.object(BATCH, "completion_marker_gate"))
+            stack.enter_context(patch_split(BATCH, "completion_marker_gate"))
             stack.enter_context(mock.patch.object(BATCH.subprocess, "check_output", return_value=str(self.base)))
             reserve = stack.enter_context(mock.patch.object(BATCH, "reserve_batch", return_value=["b" * 32]))
             stack.enter_context(mock.patch.object(BATCH, "cancel_unclaimed"))
@@ -4165,7 +4166,7 @@ class DispatchBatchTest(unittest.TestCase):
             stack.enter_context(mock.patch.object(BATCH, "resolve_agent_home", return_value=self.base))
             stack.enter_context(mock.patch.object(BATCH, "resolve_global_registry", return_value=SimpleNamespace(path=self.jobs)))
             stack.enter_context(mock.patch.object(BATCH, "resolve_live_parent_attempt"))
-            stack.enter_context(mock.patch.object(BATCH, "completion_marker_gate"))
+            stack.enter_context(patch_split(BATCH, "completion_marker_gate"))
             stack.enter_context(mock.patch.object(BATCH.subprocess, "check_output", return_value=str(self.base)))
             reserve = stack.enter_context(mock.patch.object(BATCH, "reserve_batch"))
             popen = stack.enter_context(mock.patch.object(BATCH.subprocess, "Popen"))
@@ -4201,7 +4202,7 @@ class DispatchBatchTest(unittest.TestCase):
                 BATCH, "resolve_global_registry", return_value=SimpleNamespace(path=self.jobs)
             ))
             stack.enter_context(mock.patch.object(BATCH, "resolve_live_parent_attempt"))
-            stack.enter_context(mock.patch.object(BATCH, "completion_marker_gate"))
+            stack.enter_context(patch_split(BATCH, "completion_marker_gate"))
             stack.enter_context(mock.patch.object(
                 BATCH.subprocess, "check_output", return_value=str(self.base)
             ))
@@ -4301,7 +4302,7 @@ class DispatchBatchTest(unittest.TestCase):
             stack.enter_context(mock.patch.object(BATCH, "resolve_agent_home", return_value=self.base))
             stack.enter_context(mock.patch.object(BATCH, "resolve_global_registry", return_value=SimpleNamespace(path=self.jobs)))
             stack.enter_context(mock.patch.object(BATCH, "resolve_live_parent_attempt"))
-            stack.enter_context(mock.patch.object(BATCH, "completion_marker_gate"))
+            stack.enter_context(patch_split(BATCH, "completion_marker_gate"))
             stack.enter_context(mock.patch.object(BATCH.subprocess, "check_output", return_value=str(self.base)))
             stack.enter_context(mock.patch.object(BATCH, "reserve_batch", return_value=["a" * 32, "b" * 32]))
             cancel = stack.enter_context(mock.patch.object(BATCH, "cancel_unclaimed"))
@@ -4371,7 +4372,7 @@ class DispatchBatchTest(unittest.TestCase):
             stack.enter_context(mock.patch.object(BATCH, "resolve_global_registry",
                                                   return_value=SimpleNamespace(path=jobs)))
             stack.enter_context(mock.patch.object(BATCH, "resolve_live_parent_attempt"))
-            stack.enter_context(mock.patch.object(BATCH, "completion_marker_gate"))
+            stack.enter_context(patch_split(BATCH, "completion_marker_gate"))
             stack.enter_context(mock.patch.object(BATCH.subprocess, "check_output", return_value=str(self.base)))
             stack.enter_context(mock.patch.object(BATCH, "reserve_batch", return_value=["a" * 32, "b" * 32]))
             stack.enter_context(mock.patch.object(BATCH, "cancel_unclaimed"))
@@ -4536,7 +4537,7 @@ class DispatchBatchTest(unittest.TestCase):
             stack.enter_context(mock.patch.object(BATCH, "resolve_agent_home", return_value=self.base))
             stack.enter_context(mock.patch.object(BATCH, "resolve_global_registry", return_value=SimpleNamespace(path=self.jobs)))
             stack.enter_context(mock.patch.object(BATCH, "resolve_live_parent_attempt"))
-            stack.enter_context(mock.patch.object(BATCH, "completion_marker_gate"))
+            stack.enter_context(patch_split(BATCH, "completion_marker_gate"))
             stack.enter_context(mock.patch.object(BATCH.subprocess, "check_output", return_value=str(self.base)))
             stack.enter_context(mock.patch.dict(os.environ, {
                 "AGENT_DISPATCH_SELF_SLUG": "owner",
@@ -5588,7 +5589,7 @@ class GroupLegReviewRoundCapTest(unittest.TestCase):
              mock.patch.object(BATCH, "resolve_agent_home", return_value=self.base), \
              mock.patch.object(BATCH, "resolve_global_registry", return_value=SimpleNamespace(path=self.jobs)), \
              mock.patch.object(BATCH, "resolve_live_parent_attempt"), \
-             mock.patch.object(BATCH, "completion_marker_gate"), \
+             patch_split(BATCH, "completion_marker_gate"), \
              mock.patch.object(BATCH.subprocess, "check_output", return_value=str(self.base)), \
              mock.patch.object(BATCH, "reserve_batch", return_value=["a" * 32, "b" * 32]), \
              mock.patch.object(BATCH, "cancel_unclaimed"), \

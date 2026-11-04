@@ -17,6 +17,8 @@ from fleet import herdr_projection as projection  # noqa: E402
 from fleet.collectors import procscan  # noqa: E402
 import pane_ownership  # noqa: E402
 import session_tidy  # noqa: E402
+sys.path.append(str(Path(__file__).resolve().parents[3] / "utilities"))  # split_module_fixture
+from split_module_fixture import patch_split  # noqa: E402
 
 _RUN = subprocess.run  # setUp replaces subprocess.run with the herdr double
 
@@ -75,7 +77,7 @@ class CodexFooterBindingTest(unittest.TestCase):
             mock.patch.object(pane_ownership, "_process", side_effect=self.read_process),
             mock.patch.object(pane_ownership, "_runtime", side_effect=self.runtime),
             mock.patch.object(pane_ownership, "_native_session", side_effect=self.native_session),
-            mock.patch.object(pane_ownership, "_registered_worker", side_effect=self.is_worker),
+            patch_split(pane_ownership, "_registered_worker", side_effect=self.is_worker),
             mock.patch.object(procscan, "read_proc_start", side_effect=self.proc_start),
             mock.patch.object(pane_ownership.subprocess, "run", side_effect=self.herdr),
             mock.patch.object(pane_ownership.shutil, "which", return_value="/fake/herdr"),
@@ -532,7 +534,7 @@ class CodexFooterBindingTest(unittest.TestCase):
                 self.screens[pane] = [content, content]
                 scan = self.scan_panes([pid])
                 with scan[0], scan[1], scan[2], \
-                        mock.patch.object(pane_ownership, "_registered_worker", return_value=False):
+                        patch_split(pane_ownership, "_registered_worker", return_value=False):
                     expected = "" if index == 3 else pane
                     self.assertEqual(pane_ownership.verified_pane(
                         pane, "codex", THREAD_A, pid=pid, executable="/fake/herdr"), expected)

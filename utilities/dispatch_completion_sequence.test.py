@@ -19,6 +19,7 @@ import dispatch_contract
 import dispatch_pending_delivery as pending
 import dispatch_session_sweep as sweep
 import dispatch_supervision as supervision
+from split_module_fixture import split_patch
 
 
 class ExactCompletionSequenceTest(unittest.TestCase):
@@ -166,7 +167,7 @@ class ExactCompletionSequenceTest(unittest.TestCase):
                 parent_completion_delivery="codex-native-queue"))
             notice = supervision.materialize(self.jobs, {self.attempts[0]}, reason="join-deadline")[0]
             self.assertIsNone(supervision._cleanup_only_result(notice["receipt"]))
-        with mock.patch("dispatch_contract.terminal_conflict_pending", return_value=True):
+        with split_patch("dispatch_contract.terminal_conflict_pending", return_value=True):
             self.assertIsNone(join.recover_acknowledged_batch_outcome(
                 self.jobs, set(self.attempts), recipient_sid=self.recipient,
                 parent_attempt_id=self.receipt["parent_attempt_id"],

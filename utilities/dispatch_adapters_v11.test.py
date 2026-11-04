@@ -10,6 +10,7 @@ sys.path.insert(0,str(ROOT/"utilities"))
 import dispatch_contract as DC
 sys.path.insert(0,str(ROOT/"tools"))
 import fixture_processes  # noqa: E402
+from split_module_fixture import patch_split  # noqa: E402
 
 ADAPTERS={
  "codex":([sys.executable,str(ROOT/"adapters/codex/bin/dispatch-headless.py")],["--model","gpt-test","--reasoning","low"]),
@@ -107,7 +108,7 @@ class AdapterV11Test(unittest.TestCase):
                    ",".join(f"{k}={v}" for k,v in source.items())+"\n")
    fake_claim={"replacement_attempt_id":"att-next","family_id":"family-fixture"}
    with mock.patch.object(recovery,"datetime",FrozenDateTime), \
-        mock.patch.object(recovery.DC._route_module(),"verify_route"), \
+        patch_split(recovery.DC._route_module(),"verify_route"), \
         mock.patch.object(artifact_context,"resolve_context",
                          return_value=SimpleNamespace(output_dir=output)):
     for harness in ADAPTERS:
