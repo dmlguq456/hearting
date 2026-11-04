@@ -1699,7 +1699,7 @@ def _linked_slice_source_worktree(args, route) -> Path | None:
 def worker_ending_prompt(*, supervised_owner: bool = False) -> str:
     """One ending rule for every adapter; supervised wait turns are nonterminal."""
     wait = (
-        "End an intermediate child-registration or resource-wait turn only with the "
+        "End an intermediate child-registration, resource-wait, or parent-deploy-request turn only with the "
         "standalone line `runtime_wait: registered-children`, without a three-line handoff. "
         if supervised_owner else ""
     )
@@ -1716,7 +1716,7 @@ def supervised_owner_prompt() -> str:
         "Runtime-owned completion join: launch the current batch through its checked dispatch surface. "
         "A start receipt proves launch with registered=1, started=1, child_spawned=1. "
         "Yield with `runtime_wait: registered-children`; the runtime waits and resumes this owner "
-        "after model children or the exact route-bound resource. For a resource, use the normal "
+        "after model children, the exact route-bound resource, or the route's parent deploy request. For a resource, use the normal "
         "runner receipt confirming payload_spawned and supervisor_alive, then yield instead of "
         "waiting for training inside a Bash turn. Resource exit is not verification PASS. "
         "with an exact receipt. It also acknowledges delivery and retains unresolved cleanup. "

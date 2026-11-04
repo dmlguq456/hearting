@@ -996,7 +996,7 @@ class WorkerEndingPromptTest(unittest.TestCase):
         "handoff as the entire message — no summary sentence before it, nothing after it.\n"
     )
     WAIT = (
-        "End an intermediate child-registration or resource-wait turn only with the "
+        "End an intermediate child-registration, resource-wait, or parent-deploy-request turn only with the "
         "standalone line `runtime_wait: registered-children`, without a three-line handoff. "
     )
 
@@ -1053,7 +1053,7 @@ class WorkerEndingPromptTest(unittest.TestCase):
                 # even when the adapter's trailing ending is correctly gated.
                 compact = " ".join(prompt.split())
                 self.assertIn(
-                    "For a supervised owner, end a child-registration or resource-wait turn with only",
+                    "For a supervised owner, end a child-registration, resource-wait, or parent-deploy-request turn with only",
                     compact,
                 )
                 self.assertIn("polling fallback waits synchronously in the current turn.", compact)
