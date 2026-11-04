@@ -177,6 +177,25 @@ class CoreReference(unittest.TestCase):
                 self.assertEqual(hits, expected_hits, f"ordered hit mismatch at {cols} columns")
 
 
+class NarrowOverviewTable(unittest.TestCase):
+    def test_id_cell_never_touches_age_at_50_columns(self):
+        import dataclasses
+        vm = load_fixture(FIXTURES / "view_model.json")
+        for age, tag in (("14h", "?26"), ("26d 14h", "?26"), ("14h", "e88"), ("26d 14h", "한글태그")):
+            sessions = tuple({**s, "tag": tag, "age": age} for s in vm.sessions)
+            frame = draw(dataclasses.replace(vm, sessions=sessions), NavState(), 50, 30, beat=1)
+            rows = ["".join(str(c[0] or " ") for c in row)[34:] for row in frame.cells]
+            with self.subTest(age=age, tag=tag):
+                header = next(r for r in rows if " ID " in r)
+                self.assertNotIn("HAGE", header)
+                self.assertIn(" AGE", header)
+                body = [r for r in rows if r.rstrip().endswith(age)]
+                self.assertTrue(body)
+                for row in body:
+                    self.assertRegex(row, r"[^\s] \s*" + age.replace(" ", " ") + r"\s*$")
+                    self.assertNotRegex(row, r"[^\s ]" + age.split()[0])
+
+
 class ListReference(unittest.TestCase):
     def test_routes_questions_and_history_exact_reference(self):
         vm = load_fixture(FIXTURES / "view_model.json")
