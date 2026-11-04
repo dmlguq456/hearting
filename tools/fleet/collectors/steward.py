@@ -92,9 +92,19 @@ def _repository_key(cwd):
     return value
 
 
+_REGISTRY_READ_CACHE = None
+
+
 def _registry_sessions():
     """Reuse native session metadata; no process, herdr or role probe."""
     from .. import session_registry
+    from . import dispatch
+    global _REGISTRY_READ_CACHE
+    cache = None
+    if dispatch._COLLECTION_INPUTS.get() is not None:
+        if _REGISTRY_READ_CACHE is None:
+            _REGISTRY_READ_CACHE = session_registry.PassiveReadCache()
+        cache = _REGISTRY_READ_CACHE
     rows = []
     for harness in ("claude", "codex", "opencode"):
         try:
@@ -104,7 +114,8 @@ def _registry_sessions():
         for entry in entries:
             if not entry.endswith(".json") or not entry[:-5].isdigit():
                 continue
-            record = session_registry.read(harness, int(entry[:-5]))
+            record = session_registry.read(harness, int(entry[:-5]),
+                                           **({'validation_cache': cache} if cache is not None else {}))
             if record and record.get("sessionId") and record.get("cwd"):
                 rows.append(SimpleNamespace(harness=harness, session_id=record["sessionId"],
                                             cwd=record["cwd"], runtime_name=record.get("name")))
