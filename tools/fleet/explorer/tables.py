@@ -113,10 +113,13 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3):
     grid.put(x - 2, y, "┃", "line")
     grid.put(1, y, "OVERVIEW", "head", tint=236)
     c = _overview_columns(use, _overview_harness_width(vm.sessions))
+    harn_end = _overview_harness_end(use, c)
     for offset, label in ((IND + 3, "ID"), (c["h"], "HARNESS"),
                           *(((c["title"], "TITLE"),) if c["title_w"] else ()), (c["ctx"], "CTX"),
                           *(([(c["now"], "NOW")] if c["now"] is not None else [])),
                           (use - 2, "AGE")):
+        if label == "HARNESS" and harn_end is None:
+            continue                      # a table this narrow has no room for the harness cell
         grid.put(x + offset, y, label, "head", tint=234, limit=right)
     y += 1
     repos = tuple(vm.repos or ())
@@ -184,14 +187,27 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3):
                 marker, marker_key = "◑", "lvl_y"
             grid.put(x + IND + 1, y, marker, marker_key)
             tag_x = x + IND + 3
-            grid.put(tag_x, y, "[", "dim")
-            grid.put(tag_x + 1, y, tag, "steward" if session.get("steward") else "soft")
-            grid.put(tag_x + 1 + _seg_width(tag), y, "]", "dim")
-            if session.get("steward"):
+            age_text = str(session.get("age") or "")
+            # The ID cell ends one cell short of the age text, so a long tag (an unnamed Codex
+            # thread's `[?26]`) is clipped inside its own column and never touches AGE.
+            id_end = x + use - len(age_text) - 1
+            tag_room = id_end - tag_x - 2
+            if tag_room < 1:
+                grid.put(tag_x, y, "…", "dim", limit=max(tag_x, id_end))
+            else:
+                shown = _clip_cut(tag, tag_room) if _seg_width(tag) > tag_room else tag
+                grid.put(tag_x, y, "[", "dim")
+                grid.put(tag_x + 1, y, shown, "steward" if session.get("steward") else "soft")
+                grid.put(tag_x + 1 + _seg_width(shown), y, "]", "dim")
+            if session.get("steward") and x + IND + 9 <= id_end:
                 grid.put(x + IND + 8, y, "⚑", "steward")
             harness = str(session.get("harness") or "other")
             harn_limit = x + c["title"] - GAP
-            if not session.get("model"):
+            if harn_end is not None:
+                harn_limit = min(harn_limit, x + harn_end)
+            if harn_end is None:
+                pass                          # no room for the harness cell at this width
+            elif not session.get("model"):
                 # No model value: the harness alone, as the default board draws a row without telemetry.
                 grid.put(x + c["h"], y, harness, "hb_" + harness, limit=harn_limit)
                 if session.get("effort"):
@@ -827,6 +843,12 @@ def _overview_columns(use, harn_need=0):
         ctx = title + title_w + GAP
     return {"h": h, "title": title, "title_w": title_w, "ctx": ctx,
             "narrow": narrow, "now": ctx + ctx_w + GAP if now else None}
+
+
+def _overview_harness_end(use, c):
+    """Column where the HARNESS cell must stop (before AGE), or None when under 5 cells remain."""
+    end = use - AGE_W - GAP
+    return end if end - c["h"] >= 5 else None
 
 
 def _clip(text, width):
