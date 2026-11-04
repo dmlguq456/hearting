@@ -50,6 +50,7 @@ import select
 import shlex
 import shutil
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -4594,7 +4595,10 @@ def _herdr_prompt(target, text, *, wait, timeout_ms, start_aware=False):
 
 
 def _prompt_foreground(pane, harness, *, info=None):
-    """Prompt-only foreground lifetime, including a native child of a group wrapper."""
+    """Prompt-only foreground lifetime, including a native child of a group wrapper.
+
+    The agent may be the pane's root process (tmux ``new-session "claude"``), so it
+    can be the same pid as ``shell_pid``; the argv basename already rules out a shell."""
     info = info if info is not None else _retire_pane_info(pane)
     if not isinstance(info, dict):
         return None
@@ -4604,8 +4608,7 @@ def _prompt_foreground(pane, harness, *, info=None):
         actual = _retire_process_record(pid) if type(pid) is int and pid > 0 else None
         argv = (actual or {}).get("argv") or []
         if (actual and argv and os.path.basename(argv[0]) == harness
-                and actual.get("group") == info.get("foreground_process_group_id")
-                and pid != info.get("shell_pid")):
+                and actual.get("group") == info.get("foreground_process_group_id")):
             found.append({"pid": pid, **actual, "shell_pid": info.get("shell_pid"),
                           "shell_start": _proc_start_ticks(info.get("shell_pid"))})
     return found[0] if len(found) == 1 else None
@@ -5083,6 +5086,25 @@ def _watch_publish_ready_receipt(target, native_state, arm, expected, server,
     return _WATCH_RECEIPT_PENDING if readiness_pending else False
 
 
+def _message_census(server, pane):
+    """The pane census of ``server``; for a tmux pane whose server is gone, an empty
+    complete one (nothing listens on its socket, so it holds no pane or session)."""
+    _bare, socket_path = terminal_surface.tmux_address(pane)
+    if socket_path:
+        probe = socket.socket(socket.AF_UNIX)
+        try:
+            probe.settimeout(2.0)
+            probe.connect(socket_path)
+        except (FileNotFoundError, ConnectionRefusedError):
+            return herdr_observation.PaneCensus(
+                herdr_observation.endpoint_name(server), (), time.monotonic())
+        except OSError:
+            pass
+        finally:
+            probe.close()
+    return herdr_observation.pane_census(session=server)
+
+
 def _message_terminal_evidence(duty, row, observed, reason):
     """Prove only an exact recipient loss or death of its pane-bound process."""
     intent = duty.get("intent") or {}
@@ -5118,7 +5140,7 @@ def _message_terminal_evidence(duty, row, observed, reason):
                     "process": proof, "process_disposition": disposition,
                     "recipient_binding": recipient_binding}
         if recipient is not None:
-            census = herdr_observation.pane_census(session=server)
+            census = _message_census(server, original.get("pane_id"))
             presence = _census_session_presence(census, recipient.get("session_id"), server)
             if presence is not False:
                 return None
@@ -5144,7 +5166,7 @@ def _message_terminal_evidence(duty, row, observed, reason):
             target_observation=("observed", observed))
         if current is not None:
             return None  # Native process proof outranks an outdated census/terminal label.
-    census = herdr_observation.pane_census(session=server)
+    census = _message_census(server, expected_pane)
     presence = _census_session_presence(census, recipient.get("session_id"), server)
     if presence is not False:
         return None
@@ -7763,6 +7785,13 @@ def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_bind
                 reason = result.get("reason")
                 verify = ("native-steer-" if reason == "native-steer-accepted"
                           else "native-queue-") + result["status"]
+                if outcome == "unverified" and str(reason).startswith("queue-rpc-refused:"):
+                    # A refused RPC sent nothing (a Codex thread not materialized
+                    # before its first message): the carrier still holds the row
+                    # and delivers it, so the receipt says queued, not unverified.
+                    held = peer_message._read_pending(transfer_ref) or {}
+                    if held.get("state") in {"pending", "queued"} and not held.get("rpc_claim"):
+                        outcome, verify = "queued", "native-queue-held"
             except (OSError, ValueError) as exc:
                 outcome, reason = "unverified", "peer-pending-unavailable:" + str(exc)
             if outcome != "true" and producer_binding is None:

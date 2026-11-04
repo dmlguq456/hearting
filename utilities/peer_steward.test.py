@@ -18,6 +18,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import socket
 import tempfile
 import threading
 import time
@@ -7278,6 +7279,23 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
         self.assertEqual((row["state"], row["to"]["session_id"]), ("pending", "proven-thread"))
         self.assertEqual(self._pane_io_calls(calls), [])
 
+    def test_a_refused_queue_rpc_that_left_the_row_for_the_carrier_is_reported_queued(self):
+        os.environ["CLAUDE_CODE_SESSION_ID"] = "sid-steward"
+        calls = []
+        payload = _agent_json("codex", None, "fresh", status="idle")
+        self._native_sid_by_pid[os.getpid()] = "proven-thread"
+        refused = {"status": "unverified", "reason":
+                   "queue-rpc-refused:thread/turns/list:-32600:not materialized yet"}
+        with mock.patch.object(peer_steward.shutil, "which", return_value="/usr/bin/herdr"), \
+             mock.patch.object(peer_steward.subprocess, "run", side_effect=self._fake_run(payload, calls)), \
+             mock.patch.object(peer_steward.peer_message, "deliver_pending_codex", return_value=refused), \
+             mock.patch("builtins.print") as printed:
+            peer_steward.main(["prompt", "fresh", "[steer] first message not sent yet"])
+        line = printed.call_args[0][0]
+        self.assertIn("prompted=queued", line)
+        self.assertIn("queue-rpc-refused:thread/turns/list", line)
+        self.assertNotIn("prompted=unverified", line)
+
     def test_same_sender_recipient_body_retry_reuses_the_same_ref(self):
         os.environ["CLAUDE_CODE_SESSION_ID"] = "sid-steward"
         payload = _agent_json("claude", "sid-child", "child", status="idle")
@@ -9355,6 +9373,28 @@ class MessageTerminalObligationTest(_TmpRootMixin, unittest.TestCase):
             peer_steward._reconcile_obligations(old_store)
         self.assertEqual([call.args[0]["id"] for call in resume.call_args_list],
                          [live_duty["id"]])
+
+    def test_queued_message_to_a_vanished_tmux_server_is_folded_like_a_vanished_herdr_pane(self):
+        store, duty, row, recipient = self._queued_duty(
+            sid="sid-gone", target_name="gone-peer", ref_seed="tmuxgone")
+        gone = "%0@" + os.path.join(tempfile.mkdtemp(), "no-such.sock")
+        recipient["pane_id"] = gone
+        identity = dict(duty["intent"]["identity"], pane=gone)
+        evidence = None
+        with mock.patch.object(peer_steward.herdr_observation, "pane_census", return_value=None):
+            evidence = peer_steward._message_terminal_evidence(
+                {"intent": {"identity": identity}}, dict(row, to=recipient),
+                {"harness": "-", "session_id": "-", "pane": "-"}, "agent-not-found")
+        self.assertEqual(evidence["kind"], "recipient-session-absent")
+        self.assertTrue(evidence["session_absent"])
+        # A live tmux server is not decided here: the unavailable census stays unknown.
+        listener = socket.socket(socket.AF_UNIX)
+        path = os.path.join(tempfile.mkdtemp(), "live.sock")
+        listener.bind(path)
+        listener.listen(1)
+        self.addCleanup(listener.close)
+        with mock.patch.object(peer_steward.herdr_observation, "pane_census", return_value=None):
+            self.assertIsNone(peer_steward._message_census("default", "%0@" + path))
 
     def test_incomplete_or_foreign_session_census_preserves_unknown(self):
         cases = (
