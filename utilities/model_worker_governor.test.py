@@ -23,6 +23,7 @@ import replica_batch_contract as CONTRACT
 from dispatch_contract import process_start_ticks
 from replica_batch_contract import build_manifest
 import dispatch_contract as DC
+from split_module_fixture import patch_split
 
 
 class GovernorDirectReturnDrainTest(unittest.TestCase):
@@ -976,11 +977,11 @@ class GovernorTest(unittest.TestCase):
         import dispatch_contract as contract
         from types import SimpleNamespace
         stack = contextlib.ExitStack()
-        stack.enter_context(mock.patch.object(contract, "completion_marker_is_current", return_value=True))
-        stack.enter_context(mock.patch.object(contract, "completion_attempt_readiness",
+        stack.enter_context(patch_split(contract, "completion_marker_is_current", return_value=True))
+        stack.enter_context(patch_split(contract, "completion_attempt_readiness",
             return_value=SimpleNamespace(state="ready", reason="settled")))
-        stack.enter_context(mock.patch.object(contract, "dispatch_state_roots", return_value=[root]))
-        stack.enter_context(mock.patch.object(contract, "resolve_dispatch_state_root", return_value=root))
+        stack.enter_context(patch_split(contract, "dispatch_state_roots", return_value=[root]))
+        stack.enter_context(patch_split(contract, "resolve_dispatch_state_root", return_value=root))
         return stack
 
     def test_replacement_owner_reserves_only_pending_leg_with_original_failed_closure(self):
@@ -990,7 +991,7 @@ class GovernorTest(unittest.TestCase):
                 root = Path(td)
                 batch, jobs, marker = self._replacement_owner_peer_fixture(root, harness)
                 before, closure = jobs.read_bytes(), marker.read_bytes()
-                with self._peer_completion_probes(root), mock.patch.object(
+                with self._peer_completion_probes(root), patch_split(
                         contract, "review_self_disposition_lineage",
                         return_value=["att-parent-governor", "att-owner-new"]) as ancestry:
                     tokens = self.reserve_batch(td, 1, batch)
@@ -1135,7 +1136,7 @@ class GovernorTest(unittest.TestCase):
                     jobs.write_text("\n".join(lines) + "\n")
                 with self._peer_completion_probes(root) as stack:
                     if fault != "unverified-owner":
-                        stack.enter_context(mock.patch.object(contract, "review_self_disposition_lineage",
+                        stack.enter_context(patch_split(contract, "review_self_disposition_lineage",
                             return_value=["att-parent-governor", "att-wrong-owner" if fault == "other-owner" else "att-owner-new"]))
                     with self.assertRaises(ValueError):
                         self.reserve_batch(td, 1, batch)
@@ -1349,7 +1350,7 @@ print(json.dumps({"returncode": result.returncode, "stderr": result.stderr}))
         with mock.patch.object(
             GOVERNOR, "process_observation",
             return_value=("inaccessible", "", ""),
-        ), mock.patch.object(
+        ), patch_split(
             GOVERNOR, "process_group_observation",
             return_value=GOVERNOR.ProcessGroupObservation(
                 "unverifiable", reason="permission-denied"
@@ -2033,7 +2034,7 @@ class GovernorIdentityRegressionTest(unittest.TestCase):
         t=GOVERNOR.reserve(self.root,"dispatch",1)[0]
         with mock.patch.object(GOVERNOR,"_owned_group_metadata",return_value={"group_owned":True,"pgid":os.getpid()}):
             GOVERNOR.claim_reservation(self.root,t,"dispatch")
-        with mock.patch.object(GOVERNOR.os,"getpgrp",return_value=os.getpid()), mock.patch.object(GOVERNOR,"capture_local_identity",return_value=self.state()["leases"][t]["claimant_identity"]), mock.patch.object(GOVERNOR,"process_group_observation",return_value=GOVERNOR.ProcessGroupObservation("unverifiable",reason="fixture-enumeration-race")):
+        with mock.patch.object(GOVERNOR.os,"getpgrp",return_value=os.getpid()), mock.patch.object(GOVERNOR,"capture_local_identity",return_value=self.state()["leases"][t]["claimant_identity"]), patch_split(GOVERNOR,"process_group_observation",return_value=GOVERNOR.ProcessGroupObservation("unverifiable",reason="fixture-enumeration-race")):
             result=GOVERNOR.release(self.root,t)
         self.assertEqual(result["reason"],"group-observation-incomplete")
         self.assertIsNone(self.state()["claims"][t]["released_at"])

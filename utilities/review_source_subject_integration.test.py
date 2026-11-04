@@ -287,14 +287,14 @@ class SourceSubjectIntegrationTest(unittest.TestCase):
                 "route_id": route["route_id"], "route_hash": route["route_hash"],
                 "node_id": node["id"], "attempt_id": "att-" + node["id"],
             }), encoding="utf-8")
-        with mock.patch.object(DC, "dispatch_state_roots", return_value=[self.state]), \
-             mock.patch.object(DC, "completion_marker_is_current", return_value=True), \
-             mock.patch.object(DC, "completion_attempt_readiness",
+        with patch_split(DC, "dispatch_state_roots", return_value=[self.state]), \
+             patch_split(DC, "completion_marker_is_current", return_value=True), \
+             patch_split(DC, "completion_attempt_readiness",
                  return_value=DC.AttemptReadiness("ready", "fixture-settled", "att-peer")), \
-             mock.patch.object(DC, "_frame_pair_attempt_gate"), \
-             mock.patch.object(DC, "_human_gate_entry_fence"), \
-             mock.patch.object(DC, "_auxiliary_arbitration_gate"), \
-             mock.patch.object(DC, "_sibling_attempt_gate"):
+             patch_split(DC, "_frame_pair_attempt_gate"), \
+             patch_split(DC, "_human_gate_entry_fence"), \
+             patch_split(DC, "_auxiliary_arbitration_gate"), \
+             patch_split(DC, "_sibling_attempt_gate"):
             DC.completion_marker_gate(str(route_file), "handoff", "dry-run", self.agent_home, self.jobs)
             (completion / "critic-review-alternative.json").unlink()
             with self.assertRaises(DC.DispatchContractError) as missing:
@@ -1290,7 +1290,7 @@ class SourceSubjectIntegrationTest(unittest.TestCase):
         self.assertEqual(marker["source_subject"]["binding_digest"],
                          metadata["review_subject_binding_digest"])
         self.assertEqual(self.currency(marker).state, "current")
-        with mock.patch.object(
+        with patch_split(
             DC, "attempt_process_quiescence",
             return_value=DC.ProcessQuiescence("quiescent", "fixture-terminal-observation"),
         ):
@@ -1324,7 +1324,7 @@ class SourceSubjectIntegrationTest(unittest.TestCase):
         (self.repo / "engine.py").write_text("value = 'B'\n", encoding="utf-8")
         self.current_smoke_markers("B")
         self.assertEqual(self.currency(a_pass).state, "superseded")
-        with mock.patch.object(DC, "completion_attempt_readiness",
+        with patch_split(DC, "completion_attempt_readiness",
                                side_effect=AssertionError("stale PASS must not be consumed")):
             DC.completion_marker_gate(str(self.route_file), "test", "start",
                                       self.agent_home, self.jobs)
@@ -1332,7 +1332,7 @@ class SourceSubjectIntegrationTest(unittest.TestCase):
     def _gate_start(self, node, *, readiness=False):
         patches = []
         if not readiness:
-            patches.append(mock.patch.object(DC, "completion_attempt_readiness",
+            patches.append(patch_split(DC, "completion_attempt_readiness",
                                              side_effect=AssertionError("superseded PASS must not be consumed")))
         with contextlib.ExitStack() as stack:
             for patch in patches:
@@ -1354,17 +1354,17 @@ class SourceSubjectIntegrationTest(unittest.TestCase):
         # N28: a review PASS that records no subject cannot be read as current; the next node proceeds.
         self.current_smoke_markers("A")
         self.complete_review("att-review-unbound")
-        with mock.patch.object(DC, "gate_currency", return_value=DC.GateCurrency(
+        with patch_split(DC, "gate_currency", return_value=DC.GateCurrency(
                 "superseded", "completion-review-subject-unknown")), \
-                mock.patch.object(DC, "completion_marker_is_current", return_value=False):
+                patch_split(DC, "completion_marker_is_current", return_value=False):
             self._gate_start("test")
 
     def test_missing_review_input_proceeds_without_reusing_pass(self):
         self.current_smoke_markers("A")
         self.complete_review("att-review-input-missing")
-        with mock.patch.object(DC, "gate_currency", return_value=DC.GateCurrency(
+        with patch_split(DC, "gate_currency", return_value=DC.GateCurrency(
                 "superseded", "completion-review-subject-input-missing")), \
-                mock.patch.object(DC, "completion_marker_is_current", return_value=False):
+                patch_split(DC, "completion_marker_is_current", return_value=False):
             self._gate_start("test")
 
     def test_superseded_rule_never_admits_integrity_breaks(self):
@@ -1739,7 +1739,7 @@ class UpstreamOrderTest(unittest.TestCase):
         return DC.gate_currency(self.route, self.get_node(node), self.path(node), self.marker(node), observe=True)
 
     def start(self, node):
-        with mock.patch.object(DC, "completion_attempt_readiness",
+        with patch_split(DC, "completion_attempt_readiness",
                                   side_effect=AssertionError("a superseded result must not be consumed")):
             DC.completion_marker_gate(str(self.route_file), node, "start", self.agent_home, self.jobs)
 

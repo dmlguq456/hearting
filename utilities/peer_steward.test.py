@@ -25,6 +25,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
+from split_module_fixture import patch_split, split_patch  # noqa: E402
 
 _HERE = Path(__file__).resolve().parent
 # Real capture fixtures: codex-cli 0.162.1 via tmux capture-pane, 80x40 and
@@ -481,7 +482,7 @@ class CompletionConsumerCorrectionTest(_TmpRootMixin, unittest.TestCase):
                              mock.patch.object(peer_steward, "_retire_target", return_value=(native, identity, 0, None)), \
                              mock.patch.object(peer_steward, "_retire_pane_info", return_value={
                                  "shell_pid": os.getpid(), "foreground_processes": []}), \
-                             mock.patch("dispatch_contract.observed_attempt_liveness", return_value=ObservedAttemptLiveness(
+                             split_patch("dispatch_contract.observed_attempt_liveness", return_value=ObservedAttemptLiveness(
                                  "alive" if process_state == "live" else "unverifiable", "fixture", process_state, "fixture")), \
                              mock.patch.object(peer_steward.peer_obligations,
                                                "ensure_normal_runner"), \
@@ -1922,7 +1923,7 @@ class WatchPendingRegisteredWorkTest(_TmpRootMixin, unittest.TestCase):
         self._row()
         check = peer_steward._watch_registered_work_pending
         self.assertTrue(check(self._view(), self._expected(), "default"))
-        with mock.patch("dispatch_contract.observed_attempt_liveness", return_value=
+        with split_patch("dispatch_contract.observed_attempt_liveness", return_value=
                         ObservedAttemptLiveness("unverifiable", "fixture", "unverifiable", "fixture")):
             self.assertFalse(check(self._view(), self._expected(), "default"))
         self._row(status="done")
@@ -1976,7 +1977,7 @@ class WatcherIdentityTest(unittest.TestCase):
             paths.arm.write_text(json.dumps(arm), encoding="utf-8")
             # An empty pid_start would make this live observer read as exited.
             with mock.patch.object(peer_steward, "_proc_start_ticks", return_value=None), \
-                    mock.patch.object(peer_steward, "process_start_ticks", return_value=None):
+                    patch_split(peer_steward, "process_start_ticks", return_value=None):
                 peer_steward._record_own_watch_identity(watch_id, paths, "default")
             self.assertEqual(json.loads(paths.arm.read_text())["watcher"], {})
 
@@ -12638,7 +12639,7 @@ class RetireTest(_TmpRootMixin, unittest.TestCase):
         self.jobs_path.write_text(f"2026-10-09T00:00:00Z\topen\trepo\t-\tslug\t{meta}\n")
         for state, reason in (("live", "bound-registered-work-pending"),
                               ("unverifiable", "bound-registered-work-unknown")):
-            with self.subTest(process_state=state), mock.patch(
+            with self.subTest(process_state=state), split_patch(
                     "dispatch_contract.observed_attempt_liveness",
                     return_value=ObservedAttemptLiveness(
                         "alive" if state == "live" else "unverifiable", "fixture", state, "fixture")):
@@ -12911,7 +12912,7 @@ class RetireTest(_TmpRootMixin, unittest.TestCase):
         self.jobs_path.write_text(f"2026-10-09T00:00:00Z\topen\trepo\t-\tslug\t{meta}\n")
         world = _RetireWorld(sid=None)
         with mock.patch.object(peer_steward, "_proven_session", return_value="thread-real"), \
-             mock.patch("dispatch_contract.observed_attempt_liveness",
+             split_patch("dispatch_contract.observed_attempt_liveness",
                         return_value=ObservedAttemptLiveness("alive", "fixture", "live", "fixture")):
             rc, line = self.retire(world)
         self.assertIn("retired=false reason=bound-registered-work-pending", line)
@@ -16593,7 +16594,7 @@ class NativeReceivingTurnRecoveryTest(_TmpRootMixin, unittest.TestCase):
              mock.patch.object(join, "pending_record_identity",
                                return_value=("rt-native", "execute", "att-owner")), \
              mock.patch("dispatch_seat_handover.effective_parent", return_value=sid), \
-             mock.patch("dispatch_contract.terminal_conflict_pending", return_value=False), \
+             split_patch("dispatch_contract.terminal_conflict_pending", return_value=False), \
              mock.patch.object(codex_queue_dispatch, "resolve_queue_socket", return_value=Path("/tmp/fixture.sock")), \
              mock.patch.object(codex_queue_delivery, "read_exact_turn",
                                side_effect=[native_turn, native_turn]) as read_turn, \

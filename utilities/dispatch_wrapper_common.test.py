@@ -22,6 +22,7 @@ sys.path.insert(0, str(ROOT / "utilities"))
 import dispatch_wrapper_common as C  # noqa: E402
 import dispatch_resource_wait as WAIT  # noqa: E402
 from dispatch_contract import resolve_agent_home  # noqa: E402
+from split_module_fixture import patch_split, split_patch  # noqa: E402
 
 _fixture_spec = importlib.util.spec_from_file_location(
     "wrapper_resource_workflow_fixture", ROOT / "utilities" / "workflow_supervisor.test.py")
@@ -92,7 +93,7 @@ class WrapperCommonTest(unittest.TestCase):
              mock.patch.dict(os.environ, {"AGENT_MODEL_GOVERNOR_RESERVATION_TOKEN": "token-fixture"}), \
              mock.patch("dispatch_contract.replica_batch_expectation", return_value={}), \
              mock.patch("dispatch_contract.resolve_model_governor_root", return_value=Path(td) / "governor"), \
-             mock.patch("dispatch_contract._governor_json", return_value={
+             split_patch("dispatch_contract._governor_json", return_value={
                  "state": "unclaimed", "batch_manifest": manifest}), \
              mock.patch("route_authority.require_batch_reservation"), \
              mock.patch("replica_batch_contract.verify_manifest", return_value=(manifest, "digest", {})), \
@@ -121,7 +122,7 @@ class WrapperCommonTest(unittest.TestCase):
              mock.patch.dict(os.environ, {"AGENT_MODEL_GOVERNOR_RESERVATION_TOKEN": "token-fixture"}), \
              mock.patch("dispatch_contract.replica_batch_expectation", return_value={}), \
              mock.patch("dispatch_contract.resolve_model_governor_root", return_value=Path(td) / "governor"), \
-             mock.patch("dispatch_contract._governor_json", return_value={
+             split_patch("dispatch_contract._governor_json", return_value={
                  "state": "unclaimed", "batch_manifest": manifest}), \
              mock.patch("route_authority.require_batch_reservation"), \
              mock.patch("replica_batch_contract.verify_manifest", return_value=(manifest, "digest", {})):
@@ -143,7 +144,7 @@ class WrapperCommonTest(unittest.TestCase):
              mock.patch.dict(os.environ, {"AGENT_MODEL_GOVERNOR_RESERVATION_TOKEN": "token-fixture"}), \
              mock.patch("dispatch_contract.replica_batch_expectation", return_value={}), \
              mock.patch("dispatch_contract.resolve_model_governor_root", return_value=Path(td) / "governor"), \
-             mock.patch("dispatch_contract._governor_json", return_value={
+             split_patch("dispatch_contract._governor_json", return_value={
                  "state": "unclaimed", "batch_manifest": manifest}), \
              mock.patch("route_authority.require_batch_reservation"), \
              mock.patch("replica_batch_contract.verify_manifest", return_value=(manifest, "digest", {})), \
@@ -249,7 +250,7 @@ class WrapperCommonTest(unittest.TestCase):
              mock.patch("model_config.resolve_config", return_value=(config, receipt)), \
              mock.patch("dispatch_contract.replica_batch_expectation", return_value={}), \
              mock.patch("dispatch_contract.resolve_model_governor_root", return_value=Path(td) / "governor"), \
-             mock.patch("dispatch_contract._governor_json", return_value={
+             split_patch("dispatch_contract._governor_json", return_value={
                  "state": "unclaimed", "batch_manifest": manifest}), \
              mock.patch("route_authority.require_batch_reservation"), \
              mock.patch("replica_batch_contract.verify_manifest", return_value=(manifest, "digest", {})):
@@ -271,7 +272,7 @@ class WrapperCommonTest(unittest.TestCase):
              mock.patch.dict(os.environ, {"AGENT_MODEL_GOVERNOR_RESERVATION_TOKEN": "token-fixture"}), \
              mock.patch("dispatch_contract.replica_batch_expectation", return_value={}), \
              mock.patch("dispatch_contract.resolve_model_governor_root", return_value=Path(td) / "governor"), \
-             mock.patch("dispatch_contract._governor_json", return_value={
+             split_patch("dispatch_contract._governor_json", return_value={
                  "state": "unclaimed", "batch_manifest": manifest}), \
              mock.patch("route_authority.require_batch_reservation"), \
              mock.patch("replica_batch_contract.verify_manifest", return_value=(manifest, "digest", {})), \
@@ -871,7 +872,7 @@ sys.exit(int(os.environ.get("ADMISSION_EXIT", "0")))
             args.jobs = None
             with mock.patch.dict("os.environ", {}, clear=False), \
                  mock.patch.dict("os.environ", {"AGENT_DISPATCH_JOBS": ""}), \
-                 mock.patch.object(C, "resolve_dispatch_state_root",
+                 patch_split(C, "resolve_dispatch_state_root",
                                    side_effect=C.DispatchContractError("registry-ambiguous", "x")):
                 self.assertEqual(C.diff_attribution_prompt(args), "")
 
@@ -881,7 +882,7 @@ sys.exit(int(os.environ.get("ADMISSION_EXIT", "0")))
             jobs = Path(tmp) / "state" / "jobs.log"
             C.write_reset_cache(Path(tmp), "codex", "usage-limit", "12:00", jobs)
             self.assertTrue((jobs.parent / "usage-reset.codex").read_text().endswith(" usage-limit 12:00\n"))
-            with mock.patch.object(C, "dispatch_state_roots",
+            with patch_split(C, "dispatch_state_roots",
                                    side_effect=C.DispatchContractError("registry-ambiguous", "x")):
                 C.write_reset_cache(Path(tmp), "claude", "usage-limit", "12:00")  # no raise
 
@@ -937,7 +938,7 @@ class WatcherLaunchFailureTest(unittest.TestCase):
     def test_wait_delay_keeps_cleanup_pending_then_existing_join_settles_same_row(self):
         import dispatch_completion_join as J
         with mock.patch("route_parent_close.stop_failed_launch") as stop, \
-                mock.patch.object(self.D, "_terminal_cleanup_values", return_value={}), \
+                patch_split(self.D, "_terminal_cleanup_values", return_value={}), \
                 mock.patch.object(self.D, "resolve_attempt_cleanup", return_value={
                     "settled": False, "reason": "governed-leader-live"}):
             self.assertEqual(self.invoke()["cleanup_settled"], "0")
@@ -947,10 +948,10 @@ class WatcherLaunchFailureTest(unittest.TestCase):
         self.proc.kill.assert_not_called()
         self.assertTrue(self.jobs.read_text().endswith(self.sibling))
         empty = self.D.ProcessGroupObservation("empty")
-        with mock.patch.object(self.D, "_proc_observation", return_value=("missing", "", "")), \
-                mock.patch.object(self.D, "process_group_observation", return_value=empty), \
-                mock.patch.object(self.D, "attempt_tagged_descendants", return_value=empty), \
-                mock.patch.object(self.D, "attempt_scan_namespace_authority", return_value=True):
+        with patch_split(self.D, "_proc_observation", return_value=("missing", "", "")), \
+                patch_split(self.D, "process_group_observation", return_value=empty), \
+                patch_split(self.D, "attempt_tagged_descendants", return_value=empty), \
+                patch_split(self.D, "attempt_scan_namespace_authority", return_value=True):
             result = J.recover_receiptless_attempt(self.jobs, J.exact_attempt_row(self.jobs, self.attempt))
             self.assertTrue(result["settled"], result)
             before = self.jobs.read_bytes()
@@ -972,7 +973,7 @@ class WatcherLaunchFailureTest(unittest.TestCase):
 
     def test_unknown_resource_inventory_does_not_apply_cleanup_or_fabricate_settlement(self):
         with mock.patch("route_parent_close.stop_failed_launch", return_value="cleanup-resource-unverifiable"), \
-                mock.patch.object(self.D, "_terminal_cleanup_values", return_value={}), \
+                patch_split(self.D, "_terminal_cleanup_values", return_value={}), \
                 mock.patch.object(self.D, "resolve_attempt_cleanup") as resolve:
             result = self.invoke()
         self.assertEqual(result["cleanup_settled"], "0")
@@ -1011,7 +1012,7 @@ class WatcherLaunchFailureTest(unittest.TestCase):
                         saved.append(self.jobs.read_bytes())
                         return result if after else original(*args, **kwargs)
                     with mock.patch.object(self.D, "close_attempt_row_if", side_effect=raced), \
-                            mock.patch.object(self.D, "_terminal_cleanup_values", return_value={}), \
+                            patch_split(self.D, "_terminal_cleanup_values", return_value={}), \
                             mock.patch("route_parent_close.stop_failed_launch") as stop:
                         self.assertEqual(self.invoke()["cleanup_settled"], "0")
                     stop.assert_not_called()
@@ -1247,7 +1248,7 @@ class ValidateRouteRecordTest(unittest.TestCase):
                 with self.subTest(harness=harness):
                     self.assertIn("WRAPPER_COMMON.validate_route_record", ast.unparse(delegation))
                     self.assertIn("marker_gate=completion_marker_gate", ast.unparse(delegation))
-                    with mock.patch.object(wrapper, "completion_marker_gate") as marker, \
+                    with patch_split(wrapper, "completion_marker_gate") as marker, \
                          mock.patch.object(C, "validate_runtime_requirements"), \
                          mock.patch.object(C, "validate_route_mode_axes"), \
                          mock.patch.object(route_authority, "completion_gate", return_value=None) as completion, \
@@ -1324,7 +1325,7 @@ class ReviewLeaseTest(unittest.TestCase):
                     self.assertIs(acquire.call_args.kwargs["budget"], self.args(lifecycle).watchdog_budget)
                     # The witness probe resolves the wrapper's name when it is
                     # called (the reviewer_report_binding pattern).
-                    with mock.patch.object(wrapper, "review_governed_lease_is_held", return_value=True):
+                    with patch_split(wrapper, "review_governed_lease_is_held", return_value=True):
                         self.assertFalse(acquire.call_args.kwargs["witness_probe"]())
 class ModelPolicyTest(unittest.TestCase):
     def test_model_policy_reads_the_wrappers_harness_and_error(self):

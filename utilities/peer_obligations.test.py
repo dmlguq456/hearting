@@ -23,6 +23,7 @@ from unittest import mock
 import peer_obligations as obligations
 from dispatch_contract import pidfd_open
 import dispatch_batch_obligations as batch_obligations
+from split_module_fixture import split_patch
 
 _HERE = Path(__file__).resolve().parent
 _STEWARD_SPEC = importlib.util.spec_from_file_location(
@@ -2324,7 +2325,7 @@ class ObligationStoreTest(unittest.TestCase):
             jobs.write_text(
                 f"now\topen\trepo\t-\texec\tattempt_id=att-exec,harness={harness},parent_sid=other\n"
                 f"now\topen\trepo\t-\tchild\tattempt_id=att-child,parent_sid=sid,parent_harness={harness}\n")
-            with mock.patch("dispatch_contract.observed_attempt_liveness", return_value=
+            with split_patch("dispatch_contract.observed_attempt_liveness", return_value=
                             ObservedAttemptLiveness("alive", "fixture", "live", "fixture")):
                 work, state = obligations.bound_work_for_pane(
                     "pane", harness, "sid", jobs=jobs, execution_attempt_ids=("att-exec",))
@@ -2332,7 +2333,7 @@ class ObligationStoreTest(unittest.TestCase):
             self.assertEqual([(w.attempt_id, w.pane_relation) for w in work],
                              [("att-exec", "executor"), ("att-child", "parent")])
             # Input readiness ignores parent rows, so it never observes them.
-            with mock.patch("dispatch_contract.observed_attempt_liveness", return_value=
+            with split_patch("dispatch_contract.observed_attempt_liveness", return_value=
                             ObservedAttemptLiveness("alive", "fixture", "live", "fixture")), \
                  mock.patch("dispatch_terminal_commit.owner_completion_state",
                             wraps=__import__("dispatch_terminal_commit").owner_completion_state) as closure:
@@ -2350,7 +2351,7 @@ class ObligationStoreTest(unittest.TestCase):
         jobs.write_text(
             "now\topen\trepo\t-\texec\tattempt_id=att-exec,harness=codex,parent_sid=other\n"
             "now\topen\trepo\t-\tchild\tattempt_id=att-child,parent_sid=sid,parent_harness=codex\n")
-        with mock.patch("dispatch_contract.observed_attempt_liveness", return_value=
+        with split_patch("dispatch_contract.observed_attempt_liveness", return_value=
                         ObservedAttemptLiveness("alive", "fixture", "live", "fixture")), \
                 mock.patch.object(dispatch_seat_handover, "owns", return_value=None):
             work, state = obligations.bound_work_for_pane(
@@ -2358,14 +2359,14 @@ class ObligationStoreTest(unittest.TestCase):
         self.assertEqual((work, state), ((), "unknown"))
 
     def test_foreground_tag_read_is_birth_checked_and_does_not_use_parent_tag(self):
-        with mock.patch("dispatch_contract._runtime_ancestry_proc_stat", return_value={"start": 7}), \
+        with split_patch("dispatch_contract._runtime_ancestry_proc_stat", return_value={"start": 7}), \
              mock.patch.object(Path, "read_bytes", return_value=b"AGENT_DISPATCH_ATTEMPT_ID=att-own\0"):
             self.assertEqual(obligations.execution_attempts_for_processes([{"pid": 123}]), ("att-own",))
-        with mock.patch("dispatch_contract._runtime_ancestry_proc_stat",
+        with split_patch("dispatch_contract._runtime_ancestry_proc_stat",
                         side_effect=[{"start": 7}, {"start": 8}]), \
              mock.patch.object(Path, "read_bytes", return_value=b"AGENT_DISPATCH_ATTEMPT_ID=att-own\0"):
             self.assertEqual(obligations.execution_attempts_for_processes([{"pid": 123}]), ())
-        with mock.patch("dispatch_contract._runtime_ancestry_proc_stat", return_value={"start": 7}), \
+        with split_patch("dispatch_contract._runtime_ancestry_proc_stat", return_value={"start": 7}), \
              mock.patch.object(Path, "read_bytes", side_effect=PermissionError()):
             with self.assertRaisesRegex(obligations.ObligationError, "pane-execution-unavailable"):
                 obligations.execution_attempts_for_processes([{"pid": 123}])
@@ -2589,7 +2590,7 @@ class StewardRecoveryIntegrationTest(unittest.TestCase):
         before = self.jobs.read_bytes()
         for process_state, expected in (("quiescent", "ready"), ("live", "pending"),
                                         ("unverifiable", "unknown")):
-            with self.subTest(process_state=process_state), mock.patch(
+            with self.subTest(process_state=process_state), split_patch(
                     "dispatch_contract.observed_attempt_liveness", return_value=ObservedAttemptLiveness(
                         "dead" if process_state == "quiescent" else
                         "alive" if process_state == "live" else "unverifiable",
@@ -2623,7 +2624,7 @@ class StewardRecoveryIntegrationTest(unittest.TestCase):
             f"{key}={value}" for key, value in metadata.items())
         self.assertTrue(claim_attempt_row(self.jobs, "att-fixture-1", row, launch=True))
         for process_state, expected in (("live", "pending"), ("unverifiable", "unknown")):
-            with self.subTest(process_state=process_state), mock.patch(
+            with self.subTest(process_state=process_state), split_patch(
                     "dispatch_contract.observed_attempt_liveness", return_value=ObservedAttemptLiveness(
                         "alive" if process_state == "live" else "unverifiable",
                         "fixture", process_state, "fixture")):
@@ -2685,7 +2686,7 @@ class StewardRecoveryIntegrationTest(unittest.TestCase):
                             return_value=(("rt-parent-delivery", "sha256:" + "b" * 64, "execute"),)), \
                  mock.patch("dispatch_seat_handover.effective_parent", return_value="sid-current"), \
                  mock.patch("dispatch_seat_handover.effective_parent_harness", return_value="codex"), \
-                 mock.patch("dispatch_contract.observed_attempt_liveness", return_value=
+                 split_patch("dispatch_contract.observed_attempt_liveness", return_value=
                             ObservedAttemptLiveness("dead", "fixture", "quiescent", "fixture")), \
                  mock.patch("dispatch_terminal_commit.owner_completion_state",
                             side_effect=AssertionError(

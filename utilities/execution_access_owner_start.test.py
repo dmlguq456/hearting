@@ -27,6 +27,7 @@ from execution_access import (
     AccessContext, ExecutionAccessError, assert_within_parent, load_request,
     load_parent_effective_grant,
 )
+from split_module_fixture import patch_split
 
 ROOT = Path(__file__).resolve().parents[1]
 OWNER = "att-" + "a" * 32
@@ -309,7 +310,7 @@ class OwnerGrantStartTest(unittest.TestCase):
             # Frame/review readiness is covered separately; this fixture starts
             # at the approved owner's execution-access boundary.
             stack.enter_context(mock.patch.object(wrapper, "owner_frame_launch_gate"))
-            stack.enter_context(mock.patch.object(wrapper, "completion_marker_gate"))
+            stack.enter_context(patch_split(wrapper, "completion_marker_gate"))
             for name in ("launch_orphan_watch", "launch_reap_watch"):
                 if hasattr(wrapper, name):
                     stack.enter_context(mock.patch.object(wrapper, name, return_value=os.getpid()))

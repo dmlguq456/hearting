@@ -200,11 +200,11 @@ class ProjectionFixture(unittest.TestCase):
         stack.enter_context(mock.patch.object(
             artifact_lifecycle, "_load_capability_route",
             return_value=SimpleNamespace(completion_dir=lambda _rid, jobs=None: self.marker_dir)))
-        stack.enter_context(mock.patch.object(
+        stack.enter_context(patch_split(
             dispatch_contract, "evidence_currency", return_value=SimpleNamespace(state="current")))
-        stack.enter_context(mock.patch.object(
+        stack.enter_context(patch_split(
             dispatch_contract, "gate_currency", return_value=SimpleNamespace(state="current")))
-        stack.enter_context(mock.patch.object(
+        stack.enter_context(patch_split(
             dispatch_contract, "completion_attempt_readiness",
             return_value=SimpleNamespace(state="ready")))
 
@@ -444,8 +444,8 @@ class ClosedFindingTests(ProjectionFixture):
         (self.marker_dir / f"{leg}.{marker['attempt_id']}.attempt.json").write_bytes(encoded(link))
         self.save_marker(leg, marker)
         self.addCleanup(mock.patch.stopall)
-        mock.patch.object(dispatch_contract, "evidence_currency", REAL_EVIDENCE).start()
-        mock.patch.object(dispatch_contract, "gate_currency", REAL_GATE).start()
+        patch_split(dispatch_contract, "evidence_currency", REAL_EVIDENCE).start()
+        patch_split(dispatch_contract, "gate_currency", REAL_GATE).start()
         return node, marker_path, marker
 
     def save_marker(self, leg, marker):
@@ -496,7 +496,7 @@ class ClosedFindingTests(ProjectionFixture):
         result = REAL_READINESS(self.route, node, marker, self.jobs,
                                 registry_lines=lines, observe=True)
         self.assertEqual(result.reason, "attempt-route-hash-mismatch")
-        with mock.patch.object(dispatch_contract, "completion_attempt_readiness", REAL_READINESS):
+        with patch_split(dispatch_contract, "completion_attempt_readiness", REAL_READINESS):
             self.jobs.write_text(lines[0] + "\n")
             self.assertEqual(self.payload()["verification"]["verdict"], "unresolved")
 

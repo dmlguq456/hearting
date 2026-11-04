@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
 import dispatch_batch_obligations as obligations  # noqa: E402
 import dispatch_registry_cache as registry_cache  # noqa: E402
+from split_module_fixture import split_patch  # noqa: E402
 
 
 class BatchObligationTest(unittest.TestCase):
@@ -46,7 +47,7 @@ class BatchObligationTest(unittest.TestCase):
 
     def test_done_runtime_owner_without_sidecar_remains_discoverable_and_retries(self):
         self.jobs.write_text(self._runtime_owner_row() + "\n", encoding="utf-8")
-        with mock.patch("dispatch_contract.supervisor_lease_is_held", return_value=False), \
+        with split_patch("dispatch_contract.supervisor_lease_is_held", return_value=False), \
              mock.patch("dispatch_terminal_commit.owner_completion_pending", return_value=True), \
              mock.patch("dispatch_completion_join.materialize_after_terminal_close") as settle:
             self.assertTrue(obligations.has_unowned_work(self.jobs))
@@ -60,7 +61,7 @@ class BatchObligationTest(unittest.TestCase):
         self.jobs.write_text(self._runtime_owner_row(), encoding="utf-8")
         before = self.jobs.read_bytes()
         context = obligations.OwnerSettlementReadContext()
-        with mock.patch("dispatch_contract.supervisor_lease_is_held", return_value=False), \
+        with split_patch("dispatch_contract.supervisor_lease_is_held", return_value=False), \
              mock.patch("dispatch_terminal_commit.owner_completion_pending", return_value=True), \
              mock.patch("dispatch_completion_join.materialize_after_terminal_close") as settle:
             self.assertTrue(obligations.has_unowned_work(self.jobs))
@@ -84,7 +85,7 @@ class BatchObligationTest(unittest.TestCase):
         service_script = self.base / "release" / "utilities" / "codex-managed-completion.py"
         with mock.patch("peer_obligations.service_script",
                         return_value=(service_script, {}, None)), \
-             mock.patch("dispatch_contract.supervisor_lease_is_held", return_value=True) as lease, \
+             split_patch("dispatch_contract.supervisor_lease_is_held", return_value=True) as lease, \
              mock.patch("dispatch_terminal_commit.owner_completion_pending", return_value=True), \
              mock.patch("dispatch_completion_join.materialize_after_terminal_close") as settle:
             first = {"signature": ()}
@@ -125,7 +126,7 @@ class BatchObligationTest(unittest.TestCase):
 
         with mock.patch.object(obligations, "_jobs_paths", side_effect=selected_or_discovered), \
              mock.patch("peer_obligations.service_script", return_value=(service_script, {}, None)), \
-             mock.patch("dispatch_contract.supervisor_lease_is_held", return_value=False), \
+             split_patch("dispatch_contract.supervisor_lease_is_held", return_value=False), \
              mock.patch("dispatch_terminal_commit.owner_completion_pending", return_value=True), \
              mock.patch("dispatch_completion_join.materialize_after_terminal_close") as settle:
             self.assertEqual(obligations.ensure_observers(), 0)
@@ -173,7 +174,7 @@ class BatchObligationTest(unittest.TestCase):
         service_script = self.base / "release" / "utilities" / "codex-managed-completion.py"
         with mock.patch.object(obligations, "_jobs_paths", return_value=[self.jobs, other_jobs]), \
              mock.patch("peer_obligations.service_script", return_value=(service_script, {}, None)), \
-             mock.patch("dispatch_contract.supervisor_lease_is_held", side_effect=lease_held), \
+             split_patch("dispatch_contract.supervisor_lease_is_held", side_effect=lease_held), \
              mock.patch("dispatch_terminal_commit.owner_completion_pending", return_value=True), \
              mock.patch("dispatch_completion_join.materialize_after_terminal_close") as settle, \
              mock.patch.object(obligations, "_parent_duty_has_recipient", return_value=False), \
@@ -232,7 +233,7 @@ class BatchObligationTest(unittest.TestCase):
 
         with mock.patch.object(obligations, "_jobs_paths", return_value=[self.jobs, other_jobs]), \
              mock.patch("peer_obligations.service_script", return_value=(Path("/unused"), {}, None)), \
-             mock.patch("dispatch_contract.supervisor_lease_is_held", return_value=False), \
+             split_patch("dispatch_contract.supervisor_lease_is_held", return_value=False), \
              mock.patch("dispatch_terminal_commit.owner_completion_pending", return_value=True), \
              mock.patch("dispatch_completion_join.materialize_after_terminal_close") as settle, \
              mock.patch.object(obligations, "_pending_owner_settlements",
@@ -436,7 +437,7 @@ class BatchObligationTest(unittest.TestCase):
         roots = (self.base / "release" / ".dispatch",
                  self.base / "xdg-state" / "hearting" / "dispatch")
         with mock.patch("dispatch_contract.resolve_agent_home", return_value=self.base / "release"), \
-             mock.patch("dispatch_contract.dispatch_state_roots", return_value=roots):
+             split_patch("dispatch_contract.dispatch_state_roots", return_value=roots):
             self.assertEqual(obligations.pending_observer_signature(), ())
             self.assertFalse(obligations.has_unowned_work())
 
@@ -583,7 +584,7 @@ class BatchObligationTest(unittest.TestCase):
         registry_cache.reset_metrics()
         context = obligations.OwnerSettlementReadContext()
 
-        with mock.patch("dispatch_contract.supervisor_lease_is_held", return_value=True) as lease, \
+        with split_patch("dispatch_contract.supervisor_lease_is_held", return_value=True) as lease, \
              mock.patch("dispatch_completion_join.settle_finished_attempt") as settle:
             obligations._resume_owner_settlements(self.jobs, context=context)
             obligations._resume_owner_settlements(self.jobs, context=context)
@@ -618,7 +619,7 @@ class BatchObligationTest(unittest.TestCase):
              mock.patch("dispatch_terminal_commit.owner_completion_pending",
                         side_effect=[False, True, True]) as pending, \
              mock.patch("dispatch_completion_join.materialize_after_terminal_close"), \
-             mock.patch("dispatch_contract.supervisor_lease_is_held", return_value=False):
+             split_patch("dispatch_contract.supervisor_lease_is_held", return_value=False):
             self.assertEqual(obligations._resume_owner_settlements(
                 self.jobs, context=context), ())
             with self.jobs.open("a", encoding="utf-8") as stream:
@@ -664,7 +665,7 @@ class BatchObligationTest(unittest.TestCase):
              mock.patch("dispatch_terminal_commit.owner_completion_pending",
                         side_effect=owner_pending), \
              mock.patch("dispatch_completion_join.materialize_after_terminal_close") as settle, \
-             mock.patch("dispatch_contract.supervisor_lease_is_held",
+             split_patch("dispatch_contract.supervisor_lease_is_held",
                         side_effect=lambda _jobs, metadata:
                             metadata.get("attempt_id") == "att-active"):
             obligations._resume_owner_settlements(self.jobs, context=context)
@@ -816,7 +817,7 @@ class BatchObligationTest(unittest.TestCase):
              mock.patch("dispatch_terminal_commit.owner_completion_pending",
                         side_effect=(False, True)) as pending, \
              mock.patch("dispatch_completion_join.materialize_after_terminal_close") as settle, \
-             mock.patch("dispatch_contract.supervisor_lease_is_held", return_value=False):
+             split_patch("dispatch_contract.supervisor_lease_is_held", return_value=False):
             signatures = obligations._resume_owner_settlements(self.jobs, context=context)
 
         self.assertEqual(pending.call_count, 2)
@@ -852,7 +853,7 @@ class BatchObligationTest(unittest.TestCase):
              mock.patch("dispatch_terminal_commit.owner_completion_pending",
                         side_effect=(False, True)) as pending, \
              mock.patch("dispatch_completion_join.materialize_after_terminal_close") as settle, \
-             mock.patch("dispatch_contract.supervisor_lease_is_held", return_value=False):
+             split_patch("dispatch_contract.supervisor_lease_is_held", return_value=False):
             signatures = obligations._resume_owner_settlements(self.jobs, context=context)
 
         self.assertEqual(snapshots, 2)
@@ -878,7 +879,7 @@ class BatchObligationTest(unittest.TestCase):
              mock.patch("dispatch_terminal_commit.owner_completion_pending",
                         side_effect=(False, True)) as pending, \
              mock.patch("dispatch_completion_join.materialize_after_terminal_close") as settle, \
-             mock.patch("dispatch_contract.supervisor_lease_is_held", return_value=False):
+             split_patch("dispatch_contract.supervisor_lease_is_held", return_value=False):
             signatures = obligations._resume_owner_settlements(self.jobs, context=context)
 
         register.assert_not_called()
@@ -894,7 +895,7 @@ class BatchObligationTest(unittest.TestCase):
         self.jobs.write_text(row + "\n", encoding="utf-8")
         registry_cache.clear_cache()
         registry_cache.reset_metrics()
-        with mock.patch("dispatch_contract.supervisor_lease_is_held", return_value=True), \
+        with split_patch("dispatch_contract.supervisor_lease_is_held", return_value=True), \
              mock.patch("dispatch_terminal_commit.owner_completion_pending", return_value=True):
             signatures = obligations._resume_owner_settlements(self.jobs)
 

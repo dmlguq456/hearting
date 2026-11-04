@@ -322,7 +322,7 @@ class ProducerBindingTests(unittest.TestCase):
         seal_fixture_route(route, self.route_file, self.root, self.jobs, "att-owner")
         owner = owner_route_binding.OwnerRouteBinding(str(self.route_file), route["route_id"], route["route_hash"])
         with mock.patch.object(T, "validate_owner_route", return_value=owner), \
-             mock.patch.object(T, "_route_module") as route_module:
+             patch_split(T, "_route_module") as route_module:
             route_module.return_value.terminal_gate_observation.return_value = {"route": {"passed": True}}
             proof = T.prove_terminal_authority(T.TerminalCommitRequest(
                 self.route_file, "att-owner", self.jobs, self.root))
@@ -335,7 +335,7 @@ class ProducerBindingTests(unittest.TestCase):
         seal_fixture_route(route, self.route_file, self.root, self.jobs, "att-owner")
         owner = owner_route_binding.OwnerRouteBinding(str(self.route_file), route["route_id"], route["route_hash"])
         with mock.patch.object(T, "validate_owner_route", return_value=owner), \
-             mock.patch.object(T, "_route_module") as route_module, \
+             patch_split(T, "_route_module") as route_module, \
              mock.patch.object(T, "load_producer_binding",
                                side_effect=T.TerminalCommitError("producer-binding-required")):
             route_module.return_value.terminal_gate_observation.return_value = {"route": {"passed": True}}
@@ -356,7 +356,7 @@ class ProducerBindingTests(unittest.TestCase):
             "cycle_record_digest": T.cycle_identity_digest({"state":"open"})})
         with mock.patch.object(T, "validate_owner_route", return_value=owner), \
              mock.patch.object(T, "producer_lifecycle_applies", return_value=True), \
-             mock.patch.object(T, "_route_module") as route_module, \
+             patch_split(T, "_route_module") as route_module, \
              mock.patch.object(T, "load_producer_binding", return_value=binding), \
              patch_split(artifact_producer, "cycle_route_admission", return_value=SimpleNamespace(allow=True)), \
              split_patch("artifact_producer._live_review_lease", return_value=None):
@@ -369,7 +369,7 @@ class ProducerBindingTests(unittest.TestCase):
         foreign = SimpleNamespace(binding={"route_hash": "sha256:" + "f" * 64, "cycle_id": cycle_id})
         with mock.patch.object(T, "validate_owner_route", return_value=owner), \
              mock.patch.object(T, "producer_lifecycle_applies", return_value=True), \
-             mock.patch.object(T, "_route_module") as route_module, \
+             patch_split(T, "_route_module") as route_module, \
              mock.patch.object(T, "load_producer_binding", return_value=foreign):
             route_module.return_value.terminal_gate_observation.return_value = {"route": {"passed": True}}
             rejected = T.prove_terminal_authority(T.TerminalCommitRequest(
@@ -400,7 +400,7 @@ class ProducerBindingTests(unittest.TestCase):
             cycle_path.write_text(json.dumps(record), encoding="utf-8")
             with mock.patch.object(T, "validate_owner_route", return_value=owner), \
                  mock.patch.object(T, "producer_lifecycle_applies", return_value=True), \
-                 mock.patch.object(T, "_route_module") as route_module, \
+                 patch_split(T, "_route_module") as route_module, \
                  mock.patch.object(T, "load_producer_binding", return_value=binding), \
                  patch_split(artifact_producer, "cycle_route_admission", return_value=SimpleNamespace(allow=True)), \
                  split_patch("artifact_producer._live_review_lease", return_value=None):
@@ -451,7 +451,7 @@ class ContinuationTerminalSettlementTests(unittest.TestCase):
         with mock.patch.object(T, "validate_owner_route", return_value=owner), \
              mock.patch.object(T, "producer_lifecycle_applies", return_value=True), \
              mock.patch.object(T, "load_producer_binding", return_value=binding), \
-             mock.patch.object(T, "_route_module") as route_module, \
+             patch_split(T, "_route_module") as route_module, \
              patch_split(artifact_producer, "cycle_route_admission", return_value=denied):
             route_module.return_value.terminal_gate_observation.return_value = {"execute": {"passed": True}}
             proof = T.prove_terminal_authority(T.TerminalCommitRequest(
@@ -536,7 +536,7 @@ class RelatedOwnerDiscoveryTests(unittest.TestCase):
             with mock.patch.object(T, "verify_request_identity"), \
                  mock.patch.object(T, "validate_owner_route", return_value=owner), \
                  mock.patch.object(T, "producer_lifecycle_applies", return_value=False), \
-                 mock.patch.object(T, "_route_module") as route_module:
+                 patch_split(T, "_route_module") as route_module:
                 route_module.return_value.terminal_gate_observation.return_value = self.owner_gate()
                 transaction = T.settle_terminal_commit(self.request(), services)
             self.assertEqual((transaction.result, transaction.reason),
@@ -910,7 +910,7 @@ class _TerminalCommitFixture(unittest.TestCase):
         proof = T.TerminalProof("proved")
         topology = mock.patch.object(T, "producer_lifecycle_applies", return_value=producer)
         authority = mock.patch.object(T, "prove_terminal_authority", return_value=proof)
-        route_mod = mock.patch.object(T, "_route_module")
+        route_mod = patch_split(T, "_route_module")
         route_mod.return_value.terminal_gate_observation.return_value = self.gates
         return mock.patch.multiple(T, _route_module=route_mod.return_value), topology, authority
 
@@ -935,7 +935,7 @@ class TerminalCommitHappyPathTest(_TerminalCommitFixture):
         services, calls = self.services(calls)
         with mock.patch.object(T, "prove_terminal_authority", return_value=T.TerminalProof("proved")), \
              mock.patch.object(T, "producer_lifecycle_applies", return_value=False), \
-             mock.patch.object(T, "_route_module") as route_module:
+             patch_split(T, "_route_module") as route_module:
             route_module.return_value.terminal_gate_observation.return_value = self.gates
             result = T.settle_terminal_commit(self.request(), services)
         self.assertEqual(result.result, "completed")
@@ -1028,7 +1028,7 @@ class CrashReplayMatrixTest(_TerminalCommitFixture):
                 with mock.patch.object(T, "prove_terminal_authority", return_value=T.TerminalProof("proved")), \
                      mock.patch.object(T, "validate_owner_route", return_value=owner), \
                      mock.patch.object(T, "producer_lifecycle_applies", return_value=False), \
-                     mock.patch.object(T, "_route_module") as route_module:
+                     patch_split(T, "_route_module") as route_module:
                     route_module.return_value.terminal_gate_observation.return_value = self.gates
                     first = T.settle_terminal_commit(self.request(), services)
                     second = T.settle_terminal_commit(self.request(), T.TerminalCommitServices(
@@ -1058,7 +1058,7 @@ class ForwardRecoveryTest(_TerminalCommitFixture):
         with mock.patch.object(T, "prove_terminal_authority", return_value=T.TerminalProof("proved")), \
              mock.patch.object(T, "validate_owner_route", return_value=owner), \
              mock.patch.object(T, "producer_lifecycle_applies", return_value=False), \
-             mock.patch.object(T, "_route_module") as route_module:
+             patch_split(T, "_route_module") as route_module:
             route_module.return_value.terminal_gate_observation.return_value = self.gates
             first = T.settle_terminal_commit(self.request(), services)
             state = json.loads(T._commit_state_path(self.request()).read_text())
@@ -1122,7 +1122,7 @@ class ForwardRecoveryIdentityMismatchTest(_TerminalCommitFixture):
         with mock.patch.object(T, "prove_terminal_authority", return_value=T.TerminalProof("proved")), \
              mock.patch.object(T, "validate_owner_route", return_value=owner), \
              mock.patch.object(T, "producer_lifecycle_applies", return_value=False), \
-             mock.patch.object(T, "_route_module") as route_module:
+             patch_split(T, "_route_module") as route_module:
             route_module.return_value.terminal_gate_observation.return_value = self.gates
             services = T.TerminalCommitServices(
                 close_route=lambda *a, **k: None,
@@ -1170,7 +1170,7 @@ class EnvelopeReplayReverificationTest(_TerminalCommitFixture):
         with mock.patch.object(T, "prove_terminal_authority", return_value=T.TerminalProof("proved")), \
              mock.patch.object(T, "validate_owner_route", return_value=owner), \
              mock.patch.object(T, "producer_lifecycle_applies", return_value=False), \
-             mock.patch.object(T, "_route_module") as route_module:
+             patch_split(T, "_route_module") as route_module:
             route_module.return_value.terminal_gate_observation.return_value = self.gates
             services = T.TerminalCommitServices(
                 close_route=lambda *a, **k: None,
@@ -1186,7 +1186,7 @@ class EnvelopeReplayReverificationTest(_TerminalCommitFixture):
         with mock.patch.object(T, "prove_terminal_authority", return_value=T.TerminalProof("proved")), \
              mock.patch.object(T, "validate_owner_route", return_value=owner), \
              mock.patch.object(T, "producer_lifecycle_applies", return_value=False), \
-             mock.patch.object(T, "_route_module") as route_module:
+             patch_split(T, "_route_module") as route_module:
             route_module.return_value.terminal_gate_observation.return_value = self.gates
             second = T.settle_terminal_commit(self.request(), T.TerminalCommitServices())
         self.assertEqual(second.result, "completed")
@@ -1195,7 +1195,7 @@ class EnvelopeReplayReverificationTest(_TerminalCommitFixture):
         with mock.patch.object(T, "prove_terminal_authority", return_value=T.TerminalProof("proved")), \
              mock.patch.object(T, "validate_owner_route", return_value=owner), \
              mock.patch.object(T, "producer_lifecycle_applies", return_value=False), \
-             mock.patch.object(T, "_route_module") as route_module:
+             patch_split(T, "_route_module") as route_module:
             route_module.return_value.terminal_gate_observation.return_value = self.gates
             return T.settle_terminal_commit(self.request(), T.TerminalCommitServices())
 
@@ -1334,7 +1334,7 @@ class LauncherPreparedCycleBindingTest(_TerminalCommitFixture):
         with mock.patch.object(T, "prove_terminal_authority", return_value=T.TerminalProof("proved")), \
              mock.patch.object(T, "validate_owner_route", return_value=self.owner), \
              mock.patch.object(T, "producer_lifecycle_applies", return_value=True), \
-             mock.patch.object(T, "_route_module") as route_module:
+             patch_split(T, "_route_module") as route_module:
             route_module.return_value.terminal_gate_observation.return_value = self.gates
             return T.settle_terminal_commit(self.request(), services)
 
@@ -1546,7 +1546,7 @@ class OwnerCompletionStateTest(_TerminalCommitFixture):
         # never complete, so the caller must stop waiting on it, not retry
         # forever the way a bare `pending`/True would.
         gates = {"execute": {"passed": False, "reason": "completion-attempt-not-current"}}
-        with mock.patch.object(T, "_route_module") as route_module:
+        with patch_split(T, "_route_module") as route_module:
             route_module.return_value.terminal_gate_observation.return_value = gates
             state = T.owner_completion_state(self.jobs, "done", self._metadata())
             self.assertEqual((state.state, state.reason),
@@ -1558,7 +1558,7 @@ class OwnerCompletionStateTest(_TerminalCommitFixture):
         # `completion-evidence-revised-unrecorded` now (owner recovers with
         # `capability-route.py revise`, not by treating the row as a dead end).
         gates = {"execute": {"passed": False, "reason": "completion-evidence-revised-unrecorded"}}
-        with mock.patch.object(T, "_route_module") as route_module:
+        with patch_split(T, "_route_module") as route_module:
             route_module.return_value.terminal_gate_observation.return_value = gates
             state = T.owner_completion_state(self.jobs, "done", self._metadata())
         self.assertEqual((state.state, state.reason),
@@ -1568,7 +1568,7 @@ class OwnerCompletionStateTest(_TerminalCommitFixture):
         # Cannot be proven permanent -- the marker may simply not be written
         # yet, so this must keep retrying, not be reported as a dead end.
         gates = {"execute": {"passed": False, "reason": "completion-marker-absent"}}
-        with mock.patch.object(T, "_route_module") as route_module:
+        with patch_split(T, "_route_module") as route_module:
             route_module.return_value.terminal_gate_observation.return_value = gates
             state = T.owner_completion_state(self.jobs, "done", self._metadata())
             self.assertEqual((state.state, state.reason),
@@ -1591,7 +1591,7 @@ class OwnerCompletionStateTest(_TerminalCommitFixture):
                        "marker-attempt-failure-class-not-pass"):
             with self.subTest(reason=reason):
                 gates = {"execute": {"passed": False, "reason": reason}}
-                with mock.patch.object(T, "_route_module") as route_module:
+                with patch_split(T, "_route_module") as route_module:
                     route_module.return_value.terminal_gate_observation.return_value = gates
                     state = T.owner_completion_state(self.jobs, "done", self._metadata())
                 self.assertEqual(state.state, "pending")
@@ -1613,7 +1613,7 @@ class OwnerCompletionStateTest(_TerminalCommitFixture):
         with mock.patch.object(T, "_historical_request", return_value=request), \
              mock.patch.object(T, "_completion_request", return_value=request), \
              mock.patch.object(T, "_commit_state_path", return_value=self.root / "missing-commit.json"), \
-             mock.patch.object(T, "_route_module") as route_module:
+             patch_split(T, "_route_module") as route_module:
             route_module.return_value.terminal_gate_observation.return_value = {
                 "execute": {"passed": True}}
             state = T.owner_completion_state(
@@ -1656,7 +1656,7 @@ class OwnerCompletionStateTest(_TerminalCommitFixture):
              mock.patch.object(T, "_commit_state_path", return_value=self.root / "missing-commit.json"), \
              mock.patch.object(registry, "_SETTLED_NS", 10**18), \
              mock.patch.object(registry, "_SETTLED_FINE_NS", 10**18), \
-             mock.patch.object(T, "_route_module") as route_module:
+             patch_split(T, "_route_module") as route_module:
             route_module.return_value.terminal_gate_observation.return_value = {
                 "execute": {"passed": True}}
             registry.reset_metrics()
@@ -1699,7 +1699,7 @@ class OwnerCompletionStateTest(_TerminalCommitFixture):
         with mock.patch.object(T, "_historical_request", return_value=request), \
              mock.patch.object(T, "_completion_request", return_value=request), \
              mock.patch.object(T, "_commit_state_path", return_value=self.root / "missing-commit.json"), \
-             mock.patch.object(T, "_route_module") as route_module:
+             patch_split(T, "_route_module") as route_module:
             route_module.return_value.terminal_gate_observation.side_effect = (
                 lambda _route, **kwargs: (
                     snapshots.append(kwargs["registry_snapshot"])
@@ -1730,7 +1730,7 @@ class OwnerCompletionStateTest(_TerminalCommitFixture):
         with mock.patch.object(T, "_historical_request", return_value=request), \
              mock.patch.object(T, "_completion_request", return_value=request), \
              mock.patch.object(T, "_commit_state_path", return_value=self.root / "missing-commit.json"), \
-             mock.patch.object(T, "_route_module") as route_module:
+             patch_split(T, "_route_module") as route_module:
             for raw in (b"malformed\n", b"job\tdone\t/repo\t/wt\towner\tpartial",
                         b"job\tdone\t/repo\t/wt\towner\tvalue=\xff\n"):
                 with self.subTest(raw=raw):
@@ -2586,7 +2586,7 @@ class OwnerFinishPrimaryRegressionTest(_TerminalCommitFixture):
         services, _ = self.services()
         with mock.patch.object(T, "prove_terminal_authority", return_value=T.TerminalProof("proved")), \
              mock.patch.object(T, "producer_lifecycle_applies", return_value=False), \
-             mock.patch.object(T, "_route_module") as route_module:
+             patch_split(T, "_route_module") as route_module:
             route_module.return_value.terminal_gate_observation.return_value = self.gates
             result = T.settle_terminal_commit(request, services)
         self.assertEqual(result.result, "completed", (result.reason, result.detail))
@@ -2601,7 +2601,7 @@ class OwnerFinishPrimaryRegressionTest(_TerminalCommitFixture):
         services, _ = self.services()
         with mock.patch.object(T, "prove_terminal_authority", return_value=T.TerminalProof("proved")), \
              mock.patch.object(T, "producer_lifecycle_applies", return_value=False), \
-             mock.patch.object(T, "_route_module") as route_module:
+             patch_split(T, "_route_module") as route_module:
             route_module.return_value.terminal_gate_observation.return_value = self.gates
             result = T.settle_terminal_commit(request, services)
         self.assertEqual(result.result, "completed", (result.reason, result.detail))

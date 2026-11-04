@@ -13,6 +13,8 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "utilities"))
+sys.path.append(str(Path(__file__).resolve().parents[3] / "utilities"))  # split_module_fixture
+from split_module_fixture import patch_split  # noqa: E402
 
 NOTE_DEAD = "the earlier attempt is no longer running; run the same --start again and a replacement starts"
 NOTE_UNVERIFIED = ("this place cannot see whether the earlier attempt is still running; the runtime "
@@ -83,7 +85,7 @@ class AlreadyClaimedTest(unittest.TestCase):
                 ("existing-dead", "namespace-extinct", NOTE_DEAD),
                 ("existing-unverified", "process-unverifiable", NOTE_UNVERIFIED),
                 ("existing-completed", "attempt-closed", None)):
-            with self.subTest(state=state), mock.patch.object(
+            with self.subTest(state=state), patch_split(
                     self.wrapper, "existing_attempt_launch_state", return_value=(state, reason)):
                 code, out = self.invoke("start", claimed_elsewhere=True)
                 lines = out.splitlines()

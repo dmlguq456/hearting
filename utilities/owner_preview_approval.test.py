@@ -20,6 +20,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from split_module_fixture import patch_split
 
 _SPEC = importlib.util.spec_from_file_location(
     "producer_fixture_for_owner_preview", Path(__file__).with_name("artifact_producer.test.py"))
@@ -590,7 +591,7 @@ class OwnerGateReachesEveryParentTest(OwnerRefineBase):
             with self.subTest(parent=kind):
                 fixture = self.fresh("test_a_raise_the_runtime_cannot_make_keeps_the_attention_receipt_and_asks_nothing",
                                      harness, parent=kind)
-                with mock.patch.object(DC, "raise_preview_gate_for_node",
+                with patch_split(DC, "raise_preview_gate_for_node",
                                        side_effect=ValueError("gate-carrier-refused: ledger cannot enter the gate")):
                     receipt = fixture.start(run=self.no_launch)
                 self.assertEqual((receipt["state"], receipt["reason"], receipt["required_action"], receipt["gate"]),

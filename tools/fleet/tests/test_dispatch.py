@@ -34,6 +34,8 @@ from fleet import route              # noqa: E402
 from fleet import collectors as fleet_collectors  # noqa: E402
 from fleet.model import ATTEMPT_CLASSIFIER_SOURCE, DispatchJob, Session  # noqa: E402
 from fleet.tests.snapshot_fixture import build_observed_lines, draw_observed
+sys.path.append(str(Path(__file__).resolve().parents[3] / "utilities"))  # split_module_fixture
+from split_module_fixture import patch_split  # noqa: E402
 
 REAL = os.path.join(os.path.dirname(__file__), "fixtures", "route", "real_claude_staged.json")
 COMPOSED = os.path.join(os.path.dirname(__file__), "fixtures", "route", "synth_composed_survey.json")
@@ -2277,8 +2279,8 @@ class CodexAttemptIdentityTest(unittest.TestCase):
 
             seed = {"attempt_id": attempt, "route_id": "rt-ns", "route_node": "plan",
                     "phase": "launch", "kind": "registry", "sequence": 1, "updated_at": 990.0}
-            with mock.patch.object(contract, "namespace_gone", return_value="extinct"), \
-                 mock.patch.object(contract, "attempt_tagged_descendants", side_effect=probe), \
+            with patch_split(contract, "namespace_gone", return_value="extinct"), \
+                 patch_split(contract, "attempt_tagged_descendants", side_effect=probe), \
                  mock.patch.object(dispatch, "_attempt_heartbeat", return_value=seed), \
                  mock.patch.object(dispatch, "_job_transcript_signal", return_value="working"):
                 state = dispatch._dispatch_liveness(rows[0], now=1000.0, track=False)
@@ -3009,7 +3011,7 @@ class ResidueDisplayTest(unittest.TestCase):
 
     def test_residue_pid_is_collected_for_a_live_residue_row(self):
         job = self._job()
-        with mock.patch.object(dispatch, "observed_attempt_liveness", return_value=self._observed()), \
+        with patch_split(dispatch, "observed_attempt_liveness", return_value=self._observed()), \
              mock.patch.object(dispatch, "tagged_residue_receipt", return_value=True), \
              mock.patch.object(dispatch, "residue_live_pids", return_value=(753216,)):
             dispatch._dispatch_liveness(job, now=1000.0, track=False)
@@ -3018,7 +3020,7 @@ class ResidueDisplayTest(unittest.TestCase):
 
     def test_residue_pid_is_absent_without_a_residue_receipt(self):
         job = self._job()
-        with mock.patch.object(dispatch, "observed_attempt_liveness", return_value=self._observed()), \
+        with patch_split(dispatch, "observed_attempt_liveness", return_value=self._observed()), \
              mock.patch.object(dispatch, "residue_live_pids", return_value=(753216,)) as probe:
             dispatch._dispatch_liveness(job, now=1000.0, track=False)
         probe.assert_not_called()

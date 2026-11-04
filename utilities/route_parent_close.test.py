@@ -359,7 +359,7 @@ class ParentCloseTest(unittest.TestCase):
         child = self.terminal_fail_stage(name="att-no-receipt", foreground=False, cleanup=False)
         # The recorded namespace still exists: no extinction proof stands in
         # for the missing receipt, on a host observer or inside a sandbox.
-        with mock.patch.object(DC, "namespace_gone", return_value="present"):
+        with patch_split(DC, "namespace_gone", return_value="present"):
             result = self.close()
         self.assertEqual(result["state"], "termination-pending")
         self.assertIn(child["attempt_id"], result["pending_attempts"])
@@ -393,7 +393,7 @@ class ParentCloseTest(unittest.TestCase):
             child = self.terminal_fail_stage(name=name, foreground=False, **receipt)
             self.assertEqual(DC._cleanup_receipt_reason(child), "", name)
             children[name] = child
-        with mock.patch.object(DC, "namespace_gone", return_value="present"):
+        with patch_split(DC, "namespace_gone", return_value="present"):
             result = self.close()
         self.assertEqual(result["state"], "termination-pending")
         for name, child in children.items():
@@ -474,7 +474,7 @@ class ParentCloseTest(unittest.TestCase):
                     self.assertEqual(json.loads(replay.stdout)["successor_route"], str(successor_path))
                     with mock.patch.object(ROUTE, "build_continuation_route",
                                            side_effect=AssertionError("replayed close rebuilt its suffix")), \
-                            mock.patch.object(work_start, "_route_module", return_value=ROUTE):
+                            patch_split(work_start, "_route_module", return_value=ROUTE):
                         replayed = work_start.pin_handoff_continuation(
                             child.route, child.path, child.jobs, closed)
                     self.assertEqual(replayed["successor_route"], str(successor_path))
@@ -1190,7 +1190,7 @@ class ParentCloseTest(unittest.TestCase):
             try:
                 # Keep this namespace present but unobservable. A host observer
                 # may correctly prove the fabricated namespace extinct otherwise.
-                with mock.patch.object(DC, "namespace_gone", return_value="present"):
+                with patch_split(DC, "namespace_gone", return_value="present"):
                     self.assertNotEqual(
                         DC.attempt_process_quiescence(unknown_child, terminal_receipt=True).state,
                         "quiescent")
@@ -1704,7 +1704,7 @@ class ParentCloseTest(unittest.TestCase):
         CACHE.reset_metrics()
         with mock.patch.object(OWNER, "_registry_snapshot",
                                side_effect=AssertionError("full registry snapshot")), \
-             mock.patch.object(DC, "parse_registry_metadata",
+             patch_split(DC, "parse_registry_metadata",
                                side_effect=AssertionError("full metadata reparse")):
             self.assertFalse(CLOSE.row_requested(child, self.jobs))
         metrics = CACHE.metrics_snapshot()
@@ -2101,10 +2101,10 @@ class ParentCloseTest(unittest.TestCase):
         owner = self.process("att-owner")
         meta = self.row("att-owner", process=owner)
         identity = DC.AuthoritativeProcessIdentity("local", owner.pid, meta["pid_start"])
-        with mock.patch.object(DC, "attempt_process_quiescence", return_value=DC.ProcessQuiescence(
+        with patch_split(DC, "attempt_process_quiescence", return_value=DC.ProcessQuiescence(
                 "quiescent", "pid-reused", identity=identity)), \
              mock.patch.object(DC, "process_observation", return_value=("present", "different-birth", "S")), \
-             mock.patch.object(DC, "attempt_tagged_descendants", return_value=DC.ProcessGroupObservation("empty")), \
+             patch_split(DC, "attempt_tagged_descendants", return_value=DC.ProcessGroupObservation("empty")), \
              mock.patch.object(CLOSE, "_signal") as signal_mock:
             self.assertEqual(self.close()["state"], "cancelled")
             signal_mock.assert_not_called()

@@ -38,6 +38,7 @@ import dispatch_contract as D  # noqa: E402
 import dispatch_observation_log as OBS  # noqa: E402
 import dispatch_terminal_commit as TERMINAL  # noqa: E402
 import dispatch_supervision  # noqa: E402
+from split_module_fixture import patch_split, split_patch  # noqa: E402
 
 # D-42 hermeticity: `classify_supervised_shell_command` and the supervisor
 # state readers consult the LIVE session's dispatch environment on purpose, so
@@ -189,13 +190,13 @@ class DispatchCompletionJoinTest(unittest.TestCase):
         try:
             with (mock.patch.object(cache, "_stat_signature", side_effect=signature),
                   mock.patch.object(JOIN.time, "sleep", side_effect=publish_terminal_row),
-                  mock.patch.object(D, "_proc_observation", return_value=("missing", "", "")),
-                  mock.patch.object(D, "process_group_observation",
+                  patch_split(D, "_proc_observation", return_value=("missing", "", "")),
+                  patch_split(D, "process_group_observation",
                                     return_value=D.ProcessGroupObservation("empty")),
-                  mock.patch.object(D, "attempt_tagged_descendants",
+                  patch_split(D, "attempt_tagged_descendants",
                                     return_value=D.ProcessGroupObservation("empty")),
-                  mock.patch.object(D, "attempt_scan_namespace_authority", return_value=True),
-                  mock.patch.object(D, "observer_namespace_extinct", return_value="present")):
+                  patch_split(D, "attempt_scan_namespace_authority", return_value=True),
+                  patch_split(D, "observer_namespace_extinct", return_value="present")):
                 receipt = JOIN.join_batch(
                     jobs=self.jobs, parent_attempt_id=parent, interval=0.05, timeout=1,
                     registry_append_only=True,
@@ -678,7 +679,7 @@ class DispatchCompletionJoinTest(unittest.TestCase):
     def test_live_residue_pids_are_published_in_the_join_observation(self):
         self.jobs.write_text(self.residue_row())
         populated = D.ProcessGroupObservation("populated", ((4242, "900", "S"),))
-        with mock.patch.object(D, "attempt_tagged_descendants", return_value=populated), \
+        with patch_split(D, "attempt_tagged_descendants", return_value=populated), \
              mock.patch.object(JOIN, "residue_live_pids", return_value=(4242,)):
             receipt = JOIN.join_batch(jobs=self.jobs, parent_attempt_id="att-parent", timeout=0,
                                       recover_receiptless=True)
@@ -705,8 +706,8 @@ class DispatchCompletionJoinTest(unittest.TestCase):
                                  "completed-subsession", process_metadata=metadata))
         denied = D.ProcessGroupObservation(
             "unverifiable", reason="procfs-environ:997325:same-uid-unobservable")
-        with mock.patch.object(D, "process_group_observation", return_value=D.ProcessGroupObservation("empty")), \
-             mock.patch.object(D, "attempt_tagged_descendants", return_value=denied):
+        with patch_split(D, "process_group_observation", return_value=D.ProcessGroupObservation("empty")), \
+             patch_split(D, "attempt_tagged_descendants", return_value=denied):
             sealed = D.resolve_attempt_cleanup(self.jobs, "att-portable-ready", apply=True)
             self.assertTrue(sealed["changed"], sealed)
             original = self.jobs.read_bytes()
@@ -1067,7 +1068,7 @@ class DispatchCompletionJoinTest(unittest.TestCase):
 
     def test_current_delivery_state_advances_marker_open_row_once(self):
         self.marker_delivery_fixture()
-        with mock.patch.object(
+        with patch_split(
             JOIN,
             "attempt_process_quiescence",
             return_value=JOIN.ProcessQuiescence("quiescent", "fixture"),
@@ -1096,7 +1097,7 @@ class DispatchCompletionJoinTest(unittest.TestCase):
             )
             return transaction(*args, **kwargs)
 
-        with mock.patch.object(
+        with patch_split(
             JOIN,
             "attempt_process_quiescence",
             return_value=JOIN.ProcessQuiescence("quiescent", "stale"),
@@ -2739,11 +2740,11 @@ class NormalReadyCleanupJoinTest(unittest.TestCase):
 
     def observations(self, tag=None):
         stack = contextlib.ExitStack()
-        stack.enter_context(mock.patch.object(D, "_proc_observation", return_value=("missing", "", "")))
-        stack.enter_context(mock.patch.object(D, "process_group_observation", return_value=self.empty))
-        stack.enter_context(mock.patch.object(D, "attempt_tagged_descendants", return_value=tag or self.empty))
-        stack.enter_context(mock.patch.object(D, "attempt_scan_namespace_authority", return_value=True))
-        stack.enter_context(mock.patch.object(D, "observer_namespace_extinct", return_value="present"))
+        stack.enter_context(patch_split(D, "_proc_observation", return_value=("missing", "", "")))
+        stack.enter_context(patch_split(D, "process_group_observation", return_value=self.empty))
+        stack.enter_context(patch_split(D, "attempt_tagged_descendants", return_value=tag or self.empty))
+        stack.enter_context(patch_split(D, "attempt_scan_namespace_authority", return_value=True))
+        stack.enter_context(patch_split(D, "observer_namespace_extinct", return_value="present"))
         return stack
 
     def join(self, recover=True):
@@ -2819,7 +2820,7 @@ class NormalReadyCleanupJoinTest(unittest.TestCase):
         def race(jobs, attempt, values, predicate, **kwargs):
             self.jobs.write_text(self.jobs.read_text().replace("pid_start=123", "pid_start=456"))
             return annotate(jobs, attempt, values, predicate, **kwargs)
-        with self.observations(), mock.patch.object(D, "annotate_attempt_row_if", side_effect=race):
+        with self.observations(), patch_split(D, "annotate_attempt_row_if", side_effect=race):
             outcome = D.resolve_attempt_cleanup(self.jobs, "att-ready", apply=True)
             self.assertFalse(outcome["changed"])
             result = self.join()
@@ -2834,13 +2835,13 @@ class NormalReadyCleanupJoinTest(unittest.TestCase):
         producer = D._terminal_cleanup_values
         live = D.ProcessGroupObservation("populated", ((42, "901", "S"),))
         with self.observations() as stack:
-            tags = stack.enter_context(mock.patch.object(D, "attempt_tagged_descendants", return_value=self.empty))
+            tags = stack.enter_context(patch_split(D, "attempt_tagged_descendants", return_value=self.empty))
             def commit(*args, **kwargs):
                 outcome = producer(*args, **kwargs)
                 self.assertIn("cleanup_receipt_digest", outcome)
                 tags.return_value = live
                 return outcome
-            with mock.patch.object(D, "_terminal_cleanup_values", side_effect=commit):
+            with patch_split(D, "_terminal_cleanup_values", side_effect=commit):
                 self.assertTrue(D.close_attempt_row(self.jobs, "att-ready", "completed-review-blocking"))
                 result = self.join()
         self.assertEqual(result["state"], "timeout", result)
@@ -3221,7 +3222,7 @@ class FinishedChildClosure(unittest.TestCase):
 
         completion_calls = []
         with mock.patch.object(JOIN, "recover_receiptless_attempt", side_effect=drain), \
-             mock.patch.object(JOIN, "attempt_process_quiescence", side_effect=quiescence), \
+             patch_split(JOIN, "attempt_process_quiescence", side_effect=quiescence), \
              mock.patch.object(JOIN, "run_route_completion", side_effect=completion_calls.append):
             receipt = JOIN.join_batch(jobs=self.jobs, parent_attempt_id="att-parent",
                                       timeout=1, interval=0.001, recover_receiptless=True)
@@ -3268,14 +3269,14 @@ class FinishedChildClosure(unittest.TestCase):
         raw_before = log.read_bytes()
 
         for observed, process in (("wait", "live"), ("recover", "unverifiable")):
-            with self.subTest(process=process), mock.patch.object(
+            with self.subTest(process=process), patch_split(
                     JOIN, "observed_attempt_liveness",
                     return_value=SimpleNamespace(state=observed, process_state=process)):
                 self.assertEqual(JOIN.close_finished_child(child, jobs=self.jobs), "typed-capacity")
             self.assertEqual(JOIN.exact_attempt_row(self.jobs, child.attempt_id).status, "open")
 
         with mock.patch.object(JOIN, "run_route_completion") as completion, \
-             mock.patch.object(JOIN, "observed_attempt_liveness",
+             patch_split(JOIN, "observed_attempt_liveness",
                 return_value=SimpleNamespace(state="reconcile-needed", process_state="quiescent")):
             result = JOIN.close_finished_child(child, jobs=self.jobs)
 
@@ -5233,7 +5234,7 @@ class ReconcilePendingDeliveryTest(unittest.TestCase):
             # and not a real process, so an unpatched real `_proc_observation`
             # would itself report "missing" and mask the regression this
             # test is for.
-            with mock.patch.object(
+            with patch_split(
                 D, "_proc_observation", return_value=("inaccessible", "", "")
             ):
                 first = JOIN.reconcile_pending_delivery(jobs)
@@ -6083,7 +6084,7 @@ class AcknowledgedCompletionRecoveryTest(unittest.TestCase):
                  mock.patch.object(JOIN, "pending_record_identity",
                                    return_value=("rt-exact", "execute", "parent-attempt")), \
                  mock.patch("dispatch_seat_handover.effective_parent", return_value="thread-parent"), \
-                 mock.patch("dispatch_contract.terminal_conflict_pending", return_value=False), \
+                 split_patch("dispatch_contract.terminal_conflict_pending", return_value=False), \
                  mock.patch.object(pending, "read", return_value=record), \
                  mock.patch.object(pending, "received_ack_identity", return_value=identity):
                 self.assertEqual(JOIN.recover_acknowledged_batch_outcome(
@@ -6150,7 +6151,7 @@ class CachedBatchDeliveryStateTest(unittest.TestCase):
                 mock.patch.object(JOIN, "pending_record_identity",
                                   return_value=("rt-exact", "execute", "parent-attempt")),
                 mock.patch("dispatch_seat_handover.effective_parent", return_value="thread-parent"),
-                mock.patch("dispatch_contract.terminal_conflict_pending", return_value=False),
+                split_patch("dispatch_contract.terminal_conflict_pending", return_value=False),
                 mock.patch.object(pending, "read", side_effect=lambda *a, **k: self.record),
                 mock.patch.object(pending, "received_ack_identity", return_value=identity)):
             patcher.start()
@@ -6249,7 +6250,7 @@ class MixedBatchDeliveryStateTest(unittest.TestCase):
                 mock.patch.object(JOIN, "pending_record_identity",
                                   return_value=("rt-exact", "execute", "parent-attempt")),
                 mock.patch("dispatch_seat_handover.effective_parent", return_value="thread-parent"),
-                mock.patch("dispatch_contract.terminal_conflict_pending", return_value=False),
+                split_patch("dispatch_contract.terminal_conflict_pending", return_value=False),
                 mock.patch.object(pending, "read",
                                   side_effect=lambda root, sid, delivery_id: self.records[delivery_id]),
                 mock.patch.object(pending, "received_ack_identity",
@@ -6328,9 +6329,9 @@ class ProcessUnverifiableNoticeTest(unittest.TestCase):
             int(ready_metadata["pgid"]), "empty", "empty", True,
             D._cancellation_quiescence_binding_digest(ready_metadata),
         )
-        with mock.patch.object(D, "attempt_governed_process_quiescence",
+        with patch_split(D, "attempt_governed_process_quiescence",
                                return_value=D.ProcessQuiescence("quiescent", "fixture")), \
-             mock.patch.object(D, "prove_attempt_quiescence", return_value=proof):
+             patch_split(D, "prove_attempt_quiescence", return_value=proof):
             cleanup = D._terminal_cleanup_values(ready_metadata)
         self.assertIn("cleanup_receipt_digest", cleanup)
 
@@ -6488,9 +6489,9 @@ class ProcessUnverifiableNoticeTest(unittest.TestCase):
             int(receipt_metadata["pgid"]), "empty", "empty", True,
             D._cancellation_quiescence_binding_digest(receipt_metadata),
         )
-        with mock.patch.object(D, "attempt_governed_process_quiescence",
+        with patch_split(D, "attempt_governed_process_quiescence",
                                return_value=D.ProcessQuiescence("quiescent", "fixture")), \
-             mock.patch.object(D, "prove_attempt_quiescence", return_value=proof):
+             patch_split(D, "prove_attempt_quiescence", return_value=proof):
             receipt_cleanup = D._terminal_cleanup_values(receipt_metadata)
         sibling_metadata = dict(live_metadata)
         live_child = row("open", attempt, parent, "execute", process_metadata=child_metadata)
@@ -6511,9 +6512,9 @@ class ProcessUnverifiableNoticeTest(unittest.TestCase):
             return JOIN.current_children(self.jobs, parent)
 
         context = __import__("runtime_observation").ObservationContext(max_entries=8)
-        with mock.patch.object(D, "attempt_governed_process_quiescence",
+        with patch_split(D, "attempt_governed_process_quiescence",
                                return_value=D.ProcessQuiescence("quiescent", "fixture")), \
-             mock.patch.object(D, "prove_attempt_quiescence", return_value=proof), \
+             patch_split(D, "prove_attempt_quiescence", return_value=proof), \
              mock.patch.object(JOIN.time, "monotonic", side_effect=lambda: clock["t"]), \
              mock.patch.object(JOIN.time, "sleep"):
             receipt = JOIN._join_snapshot(
@@ -6579,7 +6580,7 @@ class RegisteredDeliveryExpiryHelperTest(unittest.TestCase):
                 candidate = dict(record)
                 patches = []
                 if label == "unknown":
-                    patches.append(mock.patch.object(
+                    patches.append(patch_split(
                         D, "_proc_observation", return_value=("inaccessible", "", "")))
                 elif label == "wrong-digest":
                     candidate["recipient_digest"] = "0" * 64

@@ -12,6 +12,7 @@ from dispatch_contract import (attempt_process_quiescence,  # noqa: E402
                                observed_attempt_liveness,
                                parse_registry_metadata,
                                post_exit_receipt_reason)
+from split_module_fixture import patch_split  # noqa: E402
 CURRENT_ATTEMPT_CONTRACT=(
  "attempt_schema_version=2,dispatch_depth=2,transport=headless,"
  "execution_surface=registered-headless,registered_worker=1,"
@@ -60,8 +61,8 @@ def fixture_process_scope(jobs):
   def get(self,*args): return raw_context.get(*args) or snapshot()
   def set(self,value): return raw_context.set(value)
   def reset(self,token): return raw_context.reset(token)
- with mock.patch.object(D,"scan_process_table",side_effect=snapshot), \
-      mock.patch.object(D,"_PROCESS_TABLE_SCAN",Context()):
+ with patch_split(D,"scan_process_table",side_effect=snapshot), \
+      patch_split(D,"_PROCESS_TABLE_SCAN",Context()):
   yield
 
 FIXTURE_CLI="""import importlib.util,runpy,sys
@@ -110,7 +111,7 @@ class FixtureNamespaceScopeTest(unittest.TestCase):
         group_errors=((0,None,controlled),(1,None,unrelated),(2,300,member)),
         tag_access_errors=((300,"",controlled),(400,"",unrelated),
                            (301,"",member),(501,"11",tagged)))
-   with mock.patch.object(D,"scan_process_table",return_value=scan), fixture_process_scope(jobs):
+   with patch_split(D,"scan_process_table",return_value=scan), fixture_process_scope(jobs):
     snapshot=D._PROCESS_TABLE_SCAN.get()
     self.assertEqual(snapshot.members_by_attempt,scan.members_by_attempt)
     self.assertEqual(snapshot.group_errors,((0,None,controlled),(2,300,member)))
@@ -121,7 +122,7 @@ class FixtureNamespaceScopeTest(unittest.TestCase):
 
  def test_enumeration_failure_is_never_modelled_as_empty(self):
   scan=D.ProcessTableScan({}, {},error="procfs-enumeration:13")
-  with mock.patch.object(D,"scan_process_table",return_value=scan), fixture_process_scope(None):
+  with patch_split(D,"scan_process_table",return_value=scan), fixture_process_scope(None):
    self.assertEqual(D._PROCESS_TABLE_SCAN.get().error,"procfs-enumeration:13")
 
 class RawProcfsRegistryTest(unittest.TestCase):
@@ -715,7 +716,7 @@ class RegistryTest(RegistryFixtureTestCase):
    "fallback_hop":"same-harness-headless","pid":"437","pid_start":"42",
    "pid_host":"1437","pid_host_start":"42","pgid_host":"1437",
   }
-  with mock.patch.object(module,"attempt_process_quiescence",return_value=process):
+  with patch_split(module,"attempt_process_quiescence",return_value=process):
    state=module._cascade_process_state(metadata)
   self.assertEqual(state,("live-group",1437,"42"))
 
@@ -725,7 +726,7 @@ class RegistryTest(RegistryFixtureTestCase):
   group=type("Group",(),{"state":"unverifiable"})()
   with mock.patch.object(
       module,"process_observation",return_value=("missing","", "")), \
-       mock.patch.object(module,"process_group_observation",return_value=group):
+       patch_split(module,"process_group_observation",return_value=group):
    self.assertFalse(module._wait_exact_group_end(437,"42",0.0))
 
  def test_terminal_revalidation_veto_prevents_stale_snapshot_signal(self):
@@ -1239,24 +1240,24 @@ class RegistryTest(RegistryFixtureTestCase):
   currentize_registry(self.jobs)
   args=self.cancellation_args(attempt)
   empty=D.ProcessGroupObservation("empty")
-  with mock.patch.object(module,"attempt_tagged_descendants",return_value=empty), \
-       mock.patch.object(D,"process_group_observation",return_value=empty), \
-       mock.patch.object(D,"attempt_tagged_descendants",return_value=empty), \
-       mock.patch.object(D,"attempt_scan_namespace_authority",return_value=False), \
-       mock.patch.object(module,"namespace_gone",return_value="extinct"), \
-       mock.patch.object(D,"observer_namespace_extinct",return_value="extinct"), \
+  with patch_split(module,"attempt_tagged_descendants",return_value=empty), \
+       patch_split(D,"process_group_observation",return_value=empty), \
+       patch_split(D,"attempt_tagged_descendants",return_value=empty), \
+       patch_split(D,"attempt_scan_namespace_authority",return_value=False), \
+       patch_split(module,"namespace_gone",return_value="extinct"), \
+       patch_split(D,"observer_namespace_extinct",return_value="extinct"), \
        contextlib.redirect_stdout(io.StringIO()) as stream:
    module.cancel_receiptless_namespace(module.read_rows(self.jobs),
     types.SimpleNamespace(**{**vars(args),"apply":False}))
   dry=json.loads(stream.getvalue())
   self.assertEqual(dry["closed"],0)
   self.assertTrue(dry["decisions"][0]["eligible"],dry)
-  with mock.patch.object(module,"attempt_tagged_descendants",return_value=empty), \
-       mock.patch.object(D,"process_group_observation",return_value=empty), \
-       mock.patch.object(D,"attempt_tagged_descendants",return_value=empty), \
-       mock.patch.object(D,"attempt_scan_namespace_authority",return_value=False), \
-       mock.patch.object(module,"namespace_gone",return_value="extinct"), \
-       mock.patch.object(D,"observer_namespace_extinct",return_value="extinct"), \
+  with patch_split(module,"attempt_tagged_descendants",return_value=empty), \
+       patch_split(D,"process_group_observation",return_value=empty), \
+       patch_split(D,"attempt_tagged_descendants",return_value=empty), \
+       patch_split(D,"attempt_scan_namespace_authority",return_value=False), \
+       patch_split(module,"namespace_gone",return_value="extinct"), \
+       patch_split(D,"observer_namespace_extinct",return_value="extinct"), \
        contextlib.redirect_stdout(io.StringIO()) as stream:
    module.cancel_receiptless_namespace(module.read_rows(self.jobs),args)
   applied=json.loads(stream.getvalue())
@@ -1312,12 +1313,12 @@ class RegistryTest(RegistryFixtureTestCase):
   self.jobs.write_text(self.cancellation_row(attempt))
   before=self.jobs.read_bytes()
   populated=D.ProcessGroupObservation("populated",((41,"900","S"),))
-  with mock.patch.object(module,"attempt_tagged_descendants",return_value=D.ProcessGroupObservation("empty")), \
-       mock.patch.object(D,"process_group_observation",return_value=populated), \
-       mock.patch.object(D,"attempt_tagged_descendants",return_value=D.ProcessGroupObservation("empty")), \
-       mock.patch.object(D,"attempt_scan_namespace_authority",return_value=True), \
-       mock.patch.object(module,"namespace_gone",return_value="extinct"), \
-       mock.patch.object(D,"observer_namespace_extinct",return_value="extinct"), \
+  with patch_split(module,"attempt_tagged_descendants",return_value=D.ProcessGroupObservation("empty")), \
+       patch_split(D,"process_group_observation",return_value=populated), \
+       patch_split(D,"attempt_tagged_descendants",return_value=D.ProcessGroupObservation("empty")), \
+       patch_split(D,"attempt_scan_namespace_authority",return_value=True), \
+       patch_split(module,"namespace_gone",return_value="extinct"), \
+       patch_split(D,"observer_namespace_extinct",return_value="extinct"), \
        contextlib.redirect_stdout(io.StringIO()) as stream:
    self.assertEqual(module.automatic_cancel_receiptless(
     module.read_rows(self.jobs),self.cancellation_args(attempt)),0)
@@ -1337,12 +1338,12 @@ class RegistryTest(RegistryFixtureTestCase):
     self.jobs.write_text(self.cancellation_row(attempt,portable=portable))
     observation=(D.ProcessGroupObservation("unverifiable",reason="foreign")
                  if portable else D.ProcessGroupObservation("empty"))
-    with mock.patch.object(module,"attempt_tagged_descendants",return_value=D.ProcessGroupObservation("empty")), \
-         mock.patch.object(D,"process_group_observation",return_value=observation), \
-         mock.patch.object(D,"attempt_tagged_descendants",return_value=observation), \
-         mock.patch.object(D,"attempt_scan_namespace_authority",return_value=not portable), \
-         mock.patch.object(module,"namespace_gone",return_value="extinct"), \
-         mock.patch.object(D,"observer_namespace_extinct",return_value="extinct"), \
+    with patch_split(module,"attempt_tagged_descendants",return_value=D.ProcessGroupObservation("empty")), \
+         patch_split(D,"process_group_observation",return_value=observation), \
+         patch_split(D,"attempt_tagged_descendants",return_value=observation), \
+         patch_split(D,"attempt_scan_namespace_authority",return_value=not portable), \
+         patch_split(module,"namespace_gone",return_value="extinct"), \
+         patch_split(D,"observer_namespace_extinct",return_value="extinct"), \
          contextlib.redirect_stdout(io.StringIO()) as stream:
      self.assertEqual(module.automatic_cancel_receiptless(
       module.read_rows(self.jobs),self.cancellation_args(attempt)),0)
@@ -1375,10 +1376,10 @@ class RegistryTest(RegistryFixtureTestCase):
    with self.subTest(reason=reason), \
         mock.patch.object(module,"_marker_backed_repair",return_value=False), \
         mock.patch.object(module,"inspect_terminal_attempt",return_value={"state":"absent"}), \
-        mock.patch.object(module,"attempt_tagged_descendants",return_value=D.ProcessGroupObservation("empty")), \
-        mock.patch.object(module,"attempt_process_quiescence",return_value=D.ProcessQuiescence("quiescent",reason)), \
+        patch_split(module,"attempt_tagged_descendants",return_value=D.ProcessGroupObservation("empty")), \
+        patch_split(module,"attempt_process_quiescence",return_value=D.ProcessQuiescence("quiescent",reason)), \
         mock.patch.object(module,"classify_attempt_evidence",return_value=None), \
-        mock.patch.object(module,"namespace_gone",return_value="extinct"):
+        patch_split(module,"namespace_gone",return_value="extinct"):
     self.assertEqual(module._receiptless_namespace_cancel_reason(row,args),"")
 
  def test_false_evidence_matrix_never_creates_pass_or_terminal_class_mix(self):
@@ -1399,12 +1400,12 @@ class RegistryTest(RegistryFixtureTestCase):
   }))
   before=self.jobs.read_bytes()
   populated=D.ProcessGroupObservation("populated",((41,"901","S"),))
-  with mock.patch.object(module,"attempt_tagged_descendants",return_value=D.ProcessGroupObservation("empty")), \
-       mock.patch.object(D,"process_group_observation",return_value=populated), \
-       mock.patch.object(D,"attempt_tagged_descendants",return_value=D.ProcessGroupObservation("empty")), \
-       mock.patch.object(D,"attempt_scan_namespace_authority",return_value=False), \
-       mock.patch.object(module,"namespace_gone",return_value="extinct"), \
-       mock.patch.object(D,"observer_namespace_extinct",return_value="extinct"), \
+  with patch_split(module,"attempt_tagged_descendants",return_value=D.ProcessGroupObservation("empty")), \
+       patch_split(D,"process_group_observation",return_value=populated), \
+       patch_split(D,"attempt_tagged_descendants",return_value=D.ProcessGroupObservation("empty")), \
+       patch_split(D,"attempt_scan_namespace_authority",return_value=False), \
+       patch_split(module,"namespace_gone",return_value="extinct"), \
+       patch_split(D,"observer_namespace_extinct",return_value="extinct"), \
        contextlib.redirect_stdout(io.StringIO()) as stream:
    module.automatic_cancel_receiptless(
     module.read_rows(self.jobs),self.cancellation_args(attempt))
@@ -1433,7 +1434,7 @@ class RegistryTest(RegistryFixtureTestCase):
           f"log_file={empty_log}"),
   )+"\n")
   currentize_registry(self.jobs)
-  with mock.patch.object(module,"namespace_gone",return_value="extinct"), \
+  with patch_split(module,"namespace_gone",return_value="extinct"), \
        contextlib.redirect_stdout(io.StringIO()) as stream:
    module.cancel_receiptless_namespace(
     module.read_rows(self.jobs),self.cancellation_args(attempt))
@@ -1461,7 +1462,7 @@ class RegistryTest(RegistryFixtureTestCase):
            f"log_file={empty_log}"),
    )+"\n")
    currentize_registry(self.jobs)
-   with mock.patch.object(module,"namespace_gone",return_value="extinct"), \
+   with patch_split(module,"namespace_gone",return_value="extinct"), \
         contextlib.redirect_stdout(io.StringIO()) as stream:
     module.cancel_receiptless_namespace(
      module.read_rows(self.jobs),self.cancellation_args(attempt))
@@ -1483,7 +1484,7 @@ class RegistryTest(RegistryFixtureTestCase):
   module=self.load_registry_module("r1_foreign_present")
   attempt="att-r1-foreign-present"
   self.jobs.write_text(self.cancellation_row(attempt))
-  with mock.patch.object(module,"namespace_gone",return_value="present"), \
+  with patch_split(module,"namespace_gone",return_value="present"), \
        contextlib.redirect_stdout(io.StringIO()) as stream:
    module.cancel_receiptless_namespace(
     module.read_rows(self.jobs),self.cancellation_args(attempt))
@@ -1497,8 +1498,8 @@ class RegistryTest(RegistryFixtureTestCase):
   attempt="att-observer-unavailable"
   self.jobs.write_text(self.cancellation_row(attempt))
   before=self.jobs.read_bytes()
-  with mock.patch.object(module,"namespace_gone",return_value="unverifiable"), \
-       mock.patch.object(module,"prove_attempt_quiescence") as prove, \
+  with patch_split(module,"namespace_gone",return_value="unverifiable"), \
+       patch_split(module,"prove_attempt_quiescence") as prove, \
        contextlib.redirect_stdout(io.StringIO()) as stream:
    module.automatic_cancel_receiptless(module.read_rows(self.jobs),self.cancellation_args(attempt))
   applied=json.loads(stream.getvalue())
@@ -1513,13 +1514,13 @@ class RegistryTest(RegistryFixtureTestCase):
   attempt="att-r2-automatic-extinct"
   self.jobs.write_text(self.cancellation_row(attempt))
   empty=D.ProcessGroupObservation("empty")
-  with mock.patch.object(module,"attempt_tagged_descendants",return_value=empty), \
+  with patch_split(module,"attempt_tagged_descendants",return_value=empty), \
        mock.patch.object(module,"inspect_terminal_attempt",return_value={"state":"absent"}), \
-       mock.patch.object(D,"process_group_observation",return_value=empty), \
-       mock.patch.object(D,"attempt_tagged_descendants",return_value=empty), \
-       mock.patch.object(D,"attempt_scan_namespace_authority",return_value=False), \
-       mock.patch.object(module,"namespace_gone",return_value="extinct"), \
-       mock.patch.object(D,"observer_namespace_extinct",return_value="extinct"), \
+       patch_split(D,"process_group_observation",return_value=empty), \
+       patch_split(D,"attempt_tagged_descendants",return_value=empty), \
+       patch_split(D,"attempt_scan_namespace_authority",return_value=False), \
+       patch_split(module,"namespace_gone",return_value="extinct"), \
+       patch_split(D,"observer_namespace_extinct",return_value="extinct"), \
        contextlib.redirect_stdout(io.StringIO()) as stream:
    module.automatic_cancel_receiptless(
     module.read_rows(self.jobs),self.cancellation_args(attempt))
@@ -1542,7 +1543,7 @@ class RegistryTest(RegistryFixtureTestCase):
   module=self.load_registry_module("r3_envelope_present")
   attempt="att-r3-envelope-present"
   self.jobs.write_text(self.cancellation_row(attempt))
-  with mock.patch.object(module,"namespace_gone",return_value="extinct"), \
+  with patch_split(module,"namespace_gone",return_value="extinct"), \
        mock.patch.object(module,"_marker_backed_repair",return_value=False), \
        mock.patch.object(module,"inspect_terminal_attempt",
                          return_value={"state":"valid","verdict":"PASS"}), \
@@ -1574,7 +1575,7 @@ class RegistryTest(RegistryFixtureTestCase):
   module=self.load_registry_module("r5_marker_present")
   attempt="att-r5-marker-present"
   self.jobs.write_text(self.cancellation_row(attempt))
-  with mock.patch.object(module,"namespace_gone",return_value="extinct"), \
+  with patch_split(module,"namespace_gone",return_value="extinct"), \
        mock.patch.object(module,"_marker_backed_repair",return_value=True), \
        contextlib.redirect_stdout(io.StringIO()) as stream:
    module.cancel_receiptless_namespace(
@@ -1590,10 +1591,10 @@ class RegistryTest(RegistryFixtureTestCase):
   attempt="att-r6-descendant-live"
   self.jobs.write_text(self.cancellation_row(attempt))
   populated=D.ProcessGroupObservation("populated",((41,"900","S"),))
-  with mock.patch.object(module,"namespace_gone",return_value="extinct"), \
+  with patch_split(module,"namespace_gone",return_value="extinct"), \
        mock.patch.object(module,"_marker_backed_repair",return_value=False), \
        mock.patch.object(module,"inspect_terminal_attempt",return_value={"state":"absent"}), \
-       mock.patch.object(module,"attempt_tagged_descendants",return_value=populated), \
+       patch_split(module,"attempt_tagged_descendants",return_value=populated), \
        contextlib.redirect_stdout(io.StringIO()) as stream:
    module.cancel_receiptless_namespace(
     module.read_rows(self.jobs),self.cancellation_args(attempt))
@@ -1608,13 +1609,13 @@ class RegistryTest(RegistryFixtureTestCase):
   attempt="att-r10-idempotent"
   self.jobs.write_text(self.cancellation_row(attempt))
   empty=D.ProcessGroupObservation("empty")
-  with mock.patch.object(module,"attempt_tagged_descendants",return_value=empty), \
+  with patch_split(module,"attempt_tagged_descendants",return_value=empty), \
        mock.patch.object(module,"inspect_terminal_attempt",return_value={"state":"absent"}), \
-       mock.patch.object(D,"process_group_observation",return_value=empty), \
-       mock.patch.object(D,"attempt_tagged_descendants",return_value=empty), \
-       mock.patch.object(D,"attempt_scan_namespace_authority",return_value=False), \
-       mock.patch.object(module,"namespace_gone",return_value="extinct"), \
-       mock.patch.object(D,"observer_namespace_extinct",return_value="extinct"), \
+       patch_split(D,"process_group_observation",return_value=empty), \
+       patch_split(D,"attempt_tagged_descendants",return_value=empty), \
+       patch_split(D,"attempt_scan_namespace_authority",return_value=False), \
+       patch_split(module,"namespace_gone",return_value="extinct"), \
+       patch_split(D,"observer_namespace_extinct",return_value="extinct"), \
        contextlib.redirect_stdout(io.StringIO()):
    module.automatic_cancel_receiptless(module.read_rows(self.jobs),self.cancellation_args(attempt))
   first_digest=D.parse_registry_metadata(
@@ -1637,12 +1638,12 @@ class RegistryTest(RegistryFixtureTestCase):
     self.jobs.write_text(self.cancellation_row(attempt,portable=portable))
     observation=(D.ProcessGroupObservation("unverifiable",reason="foreign")
                  if portable else D.ProcessGroupObservation("empty"))
-    with mock.patch.object(module,"attempt_tagged_descendants",return_value=D.ProcessGroupObservation("empty")), \
-         mock.patch.object(D,"process_group_observation",return_value=observation), \
-         mock.patch.object(D,"attempt_tagged_descendants",return_value=observation), \
-         mock.patch.object(D,"attempt_scan_namespace_authority",return_value=not portable), \
-         mock.patch.object(module,"namespace_gone",return_value="extinct"), \
-         mock.patch.object(D,"observer_namespace_extinct",return_value="extinct"), \
+    with patch_split(module,"attempt_tagged_descendants",return_value=D.ProcessGroupObservation("empty")), \
+         patch_split(D,"process_group_observation",return_value=observation), \
+         patch_split(D,"attempt_tagged_descendants",return_value=observation), \
+         patch_split(D,"attempt_scan_namespace_authority",return_value=not portable), \
+         patch_split(module,"namespace_gone",return_value="extinct"), \
+         patch_split(D,"observer_namespace_extinct",return_value="extinct"), \
          contextlib.redirect_stdout(io.StringIO()) as stream:
      module.automatic_cancel_receiptless(
       module.read_rows(self.jobs),self.cancellation_args(attempt))
@@ -1667,8 +1668,8 @@ class RegistryTest(RegistryFixtureTestCase):
 
  def extinct_namespace(self,gone="extinct"):
   stack=contextlib.ExitStack()
-  stack.enter_context(mock.patch.object(D,"namespace_gone",return_value=gone))
-  stack.enter_context(mock.patch.object(D,"_current_observer_is_host_like",return_value=True))
+  stack.enter_context(patch_split(D,"namespace_gone",return_value=gone))
+  stack.enter_context(patch_split(D,"_current_observer_is_host_like",return_value=True))
   return stack
 
  def exact_dead(self,module,attempt,apply=True):
@@ -1716,11 +1717,11 @@ class RegistryTest(RegistryFixtureTestCase):
     attempt=f"att-seed-{phase}"
     self.jobs.write_text(self.extinct_row(attempt,phase))
     row=module.read_rows(self.jobs)[0]
-    with mock.patch.object(module,"namespace_gone",return_value="extinct"), \
+    with patch_split(module,"namespace_gone",return_value="extinct"), \
          mock.patch.object(module,"_marker_backed_repair",return_value=False), \
          mock.patch.object(module,"inspect_terminal_attempt",return_value={"state":"absent"}), \
-         mock.patch.object(module,"attempt_tagged_descendants",return_value=unverifiable), \
-         mock.patch.object(module,"attempt_process_quiescence",
+         patch_split(module,"attempt_tagged_descendants",return_value=unverifiable), \
+         patch_split(module,"attempt_process_quiescence",
                            return_value=D.ProcessQuiescence("unverifiable","process-namespace-unverifiable")):
      self.assertEqual(module._receiptless_namespace_cancel_reason(
       row,self.cancellation_args(attempt)),reason)
@@ -1916,7 +1917,7 @@ class SameHostForegroundStageReceiptTest(RegistryFixtureTestCase):
   spec=importlib.util.spec_from_file_location('registry_claude_receipt_fixture',SCRIPT)
   module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
   row=module.read_rows(self.jobs)[0]
-  with mock.patch.object(module,'prove_attempt_quiescence',return_value=types.SimpleNamespace(
+  with patch_split(module,'prove_attempt_quiescence',return_value=types.SimpleNamespace(
           proven=False,source='exact-teardown',process_group_state='empty',
           descendant_state='unverifiable',namespace_authority=True)):
    self.assertIsNone(module._same_host_foreground_stage_receipt(row))
@@ -1927,7 +1928,7 @@ class SameHostForegroundStageReceiptTest(RegistryFixtureTestCase):
    self.log.write_text(self.log.read_text()+'{"type":"result"')
    self.assertFalse(predicate(row['raw'].split('\t')))
    return False
-  with mock.patch.object(module,'annotate_attempt_row_if',side_effect=changed), \
+  with patch_split(module,'annotate_attempt_row_if',side_effect=changed), \
        mock.patch.object(module,'close_finished_child',side_effect=AssertionError('completion after veto')):
    with contextlib.redirect_stdout(io.StringIO()):module.reconcile([row],args)
   self.assertEqual(self.jobs.read_bytes(),before)
@@ -2109,15 +2110,15 @@ class SameHostForegroundReviewFailureTest(RegistryFixtureTestCase):
   row=module.read_rows(self.jobs)[0]
   before=self.jobs.read_bytes()
   populated=D.ProcessGroupObservation("populated",((424242,"1","S"),))
-  with mock.patch.object(D,"process_group_observation",return_value=populated):
+  with patch_split(D,"process_group_observation",return_value=populated):
    self.assertIsNone(module._same_host_foreground_review_failure(row))
-  with mock.patch.object(D,"attempt_tagged_descendants",return_value=populated):
+  with patch_split(D,"attempt_tagged_descendants",return_value=populated):
    self.assertIsNone(module._same_host_foreground_review_failure(row))
   self.assertEqual(self.jobs.read_bytes(),before)
   args=types.SimpleNamespace(jobs=self.jobs,attempt=self.attempt,session=None,route=None,
                              node=None,job=None,all=False,apply=True,agent_home=self.base,
                              only_exact_dead=False,audit=None)
-  with mock.patch.object(D,"attempt_tagged_descendants",return_value=populated), \
+  with patch_split(D,"attempt_tagged_descendants",return_value=populated), \
        mock.patch.object(module,"reconcile_pending_delivery",side_effect=AssertionError("broad delivery")):
    stream=io.StringIO()
    with contextlib.redirect_stdout(stream):module.reconcile(module.read_rows(self.jobs),args)
@@ -2603,7 +2604,7 @@ class DetachedResidueDrainReconcileTest(RegistryFixtureTestCase):
  def test_live_residue_keeps_waiting_and_names_the_pid(self):
   populated=D.ProcessGroupObservation("populated",((4242,"900","S"),))
   before=self.jobs.read_bytes()
-  with mock.patch.object(D,"attempt_tagged_descendants",return_value=populated):
+  with patch_split(D,"attempt_tagged_descendants",return_value=populated):
    decision=self.decision("--apply")
   self.assertFalse(decision["category"].startswith("residue-drain"))
   self.assertEqual(decision["residue"],{"state":"residue-live","live_pids":[4242]})
@@ -3200,7 +3201,7 @@ class ClosedUnclaimedOwnerTest(RegistryFixtureTestCase):
   self.assertIsNone(self.module._closed_unclaimed_owner(self.row(),self.jobs))
  def test_active_incomplete_process_and_advanced_owner_binding_refuse(self):
   for state in ("populated","unverifiable"):
-   with self.subTest(state=state),mock.patch.object(self.module,"attempt_tagged_descendants",
+   with self.subTest(state=state),patch_split(self.module,"attempt_tagged_descendants",
     return_value=D.ProcessGroupObservation(state)):
     self.assertIsNone(self.module._closed_unclaimed_owner(self.row(),self.jobs))
   binding=self.module.OwnerRouteBinding(str(self.route_file),self.route["route_id"],self.route["route_hash"])
@@ -3223,7 +3224,7 @@ class ClosedUnclaimedOwnerTest(RegistryFixtureTestCase):
    self.assertEqual(record["decisions"][0]["category"],"closed-owner-revalidation-veto")
    self.assertEqual(self.row()["status"],"open")
  def test_new_tagged_process_vetoes_lock_time_cancel(self):
-  with mock.patch.object(self.module,"attempt_tagged_descendants",side_effect=[
+  with patch_split(self.module,"attempt_tagged_descendants",side_effect=[
    D.ProcessGroupObservation("empty"),D.ProcessGroupObservation("populated",((123,"1","S"),))]):
    record=self.reconcile(True)
   self.assertEqual(record["closed"],0);self.assertEqual(self.row()["status"],"open")

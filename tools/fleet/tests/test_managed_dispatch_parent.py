@@ -15,6 +15,8 @@ from fleet import fleet, render, model  # noqa: E402
 from fleet.collectors import dispatch, resolve_parent_edges, _mark_dispatch_child_sessions  # noqa: E402
 from fleet.model import DispatchJob, Session  # noqa: E402
 from fleet.tests.snapshot_fixture import build_observed_lines
+sys.path.append(str(Path(__file__).resolve().parents[3] / "utilities"))  # split_module_fixture
+from split_module_fixture import patch_split  # noqa: E402
 
 
 MANAGED = "/home/u/.codex/.harness/managed-sessions/session-live"
@@ -65,7 +67,7 @@ class ManagedDispatchParentTest(unittest.TestCase):
                 "dispatch_depth": "1", "worker_type": "owner", "route_id": "rt-coherent", "route_hash": "sha256:coherent"}
         job._registry_metadata, job._registry_path = meta, "/fixture/jobs.log"
         binding = handover.binding_of(job._registry_path, meta)
-        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(tidy, "state_root", return_value=Path(tmp)):
+        with tempfile.TemporaryDirectory() as tmp, patch_split(tidy, "state_root", return_value=Path(tmp)):
             seat = tidy.Seat("pane", "coherent")
             def publish(origin_sid, origin_harness, sid, harness, ts):
                 tidy._append_ledger_entry(seat, {"event": "handover", "source": "retire",
@@ -98,7 +100,7 @@ class ManagedDispatchParentTest(unittest.TestCase):
         binding = handover.binding_of(job._registry_path, meta)
         for reverse in (False, True):
             with self.subTest(reverse=reverse), tempfile.TemporaryDirectory() as tmp, \
-                    mock.patch.object(tidy, "state_root", return_value=Path(tmp)):
+                    patch_split(tidy, "state_root", return_value=Path(tmp)):
                 seat = tidy.Seat("pane", "competing")
                 arms = [("current-B", "claude", 1), ("current-C", "opencode", 2)]
                 for sid, harness, ts in reversed(arms) if reverse else arms:
@@ -122,7 +124,7 @@ class ManagedDispatchParentTest(unittest.TestCase):
         job._registry_path = "/fixture/jobs.log"
         parent = self.session(sid="confirmed-successor")
         original = job.parent_sid
-        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(tidy, "state_root", return_value=Path(tmp)):
+        with tempfile.TemporaryDirectory() as tmp, patch_split(tidy, "state_root", return_value=Path(tmp)):
             seat = tidy.Seat("pane", "grace")
             tidy._append_ledger_entry(seat, {"event": "succession", "source": "tidy-clear",
                 "harness": "codex", "sid": parent.session_id, "from": original, "ts": 1})
@@ -163,7 +165,7 @@ class ManagedDispatchParentTest(unittest.TestCase):
                         with self.subTest(harness=harness, parent_cwd=parent_cwd,
                                           successor=successor, grace=grace), \
                              tempfile.TemporaryDirectory() as tmp, \
-                             mock.patch.object(tidy, "state_root", return_value=Path(tmp)):
+                             patch_split(tidy, "state_root", return_value=Path(tmp)):
                             model.reset_parent_edge_tracker()
                             registered = "parent-A"
                             current = "parent-B" if successor else registered

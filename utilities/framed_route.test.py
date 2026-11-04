@@ -28,6 +28,7 @@ os.environ["FLEET_NOW_LANG"] = "Korean"
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent / "tools"))
+from split_module_fixture import split_patch  # noqa: E402
 
 
 def _load(name, filename):
@@ -756,7 +757,7 @@ class EndingBase(FramedBase):
         self.write_frame_outputs(self.output)
         self.cli_calls = []
         self.gate_calls = []
-        patch = mock.patch("dispatch_contract.completion_marker_gate",
+        patch = split_patch("dispatch_contract.completion_marker_gate",
                            side_effect=lambda *a, **k: self.gate_calls.append(a[1:3]))
         patch.start()
         self.addCleanup(patch.stop)
@@ -958,7 +959,7 @@ class TerminalCompletionGateTest(FramedBase):
 
     def test_an_unreleased_frame_review_gate_is_not_completed(self):
         refusal = R.DispatchContractError("human-gate-unreleased", "frame-review")
-        with mock.patch("dispatch_contract.completion_marker_gate", side_effect=refusal), \
+        with split_patch("dispatch_contract.completion_marker_gate", side_effect=refusal), \
                 self.assertRaisesRegex(ValueError, "framed-terminal-not-ready:human-gate-unreleased"):
             R.complete_node(self.route, self.node, "route-decision", self.evidence)
         self.assertFalse(self.marker().exists())
@@ -972,13 +973,13 @@ class TerminalCompletionGateTest(FramedBase):
         for label, payload, expected in (("foreign route", foreign, "route-decision-invalid:frame_route"),
                                          ("digest mismatch", broken, "route-decision-invalid:digest")):
             self.evidence.write_bytes(RP.render(payload))
-            with self.subTest(label), mock.patch("dispatch_contract.completion_marker_gate"), \
+            with self.subTest(label), split_patch("dispatch_contract.completion_marker_gate"), \
                     self.assertRaisesRegex(ValueError, expected):
                 R.complete_node(self.route, self.node, "route-decision", self.evidence)
             self.assertFalse(self.marker().exists())
 
     def test_with_the_gate_satisfied_the_marker_is_published_once_and_replays(self):
-        with mock.patch("dispatch_contract.completion_marker_gate") as gate:
+        with split_patch("dispatch_contract.completion_marker_gate") as gate:
             first, row = R.complete_node(self.route, self.node, "route-decision", self.evidence)
             second, _row = R.complete_node(self.route, self.node, "route-decision", self.evidence)
         self.assertIsNone(row)
@@ -1067,7 +1068,7 @@ class FramedStartTest(FramedBase):
             patch = mock.patch.object(W, name, **options)
             patch.start()
             self.addCleanup(patch.stop)
-        patch = mock.patch("dispatch_contract.completion_marker_gate")
+        patch = split_patch("dispatch_contract.completion_marker_gate")
         patch.start()
         self.addCleanup(patch.stop)
         patch = mock.patch.object(W, "_route_cli", side_effect=self.in_process_cli)

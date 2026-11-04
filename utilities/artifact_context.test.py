@@ -16,7 +16,7 @@ import artifact_producer as P
 import dispatch_terminal_commit as T
 import dispatch_completion_join as JOIN
 import codex_dispatch_terminal as terminal
-from split_module_fixture import patch_split
+from split_module_fixture import patch_split, split_patch
 
 _PRODUCER_FIXTURE_SPEC = importlib.util.spec_from_file_location(
     "producer_fixture_for_terminal_artifact_context", Path(__file__).with_name("artifact_producer.test.py"))
@@ -271,7 +271,7 @@ class ArtifactContextTest(unittest.TestCase):
         with patch_split(P, "load_route", return_value=self.route), \
              patch_split(P, "read_cycle_record", return_value=review), \
              patch_split(P, "cycle_dir", return_value=self.root / "fixture-cycle"), \
-             mock.patch("dispatch_contract.validate_review_output_binding", return_value={
+             split_patch("dispatch_contract.validate_review_output_binding", return_value={
                  "cycle_id": review["cycle_id"], "producer_id": review["producer_id"],
                  "output_path": str(output)}):
             context = C.resolve_context(route=self.route, environ=values)

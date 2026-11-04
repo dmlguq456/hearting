@@ -875,7 +875,7 @@ class A2EnvelopeReplayTest(TERM._TerminalCommitFixture):
         with mock.patch.object(T, "prove_terminal_authority", return_value=T.TerminalProof("proved")), \
              mock.patch.object(T, "validate_owner_route", return_value=owner), \
              mock.patch.object(T, "producer_lifecycle_applies", return_value=False), \
-             mock.patch.object(T, "_route_module") as route_module:
+             patch_split(T, "_route_module") as route_module:
             route_module.return_value.terminal_gate_observation.return_value = self.gates
             first = T.settle_terminal_commit(self.request(), T.TerminalCommitServices(
                 close_route=lambda *a, **k: None, finalize_exact_cycle=lambda *a, **k: None,
@@ -887,7 +887,7 @@ class A2EnvelopeReplayTest(TERM._TerminalCommitFixture):
         with mock.patch.object(T, "prove_terminal_authority", return_value=T.TerminalProof("proved")), \
              mock.patch.object(T, "validate_owner_route", return_value=owner), \
              mock.patch.object(T, "producer_lifecycle_applies", return_value=False), \
-             mock.patch.object(T, "_route_module") as route_module:
+             patch_split(T, "_route_module") as route_module:
             route_module.return_value.terminal_gate_observation.return_value = self.gates
             return T.settle_terminal_commit(self.request(), T.TerminalCommitServices())
 

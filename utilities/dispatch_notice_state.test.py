@@ -136,7 +136,7 @@ class NoticeTest(unittest.TestCase):
     def _resolve_success_batch(self, seed, now_ns=None):
         from types import SimpleNamespace
         with mock.patch("dispatch_attempt_policy.committed_outcome", return_value="succeeded"), \
-             mock.patch("dispatch_contract.observed_attempt_liveness",
+             split_patch("dispatch_contract.observed_attempt_liveness",
                         return_value=SimpleNamespace(state="terminal")):
             return notice.resolve_delivery_batch(self.jobs, seed, recipient_key="parent",
                                                  delivery_root=self.root, now_ns=now_ns)
@@ -591,7 +591,7 @@ class NoticeTest(unittest.TestCase):
         record = supervision.materialize(self.jobs, {"att-owner"}, reason="supervisor-exited")[0]
         self.close()
         with mock.patch("dispatch_terminal_commit.owner_completion_pending", return_value=True), \
-             mock.patch("dispatch_contract.attempt_process_quiescence",
+             split_patch("dispatch_contract.attempt_process_quiescence",
                         return_value=SimpleNamespace(state="quiescent", reason="registry-closed")):
             self.assertEqual(record["receipt"]["reason"], "supervisor-exited")
             self.assertEqual(record["receipt"]["obligation_revision"], "")

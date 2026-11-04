@@ -25,6 +25,7 @@ import dispatch_observation_log as OBS  # noqa: E402
 import dispatch_contract as DC  # noqa: E402
 import dispatch_pending_delivery as PD  # noqa: E402
 import dispatch_retention as SHARED  # noqa: E402
+from split_module_fixture import patch_split  # noqa: E402
 
 _SPEC = importlib.util.spec_from_file_location("g03_home_fixtures", ROOT / "utilities/worker_home_retention.test.py")
 _HOME_FIXTURES = importlib.util.module_from_spec(_SPEC)
@@ -240,7 +241,7 @@ class DispatchLogRetentionTest(unittest.TestCase):
             prompts.append(review_path)
 
         unbound = self.log("orphan.codex.prompt.txt")
-        with mock.patch.object(
+        with patch_split(
                 DC, "attempt_process_quiescence",
                 side_effect=lambda meta, **_kwargs: (
                     DC.ProcessQuiescence("unverifiable", "fixture-unknown")
@@ -266,7 +267,7 @@ class DispatchLogRetentionTest(unittest.TestCase):
                 return DC.ProcessQuiescence("live", "attempt-descendant-live")
             return DC.ProcessQuiescence("unverifiable", "process-namespace-unverifiable")
 
-        with mock.patch.object(DC, "attempt_process_quiescence", side_effect=quiescence):
+        with patch_split(DC, "attempt_process_quiescence", side_effect=quiescence):
             result = self.sweep()
         self.assertEqual(result["removed"], 0)
         self.assertTrue(live.exists() and unknown.exists())
@@ -1187,7 +1188,7 @@ class DispatchLogRetentionTest(unittest.TestCase):
                 return original_probe(*args, **kwargs)
             with mock.patch.object(home, "_registry_lock_until", lock), \
                     mock.patch.object(home, "_directory_page", page), mock.patch.object(home, "_read_json", read), \
-                    mock.patch.object(DC, "attempt_process_quiescence", probe):
+                    patch_split(DC, "attempt_process_quiescence", probe):
                 second = R.sweep(self.jobs, now_ns=self.now + 301 * 10**9)
             self.assertEqual(second["removed"], 1, second)
             self.assertFalse(target.exists())

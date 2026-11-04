@@ -20,6 +20,7 @@ import unittest
 import threading
 from unittest import mock
 from pathlib import Path
+from split_module_fixture import patch_split
 
 _HERE = Path(__file__).resolve().parent
 _SPEC = importlib.util.spec_from_file_location("peer_message", str(_HERE / "peer-message.py"))
@@ -3839,7 +3840,7 @@ class HandoffAcceptanceTest(_TmpRootMixin, unittest.TestCase):
             print(f"prompted={outcome} reason=native-queue")
             return exit_code
         with mock.patch.object(tidy, "read_latest_card", return_value={"generation": 7, "body": "read this card"}), \
-             mock.patch.object(tidy, "state_root", return_value=self.tmp_root), \
+             patch_split(tidy, "state_root", return_value=self.tmp_root), \
              mock.patch.object(tidy, "mark_card_handed_off") as marked, \
              mock.patch.object(self.runner, "injected_executable", return_value=None), \
              mock.patch.object(self.steward, "_retire_target", side_effect=target), \
@@ -3900,7 +3901,7 @@ class HandoffAcceptanceTest(_TmpRootMixin, unittest.TestCase):
                     return 0
                 with mock.patch.object(tidy, "read_latest_card",
                                        return_value={"id": "card-startup", "body": "exact card"}), \
-                     mock.patch.object(tidy, "state_root", return_value=self.tmp_root), \
+                     patch_split(tidy, "state_root", return_value=self.tmp_root), \
                      mock.patch.object(tidy, "mark_card_handed_off"), \
                      mock.patch.object(self.runner, "injected_executable", return_value=None), \
                      mock.patch.object(self.steward, "_retire_target", side_effect=target), \
@@ -4109,7 +4110,7 @@ class HandoffAcceptanceTest(_TmpRootMixin, unittest.TestCase):
                         print(verdict)
                         return 5
                     with mock.patch.object(tidy, "read_latest_card", return_value={"id":"card", "body":"continue me"}), \
-                         mock.patch.object(tidy, "state_root", return_value=self.tmp_root), \
+                         patch_split(tidy, "state_root", return_value=self.tmp_root), \
                          mock.patch.object(tidy, "mark_card_handed_off") as marked, \
                          mock.patch.object(self.runner, "injected_executable", return_value=injected), \
                          mock.patch.object(self.steward, "_retire_target", side_effect=target), \

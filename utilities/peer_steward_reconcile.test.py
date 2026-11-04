@@ -38,6 +38,7 @@ import peer_obligations  # noqa: E402
 import session_notice  # noqa: E402
 import session_tidy as tidy  # noqa: E402
 from route_identity import route_hash  # noqa: E402
+from split_module_fixture import patch_split  # noqa: E402
 
 
 def _notice(harness, sid, *, key, subject, text, jobs,
@@ -537,7 +538,7 @@ class ReconcileDutyTest(IsolatedCase):
         # retention passes (registry archive included) itself, detached, for its own root.
         import dispatch_contract
         with mock.patch.object(peer_steward.subprocess, "Popen") as popen, \
-                mock.patch.object(dispatch_contract, "stable_state_root", return_value=self.root):
+                patch_split(dispatch_contract, "stable_state_root", return_value=self.root):
             popen.return_value.pid = 4242
             first = peer_steward._runner_maintenance_pass(self.store)
             second = peer_steward._runner_maintenance_pass(self.store)
@@ -554,7 +555,7 @@ class ReconcileDutyTest(IsolatedCase):
     def test_a_retention_start_that_fails_is_not_retried_before_its_due_window(self):
         import dispatch_contract
         with mock.patch.object(peer_steward.subprocess, "Popen", side_effect=OSError("no fork")) as popen, \
-                mock.patch.object(dispatch_contract, "stable_state_root", return_value=self.root):
+                patch_split(dispatch_contract, "stable_state_root", return_value=self.root):
             peer_steward._runner_maintenance_pass(self.store)
             peer_steward._runner_maintenance_pass(self.store)
         self.assertEqual(len(self._retention_starts(popen)), 1)

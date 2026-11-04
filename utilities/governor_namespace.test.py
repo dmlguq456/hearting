@@ -6,6 +6,7 @@ SOURCE=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(SOURCE/'utilities'))
 import governor_identity as G
 import dispatch_contract as D
+from split_module_fixture import patch_split
 s=importlib.util.spec_from_file_location('gov',SOURCE/'utilities/model-worker-governor.py');gov=importlib.util.module_from_spec(s);s.loader.exec_module(gov)
 SCRIPT=Path(__file__).resolve()
 def snap(root):
@@ -49,7 +50,7 @@ def finish_local_lease(root, token):
   return result
  argv=[str(SOURCE/'utilities/model-worker-governor.py'),'--root',str(root),'run','--class','dispatch','--',sys.executable,'-c','pass']
  assert gov.RESERVATION_ENV not in os.environ
- with mock.patch.object(gov,'acquire',acquire_existing), mock.patch.object(gov,'release',release_observed), mock.patch.object(gov,'process_group_observation',scan), mock.patch.object(sys,'argv',argv):
+ with mock.patch.object(gov,'acquire',acquire_existing), mock.patch.object(gov,'release',release_observed), patch_split(gov,'process_group_observation',scan), mock.patch.object(sys,'argv',argv):
   exit_code=gov.main()
  return {'root':str(root),'token':token,'exit':exit_code,'result':transitions[-1]['result'],
          'state':snap(root),'transitions':transitions,'acquisition_seam':'existing-actor-issued-lease'}

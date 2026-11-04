@@ -21,6 +21,7 @@ sys.modules[S.name] = A
 S.loader.exec_module(A)
 
 import owner_route_binding as OWNER_BINDING
+from split_module_fixture import split_patch
 
 
 OWNER_ATTEMPT = "att-owner-activity"
@@ -309,7 +310,7 @@ class ForegroundActivityTests(unittest.TestCase):
             (11, "2"): {"ppid": 1, "pgid": 10},  # same group, not a descendant
             (12, "3"): {"ppid": 10, "pgid": 12},  # exact runtime descendant
         }
-        with mock.patch("dispatch_contract.attempt_tagged_descendants",
+        with split_patch("dispatch_contract.attempt_tagged_descendants",
                         side_effect=AssertionError("owner must not broaden by tag")):
             self.assertEqual(monitor._members(table), {(10, "1"), (12, "3")})
 
