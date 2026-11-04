@@ -29,6 +29,7 @@ from route_authority import linked_worktree_slice as is_linked_worktree_slice
 
 from dispatch_contract_base import (
     _cancellation_quiescence_receipt_record, ARTIFACT_PROOF_RECEIPT,
+    _has_persisted_process_identity,
     ATTEMPT_CANCELLATION_QUIESCENCE_RECEIPT, ATTEMPT_DESCENDANT_ENV, ATTEMPT_DESCENDANT_PROOF,
     ATTEMPT_DESCENDANT_RESIDUE_PROOF, AttemptExecutionObservation,
     AuthoritativeProcessIdentity, CANCELLATION_QUIESCENCE_MAX_WAIT_SECONDS,
@@ -2350,6 +2351,12 @@ def attempt_identity_lineage(metadata: Mapping[str, str]) -> set[tuple[str, str]
     return identities
 
 
+# The two notes only a pre-start, lock-held close wrote before it also recorded
+# launch_outcome. Rows already on disk cannot be rewritten.
+_UNSTARTED_SLICE_CLOSE_NOTES = frozenset({
+    "subsession-batch-start-failed", "subsession-batch-registration-incomplete"})
+
+
 def _attempt_process_quiescence_impl(metadata: dict[str, str]) -> ProcessQuiescence:
     """Classify the exact governed process without PID-namespace guessing.
 
@@ -2368,6 +2375,11 @@ def _attempt_process_quiescence_impl(metadata: dict[str, str]) -> ProcessQuiesce
             "reaped-before-publish",
         }:
             return ProcessQuiescence("quiescent", launch_outcome)
+        if (metadata.get("note") in _UNSTARTED_SLICE_CLOSE_NOTES and metadata.get("session_chain_id")
+                and not launch_outcome and metadata.get("launch_claimed") == "0"
+                and metadata.get("launch_started") != "1"
+                and not _has_persisted_process_identity(metadata)):
+            return ProcessQuiescence("quiescent", "never-launched")
         return ProcessQuiescence("unverifiable", "process-identity-missing")
     if not raw_pid.isdigit() or not metadata.get("pid_start"):
         return ProcessQuiescence("unverifiable", "process-identity-invalid")

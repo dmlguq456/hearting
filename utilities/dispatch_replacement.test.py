@@ -471,6 +471,45 @@ class ReplacementTest(unittest.TestCase):
                     else:
                         self.assertIsNone(R._children_quiescent(rows, 'att-source'))
 
+    def test_legacy_and_new_unstarted_slice_rows_do_not_block_replacement(self):
+        # setUp patches the process verdict for every test; this one reads the real rows.
+        self.quiet.stop()
+        owner = {**self.meta, 'worker_type': 'owner'}
+        base = {k: v for k, v in self.meta.items()
+                if k not in {'launch_outcome', 'failure_class'} and not k.startswith('pid')}
+        slice_row = {**base, 'attempt_id': 'att-slice', 'parent_attempt_id': 'att-source',
+                     'worker_type': 'stage', 'subsession_id': 'ss-chain-a', 'stage_authority': '0',
+                     'route_node': 'execute', 'session_chain_id': 'ssc-execute-a',
+                     'subsession_mode': 'parallel', 'launch_claimed': '0'}
+        # A slice row closed before the close also wrote launch_outcome (note only), and the
+        # same close as it is written now.
+        legacy = {**slice_row, 'note': 'subsession-batch-start-failed'}
+        legacy_registration = {**slice_row, 'note': 'subsession-batch-registration-incomplete'}
+        current = {**legacy, 'launch_outcome': 'never-launched', 'failure_class': 'cancelled',
+                   'reconcile_reason': 'subsession-batch-start-failed'}
+        for name, row in (('legacy-start-failed', legacy), ('legacy-registration-incomplete', legacy_registration),
+                          ('current', current)):
+            with self.subTest(settled=name):
+                self.write(owner, status='done')
+                self.write(row, status='done', append=True)
+                rows = R._rows(self.jobs.read_text(encoding='utf-8').splitlines())
+                self.assertIsNone(R._children_quiescent(rows, 'att-source'))
+        lookalikes = {
+            'launch-cleanup-unverified': {**legacy, 'launch_outcome': 'launch-cleanup-unverified'},
+            'launch-started': {**legacy, 'launch_started': '1'},
+            'claimed': {**legacy, 'launch_claimed': '1'},
+            'pid-recorded': {**legacy, 'pid': '4242', 'pid_start': '77'},
+            'other-note': {**legacy, 'note': 'completed'},
+        }
+        for name, row in lookalikes.items():
+            with self.subTest(unsettled=name):
+                self.write(owner, status='done')
+                self.write(row, status='done', append=True)
+                rows = R._rows(self.jobs.read_text(encoding='utf-8').splitlines())
+                with self.assertRaises(D.DispatchContractError) as caught:
+                    R._children_quiescent(rows, 'att-source')
+                self.assertEqual(caught.exception.reason, 'replacement-owner-child-unsettled')
+
     def test_terminal_fence_vetoes_claim(self):
         with mock.patch.object(D,'ensure_terminal_claim_absent',side_effect=D.DispatchContractError('terminal-claim-pending')):
             with self.assertRaises(D.DispatchContractError):self.claim()

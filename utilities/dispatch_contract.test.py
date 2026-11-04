@@ -1746,6 +1746,34 @@ class DispatchContractTest(unittest.TestCase):
    })
   self.assertEqual((reused.state,reused.reason),("quiescent","local-pid-reused"))
 
+ def test_legacy_unstarted_slice_close_is_quiescent_and_lookalikes_are_not(self):
+  # The key set of a slice row closed before the close also wrote launch_outcome.
+  legacy={
+   "attempt_id":"att-slice","parent_attempt_id":"att-owner","session_chain_id":"ssc-aaaa",
+   "subsession_mode":"parallel","launch_claimed":"0","registered_worker":"1",
+   "execution_surface":"registered-headless",
+  }
+  for note in ("subsession-batch-start-failed","subsession-batch-registration-incomplete"):
+   with self.subTest(legacy=note):
+    result=D.attempt_process_quiescence({**legacy,"note":note},terminal_receipt=True)
+    self.assertEqual((result.state,result.reason),("quiescent","never-launched"))
+  base={**legacy,"note":"subsession-batch-start-failed"}
+  lookalikes={
+   "launch-cleanup-unverified":{"launch_outcome":"launch-cleanup-unverified"},
+   "pid-and-start":{"pid":"4242","pid_start":"77"},
+   "other-note":{"note":"completed"},
+   "claimed":{"launch_claimed":"1"},
+   "started":{"launch_started":"1"},
+   "no-note":{"note":""},
+   "no-chain":{"session_chain_id":""},
+  }
+  for name,change in lookalikes.items():
+   with self.subTest(lookalike=name):
+    metadata={**base,**change}
+    if name=="no-note": metadata.pop("note")
+    self.assertNotEqual(
+     D.attempt_process_quiescence(metadata,terminal_receipt=True).state,"quiescent")
+
  def test_foreground_reap_note_cannot_override_a_live_recorded_process(self):
   metadata={
    "pid":str(os.getpid()),

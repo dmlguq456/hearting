@@ -86,7 +86,11 @@ class CellGrid:
 
     def __init__(self, cols, rows, background=None):
         self.cols, self.rows = max(0, int(cols)), max(0, int(rows))
-        self.cells = [[(" ", None, background) for _ in range(self.cols)] for _ in range(self.rows)]
+        # Cells are immutable tuples and writes replace them. Share the blank,
+        # keeping each row independent, instead of allocating a tuple per cell
+        # on every spinner tick (and repeatedly collecting the long-lived VM).
+        blank = (" ", None, background)
+        self.cells = [[blank] * self.cols for _ in range(self.rows)]
         self.hits = []
         self.trace = CellGrid.default_trace   # ownership checks in tests; None in production
         self.pane_clip = None                 # (first column, edge): pane text never crosses the edge

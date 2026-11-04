@@ -326,6 +326,10 @@ definition's current hash, enabled state, and discovered source set to match.
 Use `adapters/codex/bin/preflight.sh runtime-projection
 --require-hook-trust` or `adapters/codex/bin/preflight.sh doctor --runtime-strict`
 when hook trust must fail runtime checks.
+A worker home (`AGENT_SESSION_ROLE=worker` with a `worker-home.json`) is checked
+against the release recorded as its `source`, because an owner's home stays linked
+to the release that built it while its children may start on the installed one; its
+`hearting` link must still point at that release.
 The lifecycle hooks provide informational context. The design hook is a console-check alert path, not a
 full render/screenshot visual harness.
 The final `PostToolUse` hook group passes Edit/Write/MultiEdit/apply_patch input to the shared `hooks/spec-sync-nudge.sh` and returns one `hookSpecificOutput.additionalContext` JSON object when canonical spec lines remain stale.

@@ -199,6 +199,19 @@ class LoadingGate(unittest.TestCase):
         self.assertNotIn("불러오는 중", self.draw(loading=False))
         self.assertNotIn("불러오는 중", self.draw(loading=False, pending=True))
 
+    def test_only_the_model_that_can_be_published_is_rendered(self):
+        from tools.fleet.explorer import frame
+
+        with mock.patch.object(frame, "draw", wraps=frame.draw) as draw:
+            self.assertIn("불러오는 중", self.draw(loading=False, pending=True))
+            self.assertEqual(draw.call_count, 0)
+            self.assertNotIn("불러오는 중", self.draw(loading=False))
+            self.assertEqual(draw.call_count, 1)
+            # A pending candidate must still advance readiness, but only the
+            # last complete model should pay for a cell frame and click map.
+            self.assertNotIn("불러오는 중", self.draw(loading=False, pending=True))
+            self.assertLessEqual(draw.call_count, 2)
+
     def test_cached_frame_skips_live_composition_before_first_collection(self):
         from unittest.mock import patch
         from tools.fleet.explorer.view_model import ExplorerViewModel
@@ -727,3 +740,7 @@ class StartupOrdering(unittest.TestCase):
         starts = [index for index, event in enumerate(events) if event.startswith("start:")]
         self.assertTrue(starts)
         self.assertTrue(all(draw_index < index for index in starts), events)
+
+
+if __name__ == "__main__":
+    unittest.main()
