@@ -483,6 +483,16 @@ GPU sampling deadlines cover SSH connection, both bounded NVIDIA queries and
 process attribution, with room in the outer collection deadline. Slow sampling
 stays in the independent GPU refresh pump and does not delay basic refresh or
 input. A genuinely expired query still reports the timeout and unknown metrics.
+Fleet's adaptive background cadence also accounts for collector CPU time:
+a CPU-heavy pass leaves at least four times its thread CPU time before the next
+periodic pass. Cheap reads retain the existing interval, and slow I/O alone does
+not earn an additional CPU delay. First collection, explicit refresh, input and
+animation retain their existing scheduling; a costly observation's lower refresh
+frequency is the deliberate cost of reducing idle CPU. This adds no control,
+approval or recovery step.
+Completed cache-writer threads and their generation deduplication history stay
+bounded in a long-running viewer. Live writes remain owned; the existing on-disk
+observation ordering still protects newer saved screens.
 
 ## Basis and current scope
 

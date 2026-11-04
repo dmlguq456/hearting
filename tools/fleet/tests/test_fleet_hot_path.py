@@ -317,6 +317,22 @@ class ProcessTableScanScopeTest(unittest.TestCase):
         self.assertEqual(counter.calls, 1)
         self.assertIsNone(D._PROCESS_TABLE_SCAN.get())
 
+    def test_early_stall_probes_share_the_liveness_process_scan(self):
+        counter = _Counter(D.scan_process_table)
+
+        def collect_with_early_probes(*_args):
+            D.attempt_tagged_descendants({"attempt_id": "stall-a"})
+            D.attempt_tagged_descendants({"attempt_id": "stall-b"})
+            with D.process_table_scan_scope():
+                D.process_group_observation(4242)
+            return []
+
+        with patch_split(D, "scan_process_table", counter), \
+                mock.patch.object(dispatch_collector, "_collect", side_effect=collect_with_early_probes):
+            dispatch_collector.collect()
+        self.assertEqual(counter.calls, 1)
+        self.assertIsNone(D._PROCESS_TABLE_SCAN.get())
+
 
 class _SortedPath(type(Path())):
     """A Path whose directory walk is deterministic, so "last reason wins" is testable."""

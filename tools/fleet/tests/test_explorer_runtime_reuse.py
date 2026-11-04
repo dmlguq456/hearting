@@ -10,6 +10,104 @@ from tools.fleet.explorer.view_model import ExplorerViewModel
 
 
 class ExplorerRuntimeReuseTests(unittest.TestCase):
+    def test_thousands_of_completed_saves_do_not_retain_thread_or_generation_history(self):
+        import weakref
+
+        retained = []
+
+        class CompletedThread:
+            def __init__(self, *, target, args, **_kwargs):
+                self.target, self.args, self.ident = target, args, None
+                retained.append(weakref.ref(self))
+
+            def start(self):
+                self.ident = 1
+                self.target(*self.args)
+                self.target = self.args = None
+
+            def is_alive(self):
+                return False
+
+            def join(self, _timeout):
+                pass
+
+        runtime = ExplorerRuntime()
+        model = ExplorerViewModel()
+        readiness = {"ready": True, "fully_fresh": True, "all_new": True}
+        with patch("tools.fleet.explorer.runtime.threading.Thread", CompletedThread), \
+                patch.object(runtime, "_cache_envelope", return_value={}), \
+                patch.object(runtime, "_write_cache", return_value=True):
+            for generation in range(5000):
+                current = {**readiness, "generation": generation, "observed_at": 1000 + generation}
+                runtime.persist_complete_async(model, current)
+                if generation == 100:
+                    warm_history = len(runtime._persisted_generations)
+            self.assertIsNone(runtime.persist_complete_async(model, current))
+        self.assertEqual(len(runtime._persisted_generations), warm_history)
+        self.assertLessEqual(sum(ref() is not None for ref in retained), 1)
+        self.assertEqual(len(runtime._pending_generations), 0)
+
+    def test_unchanged_live_usage_does_not_copy_the_whole_immutable_model(self):
+        row = {"harness": "claude", "text": "claude", "windows": (("week", 40, None),)}
+        model = ExplorerViewModel(usage=(row,))
+        with patch.object(live, "_usage_records", return_value=[dict(row)]):
+            self.assertIs(live.current_claude_usage(model, {}, 1000), model)
+        changed = {**row, "windows": (("week", 50, None),)}
+        with patch.object(live, "_usage_records", return_value=[changed]):
+            updated = live.current_claude_usage(model, {}, 1000)
+        self.assertIsNot(updated, model)
+        self.assertEqual(updated.usage[0]["windows"][0][1], 50)
+
+    def test_idle_frames_reuse_cells_without_freezing_the_clock_or_input(self):
+        from dataclasses import replace
+        from tools.fleet.explorer import frame
+        from tools.fleet.explorer.state import NavState
+
+        runtime = ExplorerRuntime()
+        model = ExplorerViewModel(clock=1000, repos=({"id": "repo", "name": "repo"},))
+        state = NavState()
+        first = runtime.draw_frame(model, state, 140, 45)
+        with patch.object(frame, "draw", wraps=frame.draw) as draw:
+            # A new VM can carry the same visible data while a collector runs.
+            same = replace(model, clock=1000.5)
+            self.assertIs(runtime.draw_frame(same, state, 140, 45), first)
+            self.assertEqual(draw.call_count, 0)
+            cases = (
+                (replace(model, clock=1060), state, 140, 45, 1),
+                (model, replace(state, view="ROUTES"), 140, 45, 1),
+                (model, replace(state, scroll=(("pane", 3),)), 140, 45, 1),
+                (model, state, 80, 24, 1),
+                (model, state, 140, 45, 0),
+                (replace(model, hearting={"version": "new"}), state, 140, 45, 1),
+                (replace(model, repos=({"id": "changed"},)), state, 140, 45, 1),
+            )
+            for vm, nav, cols, rows, beat in cases:
+                with self.subTest(view=nav.view, cols=cols, beat=beat):
+                    before = draw.call_count
+                    actual = runtime.draw_frame(vm, nav, cols, rows, beat=beat)
+                    self.assertEqual(draw.call_count, before + 1)
+                    self.assertEqual(actual, frame.draw(vm, nav, cols, rows, beat=beat))
+
+    def test_question_edits_invalidate_a_frame_even_when_nav_states_compare_equal(self):
+        from dataclasses import replace
+        from tools.fleet.explorer import frame
+        from tools.fleet.explorer.state import NavState
+
+        runtime = ExplorerRuntime()
+        model = ExplorerViewModel()
+        state = NavState(view="QUESTIONS", question_overlay={"state": "opening"})
+        runtime.draw_frame(model, state, 140, 45)
+        edited = replace(state, question_overlay={"state": "failed", "error": "offline"})
+        self.assertEqual(state, edited)  # the editor is excluded from NavState equality
+        with patch.object(frame, "draw", wraps=frame.draw) as draw:
+            actual = runtime.draw_frame(model, edited, 140, 45)
+            self.assertEqual(draw.call_count, 1)
+            self.assertEqual(actual, frame.draw(model, edited, 140, 45))
+            edited.question_overlay["error"] = "retry"
+            before = draw.call_count
+            runtime.draw_frame(model, edited, 140, 45)
+            self.assertEqual(draw.call_count, before + 1)
+
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tempdir.cleanup)

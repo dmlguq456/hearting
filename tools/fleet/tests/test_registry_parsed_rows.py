@@ -12,6 +12,64 @@ from fleet.collectors import dispatch
 
 
 class ParsedRegistryRowsTest(unittest.TestCase):
+    def test_process_backfill_selects_the_same_slug_and_exact_attempt_as_full_indexes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            current, legacy = Path(temp) / "current", Path(temp) / "legacy"
+            current.write_text(
+                "t\topen\t/repo\t/wt\tshared\tattempt_id=old,mode=old\n"
+                "t\topen\t/repo\t/wt\tshared\tattempt_id=new,mode=new\n"
+                "t\tdone\t/repo\t/wt\tother\tattempt_id=other,mode=other\n")
+            legacy.write_text("t\topen\t/repo\t/wt\tshared\tattempt_id=old,mode=foreign\n")
+            paths = [str(current), str(legacy)]
+            all_slugs, all_attempts = dispatch._jobs_log_fields(paths)
+            slugs, attempts = dispatch._jobs_log_fields(paths, slugs={"shared"}, attempts={"old"})
+            self.assertEqual(slugs, {"shared": all_slugs["shared"]})
+            self.assertEqual(attempts, {"old": all_attempts["old"]})
+            self.assertEqual(slugs["shared"]["mode"], "new")
+            self.assertEqual(attempts["old"]["mode"], "old")
+
+    def test_parent_selection_preserves_duplicates_siblings_and_registry_precedence(self):
+        with tempfile.TemporaryDirectory() as temp:
+            current, legacy = Path(temp) / "current", Path(temp) / "legacy"
+            current.write_text(
+                "t\topen\t/repo\t/wt\tp\tattempt_id=parent\n"
+                "t\tdone\t/repo\t/wt\tp\tattempt_id=parent\n"
+                "t\topen\t/repo\t/wt\ts\tattempt_id=sibling,parent_attempt_id=parent\n"
+                "t\topen\t/repo\t/wt\tu\tattempt_id=unrelated,parent_attempt_id=other\n")
+            legacy.write_text(
+                "t\topen\t/repo\t/wt\tu\tattempt_id=unrelated,parent_attempt_id=parent\n")
+            paths = [str(current), str(legacy)]
+            full = dispatch._parent_extinction_rows(paths)
+            selected = dispatch._parent_extinction_rows(paths, {"parent"})
+            expected = tuple(row for row in full if row[1].get("attempt_id") == "parent"
+                             or row[1].get("parent_attempt_id") == "parent")
+            self.assertEqual(selected, expected)
+            self.assertEqual(len(selected), 3)
+            with mock.patch.object(dispatch, "parsed_registry_rows",
+                                   side_effect=AssertionError("no child needs parent evidence")):
+                self.assertEqual(dispatch._parent_extinction_rows(paths, set()), ())
+
+    def test_long_metadata_values_scan_field_boundaries_once(self):
+        class CountedText(str):
+            scans = 0
+
+            def find(self, *args):
+                type(self).scans += 1
+                return super().find(*args)
+
+            def rfind(self, *args):
+                type(self).scans += 1
+                return super().rfind(*args)
+
+            def split(self, *args):
+                return [type(self)(part) for part in super().split(*args)]
+
+        raw = CountedText("capability=code,note=" + "word " * 2000 + "end,mode=dev")
+        legacy, keys = dispatch._registry_metadata_analysis(raw)
+        self.assertFalse(legacy)
+        self.assertEqual(set(keys), {"note"})
+        self.assertLess(raw.scans, 20)  # depends on the three fields, not 2,000 words
+
     def test_fast_spacing_guard_matches_the_legacy_regex(self):
         legacy_pattern = re.compile(r"(?:^|,)[^=,]*\s[^=,]*=|=\s|\s+[^\s,]*=")
         examples = (
