@@ -7,6 +7,16 @@ from unittest import mock
 # suite declares the Korean operator language itself (tools/i18n/ui_text.py).
 os.environ["FLEET_NOW_LANG"]="Korean"
 P=Path(__file__).with_name("capability-route.py")
+def _split_sources(path):
+ """`path` and the parts it is split into (capability-route.py -> capability_route_*.py)."""
+ path=Path(path)
+ parts=sorted(path.parent.glob(path.stem.replace("-","_")+"_*.py"))
+ return [path,*[p for p in parts if f"Split out of `{path.name}`" in p.read_text(encoding="utf-8")]]
+def _split_text(path,**kwargs):
+ return "\n".join(p.read_text(encoding="utf-8",**kwargs) for p in _split_sources(path))
+def _split_tree(path):
+ import ast
+ return ast.Module(body=[n for p in _split_sources(path) for n in ast.parse(p.read_text(encoding="utf-8")).body],type_ignores=[])
 S=importlib.util.spec_from_file_location("route",P); R=importlib.util.module_from_spec(S); S.loader.exec_module(R)
 GUARD_P=P.with_name("worker-route-guard.py")
 GUARD_S=importlib.util.spec_from_file_location("guard",GUARD_P); G=importlib.util.module_from_spec(GUARD_S); GUARD_S.loader.exec_module(G)
@@ -16,7 +26,7 @@ FLEET_ROUTE=importlib.util.module_from_spec(FLEET_S); FLEET_S.loader.exec_module
 sys.path.insert(0,str(P.parent))
 import dispatch_contract as D
 import dispatch_runtime_support as RUNTIME_SUPPORT
-from split_module_fixture import patch_split
+from split_module_fixture import patch_split, set_split
 ALL=["atomic-outcome","known-scope","no-shared-contract","no-resource-run","no-artifact-handoff","no-independent-verifier","focused-verification"]
 
 DD_CONFIG_A="""schema_version: 1
@@ -1794,7 +1804,7 @@ class TestRoute(unittest.TestCase):
     for state in ("READY","RUNNING","CANCELLED"):
      ledger.set_workflow_state(state,actor="fixture",evidence={"reason":"user stop"})
     return gates
-   with mock.patch.object(R,"terminal_gate_observation",side_effect=cancel_after_observation):
+   with patch_split(R,"terminal_gate_observation",side_effect=cancel_after_observation):
     kept,created=R.close_route(route,path,jobs=jobs)
    self.assertFalse(created); self.assertFalse(kept["terminal_gate_proven"])
    self.assertEqual(R.outcome_path(path).read_bytes(),raw)
@@ -2014,8 +2024,8 @@ class TestRoute(unittest.TestCase):
    evidence=Path(tmp)/"result.md"
    marker=json.loads((R.completion_dir(route["route_id"],jobs=jobs)/f"{node['id']}.json").read_text())
    # the owner's normal complete: its marker is published by the completion path, then the hook reads the state
-   with mock.patch.object(R,"_complete_node_locked",return_value=(marker,{"status":"closed"})), \
-        mock.patch.object(R,"materialize_after_terminal_close"):
+   with patch_split(R,"_complete_node_locked",return_value=(marker,{"status":"closed"})), \
+        patch_split(R,"materialize_after_terminal_close"):
     R.complete_node(route,node,node["id"],evidence,jobs=jobs,attempt_id=attempt)
    current=json.loads(R.outcome_path(path).read_text())
    self.assertTrue(current["terminal_gate_proven"])
@@ -2027,8 +2037,8 @@ class TestRoute(unittest.TestCase):
    retained=list(path.parent.glob("*.historical-false-*.outcome.json"))
    self.assertEqual(len(retained),1); self.assertEqual(retained[0].read_bytes(),raw)
    settled=R.outcome_path(path).read_bytes()
-   with mock.patch.object(R,"_complete_node_locked",return_value=(marker,{"status":"closed"})), \
-        mock.patch.object(R,"materialize_after_terminal_close"):
+   with patch_split(R,"_complete_node_locked",return_value=(marker,{"status":"closed"})), \
+        patch_split(R,"materialize_after_terminal_close"):
     R.complete_node(route,node,node["id"],evidence,jobs=jobs,attempt_id=attempt)   # a repeated complete
    self.assertEqual(R.outcome_path(path).read_bytes(),settled)
    self.assertEqual(len(list(path.parent.glob("*.historical-false-*.outcome.json"))),1)
@@ -2040,8 +2050,8 @@ class TestRoute(unittest.TestCase):
    T=R.dispatch_terminal_commit; bpath=T.producer_binding_path(Path(route["artifact_root"]),route["route_id"],attempt)
    stored=json.loads(bpath.read_text()); stored["cycle_id"]="cyc_"+"b"*32; bpath.write_bytes(T._canonical(stored)+b"\n")
    marker=json.loads((R.completion_dir(route["route_id"],jobs=jobs)/f"{node['id']}.json").read_text())
-   with mock.patch.object(R,"_complete_node_locked",return_value=(marker,{"status":"closed"})), \
-        mock.patch.object(R,"materialize_after_terminal_close"):
+   with patch_split(R,"_complete_node_locked",return_value=(marker,{"status":"closed"})), \
+        patch_split(R,"materialize_after_terminal_close"):
     R.complete_node(route,node,node["id"],Path(tmp)/"result.md",jobs=jobs,attempt_id=attempt)
    self.assertEqual(R.outcome_path(path).read_bytes(),raw)
    self.assertEqual(list(path.parent.glob("*.historical-false-*")),[])
@@ -2066,7 +2076,7 @@ class TestRoute(unittest.TestCase):
    route,node,path,jobs,evidence,raw=self._false_closed_route(tmp)
    R.write_completion_marker(route,node,node["id"],evidence,jobs=jobs)
    retained=self._retained_name(path,raw)
-   with mock.patch.object(R,"atomic_write",side_effect=OSError("interrupted after the retained copy")):
+   with patch_split(R,"atomic_write",side_effect=OSError("interrupted after the retained copy")):
     with self.assertRaises(OSError): R.close_route(route,path,jobs=jobs)
    self.assertEqual(R.outcome_path(path).read_bytes(),raw)   # canonical false untouched
    self.assertEqual(retained.read_bytes(),raw)               # raw history already durable, whole
@@ -2612,7 +2622,7 @@ class TestRoute(unittest.TestCase):
    R.ROOT/"tools"/"fleet"/"route.py",
   )
   for path in scanned:
-   text=path.read_text(encoding="utf-8")
+   text=_split_text(path)
    self.assertNotIn('"operation":"recompile"',text.replace(" ",""))
    self.assertNotIn("'operation':'recompile'",text.replace(" ",""))
    self.assertNotRegex(text,r"lineage.*reject|reject.*lineage")
@@ -3911,7 +3921,7 @@ class TestContinuation(unittest.TestCase):
   with tempfile.TemporaryDirectory() as tmp:
    repo=self._git_repo(tmp)
    previous=R.resolve_agent_home
-   R.resolve_agent_home=lambda *a,**k: str(repo)
+   set_split(R, "resolve_agent_home", lambda *a,**k: str(repo))
    try:
     first=R.launch_compatibility_tuple(artifact_root=str(Path(tmp)/"artifacts"),cwd=repo)
     stale=self._git_head(repo)
@@ -3936,7 +3946,7 @@ class TestContinuation(unittest.TestCase):
      self.assertEqual(len(revisions),1,f"{path} carries {revisions}")
     self.assertEqual(by_path[str(repo)],{fresh})
    finally:
-    R.resolve_agent_home=previous
+    set_split(R, "resolve_agent_home", previous)
 
  def test_c_lineage_recheck_reaches_a_repo_subdirectory(self):
   # S3: `(cwd/".git").exists()` answers only for a repository root, so a route
@@ -4227,7 +4237,7 @@ class TestContinuation(unittest.TestCase):
  def test_verdict_pass_row_with_terminal_conflict_gets_no_marker(self):
   with tempfile.TemporaryDirectory() as tmp:
    source,node,jobs,evidence=self._u11_registered_node(tmp,[("att-conflict","completed-owner-envelope","pass")])
-   with mock.patch.object(R,"terminal_conflict_pending",return_value=True):
+   with patch_split(R,"terminal_conflict_pending",return_value=True):
     with self.assertRaisesRegex(ValueError,"attempt-row-terminal-without-completion"):
      R.complete_node(source,node,node["id"],evidence,jobs=jobs,attempt_id="att-conflict")
    self.assertNotIn("completed-marker",jobs.read_text(encoding="utf-8"))
@@ -4274,7 +4284,7 @@ class TestContinuation(unittest.TestCase):
            "manifest_revision_id":"mrev-fixture","artifact_revision_id":"arev-fixture",
            "current_content_digest":"sha256:"+hashlib.sha256(evidence.read_bytes()).hexdigest(),
            "placement_sha256":"a"*64,"manifest_sha256":"b"*64}
-    with mock.patch.object(R,"inspect_terminal_attempt",return_value=terminal), \
+    with patch_split(R,"inspect_terminal_attempt",return_value=terminal), \
          patch_split(R,"attempt_process_quiescence",return_value=mock.Mock(state="quiescent")), \
          patch_split(R,"process_namespace_identity",return_value=namespace), \
          mock.patch("artifact_producer.placed_output_proof",return_value=proof):
@@ -4291,7 +4301,7 @@ class TestContinuation(unittest.TestCase):
                     "_completion_marker_replay","_next_marker_sequence"):
       with self.subTest(drift_at=target):
        evidence.write_bytes(original_bytes)
-       with mock.patch.object(R,target,side_effect=drift_after_proof(getattr(R,target))):
+       with patch_split(R,target,side_effect=drift_after_proof(getattr(R,target))):
         with self.assertRaisesRegex(ValueError,"recorded-move-evidence-drift"):
          R.complete_node(source,node,node["id"],evidence,jobs=jobs,attempt_id=attempt)
        self.assertEqual(jobs.read_bytes(),original_row)
@@ -4323,7 +4333,7 @@ class TestContinuation(unittest.TestCase):
     # cannot use the same narrow correction, even with a readable file.
     for change in ({"failure_class":"fail"},{"route_hash":"sha256:"+"0"*64},{}):
      row({**meta,**change})
-     with mock.patch.object(R,"inspect_terminal_attempt",return_value=terminal), \
+     with patch_split(R,"inspect_terminal_attempt",return_value=terminal), \
           patch_split(R,"attempt_process_quiescence",return_value=mock.Mock(state="quiescent")), \
           patch_split(R,"process_namespace_identity",return_value=namespace), \
           mock.patch("artifact_producer.placed_output_proof",return_value=None if not change else proof):
@@ -4331,7 +4341,7 @@ class TestContinuation(unittest.TestCase):
        R.complete_node(source,node,node["id"],evidence,jobs=jobs,attempt_id=attempt)
     for verdict in ("FAIL","BLOCKED"):
      row(meta)
-     with mock.patch.object(R,"inspect_terminal_attempt",return_value={**terminal,"verdict":verdict}), \
+     with patch_split(R,"inspect_terminal_attempt",return_value={**terminal,"verdict":verdict}), \
           patch_split(R,"attempt_process_quiescence",return_value=mock.Mock(state="quiescent")), \
           patch_split(R,"process_namespace_identity",return_value=namespace), \
           mock.patch("artifact_producer.placed_output_proof",return_value=proof):
@@ -4339,7 +4349,7 @@ class TestContinuation(unittest.TestCase):
        R.complete_node(source,node,node["id"],evidence,jobs=jobs,attempt_id=attempt)
     row(meta)
     jobs.write_text(jobs.read_text()+jobs.read_text().replace(attempt,"att-newer-attempt"))
-    with mock.patch.object(R,"inspect_terminal_attempt",return_value=terminal), \
+    with patch_split(R,"inspect_terminal_attempt",return_value=terminal), \
          patch_split(R,"attempt_process_quiescence",return_value=mock.Mock(state="quiescent")), \
          patch_split(R,"process_namespace_identity",return_value=namespace), \
          mock.patch("artifact_producer.placed_output_proof",return_value=proof):
@@ -4576,7 +4586,7 @@ class TestContinuation(unittest.TestCase):
    with mock.patch("datetime.datetime",_FrozenDatetime), \
         mock.patch.object(R,"_launch_source_revision",lambda path:"golden-fixed-revision"), \
         mock.patch.object(R,"_launch_content_digest",lambda path:"sha256:"+"0"*64), \
-        mock.patch.object(R,"_git_commit",lambda cwd:fixture_head):
+        patch_split(R,"_git_commit",lambda cwd:fixture_head):
     # write_completion_marker() stamps a real wall clock into `completed_at`
     # (frozen above), and launch_compatibility_tuple() seals the *current
     # uncommitted git diff* of the whole worktree into release_id/
@@ -4710,8 +4720,8 @@ class TestValidationBasis(unittest.TestCase):
    right=self._release(Path(tmp)/"managed-release")
    self.assertNotEqual(left.resolve(),right.resolve())
    self.assertTrue(R.immutable_code_root_equivalent(left,right))
-   with mock.patch.object(R.TOPO,"ROOT",left), \
-        mock.patch.object(R,"resolve_agent_home",return_value=right):
+   with patch_split(R.TOPO,"ROOT",left), \
+        patch_split(R,"resolve_agent_home",return_value=right):
     basis=R._validation_basis()
    self.assertTrue(basis["runtime_root_validated"])
    self.assertTrue(basis["runtime_root_match"])
@@ -4762,7 +4772,7 @@ class TestValidationBasis(unittest.TestCase):
    jobs=root/"state"/"jobs.log"
    env={"AGENT_DISPATCH_JOBS":str(jobs)}
    with mock.patch.dict(os.environ,env,clear=False), \
-        mock.patch.object(R,"resolve_agent_home",return_value=runtime_a):
+        patch_split(R,"resolve_agent_home",return_value=runtime_a):
     sealed={
      "contract_version":R.LAUNCH_COMPATIBILITY_TUPLE_VERSION,
      **R.launch_compatibility_tuple(artifact_root=artifact_root,cwd=cwd),
@@ -4772,7 +4782,7 @@ class TestValidationBasis(unittest.TestCase):
     "artifact_root":str(artifact_root),"cwd":str(cwd),
    }
    with mock.patch.dict(os.environ,env,clear=False), \
-        mock.patch.object(R,"resolve_agent_home",return_value=runtime_b):
+        patch_split(R,"resolve_agent_home",return_value=runtime_b):
     compatible,mismatches=R.revalidate_launch_compatibility(route)
    # Two release copies are two places to run the same work (route_authority.release_moved);
    # the registry that resolved under each keeps its own path, so nothing else differs.
@@ -5189,7 +5199,7 @@ class GroundingCwdLineageTest(unittest.TestCase):
    git("add","."); git("commit","-qm","adapters")
    (adapters/"source.py").write_text("new")
    R._forget_launch_path(root); R._forget_launch_path(adapters)
-   with mock.patch.object(R,"resolve_agent_home",return_value=str(root)):
+   with patch_split(R,"resolve_agent_home",return_value=str(root)):
     result=R.launch_compatibility_tuple(artifact_root=Path(tmp)/"artifacts",cwd=adapters)
    self.assertEqual(result["grounding_roots"]["cwd"]["release_id"],result["wrapper_root"]["release_id"])
    self.assertIn("+dirty:",result["wrapper_root"]["release_id"])
@@ -5852,7 +5862,7 @@ class SourceCensusTest(unittest.TestCase):
   root=P.parents[1]
   hits=[]
   for relative in self.ROUTE_LINEAGE_CONSUMERS:
-   text=(root/relative).read_text(encoding="utf-8",errors="replace")
+   text=_split_text(root/relative,errors="replace")
    if "rev-list" in text and "--first-parent" in text:
     hits.append(relative)
   self.assertEqual(hits,["utilities/capability-route.py"],hits)
@@ -5950,7 +5960,7 @@ class SourceCensusTest(unittest.TestCase):
   contract_parts=tuple(sorted(f"utilities/{path.name}" for path in (P.parents[1]/"utilities").glob("dispatch_contract_*.py")))
   for relative in ("utilities/capability-route.py","utilities/dispatch_contract.py",*contract_parts):
    path=P.parents[1]/relative
-   file_tree=ast.parse(path.read_text(encoding="utf-8"))
+   file_tree=_split_tree(path)
    visitor=EvidenceDigestVisitor(); visitor.visit(file_tree)
    for fn,ln in visitor.hits:
     if fn not in self._EVIDENCE_DIGEST_ALLOWED_FUNCTIONS:
@@ -5991,7 +6001,7 @@ class SourceCensusTest(unittest.TestCase):
    "utilities/dispatch-batch.py","utilities/stage-dispatch-fallback.py",
   ):
    path=P.parents[1]/relative
-   file_tree=ast.parse(path.read_text(encoding="utf-8"))
+   file_tree=_split_tree(path)
    visitor=MaxReviewRoundsVisitor(); visitor.visit(file_tree)
    for fn,ln in visitor.hits:
     if relative=="utilities/capability-route.py":
@@ -6035,7 +6045,7 @@ class SourceCensusTest(unittest.TestCase):
    "utilities/stage-dispatch-fallback.py",
   ):
    path=P.parents[1]/relative
-   file_tree=ast.parse(path.read_text(encoding="utf-8"))
+   file_tree=_split_tree(path)
    visitor=ClosureClassDictVisitor(); visitor.visit(file_tree)
    for fn,ln in visitor.hits:
     if fn not in self._CLOSURE_CLASS_ALLOWED_FUNCTIONS:
@@ -6043,7 +6053,7 @@ class SourceCensusTest(unittest.TestCase):
   self.assertEqual(offenders,[],offenders)
   # And every capped-node marker writer reaches that one function, rather
   # than reading `round_census`/`closure_class` out of thin air.
-  route_text=(P.parents[1]/"utilities"/"capability-route.py").read_text(encoding="utf-8")
+  route_text=_split_text(P.parents[1]/"utilities"/"capability-route.py")
   self.assertEqual(route_text.count("REVIEW_ROUND_CAP.marker_round_census("),2,
                     "expected exactly two call sites: write_completion_marker, _producer_revision_plan")
 
@@ -7146,7 +7156,7 @@ class HistoricalReviewSelfDispositionTest(InlineStageCompletionRecipeTest):
    self.assertEqual(origin["reviewer_downgrade_reason"],"reviewer-attempt-no-terminal-verdict")
    print("historical_cli",json.dumps({"argv":argv,"exit":result.returncode,"downgrade":origin["reviewer_downgrade_reason"]}))
   else:
-   with mock.patch.object(R,"resolve_review_identity",return_value=degraded):
+   with patch_split(R,"resolve_review_identity",return_value=degraded):
     origin,_=R.complete_node(route,node,node["id"],evidence,jobs=self.jobs,
      attempt_id=meta["attempt_id"],review_claim=claim)
   directory=R.completion_dir(route["route_id"])
@@ -7294,8 +7304,8 @@ class HistoricalReviewSelfDispositionTest(InlineStageCompletionRecipeTest):
      original_once(path,payload)
      if boundary=="history" and "reviewer_disposition" in payload:
       raise RuntimeError("publication-interrupted")
-    with mock.patch.object(R,"atomic_write",side_effect=interrupted_write), \
-         mock.patch.object(R,"write_once",side_effect=interrupted_once), \
+    with patch_split(R,"atomic_write",side_effect=interrupted_write), \
+         patch_split(R,"write_once",side_effect=interrupted_once), \
          self.assertRaisesRegex(RuntimeError,"publication-interrupted"):
      self.replay()
     canonical=json.loads((self.directory/f"{self.node['id']}.json").read_text())
@@ -7630,7 +7640,7 @@ class ComposeRouteTest(TestRoute):
     return {"state":"inline","required_action":"execute-inline","route_id":route["route_id"]}
    out,err=io.StringIO(),io.StringIO()
    with mock.patch.object(sys,"argv",argv),mock.patch.object(R,"compose_route",return_value=route), \
-        mock.patch.object(work_start,"start_work",side_effect=start),mock.patch.object(R,"_record_route_chain"), \
+        mock.patch.object(work_start,"start_work",side_effect=start),patch_split(R,"_record_route_chain"), \
         mock.patch.object(R,"_route_autoclose"),contextlib.redirect_stdout(out),contextlib.redirect_stderr(err):
     self.assertEqual(R.main(),0)
    self.assertEqual(json.loads(out.getvalue())["state"],"inline")
@@ -7667,8 +7677,8 @@ class ComposeRouteTest(TestRoute):
   enabled = ("claude", "codex", "opencode")
   for caller in enabled:
    with self.subTest(caller=caller), \
-        mock.patch.object(R, "_compose_default_children", return_value=enabled), \
-        mock.patch.object(R, "_compose_readiness", return_value=readiness) as probe:
+        patch_split(R, "_compose_default_children", return_value=enabled), \
+        patch_split(R, "_compose_readiness", return_value=readiness) as probe:
     route = self.compose(dispatch_evidence=None, parent_harness=caller,
                          children=["claude", "codex", "opencode"])
    self.assertEqual(probe.call_args.kwargs["owner_harnesses"], enabled)
@@ -7679,7 +7689,7 @@ class ComposeRouteTest(TestRoute):
  def test_owner_and_worker_pins_do_not_add_disabled_automatic_owners(self):
   self.assertEqual(R._compose_default_owners(), R._compose_default_children())
   pins = {"owner": {"harness": "gemini"}, "worker": {"harness": "opencode"}}
-  with mock.patch.object(R, "_compose_default_children", return_value=("claude", "codex")):
+  with patch_split(R, "_compose_default_children", return_value=("claude", "codex")):
    self.assertEqual(R._compose_default_owners(pins), ("claude", "codex"))
 
  def test_automatic_pool_does_not_reprobe_a_checked_but_ineligible_owner_pin(self):
@@ -7688,8 +7698,8 @@ class ComposeRouteTest(TestRoute):
    checked = self.nested(parent=pinned, child="claude", status="unsupported", failure="fixture-unavailable")
    readiness = self.dispatch(self.nested(parent=other, child="claude"), checked)
    with self.subTest(pinned=pinned), \
-        mock.patch.object(R, "_compose_default_children", return_value=("claude", "codex", "opencode")), \
-        mock.patch.object(R, "_compose_readiness", return_value=readiness) as probe:
+        patch_split(R, "_compose_default_children", return_value=("claude", "codex", "opencode")), \
+        patch_split(R, "_compose_readiness", return_value=readiness) as probe:
     route = self.compose(dispatch_evidence=None, selection_pins=R._parse_selection_pins([], pinned),
                          children=["claude"])
     probe.assert_called_once()
@@ -7699,7 +7709,7 @@ class ComposeRouteTest(TestRoute):
  def test_checked_owner_without_conductor_authority_is_not_reprobed_or_accepted(self):
   readiness = self.dispatch(self.nested(parent="claude", child="claude"),
                             self.nested(parent="codex", child="claude", authority="ancestor-broker"))
-  with mock.patch.object(R, "_compose_readiness", return_value=readiness) as probe:
+  with patch_split(R, "_compose_readiness", return_value=readiness) as probe:
    with self.assertRaisesRegex(ValueError, "v3 dispatch evidence requires conductor launch authority"):
     self.compose(dispatch_evidence=None, selection_pins=R._parse_selection_pins([], "codex"))
   probe.assert_called_once()
@@ -7707,7 +7717,7 @@ class ComposeRouteTest(TestRoute):
  def test_supplied_checked_owner_refusal_is_preserved_without_another_probe(self):
   checked = self.nested(parent="codex", child="claude", status="unsupported", failure="fixture-unavailable")
   evidence = self.dispatch(self.nested(parent="claude", child="claude"), checked)
-  with mock.patch.object(R, "_compose_readiness") as probe:
+  with patch_split(R, "_compose_readiness") as probe:
    route = self.compose(dispatch_evidence=evidence, selection_pins=R._parse_selection_pins([], "codex"))
   probe.assert_not_called()
   self.assertEqual(route["dispatch_evidence"]["tuples"], evidence["tuples"])
@@ -7716,8 +7726,8 @@ class ComposeRouteTest(TestRoute):
  def test_out_of_pool_owner_pin_still_gets_its_exact_probe(self):
   pool = self.dispatch(self.nested(parent="claude", child="claude"))
   exact = self.dispatch(self.nested(parent="codex", child="claude"))
-  with mock.patch.object(R, "_compose_default_children", return_value=("claude",)), \
-       mock.patch.object(R, "_compose_readiness", side_effect=[pool, exact]) as probe:
+  with patch_split(R, "_compose_default_children", return_value=("claude",)), \
+       patch_split(R, "_compose_readiness", side_effect=[pool, exact]) as probe:
    route = self.compose(dispatch_evidence=None, selection_pins=R._parse_selection_pins([], "codex"),
                         children=["claude"])
   self.assertEqual(probe.call_count, 2)
@@ -7889,7 +7899,7 @@ class ComposeRouteTest(TestRoute):
       return dict(receipt)
      with mock.patch.object(sys,"argv",argv),mock.patch.object(R,"compose_route",return_value=route), \
           mock.patch.object(work_start,"start_work",side_effect=start) as launch, \
-          mock.patch.object(R,"_record_route_chain"),mock.patch.object(R,"_route_autoclose"), \
+          patch_split(R,"_record_route_chain"),mock.patch.object(R,"_route_autoclose"), \
           contextlib.redirect_stdout(out),contextlib.redirect_stderr(err):
       self.assertEqual(R.main(),0)
      self.assertEqual(err.getvalue().count(notice),1)
@@ -7908,7 +7918,7 @@ class ComposeRouteTest(TestRoute):
   def historical(*a,**kw):
    kw["group_intensity"]=None
    return compose(*a,**kw)
-  with mock.patch.object(R,"compose_subgraph_recipe",side_effect=historical):
+  with patch_split(R,"compose_subgraph_recipe",side_effect=historical):
    route=self.compose(**args)
   expected=[{"id":"independent-verify","reason":"terminal-anchor"}]
   self.assertEqual(route["composed_recipe"]["compose"]["omitted_parallel_presets"],expected)
@@ -7932,7 +7942,7 @@ class ComposeRouteTest(TestRoute):
    recipe=compose(*a,**kw)
    recipe["compose"].pop("omitted_parallel_presets")
    return recipe
-  with mock.patch.object(R,"compose_subgraph_recipe",side_effect=pre_notice):
+  with patch_split(R,"compose_subgraph_recipe",side_effect=pre_notice):
    old=self.compose(**args)
   before=R.canonical(old)
   self.assertEqual(old["nodes"],route["nodes"])
@@ -7948,7 +7958,7 @@ class ComposeRouteTest(TestRoute):
    def historical(*args,**kwargs):
     kwargs["complete_group_consumers"]=False
     return compose(*args,**kwargs)
-   with mock.patch.object(R,"compose_subgraph_recipe",side_effect=historical):
+   with patch_split(R,"compose_subgraph_recipe",side_effect=historical):
     route=self.compose(intensity="strong",graph="plan,test,report",artifact_root=str(root/"artifacts"))
    warning="strong group plan dropped by --graph: review-consumer-not-selected"
    for harness in ("claude","codex","opencode"):
@@ -7964,7 +7974,7 @@ class ComposeRouteTest(TestRoute):
       return dict(receipt)
      with mock.patch.object(sys,"argv",argv),mock.patch.object(R,"compose_route",return_value=route), \
           mock.patch.object(work_start,"start_work",side_effect=start) as launch, \
-          mock.patch.object(R,"_record_route_chain"),mock.patch.object(R,"_route_autoclose"), \
+          patch_split(R,"_record_route_chain"),mock.patch.object(R,"_route_autoclose"), \
           contextlib.redirect_stdout(out),contextlib.redirect_stderr(err):
       self.assertEqual(R.main(),0)
      self.assertEqual(err.getvalue().count(warning),1)
@@ -8044,7 +8054,7 @@ class ComposeRouteTest(TestRoute):
      with mock.patch.object(sys,"argv",argv),mock.patch.object(R,"compose_route",return_value=route), \
           mock.patch.object(R,"prepare_isolated_worktree",return_value={"state":"reused","cwd":str(R.ROOT)}), \
           mock.patch.object(work_start,"start_work",side_effect=start), \
-          mock.patch.object(R,"_record_route_chain"),mock.patch.object(R,"_route_autoclose"), \
+          patch_split(R,"_record_route_chain"),mock.patch.object(R,"_route_autoclose"), \
           contextlib.redirect_stdout(out),contextlib.redirect_stderr(err):
       self.assertEqual(R.main(),0)
      actual=json.loads(out.getvalue())
@@ -8221,7 +8231,7 @@ class ComposeRouteTest(TestRoute):
     out,err=io.StringIO(),io.StringIO()
     with mock.patch.object(sys,"argv",argv), mock.patch.object(R,"compose_route",return_value=route), \
          mock.patch.object(R,"prepare_isolated_worktree",return_value={"state":"reused","cwd":str(R.ROOT)}), \
-         mock.patch.object(R,"_record_route_chain"), mock.patch.object(R,"_route_autoclose"), \
+         patch_split(R,"_record_route_chain"), mock.patch.object(R,"_route_autoclose"), \
          mock.patch.object(work_start,"start_work",side_effect=start), \
          contextlib.redirect_stdout(out),contextlib.redirect_stderr(err):
      self.assertEqual(R.main(),0)
@@ -8279,7 +8289,7 @@ class ComposeRouteTest(TestRoute):
                          ([{"key":"my-project-2","state":"abandoned"}], None),
                          ([{"key":"my-project-2","state":"satisfied"},{"key":"my-project-2","state":"satisfied"}], None),
                          ([{"key":"other","state":"active"}], None), (None, None)):
-    with self.subTest(rows=rows), mock.patch.object(R,"compose_campaign_summaries",return_value=rows):
+    with self.subTest(rows=rows), patch_split(R,"compose_campaign_summaries",return_value=rows):
      self.assertEqual(R.first_campaign_key(reports,R.ROOT),expected)
   with self.assertRaisesRegex(ValueError,"compose-campaign-selection-conflict"): self.compose(campaign_key="tts-v6-release",unassigned=True)
   by_parent=self.compose(parent_cycle_id="cyc_"+"b"*32)
@@ -8343,7 +8353,7 @@ class ComposeRouteTest(TestRoute):
    for origin,expected in (("peer:verifier·ref","peer-notice"),
                            ("runtime:completion·attempt/delivery","user-card"),
                            ("unattributed","user-card")):
-    with self.subTest(origin=origin), mock.patch.object(R,"_turn_peer_source",return_value=origin):
+    with self.subTest(origin=origin), patch_split(R,"_turn_peer_source",return_value=origin):
      observed=R.compose_observations(route)
      self.assertEqual(observed["confirmation"]["method"],expected)
      self.assertEqual(observed["confirmation"]["origin"],origin)
@@ -8372,7 +8382,7 @@ class ComposeRouteTest(TestRoute):
   import types
   route=self.compose(shape="direct",graph=None,capability="autopilot-ship",capability_mode="default")
   with mock.patch("session_identity.identity",return_value=types.SimpleNamespace(known=True,harness="codex",session_id="s")), \
-       mock.patch.object(R,"_turn_peer_source",return_value="peer:source·ref"):
+       patch_split(R,"_turn_peer_source",return_value="peer:source·ref"):
    self.assertEqual(R.compose_observations(route)["confirmation"]["method"],"user-card")
  def test_compose_names_its_slug_from_the_task(self):
   import hashlib
@@ -8421,13 +8431,13 @@ class ComposeRouteTest(TestRoute):
   lines=[{"artifact_root":"/r/a","campaign_key":"older"},{"artifact_root":"/r/b","campaign_key":"other-root"},
          {"artifact_root":"/r/a","campaign_key":"latest"}]
   rc=types.SimpleNamespace(read_tail=lambda harness,sid: list(lines))
-  with mock.patch.object(R,"_route_chain_module",return_value=rc), \
-       mock.patch.object(R,"_route_chain_identity",return_value=("claude","sid",0,None)):
+  with patch_split(R,"_route_chain_module",return_value=rc), \
+       patch_split(R,"_route_chain_identity",return_value=("claude","sid",0,None)):
    self.assertEqual(R._session_campaign_key("/r/a"),"latest")
    self.assertIsNone(R._session_campaign_key("/r/c"))
    lines.append({"artifact_root":"/r/a","campaign_key":None,"parent_cycle_id":"cyc_"+"a"*32})
    self.assertIsNone(R._session_campaign_key("/r/a"))  # never reaches past a keyless latest route
-  with mock.patch.object(R,"_route_chain_identity",return_value=None):
+  with patch_split(R,"_route_chain_identity",return_value=None):
    self.assertIsNone(R._session_campaign_key("/r/a"))
  def test_compose_cli_needs_no_slug_and_resolves_the_stream(self):
   import contextlib, io
@@ -8446,7 +8456,7 @@ class ComposeRouteTest(TestRoute):
     err=io.StringIO()
     with mock.patch.object(sys,"argv",base+extra), mock.patch.object(R,"compose_route",side_effect=capture), \
          mock.patch.object(R,"_session_campaign_key",return_value=session), \
-         mock.patch.object(R,"cwd_campaign_keys",return_value=folder), \
+         patch_split(R,"cwd_campaign_keys",return_value=folder), \
          contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
      self.assertEqual(R.main(),0)
     self.assertRegex(seen[-1]["slug"],r"^autopilot-code-fix-streaming-window-[0-9a-f]{10}$")
@@ -8541,7 +8551,7 @@ class ComposeRouteTest(TestRoute):
    R.verify_route(route,R.ROOT)
  def test_ship_package_compose_uses_owner_probe_without_child_tuples(self):
   readiness={"candidates":self.registered_headless()["candidates"],"tuples":[]}
-  with mock.patch.object(R,"_compose_readiness",return_value=readiness) as probe:
+  with patch_split(R,"_compose_readiness",return_value=readiness) as probe:
    route=self.compose(capability="autopilot-ship",capability_mode="package",graph=None,dispatch_evidence=None)
   probe.assert_called_once()
   self.assertIsNone(route["dispatch_evidence"])
@@ -8594,7 +8604,7 @@ class ComposeRouteTest(TestRoute):
      self.assertEqual(result["state"],"running",result)
    self.assertEqual(len(launches),1)
  def test_depth_two_recipe_cannot_use_owner_candidates_instead_of_tuples(self):
-  with mock.patch.object(R,"_compose_readiness",return_value={"tuples":[],"candidates":self.registered_headless()["candidates"]}), \
+  with patch_split(R,"_compose_readiness",return_value={"tuples":[],"candidates":self.registered_headless()["candidates"]}), \
        self.assertRaisesRegex(ValueError,"nested eligibility tuples required"):
    self.compose(dispatch_evidence=None,registered_headless_evidence=self.registered_headless())
   route=self.compose()
@@ -8658,7 +8668,7 @@ class ComposeRouteTest(TestRoute):
   def historical(*args,**kwargs):
    kwargs["complete_group_consumers"]=False
    return compose(*args,**kwargs)
-  with mock.patch.object(R,"compose_subgraph_recipe",side_effect=historical):
+  with patch_split(R,"compose_subgraph_recipe",side_effect=historical):
    old=self.compose(graph="plan,test,report",intensity="strong")
   before=R.canonical(old)
   self.assertEqual([n["id"] for n in old["nodes"]],["plan","test","report"])
@@ -8765,7 +8775,7 @@ class ComposeRouteTest(TestRoute):
       self.assertEqual(err.getvalue().count(notice),1)
       return dict(receipt)
      with mock.patch.object(sys,"argv",argv),mock.patch.object(R,"compose_route",return_value=route), \
-      mock.patch.object(work_start,"start_work",side_effect=start),mock.patch.object(R,"_record_route_chain"), \
+      mock.patch.object(work_start,"start_work",side_effect=start),patch_split(R,"_record_route_chain"), \
       mock.patch.object(R,"_route_autoclose"),contextlib.redirect_stdout(out),contextlib.redirect_stderr(err):
       self.assertEqual(R.main(),0)
      self.assertEqual(err.getvalue().count(notice),1)
@@ -8931,7 +8941,7 @@ class ComposeRouteTest(TestRoute):
    rows=[{"key":"alpha","state":"active","cycle_count":2},{"key":"beta","state":"active","cycle_count":1},
          {"key":"done","state":"closed","cycle_count":4}]
    route("a",here,"alpha",30); route("b",other,"beta",20); route("c",here,"done",10); route("d",here,"alpha",5)
-   with mock.patch.object(R,"compose_campaign_summaries",return_value=rows):
+   with patch_split(R,"compose_campaign_summaries",return_value=rows):
     self.assertEqual(R.cwd_campaign_keys(root,here),["alpha"])          # one active stream: compose joins it
     self.assertIn("this folder's streams: alpha; ",R.compose_campaign_hint(root,here))
     route("e",here,"beta",1)
@@ -8979,7 +8989,7 @@ class ComposeRouteTest(TestRoute):
     self.assertNotIn(args[:1],(("ls-remote",),("fetch",)))
     self.assertNotEqual(args[:2],("worktree","add"))
     return real_worktree_git(cwd,*args)
-   with mock.patch.object(R,"_worktree_git",side_effect=no_network):
+   with patch_split(R,"_worktree_git",side_effect=no_network):
     again=R.prepare_isolated_worktree(primary,"fix-x",artifact_root=reports,preparation_key=key)
    self.assertEqual((again["state"],again["path"],again["branch"]),("reused",str(wt),"fix-x"))
    explicit_key={"request":"approved linked task"}
@@ -8987,7 +8997,7 @@ class ComposeRouteTest(TestRoute):
                                        explicitly_approved=True)
    self.assertEqual((explicit["state"],explicit["cwd"]),("reused",str(wt)))
    self.assertEqual((wt/"pending.py").read_text(),"keep this linked task\n")
-   with mock.patch.object(R,"_worktree_git",side_effect=no_network):
+   with patch_split(R,"_worktree_git",side_effect=no_network):
     explicit_again=R.prepare_isolated_worktree(wt,"other",artifact_root=reports,
                                                preparation_key=explicit_key)
    self.assertEqual((explicit_again["state"],explicit_again["path"]),("reused",str(wt)))
@@ -9021,8 +9031,8 @@ class ComposeRouteTest(TestRoute):
    path=routes/("rt-"+"f"*16+".json")
    path.write_text(json.dumps({"route_id":"rt-"+"f"*16,"nodes":[],"cwd":str(collided["cwd"]),
                                "slug":"fix-x","artifact_root":str(reports)}),encoding="utf-8")
-   with mock.patch.object(R,"_route_chain_module",return_value=None), \
-        mock.patch.object(R,"_compose_artifact_root",return_value=str(reports)):
+   with patch_split(R,"_route_chain_module",return_value=None), \
+        patch_split(R,"_compose_artifact_root",return_value=str(reports)):
     self.assertEqual(R.caller_open_route(primary)[:2],(str(path),"cwd"))
     other=routes/("rt-"+"e"*16+".json")
     other.write_text(json.dumps({"route_id":"rt-"+"e"*16,"nodes":[],"cwd":str(collided["cwd"]),
@@ -9052,8 +9062,8 @@ class ComposeRouteTest(TestRoute):
           "other":[{"route_id":"rt-"+"9"*16,"route_file":str(in_other)}]}
    chain=SimpleNamespace(HARNESSES=("claude",),ANCHOR_SCAN_FILES=64,state_root=lambda: str(state),
                          writer_identity=lambda: ("claude","s"),read_tail=lambda h,sid: tails.get(sid,[]))
-   with mock.patch.object(R,"_compose_artifact_root",return_value=str(here)), \
-        mock.patch.object(R,"_route_chain_module",return_value=chain), \
+   with patch_split(R,"_compose_artifact_root",return_value=str(here)), \
+        patch_split(R,"_route_chain_module",return_value=chain), \
         mock.patch.dict(os.environ,{"AGENT_ARTIFACT_ROOT":str(env)}):
     resolve=lambda value: R.resolve_route_argument(value,jobs)
     self.assertEqual(resolve(str(in_ledger)),in_ledger)                   # a file stays a file
@@ -9075,8 +9085,8 @@ class ComposeRouteTest(TestRoute):
    mine_old,mine_new,mine_closed=route("a",other),route("b",other),route("c",other,closed=True)
    ledger=[{"route_file":mine_old},{"route_file":mine_new},{"route_file":mine_closed}]
    chain=mock.Mock(writer_identity=lambda: ("claude","sess"),read_tail=lambda harness,sid: ledger)
-   with mock.patch.object(R,"_route_chain_module",return_value=chain), \
-        mock.patch.object(R,"_compose_artifact_root",return_value=str(root)):
+   with patch_split(R,"_route_chain_module",return_value=chain), \
+        patch_split(R,"_compose_artifact_root",return_value=str(root)):
     self.assertEqual(R.caller_open_route(here)[:2],(mine_new,"this-session"))   # newest open, closed skipped
     ledger.clear()                                                               # a new session: no ledger
     self.assertEqual(R.caller_open_route(here)[:2],(None,"none"))
@@ -9093,7 +9103,7 @@ class ComposeRouteTest(TestRoute):
    (reports/"spec").mkdir(parents=True); home.mkdir(); prd=reports/"spec"/"prd.md"; prd.write_text("# prd\n",encoding="utf-8")
    read=lambda session: subprocess.run(["sh",str(R.ROOT/"hooks"/"spec-read-marker.sh"),"--file",str(prd),"--session",session,
                                         "--agent-home",str(home)],check=True,capture_output=True,text=True)
-   with mock.patch.object(R,"resolve_agent_home",return_value=str(home)), \
+   with patch_split(R,"resolve_agent_home",return_value=str(home)), \
         mock.patch.object(R.ROUTE_AUTHORITY,"default_parent_session_id",return_value="sess-a"):
     with self.assertRaisesRegex(ValueError,"compose-spec-read-required"): R.compose_spec_read(repo,reports,"auto")
     read("sess-b")                                    # another session's read is not this one's
@@ -9155,7 +9165,7 @@ class ComposeRouteTest(TestRoute):
      raise FileNotFoundError(path)
     return original(name,path,*args,**kwargs)
    with mock.patch.dict(os.environ, {"AGENT_DISPATCH_ATTEMPT_ID":""}), \
-        mock.patch.object(R,"_record_route_chain"), \
+        patch_split(R,"_record_route_chain"), \
         mock.patch("importlib.util.spec_from_file_location",side_effect=without_guard), \
         contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
     R._emit_compiled_route(types.SimpleNamespace(command="compose",full_record=True),route,root)
@@ -9431,7 +9441,7 @@ class EnvironmentAttemptDefaultTest(unittest.TestCase):
   path=Path(route["artifact_root"])/".runtime"/"routes"/(route["route_id"]+".json")
   path.parent.mkdir(parents=True); path.write_text(json.dumps(route))
   evidence=self.base/"artifacts"/"run.md"; evidence.write_text("run\n")
-  with mock.patch.object(R,"complete_node",return_value=({},None)) as complete:
+  with patch_split(R,"complete_node",return_value=({},None)) as complete:
    self._main(["complete","--route",str(path),"--node",node["id"],"--evidence",str(evidence)],
     {"AGENT_DISPATCH_ATTEMPT_ID":"att-owner","AGENT_DISPATCH_JOBS":str(self.jobs)})
   self.assertIsNone(complete.call_args.kwargs["jobs"])
@@ -9449,7 +9459,7 @@ class EnvironmentAttemptDefaultTest(unittest.TestCase):
  def test_check_reads_the_environment_and_keeps_its_refusals(self):
   route,node,path,evidence=self.fixture()
   env={"AGENT_DISPATCH_ATTEMPT_ID":"att-terminal-owner","AGENT_DISPATCH_JOBS":str(self.jobs)}
-  with mock.patch.object(R,"owner_closure_plan",return_value={}) as plan:
+  with patch_split(R,"owner_closure_plan",return_value={}) as plan:
    # No --jobs/--attempt-id: the environment fills both, so the check gets past its exact-attempt
    # refusal and answers this non-review node `not-applicable` (owner closure answers review nodes only).
    result,=self._main(["complete","--route",str(path),"--node",node["id"],"--evidence",str(evidence),
@@ -9540,7 +9550,7 @@ class OwnerNodeBoundTerminalTest(unittest.TestCase):
   self.jobs.write_text("".join(r+"\n" for r in rows))
   route=route or self.route
   with patch_split(R,"attempt_process_quiescence",return_value=mock.Mock(state="quiescent")), \
-       mock.patch.object(R,"owner_terminal_prerequisites",return_value={}):
+       patch_split(R,"owner_terminal_prerequisites",return_value={}):
    return R.terminal_gate_observation(route,jobs=self.jobs,exact_terminal=True)["one-shot"]
 
  def assertProven(self,gate,attempt):
@@ -9952,7 +9962,7 @@ class FrameBootstrapLayerTest(unittest.TestCase):
   # checked evidence through this derivation, with the whole node list and the
   # owner's depth -- so the frame pair cannot become an evidence consumer by
   # anyone quietly rewiring a call site instead of the constant
-  with mock.patch.object(R,"_evidence_parent_dispatch_depth",
+  with patch_split(R,"_evidence_parent_dispatch_depth",
                          wraps=R._evidence_parent_dispatch_depth) as spy:
    compiled=self.standard()
    R.verify_route(compiled,R.ROOT)
@@ -10415,7 +10425,7 @@ class SealedFrameProfileCompatibilityTest(unittest.TestCase):
   self.base.setUp(); self.addCleanup(self.base.doCleanups)
   # These are routes sealed with their recipe frame pair, as compose sealed them before
   # decided shapes compiled without it.
-  frames=mock.patch.object(R,"DECIDED_SHAPES",()); frames.start(); self.addCleanup(frames.stop)
+  frames=patch_split(R,"DECIDED_SHAPES",()); frames.start(); self.addCleanup(frames.stop)
  @contextlib.contextmanager
  def prior_policy(self):
   demand=json.loads(json.dumps(R.PROFILE.FRAME_ANCHOR_SHAPE_DEMAND)); demand["execution_reason"]=self.PRIOR_REASON
@@ -10657,9 +10667,9 @@ class GitIndexLockPreparationReceipt(unittest.TestCase):
      with mock.patch.dict(os.environ,{"GIT_INDEX_FILE":str(custom_index)}):
       return original(cwd,*args)
     return original(cwd,*args)
-   with mock.patch.object(R,"_remote_default_base",
+   with patch_split(R,"_remote_default_base",
                           return_value=({"branch":"main","sha":head},None,None)), \
-        mock.patch.object(R,"_worktree_git",side_effect=fail_add):
+        patch_split(R,"_worktree_git",side_effect=fail_add):
     receipt=R.prepare_isolated_worktree(
      repo,"fixture-lock-failure",artifact_root=reports,
      preparation_key={"task":"isolated lock receipt"})
@@ -10701,9 +10711,9 @@ class TerminalGateRegistrySnapshotTest(unittest.TestCase):
     seen["owner_view"]=kwargs["registry_view"]
     seen["owner_lines"]=kwargs["registry_lines"]
     return {"passed":False,"reason":"fixture"}
-   with mock.patch.object(R,"completion_dir",return_value=completions), \
-        mock.patch.object(R,"_marker_identity_row",side_effect=marker), \
-        mock.patch.object(R,"_owner_terminal_observation",side_effect=owner):
+   with patch_split(R,"completion_dir",return_value=completions), \
+        patch_split(R,"_marker_identity_row",side_effect=marker), \
+        patch_split(R,"_owner_terminal_observation",side_effect=owner):
     R.terminal_gate_observation(route,jobs=jobs,exact_terminal=True,
                                 registry_snapshot=snapshot)
     self.assertEqual(R.owner_terminal_prerequisites(
@@ -10775,7 +10785,7 @@ class SpecReadCandidateAlignmentTest(unittest.TestCase):
    marker_dir.mkdir(parents=True)
    key=str(root.parent).replace("/","_").replace(" ","_")
    marker=marker_dir/f"sess-a__{key}"
-   with mock.patch.object(R,"resolve_agent_home",return_value=str(home)), \
+   with patch_split(R,"resolve_agent_home",return_value=str(home)), \
         mock.patch.object(R.ROUTE_AUTHORITY,"default_parent_session_id",return_value="sess-a"):
     with self.assertRaisesRegex(ValueError,"compose-spec-read-required"):
      R.compose_spec_read(repo,root,"auto")
@@ -10847,7 +10857,7 @@ class LegacyDesignBasisVerifyTest(unittest.TestCase):
   route,old,root,unit_digest,current=self._route()
   actual_unit_digest=R.unit_catalog_digest
   with mock.patch.object(R,"_verified_immutable_release_identity",return_value={"version":"v3.43.6"}), \
-       mock.patch.object(R,"unit_catalog_digest",side_effect=lambda path=None:
+       patch_split(R,"unit_catalog_digest",side_effect=lambda path=None:
           unit_digest if path is None else actual_unit_digest(path)):
    verified=R.verify_route(route,expected_cwd=R.ROOT)
    self.assertEqual(verified["route_hash"],route["route_hash"])
@@ -10963,7 +10973,7 @@ class RouteOrAttemptArgumentTest(unittest.TestCase):
   self.assertEqual(R.resolve_route_argument(str(self.route_file),self.jobs),self.route_file)   # a file stays a file
   self.assertEqual(R.resolve_route_argument("att-unknown",self.jobs),Path("att-unknown"))       # unchanged refusal path
  def test_correct_reaches_a_routes_newest_owner_and_keeps_an_attempt_as_given(self):
-  with mock.patch.object(R,"_compose_artifact_root",return_value=str(self.root)):
+  with patch_split(R,"_compose_artifact_root",return_value=str(self.root)):
    self.assertEqual(R._correct_attempt_argument(self.rid,self.jobs),"att-owner-2")
    self.assertEqual(R._correct_attempt_argument(str(self.route_file),self.jobs),"att-owner-2")
    self.assertEqual(R._correct_attempt_argument("att-owner-1",self.jobs),"att-owner-1")

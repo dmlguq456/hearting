@@ -251,7 +251,7 @@ class ResultLocationLineTest(unittest.TestCase):
         self.assertEqual(self.line({**self.route, "cwd": str(self.base / "missing")}), "")
 
     def test_unversioned_route_runs_no_git(self):
-        with unittest.mock.patch.object(CAP, "_git", side_effect=AssertionError("git probed")):
+        with patch_split(CAP, "_git", side_effect=AssertionError("git probed")):
             self.assertEqual(self.line({**self.route, "source_commit": "unversioned"}), "")
 
 
@@ -531,7 +531,7 @@ class PublicInlineFinishTest(unittest.TestCase):
         recorded_commit = held.pop("commit", state["intent"]["commit"])
         state_path.unlink()
         unproven = {"inline": {"passed": False, "reason": "completion-attempt-not-current"}}
-        with unittest.mock.patch.object(CAP, "terminal_gate_observation", return_value=unproven):
+        with patch_split(CAP, "terminal_gate_observation", return_value=unproven):
             outcome, created = CAP.close_route(
                 self.route, self.route_file, recorded_commit, "an earlier caller's close",
                 allow_unproven=True, jobs=self.jobs, **held)
@@ -569,7 +569,7 @@ class PublicInlineFinishTest(unittest.TestCase):
             if point == "after-close":
                 raise inline_finish.InlineFinishError("fixture-after-close")
 
-        with unittest.mock.patch.object(CAP, "terminal_gate_observation", return_value=unknown), \
+        with patch_split(CAP, "terminal_gate_observation", return_value=unknown), \
                 unittest.mock.patch.object(inline_finish, "_fault", side_effect=stop_after_close):
             with self.assertRaisesRegex(inline_finish.InlineFinishError, "fixture-after-close"):
                 inline_finish.finish(args, self.route, self.route_file, CAP)
@@ -656,7 +656,7 @@ class PublicInlineFinishTest(unittest.TestCase):
         original_state = state_path.read_bytes()
         args = SimpleNamespace(evidence=str(self.evidence), summary_file=str(self.summary), commit=None)
         unknown = {"inline": {"passed": False, "reason": "completion-attempt-not-current"}}
-        with unittest.mock.patch.object(CAP, "terminal_gate_observation", return_value=unknown):
+        with patch_split(CAP, "terminal_gate_observation", return_value=unknown):
             with self.assertRaisesRegex(artifact_producer.ProducerError, "completion-terminal-gate-unproven"):
                 inline_finish.finish(args, self.route, self.route_file, CAP)
         self.assertEqual(state_path.read_bytes(), original_state)
@@ -1720,7 +1720,7 @@ class UnstartedInlineFinishTest(unittest.TestCase):
                     seen.append((dict(node), Path(output)))
                     return original(route, node, output)
 
-                with unittest.mock.patch.object(CAP, "_require_entry_scope_review_preview",
+                with patch_split(CAP, "_require_entry_scope_review_preview",
                                                 side_effect=recording):
                     result = inline_finish.finish(args, fixture.route, fixture.route_file, CAP)
                 output = self._cycle_dir(fixture, result["cycle_id"]) / "artifacts"
@@ -1730,7 +1730,7 @@ class UnstartedInlineFinishTest(unittest.TestCase):
                 refused = self._fixture(started=started)
                 refused_args = SimpleNamespace(evidence=str(refused.evidence),
                                                summary_file=str(refused.summary), commit=None)
-                with unittest.mock.patch.object(CAP, "_require_entry_scope_review_preview",
+                with patch_split(CAP, "_require_entry_scope_review_preview",
                                                 side_effect=ValueError("completion-evidence-unreadable")):
                     with self.assertRaisesRegex(ValueError, "completion-evidence-unreadable"):
                         inline_finish.finish(refused_args, refused.route, refused.route_file, CAP)

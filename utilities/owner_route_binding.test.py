@@ -11,6 +11,7 @@ import threading
 import unittest
 from unittest import mock
 import sys
+from split_module_fixture import patch_split
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -156,7 +157,7 @@ class OwnerRouteBindingTest(unittest.TestCase):
             path = Path(td) / "route.json"
             route = self.route(td)
             path.write_text(json.dumps(route), encoding="utf-8")
-            with mock.patch.object(M.ROUTE, "verify_route", return_value=route):
+            with patch_split(M.ROUTE, "verify_route", return_value=route):
                 result = M.validate_owner_route_binding(
                     path,
                     worktree=td,
@@ -251,7 +252,7 @@ class OwnerRouteAdvanceTest(unittest.TestCase):
             r1_path, r1 = self._route(td, "rt-r1", 1, "rt-r0", "sha256:rt-r0")
             anchor = self._binding(r0_path, r0)
             target = self._binding(r1_path, r1)
-            with mock.patch.object(M.ROUTE, "verify_route", side_effect=lambda raw, *a, **k: raw):
+            with patch_split(M.ROUTE, "verify_route", side_effect=lambda raw, *a, **k: raw):
                 M.publish_owner_route_advance(
                     jobs, owner_attempt_id="att-1", source=anchor, target=target,
                     from_generation=0, to_generation=1,
@@ -272,7 +273,7 @@ class OwnerRouteAdvanceTest(unittest.TestCase):
             anchor = self._binding(r0_path, r0)
             mid = self._binding(r1_path, r1)
             end = self._binding(r2_path, r2)
-            with mock.patch.object(M.ROUTE, "verify_route", side_effect=lambda raw, *a, **k: raw):
+            with patch_split(M.ROUTE, "verify_route", side_effect=lambda raw, *a, **k: raw):
                 M.publish_owner_route_advance(jobs, owner_attempt_id="att-1", source=anchor,
                                               target=mid, from_generation=0, to_generation=1)
                 M.publish_owner_route_advance(jobs, owner_attempt_id="att-1", source=mid,
@@ -294,7 +295,7 @@ class OwnerRouteAdvanceTest(unittest.TestCase):
             r1_path, r1 = self._route(td, "rt-r1", 1, "rt-r0", "sha256:rt-r0")
             anchor = self._binding(r0_path, r0)
             target = self._binding(r1_path, r1)
-            with mock.patch.object(M.ROUTE, "verify_route", side_effect=lambda raw, *a, **k: raw):
+            with patch_split(M.ROUTE, "verify_route", side_effect=lambda raw, *a, **k: raw):
                 first = M.publish_owner_route_advance(
                     jobs, owner_attempt_id="att-1", source=anchor, target=target,
                     from_generation=0, to_generation=1,
@@ -314,7 +315,7 @@ class OwnerRouteAdvanceTest(unittest.TestCase):
             anchor = self._binding(r0_path, r0)
             target = self._binding(r1_path, r1)
             other = self._binding(r1b_path, r1b)
-            with mock.patch.object(M.ROUTE, "verify_route", side_effect=lambda raw, *a, **k: raw):
+            with patch_split(M.ROUTE, "verify_route", side_effect=lambda raw, *a, **k: raw):
                 M.publish_owner_route_advance(jobs, owner_attempt_id="att-1", source=anchor,
                                               target=target, from_generation=0, to_generation=1)
                 M.publish_owner_route_advance(jobs, owner_attempt_id="att-1", source=anchor,
@@ -364,7 +365,7 @@ class OwnerRouteAdvanceTest(unittest.TestCase):
             r1_path, r1 = self._route(td, "rt-r1", 1, "rt-r0", "sha256:rt-r0")
             anchor = self._binding(r0_path, r0)
             target = self._binding(r1_path, r1)
-            with mock.patch.object(M.ROUTE, "verify_route", side_effect=lambda raw, *a, **k: raw):
+            with patch_split(M.ROUTE, "verify_route", side_effect=lambda raw, *a, **k: raw):
                 M.publish_owner_route_advance(jobs, owner_attempt_id="att-1", source=anchor,
                                               target=target, from_generation=0, to_generation=1)
                 r1_path.unlink()
@@ -392,7 +393,7 @@ class OwnerRouteAdvanceTest(unittest.TestCase):
             payload["to_generation"] = "1"
             payload["record_id"] = M._advance_record_id(payload)
             path.write_text(json.dumps(payload), encoding="utf-8")
-            with mock.patch.object(
+            with patch_split(
                 M.ROUTE, "verify_route", side_effect=lambda raw, *a, **k: raw
             ), self.assertRaisesRegex(
                 M.OwnerRouteBindingError, "owner-route-advance-record-invalid"
@@ -475,7 +476,7 @@ class OwnerRouteLifecycleTest(unittest.TestCase):
             seen = []
             observe = lambda kind, path: seen.append((kind, Path(path)))
             attachment = M._attachment_root(jobs) / M._attachment_key(self.ATTEMPT)
-            with mock.patch.object(M.ROUTE, "verify_route", side_effect=lambda raw, *a, **k: raw):
+            with patch_split(M.ROUTE, "verify_route", side_effect=lambda raw, *a, **k: raw):
                 absent, status = M.resolve_owner_route_lifecycle(
                     jobs, owner_attempt_id=self.ATTEMPT, observer=observe)
                 self.assertIsNone(absent)
@@ -602,7 +603,7 @@ class OwnerRouteLifecycleTest(unittest.TestCase):
             jobs = Path(td) / "jobs.log"
             jobs.write_text(self._row(td), encoding="utf-8")
             path, route = self._route(td, "rt-r0", 0)
-            with mock.patch.object(M.ROUTE, "verify_route", side_effect=lambda raw, *a, **k: raw):
+            with patch_split(M.ROUTE, "verify_route", side_effect=lambda raw, *a, **k: raw):
                 attachment = self._attach(td, jobs, path, route)
                 current, status = M.resolve_owner_route_lifecycle(
                     jobs, owner_attempt_id=self.ATTEMPT
@@ -619,7 +620,7 @@ class OwnerRouteLifecycleTest(unittest.TestCase):
             restarted = importlib.util.module_from_spec(spec)
             sys.modules[spec.name] = restarted
             spec.loader.exec_module(restarted)
-            with mock.patch.object(restarted.ROUTE, "verify_route", side_effect=lambda raw, *a, **k: raw):
+            with patch_split(restarted.ROUTE, "verify_route", side_effect=lambda raw, *a, **k: raw):
                 recovered, recovered_status = restarted.resolve_owner_route_lifecycle(
                     jobs, owner_attempt_id=self.ATTEMPT
                 )
@@ -635,7 +636,7 @@ class OwnerRouteLifecycleTest(unittest.TestCase):
             r1["reused_nodes"] = [{"node_id": "plan", "completion_marker": "plan.done"}]
             r1_path.write_text(json.dumps(r1), encoding="utf-8")
             r2_path, r2 = self._route(td, "rt-r2", 2, source=r1)
-            with mock.patch.object(M.ROUTE, "verify_route", side_effect=lambda raw, *a, **k: raw):
+            with patch_split(M.ROUTE, "verify_route", side_effect=lambda raw, *a, **k: raw):
                 self._attach(td, jobs, r0_path, r0)
                 M.publish_owner_route_advance_from_environment(
                     jobs, source_route=self._payload(r0_path, r0),
@@ -665,7 +666,7 @@ class OwnerRouteLifecycleTest(unittest.TestCase):
                 td, "rt-abandoned", 1, source=r0
             )
             active_path, active = self._route(td, "rt-active", 1, source=r0)
-            with mock.patch.object(
+            with patch_split(
                 M.ROUTE, "verify_route", side_effect=lambda raw, *a, **k: raw
             ):
                 self._attach(td, jobs, r0_path, r0)
@@ -703,7 +704,7 @@ class OwnerRouteLifecycleTest(unittest.TestCase):
             }
             r0_path.write_text(json.dumps(r0), encoding="utf-8")
             env = self._env(jobs, session="launch-parent")
-            with mock.patch.object(
+            with patch_split(
                 M.ROUTE, "verify_route", side_effect=lambda raw, *a, **k: raw
             ):
                 attached = M.publish_owner_route_attachment_from_environment(
@@ -744,7 +745,7 @@ class OwnerRouteLifecycleTest(unittest.TestCase):
                 )
                 return current.route_id, status
 
-            with mock.patch.object(
+            with patch_split(
                 M.ROUTE, "verify_route", side_effect=lambda raw, *a, **k: raw
             ):
                 self._attach(td, jobs, r0_path, r0)
@@ -773,7 +774,7 @@ class OwnerRouteLifecycleTest(unittest.TestCase):
             jobs.write_text(self._row(td), encoding="utf-8")
             r0_path, r0 = self._route(td, "rt-r0", 0)
             wrong_path, wrong = self._route(td, "rt-wrong", 1, source=r0, worktree=unrelated)
-            with mock.patch.object(M.ROUTE, "verify_route", side_effect=lambda raw, *a, **k: raw):
+            with patch_split(M.ROUTE, "verify_route", side_effect=lambda raw, *a, **k: raw):
                 self._attach(td, jobs, r0_path, r0)
                 with self.assertRaisesRegex(
                     M.OwnerRouteBindingError, "owner-route-advance-generation-invalid"
@@ -790,7 +791,7 @@ class OwnerRouteLifecycleTest(unittest.TestCase):
             jobs = Path(td) / "jobs.log"
             jobs.write_text(self._row(td), encoding="utf-8")
             path, route = self._route(td, "rt-r0", 0)
-            with mock.patch.object(M.ROUTE, "verify_route", side_effect=lambda raw, *a, **k: raw):
+            with patch_split(M.ROUTE, "verify_route", side_effect=lambda raw, *a, **k: raw):
                 with ThreadPoolExecutor(max_workers=8) as pool:
                     results = list(pool.map(
                         lambda _n: self._attach(td, jobs, path, route), range(16)
@@ -805,7 +806,7 @@ class OwnerRouteLifecycleTest(unittest.TestCase):
             with M._jobs_lock(jobs):
                 jobs.write_text(self._row(td, status="done"), encoding="utf-8")
             other_path, other = self._route(td, "rt-after-close", 0)
-            with mock.patch.object(M.ROUTE, "verify_route", side_effect=lambda raw, *a, **k: raw), \
+            with patch_split(M.ROUTE, "verify_route", side_effect=lambda raw, *a, **k: raw), \
                  self.assertRaisesRegex(M.OwnerRouteBindingError, "owner-route-owner-row-ineligible"):
                 self._attach(td, jobs, other_path, other)
 
@@ -1008,7 +1009,7 @@ class QuickNodeBindingTest(unittest.TestCase):
                 with self.assertRaisesRegex(M.OwnerRouteBindingError,
                                             "owner-route-verification-failed"):
                     self.derive(path=path, route_node="frame")
-                with mock.patch.object(M.ROUTE, "verify_route",
+                with patch_split(M.ROUTE, "verify_route",
                                        side_effect=lambda raw, *a, **k: raw):
                     with self.assertRaisesRegex(M.OwnerRouteBindingError,
                                                 "quick-node-tuple-invalid"):
@@ -1021,7 +1022,7 @@ class QuickNodeBindingTest(unittest.TestCase):
         def drop(route):
             route["nodes"] = [n for n in route["nodes"] if n["id"] != "frame-alternative"]
         path = self.resealed(drop)
-        with mock.patch.object(M.ROUTE, "verify_route", side_effect=lambda raw, *a, **k: raw):
+        with patch_split(M.ROUTE, "verify_route", side_effect=lambda raw, *a, **k: raw):
             with self.assertRaises(M.OwnerRouteBindingError) as caught:
                 self.derive(path=path, route_node="frame-alternative")
         self.assertEqual(str(caught.exception), "quick-owner-node-missing")

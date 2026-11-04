@@ -296,9 +296,9 @@ class ReviewInputTest(unittest.TestCase):
         revision = {'input_binding_digest': self.meta[R.KEY], 'answers': ['att-review'], 'evidence': candidate}
         module = node_module.ROUTE
         with mock.patch.object(node_module, 'prior_round_attempts', return_value=[(['now','done'], previous)]), \
-                mock.patch.object(module, 'review_lineage_routes', return_value=[self.route]), \
-                mock.patch.object(module, '_review_input_revision_records', return_value=[revision]), \
-                mock.patch.object(module, 'publish_review_input_revision', return_value={'input_revision':revision}):
+                patch_split(module, 'review_lineage_routes', return_value=[self.route]), \
+                patch_split(module, '_review_input_revision_records', return_value=[revision]), \
+                patch_split(module, 'publish_review_input_revision', return_value={'input_revision':revision}):
             stale = node_module.admit_round(self.route, self.node, self.jobs, reviewed_evidence=self.evidence)
             fresh = node_module.admit_round(self.route, self.node, self.jobs, reviewed_evidence=corrected)
         self.assertEqual(stale.budget.state, 'exhausted')
@@ -315,9 +315,9 @@ class ReviewInputTest(unittest.TestCase):
         (self.root/'review-input-revisions').mkdir()
         patches = (mock.patch.object(R, '_dispatch_node_module', return_value=node_module),
                    mock.patch.object(node_module, 'prior_round_attempts', return_value=[(['now','done'], previous)]),
-                   mock.patch.object(module, 'review_lineage_routes', return_value=[self.route]),
+                   patch_split(module, 'review_lineage_routes', return_value=[self.route]),
                    mock.patch.object(module, 'preview_review_input_revision', return_value={'input_revision':revision}),
-                   mock.patch.object(module, '_review_input_revision_records', return_value=[revision]))
+                   patch_split(module, '_review_input_revision_records', return_value=[revision]))
         with contextlib.ExitStack() as stack:
             for patch in patches:
                 stack.enter_context(patch)

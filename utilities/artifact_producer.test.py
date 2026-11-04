@@ -1219,7 +1219,7 @@ class CheckWriteTest(ProducerTestBase):
         route, _, result = self.begin()
         foreign = Path(self._tmp.name) / "foreign.md"
         foreign.write_text("other cycle result\n")
-        with mock.patch.object(R, "_marker_attempt_axes") as axes:
+        with patch_split(R, "_marker_attempt_axes") as axes:
             with self.assertRaisesRegex(ValueError, "artifact-outside-bound-cycle"):
                 R._publish_completion_locked(route, {}, "frame", foreign,
                                              attempt_id="att-wrong-cycle", attempt_metadata={})
@@ -5721,7 +5721,7 @@ class TerminalTransactionIntegrationTest(ProducerTestBase):
                   expected_terminal_marker_digest=state["terminal_marker_digest"])
         held.update(different)
         unproven={"report":{"passed":False,"reason":"completion-attempt-not-current"}}
-        with mock.patch.object(R,"terminal_gate_observation",return_value=unproven):
+        with patch_split(R,"terminal_gate_observation",return_value=unproven):
             first,created=R.close_route(route,route_file,allow_unproven=True,jobs=jobs,**held)
         self.assertTrue(created); self.assertFalse(first["terminal_gate_proven"])
         return route,route_file,jobs,owner,result,request,R.outcome_path(route_file).read_bytes(),state
@@ -5807,7 +5807,7 @@ class TerminalTransactionIntegrationTest(ProducerTestBase):
                   expected_producer_binding_digest=foreign,
                   expected_terminal_marker_digest=state["terminal_marker_digest"])
         unproven={"report":{"passed":False,"reason":"completion-attempt-not-current"}}
-        with mock.patch.object(R,"terminal_gate_observation",return_value=unproven):
+        with patch_split(R,"terminal_gate_observation",return_value=unproven):
             first,created=R.close_route(route,route_file,allow_unproven=True,jobs=jobs,**held)
         self.assertTrue(created); self.assertFalse(first["terminal_gate_proven"])
         raw=R.outcome_path(route_file).read_bytes()
@@ -5877,7 +5877,7 @@ class TerminalTransactionIntegrationTest(ProducerTestBase):
             unproven={"report":{"passed":False,"reason":"completion-attempt-not-current"}}
             manifest=Path(result["cycle_dir"])/"manifest.json"
             manifest_before=manifest.read_bytes() if manifest.exists() else None
-            with mock.patch.object(R,"terminal_gate_observation",return_value=unproven):
+            with patch_split(R,"terminal_gate_observation",return_value=unproven):
                 out,created=R.close_route(route,route_file)
             self.assertFalse(created); self.assertFalse(out["terminal_gate_proven"])
             self.assertNotEqual(P.read_cycle_record(self.root,result["cycle_id"])["state"],"sealed")
@@ -7002,7 +7002,7 @@ class RouteLineageBindingTest(ProducerTestBase):
         self.jobs.write_text("corrupt registry row\n")
         self.assertFalse(P._closed_unexecuted_continuation(self.root, successor))
         self.jobs.write_text("")
-        with mock.patch.object(P.artifact_lifecycle._load_capability_route(), "resolve_dangling_registry",
+        with patch_split(P.artifact_lifecycle._load_capability_route(), "resolve_dangling_registry",
                                side_effect=OSError("unreadable registry")):
             self.assertFalse(P._closed_unexecuted_continuation(self.root, successor))
         markers = R.completion_dir(successor["route_id"], jobs=self.jobs)

@@ -555,9 +555,9 @@ class ReplacementTest(unittest.TestCase):
         candidate.update(D.parse_registry_metadata(R.seal_launch_input(args,'codex','the raw task')))
         rows=[(['now','done'],meta) for _,meta in R._rows(self.jobs.read_text().splitlines()).values()]
         route_module=review_input._dispatch_node_module().ROUTE
-        patches=[mock.patch.object(route_module,'review_lineage_routes',side_effect=lambda route,node:[route]),
-                 mock.patch.object(route_module,'review_round_records',side_effect=lambda *args,**kw:rows),
-                 mock.patch.object(route_module,'_dependency_revisions',side_effect=lambda *args,**kw:[])]
+        patches=[patch_split(route_module,'review_lineage_routes',side_effect=lambda route,node:[route]),
+                 patch_split(route_module,'review_round_records',side_effect=lambda *args,**kw:rows),
+                 patch_split(route_module,'_dependency_revisions',side_effect=lambda *args,**kw:[])]
         with contextlib.ExitStack() as stack:
             for patch in patches: stack.enter_context(patch)
             with self.assertRaises(D.DispatchContractError) as failure:
@@ -600,19 +600,19 @@ class ReplacementTest(unittest.TestCase):
         first=R.seal_launch_input(args,'codex','the raw task')
         self.write({**self.meta,'attempt_id':'att-next','launch_claimed':'0',
                     **D.parse_registry_metadata(first)},'open',append=True)
-        with mock.patch.object(R,'ROOT',Path('/newer/release')):
+        with patch_split(R,'ROOT',Path('/newer/release')):
             second=R.seal_launch_input(args,'codex','the raw task')
         self.assertNotEqual(first,second)
         saved=json.loads((R._directory(self.jobs)/'inputs'/'att-next.json').read_text())
         self.assertEqual(saved['launch_home'],'/newer/release')
         self.assertEqual(',replacement_input_digest='+R._digest(saved),second)
         # Different work, or an attempt that already started, still conflicts.
-        with mock.patch.object(R,'ROOT',Path('/third/release')):
+        with patch_split(R,'ROOT',Path('/third/release')):
             with self.assertRaises(D.DispatchContractError) as caught:
                 R.seal_launch_input(args,'codex','changed task')
         self.assertEqual(caught.exception.reason,'replacement-record-conflict')
         self.write({**self.meta,'attempt_id':'att-next','launch_claimed':'1'},'open',append=True)
-        with mock.patch.object(R,'ROOT',Path('/third/release')):
+        with patch_split(R,'ROOT',Path('/third/release')):
             with self.assertRaises(D.DispatchContractError) as caught:
                 R.seal_launch_input(args,'codex','the raw task')
         self.assertEqual(caught.exception.reason,'replacement-record-conflict')
@@ -682,7 +682,7 @@ class ReplacementTest(unittest.TestCase):
         """Seal an attempt's input under a verified route and register it unstarted."""
         import execution_access as EA
         self.bind_fixture_route()
-        verify=mock.patch.object(D._route_module(),'verify_route',side_effect=lambda route,*a,**k:dict(route))
+        verify=patch_split(D._route_module(),'verify_route',side_effect=lambda route,*a,**k:dict(route))
         verify.start();self.addCleanup(verify.stop)
         work=self.root/'work';work.mkdir(exist_ok=True)
         (self.root/'work2').mkdir(exist_ok=True)
@@ -2798,7 +2798,7 @@ class ReplacementTest(unittest.TestCase):
         self._successor(record,self.meta|{'worker_type':'owner'},'open')
         hold={'until_epoch':4102444800,'label':'2100-01-01T00:00:00Z'}
         with mock.patch('dispatch_capacity_evidence.harness_hold',return_value=hold), \
-             mock.patch.object(R,'ROOT',self.root/'newer-release'):
+             patch_split(R,'ROOT',self.root/'newer-release'):
             result=R.advance(self.jobs,'att-source',authority_check=lambda *_:True)
         self.assertEqual(result.get('state'),'running',result)
         self.assertEqual(result['attempt_id'],record['replacement_attempt_id'])
@@ -3648,7 +3648,7 @@ class ReplacementTest(unittest.TestCase):
                       'parent_attempt_id': record['replacement_attempt_id'], 'note': ''}
         history = self.jobs.read_bytes()
         # This isolated claim fixture has one route; use the real registry census and admission.
-        with mock.patch.object(dispatch.ROUTE, 'review_lineage_routes', return_value=[self.route]):
+        with patch_split(dispatch.ROUTE, 'review_lineage_routes', return_value=[self.route]):
             for status in ('open', 'running'):
                 with self.subTest(status=status):
                     self.jobs.write_bytes(history)
@@ -3762,7 +3762,7 @@ class ReplacementTest(unittest.TestCase):
         dispatch = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = dispatch
         spec.loader.exec_module(dispatch)
-        with mock.patch.object(dispatch.ROUTE, 'review_lineage_routes', return_value=[self.route]):
+        with patch_split(dispatch.ROUTE, 'review_lineage_routes', return_value=[self.route]):
             budget = dispatch.admit_round(self.route, self.route['nodes'][0], self.jobs,
                                           record_auto_revisions=False).budget
         self.assertEqual((budget.state, budget.round_kind, budget.next_round), ('admit', 'first', 1))
@@ -4753,7 +4753,7 @@ class ReplacementLaunchSafetyTest(unittest.TestCase):
                 'worker_type': 'stage', 'route_node': 'retained-peer', 'note': 'completed-marker',
                 'failure_class': '', 'launch_outcome': 'reaped-before-publish'}
         t.write(peer, append=True)
-        stack.enter_context(mock.patch.object(D._route_module(), 'completion_dir', return_value=completion))
+        stack.enter_context(patch_split(D._route_module(), 'completion_dir', return_value=completion))
         stack.enter_context(patch_split(D, 'gate_currency', return_value=D.GateCurrency('current', 'fixture-current')))
         stack.enter_context(patch_split(D, 'note_evidence_change'))
         stack.enter_context(mock.patch.object(R, '_gate_snapshot', return_value=[]))
@@ -5019,7 +5019,7 @@ class StageRecoveryProgressTest(unittest.TestCase):
             fixed_now = datetime.now(timezone.utc)
             start = (fixed_now - timedelta(minutes=5)).isoformat()
             jobs = root / 'jobs.log'; jobs.write_text('')
-            with mock.patch.object(D._route_module(), 'verify_route'), \
+            with patch_split(D._route_module(), 'verify_route'), \
                  mock.patch.object(artifact_context, 'resolve_context',
                                    return_value=SimpleNamespace(output_dir=output)):
                 for note in ('dead-timeout', 'dead-no-progress'):
@@ -5091,7 +5091,7 @@ class NonGitStageProgressTest(unittest.TestCase):
             route_path.write_text(json.dumps(route), encoding="utf-8")
             meta = {"worker_type": "stage", "route_node": "execute",
                     "route_file": str(route_path), "note": "dead-timeout"}
-            with mock.patch.object(D._route_module(), "verify_route"), \
+            with patch_split(D._route_module(), "verify_route"), \
                  mock.patch.object(artifact_context, "resolve_context",
                                    return_value=SimpleNamespace(output_dir=output)), \
                  mock.patch.object(R, "_git_readonly", side_effect=AssertionError("Git must not be probed")):

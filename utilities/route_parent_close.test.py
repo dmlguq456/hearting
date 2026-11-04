@@ -69,7 +69,7 @@ class FailedLaunchStopTest(unittest.TestCase):
         self.patch(CLOSE.time, "sleep")
 
     def patch(self, target, name, **kwargs):
-        return self.stack.enter_context(mock.patch.object(target, name, **kwargs))
+        return self.stack.enter_context(patch_split(target, name, **kwargs))
 
     def run_stop(self):
         CLOSE.stop_failed_launch(Path("/synthetic/jobs.log"), self.fields)
@@ -445,7 +445,7 @@ class ParentCloseTest(unittest.TestCase):
                     argv = ["capability-route.py", "start", "--route", str(child.path),
                             "--jobs", str(child.jobs), "--pin", "owner=" + target,
                             "--pin", "worker=" + target]
-                    with mock.patch.object(ROUTE, "_pin_change_probe", return_value=([], [])), \
+                    with patch_split(ROUTE, "_pin_change_probe", return_value=([], [])), \
                             mock.patch.object(sys, "argv", argv), contextlib.redirect_stdout(notice):
                         ROUTE.main()
                     receipt = json.loads(notice.getvalue())
@@ -1639,7 +1639,7 @@ class ParentCloseTest(unittest.TestCase):
                "AGENT_DISPATCH_EXECUTION_SURFACE": "registered-headless",
                "AGENT_DISPATCH_REGISTERED_WORKER": "1", "AGENT_DISPATCH_OWNER_HARNESS": "codex",
                "AGENT_DISPATCH_PARENT_SESSION_ID": "fixture-parent", "AGENT_DISPATCH_JOBS": str(self.jobs)}
-        with mock.patch.object(OWNER.ROUTE, "verify_route", side_effect=lambda raw, *a, **k: raw):
+        with patch_split(OWNER.ROUTE, "verify_route", side_effect=lambda raw, *a, **k: raw):
             OWNER.publish_owner_route_attachment_from_environment(self.jobs,
                 target_route={**self.route, "route_file": str(self.path)}, environ=env)
             old = self.route.copy()
