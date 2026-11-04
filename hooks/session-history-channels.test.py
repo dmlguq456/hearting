@@ -50,7 +50,7 @@ class HistoryChannelTests(unittest.TestCase):
     def test_codex_places_notice_outside_additional_context(self):
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
-            codex.emit_context("UserPromptSubmit", ["MODEL-CARD"], "PERSON-NOTICE")
+            codex.emit_context("UserPromptSubmit", ["MODEL-CARD"], system_message="PERSON-NOTICE")
         payload = json.loads(output.getvalue())
         self.assertEqual(payload["hookSpecificOutput"]["additionalContext"], "MODEL-CARD")
         self.assertEqual(payload["systemMessage"], "PERSON-NOTICE")
