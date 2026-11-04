@@ -62,7 +62,7 @@ from dispatch_completion_join import read_supervisor_phase_state, read_join_obse
 from dispatch_subsession_advance import row_is_registered_only  # noqa: E402
 from dispatch_attempt_policy import decide_attempt, terminal_conflict_pending  # noqa: E402
 import dispatch_registry_cache as _dispatch_registry_cache  # noqa: E402
-from runtime_observation import ProjectionCache, retained_size  # noqa: E402
+from runtime_observation import ProjectionCache, retained_size, observe_once  # noqa: E402
 from codex_dispatch_terminal import terminal_envelope_observed  # noqa: E402
 from claude_project_dir import encode_project_dir  # noqa: E402
 from attempt_view import owned_attempt_log_path as _shared_owned_attempt_log_path  # noqa: E402
@@ -296,8 +296,14 @@ def _drop_registry_path_locked(absolute, *, preserve_projections=False):
             if key[0] == absolute:
                 cache.pop(key, None)
     _PARSED_REGISTRY_PATH_ORDER.pop(absolute, None)
+    # Intent rows borrow the parsed generation too; never retain a discarded
+    # source through their identity proof or through an old metadata tuple.
+    for key in tuple(_DELIVERY_INTENTS):
+        if os.path.abspath(key) == absolute:
+            _DELIVERY_INTENTS.pop(key, None)
     if not preserve_projections:
         _ORPHAN_ROW_PROJECTIONS.pop(absolute, None)
+        _REGISTRY_MERGED_CACHE.clear()
         for key in tuple(_REGISTRY_EVIDENCE_CACHE):
             if os.path.abspath(key[1]) == absolute:
                 _REGISTRY_EVIDENCE_CACHE.pop(key, None)
@@ -1630,8 +1636,19 @@ def _attempt_state_record(job, bucket):
     attempt_id = getattr(job, "attempt_id", None)
     if not attempt_id or bucket not in {"heartbeats", "watchdog"}:
         return None
+    # Heartbeat, terminal and stall classifiers consume the same observed
+    # record, with independent mutable return values. Controls outside this
+    # explicit collection scope still read the file on every call.
+    return _observed_attempt_state_record(
+        attempt_id, bucket, tuple(_row_state_roots(job)),
+        (open, json.load, json.loads, os.path.realpath, os.path.islink,
+         os.path.getsize, os.path.commonpath))
+
+
+@observe_once
+def _observed_attempt_state_record(attempt_id, bucket, roots, _reader_policy):
     name = str(attempt_id).replace("/", "_") + ".json"
-    for root in _row_state_roots(job):
+    for root in roots:
         directory = os.path.realpath(os.path.join(root, bucket))
         raw_path = os.path.join(directory, name)
         path = os.path.realpath(raw_path)
@@ -3663,6 +3680,7 @@ def _iso_to_epoch(ts):
 
 _REGISTRY_EVIDENCE_CACHE = ProjectionCache(max_bytes=48 * 1024 * 1024)
 _REGISTRY_FINGERPRINT_CACHE = ProjectionCache(max_entries=16384, max_bytes=16 * 1024 * 1024)
+_REGISTRY_MERGED_CACHE = ProjectionCache(max_entries=1, max_bytes=512 * 1024)
 
 
 class RegistryRouteEvidence(dict):
@@ -3699,6 +3717,10 @@ def _registry_evidence_for_path(path, rows):
     same_functions = held is not None and all(a is b for a, b in zip(functions, held[1]))
     if same_functions and held[0].token is proof.token:
         return held[2], held[3]
+    # The merged view borrows these path-owned graphs. Retire it before a
+    # producer replacement/eviction can transfer their ownership to that view.
+    with _PARSED_REGISTRY_CACHE_LOCK:
+        _REGISTRY_MERGED_CACHE.clear()
     prefix = (same_functions and held[0].owned == proof.owned
               and held[0].policy == proof.policy and len(rows) >= len(held[0].rows)
               and all(old is new or old == new for old, new in zip(held[0].rows, proof.rows)))
@@ -3826,11 +3848,22 @@ def _scan_registry_evidence(paths):
     latest_attempts = {}
     if isinstance(paths, (str, bytes, os.PathLike)):
         paths = [paths]
+    pieces = []
     for path in paths:
-        path_result = {}
-        path_attempts = {}
         rows = parsed_registry_rows(path)
         path_result, path_attempts = _registry_evidence_for_path(path, rows)
+        proof = _registry_rows_proof(path, rows)
+        pieces.append(((type(path), os.fspath(path)), proof, path_result, path_attempts))
+    signature = (tuple((key, proof.token) for key, proof, _result, _attempts in pieces),
+                 frozenset(_TERMINAL_REGISTRY_STATUSES), _registry_evidence_for_path)
+    with _PARSED_REGISTRY_CACHE_LOCK:
+        cached = _REGISTRY_MERGED_CACHE.get(signature)
+        if cached is not None:
+            # Callers own the outer mappings, as before. Their immutable
+            # per-route histories already have producer ownership.
+            return RegistryEvidence(cached[0]), dict(cached[1])
+    overlays = {}
+    for _key, _proof, path_result, path_attempts in pieces:
         # Candidate paths are precedence-ordered (canonical first). Preserve
         # last-occurrence-wins inside each file, but never let a later legacy
         # registry overwrite canonical terminal evidence or attempt identity.
@@ -3841,6 +3874,7 @@ def _scan_registry_evidence(paths):
                 target = result[route_id] = RegistryRouteEvidence(result[route_id])
                 for route_node, evidence in nodes.items():
                     target.setdefault(route_node, evidence)
+                overlays[route_id] = target
         for attempt_id, evidence in path_attempts.items():
             latest_attempts.setdefault(attempt_id, evidence)
 
@@ -3856,6 +3890,20 @@ def _scan_registry_evidence(paths):
         and evidence["route_id"]
         and evidence["route_node"]
     }
+    with _PARSED_REGISTRY_CACHE_LOCK:
+        owned = all(proof.owned and (held := _REGISTRY_EVIDENCE_CACHE.get(key)) is not None
+                    and held[0].token is proof.token and held[2] is part and held[3] is attempts
+                    for key, proof, part, attempts in pieces)
+        if owned:
+            # Own the outer tables and merged overlays. Path-cache changes
+            # release their borrowed child graphs before their producer.
+            weight = (sys.getsizeof(result) + sys.getsizeof(terminal_attempts)
+                      + sys.getsizeof(signature) + sys.getsizeof(signature[0]) + 1024
+                      + sum(sys.getsizeof(item) + sys.getsizeof(item[0]) for item in signature[0])
+                      + sum(sys.getsizeof(item) + sys.getsizeof(item.__dict__) + 32
+                            for item in overlays.values()))
+            _REGISTRY_MERGED_CACHE.remember(
+                signature, (RegistryEvidence(result), dict(terminal_attempts)), weight=weight)
     return result, terminal_attempts
 
 
@@ -4768,13 +4816,16 @@ def _delivery_document(path):
 
 def _delivery_intents(path, parsed):
     key = os.fspath(path)
+    proof = _registry_rows_proof(path, parsed)
     with _PARSED_REGISTRY_CACHE_LOCK:
         held = _DELIVERY_INTENTS.get(key)
-        if held is not None and held[0] is parsed:
+        if held is not None and held[0] is proof.token:
             return held[1]
     intents = tuple(meta for _order, _fields, meta in parsed if meta.get("delivery_intent") == "1")
+    if not proof.owned:
+        return intents
     with _PARSED_REGISTRY_CACHE_LOCK:
-        _DELIVERY_INTENTS[key] = (parsed, intents)
+        _DELIVERY_INTENTS[key] = (proof.token, intents)
         _DELIVERY_INTENTS.move_to_end(key)
         while len(_DELIVERY_INTENTS) > 32:
             _DELIVERY_INTENTS.popitem(last=False)
