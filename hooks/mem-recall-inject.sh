@@ -130,7 +130,7 @@ fi
 [ "$EVENT" = UserPromptSubmit ] || exit 0
 [ -n "$PROMPT" ] && [ -n "$CWD" ] && [ -f "$MEM_PY" ] || exit 0
 
-# Runtime-sent prompts (completion delivery, progress notices) carry no new
+# Runtime-completion prompts (verified runtime-from trailer) carry no new
 # user intent: skip candidates. Same judgment as peer-message receiver_guidance.
 case "$PROMPT" in
   *"(runtime-from:"*)

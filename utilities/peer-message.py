@@ -3581,7 +3581,7 @@ def cancel_message_obligation(ref, *, duty_id, expected_revision, identity,
 
 
 def _ordinary_receiver_guidance():
-    return ("Peer request: answer once; for delayed work send one short receipt, "
+    return ("Peer request: answer once (notices need no reply); for delayed work send one short receipt, "
             "then continue in the registered continuation.")
 
 
