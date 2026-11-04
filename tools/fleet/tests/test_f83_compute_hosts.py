@@ -189,6 +189,7 @@ class ComputeHostCollectorTest(unittest.TestCase):
 
 
 class ComputeHostRenderTest(unittest.TestCase):
+    @mock.patch.dict("os.environ", {"FLEET_NOW_LANG": "Korean"})   # Korean screen words
     def test_expanded_reservation_keeps_start_without_task_description(self):
         gpu = self.snapshot["hosts"][0]["gpus"][0]
         gpu["reservations"] = [{"owner": {"label": "SR_ModelA [cd]"},

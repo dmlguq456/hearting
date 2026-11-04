@@ -2,6 +2,7 @@
 import datetime
 import math
 from collections.abc import Mapping
+from ..config import ui_text
 from .grid import CellGrid, cell_width, clip_cells
 from .tables import repo_label, route_counts
 from .style import steward_flag_key
@@ -609,7 +610,7 @@ def draw_chrome(grid: CellGrid, vm, state, beat=1):
             status = f"{install.get('version', '·')} · {waiting} pending"
             no_recipient = delivery.get("no_recipient")
             if isinstance(no_recipient, int) and not isinstance(no_recipient, bool):
-                status += f" · 받을 세션 없음 {no_recipient}"
+                status += ui_text("fleet.delivery.no_recipient", count=no_recipient)
         else:
             status = ""
         grid.fill(0, width, height - 1, " ")

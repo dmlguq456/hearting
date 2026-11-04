@@ -307,6 +307,7 @@ class NVMLFallbackTest(unittest.TestCase):
             with self.assertRaises(gpu_leases.GPUUnavailable):
                 gpu_leases.select(row, [], share=True)
 
+    @mock.patch.dict("os.environ", {"FLEET_NOW_LANG": "Korean"})   # Korean screen words
     def test_failed_nvml_reaches_real_reservation_snapshot_without_writing(self):
         namespace = self.root / "proc/self/ns/pid"
         namespace.parent.mkdir(parents=True)
