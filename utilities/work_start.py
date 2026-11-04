@@ -2181,6 +2181,9 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
                                       "outcome": closed,
                                       **({"completion_delivery": delivery} if delivery else {}),
                                       **({"shared_publication": publication} if publication is not None else {})})
+    from start_receipt import runtime_commands
+    # start_work preserves this object's collected progress when a launch raises.
+    result["runtime"] = runtime_commands(ROOT)
     harvested = _harvest_unread_blocked_owner(route, jobs, run)
     if harvested is not None:
         if not harvested["ok"]:
