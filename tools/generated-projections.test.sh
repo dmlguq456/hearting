@@ -122,7 +122,6 @@ python3 "$ROOT/tools/generate.py" >/dev/null
 python3 - \
   "$RECOVERY_CONTRACT" \
   "$ROOT/adapters/codex/skills/code-execute/SKILL.md" \
-  "$ROOT/adapters/codex/plugins/hearting-codex/skills/code-execute/SKILL.md" \
   "$ROOT/adapters/opencode/skills/code-execute/SKILL.md" <<'PY'
 from pathlib import Path
 import re
@@ -149,9 +148,7 @@ grep -Fq 'capabilities/code-execute.md#portable-procedure' "$RECOVERY_PROCEDURE"
 for skill_copy in \
   "$ROOT/skills/code-execute/SKILL.md" \
   "$ROOT/adapters/claude/skills/code-execute/SKILL.md" \
-  "$ROOT/adapters/claude/plugin-marketplace/plugins/hearting-claude/skills/code-execute/SKILL.md" \
   "$ROOT/adapters/codex/skills/code-execute/SKILL.md" \
-  "$ROOT/adapters/codex/plugins/hearting-codex/skills/code-execute/SKILL.md" \
   "$ROOT/adapters/opencode/skills/code-execute/SKILL.md"; do
   grep -Fq 'capabilities/code-execute/references/procedure.md' "$skill_copy" || {
     echo "not ok - renamed canonical procedure reference missing from $skill_copy" >&2
@@ -159,8 +156,6 @@ for skill_copy in \
   }
 done
 cmp -s "$ROOT/skills/code-execute/SKILL.md" "$ROOT/adapters/claude/skills/code-execute/SKILL.md"
-cmp -s "$ROOT/skills/code-execute/SKILL.md" \
-  "$ROOT/adapters/claude/plugin-marketplace/plugins/hearting-claude/skills/code-execute/SKILL.md"
 cp "$TMP/code-execute-contract.md" "$RECOVERY_CONTRACT"
 python3 "$ROOT/tools/generate.py" >/dev/null
 
@@ -479,8 +474,8 @@ grep -Fq '### Step 4c: Report figure semantic gate' "$ROOT/capabilities/autopilo
 grep -Fq 'PNG existence, dimensions, count, and links alone are not a pass' "$ROOT/capabilities/code-test/references/procedure.md"
 cmp -s "$ROOT/adapters/codex/skills/analyze-project/SKILL.md" \
   "$ROOT/adapters/codex/plugins/hearting-codex/skills/analyze-project/SKILL.md"
-cmp -s "$ROOT/adapters/claude/skills/code-test/SKILL.md" \
-  "$ROOT/adapters/claude/plugin-marketplace/plugins/hearting-claude/skills/code-test/SKILL.md"
+cmp -s "$ROOT/adapters/claude/skills/analyze-project/SKILL.md" \
+  "$ROOT/adapters/claude/plugin-marketplace/plugins/hearting-claude/skills/analyze-project/SKILL.md"
 cmp -s "$ROOT/utilities/artifact-root.sh" \
   "$ROOT/adapters/claude/plugin-marketplace/plugins/hearting-claude/utilities/artifact-root.sh"
 python3 "$ROOT/tools/figure-semantic-verify.test.py" >/dev/null

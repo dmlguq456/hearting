@@ -32,6 +32,13 @@ MARKETPLACE = MARKETPLACE_ROOT / ".agents" / "plugins" / "marketplace.json"
 MARKETPLACE_PLUGIN_LINK = MARKETPLACE_ROOT / "plugins" / PLUGIN_NAME
 MARKETPLACE_PLUGIN_TARGET = Path("../../plugins") / PLUGIN_NAME
 SKILLS = ADAPTER / "skills"
+# Stage skills stay in adapters/codex/skills (stage workers read them by path) but are not
+# copied into the plugin, so they never enter the main session's skill list.
+HIDDEN = harness_manifest.main_hidden_skill_names(harness_manifest.load(ROOT / "harness-manifest.json"))
+
+
+def plugin_skill_sources() -> list[Path]:
+    return [skill for skill in sorted(SKILLS.glob("*/SKILL.md")) if skill.parent.name not in HIDDEN]
 VALIDATOR = Path.home() / ".codex" / "skills" / ".system" / "plugin-creator" / "scripts" / "validate_plugin.py"
 
 
@@ -140,7 +147,7 @@ def sync() -> None:
     plugin_skills = PLUGIN_ROOT / "skills"
     if plugin_skills.exists() or plugin_skills.is_symlink():
         shutil.rmtree(plugin_skills)
-    shutil.copytree(SKILLS, plugin_skills)
+    shutil.copytree(SKILLS, plugin_skills, ignore=shutil.ignore_patterns(*sorted(HIDDEN)))
     sync_portable_bundle()
 
     write_json(MARKETPLACE, marketplace_json())
@@ -179,13 +186,13 @@ def check() -> int:
     elif os.readlink(MARKETPLACE_PLUGIN_LINK) != str(MARKETPLACE_PLUGIN_TARGET):
         stale.append(str(MARKETPLACE_PLUGIN_LINK.relative_to(ROOT)))
 
-    for skill in sorted(SKILLS.glob("*/SKILL.md")):
+    for skill in plugin_skill_sources():
         rel = skill.relative_to(SKILLS)
         plugin_skill = PLUGIN_ROOT / "skills" / rel
         if not plugin_skill.exists() or plugin_skill.read_text(encoding="utf-8") != skill.read_text(encoding="utf-8"):
             stale.append(str(plugin_skill.relative_to(ROOT)))
 
-    expected = {PLUGIN_ROOT / "skills" / skill.relative_to(SKILLS) for skill in SKILLS.glob("*/SKILL.md")}
+    expected = {PLUGIN_ROOT / "skills" / skill.relative_to(SKILLS) for skill in plugin_skill_sources()}
     plugin_skill_files = sorted((PLUGIN_ROOT / "skills").glob("*/SKILL.md")) if (PLUGIN_ROOT / "skills").exists() else []
     for path in plugin_skill_files:
         if path not in expected:
