@@ -21,6 +21,11 @@ import subprocess
 import sys
 import time
 import uuid
+try:  # ends a detached child with the test that started it; no-op outside tests
+    from detached_lifetime import bind as end_with_test
+except ImportError:  # a partial tree without it (e.g. a fixture release): no record
+    def end_with_test(child):
+        return child
 
 ROOT = Path(__file__).resolve().parents[1]
 MAX_TIMEOUT = 900
@@ -310,6 +315,7 @@ class LiveRunner:
                                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                        stderr=subprocess.DEVNULL, start_new_session=True,
                                        close_fds=True)
+        end_with_test(self.server)
         self.server_started = True
         self.steps.append({"name": "server-start", "argv": _safe_argv(argv),
                            "argv_hmac": hmac.new(self.salt, json.dumps(argv).encode(), hashlib.sha256).hexdigest(),
@@ -380,6 +386,7 @@ class LiveRunner:
         self.backend = subprocess.Popen(argv, cwd=self.project, env=self.env,
                                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                         stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
+        end_with_test(self.backend)
         self.steps.append({"name": "backend-start", "argv_hmac": hmac.new(
             self.salt, json.dumps(argv).encode(), hashlib.sha256).hexdigest(), "pid": self.backend.pid,
             "pid_start": _proc_start(self.backend.pid), "argv_redacted": True})

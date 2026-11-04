@@ -65,13 +65,22 @@ def main() -> int:
                     and os.environ.get("AGENT_DISPATCH_CHILD") != "1"
                     and not os.environ.get("AGENT_DISPATCH_DEPTH")):
                 import subprocess
-                subprocess.Popen(
+                ensurer = subprocess.Popen(
                     [sys.executable, str(tools.parent / "utilities" / "peer-steward.py"),
                      "__ensure-obligations", "--lifecycle-root",
                      str(Path(__file__).resolve().parents[1])],
                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     close_fds=True, start_new_session=True,
                 )
+                # Under a test the ensurer (and the runner it starts) ends with the test.
+                if str(tools.parent / "utilities") not in sys.path:
+                    sys.path.append(str(tools.parent / "utilities"))
+                try:
+                    from detached_lifetime import bind
+                except ImportError:
+                    pass
+                else:
+                    bind(ensurer)
             if (event in {"Stop", "UserPromptSubmit"} and permission
                     and time.monotonic_ns() - _STARTED_NS < RETRY_BUDGET_NS):
                 # Reuse the existing idle/receive callback and shared draft guard.

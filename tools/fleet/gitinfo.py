@@ -12,6 +12,19 @@ import stat
 import sys
 import tempfile
 
+
+def _end_with_test(child):
+    """End a detached ``child`` with the test that started it (utilities/detached_lifetime.py)."""
+    utilities = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)))), "utilities")
+    if utilities not in sys.path:
+        sys.path.append(utilities)
+    try:
+        from detached_lifetime import bind
+    except ImportError:
+        return child
+    return bind(child)
+
 _TTL = 30.0
 _CACHE = {}
 _INFLIGHT = set()
@@ -334,11 +347,11 @@ def cached_display(cwd, request=True, project_dir=None):
             latest = _read_display(binding)
             if latest is not None and time.time() - latest["observed_at"] <= _TTL:
                 return latest
-            subprocess.Popen([sys.executable, os.path.abspath(__file__), "--display-refresh",
+            _end_with_test(subprocess.Popen([sys.executable, os.path.abspath(__file__), "--display-refresh",
                               json.dumps(binding), "--lock-fd", str(fd)],
                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL, cwd="/", close_fds=True,
-                             pass_fds=(fd,), start_new_session=True)
+                             pass_fds=(fd,), start_new_session=True))
         except (OSError, subprocess.SubprocessError):
             pass
         finally:

@@ -44,6 +44,11 @@ import artifact_meta as M  # noqa: E402
 import artifact_producer as producer  # noqa: E402
 import artifact_workflow_groups as W  # noqa: E402
 from artifact_checkpoint_trigger import CUTOVER_REL, in_test_process  # noqa: E402
+try:  # ends a detached child with the test that started it; no-op outside tests
+    from detached_lifetime import bind as end_with_test  # noqa: E402
+except ImportError:  # a partial tree without it (e.g. a fixture release): no record
+    def end_with_test(child):
+        return child
 
 PROFILE = "light"
 # A full-size campaign input (~120k characters) took 393 s on the light profile
@@ -1553,12 +1558,12 @@ def launch_after_seal(root: Path, record: Mapping[str, Any]) -> bool:
             return False
         _unlock(lock)
         workdir = neutral_workdir()
-        subprocess.Popen(
+        end_with_test(subprocess.Popen(
             [sys.executable, str(Path(__file__).resolve()), "sweep", "--artifact-root", str(root),
              "--auto", "--cycle", cycle_id],
             cwd=str(workdir if workdir.is_dir() else UTILITIES), env=_child_env(),
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            start_new_session=True)
+            start_new_session=True))
         return True
     except Exception:  # noqa: BLE001 -- a trigger never fails a seal
         return False
