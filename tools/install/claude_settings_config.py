@@ -1,6 +1,6 @@
 """Upgrade migration for the user's `~/.claude/settings.json`.
 
-The managed install merges only hooks, statusLine, env and autoMemoryEnabled
+The managed install merges only hooks, statusLine, env, autoMemoryEnabled and idleCompaction
 into the user's file and never writes `permissions`, so Hearting does not read
 or judge permission settings (`harness config status` has no row for them).
 This module only removes retired harness hook registrations, preserving the

@@ -209,6 +209,25 @@ class ClaudeManagedSettingsTests(unittest.TestCase):
             self.assertFalse(missing)
             self.assertEqual(conflicts, [])
 
+    def test_idle_health_requires_the_key_only_when_the_source_declares_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            active_root, claude_home = self._fixture(tmp)
+            source_path = active_root / "adapters/claude/settings.json"
+            source = json.loads(source_path.read_text())
+            settings = dict(source)
+            self._write_user_settings(claude_home, settings)
+            statusline = claude_home / "statusline.sh"
+            statusline.write_text("#!/bin/sh\n")
+            statusline.chmod(0o755)
+            with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR":str(claude_home)}):
+                self.assertEqual(runtime_activation._claude_settings_health(active_root), (False, []))
+                source["idleCompaction"] = False
+                source_path.write_text(json.dumps(source))
+                self.assertTrue(runtime_activation._claude_settings_health(active_root)[0])
+                settings["idleCompaction"] = False
+                self._write_user_settings(claude_home, settings)
+                self.assertEqual(runtime_activation._claude_settings_health(active_root), (False, []))
+
 
 class ClaudeHookRootHealthTests(unittest.TestCase):
     def _source(self, root: Path) -> tuple[Path, dict]:
