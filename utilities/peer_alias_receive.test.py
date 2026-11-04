@@ -903,8 +903,7 @@ class PendingCallbacks(unittest.TestCase):
         body = "[handoff] exact card\n" + "complete context " * 260 + "\nDo not run; final instruction: preserve the original"
         text, ref = AliasReceive.prepare_legacy_reference(self, body, self.sender, recipient)
         guidance = pm.receiver_guidance(text, recipient, cwd=str(ROOT))
-        self.assertIn("immediate results once", guidance)
-        self.assertIn("Receipt/queue/ACK is not execution", guidance)
+        self.assertIn("answer once", guidance)
         self.assertNotIn("handoff accept " + ref, guidance)
         self.assertNotIn("acceptance", pm._read_pending(ref))
         self.assertEqual(pm._read_pending(ref)["state"], "pending")

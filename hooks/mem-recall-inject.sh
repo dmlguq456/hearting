@@ -130,6 +130,25 @@ fi
 [ "$EVENT" = UserPromptSubmit ] || exit 0
 [ -n "$PROMPT" ] && [ -n "$CWD" ] && [ -f "$MEM_PY" ] || exit 0
 
+# Runtime-completion prompts (verified runtime-from trailer) carry no new
+# user intent: skip candidates. Same judgment as peer-message receiver_guidance.
+case "$PROMPT" in
+  *"(runtime-from:"*)
+    if AGENT_HOME="$AGENT_HOME" RT="$RUNTIME" SID="${SID:-}" PROMPT="$PROMPT" python3 -c '
+import importlib.util, os, sys
+try:
+    spec = importlib.util.spec_from_file_location("peer", os.path.join(os.environ["AGENT_HOME"], "utilities", "peer-message.py"))
+    mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+    origin = mod.parse_peer_trailer(os.environ["PROMPT"], {"harness": os.environ["RT"], "session_id": os.environ["SID"]}, include_ref=True)
+    sys.exit(0 if isinstance(origin, dict) and origin.get("source") == "runtime-completion" else 1)
+except Exception:
+    sys.exit(1)
+' 2>/dev/null; then
+      exit 0
+    fi
+    ;;
+esac
+
 args=(candidates "$PROMPT" --runtime "$RUNTIME" --session-id "${SID:-memory-prompt-hook}")
 [ -z "$TURN" ] || args+=(--turn-id "$TURN")
 [ "$FORMAT" = hook-json ] && args+=(--hook)
