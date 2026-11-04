@@ -72,6 +72,9 @@ to look, and the instruction to follow the next action the runtime prints.
 The command detail it used to carry lives here; command output stays
 authoritative for current support.
 
+If the memory prompt hook is unavailable, record `recall` or `skip` with
+`preflight.sh recall-gate <cwd> ...`.
+
 | Need | Command |
 |---|---|
 | lifecycle | `preflight.sh prompt-signal` |

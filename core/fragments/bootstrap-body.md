@@ -96,17 +96,15 @@ dispatch depth, model role, tests, safety, or validation.
 
 ## Where to look
 
-| Need | Read |
-|---|---|
-| Layers, harness root, artifact root | `core/CORE.md` |
-| Routing §0.2, entry card §0.4, report §0.5, completion §0.6 | `core/WORKFLOW.md` |
-| Intensity, QA, model roles, artifacts, Skills | `core/CONVENTIONS.md` |
-| Git, worktrees, dispatch, receipts §5.10a, frame questions §5.10b, continuation §5.12, other sessions §5.14 | `core/OPERATIONS.md` |
-| Memory | `core/MEMORY.md` |
-| Capabilities, roles, modes | `capabilities/README.md`, `roles/README.md`, `roles/MODES.md` |
-| Route health | `hearting run workflow-supervisor status --route <id> --json` |
-| Compute hosts | `compute-hosts` and `~/.config/hearting/compute-hosts.yaml`; `run` receipts include GPU headroom |
-| This runtime's commands and edge cases | the adapter `README.md` and `ADAPTATION.md` named below |
+- Layers, harness root, artifact root: `core/CORE.md`
+- Routing §0.2, entry card §0.4, report §0.5, completion §0.6: `core/WORKFLOW.md`
+- Intensity, QA, model roles, artifacts, Skills: `core/CONVENTIONS.md`
+- Git, worktrees, dispatch, receipts §5.10a, frame questions §5.10b, continuation §5.12, other sessions §5.14: `core/OPERATIONS.md`
+- Memory: `core/MEMORY.md`
+- Capabilities, roles, modes: `capabilities/README.md`, `roles/README.md`, `roles/MODES.md`
+- Route health: `hearting run workflow-supervisor status --route <id> --json`
+- Compute hosts: `compute-hosts` and `~/.config/hearting/compute-hosts.yaml`; `run` receipts include GPU headroom
+- This runtime's commands and edge cases: the adapter `README.md` and `ADAPTATION.md`
 
 Resolve the artifact root with `utilities/artifact-root.sh`; linked worktrees
 write the primary checkout's `.agent_reports/`, and legacy `.claude_reports/`
