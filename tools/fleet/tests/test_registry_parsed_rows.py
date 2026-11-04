@@ -12,6 +12,28 @@ from fleet.collectors import dispatch
 
 
 class ParsedRegistryRowsTest(unittest.TestCase):
+    def test_oversized_reuse_entries_leave_the_current_observation_usable(self):
+        from types import SimpleNamespace
+        from runtime_observation import ProjectionCache
+        def convert(order, fields, **kwargs):
+            return {'order': order, 'meta': dict(kwargs.get('meta') or {})}
+        raw = 't\tdone\t/r\t/w\ta\tattempt_id=one,route_id=rt-one,route_node=work\n'
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)/'jobs.log';path.write_text(raw)
+            with mock.patch.object(dispatch, '_ORPHAN_ROW_PROJECTIONS', ProjectionCache(max_bytes=1)):
+                first = dispatch._orphan_registry_rows(path, SimpleNamespace(_row_from_fields=convert))
+                second = dispatch._orphan_registry_rows(path, SimpleNamespace(_row_from_fields=convert))
+                self.assertEqual(first, second)
+                self.assertEqual(len(first), 1)
+                self.assertFalse(dispatch._ORPHAN_ROW_PROJECTIONS)
+            with mock.patch.object(dispatch, '_REGISTRY_EVIDENCE_CACHE', ProjectionCache(max_bytes=1)):
+                rows = dispatch.parsed_registry_rows(path)
+                first = dispatch._registry_evidence_for_path(path, rows)
+                second = dispatch._registry_evidence_for_path(path, rows)
+                self.assertEqual(first, second)
+                self.assertIn('rt-one', first[0])
+                self.assertFalse(dispatch._REGISTRY_EVIDENCE_CACHE)
+
     def test_source_byte_limit_evicts_all_references_of_the_old_path(self):
         import tempfile
         from unittest import mock

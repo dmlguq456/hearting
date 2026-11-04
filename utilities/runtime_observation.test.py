@@ -15,6 +15,19 @@ from runtime_observation import (ObservationContext, file_generation,
 
 
 class PassObservationTest(unittest.TestCase):
+    def test_a_changed_effective_uid_has_its_own_observation(self):
+        from runtime_observation import observation_read_scope, observe_once
+        from unittest import mock
+        calls = []
+        @observe_once
+        def read():
+            calls.append(1)
+            return len(calls)
+        with observation_read_scope(), mock.patch('runtime_observation.os.geteuid', side_effect=[1,2,2]):
+            self.assertEqual(read(), 1)
+            self.assertEqual(read(), 2)
+            self.assertEqual(read(), 2)
+
     def test_pass_shares_reads_and_next_pass_observes_again(self):
         from runtime_observation import observation_read_scope, observe_once
         observed = []

@@ -54,7 +54,7 @@ def retained_size(value, limit=None):
 
 
 class ProjectionCache(OrderedDict):
-    """LRU ownership of pure projections with entry and retained-byte bounds."""
+    """LRU ownership with entry and byte charges (exact or schema-derived)."""
 
     def __init__(self, max_entries=32, max_bytes=512 * 1024 * 1024):
         super().__init__()
@@ -62,8 +62,13 @@ class ProjectionCache(OrderedDict):
         self.weights, self.bytes = {}, 0
 
     def __setitem__(self, key, value):
+        self.remember(key, value)
+
+    def remember(self, key, value, *, weight=None):
+        """Admit an exact graph weight or a caller's schema-derived charge."""
         self.pop(key, None)
-        weight = retained_size((key, value), self.max_bytes)
+        if weight is None:
+            weight = retained_size((key, value), self.max_bytes)
         if weight > self.max_bytes:
             return
         super().__setitem__(key, value)
@@ -125,7 +130,11 @@ def observe_once(reader=None, *, immutable=False):
         scope = _PASS_READS.get()
         if scope is None:
             return reader(*args, **kwargs)
-        key = (reader, args, tuple(sorted(kwargs.items())))
+        try:
+            uid = os.geteuid() if hasattr(os, 'geteuid') else None
+        except OSError:
+            return reader(*args, **kwargs)
+        key = (reader, uid, args, tuple(sorted(kwargs.items())))
         try:
             hash(key)
         except TypeError:

@@ -400,7 +400,18 @@ def _raise_registry_read_error(path, *, ignore_missing=False):
         raise error
 
 
-_ORPHAN_ROW_PROJECTIONS = ProjectionCache()
+_ORPHAN_ROW_PROJECTIONS = ProjectionCache(max_bytes=640 * 1024 * 1024)
+
+
+def _registry_projection_charge(rows, *, copies):
+    """Bound native schema copies without traversing every child a second time.
+
+    Charge repeated text at its Python string size and 8 KiB of fixed container
+    overhead per row. This is a conservative retention estimate, not RSS.
+    Custom converters retain the exact graph walk instead.
+    """
+    return (copies * sum(sys.getsizeof(field) for _order, fields, _meta in rows
+                         for field in fields) + 8192 * len(rows))
 
 
 def _orphan_registry_rows(path, registry, *, read_only=False):
@@ -469,8 +480,12 @@ def _orphan_registry_rows(path, registry, *, read_only=False):
             rows.append(row)
     projection = tuple(rows)
     with _PARSED_REGISTRY_CACHE_LOCK:
-        _ORPHAN_ROW_PROJECTIONS[key] = (converter, parsed, converted, projection)
-        _ORPHAN_ROW_PROJECTIONS.move_to_end(key)
+        native = getattr(getattr(converter, '__code__', None), 'co_filename', None)
+        weight = (_registry_projection_charge(parsed, copies=8)
+                  if native == str(_ROOT / 'utilities' / 'dispatch-registry.py') else None)
+        _ORPHAN_ROW_PROJECTIONS.remember(key, (converter, parsed, converted, projection), weight=weight)
+        if key in _ORPHAN_ROW_PROJECTIONS:
+            _ORPHAN_ROW_PROJECTIONS.move_to_end(key)
         while len(_ORPHAN_ROW_PROJECTIONS) > _PARSED_REGISTRY_ROWS_LIMIT:
             _ORPHAN_ROW_PROJECTIONS.popitem(last=False)
     return projection if read_only else [dict(row, meta=dict(row["meta"])) for row in rows]
@@ -3546,7 +3561,7 @@ def _iso_to_epoch(ts):
     return dt.timestamp()
 
 
-_REGISTRY_EVIDENCE_CACHE = ProjectionCache()
+_REGISTRY_EVIDENCE_CACHE = ProjectionCache(max_bytes=384 * 1024 * 1024)
 
 
 class RegistryRouteEvidence(dict):
@@ -3682,8 +3697,12 @@ def _registry_evidence_for_path(path, rows):
     for evidence in path_result.values():
         evidence.fingerprint()
     with _PARSED_REGISTRY_CACHE_LOCK:
-        _REGISTRY_EVIDENCE_CACHE[key] = (rows, functions, path_result, path_attempts)
-        _REGISTRY_EVIDENCE_CACHE.move_to_end(key)
+        native = all(getattr(getattr(fn, '__code__', None), 'co_filename', None) == __file__
+                     for fn in functions)
+        weight = _registry_projection_charge(rows, copies=4) if native else None
+        _REGISTRY_EVIDENCE_CACHE.remember(key, (rows, functions, path_result, path_attempts), weight=weight)
+        if key in _REGISTRY_EVIDENCE_CACHE:
+            _REGISTRY_EVIDENCE_CACHE.move_to_end(key)
         while len(_REGISTRY_EVIDENCE_CACHE) > _PARSED_REGISTRY_ROWS_LIMIT:
             _REGISTRY_EVIDENCE_CACHE.popitem(last=False)
     return path_result, path_attempts
