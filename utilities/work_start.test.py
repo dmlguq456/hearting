@@ -20,6 +20,7 @@ from types import SimpleNamespace
 
 import work_start as W
 from dispatch_completion_join import CurrentDeliveryState
+from split_module_fixture import patch_split
 
 
 def load(name, path):
@@ -1790,8 +1791,8 @@ class WorkStartTest(unittest.TestCase):
         pending = {"cycle_id": "cyc-original", "status": "pending", "reason": "shared-spec-conflict"}
         admitted = {"cycle_id": "cyc-original", "status": "admitted", "shared_reference_revision_id": "rrev-original"}
         with mock.patch.object(artifact_producer, "prepare_route_artifact_env", side_effect=AssertionError("reopen")), \
-             mock.patch.object(artifact_producer, "route_cycle_for", return_value={"cycle_id": "cyc-original"}), \
-             mock.patch.object(artifact_producer, "completed_spec_publication", side_effect=[pending, admitted]) as publish:
+             patch_split(artifact_producer, "route_cycle_for", return_value={"cycle_id": "cyc-original"}), \
+             patch_split(artifact_producer, "completed_spec_publication", side_effect=[pending, admitted]) as publish:
             first = self.start()
             self.assertEqual((first["state"], first["reason"]), ("needs-attention", "shared-spec-publication-pending"))
             self.assertEqual(first["shared_publication"], pending)
@@ -1813,8 +1814,8 @@ class WorkStartTest(unittest.TestCase):
             "route_hash": self.route["route_hash"], "terminal_gate_proven": True}))
         original = outcome_path.read_bytes()
         with mock.patch.object(artifact_producer, "prepare_route_artifact_env", side_effect=AssertionError("reopen")), \
-             mock.patch.object(artifact_producer, "route_cycle_for", side_effect=AssertionError("guessed root")), \
-             mock.patch.object(artifact_producer, "completed_spec_publication", side_effect=AssertionError("no root")):
+             patch_split(artifact_producer, "route_cycle_for", side_effect=AssertionError("guessed root")), \
+             patch_split(artifact_producer, "completed_spec_publication", side_effect=AssertionError("no root")):
             for root in (None, "", " "):
                 if root is None:
                     self.route.pop("artifact_root", None)
@@ -1843,10 +1844,10 @@ class WorkStartTest(unittest.TestCase):
             "route_hash": self.route["route_hash"], "terminal_gate_proven": True}))
         with mock.patch.object(artifact_producer, "prepare_route_artifact_env",
                                side_effect=AssertionError("reopen")), \
-                mock.patch.object(artifact_producer, "route_cycle_for", return_value=None), \
-                mock.patch.object(artifact_producer, "list_references",
+                patch_split(artifact_producer, "route_cycle_for", return_value=None), \
+                patch_split(artifact_producer, "list_references",
                                   side_effect=AssertionError("unseeded code must not enumerate references")), \
-                mock.patch.object(artifact_producer, "admit_shared",
+                patch_split(artifact_producer, "admit_shared",
                                   side_effect=AssertionError("unseeded code must not attempt publication")):
             receipt = self.start()
         self.assertEqual(receipt["state"], "completed", receipt)
@@ -1867,7 +1868,7 @@ class WorkStartTest(unittest.TestCase):
                  terminal.CompletionState("pending", "shared-spec-publication-pending"), terminal.CompletionState("complete")]), \
              mock.patch.object(terminal, "settle_owner_completion", return_value=terminal.TerminalCommitResult(
                  "completed", shared_publication=publication)) as settle, \
-             mock.patch.object(artifact_producer, "completed_spec_publication") as duplicate, \
+             patch_split(artifact_producer, "completed_spec_publication") as duplicate, \
              mock.patch.object(artifact_producer, "prepare_route_artifact_env", side_effect=AssertionError("reopen")):
             result = self.start()
         self.assertEqual(result["state"], "completed")
@@ -2963,9 +2964,9 @@ class UnseededCodeCleanupWorkStartTest(GF.fixture.ProducerTestBase):
         }
         campaign_dir.rename(moved_campaign)
 
-        with mock.patch.object(artifact_producer, "list_references",
+        with patch_split(artifact_producer, "list_references",
                                side_effect=AssertionError("unseeded cleanup must not scan shared refs")), \
-                mock.patch.object(artifact_producer, "admit_shared",
+                patch_split(artifact_producer, "admit_shared",
                                   side_effect=AssertionError("unseeded cleanup must not admit shared refs")), \
                 mock.patch.object(artifact_producer, "prepare_route_artifact_env",
                                   side_effect=AssertionError("closed route must not be reopened")):
@@ -3063,9 +3064,9 @@ class SeedOnlyCodeCleanupWorkStartTest(GF.fixture.ProducerTestBase):
             base_publication["shared_reference_id"])
 
         with self.observe_shared_spec_enumeration() as enumerated:
-            with mock.patch.object(artifact_producer, "admit_shared",
+            with patch_split(artifact_producer, "admit_shared",
                                    side_effect=AssertionError("seed-only cleanup must not publish shared refs")), \
-                    mock.patch.object(artifact_producer, "list_references",
+                    patch_split(artifact_producer, "list_references",
                                       side_effect=AssertionError("seed-only cleanup must not census shared refs")), \
                     mock.patch.object(artifact_producer, "prepare_route_artifact_env",
                                       side_effect=AssertionError("closed route must not be reopened")):

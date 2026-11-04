@@ -26,6 +26,7 @@ import time
 import unittest
 from unittest import mock
 from types import SimpleNamespace
+from split_module_fixture import patch_split  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
@@ -448,7 +449,7 @@ class SweepTest(IsolatedRootMixin, unittest.TestCase):
                         (artifact_producer, ("completed_spec_publication", "_code_spec_tree_changed", "_spec_bytes")),
                         (terminal._route_module(), ("terminal_gate_observation",))):
                         for name in names:
-                            heavy.append(stack.enter_context(mock.patch.object(module, name, side_effect=AssertionError(name))))
+                            heavy.append(stack.enter_context(patch_split(module, name, side_effect=AssertionError(name))))
                     reader = stack.enter_context(mock.patch.object(terminal, "recorded_owner_completion_notice", wraps=terminal.recorded_owner_completion_notice))
                     begin = time.monotonic()
                     started = SWEEP.activate(jobs.parent, carrier, "parent", request_recovery=False)

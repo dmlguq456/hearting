@@ -19,6 +19,7 @@ from unittest import mock
 import dispatch_replacement as R
 import dispatch_contract as D
 import route_identity
+from split_module_fixture import patch_split
 os.environ.setdefault("HEARTING_CAPACITY_PROBE_CLI", os.devnull)  # never ask a real Claude login
 
 
@@ -3330,9 +3331,9 @@ class ReplacementTest(unittest.TestCase):
         stack.enter_context(mock.patch.object(D, 'completion_attempt_readiness',
                                               return_value=SimpleNamespace(state='ready')))
         stack.enter_context(mock.patch.object(R, '_gate_snapshot', return_value=[]))
-        stack.enter_context(mock.patch.object(artifact_producer, 'route_cycle_for', return_value={
+        stack.enter_context(patch_split(artifact_producer, 'route_cycle_for', return_value={
             'cycle_id': 'cyc-test', 'producer_id': 'prod-test'}))
-        stack.enter_context(mock.patch.object(artifact_producer, 'cycle_route_admission',
+        stack.enter_context(patch_split(artifact_producer, 'cycle_route_admission',
                                               return_value=SimpleNamespace(allow=True)))
         self._blocked_owner()
         answer = 'Record the timeout as an environment FAIL and continue the host runs.'
@@ -3736,9 +3737,9 @@ class ReplacementTest(unittest.TestCase):
                                               return_value=SimpleNamespace(state='ready')))
         stack.enter_context(mock.patch.object(D, 'note_evidence_change'))
         stack.enter_context(mock.patch.object(R, '_gate_snapshot', return_value=[]))
-        stack.enter_context(mock.patch.object(artifact_producer, 'route_cycle_for', return_value={
+        stack.enter_context(patch_split(artifact_producer, 'route_cycle_for', return_value={
             'cycle_id': 'cyc-test', 'producer_id': 'prod-test'}))
-        stack.enter_context(mock.patch.object(artifact_producer, 'cycle_route_admission',
+        stack.enter_context(patch_split(artifact_producer, 'cycle_route_admission',
                                               return_value=SimpleNamespace(allow=True)))
 
     def _sr_recovery_text(self, record):
@@ -3825,8 +3826,8 @@ class ReplacementTest(unittest.TestCase):
         output = self.root / 'artifacts'
         cycle = {'campaign_id': 'camp-test', 'cycle_id': 'cyc-test'}
         import artifact_producer
-        with mock.patch.object(artifact_producer, 'route_cycle_for', return_value=cycle), \
-                mock.patch.object(artifact_producer, 'cycle_dir', return_value=output.parent), \
+        with patch_split(artifact_producer, 'route_cycle_for', return_value=cycle), \
+                patch_split(artifact_producer, 'cycle_dir', return_value=output.parent), \
                 mock.patch.object(D, 'reopened_output_path', side_effect=lambda r, node, j, out: (
                     str(Path(out) / 'reviews/audit-report.r2.md') if node['id'] == 'report' else None)) as named:
             note = R._reopened_outputs_note(route, invalidated, self.jobs)
@@ -3834,7 +3835,7 @@ class ReplacementTest(unittest.TestCase):
         self.assertIn('report -> ' + str(output / 'reviews/audit-report.r2.md'), note)
         self.assertNotIn('inspect ->', note)
         # No cycle, or no path to name: nothing is added.
-        with mock.patch.object(artifact_producer, 'route_cycle_for', return_value=None):
+        with patch_split(artifact_producer, 'route_cycle_for', return_value=None):
             self.assertEqual(R._reopened_outputs_note(route, invalidated, self.jobs), '')
 
     def test_sr_new_claim_pins_the_reopening_on_every_harness(self):
@@ -4756,8 +4757,8 @@ class ReplacementLaunchSafetyTest(unittest.TestCase):
         stack.enter_context(mock.patch.object(D, 'gate_currency', return_value=D.GateCurrency('current', 'fixture-current')))
         stack.enter_context(mock.patch.object(D, 'note_evidence_change'))
         stack.enter_context(mock.patch.object(R, '_gate_snapshot', return_value=[]))
-        stack.enter_context(mock.patch.object(P, 'route_cycle_for', return_value={'cycle_id': 'cyc-test', 'producer_id': 'prod-test'}))
-        stack.enter_context(mock.patch.object(P, 'cycle_route_admission', return_value=SimpleNamespace(allow=True)))
+        stack.enter_context(patch_split(P, 'route_cycle_for', return_value={'cycle_id': 'cyc-test', 'producer_id': 'prod-test'}))
+        stack.enter_context(patch_split(P, 'cycle_route_admission', return_value=SimpleNamespace(allow=True)))
         return peer
 
     def test_retained_non_direct_peer_is_pinned_at_both_commits_and_registration(self):
@@ -5140,9 +5141,9 @@ class ReplacementReuseCurrencyTest(unittest.TestCase):
                                   return_value=SimpleNamespace(state=readiness)), \
                 mock.patch.object(D, "note_evidence_change"), \
                 mock.patch.object(R, "_gate_snapshot", return_value=[]), \
-                mock.patch.object(artifact_producer, "route_cycle_for",
+                patch_split(artifact_producer, "route_cycle_for",
                                   return_value={"cycle_id": "cyc-reuse", "producer_id": "prod-reuse"}), \
-                mock.patch.object(artifact_producer, "cycle_route_admission",
+                patch_split(artifact_producer, "cycle_route_admission",
                                   return_value=SimpleNamespace(allow=True)):
             return R._reuse_snapshot(self.jobs, self.route, [])
 
@@ -5492,9 +5493,9 @@ class AnsweredFailVerdictReuseTest(unittest.TestCase):
                                   return_value=SimpleNamespace(state=readiness)), \
                 mock.patch.object(D, "note_evidence_change") as noted, \
                 mock.patch.object(R, "_gate_snapshot", return_value=[]), \
-                mock.patch.object(artifact_producer, "route_cycle_for",
+                patch_split(artifact_producer, "route_cycle_for",
                                   return_value={"cycle_id": "cyc-answered", "producer_id": "prod-answered"}), \
-                mock.patch.object(artifact_producer, "cycle_route_admission",
+                patch_split(artifact_producer, "cycle_route_admission",
                                   return_value=SimpleNamespace(allow=True)):
             snapshot = R._reuse_snapshot(self.jobs, self.route, [], proof=proof, pinned=pinned)
         self.noted = {call.args[1]["id"] for call in noted.call_args_list}

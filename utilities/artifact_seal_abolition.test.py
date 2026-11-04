@@ -45,6 +45,7 @@ import artifact_producer as P  # noqa: E402
 import artifact_receipt as RCPT  # noqa: E402
 import dispatch_lock_order  # noqa: E402
 import dispatch_terminal_commit as T  # noqa: E402
+from split_module_fixture import patch_split  # noqa: E402
 
 _FX_SPEC = importlib.util.spec_from_file_location(
     "producer_fixtures_for_seal_abolition", Path(__file__).with_name("artifact_producer.test.py"))
@@ -411,7 +412,7 @@ class A2SnapshotsAndRefreshTest(SealAbolitionBase):
                 seen.append(("refinalize", copy.is_file() and copy.read_bytes() == data))
             return atomic(path, data, mode)
 
-        with mock.patch.object(P, "_write_exclusive", spy_exclusive), mock.patch.object(P, "_write_atomic", spy_atomic):
+        with patch_split(P, "_write_exclusive", spy_exclusive), patch_split(P, "_write_atomic", spy_atomic):
             P.finalize(self.root, cycle_id=cycle_id)
             first_raw = (Path(result["cycle_dir"]) / "manifest.json").read_bytes()
             self.edit(result, "plans/cycle/plan.md", b"plan body, edited\n")
@@ -515,7 +516,7 @@ class A2SnapshotsAndRefreshTest(SealAbolitionBase):
                 raise OSError("simulated crash before the swap")
             return real_atomic(path, data, mode)
 
-        with mock.patch.object(P, "_write_atomic", refuse_manifest), self.assertRaises(OSError):
+        with patch_split(P, "_write_atomic", refuse_manifest), self.assertRaises(OSError):
             P.finalize(self.root, cycle_id=cycle_id)
         self.assertEqual(manifest.read_bytes(), before)
         planned = [json.loads(p.read_bytes())["manifest_revision_id"]
@@ -1007,7 +1008,7 @@ class A2SharedPublicationTest(SealAbolitionBase):
     def test_a2_uncommitted_shared_journal_still_checks_stable_input(self):
         cycle = self._cycle([["a"], ["a"]])
         first = self.admit(cycle, 0, base_revision="none")
-        with mock.patch.object(P, "_commit_shared", side_effect=RuntimeError("crash before commit")):
+        with patch_split(P, "_commit_shared", side_effect=RuntimeError("crash before commit")):
             with self.assertRaises(RuntimeError):
                 self.admit(cycle, 1, base_revision=first["shared_reference_revision_id"])
         self.assertEqual(len(self._journals()), 1)
@@ -1427,7 +1428,7 @@ class B1RefreshTest(B1RefreshBase):
                 ("equal to last excluded directory", "artifacts/c-cache"),
                 ("ordinary start", None),
             )
-            with mock.patch.object(P, "_stream_file_facts", recording_stream):
+            with patch_split(P, "_stream_file_facts", recording_stream):
                 for label, cursor in cursors:
                     with self.subTest(cursor=label):
                         saved_cursor = cursor is not None
@@ -1532,7 +1533,7 @@ class B1RefreshTest(B1RefreshBase):
             holds.append(time.monotonic() - started.pop(fd, time.monotonic()))
             return real_release(root, fd)
 
-        with mock.patch.object(P, "_stream_file_facts", watching), \
+        with patch_split(P, "_stream_file_facts", watching), \
                 mock.patch.object(adm, "_acquire_lock", acquire), mock.patch.object(adm, "_release_lock", release):
             self.assertEqual(self.refresh(result)["status"], "emitted")
         self.assertGreaterEqual(len(seen), 3)
@@ -1733,7 +1734,7 @@ class B1RefreshTest(B1RefreshBase):
             self.edit(result, "plans/cycle/a.md", b"a, edited again while we scanned\n")
             return real_lock(root, cycle_id, timeout=timeout)
 
-        with mock.patch.object(P, "_refresh_lock", lock_after_a_write):
+        with patch_split(P, "_refresh_lock", lock_after_a_write):
             out = self.refresh(result)
         self.assertEqual((out["status"], out["reason"]), ("skipped", "superseded"))
         self.assertEqual(self.manifest_path(result).read_bytes(), raw)
@@ -2040,7 +2041,7 @@ class B1RefreshTest(B1RefreshBase):
             hashed.append(adm.holds_lock(self.root))
             return real_stream(path)
 
-        with mock.patch.object(P, "_stream_file_facts", watching):
+        with patch_split(P, "_stream_file_facts", watching):
             out = P.finalize(self.root, cycle_id=result["cycle_id"])
         self.assertTrue(out["refreshed"], out)
         self.assertTrue(hashed)
@@ -2059,7 +2060,7 @@ class B1RefreshTest(B1RefreshBase):
             hashed.append(Path(path).relative_to(result["cycle_dir"]).as_posix())
             return real_stream(path)
 
-        with mock.patch.object(P, "_stream_file_facts", counting):
+        with patch_split(P, "_stream_file_facts", counting):
             for _ in range(30):
                 if self.refresh(result, budget=P.RefreshBudget(max_walk_entries=6)).get("complete"):
                     break
@@ -2077,7 +2078,7 @@ class B1RefreshTest(B1RefreshBase):
         raw = self.manifest_path(result).read_bytes()
         self.edit(result, "plans/cycle/a.md", b"a, edited\n")
         # Whatever goes wrong inside a refresh is a skipped result, not an exception.
-        with mock.patch.object(P, "_bounded_scan", side_effect=P.ProducerError("artifacts-dir-missing", "x")):
+        with patch_split(P, "_bounded_scan", side_effect=P.ProducerError("artifacts-dir-missing", "x")):
             out = self.refresh(result)
         self.assertEqual((out["status"], out["reason"]), ("skipped", "artifacts-dir-missing"))
         with mock.patch.object(adm, "_acquire_lock", side_effect=adm.AdmissionBusy("busy")):
@@ -2085,7 +2086,7 @@ class B1RefreshTest(B1RefreshBase):
         self.assertEqual((out["status"], out["reason"]), ("skipped", "busy"))
         self.assertEqual(self.manifest_path(result).read_bytes(), raw)
         # The checkpoint command a trigger runs returns a result too.
-        with mock.patch.object(P, "refresh_cycle", side_effect=RuntimeError("boom")):
+        with patch_split(P, "refresh_cycle", side_effect=RuntimeError("boom")):
             sweep = P.refresh_sweep(self.root, trigger="turn-end")
         self.assertEqual(sweep["refreshed"], [])
         # A recorder that raises never fails an explicit re-close: the lines wait in the record.
@@ -2346,7 +2347,7 @@ class B2TriggerTest(B1RefreshBase):
 
         wanted = ["sha256:" + hashlib.sha256(f"edited {i}\n".encode()).hexdigest() for i in range(13)]
         triggers = ("stage-complete", "supervisor-poll", "turn-end", "begin")
-        with mock.patch.object(P, "RefreshBudget", Small):
+        with patch_split(P, "RefreshBudget", Small):
             for call in range(80):
                 out = P.checkpoint(self.root, cycle_id=cycles[0]["cycle_id"], trigger=triggers[call % 4])
                 self.assertNotEqual(out.get("reason"), "checkpoint-trigger-invalid")
@@ -3574,9 +3575,9 @@ class Gap2LocksTest(C1ChangesBase):
         for i in range(3):
             self.edit(result, f"plans/cycle/f{i}.md", f"edited {i}\n".encode())
         seen = []
-        with mock.patch.object(P, "_scan_cycle_facts", self.probe(seen, P._scan_cycle_facts)), \
-                mock.patch.object(P, "_stream_file_facts", self.probe(seen, P._stream_file_facts)), \
-                mock.patch.object(P, "_walk_files", self.probe(seen, P._walk_files)):
+        with patch_split(P, "_scan_cycle_facts", self.probe(seen, P._scan_cycle_facts)), \
+                patch_split(P, "_stream_file_facts", self.probe(seen, P._stream_file_facts)), \
+                patch_split(P, "_walk_files", self.probe(seen, P._walk_files)):
             out = P.finalize(self.root, cycle_id=result["cycle_id"])
         self.assertTrue(out["refreshed"], out)
         self.assertGreaterEqual(len(seen), 4)
@@ -3595,7 +3596,7 @@ class Gap2LocksTest(C1ChangesBase):
                 self.edit(result, "plans/cycle/a.md", b"a, edited again, longer\n")
             return out
 
-        with mock.patch.object(P, "_prescan_cycle", prescan):
+        with patch_split(P, "_prescan_cycle", prescan):
             out = P.finalize(self.root, cycle_id=result["cycle_id"])
         self.assertEqual(calls, [False, False])
         self.assertTrue(out["refreshed"], out)
@@ -3615,7 +3616,7 @@ class Gap2LocksTest(C1ChangesBase):
             self.edit(result, "plans/cycle/a.md", b"a" * (len(calls) + 5) + b"\n")
             return out
 
-        with mock.patch.object(P, "_prescan_cycle", prescan):
+        with patch_split(P, "_prescan_cycle", prescan):
             out = P.finalize(self.root, cycle_id=result["cycle_id"])
         self.assertEqual(len(calls), 2)
         self.assertEqual((out["status"], out["refreshed"]), ("already-sealed", False), out)
@@ -3628,7 +3629,7 @@ class Gap2LocksTest(C1ChangesBase):
         folder = self.cycle_path(mover)
         os.rename(str(folder), str(folder.with_name("hand-renamed")))
         seen = []
-        with mock.patch.object(P, "_scan_layout", self.probe(seen, P._scan_layout)):
+        with patch_split(P, "_scan_layout", self.probe(seen, P._scan_layout)):
             out = P.recover(self.root)
         self.assertIn(out["status"], {"recovered", "recovered-with-problems"})
         self.assertTrue(seen)
@@ -3650,7 +3651,7 @@ class Gap2LocksTest(C1ChangesBase):
                 os.rename(str(renamed), str(folder))  # put back before the lock is taken
             return out
 
-        with mock.patch.object(P, "_scan_layout", scan):
+        with patch_split(P, "_scan_layout", scan):
             P.reconcile_root(self.root)
         self.assertEqual(self.record(mover)["locator"], folder.name)
         self.assertEqual(self.lines(field="path"), [])
@@ -3676,7 +3677,7 @@ class Gap2LocksTest(C1ChangesBase):
         def file_lines():
             return [e for e in self.history.published if e.get("kind") == "artifact"]
 
-        with mock.patch.object(P, "_recheck_candidate", checking), mock.patch.object(adm, "_acquire_lock", acquire):
+        with patch_split(P, "_recheck_candidate", checking), mock.patch.object(adm, "_acquire_lock", acquire):
             out = self.refresh(moved)
         self.assertTrue(state["moved"])
         self.assertEqual((out["status"], out["reason"]), ("skipped", "superseded"), out)
@@ -3755,7 +3756,7 @@ class Gap2LocksTest(C1ChangesBase):
             if str(path).startswith(payload):
                 on_read("sha", path)
             return real_sha(path, *args, **kwargs)
-        return [mock.patch.object(Path, "read_bytes", read_bytes), mock.patch.object(P, "_stream_file_facts", stream),
+        return [mock.patch.object(Path, "read_bytes", read_bytes), patch_split(P, "_stream_file_facts", stream),
                 mock.patch.object(P.artifact_lifecycle, "_sha256_path", sha)]
 
     def test_gap2_first_finalize_scans_outside_admission(self):
@@ -3785,8 +3786,8 @@ class Gap2LocksTest(C1ChangesBase):
             time.sleep(0.1)
 
         patches = self.payload_reads(result, on_read) + [
-            mock.patch.object(P, "_walk_files", self.probe(seen, P._walk_files)),
-            mock.patch.object(P, "_scan_cycle_facts", self.probe(seen, P._scan_cycle_facts)),
+            patch_split(P, "_walk_files", self.probe(seen, P._walk_files)),
+            patch_split(P, "_scan_cycle_facts", self.probe(seen, P._scan_cycle_facts)),
             mock.patch.object(adm, "_acquire_lock", acquire), mock.patch.object(adm, "_release_lock", release)]
         with contextlib.ExitStack() as stack:
             for patch in patches:
@@ -3831,7 +3832,7 @@ class Gap2LocksTest(C1ChangesBase):
                 self.edit(result, "plans/cycle/g0.md", b"g0, edited again, longer\n")
             return out
 
-        with mock.patch.object(P, "_prescan_cycle", prescan):
+        with patch_split(P, "_prescan_cycle", prescan):
             out = P.finalize(self.root, cycle_id=result["cycle_id"])
         self.assertEqual(calls, [False, False])  # read again with the lock released, not trusted
         self.assertEqual(out["status"], "sealed", out)
@@ -3855,7 +3856,7 @@ class Gap2LocksTest(C1ChangesBase):
         lease = P._review_lease_path(self.root, held["cycle_id"], "att-gap2-first")
         lease.parent.mkdir(parents=True, exist_ok=True)
         lease.write_text(json.dumps({"schema_version": 2}), encoding="utf-8")
-        with mock.patch.object(P, "_live_review_lease", return_value=lease):
+        with patch_split(P, "_live_review_lease", return_value=lease):
             with self.assertRaises(P.ProducerError) as caught:
                 P.finalize(self.root, cycle_id=held["cycle_id"])
         self.assertEqual(caught.exception.code, "cycle-finalize-blocked-live-review")
@@ -4015,7 +4016,7 @@ class E1RecorderLinesTest(C1ChangesBase):
 
     def test_e1_without_a_recorder_lines_wait_and_the_recorder_takes_them_later(self):
         with mock.patch.dict(sys.modules, {"artifact_history": H}):
-            with mock.patch.object(P, "_history_module", return_value=None):
+            with patch_split(P, "_history_module", return_value=None):
                 result = self.keep("e1-wait", "e1-wait", activate=True)
                 P.cycle_mark(self.root, result["cycle_id"], discard=True)
                 waiting = self.record(result)["history_pending"]
@@ -4169,7 +4170,7 @@ class E3ReconcileRaceTest(C1ChangesBase):
             calls.append(1)
             return real_scan(root) if len(calls) == 1 else incomplete
 
-        with mock.patch.object(P, "_scan_layout", scan):
+        with patch_split(P, "_scan_layout", scan):
             out = P.reconcile_root(self.root)
         self.assertEqual(out["status"], "unchanged", out)
         self.assertEqual(len(calls), 2)
@@ -4266,7 +4267,7 @@ class E4ReviveTest(C1ChangesBase):
         keep = self.closed_with("e4-del-keep", "e4-del", {"plans/cycle/k.md": b"k\n"}, activate=True)
         gone = self.closed_with("e4-del-gone", "e4-del", {"plans/cycle/g.md": b"g\n"})
         folder = Path(gone["cycle_dir"])
-        with mock.patch.object(P, "_remove_folder", side_effect=RuntimeError("stopped here")):
+        with patch_split(P, "_remove_folder", side_effect=RuntimeError("stopped here")):
             with self.assertRaises(RuntimeError):
                 P.delete_cycle(self.root, gone["cycle_id"])
         record = self.record(gone)
@@ -4303,7 +4304,7 @@ class E5ManifestReadOutsideLockTest(C1ChangesBase):
                 seen["digest"].append(adm.holds_lock(self.root))
             return real_digest(document)
 
-        patches = (mock.patch.object(P, "_read_manifest_raw", read),
+        patches = (patch_split(P, "_read_manifest_raw", read),
                    mock.patch.object(P.artifact_manifest, "manifest_digest", digest))
         return seen, patches
 
@@ -4375,7 +4376,7 @@ class E5ManifestReadOutsideLockTest(C1ChangesBase):
                 os.utime(str(path), ns=(seen.st_atime_ns, seen.st_mtime_ns + 1_000_000_000))
             return out
 
-        return mock.patch.object(P, "_preread_manifests", preread), state
+        return patch_split(P, "_preread_manifests", preread), state
 
     def test_e5_a_manifest_that_changes_after_the_read_is_adopted_by_the_next_look(self):
         keep, moved, early, late = self.two_campaigns()
@@ -4390,7 +4391,7 @@ class E5ManifestReadOutsideLockTest(C1ChangesBase):
             adopted.append(1)
             return real_adopt(*args, **kwargs)
 
-        with patch, mock.patch.object(P, "_adopt_location_locked", adopt):
+        with patch, patch_split(P, "_adopt_location_locked", adopt):
             out = P.reconcile_root(self.root)
         self.assertEqual(out["status"], "reconciled", out)
         self.assertEqual(state["calls"], 2)  # the first run saw the change and left it to the second look

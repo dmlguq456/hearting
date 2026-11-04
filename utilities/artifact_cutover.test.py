@@ -16,6 +16,7 @@ import artifact_lifecycle as L  # noqa: E402
 import artifact_manifest as M  # noqa: E402
 import artifact_producer as P  # noqa: E402
 import artifact_cutover as C  # noqa: E402
+from split_module_fixture import patch_split  # noqa: E402
 
 _S = importlib.util.spec_from_file_location("route_for_cutover_test", Path(__file__).with_name("capability-route.py"))
 R = importlib.util.module_from_spec(_S)
@@ -152,7 +153,7 @@ class CutoverTest(unittest.TestCase):
             if kw["kind"] == "analysis":
                 raise RuntimeError("crash after spec publication")
             return original(*args, **kw)
-        with mock.patch.object(P, "admit_shared", side_effect=interrupt):
+        with patch_split(P, "admit_shared", side_effect=interrupt):
             with self.assertRaises(RuntimeError):
                 C.migrate_seal(self.root, run_dir=Path(report["run_dir"]))
         reference = P.find_reference_by_key(self.root, "spec", "spec")
@@ -217,7 +218,7 @@ class CutoverTest(unittest.TestCase):
                 self.assertEqual(ctx.exception.code, reason)
                 self.assertEqual(P.read_cycle_record(self.root, report["cycle_id"])["state"], "open")
                 self.assertFalse((Path(report["cycle_dir"]) / "manifest.json").exists())
-        with mock.patch.object(P, "find_reference_by_key", return_value={"shared_reference_id": W7_REF}):
+        with patch_split(P, "find_reference_by_key", return_value={"shared_reference_id": W7_REF}):
             receipt.write_text('{"schema_version":1,"spec":{}}')
             with self.assertRaises(C.CutoverError) as ctx:
                 C.migrate_seal(self.root, run_dir=Path(report["run_dir"]))

@@ -25,6 +25,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
 import artifact_producer  # noqa: E402
+from split_module_fixture import patch_split  # noqa: E402
 
 CAP = ROOT / "utilities/capability-route.py"
 PRODUCER = ROOT / "utilities/artifact_producer.py"
@@ -357,7 +358,7 @@ class RouteAutocloseTest(unittest.TestCase):
 
         cycle_id = record["cycle_id"]
         with mock.patch.object(time, "monotonic", lambda: real_monotonic() + offset[0]), \
-                mock.patch.object(artifact_producer, "_stream_file_facts", facts):
+                patch_split(artifact_producer, "_stream_file_facts", facts):
             first = one_sweep()
             self.assertEqual([row["cycle"] for row in first["cycles"]], ["cycle-left-open:scan-in-progress"])
             self.assertEqual(self.cycle_record(cycle_id)["state"], "open")
@@ -511,7 +512,7 @@ class RouteAutocloseTest(unittest.TestCase):
                    (artifact_campaign, "fold_campaign"), (RA, "_signature"), (RA, "_newest_mtime"),
                    (os, "scandir")]
         return {f"{owner.__name__}.{name}": stack.enter_context(
-            mock.patch.object(owner, name, wraps=getattr(owner, name))) for owner, name in targets}
+            patch_split(owner, name, wraps=getattr(owner, name))) for owner, name in targets}
 
     @staticmethod
     def _touched(spies):
@@ -1221,7 +1222,7 @@ class LeftoverCyclesTest(PRODUCER_FIXTURE.ProducerTestBase):
                     self.P._finalize_route(self.root, record)["route_id"],
                     self.P.closed_lineage_handover(self.root, record))
 
-        with mock.patch.object(self.P, "_qualified_continuation", spy):
+        with patch_split(self.P, "_qualified_continuation", spy):
             first = walk()
             read_once = len(reads)
             self.assertGreaterEqual(read_once, 3)            # the scan really parsed the routes

@@ -5861,8 +5861,11 @@ class SourceCensusTest(unittest.TestCase):
  # identity, so a function-name whitelist is not a cycle-ownership test.
  def test_a25_7_lineage_and_binding_writer_single_site(self):
   import ast
-  producer_path=P.parents[1]/"utilities"/"artifact_producer.py"
-  tree=ast.parse(producer_path.read_text(encoding="utf-8"))
+  # artifact_producer.py is split into artifact_producer_*.py siblings; read them as one module.
+  producer_dir=P.parents[1]/"utilities"
+  producer_paths=[producer_dir/"artifact_producer.py",*sorted(producer_dir.glob("artifact_producer_*.py"))]
+  tree=ast.Module(body=[node for path in producer_paths
+                        for node in ast.parse(path.read_text(encoding="utf-8")).body],type_ignores=[])
 
   class LineageWalkVisitor(ast.NodeVisitor):
    """`continuation_contract_version`-driven ancestor walks (a `while`

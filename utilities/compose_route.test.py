@@ -17,6 +17,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+from split_module_fixture import patch_split
 
 ROOT = Path(__file__).resolve().parents[1]
 COMPOSE = ROOT / "utilities" / "compose-route.py"
@@ -85,7 +86,7 @@ class CampaignInputSnapshotTest(unittest.TestCase):
                       "cycles": ["cyc_" + "2" * 32] * 4}
             (folder / "campaign.json").write_text(json.dumps(record))
             with mock.patch.object(P.artifact_campaign, "campaign_state", wraps=P.artifact_campaign.campaign_state) as folds, \
-                    mock.patch.object(P, "read_cycle_record", side_effect=AssertionError("classification reads cycles")):
+                    patch_split(P, "read_cycle_record", side_effect=AssertionError("classification reads cycles")):
                 with R.compose_campaign_snapshot():
                     self.assertEqual(R.compose_resolve_campaign_key(root, folder.name), ("existing-stream", folder.name))
                     self.assertIn("existing-stream(4)", R.compose_campaign_hint(root, root))

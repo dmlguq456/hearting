@@ -22,6 +22,7 @@ import artifact_lifecycle
 import artifact_producer
 import dispatch_terminal_commit
 import inline_finish
+from split_module_fixture import patch_split
 
 CAP_SPEC = importlib.util.spec_from_file_location(
     "inline_finish_capability_route", ROOT / "utilities/capability-route.py")
@@ -1861,9 +1862,9 @@ class SpecInlinePublicationTest(unittest.TestCase):
         fixture = PublicInlineFinishTest()
         fixture.setUp()
         self.addCleanup(fixture.tearDown)
-        with unittest.mock.patch.object(artifact_producer, "list_references",
+        with patch_split(artifact_producer, "list_references",
                                        side_effect=AssertionError("unseeded code must not enumerate references")), \
-                unittest.mock.patch.object(artifact_producer, "admit_shared",
+                patch_split(artifact_producer, "admit_shared",
                                           side_effect=AssertionError("unseeded code must not attempt publication")):
             done = fixture.finish()
         self.assertEqual(done.returncode, 0, done.stderr + done.stdout)

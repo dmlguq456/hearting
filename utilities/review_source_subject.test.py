@@ -15,6 +15,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
 import review_source_subject as SUBJECT  # noqa: E402
+from split_module_fixture import patch_split  # noqa: E402
 
 
 class SourceSubjectTest(unittest.TestCase):
@@ -364,8 +365,8 @@ class SourceSubjectTest(unittest.TestCase):
             path.write_bytes(data)
         cycle = {"campaign_id": "camp_report", "cycle_id": "cyc_report",
                  "route_id": route["route_id"]}
-        with mock.patch.object(artifact_producer, "route_cycle_for", return_value=cycle), \
-             mock.patch.object(artifact_producer, "cycle_dir", return_value=cycle_dir):
+        with patch_split(artifact_producer, "route_cycle_for", return_value=cycle), \
+             patch_split(artifact_producer, "cycle_dir", return_value=cycle_dir):
             first = SUBJECT.observe(route, verify)
             self.assertEqual(first["family"], "artifact-review:lab-independent-verify")
             self.assertTrue(SUBJECT.has_review_subject(route, verify))
@@ -405,8 +406,8 @@ class SourceSubjectTest(unittest.TestCase):
                  "nodes": [producer, verify]}
         cycle = {"campaign_id": "camp_missing", "cycle_id": "cyc_missing",
                  "route_id": route["route_id"]}
-        with mock.patch.object(artifact_producer, "route_cycle_for", return_value=cycle), \
-             mock.patch.object(artifact_producer, "cycle_dir", return_value=cycle_dir):
+        with patch_split(artifact_producer, "route_cycle_for", return_value=cycle), \
+             patch_split(artifact_producer, "cycle_dir", return_value=cycle_dir):
             self.assertFalse(SUBJECT.has_review_subject(route, verify))
             self.assertIsNone(SUBJECT.marker_currency(
                 route, verify, {"attempt_id": "att-legacy"},
@@ -434,9 +435,9 @@ class SourceSubjectTest(unittest.TestCase):
             ("inspect", ["target-artifact"], ["target-artifact"], [], False),
             ("qa", ["analysis_project/<mode>/**"], ["analysis_project/<mode>/**"], [], False),
         )
-        with mock.patch.object(artifact_producer, "route_cycle_for", side_effect=lambda _root, route: {
+        with patch_split(artifact_producer, "route_cycle_for", side_effect=lambda _root, route: {
                 "campaign_id": "camp-table", "cycle_id": "cyc-table", "route_id": route["route_id"]}), \
-             mock.patch.object(artifact_producer, "cycle_dir", side_effect=lambda _root, *_args:
+             patch_split(artifact_producer, "cycle_dir", side_effect=lambda _root, *_args:
                                self.repo / "generic-cycle"):
             for index, (node_id, inputs, scopes, payloads, expected) in enumerate(cases):
                 artifact_root = Path(self.temp.name) / f"root-{index}"
