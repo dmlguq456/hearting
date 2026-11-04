@@ -2644,7 +2644,7 @@ def cmd_list(args):
             for g in row["gpus"] if g.get("used_mib") is not None
             and g.get("total_mib") is not None)
         if row.get("gpu_status"):
-            summary = row["gpu_status"]["summary"]
+            summary = _gpu_leases().gpu_status_text(row["gpu_status"])
         summary = summary or "no gpu"
         here = "*" if row.get("self") else " "
         cpu = row.get("cpu_utilization_pct")
@@ -2664,7 +2664,8 @@ def cmd_list(args):
         if row.get("reservation_detail"):
             print(f"    reservations unknown: {row['reservation_detail']}")
         for lease in row.get("unplaced_gpu_reservations", []):
-            print("    GPU 예약 · 장치 위치 모름: " + gpu_leases.description(lease))
+            print("    " + gpu_leases.ui_translator()("compute.reservation_unplaced",
+                                                   lease=gpu_leases.description(lease)))
     return 0
 
 
@@ -2679,7 +2680,7 @@ def cmd_probe(args):
         for row in results:
             detail = row.get("detail") or row.get("process_detail")
             if not row["reachable"] or detail:
-                summary = (row.get("gpu_status") or {}).get("summary")
+                summary = _gpu_leases().gpu_status_text(row.get("gpu_status"))
                 if summary:
                     print(f"compute-hosts: {row['host']}: {summary}", file=sys.stderr)
                 else:
@@ -2690,14 +2691,16 @@ def cmd_probe(args):
         for row in results:
             state = "up" if row["reachable"] else f"down ({row.get('detail', '')})"
             print(f"{row['host']:<10} {state}")
-            summary = (row.get("gpu_status") or {}).get("summary")
+            summary = _gpu_leases().gpu_status_text(row.get("gpu_status"))
             if summary:
                 print("    " + summary)
             for gpu in row.get("gpus", []):
                 if gpu.get("observation_source"):
-                    print(f"    GPU {gpu['index']} {gpu.get('name') or '모름'}: 사용률·VRAM 모름")
+                    t = _gpu_leases().ui_translator()
+                    print("    " + t("compute.gpu_unobserved_named", index=gpu["index"],
+                                      name=gpu.get("name") or t("compute.unknown")))
                     for process in gpu.get("processes", []):
-                        print(f"      pid {process['pid']} · {process.get('command') or '장치 접근 확인'}")
+                        print(f"      pid {process['pid']} · {process.get('command') or t('compute.device_access')}")
                     continue
                 util = gpu.get("utilization_gpu_pct")
                 print(f"    gpu{gpu['index']} {gpu['name']}: "
@@ -2855,6 +2858,11 @@ def _run_gpu_observation(name, host):
             "suggested_gpu": suggested["index"] if suggested is not None else None}
 
 
+def _gpu_leases():
+    import gpu_leases
+    return gpu_leases
+
+
 def _print_run_gpu_observation(observation):
     observed_at = observation.get("observed_at")
     observed_time = (datetime.datetime.fromtimestamp(observed_at, datetime.timezone.utc)
@@ -2862,14 +2870,14 @@ def _print_run_gpu_observation(observation):
                      if isinstance(observed_at, (int, float)) else "unknown")
     print(f"  GPUs observed at: {observed_time}")
     if not observation.get("reachable") or observation.get("detail"):
-        summary = (observation.get("gpu_status") or {}).get("summary")
+        summary = _gpu_leases().gpu_status_text(observation.get("gpu_status"))
         print("  " + summary if summary else
               f"  GPU headroom: unknown ({observation.get('detail') or 'probe unavailable'})")
     elif not observation["gpus"]:
         print("  GPU headroom: no GPUs observed")
     for gpu in observation["gpus"]:
         if gpu.get("observation_source"):
-            print(f"  GPU {gpu['index']}: 사용률·VRAM 모름")
+            print("  " + _gpu_leases().ui_translator()("compute.gpu_unobserved", index=gpu["index"]))
             continue
         free, total, util = (gpu.get(key) for key in
                              ("free_mib", "total_mib", "utilization_gpu_pct"))
@@ -3254,6 +3262,8 @@ def _observe_compute_experiment(meta, run_dir, now, *, final=False):
 
 
 def _compute_observation_summary(result):
+    # Part of the run-ended notice text; dispatch_session_sweep (this and older releases) matches the
+    # no-observation form of that notice literally, so the words stay as they are.
     if not isinstance(result, dict) or not isinstance(result.get("observation"), dict):
         return "; 지표 없음; 계획 시간 미상; run 기록 경로 없음"
     observation = result["observation"]
