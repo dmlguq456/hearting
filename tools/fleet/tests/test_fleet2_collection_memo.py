@@ -23,6 +23,28 @@ from split_module_fixture import patch_split  # noqa: E402
 
 
 class Fleet2CollectionMemoTest(unittest.TestCase):
+    def test_fresh_raw_bytes_share_passive_parses_but_keep_strict_readers_fresh(self):
+        cache = session_tidy.LedgerParseCache()
+        first = b'{"sid":"one","event":"start"}\n'
+        suffix = b'{"sid":"two","event":"start"}\n'
+        with self._state_root(), mock.patch.object(
+                session_tidy, '_parse_ledger_lines', wraps=session_tidy._parse_ledger_lines) as parse:
+            with session_tidy.seat_ledger_read_scope(cache):
+                row = session_tidy._read_ledger_lines(self.seat, raw=first)
+                row[0]['sid'] = 'caller mutation'
+                again = session_tidy._read_ledger_lines(self.seat, raw=first)
+                self.assertEqual(again[0]['sid'], 'one')
+                self.assertEqual(parse.call_count, 1)
+                appended = session_tidy._read_ledger_lines(self.seat, raw=first + suffix)
+                self.assertEqual(parse.call_args.args[0], suffix)
+                self.assertEqual([entry['sid'] for entry in appended], ['one', 'two'])
+                session_tidy._read_ledger_lines(self.seat, raw=first, strict=True)
+                self.assertTrue(parse.call_args.kwargs['strict'])
+            before = parse.call_count
+            session_tidy._read_ledger_lines(self.seat, raw=first)
+            session_tidy._read_ledger_lines(self.seat, raw=first)
+            self.assertEqual(parse.call_count, before + 2)
+
     def test_steward_relation_output_reuse_observes_marker_and_ledger_changes(self):
         from fleet.collectors import steward
         import dispatch_seat_handover as handover

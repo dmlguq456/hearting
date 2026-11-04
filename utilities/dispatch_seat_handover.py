@@ -395,7 +395,10 @@ def _build_lineage_graph_uncached(signature, contents, compact_rows=None) -> Lin
             indexed = compact_rows[filename]
         else:
             seat = st.Seat("pane", ledger_key)
-            rows = st._read_ledger_lines(seat, raw=contents[filename])
+            # Bytes were freshly observed above. These graph builders only read
+            # row records, so a passive scan can reuse their pure ledger parse.
+            with st.seat_ledger_readonly_scope():
+                rows = st._read_ledger_lines(seat, raw=contents[filename])
             if not getattr(rows, "usable", True):
                 raise OSError("lineage-ledger-unavailable")
             indexed = list(enumerate(rows))

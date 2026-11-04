@@ -10,6 +10,54 @@ from tools.fleet.explorer.view_model import ExplorerViewModel
 
 
 class ExplorerRuntimeReuseTests(unittest.TestCase):
+    def test_changed_models_share_unchanged_subtrees_and_keep_fresh_metadata(self):
+        from tools.fleet.explorer.view_model import freeze, thaw
+        old = ExplorerViewModel(sessions=({'tag': 'a', 'progress': {'count': 1}},
+                                          {'tag': 'b', 'progress': {'count': 2}}),
+                                source_records={'native': {'pid': 1}})
+        data = old.to_mapping()
+        data['sessions'][1]['progress']['count'] = 3
+        data['source_records']['native']['pid'] = 2
+        current = ExplorerViewModel.from_mapping(data, previous=old)
+        self.assertEqual(current, ExplorerViewModel.from_mapping(data))
+        self.assertIs(current.sessions[0], old.sessions[0])
+        self.assertIsNot(current.sessions[1], old.sessions[1])
+        self.assertEqual(current.source_records['native']['pid'], 2)
+        data['sessions'][0]['progress']['count'] = 999
+        self.assertEqual(current.sessions[0]['progress']['count'], 1)
+        self.assertEqual(old.source_records['native']['pid'], 1)
+        cases = [({'a': [1, True]}, {'a': [1, 1]}),
+                 ({'a': 1, 'b': 2}, {'b': 2, 'a': 1}),
+                 ({'a': [1]}, {'b': [1, 2]}), ({'a': 1}, {}),
+                 ({'1': 'old'}, {1: 'new', '1': 'last'})]
+        for before, after in cases:
+            expected = freeze(after)
+            actual = freeze(after, freeze(before))
+            self.assertEqual(thaw(actual), thaw(expected))
+            self.assertEqual(tuple(actual), tuple(expected))
+            if after == {'a': [1, 1]}:
+                self.assertIs(type(actual['a'][1]), int)
+
+    def test_frame_reuse_ignores_metadata_but_matches_every_view_cells_and_hits(self):
+        from tools.fleet.explorer import frame
+        from tools.fleet.explorer.state import NavState, VIEWS
+        from tools.fleet.explorer.view_model import load_fixture
+        model = load_fixture(Path(__file__).parent / 'fixtures' / 'explorer' / 'view_model.json')
+        updated = model.with_updates(source_records={'native': {'pid': 'current'}},
+                                     readiness={'ready': False, 'generation': 2},
+                                     ordering={'private': 'current'})
+        for cols, rows in ((80, 45), (140, 45), (274, 85), (410, 84)):
+            for view in VIEWS:
+                with self.subTest(cols=cols, view=view):
+                    runtime = ExplorerRuntime()
+                    state = NavState(view=view)
+                    first = runtime.draw_frame(model, state, cols, rows)
+                    with patch.object(frame, 'draw', wraps=frame.draw) as draw:
+                        reused = runtime.draw_frame(updated, state, cols, rows)
+                    self.assertIs(reused, first)
+                    self.assertEqual(draw.call_count, 0)
+                    self.assertEqual(reused, frame.draw(updated, state, cols, rows))
+
     def test_model_updates_freeze_changed_data_and_share_unchanged_fields(self):
         from dataclasses import replace
         from dataclasses import FrozenInstanceError

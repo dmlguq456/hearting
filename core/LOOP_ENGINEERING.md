@@ -526,6 +526,10 @@ one scan and are released with it. Existing dead-owner retention may run before
 advisory reads for rows it already excludes, preserving output and precedence.
 These changes reduce actual repeated work without changing collection periods,
 cooldown, retention or archival policy, adding persistent state or new gates.
+An immutable display model may share unchanged subtrees with its predecessor;
+fresh action and readiness metadata still belong to the current observation.
+Cell-frame reuse depends on values consumed by the renderer, not provenance
+or ordering metadata that the current interaction model owns separately.
 
 ## Basis and current scope
 

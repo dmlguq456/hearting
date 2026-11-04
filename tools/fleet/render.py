@@ -3200,7 +3200,8 @@ def _explorer_compose(snapshot, cols, rows, state=None, focus_result=None, last_
         model = _EXPLORER_COMPOSE_MODEL
     else:
         view = _explorer_view(snapshot)
-        model = live.build_view_model(view, accepted_detail=focus_result, now=now)
+        model = live.build_view_model(view, accepted_detail=focus_result, now=now,
+                                      previous=_EXPLORER_COMPOSE_MODEL)
     runtime = _explorer_runtime()
     model, readiness = runtime.prepare(
         snapshot, focus_result, vm=model, generation=_EXPLORER_GENERATION, now=now)

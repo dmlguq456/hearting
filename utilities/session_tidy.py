@@ -975,7 +975,8 @@ class LedgerParseCache:
         size = len(raw or b"")
         with self.lock:
             old = self.entries.pop(key, None)
-            self.generations.pop(key, None)
+            if old is None or old[0] is not parser or old[1] != raw:
+                self.generations.pop(key, None)
             if old is not None:
                 self.bytes -= len(old[1] or b"")
             if size <= 2 * 1024 * 1024:
@@ -1086,7 +1087,10 @@ def _read_ledger_lines(seat: Seat, *, include_physical_relations: bool = True,
                        strict: bool = False, raw: Optional[bytes] = None) -> list[dict]:
     """Parse one observed incarnation, preserving health for every reader."""
     if raw is not None:
-        entries = _parse_ledger_lines(raw, strict=True) if strict else _parse_ledger_lines(raw)
+        cache = _LEDGER_PARSE_SCOPE.get() if not strict else None
+        entries = (cache.parse(_native_ledger_path(seat), raw, _parse_ledger_lines,
+                               read_only=_LEDGER_READ_ONLY.get()) if cache is not None
+                   else _parse_ledger_lines(raw, strict=True) if strict else _parse_ledger_lines(raw))
         if strict and not entries.usable:
             raise ValueError("seat-ledger-schema-invalid")
         return entries

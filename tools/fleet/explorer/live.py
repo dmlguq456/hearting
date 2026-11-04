@@ -3040,14 +3040,14 @@ def _header_identity(snapshot):
     }
 
 
-def build_view_model(snapshot, accepted_detail=None, cached_config=None, now=None):
+def build_view_model(snapshot, accepted_detail=None, cached_config=None, now=None, *, previous=None):
     """Project facts only; identity and liveness decisions stay with their source builders."""
     clock = time.time() if now is None else now
     fixture_values = _get(snapshot, "values")
     if isinstance(fixture_values, Mapping):
-        return current_claude_usage(ExplorerViewModel.from_mapping(fixture_values), snapshot, clock)
+        return current_claude_usage(ExplorerViewModel.from_mapping(fixture_values, previous=previous), snapshot, clock)
     if isinstance(snapshot, Mapping) and "schema" in snapshot and "sessions" in snapshot:
-        return current_claude_usage(ExplorerViewModel.from_mapping(snapshot), snapshot, clock)
+        return current_claude_usage(ExplorerViewModel.from_mapping(snapshot, previous=previous), snapshot, clock)
     bindings = detail_bindings(snapshot)
     # Global view-only memory is independent of the selected session's incarnation.
     journal = _journal_groups(snapshot, clock)
@@ -3177,7 +3177,7 @@ def build_view_model(snapshot, accepted_detail=None, cached_config=None, now=Non
                                             for row in session_rows
                                             if f"{row['harness']}:{session_index[row['tag']]['sid']}" in bindings}},
     }
-    return ExplorerViewModel.from_mapping(data)
+    return ExplorerViewModel.from_mapping(data, previous=previous)
 
 
 def from_mapping(value):
