@@ -1604,6 +1604,7 @@ def _claude_managed_values(source: dict) -> dict:
     return {
         "statusLine": statusline,
         "autoMemoryEnabled": auto_memory_enabled,
+        "idleCompaction": False,
         "env": managed_env,
     }
 
@@ -1881,6 +1882,14 @@ def _merge_claude_settings(
     else:
         conflicts.append("statusLine")
 
+    from native_context import _native_key_record
+    idle_record = _native_key_record(previous, "claude", "idleCompaction" in data,
+                                     data.get("idleCompaction"), False, key="idleCompaction")
+    if data.get("idleCompaction") is not False:
+        data["idleCompaction"] = False
+        changed = True
+    managed_values["idleCompaction"] = False
+
     desired_auto_memory = desired_values["autoMemoryEnabled"]
     current_auto_memory = data.get("autoMemoryEnabled", missing_value)
     previous_auto_memory = previous_values.get("autoMemoryEnabled", missing_value)
@@ -1957,12 +1966,12 @@ def _merge_claude_settings(
     if changed:
         _atomic_json(config, data)
     context_previous = context_before if context_present else None
-    native_context = None
+    native_context = {"claude": {"keys": {"idleCompaction": idle_record}}}
     if context_window is not None:
         from native_context import _native_key_record
         record = _native_key_record(previous, "claude", context_present, context_before,
                                    str(context_window), extra={"env_present": env_container_present})
-        native_context = {"claude": {"keys": {f"env.{context_key}": record}}}
+        native_context["claude"]["keys"][f"env.{context_key}"] = record
     return {
         "kind": "claude-settings-merged",
         "path": str(config),
@@ -2012,6 +2021,8 @@ def _claude_settings_health(
         missing = True
     elif config["statusLine"] != desired_values["statusLine"]:
         conflicts.append("statusLine")
+    if config.get("idleCompaction") is not False:
+        missing = True
     if "autoMemoryEnabled" not in config:
         missing = True
     elif config["autoMemoryEnabled"] != desired_values["autoMemoryEnabled"]:
@@ -4577,6 +4588,17 @@ def _unmerge_claude_settings(
             data.pop("env")
     claude_native = native_context.get("claude", {}) if isinstance(native_context, dict) else {}
     native_keys = claude_native.get("keys", {}) if isinstance(claude_native, dict) else {}
+    from native_context import _native_restore_action
+    idle_record = native_keys.get("idleCompaction") if isinstance(native_keys, dict) else None
+    idle_action, idle_baseline = _native_restore_action(
+        idle_record, "idleCompaction" in data, data.get("idleCompaction"),
+        adapter="claude", key="idleCompaction")
+    if idle_action == "restore":
+        data["idleCompaction"] = idle_baseline
+        changed = True
+    elif idle_action == "delete":
+        data.pop("idleCompaction", None)
+        changed = True
     window_record = native_keys.get("env.CLAUDE_CODE_AUTO_COMPACT_WINDOW") if isinstance(native_keys, dict) else None
     current_env = data.get("env")
     if isinstance(current_env, dict):

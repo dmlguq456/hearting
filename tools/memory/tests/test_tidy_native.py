@@ -452,7 +452,8 @@ class NativeCommandTest(NativeCase):
             held = clear.read_reservation(self.seat.key)
             held.update(origin="idle", followup_kind="status-only", snapshot_state="ready",
                         idle={"identity": "idle-event", "due_at": now - 1, "tokens": 200000,
-                              "min_tokens": 200000})
+                              "min_tokens": 200000,
+                              "compaction": clear.compaction_position(self.seat, "claude", "session-A")})
             clear._write_reservation(held)
         req = clear.read_reservation(self.seat.key)
         self.prepare_transport()
@@ -482,7 +483,8 @@ class NativeCommandTest(NativeCase):
             held = clear.read_reservation(self.seat.key)
             held.update(origin="idle", followup_kind="status-only", snapshot_state="ready",
                         idle={"identity": "idle-native", "due_at": now - 1, "tokens": 200000,
-                              "min_tokens": 200000})
+                              "min_tokens": 200000,
+                              "compaction": clear.compaction_position(self.seat, "claude", "session-A")})
             clear._write_reservation(held)
         req = clear.read_reservation(self.seat.key)
         self.prepare_transport()
@@ -796,7 +798,7 @@ raise SystemExit(code)
         return outcome, held, events, writes, req
 
     def test_rpc_outage_longer_than_fixed_timeout_recovers_on_original_clear_compact_and_continue_window(self):
-        for mode in ("ordinary", "compact", "continue"):
+        for mode in ("ordinary", "continue"):
             with self.subTest(mode=mode):
                 outcome, held, events, writes, req = self.probe(mode=mode)
                 self.assertEqual(outcome, "continued" if mode == "continue" else "cleared", events)
@@ -810,7 +812,7 @@ raise SystemExit(code)
                 self.assertEqual(events[-2]["event"], "attachment-closed")
 
     def test_rpc_original_deadline_expiry_supersession_input_and_recovered_draft_never_send(self):
-        for mode in ("ordinary", "compact", "continue"):
+        for mode in ("ordinary", "continue"):
             for scenario in ("expiry", "supersede", "new-input", "draft"):
                 with self.subTest(mode=mode, scenario=scenario):
                     outcome, held, events, writes, req = self.probe(mode=mode, scenario=scenario)

@@ -76,15 +76,22 @@ def _opencode_latest(sid: str) -> tuple[int | None, str, str, str]:
         uri = database.as_uri() + "?mode=ro"
         con = sqlite3.connect(uri, uri=True, timeout=0.2)
         try:
-            rows = con.execute(
-                "SELECT id,data FROM message WHERE session_id=? ORDER BY time_updated DESC LIMIT 50", (sid,))
+            tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if "session_message" in tables:
+                rows = con.execute("SELECT id,data FROM session_message WHERE session_id=? AND type='assistant' "
+                                   "ORDER BY time_created DESC, id DESC LIMIT 1", (sid,))
+            else:
+                rows = con.execute("SELECT id,data FROM message WHERE session_id=? "
+                                   "ORDER BY time_updated DESC LIMIT 50", (sid,))
             for message_id, raw in rows:
                 try:
                     payload = json.loads(raw)
                 except (ValueError, TypeError):
                     continue
-                if not isinstance(payload, dict) or payload.get("role") != "assistant":
+                if not isinstance(payload, dict) or payload.get("role", "assistant" if "session_message" in tables else "") != "assistant":
                     continue
+                if payload.get("summary") is True or payload.get("agent") == "compaction":
+                    return None, "", "", str(message_id or "")
                 moment = payload.get("time") if isinstance(payload.get("time"), dict) else {}
                 if not payload.get("finish") and not moment.get("completed"):
                     continue
@@ -102,8 +109,10 @@ def _opencode_latest(sid: str) -> tuple[int | None, str, str, str]:
                     if any(part is None for part in parts):
                         return None, "", "", str(message_id or payload.get("id") or "")
                     total = sum(parts)
-                return (total, str(payload.get("providerID") or ""),
-                        str(payload.get("modelID") or ""), str(message_id or payload.get("id") or ""))
+                model = payload.get("model") if isinstance(payload.get("model"), dict) else {}
+                return (total, str(payload.get("providerID") or model.get("providerID") or ""),
+                        str(payload.get("modelID") or model.get("id") or ""),
+                        str(message_id or payload.get("id") or ""))
         finally:
             con.close()
     except (OSError, sqlite3.Error, ValueError, TypeError):
@@ -291,18 +300,13 @@ def observe_payload(harness: str, payload: dict, *, now: float | None = None,
                     human_wait_state.remove_signal_if_current(signal)
     except Exception:
         pass
-    from session_tidy import accept_reply_card, reconcile_compact_frontier
+    from session_tidy import accept_reply_card
     try:
         # A card written as the reply to an automatic tidy request is taken before the
         # compact/idle bookings below look at this turn; an ordinary reply changes nothing.
         accept_reply_card(harness, sid, cwd, last_reply(harness, payload, sid), seat=proven)
     except Exception:  # noqa: BLE001 - optional; the request simply stays unanswered
         pass
-    compact_result = reconcile_compact_frontier(harness, sid, cwd, now=now, lock_wait=lock_wait,
-                                                seat=proven)
-    if compact_result and compact_result not in ("booking=skipped reason=new-input",
-                                                  "booking=skipped reason=card-changed"):
-        return compact_result
     tokens, provider, model = _tokens_and_provider(harness, payload, sid, transcript)
     tokens = _safe_tokens(tokens) if tokens is not None else None
     if tokens is None:
