@@ -267,6 +267,28 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
             encoding="utf-8",
         )
 
+    def test_parent_deploy_wait_failure_is_blocked_for_claude_and_opencode(self):
+        import io
+        for harness in ("claude", "opencode"):
+            with self.subTest(harness=harness):
+                if harness == "opencode":
+                    self.setUp()  # each native harness has a separate exact input binding
+                self.jobs.write_text(owner_row(self.lease).replace("harness=claude", "harness=" + harness))
+                events = []
+                with mock.patch.object(supervisor, "run_turn", return_value=(
+                        {"type": "result", "subtype": "success", "result": "runtime_wait: registered-children"}, 0)), \
+                     mock.patch.object(supervisor.RESOURCE_WAIT, "wait", side_effect=
+                        supervisor.RESOURCE_WAIT.ParentDeployWaitBlocked("parent-deploy-wait-unavailable:binding")), \
+                     mock.patch.object(supervisor, "reconcile", return_value=True) as reconcile, \
+                     mock.patch.object(supervisor, "emit", side_effect=events.append), \
+                     mock.patch("sys.stdin", io.StringIO("wait for the approved parent deploy")):
+                    code = supervisor.main(self.command()[2:] + ["--runtime-harness", harness, "--turn-transport", "resume-process"])
+                self.assertEqual(code, 3, events)
+                self.assertEqual(reconcile.call_args.args[1].failure_class, "blocked")
+                self.assertFalse(self.lease.exists())
+                self.assertEqual(reconcile.call_args.args[1].terminal_event, "dispatch.supervisor.terminal")
+                self.state.unlink(missing_ok=True)
+
     def command(self, claude: Path | None = None) -> list[str]:
         return [
             sys.executable,

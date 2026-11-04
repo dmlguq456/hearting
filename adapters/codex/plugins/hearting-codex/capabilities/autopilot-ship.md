@@ -167,6 +167,17 @@ through the existing correction channel and resumes post-deploy verification. If
 installed utility's absolute path in its existing correction; do not rewrite
 the sealed owner environment.
 
+Supervised Claude and Codex owners wait through their existing owner controllers.
+Supervised OpenCode owners use the same controller via
+`claude-session-supervisor.py --runtime-harness opencode`; this is a shared
+controller, not a Claude-only path. Waiting retains the exact supervisor lease
+and is bounded by its existing `--join-timeout` (default 3,600 seconds).
+A lost input channel, changed binding, or expired wait ends BLOCKED and keeps
+the deploy request for the ordinary parent handoff. A parent notification that
+cannot be retained also returns BLOCKED. Unsupervised and legacy owners use
+the ordinary BLOCKED handoff and printed correction command instead of
+`runtime_wait`; neither case grants the owner deployment authority.
+
 Owner status and parent admission use the common continuation decision. A live
 owner hands work back; an answerable BLOCKED/FAIL owner receives the existing
 correction with the deployment result. A wait, cancellation or settlement keeps

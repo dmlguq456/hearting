@@ -10,6 +10,7 @@ import io
 import os
 from functools import lru_cache
 import json
+import math
 from pathlib import Path
 from types import SimpleNamespace
 import time
@@ -754,30 +755,63 @@ def acknowledge(path, parent, receipt_id):
         return True
 
 
-def wait(args, path, control, delivered, emit, *, sleep=time.sleep):
+class ParentDeployWaitBlocked(JOIN.JoinContractError):
+    """An ordinary parent handoff, not a broken supervisor or resource retry."""
+
+
+def leave_parent_deploy_wait(args, path, delivered):
+    state = JOIN.read_supervisor_phase_state(path, args.parent_attempt_id)
+    resource = dict(state.resource or {}) if state else {}
+    if "parent_deploy" in resource:
+        resource.pop("parent_deploy")
+        _write(path, args.parent_attempt_id, delivered, resource, "running-turn")
+
+
+def wait(args, path, control, delivered, emit, *, sleep=time.sleep, clock=time.monotonic):
     """Scan every exact resource and deliver one ready receipt through the existing outbox."""
     correction = "Continue the same work using the pending user correction; preserve the resource request."
 
     import ship_parent_deploy
-    deployment = ship_parent_deploy.waiting_request(args, control)
+    try:
+        deployment = ship_parent_deploy.waiting_request(args, control)
+    except (ValueError, OSError, JOIN.JoinContractError) as exc:
+        leave_parent_deploy_wait(args, path, delivered)
+        raise ParentDeployWaitBlocked("parent-deploy-wait-unavailable:" + str(exc)) from exc
     if deployment is not None:
         state = JOIN.read_supervisor_phase_state(path, args.parent_attempt_id)
         resource = dict(state.resource or {}) if state else {}
         if resource and resource.get("session_id") != control.thread_id:
-            raise JOIN.JoinContractError("resource-native-session-changed")
+            leave_parent_deploy_wait(args, path, delivered)
+            raise ParentDeployWaitBlocked("parent-deploy-wait-unavailable:resource-native-session-changed")
         resource = resource or {"session_id": control.thread_id, "delivered": [], "outbox": None}
         resource["parent_deploy"] = deployment["request_digest"]
         _write(path, args.parent_attempt_id, delivered, resource, "parked")
+        def leave():
+            leave_parent_deploy_wait(args, path, delivered)
+        limit = float(getattr(args, "join_timeout", 3600.0))
+        if not math.isfinite(limit) or limit <= 0:
+            leave()
+            raise ParentDeployWaitBlocked("parent-deploy-wait-timeout")
+        deadline = clock() + limit
         emit({"type": "dispatch.supervisor.parent-deploy-parked",
-              "parent_attempt_id": args.parent_attempt_id, "route_id": args.route_id})
+              "parent_attempt_id": args.parent_attempt_id, "route_id": args.route_id,
+              "timeout_seconds": limit})
         while True:
             if control.pending():
-                resource.pop("parent_deploy", None)
-                _write(path, args.parent_attempt_id, delivered, resource, "running-turn")
+                leave()
                 return "Continue the same ship work using the pending correction; read the parent deployment result."
-            if ship_parent_deploy.waiting_request(args, control) is None:
+            if clock() >= deadline:
+                leave()
+                raise ParentDeployWaitBlocked("parent-deploy-wait-timeout")
+            try:
+                current = ship_parent_deploy.waiting_request(args, control)
+            except (ValueError, OSError, JOIN.JoinContractError) as exc:
+                leave()
+                raise ParentDeployWaitBlocked("parent-deploy-wait-unavailable:" + str(exc)) from exc
+            if current is None:
+                leave()
                 return None
-            sleep(1)
+            sleep(max(0, min(1, deadline - clock())))
 
     def look(observation):
         """An unobserved holder is looked at again on the next poll, never read as "nothing"."""

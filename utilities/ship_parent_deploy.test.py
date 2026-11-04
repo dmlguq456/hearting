@@ -98,18 +98,90 @@ class ParentDeployTest(unittest.TestCase):
         self.assertIn("--check, then", delivery["receipt"]["text"])
         self.assertEqual(delivery["route_id"], "rt-test")
 
+    def test_notice_unavailable_returns_blocked_handoff_for_all_parents(self):
+        for harness, variable in (("codex", "CODEX_THREAD_ID"), ("claude", "CLAUDE_CODE_SESSION_ID"),
+                                  ("opencode", "OPENCODE_SESSION_ID")):
+            with self.subTest(harness=harness), patch.dict(os.environ, {variable: "parent"}, clear=True), \
+                 patch("session_notice.notify", return_value=None):
+                self.meta["parent_harness"] = harness
+                result = S.prepare(self.jobs, "owner", self.command)
+                self.assertEqual(result["state"], "blocked")
+                self.assertFalse(result["runtime_wait"])
+                self.assertIn("BLOCKED handoff", result["next_step"])
+                self.assertTrue(Path(result["request"]).exists())
+                self.assertIn("--request", result["run_command"])
+                self.assertFalse(self.counter.exists())
+
+    def test_unsupervised_owner_keeps_the_ordinary_blocked_handoff(self):
+        with patch.object(S, "owner_input", return_value={}):
+            prepared = S.prepare(self.jobs, "owner", self.command)
+            self.assertFalse(prepared["runtime_wait"])
+            self.assertIn("BLOCKED handoff", prepared["next_step"])
+            result = S.run(Path(prepared["request"]))
+            self.assertIn("correction_command", result)
+            self.assertNotIn("owner_resume", result)
+
+    def test_notice_storage_failure_returns_blocked_without_deployment(self):
+        with patch("session_notice.notify", side_effect=OSError("unavailable")):
+            result = S.prepare(self.jobs, "owner", self.command)
+        self.assertEqual(result["state"], "blocked")
+        self.assertFalse(result["runtime_wait"])
+        self.assertTrue(Path(result["request"]).exists())
+        self.assertFalse(self.counter.exists())
+
+    def test_wait_timeout_and_binding_error_are_blocked_and_release_parked_state(self):
+        import dispatch_resource_wait as WAIT
+        import dispatch_completion_join as JOIN
+        from dispatch_supervisor_terminal import classify_parent_deploy_wait_blocked
+        value = S.read(self.prepared())
+        for reason in ("timeout", "binding", "entry-binding"):
+            with self.subTest(reason=reason):
+                state_path = S.DC.dispatch_state_root(self.jobs) / "supervisor-state/owner.json"
+                JOIN.write_supervisor_state(state_path, "owner", set(), phase="running-turn")
+                if reason == "entry-binding":
+                    WAIT._write(state_path, "owner", set(),
+                        {"session_id": "thread", "delivered": [], "outbox": None,
+                         "parent_deploy": value["request_digest"]}, "parked")
+                args = SimpleNamespace(parent_attempt_id="owner", route_id="rt-test", jobs=str(self.jobs),
+                                       join_timeout=2)
+                control = SimpleNamespace(thread_id="thread", pending=lambda: False)
+                elapsed = [0]
+                def sleep(seconds):
+                    elapsed[0] += seconds
+                with patch.object(S, "waiting_request", side_effect=(
+                        ValueError("parent-deploy-owner-input-unavailable") if reason == "entry-binding" else
+                        [value, ValueError("parent-deploy-owner-input-unavailable")]
+                        if reason == "binding" else None), return_value=value):
+                    with self.assertRaises(WAIT.ParentDeployWaitBlocked) as stopped:
+                        WAIT.wait(args, state_path, control, set(), lambda _: None,
+                                  sleep=sleep, clock=lambda: elapsed[0])
+                terminal = classify_parent_deploy_wait_blocked(str(stopped.exception))
+                self.assertEqual((terminal.note, terminal.failure_class), ("dead-worker-blocked", "blocked"))
+                self.assertLessEqual(elapsed[0], 2)
+                state = JOIN.read_supervisor_phase_state(state_path, "owner")
+                self.assertEqual(state.phase, "running-turn")
+                self.assertNotIn("parent_deploy", state.resource)
+                self.assertFalse(WAIT.needs_recovery(state_path, "owner"))
+
     def test_parent_wait_deploy_resume_and_post_deploy_for_all_owner_harnesses(self):
         import dispatch_resource_wait as WAIT
         import dispatch_completion_join as JOIN
         import fcntl
-        for harness in ("codex", "claude", "opencode"):
-            with self.subTest(harness=harness):
-                self.meta["parent_harness"] = "codex"
+        for harness, variable in (("codex", "CODEX_THREAD_ID"), ("claude", "CLAUDE_CODE_SESSION_ID"),
+                                  ("opencode", "OPENCODE_SESSION_ID")):
+            with self.subTest(harness=harness), patch.dict(os.environ, {variable: "parent"}, clear=True):
+                self.meta["parent_harness"] = harness
                 request = self.prepared()
                 value = S.read(request)
+                import dispatch_pending_delivery as pending
+                from harness_capabilities import parent_completion
+                key = __import__("hashlib").sha256(("notice\0parent-deploy-" + value["request_digest"]).encode()).hexdigest()
+                notice = pending.read(self.jobs.parent, "parent", "delivery-" + key)
+                self.assertEqual(notice["recipient_kind"], parent_completion(harness)["carrier"])
                 state_path = S.DC.dispatch_state_root(self.jobs) / "supervisor-state/owner.json"
                 args = SimpleNamespace(parent_attempt_id="owner", route_id="rt-test",
-                    route_hash=self.route["route_hash"], route_file=str(self.root / "route.json"), jobs=str(self.jobs))
+                    route_hash=self.route["route_hash"], route_file=str(self.root / "route.json"), jobs=str(self.jobs),
+                    join_timeout=14400)
                 delivered, resumed, events, virtual = set(), [], [], []
                 control = SimpleNamespace(thread_id=harness + "-thread", pending=lambda: bool(resumed))
                 channel = {"supervisor_live": True, "accepting": True, "thread_id": control.thread_id}
@@ -138,7 +210,8 @@ class ParentDeployTest(unittest.TestCase):
                 with patch.object(S, "owner_input", return_value=channel), \
                      patch.object(S, "exact_attempt_row", side_effect=lambda jobs, aid: owner if aid == "owner" else old_exact(jobs, aid)), \
                      patch.object(S.subprocess, "run", side_effect=correct):
-                    prompt = WAIT.wait(args, state_path, control, delivered, events.append, sleep=sleep)
+                    prompt = WAIT.wait(args, state_path, control, delivered, events.append, sleep=sleep,
+                                       clock=lambda: sum(virtual))
                 self.assertIn("parent deployment result", prompt)
                 self.assertEqual(sum(virtual), 12000)
                 self.assertEqual(len(resumed), 1)

@@ -300,13 +300,24 @@ def prepare(jobs, attempt, command_file):
     run_command = shlex.join([sys.executable, str(Path(__file__).resolve().with_name("ship-parent-deploy.py")),
                              "run", "--request", str(request_path)])
     from session_notice import notify
-    notify(meta["parent_harness"], meta["parent_sid"], jobs=jobs,
-           key="parent-deploy-" + value["request_digest"], subject="ship deploy ready",
-           text=f"route {route['route_id']}: {run_command} --check, then {run_command}",
-           required_action="run-parent-deploy", route_id=route["route_id"],
-           lineage={"kind": "attempt-parent", "harness": meta["parent_harness"],
-                    "session_id": meta["parent_sid"], "attempt_id": current})
-    return {"state": "prepared", "request": str(request_path), **value, "run_command": run_command}
+    try:
+        notice = notify(meta.get("parent_harness"), meta.get("parent_sid"), jobs=jobs,
+               key="parent-deploy-" + value["request_digest"], subject="ship deploy ready",
+               text=f"route {route['route_id']}: {run_command} --check, then {run_command}",
+               required_action="run-parent-deploy", route_id=route["route_id"],
+               lineage={"kind": "attempt-parent", "harness": meta["parent_harness"],
+                        "session_id": meta["parent_sid"], "attempt_id": current})
+    except (OSError, ValueError):
+        notice = None
+    channel = owner_input(jobs, current)
+    runtime_wait = bool(notice and channel.get("supervisor_live") and channel.get("accepting"))
+    return {"state": "prepared" if notice else "blocked", "request": str(request_path), **value,
+            "run_command": run_command, "runtime_wait": runtime_wait,
+            **({"reason": "parent-deploy-notice-unavailable"} if not notice else {}),
+            "next_step": ("Finish readiness reviews, then yield runtime_wait: registered-children."
+                          if runtime_wait else
+                          "Use the ordinary BLOCKED handoff with this request and run_command; "
+                          "the actual parent checks and executes it, then uses the printed correction_command.")}
 
 
 def load_request(path):
