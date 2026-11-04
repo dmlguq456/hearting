@@ -26,6 +26,7 @@ import dispatch_batch_obligations  # noqa: E402
 import peer_obligations  # noqa: E402
 import route_identity  # noqa: E402
 import route_lineage  # noqa: E402
+from split_module_fixture import patch_split  # noqa: E402
 
 REAL_EVIDENCE = dispatch_contract.evidence_currency
 REAL_GATE = dispatch_contract.gate_currency
@@ -63,7 +64,7 @@ class ProjectionFixture(unittest.TestCase):
             absent = projection.project_report(self.source, artifact_root=self.root)
             self.assertIsNone(projection.report_detail_payload(absent))
     def test_route_without_report_keeps_absence_and_real_hash_mismatch(self):
-        with mock.patch.object(artifact_producer, "route_cycle_for",
+        with patch_split(artifact_producer, "route_cycle_for",
                                return_value={"cycle_id": CYCLE_ID}):
             # Use an admitted cycle with no report stage and no report directory.
             self.route["nodes"] = [{"id": "full-run", "outputs": []}]
@@ -75,7 +76,7 @@ class ProjectionFixture(unittest.TestCase):
             self.assertEqual(wrong["verification"]["reason"], "route-hash-binding-mismatch")
 
     def test_existing_invalid_report_source_is_visible(self):
-        with mock.patch.object(artifact_producer, "route_cycle_for",
+        with patch_split(artifact_producer, "route_cycle_for",
                                return_value={"cycle_id": CYCLE_ID}):
             self.source.rename(self.source.with_name("report-original"))
             self.source.write_text("invalid report directory", encoding="utf-8")
@@ -84,7 +85,7 @@ class ProjectionFixture(unittest.TestCase):
             self.assertIs(projection.report_detail_payload(payload), payload)
 
     def test_route_keeps_other_unresolved_reasons_and_checks_bound_subject_hash(self):
-        with mock.patch.object(artifact_producer, "route_cycle_for",
+        with patch_split(artifact_producer, "route_cycle_for",
                                return_value={"cycle_id": CYCLE_ID}):
             for payload, reason in ((projection._unresolved("artifact-revision-stale"),
                                      "artifact-revision-stale"),

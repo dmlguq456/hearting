@@ -17,6 +17,7 @@ import artifact_producer  # noqa: E402
 import stage_session_runtime as runtime  # noqa: E402
 from dispatch_contract import DispatchContractError  # noqa: E402
 from stage_session_contract import StageSessionError  # noqa: E402
+from split_module_fixture import patch_split  # noqa: E402
 
 
 def _args(worktree: Path, brief: Path, fixed: Path, **overrides) -> argparse.Namespace:
@@ -306,9 +307,9 @@ class StageSessionStateDirTests(unittest.TestCase):
     def _bind_artifact(self, args, route, cycle, output_dir, action="dry-run"):
         import artifact_producer
         with mock.patch.dict("os.environ", {}, clear=True), \
-             mock.patch.object(artifact_producer, "load_route", return_value=route), \
-             mock.patch.object(artifact_producer, "route_cycle_for", return_value=cycle), \
-             mock.patch.object(artifact_producer, "cycle_dir", return_value=output_dir.parent):
+             patch_split(artifact_producer, "load_route", return_value=route), \
+             patch_split(artifact_producer, "route_cycle_for", return_value=cycle), \
+             patch_split(artifact_producer, "cycle_dir", return_value=output_dir.parent):
             runtime.bind(args, artifact_root=self.root, action=action)
 
     def test_artifact_only_fence_uses_brief_outputs_and_keeps_declaration_identity(self):
@@ -428,8 +429,8 @@ class StageSessionStateDirTests(unittest.TestCase):
         import artifact_producer
         args, route, cycle, output_dir = self._artifact_args()
         with mock.patch.dict("os.environ", {}, clear=True), \
-             mock.patch.object(artifact_producer, "load_route", return_value=route), \
-             mock.patch.object(artifact_producer, "route_cycle_for", return_value=None):
+             patch_split(artifact_producer, "load_route", return_value=route), \
+             patch_split(artifact_producer, "route_cycle_for", return_value=None):
             runtime.bind(args, artifact_root=self.root, action="dry-run")
         self.assertEqual(args.effective_fixed_files, args.fixed_file)
 
@@ -505,9 +506,9 @@ class StageSessionStateDirTests(unittest.TestCase):
         import artifact_producer
         import worker_bootstrap
         with mock.patch.dict("os.environ", {}, clear=True), \
-             mock.patch.object(artifact_producer, "load_route", return_value=route), \
-             mock.patch.object(artifact_producer, "route_cycle_for", return_value=cycle), \
-             mock.patch.object(artifact_producer, "cycle_dir", return_value=output_dir.parent):
+             patch_split(artifact_producer, "load_route", return_value=route), \
+             patch_split(artifact_producer, "route_cycle_for", return_value=cycle), \
+             patch_split(artifact_producer, "cycle_dir", return_value=output_dir.parent):
             lineage_prompt = worker_bootstrap.assignment_prompt(args, "task", {})
         scope_line = next(line for line in lineage_prompt.splitlines() if "artifact_write_scope=" in line)
         self.assertIn(str(output_dir), scope_line)
@@ -518,10 +519,10 @@ class StageSessionStateDirTests(unittest.TestCase):
         with mock.patch.dict("os.environ", {"AGENT_ARTIFACT_CYCLE_ID": "cyc_stale",
                                              "AGENT_ROUTE_NODE": "parent-node",
                                              "AGENT_DISPATCH_WORKTREE": "/stale/parent"}, clear=True), \
-             mock.patch.object(artifact_producer, "load_route", return_value=route), \
-             mock.patch.object(artifact_producer, "read_cycle_record", return_value=cycle), \
-             mock.patch.object(artifact_producer, "cycle_route_admission", return_value=admission), \
-             mock.patch.object(artifact_producer, "cycle_dir", return_value=output_dir.parent), \
+             patch_split(artifact_producer, "load_route", return_value=route), \
+             patch_split(artifact_producer, "read_cycle_record", return_value=cycle), \
+             patch_split(artifact_producer, "cycle_route_admission", return_value=admission), \
+             patch_split(artifact_producer, "cycle_dir", return_value=output_dir.parent), \
              mock.patch("dispatch_terminal_commit.load_producer_binding", return_value=loaded):
             bound_prompt = worker_bootstrap.assignment_prompt(args, "task", os.environ)
         bound_scope_line = next(line for line in bound_prompt.splitlines() if "artifact_write_scope=" in line)

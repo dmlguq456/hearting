@@ -112,6 +112,18 @@ utility-deferred	artifact_locator.py
 utility-deferred	artifact_manifest.py
 utility-deferred	artifact_meta.py
 utility-deferred	artifact_producer.py
+utility-deferred	artifact_producer_checkpoint.py
+utility-deferred	artifact_producer_cycle_ops.py
+utility-deferred	artifact_producer_finalize.py
+utility-deferred	artifact_producer_history.py
+utility-deferred	artifact_producer_interim.py
+utility-deferred	artifact_producer_lease.py
+utility-deferred	artifact_producer_manifest.py
+utility-deferred	artifact_producer_refresh.py
+utility-deferred	artifact_producer_routes.py
+utility-deferred	artifact_producer_shared.py
+utility-deferred	artifact_producer_spec.py
+utility-deferred	artifact_producer_store.py
 utility-deferred	artifact_reader.py
 utility-deferred	artifact_reader.test.py
 utility-deferred	artifact_receipt.py
@@ -257,6 +269,7 @@ utility-deferred	resource_runner.test.py
 utility-deferred	runtime_observation.py
 utility-deferred	shared_readiness.py
 utility-deferred	review_batch_revision_fixture.py
+utility-deferred	split_module_fixture.py
 utility-deferred	review_round_cap.py
 utility-deferred	review_round_cap.test.py
 utility-deferred	review_source_subject.py

@@ -23,6 +23,7 @@ ROUTE = owner_route_binding.ROUTE
 
 import importlib.util
 import sys
+from split_module_fixture import patch_split, split_patch
 
 _PRODUCER_SPEC = importlib.util.spec_from_file_location(
     "producer_fixture_for_terminal_commit", Path(__file__).with_name("artifact_producer.test.py"))
@@ -148,7 +149,7 @@ class ProducerBindingTests(unittest.TestCase):
     @mock.patch.object(owner_route_binding, "resolve_owner_route_lifecycle")
     def test_publish_replay_and_conflict(self, resolve, _identity):
         resolve.return_value = (owner_route_binding.OwnerRouteBinding(str(self.route_file), "rt-abcdef12", "sha256:" + "a" * 64), "current")
-        with mock.patch.object(artifact_producer, "cycle_route_admission",
+        with patch_split(artifact_producer, "cycle_route_admission",
                                return_value=SimpleNamespace(allow=True)):
             first = T.publish_producer_binding(artifact_root=self.root, jobs=self.jobs, route_file=self.route_file,
                                                owner_attempt_id="att-owner", cycle_id=self.cycle_id, owner_begin=True)
@@ -179,7 +180,7 @@ class ProducerBindingTests(unittest.TestCase):
         parent = {"route_id": "rt-parent01", "route_hash": "sha256:" + "p" * 64}
         self._record_begun_by(parent["route_id"], parent["route_hash"])
         own = {"route_id": "rt-abcdef12", "route_hash": "sha256:" + "a" * 64}
-        with mock.patch.object(artifact_producer, "cycle_route_admission",
+        with patch_split(artifact_producer, "cycle_route_admission",
                                return_value=SimpleNamespace(allow=True)) as admission:
             result = T.publish_producer_binding(artifact_root=self.root, jobs=self.jobs, route_file=self.route_file,
                                                 owner_attempt_id="att-owner", cycle_id=self.cycle_id, owner_begin=True)
@@ -203,7 +204,7 @@ class ProducerBindingTests(unittest.TestCase):
             with self.subTest(begin=begin_id, hash=begin_hash[-4:]):
                 self._record_begun_by(begin_id, begin_hash)
                 denied = SimpleNamespace(allow=False, reason="cycle-route-binding-mismatch", detail="fixture")
-                with mock.patch.object(artifact_producer, "cycle_route_admission", return_value=denied), \
+                with patch_split(artifact_producer, "cycle_route_admission", return_value=denied), \
                         self.assertRaises(T.TerminalCommitError) as caught:
                     T.publish_producer_binding(artifact_root=self.root, jobs=self.jobs, route_file=self.route_file,
                                                owner_attempt_id="att-owner", cycle_id=self.cycle_id, owner_begin=True)
@@ -357,8 +358,8 @@ class ProducerBindingTests(unittest.TestCase):
              mock.patch.object(T, "producer_lifecycle_applies", return_value=True), \
              mock.patch.object(T, "_route_module") as route_module, \
              mock.patch.object(T, "load_producer_binding", return_value=binding), \
-             mock.patch.object(artifact_producer, "cycle_route_admission", return_value=SimpleNamespace(allow=True)), \
-             mock.patch("artifact_producer._live_review_lease", return_value=None):
+             patch_split(artifact_producer, "cycle_route_admission", return_value=SimpleNamespace(allow=True)), \
+             split_patch("artifact_producer._live_review_lease", return_value=None):
             route_module.return_value.terminal_gate_observation.return_value = {"route": {"passed": True}}
             proof = T.prove_terminal_authority(T.TerminalCommitRequest(
                 self.route_file, "att-owner", self.jobs, self.root))
@@ -401,8 +402,8 @@ class ProducerBindingTests(unittest.TestCase):
                  mock.patch.object(T, "producer_lifecycle_applies", return_value=True), \
                  mock.patch.object(T, "_route_module") as route_module, \
                  mock.patch.object(T, "load_producer_binding", return_value=binding), \
-                 mock.patch.object(artifact_producer, "cycle_route_admission", return_value=SimpleNamespace(allow=True)), \
-                 mock.patch("artifact_producer._live_review_lease", return_value=None):
+                 patch_split(artifact_producer, "cycle_route_admission", return_value=SimpleNamespace(allow=True)), \
+                 split_patch("artifact_producer._live_review_lease", return_value=None):
                 route_module.return_value.terminal_gate_observation.return_value = {"route": {"passed": True}}
                 return T.prove_terminal_authority(T.TerminalCommitRequest(
                     self.route_file, "att-owner", self.jobs, self.root))
@@ -451,7 +452,7 @@ class ContinuationTerminalSettlementTests(unittest.TestCase):
              mock.patch.object(T, "producer_lifecycle_applies", return_value=True), \
              mock.patch.object(T, "load_producer_binding", return_value=binding), \
              mock.patch.object(T, "_route_module") as route_module, \
-             mock.patch.object(artifact_producer, "cycle_route_admission", return_value=denied):
+             patch_split(artifact_producer, "cycle_route_admission", return_value=denied):
             route_module.return_value.terminal_gate_observation.return_value = {"execute": {"passed": True}}
             proof = T.prove_terminal_authority(T.TerminalCommitRequest(
                 self.route_file, "att-a3fixture", self.jobs, self.root))
@@ -2103,7 +2104,7 @@ class OwnerTerminalPlacementReplayTest(unittest.TestCase):
                     code_imports.append(str(path))
                 return loader(name, path, *args, **kwargs)
             verify = artifact_producer._verify_sealed_cycle_locked
-            with mock.patch.object(artifact_producer, "_verify_sealed_cycle_locked", wraps=verify) as checked, \
+            with patch_split(artifact_producer, "_verify_sealed_cycle_locked", wraps=verify) as checked, \
                  mock.patch.object(importlib.util, "spec_from_file_location", side_effect=load_code):
                 self.assertEqual(terminal.owner_completion_state(jobs, "done", meta).state, "complete")
                 first_count = checked.call_count
@@ -2232,7 +2233,7 @@ class OwnerTerminalPlacementReplayTest(unittest.TestCase):
             report.unlink()
             before = {str(p.relative_to(moved)): p.read_bytes() for p in moved.rglob("*") if p.is_file()}
             with mock.patch.object(artifact_admission, "_acquire_lock", side_effect=AssertionError("reader took lock")), \
-                 mock.patch.object(artifact_producer, "refresh_cycle", side_effect=AssertionError("reader refreshed")):
+                 patch_split(artifact_producer, "refresh_cycle", side_effect=AssertionError("reader refreshed")):
                 observed = terminal.owner_completion_state(jobs, "done", meta)
                 self.assertEqual(observed.state, "complete", observed)
                 self.assertIn("verdict: PASS", terminal.completed_owner_handoff(jobs, "done", meta))
@@ -2416,7 +2417,7 @@ class OwnerTerminalPlacementReplayTest(unittest.TestCase):
     def test_admission_failure_is_visible_without_reopening_pass_or_overwriting_primary(self):
         fixture, terminal, route, path, jobs, owner, report, meta = self._settled("opencode", "spec/REPORT.md")
         with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(jobs), "AGENT_ARTIFACT_ROOT": str(fixture.root)}):
-            with mock.patch.object(artifact_producer, "admit_shared",
+            with patch_split(artifact_producer, "admit_shared",
                                    side_effect=artifact_producer.ProducerError("shared-spec-conflict", "policy")):
                 completed = terminal.settle_owner_completion(jobs, "done", meta)
             self.assertEqual(completed.result, "completed", completed)
@@ -2560,9 +2561,9 @@ class CodeRouteSpecPublicationIntegrationTest(unittest.TestCase):
         metadata = self._owner_metadata(fixture, jobs, owner, report)
         with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(jobs),
                                           "AGENT_ARTIFACT_ROOT": str(fixture.root)}), \
-                mock.patch.object(artifact_producer, "list_references",
+                patch_split(artifact_producer, "list_references",
                                   side_effect=AssertionError("unseeded code must not enumerate references")), \
-                mock.patch.object(artifact_producer, "admit_shared",
+                patch_split(artifact_producer, "admit_shared",
                                   side_effect=AssertionError("unseeded code must not attempt publication")):
             settled = T.settle_owner_completion(jobs, "done", metadata)
         self.assertEqual(settled.result, "completed", settled)

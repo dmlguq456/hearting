@@ -17,6 +17,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import artifact_history as history
 import artifact_reader as reader
+from split_module_fixture import patch_split
 
 spec = importlib.util.spec_from_file_location("freedom_fixture", Path(__file__).with_name("artifact_producer.test.py"))
 FX = importlib.util.module_from_spec(spec)
@@ -180,7 +181,7 @@ class ArtifactFreedomTest(FX.ProducerTestBase):
         P.artifact_admission.clear_index_cache()
         real = P._read_json
         read = []
-        with mock.patch.object(P, "_read_json", side_effect=lambda path: read.append(Path(path)) or real(path)), \
+        with patch_split(P, "_read_json", side_effect=lambda path: read.append(Path(path)) or real(path)), \
                 mock.patch.object(P.artifact_admission, "load_index", side_effect=AssertionError("full index read")):
             record = P.read_cycle_record(self.root, first["cycle_id"])
         self.assertEqual(record["cycle_id"], first["cycle_id"])
@@ -195,12 +196,12 @@ class ArtifactFreedomTest(FX.ProducerTestBase):
         later = next(item for item in cycles if item["cycle_id"] != earliest)
         later_record = P.cycle_record_path(self.root, later["cycle_id"])
         memo = P.producer_dir(self.root) / P.CONTROL_MEMO_NAME
-        with mock.patch.object(P, "_CONTROL_MEMO_SETTLE_NS", -1):
+        with patch_split(P, "_CONTROL_MEMO_SETTLE_NS", -1):
             P.reconcile_root(self.root)
             self.assertIn(later["cycle_id"], json.loads(memo.read_text())["cycles"])
             real = P._read_json
             read = []
-            with mock.patch.object(P, "_read_json", side_effect=lambda path: read.append(Path(path)) or real(path)):
+            with patch_split(P, "_read_json", side_effect=lambda path: read.append(Path(path)) or real(path)):
                 P.reconcile_root(self.root)
             self.assertNotIn(later_record, read)  # the quiet, unchanged cycle is not read again
             self.assertIn(P.cycle_record_path(self.root, earliest), read)  # the earliest also watches INDEX
@@ -229,7 +230,7 @@ class ArtifactFreedomTest(FX.ProducerTestBase):
                                    side_effect=lambda path: opened.append(Path(path)) or real(path)):
                 return P.deliver_pending_history(self.root)
 
-        with mock.patch.object(P, "_CONTROL_MEMO_SETTLE_NS", -1):
+        with patch_split(P, "_CONTROL_MEMO_SETTLE_NS", -1):
             P.reconcile_root(self.root)
             vouched = json.loads((P.producer_dir(self.root) / P.HISTORY_QUIET_NAME).read_text())["records"]
             self.assertEqual(set(vouched), set(paths))
@@ -268,7 +269,7 @@ class ArtifactFreedomTest(FX.ProducerTestBase):
             opened.clear()
             with mock.patch.object(Path, "read_bytes", autospec=True,
                                    side_effect=lambda path: opened.append(Path(path)) or real_bytes(path)), \
-                    mock.patch.object(P, "_read_json", side_effect=lambda path: opened.append(Path(path))
+                    patch_split(P, "_read_json", side_effect=lambda path: opened.append(Path(path))
                                       or real_json(path)):
                 action()
             return set(opened) & paths
@@ -278,7 +279,7 @@ class ArtifactFreedomTest(FX.ProducerTestBase):
             looked = counted(lambda: P.reconcile_root(self.root))
             return looked, counted(lambda: P.deliver_pending_history(self.root))
 
-        with mock.patch.object(P, "_CONTROL_MEMO_SETTLE_NS", -1):
+        with patch_split(P, "_CONTROL_MEMO_SETTLE_NS", -1):
             P.reconcile_root(self.root)  # the memo knows every cycle now
             vouched.unlink()  # the first start after an install: nothing vouched yet
             looked, delivered = next_start()
@@ -423,7 +424,7 @@ class ArtifactFreedomTest(FX.ProducerTestBase):
         document = json.loads(path.read_text())
         document["cycle"]["title"] = "edited while recorder was unavailable"
         path.write_text(json.dumps(document))
-        with mock.patch.object(P, "_history_module", return_value=None):
+        with patch_split(P, "_history_module", return_value=None):
             P.finalize(self.root, cycle_id=first["cycle_id"])
             pending = P.read_cycle_record(self.root, first["cycle_id"])["history_pending"]
             self.assertTrue(any(row.get("reason") == "filesystem-change" and
