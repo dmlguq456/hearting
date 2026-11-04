@@ -4,7 +4,9 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -69,6 +71,34 @@ class HistoryChannelTests(unittest.TestCase):
                                                  human=human, startup=startup)
         self.assertEqual((card, human, deferred), ("MODEL-CARD", ["PERSON-NOTICE"], [receipt]))
         self.assertTrue(startup["due"])
+
+    def test_slow_claude_evidence_probe_does_not_lose_the_prepared_card(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            hooks = root / "hooks"
+            utilities = root / "utilities"
+            hooks.mkdir(); utilities.mkdir()
+            shutil.copyfile(ROOT / "hooks/session-card-inject.sh", hooks / "card.sh")
+            (utilities / "session_tidy.py").write_text(
+                'HUMAN_NOTICE_BUDGET_SECONDS = 2.0\n'
+                'def run_hook(*a, **kw):\n'
+                '    kw["emit"]("PREPARED-CARD")\n'
+                '    kw["startup_context"]["due"] = True\n'
+                'def apply_deferred(entries): pass\n')
+            probe = hooks / "local-evidence-inject.sh"
+            probe.write_text('#!/bin/sh\nexec python3 -c "import time; time.sleep(6)"\n')
+            probe.chmod(0o755)
+            env = {**os.environ, "AGENT_HOME": str(root)}
+            for key in ("AGENT_SESSION_ROLE", "AGENT_DISPATCH_CHILD", "AGENT_DISPATCH_DEPTH",
+                        "OPENCODE_DISPATCH_SLUG", "FLEET_TITLE_REFRESH", "MEM_DISTILL"):
+                env.pop(key, None)
+            result = subprocess.run(["bash", str(hooks / "card.sh")], env=env,
+                input=json.dumps({"hook_event_name": "UserPromptSubmit", "session_id": "fixture",
+                                  "cwd": directory, "prompt": "hi"}),
+                text=True, capture_output=True, timeout=2.5)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"],
+                             "PREPARED-CARD")
 
     def test_human_only_lookup_leaves_ledger_and_receipts_untouched(self):
         with tempfile.TemporaryDirectory() as directory:

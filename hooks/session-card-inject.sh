@@ -71,12 +71,18 @@ if event == "start":
 if startup.get("due"):
     try:
         import subprocess
-        result = subprocess.run(
-            [os.path.join(os.environ["HOOK_DIR"], "local-evidence-inject.sh"),
-             "--cwd", text("cwd") or os.getcwd(), "--format", "text"],
-            text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5)
-        if result.returncode == 0 and result.stdout.strip():
-            contexts.append(result.stdout.strip())
+        # The outer card hook has five seconds. Keep the probe inside its
+        # remainder, reserving time to render the already prepared card.
+        probe_budget = min(0.5, max(0.0, 4.0 - (time.monotonic() - started)))
+        if probe_budget > 0:
+            result = subprocess.run(
+                [os.path.join(os.environ["HOOK_DIR"], "local-evidence-inject.sh"),
+                 "--cwd", text("cwd") or os.getcwd(), "--format", "text"],
+                text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                env={**os.environ, "LOCAL_EVIDENCE_BUDGET": str(min(0.3, probe_budget))},
+                timeout=probe_budget)
+            if result.returncode == 0 and result.stdout.strip():
+                contexts.append(result.stdout.strip())
     except Exception:
         pass
 notice = ""

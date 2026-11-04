@@ -22,6 +22,13 @@ _RETIRED_HOOKS = (
     "git-state-guard.sh", "core-read-marker.sh", "pretooluse-write-guard.py",
 )
 
+# These entrypoints still serve prompts. Retire only their former startup
+# registrations, including the run-hook.sh alias and direct-file spellings.
+_RETIRED_EVENT_HOOKS = {"SessionStart": (
+    "local-evidence-inject", "local-evidence-inject.sh",
+    "dispatch-session-sweep", "dispatch-session-sweep.py",
+)}
+
 
 # The SessionEnd `mem.py sync` registration older releases shipped (D-82: memory
 # now exchanges after writes and reads, not at session end). Only the managed
@@ -86,7 +93,7 @@ def remove_retired_hooks(data: dict) -> bool:
                     '$root/adapters/codex/hooks/run-hook.sh',
                 )) or bool(_OWNED_ROOT_HOOK_PATH.search(command))
                 retired = any(re.search(r'(?<![\w.-])' + re.escape(name) + r'(?![\w.-])', command)
-                              for name in _RETIRED_HOOKS)
+                              for name in (*_RETIRED_HOOKS, *_RETIRED_EVENT_HOOKS.get(event, ())))
                 retired = retired or ('worker-state-compact.py' in command and 'guard-write' in command)
                 if event == "SessionEnd" and _RETIRED_SESSION_END_MEM_SYNC.match(command):
                     owned = retired = True
