@@ -521,8 +521,8 @@ The stderr `[경로]` notice (§0.4) keeps the campaign choice observed before
 compose starts, and accompanies an admitted first leg. A no-wait snapshot is
 pending; only an elapsed bounded wait is a timeout.
 
-Start receipts include `runtime.run_command` and, when that adapter provides
-one, `runtime.preflight_command`, using the already resolved harness root.
+Start receipts for open work include `runtime.run_command` and, when the adapter
+provides one, `runtime.preflight_command`, using the already resolved harness root.
 Reuse those prefixes without rediscovering the installation; `capability-info`
 and tool availability checks retain their existing meaning.
 

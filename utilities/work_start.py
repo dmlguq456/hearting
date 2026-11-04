@@ -2181,6 +2181,8 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
                                       "outcome": closed,
                                       **({"completion_delivery": delivery} if delivery else {}),
                                       **({"shared_publication": publication} if publication is not None else {})})
+    from start_receipt import runtime_commands
+    result = {**result, "runtime": runtime_commands(ROOT)}
     harvested = _harvest_unread_blocked_owner(route, jobs, run)
     if harvested is not None:
         if not harvested["ok"]:
@@ -2815,8 +2817,8 @@ def start_work(route, path, jobs, *, wait=False, interview=None, answers=None,
     advanced = _advance_plan(route, jobs, result, run=run, sleep=sleep, clock=clock)
     if advanced is not result:
         return advanced          # the next leg's own start already armed its own resume
-    from start_receipt import runtime_commands, save
-    return save({**_arm_capacity_resume(result, path, jobs), "runtime": runtime_commands(ROOT)}, jobs)
+    from start_receipt import save
+    return save(_arm_capacity_resume(result, path, jobs), jobs)
 
 
 def _arm_capacity_resume(result, path, jobs):
