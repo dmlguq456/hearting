@@ -21,6 +21,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
 import session_tidy as st  # noqa: E402
 import session_tidy_runner as runner  # noqa: E402
+sys.path.append(str(Path(__file__).resolve().parents[1] / "utilities"))  # split_module_fixture
+from split_module_fixture import patch_split  # noqa: E402
 
 # Markers a dispatched test runner inherits; a main-session case must not see them.
 WORKER_MARKERS = ("AGENT_SESSION_ROLE", "AGENT_DISPATCH_CHILD", "AGENT_DISPATCH_DEPTH",
@@ -57,7 +59,7 @@ class CompactHookTest(unittest.TestCase):
         self.state = self.root / "state"
         self.cwd = self.root / "project"
         self.cwd.mkdir()
-        self.env = {"XDG_STATE_HOME": str(self.state)}
+        self.env = {"XDG_STATE_HOME": str(self.state), "FLEET_NOW_LANG": "Korean"}   # Korean card words
         envpatch = mock.patch.dict("os.environ", self.env)
         envpatch.start()
         self.addCleanup(envpatch.stop)
@@ -87,6 +89,30 @@ class CompactHookTest(unittest.TestCase):
                                            "sid": successor, "event": "handover",
                                            "from": {"harness": harness, "sid": predecessor},
                                            "source": "clear"})
+
+    def test_all_adapter_booking_entries_reject_handed_over_source_without_losing_queue(self):
+        import session_tidy_clear as clear
+        for harness in ("claude", "opencode", "codex"):
+            with self.subTest(harness=harness), \
+                 mock.patch.object(clear, "herdr_command", return_value="/bin/true"), \
+                 mock.patch.object(clear, "_start_helper") as helper, \
+                 mock.patch.object(runner, "read_item", return_value=None):
+                sid = harness + "-old"
+                self.confirmed_handover(sid, harness + "-next", harness)
+                context = dict(identity=harness + "-compact", trigger="auto", transcript="fixture.jsonl",
+                               boundary_offset=0, card_request_required=True)
+                if harness == "codex":
+                    qid = runner.operation_queue_id(context["identity"])
+                    self.enqueue_mock.return_value = dict(id=qid, operation_id=context["identity"])
+                    result = clear.schedule_compact_card_request(self.session_seat(sid, harness), harness, sid,
+                                                                 str(self.cwd), context)
+                    self.assertEqual(self.enqueue_mock.call_args.kwargs["operation_id"], context["identity"])
+                else:
+                    st.write_card(self.seat, harness, sid, "compact card", compact_context=context)
+                    result = clear.schedule_for_enqueue(self.seat, harness, sid, str(self.cwd), compact_context=context)
+                self.assertEqual(result, "clear=skipped reason=session-handed-over")
+                helper.assert_not_called()
+                self.assertIsNone(clear.read_reservation(self.seat.key))
 
     def test_before_is_shared_and_does_not_touch_state(self):
         self.assertEqual(st.run_hook("claude", "compact", "sid-main", phase="before", env=self.env),
@@ -281,7 +307,7 @@ class CompactHookTest(unittest.TestCase):
 
         with mock.patch.object(clear, "herdr_command", return_value="/bin/true"), \
              mock.patch.object(clear, "_start_helper", return_value=4321), \
-             mock.patch.object(st, "atomic_write", side_effect=fail_text):
+             patch_split(st, "atomic_write", side_effect=fail_text):
             st.run_hook("claude", "compact", "sid-main", phase="after", compact_summary="new summary",
                         compact_context={"trigger": "auto"}, cwd=str(self.cwd), env=self.env, now=1000)
         self.assertEqual(st.read_latest_card(self.session_seat("sid-main"))["generation"], previous["generation"])

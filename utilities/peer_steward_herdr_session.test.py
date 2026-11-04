@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 STEWARD = ROOT / "utilities/peer-steward.py"
 sys.path.insert(0, str(ROOT / "utilities"))
 sys.path.insert(0, str(ROOT / "tools"))
+from split_module_fixture import patch_split
 
 FAKE_HERDR = """#!/usr/bin/env python3
 import json, os, sys
@@ -144,13 +145,13 @@ class HerdrSessionTargeting(unittest.TestCase):
         module = self.load("fourth")
         req = {"seat": {"pane": "w1:p3"}, "harness": "opencode", "sid": "booked-sid"}
         agent = {"pane": "w1:p3", "harness": "opencode", "session_id": "stale-herdr-sid"}
-        with unittest.mock.patch.object(module, "_interpret_payload",
+        with patch_split(module, "_interpret_payload",
                                         return_value=("idle", agent, 0, None)), \
                 unittest.mock.patch.object(module, "_process_session", return_value="current-sid"):
             reason, _agent, _lines = module._clear_look("oc-live", req)
         self.assertEqual(reason, "target-changed")
 
-        with unittest.mock.patch.object(module, "_interpret_payload",
+        with patch_split(module, "_interpret_payload",
                                         return_value=("idle", agent, 0, None)), \
                 unittest.mock.patch.object(module, "_process_session", return_value="booked-sid"), \
                 unittest.mock.patch.object(module, "_read_screen", return_value=[]), \

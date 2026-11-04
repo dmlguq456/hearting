@@ -12,6 +12,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).parent))
 import directory_record_index as I
 import artifact_producer as P
+from split_module_fixture import patch_split
 
 spec = importlib.util.spec_from_file_location("producer_index_fixtures", Path(__file__).with_name("artifact_producer.test.py"))
 F = importlib.util.module_from_spec(spec)
@@ -68,7 +69,7 @@ class DirectoryLookupTest(F.ProducerTestBase):
             if Path(path).parent in (self.routes, self.cycles) and not Path(path).name.startswith("."):
                 reads.append(Path(path).name)
             return original(path)
-        with mock.patch.object(P, "_read_json", side_effect=read):
+        with patch_split(P, "_read_json", side_effect=read):
             self.assertEqual(P.cycle_route_admission(self.root, self.record, b, finalize=True), expected)
             self.assertEqual(P.route_cycle_for(self.root, b)["cycle_id"], self.cycle["cycle_id"])
         self.assertLessEqual(len(reads), 4, reads)
@@ -105,7 +106,7 @@ class DirectoryLookupTest(F.ProducerTestBase):
             if Path(path).parent == self.routes:
                 reads.append(Path(path).name)
             return original(path)
-        with mock.patch.object(P, "_read_json", side_effect=read):
+        with patch_split(P, "_read_json", side_effect=read):
             R.write_once(self.routes / f"{c['route_id']}.json", c)
             self.assertEqual([row["route_id"] for row in self.children()], [c["route_id"]])
         self.assertEqual(reads, [f"{c['route_id']}.json", f"{c['route_id']}.outcome.json"])
@@ -132,7 +133,7 @@ class DirectoryLookupTest(F.ProducerTestBase):
                 published = True
                 R.write_once(self.routes / f"{c['route_id']}.json", c)
             return value
-        with mock.patch.object(P, "_read_json", side_effect=read):
+        with patch_split(P, "_read_json", side_effect=read):
             actual = self.children()
         self.assertEqual({row["route_id"] for row in actual}, {b["route_id"], c["route_id"]})
 
@@ -147,7 +148,7 @@ class DirectoryLookupTest(F.ProducerTestBase):
             if Path(path).parent == self.cycles:
                 reads.append(Path(path).name)
             return original(path)
-        with mock.patch.object(P, "_read_json", side_effect=read):
+        with patch_split(P, "_read_json", side_effect=read):
             actual = P.list_cycle_records(self.root, route_ids={self.a["route_id"]})
         self.assertEqual(actual[0]["state"], "sealed")
         self.assertEqual(reads, [f"{self.cycle['cycle_id']}.json"])
@@ -207,7 +208,7 @@ class DirectoryLookupTest(F.ProducerTestBase):
             with self.subTest(projection=projection):
                 index_path.write_text(json.dumps(
                     {"cycles": {cycle_id: {}}, "routes": projection}))
-                with mock.patch.object(P, "read_cycle_record", return_value=self.record) as recover:
+                with patch_split(P, "read_cycle_record", return_value=self.record) as recover:
                     self.assertEqual(P.list_cycle_records(self.root, route_ids={route_id}), [self.record])
                     recover.assert_called_once_with(self.root, cycle_id)
 

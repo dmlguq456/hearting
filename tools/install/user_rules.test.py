@@ -69,6 +69,29 @@ class UserRulesBlockTest(unittest.TestCase):
         self.assertEqual(skipped, ["legacy.md is not UTF-8 text"])
         self.assertEqual(user_rules.block(self.claude).count(RULE), 1)
 
+    def test_a_linked_folder_of_shared_rules_is_carried_and_a_loop_is_read_once(self):
+        # Claude follows links in its rule folder and handles one that loops back.
+        shared = self.claude.parent / "shared-rules"
+        (shared / "nested").mkdir(parents=True)
+        (shared / "team.md").write_bytes(b"shared team rule\n")
+        (shared / "nested/deep.md").write_bytes(b"shared deep rule\n")
+        (shared / "nested/back").symlink_to(shared, target_is_directory=True)
+        self.write("external.md", RULE)
+        (self.claude / "rules/shared").symlink_to(shared, target_is_directory=True)
+        (self.claude / "rules/again").symlink_to(shared, target_is_directory=True)
+        (self.claude / "rules/linked.md").symlink_to(shared / "team.md")
+        rules, skipped = user_rules.collect(self.claude)
+        names = [name for name, _data in rules]
+        self.assertEqual(skipped, [])
+        self.assertIn("external.md", names)
+        self.assertIn("linked.md", names)
+        # The shared folder is read once, under whichever link reached it first.
+        shared_names = [name for name in names if name.endswith(("team.md", "deep.md"))
+                        and name != "linked.md"]
+        self.assertEqual(sorted(name.rsplit("/", 1)[-1] for name in shared_names),
+                         ["deep.md", "team.md"])
+        self.assertEqual(user_rules.block(self.claude).count(b"shared deep rule"), 1)
+
 
 class UserRulesSwitchTest(unittest.TestCase):
     def test_off_in_the_user_defaults_renders_nothing(self):

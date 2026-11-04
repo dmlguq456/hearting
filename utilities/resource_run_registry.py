@@ -307,16 +307,18 @@ _PF_EXITING = 0x4
 def _detached_wrapper_exited(run, pid):
     """One stat read for a recorded process whose full identity is unreadable.
 
-    None when the PID is gone. True when a run with no launch controller still
-    has its exact single-threaded process in /proc only because it exited: a
-    zombie (or one being reaped) waiting for whatever reaper adopted the
-    detached wrapper, or a process past exit_mm, which has already emptied its
-    cmdline. Its exit proof is the sentinel it wrote before exiting, so it is
-    exited, not unreadable. A controller-launched run keeps the exact-owner
-    rule above: only its controller collects that child.
+    None when the PID is gone. True when the run's exact single-threaded
+    process is still in /proc only because it exited: a zombie (or one being
+    reaped) waiting for whatever reaper adopted the detached wrapper, or a
+    process past exit_mm, which has already emptied its cmdline. Its exit proof
+    is the sentinel it wrote before exiting, so it is exited, not unreadable.
+    While a controller-launched process is still its controller's child (the
+    same stat names that PID as parent), only that controller collects it: the
+    exact-owner rule above answers, and this says nothing. Once its kernel
+    parent is anyone else the controller died and an adopter reaps it, so the
+    same rule as a detached wrapper applies.
     """
-    if run.get("launch_controller"):
-        return False if Path(f"/proc/{pid}").exists() else None
+    controller = run.get("launch_controller")
     try:
         raw = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -325,10 +327,13 @@ def _detached_wrapper_exited(run, pid):
         return False
     try:
         fields = raw.rsplit(") ", 1)[1].split()
+        if controller and (not isinstance(controller, dict) or isinstance(controller.get("pid"), bool)
+                           or int(fields[1]) == int(controller["pid"])):
+            return False
         exiting = fields[0] in {"Z", "X"} or int(fields[6]) & _PF_EXITING
         return bool(exiting and int(fields[17]) <= 1
                     and fields[19] == str(run.get("starttime")))
-    except (IndexError, ValueError):
+    except (IndexError, KeyError, TypeError, ValueError):
         return False
 
 
@@ -432,9 +437,11 @@ def resource_process_group_quiescent(run: dict) -> bool:
         for process in Path("/proc").iterdir():
             if not process.name.isdigit():
                 continue
+            # A process that exits during the scan is gone, not unverifiable:
+            # its entry vanishes (ENOENT) or its open stat file reads ESRCH.
             try:
                 info = process.stat()
-            except FileNotFoundError:
+            except (FileNotFoundError, ProcessLookupError):
                 continue
             except OSError:
                 return False
@@ -445,7 +452,7 @@ def resource_process_group_quiescent(run: dict) -> bool:
                 fields = raw.rsplit(") ", 1)[1].split()
                 process_group = int(fields[2])
                 process_state = fields[0]
-            except FileNotFoundError:
+            except (FileNotFoundError, ProcessLookupError):
                 continue
             except (OSError, IndexError, ValueError):
                 return False

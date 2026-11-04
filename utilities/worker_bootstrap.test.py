@@ -20,6 +20,7 @@ import artifact_producer as AP
 import dispatch_contract as DC
 import dispatch_wrapper_common as C
 import route_identity
+from split_module_fixture import patch_split
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -245,7 +246,7 @@ class WorkerBootstrapTest(unittest.TestCase):
                     record = {"campaign_id": "camp_test", "cycle_id": "cyc_test", "producer_id": "prod_test"}
                     route = {"source_commit": "unversioned", "cwd": str(source)}
                     with mock.patch.dict(os.environ, values, clear=True), \
-                            mock.patch.object(AP, "cycle_dir", return_value=artifacts / "cycle"), \
+                            patch_split(AP, "cycle_dir", return_value=artifacts / "cycle"), \
                             mock.patch("artifact_workflow_groups.group_for_cycle", return_value=None):
                         produced = AP._env_for(artifacts, record, route)
                     prepared = C.prepare_runtime_root(
@@ -323,7 +324,7 @@ class WorkerBootstrapTest(unittest.TestCase):
             route = {"source_commit": "unversioned", "cwd": str(source)}
             values = {"HOME": str(home)}
             with mock.patch.dict(os.environ, values, clear=True), \
-                    mock.patch.object(AP, "cycle_dir", return_value=base / "cycle"), \
+                    patch_split(AP, "cycle_dir", return_value=base / "cycle"), \
                     mock.patch("artifact_workflow_groups.group_for_cycle", return_value=None):
                 produced = AP._env_for(artifact_root, record, route)
                 legacy = AP._env_for(artifact_root, record, {"source_commit": "abc123", "cwd": str(source)})
@@ -364,7 +365,7 @@ class WorkerBootstrapTest(unittest.TestCase):
                 record = {"campaign_id": "camp_test", "cycle_id": "cyc_test", "producer_id": "prod_test"}
                 route = {"source_commit": "unversioned", "cwd": str(source)}
                 with mock.patch.dict(os.environ, values, clear=True), \
-                        mock.patch.object(AP, "cycle_dir", return_value=artifact_root / "cycle"), \
+                        patch_split(AP, "cycle_dir", return_value=artifact_root / "cycle"), \
                         mock.patch("artifact_workflow_groups.group_for_cycle", return_value=None):
                     produced = AP._env_for(artifact_root, record, route)
                 self.assertEqual(produced.get("AGENT_RUNTIME_DIR"), str(expected))
@@ -399,7 +400,7 @@ class WorkerBootstrapTest(unittest.TestCase):
             runtime = project / ".agent_runtime"
             record = {"campaign_id": "camp_test", "cycle_id": "cyc_test", "producer_id": "prod_test"}
             with mock.patch.dict(os.environ, {"AGENT_RUNTIME_DIR": str(runtime)}, clear=False), \
-                    mock.patch.object(AP, "cycle_dir", return_value=project / "child-cycle"), \
+                    patch_split(AP, "cycle_dir", return_value=project / "child-cycle"), \
                     mock.patch("artifact_workflow_groups.group_for_cycle", return_value=None):
                 child_env = AP._env_for(artifact_root, record)
             self.assertEqual(child_env["AGENT_RUNTIME_DIR"], str(runtime))
@@ -781,8 +782,8 @@ class NodeScopeTest(unittest.TestCase):
             for worker_type in ("stage", "frame"):
                 args.worker_type = worker_type
                 with self.subTest(worker_type=worker_type), \
-                     mock.patch.object(AP, "load_route", wraps=AP.load_route) as route_loader, \
-                     mock.patch.object(DC, "validate_review_output_binding",
+                     patch_split(AP, "load_route", wraps=AP.load_route) as route_loader, \
+                     patch_split(DC, "validate_review_output_binding",
                                        side_effect=validate_review_binding) as review_validator:
                     prompt = W.assignment_prompt(args, "prepare the child", parent_env)
 
@@ -868,7 +869,7 @@ class NodeScopeTest(unittest.TestCase):
                 {"campaign_id": "camp1", "cycle_id": "cyc1"}, "digest", True,
             )
             with mock.patch.object(T, "load_producer_binding", return_value=binding), \
-                 mock.patch.object(AP, "cycle_dir", return_value=cycle_dir):
+                 patch_split(AP, "cycle_dir", return_value=cycle_dir):
                 prompt = W.assignment_prompt(args, "do the research", {})
             self.assertIn(
                 str(cycle_dir / "artifacts" / "spec" / "<component>" / "_internal" / "research" / "**"),

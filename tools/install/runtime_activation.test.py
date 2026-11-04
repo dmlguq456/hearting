@@ -180,6 +180,33 @@ class OpenCodeGuardDiscoveryTest(unittest.TestCase):
         self.assertEqual(os.readlink(agents), str(own))
         self.assertEqual(own.read_bytes(), b"# my own global rules\n")
 
+    def test_an_edit_made_while_the_last_edit_is_kept_aside_is_put_back(self):
+        self.seed_rule()
+        agents = self.home / "AGENTS.md"
+        self.run_activation()
+        edited = agents.read_bytes() + b"\n- my own line\n"
+        agents.write_bytes(edited)
+        newer = edited + b"- and one more, typed meanwhile\n"
+        real_move = activation.shutil.move
+
+        def edit_then_move(source, target):
+            if source == str(agents):
+                Path(source).write_bytes(newer)
+            return real_move(source, target)
+
+        with mock.patch.object(activation.shutil, "move", side_effect=edit_then_move):
+            with self.assertRaisesRegex(activation.ActivationError, "concurrent-successor"):
+                activation.refresh("opencode")
+        # Rollback puts the newer edit back; the earlier one stays kept aside.
+        self.assertEqual(agents.read_bytes(), newer)
+        self.assertEqual([path.read_bytes() for path in self.home.glob("AGENTS.md.edited-*")], [edited])
+        # The next refresh keeps the newer edit too and rewrites the file.
+        report = activation.refresh("opencode")
+        self.assertEqual(report["freshness"], "fresh", report)
+        self.assertEqual(agents.read_bytes(), self.expected_render())
+        self.assertEqual(sorted(path.read_bytes() for path in self.home.glob("AGENTS.md.edited-*")),
+                         sorted([edited, newer]))
+
     def set_carry(self, value):
         """Write the user's dispatch-defaults with `user_rules.opencode`, or remove the section."""
         user_file = activation.paths.hearting_config_dir() / "dispatch-defaults.yaml"
@@ -1828,7 +1855,7 @@ class RuntimeActivationOwnershipTest(unittest.TestCase):
                     self.assertTrue(config.is_symlink())
                     self.assertEqual(os.readlink(config), link_target)
                     projected = target.read_text(encoding="utf-8")
-                    self.assertIn('status_line = ["project-name", "custom", "thread-id"]', projected)
+                    self.assertIn('status_line = ["thread-id", "project-name", "custom"]', projected)
                     self.assertIn(activation.CODEX_IDENTITY_BEGIN, projected)
                     self.assertIn('status_line_use_colors = false', projected)
                     self.assertEqual(backup.read_bytes(), original)
@@ -1994,7 +2021,7 @@ class NativeContextLifecycleTest(unittest.TestCase):
                 config.symlink_to(link_target)
                 activation.activate("codex", "linked", str(source))
                 edited = target.read_text(encoding="utf-8").replace(
-                    '["custom", "thread-id"]', '["custom", "later", "thread-id"]')
+                    '["thread-id", "custom"]', '["thread-id", "custom", "later"]')
                 edited = edited.replace('status_line_use_colors = true', 'status_line_use_colors = false')
                 target.write_text(edited + '\n[projects."/mine"]\ntrust_level = "trusted"\n', encoding="utf-8")
                 activation.activate("codex", "linked", str(source))
@@ -2321,6 +2348,49 @@ class ClaudeHookGroupIdentityTest(unittest.TestCase):
             # The kept hook stays tuned and only the missing one comes back.
             self.assertEqual(groups, [trimmed, {"matcher": "*", "hooks": [self.NUDGE]}])
 
+    def test_shipped_stop_projection_runs_in_the_background_and_a_tuned_copy_stays(self):
+        # The Stop pane-header projection prints nothing, so Stop never waits on
+        # it (HOOK-LATENCY 7-2: 112 Stop cancels at its old 5 s limit). An
+        # untuned install takes the new values on upgrade; a tuned one keeps its own.
+        shipped_path = Path(__file__).resolve().parents[2] / "adapters/claude/settings.json"
+        shipped = json.loads(shipped_path.read_text(encoding="utf-8"))
+
+        def stop_projection(hooks):
+            return [{key: hook.get(key) for key in ("timeout", "async")}
+                    for group in hooks.get("Stop", []) for hook in group.get("hooks", [])
+                    if hook.get("command", "").endswith("python3 herdr-session-projection.py")]
+
+        self.assertEqual(stop_projection(shipped["hooks"]), [{"timeout": 30, "async": True}])
+        sync_old = json.loads(json.dumps(shipped))
+        for group in sync_old["hooks"]["Stop"]:
+            for hook in group["hooks"]:
+                if hook["command"].endswith("python3 herdr-session-projection.py"):
+                    hook.pop("async")
+                    hook["timeout"] = 5
+        for tuned_timeout, expected in ((None, {"timeout": 30, "async": True}),
+                                        (12, {"timeout": 12, "async": None})):
+            with self.subTest(tuned=tuned_timeout), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                releases = {}
+                for name, data in (("old", sync_old), ("new", shipped)):
+                    (root / name / "adapters/claude").mkdir(parents=True)
+                    (root / name / "adapters/claude/settings.json").write_text(
+                        json.dumps(data), encoding="utf-8")
+                    releases[name] = root / name
+                user = json.loads(json.dumps({"hooks": sync_old["hooks"]}))
+                if tuned_timeout is not None:
+                    for group in user["hooks"]["Stop"]:
+                        for hook in group["hooks"]:
+                            if hook["command"].endswith("python3 herdr-session-projection.py"):
+                                hook["timeout"] = tuned_timeout
+                config = root / "settings.json"
+                config.write_text(json.dumps(user), encoding="utf-8")
+
+                self._merge(config, releases["new"], releases["old"])
+
+                merged = json.loads(config.read_text(encoding="utf-8"))["hooks"]
+                self.assertEqual(stop_projection(merged), [expected])
+
     def test_uninstall_removes_tuned_and_trimmed_copies_but_not_user_hooks(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -2463,7 +2533,7 @@ class CodexIdentityConfigTest(unittest.TestCase):
             self.assertIn(self.BEGIN, config.read_text(encoding="utf-8"))
             self._assert_clears_inherited(config)
 
-    def test_runtime_config_preparation_moves_thread_id_last_and_deactivation_restores_it(self):
+    def test_runtime_config_preparation_moves_thread_id_first_and_deactivation_restores_it(self):
         import tomllib
         import native_context
         with tempfile.TemporaryDirectory() as temporary:
@@ -2484,7 +2554,7 @@ class CodexIdentityConfigTest(unittest.TestCase):
             parsed_root = tomllib.loads(config.read_text(encoding="utf-8"))
             self.assertIs(parsed_root["check_for_update_on_startup"], False)
             parsed = parsed_root["tui"]
-            self.assertEqual(parsed["status_line"], ["project-name", "custom", "thread-id"])
+            self.assertEqual(parsed["status_line"], ["thread-id", "project-name", "custom"])
             self.assertIs(parsed["status_line_use_colors"], False)
             self.assertIn(self.BEGIN, config.read_text(encoding="utf-8"))
 
@@ -2583,7 +2653,7 @@ class CodexIdentityConfigTest(unittest.TestCase):
             parsed_root = tomllib.loads(applied)
             self.assertIs(parsed_root["check_for_update_on_startup"], False)
             parsed = parsed_root["tui"]
-            self.assertEqual(parsed["status_line"], ["project-name", "custom", "thread-id"])
+            self.assertEqual(parsed["status_line"], ["thread-id", "project-name", "custom"])
             self.assertIs(parsed["status_line_use_colors"], False)
             self.assertIn(self.BEGIN, applied)
 

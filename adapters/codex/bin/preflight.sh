@@ -392,7 +392,7 @@ case "$cmd" in
   prompt-signal)
     cwd=${2:-$PWD}
     sid=${3:-${CODEX_THREAD_ID:-codex}}
-    status=$(AGENT_ADAPTER=codex "$ROOT/utilities/harness-status.sh" "$cwd" "$sid")
+    status=$(AGENT_ADAPTER=codex "$ROOT/utilities/harness-status.sh" --signal "$cwd" "$sid")
     artifact_root_kind=$(printf '%s\n' "$status" | awk -F= '$1=="artifact_root_kind"{print $2; exit}')
     git_operation=$(printf '%s\n' "$status" | awk -F= '$1=="git_operation"{print $2; exit}')
     git_dirty_tracked=$(printf '%s\n' "$status" | awk -F= '$1=="git_dirty_tracked"{print $2; exit}')
@@ -849,7 +849,7 @@ statusline_command=/statusline
 statusline_custom_dynamic_fields=unsupported
 statusline_config_surface=$CODEX_HOME/config.toml
 statusline_fragment=codex_setting/codex-config/tui-statusline.toml
-recommended_status_line=project-name,git-branch,context-used,current-dir,model-with-reasoning,five-hour-limit,weekly-limit,thread-id
+recommended_status_line=thread-id,project-name,git-branch,context-used,current-dir,model-with-reasoning,five-hour-limit,weekly-limit
 recommended_status_line_use_colors=true
 title_surface=codex-native-title-config
 title_command=/title

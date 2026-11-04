@@ -23,6 +23,11 @@ from decimal import Decimal, InvalidOperation
 import urllib.error
 import urllib.parse
 import urllib.request
+try:  # ends a detached child with the test that started it; no-op outside tests
+    from detached_lifetime import bind as end_with_test
+except ImportError:  # a partial tree without it (e.g. a fixture release): no record
+    def end_with_test(child):
+        return child
 
 
 _MARKER = re.compile(r"^\s*\[(?:답변 필요|결정 필요)\]\s*(.*)$")
@@ -45,6 +50,22 @@ _SELECTED_ENTRY_KEYS = frozenset(("identity", "selected_id", "draft", "state", "
 # 2026-10-26: elapsed time never answers or closes an unanswered question.
 OLDER_AFTER = 72 * 3600
 OWNER_STATES = ("live", "successor", "none", "unknown")
+
+
+def ui_translator():
+    """The shared UI-text catalog (English by default, Korean when declared).
+
+    A notification never fails over its words: without a readable catalog it names the key.
+    """
+    try:
+        import importlib.util
+        path = Path(__file__).resolve().parents[1] / "tools" / "i18n" / "ui_text.py"
+        spec = importlib.util.spec_from_file_location("ui_text", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.translator()
+    except Exception:  # noqa: BLE001 -- a missing or broken catalog must not stop a reminder
+        return lambda message, /, **fields: message.rsplit(".", 1)[-1].replace("_", " ")
 
 
 def wait_fold(since, now, *, owner_state=None):
@@ -1822,7 +1843,9 @@ def _workflow_owner_person_context(base, metadata, jobs):
             metadata, jobs, read_context=read_context)
         owns = route_authority.owns(metadata, session_id, jobs, read_context=read_context)
     except Exception:
-        return False
+        return None  # the lineage could not be read: unknown, not another parent
+    if owns is None:
+        return None
     return bool(owns and harness == effective_harness == owner.get("harness")
                 and session_id == effective_session == owner.get("session_id"))
 
@@ -1913,10 +1936,13 @@ def _workflow_owner_snapshot(base, *, expected_native_ref=None):
                       "owner_binding": binding}
         if expected_native_ref is not None and expected_native_ref != native_ref:
             return None, "workflow-owner-binding-changed"
-        if not _workflow_owner_person_context(base, metadata, jobs):
+        person = _workflow_owner_person_context(base, metadata, jobs)
+        if not person:
+            # Unknown (None) is the lineage that cannot be read now, not another parent.
             return {"jobs": jobs, "item": item, "native_ref": native_ref,
                     "observed": None, "support": False,
-                    "reason": "owner-correction-native-parent-context-required"}, None
+                    "reason": ("owner-correction-lineage-unverified" if person is None
+                               else "owner-correction-native-parent-context-required")}, None
         lineage = _workflow_owner_lineage(jobs, native_ref)
         if not lineage:
             return {"jobs": jobs, "item": item, "native_ref": native_ref,
@@ -3525,10 +3551,11 @@ def _ensure_producer():
         os.close(fd)
         return False
     try:
-        subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--refresh-cache", "--lock-fd", str(fd)],
+        end_with_test(subprocess.Popen(
+                         [sys.executable, str(Path(__file__).resolve()), "--refresh-cache", "--lock-fd", str(fd)],
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL, close_fds=True, pass_fds=(fd,),
-                         start_new_session=True)
+                         start_new_session=True))
     except (OSError, subprocess.SubprocessError):
         os.close(fd)
         return False
@@ -3572,13 +3599,109 @@ def _claim_notification(item_id: str, boundary: str):
     return path, fd
 
 
+def _desktop_notifier():
+    """``notify-send`` when this process sits in a graphical session with its bus.
+
+    A bare SSH or CI login has neither a display nor a session bus, and there
+    notify-send would only fail or wait, so it is not tried at all.
+    """
+    executable = shutil.which("notify-send")
+    if not executable or not (os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY")):
+        return None
+    if not (os.environ.get("DBUS_SESSION_BUS_ADDRESS")
+            or Path("/run/user/%d/bus" % os.getuid()).exists()):
+        return None
+    return executable
+
+
+def _tmux_server() -> str | None:
+    """The tmux server this process runs inside (``$TMUX``), while its socket is there.
+
+    An installed tmux nobody runs Hearting in is no notifier: the detached producer
+    would otherwise stay up to the 6 h reminder with nobody to show it to.
+    """
+    socket = str(os.environ.get("TMUX") or "").split(",", 1)[0].strip()
+    if not socket or not shutil.which("tmux"):
+        return None
+    try:
+        return socket if stat.S_ISSOCK(os.stat(socket).st_mode) else None
+    except OSError:
+        return None
+
+
+def _notification_available() -> bool:
+    return bool(shutil.which("herdr") or _tmux_server() or _desktop_notifier())
+
+
+def _quiet_run(argv, timeout=5) -> bool:
+    try:
+        return subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL, timeout=timeout,
+                              check=False).returncode == 0
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return False
+
+
+def _tmux_notify(text: str) -> bool:
+    """Every client of the tmux server this process runs inside (``$TMUX``)."""
+    socket = _tmux_server()
+    if not socket:
+        return False
+    try:
+        here = str(Path(__file__).resolve().parent)
+        if here not in sys.path:
+            sys.path.insert(0, here)
+        from terminal_surface import TmuxSurface
+
+        def bounded(argv):
+            return subprocess.run(argv, capture_output=True, text=True, timeout=3,
+                                  stdin=subprocess.DEVNULL, check=False)
+        return TmuxSurface(runner=bounded, socket=socket).notify(text)
+    except Exception:
+        return False
+
+
+def _show_elsewhere(title: str, body: str) -> bool:
+    """tmux clients and the desktop: display only, bounded, never a typed input."""
+    shown = _tmux_notify(title + ": " + body)
+    desktop = _desktop_notifier()
+    if desktop:
+        shown = _quiet_run([desktop, "-a", "Hearting", "--", title, body]) or shown
+    return shown
+
+
+def _show_once_elsewhere(item_id: str, boundary: str, title: str, body: str) -> None:
+    """After a failed Herdr call: the same reminder on tmux and the desktop, once.
+
+    Its own marker keeps that display single while Herdr itself is retried on every
+    refresh, exactly as before; nothing shown leaves no marker, so it can show later.
+    """
+    claim = _claim_notification(item_id, boundary + "\0elsewhere")
+    if claim is None:
+        return
+    marker, fd = claim
+    try:
+        os.write(fd, (boundary + "\n").encode())
+        os.fchmod(fd, 0o600)
+    finally:
+        os.close(fd)
+    if not _show_elsewhere(title, body):
+        marker.unlink(missing_ok=True)
+
+
 def _notify_item(item: dict, *, boundary: str, sound: bool = False) -> bool:
-    executable = shutil.which("herdr")
-    if not executable:
+    """Herdr's notification; without Herdr, tmux clients and the desktop.
+
+    The producer that calls this runs detached, so no session or hook waits on it.
+    When Herdr's call fails, its marker is released so the next refresh tries Herdr
+    again, and the same reminder is shown once on tmux and the desktop meanwhile.
+    """
+    if not _notification_available():
         return False
     claim = None
     try:
-        claim = _claim_notification(str(item.get("id") or ""), boundary)
+        item_id = str(item.get("id") or "")
+        claim = _claim_notification(item_id, boundary)
         if claim is None:
             return True
         marker, fd = claim
@@ -3586,15 +3709,20 @@ def _notify_item(item: dict, *, boundary: str, sound: bool = False) -> bool:
         os.fchmod(fd, 0o600)
         os.close(fd)
         claim = (marker, None)
-        question = _clean(item.get("question") or "사용자 답 대기")
+        t = ui_translator()
+        question = _clean(item.get("question") or t("wait.no_question"))
         age = max(0, int((time.time() - float(item.get("since") or time.time())) // 3600))
-        title = "◑답변 필요" + (" · %dh" % age if boundary in {"1h", "6h"} else "")
-        command = [executable, "notification", "show", title, "--body", question or "사용자 답 대기"]
-        if sound:
-            command.extend(("--sound", "request"))
-        result = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL, timeout=5, check=False)
-        if result.returncode == 0:
+        title = t("wait.title") + (" · %dh" % age if boundary in {"1h", "6h"} else "")
+        body = question or t("wait.no_question")
+        herdr = shutil.which("herdr")
+        if herdr:
+            command = [herdr, "notification", "show", title, "--body", body]
+            if sound:
+                command.extend(("--sound", "request"))
+            if _quiet_run(command):
+                return True
+            _show_once_elsewhere(item_id, boundary, title, body)
+        elif _show_elsewhere(title, body):
             return True
         marker.unlink(missing_ok=True)
         return False
@@ -3664,7 +3792,7 @@ def _producer_loop(fd: int) -> None:
                 demand = 0
             cached = _read_cache(now=now, max_age=float("inf")) or {}
             boundary = _notification_delay(cached.get("items", ()), now,
-                                           enabled=bool(shutil.which("herdr")))
+                                           enabled=_notification_available())
             idle = now - demand
             if idle >= 600 and boundary is None:
                 try:

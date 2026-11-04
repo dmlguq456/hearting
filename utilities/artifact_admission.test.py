@@ -970,5 +970,378 @@ class TestIndexGenerationCache(AdmissionContractBase):
         self.assertIn("index-drift", [violation.code for violation in report.violations])
 
 
+# ---------------------------------------------------------------------------
+# 3366fe -- a large root keeps its artifact and event rows beside index.json
+# ---------------------------------------------------------------------------
+
+_OLD_RELEASE_WRITER = r"""
+import json, os, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import artifact_admission as adm
+import artifact_identity as idm
+import artifact_manifest as m
+mode, root, count, seed = sys.argv[2], Path(sys.argv[3]), int(sys.argv[4]), sys.argv[5]
+spec = json.loads(Path(sys.argv[6]).read_text())
+identity = adm.ensure_root_identity(root)
+if mode == "old":
+    # An older release: it knows only index.json (no layout beside it).
+    adm._bulk_store = lambda _root: None
+    adm.BULK_THRESHOLD_ROWS = 10 ** 9
+else:
+    adm.BULK_THRESHOLD_ROWS = 0
+for n in range(count):
+    adm.clear_index_cache()
+    alloc = idm.IdAllocator()
+    doc = json.loads(json.dumps(spec))
+    for path, kind in (("manifest_id", "manifest"), ("manifest_revision_id", "manifest_revision")):
+        doc[path] = alloc.allocate(kind)
+    doc["campaign"]["campaign_id"] = doc["cycle"]["campaign_id"] = alloc.allocate("campaign")
+    doc["cycle"]["cycle_id"] = alloc.allocate("cycle")
+    doc["artifacts"][0]["artifact_id"] = doc["artifact_revisions"][0]["artifact_id"] = alloc.allocate("artifact")
+    doc["artifacts"][0]["cycle_id"] = doc["cycle"]["cycle_id"]
+    doc["artifact_revisions"][0]["artifact_revision_id"] = alloc.allocate("artifact_revision")
+    doc["events"][0]["event_id"] = alloc.allocate("event")
+    doc["events"][0]["stream_id"] = alloc.allocate("stream")
+    doc["events"][0]["target_id"] = doc["artifacts"][0]["artifact_id"]
+    for row in (doc["artifact_revisions"][0]["provenance"], doc["events"][0]["provenance"]):
+        row["source_manifest_id"], row["source_revision_id"] = doc["manifest_id"], doc["manifest_revision_id"]
+    doc["repository_id"], doc["artifact_root_id"] = identity.repository_id, identity.artifact_root_id
+    src = root.parent / "src-{0}-{1}-{2}".format(mode, seed, n)
+    src.mkdir()
+    (src / "plan.md").write_bytes(b"hello")
+    outcome = adm.admit(root, adm.AdmissionRequest(idempotency_key="k-{0}-{1}-{2}".format(mode, seed, n),
+                                                    document=doc, staging_source=src))
+    assert outcome.status == "admitted", outcome.to_payload()
+    print(doc["cycle"]["cycle_id"], flush=True)
+"""
+
+
+class TestCycleRowsBesideIndex(AdmissionContractBase):
+    """3366fe: above the threshold, index.json keeps its shape and the moved rows live per cycle."""
+
+    MOVED = ("art_", "arev_", "evt_")
+
+    def setUp(self):
+        super().setUp()
+        adm.clear_index_cache()
+        self._threshold = mock.patch.object(adm, "BULK_THRESHOLD_ROWS", 0)
+        self._threshold.start()
+
+    def tearDown(self):
+        self._threshold.stop()
+        adm.clear_index_cache()
+        super().tearDown()
+
+    def _raw(self):
+        return json.loads(adm._index_path(self.root).read_bytes())
+
+    def _bulk(self):
+        return self.root / adm.ADMISSION_REL / adm.BULK_REL
+
+    def _whole(self):
+        adm.clear_index_cache()
+        return idx.canonical_bytes(adm.load_index(self.root))
+
+    def _as_old_release(self):
+        """What an older release does: index.json is the only file it knows."""
+        return mock.patch.multiple(adm, _bulk_store=lambda _root: None, BULK_THRESHOLD_ROWS=10 ** 9)
+
+    def test_index_json_keeps_its_closed_shape_and_rebuild_matches_the_whole_view(self):
+        docs = [self._admit_valid(key="k-bulk-%d" % n, content=b"c-%d" % n)[0] for n in range(3)]
+        raw = self._raw()
+        parsed = idx.parse(raw)  # the reader every older release has
+        self.assertEqual(parsed.event_ids, {})
+        self.assertEqual(parsed.streams, {})
+        self.assertFalse([key for key in parsed.stable_ids if key.startswith(self.MOVED)])
+        for doc in docs:
+            self.assertIn(doc["cycle"]["cycle_id"], parsed.cycles)
+            self.assertIn(doc["campaign"]["campaign_id"], parsed.stable_ids)
+            self.assertTrue((self._bulk() / "cycles" / (doc["cycle"]["cycle_id"] + ".json")).is_file())
+        self.assertTrue((self._bulk() / "format.json").is_file())
+        whole = adm.load_index(self.root)
+        for doc in docs:
+            self.assertEqual(whole.event_ids[doc["events"][0]["event_id"]]["cycle_id"], doc["cycle"]["cycle_id"])
+            self.assertIn(doc["artifacts"][0]["artifact_id"], whole.stable_ids)
+        rebuilt, _keys = adm._compute_rebuilt_index(self.root)
+        self.assertEqual(self._whole(), idx.canonical_bytes(rebuilt))
+        self.assertTrue(adm.verify_index(self.root).ok)
+        self.assertEqual(idx.canonical_bytes(adm.rebuild_index(self.root)), idx.canonical_bytes(rebuilt))
+        self.assertEqual(self._whole(), idx.canonical_bytes(rebuilt))
+
+    def test_a_write_rewrites_only_its_own_cycle_file(self):
+        first, _ = self._admit_valid(key="k-own-1", content=b"one")
+        second, _ = self._admit_valid(key="k-own-2", content=b"two")
+        cycles = self._bulk() / "cycles"
+        before = {path.name: adm._file_key(path) for path in cycles.iterdir()}
+        reads = []
+        original = adm._BulkStore.shard
+        with mock.patch.object(adm._BulkStore, "shard",
+                               lambda store, name, fresh=False: reads.append(name) or original(store, name, fresh=fresh)):
+            third, _ = self._admit_valid(key="k-own-3", content=b"three")
+        after = {path.name: adm._file_key(path) for path in cycles.iterdir()}
+        own = third["cycle"]["cycle_id"] + ".json"
+        self.assertEqual(set(after) - set(before), {own})
+        self.assertEqual({name: key for name, key in after.items() if name != own}, before)
+        # Fresh IDs are absent from keys.bin: no other cycle's file is read to know it.
+        self.assertEqual(set(reads), {third["cycle"]["cycle_id"]})
+        self.assertNotIn(first["cycle"]["cycle_id"], reads)
+        self.assertNotIn(second["cycle"]["cycle_id"], reads)
+
+    def test_duplicate_ids_are_still_refused_from_the_cycle_files(self):
+        doc, _ = self._admit_valid(key="k-dup-1", content=b"one")
+        identity = self._identity()
+        clash, content = _make_valid_document(self.alloc, identity, content=b"two")
+        clash["events"][0]["event_id"] = doc["events"][0]["event_id"]
+        adm.clear_index_cache()
+        self._assert_rejected_and_unchanged(clash, self._stage_source(content), "k-dup-2",
+                                            expect_code="index-event-id-reused")
+
+    def test_an_older_release_writer_keeps_working_and_its_rows_are_folded_in(self):
+        self._admit_valid(key="k-mixed-new-1", content=b"n1")
+        with self._as_old_release():
+            adm.clear_index_cache()
+            old_doc, _ = self._admit_valid(key="k-mixed-old", content=b"o1")
+            # The older reader sees only index.json; the row it added stays there.
+            raw = self._raw()
+            self.assertIn(old_doc["events"][0]["event_id"], raw["event_ids"])
+        adm.clear_index_cache()
+        self.assertIn(old_doc["events"][0]["event_id"], adm.load_index(self.root).event_ids)
+        later, _ = self._admit_valid(key="k-mixed-new-2", content=b"n2")
+        raw = self._raw()
+        self.assertEqual(raw["event_ids"], {}, "the next writer folds the older writer's rows in")
+        whole = adm.load_index(self.root)
+        for doc in (old_doc, later):
+            self.assertIn(doc["events"][0]["event_id"], whole.event_ids)
+            self.assertIn(doc["artifact_revisions"][0]["artifact_revision_id"], whole.stable_ids)
+        rebuilt, _keys = adm._compute_rebuilt_index(self.root)
+        self.assertEqual(self._whole(), idx.canonical_bytes(rebuilt))
+
+    def test_an_older_release_refresh_of_a_moved_cycle_is_not_refused(self):
+        doc, outcome = self._admit_valid(key="k-refresh", content=b"r")
+        digest = outcome.manifest_digest
+        refreshed = json.loads(json.dumps(doc))
+        refreshed["manifest_revision_id"] = self.alloc.allocate("manifest_revision")
+        extra = json.loads(json.dumps(doc["events"][0]))
+        extra.update(event_id=self.alloc.allocate("event"), stream_id=self.alloc.allocate("stream"))
+        refreshed["events"].append(extra)
+        old_view = idx.parse(self._raw())  # what an older release loads
+        report = idx.check(old_view, refreshed, idempotency_key="k-refresh",
+                           manifest_digest=m.manifest_digest(refreshed), replaces_manifest_digest=digest)
+        self.assertTrue(report.ok, report.violations)
+        report = idx.check(adm.load_index(self.root), refreshed, idempotency_key="k-refresh",
+                           manifest_digest=m.manifest_digest(refreshed), replaces_manifest_digest=digest)
+        self.assertTrue(report.ok, report.violations)
+
+    def test_migration_crash_before_format_leaves_index_json_whole(self):
+        with mock.patch.object(adm, "BULK_THRESHOLD_ROWS", 10 ** 9):
+            docs = [self._admit_valid(key="k-mig-%d" % n, content=b"m-%d" % n)[0] for n in range(2)]
+        whole_before = self._whole()
+        original = adm._atomic_write_bytes
+
+        def crash(path, data):
+            if Path(path).name == "format.json":
+                raise OSError("simulated crash before the layout is turned on")
+            return original(path, data)
+
+        adm.clear_index_cache()
+        with mock.patch.object(adm, "_atomic_write_bytes", crash):
+            with self.assertRaises(OSError):
+                adm._write_index(self.root, adm.load_index(self.root))
+        self.assertFalse((self._bulk() / "format.json").exists())
+        self.assertEqual(self._whole(), whole_before)
+        self.assertTrue([key for key in self._raw()["stable_ids"] if key.startswith(self.MOVED)])
+        adm.clear_index_cache()
+        adm._write_index(self.root, adm.load_index(self.root))
+        self.assertTrue((self._bulk() / "format.json").is_file())
+        self.assertEqual(self._raw()["event_ids"], {})
+        self.assertEqual(self._whole(), whole_before)
+        self.assertTrue(adm.verify_index(self.root).ok)
+        for doc in docs:
+            self.assertIn(doc["cycle"]["cycle_id"], adm.load_index(self.root).cycles)
+
+    def test_a_crash_between_cycle_files_and_index_json_loses_nothing(self):
+        self._admit_valid(key="k-crash-1", content=b"a")
+        identity = self._identity()
+        doc, content = _make_valid_document(self.alloc, identity, content=b"b")
+        original = adm._atomic_write_bytes
+
+        def crash(path, data):
+            if Path(path).name == "index.json":
+                raise OSError("simulated crash after the cycle files")
+            return original(path, data)
+
+        adm.clear_index_cache()
+        with mock.patch.object(adm, "_atomic_write_bytes", crash):
+            with self.assertRaises(adm.AdmissionRecoveryRequired):
+                self._admit(doc, self._stage_source(content), "k-crash-2")
+        adm.clear_index_cache()
+        adm.recover(self.root)
+        whole = adm.load_index(self.root)
+        self.assertIn(doc["cycle"]["cycle_id"], whole.cycles)
+        self.assertIn(doc["events"][0]["event_id"], whole.event_ids)
+        rebuilt, _keys = adm._compute_rebuilt_index(self.root)
+        self.assertEqual(self._whole(), idx.canonical_bytes(rebuilt))
+
+    def test_a_missing_or_damaged_key_table_is_derived_and_stored_again(self):
+        doc, _ = self._admit_valid(key="k-table-1", content=b"one")
+        table = self._bulk() / "keys.bin"
+        for damage in ("missing", "truncated"):
+            with self.subTest(damage=damage):
+                if damage == "missing":
+                    table.unlink()
+                else:
+                    table.write_bytes(table.read_bytes()[:-3])
+                adm.clear_index_cache()
+                self.assertTrue(adm.verify_index(self.root).ok)
+                clash, content = _make_valid_document(self.alloc, self._identity(), content=b"x-" + damage.encode())
+                clash["events"][0]["event_id"] = doc["events"][0]["event_id"]
+                adm.clear_index_cache()
+                self._assert_rejected_and_unchanged(clash, self._stage_source(content), "k-clash-" + damage,
+                                                    expect_code="index-event-id-reused")
+                adm.clear_index_cache()
+                self._admit_valid(key="k-table-" + damage, content=b"fresh-" + damage.encode())
+                adm._BulkLocator.parse(table.read_bytes())  # stored again, whole
+                self.assertFalse(adm._BulkStore(self.root).uncovered())
+                self.assertTrue(adm.verify_index(self.root).ok)
+
+    def test_verify_reports_a_key_table_that_does_not_name_every_row(self):
+        self._admit_valid(key="k-stale-1", content=b"one")
+        table = self._bulk() / "keys.bin"
+        older = table.read_bytes()
+        self._admit_valid(key="k-stale-2", content=b"two")
+        table.write_bytes(older)  # an older table put back by hand: it parses, but misses rows
+        adm.clear_index_cache()
+        report = adm.verify_index(self.root)
+        self.assertFalse(report.ok)
+        self.assertIn("index-drift", [violation.code for violation in report.violations])
+        adm.rebuild_index(self.root)
+        self.assertTrue(adm.verify_index(self.root).ok)
+
+    def test_a_document_read_before_the_layout_turned_on_is_folded_not_replaced(self):
+        with mock.patch.object(adm, "BULK_THRESHOLD_ROWS", 10 ** 9):
+            for n in range(5):
+                self._admit_valid(key="k-early-%d" % n, content=b"e-%d" % n)
+        adm.clear_index_cache()
+        fd = adm._acquire_lock(self.root, 5)
+        try:
+            index = adm.load_index(self.root)  # plain rows: the layout is not on yet
+            with mock.patch.object(adm, "BULK_FOLD_ROWS", 1), \
+                    mock.patch.object(adm._BulkStore, "replace",
+                                      side_effect=AssertionError("every cycle file rewritten")):
+                adm._write_index(self.root, index)  # turns the layout on and folds one cycle
+                adm._write_index(self.root, index)  # the same locked section hands it in again
+        finally:
+            adm._release_lock(self.root, fd)
+        self.assertLessEqual(len(list((self._bulk() / "cycles").iterdir())), 2)
+        for cycle_id, sections in self._inline_cycles().items():
+            self.assertEqual(sections, {"stable_ids", "event_ids", "streams"}, cycle_id)
+        rebuilt, _keys = adm._compute_rebuilt_index(self.root)
+        self.assertEqual(self._whole(), idx.canonical_bytes(rebuilt))
+        with mock.patch.object(adm._BulkStore, "replace", wraps=adm._BulkStore.replace, autospec=True) as whole:
+            adm.rebuild_index(self.root)
+        self.assertEqual(whole.call_count, 1)  # rebuild is what replaces
+        self.assertTrue(adm.verify_index(self.root).ok)
+
+    def test_receipt_reader_sees_moved_rows_read_only(self):
+        doc, _ = self._admit_valid(key="k-receipt", content=b"r")
+        before = self._root_fingerprint()
+        view = adm.attach_bulk_rows(self.root, idx.parse(self._raw()))
+        row = view.stable_ids.get(doc["artifacts"][0]["artifact_id"])
+        self.assertEqual(row["cycle_id"], doc["cycle"]["cycle_id"])
+        self.assertEqual(self._root_fingerprint(), before)
+
+    def test_old_and_new_release_writers_racing_lose_no_rows(self):
+        self._admit_valid(key="k-race-seed", content=b"seed")
+        spec_doc, _ = _make_valid_document(self.alloc, self._identity())
+        spec = self.scratch / "spec.json"
+        spec.write_text(json.dumps(spec_doc))
+        script = self.scratch / "writer.py"
+        script.write_text(_OLD_RELEASE_WRITER)
+        utilities = str(Path(__file__).resolve().parent)
+        procs = [subprocess.Popen([sys.executable, str(script), utilities, mode, str(self.root), "4", str(n),
+                                   str(spec)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                 for n, mode in enumerate(("old", "new", "old", "new"))]
+        cycles = []
+        for proc in procs:
+            out, err = proc.communicate(timeout=300)
+            self.assertEqual(proc.returncode, 0, err.decode())
+            cycles.extend(out.decode().split())
+        self.assertEqual(len(cycles), 16)
+        adm.clear_index_cache()
+        adm._write_index(self.root, adm.load_index(self.root))  # one writer of this release folds the rest
+        whole = adm.load_index(self.root)
+        for cycle_id in cycles:
+            self.assertIn(cycle_id, whole.cycles)
+            self.assertIn(cycle_id, {row["cycle_id"] for row in whole.event_ids.values()})
+        rebuilt, _keys = adm._compute_rebuilt_index(self.root)
+        self.assertEqual(self._whole(), idx.canonical_bytes(rebuilt))
+        self.assertTrue(adm.verify_index(self.root).ok)
+
+    def _inline_cycles(self):
+        """Per cycle, which moved sections index.json still holds rows of."""
+        raw = self._raw()
+        held = {}
+        for name in ("stable_ids", "event_ids", "streams"):
+            for key, row in raw[name].items():
+                if name != "stable_ids" or key.startswith(self.MOVED):
+                    held.setdefault(row["cycle_id"], set()).add(name)
+        return held
+
+    def test_rows_move_out_a_few_whole_cycles_per_write(self):
+        with mock.patch.object(adm, "BULK_THRESHOLD_ROWS", 10 ** 9):
+            docs = [self._admit_valid(key="k-fold-%d" % n, content=b"f-%d" % n)[0] for n in range(4)]
+        whole_before = self._whole()
+        cycles = {doc["cycle"]["cycle_id"] for doc in docs}
+        writes = 0
+        with mock.patch.object(adm, "BULK_FOLD_ROWS", 1):
+            while self._inline_cycles():
+                adm.clear_index_cache()
+                adm._write_index(self.root, adm.load_index(self.root))
+                writes += 1
+                held = self._inline_cycles()
+                # An older reader sees each cycle's rows all together or not at all.
+                for cycle_id, sections in held.items():
+                    self.assertEqual(sections, {"stable_ids", "event_ids", "streams"}, cycle_id)
+                self.assertEqual(len(held), len(cycles) - writes)
+                self.assertEqual(self._whole(), whole_before)
+                old_view = idx.parse(self._raw())
+                for doc in docs:
+                    refreshed = json.loads(json.dumps(doc))
+                    refreshed["manifest_revision_id"] = self.alloc.allocate("manifest_revision")
+                    key = next(k for k, row in old_view.manifests.items()
+                               if row["cycle_id"] == doc["cycle"]["cycle_id"])
+                    previous = old_view.manifests[key]["manifest_digest"]
+                    report = idx.check(old_view, refreshed, idempotency_key=key,
+                                       manifest_digest=m.manifest_digest(refreshed),
+                                       replaces_manifest_digest=previous)
+                    self.assertTrue(report.ok, report.violations)
+        self.assertTrue((self._bulk() / "format.json").is_file())
+        self.assertEqual(writes, len(cycles))
+        self.assertTrue(adm.verify_index(self.root).ok)
+
+    def test_a_write_moves_every_row_of_the_cycle_it_changes(self):
+        with mock.patch.object(adm, "BULK_THRESHOLD_ROWS", 10 ** 9):
+            docs = [self._admit_valid(key="k-touch-%d" % n, content=b"t-%d" % n)[0] for n in range(3)]
+        with mock.patch.object(adm, "BULK_FOLD_ROWS", 0):
+            adm.clear_index_cache()
+            adm._write_index(self.root, adm.load_index(self.root))  # layout on, nothing changed: all stay
+            self.assertEqual(len(self._inline_cycles()), 3)
+            target = docs[1]
+            refreshed = json.loads(json.dumps(target))
+            refreshed["manifest_revision_id"] = self.alloc.allocate("manifest_revision")
+            adm.clear_index_cache()
+            index = adm.load_index(self.root)
+            key = next(k for k, row in index.manifests.items() if row["cycle_id"] == target["cycle"]["cycle_id"])
+            cycle_path = index.cycles[target["cycle"]["cycle_id"]]["cycle_path"]
+            index = idx.apply(index, refreshed, cycle_path=cycle_path,
+                              manifest_digest=m.manifest_digest(refreshed), idempotency_key=key)
+            adm._write_index(self.root, index)
+        held = self._inline_cycles()
+        self.assertNotIn(target["cycle"]["cycle_id"], held)
+        self.assertEqual(set(held), {docs[0]["cycle"]["cycle_id"], docs[2]["cycle"]["cycle_id"]})
+        self.assertTrue((self._bulk() / "cycles" / (target["cycle"]["cycle_id"] + ".json")).is_file())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

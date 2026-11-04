@@ -26,6 +26,8 @@ from unittest import mock
 MODULE_PATH = Path(__file__).with_name("dispatch-owner-rewake.py")
 ROOT = MODULE_PATH.parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
+sys.path.append(str(Path(__file__).resolve().parents[1] / "utilities"))  # split_module_fixture
+from split_module_fixture import patch_split  # noqa: E402
 # A holder that is provably dead *from this process's own PID namespace*:
 # pid 4194304 is above Linux's pid_max, so `/proc/<pid>` never exists, and
 # the namespace is ours so the hook may judge it (a holder recorded from
@@ -126,6 +128,36 @@ class ReplacementCarrierTest(unittest.TestCase):
                 held["state"] = "waiting"
                 native.return_value = False
                 self.assertFalse(rewake.replacement_authority(launch, claim, jobs, "att-old", metadata))
+                # RV-OWNS-TRI: an unreadable lineage is neither authority nor a refusal; the
+                # replacement waits for the same command.
+                native.return_value = True
+                with mock.patch.object(rewake.seat_handover, "owns", return_value=None), \
+                        self.assertRaises(rewake.DispatchContractError) as waiting:
+                    rewake.replacement_authority(launch, claim, jobs, "att-old", metadata)
+                self.assertEqual((waiting.exception.reason, waiting.exception.next_action),
+                                 ("handover-unreadable", "same-command"))
+
+    def test_an_unreadable_lineage_is_not_reported_as_another_session(self):
+        with tempfile.TemporaryDirectory() as directory:
+            jobs = Path(directory) / "jobs.log"
+            jobs.write_text("")
+            existing = {"schema": rewake.ARM_SCHEMA, "attempt_id": "att-old", "session_id": "sid",
+                        "holder": ["1", "2", "ns"], "state": "waiting", "arms": 1}
+            metadata = {**rewake.REGISTRY_DEPTH1_START, "parent_sid": "sid", "worker_type": "owner"}
+            with mock.patch.object(rewake, "_row_metadata", return_value=metadata), \
+                    mock.patch.object(rewake.seat_handover, "owns", return_value=None):
+                self.assertEqual(rewake._reclaim_refusal(existing, jobs, "sid"), "handover-unreadable")
+            with mock.patch.object(rewake, "_row_metadata", return_value=metadata), \
+                    mock.patch.object(rewake.seat_handover, "owns", return_value=False):
+                self.assertEqual(rewake._reclaim_refusal(existing, jobs, "sid"), "foreign-session")
+            # RV-BC-P1B: a successor seat re-arming (arm by sid, caller sid-B) reads
+            # an unreadable lineage as unknown too, not as another session.
+            with mock.patch.object(rewake, "_row_metadata", return_value=metadata), \
+                    mock.patch.object(rewake.seat_handover, "owns", return_value=None):
+                self.assertEqual(rewake._reclaim_refusal(existing, jobs, "sid-B"), "handover-unreadable")
+            with mock.patch.object(rewake, "_row_metadata", return_value=metadata), \
+                    mock.patch.object(rewake.seat_handover, "owns", return_value=False):
+                self.assertEqual(rewake._reclaim_refusal(existing, jobs, "sid-B"), "foreign-session")
 
     def test_restarted_carrier_follows_same_registered_successor(self):
         import dispatch_replacement as replacement
@@ -1082,7 +1114,7 @@ class DispatchOwnerRewakeTest(unittest.TestCase):
         self.assertIn(str(sealed_home), harvest_line)
 
         with mock.patch.dict(os.environ, {"AGENT_HOME": str(new_release)}, clear=False), \
-             mock.patch.object(JOIN, "ROOT", new_release):
+             patch_split(JOIN, "ROOT", new_release):
             action = JOIN.classify_supervised_shell_command(
                 base=new_release,
                 command=harvest_line.strip(),
@@ -1655,6 +1687,17 @@ class RegistryConfirmArmTest(unittest.TestCase):
         self.assertIsNone(rewake.registry_launch(self.payload(session_id=None)))
         self.assertIsNone(rewake.registry_launch(self.payload(tool_name="Read")))
 
+    def test_a_registered_worker_session_ends_without_scanning_the_registry(self) -> None:
+        # HOOK-LATENCY 7-4: a child session cannot hold such a row, so its scan is skipped.
+        self.jobs.write_text(self.row(), encoding="utf-8")
+        with mock.patch.dict(os.environ, {"AGENT_DISPATCH_CHILD": "1"}), \
+                mock.patch.object(rewake, "_session_owner_states",
+                                  side_effect=AssertionError("scanned")) as scan:
+            self.assertIsNone(rewake.registry_launch(self.payload()))
+        scan.assert_not_called()
+        with mock.patch.dict(os.environ, {"AGENT_DISPATCH_CHILD": "0"}):
+            self.assertIsNotNone(self.arm())
+
     def test_closed_or_non_owner_rows_never_arm(self) -> None:
         self.jobs.write_text(
             self.row() + self.row(status="done", note="completed-marker"), encoding="utf-8"
@@ -1728,6 +1771,7 @@ class RegistryConfirmArmTest(unittest.TestCase):
 
 
 import dispatch_contract as D  # noqa: E402
+from split_module_fixture import patch_split  # noqa: E402
 import dispatch_completion_join as JOIN  # noqa: E402
 
 
@@ -2337,7 +2381,7 @@ class CarrierOneClaimGateTest(unittest.TestCase):
             if changed_pane:
                 # The real courier must refuse before sealing any payload if
                 # its own target read no longer matches the retained identity.
-                with mock.patch.object(steward, "_herdr_missing", return_value=False), \
+                with patch_split(steward, "_herdr_missing", return_value=False), \
                         mock.patch.object(steward, "_resolve_prompt_target", return_value=({
                             "harness": "claude", "session_id": "stranger", "pane": "w1:p9",
                             "name": "stranger", "state": "idle"}, None, ["w1:p9"])), \
@@ -2567,7 +2611,7 @@ class RuntimeDeathSuccessorTest(CarrierOneClaimGateTest):
             side_effect=lambda route, meta: {"root_route_id": route["route_id"], "node": "owner"}))
         self.enterContext(mock.patch.object(replacement, "_reuse_snapshot",
                                             side_effect=lambda *a, **k: self.reuse))
-        self.enterContext(mock.patch.object(D, "attempt_process_quiescence",
+        self.enterContext(patch_split(D, "attempt_process_quiescence",
             return_value=SimpleNamespace(state="quiescent", reason="process-absent")))
         self.enterContext(mock.patch.object(D, "resolve_attempt_cleanup",
                                             return_value={"settled": True}))
@@ -2838,6 +2882,19 @@ class RuntimeDeathSuccessorTest(CarrierOneClaimGateTest):
         self.assertEqual(json.loads(record_path.read_text())["state"], "pending")
         self.assertEqual(self.replacement.recovery_delivery_state(self.jobs, "att-owner-1"),
                          "accepted")
+
+    def test_a_deferred_claim_whose_successor_is_unreadable_does_not_say_not_launched(self):
+        """#1153 impl-review: an unreadable successor row still announces (never a
+        silent exit), but no longer asserts that nothing launched."""
+        self._write_runtime_owner(status="open")
+        self._supervisor_death()
+        with mock.patch.object(rewake, "replacement_authority", return_value=False), \
+                mock.patch("dispatch_replacement.source_binding",
+                           side_effect=OSError("registry unreadable")):
+            code, observation, stdout, _stderr, _holder = self._carrier()
+        self.assertEqual(code, 2, observation)
+        self.assertNotIn("was not launched", stdout)
+        self.assertIn("whether it launched could not be read", stdout)
 
     def test_a_deferred_claim_whose_successor_already_launched_keeps_the_silent_exit(self):
         """Existing behavior kept: once the reserved successor crossed the launch fence,
@@ -4557,6 +4614,32 @@ class SeatHandoverRewakeTest(unittest.TestCase):
         environment.start()
         self.addCleanup(environment.stop)
 
+    def test_real_fork_descendant_registry_row_arms_but_unbound_ancestor_cannot(self):
+        import session_tidy as tidy
+        root = Path(self.temporary.name)
+        with mock.patch.dict(os.environ, {"HOME": str(root / "home"), "XDG_STATE_HOME": str(root / "state"),
+                "HARNESS_STATE_ROOT": str(root / "harness"), "AGENT_HOME": str(ROOT)}):
+            seat = tidy.Seat("pane", "rewake-fork")
+            for origin, target in (("P", "A"), ("A", "B"), ("B", "C"), ("A", "D")):
+                tidy._append_ledger_entry(seat, dict(event="succession", source="tidy-clear", harness="claude",
+                    sid=target, ts=1, **{"from": origin}))
+            self.jobs.write_text("".join(DispatchOwnerRewakeTest.row(attempt_id="att-fork-" + sid, parent_sid=sid,
+                parent_harness="claude", route_id="rt-fork-" + sid, route_hash="sha256:fork", route_node="execute")
+                for sid in ("P", "A", "B", "C")))
+            found = {attempt for attempt, _age in rewake._session_owner_rows(self.jobs, "C")}
+            self.assertEqual(found, {"att-fork-B", "att-fork-C"})
+            for sid in ("P", "A", "B", "C"):
+                launch = rewake.Launch(attempt_id="att-fork-" + sid, jobs=self.jobs, session_id="C", armed="registry")
+                age = rewake.receipt_row_age(launch)
+                if sid in ("P", "A"):
+                    self.assertIsNone(age)
+                    self.assertFalse(rewake.arm_path(self.jobs, launch.attempt_id).exists())
+                else:
+                    self.assertIsNotNone(age)
+                    claim = rewake.claim_arm(self.jobs, launch.attempt_id, "C", fresh=True)
+                    self.assertIsInstance(claim, rewake.ArmClaim)
+                    self.assertTrue(rewake._holds_arm(claim))
+
     def handed_to(self, successor):
         resolver = lambda meta, jobs=None: successor if meta.get("parent_sid") == "session-1" else meta.get("parent_sid")
         @contextlib.contextmanager
@@ -4584,14 +4667,30 @@ class SeatHandoverRewakeTest(unittest.TestCase):
             tidy._append_ledger_entry(tidy.Seat("pane", "scan-fixture"),
                                      dict(event="start", harness="claude", sid="session-1"))
             ledgers = sorted((tidy.state_root() / "sessions").glob("*.jsonl"))
+            rewake.seat_handover._LINEAGE_GRAPH_CACHE.clear()
             with mock.patch.object(tidy, "read_bytes", wraps=tidy.read_bytes) as reads, \
                     mock.patch.object(rewake.seat_handover, "_readable_lineage_signature",
-                                      wraps=rewake.seat_handover._readable_lineage_signature) as scans:
+                                      wraps=rewake.seat_handover._readable_lineage_signature) as scans, \
+                    mock.patch.object(rewake.seat_handover, "_lineage_signature",
+                                      wraps=rewake.seat_handover._lineage_signature) as walks:
                 rows = rewake._session_owner_rows(self.jobs, "session-1", statuses=rewake.RECEIPT_ROW_STATUSES)
+            self.jobs.write_text("".join(
+                DispatchOwnerRewakeTest.row(attempt_id=f"att-owner-{n}", status="done" if n % 2 else "open",
+                                            route_id=f"rt-{n}", route_hash="digest")
+                for n in (1, 2)), encoding="utf-8")
+            rewake.seat_handover._LINEAGE_GRAPH_CACHE.clear()
+            with mock.patch.object(rewake.seat_handover, "_lineage_signature",
+                                   wraps=rewake.seat_handover._lineage_signature) as two_row_walks:
+                rewake._session_owner_rows(self.jobs, "session-1", statuses=rewake.RECEIPT_ROW_STATUSES)
         self.assertEqual(len(rows), 20)
         self.assertEqual(scans.call_count, 1)
         self.assertEqual([call.args[0] for call in reads.call_args_list], ledgers,
                          "one scan reads each current logical/physical ledger once")
+        # 2026-11-03: the graph was built once, but every row's `owns` still listed and
+        # stat'ed the whole sessions directory again (~8s of CPU per Bash call on a
+        # 1,600-row registry). The directory walks must not grow with the row count.
+        self.assertEqual(walks.call_count, two_row_walks.call_count,
+                         "one scan walks the sessions directory a fixed number of times")
 
     def test_the_successor_arms_the_row_the_old_window_launched_and_a_stranger_does_not(self) -> None:
         self.assertEqual(rewake._session_owner_rows(self.jobs, "session-2"), [])

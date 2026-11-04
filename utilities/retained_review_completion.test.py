@@ -19,6 +19,7 @@ import dispatch_contract as D
 import dispatch_replacement as replacement
 import retained_review_completion as retained
 from codex_dispatch_terminal import inspect_terminal_attempt
+from split_module_fixture import patch_split
 
 spec = importlib.util.spec_from_file_location("retained_marker_fixture", ROOT / "utilities/dispatch_completion_marker.test.py")
 fixture = importlib.util.module_from_spec(spec)
@@ -299,7 +300,7 @@ class RetainedReviewTest(unittest.TestCase):
         def interrupted(path,value):
             if Path(path)==self.directory/f"{self.node['id']}.json":raise OSError("interrupted canonical replace")
             return original(path,value)
-        with mock.patch.object(route_module,"atomic_write",side_effect=interrupted):
+        with patch_split(route_module,"atomic_write",side_effect=interrupted):
             with self.assertRaises(OSError):self.apply()
         self.assertEqual(D.gate_currency(self.route,self.node,self.directory/f"{self.node['id']}.json",jobs=self.f.jobs).reason,"completion-evidence-verdict-not-pass")
         self.assertEqual(self.preview()["recovery_state"],"publication-pending")
@@ -309,7 +310,7 @@ class RetainedReviewTest(unittest.TestCase):
 
     def test_uncommitted_history_is_reused_after_registry_replace_interruption(self):
         self.seed()
-        with mock.patch.object(D,"_atomic_registry_replace",side_effect=OSError("registry write interrupted")):
+        with patch_split(D,"_atomic_registry_replace",side_effect=OSError("registry write interrupted")):
             with self.assertRaises(OSError):self.apply()
         self.assertTrue(D.terminal_conflict_pending(retained._rows(self.f.jobs)["att-retained-rejected"][1]))
         self.apply()

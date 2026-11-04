@@ -21,6 +21,7 @@ spec.loader.exec_module(FIX)
 SUP, WS = FIX.SUP, FIX.WS
 import resource_failure_resolution as R
 import dispatch_resource_wait as WAIT
+from split_module_fixture import patch_split
 
 
 class FailedOutputResolutionTest(FIX.WorkflowFixture):
@@ -85,7 +86,7 @@ class FailedOutputResolutionTest(FIX.WorkflowFixture):
         # and bytes, while fixture-only native dispatch receipts are omitted.
         module = SUP.route_module()
         reader = module._marker_identity_row
-        patch = mock.patch.object(module, "_marker_identity_row", side_effect=lambda *a, **kw:
+        patch = patch_split(module, "_marker_identity_row", side_effect=lambda *a, **kw:
             reader(*a, **{**kw, "exact_terminal": False}))
         patch.start()
         self.addCleanup(patch.stop)
@@ -637,7 +638,7 @@ module.main()
             if args[2] == 'metrics':
                 (output / 'summary.json').write_text('{"owner_says":"PASS"}')
             return result
-        with mock.patch.object(module, '_marker_identity_row', side_effect=swap):
+        with patch_split(module, '_marker_identity_row', side_effect=swap):
             result, commits = self._settle_resource_owner(route, path, jobs)
         self.assertEqual((result.reason, commits), ('resource-failure-unresolved', 0))
         self.assertIn('bound-artifact-changed', result.detail)

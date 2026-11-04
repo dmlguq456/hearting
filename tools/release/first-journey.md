@@ -18,6 +18,13 @@ python3 tools/release/first-journey.py run --source checkout --profile claude-on
 ```
 
 `--profile` (repeatable) runs only the named profile; without it both run.
+`--harness` (repeatable: `claude`, `codex`, `opencode`) measures the task only
+with the named harnesses, for example `run --harness opencode` when Codex has no
+budget left. Without `--profile` it runs only the profiles that measure a named
+harness (`claude` → `claude-only`, `codex`/`opencode` → `all`); a named profile
+that measures none of them stops before any world is built. Install, status and
+doctor still cover every runtime of the profile. The report's `task_harnesses`
+lists the measured ones.
 
 Without a dedicated measurement login, `run` uses the login you already have
 for each harness (`~/.claude/.credentials.json`, `~/.codex/auth.json`, or

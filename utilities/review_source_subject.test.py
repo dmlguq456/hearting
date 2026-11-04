@@ -15,6 +15,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
 import review_source_subject as SUBJECT  # noqa: E402
+from split_module_fixture import patch_split  # noqa: E402
 
 
 class SourceSubjectTest(unittest.TestCase):
@@ -124,7 +125,7 @@ class SourceSubjectTest(unittest.TestCase):
                 raise SUBJECT.SourceSubjectError("repository-status-unavailable")
             return original_git(root, *args, **kwargs)
 
-        with mock.patch.object(SUBJECT, "_git", side_effect=without_status):
+        with patch_split(SUBJECT, "_git", side_effect=without_status):
             current = self.observe()
         self.assertEqual(current["digest"], before["digest"])
         self.assertEqual(current["manifest"], before["manifest"])
@@ -258,8 +259,8 @@ class SourceSubjectTest(unittest.TestCase):
 
     def test_design_review_uses_same_sealed_build_subject_and_excludes_review_output(self):
         route, visual, critic, output, cycle, producer = self._design_fixture()
-        with mock.patch.object(producer, "route_cycle_for", return_value=cycle), \
-             mock.patch.object(producer, "cycle_dir", return_value=output.parent):
+        with patch_split(producer, "route_cycle_for", return_value=cycle), \
+             patch_split(producer, "cycle_dir", return_value=output.parent):
             before = SUBJECT.observe(route, visual)
             self.assertEqual(SUBJECT.observe(route, critic)["digest"], before["digest"])
             self.assertEqual(before["family"], "design-build")
@@ -277,8 +278,8 @@ class SourceSubjectTest(unittest.TestCase):
     def test_literal_legacy_design_build_scopes_are_observed_without_rewriting_them(self):
         route, visual, _critic, output, cycle, producer = self._design_fixture(legacy=True)
         self.assertIn("designs/<cycle>/02_tokens/**", route["nodes"][0]["write_scope"])
-        with mock.patch.object(producer, "route_cycle_for", return_value=cycle), \
-             mock.patch.object(producer, "cycle_dir", return_value=output.parent):
+        with patch_split(producer, "route_cycle_for", return_value=cycle), \
+             patch_split(producer, "cycle_dir", return_value=output.parent):
             subject = SUBJECT.observe(route, visual)
         self.assertTrue(any(item["path"].startswith("designs/<cycle>/")
                             for item in subject["manifest"]))
@@ -330,8 +331,8 @@ class SourceSubjectTest(unittest.TestCase):
             with jobs.open("a", encoding="utf-8") as stream:
                 stream.write(row + "\n")
             return SUBJECT.read_binding(jobs, metadata)
-        with mock.patch.object(producer, "route_cycle_for", return_value=cycle), \
-             mock.patch.object(producer, "cycle_dir", return_value=output.parent):
+        with patch_split(producer, "route_cycle_for", return_value=cycle), \
+             patch_split(producer, "cycle_dir", return_value=output.parent):
             a1 = register("att-design-A1")
             (output / "designs/02_tokens/tokens.json").write_bytes(b'{"color":"green"}\n')
             _b = register("att-design-B")  # no completion marker for B
@@ -364,8 +365,8 @@ class SourceSubjectTest(unittest.TestCase):
             path.write_bytes(data)
         cycle = {"campaign_id": "camp_report", "cycle_id": "cyc_report",
                  "route_id": route["route_id"]}
-        with mock.patch.object(artifact_producer, "route_cycle_for", return_value=cycle), \
-             mock.patch.object(artifact_producer, "cycle_dir", return_value=cycle_dir):
+        with patch_split(artifact_producer, "route_cycle_for", return_value=cycle), \
+             patch_split(artifact_producer, "cycle_dir", return_value=cycle_dir):
             first = SUBJECT.observe(route, verify)
             self.assertEqual(first["family"], "artifact-review:lab-independent-verify")
             self.assertTrue(SUBJECT.has_review_subject(route, verify))
@@ -405,8 +406,8 @@ class SourceSubjectTest(unittest.TestCase):
                  "nodes": [producer, verify]}
         cycle = {"campaign_id": "camp_missing", "cycle_id": "cyc_missing",
                  "route_id": route["route_id"]}
-        with mock.patch.object(artifact_producer, "route_cycle_for", return_value=cycle), \
-             mock.patch.object(artifact_producer, "cycle_dir", return_value=cycle_dir):
+        with patch_split(artifact_producer, "route_cycle_for", return_value=cycle), \
+             patch_split(artifact_producer, "cycle_dir", return_value=cycle_dir):
             self.assertFalse(SUBJECT.has_review_subject(route, verify))
             self.assertIsNone(SUBJECT.marker_currency(
                 route, verify, {"attempt_id": "att-legacy"},
@@ -434,9 +435,9 @@ class SourceSubjectTest(unittest.TestCase):
             ("inspect", ["target-artifact"], ["target-artifact"], [], False),
             ("qa", ["analysis_project/<mode>/**"], ["analysis_project/<mode>/**"], [], False),
         )
-        with mock.patch.object(artifact_producer, "route_cycle_for", side_effect=lambda _root, route: {
+        with patch_split(artifact_producer, "route_cycle_for", side_effect=lambda _root, route: {
                 "campaign_id": "camp-table", "cycle_id": "cyc-table", "route_id": route["route_id"]}), \
-             mock.patch.object(artifact_producer, "cycle_dir", side_effect=lambda _root, *_args:
+             patch_split(artifact_producer, "cycle_dir", side_effect=lambda _root, *_args:
                                self.repo / "generic-cycle"):
             for index, (node_id, inputs, scopes, payloads, expected) in enumerate(cases):
                 artifact_root = Path(self.temp.name) / f"root-{index}"

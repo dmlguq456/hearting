@@ -38,6 +38,7 @@ import peer_obligations  # noqa: E402
 import session_notice  # noqa: E402
 import session_tidy as tidy  # noqa: E402
 from route_identity import route_hash  # noqa: E402
+from split_module_fixture import patch_split  # noqa: E402
 
 
 def _notice(harness, sid, *, key, subject, text, jobs,
@@ -144,7 +145,7 @@ class IsolatedCase(unittest.TestCase):
                                    returncode=0, stdout=json.dumps(inventory))), \
              mock.patch.object(peer_steward, "_resolve_target",
                                return_value=("claude", sid, "fixture")), \
-             mock.patch.object(peer_steward, "_herdr_missing", return_value=False), \
+             patch_split(peer_steward, "_herdr_missing", return_value=False), \
              mock.patch.object(peer_steward, "_resolve_prompt_target",
                                return_value=(resolved, None, [])), \
              mock.patch.object(peer_steward, "_pane_readiness",
@@ -317,6 +318,91 @@ class BatchClaimContinuationTest(IsolatedCase):
                          "rejected")
 
 
+class RunnerPassLineageReadTest(IsolatedCase):
+    """One runner pass observes lineage a fixed number of times, whatever the open notice count.
+
+    Per-notice lineage observations (a directory walk, or a read and hash of every
+    ledger) made the live runner use 34-86% CPU with jobs.log unchanged
+    (2026-11-04). Counts, not timings. The per-member transport check stays fresh by
+    design and is counted apart.
+    """
+
+    @contextlib.contextmanager
+    def counting(self):
+        import dispatch_recipient_receipt as receipt
+        import dispatch_seat_handover as handover
+        counts = {"lineage_signature": 0, "readable_lineage_signature": 0}
+        transport = []
+        real_stat = handover._lineage_signature
+        real_readable = handover._readable_lineage_signature
+        real_send_current = receipt.claimed_send_current
+
+        def stat(directory):
+            if not transport:
+                counts["lineage_signature"] += 1
+            return real_stat(directory)
+
+        def readable(directory):
+            if not transport:
+                counts["readable_lineage_signature"] += 1
+            return real_readable(directory)
+
+        def send_current(*args, **kwargs):
+            transport.append(True)
+            try:
+                return real_send_current(*args, **kwargs)
+            finally:
+                transport.pop()
+
+        handover._LINEAGE_GRAPH_CACHE.clear()
+        with mock.patch.object(handover, "_lineage_signature", new=stat), \
+             mock.patch.object(handover, "_readable_lineage_signature", new=readable), \
+             mock.patch.object(receipt, "claimed_send_current", new=send_current):
+            yield counts
+
+    def open_notices(self, storage, total):
+        for index in range(len(self.duties_for(storage)), total):
+            _notice("claude", storage, key=f"open-{storage}-{index}", subject="progress",
+                    text="routine progress", jobs=self.jobs)
+
+    def duties_for(self, storage):
+        return [duty for duty in self.duties()
+                if duty["intent"]["identity"].get("storage_sid") == storage]
+
+    def test_discovery_lineage_reads_do_not_grow_with_open_notices(self):
+        from peer_read_context import PeerReadContext
+        self.edge("A", "B")
+        observed = []
+        for total in (3, 12):
+            self.open_notices("A", total)
+            with self.counting() as counts:
+                self.assertTrue(peer_steward._discover_session_notice_duties(
+                    self.store, read_context=PeerReadContext(registry_append_only=True)))
+            observed.append(counts)
+        self.assertEqual(len(self.duties()), 12)
+        self.assertEqual(observed[0], observed[1])
+
+    def test_resume_lineage_reads_do_not_grow_with_notice_duties(self):
+        from peer_read_context import PeerReadContext
+        observed = []
+        for total in (3, 12):
+            storage, recipient = f"A{total}", f"B{total}"
+            self.edge(storage, recipient)
+            self.open_notices(storage, total)
+            duties = self.duties_for(storage)
+            self.assertEqual(len(duties), total)
+            sent = []
+            with self.transport(recipient, sent=sent), self.counting() as counts:
+                peer_steward._resume_session_notice_obligations(
+                    duties, self.store, read_context=PeerReadContext(registry_append_only=True))
+            # The effect group really handed min(total, batch limit) records over.
+            self.assertEqual(len(sent), 1)
+            self.assertEqual(sent[0]["body"].count("routine progress"),
+                             min(total, peer_steward.NOTICE_BATCH_LIMIT))
+            observed.append(counts)
+        self.assertEqual(observed[0], observed[1])
+
+
 class AttentionRetirementTest(IsolatedCase):
     OWNER = ("att-owner\tdone\t/fixture/repo\t/fixture/wt\towner\t"
              "attempt_id=att-owner,dispatch_depth=1,parent_sid=parent-test,"
@@ -443,6 +529,44 @@ class ReconcileDutyTest(IsolatedCase):
         self.assertTrue(peer_obligations.read_runner_duty_state(
             self.root, "peer-history"))
 
+    def _retention_starts(self, popen):
+        return [call for call in popen.call_args_list
+                if call.args and str(call.args[0][1:2]).find("dispatch_registry_archive.py") >= 0]
+
+    def test_maintenance_pass_starts_the_retention_passes_once_per_due_window(self):
+        # With nothing dispatched no reap watch ends, so the runner starts the post-exit
+        # retention passes (registry archive included) itself, detached, for its own root.
+        import dispatch_contract
+        with mock.patch.object(peer_steward.subprocess, "Popen") as popen, \
+                patch_split(dispatch_contract, "stable_state_root", return_value=self.root):
+            popen.return_value.pid = 4242
+            first = peer_steward._runner_maintenance_pass(self.store)
+            second = peer_steward._runner_maintenance_pass(self.store)
+        self.assertEqual(first["retention"], {"started": 4242})
+        self.assertNotIn("retention", second)
+        starts = self._retention_starts(popen)
+        self.assertEqual(len(starts), 1)
+        argv, kwargs = starts[0].args[0], starts[0].kwargs
+        self.assertTrue(argv[1].endswith("utilities/dispatch_registry_archive.py"))
+        self.assertEqual(argv[2:], ["retention", "--jobs", str(self.root / "jobs.log")])
+        self.assertTrue(kwargs["start_new_session"])
+        popen.return_value.wait.assert_called_with(timeout=10)   # its child exits at once: no zombie
+
+    def test_a_retention_start_that_fails_is_not_retried_before_its_due_window(self):
+        import dispatch_contract
+        with mock.patch.object(peer_steward.subprocess, "Popen", side_effect=OSError("no fork")) as popen, \
+                patch_split(dispatch_contract, "stable_state_root", return_value=self.root):
+            peer_steward._runner_maintenance_pass(self.store)
+            peer_steward._runner_maintenance_pass(self.store)
+        self.assertEqual(len(self._retention_starts(popen)), 1)
+        self.assertTrue(peer_obligations.read_runner_duty_state(self.root, "retention")["last_pass_ns"])
+
+    def test_maintenance_pass_never_starts_retention_for_a_fixture_root(self):
+        with mock.patch.object(peer_steward.subprocess, "Popen") as popen:
+            result = peer_steward._runner_maintenance_pass(self.store)
+        self.assertNotIn("retention", result)
+        self.assertEqual(self._retention_starts(popen), [])
+
     def test_incomplete_registry_never_judges_records_and_still_prunes(self):
         records = self._open_records(3)
         result = join.reconcile_pending_delivery(self.jobs, time_budget_s=0)
@@ -482,6 +606,94 @@ class ReconcileDutyTest(IsolatedCase):
         self.assertGreaterEqual(sum(totals), 5)
         self.assertIsNone(state["cursor"])
         self.assertGreater(state["last_pass_ns"], 0)
+
+    def _owner_rows(self, count):
+        rows = []
+        for index in range(count):
+            meta = ",".join(f"{key}={value}" for key, value in (
+                ("attempt_id", f"att-backlog-{index:04d}"), ("worker_type", "owner"),
+                ("dispatch_depth", "1"), ("attempt_schema_version", "2")))
+            rows.append(f"2026-11-03T00:00:{index % 60:02d}Z\tdone\t0\t-\tbacklog-{index}\t{meta}")
+        self.jobs.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+    def test_bounded_registry_backstops_resume_instead_of_restarting(self):
+        # 2026-11-03: a pass that could not reach the last registry row restarted
+        # at row 0, so the runner re-read the same ~150 rows on every pass and
+        # never reached the record walk or the duties after it.
+        self._owner_rows(10)
+        self._open_records(2)
+        clock = [0.0]
+        seen = []
+
+        def backstop(_jobs, attempt):
+            seen.append(attempt)
+            clock[0] += 1.0     # each backstop costs one fake second
+
+        import dispatch_owner_input
+        with mock.patch.object(join.time, "monotonic", side_effect=lambda: clock[0]), \
+                mock.patch.object(dispatch_owner_input, "materialize_unresolved",
+                                  side_effect=backstop):
+            passes, cursor, registry_cursor, records = 0, None, None, 0
+            while passes < 10:
+                passes += 1
+                result = join.reconcile_pending_delivery(
+                    self.jobs, max_rows=500, time_budget_s=3.5,
+                    start_after=cursor, registry_start=registry_cursor)
+                cursor, registry_cursor = result["cursor"], result["registry_cursor"]
+                records += result["records_read"]
+                if not result["budget_exhausted"] and cursor is None and registry_cursor is None:
+                    break
+        self.assertEqual(seen, [f"att-backlog-{index:04d}" for index in range(10)],
+                         "every row's backstop runs once per cycle, in order")
+        self.assertEqual(records, 2, "the record walk is reached once the backstops finish")
+        self.assertLessEqual(passes, 4)
+
+    def test_backstops_that_end_with_the_budget_continue_at_the_records(self):
+        # Review of #1193: backstops that reach the last row just as the budget
+        # runs out left both cursors empty, so the next pass restarted at row 0.
+        self._owner_rows(10)
+        self._open_records(2)
+        clock = [0.0]
+        seen = []
+
+        def backstop(_jobs, attempt):
+            seen.append(attempt)
+            clock[0] += 1.0
+
+        import dispatch_owner_input
+        with mock.patch.object(join.time, "monotonic", side_effect=lambda: clock[0]), \
+                mock.patch.object(dispatch_owner_input, "materialize_unresolved",
+                                  side_effect=backstop):
+            first = join.reconcile_pending_delivery(self.jobs, max_rows=500, time_budget_s=10.0)
+            self.assertEqual((first["records_read"], first["budget_exhausted"]), (0, 1))
+            self.assertEqual(first["registry_cursor"], 10)
+            second = join.reconcile_pending_delivery(
+                self.jobs, max_rows=500, time_budget_s=10.0, start_after=first["cursor"],
+                registry_start=first["registry_cursor"])
+        self.assertEqual(len(seen), 10, "no backstop runs twice in one cycle")
+        self.assertEqual(second["records_read"], 2)
+        self.assertIsNone(second["cursor"])
+        self.assertIsNone(second["registry_cursor"])
+
+    def test_a_reconcile_backlog_does_not_starve_the_peer_history_and_index(self):
+        def exhausting(_jobs, *, time_budget_s=None, **_kwargs):
+            time.sleep(time_budget_s or 0)
+            return {"materialized": 0, "expired": 0, "skipped": 0, "pruned_records": 0,
+                    "pruned_locks": 0, "prune_skipped": 0, "rows_read": 1,
+                    "records_read": 0, "budget_exhausted": 1, "cursor": None,
+                    "registry_cursor": 1}
+
+        # 2026-11-03: the reconcile ran first and spent the whole shared budget on
+        # every pass, so the prune and the index publisher never ran once.
+        with mock.patch.object(peer_steward, "MAINTENANCE_TIME_BUDGET_S", 1.5), \
+                mock.patch.object(join, "reconcile_pending_delivery", side_effect=exhausting):
+            result = peer_steward._runner_maintenance_pass(self.store)
+        self.assertIn("peer_history", result)
+        self.assertNotEqual(result["peer_index"].get("deferred"), True, result)
+        self.assertTrue(peer_obligations.read_runner_duty_state(self.root, "peer-history"))
+        self.assertTrue(peer_obligations.read_runner_duty_state(self.root, "peer-index"))
+        self.assertEqual(peer_obligations.read_runner_duty_state(
+            self.root, "reconcile")["registry_cursor"], 1)
 
     def test_a_quiet_pass_reads_no_registry(self):
         now_ns = time.time_ns()
@@ -559,7 +771,7 @@ class PeerHistoryCursorTest(IsolatedCase):
         self._received("b" * 32, now - 8 * 86400)
         self._received("c" * 32, now - 8 * 86400)
         clock = iter([0, 5])
-        with mock.patch.object(peer_steward, "time",
+        with patch_split(peer_steward, "time",
                                SimpleNamespace(time=lambda: now,
                                                monotonic_ns=lambda: next(clock))):
             cut = peer_steward._prune_received_peer_history(now=now, deadline_ns=3)
@@ -567,7 +779,7 @@ class PeerHistoryCursorTest(IsolatedCase):
         self.assertEqual(cut["examined"], 1)
         self.assertEqual(cut["cursor"], "a" * 32 + ".json")
         self.assertFalse(first.exists())
-        with mock.patch.object(peer_steward, "time",
+        with patch_split(peer_steward, "time",
                                SimpleNamespace(time=lambda: now,
                                                monotonic_ns=lambda: 0)):
             rest = peer_steward._prune_received_peer_history(
@@ -604,6 +816,64 @@ class PeerHistoryCleanupTest(IsolatedCase):
         self.assertTrue(new_received.exists())
         self.assertTrue(old_pending.exists())
         self.assertTrue(transfer.exists())
+
+    def _lock(self, ref, mtime):
+        path = peer_steward.peer_message._pending_dir() / (".lock-" + ref)
+        path.touch(mode=0o600)
+        os.utime(path, (mtime, mtime))
+        return path
+
+    def test_rowless_ref_locks_are_removed_and_held_or_rowed_locks_stay(self):
+        import fcntl
+        pending_dir = peer_steward.peer_message._pending_dir()
+        now = time.time()
+        old = now - 8 * 86400
+        for index in range(5):
+            self._lock(f"{index:032x}", old)
+        rowed = self._lock("c" * 32, old)
+        (pending_dir / ("c" * 32 + ".json")).write_text(
+            json.dumps(self._row("c" * 32, "pending", old)))
+        held = self._lock("d" * 32, old)
+        young = self._lock("e" * 32, now - 86400)
+        legacy_prepare = self._lock("prepare-" + "f" * 64, old)
+        # A received row past the window goes first; its lock goes in the same pass.
+        expired = self._lock("a" * 32, old)
+        (pending_dir / ("a" * 32 + ".json")).write_text(
+            json.dumps(self._row("a" * 32, "received", old)))
+        holder = os.open(held, os.O_RDWR)
+        try:
+            fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            result = peer_steward._prune_received_peer_history(now=now)
+        finally:
+            os.close(holder)
+        self.assertEqual(sorted(path.name for path in pending_dir.glob(".lock-*")),
+                         sorted(path.name for path in (rowed, held, young, legacy_prepare)))
+        self.assertFalse(expired.exists())
+        self.assertEqual(result["removed"], 1)
+        self.assertEqual(result.get("locks_removed"), 6)
+        self.assertTrue(result["complete"])
+
+    def test_lock_backlog_clears_across_budgeted_passes(self):
+        import itertools
+        pending_dir = peer_steward.peer_message._pending_dir()
+        now = time.time()
+        for index in range(7):
+            self._lock(f"{index:032x}", now - 8 * 86400)
+        ticks = itertools.count()
+        clock = SimpleNamespace(time=lambda: now, monotonic_ns=lambda: next(ticks))
+        cursor, passes, removed = None, 0, 0
+        with patch_split(peer_steward, "time", clock):
+            while passes < 20:
+                passes += 1
+                counts = peer_steward._prune_received_peer_history(
+                    now=now, deadline_ns=next(ticks) + 3, start_after=cursor)
+                removed += counts.get("locks_removed", 0)
+                if counts["complete"]:
+                    break
+                cursor = counts["cursor"]
+        self.assertEqual(removed, 7)
+        self.assertGreater(passes, 3)
+        self.assertEqual(list(pending_dir.glob(".lock-*")), [])
 
 
 class LineageBundleRetirementTest(IsolatedCase):
@@ -778,7 +1048,7 @@ class InboxPrefillTest(IsolatedCase):
                          jobs=self.jobs)
         self.edge("A", "B")
         deadline = time.monotonic_ns() + 30 * 1_000_000_000
-        with mock.patch.object(peer_steward, "_live_recipients",
+        with patch_split(peer_steward, "_live_recipients",
                                return_value={("claude", "B")}):
             result = peer_steward._prefill_live_inboxes(self.root, deadline_ns=deadline)
         self.assertEqual(result["written"], 1)
@@ -792,7 +1062,7 @@ class InboxPrefillTest(IsolatedCase):
         # A new record in a named scope makes the inbox stale; prefill repairs it.
         _notice("claude", "A", key="open-2", subject="n2", text="t2", jobs=self.jobs)
         self.assertFalse(inbox.is_current(payload, self.root))
-        with mock.patch.object(peer_steward, "_live_recipients",
+        with patch_split(peer_steward, "_live_recipients",
                                return_value={("claude", "B")}):
             peer_steward._prefill_live_inboxes(self.root, deadline_ns=deadline)
         self.assertTrue(inbox.is_current(inbox.read_inbox(self.root, "claude", "B"),
@@ -839,7 +1109,7 @@ class InboxPrefillTest(IsolatedCase):
         notice = _notice("opencode", "B", key="oc-open-1", subject="n", text="t",
                          jobs=self.jobs)
         self.assertEqual(inbox.read_edge_generation(self.root), 0)
-        with mock.patch.object(peer_steward, "_live_recipients",
+        with patch_split(peer_steward, "_live_recipients",
                                return_value={("opencode", "B")}):
             result = peer_steward._runner_maintenance_pass(self.store)
         self.assertIn("inbox", result)
@@ -855,7 +1125,7 @@ class InboxPrefillTest(IsolatedCase):
         _notice("claude", "A", key="open-1", subject="n", text="t", jobs=self.jobs)
         self.edge("A", "B")
         deadline = time.monotonic_ns() + 30 * 1_000_000_000
-        with mock.patch.object(peer_steward, "_live_recipients",
+        with patch_split(peer_steward, "_live_recipients",
                                return_value={("claude", "B")}):
             first = peer_steward._prefill_live_inboxes(self.root, deadline_ns=deadline)
         self.assertEqual(first["written"], 1)
@@ -867,7 +1137,7 @@ class InboxPrefillTest(IsolatedCase):
         self.assertEqual(inbox.read_edge_generation(self.root), 0)
         # The hook's current path is stat-only, so it still trusts what it has.
         self.assertTrue(inbox.is_current(recorded, self.root))
-        with mock.patch.object(peer_steward, "_live_recipients",
+        with patch_split(peer_steward, "_live_recipients",
                                return_value={("claude", "B")}):
             second = peer_steward._prefill_live_inboxes(self.root, deadline_ns=deadline)
         self.assertEqual(second["written"], 1)
@@ -918,9 +1188,9 @@ class InboxPrefillTest(IsolatedCase):
 
         started = time.monotonic()
         with mock.patch.object(handover, "lineage_graph", side_effect=slow_graph), \
-                mock.patch.object(peer_steward, "_live_recipients",
+                patch_split(peer_steward, "_live_recipients",
                                   return_value={("claude", "B"), ("claude", "C")}), \
-                mock.patch.object(peer_steward, "_prefill_recipient_inbox",
+                patch_split(peer_steward, "_prefill_recipient_inbox",
                                   side_effect=AssertionError("prefill after deadline")):
             result = peer_steward._prefill_live_inboxes(
                 self.root, deadline_ns=time.monotonic_ns() + 40_000_000)

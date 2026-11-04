@@ -15,6 +15,7 @@ import dispatch_completion_join as J
 import dispatch_owner_input as I
 import dispatch_replacement as R
 import dispatch_supervisor_terminal as T
+from split_module_fixture import patch_split
 
 
 class DeadOwnerOSErrorTest(unittest.TestCase):
@@ -31,7 +32,7 @@ class DeadOwnerOSErrorTest(unittest.TestCase):
         process.wait(timeout=5)
         # Keep unrelated host process permissions out of this storage-failure
         # fixture. The leader/group identity remains a real exited process.
-        tags = mock.patch.object(D, 'attempt_tagged_descendants',
+        tags = patch_split(D, 'attempt_tagged_descendants',
                                  return_value=D.ProcessGroupObservation('empty'))
         tags.start()
         self.addCleanup(tags.stop)
@@ -55,7 +56,7 @@ class DeadOwnerOSErrorTest(unittest.TestCase):
         # The input consumer bound a native session before its supervisor died.
         I.OwnerInput(self.jobs, self.attempt, 'native-session', 'codex-active-turn', lambda _: None)
         self.terminal = T.classify_supervisor_error('codex', 'terminal-reconcile-failed-OSError')
-        with mock.patch.object(D, '_atomic_registry_replace', side_effect=OSError(errno.ENOSPC, 'disk full')):
+        with patch_split(D, '_atomic_registry_replace', side_effect=OSError(errno.ENOSPC, 'disk full')):
             with self.assertRaises(OSError):
                 T.reconcile_supervisor_terminal(self.jobs, self.attempt, self.terminal)
         self.log.write_text(json.dumps({'type': 'dispatch.supervisor.turn-completed'}) + '\n' +
@@ -122,8 +123,8 @@ class DeadOwnerOSErrorTest(unittest.TestCase):
                             D.ProcessQuiescence('live', 'attempt-descendant-live')):
             with self.subTest(observation=observation):
                 before = self.jobs.read_bytes()
-                with mock.patch.object(D, 'attempt_process_quiescence', return_value=observation), \
-                     mock.patch.object(J, 'attempt_process_quiescence', return_value=observation):
+                with patch_split(D, 'attempt_process_quiescence', return_value=observation), \
+                     patch_split(J, 'attempt_process_quiescence', return_value=observation):
                     result = J.settle_finished_attempt(self.jobs, J.exact_attempt_row(self.jobs, self.attempt))
                     self.assertFalse(result['closed'], result)
                 self.assertEqual(self.jobs.read_bytes(), before)
@@ -142,7 +143,7 @@ class DeadOwnerOSErrorTest(unittest.TestCase):
 
     def test_normal_reconnection_retries_storage_failure_without_a_model_launch(self):
         import dispatch_batch_obligations as obligations
-        with mock.patch.object(D, '_atomic_registry_replace', side_effect=OSError(errno.ENOSPC, 'full')), \
+        with patch_split(D, '_atomic_registry_replace', side_effect=OSError(errno.ENOSPC, 'full')), \
              mock.patch.object(obligations.subprocess, 'Popen') as launch:
             self.assertEqual(obligations.ensure_observers(self.jobs), 0)
             self.assertEqual(J.exact_attempt_row(self.jobs, self.attempt).status, 'open')
@@ -173,7 +174,7 @@ class DeadOwnerOSErrorTest(unittest.TestCase):
                 terminal = (T.classify_codex_result(text) if harness == 'codex' else
                             T.classify_session_result({'is_error': False, 'result': text},
                                                       0, runtime=harness))
-                with mock.patch.object(D, '_atomic_registry_replace',
+                with patch_split(D, '_atomic_registry_replace',
                                        side_effect=OSError(errno.ENOSPC, 'full')):
                     with self.assertRaises(OSError):
                         T.reconcile_supervisor_terminal(self.jobs, self.attempt, terminal,
@@ -240,7 +241,7 @@ class DeadOwnerOSErrorTest(unittest.TestCase):
         legacy_jobs = legacy / 'jobs.log'
         legacy_jobs.write_bytes(self.jobs.read_bytes())
         before = legacy_jobs.read_bytes()
-        with mock.patch.object(D, 'dispatch_state_roots', return_value=(self.root, legacy)), \
+        with patch_split(D, 'dispatch_state_roots', return_value=(self.root, legacy)), \
              mock.patch.object(obligations.subprocess, 'Popen') as launch:
             self.assertEqual(obligations.ensure_observers(), 0)
             launch.assert_not_called()

@@ -15,6 +15,7 @@ import threading
 from types import SimpleNamespace
 import unittest
 from unittest import mock
+from split_module_fixture import patch_split
 
 ROOT = Path(os.environ.get("AGENT_HOME", Path(__file__).resolve().parent.parent)).resolve()
 sys.path[:0] = [str(ROOT / "utilities"), str(ROOT / "tools")]
@@ -276,7 +277,7 @@ class RunnerDiscoveryObservationTest(peer._TmpRootMixin, unittest.TestCase):
                     mock.patch.object(steward, "_reconcile_obligations", side_effect=reconcile),
                     mock.patch.object(steward, "_runner_readiness_loop", side_effect=readiness),
                     mock.patch.object(steward, "_resume_message_obligation", side_effect=resume_message),
-                    mock.patch.object(steward, "_external_obligation_snapshot", side_effect=snapshot),
+                    patch_split(steward, "_external_obligation_snapshot", side_effect=snapshot),
                     mock.patch.object(steward, "_external_obligation_snapshot_unchanged", return_value=True),
                     mock.patch.object(steward, "_ensure_watch_observers", side_effect=lambda **kw: watch_calls.append(kw)),
                     mock.patch.object(steward.dispatch_batch_obligations, "ensure_observers",
@@ -683,7 +684,7 @@ class ScannerInventoryObservationTest(peer._TmpRootMixin, unittest.TestCase):
                 directory.mkdir(parents=True)
             with self.subTest(present=present), contextlib.ExitStack() as stack:
                 for patch in (mock.patch.object(steward, "_runner_readiness_loop"),
-                        mock.patch.object(steward, "_external_obligation_snapshot", return_value={}),
+                        patch_split(steward, "_external_obligation_snapshot", return_value={}),
                         mock.patch.object(steward, "_external_obligation_signature", return_value=()),
                         mock.patch.object(steward, "_external_obligation_snapshot_unchanged", return_value=True),
                         mock.patch.object(steward, "_reconcile_external_obligations"),

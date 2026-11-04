@@ -65,7 +65,8 @@ let contextPolicyRuntimeVersion = null
 let contextPolicyRequestedWindow = null
 const frameNativeAnswer = path.join(root, "utilities", "frame_native_answer.py")
 const startReceipt = path.join(root, "utilities", "start_receipt.py")
-const routeGateTools = new Set(["write", "edit", "multiedit", "patch", "apply_patch", "bash"])
+// V2 names its shell tool `shell` (V1: `bash`); both reach the gate's one shell branch.
+const routeGateTools = new Set(["write", "edit", "multiedit", "patch", "apply_patch", "bash", "shell"])
 const designPattern = /(designs?\/|\/design\/|spec\/design|preview\.html$|slides?\.html$|03_components|scaffolds\/)/
 const promptBySession = new Map()
 const turnBySession = new Map()
@@ -422,18 +423,22 @@ function spawnCheckpoint(sid) {
 // skipped: its work happens inside the parent's turn and is the parent's, as a Claude
 // subagent's is. No SDK request is made for this. Fire-and-forget like the checkpoint
 // above; the child step applies the shared exemptions and judges the rest.
-function spawnTurnChangeRecord(phase, sid, cwd) {
+// `--at` is the event time; a step older than this plugin (AGENT_HOME naming an older
+// release) rejects that argument with exit 2, so the same step runs once more without it.
+function spawnTurnChangeRecord(phase, sid, cwd, at = (Date.now() / 1000).toFixed(6)) {
   if (!sid || isWorkerSession()) return
   if (sessionInfoById.get(sid)?.parentID || v2SessionInfo.get(sid)?.parentID) return
   try {
-    const child = spawn("python3", [turnChangeRecord, phase, "--harness", "opencode",
-      "--session", sid, "--cwd", cwd || root], {
+    const args = [turnChangeRecord, phase, "--harness", "opencode", "--session", sid,
+      "--cwd", cwd || root, ...(at ? ["--at", at] : [])]
+    const child = spawn("python3", args, {
       cwd: root,
       env: { ...process.env, AGENT_HOME: root },
       detached: true,
       stdio: "ignore",
     })
     child.on("error", () => {})
+    if (at) child.on("exit", (code) => { if (code === 2) spawnTurnChangeRecord(phase, sid, cwd, "") })
     child.unref()
   } catch {
     // best-effort; a turn never depends on its record
@@ -465,6 +470,15 @@ function spawnIdleObserver(sid, cwd) {
 function sdkResponseData(result) {
   if (!result || typeof result !== "object" || result.error != null || result.response?.ok === false) return null
   return Object.hasOwn(result, "data") ? result.data : result
+}
+
+// Herdr's pane, else the tmux pane this TUI runs in. Either is only a hint: the
+// projector's may_report proves the foreground runtime there before any header.
+function paneHint() {
+  const herdr = process.env.HERDR_PANE_ID || ""
+  if (herdr) return herdr
+  const tmux = process.env.TMUX_PANE || ""
+  return process.env.TMUX && /^%[0-9]+$/.test(tmux) ? tmux : ""
 }
 
 function runCompactHook(action, payload = {}) {
@@ -837,7 +851,7 @@ function observePaneCallback(ctx, callback, sid) {
   if (paneCallbackObservedAt.size >= 128) paneCallbackObservedAt.delete(paneCallbackObservedAt.keys().next().value)
   paneCallbackObservedAt.set(key, now + 10000)
   const reason = !sid ? "callback-no-session" : isWorkerSession() ? "callback-worker"
-    : !process.env.HERDR_PANE_ID ? "callback-no-pane" : "callback-entry"
+    : !paneHint() ? "callback-no-pane" : "callback-entry"
   peerIdentityLog(ctx, "callback", reason, { callback, sessionID: sid })
 }
 
@@ -1197,11 +1211,22 @@ async function setupOpenCodeV2(ctx) {
     if (command) forgetShellCommand(command, event.sessionID)
     await withSession(event.sessionID, async () => {
       const content = event.status === "completed" ? event.result?.content : []
+      // V2 carries the tool's own metadata on the result (the question tool's `answers`, the
+      // same shape V1 hands `tool.execute.after`); keep it so the shared hook reads one shape.
+      const metadata = event.status === "completed" && event.result?.metadata
+        && typeof event.result.metadata === "object" ? { ...event.result.metadata } : {}
       const output = { output: Array.isArray(content)
         ? content.map((part) => part?.text || "").filter(Boolean).join("\n") : "",
-        metadata: event.status === "error" ? { exit: 1 } : {} }
+        metadata: event.status === "error" ? { exit: 1 } : metadata }
       const originalText = output.output
       if (v2WorkerSessions.has(event.sessionID)) {
+        // A worker keeps only the shared contract's observations: the spec-read record
+        // (as the general hook below does for `read`) and the spec-sync nudge.
+        if (event.tool === "read" && event.status === "completed") {
+          const args = event.input || {}
+          const readFile = normalizeFile(ctx, args.filePath || args.path || args.file)
+          if (readFile) collectPreflight("read", [readFile, event.sessionID || "opencode-plugin"])
+        }
         await appendSpecSyncNudge(ctx, { tool: event.tool, sessionID: event.sessionID, args: event.input || {} }, output, root)
       } else {
         await hooks["tool.execute.after"]?.(
@@ -1528,7 +1553,7 @@ const paneProjectionBusy = new Map()
 const paneProjectionRetryAt = new Map()
 let paneProjectionGeneration = 0
 async function projectPane(sid, ctx, retry = false) {
-  if (!sid || isWorkerSession() || !process.env.HERDR_PANE_ID) return
+  if (!sid || isWorkerSession() || !paneHint()) return
   const binding = registerPaneContext(ctx)
   if (!binding.active) return
   let ownsSession = binding.ownsOrigin && paneNativeOrigin?.sid === sid
@@ -1678,7 +1703,7 @@ function scheduleInitialPaneProjection(ctx, binding, sid) {
   const origin = paneNativeOrigin
   if (!sid || !binding?.active || !binding.ownsOrigin || paneOwningContext !== ctx
       || !origin || origin.sid !== sid || origin.state !== "pending"
-      || binding.startupScheduled || !process.env.HERDR_PANE_ID || isWorkerSession()) return
+      || binding.startupScheduled || !paneHint() || isWorkerSession()) return
   binding.startupScheduled = true
   binding.startupQueued = true
   const generation = paneProjectionGeneration
@@ -1689,7 +1714,7 @@ function scheduleInitialPaneProjection(ctx, binding, sid) {
     if (!binding.active || paneOwningContext !== ctx || binding.generation !== generation
         || generation !== paneProjectionGeneration || paneNativeOrigin !== origin
         || origin.sid !== sid || origin.state !== "pending"
-        || !process.env.HERDR_PANE_ID || isWorkerSession()) return
+        || !paneHint() || isWorkerSession()) return
     binding.startupRunning = true
     Promise.resolve().then(() => projectPane(sid, ctx)).catch(() => {}).finally(() => {
       binding.startupRunning = false

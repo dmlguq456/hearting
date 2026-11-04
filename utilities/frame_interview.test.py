@@ -427,6 +427,27 @@ class NativeAnswerNormalizationTest(unittest.TestCase):
         answers = FI.answers_from_native(interview, asked)
         self.assertEqual(answers["answers"][question["id"]]["choice"], 0)
 
+    def test_a_note_beside_a_picked_option_is_kept_with_the_choice(self):
+        # GA-A5-007: the words added beside a picked option are the person's, kept as the note.
+        interview = good_interview()
+        first, second = interview["questions"][0], interview["questions"][1]
+        label = first["options"][1]["label"]
+        asked = [
+            {"question": interview["understanding"], "options": ["yes", "no"], "answer": "yes"},
+            {"question": first["question"], "options": [label], "answer": label, "note": "빨리"},
+            {"question": second["question"], "options": ["Yes", "No"], "answer": "Yes"},
+        ]
+        answers = FI.answers_from_native(interview, asked)
+        self.assertEqual(answers["answers"][first["id"]], {"choice": 1, "note": "빨리"})
+        self.assertEqual(answers["answers"][second["id"]]["note"], "")
+        self.assertEqual(FI.validate_answers(interview, answers), [])
+        asked[1]["note"] = "x" * (FI.MAX_NOTE_CHARS + 50)      # never asked again for its length
+        kept = FI.answers_from_native(interview, asked)["answers"][first["id"]]["note"]
+        self.assertEqual(len(kept), FI.MAX_NOTE_CHARS)
+        self.assertTrue(kept.endswith(FI._truncated_mark()))          # the cut says so
+        self.assertIn(FI._truncated_mark(), ("…(truncated)", "…(잘림)"))
+        self.assertEqual(FI.validate_answers(interview, FI.answers_from_native(interview, asked)), [])
+
     def test_native_slots_and_answers_from_native_agree_with_the_single_call_rules(self):
         interview = good_interview()
         first, second = interview["questions"][0], interview["questions"][1]

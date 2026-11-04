@@ -13,6 +13,7 @@ from unittest import mock
 
 import resource_progress as progress
 import resource_metric_sources as metric_sources
+from split_module_fixture import patch_split
 
 
 def _cairn_problems(record_path):
@@ -977,6 +978,7 @@ class ExperimentObservationTest(unittest.TestCase):
             self.assertEqual(public["rows"][0]["admission"]["denied_samples"], 2)
             self.assertIsNone(public["output_dir"])
 
+    @mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"})   # Korean notice words
     def test_independent_raw_counter_binding_persists_without_canonical_progress(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -1604,7 +1606,7 @@ class ExperimentObservationTest(unittest.TestCase):
         import dispatch_seat_handover as handover
         import session_tidy as tidy
         from peer_obligations import _ordinary_notice_target
-        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(tidy, "state_root", return_value=Path(temporary)):
+        with tempfile.TemporaryDirectory() as temporary, patch_split(tidy, "state_root", return_value=Path(temporary)):
             identity = {"jobs": str(Path(temporary) / "jobs.log"), "storage_recipient": "sid-codex",
                         "lineage": {"kind": "provenance", "harness": "codex", "session_id": "sid-codex"}}
             self.assertEqual(handover.session_successor("sid-codex"), ("", ""))
@@ -1620,6 +1622,44 @@ class ExperimentObservationTest(unittest.TestCase):
                              ("claude", "sid-claude-2", "sid-codex"))
             with mock.patch.object(handover, "_readable_lineage_signature", side_effect=OSError("ledger")):
                 self.assertIsNone(_ordinary_notice_target(identity, "codex-native-queue"))
+    def test_notice_text_survives_a_missing_catalog(self):
+        run = {"run_id": "r1", "status": "succeeded", "exit_code": 0}
+        observation = {"summary": {"metric": "loss", "trend": "개선"}, "elapsed_seconds": 60}
+        with mock.patch("importlib.util.spec_from_file_location", side_effect=FileNotFoundError("gone")):
+            text = "; ".join(progress._notice_texts(run, "final", observation, None, []))
+        self.assertIn("status=succeeded; exit=0; latest=no metrics; best=no metrics; trend=improving", text)
+        self.assertIn("actual=1m; plan=unknown duration", text)
+
+    def test_notice_words_follow_the_declared_language(self):
+        run = {"run_id": "r1", "status": "succeeded", "exit_code": 0}
+        observation = {"summary": {"metric": "loss", "latest": {"value": 0.5, "epoch": 3},
+                                   "best": {"value": 0.4, "epoch": 2}, "trend": "악화",
+                                   "baseline_delta": None},
+                       "elapsed_seconds": 3720, "planned_seconds": None,
+                       "predicted_total_seconds": None}
+        texts = {}
+        for language in ("English", "Korean"):
+            with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": language}):
+                texts[language] = ("; ".join(progress._notice_texts(run, "final", observation, None, [])),
+                                   "; ".join(progress._notice_texts(run, "checkpoint", observation,
+                                                                    "/r/record.json", [{"format": "jsonl"}])))
+        final, checkpoint = texts["English"]
+        self.assertIn("public run record=no record path", final)
+        self.assertIn("latest=loss=0.5@3; best=loss=0.4@2; trend=worsening", final)
+        self.assertIn("actual=1h02m; planned=unknown", final)
+        self.assertIn("latest=loss=0.5@3; best=loss=0.4@2; baseline delta=no baseline; trend=worsening",
+                      checkpoint)
+        self.assertIn("estimated total time unknown; planned unknown; elapsed 1h02m", checkpoint)
+        self.assertIn("source jsonl=no path", checkpoint)
+        final, checkpoint = texts["Korean"]
+        self.assertIn("public run record=기록 경로 없음", final)
+        self.assertIn("마지막=loss=0.5@3; 최고=loss=0.4@2; 추세=악화", final)
+        self.assertIn("실제=1h02m; 계획=미상", final)
+        self.assertIn("최근=loss=0.5@3; 최고=loss=0.4@2; 기준 delta=기준 없음; 추세=악화", checkpoint)
+        self.assertIn("ETA 총 미상; 계획 미상; 경과 1h02m", checkpoint)
+        self.assertIn("source jsonl=경로 없음", checkpoint)
+
+    @mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"})   # Korean notice words
     def test_terminal_observation_keeps_durable_live_checkpoint_and_adds_one_final_notice(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2085,6 +2125,79 @@ class ExperimentObservationTest(unittest.TestCase):
         self.assertIsNotNone(progress.write_public_run_record(artifact, "case-e", later))
         kept = progress.read_public_run_record(artifact, "case-e")
         self.assertEqual((kept["output_dir_state"], kept["output_dir"]), ("present", str(output)))
+
+    def test_output_dir_reason_tells_remote_unmapped_from_not_declared(self):
+        base = Path(self.tmp.name) / "d2-remote"
+        project = base / "nas" / "project"
+        (project / "configs").mkdir(parents=True)
+        output = project / "out"
+        output.mkdir()
+        mapping = {"/host-ns": str(base / "nas")}
+        unmounted = {"/host-ns": str(base / "not-mounted-here")}
+
+        def config(name, value):
+            path = project / "configs" / name
+            path.write_text(json.dumps({"output_dir": value}))
+            return ["python", "train.py", "--config", "configs/" + name]
+
+        def observe(name, **run):
+            artifact = base / name
+            run = {"run_id": name, "artifact_root": str(artifact), "node": "full-run",
+                   "route_id": "r", "started_at": 0, **run}
+            with mock.patch.object(progress, "_observation_state_path",
+                                   return_value=base / (name + ".state")):
+                progress.observe_experiment(run, base / "registry.json", 60,
+                    row_key="run", started_at=0, notify_events=False)
+            record = progress.read_public_run_record(artifact, name)
+            return record["output_dir_state"], record["output_dir_reason"], record["output_dir"]
+
+        remote = {"cwd": "/host-ns/project", "run_root": "/host-ns/runs"}
+        (project / "other").mkdir()
+        (project / "configs" / "both.json").write_text(
+            json.dumps({"output_dir": "out", "save_dir": "other"}))
+        conflict = ["python", "train.py", "--config", "configs/both.json"]
+        cases = {
+            # nothing declared and no exact config/request evidence
+            "plain": ({}, ("unknown", "not-declared", None)),
+            # compute-hosts dropped a declared folder it could not map
+            "declared-unmapped": ({"output_dir_unmapped": True},
+                                  ("unknown", "remote-unmapped", None)),
+            # exact config evidence fills the folder through the host mapping
+            "config-mapped": ({**remote, "path_namespace": mapping,
+                               "command": config("mapped.json", "/host-ns/project/out")},
+                              ("present", None, str(output))),
+            # config names a host-only path outside the mapping and the shared run root
+            "config-host-only": ({**remote, "path_namespace": mapping,
+                                  "command": config("host.json", "/scratch/private/out")},
+                                 ("unknown", "remote-unmapped", None)),
+            # the namespace source is not mounted where this observer runs
+            "source-not-mounted": ({**remote, "path_namespace": unmounted,
+                                    "command": config("mapped.json", "/host-ns/project/out")},
+                                   ("unknown", "remote-unmapped", None)),
+            # config evidence names a folder that does not exist yet
+            "config-missing": ({"cwd": str(project),
+                                "command": config("missing.json", "not-yet")},
+                               ("unknown", "declared-unresolved", None)),
+            # two keys naming different folders are no single binding
+            "config-conflict": ({"cwd": str(project), "command": conflict},
+                                ("unknown", "not-declared", None)),
+        }
+        for name, (run, expected) in cases.items():
+            self.assertEqual(observe(name, **run), expected, name)
+            if expected[2] is None:
+                self.assertIsNone(progress.discover_output_root(run), name)
+        # A node that declares no training output stays `none` even when compute-hosts
+        # had to drop a declared folder; the unmapped reason never changes that state.
+        route = base / "route.json"
+        route.write_text(json.dumps({"nodes": [
+            {"id": "eval-run", "kind": "resource-runner", "outputs": ["eval-report"]},
+            {"id": "full-run", "kind": "resource-runner", "outputs": ["logs/**"]}]}))
+        self.assertEqual(observe("eval-unmapped", node="eval-run", route=str(route),
+                                 output_dir_unmapped=True)[:2],
+                         ("none", "node-declares-no-training-output"))
+        self.assertEqual(observe("train-unmapped", node="full-run", route=str(route),
+                                 output_dir_unmapped=True)[:2],
+                         ("unknown", "remote-unmapped"))
 
     def test_compacted_record_feeds_resource_wait_note_and_runner_observation(self):
         import dispatch_resource_wait

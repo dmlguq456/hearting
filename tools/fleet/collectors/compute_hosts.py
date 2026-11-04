@@ -74,7 +74,8 @@ def _self_fallback(argv, snapshot, deadline):
         snapshot["error"] = "local compute observation timed out"
         return snapshot
     try:
-        result = subprocess.run(argv + ["self", "--json"], text=True, capture_output=True,
+        result = subprocess.run(argv + ["self", "--json"], stdin=subprocess.DEVNULL,
+                                text=True, capture_output=True,
                                 timeout=remaining)
         payload = json.loads(result.stdout) if result.returncode == 0 else None
         if isinstance(payload, dict) and isinstance(payload.get("hosts"), list):
@@ -100,7 +101,7 @@ def collect(timeout=COLLECT_TIMEOUT):
     observed_at = time.time()
     try:
         result = subprocess.run(
-            argv + ["list", "--json"], text=True, capture_output=True,
+            argv + ["list", "--json"], stdin=subprocess.DEVNULL, text=True, capture_output=True,
             timeout=max(0.1, deadline - time.monotonic()),
         )
     except subprocess.TimeoutExpired:

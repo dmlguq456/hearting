@@ -42,13 +42,21 @@ prints. Two locks keep a slow record from dropping a turn: the session's state l
 held only to snapshot and to read or write the state, while composing, closing and
 appending run under a separate record lock, so the next turn's start never finds the
 session busy for the length of a record, and a turn that ends while a record is running
-is queued and written by the same or the next record pass. A created route is kept in
+is queued and written by the same or the next record pass. A queued turn whose record
+step died (the session ended) is written at the session's next boundary or, once the
+session is proven gone (``session_ended``) and quiet for ``ORPHAN_AFTER``, by the turn-end
+step of any session in the same folder, for that folder only and as that session; no
+process is added for it. A created route is kept in
 the state file until it is closed; a failed close is tried again at every later turn
 boundary, so an automatic route never stays open as the session's default. A turn whose record could not be written keeps its own section and is
 written at a later boundary, at most ``MAX_ATTEMPTS`` times. Changes another process made
 in the same work tree during the turn cannot be told apart from the session's own; the
 evidence names the other Hearting sessions whose turns overlapped there instead of
 guessing. A turn the runtime ends without its end event (an interrupt) is not compared.
+Each hook passes its own event time (``--at``): when the next turn's start step runs before
+the previous turn's end step (a prompt queued or injected at once), that late end never
+closes the newer turn; it compares its own turn against the start snapshot kept from it,
+and the newer turn's start snapshot stands in for its end.
 
 ``HEARTING_AUTO_RECORD=off`` turns it off. Registered owners and workers, CI and dev
 activation are left alone, as by the gate (``skipped``).
@@ -76,6 +84,11 @@ if str(UTILITIES) not in sys.path:
     sys.path.insert(0, str(UTILITIES))
 
 import route_presence_gate as gate  # noqa: E402
+try:  # ends a detached child with the test that started it; no-op outside tests
+    from detached_lifetime import bind as end_with_test  # noqa: E402
+except ImportError:  # a partial tree without it (e.g. a fixture release): no record
+    def end_with_test(child):
+        return child
 
 SWITCH = "HEARTING_AUTO_RECORD"
 MARK = "auto-record"
@@ -93,12 +106,17 @@ KEEP_SECONDS = 14 * 86400
 STATE_LOCK_WAIT = 30.0
 RECORD_LOCK_WAIT = 1800.0
 MAX_ROUNDS = 10
+# A queued turn of a session proven gone (its record step died with it) is left this long
+# after the session's last state change before a turn end in the same folder writes it.
+ORPHAN_AFTER = 120.0
 GIT_TIMEOUT = 30
 COMPOSE_TIMEOUT = 600
 FINISH_TIMEOUT = 300
 CHECKPOINT_TIMEOUT = 120
 CLOCK_SLACK = 2.0
 APPENDED = "auto-record-turns.md"
+# The open turn's start snapshot kept at the next start for its late end step.
+PRIOR_KEYS = ("turn_started_at", "top", "root", "head", "entries")
 GATE_VALUE = (f"{MARK}: changes observed at turn end and recorded after the fact; "
               "this gate was not assessed")
 # Byte code Python writes beside sources; untracked, it is never a reason for a record.
@@ -166,11 +184,11 @@ def launch(phase: str, harness: str, payload, *, environ=None, popen=None) -> bo
             return False
         cwd = _field(payload, "cwd", "working_directory", "workingDirectory") or os.getcwd()
         command = [sys.executable, str(Path(__file__).resolve()), phase, "--harness", harness,
-                   "--session", sid, "--cwd", cwd]
+                   "--session", sid, "--cwd", cwd, "--at", f"{time.time():.6f}"]
         spawn = subprocess.Popen if popen is None else popen
-        spawn(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        end_with_test(spawn(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
               stderr=subprocess.DEVNULL, close_fds=True, start_new_session=True,
-              cwd=str(ROOT), env=dict(env))
+              cwd=str(ROOT), env=dict(env)))
         return True
     except Exception:  # noqa: BLE001 -- a turn never depends on its record
         return False
@@ -245,6 +263,10 @@ def _locked(lock: Path, wait: float):
                     yield False
                     return
                 time.sleep(0.2)
+        # flock never changes mtime: mark the use, so pruning by age (``_prune``) never
+        # removes a lock some long-lived session is holding.
+        with contextlib.suppress(OSError):
+            os.utime(fd)
         yield True
     finally:
         os.close(fd)
@@ -620,12 +642,55 @@ def _mode(harness: str, sid: str, top: Path, state: dict, env):
     """``("record", root)`` when the session's only routes for this folder are its own
     automatic record (or none); ``("route-held", root)`` once it holds a route of its own;
     ``("skip", "")`` under dev activation, without an identity or a resolvable root."""
-    routes = gate.held_routes(harness, sid, env)
+    # The ledger's `automatic` lines are this record's own routes, not the session's: they are
+    # left out, so a turn that starts while the record's route is being created still records.
+    routes = gate.held_routes(harness, sid, env, own_only=True)
     root = gate.folder_root(top, env) if routes is not None else ""
     if not root:
         return "skip", ""
     automatic = (state.get("records") or {}).get(root, {}).get("route_id")
     return ("record" if routes.get(root, set()) <= {automatic} else "route-held"), root
+
+
+def _pending_marker(env, root: str, harness: str, sid: str) -> Path:
+    """One empty file per session with queued turns for this folder, so a record pass in the
+    same folder finds them without reading every session's state."""
+    digest = hashlib.sha256(root.encode("utf-8")).hexdigest()[:12]
+    return state_dir(env) / "pending" / digest / f"{harness}--{sid}"
+
+
+def _mark_pending(env, state: dict, harness: str, sid: str) -> None:
+    roots = {row.get("root") for row in state.get("pending") or [] if row.get("root")}
+    for root in roots:
+        marker = _pending_marker(env, root, harness, sid)
+        with contextlib.suppress(OSError):
+            marker.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            marker.touch()
+    for root in set(state.get("pending_roots") or []) - roots:
+        marker = _pending_marker(env, root, harness, sid)
+        with contextlib.suppress(OSError):
+            marker.unlink()
+        with contextlib.suppress(OSError):
+            marker.parent.rmdir()  # only when no other session has turns queued there
+    state["pending_roots"] = sorted(roots)
+
+
+def _prune_markers(env) -> None:
+    """Drop markers whose session no longer has turns queued for that folder, and empty
+    folders; run when a new session first starts, like the state pruning."""
+    base = state_dir(env) / "pending"
+    with contextlib.suppress(OSError):
+        for folder in os.scandir(base):
+            with contextlib.suppress(OSError):
+                for marker in os.scandir(folder.path):
+                    harness, _, sid = marker.name.partition("--")
+                    state = _read(state_path(env, harness, sid)) if harness in HARNESSES and _SAFE_SID.match(sid) else {}
+                    digests = {hashlib.sha256(root.encode("utf-8")).hexdigest()[:12]
+                               for root in state.get("pending_roots") or []
+                               if any(row.get("root") == root for row in state.get("pending") or [])}
+                    if folder.name not in digests:
+                        os.unlink(marker.path)
+                os.rmdir(folder.path)
 
 
 def _update(path: Path, change, wait=None):
@@ -667,11 +732,14 @@ def _apply_close(state: dict, tried: dict) -> None:
             entry["last_failure"] = {"reason": settled.get("reason"), "detail": settled.get("detail")}
 
 
-def _record_pass(path: Path, harness: str, sid: str, env, recorder, appender, now: float, wait: float) -> str:
+def _record_pass(path: Path, harness: str, sid: str, env, recorder, appender, now: float, wait: float,
+                 *, only_root: str = "", carried: bool = False) -> str:
     """Under the record lock: close open automatic routes and write every queued turn into
     the session's record for its folder, round after round until nothing is queued. A turn
     queued while this runs is taken by a later round, or by the pass its own end starts once
-    this one lets go of the lock."""
+    this one lets go of the lock. ``only_root`` keeps the pass to one folder; a ``carried``
+    pass (another session writing an ended session's turns) leaves that session's attempts
+    as they were."""
     result = ""
     with _locked(_record_lock(path), wait) as held:
         if not held:
@@ -680,8 +748,9 @@ def _record_pass(path: Path, harness: str, sid: str, env, recorder, appender, no
             state = _update(path, lambda state: None)
             if state is None:
                 break
-            records = {root: dict(entry) for root, entry in (state.get("records") or {}).items()}
-            pending = list(state.get("pending") or [])
+            records = {root: dict(entry) for root, entry in (state.get("records") or {}).items()
+                       if not only_root or root == only_root}
+            pending = [item for item in state.get("pending") or [] if not only_root or item.get("root") == only_root]
             tried = _close_pass(records, harness, sid, env)
             if not pending:
                 _update(path, lambda state: _apply_close(state, tried))
@@ -727,6 +796,10 @@ def _record_pass(path: Path, harness: str, sid: str, env, recorder, appender, no
                         elif not created and root in records_now:
                             records_now[root]["turns"] = int(records_now[root].get("turns") or 0) + count
                         result = "recorded" if created else "appended"
+                    elif carried:
+                        state["last_carry_failure"] = {"reason": outcome.get("reason"),
+                                                       "detail": outcome.get("detail"), "at": now}
+                        result = "retry"
                     else:
                         state["attempts"] = int(state.get("attempts") or 0) + 1
                         state["last_failure"] = {"reason": outcome.get("reason"),
@@ -738,13 +811,14 @@ def _record_pass(path: Path, harness: str, sid: str, env, recorder, appender, no
                     state["last_failure"] = {**(state.get("last_failure") or {}), "gave_up": True,
                                              "dropped_turns": len(state["pending"])}
                     state["pending"], state["attempts"], result = [], 0, "gave-up"
+                _mark_pending(env, state, harness, sid)
             _update(path, apply)
             if not any(outcome.get("ok") for *_rest, outcome in outcomes):
                 break
     return result
 
 
-def turn_start(harness: str, sid: str, cwd: str, env, *, now=None) -> dict:
+def turn_start(harness: str, sid: str, cwd: str, env, *, now=None, recorder=None, appender=None) -> dict:
     """Take this turn's start snapshot (git only while the session records this folder),
     then close any automatic route still open."""
     now = time.time() if now is None else now
@@ -754,6 +828,15 @@ def turn_start(harness: str, sid: str, cwd: str, env, *, now=None) -> dict:
     def begin(state):
         if not state:
             _prune(path.parent, now)
+            _prune_markers(env)
+        # The previous turn is still open: its end step may simply not have run yet (the
+        # next prompt came at once). Keep its start snapshot for that late end; an
+        # interrupted turn's is dropped at the next start or end.
+        if (state.get("turn_ended_at") is None and isinstance(state.get("turn_started_at"), (int, float))
+                and state.get("entries") is not None and state.get("root")):
+            state["prior_turn"] = {key: state.get(key) for key in PRIOR_KEYS}
+        else:
+            state.pop("prior_turn", None)
         top = _top(cwd, env)
         state.update(harness=harness, session_id=sid, top=str(top) if top else None,
                      turn_started_at=now, turn_ended_at=None, head="", entries=None, root="")
@@ -775,8 +858,10 @@ def turn_start(harness: str, sid: str, cwd: str, env, *, now=None) -> dict:
                 result["state"] = "baseline"
 
     _update(path, begin)
-    if any(not entry.get("closed") for entry in (_read(path).get("records") or {}).values()):
-        _record_pass(path, harness, sid, env, record, append, now, 0.0)
+    state = _read(path)
+    if state.get("pending") or any(not entry.get("closed") for entry in (state.get("records") or {}).values()):
+        # A queued turn whose record step did not run (killed) is written at the next boundary.
+        _record_pass(path, harness, sid, env, recorder or record, appender or append, now, 0.0)
     return result
 
 
@@ -789,18 +874,57 @@ def turn_end(harness: str, sid: str, cwd: str, env, *, now=None, recorder=None, 
     path = state_path(env, harness, sid)
     result = {"state": "busy"}
 
+    def queue(state, before, after, top, root, began):
+        """Queue the source changes between ``before`` and ``after`` as one turn."""
+        top_path = Path(top)
+        source, commits = changes(before, after, top_path, root, began, env)
+        result["state"] = "unchanged"
+        if source:
+            overlap = concurrent_sessions(env, harness, sid, top, began, now)
+            pending = state.setdefault("pending", [])
+            pending.append({
+                "id": f"{began:.6f}", "root": root, "top": top, "began": began, "ended": now,
+                "source": source,
+                "fresh": [p for p in source if p not in (before.get("entries") or {})],
+                "section": turn_section(harness, sid, top_path, source, commits, before, after,
+                                        began, now, overlap, env)})
+            del pending[:-MAX_PENDING]
+            _mark_pending(env, state, harness, sid)
+            result["state"] = "changed"
+
     def finish_turn(state):
         if not state:
             result["state"] = "no-start-snapshot"
             return
         began, top = state.get("turn_started_at"), state.get("top")
+        prior = state.get("prior_turn")
+        if isinstance(began, (int, float)) and now < began:
+            # This end happened before the open turn began: the next turn's start step ran
+            # first. The open turn is not this one's to close. This turn's own start
+            # snapshot was kept; the newer turn's start snapshot stands in for its end.
+            result["state"] = "late-end"
+            if (isinstance(prior, dict) and isinstance(prior.get("turn_started_at"), (int, float))
+                    and prior["turn_started_at"] > now):
+                return  # a later turn's kept snapshot: that turn's own late end still needs it
+            state.pop("prior_turn", None)
+            if (isinstance(prior, dict) and isinstance(prior.get("turn_started_at"), (int, float))
+                    and prior["turn_started_at"] <= now and prior.get("entries") is not None
+                    and state.get("entries") is not None and prior.get("top") == top
+                    and prior.get("root") == state.get("root") and top and Path(top).is_dir()):
+                mode, root = _mode(harness, sid, Path(top), state, env)
+                result["root"] = root
+                if mode == "record" and root == prior["root"]:
+                    queue(state, prior, {"head": state.get("head") or "", "entries": state["entries"]},
+                          top, root, prior["turn_started_at"])
+            return
+        state.pop("prior_turn", None)
         opened = (state.get("turn_ended_at") is None and isinstance(began, (int, float)) and top
                   and Path(top).is_dir())
         result["state"] = "no-start-snapshot"
         if opened:
             top_path = Path(top)
             mode, root = _mode(harness, sid, top_path, state, env)
-            result["state"] = mode
+            result["state"], result["root"] = mode, root
             after = None
             if mode == "record":
                 # Only this turn's own start snapshot is compared; without it nothing is attributed.
@@ -810,19 +934,7 @@ def turn_end(harness: str, sid: str, cwd: str, env, *, now=None, recorder=None, 
                 if after is not None and after.get("entries") is None:
                     after = None
             if after is not None:
-                source, commits = changes(state, after, top_path, root, began, env)
-                result["state"] = "unchanged"
-                if source:
-                    overlap = concurrent_sessions(env, harness, sid, top, began, now)
-                    pending = state.setdefault("pending", [])
-                    pending.append({
-                        "id": f"{began:.6f}", "root": root, "top": top, "began": began, "ended": now,
-                        "source": source,
-                        "fresh": [p for p in source if p not in (state.get("entries") or {})],
-                        "section": turn_section(harness, sid, top_path, source, commits, state, after,
-                                                began, now, overlap, env)})
-                    del pending[:-MAX_PENDING]
-                    result["state"] = "changed"
+                queue(state, state, after, top, root, began)
         state.update(turn_ended_at=now, entries=None, head="")
 
     if _update(path, finish_turn) is None:
@@ -831,9 +943,67 @@ def turn_end(harness: str, sid: str, cwd: str, env, *, now=None, recorder=None, 
     flushed = ""
     if state.get("pending") or any(not entry.get("closed") for entry in (state.get("records") or {}).values()):
         flushed = _record_pass(path, harness, sid, env, recorder, appender, now, RECORD_LOCK_WAIT)
+    adopted = _adopt_orphans(result.get("root") or "", harness, sid, env, now, recorder, appender)
     state = _read(path)
     return {"state": flushed if flushed and flushed != "busy" else result["state"],
-            "records": state.get("records") or {}, "pending": len(state.get("pending") or [])}
+            "records": state.get("records") or {}, "pending": len(state.get("pending") or []),
+            "adopted": adopted}
+
+
+def session_ended(harness: str, sid: str) -> bool:
+    """Proof that a session is gone, from the evidence the runtime already uses for a
+    steward's end (``tools/fleet/collectors/steward.session_liveness``: herdr rows, the
+    Claude process census, open Codex rollouts, visible OpenCode sessions, the registry
+    record's process). Only ``ended`` counts; ``live`` and ``unknown`` do not."""
+    try:
+        tools = str(ROOT / "tools")
+        if tools not in sys.path:
+            sys.path.insert(0, tools)
+        from fleet.collectors import steward
+        return steward.session_liveness(harness, sid) == "ended"
+    except Exception:  # noqa: BLE001 -- unknown is not ended
+        return False
+
+
+def _adopt_orphans(root: str, harness: str, sid: str, env, now: float, recorder, appender) -> list:
+    """Write other sessions' queued turns for this folder -- this folder only -- when that
+    session is proven gone (``session_ended``), its record lock is free and its state has not
+    moved for ``ORPHAN_AFTER``. Each is written as that session (its identity, its own
+    record), through the same record pass kept to this folder; a session whose pass is
+    running keeps its lock and is skipped, and a failed carry leaves its attempts alone. No
+    process is added: this runs inside a turn-end step that is already running."""
+    adopted = []
+    if not root:
+        return adopted
+    directory = _pending_marker(env, root, harness, sid).parent
+    try:
+        markers = [entry.name for entry in os.scandir(directory)]
+    except OSError:
+        return adopted
+    for name in markers:
+        other_harness, _, other_sid = name.partition("--")
+        if (other_harness, other_sid) == (harness, sid) or other_harness not in HARNESSES \
+                or not _SAFE_SID.match(other_sid):
+            continue
+        other = state_path(env, other_harness, other_sid)
+        try:
+            idle = now - other.stat().st_mtime
+        except OSError:
+            with contextlib.suppress(OSError):
+                (directory / name).unlink()
+            continue
+        if idle < ORPHAN_AFTER:
+            continue
+        if not any(row.get("root") == root for row in _read(other).get("pending") or []):
+            with contextlib.suppress(OSError):
+                (directory / name).unlink()
+            continue
+        if not session_ended(other_harness, other_sid):
+            continue  # idle, alive or unknown: its own next boundary writes it
+        outcome = _record_pass(other, other_harness, other_sid, env, recorder, appender, now, 0.0,
+                               only_root=root, carried=True)
+        adopted.append(f"{other_harness}:{other_sid}:{outcome or 'none'}")
+    return adopted
 
 
 def main(argv=None) -> int:
@@ -842,12 +1012,17 @@ def main(argv=None) -> int:
     parser.add_argument("--harness", choices=HARNESSES, required=True)
     parser.add_argument("--session", required=True)
     parser.add_argument("--cwd", required=True)
+    # The hook's own event time; the detached steps of two turns may run out of order.
+    parser.add_argument("--at", type=float, default=None)
     args = parser.parse_args(argv)
     if not _SAFE_SID.match(args.session) or skipped(os.environ):
         return 0
+    at = args.at
+    if at is not None and not (0 < at <= time.time() + CLOCK_SLACK):
+        at = None
     try:
         step = turn_start if args.phase == "start" else turn_end
-        step(args.harness, args.session, args.cwd, os.environ)
+        step(args.harness, args.session, args.cwd, os.environ, now=at)
     except Exception:  # noqa: BLE001 -- detached and silent: a failure leaves only its state
         pass
     return 0

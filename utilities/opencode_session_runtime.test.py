@@ -94,6 +94,25 @@ class NativeSessionTest(unittest.TestCase):
         self.assertEqual(result["result"], "answer")
         self.assertEqual(result["subtype"], "success")
 
+    def test_a_turns_steps_add_up_to_its_token_usage_counters_only(self):
+        self.program("event('step_start', part={})\n"
+                     "event('step_finish', part={'reason':'tool-calls','tokens':{'input':100,'output':20,"
+                     "'reasoning':5,'cache':{'read':1000,'write':7}}})\n"
+                     "event('step_start', part={})\n"
+                     "event('text', part={'text':'answer'})\n"
+                     "event('step_finish', part={'reason':'stop','tokens':{'input':30,'output':10,"
+                     "'reasoning':0,'cache':{'read':1120,'write':0}}})\n")
+        with unittest.mock.patch.object(runtime.opencode_runtime, "is_v2", return_value=True):
+            result, code = runtime.run_turn(self.args, "question", emit=self.events.append)
+        self.assertEqual(code, 0)
+        self.assertEqual(result["usage"], {"input_tokens": 130, "output_tokens": 35,
+                                           "cache_read_input_tokens": 2120,
+                                           "cache_creation_input_tokens": 7})
+        self.program("event('step_start', part={})\nevent('text', part={'text':'answer'})\n")
+        with unittest.mock.patch.object(runtime.opencode_runtime, "is_v2", return_value=True):
+            result, _code = runtime.run_turn(self.args, "question", emit=self.events.append)
+        self.assertNotIn("usage", result)   # no counts reported: none invented
+
     def test_v2_identityless_provider_rejection_is_preserved_without_secret(self):
         self.program("print(json.dumps({'type':'error','sessionID':'','error':{"
                      "'type':'provider.auth','code':'api_key_expired','status':401,"

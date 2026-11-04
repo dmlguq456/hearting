@@ -21,6 +21,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 import pane_ownership as po
 import session_tidy as st
 import session_tidy_native as native
+from split_module_fixture import patch_split
 
 
 class PaneOwnershipTest(unittest.TestCase):
@@ -43,18 +44,66 @@ class PaneOwnershipTest(unittest.TestCase):
         sid = "019facc9-fe83-7480-89f6-9e64fbebf0ca"
         binding = {"pid": 1234, "pid_start": "77", "session_id": sid,
                    "pane": "w:p1", "socket_path": "/tmp/herdr.sock"}
-        with mock.patch.object(po, "_registered_worker", return_value=False), \
+        with patch_split(po, "_registered_worker", return_value=False), \
                 mock.patch.object(po, "_caller_runtime", return_value=((99, 1, 1, 0, 0, "1"), True)), \
                 mock.patch.object(po, "codex_tui_process_bindings", return_value=[binding]), \
                 mock.patch.object(po, "_process", return_value=(1234, 1, 1, 0, 0, "77")):
             got = po.codex_caller_binding(sid, pid=99, environ={
                 "CODEX_THREAD_ID": sid, "HERDR_PANE_ID": "foreign", "HERDR_SOCKET_PATH": "/tmp/foreign"})
         self.assertEqual(got, binding)
-        with mock.patch.object(po, "_registered_worker", return_value=False), \
+        with patch_split(po, "_registered_worker", return_value=False), \
                 mock.patch.object(po, "_caller_runtime", return_value=((99, 1, 1, 0, 0, "1"), True)), \
                 mock.patch.object(po, "codex_tui_process_bindings", return_value=[binding, dict(binding, pane="w:p2")]):
             self.assertIsNone(po.codex_caller_binding(
                 sid, pid=99, environ={"CODEX_THREAD_ID": sid, "HERDR_PANE_ID": "w:p1"}))
+
+    def test_a_daemon_hook_without_a_thread_id_binds_by_its_own_thread_and_never_by_another(self):
+        # Codex runs hooks under its shared app-server with no CODEX_THREAD_ID (measured
+        # 2026-09-25); a tool command carries its own. Both keep the one-binding proof.
+        sid = "019facc9-fe83-7480-89f6-9e64fbebf0ca"
+        binding = {"pid": 1234, "pid_start": "77", "session_id": sid,
+                   "pane": "w:p1", "socket_path": "/tmp/herdr.sock"}
+        with patch_split(po, "_registered_worker", return_value=False), \
+                mock.patch.object(po, "_caller_runtime", return_value=((99, 1, 1, 0, 0, "1"), True)), \
+                mock.patch.object(po, "codex_tui_process_bindings", return_value=[binding]), \
+                mock.patch.object(po, "_process", return_value=(1234, 1, 1, 0, 0, "77")):
+            self.assertEqual(po.codex_caller_binding(sid, pid=99, environ={}, from_hook=True), binding)
+            self.assertIsNone(po.codex_caller_binding(sid, pid=99, environ={}))   # not a hook
+            self.assertIsNone(po.codex_caller_binding(sid, pid=99, from_hook=True, environ={
+                "CODEX_THREAD_ID": "019facc9-fe83-7480-89f6-9e64fbebf0cb"}))
+        with patch_split(po, "_registered_worker", return_value=False), \
+                mock.patch.object(po, "_caller_runtime", return_value=((99, 1, 1, 0, 0, "1"), False)), \
+                mock.patch.object(po, "codex_tui_process_bindings", return_value=[binding]):
+            self.assertIsNone(po.codex_caller_binding(sid, pid=99, environ={}, from_hook=True))   # not the daemon
+
+    def test_the_daemon_hook_gets_the_bound_pane_and_a_fallback_names_its_steps(self):
+        sid = "019facc9-fe83-7480-89f6-9e64fbebf0ca"
+        binding = {"pid": 1234, "pid_start": "77", "session_id": sid,
+                   "pane": "w:p1", "socket_path": "/run/herdr/actual.sock"}
+        with tempfile.TemporaryDirectory() as temp, \
+                mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(Path(temp) / "state"),
+                                             "XDG_CONFIG_HOME": str(Path(temp) / "config")}, clear=True), \
+                patch_split(po, "_registered_worker", return_value=False), \
+                mock.patch.object(po, "_caller_runtime", return_value=((99, 1, 1, 0, 0, "1"), True)), \
+                mock.patch.object(po, "_process", return_value=(1234, 1, 1, 0, 0, "77")):
+            with mock.patch.object(po, "codex_tui_process_bindings", return_value=[binding]):
+                seat = st.resolve_seat("codex", temp, sid=sid, hook=True)
+                # Outside a hook the caller's own thread id is still required.
+                self.assertEqual(st.resolve_seat("codex", temp, sid=sid).kind, "project")
+            self.assertEqual((seat.kind, seat.pane, seat.socket_path),
+                             ("pane", "w:p1", "/run/herdr/actual.sock"))
+            records = Path(temp) / "state" / "hearting" / "session-tidy" / "seat-fallback"
+            self.assertFalse(records.exists())                 # only a hook's fallback is recorded
+            with mock.patch.object(po, "codex_tui_process_bindings", return_value=[]):
+                self.assertEqual(st.resolve_seat("codex", temp, sid=sid, hook=True).kind, "project")
+                (record,) = records.glob("*.json")
+                first = json.loads(record.read_text())
+                st.resolve_seat("codex", temp, sid=sid, hook=True)
+            self.assertEqual({key: first[key] for key in
+                              ("sid", "caller", "service", "thread_env", "binding")},
+                             {"sid": sid, "caller": "codex", "service": True,
+                              "thread_env": "absent", "binding": "none"})
+            self.assertEqual(json.loads(record.read_text())["at"], first["at"])   # unchanged steps
 
     def test_pane_seat_from_binding_uses_the_bound_socket_not_inherited_environment(self):
         binding = {"pid": 1, "pid_start": "2", "session_id": "t-A",
@@ -185,7 +234,7 @@ class PaneOwnershipTest(unittest.TestCase):
                 if harness == "codex":
                     with mock.patch.object(po, "_native_session", return_value=sid), \
                             mock.patch.object(po, "_read_codex_footer_threads", return_value={sid}), \
-                            mock.patch.object(po, "_registered_worker", return_value=False):
+                            patch_split(po, "_registered_worker", return_value=False):
                         self.assertEqual(self.verify(foreground.pid, harness, sid), "wB:p3N")
                 else:
                     self.assertEqual(self.verify(foreground.pid, harness, sid), "wB:p3N")
@@ -332,12 +381,12 @@ class PaneOwnershipTest(unittest.TestCase):
         with mock.patch.object(procscan, "read_environ", return_value=owner_env), \
                 mock.patch.object(po, "_native_session", return_value=current), \
                 mock.patch.object(po, "_read_codex_footer_threads", return_value=set()), \
-                mock.patch.object(po, "_registered_worker", return_value=False):
+                patch_split(po, "_registered_worker", return_value=False):
             self.assertEqual(self.verify(foreground.pid, "codex", current), "wB:p3N")
         with mock.patch.object(procscan, "read_environ", return_value=owner_env), \
                 mock.patch.object(po, "_native_session", return_value=current), \
                 mock.patch.object(po, "_read_codex_footer_threads", return_value={"different-thread"}), \
-                mock.patch.object(po, "_registered_worker", return_value=False):
+                patch_split(po, "_registered_worker", return_value=False):
             self.assertEqual(self.verify(foreground.pid, "codex", current), "")
 
     def test_current_codex_thread_rechecks_native_claim_and_process_birth(self):
@@ -349,7 +398,7 @@ class PaneOwnershipTest(unittest.TestCase):
         with mock.patch.object(po, "_runtime", return_value=("codex", False)), \
                 mock.patch.object(po, "_native_session", side_effect=(current, replacement)) as native, \
                 mock.patch.object(po, "_read_codex_footer_threads", return_value=set()), \
-                mock.patch.object(po, "_registered_worker", return_value=False):
+                patch_split(po, "_registered_worker", return_value=False):
             self.assertEqual(po.current_codex_thread(
                 "wB:p3N", foreground.pid, executable=str(self.herdr)), "")
         self.assertEqual(native.call_count, 2)
@@ -359,7 +408,7 @@ class PaneOwnershipTest(unittest.TestCase):
                 mock.patch.object(po, "_process", side_effect=(record, recycled)), \
                 mock.patch.object(po, "_native_session", return_value=current) as native, \
                 mock.patch.object(po, "_read_codex_footer_threads", return_value=set()), \
-                mock.patch.object(po, "_registered_worker", return_value=False):
+                patch_split(po, "_registered_worker", return_value=False):
             self.assertEqual(po.current_codex_thread(
                 "wB:p3N", foreground.pid, executable=str(self.herdr)), "")
         native.assert_called_once()
@@ -376,7 +425,7 @@ class PaneOwnershipTest(unittest.TestCase):
                 mock.patch.object(po, "_pane_process_info", return_value=info), \
                 mock.patch.object(po, "_process", return_value=record), \
                 mock.patch.object(po, "_runtime", return_value=("codex", False)), \
-                mock.patch.object(po, "_registered_worker", return_value=False), \
+                patch_split(po, "_registered_worker", return_value=False), \
                 mock.patch.object(po, "_native_session", return_value=sid) as native, \
                 mock.patch.object(po, "_read_codex_footer_threads", return_value=set()):
             self.assertEqual(po.current_codex_thread("w:p1", pid, executable="/fake/herdr"), sid)
@@ -403,7 +452,7 @@ class PaneOwnershipTest(unittest.TestCase):
                 mock.patch.object(codex, "_daemon_endpoint_current", return_value=True), \
                 mock.patch.object(codex, "_listener_unchanged", return_value=True), \
                 mock.patch.object(po, "_read_codex_footer_threads", return_value=set()), \
-                mock.patch.object(po, "_registered_worker", return_value=False):
+                patch_split(po, "_registered_worker", return_value=False):
             self.assertEqual(self.verify(foreground.pid, "codex", current), "wB:p3N")
             self.assertEqual(self.verify(foreground.pid, "codex", foreign), "")
 
@@ -417,7 +466,7 @@ class PaneOwnershipTest(unittest.TestCase):
                 mock.patch.object(procscan, "read_environ", return_value=owner_env), \
                 mock.patch.object(po, "_native_session", return_value=current), \
                 mock.patch.object(po, "_read_codex_footer_threads", return_value=set()), \
-                mock.patch.object(po, "_registered_worker", return_value=False):
+                patch_split(po, "_registered_worker", return_value=False):
             self.assertEqual(po.codex_tui_pane_endpoint(current, executable=str(self.herdr)),
                              ("wB:p3N", "/owner.sock"))
             binding = po.codex_tui_process_bindings(current, executable=str(self.herdr))
@@ -443,7 +492,7 @@ class PaneOwnershipTest(unittest.TestCase):
         with mock.patch.object(po.os, "listdir", return_value=[str(foreground.pid)]), \
                 mock.patch.object(procscan, "read_environ", return_value=named_server), \
                 mock.patch.object(po, "_native_session", return_value=current), \
-                mock.patch.object(po, "_registered_worker", return_value=False):
+                patch_split(po, "_registered_worker", return_value=False):
             self.assertIsNone(po.codex_tui_pane_endpoint(current, executable=str(self.herdr)))
 
     def test_endpoint_reads_the_pane_hint_before_the_session_proof(self):
@@ -456,7 +505,7 @@ class PaneOwnershipTest(unittest.TestCase):
                 mock.patch.object(procscan, "read_environ", return_value=owner_env), \
                 mock.patch.object(po, "_native_session", return_value=current) as proof, \
                 mock.patch.object(po, "_read_codex_footer_threads", return_value=set()), \
-                mock.patch.object(po, "_registered_worker", return_value=False):
+                patch_split(po, "_registered_worker", return_value=False):
             self.assertIsNone(po.codex_tui_pane_endpoint(
                 current, pane_hint="wB:p9Z", executable=str(self.herdr)))
             proof.assert_not_called()
@@ -487,7 +536,7 @@ class PaneOwnershipTest(unittest.TestCase):
         with mock.patch.object(po.os, "listdir", return_value=[str(pid) for pid in pids]), \
                 mock.patch.object(po, "_runtime", return_value=("codex", False)), \
                 mock.patch.object(po, "_process", side_effect=lambda pid: records.get(int(pid))), \
-                mock.patch.object(po, "_registered_worker", return_value=False), \
+                patch_split(po, "_registered_worker", return_value=False), \
                 mock.patch.object(procscan, "read_environ", side_effect=lambda pid: envs[int(pid)]), \
                 mock.patch.object(po, "_pane_process_info", side_effect=pane_info), \
                 mock.patch.object(po, "_read_codex_footer_threads", return_value=set()), \
@@ -515,7 +564,7 @@ class PaneOwnershipTest(unittest.TestCase):
                     "HERDR_PANE_ID": "wB:p3N", "HERDR_SOCKET_PATH": ""}), \
                 mock.patch.object(po, "_native_session", return_value=current), \
                 mock.patch.object(po, "_read_codex_footer_threads", return_value={current}), \
-                mock.patch.object(po, "_registered_worker", return_value=False):
+                patch_split(po, "_registered_worker", return_value=False):
             self.assertTrue(hp.may_report("codex", current, worker=False))
             self.assertFalse(hp.may_report("codex", "old-thread", worker=False))
 
@@ -529,7 +578,7 @@ class PaneOwnershipTest(unittest.TestCase):
                 mock.patch.object(po, "_caller_runtime", return_value=(process, False)), \
                 mock.patch.object(po.shutil, "which", return_value=str(self.herdr)), \
                 mock.patch.object(po, "_read_codex_footer_threads", return_value={current}), \
-                mock.patch.object(po, "_registered_worker", return_value=False):
+                patch_split(po, "_registered_worker", return_value=False):
             self.assertEqual(st.session_from_env(), ("codex", current))
 
     def test_dual_root_transition_keeps_caller_thread_but_refuses_pane(self):
@@ -539,7 +588,7 @@ class PaneOwnershipTest(unittest.TestCase):
         with mock.patch.object(po, "_caller_runtime", return_value=(caller, True)), \
                 mock.patch.object(po, "_native_session", return_value=""), \
                 mock.patch.object(po, "_read_codex_footer_threads", return_value=set()), \
-                mock.patch.object(po, "_registered_worker", return_value=False), \
+                patch_split(po, "_registered_worker", return_value=False), \
                 mock.patch.dict(os.environ, {"CODEX_THREAD_ID": caller_thread}, clear=True):
             self.assertEqual(po.current_codex_thread_for_caller("wB:p3N"), caller_thread)
             self.assertEqual(self.verify(123, "codex", caller_thread), "")
@@ -927,7 +976,7 @@ finally:
                 self.assertFalse(po.verified_terminal_caller(variant, pid=pid))
             with mock.patch.object(po.os, "getuid", return_value=os.getuid() + 1):
                 self.assertFalse(po.verified_terminal_caller(variant, pid=pid))
-            with mock.patch.object(po, "_registered_worker", return_value=True):
+            with patch_split(po, "_registered_worker", return_value=True):
                 self.assertFalse(po.verified_terminal_caller(variant, pid=pid))
             with mock.patch.object(po, "_runtime", return_value=("codex", True)):
                 self.assertFalse(po.verified_terminal_caller(variant, pid=pid))

@@ -149,8 +149,10 @@ activation record carrying a retired `profile*` field is read but ignored.
 - The SHA-256 sidecar is an integrity/corruption check. Authenticity remains
   anchored to the repository's GitHub Release and HTTPS publisher account; the
   sidecar is not an independent signature.
-- `linked` is the maintainer default. It projects one explicit local checkout;
-  managed update never fetches, pulls, or repoints it.
+- `linked` is an explicit live-debug mode (`runtime activate --mode linked`);
+  `runtime activate` defaults to `packaged` for maintainers too. `linked`
+  projects one explicit local checkout; managed update never fetches, pulls,
+  or repoints it.
 - A manually activated `packaged` source changes only after `runtime refresh`;
   a managed release changes through `harness update`. Both use the same native
   discovery paths.
@@ -557,6 +559,10 @@ existence · canonical generator drift · preflight assertions · bootstrap load
 smoke). This avoids mixing activation's per-file discovery paths with the old
 installer layout while retaining verification for installations that have not
 migrated to activation yet.
+
+PyYAML is a required dependency (framed routes read frame proposals with it):
+`verify` fails when the harness's Python cannot import it, and `runtime doctor`
+prints one `missing:` line for it without changing its exit code.
 
 With no runtime named, or `all`, `verify` covers the runtimes installed in this
 scope (an activation record or a legacy copy-install manifest), and

@@ -3,6 +3,7 @@ import json, subprocess, sys, tempfile, unittest
 import os
 from pathlib import Path
 from unittest import mock
+from split_module_fixture import patch_split
 
 ROOT=Path(__file__).resolve().parents[1]
 HELPER=ROOT/"utilities/artifact-snapshot.py"
@@ -165,7 +166,7 @@ class ArtifactSnapshotTest(unittest.TestCase):
    repository=root/"repo"; repository.mkdir(); subprocess.run(["git","init","-q",str(repository)],check=True)
    (repository/"README.md").write_text("r\n")
    cycle=root/".agent_reports"/"cycle"/"artifacts"; cycle.mkdir(parents=True)
-   with mock.patch.object(artifact_producer,"route_cycle_for",return_value={"cycle_id":"cyc"}), \
+   with patch_split(artifact_producer,"route_cycle_for",return_value={"cycle_id":"cyc"}), \
         mock.patch.object(artifact_producer,"_cycle_artifacts_dir",return_value=cycle):
     self.assertIsNone(helper.worktree_target(root/".agent_reports",{"cwd":str(plain)},plain/"notes.md"))
     self.assertIsNone(helper.worktree_target(root/".agent_reports",{"cwd":str(repository)},repository/".git"/"HEAD"))

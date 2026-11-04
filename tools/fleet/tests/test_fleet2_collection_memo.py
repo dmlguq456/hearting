@@ -18,6 +18,8 @@ if str(UTILITIES) not in sys.path:
 
 from fleet.collectors import codex, dispatch  # noqa: E402
 import session_tidy  # noqa: E402
+sys.path.append(str(Path(__file__).resolve().parents[3] / "utilities"))  # split_module_fixture
+from split_module_fixture import patch_split  # noqa: E402
 
 
 class Fleet2CollectionMemoTest(unittest.TestCase):
@@ -32,7 +34,7 @@ class Fleet2CollectionMemoTest(unittest.TestCase):
                                          "details": {"label": "original"}}) + "\n")
 
     def _state_root(self):
-        return mock.patch.object(session_tidy, "state_root", return_value=self.root)
+        return patch_split(session_tidy, "state_root", return_value=self.root)
 
     def test_scope_reads_once_and_returns_defensive_nested_copies(self):
         with self._state_root(), mock.patch.object(

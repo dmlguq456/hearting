@@ -22,6 +22,7 @@ import dispatch_contract as D
 import dispatch_replacement as R
 import work_start as W
 from dispatch_completion_join import CurrentDeliveryState
+from split_module_fixture import patch_split
 os.environ.setdefault("HEARTING_CAPACITY_PROBE_CLI", os.devnull)  # never ask a real Claude login
 
 LIMITED = "resets 2099-01-01 00:00 (UTC)"
@@ -58,7 +59,7 @@ class CapacityResumeTest(unittest.TestCase):
                     "root_route_id": "rt-root", "node": "__owner__" if m.get("worker_type") == "owner" else m["route_node"]}),
                 mock.patch.object(R, "_reuse_snapshot", return_value={
                     "completed": [], "cycle_id": "cyc", "producer_id": "prod", "gates": []}),
-                mock.patch.object(D, "attempt_process_quiescence", side_effect=self.quiescence),
+                patch_split(D, "attempt_process_quiescence", side_effect=self.quiescence),
                 mock.patch.object(D, "resolve_attempt_cleanup", side_effect=self.cleanup),
                 mock.patch("artifact_producer.prepare_route_artifact_env", return_value={})):
             patcher.start()
@@ -154,7 +155,7 @@ class CapacityResumeTest(unittest.TestCase):
     def seal_under(self, home):
         """Re-seal the source owner's input as an older installed release."""
         (R._directory(self.jobs) / "inputs" / "att-owner.json").unlink()
-        with mock.patch.object(R, "ROOT", home):
+        with patch_split(R, "ROOT", home):
             args = SimpleNamespace(attempt_id="att-owner", jobs_path=self.jobs, worktree=str(self.root),
                                    route_id="rt-cap", route_node="owner", model="old-model", model_profile="deep",
                                    replacement_input_argv=["--start", "--attempt-id", "att-owner", "--prompt-text", "the raw task"])
@@ -405,7 +406,7 @@ class CapacityResumeTest(unittest.TestCase):
         self.assertEqual(pending["reason"], "replacement-launch-timeout", result)
         replacement = self.replacement_id()
         self.assertEqual(self.rows()[replacement][1]["launch_claimed"], "0")
-        with mock.patch.object(R, "ROOT", self.root / "newer-release"):
+        with patch_split(R, "ROOT", self.root / "newer-release"):
             result = W.start_work(self.route, self.path, self.jobs, run=self.claiming_launcher(False))
         self.assertEqual(result["state"], "running", result)
         self.assertEqual(self.replacement_id(), replacement)
@@ -540,7 +541,7 @@ class CapacityResumeTest(unittest.TestCase):
                             R.exhausted_attention(self.jobs, previous, self.rows()[previous][1])
                             history = [(path, path.read_bytes()) for path in
                                 R._directory(self.jobs).joinpath("attention").rglob("*.json")]
-                        with mock.patch.object(R, "ROOT", self.root / "installed-new-release"):
+                        with patch_split(R, "ROOT", self.root / "installed-new-release"):
                             result = self.start()
                         self.assertEqual(result["state"], "running", result)
                         self.assertEqual((len(self.calls), len(self.claims())), (count, count))

@@ -22,6 +22,11 @@ import tempfile
 import time
 from typing import Iterable
 
+try:  # ends a detached child with the test that started it; no-op outside tests
+    from detached_lifetime import bind as end_with_test
+except ImportError:  # a partial tree without it (e.g. a fixture release): no record
+    def end_with_test(child):
+        return child
 from dispatch_attempt_policy import (
     PaneObservation,
     RegisteredWorkObservation,
@@ -173,12 +178,20 @@ def _service_layout(root: Path):
 
 def _service_environment_matches(root: Path, environ=None) -> bool:
     environ = os.environ if environ is None else environ
+    layout = None
     for name in ("AGENT_HOME", "CLAUDE_HOME"):
         raw = environ.get(name)
         if not raw:
             continue
         try:
-            if Path(raw).expanduser().resolve(strict=True) != root:
+            if Path(raw).expanduser().resolve(strict=True) == root:
+                continue
+            # The installer's own `current` pointer names this install whichever
+            # release it points at now. Resolving it after an install names the
+            # new release, which made a helper started under it refuse to follow.
+            if layout is None:
+                layout = _service_layout(root) or ()
+            if not layout or Path(os.path.abspath(os.path.expanduser(raw))) != layout[3]:
                 return False
         except (OSError, RuntimeError, ValueError):
             return False
@@ -914,7 +927,7 @@ def request_obligation_recovery(*, lifecycle_root: str | Path | None = None) -> 
     else:
         child_env[STATE_ROOT_IDENTITY_ENV] = f"{identity[0]}:{identity[1]}"
     try:
-        subprocess.Popen(
+        end_with_test(subprocess.Popen(
             command,
             cwd=str(root),
             env=child_env,
@@ -923,7 +936,7 @@ def request_obligation_recovery(*, lifecycle_root: str | Path | None = None) -> 
             stderr=subprocess.DEVNULL,
             close_fds=True,
             start_new_session=True,
-        )
+        ))
         return True
     except (OSError, subprocess.SubprocessError):
         return False
@@ -1158,8 +1171,13 @@ def retain_registered_completion(jobs, attempt_id, session_id, carrier, *, holde
     return True
 
 
-def retain_session_notice(jobs, harness, storage_sid, record):
-    """Retain one route-free notice under its immutable storage identity."""
+def retain_session_notice(jobs, harness, storage_sid, record, *, read_context=None):
+    """Retain one route-free notice under its immutable storage identity.
+
+    ``read_context`` is the caller's retention context: one current lineage
+    observation shared by the retentions of one runner pass, never its
+    discovery view.
+    """
     from dispatch_seat_handover import record_recipient_binding
     from harness_capabilities import parent_completion
     import dispatch_pending_delivery as pending
@@ -1188,7 +1206,8 @@ def retain_session_notice(jobs, harness, storage_sid, record):
         if any(isinstance(value, str) and value.startswith(session_notice.LINEAGE_PREFIX)
                for value in stored.get("lineage", [])):
             return session_notice.retain_pending(jobs, {**stored, "_storage_key": storage_sid})
-        if record_recipient_binding(stored, storage_sid, harness=harness, jobs=jobs) is None:
+        if record_recipient_binding(stored, storage_sid, harness=harness, jobs=jobs,
+                                    read_context=read_context) is None:
             return False
         identity = {"state_root": str(root), "storage_sid": storage_sid,
                     "harness": harness, "delivery_id": record["delivery_id"],
@@ -1295,7 +1314,7 @@ def retain_ordinary_notice(jobs, record):
     return session_notice.retain_pending(jobs, record)
 
 
-def _ordinary_notice_target(identity, carrier):
+def _ordinary_notice_target(identity, carrier, *, read_context=None):
     from harness_capabilities import parent_completion
     from dispatch_seat_handover import _notice_recipient_binding
     import session_notice
@@ -1313,14 +1332,15 @@ def _ordinary_notice_target(identity, carrier):
         if not isinstance(identity.get("lineage"), dict):
             return None
         lineage = session_notice._lineage(identity["lineage"], harness, storage)
-        pair = _notice_recipient_binding(lineage, jobs, harness)
+        pair = _notice_recipient_binding(lineage, jobs, harness, read_context=read_context)
         return (*pair, storage) if pair is not None else None
     except (OSError, ValueError, KeyError, TypeError, RuntimeError):
         return None
 
 
 def _ordinary_notice_delivery(message, roots=None, *, received_only=False,
-                              require_current_recipient=True, original_body=None):
+                              require_current_recipient=True, original_body=None,
+                              read_context=None):
     binding = message.get("producer_binding") or {}
     if (binding.get("schema") != "retained-runtime-notice-v1"
             or message.get("state") not in {"pending", "queued", "unverified", "received"}
@@ -1367,7 +1387,8 @@ def _ordinary_notice_delivery(message, roots=None, *, received_only=False,
         saved = (observation.get("transfer_bindings") or {}).get(message.get("ref"))
         if saved != binding:
             return
-        if (require_current_recipient and _ordinary_notice_target(identity, intent["carrier"]) !=
+        if (require_current_recipient and _ordinary_notice_target(
+                identity, intent["carrier"], read_context=read_context) !=
                 (target.get("harness"), target.get("session_id"), identity.get("storage_recipient"))):
             return
         storage = identity.get("storage_recipient")
@@ -1404,10 +1425,10 @@ def ordinary_notice_delivery_settled(message, *, roots=None):
                                             require_current_recipient=False))
 
 
-def ordinary_notice_transfer_is_current(message):
+def ordinary_notice_transfer_is_current(message, *, read_context=None):
     """Whether this immutable transfer still targets the recorded live lineage."""
     return any(True for _ in _ordinary_notice_delivery(
-        message, require_current_recipient=True))
+        message, require_current_recipient=True, read_context=read_context))
 
 
 def acknowledge_ordinary_notice_delivery(message, *, roots=None):
@@ -3542,6 +3563,7 @@ def _ensure_runner(root, *, service_current=None, use_remembered=False,
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             close_fds=True, pass_fds=(fd,), start_new_session=True, env=child_env,
         )
+        end_with_test(process)
         _RUNNERS.append(process)
         return True
     except (OSError, subprocess.SubprocessError):
@@ -3854,6 +3876,10 @@ def bound_work_for_pane(pane: str, harness: str, session_id: str, *,
         if include_parent:
             parent_owned = seat_owns(metadata, session_id, jobs_path,
                                      read_context=read_context)
+            if parent_owned is None and not executor:
+                # Whose work this is cannot be read now: neither this session's nor
+                # another's, so the observation is unknown, as for an unreadable registry.
+                return (), "unknown"
             parent_harness = effective_parent_harness(
                 metadata, jobs_path, read_context=read_context)
         else:

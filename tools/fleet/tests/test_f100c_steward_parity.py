@@ -25,6 +25,8 @@ from fleet import render                                          # noqa: E402
 from fleet import herdr_projection                                # noqa: E402
 from fleet.model import Session                                   # noqa: E402
 from fleet.collectors import steward                              # noqa: E402
+sys.path.append(str(Path(__file__).resolve().parents[3] / "utilities"))  # split_module_fixture
+from split_module_fixture import patch_split  # noqa: E402
 
 
 def _text(segs):
@@ -145,7 +147,7 @@ class StewardChipTest(unittest.TestCase):
         self.assertEqual(render._dw("⚑"), 1)
         measure = render._dw
         for width in (1, 2):
-            with mock.patch.object(render, "_dw", side_effect=lambda text: width if text == "⚑" else measure(text)):
+            with patch_split(render, "_dw", side_effect=lambda text: width if text == "⚑" else measure(text)):
                 marked = render._under_id_connector(original, "⚑", "tag_steward")
                 self.assertEqual(sum(render._dw(t) for t, _ in marked[:-1]), 8)
                 self.assertEqual(sum(render._dw(t) for t, _ in marked), 14)
@@ -429,6 +431,42 @@ class StewardCollectorTest(unittest.TestCase):
         self.assertEqual([target["session_id"] for target in parent.steward_targets], ["local"])
         self.assertEqual(local.steward_parents[0]["session_id"], "self")
         self.assertIsNone(foreign.steward_parents)
+
+    def test_foreign_only_holder_shows_no_flag_in_fleet_or_pane_title(self):
+        # W7 [b6]: a marker plus an unreleased holder relation whose targets all live in
+        # another repository is communication, not a role. Fleet and the pane title
+        # (live and runner-published reads) agree on no flag; a same-repository target
+        # in the same shape flags on both, so the agreement is not vacuous.
+        for harness in ("claude", "codex", "opencode"):
+            for target_cwd, expected in (("/foreign", False), ("/x", True)):
+                with self.subTest(harness=harness, target_cwd=target_cwd):
+                    holder = Session(harness=harness, pid=1, session_id="holder", cwd="/x")
+                    targets = [Session(harness="claude", pid=2 + index, session_id=sid,
+                                       cwd=target_cwd)
+                               for index, sid in enumerate(("t1", "t2"))]
+                    claims = {target.session_id: {
+                        "harness": "claude", "session_id": target.session_id,
+                        "name": target.session_id, "kind": "watch", "source": "watch"}
+                        for target in targets}
+                    markers = {(harness, "holder"): {"session_id": "holder",
+                                                     "targets": claims}}
+                    relation = {"generation": "g", "seat_key": "seat",
+                                "origin": {"harness": harness, "sid": "holder"},
+                                "holder": {"harness": harness, "sid": "holder"},
+                                "targets": list(claims.values()), "lineage": [],
+                                "released": False}
+                    self.registry.return_value = [holder, *targets]
+                    with mock.patch.object(steward, "read_markers", return_value=markers), \
+                         mock.patch.object(steward, "read_relations", return_value=[relation]), \
+                         mock.patch.object(herdr_projection, "_published_steward_relations",
+                                           return_value=[relation]), \
+                         mock.patch("fleet.collectors.herdr._clear_gpu_session_aliases",
+                                    return_value=[]):
+                        steward.enrich([holder, *targets])
+                        self.assertIs(bool(holder.steward), expected)
+                        self.assertIs(herdr_projection.is_steward(harness, "holder"), expected)
+                        self.assertIs(herdr_projection.is_steward(
+                            harness, "holder", published_only=True), expected)
 
     def test_many_session_refresh_reads_relation_ledger_once_and_keeps_exact_lineage(self):
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "utilities"))
@@ -738,6 +776,73 @@ class StewardReverseIndexTest(unittest.TestCase):
         self._enrich([parent, target],
                      {"sidOld": {"harness": "codex", "kind": "watch", "source": "watch"}})
         self.assertEqual(target.steward_parents[0]["session_id"], "sidP")
+
+    def test_a_cleared_claude_target_keeps_its_supervisor(self):
+        """The start marker names the id a Claude target had before /clear. Claude ids
+        are resolved after the herdr pane pass, so the pane's seat-history join waits
+        for the id; joined in the pane pass, it saw no id and the relation was lost."""
+        from fleet.collectors import herdr, procscan
+        parent = Session(harness="claude", pid=1, cwd="/x", slug="p", session_id="sidP")
+        target = Session(harness="claude", pid=2, proc_start="22", cwd="", slug="t")
+
+        def lineage(harness, sid, pane, cwd=None):
+            return ["sidOld"] if (harness, sid, pane, cwd) == ("claude", "sidNew", "w:p2", "/x") else []
+
+        with mock.patch.object(herdr, "pane_session_aliases", side_effect=lineage), \
+             mock.patch.object(herdr, "_clear_gpu_session_aliases", side_effect=lineage), \
+             mock.patch.object(procscan, "read_proc_start", return_value="22"), \
+             mock.patch.object(herdr, "pid_in_panes", return_value=False):
+            herdr.enrich([parent, target], agents=[], pids=(set(), {2}),
+                         pane_bindings={2: {"w:p2"}})
+            self.assertIsNone(target.session_aliases)
+            target.session_id, target.cwd = "sidNew", "/x"   # the Claude enricher, then its directory
+            herdr.join_deferred_pane_aliases([parent, target])
+        self.assertEqual(target.session_aliases, ["sidOld"])
+        self.assertEqual(target._gpu_session_aliases, ["sidOld"])
+        self._enrich([parent, target],
+                     {"sidOld": {"harness": "claude", "kind": "start", "source": "start"}})
+        self.assertTrue(parent.steward)
+        self.assertEqual(target.steward_parents[0]["session_id"], "sidP")
+
+    def test_collection_joins_claude_aliases_after_its_id_and_directory(self):
+        import importlib
+        from types import SimpleNamespace
+        from fleet import session_cwd
+        from fleet.collectors import herdr
+        collectors = importlib.import_module("fleet.collectors")
+        session = SimpleNamespace(harness="claude", pid=123, proc_start="1", cwd="",
+                                  session_id=None, is_child=False)
+        order = []
+
+        class Joined(BaseException):
+            pass
+
+        def claude_enrich(row, **_kwargs):
+            order.append("claude-id")
+            row.session_id = "sid-new"
+
+        def project(rows):
+            order.append("directory")
+            for row in rows:
+                row.cwd = "/work"
+
+        def join(rows):
+            order.append("join")
+            raise Joined([(row.session_id, row.cwd) for row in rows])
+
+        modules = {".claude": SimpleNamespace(enrich=claude_enrich),
+                   ".codex": SimpleNamespace(enrich=lambda *_a, **_k: None),
+                   ".opencode": SimpleNamespace(enrich=lambda *_a, **_k: None)}
+        with mock.patch.object(collectors.procscan, "scan", return_value=[session]), \
+             mock.patch.object(collectors.importlib, "import_module",
+                               side_effect=lambda name, _package: modules[name]), \
+             mock.patch.object(herdr, "enrich", side_effect=lambda *_a, **_k: order.append("pane")), \
+             mock.patch.object(session_cwd, "project", side_effect=project), \
+             mock.patch.object(herdr, "join_deferred_pane_aliases", side_effect=join):
+            with self.assertRaises(Joined) as joined:
+                collectors.collect_all(harness_filter=("claude",))
+        self.assertEqual(order, ["pane", "claude-id", "directory", "join"])
+        self.assertEqual(joined.exception.args[0], [("sid-new", "/work")])
 
     def test_no_markers_leaves_every_field_at_its_default(self):
         target = Session(harness="codex", pid=2, cwd="/x", slug="t", session_id="sidT")

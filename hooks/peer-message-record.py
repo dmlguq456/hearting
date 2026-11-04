@@ -12,33 +12,102 @@ Two subcommands, dispatched by argv[1]:
                 receipt on disk does not).
 
 Fail-soft over its entire body: any exception is swallowed and the process
-exits 0. Never prints permissionDecision/deny. The prompt path never writes
-to stdout (UserPromptSubmit stdout is injected into the prompt).
+exits 0. Never prints permissionDecision/deny. Stdout carries only the one
+hook JSON object (UserPromptSubmit/PostToolUse context), and only when
+something is pending.
+
+Both hooks run under a 10 s harness timeout, and a cancelled hook loses the
+whole context it was about to add. All reading and claiming before that
+context is flushed therefore shares one budget (`_HOOK_BUDGET_S`) counted from
+process start: work past it is left exactly as it is on disk for the next
+prompt or tool call, the Stop path, the asyncRewake hook or the runner,
+instead of making the user wait. What was claimed or shown is still settled.
+
+After the flush the hook must also end in time, because a cancelled hook's
+output is discarded even when its rows were already marked received. The
+watch ACKs therefore run in a child with a hard timeout, and a run started
+as a script exits on its own `_EXIT_AFTER_FLUSH_S` after spawn once its
+output is flushed.
 """
+import contextlib
+import importlib.util
+import io
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
+
+def _process_started():
+    """This process's spawn on the ``time.monotonic()`` scale (now when unknown).
+
+    The harness timeout runs from spawn, and interpreter start plus imports can
+    take seconds on a loaded machine."""
+    try:
+        with open("/proc/self/stat", "rb") as handle:
+            fields = handle.read().rsplit(b")", 1)[1].split()
+        age = (time.clock_gettime(time.CLOCK_BOOTTIME)
+               - int(fields[19]) / os.sysconf("SC_CLK_TCK"))
+    except (OSError, ValueError, IndexError, AttributeError):
+        return time.monotonic()
+    return time.monotonic() - min(max(age, 0.0), 60.0)
+
+
+# Module load; a run started as a script rebinds it to the process spawn below.
+_STARTED = time.monotonic()
 _HOOKS_DIR = Path(__file__).resolve().parent
 _UTILITIES_DIR = _HOOKS_DIR.parent / "utilities"
 _PEER_MESSAGE_PY = _UTILITIES_DIR / "peer-message.py"
 _PEER_STEWARD_PY = _UTILITIES_DIR / "peer-steward.py"
 _SWEEP_MAX = 5
+# Reading and claiming before the flush (the hook timeout is 10 s). A normal
+# prompt needs well under a second of it; a loaded disk stops here.
+_HOOK_BUDGET_S = 2.5
+# The watch sweep is the fallback carrier: it runs after the exact peer-message
+# claims and may use at most this much of what they left.
+_SWEEP_SHARE_S = 1.0
+# ACKs for receipts already shown run in a child that must end this long after
+# spawn. One left undone shows its line again on the next prompt, which is
+# better than a cancelled hook losing the whole context.
+_ACK_END_S = 4.0
+# A script run that is still busy settling this long after spawn exits once its
+# output is flushed, so the harness (10 s) never discards what it showed.
+_EXIT_AFTER_FLUSH_S = 8.5
+# `record` children write one ledger row each; they keep their own bound.
+_RECORD_TIMEOUT_S = 2.5
+_MODULES = {}
+
+
+def _deadline():
+    return _STARTED + _HOOK_BUDGET_S
+
+
+def _load_module(key, path, name):
+    """One fail-soft load per process; ``None`` when the file cannot run."""
+    if key not in _MODULES:
+        try:
+            spec = importlib.util.spec_from_file_location(name, str(path))
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            _MODULES[key] = mod
+        except BaseException:  # a broken tool may even call sys.exit at import
+            _MODULES[key] = None
+    return _MODULES[key]
 
 
 def _peer_message_module():
     """The ledger tool as a module (trailer parser + registry-name lookup), fail-soft."""
-    try:
-        import importlib.util
-        spec = importlib.util.spec_from_file_location("_peer_message", str(_PEER_MESSAGE_PY))
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        return mod
-    except Exception:
-        return None
+    return _load_module("peer-message", _PEER_MESSAGE_PY, "_peer_message")
+
+
+def _steward_module():
+    """`peer-steward.py` in this process: a second interpreter and import per
+    prompt cost more than the sweep itself once the machine was loaded."""
+    return _load_module("peer-steward", _PEER_STEWARD_PY, "_peer_record_steward")
 
 _PREFIX_KIND = {
     "[steer]": "steer",
@@ -132,7 +201,7 @@ def handle_post_tool(payload):
     subprocess.run(
         [sys.executable, str(_PEER_MESSAGE_PY), "record"] + args_list,
         input=message.encode("utf-8", "replace"),
-        timeout=5,
+        timeout=_RECORD_TIMEOUT_S,
         capture_output=True,
     )
 
@@ -199,13 +268,13 @@ def _record(args_list, body):
     subprocess.run(
         [sys.executable, str(_PEER_MESSAGE_PY), "record"] + args_list,
         input=body.encode("utf-8"),
-        timeout=5,
+        timeout=_RECORD_TIMEOUT_S,
         capture_output=True,
     )
 
 
 def _typed_watch_line(row):
-    agent = row.get("agent") or {}
+    agent = row.get("agent") if isinstance(row.get("agent"), dict) else {}
     return (
         f"state={row.get('receipt_state') or 'unknown'} agent={agent.get('harness', '-')} "
         f"session_id={agent.get('session_id', '-')} name={agent.get('name') or row.get('target', '-')} "
@@ -214,61 +283,129 @@ def _typed_watch_line(row):
     )
 
 
-def _sweep_env(session_id):
-    env = dict(os.environ)
-    env["CLAUDE_CODE_SESSION_ID"] = str(session_id)
-    return env
+@contextlib.contextmanager
+def _steward_call(session_id):
+    """Run in-process `peer-steward.py` code as the prompt's own session, with
+    stdout (and any child's fd 1) kept out of the hook's JSON output."""
+    previous = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    os.environ["CLAUDE_CODE_SESSION_ID"] = str(session_id)
+    saved = None
+    try:
+        sys.stdout.flush()
+        saved = os.dup(1)
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, 1)
+        os.close(devnull)
+    except (OSError, ValueError):
+        if saved is not None:
+            os.close(saved)
+        saved = None
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            yield
+    finally:
+        if saved is not None:
+            os.dup2(saved, 1)
+            os.close(saved)
+        if previous is None:
+            os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
+        else:
+            os.environ["CLAUDE_CODE_SESSION_ID"] = previous
 
 
-def sweep_undelivered(payload):
+def sweep_undelivered(payload, deadline=None):
     """List un-acked watch receipts for THIS session (bounded, read-only).
 
     Fail-soft in its own right: a broken or slow `peer-steward.py` must never
-    cost the user a prompt. Acking is a separate step (`ack_rows`) that runs
-    only AFTER the context has been written: an ack with no display behind it
-    would silence the fallback forever (review M2).
+    cost the user a prompt, so ``deadline`` stops it and an unreached receipt
+    simply waits for the next prompt. Acking is a separate step (`ack_rows`)
+    that runs only AFTER the context has been written: an ack with no display
+    behind it would silence the fallback forever (review M2).
     """
     session_id = payload.get("session_id")
-    if not session_id:
-        return []
+    if not session_id or (deadline is not None and time.monotonic() >= deadline):
+        return []  # Startup already spent the share: the receipts wait on disk.
     try:
-        proc = subprocess.run(
-            [sys.executable, str(_PEER_STEWARD_PY), "status", "--undelivered", "--json"],
-            capture_output=True, text=True, timeout=5, env=_sweep_env(session_id),
-        )
-        rows = (json.loads(proc.stdout or "{}") or {}).get("watches") or []
-    except Exception:
+        steward = _steward_module()
+        if steward is None:
+            return []
+        with _steward_call(session_id):
+            rows = steward.undelivered_watch_rows(deadline=deadline)
+        return [row for row in rows if isinstance(row, dict)][:_SWEEP_MAX]
+    except BaseException:
         return []
-    return rows[:_SWEEP_MAX]
 
 
-def ack_rows(payload, rows):
+_ACK_SCRIPT = """
+import runpy, signal, sys
+signal.alarm(int(float(sys.argv[2])) + 1)  # ends itself even if its parent is gone
+steward = runpy.run_path(sys.argv[1])
+for watch_id in sys.argv[3:]:
+    try:
+        steward["main"](["ack", watch_id, "--carrier", "userprompt-sweep"])
+    except (Exception, SystemExit):
+        continue
+"""
+
+
+def ack_rows(payload, rows, deadline=None):
+    """ACK the receipts just shown through the normal `ack` command.
+
+    Each watch is revalidated by `ack` itself, which may wait on its seat lock,
+    so the ACKs run in one child with a hard timeout ending at ``deadline``
+    (process spawn + `_ACK_END_S` by default). An unacknowledged receipt is
+    listed again on the next prompt.
+    """
     session_id = payload.get("session_id")
     if not session_id:
         return
     watch_ids = [str(row["watch_id"]) for row in rows[:_SWEEP_MAX] if row.get("watch_id")]
     if not watch_ids:
         return
-    # Load the existing command once. Five independent interpreter/import
-    # starts can exhaust the prompt's deadline under load, even when each ACK
-    # finishes inside its own timeout. Keep the entire ACK phase bounded by
-    # the same five seconds, and revalidate every watch through normal `ack`.
-    script = """
-import runpy, sys
-steward = runpy.run_path(sys.argv[1])
-for watch_id in sys.argv[2:]:
-    try:
-        steward["main"](["ack", watch_id, "--carrier", "userprompt-sweep"])
-    except (Exception, SystemExit):
-        continue
-"""
+    deadline = _STARTED + _ACK_END_S if deadline is None else deadline
+    remaining = deadline - time.monotonic()
+    if remaining < 0.5:
+        return
+    env = dict(os.environ)
+    env["CLAUDE_CODE_SESSION_ID"] = str(session_id)
     try:
         subprocess.run(
-            [sys.executable, "-c", script, str(_PEER_STEWARD_PY), *watch_ids],
-            capture_output=True, timeout=5, env=_sweep_env(session_id),
-        )
+            [sys.executable, "-c", _ACK_SCRIPT, str(_PEER_STEWARD_PY),
+             str(remaining), *watch_ids],
+            capture_output=True, timeout=remaining, env=env)
     except Exception:
         pass
+
+
+class _FlushMark:
+    """Stdout that remembers whether the hook output reached the harness."""
+
+    def __init__(self, stream):
+        self.stream = stream
+        self.flushed = False
+
+    def write(self, text):
+        return self.stream.write(text)
+
+    def flush(self):
+        self.stream.flush()
+        self.flushed = True
+
+
+def _exit_after_flush(mark):
+    """Past `_EXIT_AFTER_FLUSH_S`, a run ends as soon as its output is flushed,
+    even inside a blocked lock wait; until then it keeps its cooperative path."""
+    def on_alarm(_signum, _frame):
+        if mark.flushed:
+            os._exit(0)
+    try:
+        signal.signal(signal.SIGALRM, on_alarm)
+        signal.setitimer(signal.ITIMER_REAL,
+                         max(0.01, _STARTED + _EXIT_AFTER_FLUSH_S - time.monotonic()), 0.25)
+    except (OSError, ValueError, AttributeError):
+        pass
+
+
 def _is_helper_process():
     """F-100c: a title/summary refresher or memory distiller runs `claude -p` with the
     user's prompt text inside ITS prompt, so the trailer would make the helper look like
@@ -283,11 +420,14 @@ def _is_helper_process():
             or bool(env.get("AGENT_DISPATCH_DEPTH")))
 
 
-def main():
+def main(exit_guard=False):
     mode = sys.argv[1] if len(sys.argv) > 1 else ""
     if _is_helper_process():
         return
     payload = _read_stdin_json()
+    out = _FlushMark(sys.stdout)
+    if exit_guard:
+        _exit_after_flush(out)
     if mode == "post-tool":
         try:
             handle_post_tool(payload)
@@ -299,7 +439,8 @@ def main():
             # remains active for subagent calls.
             if mod and not str(payload.get("agent_id") or "").strip():
                 mod.emit_peer_context({"harness": "claude", "session_id": payload.get("session_id")},
-                                      "PostToolUse", native_delivery=True)
+                                      "PostToolUse", native_delivery=True,
+                                      deadline=_deadline(), stream=out)
     elif mode == "prompt":
         # The cross-session `notice` record path runs first and unconditionally:
         # the sweep must never be able to swallow it.
@@ -307,37 +448,50 @@ def main():
             handle_prompt(payload)
         except Exception:
             pass
-        rows = sweep_undelivered(payload)
-        extra = ""
-        if rows:
-            # The only stdout this path ever writes, and only when something is
-            # actually pending. Written and flushed BEFORE the acks (review M2).
-            extra = "\n".join(
-                    ["[peer-steward] undelivered watch receipts:"]
-                    + [_typed_watch_line(row) for row in rows]
-                )
+        prompt = payload.get("prompt") or ""
         mod = _peer_message_module()
-        if mod and ("peer-from:" in (payload.get("prompt") or "")
-                    or "runtime-from:" in (payload.get("prompt") or "")
-                    or "cross-session-message" in (payload.get("prompt") or "")):
-            extra = "\n".join(filter(None, [extra, mod.receiver_guidance(
-                payload.get("prompt") or "",
-                {"harness": "claude", "session_id": payload.get("session_id")},
-                cwd=payload.get("cwd") or os.getcwd())]))
+        guidance = ""
+        if mod and ("peer-from:" in prompt or "runtime-from:" in prompt
+                    or "cross-session-message" in prompt):
+            guidance = mod.receiver_guidance(
+                prompt, {"harness": "claude", "session_id": payload.get("session_id")},
+                cwd=payload.get("cwd") or os.getcwd())
+        rows = []
+
+        def extra_context():
+            # The watch sweep is the fallback carrier (asyncRewake is the primary),
+            # so it runs after the exact peer-message claims, in what they left.
+            found = sweep_undelivered(
+                payload, deadline=min(_deadline(), time.monotonic() + _SWEEP_SHARE_S))
+            sweep = ""
+            if found:
+                sweep = "\n".join(
+                    ["[peer-steward] undelivered watch receipts:"]
+                    + [_typed_watch_line(row) for row in found])
+            # Only receipts whose line was built may be ACKed after the flush
+            # (review M2): an ACK with no display behind it would silence them.
+            rows.extend(found)
+            return "\n".join(filter(None, [sweep, guidance]))
+
         if mod:
             mod.emit_peer_context({"harness": "claude", "session_id": payload.get("session_id")},
-                                  "UserPromptSubmit", extra_context=extra, native_delivery=True)
-        elif extra:
-            print(json.dumps({"hookSpecificOutput": {
-                "hookEventName": "UserPromptSubmit", "additionalContext": extra}}, ensure_ascii=False))
-            sys.stdout.flush()
-        if rows:
+                                  "UserPromptSubmit", extra_context=extra_context,
+                                  native_delivery=True, deadline=_deadline(), stream=out)
+        else:
+            extra = extra_context()
+            if extra:
+                out.write(json.dumps({"hookSpecificOutput": {
+                    "hookEventName": "UserPromptSubmit", "additionalContext": extra}},
+                    ensure_ascii=False) + "\n")
+                out.flush()
+        if rows and out.flushed:
             ack_rows(payload, rows)
 
 
 if __name__ == "__main__":
+    _STARTED = _process_started()
     try:
-        main()
+        main(exit_guard=True)
     except BaseException:
         pass
     sys.exit(0)

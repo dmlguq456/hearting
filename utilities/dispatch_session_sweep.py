@@ -78,9 +78,11 @@ DELIVER_LEASE_SECONDS = 120.0
 # so the same records come back on every prompt. Records not reached within this
 # budget stay pending for the next prompt instead.
 DELIVER_BUDGET_SECONDS = 6.0
-# One pass-wide deadline covers discovery, claiming, rendering and ACK inside the
-# configured 10 s prompt hook. The remainder is the render/ACK reserve.
-ACTION_BUDGET_SECONDS = 8.0
+# One pass-wide deadline covers discovery and claiming inside the configured
+# 10 s prompt hook; no new work starts after it. Rendering and ACK of what the
+# pass already holds run after it, so the remaining 4 s is their reserve under
+# load (HOOK-LATENCY 7-4; 8 s left 2 s and was decided down on 2026-11-04).
+ACTION_BUDGET_SECONDS = 6.0
 STORAGE_KEY = "_storage_key"     # added to a returned copy only: the directory a record is stored under
 
 

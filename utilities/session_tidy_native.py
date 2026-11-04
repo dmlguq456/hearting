@@ -21,6 +21,11 @@ import time
 import unicodedata
 
 from pane_ownership import _caller_runtime, _process
+try:  # ends a detached child with the test that started it; no-op outside tests
+    from detached_lifetime import bind as end_with_test
+except ImportError:  # a partial tree without it (e.g. a fixture release): no record
+    def end_with_test(child):
+        return child
 
 
 def live(target):
@@ -193,6 +198,7 @@ def attachment(target):
         proc = subprocess.Popen([target["binary"], "attach", target["job"]],
                                 stdin=slave, stdout=slave, stderr=slave,
                                 env=env, cwd=target["home"], preexec_fn=terminal)
+        end_with_test(proc)
         os.close(slave); slave = -1
         yield master, proc
     finally:
@@ -317,7 +323,9 @@ def command(req, request_path, nonce, *, continuing, screen_ready):
                     continue
                 if continuing: clear.release_unsent_continue(claim)
                 return result("skipped", why)
-            text = clear.followup_text(req) if continuing else "/clear"
+            compacting = not continuing and (claim.get("clear_claim") or {}).get("command") == "compact"
+            text = clear.followup_text(req) if continuing else (
+                clear.COMPACT_COMMAND if compacting else "/clear")
             # A single write includes Enter; partial/failed writes are never retried.
             data = (text + "\r").encode()
             try:
@@ -325,6 +333,9 @@ def command(req, request_path, nonce, *, continuing, screen_ready):
             except OSError:
                 return result("unverified", "partial-send")
             if written != len(data): return result("unverified", "partial-send")
+            if compacting:
+                # The session id stays; the helper waits (bounded) for the compaction evidence.
+                return result("unverified", "compact-pending")
             deadline = time.monotonic() + 20
             while time.monotonic() < deadline:
                 record = live(target)

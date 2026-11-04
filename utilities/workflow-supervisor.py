@@ -45,6 +45,11 @@ sys.path.insert(0, str(ROOT / "utilities"))
 from hearting_gates import note_same_work_drift
 
 from dispatch_contract import success_note, verdict_pass  # noqa: E402
+try:  # ends a detached child with the test that started it; no-op outside tests
+    from detached_lifetime import bind as end_with_test  # noqa: E402
+except ImportError:  # a partial tree without it (e.g. a fixture release): no record
+    def end_with_test(child):
+        return child
 import workflow_state as WS  # noqa: E402
 import resource_run_registry as RR  # noqa: E402
 import resource_resume as RESOURCE_RESUME  # noqa: E402
@@ -697,7 +702,23 @@ def resource_evidence(armed, *, compute_observation=None):
         # This reader cannot settle a host process or contradict its controller.
         return {"terminal": False, "liveness": "stale", "quiescent": None,
                 "reason": "resource-host-observation-unavailable"}
-    row, _settled = runner().settle(registry, run_id, row)
+    try:
+        row, _settled = runner().settle(registry, run_id, row)
+    except ValueError as exc:
+        if str(exc) == "unknown run id":
+            return {"terminal": False, "reason": "resource-run-absent"}
+        if str(exc) != "resource-reservation-changed":
+            raise
+        # Another writer changed the row between this read and the settle. That is
+        # an observation race, not a resource result: report the row as not settled
+        # yet, bound to the row as it now is, and let the next look read it again.
+        try:
+            current = (json.loads(registry.read_text(encoding="utf-8")).get("runs") or {}).get(run_id)
+        except (OSError, ValueError, AttributeError):
+            current = None
+        return {"terminal": False, "reason": "resource-reservation-changed",
+                "resource_sha256": (RESOURCE_RESUME.row_digest(current)
+                                    if isinstance(current, dict) else None)}
     liveness, _current, reason = RR.classify_identity(row)
     identity = f"{run_id}:{row.get('pid')}:{row.get('starttime')}:{row.get('exit_code')}"
     if liveness == "working":
@@ -1175,6 +1196,7 @@ def _start_successor(armed, successor, key):
             stdout=stdout, stderr=subprocess.STDOUT if stdout else None,
             start_new_session=True,
         )
+        end_with_test(proc)
     finally:
         if handle is not None:
             handle.close()
@@ -3479,7 +3501,10 @@ def create_local_frame_gate_delivery(route, gate, artifact, jobs_path, epoch, *,
         if len(metadata) != 1:
             raise SupervisorError("frame-gate-parent-binding-mismatch")
         from dispatch_seat_handover import owns   # the launching session, or its same-seat successor
-        if not owns(metadata[0], session, Path(jobs_path)):
+        owned = owns(metadata[0], session, Path(jobs_path))
+        if owned is None:  # an unreadable lineage is no mismatch
+            note_same_work_drift("handover-unreadable", attempt)
+        elif not owned:
             note_same_work_drift("frame-gate-parent-binding-mismatch")
         attempts.append(attempt)
     # A pre-owner frame interview is already running in its interactive

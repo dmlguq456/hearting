@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'utilities'))
 import dispatch_owner_input as I
 from dispatch_contract import hold_supervisor_lease, supervisor_lease_path
+from split_module_fixture import patch_split
 
 
 def load(name, path):
@@ -86,7 +87,7 @@ class OwnerInputTest(unittest.TestCase):
             'pid=99999999,pid_start=100,attempt_id=' + self.attempt))
         launch = mock.Mock()
         patches = (
-            mock.patch.object(contract, 'supervisor_lease_is_held', return_value=False),
+            patch_split(contract, 'supervisor_lease_is_held', return_value=False),
             mock.patch.object(route_authority, 'owns', return_value=True),
             mock.patch.object(route_parent_close, 'row_requested', return_value=False),
             mock.patch.object(route_parent_close, 'owner_continuation_processes', return_value=(
@@ -96,14 +97,14 @@ class OwnerInputTest(unittest.TestCase):
         for patcher in patches:
             patcher.start()
             self.addCleanup(patcher.stop)
-        with mock.patch.object(contract, 'attempt_governed_process_quiescence',
+        with patch_split(contract, 'attempt_governed_process_quiescence',
                                return_value=contract.ProcessQuiescence(
                                    'unverifiable', 'identity-missing')):
             unknown = I.recover_consumer(self.jobs, self.attempt, session='parent', spawn=launch)
         self.assertEqual(unknown['consumer_recovery'], 'not-started:owner-process-unverifiable')
         launch.assert_not_called()
 
-        with mock.patch.object(contract, 'attempt_governed_process_quiescence',
+        with patch_split(contract, 'attempt_governed_process_quiescence',
                                return_value=contract.ProcessQuiescence('quiescent', 'gone')), \
              mock.patch.object(join, 'read_supervisor_phase_state',
                                return_value=SimpleNamespace(resource={'session_id': 'different-thread'})):
@@ -141,13 +142,13 @@ class OwnerInputTest(unittest.TestCase):
                 value['target'] = I._target(jobs, self.attempt)[1]
                 channel.write_text(json.dumps(value))
                 I.submit(jobs, self.attempt, 'pending correction', 'pending')
-                with mock.patch.object(contract, 'supervisor_lease_is_held', return_value=False), \
+                with patch_split(contract, 'supervisor_lease_is_held', return_value=False), \
                      mock.patch.object(route_authority, 'owns', return_value=True), \
                      mock.patch.object(route_parent_close, 'row_requested', return_value=False), \
                      mock.patch.object(route_parent_close, 'owner_continuation_processes',
                                        return_value=(contract.ProcessQuiescence(
                                            'quiescent', 'registered-resources-preserved'), resources)), \
-                     mock.patch.object(contract, 'attempt_governed_process_quiescence',
+                     patch_split(contract, 'attempt_governed_process_quiescence',
                                        return_value=contract.ProcessQuiescence('quiescent', 'gone')):
                     result = I.recover_consumer(jobs, self.attempt, session='parent')
                 self.assertEqual(result['consumer_recovery'],
@@ -159,7 +160,7 @@ class OwnerInputTest(unittest.TestCase):
                      mock.patch.object(route_parent_close, 'owner_resources', return_value=resources), \
                      mock.patch.object(route_parent_close, 'owner_consumer_session',
                                        return_value='thread-1'), \
-                     mock.patch.object(I, 'supervisor_lease_is_held', return_value=True), \
+                     patch_split(I, 'supervisor_lease_is_held', return_value=True), \
                      mock.patch.object(I, '_respawn_adapter', wraps=I._respawn_adapter) as adapter:
                     row, target = I._target(jobs, self.attempt)
                     self.assertEqual(I.move_parked_consumer(jobs, row, target, 'pending'), {})
@@ -631,7 +632,7 @@ class RegisteredOwnerInputTest(unittest.TestCase):
         I.OwnerInput(self.jobs, self.attempt, 'thread-1', 'codex-active-turn', self.events.append)
         import route_authority
         import dispatch_completion_join as join
-        with mock.patch.object(I, 'supervisor_lease_is_held', return_value=False), \
+        with patch_split(I, 'supervisor_lease_is_held', return_value=False), \
              mock.patch.object(join, 'settle_finished_attempt'), \
              mock.patch.object(route_authority, 'owns', return_value=False), \
              mock.patch.object(I, 'recover_consumer', wraps=I.recover_consumer) as recover:
@@ -640,6 +641,25 @@ class RegisteredOwnerInputTest(unittest.TestCase):
         self.assertEqual(receipt['consumer_recovery'], 'awaiting-parent')
         self.assertEqual(I.inspect(self.jobs, self.attempt)['requests'][0]['state'], 'queued')
         self.assertEqual(len(list((self.root/'pending-delivery').glob('*/*.json'))), 1)
+
+    def test_an_unreadable_lineage_keeps_the_correction_queued_without_naming_another_parent(self):
+        # RV-OWNS-TRI: unknown is neither the parent nor "awaiting" another one.
+        self.jobs.write_text(self.jobs.read_text().rstrip() +
+            ",parent_sid=01a0971c-b5b2-7a62-ab10-0dfb6d2b4e79,"
+            "parent_completion_delivery=codex-managed-gateway,managed_sealed_batch_id=batch-test\n")
+        I.initialize_owner_input(self.jobs, self.attempt, 'codex-active-turn')
+        I.OwnerInput(self.jobs, self.attempt, 'thread-1', 'codex-active-turn', self.events.append)
+        import route_authority
+        import dispatch_completion_join as join
+        with patch_split(I, 'supervisor_lease_is_held', return_value=False), \
+             mock.patch.object(join, 'settle_finished_attempt'), \
+             mock.patch.object(route_authority, 'owns', return_value=None):
+            receipt = I.submit(self.jobs, self.attempt, 'keep until the lineage reads', 'lineage-unknown')
+        self.assertEqual(receipt['consumer_recovery'], 'not-started:handover-unreadable')
+        self.assertIn('run the same command', receipt['consumer_retry_when'])
+        self.assertIn(self.attempt, receipt['consumer_detail'])
+        self.assertNotIn('restore this same owner', receipt.get('next_step', ''))
+        self.assertEqual(I.inspect(self.jobs, self.attempt)['requests'][0]['state'], 'queued')
 
     def test_consumer_that_never_attached_leaves_an_unresolved_undelivered_input(self):
         I.initialize_owner_input(self.jobs, self.attempt, 'codex-active-turn')

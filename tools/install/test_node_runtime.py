@@ -63,7 +63,7 @@ class ReuseTest(unittest.TestCase):
 
 
 class InstallTest(unittest.TestCase):
-    def _run_install(self, stack, tmp, *, checksum_ok=True):
+    def _run_install(self, stack, tmp, *, checksum_ok=True, timeout_on=None):
         version = "v24.19.0"
         top_level = f"node-{version}-linux-x64"
         archive_bytes = _fake_archive(top_level)
@@ -91,6 +91,8 @@ class InstallTest(unittest.TestCase):
         real_run = subprocess.run
 
         def run(cmd, **kwargs):
+            if timeout_on is not None and timeout_on(cmd):
+                raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
             if cmd[:2] == ["tar", "-xJf"]:
                 return real_run(cmd, **kwargs)
             return subprocess.CompletedProcess(cmd, 0, stdout="v24.19.0\n", stderr="")
@@ -137,6 +139,18 @@ class InstallTest(unittest.TestCase):
             self.assertEqual(result["status"], "warning")
             self.assertIn("checksum mismatch", result["detail"])
             self.assertFalse((tmp / "bin" / "node").exists())
+
+    def test_a_timed_out_extract_or_smoke_is_a_warning_not_an_aborted_install(self):
+        # GA-A7-023: every failure of the optional Node step degrades to a warning.
+        for name, timeout_on in (("extract", lambda cmd: cmd[:2] == ["tar", "-xJf"]),
+                                 ("smoke", lambda cmd: str(cmd[0]).endswith("/bin/node"))):
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp_str:
+                tmp = Path(tmp_str)
+                with ExitStack() as stack:
+                    result = self._run_install(stack, tmp, timeout_on=timeout_on)
+                self.assertEqual(result["status"], "warning")
+                self.assertIn("timed out", result["detail"])
+                self.assertFalse((tmp / "bin" / "node").exists())
 
     def test_foreign_bin_entry_is_never_replaced(self):
         with tempfile.TemporaryDirectory() as tmp_str:

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import importlib.util, json, os, subprocess, sys, tempfile, time, unittest
 from pathlib import Path
+from split_module_fixture import patch_split
 
 ROOT=Path(__file__).resolve().parents[1]
 def load(name,path):
@@ -439,7 +440,7 @@ class CycleLayoutTest(unittest.TestCase):
   (latest_spec/"b/prd.md").write_text("# B\nlatest\n")
   winner=self._publish_components(l,lf,lb)
   before=self.P._spec_bytes(spec)
-  with mock.patch.object(self.P,"_commit_shared",side_effect=RuntimeError("post-publish interruption")):
+  with patch_split(self.P,"_commit_shared",side_effect=RuntimeError("post-publish interruption")):
    with self.assertRaises(RuntimeError):self._publish_components(r,f,b)
   record=self.P.read_cycle_record(self.artifact,b["cycle_id"])
   manifest=self.P._record_cycle_manifest_path(self.artifact,record); manifest_before=manifest.read_bytes()
@@ -516,7 +517,7 @@ class CycleLayoutTest(unittest.TestCase):
     calls.append(str(path))
     if len(calls)==2:raise OSError("seed interrupted")
    return original(path,data)
-  with patch.object(TX.PRODUCER,"_write_atomic",interrupted):
+  with patch_split(TX.PRODUCER,"_write_atomic",interrupted):
    with self.assertRaises(OSError):TX.seed_cycle_spec(spec,self.artifact,spec_root=spec/"a")
   self.assertFalse(json.loads((spec/TX.PRODUCER.SPEC_BASE_RECEIPT).read_text())["seed_complete"])
   TX.seed_cycle_spec(spec,self.artifact,spec_root=spec/"a")
@@ -596,7 +597,7 @@ class CycleLayoutTest(unittest.TestCase):
   def interrupted(path,data):
    if path == spec/"a/extra.md":raise OSError("after old history")
    return original(path,data)
-  with patch.object(TX.PRODUCER,"_write_atomic",interrupted):
+  with patch_split(TX.PRODUCER,"_write_atomic",interrupted):
    with self.assertRaises(OSError):TX.seed_cycle_spec(spec,self.artifact,spec_root=spec/"a")
   self.assertEqual((spec/"a/_internal/versions/v3/prd.md").read_text(),"older a\n")
   TX.seed_cycle_spec(spec,self.artifact,spec_root=spec/"a")
@@ -784,7 +785,7 @@ class CycleLayoutTest(unittest.TestCase):
   def interrupt(path,data):
    if path.name=="prd.md": raise OSError("interrupted")
    return original(path,data)
-  with mock.patch.object(TX.PRODUCER,"_write_atomic",interrupt):
+  with patch_split(TX.PRODUCER,"_write_atomic",interrupt):
    with self.assertRaises(OSError): TX.seed_cycle_spec(base,self.artifact)
   receipt=(base/TX.PRODUCER.SPEC_BASE_RECEIPT).read_bytes()
   self.assertEqual(json.loads(receipt)["revision_id"],first["shared_reference_revision_id"])
@@ -826,7 +827,7 @@ class CycleLayoutTest(unittest.TestCase):
   def interrupt(path,data):
    if path.name=="prd.md": raise OSError("interrupted")
    return original(path,data)
-  with mock.patch.object(TX.PRODUCER,"_write_atomic",interrupt):
+  with patch_split(TX.PRODUCER,"_write_atomic",interrupt):
    with self.assertRaises(OSError): TX.seed_cycle_spec(base,self.artifact)
   route,route_file,new=self._cycle("other-publisher")
   output=Path(new["cycle_dir"])/"artifacts/spec"
@@ -871,7 +872,7 @@ class CycleLayoutTest(unittest.TestCase):
   def interrupt(path,data):
    if path.name=="prd.md": raise OSError("interrupted")
    return original(path,data)
-  with mock.patch.object(TX.PRODUCER,"_write_atomic",interrupt):
+  with patch_split(TX.PRODUCER,"_write_atomic",interrupt):
    with self.assertRaises(OSError): TX.seed_cycle_spec(base,self.artifact)
   (base/"prd.md").write_text("user edit\n")
   with self.assertRaises(self.P.ProducerError) as exc: TX.seed_cycle_spec(base,self.artifact)

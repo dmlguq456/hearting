@@ -8,6 +8,7 @@ sys.path.insert(0,str(ROOT/'utilities'))
 spec=importlib.util.spec_from_file_location('preview_fallback_fixture',ROOT/'utilities/stage_dispatch_fallback.test.py')
 fixture=importlib.util.module_from_spec(spec);spec.loader.exec_module(fixture)
 import review_input
+from split_module_fixture import patch_split
 
 class WrapperPreviewTest(unittest.TestCase):
  def setUp(self):
@@ -16,7 +17,7 @@ class WrapperPreviewTest(unittest.TestCase):
   from types import SimpleNamespace
   args=SimpleNamespace(action='dry-run',route_file='route.json',automatic_retry_of='att-source')
   with mock.patch.object(review_input,'_dispatch_node_module',side_effect=AssertionError('new round')):
-   self.assertEqual(review_input.preview_request_nodes(args,self.f.jobs),frozenset())
+   self.assertIsNone(review_input.preview_request_admission(args,self.f.jobs))
  def test_declared_phase_preview_is_not_a_full_stage_round_and_the_stage_stays_exhausted(self):
   # BC rt-96bab699: the dry-run of a stage_authority=0 test phase was refused
   # `reviewed-evidence-revision-not-admitted detail=exhausted`, although its
@@ -29,20 +30,20 @@ class WrapperPreviewTest(unittest.TestCase):
    full=dict(action='dry-run',route_file=str(path),route_id=route['route_id'],route_hash=route['route_hash'],
              route_node='test',attempt_id=None,dispatch_depth=2)
    with self.assertRaises(review_input.DC.DispatchContractError) as refused:
-    review_input.preview_request_nodes(SimpleNamespace(**full),f.jobs)
+    review_input.preview_request_admission(SimpleNamespace(**full),f.jobs)
    self.assertEqual((refused.exception.reason,refused.exception.detail),('reviewed-evidence-revision-not-admitted','exhausted'))
    phase=dict(full,subsession_id='ss-gap-1',subsession_index=1,subsession_count=2,subsession_mode='serial',
               session_chain_id='ssc-gap-1',phase_brief='brief.md',narrow_verify='true',expected_round_trips=1,
               stage_authority=0,attempt_id='att-gap-1')
    with mock.patch.object(review_input,'_dispatch_node_module',side_effect=AssertionError('full-stage round')):
-    self.assertEqual(review_input.preview_request_nodes(SimpleNamespace(**phase),f.jobs),frozenset())
+    self.assertIsNone(review_input.preview_request_admission(SimpleNamespace(**phase),f.jobs))
    # One raw flag is not a declaration: it is refused, never admitted.
    for raw,reason in ((dict(full,stage_authority=0),'stage-authority-zero-without-subsession'),
                       (dict(full,subsession_id='ss-gap-1',stage_authority=0),'subsession-arguments-incomplete'),
                       (dict(phase,stage_authority=1),'subsession-stage-authority-forbidden'),
                       (dict(phase,dispatch_depth=1),'subsession-route-binding-invalid')):
     with self.subTest(reason=reason),self.assertRaises(review_input.DC.DispatchContractError) as caught:
-     review_input.preview_request_nodes(SimpleNamespace(**raw),f.jobs)
+     review_input.preview_request_admission(SimpleNamespace(**raw),f.jobs)
     self.assertEqual(caught.exception.reason,reason)
  def _changed_plan_preview(self, *, prior_quiescent):
   f=self.f
@@ -70,7 +71,7 @@ class WrapperPreviewTest(unittest.TestCase):
         'quiescent' if prior_quiescent else 'unverifiable',
         'fixture-group-empty' if prior_quiescent else 'process-identity-missing')
       return original_observer(meta, **kwargs)
-     stack.enter_context(mock.patch.object(review_input.DC,'attempt_process_quiescence',side_effect=observe))
+     stack.enter_context(patch_split(review_input.DC,'attempt_process_quiescence',side_effect=observe))
      stack.enter_context(mock.patch.object(w,'validate_route_record',side_effect=lambda args:setattr(args,'route_validation',{}) or 0))
      stack.enter_context(mock.patch.object(w,'headless_attempt_policy',return_value={
       'fallback_hop':'same-harness-headless','fallback_ordinal':1,'quick':False,

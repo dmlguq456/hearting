@@ -47,7 +47,9 @@ import time
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 
-INBOX_SCHEMA_VERSION = 1
+# Version 2 invalidates cached scopes computed before fork suffix isolation.
+# Normal prefill/reconciliation rebuilds them from the current lineage.
+INBOX_SCHEMA_VERSION = 2
 EDGE_GENERATION_SCHEMA = 1
 LINEAGE_ROWS_SCHEMA = 1
 RUN_STATES_SCHEMA = 1

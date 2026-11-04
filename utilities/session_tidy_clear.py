@@ -50,6 +50,7 @@ import shutil
 import subprocess
 import sys
 import time
+from datetime import datetime
 from typing import Callable, Optional
 
 HERE = Path(__file__).resolve().parent
@@ -57,6 +58,11 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 import session_tidy as st  # noqa: E402
+try:  # ends a detached child with the test that started it; no-op outside tests
+    from detached_lifetime import bind as end_with_test  # noqa: E402
+except ImportError:  # a partial tree without it (e.g. a fixture release): no record
+    def end_with_test(child):
+        return child
 
 SCHEMA = 1
 CLEAR_DEADLINE_SEC = 600.0
@@ -66,6 +72,14 @@ OBSERVE_WAIT_SEC = 20.0
 STEWARD_TIMEOUT_SEC = 180.0
 # The built-in command that starts a fresh conversation in each harness.
 CLEAR_COMMAND = {"claude": "/clear", "codex": "/clear", "opencode": "/new"}
+# Typed instead of the clear while a Claude window still has native background agents:
+# compaction keeps the session, its agents and their results (see background_agents_running).
+COMPACT_COMMAND = "/compact"
+COMPACT_CONFIRM_SEC = 900.0          # compaction of ~950k tokens took 145 s (measured 2026-11-03)
+_TASK_ID = re.compile(rb"<task-id>([0-9A-Za-z_-]{1,80})</task-id>")
+_NOTICE = re.compile(rb"<task-notification>(.*?)</task-notification>", re.S)
+_WAITING = (b"waiting on its own background work", b"background work of its own")
+_RESUME_MARGIN_SEC = 5.0             # a finished agent's last write lands within 0.1 s of its notice
 # No-trailer body used by the exact-native attachment or the sealed pending-ref carrier.
 CONTINUE_TEXT = "이어서해"
 STATUS_ONLY_TEXT = "현재 카드 기준 현황만 짧게 표시하고 새 작업은 시작하지 말고 다음 입력을 기다리세요."
@@ -84,6 +98,9 @@ REASON_TEXT = {
     "screen-unknown": "화면을 읽지 못했습니다",
     "target-changed": "그 자리의 세션이 바뀌었습니다",
     "herdr-not-found": "herdr를 찾지 못했습니다",
+    "pane-in-mode": "창이 tmux 복사·선택 모드에 있습니다",
+    "pane-synchronized": "창이 tmux 동시 입력(synchronize-panes) 상태입니다",
+    "pane-input-off": "창의 tmux 입력이 꺼져 있습니다",
     "agent-not-found": "창을 찾지 못했습니다",
     "card-not-delivered": "새 세션이 카드를 받지 못했습니다",
     "card-taken": "카드가 이미 다른 세션에 전달됐습니다",
@@ -96,6 +113,8 @@ REASON_TEXT = {
     "usage-unknown": "현재 입력 토큰을 확인하지 못했습니다",
     "idle-card-not-accepted": "유휴 정리 카드를 접수하지 못했습니다",
 }
+# A clear booking whose card a later task-notification turn would miss: cancelled without a line.
+NOTIFICATION_TURN = "notification-turn"
 # Reasons after which this seat holds no card for the next session to receive.
 NO_CARD_REASONS = frozenset({"card-taken", "idle-card-not-accepted"})
 # Continue skips the person caused (or chose) themselves: no result line for these.
@@ -139,6 +158,12 @@ def _injected(name: str) -> Optional[Path]:
 def herdr_command() -> Optional[str]:
     injected = _injected("HEARTING_TIDY_HERDR")
     return str(injected) if injected else shutil.which("herdr")
+
+
+def pane_command(pane: str) -> Optional[str]:
+    """The terminal command that reaches ``pane``: tmux for a tmux pane id, else herdr."""
+    from terminal_surface import is_tmux_pane
+    return shutil.which("tmux") if is_tmux_pane(pane) else herdr_command()
 
 
 # ---------------------------------------------------------------------------
@@ -259,9 +284,33 @@ def reconcile_pending(seat: "st.Seat", *, lock_wait: float = 0.2) -> bool:
     return ok
 
 
+def _clear_lineage_reason(harness: str, sid: str) -> str:
+    """A new automatic clear belongs only to the current source session."""
+    from dispatch_seat_handover import resolve_recipient
+    # The qualified seat answer includes legacy and cross-harness retire edges;
+    # tidy-only chain_end cannot see a successor published in another harness.
+    result = resolve_recipient("seat-successor", harness=harness, session=sid)
+    if result.state == "no-handover":
+        return ""
+    return "session-handed-over" if result.state == "confirmed" else "lineage-unresolved"
+
+
+@contextlib.contextmanager
+def _booking_lock(seat: "st.Seat", *, wait: Optional[float] = None):
+    """Keep fresh lineage validation and booking mutation together across panes.
+
+    Like lifecycle writers, take the physical seat before the common lineage
+    lock. Callers hold neither lock and acquire no further seat inside this
+    transaction; flock is not reentrant. Start helpers only after releasing it.
+    """
+    from dispatch_seat_handover import LINEAGE_WRITE_KEY
+    with st.seat_lock(seat.key, wait=wait), st.seat_lock(LINEAGE_WRITE_KEY, wait=wait):
+        yield
+
+
 def observe_idle_event(harness: str, sid: str, cwd: str, *, event_id: str, provider: str = "",
                        model: str = "", tokens: int, now: Optional[float] = None,
-                       lock_wait: Optional[float] = None) -> str:
+                       lock_wait: Optional[float] = None, proven_seat=None) -> str:
     """Durably book one token-qualified idle window for an exact main session turn."""
     import hashlib
     import session_tidy as st
@@ -278,9 +327,15 @@ def observe_idle_event(harness: str, sid: str, cwd: str, *, event_id: str, provi
         return "booking=off"
     if tokens < policy["min_tokens"]:
         return "booking=skipped reason=below-threshold"
+    reason = _clear_lineage_reason(harness, sid)
+    if reason:
+        return f"booking=skipped reason={reason}"
     seat = st.resolve_seat(harness, cwd or None, sid=sid)
     # Idle automation requires a transport whose exact session and empty input
     # can be checked by peer-steward at send time.
+    if proven_seat is not None and seat.kind == "project":
+        # The detached observer has no runtime ancestor left; its launching hook proved this seat.
+        seat = st.session_seat(proven_seat, harness, sid)
     if not ((seat.kind == "pane" and seat.pane)
             or (harness == "claude" and seat.kind == "native" and seat.native)):
         return "booking=skipped reason=exact-pane-unavailable"
@@ -290,7 +345,10 @@ def observe_idle_event(harness: str, sid: str, cwd: str, *, event_id: str, provi
                      or (prompt_state.get("harness"), prompt_state.get("sid")) != (harness, sid)):
         return "booking=skipped reason=not-rearmed"
     identity = hashlib.sha256(f"{harness}\0{sid}\0{sequence}\0{event_id}".encode("utf-8")).hexdigest()
-    with st.seat_lock(seat.key, wait=lock_wait):
+    with _booking_lock(seat, wait=lock_wait):
+        reason = _clear_lineage_reason(harness, sid)
+        if reason:
+            return f"booking=skipped reason={reason}"
         existing = read_reservation(seat.key)
         old_idle = (existing or {}).get("idle") if isinstance((existing or {}).get("idle"), dict) else {}
         if existing and old_idle.get("identity") == identity:
@@ -362,7 +420,10 @@ def validate_idle_request(path, nonce: Optional[str] = None, *, now: Optional[fl
         return None, "turn-not-ended"
     if now > float(req.get("deadline", 0) or 0):
         return None, "expired"
-    if st.read_prompt_seq(seat) != int(req.get("prompt_seq", -1)):
+    sequence, booked = st.read_prompt_seq(seat), int(req.get("prompt_seq", -1))
+    if sequence != booked and not _only_notifications_since(seat, booked, sequence):
+        # A task notification is not the person: the request follows its turn, so the
+        # card written in reply covers it.
         return None, "new-input"
     card = st.read_latest_card(seat)
     if (int(card.get("generation", 0) or 0) if card else 0) != int(req.get("card_generation", -1)):
@@ -375,32 +436,47 @@ def validate_idle_request(path, nonce: Optional[str] = None, *, now: Optional[fl
     return req, ""
 
 
-def reply_card_guide(nonce: str) -> str:
+def reply_card_guide(nonce: str, t=None) -> str:
+    t = t or st._ui_translator()
     begin, end = st.reply_card_markers(nonce)
-    return ("Skill·지침·도구를 쓰지 말고 답 하나로 끝내세요. 답의 첫 줄은 정확히 " + begin + ", 마지막 줄은 정확히 "
-            + end + " 로 쓰고, 그 사이에 카드 본문을 다음 순서로 사용자의 언어로 90줄 이내로 씁니다: "
-            + " → ".join(st.CARD_FIELDS) + ". "
-            "이전 카드의 " + "·".join(st.CARD_FIXED_FIELDS)
-            + "은 다시 요약하지 말고 그대로 이어받으세요. 날짜 있는 사용자 원문 인용을 보존하고, "
-            "새 내용은 다시 요약하지 말고 이어 붙이세요. "
-            "사용자가 대체한 항목만 제거하세요. 실제 작업 전에 카드 전체와 PRD를 다시 읽으세요. "
-            "관련 등 기존 칸에서 세션을 적을 때 확정 Fleet 번호와 관측 pane·전체 native SID를 함께 남기고, "
-            "모르는 번호·pane·SID는 미확인으로 두세요. "
-            "턴이 끝나면 하팅이 이 답을 카드로 저장하고 기억 정리를 접수합니다. ")
+    return t("tidy.request.card_guide", begin=begin, end=end, fields=" → ".join(st.CARD_FIELDS),
+             fixed="·".join(st.CARD_FIXED_FIELDS))
+
+
+def idle_tidy_terms(req: Optional[dict] = None, *, request: bool = True, t=None) -> str:
+    """The real conditions of automatic idle tidy and how to turn it off, for the person.
+    ``request=False`` is the wording of its result line (which never suggests a clear)."""
+    from session_tidy_policy import DEFAULT_IDLE, config_path
+    t = t or st._ui_translator()
+    idle = (req or {}).get("idle") if isinstance((req or {}).get("idle"), dict) else {}
+    tokens = idle.get("min_tokens", DEFAULT_IDLE["min_tokens"])
+    tokens = tokens if type(tokens) is int and tokens > 0 else DEFAULT_IDLE["min_tokens"]
+    try:
+        minutes = max(1, round(float(idle.get("wait_seconds", DEFAULT_IDLE["wait_seconds"])) / 60))
+    except (TypeError, ValueError):
+        minutes = round(DEFAULT_IDLE["wait_seconds"] / 60)
+    # Korean counts tokens in units of 10,000 (만) when the number is round.
+    amount = f"{tokens // 10000}만" if getattr(t, "lang", "") == "ko" and tokens % 10000 == 0 else f"{tokens:,}"
+    path = config_path()
+    try:
+        shown = "~/" + str(path.relative_to(Path.home()))
+    except ValueError:
+        shown = str(path)
+    when = t("tidy.idle.when", amount=amount,
+             wait=t("tidy.idle.wait_minute" if minutes == 1 else "tidy.idle.wait_minutes", count=minutes))
+    off = t("tidy.idle.off", path=shown)
+    claude = (req or {}).get("harness") == "claude"     # only Claude windows compact for agents
+    if not request:
+        return t("tidy.idle.result_claude" if claude else "tidy.idle.result", when=when, off=off)
+    return t("tidy.idle.request_claude" if claude else "tidy.idle.request", when=when, off=off)
 
 
 def idle_card_request_text(req: dict) -> str:
+    t = st._ui_translator()
     nonce = str(req.get("nonce") or "")
     if req.get("origin") == "compact":
-        return ("자동 압축 뒤 카드 작성 요청입니다. 지금까지의 이 대화만 바탕으로 session-tidy 카드를 쓰세요. "
-                + reply_card_guide(nonce) +
-                "빈 요약을 만들거나 다음 작업을 시작하지 마세요. "
-                "이 요청이 끝나면 창 비우기와 이어서하기는 예약된 기존 절차가 처리합니다. "
-                f"요청 식별자: {nonce}")
-    return ("자동 유휴 정리 요청입니다. 지금까지의 이 대화만 바탕으로 session-tidy 카드를 쓰세요. "
-            + reply_card_guide(nonce) +
-            "별도 작업을 시작하거나 이어서 하지 말고, 답을 마치면 다음 입력을 기다리세요. "
-            f"요청 식별자: {nonce}")
+        return t("tidy.request.compact", guide=reply_card_guide(nonce, t), nonce=nonce)
+    return t("tidy.request.idle", terms=idle_tidy_terms(req, t=t), guide=reply_card_guide(nonce, t), nonce=nonce)
 
 
 def claim_idle_card_request(path, nonce: Optional[str] = None):
@@ -708,7 +784,10 @@ def _accept_idle_enqueue(seat: "st.Seat", harness: str, sid: str, cwd: str, idle
     if idle_context.get("eligible") is False:
         return "clear=skipped reason=idle-request-not-eligible"
     try:
-        with st.seat_lock(seat.key, wait=lock_wait):
+        with _booking_lock(seat, wait=lock_wait):
+            reason = _clear_lineage_reason(harness, sid)
+            if reason:
+                return f"clear=skipped reason={reason}"
             req = read_reservation(seat.key)
             request = (req or {}).get("idle_request") if isinstance((req or {}).get("idle_request"), dict) else {}
             arrival = request.get("arrival") if isinstance(request.get("arrival"), dict) else {}
@@ -823,6 +902,7 @@ def _start_helper(seat_key: str, nonce: str) -> int:
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         close_fds=True, start_new_session=True, env=_helper_env(socket_path=socket_path),
         cwd=str(st.ensure_dir(st.state_root())))
+    end_with_test(proc)
     return proc.pid
 
 
@@ -839,7 +919,7 @@ def schedule_compact_card_request(seat: "st.Seat", harness: str, sid: str, cwd: 
             or compact_context.get("card_request_required") is not True
             or not identity or seat.kind != "pane" or not seat.pane
             or not transcript or isinstance(boundary, bool) or not isinstance(boundary, int)
-            or boundary < 0 or not herdr_command()):
+            or boundary < 0 or not pane_command(seat.pane)):
         return "clear=skipped reason=compact-ineligible"
     import session_tidy_runner as runner
     operation_id = identity
@@ -856,8 +936,14 @@ def schedule_compact_card_request(seat: "st.Seat", harness: str, sid: str, cwd: 
             return "clear=pending reason=queue-receipt-unavailable"
     except BaseException as exc:  # noqa: BLE001 - do not book a clear without a durable queue row
         return f"clear=pending reason=queue-write-{type(exc).__name__}"
+    reason = _clear_lineage_reason(harness, sid)
+    if reason:
+        return f"clear=skipped reason={reason}"
     try:
-        with st.seat_lock(seat.key, wait=lock_wait):
+        with _booking_lock(seat, wait=lock_wait):
+            reason = _clear_lineage_reason(harness, sid)
+            if reason:
+                return f"clear=skipped reason={reason}"
             existing = read_reservation(seat.key)
             if existing and (existing.get("compact") or {}).get("identity") == identity:
                 if existing.get("status") == "cancelled":
@@ -929,10 +1015,19 @@ def schedule_for_enqueue(seat: "st.Seat", harness: str, sid: str, cwd: str, *, o
     seat = st.session_seat(seat, harness, sid)
     now = st.now_epoch() if now is None else now
     hint = CLEAR_COMMAND.get(harness, "/clear")
+    if opt_out:
+        cancel(seat)
+        return "clear=off"
+    reason = _clear_lineage_reason(harness, sid)
+    if reason:
+        existing = read_reservation(seat.key)
+        if (compact_context and existing
+                and (existing.get("compact") or {}).get("identity") == compact_context.get("identity")
+                and existing.get("status") != "reserved"):
+            return ("clear=off" if existing.get("status") == "cancelled"
+                    else f"clear=completed reason={existing.get('status') or 'terminal'}")
+        return f"clear=skipped reason={reason}"
     if idle_context is not None:
-        if opt_out:
-            cancel(seat)
-            return "clear=off"
         return _accept_idle_enqueue(seat, harness, sid, cwd, idle_context,
                                     operation_id=operation_id, queue_id=queue_id, lock_wait=lock_wait,
                                     no_continue=no_continue)
@@ -950,16 +1045,17 @@ def schedule_for_enqueue(seat: "st.Seat", harness: str, sid: str, cwd: str, *, o
                    ("identity", "trigger", "transcript", "transcript_identity", "summary_id", "parent_id",
                     "tail_start_id", "compaction_part_id", "boundary_offset")
                    if compact_context.get(key) is not None}
-    if opt_out:
-        cancel(seat)
-        return "clear=off"
     native = seat.kind == "native" and seat.native and harness == "claude"
-    if not native and (seat.kind != "pane" or not seat.pane or harness not in CLEAR_COMMAND or herdr_command() is None):
+    if not native and (seat.kind != "pane" or not seat.pane or harness not in CLEAR_COMMAND
+                       or pane_command(seat.pane) is None):
         if compact:
             return "clear=skipped reason=outside-herdr"
         cancel(seat)
         return f"clear=manual hint={hint}"
-    with st.seat_lock(seat.key, wait=lock_wait):
+    with _booking_lock(seat, wait=lock_wait):
+        reason = _clear_lineage_reason(harness, sid)
+        if reason:
+            return f"clear=skipped reason={reason}"
         existing = read_reservation(seat.key)
         if compact and existing and (existing.get("compact") or {}).get("identity") == compact.get("identity"):
             if existing.get("status") == "reserved":
@@ -1119,12 +1215,179 @@ def _refresh_compact_card(req: dict, observation: dict) -> None:
         return
 
 
+def _claude_transcript(seat: Optional["st.Seat"], sid: str):
+    """The session's own transcript: the path its hooks recorded, else the runtime's projects."""
+    import tidy_transcripts as transcripts
+    hint = ""
+    if seat is not None:
+        with contextlib.suppress(Exception):
+            hint = str((st.session_summary(st.session_seat(seat, "claude", sid)).get(("claude", sid)) or {})
+                       .get("transcript") or "")
+    return transcripts.locate_transcript("claude", sid, hint or None)
+
+
+def background_agents_running(harness: str, sid: str, seat: Optional["st.Seat"] = None) -> bool:
+    """Whether this Claude session may still have native background agents that run or resume.
+
+    Claude keeps one ``subagents/agent-<id>.meta.json`` per Agent-tool launch beside the
+    session transcript, and reports each stop with a task notification (``<task-id>`` of the
+    agent) in the launching transcript. A background agent is over only when its last
+    notification is a final one and its own transcript was not written after it: a "waiting
+    on its own background work" notification or a later write (a SendMessage resume) means it
+    still runs, and so does a launch with no notification yet. A transcript or record that
+    cannot be found or read leaves the answer open, and then the window is compacted. A
+    session that never launched an agent has no ``subagents`` folder. Codex and OpenCode keep
+    their clear (see capabilities/session-tidy.md).
+    """
+    if harness != "claude" or not sid:
+        return False
+    try:
+        main = _claude_transcript(seat, sid)
+    except Exception:  # noqa: BLE001 - undecidable: keep the agents
+        return True
+    if main is None or main.suffix != ".jsonl":
+        return True
+    folder = main.with_suffix("") / "subagents"
+    try:
+        names = sorted(entry.name for entry in os.scandir(folder)
+                       if entry.name.startswith("agent-") and entry.name.endswith(".meta.json"))
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    launched = {}
+    for name in names:
+        try:
+            meta = json.loads((folder / name).read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError, UnicodeError):
+            return True
+        if not isinstance(meta, dict):
+            return True
+        if meta.get("requestShape") in (None, "background"):
+            launched[name[len("agent-"):-len(".meta.json")]] = str(meta.get("parentAgentId") or "")
+    if not launched:
+        return False
+    events: dict = {}       # (agent id, notification text) -> (earliest row epoch: its enqueue, "waiting")
+    sources = {main, *(folder / f"agent-{parent}.jsonl" for parent in launched.values() if parent)}
+    for source in sources:
+        try:
+            with open(source, "rb") as handle:
+                for line in handle:
+                    if b"<task-notification>" not in line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                        at = datetime.fromisoformat(str(row["timestamp"]).replace("Z", "+00:00")).timestamp()
+                    except (ValueError, KeyError, TypeError):
+                        continue
+                    for block in _NOTICE.findall(line):
+                        agent = _TASK_ID.search(block)
+                        if not agent:
+                            continue
+                        key = (agent.group(1).decode("ascii"), block)
+                        if at < events.get(key, (float("inf"), False))[0]:
+                            events[key] = (at, any(mark in block for mark in _WAITING))
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return True
+    notices: dict = {}      # agent id -> its newest notification (enqueued at, says "waiting")
+    for (agent_id, _block), event in events.items():
+        if event[0] >= notices.get(agent_id, (float("-inf"), False))[0]:
+            notices[agent_id] = event
+    for agent_id in launched:
+        notice = notices.get(agent_id)
+        if notice is None or notice[1]:
+            return True
+        try:
+            written = (folder / f"agent-{agent_id}.jsonl").stat().st_mtime
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return True
+        if written > notice[0] + _RESUME_MARGIN_SEC:
+            return True
+    return False
+
+
+def _compact_mode(req: dict) -> bool:
+    """Whether this booking's one window command is /compact (Claude with background agents)."""
+    if req.get("harness") != "claude":
+        return False
+    if req.get("clear_command") == "compact":
+        return True
+    seat = st.seat_from_dict(req["seat"]) if isinstance(req.get("seat"), dict) else None
+    return background_agents_running("claude", str(req.get("sid") or ""), seat)
+
+
+def mark_compact(seat_key: str, harness: str, sid: str, nonce: str = "") -> bool:
+    """Make this reserved, unclaimed Claude booking type /compact; it never goes back to the clear.
+
+    The same session continues after /compact, so a handover snapshot not taken yet is not
+    needed. Returns True when the booking now says compact."""
+    if harness != "claude":
+        return False
+    try:
+        with st.seat_lock(seat_key, wait=1.0):
+            req = read_reservation(seat_key)
+            if (not req or req.get("status") != "reserved" or (nonce and req.get("nonce") != nonce)
+                    or (req.get("harness"), req.get("sid")) != (harness, sid) or req.get("clear_claim")):
+                return False
+            if req.get("clear_command") == "compact" and req.get("snapshot_state") != "pending":
+                return True
+            req["clear_command"] = "compact"
+            if req.get("snapshot_state") == "pending":
+                req["snapshot_state"] = "not-applicable"
+            _write_reservation(req)
+            return True
+    except (OSError, TimeoutError, st.StateError):
+        return False     # the snapshot is taken as usual; the claim still types /compact
+
+
+def compact_confirmed(req: dict) -> bool:
+    """The booked session compacted after the /compact claim: a ``compact_boundary`` row after
+    the transcript end seen at the claim, or this session's PostCompact ledger row since then."""
+    claim = req.get("clear_claim") if isinstance(req.get("clear_claim"), dict) else {}
+    harness, sid = str(req.get("harness") or ""), str(req.get("sid") or "")
+    if claim.get("command") != "compact" or not sid:
+        return False
+    source, offset = str(claim.get("transcript") or ""), claim.get("offset")
+    if source and type(offset) is int and offset >= 0:
+        with contextlib.suppress(OSError):
+            with open(source, "rb") as handle:
+                handle.seek(offset)
+                for line in handle:
+                    if b'"compact_boundary"' not in line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except ValueError:
+                        continue
+                    if (isinstance(row, dict) and row.get("type") == "system"
+                            and row.get("subtype") == "compact_boundary"
+                            and row.get("sessionId") in (None, sid)):
+                        return True
+    try:
+        seat = _booked_seat(req, str((req.get("seat") or {}).get("key") or ""))
+        since = float(claim.get("at", 0) or 0)
+        return any(row.get("event") == "compact" and row.get("harness") == harness and row.get("sid") == sid
+                   and float(row.get("ts", 0) or 0) >= since for row in st._read_ledger_lines(seat))
+    except (OSError, ValueError, TypeError, st.StateError):
+        return False
+
+
 def _prepare_handover_snapshot(req: dict) -> bool:
     """Take the dispatch snapshot after durable queueing, outside the short hook's lock."""
     seat = st.session_seat(st.seat_from_dict(req["seat"]),
                            str(req.get("harness") or ""), str(req.get("sid") or ""))
     if seat.kind not in ("pane", "native"):
         return True
+    if ((_compact_mode(req) or _notified_manual_tidy(req, seat))
+            and mark_compact(seat.key, str(req.get("harness") or ""),
+                             str(req.get("sid") or ""), str(req.get("nonce") or ""))):
+        return True    # /compact keeps this session: there is no successor to hand over to
     import dispatch_seat_handover as handover
     try:
         bindings = handover.collect_snapshot_bindings(str(req.get("harness") or ""), str(req.get("sid") or ""))
@@ -1196,7 +1459,8 @@ def note_start_locked(seat: "st.Seat", harness: str, sid: str, now: float) -> No
 
 def _drop_unverified_notice(seat: "st.Seat", req: dict) -> None:
     """Remove the "could not confirm" line this booking left (caller holds the seat lock)."""
-    text = _notice_text("unverified", "", str(req.get("harness") or ""))
+    text = _notice_text("unverified", "", str(req.get("harness") or ""),
+                        compact=req.get("clear_command") == "compact")
     path = st._notices_path(seat)
     data = st.read_json(path)
     items = data.get("items") if isinstance(data, dict) else None
@@ -1266,7 +1530,30 @@ def _unchanged_since_card(req: dict, seat: "st.Seat") -> str:
     if observation is None:
         return "idle-card-observation-unavailable"
     card, sequence = observation
-    return _card_unchanged_reason(req, card, sequence)
+    reason = _card_unchanged_reason(req, card, sequence)
+    booked = int(req.get("prompt_seq", -1))
+    if reason == "new-input" and _only_notifications_since(seat, booked, sequence):
+        if req.get("clear_command") != "compact" and req.get("origin") in ("idle", "compact"):
+            # The card misses that turn, so no automatic clear; nobody typed, so no line.
+            return NOTIFICATION_TURN
+        # /compact keeps the notification turns; a tidy the person ran compacts at its claim
+        # instead of dropping them (see claim_clear).
+        reason = _card_unchanged_reason(req, card, booked)
+    return reason
+
+
+def _notified_manual_tidy(req: dict, seat: "st.Seat") -> bool:
+    """A tidy the person ran, followed only by task notifications since its card. It is kept,
+    not cancelled: /compact keeps that turn, where a clear would drop it."""
+    if req.get("origin") in ("idle", "compact"):
+        return False
+    observation = _card_frontier(seat)
+    return bool(observation and _only_notifications_since(seat, int(req.get("prompt_seq", -1)), observation[1]))
+
+
+def _only_notifications_since(seat: "st.Seat", booked: int, sequence: int) -> bool:
+    """Every prompt after ``booked`` up to ``sequence`` was a runtime task notification."""
+    return sequence > booked >= 0 and st.last_human_prompt_seq(seat) <= booked
 
 
 def _card_unchanged_reason(req: dict, card, sequence: int) -> str:
@@ -1410,12 +1697,22 @@ def claim_clear(path, nonce: Optional[str] = None):
     req, seat, reason = _booking_at(Path(path))
     if req is None:
         return None, reason
+    compact = _compact_mode(req) or _notified_manual_tidy(req, seat)   # outside the lock: own files
+    transcript, offset = "", None
+    if compact:
+        with contextlib.suppress(Exception):
+            found = _claude_transcript(seat, str(req.get("sid") or ""))
+            if found is not None:
+                transcript, offset = str(found), found.stat().st_size
     with st.seat_lock(seat.key):
         req, reason = validate_request(path, nonce)
         if req is None:
             return None, reason
         claim = {"state": "sending", "nonce": req["nonce"], "token": secrets.token_hex(12),
                  "at": st.now_epoch()}
+        if compact or req.get("clear_command") == "compact" or _notified_manual_tidy(req, seat):
+            claim.update(command="compact", transcript=transcript, offset=offset)
+            req["clear_command"] = "compact"
         req["clear_claim"] = claim
         _write_reservation(req)
         return {**req, "clear_claim": claim}, ""
@@ -1619,16 +1916,29 @@ def release_unsent_continue(claim):
 # ---------------------------------------------------------------------------
 
 def _herdr_wait_idle(pane: str, timeout_ms: int) -> str:
-    """One event-driven ``herdr agent wait``: ``idle``/``done``, or the reason it did not end that way."""
-    exe = herdr_command()
-    if not exe:
-        return "herdr-not-found"
-    command = [exe, "agent", "wait", pane, "--until", "idle", "--until", "done", "--timeout", str(max(1, timeout_ms))]
-    try:
-        done = subprocess.run(command, capture_output=True, text=True, timeout=timeout_ms / 1000.0 + 30)
-    except (OSError, subprocess.SubprocessError):
-        return "herdr-invocation-failed"
-    for stream in (done.stdout, done.stderr):
+    """One event-driven ``herdr agent wait``: ``idle``/``done``, or the reason it did not end that way.
+
+    A tmux pane has no agent event: the tmux surface re-reads the runtime's own turn
+    record inside the same bound and answers in the same payload shape."""
+    from terminal_surface import is_tmux_pane, pane_surface
+    if is_tmux_pane(pane):
+        surface = pane_surface(pane)
+        if surface is None:
+            return "tmux-not-found"
+        payload = surface.wait_agent(pane, ("idle", "done"), max(1, timeout_ms))
+        streams = (json.dumps(payload),) if isinstance(payload, dict) else ()
+    else:
+        exe = herdr_command()
+        if not exe:
+            return "herdr-not-found"
+        command = [exe, "agent", "wait", pane, "--until", "idle", "--until", "done",
+                   "--timeout", str(max(1, timeout_ms))]
+        try:
+            done = subprocess.run(command, capture_output=True, text=True, timeout=timeout_ms / 1000.0 + 30)
+        except (OSError, subprocess.SubprocessError):
+            return "herdr-invocation-failed"
+        streams = (done.stdout, done.stderr)
+    for stream in streams:
         try:
             payload = json.loads(stream)
         except (ValueError, TypeError):
@@ -1691,26 +2001,72 @@ def followup_text(req: dict) -> str:
     return STATUS_ONLY_TEXT if req.get("followup_kind") == "status-only" else CONTINUE_TEXT
 
 
-def _notice_text(outcome: str, reason: str, harness: str) -> str:
+def _reason_text(reason: str, t) -> str:
+    """Why a step held, in the reader's language (``tidy.hold.<reason>``; REASON_TEXT is its Korean)."""
+    if not reason:
+        return t("tidy.hold.unknown")
+    try:
+        return t("tidy.hold." + reason)
+    except KeyError:
+        return REASON_TEXT.get(reason, reason)
+
+
+def _notice_text(outcome: str, reason: str, harness: str, *, compact: bool = False) -> str:
+    t = st._ui_translator()
+    why = _reason_text(reason, t)
+    if compact:
+        # Background agents kept this window: the next step is the same /compact, never a clear.
+        kept = "" if reason in NO_CARD_REASONS else t("tidy.clear.kept_compact")
+        if outcome == "unverified":
+            return t("tidy.clear.compact_unverified", kept=kept)
+        return t("tidy.clear.compact_failed" if outcome == "failed" else "tidy.clear.compact_skipped",
+                 why=why, kept=kept)
     hint = CLEAR_COMMAND.get(harness, "/clear")
-    why = REASON_TEXT.get(reason, reason or "알 수 없음")
-    kept = "" if reason in NO_CARD_REASONS else f" 카드는 저장돼 있어 {hint} 하면 새 창이 카드를 받습니다."
+    kept = "" if reason in NO_CARD_REASONS else t("tidy.clear.kept", hint=hint)
     if outcome == "unverified":
-        return f"[정리] 창 비우기를 요청했지만 결과를 확인하지 못했습니다. 창 상태를 확인하고 필요하면 {hint} 하세요.{kept}"
+        return t("tidy.clear.unverified", hint=hint, kept=kept)
     if outcome == "failed":
-        return f"[정리] 창 비우기에 실패했습니다({why}). 필요하면 {hint} 하세요.{kept}"
-    return f"[정리] 창을 자동으로 비우지 않았습니다({why}). 필요하면 {hint} 하세요.{kept}"
+        return t("tidy.clear.failed", why=why, hint=hint, kept=kept)
+    return t("tidy.clear.skipped", why=why, hint=hint, kept=kept)
+
+
+# Why an idle card request was not sent, as it was at the last look.
+_IDLE_WAIT_TEXT = {
+    "form-open": "질문·확인 창이 열려 있었습니다",
+    "draft": "입력창에 쓰던 글이 있었습니다",
+    "draft-unknown": "입력창이 비어 있는지 알 수 없었습니다",
+    "screen-unknown": "화면을 읽지 못했습니다",
+    "expired": "보낼 수 있는 때가 예약 시간 안에 오지 않았습니다",
+}
+# Not-sent reasons the person caused (typing, a new card): no line for these.
+_IDLE_QUIET = frozenset({"new-input", "draft", "card-changed", "superseded", "off"})
+
+
+def _idle_notice_text(req: dict, reason: str) -> str:
+    """The automatic idle tidy result line, true to what happened: whether its request was
+    typed at all, and why it stopped. "" when the person's own input stopped it."""
+    t = st._ui_translator()
+    request = req.get("idle_request") if isinstance(req.get("idle_request"), dict) else {}
+    sent = request.get("state") in ("sending", "arrived", "sent", "accepted", "unverified")
+    # _IDLE_WAIT_TEXT is the Korean of tidy.idle_wait.<reason>, as REASON_TEXT is of tidy.hold.<reason>.
+    why = (t("tidy.idle_wait." + reason) if reason in _IDLE_WAIT_TEXT else
+           t("tidy.idle_wait.not_idle") if str(reason).startswith("not-idle-") else _reason_text(reason, t))
+    terms = idle_tidy_terms(req, request=False, t=t)
+    if not sent:
+        if reason in _IDLE_QUIET:
+            return ""
+        return t("tidy.clear.idle_not_sent", why=why, terms=terms)
+    return t("tidy.clear.idle_sent_unverified", why=why, terms=terms)
 
 
 def _continue_notice_text(outcome: str, reason: str, prompt_text: str = CONTINUE_TEXT) -> str:
+    # ``prompt_text`` is the input actually typed (CONTINUE_TEXT / STATUS_ONLY_TEXT): named as is.
+    t = st._ui_translator()
     said = f'"{prompt_text}"'
     if outcome == "unverified":
-        return f"[정리] 새 세션에 {said}를 넣었지만 전달을 확인하지 못했습니다. 진행되지 않았다면 {said}라고 입력하세요."
-    why = REASON_TEXT.get(reason, reason or "알 수 없음")
-    if reason.startswith("not-idle-"):
-        why = "새 세션이 입력 대기 상태가 되지 않았습니다"
-    verb = "넣지 못했습니다" if outcome == "failed" else "넣지 않았습니다"
-    return f"[정리] 창은 비웠지만 {said}를 {verb}({why}). 이어서 하려면 {said}라고 입력하세요."
+        return t("tidy.continue.unverified", said=said)
+    why = t("tidy.continue.not_idle") if reason.startswith("not-idle-") else _reason_text(reason, t)
+    return t("tidy.continue.failed" if outcome == "failed" else "tidy.continue.skipped", said=said, why=why)
 
 
 def _booking_seat_fields(seat: "st.Seat", harness: str, sid: str) -> dict:
@@ -1748,6 +2104,8 @@ def _finish(seat_key: str, nonce: str, outcome: str, reason: str = "", *, observ
         if not req or req.get("nonce") != nonce or req.get("status") not in ("reserved", "unverified"):
             return False
         now = st.now_epoch()
+        if reason == NOTIFICATION_TURN:
+            outcome = "cancelled"
         req.update(status=outcome, reason=reason, finished=now)
         claim = req.get("clear_claim")
         if isinstance(claim, dict) and claim.get("state") == "sending":
@@ -1763,14 +2121,18 @@ def _finish(seat_key: str, nonce: str, outcome: str, reason: str = "", *, observ
             req["continued"] = {"state": "pending", "kind": kind,
                                 "deadline": now + _tunable("CONTINUE_WINDOW", CONTINUE_WINDOW_SEC)}
         _write_reservation(req)
-    if outcome != "cleared":
+    if outcome not in ("cleared", "cancelled"):
         with contextlib.suppress(BaseException):
-            if req.get("origin") in ("idle", "compact"):
-                notice = "[정리] 자동 정리의 창 전환을 확인하지 못했습니다."
+            if req.get("origin") == "idle":
+                notice = _idle_notice_text(req, reason)
+            elif req.get("origin") == "compact":
+                notice = st._ui_translator()("tidy.clear.auto_unverified")
             else:
-                notice = _notice_text(outcome, reason, str(req.get("harness") or ""))
-            st.write_notice(_booked_seat(req, seat_key), notice,
-                            author_harness=str(req.get("harness") or ""), author_sid=str(req.get("sid") or ""))
+                notice = _notice_text(outcome, reason, str(req.get("harness") or ""),
+                                      compact=req.get("clear_command") == "compact")
+            if notice:
+                st.write_notice(_booked_seat(req, seat_key), notice,
+                                author_harness=str(req.get("harness") or ""), author_sid=str(req.get("sid") or ""))
     return True
 
 
@@ -1821,7 +2183,7 @@ def _finish_continue(seat_key: str, nonce: str, outcome: str, reason: str = "", 
     if outcome != "true" and not (outcome == "skipped" and reason in CONTINUE_QUIET):
         with contextlib.suppress(BaseException):
             if req.get("origin") == "idle" and held.get("kind") == "status-only":
-                notice = "[정리] 자동 현황 안내를 확인하지 못했습니다. 다음 입력을 기다립니다."
+                notice = st._ui_translator()("tidy.continue.status_unverified")
             else:
                 prompt_text = STATUS_ONLY_TEXT if held.get("kind") == "status-only" else CONTINUE_TEXT
                 notice = _continue_notice_text(outcome, reason, prompt_text)
@@ -1901,6 +2263,7 @@ def _wait_idle_card_acceptance(seat_key: str, nonce: str, sleep: Callable[[float
 
 def _idle_due_and_request(seat_key: str, nonce: str, sleep: Callable[[float], None]) -> str:
     path = reservation_path(seat_key)
+    waited = ""         # why the last look did not send (a form, a draft, a busy screen)
     while True:
         req = read_reservation(seat_key)
         if not req or req.get("nonce") != nonce or req.get("status") != "reserved":
@@ -1917,7 +2280,7 @@ def _idle_due_and_request(seat_key: str, nonce: str, sleep: Callable[[float], No
         due = float(idle.get("due_at", 0) or 0)
         now = st.now_epoch()
         if now > float(req.get("deadline", 0) or 0):
-            return "skipped" if _finish(seat_key, nonce, "skipped", "expired") else "superseded"
+            return "skipped" if _finish(seat_key, nonce, "skipped", waited or "expired") else "superseded"
         if now < due:
             # The same absolute due_at survives interruptions and duplicate events.
             sleep(min(30.0, due - now))
@@ -1940,6 +2303,7 @@ def _idle_due_and_request(seat_key: str, nonce: str, sleep: Callable[[float], No
                                                     request.get("reason") or verdict.get("reason")) else "superseded"
                 return "pending"
             if verdict.get("accepted") == "queued" and st.now_epoch() < float(req.get("deadline", 0) or 0):
+                waited = str(verdict.get("reason") or waited)
                 sleep(min(5.0, max(0.0, float(req.get("deadline", 0) or 0) - st.now_epoch())))
                 continue
             reason = verdict.get("reason") or "idle-card-not-accepted"
@@ -2186,6 +2550,20 @@ def run_helper(seat_key: str, nonce: str, *, wait: Optional[Callable[[str, int],
     if outcome == "true":
         _finish(seat_key, nonce, "cleared", observed=verdict.get("new_session", ""))
         return _continue(seat_key, nonce, continuer, sleep=sleep)
+    held = read_reservation(seat_key) or {}
+    if outcome == "unverified" and (held.get("clear_claim") or {}).get("command") == "compact":
+        # /compact was typed once; the same session shows it ends (it takes minutes).
+        deadline = time.monotonic() + _tunable("COMPACT_CONFIRM", COMPACT_CONFIRM_SEC)
+        while True:
+            held = read_reservation(seat_key)
+            if not held or held.get("nonce") != nonce or held.get("status") != "reserved":
+                return "superseded"
+            if compact_confirmed(held):
+                _finish(seat_key, nonce, "cleared", observed=str(held.get("sid") or ""))
+                return _continue(seat_key, nonce, continuer, sleep=sleep)
+            if time.monotonic() >= deadline:
+                return "unverified" if _finish(seat_key, nonce, "unverified", reason) else "superseded"
+            sleep(COMPACT_POLL_SEC)
     if outcome == "unverified":
         # The clear was written once and never repeated; allow the new conversation's
         # start hook a short bounded window to show up before calling it unconfirmed.

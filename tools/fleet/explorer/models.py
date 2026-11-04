@@ -1,6 +1,7 @@
 """Read-only model configuration view and viewer-local selection controls."""
 from collections.abc import Mapping
 
+from ..config import ui_text
 from .grid import CellGrid, cell_width, clip_cells
 
 X = 34
@@ -259,7 +260,7 @@ def _draw_context(grid, data, state, x, y, width):
     _, y = _wrapped_chips(grid, bx, y, ("600K", "650K", "700K", "750K"),
                           current2, chosen2, "tidy2", right - 1)
     y += 1
-    grid.put(x + 3, y, "세 하네스 공통 · 설정은 Apply로 변경", "dim", limit=right)
+    grid.put(x + 3, y, ui_text("fleet.models.tidy_shared"), "dim", limit=right)
     y += 1
     if warnings:
         grid.put(x + 3, y, "tidy point meets or exceeds window: " + ", ".join(warnings), "g_blocked", limit=right)

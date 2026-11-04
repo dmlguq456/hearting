@@ -74,6 +74,22 @@ def check_file_exists(check_id, path):
     return _check
 
 
+def check_managed_copy(check_id, dest, integration_id, version):
+    """Build a zero-argument check that a managed integration copy carries its pinned version."""
+
+    def _check():
+        try:
+            import herdr_integration
+            ok = bool(herdr_integration.version_marker(Path(dest), integration_id, version))
+        except Exception as exc:  # noqa: BLE001 -- a broken copy is a failed check, not a crash
+            return {"id": check_id, "ok": False, "detail": f"{dest}: managed copy check failed: {exc}"}
+        return {"id": check_id, "ok": ok,
+                "detail": f"{dest} carries the current {integration_id} integration" if ok
+                else f"{dest} does not carry the current {integration_id} integration"}
+
+    return _check
+
+
 def check_herdr_integration(runtime, source_root):
     """Verify the pinned Herdr asset markers and real entrypoint registrations."""
     def _check():

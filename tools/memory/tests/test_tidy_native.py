@@ -48,6 +48,12 @@ class NativeCase(unittest.TestCase):
         self.cwd = str(self.iso.home)
         self.patch(native, "_caller_runtime", return_value=(self.own, False))
         self.patch(pane_ownership, "verified_pane", return_value="")
+        # Sessions with a transcript and no background agent: tidy keeps the clear
+        # (a session whose transcript cannot be found is compacted instead).
+        for sid in ("session-A", "session-B", "session-C"):
+            transcript = self.iso.claude_dir / "projects" / "-fixture" / f"{sid}.jsonl"
+            transcript.parent.mkdir(parents=True, exist_ok=True)
+            transcript.write_text(json.dumps({"type": "user", "sessionId": sid}) + "\n", encoding="utf-8")
 
     def patch(self, obj, name, **kwargs):
         p = mock.patch.object(obj, name, **kwargs)

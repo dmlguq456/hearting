@@ -15,6 +15,7 @@ import unittest
 from unittest import mock
 
 import importlib.util
+from split_module_fixture import patch_split
 
 _SSC_SPEC = importlib.util.spec_from_file_location(
     "stage_session_contract", Path(__file__).with_name("stage_session_contract.py")
@@ -317,7 +318,7 @@ class SubdivisionContractTest(unittest.TestCase):
                 self._admit(route, node, manifest)
                 rogue = worktree / "rogue.py"
                 rogue.write_text("unplanned change\n", encoding="utf-8")
-                with mock.patch.object(CR, "record_degradation", side_effect=lambda **kw: recorded.append(kw)):
+                with patch_split(CR, "record_degradation", side_effect=lambda **kw: recorded.append(kw)):
                     with self.assertRaisesRegex(ValueError, "subdivision-scope-violation"):
                         CR.complete_subsession_stage(route, node, "execute", evidence, manifest_path, jobs_path)
                 self.assertEqual(len(recorded), 1)
@@ -364,7 +365,7 @@ class SubdivisionContractTest(unittest.TestCase):
                     "rewritten after admission\n", encoding="utf-8"
                 )
                 rewritten = []
-                with mock.patch.object(
+                with patch_split(
                     CR, "record_degradation", side_effect=lambda **kw: rewritten.append(kw)
                 ):
                     with self.assertRaisesRegex(ValueError, "subdivision-scope-violation"):
@@ -419,7 +420,7 @@ class SubdivisionContractTest(unittest.TestCase):
                     ["git", "-C", str(worktree), "commit", "-q", "-m", "slice commit"],
                     check=True,
                 )
-                with mock.patch.object(CR, "record_degradation", side_effect=lambda **kw: recorded.append(kw)):
+                with patch_split(CR, "record_degradation", side_effect=lambda **kw: recorded.append(kw)):
                     with self.assertRaisesRegex(ValueError, "subdivision-commit-attempted"):
                         CR.complete_subsession_stage(
                             route, node, "execute", evidence, manifest_path, jobs_path,
@@ -490,7 +491,7 @@ class SubdivisionContractTest(unittest.TestCase):
                 for session in manifest["sessions"]:
                     Path(session["fixed_files"][0]).write_text("slice edit\n", encoding="utf-8")
                 _commit(worktree, "slice commit", "-A")
-                with mock.patch.object(
+                with patch_split(
                     CR, "record_degradation", side_effect=lambda **kw: recorded.append(kw)
                 ):
                     with self.assertRaisesRegex(ValueError, "subdivision-commit-attempted"):

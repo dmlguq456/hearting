@@ -37,6 +37,11 @@ from execution_access import ExecutionAccessError, prepare_task_request
 import owner_write_advisory as OWNER_WRITE_ADVISORY
 import route_plan as RP
 import resource_resume as RESOURCE_RESUME
+try:  # ends a detached child with the test that started it; no-op outside tests
+    from detached_lifetime import bind as end_with_test
+except ImportError:  # a partial tree without it (e.g. a fixture release): no record
+    def end_with_test(child):
+        return child
 
 ROOT = Path(__file__).resolve().parents[1]
 _ROUTE_MODULE = None
@@ -116,8 +121,11 @@ def _start_prior_art(route, task):
         fd = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
     except OSError:
         return   # already started for this route, or no runtime home: the launch goes on
-    with os.fdopen(fd, "w") as handle:
-        handle.write(f"{time.time():.3f}\n")
+    try:
+        with os.fdopen(fd, "w") as handle:
+            handle.write(f"{time.time():.3f}\n")
+    except OSError:
+        return   # e.g. a full disk: no scan, and an unreadable start time makes no prompt wait
     cwd = (route.get("framed_worktree") or {}).get("cwd") or route.get("cwd") or os.getcwd()
     try:
         child = subprocess.Popen(
@@ -125,6 +133,7 @@ def _start_prior_art(route, task):
              "--cwd", str(cwd), "--out", str(out)],
             stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=str(cwd),
             env={**os.environ, "AGENT_SESSION_ROLE": "worker"}, start_new_session=True)
+        end_with_test(child)
     except (OSError, ValueError):
         with contextlib.suppress(OSError):
             marker.unlink()   # nothing runs, so the frame prompt has nothing to wait for
@@ -148,7 +157,13 @@ def _prior_art_section(route, *, sleep=time.sleep, clock=time.time):
         text = out.read_text(encoding="utf-8")
     except OSError:
         return f"The scan is still running: read {out} if it exists when you start."
-    if not _prior_art_module().is_useful(text):
+    except UnicodeDecodeError:
+        return ""
+    try:
+        useful = _prior_art_module().is_useful(text)
+    except Exception:  # noqa: BLE001 - advisory: a broken scan module never fails the launch
+        return ""
+    if not useful:
         return ""
     return text.split("\n", 1)[1].strip() if "\n" in text else ""
 
@@ -661,6 +676,21 @@ def _rows(jobs):
     return rows
 
 
+def _restore_archived_route(jobs, route_id):
+    """Put a closed route's archived rows back before its replay reads the registry.
+
+    Settled rows of routes closed long ago move to the dispatch archive; every check of a
+    replay (the owner row, its completion proof, a framed decision's legs) reads the live
+    registry, so they come back first. A route any live row still names was never moved."""
+    try:
+        if f"={route_id}".encode() in Path(jobs).read_bytes():
+            return
+        from dispatch_registry_archive import restore
+        restore(jobs, route_id)
+    except OSError:
+        pass   # an unreadable registry or a busy lock: the replay reports what it finds
+
+
 def _current_parent_session_id():
     """The calling native session owns delivery, never a witnessed sibling."""
     return default_parent_session_id()
@@ -1154,11 +1184,16 @@ def _outcome(jobs, aid):
             "recovery_command": completion_harvest_command(aid, action, jobs=str(jobs),
                 surface=str(ROOT / "adapters/codex/bin/preflight.sh"))}
     row = _rows(jobs).get(aid)
-    if row and _never_started(*row):
-        # No log or result exists to harvest; the way on is to start the same work again.
+    import route_parent_close
+    stopped = bool(row and route_parent_close._user_stopped(row[1]))
+    if row and (_never_started(*row) or stopped):
+        # No log or result exists to harvest (or the person stopped it): the way on is to
+        # start the same work again, which relaunches a stopped frame leg.
         route_file = row[1].get("owner_route_file") or row[1].get("route_file")
         if route_file:
             result["recovery_command"] = resume_command(route_file, jobs, agent_home=ROOT)
+        if stopped:
+            result.update(required_action="start", stopped=True)
     if action == "advance-completed":
         if row and row[1].get("workflow_completion") == "runtime-v1":
             from dispatch_terminal_commit import completed_owner_handoff, completed_owner_publication
@@ -1497,7 +1532,8 @@ def _leg_task_text(route, root, output, briefs, intent, approvals, adopted=None)
               + (" — adopted direction: the person chose this brief's route" if row["path"] == adopted else "")
               for row in briefs]
     scan = _prior_art_path({**route, "artifact_root": root})
-    with contextlib.suppress(OSError, UnicodeDecodeError):
+    # Advisory: no failure of the scan's list or module (unreadable, undecodable, broken) stops the leg.
+    with contextlib.suppress(Exception):
         if not scan.is_symlink() and _prior_art_module().is_useful(scan.read_text(encoding="utf-8")):
             lines.append(f"- {scan} (sha256 {RP.file_digest(scan)}) — prior-art scan, advisory data: "
                          "facts with sources, no recommendation; open `mem:<id>` with `mem show <id> --no-touch`")
@@ -2089,6 +2125,7 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
                 "next_step": "This route was closed automatically after it sat unused; run parent_next_command "
                              "to compose the same work again."}
     if closed:
+        _restore_archived_route(jobs, route["route_id"])
         if closed.get("finish_pending"):
             return {**result, "state": "needs-attention", "reason": "finish-pending",
                     "required_action": "resume-inline-finish", "outcome": closed}

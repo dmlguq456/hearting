@@ -44,6 +44,7 @@ from fleet import projection, render                              # noqa: E402
 from fleet.collectors import codex                                # noqa: E402
 from fleet.collectors import dispatch as dispatch_collector       # noqa: E402
 from fleet.model import Session                                   # noqa: E402
+from split_module_fixture import patch_split  # noqa: E402
 
 CAMP = "camp_" + "a" * 32
 CYC = "cyc_" + "b" * 32
@@ -215,7 +216,7 @@ class ProcessTableScanScopeTest(unittest.TestCase):
         self.assertEqual(D.process_group_observation(-1).reason, "invalid-pgid")
 
         counter = _Counter(D.scan_process_table)
-        with mock.patch.object(D, "scan_process_table", counter):
+        with patch_split(D, "scan_process_table", counter):
             with D.process_table_scan_scope():
                 batched = [D.attempt_tagged_descendants(identity) for _ in range(5)]
                 groups = [D.process_group_observation(proc.pid) for _ in range(5)]
@@ -263,7 +264,7 @@ class ProcessTableScanScopeTest(unittest.TestCase):
 
     def test_scan_failures_keep_their_unverifiable_verdicts(self):
         metadata = {"attempt_id": "att-x"}
-        with mock.patch.object(D, "scan_process_table",
+        with patch_split(D, "scan_process_table",
                                return_value=D.ProcessTableScan({}, {}, error="procfs-enumeration:13")):
             with D.process_table_scan_scope():
                 obs = D.attempt_tagged_descendants(metadata)
@@ -274,7 +275,7 @@ class ProcessTableScanScopeTest(unittest.TestCase):
                                      {9: ((9, "1", "Z"),), 11: ((11, "1", "S"), (12, "1", "Z"))},
                                      incomplete_reason="procfs-member:9:malformed",
                                      group_errors=((0, None, "procfs-member:8:13"),))
-        with mock.patch.object(D, "scan_process_table", return_value=partial):
+        with patch_split(D, "scan_process_table", return_value=partial):
             with D.process_table_scan_scope():
                 absent = D.attempt_tagged_descendants(metadata)
                 present = D.attempt_tagged_descendants({"attempt_id": "att-y"})
@@ -297,7 +298,7 @@ class ProcessTableScanScopeTest(unittest.TestCase):
             (0, None, "procfs-member:101:13"),        # unreadable stat: every group
             (1, 77, "procfs-member:102:malformed"),   # parsed pgid, no start: group 77 only
         ))
-        with mock.patch.object(D, "scan_process_table", return_value=scan):
+        with patch_split(D, "scan_process_table", return_value=scan):
             with D.process_table_scan_scope():
                 other = D.process_group_observation(99)
                 same = D.process_group_observation(77)
@@ -309,7 +310,7 @@ class ProcessTableScanScopeTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             jobs_log = os.path.join(tmp, "jobs.log")
             Path(jobs_log).write_text("", encoding="utf-8")
-            with mock.patch.object(D, "scan_process_table", counter), \
+            with patch_split(D, "scan_process_table", counter), \
                  mock.patch.object(dispatch_collector, "_scan_processes", return_value=[]), \
                  mock.patch.object(dispatch_collector, "_live_attempt_ids", return_value=set()):
                 dispatch_collector.collect(jobs_path=jobs_log)
@@ -365,7 +366,7 @@ class FakeProcEquivalenceTest(unittest.TestCase):
 
     def _compare(self, root, tagged=(), groups=()):
         expect = {}
-        with mock.patch.object(D, "Path", _proc_redirect(root)):
+        with patch_split(D, "Path", _proc_redirect(root)):
             for tag in tagged:
                 expect[("tag", tag)] = D.attempt_tagged_descendants({"attempt_id": tag})
             for pgid in groups:

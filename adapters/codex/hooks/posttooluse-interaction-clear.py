@@ -6,8 +6,14 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
+_STARTED = time.monotonic()
+# Peer-context reading and claiming share this budget from hook start (the same
+# one the Claude hooks use): rows a slow disk keeps it from reaching stay
+# pending for the next tool call or prompt instead of stalling this one.
+_PEER_BUDGET_S = 2.5
 
 ROOT = Path(__file__).resolve().parents[3]
 TOOLS = ROOT / "tools"
@@ -56,7 +62,8 @@ def main():
             spec = importlib.util.spec_from_file_location("_peer_context", ROOT / "utilities/peer-message.py")
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
-            mod.emit_peer_context({"harness": "codex", "session_id": session_id}, "PostToolUse")
+            mod.emit_peer_context({"harness": "codex", "session_id": session_id}, "PostToolUse",
+                                  deadline=_STARTED + _PEER_BUDGET_S)
     except Exception:
         pass
     return 0

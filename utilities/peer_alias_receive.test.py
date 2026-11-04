@@ -998,6 +998,8 @@ import { pathToFileURL } from "node:url";
 const { AgentHarnessGuards } = await import(pathToFileURL(process.env.AGENT_HOME + "/adapters/opencode/plugins/hearting-guards.js"));
 const logs = [];
 process.env.HERDR_PANE_ID = "";
+delete process.env.TMUX;
+delete process.env.TMUX_PANE;
 const hooks = await AgentHarnessGuards({client: {app: {log: async ({body}) => logs.push(body)}}});
 if (typeof hooks.dispose !== "function") throw Error("normal host disposal missing");
 await hooks["tool.execute.after"]({sessionID: "actual-callback", tool: "fixture-noop", args: {secret: "private-tool-body"}}, {});
@@ -1016,6 +1018,29 @@ console.log(JSON.stringify(logs));
         self.assertEqual(logs[1]["extra"]["sessionID"], "actual-callback")
         self.assertNotIn("private-tool-body", run.stdout)
         self.assertNotIn("private-error", run.stdout)
+
+    def test_opencode_without_a_herdr_pane_takes_its_tmux_pane_as_the_hint(self):
+        js = r"""
+import { pathToFileURL } from "node:url";
+const { AgentHarnessGuards } = await import(pathToFileURL(process.env.AGENT_HOME + "/adapters/opencode/plugins/hearting-guards.js"));
+const reasons = [];
+process.env.HERDR_PANE_ID = "";
+for (const [tmux, pane] of [["/fixture/tmux.sock,1,0", "%4"], ["/fixture/tmux.sock,1,0", "w1:p0"], ["", "%4"]]) {
+  const logs = [];
+  if (tmux) process.env.TMUX = tmux; else delete process.env.TMUX;
+  process.env.TMUX_PANE = pane;
+  const hooks = await AgentHarnessGuards({client: {app: {log: async ({body}) => logs.push(body)}}});
+  await hooks["tool.execute.after"]({sessionID: "callback-" + reasons.length, tool: "fixture-noop", args: {}}, {});
+  reasons.push(logs.filter(row => row.extra.stage === "callback").map(row => row.extra.reason)[0]);
+  await hooks.dispose();
+}
+console.log(JSON.stringify(reasons));
+"""
+        run = subprocess.run(["node", "--input-type=module", "-e", js], env=dict(os.environ),
+                             capture_output=True, text=True, timeout=10)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        # Only a tmux pane id inside a named tmux server is a hint; the projector proves it.
+        self.assertEqual(json.loads(run.stdout), ["callback-entry", "callback-no-pane", "callback-no-pane"])
 
     def test_opencode_publisher_observation_preserves_attempt_receipt_and_failure_boundaries(self):
         js = r'''

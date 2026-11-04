@@ -118,6 +118,7 @@ class InstallFollowTest(unittest.TestCase):
             self.assertFalse(self.follower.restart(self.new, [], {}))
             execute.assert_not_called()
 
+    @mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"})
     def test_failed_exec_keeps_viewer_and_closes_handoff(self):
         self.activate(self.new)
         with mock.patch.object(install_follow.os, "execve", side_effect=OSError("fixture")):
@@ -140,6 +141,7 @@ class InstallFollowTest(unittest.TestCase):
             self.follower.restart(self.new, [], {})
             execute.assert_called_once()
 
+    @mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"})
     def test_waiting_note_names_the_release_and_the_last_reason(self):
         self.assertIsNone(self.follower.waiting_note())
         self.activate(self.new)
@@ -162,6 +164,17 @@ class InstallFollowTest(unittest.TestCase):
         self.activate(self.old)
         self.assertIsNone(self.follower.target())
         self.assertIsNone(self.follower.waiting_note(now=later + 60))
+
+    @mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "English"})
+    def test_waiting_note_reads_in_english_without_a_korean_declaration(self):
+        self.activate(self.new)
+        seen = (self.follower.target(), self.follower._pending[1])[1]
+        later = seen + install_follow.WAIT_NOTE_AFTER
+        self.assertEqual(self.follower.waiting_note(now=later),
+                         "waiting to switch to v3.25.19: after the open dialog or input finishes")
+        with mock.patch.object(install_follow.os, "execve", side_effect=OSError("fixture")):
+            self.assertFalse(self.follower.restart(self.new, [], {}))
+        self.assertEqual(self.follower._declined[0], "could not start the new release (OSError)")
 
     def test_viewer_handoff_roundtrip_includes_tuple_fold_keys_and_order(self):
         names = ("_OFFSET", "_PROCESS_VIEW", "_SHOW_ALL", "_ROUTE_FOLD", "_REPO_FOLD",

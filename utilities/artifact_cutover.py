@@ -2392,7 +2392,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                                 parser_class=functools.partial(argparse.ArgumentParser, allow_abbrev=False))
     p = sub.add_parser("migrate-delta")
     p.add_argument("--artifact-root", required=True)
-    p.add_argument("--census-rows", required=True, help="jsonl rows from artifact-delta-census.py --rows-output")
+    p.add_argument("--census-rows", required=True, help="jsonl rows, one classified legacy entry per line")
     p.add_argument("--route", required=True)
     p.add_argument("--capability", default="autopilot-code")
     p.add_argument("--intensity", default="direct")

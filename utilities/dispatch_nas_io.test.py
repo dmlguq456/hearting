@@ -24,6 +24,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).parent))
 import dispatch_contract as DC
 import review_source_subject as SUBJECT
+from split_module_fixture import patch_split
 
 CURRENT = ("attempt_schema_version=2,dispatch_depth=2,transport=headless,"
            "execution_surface=registered-headless,registered_worker=1,"
@@ -196,7 +197,7 @@ class NasDispatchIOTest(unittest.TestCase):
                     parent, jobs, binding = case._fenced_spawn(td, suffix)
                     self.children.append(parent)
                     holder = None
-                    namespace = mock.patch.object(DC, "process_namespace_identity", wraps=DC.process_namespace_identity)
+                    namespace = patch_split(DC, "process_namespace_identity", wraps=DC.process_namespace_identity)
                     if change == "lease-return":
                         attempt = f"att-parent-{suffix}"
                         lease = DC.supervisor_lease_path(jobs, attempt)
@@ -214,7 +215,7 @@ class NasDispatchIOTest(unittest.TestCase):
                                  "pid_scope=namespace-local,pid_observer_ns=pid:[outer],pid_ns=pid:[outer]")
                         lines[0] = case.owner_row(attempt, parent.pid, DC.process_start_ticks(parent.pid), extra=extra)
                         jobs.write_text("\n".join(lines) + "\n")
-                        namespace = mock.patch.object(DC, "process_namespace_identity", return_value="pid:[inner]")
+                        namespace = patch_split(DC, "process_namespace_identity", return_value="pid:[inner]")
                     entered, holding, release = threading.Event(), threading.Event(), threading.Event()
                     self.release_events.append(release)
                     rounds, invalid = [], []
@@ -243,7 +244,7 @@ class NasDispatchIOTest(unittest.TestCase):
                             yield lines
                     marker = Path(td) / "must-not-run"
                     try:
-                        with namespace, mock.patch.object(DC, "_proc_observation", side_effect=observe):
+                        with namespace, patch_split(DC, "_proc_observation", side_effect=observe):
                             if holder is not None:
                                 binding = DC.resolve_live_parent_attempt(
                                     jobs, parent_slug="owner", repo="/repo", worktree="/wt",
@@ -765,8 +766,8 @@ class NasDispatchIOTest(unittest.TestCase):
                             DC._atomic_registry_replace(jobs, lines)
                         yield lines
                 payload = self.base / f'marker-payload-{phase}'
-                with mock.patch.object(DC, 'completion_marker_is_current', return_value=True), \
-                     mock.patch.object(DC, 'note_evidence_change'), \
+                with patch_split(DC, 'completion_marker_is_current', return_value=True), \
+                     patch_split(DC, 'note_evidence_change'), \
                      mock.patch.object(DC, '_launch_registry_transaction', side_effect=mutate):
                     with self.assertRaises(DC.DispatchContractError) as refused:
                         DC.spawn_claimed_attempt(self.jobs, 'att-marker-consumer', parent_binding=None,

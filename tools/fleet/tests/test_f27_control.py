@@ -416,7 +416,8 @@ class NoAutomaticControlTest(unittest.TestCase):
         out = sp.run(["grep", "-rn", "-E", r"import control|from \. import control",
                       root, "--include=*.py"], capture_output=True, text=True).stdout
         offenders = [l for l in out.splitlines()
-                     if "/tests/" not in l and "/render.py" not in l and "/control.py" not in l]
+                     if "/tests/" not in l and "/render.py" not in l and "/render_" not in l
+                     and "/control.py" not in l]  # render_*.py are render.py's parts
         self.assertEqual(offenders, [], "control imported outside render.py: %s" % offenders)
 
     def test_control_is_not_reachable_from_collect_all(self):

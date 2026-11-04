@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -21,6 +22,115 @@ SPEC.loader.exec_module(GOVERNOR)
 import replica_batch_contract as CONTRACT
 from dispatch_contract import process_start_ticks
 from replica_batch_contract import build_manifest
+import dispatch_contract as DC
+from split_module_fixture import patch_split
+
+
+class GovernorDirectReturnDrainTest(unittest.TestCase):
+    """One finite current-path observation, not evidence of operational deadlock."""
+
+    def test_registered_direct_return_with_same_group_residue_and_watcher(self):
+        temporary = tempfile.TemporaryDirectory(prefix="governor-direct-return-")
+        base = Path(temporary.name)
+        jobs, root = base / "jobs.log", base / "governor"
+        attempt = "att-direct-return-fixture"
+        processes, identities = [], []
+
+        def until(predicate):
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                value = predicate()
+                if value:
+                    return value
+                time.sleep(0.02)
+            self.fail("finite fixture observation deadline")
+
+        def finish():
+            from route_parent_close import _signal
+            # If observation or wait fails, retain scratch for the enclosing
+            # verification lease to diagnose and settle before retirement.
+            temporary._finalizer.detach()
+            (base / "release").touch()
+            (base / "start").touch()
+            for pid, start in reversed(identities):
+                _signal(pid, start, signal.SIGKILL)
+            for proc in reversed(processes):
+                if proc.poll() is None:
+                    proc.wait(timeout=5)
+            unsettled = [(pid, start) for pid, start in identities
+                         if DC.process_observation(pid)[0] == "inaccessible" or
+                         (DC.process_observation(pid)[:2] == ("present", start)
+                          and DC.process_observation(pid)[2] != "Z")]
+            if unsettled:
+                temporary._finalizer.detach()
+                self.fail(f"owned fixture retained at {base}: {unsettled}")
+            temporary.cleanup()
+
+        self.addCleanup(finish)
+        residue_code = (
+            "import pathlib,sys,time\n"
+            "p=pathlib.Path(sys.argv[1]); end=time.monotonic()+6\n"
+            "while not (p/'release').exists() and time.monotonic()<end: time.sleep(.02)\n"
+        )
+        native_code = (
+            "import os,pathlib,subprocess,sys,time\n"
+            "p=pathlib.Path(sys.argv[1]); (p/'native').write_text(str(os.getpid()))\n"
+            "end=time.monotonic()+6\n"
+            "while not (p/'start').exists() and time.monotonic()<end: time.sleep(.02)\n"
+            "c=subprocess.Popen([sys.executable,'-c',sys.argv[2],str(p)])\n"
+            "(p/'residue').write_text(str(c.pid))\n"
+        )
+        env = {**os.environ, "AGENT_DISPATCH_ATTEMPT_ID": attempt,
+               "AGENT_DISPATCH_JOBS": str(jobs), "AGENT_ARTIFACT_ROOT": str(base),
+               "AGENT_MODEL_GOVERNOR_ROOT": str(root),
+               "RESOURCE_RUN_REGISTRY": str(base / "resources.json"),
+               "AGENT_RESOURCE_RUN_INDEX": str(base / "resource-index.json"),
+               "XDG_STATE_HOME": str(base / "state"),
+               "COMPUTE_HOSTS_CONFIG": str(base / "compute.json")}
+        env.pop("AGENT_MODEL_GOVERNOR_RESERVATION_TOKEN", None)
+        governor = subprocess.Popen(
+            [sys.executable, str(PATH), "--root", str(root), "run", "--class", "dispatch",
+             "--", sys.executable, "-c", native_code, str(base), residue_code],
+            env=env, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        processes.append(governor)
+        identity = DC.process_launch_identity(governor.pid)
+        identities.append((governor.pid, identity["pid_start"]))
+        native_pid = int(until(lambda: (base / "native").read_text() if (base / "native").exists() else ""))
+        identities.append((native_pid, DC.process_start_ticks(native_pid)))
+        meta = {**identity, "attempt_schema_version": "2", "attempt_id": attempt,
+                "dispatch_depth": "2", "transport": "headless", "worker_type": "stage",
+                "execution_surface": "registered-headless", "registered_worker": "1",
+                "fallback_hop": "same-harness-headless", "launch_lifecycle": "detached",
+                "launch_started": "1", "note": "completed-marker"}
+        jobs.write_text("2026-10-29T00:00:00Z\tdone\t/repo\t/wt\tfixture\t" +
+                        ",".join(f"{k}={v}" for k, v in meta.items()) + "\n")
+        watcher_env = {**env}
+        watcher_env.pop("AGENT_DISPATCH_ATTEMPT_ID", None)
+        watcher = subprocess.Popen(
+            [sys.executable, str(PATH.with_name("dispatch-reap-watch.py")),
+             "--jobs", str(jobs), "--attempt-id", attempt, "--pid", str(governor.pid),
+             "--pid-start", identity["pid_start"], "--pgid", identity["pgid"], "--interval", "0.02"],
+            env=watcher_env, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        processes.append(watcher)
+        identities.append((watcher.pid, DC.process_start_ticks(watcher.pid)))
+        (base / "start").touch()
+        residue_pid = int(until(lambda: (base / "residue").read_text() if (base / "residue").exists() else ""))
+        identities.append((residue_pid, DC.process_start_ticks(residue_pid)))
+        until(lambda: DC.process_observation(native_pid)[0] == "missing" or
+              DC.process_observation(native_pid)[2] == "Z")
+        lease = next(iter(json.loads((root / "state.json").read_text())["leases"].values()))
+        self.assertEqual(GOVERNOR.observe_witness(root, lease["claimant_witness"]).state, "live")
+        self.assertEqual(os.getpgid(residue_pid), governor.pid)
+        self.assertIsNone(governor.poll())
+        self.assertIsNone(watcher.poll())
+        self.assertNotIn("group_reap_proof=", jobs.read_text())
+        print("G13 baseline: direct child returned; same-group residue live; governor/lease/witness live; actual watcher awaiting leader", flush=True)
+        (base / "release").touch()
+        self.assertEqual(governor.wait(timeout=5), 0)
+        self.assertEqual(watcher.wait(timeout=5), 0)
+        self.assertEqual(json.loads((root / "state.json").read_text())["leases"], {})
+        self.assertIn("launch_outcome=governed-process-group-drained", jobs.read_text())
+        print("G13 baseline: finite residue exit -> lease returned -> leader exit -> watcher drain receipt; owned finalizer active", flush=True)
 
 
 def _run_as_non_group_actor(case):
@@ -867,11 +977,11 @@ class GovernorTest(unittest.TestCase):
         import dispatch_contract as contract
         from types import SimpleNamespace
         stack = contextlib.ExitStack()
-        stack.enter_context(mock.patch.object(contract, "completion_marker_is_current", return_value=True))
-        stack.enter_context(mock.patch.object(contract, "completion_attempt_readiness",
+        stack.enter_context(patch_split(contract, "completion_marker_is_current", return_value=True))
+        stack.enter_context(patch_split(contract, "completion_attempt_readiness",
             return_value=SimpleNamespace(state="ready", reason="settled")))
-        stack.enter_context(mock.patch.object(contract, "dispatch_state_roots", return_value=[root]))
-        stack.enter_context(mock.patch.object(contract, "resolve_dispatch_state_root", return_value=root))
+        stack.enter_context(patch_split(contract, "dispatch_state_roots", return_value=[root]))
+        stack.enter_context(patch_split(contract, "resolve_dispatch_state_root", return_value=root))
         return stack
 
     def test_replacement_owner_reserves_only_pending_leg_with_original_failed_closure(self):
@@ -881,7 +991,7 @@ class GovernorTest(unittest.TestCase):
                 root = Path(td)
                 batch, jobs, marker = self._replacement_owner_peer_fixture(root, harness)
                 before, closure = jobs.read_bytes(), marker.read_bytes()
-                with self._peer_completion_probes(root), mock.patch.object(
+                with self._peer_completion_probes(root), patch_split(
                         contract, "review_self_disposition_lineage",
                         return_value=["att-parent-governor", "att-owner-new"]) as ancestry:
                     tokens = self.reserve_batch(td, 1, batch)
@@ -1026,7 +1136,7 @@ class GovernorTest(unittest.TestCase):
                     jobs.write_text("\n".join(lines) + "\n")
                 with self._peer_completion_probes(root) as stack:
                     if fault != "unverified-owner":
-                        stack.enter_context(mock.patch.object(contract, "review_self_disposition_lineage",
+                        stack.enter_context(patch_split(contract, "review_self_disposition_lineage",
                             return_value=["att-parent-governor", "att-wrong-owner" if fault == "other-owner" else "att-owner-new"]))
                     with self.assertRaises(ValueError):
                         self.reserve_batch(td, 1, batch)
@@ -1240,7 +1350,7 @@ print(json.dumps({"returncode": result.returncode, "stderr": result.stderr}))
         with mock.patch.object(
             GOVERNOR, "process_observation",
             return_value=("inaccessible", "", ""),
-        ), mock.patch.object(
+        ), patch_split(
             GOVERNOR, "process_group_observation",
             return_value=GOVERNOR.ProcessGroupObservation(
                 "unverifiable", reason="permission-denied"
@@ -1924,7 +2034,7 @@ class GovernorIdentityRegressionTest(unittest.TestCase):
         t=GOVERNOR.reserve(self.root,"dispatch",1)[0]
         with mock.patch.object(GOVERNOR,"_owned_group_metadata",return_value={"group_owned":True,"pgid":os.getpid()}):
             GOVERNOR.claim_reservation(self.root,t,"dispatch")
-        with mock.patch.object(GOVERNOR.os,"getpgrp",return_value=os.getpid()), mock.patch.object(GOVERNOR,"capture_local_identity",return_value=self.state()["leases"][t]["claimant_identity"]), mock.patch.object(GOVERNOR,"process_group_observation",return_value=GOVERNOR.ProcessGroupObservation("unverifiable",reason="fixture-enumeration-race")):
+        with mock.patch.object(GOVERNOR.os,"getpgrp",return_value=os.getpid()), mock.patch.object(GOVERNOR,"capture_local_identity",return_value=self.state()["leases"][t]["claimant_identity"]), patch_split(GOVERNOR,"process_group_observation",return_value=GOVERNOR.ProcessGroupObservation("unverifiable",reason="fixture-enumeration-race")):
             result=GOVERNOR.release(self.root,t)
         self.assertEqual(result["reason"],"group-observation-incomplete")
         self.assertIsNone(self.state()["claims"][t]["released_at"])

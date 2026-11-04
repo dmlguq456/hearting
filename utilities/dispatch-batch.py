@@ -44,6 +44,11 @@ from dispatch_contract import (  # noqa: E402
     validate_dispatch_log_dir,
 )
 from governor_identity import IdentityCaptureError, create_witness  # noqa: E402
+try:  # ends a detached child with the test that started it; no-op outside tests
+    from detached_lifetime import bind as end_with_test  # noqa: E402
+except ImportError:  # a partial tree without it (e.g. a fixture release): no record
+    def end_with_test(child):
+        return child
 from dispatch_lifecycle import (  # noqa: E402
     FOREGROUND_NOTICE,
     FOREGROUND_SCOPED,
@@ -3026,7 +3031,6 @@ def main(argv: list[str] | None = None) -> int:
         # dispatch-node.py's own admission (which the leg launch below still
         # goes through) must agree, so this no longer keeps its own
         # `len(prior)+1 > max_round` comparison.
-        planned_revision_nodes: set[str] = set()
         round_admissions = {}
         replay_budget_errors = []
         round_errors = {}
@@ -3055,7 +3059,6 @@ def main(argv: list[str] | None = None) -> int:
             )
             round_admissions[capped_node_id] = admission
             budget = admission.budget
-            planned_revision_nodes.update(admission.planned_revision_nodes)
             choice = decide_continuation(route, action="round", node=capped_node, facts={"budget": budget})
             if not choice.allowed:
                 error = BatchError(choice.reason,
@@ -3230,7 +3233,6 @@ def main(argv: list[str] | None = None) -> int:
                 continue
             completion_marker_gate(
                 str(route_path), str(node["id"]), args.action, agent_home, jobs,
-                planned_revision_nodes=planned_revision_nodes,
                 **({"attempt_id": next(m["attempt_id"] for m in unfinished_input["manifest"]["members"]
                                        if m["route_node"] == node["id"])}
                    if unfinished_input is not None else {}),
@@ -3862,6 +3864,7 @@ def main(argv: list[str] | None = None) -> int:
                     stderr=subprocess.PIPE,
                     start_new_session=True,
                 )
+                end_with_test(proc)
                 relay.add(proc)
                 processes.append((leg, token, proc))
             except OSError:

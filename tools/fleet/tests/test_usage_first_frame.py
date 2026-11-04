@@ -2,6 +2,7 @@
 import unittest
 import time
 from types import SimpleNamespace
+from unittest import mock
 
 from tools.fleet.collectors import FIRST_FRAME_USAGE_WAIT
 from tools.fleet.explorer.runtime import ExplorerRuntime
@@ -14,6 +15,7 @@ class UsageFirstFrameTests(unittest.TestCase):
         self.runtime = ExplorerRuntime()
         self.vm = ExplorerViewModel()
 
+    @mock.patch.dict("os.environ", {"FLEET_NOW_LANG": "Korean"})
     def test_pending_usage_keeps_first_frame_loading(self):
         _, readiness = self.runtime.prepare(
             {"observations": {"usage:claude": {"state": "pending"}}}, None,

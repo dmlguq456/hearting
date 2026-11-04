@@ -491,27 +491,34 @@ class Batch:
         self.result["reinforced"].append(rid)
 
 
+def _tidy_line(t, batch: str, text: str) -> str:
+    """``[tidy] batch <id>: …``; the session-tidy runner finds the apply summary by ``[tidy]``."""
+    return "[tidy] " + t("tidy.apply.batch", batch=batch, text=text)
+
+
 def summary_line(result: dict) -> str:
+    t = st._ui_translator()
     batch = result["batch_id"]
-    undo = f"되돌리기: mem tidy-undo {batch}"
+    undo = t("tidy.apply.undo_hint", batch=batch)
     added = len(result["added"]) + len(result["choice_added"])
     parts = []
     if result["status"] in ("partial", "integrity-violation"):
-        label = "부분 적용" if result["status"] == "partial" else "삭제 검사 실패 (적용분은 되돌릴 수 있음)"
         done = added + len(result["superseded"]) + len(result["reinforced"])
-        parts.append(f"{label} {done}건" if result["status"] == "partial" else label)
+        parts.append(t("tidy.apply.partial", count=done) if result["status"] == "partial"
+                     else t("tidy.apply.integrity"))
         if result.get("failure"):
             parts.append(str(result["failure"])[:100])
-        return f"[tidy] 묶음 {batch}: " + " · ".join(parts) + f" — {undo}"
-    parts = [f"추가 {added}", f"갱신 {len(result['superseded'])}", f"강화 {len(result['reinforced'])}",
-             f"건너뜀 {len(result['skipped'])}"]
+        return _tidy_line(t, batch, " · ".join(parts) + f" — {undo}")
+    parts = [t("tidy.apply.added", count=added), t("tidy.apply.updated", count=len(result["superseded"])),
+             t("tidy.apply.reinforced", count=len(result["reinforced"])),
+             t("tidy.apply.skipped", count=len(result["skipped"]))]
     if result["rejected"]:
-        parts.append(f"거부 {len(result['rejected'])}")
+        parts.append(t("tidy.apply.rejected", count=len(result["rejected"])))
     if result["discarded_over_budget"]:
-        parts.append(f"상한 초과 폐기 {result['discarded_over_budget']}")
+        parts.append(t("tidy.apply.over_budget", count=result["discarded_over_budget"]))
     if result["choice_over_cap"]:
-        parts.append(f"선택지 기록이 상한 {MAX_NEW}건을 {result['choice_over_cap']}건 넘어 모두 기록")
-    return f"[tidy] 묶음 {batch}: " + " · ".join(parts) + f" — {undo}"
+        parts.append(t("tidy.apply.choice_over_cap", limit=MAX_NEW, count=result["choice_over_cap"]))
+    return _tidy_line(t, batch, " · ".join(parts) + f" — {undo}")
 
 
 def apply_batch(mem, doc: dict, input_doc: Optional[dict], cwd: str, input_digest: Optional[str] = None) -> dict:
@@ -529,7 +536,7 @@ def apply_batch(mem, doc: dict, input_doc: Optional[dict], cwd: str, input_diges
     interrupted = Journal.load(directory)
     if interrupted is not None and interrupted.doc.get("ops"):
         result = {"schema_version": SCHEMA, "batch_id": batch_id, "status": "partial",
-                  "failure": "이전 실행이 끝나기 전에 멈췄습니다", "added": [], "choice_added": [],
+                  "failure": st._ui_translator()("tidy.apply.interrupted"), "added": [], "choice_added": [],
                   "superseded": [], "reinforced": [], "skipped": [], "rejected": [],
                   "discarded_over_budget": 0, "choice_over_cap": 0, "already_applied": True}
         ops = [op for op in interrupted.doc["ops"] if op.get("state") == "done"]
@@ -642,6 +649,7 @@ def _marker(mem, batch_id: str, pkey: str, cwd: str) -> Optional[str]:
         con.close()
     if found:
         return found
+    # A stored memory record, not screen text: it stays as earlier releases wrote it.
     body = (f"정리 되돌림 표식: 묶음 {batch_id}의 새 기록을 사용에서 내렸습니다. "
             "이 기록에는 따로 기억할 내용이 없습니다.")
     return mem.write_record("working", "project", "tidy-undo", body, cwd_origin=pkey, source=source,
@@ -675,6 +683,7 @@ def _adopt(mem, con, op: dict, pkey: str) -> bool:
 
 def _preflight(mem, journal: Journal, marker_hint: Optional[str], pkey: str) -> Optional[str]:
     """Reason undo must refuse (something changed the records after the batch), else None."""
+    t = st._ui_translator()
     con = mem.get_con()
     try:
         for op in journal.doc["ops"]:
@@ -686,25 +695,25 @@ def _preflight(mem, journal: Journal, marker_hint: Optional[str], pkey: str) -> 
             if op["op"] == "add":
                 now, after = _digest(con, op["id"]), op.get("after")
                 if now is None:
-                    return f"{op['id']} 기록이 없어졌습니다"
+                    return t("tidy.undo.gone", record=op["id"])
                 if now["status"] == "superseded" and marker_hint and now["superseded_by"] == marker_hint:
                     continue
                 if now != after:
-                    return f"{op['id']} 기록이 묶음 적용 뒤에 바뀌었습니다"
+                    return t("tidy.undo.changed", record=op["id"])
             elif op["op"] == "supersede":
                 old, new = _digest(con, op["old_id"]), _digest(con, op["new_id"])
                 after = op.get("after") or {}
                 if old is None or new is None:
-                    return f"{op['old_id']} 또는 {op['new_id']} 기록이 없어졌습니다"
+                    return t("tidy.undo.either_gone", old=op["old_id"], new=op["new_id"])
                 if old != after.get("old"):
-                    return f"{op['old_id']} 기록이 묶음 적용 뒤에 바뀌었습니다"
+                    return t("tidy.undo.changed", record=op["old_id"])
                 if new != after.get("new") and not (marker_hint and new["status"] == "superseded"
                                                     and new["superseded_by"] == marker_hint):
-                    return f"{op['new_id']} 기록이 묶음 적용 뒤에 바뀌었습니다"
+                    return t("tidy.undo.changed", record=op["new_id"])
             elif op["op"] == "reinforce":
                 now, after = _digest(con, op["id"]), op.get("after")
                 if now is None or now != after:
-                    return f"{op['id']} 기록이 묶음 적용 뒤에 바뀌었습니다"
+                    return t("tidy.undo.changed", record=op["id"])
     finally:
         con.close()
     return None
@@ -748,8 +757,9 @@ def undo_batch(mem, batch_id: str) -> tuple:
     journal = Journal.load(directory)
     if journal is None:
         raise ApplyError(f"no undo record for batch {batch_id}")
+    t = st._ui_translator()
     if journal.doc.get("undone"):
-        return 0, f"[tidy] 묶음 {batch_id}: 이미 되돌렸습니다"
+        return 0, _tidy_line(t, batch_id, t("tidy.undo.already"))
     cwd = journal.doc.get("cwd") or os.getcwd()
     if not Path(cwd).is_dir():
         raise ApplyError(f"project folder not found: {cwd}")
@@ -762,34 +772,34 @@ def undo_batch(mem, batch_id: str) -> tuple:
         con.close()
     problem = _preflight(mem, journal, marker, pkey)
     if problem:
-        return 1, f"[tidy] 묶음 {batch_id}: 되돌리기를 거부했습니다 — {problem}"
+        return 1, _tidy_line(t, batch_id, t("tidy.undo.refused", problem=problem))
     ops = [op for op in journal.doc["ops"] if op.get("state") == "done"]
     needs_marker = any(op["op"] in ("add", "supersede") for op in ops)
     marker = _marker(mem, batch_id, pkey, cwd) if needs_marker else None
     if needs_marker and not marker:
-        return 1, f"[tidy] 묶음 {batch_id}: 되돌림 표식을 만들지 못했습니다"
+        return 1, _tidy_line(t, batch_id, t("tidy.undo.no_marker"))
     restored = 0
     for op in reversed(ops):
         if op["op"] == "reinforce":
             ok = _restore_strength(mem, op["id"], op["before"])
-            fail = "" if ok else f"{op['id']} 강화 되돌리기 실패"
+            fail = "" if ok else t("tidy.undo.reinforce_failed", record=op["id"])
         elif op["op"] == "supersede":
             ok, text = _takedown(mem, op["new_id"], marker)
             if ok:
                 ok, text = _quiet(mem.activate, op["old_id"])
-            fail = "" if ok else f"{op['old_id']} 되살리기 실패: {text[:100]}"
+            fail = "" if ok else t("tidy.undo.restore_failed", record=op["old_id"], error=text[:100])
         else:
             ok, text = _takedown(mem, op["id"], marker)
-            fail = "" if ok else f"{op['id']} 내리기 실패: {text[:100]}"
+            fail = "" if ok else t("tidy.undo.takedown_failed", record=op["id"], error=text[:100])
         if not ok:
             journal.flush()
-            return 1, f"[tidy] 묶음 {batch_id}: 되돌리기 중 멈춤 ({restored}건 되돌림) — {fail}; 다시 mem tidy-undo {batch_id}"
+            return 1, _tidy_line(t, batch_id, t("tidy.undo.stopped", count=restored, failure=fail, batch=batch_id))
         op["state"] = "undone"
         restored += 1
         journal.flush()
     journal.doc["undone"] = _now_iso()
     journal.flush()
-    return 0, f"[tidy] 묶음 {batch_id}: {restored}건을 삭제 없이 되돌렸습니다"
+    return 0, _tidy_line(t, batch_id, t("tidy.undo.done", count=restored))
 
 
 def undo_command(mem, args) -> int:

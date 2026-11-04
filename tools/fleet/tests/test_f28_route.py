@@ -467,6 +467,7 @@ class OrphanConductorAnnotationTest(unittest.TestCase):
         return path
 
     def _owner_with_open_child(self, *, quiescent):
+        from split_module_fixture import patch_split
         with tempfile.TemporaryDirectory() as td:
             home = os.path.join(td, "home")
             marker_dir = os.path.join(home, ".dispatch", "completion", "rt-fleet-orphan")
@@ -505,7 +506,7 @@ class OrphanConductorAnnotationTest(unittest.TestCase):
             with open(jobs_path, "rb") as fh:
                 before = fh.read()
             with mock.patch.object(dispatch.procscan, "_ps_lines", return_value=[]), \
-                 mock.patch.object(contract, "attempt_process_quiescence", return_value=observation), \
+                 patch_split(contract, "attempt_process_quiescence", return_value=observation), \
                  mock.patch.object(dispatch, "observed_supervised_owner_liveness", return_value=None), \
                  mock.patch.dict(os.environ, {"AGENT_HOME": home}):
                 # Isolate the orphan annotator's coarse dead-job input. The

@@ -10,6 +10,7 @@ import unittest
 from unittest import mock
 import fcntl
 from unittest.mock import patch
+from split_module_fixture import patch_split
 
 P = Path(__file__).with_name("artifact-quiescence.py")
 S = importlib.util.spec_from_file_location("artifact_quiescence_tested", P)
@@ -54,7 +55,7 @@ class QuiescenceTest(unittest.TestCase):
         else:
             # A quick route carries its frame pair here, as one sealed before decided shapes
             # compiled without it does (and as a preset compile still does).
-            frames = mock.patch.object(Q.ROUTES, "DECIDED_SHAPES", ()) if quick else contextlib.nullcontext()
+            frames = patch_split(Q.ROUTES, "DECIDED_SHAPES", ()) if quick else contextlib.nullcontext()
             with frames:
                 route = Q.ROUTES.compose_route(
                     capability="autopilot-code",
@@ -344,7 +345,7 @@ class QuiescenceTest(unittest.TestCase):
                     if ended:
                         sentinel.write_text("0", encoding="utf-8")
                     self.write_resource_runs(config, base, {"run": dict(run)})
-                    with mock.patch.object(Q.GROUPS, "process_group_observation",
+                    with patch_split(Q.GROUPS, "process_group_observation",
                                            return_value=Q.GROUPS.ProcessGroupObservation("empty")):
                         value = Q.collect(config)
                     self.assertTrue(value["observation_valid"], value.get("source_diagnostics"))
@@ -361,7 +362,7 @@ class QuiescenceTest(unittest.TestCase):
                    "sentinel": str(sentinel)}
             self.write_resource_runs(config, base, {"run": run})
             for state in ("populated", "unverifiable", "empty"):
-                with self.subTest(group_state=state), mock.patch.object(
+                with self.subTest(group_state=state), patch_split(
                         Q.GROUPS, "process_group_observation",
                         return_value=Q.GROUPS.ProcessGroupObservation(state)):
                     value = Q.collect(config)
@@ -381,7 +382,7 @@ class QuiescenceTest(unittest.TestCase):
             sentinel.write_text("0")
             row = {"registry_status": "running", "liveness": "exited", "sentinel": str(sentinel),
                    "state_evidence": {"reason": "host-reboot"}}
-            with mock.patch.object(Q.GROUPS, "process_group_observation",
+            with patch_split(Q.GROUPS, "process_group_observation",
                                    side_effect=AssertionError("past-boot group is not current")):
                 self.assertFalse(Q._resource_is_open(row))
 

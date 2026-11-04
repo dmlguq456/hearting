@@ -18,6 +18,7 @@ from unittest.mock import patch
 
 import ship_parent_deploy as S
 from review_round_cap import round_budget
+from split_module_fixture import patch_split
 
 
 class ParentDeployTest(unittest.TestCase):
@@ -69,7 +70,7 @@ class ParentDeployTest(unittest.TestCase):
             (S.DC, "human_gate_entry_fence", lambda *args, **kwargs: None),
             (S, "record_path", lambda route: self.record),
         ]:
-            mock = patch.object(obj, name, value)
+            mock = patch_split(obj, name, value)
             mock.start()
             self.addCleanup(mock.stop)
         # Native identity resolution itself is real, and used for all three harnesses.

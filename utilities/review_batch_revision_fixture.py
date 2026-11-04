@@ -24,6 +24,7 @@ import dispatch_replacement as REPLACEMENT
 import dispatch_replacement_batch as REPLACEMENT_BATCH
 import dispatch_owner_input as OWNER_INPUT
 import review_source_subject as SUBJECT
+from split_module_fixture import patch_split
 
 spec = importlib.util.spec_from_file_location("revision_route", ROOT / "utilities/capability-route.py")
 ROUTE = importlib.util.module_from_spec(spec)
@@ -1244,12 +1245,12 @@ class CurrentDesignPeerSelectionTest(unittest.TestCase):
             original_fail_row = next(line for line in jobs.read_text().splitlines()
                                      if "attempt_id=" + attempts[0] + "," in line)
             original_input_bytes = input_path.read_bytes()
-            with mock.patch.object(batch, "dispatch_state_roots", return_value=[state]), \
-                 mock.patch.object(batch, "resolve_dispatch_state_root", return_value=state), \
-                 mock.patch.object(batch, "completion_marker_is_current",
+            with patch_split(batch, "dispatch_state_roots", return_value=[state]), \
+                 patch_split(batch, "resolve_dispatch_state_root", return_value=state), \
+                 patch_split(batch, "completion_marker_is_current",
                                    side_effect=lambda _route, _node, _path, marker, **_kw:
                                    marker.get("attempt_id") == attempts[1]), \
-                 mock.patch.object(batch, "completion_attempt_readiness",
+                 patch_split(batch, "completion_attempt_readiness",
                                    return_value=SimpleNamespace(state="ready", reason="settled")):
                 peers = batch.current_completed_group_peers(
                     jobs, route, nodes, group, base, prompt_text)
@@ -1280,7 +1281,7 @@ class CurrentDesignPeerSelectionTest(unittest.TestCase):
                 return SimpleNamespace(
                     budget=SimpleNamespace(next_round=3, cap=2, state="admit", round_kind="first",
                                             correction_round=False),
-                    planned_revision_nodes=frozenset(), requires_next_round=True,
+                    requires_next_round=True,
                     physical_attempt_ids=frozenset((attempts[0],)), current_attempt_ids=frozenset(),
                     prior_attempt_ids=frozenset((attempts[0],)), reviewed_input=None,
                     source_subject_digest="sha256:" + "c" * 64,
@@ -1316,14 +1317,14 @@ class CurrentDesignPeerSelectionTest(unittest.TestCase):
                 governor = importlib.util.module_from_spec(governor_spec)
                 governor_spec.loader.exec_module(governor)
                 if peers:
-                    with mock.patch.object(DC, "completion_marker_is_current", return_value=True), \
-                         mock.patch.object(DC, "completion_attempt_readiness",
+                    with patch_split(DC, "completion_marker_is_current", return_value=True), \
+                         patch_split(DC, "completion_attempt_readiness",
                                            return_value=SimpleNamespace(state="ready", reason="settled")), \
-                         mock.patch.object(DC, "dispatch_state_roots", return_value=[state]), \
-                         mock.patch.object(DC, "resolve_dispatch_state_root", return_value=state):
+                         patch_split(DC, "dispatch_state_roots", return_value=[state]), \
+                         patch_split(DC, "resolve_dispatch_state_root", return_value=state):
                         with contextlib.ExitStack() as ancestry:
                             if replacement_owner:
-                                ancestry.enter_context(mock.patch.object(DC, "review_self_disposition_lineage",
+                                ancestry.enter_context(patch_split(DC, "review_self_disposition_lineage",
                                     return_value=[source_parent, "att-owner-current"]))
                             call["owner_closure_proof"] = governor._validate_legacy_visual_closure_peer(
                                 peers[0], current_manifest, current_digest, current_leg_digests,
@@ -1414,20 +1415,20 @@ class CurrentDesignPeerSelectionTest(unittest.TestCase):
                 stack.enter_context(mock.patch.object(batch, "assign_harnesses", side_effect=assign))
                 stack.enter_context(mock.patch.object(batch, "resolve_model_governor_root",
                                                        return_value=base / "governor"))
-                stack.enter_context(mock.patch.object(batch, "dispatch_state_roots", return_value=[state]))
-                stack.enter_context(mock.patch.object(batch, "resolve_dispatch_state_root", return_value=state))
+                stack.enter_context(patch_split(batch, "dispatch_state_roots", return_value=[state]))
+                stack.enter_context(patch_split(batch, "resolve_dispatch_state_root", return_value=state))
                 marker_is_current = lambda _route, _node, _path, marker, **_kw: (
                     marker.get("attempt_id") in current_marker_attempts)
-                stack.enter_context(mock.patch.object(batch, "completion_marker_is_current",
+                stack.enter_context(patch_split(batch, "completion_marker_is_current",
                                                        side_effect=marker_is_current))
-                stack.enter_context(mock.patch.object(batch, "completion_attempt_readiness",
+                stack.enter_context(patch_split(batch, "completion_attempt_readiness",
                     return_value=SimpleNamespace(state="ready", reason="settled")))
-                stack.enter_context(mock.patch.object(DC, "completion_marker_is_current",
+                stack.enter_context(patch_split(DC, "completion_marker_is_current",
                                                        side_effect=marker_is_current))
-                stack.enter_context(mock.patch.object(DC, "completion_attempt_readiness",
+                stack.enter_context(patch_split(DC, "completion_attempt_readiness",
                     return_value=SimpleNamespace(state="ready", reason="settled")))
-                stack.enter_context(mock.patch.object(DC, "dispatch_state_roots", return_value=[state]))
-                stack.enter_context(mock.patch.object(DC, "resolve_dispatch_state_root", return_value=state))
+                stack.enter_context(patch_split(DC, "dispatch_state_roots", return_value=[state]))
+                stack.enter_context(patch_split(DC, "resolve_dispatch_state_root", return_value=state))
                 stack.enter_context(mock.patch("dispatch_capacity_evidence.active_limits", return_value={}))
                 stack.enter_context(mock.patch.object(batch, "reserve_batch", side_effect=reserve))
                 stack.enter_context(mock.patch.object(batch, "cancel_unclaimed"))
@@ -1475,10 +1476,10 @@ class CurrentDesignPeerSelectionTest(unittest.TestCase):
                     (marker_dir / f"{leg['node']}.json").write_text(
                         json.dumps(marker), encoding="utf-8")
 
-                with mock.patch.object(DC, "_frame_pair_attempt_gate"), \
-                     mock.patch.object(DC, "_human_gate_entry_fence"), \
-                     mock.patch.object(DC, "_auxiliary_arbitration_gate"), \
-                     mock.patch.object(DC, "_sibling_attempt_gate"):
+                with patch_split(DC, "_frame_pair_attempt_gate"), \
+                     patch_split(DC, "_human_gate_entry_fence"), \
+                     patch_split(DC, "_auxiliary_arbitration_gate"), \
+                     patch_split(DC, "_sibling_attempt_gate"):
                     DC.completion_marker_gate(str(route_file), "handoff", "dry-run", agent_home, jobs)
 
                 artifact_root = Path(route["artifact_root"])
@@ -1497,8 +1498,8 @@ class CurrentDesignPeerSelectionTest(unittest.TestCase):
                 # This public-batch fixture has no artifact-producer cycle;
                 # keep its scope on the registered group and handoff gates.
                 with mock.patch.object(PRODUCER, "require_cycle_output", return_value=None), \
-                     mock.patch.object(ROUTE, "dispatch_state_roots", return_value=[state]), \
-                     mock.patch.object(ROUTE, "resolve_agent_home", return_value=agent_home):
+                     patch_split(ROUTE, "dispatch_state_roots", return_value=[state]), \
+                     patch_split(ROUTE, "resolve_agent_home", return_value=agent_home):
                     handoff_marker = ROUTE._publish_completion_locked(
                         route, handoff, "handoff", handoff_evidence,
                         attempt_id=handoff_attempt, attempt_metadata=handoff_metadata, jobs=jobs)
@@ -1534,7 +1535,7 @@ class AdmissionSelectionFixture(unittest.TestCase):
         for rows, revisions, state, next_required, verdicts in scenarios:
             with self.subTest(state=state, rows=rows), \
                  mock.patch.object(NODE, "prior_round_attempts", return_value=rows), \
-                 mock.patch.object(NODE.ROUTE, "_dependency_revisions", return_value=revisions):
+                 patch_split(NODE.ROUTE, "_dependency_revisions", return_value=revisions):
                 admission = NODE.admit_round(route, node, Path("unused"), record_auto_revisions=False)
                 self.assertEqual(admission.budget.state, state)
                 self.assertEqual(admission.budget.verdict_rounds, verdicts)
@@ -1546,7 +1547,7 @@ class AdmissionSelectionFixture(unittest.TestCase):
                                   ("arbitrary-hidden", frozenset(("successor",)))):
             rows = [row("successor", logical_round_attempt_ids=members)]
             with mock.patch.object(NODE, "prior_round_attempts", return_value=rows), \
-                 mock.patch.object(NODE.ROUTE, "_dependency_revisions", return_value=[]):
+                 patch_split(NODE.ROUTE, "_dependency_revisions", return_value=[]):
                 admission = NODE.admit_round(route, node, Path("unused"), record_auto_revisions=False)
             self.assertEqual(admission.physical_attempt_ids, expected)
             self.assertEqual(admission.prior_attempt_ids, frozenset(("successor",)))

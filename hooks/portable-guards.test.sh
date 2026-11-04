@@ -24,6 +24,12 @@ PASS=0
 FAIL=0
 ok() { PASS=$((PASS+1)); printf '  ok  %s\n' "$1"; }
 bad() { FAIL=$((FAIL+1)); printf '  BAD %s\n' "$1"; }
+# A case that checks what a harness CLI itself answers (its app server, sandbox,
+# plugin list, MCP or session-resume support) needs that CLI. CI installs none of
+# them, so such a case reports a skip where its CLI is absent, the way the native
+# runtime-discovery cases below already do. Cases that only exercise Hearting's
+# own wrappers run everywhere.
+cli_absent() { ! command -v "$1" >/dev/null 2>&1; }
 
 # Every external tool this suite reaches for, checked once. A missing tool is
 # worse than a failure here: a case shaped `! tool -q <forbidden pattern>`
@@ -492,9 +498,16 @@ else
     bad "codex headless wrapper should report missing worktree"
   fi
 fi
+# The projection install needs no Codex CLI and later cases start workers on it.
 if AGENT_HOME="$ROOT" CODEX_HOME="$TMP/codex_headless_home" "$ROOT/adapters/codex/bin/install-runtime-projection.sh" >"$TMP/codex_headless_install.out" 2>"$TMP/codex_headless_install.err" \
-  && grep -Fq 'status_line = ["thread-title", "git-branch", "context-used", "model-with-reasoning", "five-hour-limit", "weekly-limit", "thread-id"]' "$TMP/codex_headless_home/config.toml" \
-  && AGENT_HOME="$ROOT" CODEX_HOME="$TMP/codex_headless_home" CODEX_DISPATCH_SANDBOX_FORCE=danger-full-access "$CODEX" headless --check "$TMP/repo" >"$TMP/codex_headless_check.out" 2>"$TMP/codex_headless_check.err" \
+  && grep -Fq 'status_line = ["thread-id", "thread-title", "git-branch", "context-used", "model-with-reasoning", "five-hour-limit", "weekly-limit"]' "$TMP/codex_headless_home/config.toml"; then
+  ok "codex runtime projection installs the headless home"
+else
+  bad "codex runtime projection should install the headless home"
+fi
+if cli_absent codex; then
+  ok "codex headless check validates runtime projection skipped (codex not installed)"
+elif AGENT_HOME="$ROOT" CODEX_HOME="$TMP/codex_headless_home" CODEX_DISPATCH_SANDBOX_FORCE=danger-full-access "$CODEX" headless --check "$TMP/repo" >"$TMP/codex_headless_check.out" 2>"$TMP/codex_headless_check.err" \
   && grep -q '^runtime_projection=ok$' "$TMP/codex_headless_check.out" \
   && grep -q '^check=hook-trust:skipped reason=authoritative-current-hash-check-not-requested' "$TMP/codex_headless_check.out" \
   && grep -q '^check=ok$' "$TMP/codex_headless_check.out"; then
@@ -502,7 +515,9 @@ if AGENT_HOME="$ROOT" CODEX_HOME="$TMP/codex_headless_home" "$ROOT/adapters/code
 else
   bad "codex headless check should validate runtime projection"
 fi
-if AGENT_HOME="$ROOT" CODEX_HOME="$TMP/codex_headless_home" CODEX_DISPATCH_SANDBOX_FORCE=danger-full-access "$CODEX" headless --check --require-hook-trust "$TMP/repo" >"$TMP/codex_headless_strict.out" 2>"$TMP/codex_headless_strict.err"; then
+if cli_absent codex; then
+  ok "codex headless strict check requires complete hook trust skipped (codex not installed)"
+elif AGENT_HOME="$ROOT" CODEX_HOME="$TMP/codex_headless_home" CODEX_DISPATCH_SANDBOX_FORCE=danger-full-access "$CODEX" headless --check --require-hook-trust "$TMP/repo" >"$TMP/codex_headless_strict.out" 2>"$TMP/codex_headless_strict.err"; then
   bad "codex headless strict check should fail when hook trust is incomplete"
 else
   grep -q '^check=hook-trust:review-needed' "$TMP/codex_headless_strict.out" && ok "codex headless strict check requires complete hook trust" || bad "codex headless strict check missing trust output wrong"
@@ -519,7 +534,9 @@ echo "stub bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted" >&2
 exit 1
 EOF
 chmod +x "$codex_sandbox_probe_bin/bwrap"
-if PATH="$codex_sandbox_probe_bin:$PATH" AGENT_HOME="$ROOT" CODEX_HOME="$TMP/codex_headless_home" "$CODEX" headless --check "$TMP/repo" >"$TMP/codex_sandbox_probe_fail.out" 2>"$TMP/codex_sandbox_probe_fail.err"; then
+if cli_absent codex; then
+  ok "codex headless check refuses a host whose sandbox userns is unavailable skipped (codex not installed)"
+elif PATH="$codex_sandbox_probe_bin:$PATH" AGENT_HOME="$ROOT" CODEX_HOME="$TMP/codex_headless_home" "$CODEX" headless --check "$TMP/repo" >"$TMP/codex_sandbox_probe_fail.out" 2>"$TMP/codex_sandbox_probe_fail.err"; then
   bad "codex headless check refuses a host whose sandbox userns is unavailable"
 else
   rc=$?
@@ -537,7 +554,9 @@ cat >"$codex_sandbox_probe_bin/bwrap" <<'EOF'
 exit 0
 EOF
 chmod +x "$codex_sandbox_probe_bin/bwrap"
-if PATH="$codex_sandbox_probe_bin:$PATH" AGENT_HOME="$ROOT" CODEX_HOME="$TMP/codex_headless_home" "$CODEX" headless --check "$TMP/repo" >"$TMP/codex_sandbox_probe_pass.out" 2>"$TMP/codex_sandbox_probe_pass.err" \
+if cli_absent codex; then
+  ok "codex headless check still passes when the sandbox probe succeeds skipped (codex not installed)"
+elif PATH="$codex_sandbox_probe_bin:$PATH" AGENT_HOME="$ROOT" CODEX_HOME="$TMP/codex_headless_home" "$CODEX" headless --check "$TMP/repo" >"$TMP/codex_sandbox_probe_pass.out" 2>"$TMP/codex_sandbox_probe_pass.err" \
   && grep -q '^check=ok$' "$TMP/codex_sandbox_probe_pass.out"; then
   ok "codex headless check still passes when the sandbox probe succeeds"
 else
@@ -557,7 +576,9 @@ else
     bad "codex dispatch wrapper should fail cleanly without model selection"
   fi
 fi
-if "$CODEX" dispatch --dry-run --worktree "$TMP/repo" --slug codex-dispatch --capability autopilot-code --mode dev --qa standard --prompt-text "do work" --model gpt-test --reasoning low --jobs "$TMP/codex-dispatch.log" >"$TMP/codex_dispatch.out" 2>"$TMP/codex_dispatch.err" \
+if cli_absent codex; then
+  ok "codex dispatch wrapper dry-runs headless command with main-selected model settings skipped (codex not installed)"
+elif "$CODEX" dispatch --dry-run --worktree "$TMP/repo" --slug codex-dispatch --capability autopilot-code --mode dev --qa standard --prompt-text "do work" --model gpt-test --reasoning low --jobs "$TMP/codex-dispatch.log" >"$TMP/codex_dispatch.out" 2>"$TMP/codex_dispatch.err" \
   && grep -q '^adapter=codex$' "$TMP/codex_dispatch.out" \
   && grep -q '^status=dry-run$' "$TMP/codex_dispatch.out" \
   && grep -q '^registered=0$' "$TMP/codex_dispatch.out" \
@@ -607,19 +628,18 @@ if CODEX_DISPATCH_SANDBOX=workspace-write CODEX_DISPATCH_SANDBOX_FORCE=danger-fu
 else
   bad "codex dispatch wrapper should preserve a forced nested sandbox invariant"
 fi
+# An interactive Codex parent registers and gets its completion through its own
+# native thread queue (26d414823, 2026-09-28); it is no longer refused.
 if CODEX_THREAD_ID=codex-unmanaged-parent \
-  "$CODEX" dispatch --register --worktree "$TMP/repo" --slug codex-unmanaged-parent --capability autopilot-code --mode dev --qa standard --prompt-text "do work" --model gpt-test --reasoning low --dispatch-depth 1 --jobs "$TMP/codex-unmanaged-parent.log" --log-dir "$TMP/unmanaged-parent-logs" >"$TMP/codex_unmanaged_parent.out" 2>"$TMP/codex_unmanaged_parent.err"; then
-  bad "codex dispatch wrapper should reject an unmanaged interactive parent"
+  "$CODEX" dispatch --register --worktree "$TMP/repo" --slug codex-unmanaged-parent --capability autopilot-code --mode dev --qa standard --prompt-text "do work" --model gpt-test --reasoning low --dispatch-depth 1 --jobs "$TMP/codex-unmanaged-parent.log" --log-dir "$TMP/unmanaged-parent-logs" >"$TMP/codex_unmanaged_parent.out" 2>"$TMP/codex_unmanaged_parent.err" \
+  && grep -q '^registered=1$' "$TMP/codex_unmanaged_parent.out" \
+  && grep -q '^child_spawned=0$' "$TMP/codex_unmanaged_parent.out" \
+  && grep -q '^parent_completion_delivery=codex-native-queue$' "$TMP/codex_unmanaged_parent.out" \
+  && grep -q '^parent_completion_reason=native-thread-queue$' "$TMP/codex_unmanaged_parent.out" \
+  && grep -q '^parent_session_id=codex-unmanaged-parent$' "$TMP/codex_unmanaged_parent.out"; then
+  ok "codex dispatch wrapper registers an interactive parent for native-queue completion"
 else
-  rc=$?
-  if [ "$rc" -eq 69 ] \
-    && grep -q '^reason=managed-entry-required$' "$TMP/codex_unmanaged_parent.out" \
-    && grep -q '^child_spawned=0$' "$TMP/codex_unmanaged_parent.out" \
-    && [ ! -e "$TMP/codex-unmanaged-parent.log" ]; then
-    ok "codex dispatch wrapper rejects unmanaged interactive parents before registry mutation"
-  else
-    bad "codex dispatch wrapper should fail unmanaged interactive parents before registry mutation"
-  fi
+  bad "codex dispatch wrapper should register an interactive parent for native-queue completion"
 fi
 if CODEX_THREAD_ID=codex-current-thread CODEX_DISPATCH_PARENT_CURRENT_FORCE=1 \
   "$CODEX" dispatch --register --allow-unmanaged-parent-poll --worktree "$TMP/repo" --slug codex-current-parent --capability autopilot-code --mode dev --qa standard --prompt-text "do work" --model gpt-test --reasoning low --dispatch-depth 1 --parent invented-parent --parent-session-id invented-session --jobs "$TMP/codex-current-parent.log" --log-dir "$TMP/current-parent-logs" >"$TMP/codex_current_parent.out" 2>"$TMP/codex_current_parent.err" \
@@ -704,7 +724,10 @@ else
     bad "codex dispatch wrapper should validate QA level before registry write"
   fi
 fi
-if AGENT_HOME="$TMP/not-agent-home" HOME="$DISPATCH_RESOLVER_HOME" XDG_DATA_HOME="$DISPATCH_RESOLVER_XDG" CODEX_DISPATCH_SANDBOX_FORCE=danger-full-access \
+# The stable per-user root follows XDG_STATE_HOME when it is set (the test
+# runner always sets it), so these default-registry cases drop it, as the
+# OpenCode default-home case below already does.
+if env -u XDG_STATE_HOME -u HARNESS_STATE_ROOT AGENT_HOME="$TMP/not-agent-home" HOME="$DISPATCH_RESOLVER_HOME" XDG_DATA_HOME="$DISPATCH_RESOLVER_XDG" CODEX_DISPATCH_SANDBOX_FORCE=danger-full-access \
   "$CODEX" dispatch --dry-run --worktree "$TMP/repo" --slug codex-default-home --capability autopilot-code --mode dev --qa standard --prompt-text "do work" --model gpt-test --reasoning low >"$TMP/codex_dispatch_default.out" 2>"$TMP/codex_dispatch_default.err" \
   && grep -Fxq "job_registry=$DISPATCH_RESOLVER_STATE/jobs.log" "$TMP/codex_dispatch_default.out" \
   && grep -Fxq "prompt_file=$DISPATCH_RESOLVER_STATE/logs/codex-default-home.codex.prompt.txt" "$TMP/codex_dispatch_default.out" \
@@ -713,7 +736,7 @@ if AGENT_HOME="$TMP/not-agent-home" HOME="$DISPATCH_RESOLVER_HOME" XDG_DATA_HOME
 else
   bad "codex dispatch wrapper should not trust invalid AGENT_HOME for default registry"
 fi
-if AGENT_HOME="$TMP/not-agent-home" HOME="$DISPATCH_RESOLVER_HOME" XDG_DATA_HOME="$DISPATCH_RESOLVER_XDG" CODEX_DISPATCH_SANDBOX_FORCE=danger-full-access \
+if env -u XDG_STATE_HOME -u HARNESS_STATE_ROOT AGENT_HOME="$TMP/not-agent-home" HOME="$DISPATCH_RESOLVER_HOME" XDG_DATA_HOME="$DISPATCH_RESOLVER_XDG" CODEX_DISPATCH_SANDBOX_FORCE=danger-full-access \
   python3 "$ROOT/adapters/codex/bin/dispatch-headless.py" --dry-run --worktree "$TMP/repo" --slug codex-direct-home --capability autopilot-code --mode dev --qa standard --prompt-text "do work" --model gpt-test --reasoning low >"$TMP/codex_dispatch_direct.out" 2>"$TMP/codex_dispatch_direct.err" \
   && grep -Fxq "job_registry=$DISPATCH_RESOLVER_STATE/jobs.log" "$TMP/codex_dispatch_direct.out" \
   && grep -Fxq "prompt_file=$DISPATCH_RESOLVER_STATE/logs/codex-direct-home.codex.prompt.txt" "$TMP/codex_dispatch_direct.out"; then
@@ -755,12 +778,12 @@ cat > "$TMP/codex-stubbin/codex" <<'EOF'
 printf '%s\n' "$*" > "$CODEX_STUB_ARGV"
 EOF
 chmod +x "$TMP/codex-stubbin/codex"
+# A started Codex worker runs in its own attempt home (homes/workers/<id>), not a
+# worktree-local .dispatch/codex-home link; worker_runtime_home tests cover it.
 if PATH="$TMP/codex-stubbin:$PATH" AGENT_HOME="$ROOT" CODEX_HOME="$TMP/codex_headless_home" CODEX_STUB_ARGV="$TMP/codex-start.argv" CODEX_DISPATCH_SANDBOX_FORCE=danger-full-access \
   "$CODEX" dispatch --start --completion-delivery poll --worktree "$TMP/repo" --slug nested/codex-start --capability autopilot-code --mode dev --qa standard --prompt-text "nested work" --model gpt-test --reasoning low --jobs "$TMP/codex-start.log" --log-dir "$TMP/codex-logs" >"$TMP/codex_dispatch_start.out" 2>"$TMP/codex_dispatch_start.err" \
   && grep -q '^status=start$' "$TMP/codex_dispatch_start.out" \
   && grep -q '^started=1$' "$TMP/codex_dispatch_start.out" \
-  && [ "$(readlink "$TMP/repo/.dispatch/codex-home")" = "$TMP/codex_headless_home" ] \
-  && grep -Fxq "runtime_home_projection=$TMP/repo/.dispatch/codex-home" "$TMP/codex_dispatch_start.out" \
   && codex_start_prompt=$(sed -n 's/^prompt_file=//p' "$TMP/codex_dispatch_start.out") \
   && [ -f "$codex_start_prompt" ] \
   && grep -q '^# Portable Worker Kernel$' "$codex_start_prompt" \
@@ -770,7 +793,7 @@ if PATH="$TMP/codex-stubbin:$PATH" AGENT_HOME="$ROOT" CODEX_HOME="$TMP/codex_hea
   && grep -q 'route_state: validated dispatch metadata' "$codex_start_prompt" \
   && grep -q 'adapters/codex/skills/autopilot-code/SKILL.md' "$codex_start_prompt" \
   && grep -q 'preflight.sh qa-policy standard code' "$codex_start_prompt" \
-  && grep -q 'dispatch registered dispatch-depth-2 stages by invoking the' "$codex_start_prompt" \
+  && grep -q 'dispatch registered dispatch-depth-2 stages with the exact start commands' "$codex_start_prompt" \
   && grep -q 'nested work' "$codex_start_prompt"; then
   for _ in $(seq 1 20); do
     [ -f "$TMP/codex-start.argv" ] && break
@@ -859,7 +882,9 @@ fi
 # restating them as literals here re-creates the drift the SoT removed.
 claude_light_model=$(. "$ROOT/adapters/claude/config/models.conf" && printf '%s' "$CFG_TIER_LIGHT_MODEL")
 claude_light_effort=$(. "$ROOT/adapters/claude/config/models.conf" && printf '%s' "$CFG_TIER_LIGHT_EFFORT")
-if python3 "$ROOT/adapters/claude/bin/dispatch-headless.py" --dry-run --worktree "$TMP/repo" --slug claude-role-model --capability autopilot-code --mode dev --qa standard --prompt-text "do work" --model-role "fast implementer" --jobs "$TMP/claude-role-model.log" >"$TMP/claude_role_model.out" 2>"$TMP/claude_role_model.err" \
+if cli_absent claude; then
+  ok "claude dispatch wrapper supports main-selected model roles skipped (claude not installed)"
+elif python3 "$ROOT/adapters/claude/bin/dispatch-headless.py" --dry-run --worktree "$TMP/repo" --slug claude-role-model --capability autopilot-code --mode dev --qa standard --prompt-text "do work" --model-role "fast implementer" --jobs "$TMP/claude-role-model.log" >"$TMP/claude_role_model.out" 2>"$TMP/claude_role_model.err" \
   && grep -q '^adapter=claude$' "$TMP/claude_role_model.out" \
   && grep -q '^model_source=role$' "$TMP/claude_role_model.out" \
   && grep -q '^model_role=fast implementer$' "$TMP/claude_role_model.out" \
@@ -872,7 +897,9 @@ if python3 "$ROOT/adapters/claude/bin/dispatch-headless.py" --dry-run --worktree
 else
   bad "claude dispatch wrapper should support main-selected model roles"
 fi
-if python3 "$ROOT/adapters/claude/bin/dispatch-headless.py" --dry-run --worktree "$TMP/repo" --slug claude-explicit-model --capability autopilot-code --mode dev --qa standard --prompt-text "do work" --model claude-test --effort low --jobs "$TMP/claude-explicit-model.log" >"$TMP/claude_explicit_model.out" 2>"$TMP/claude_explicit_model.err" \
+if cli_absent claude; then
+  ok "claude dispatch wrapper supports explicit model/effort selection skipped (claude not installed)"
+elif python3 "$ROOT/adapters/claude/bin/dispatch-headless.py" --dry-run --worktree "$TMP/repo" --slug claude-explicit-model --capability autopilot-code --mode dev --qa standard --prompt-text "do work" --model claude-test --effort low --jobs "$TMP/claude-explicit-model.log" >"$TMP/claude_explicit_model.out" 2>"$TMP/claude_explicit_model.err" \
   && grep -q '^model_source=explicit$' "$TMP/claude_explicit_model.out" \
   && grep -q '^model=claude-test$' "$TMP/claude_explicit_model.out" \
   && grep -q '^effort=low$' "$TMP/claude_explicit_model.out" \
@@ -895,7 +922,9 @@ else
     bad "claude dispatch wrapper should reject unprovable model inheritance cleanly"
   fi
 fi
-if AGENT_DISPATCH_JOBS="$TMP/claude-env-jobs.log" \
+if cli_absent claude; then
+  ok "claude dispatch wrapper uses the selected shared registry skipped (claude not installed)"
+elif AGENT_DISPATCH_JOBS="$TMP/claude-env-jobs.log" \
   python3 "$ROOT/adapters/claude/bin/dispatch-headless.py" --register --worktree "$TMP/repo" --slug claude-env-jobs --capability autopilot-code --capability-mode dev --qa standard --prompt-text "do work" --model-role "fast implementer" --log-dir "$TMP/claude-env-logs" >"$TMP/claude_env_jobs.out" 2>"$TMP/claude_env_jobs.err" \
   && grep -q "^job_registry=$TMP/claude-env-jobs.log$" "$TMP/claude_env_jobs.out" \
   && awk -F '\t' '$2 == "open" && $5 == "claude-env-jobs" { found=1 } END { exit !found }' "$TMP/claude-env-jobs.log"; then
@@ -903,7 +932,11 @@ if AGENT_DISPATCH_JOBS="$TMP/claude-env-jobs.log" \
 else
   bad "claude dispatch wrapper should use the selected shared registry"
 fi
-if CODEX_THREAD_ID=codex-parent python3 "$ROOT/adapters/claude/bin/dispatch-headless.py" --register --allow-unmanaged-parent-poll --worktree "$TMP/repo" --slug claude-owned --capability autopilot-code --capability-mode audit --qa standard --intensity thorough --dispatch-depth 1 --worker-type owner --unit _kernel/owner --assigned-contract autopilot-code --worker-role verifier --owner autopilot-code --model-role "fast reviewer" --prompt-text "verify" --jobs "$TMP/claude-owned.log" --log-dir "$TMP/claude-owned-logs" >"$TMP/claude_owned.out" 2>"$TMP/claude_owned.err" \
+# QA and intensity are one axis now: an explicit --qa that disagrees with
+# --intensity is refused (qa-intensity-mismatch), so the case names both alike.
+if cli_absent claude; then
+  ok "claude dispatch wrapper records cross-harness ownership metadata skipped (claude not installed)"
+elif CODEX_THREAD_ID=codex-parent python3 "$ROOT/adapters/claude/bin/dispatch-headless.py" --register --allow-unmanaged-parent-poll --worktree "$TMP/repo" --slug claude-owned --capability autopilot-code --capability-mode audit --qa thorough --intensity thorough --dispatch-depth 1 --worker-type owner --unit _kernel/owner --assigned-contract autopilot-code --worker-role verifier --owner autopilot-code --model-role "fast reviewer" --prompt-text "verify" --jobs "$TMP/claude-owned.log" --log-dir "$TMP/claude-owned-logs" >"$TMP/claude_owned.out" 2>"$TMP/claude_owned.err" \
   && grep -q '^intensity=thorough$' "$TMP/claude_owned.out" \
   && grep -q '^dispatch_depth=1$' "$TMP/claude_owned.out" \
   && grep -q '^parent_session_id=codex-parent$' "$TMP/claude_owned.out" \
@@ -1101,7 +1134,9 @@ if "$CODEX" mcp >"$TMP/codex_mcp.out" 2>"$TMP/codex_mcp.err" \
 else
   bad "codex mcp wrapper should report native MCP contract"
 fi
-if "$CODEX" mcp --check >"$TMP/codex_mcp_check.out" 2>"$TMP/codex_mcp_check.err" \
+if cli_absent codex; then
+  ok "codex mcp wrapper checks native MCP CLI skipped (codex not installed)"
+elif "$CODEX" mcp --check >"$TMP/codex_mcp_check.out" 2>"$TMP/codex_mcp_check.err" \
   && grep -q '^check=ok$' "$TMP/codex_mcp_check.out"; then
   ok "codex mcp wrapper checks native MCP CLI"
 else
@@ -1131,7 +1166,9 @@ if "$CODEX" subagent-info >"$TMP/codex_subagent_info.out" 2>"$TMP/codex_subagent
 else
   bad "codex subagent-info should report native subagent contract"
 fi
-if "$CODEX" subagent-info --check >"$TMP/codex_subagent_check.out" 2>"$TMP/codex_subagent_check.err" \
+if cli_absent codex; then
+  ok "codex subagent-info checks native multi-agent feature skipped (codex not installed)"
+elif "$CODEX" subagent-info --check >"$TMP/codex_subagent_check.out" 2>"$TMP/codex_subagent_check.err" \
   && grep -q '^check=ok$' "$TMP/codex_subagent_check.out" \
   && grep -q '^feature=multi_agent$' "$TMP/codex_subagent_check.out"; then
   ok "codex subagent-info checks native multi-agent feature"
@@ -1152,7 +1189,7 @@ EOF
 if AGENT_HOME="$ROOT" CODEX_HOME="$TUIHOME" "$CODEX" tui-config >"$TMP/codex_tui.out" 2>"$TMP/codex_tui.err" \
   && grep -q '^status=ok$' "$TMP/codex_tui.out" \
   && grep -q '^changed=yes$' "$TMP/codex_tui.out" \
-  && grep -Fq 'status_line = ["old", "thread-id"]' "$TUIHOME/config.toml" \
+  && grep -Fq 'status_line = ["thread-id", "old"]' "$TUIHOME/config.toml" \
   && grep -Fq 'status_line_use_colors = true' "$TUIHOME/config.toml" \
   && grep -Fq 'model = "keep-me"' "$TUIHOME/config.toml" \
   && grep -Fq '[hooks.state]' "$TUIHOME/config.toml" \
@@ -2340,7 +2377,9 @@ else
 fi
 RPPLUGIN="$TMP/codex-runtime-home-plugin"
 rm -rf "$RPPLUGIN"; mkdir -p "$RPPLUGIN"
-if AGENT_HOME="$ROOT" CODEX_HOME="$RPPLUGIN" "$ROOT/adapters/codex/bin/install-runtime-projection.sh" --install-plugin >"$TMP/codex_rp_plugin_install.out" 2>"$TMP/codex_rp_plugin_install.err" \
+if cli_absent codex; then
+  ok "codex install-runtime-projection supports plugin-only skill discovery skipped (codex not installed)"
+elif AGENT_HOME="$ROOT" CODEX_HOME="$RPPLUGIN" "$ROOT/adapters/codex/bin/install-runtime-projection.sh" --install-plugin >"$TMP/codex_rp_plugin_install.out" 2>"$TMP/codex_rp_plugin_install.err" \
   && grep -q '^skills_mode=plugin' "$TMP/codex_rp_plugin_install.out" \
   && grep -q '^skills_linked=0' "$TMP/codex_rp_plugin_install.out" \
   && [ ! -e "$RPPLUGIN/skills/autopilot-code" ] \
@@ -2393,14 +2432,18 @@ trusted_hash = "sha256:test"
 [hooks.state."$RPHOME/hooks.json:post_tool_use:0:0"]
 trusted_hash = "sha256:test"
 EOF
-if ! AGENT_HOME="$ROOT" CODEX_HOME="$RPHOME" CODEX_RUNTIME_PROJECTION_CLI_TIMEOUT=2 "$CODEX" runtime-projection --require-hook-trust >"$TMP/codex_rp_stop_trust.out" 2>"$TMP/codex_rp_stop_trust.err" \
+if cli_absent codex; then
+  ok "codex strict runtime-projection rejects stale static hook metadata skipped (codex not installed)"
+elif ! AGENT_HOME="$ROOT" CODEX_HOME="$RPHOME" CODEX_RUNTIME_PROJECTION_CLI_TIMEOUT=2 "$CODEX" runtime-projection --require-hook-trust >"$TMP/codex_rp_stop_trust.out" 2>"$TMP/codex_rp_stop_trust.err" \
   && grep -q '^check=hook-trust:review-needed reason=current-hash-not-trusted$' "$TMP/codex_rp_stop_trust.out" \
   && grep -q '^status=failed' "$TMP/codex_rp_stop_trust.out"; then
   ok "codex strict runtime-projection rejects stale static hook metadata"
 else
   bad "codex strict runtime-projection must use authoritative current-hash trust"
 fi
-if AGENT_HOME="$ROOT" CODEX_HOME="$RPHOME" CODEX_RUNTIME_PROJECTION_CLI_TIMEOUT=2 "$CODEX" runtime-projection --require-hook-trust >"$TMP/codex_rp_strict_missing.out" 2>"$TMP/codex_rp_strict_missing.err"; then
+if cli_absent codex; then
+  ok "codex strict runtime-projection requires complete current-hash trust skipped (codex not installed)"
+elif AGENT_HOME="$ROOT" CODEX_HOME="$RPHOME" CODEX_RUNTIME_PROJECTION_CLI_TIMEOUT=2 "$CODEX" runtime-projection --require-hook-trust >"$TMP/codex_rp_strict_missing.out" 2>"$TMP/codex_rp_strict_missing.err"; then
   bad "codex strict runtime-projection should fail when hook trust is missing"
 else
   grep -q '^check=hook-trust:review-needed reason=current-hash-not-trusted$' "$TMP/codex_rp_strict_missing.out" && ok "codex strict runtime-projection requires complete current-hash trust" || bad "codex strict runtime-projection missing trust output wrong"
@@ -2427,7 +2470,9 @@ trusted_hash = "sha256:test"
 [hooks.state."$RPHOME/hooks.json:stop:0:0"]
 trusted_hash = "sha256:test"
 EOF
-if AGENT_HOME="$ROOT" CODEX_HOME="$RPHOME" CODEX_RUNTIME_PROJECTION_CLI_TIMEOUT=2 "$CODEX" runtime-projection --require-hook-trust >"$TMP/codex_rp_stop_alias.out" 2>"$TMP/codex_rp_stop_alias.err"; then
+if cli_absent codex; then
+  ok "codex runtime-projection does not alias Stop trust to SessionEnd skipped (codex not installed)"
+elif AGENT_HOME="$ROOT" CODEX_HOME="$RPHOME" CODEX_RUNTIME_PROJECTION_CLI_TIMEOUT=2 "$CODEX" runtime-projection --require-hook-trust >"$TMP/codex_rp_stop_alias.out" 2>"$TMP/codex_rp_stop_alias.err"; then
   bad "codex strict runtime-projection should not accept a static Stop alias"
 elif grep -q '^check=hook-trust:review-needed reason=current-hash-not-trusted$' "$TMP/codex_rp_stop_alias.out" \
   && ! grep -q 'session_end=stop-alias' "$TMP/codex_rp_stop_alias.out"; then
@@ -2435,7 +2480,9 @@ elif grep -q '^check=hook-trust:review-needed reason=current-hash-not-trusted$' 
 else
   bad "codex runtime-projection should reject Stop-as-SessionEnd alias metadata"
 fi
-if AGENT_HOME="$ROOT" CODEX_HOME="$RPHOME" CODEX_RUNTIME_PROJECTION_CLI_TIMEOUT=2 "$CODEX" doctor --runtime >"$TMP/codex_doctor_runtime.out" 2>"$TMP/codex_doctor_runtime.err" \
+if cli_absent codex; then
+  ok "codex doctor --runtime includes runtime projection validation skipped (codex not installed)"
+elif AGENT_HOME="$ROOT" CODEX_HOME="$RPHOME" CODEX_RUNTIME_PROJECTION_CLI_TIMEOUT=2 "$CODEX" doctor --runtime >"$TMP/codex_doctor_runtime.out" 2>"$TMP/codex_doctor_runtime.err" \
   && grep -q '^check=runtime-projection:ok' "$TMP/codex_doctor_runtime.out" \
   && grep -q '^check=native-subagents:ok' "$TMP/codex_doctor_runtime.out" \
   && grep -q '^status=ok' "$TMP/codex_doctor_runtime.out"; then
@@ -2443,7 +2490,9 @@ if AGENT_HOME="$ROOT" CODEX_HOME="$RPHOME" CODEX_RUNTIME_PROJECTION_CLI_TIMEOUT=
 else
   bad "codex doctor --runtime should include runtime projection validation"
 fi
-if AGENT_HOME="$ROOT" CODEX_HOME="$RPHOME" CODEX_RUNTIME_PROJECTION_CLI_TIMEOUT=2 "$CODEX" doctor --runtime-strict >"$TMP/codex_doctor_runtime_strict.out" 2>"$TMP/codex_doctor_runtime_strict.err"; then
+if cli_absent codex; then
+  ok "codex doctor --runtime-strict fails closed without current-hash trust skipped (codex not installed)"
+elif AGENT_HOME="$ROOT" CODEX_HOME="$RPHOME" CODEX_RUNTIME_PROJECTION_CLI_TIMEOUT=2 "$CODEX" doctor --runtime-strict >"$TMP/codex_doctor_runtime_strict.out" 2>"$TMP/codex_doctor_runtime_strict.err"; then
   bad "codex doctor --runtime-strict should fail closed on stale hook trust"
 elif grep -q '^check=runtime-projection:failed' "$TMP/codex_doctor_runtime_strict.out" \
   && grep -q '^check=native-subagents:ok' "$TMP/codex_doctor_runtime_strict.out" \
@@ -2618,7 +2667,11 @@ ln -s "$ROOT/opencode_setting/opencode-skills/autopilot-code" "$TMP/opencode_hea
 ln -s "$ROOT/opencode_setting/opencode-agents/memory-scout" "$TMP/opencode_headless_home/.config/opencode/agents/memory-scout"
 ln -s "$ROOT/opencode_setting/opencode-commands/autopilot-code.md" "$TMP/opencode_headless_home/.config/opencode/commands/autopilot-code.md"
 ln -s "$ROOT/opencode_setting/opencode-plugins/hearting-guards.js" "$TMP/opencode_headless_home/.config/opencode/plugins/hearting-guards.js"
-if HOME="$TMP/opencode_headless_home" XDG_CONFIG_HOME="$TMP/opencode_headless_home/.config" \
+# The fixture projects the OpenCode 1.x guard file; the launch generation is pinned
+# so an OpenCode 2 CLI on the host does not ask for the 2.x guard package instead.
+if cli_absent opencode; then
+  ok "opencode headless check validates plural native runtime projection skipped (opencode not installed)"
+elif OPENCODE_RUNTIME_VERSION=1.14.0 HOME="$TMP/opencode_headless_home" XDG_CONFIG_HOME="$TMP/opencode_headless_home/.config" \
   "$OPENCODE" headless --check "$TMP/repo" >"$TMP/opencode_headless_check.out" 2>"$TMP/opencode_headless_check.err" \
   && grep -q '^runtime_projection=ok$' "$TMP/opencode_headless_check.out" \
   && grep -q '/agents/memory-scout/memory-scout.md$' "$TMP/opencode_headless_check.out" \
@@ -2636,7 +2689,9 @@ ln -s "$ROOT" "$TMP/opencode_headless_config_home/.config/opencode/hearting"
 ln -s "$ROOT/opencode_setting/opencode-agents/memory-scout/memory-scout.md" "$TMP/opencode_headless_config_home/.config/opencode/agent/memory-scout.md"
 ln -s "$ROOT/opencode_setting/opencode-commands/autopilot-code.md" "$TMP/opencode_headless_config_home/.config/opencode/command/autopilot-code.md"
 ln -s "$ROOT/opencode_setting/opencode-plugins/hearting-guards.js" "$TMP/opencode_headless_config_home/.config/opencode/plugins/hearting-guards.js"
-if OPENCODE_CONFIG_CONTENT='{"skills":{"paths":["/tmp/opencode-\u0073kills"]}}' \
+if cli_absent opencode; then
+  ok "opencode headless check accepts JSON-configured native skills path skipped (opencode not installed)"
+elif OPENCODE_RUNTIME_VERSION=1.14.0 OPENCODE_CONFIG_CONTENT='{"skills":{"paths":["/tmp/opencode-\u0073kills"]}}' \
   HOME="$TMP/opencode_headless_config_home" XDG_CONFIG_HOME="$TMP/opencode_headless_config_home/.config" \
   "$OPENCODE" headless --check "$TMP/repo" >"$TMP/opencode_headless_config_check.out" 2>"$TMP/opencode_headless_config_check.err" \
   && grep -q '^runtime_projection=ok$' "$TMP/opencode_headless_config_check.out" \
@@ -2658,7 +2713,10 @@ else
     bad "opencode dispatch wrapper should fail cleanly without model selection"
   fi
 fi
-if "$OPENCODE" dispatch --dry-run --worktree "$TMP/repo" --slug opencode-dispatch --capability autopilot-code --mode dev --qa standard --prompt-text "do work" --model provider/test --variant low --jobs "$TMP/opencode-dispatch.log" >"$TMP/opencode_dispatch.out" 2>"$TMP/opencode_dispatch.err" \
+# The command form depends on the OpenCode generation the launch binds
+# (OPENCODE_RUNTIME_VERSION wins over probing the installed CLI), so each form is
+# pinned here instead of following whatever this host has installed.
+if OPENCODE_RUNTIME_VERSION=1.14.0 "$OPENCODE" dispatch --dry-run --worktree "$TMP/repo" --slug opencode-dispatch --capability autopilot-code --mode dev --qa standard --prompt-text "do work" --model provider/test --variant low --jobs "$TMP/opencode-dispatch.log" >"$TMP/opencode_dispatch.out" 2>"$TMP/opencode_dispatch.err" \
   && grep -q '^adapter=opencode$' "$TMP/opencode_dispatch.out" \
   && grep -q '^status=dry-run$' "$TMP/opencode_dispatch.out" \
   && grep -q '^registered=0$' "$TMP/opencode_dispatch.out" \
@@ -2677,13 +2735,30 @@ if "$OPENCODE" dispatch --dry-run --worktree "$TMP/repo" --slug opencode-dispatc
 else
   bad "opencode dispatch wrapper should dry-run headless command with main-selected model settings"
 fi
+if OPENCODE_RUNTIME_VERSION=2.0.32 "$OPENCODE" dispatch --dry-run --worktree "$TMP/repo" --slug opencode-dispatch-v2 --capability autopilot-code --mode dev --qa standard --prompt-text "do work" --model provider/test --variant low --jobs "$TMP/opencode-dispatch-v2.log" >"$TMP/opencode_dispatch_v2.out" 2>"$TMP/opencode_dispatch_v2.err" \
+  && grep -q '^status=dry-run$' "$TMP/opencode_dispatch_v2.out" \
+  && grep -q '^command=.*opencode run ' "$TMP/opencode_dispatch_v2.out" \
+  && grep -q -- "--model 'provider/test#low'" "$TMP/opencode_dispatch_v2.out" \
+  && ! grep -q -- '--variant low' "$TMP/opencode_dispatch_v2.out" \
+  && [ ! -e "$TMP/opencode-dispatch-v2.log" ]; then
+  ok "opencode dispatch wrapper folds the variant into the model for an OpenCode 2 launch"
+else
+  bad "opencode dispatch wrapper should fold the variant into the model for an OpenCode 2 launch"
+fi
 mkdir -p "$TMP/opencode-stubbin"
+# A start first identifies the binary it launches (`--version`); the stub answers
+# as an OpenCode 1.x CLI and records the run argv otherwise.
 cat > "$TMP/opencode-stubbin/opencode" <<'EOF'
 #!/usr/bin/env sh
+if [ "${1:-}" = --version ]; then echo 1.14.0; exit 0; fi
+# `debug config` resolves the config the launch passed (its model limit included).
+if [ "${1:-} ${2:-}" = "debug config" ]; then printf '%s\n' "${OPENCODE_CONFIG_CONTENT:-{\}}"; exit 0; fi
 printf '%s\n' "$*" > "$OPENCODE_STUB_ARGV"
 EOF
 chmod +x "$TMP/opencode-stubbin/opencode"
+# provider/test has no models.dev record, so the launch caps the limit the config declares.
 if PATH="$TMP/opencode-stubbin:$PATH" OPENCODE_STUB_ARGV="$TMP/opencode-start.argv" \
+  OPENCODE_CONFIG_CONTENT='{"provider":{"provider":{"models":{"test":{"limit":{"context":200000,"output":8192}}}}}}' \
   HOME="$TMP/opencode_headless_home" XDG_CONFIG_HOME="$TMP/opencode_headless_home/.config" \
   "$OPENCODE" dispatch --start --worktree "$TMP/repo" --slug nested/opencode-start --capability autopilot-code --mode dev --qa standard --prompt-text "nested work" --model provider/test --variant low --jobs "$TMP/opencode-start.log" --log-dir "$TMP/opencode-logs" >"$TMP/opencode_dispatch_start.out" 2>"$TMP/opencode_dispatch_start.err" \
   && grep -q '^status=start$' "$TMP/opencode_dispatch_start.out" \
@@ -2720,7 +2795,7 @@ if env -u XDG_STATE_HOME -u HARNESS_STATE_ROOT HOME="$opencode_default_home" "$O
 else
   bad "opencode dispatch wrapper should not trust invalid AGENT_HOME for default registry"
 fi
-if AGENT_HOME="$TMP/not-agent-home" HOME="$DISPATCH_RESOLVER_HOME" XDG_DATA_HOME="$DISPATCH_RESOLVER_XDG" \
+if env -u XDG_STATE_HOME -u HARNESS_STATE_ROOT AGENT_HOME="$TMP/not-agent-home" HOME="$DISPATCH_RESOLVER_HOME" XDG_DATA_HOME="$DISPATCH_RESOLVER_XDG" \
   python3 "$ROOT/adapters/opencode/bin/dispatch-headless.py" --dry-run --worktree "$TMP/repo" --slug opencode-direct-home --capability autopilot-code --mode dev --qa standard --prompt-text "do work" --model provider/test --variant low >"$TMP/opencode_dispatch_direct.out" 2>"$TMP/opencode_dispatch_direct.err" \
   && grep -Fxq "job_registry=$DISPATCH_RESOLVER_STATE/jobs.log" "$TMP/opencode_dispatch_direct.out" \
   && grep -Fxq "prompt_file=$DISPATCH_RESOLVER_STATE/logs/opencode-direct-home.opencode.prompt.txt" "$TMP/opencode_dispatch_direct.out"; then
@@ -2831,23 +2906,20 @@ EOF
 printf '2026-06-30T00:00:00Z\topen\t%s\t%s\tlive-opencode\t-\n' "$TMP/repo" "$TMP/flowproj" > "$TMP/opencode-jobs.log"
 if OPENCODE_DB="$TMP/opencode.db" DISPATCH_STALE_MIN=60 "$OPENCODE" liveness "$TMP/opencode-jobs.log" >"$TMP/opencode_liveness.out" 2>"$TMP/opencode_liveness.err" \
   && grep -q '^ALIVE    live-opencode ' "$TMP/opencode_liveness.out" \
-  && grep -q '^open 1 ; alive 1 ; suspect/dead 0$' "$TMP/opencode_liveness.out"; then
+  && grep -q '^open 1 ; alive 1 ; suspect/dead 0 ; unknown 0$' "$TMP/opencode_liveness.out"; then
   ok "opencode liveness wrapper matches worktree to session DB"
 else
   bad "opencode liveness wrapper should match worktree to session DB"
 fi
 printf '2026-06-30T00:00:00Z\topen\t%s\t%s\tdead-opencode\t-\n' "$TMP/repo" "$TMP/missing-opencode-wt" > "$TMP/opencode-dead-jobs.log"
-if OPENCODE_DB="$TMP/opencode.db" "$OPENCODE" liveness "$TMP/opencode-dead-jobs.log" >"$TMP/opencode_liveness_dead.out" 2>"$TMP/opencode_liveness_dead.err"; then
-  bad "opencode liveness wrapper should fail dead jobs"
+# A legacy row whose worktree is gone carries no exact session or guard evidence:
+# the shared classifier reports it UNKNOWN (not DEAD) and does not fail the check.
+if OPENCODE_DB="$TMP/opencode.db" "$OPENCODE" liveness "$TMP/opencode-dead-jobs.log" >"$TMP/opencode_liveness_dead.out" 2>"$TMP/opencode_liveness_dead.err" \
+  && grep -q '^UNKNOWN  dead-opencode ' "$TMP/opencode_liveness_dead.out" \
+  && grep -q '^open 1 ; alive 0 ; suspect/dead 0 ; unknown 1$' "$TMP/opencode_liveness_dead.out"; then
+  ok "opencode liveness wrapper reports an unobservable job as unknown"
 else
-  rc=$?
-  if [ "$rc" -eq 3 ] \
-    && grep -q '^DEAD     dead-opencode ' "$TMP/opencode_liveness_dead.out" \
-    && grep -q '^open 1 ; alive 0 ; suspect/dead 1$' "$TMP/opencode_liveness_dead.out"; then
-    ok "opencode liveness wrapper reports dead jobs"
-  else
-    bad "opencode liveness wrapper should report dead jobs"
-  fi
+  bad "opencode liveness wrapper should report an unobservable job as unknown"
 fi
 if "$OPENCODE" mcp >"$TMP/opencode_mcp.out" 2>"$TMP/opencode_mcp.err" \
   && grep -q '^adapter=opencode$' "$TMP/opencode_mcp.out" \
@@ -2859,7 +2931,9 @@ if "$OPENCODE" mcp >"$TMP/opencode_mcp.out" 2>"$TMP/opencode_mcp.err" \
 else
   bad "opencode mcp wrapper should report native MCP contract"
 fi
-if "$OPENCODE" mcp --check >"$TMP/opencode_mcp_check.out" 2>"$TMP/opencode_mcp_check.err" \
+if cli_absent opencode; then
+  ok "opencode mcp wrapper checks native MCP CLI skipped (opencode not installed)"
+elif "$OPENCODE" mcp --check >"$TMP/opencode_mcp_check.out" 2>"$TMP/opencode_mcp_check.err" \
   && grep -q '^check=ok$' "$TMP/opencode_mcp_check.out"; then
   ok "opencode mcp wrapper checks native MCP CLI"
 else
@@ -2968,14 +3042,21 @@ fi
 # Unconfigured fast roles fall back to the config-declared mini tier (models.conf
 # SoT retired the old `opencode-default` placeholder); derive the expectation.
 opencode_mini_model=$(. "$ROOT/adapters/opencode/config/models.conf" && printf '%s' "$CFG_TIER_MINI_MODEL")
+opencode_mini_variant=$(. "$ROOT/adapters/opencode/config/models.conf" && printf '%s' "${CFG_TIER_MINI_VARIANT:-runtime-default}")
 if "$OPENCODE" role fast reviewer >"$TMP/opencode_role.out" 2>"$TMP/opencode_role.err" \
   && grep -q "^model=${opencode_mini_model}\$" "$TMP/opencode_role.out" \
-  && grep -q '^variant=runtime-default$' "$TMP/opencode_role.out"; then
+  && grep -q "^variant=${opencode_mini_variant}\$" "$TMP/opencode_role.out"; then
   ok "opencode role wrapper falls back to the config mini tier when unconfigured"
 else
   bad "opencode role wrapper should fall back to the config mini tier when unconfigured"
 fi
-if command -v opencode >/dev/null 2>&1; then
+# These read OpenCode 1.x's own `debug config --pure` and `debug agent` output.
+# OpenCode 2 has neither (`debug agents`, no --pure), so they run only beside a 1.x CLI.
+opencode_v1_cli() {
+  command -v opencode >/dev/null 2>&1 \
+    && [ "$(opencode --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 | cut -d. -f1)" = 1 ]
+}
+if opencode_v1_cli; then
   mkdir -p "$TMP/opencode_bootstrap_home/.config/opencode" "$TMP/opencode_bootstrap_home/.local/share"
   if OPENCODE_CONFIG_CONTENT="{\"instructions\":[\"$ROOT/opencode_setting/AGENTS.md\"],\"skills\":{\"paths\":[\"$ROOT/opencode_setting/opencode-skills\"]}}" \
     HOME="$TMP/opencode_bootstrap_home" XDG_CONFIG_HOME="$TMP/opencode_bootstrap_home/.config" XDG_DATA_HOME="$TMP/opencode_bootstrap_home/.local/share" \
@@ -2988,9 +3069,9 @@ if command -v opencode >/dev/null 2>&1; then
     bad "opencode bootstrap config should project instructions and skills without Claude paths"
   fi
 else
-  ok "opencode bootstrap config runtime discovery skipped (opencode not installed)"
+  ok "opencode bootstrap config runtime discovery skipped (no OpenCode 1.x CLI)"
 fi
-if command -v opencode >/dev/null 2>&1; then
+if opencode_v1_cli; then
   mkdir -p "$TMP/opencode_home/.config/opencode/agent" "$TMP/opencode_home/.local/share"
   for f in "$ROOT"/opencode_setting/opencode-agents/*/*.md; do
     [ -f "$f" ] || continue
@@ -3030,9 +3111,9 @@ PY
     bad "opencode qa agent projection should disable edit/write/task"
   fi
 else
-  ok "opencode native agent runtime discovery skipped (opencode not installed)"
+  ok "opencode native agent runtime discovery skipped (no OpenCode 1.x CLI)"
 fi
-if command -v opencode >/dev/null 2>&1; then
+if opencode_v1_cli; then
   mkdir -p "$TMP/opencode_command_home/.config/opencode/command" "$TMP/opencode_command_home/.local/share"
   for f in "$ROOT"/opencode_setting/opencode-commands/*.md; do
     [ -f "$f" ] || continue
@@ -3048,9 +3129,9 @@ if command -v opencode >/dev/null 2>&1; then
     bad "opencode native command projection should be discoverable without Claude paths"
   fi
 else
-  ok "opencode native command runtime discovery skipped (opencode not installed)"
+  ok "opencode native command runtime discovery skipped (no OpenCode 1.x CLI)"
 fi
-if command -v opencode >/dev/null 2>&1; then
+if opencode_v1_cli; then
   mkdir -p "$TMP/opencode_plugin_project/.opencode/plugins" "$TMP/opencode_plugin_home/.config" "$TMP/opencode_plugin_home/.local/share"
   ln -s "$ROOT/opencode_setting/opencode-plugins/hearting-guards.js" "$TMP/opencode_plugin_project/.opencode/plugins/hearting-guards.js"
   if (
@@ -3064,7 +3145,7 @@ if command -v opencode >/dev/null 2>&1; then
     bad "opencode native plugin projection should be discoverable without Claude hooks"
   fi
 else
-  ok "opencode native plugin runtime discovery skipped (opencode not installed)"
+  ok "opencode native plugin runtime discovery skipped (no OpenCode 1.x CLI)"
 fi
 mkdir -p "$TMP/fake_agent_home/adapters/opencode/bin"
 cat > "$TMP/fake_agent_home/adapters/opencode/bin/preflight.sh" <<'EOF'
@@ -3658,15 +3739,30 @@ PY
 predsrv=$!
 predwait=0
 while [ ! -S "$predsock" ] && [ "$predwait" -lt 50 ]; do predwait=$((predwait + 1)); sleep 0.1; done
-# The hook reports only the session its own Claude runtime is on: make this shell that
-# runtime (a session file for its pid in a fake CLAUDE_CONFIG_DIR, as Claude Code writes).
-predclaude="$predtmp/claude-config"
-mkdir -p "$predclaude/sessions"
-printf '{"sessionId":"pred-herdr"}' > "$predclaude/sessions/$$.json"
+# The herdr-shipped hook (integration v11) reports one thing: the session a Claude
+# SessionStart names, and only when the projection's may_report allows it. The real
+# decision proves the runtime and pane from /proc and herdr (the Fleet suites cover
+# it); here a fixture tree stands in for that proof, and the worker rule is the real
+# one: the teammate marker is not worker evidence, harness worker markers are.
+predhome="$predtmp/fixture-home"
+mkdir -p "$predhome/hooks" "$predhome/tools/fleet"
+cp "$HERDR" "$predhome/hooks/herdr-agent-state.sh"
+# The fixture package falls back to the real one, so the real module's own
+# `fleet.*` imports resolve while this stand-in is found first.
+printf '__path__.append(%s)\n' "'$ROOT/tools/fleet'" > "$predhome/tools/fleet/__init__.py"
+cat > "$predhome/tools/fleet/herdr_projection.py" <<PY
+import importlib.util
+_spec = importlib.util.spec_from_file_location("fleet._real_herdr_projection", "$ROOT/tools/fleet/herdr_projection.py")
+_real = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_real)
+
+def may_report(harness, session_id, pane_id=None):
+    return harness == "claude" and session_id == "pred-herdr" and not _real.is_worker()
+PY
 pred_herdr() { # $1=pane-id [$2=session-id] ; env assignments come from the caller
-  printf '{"hook_event_name":"PreToolUse","session_id":"%s"}' "${2:-pred-herdr}" \
-    | CLAUDE_CONFIG_DIR="$predclaude" HERDR_ENV=1 HERDR_SOCKET_PATH="$predsock" HERDR_PANE_ID="$1" \
-      sh "$HERDR" working >/dev/null 2>&1 || true
+  printf '{"hook_event_name":"SessionStart","session_id":"%s"}' "${2:-pred-herdr}" \
+    | HERDR_ENV=1 HERDR_SOCKET_PATH="$predsock" HERDR_PANE_ID="$1" \
+      sh "$predhome/hooks/herdr-agent-state.sh" session >/dev/null 2>&1 || true
 }
 : > "$predrecv"
 CLAUDE_CODE_CHILD_SESSION=1 pred_herdr pane-teammate
@@ -3677,26 +3773,32 @@ if grep -q 'pane-teammate' "$predrecv" 2>/dev/null; then
 else bad "herdr pane state must not treat CLAUDE_CODE_CHILD_SESSION as worker evidence"; fi
 : > "$predrecv"
 for assignment in AGENT_SESSION_ROLE=worker AGENT_DISPATCH_CHILD=1 AGENT_DISPATCH_DEPTH=2; do
-  env "$assignment" sh -c 'printf "{\"hook_event_name\":\"PreToolUse\",\"session_id\":\"pred-herdr\"}" \
-    | CLAUDE_CONFIG_DIR="$3" HERDR_ENV=1 HERDR_SOCKET_PATH="$1" HERDR_PANE_ID=pane-worker sh "$2" working >/dev/null 2>&1' _ "$predsock" "$HERDR" "$predclaude" || true
+  env "$assignment" sh -c 'printf "{\"hook_event_name\":\"SessionStart\",\"session_id\":\"pred-herdr\"}" \
+    | HERDR_ENV=1 HERDR_SOCKET_PATH="$1" HERDR_PANE_ID=pane-worker sh "$2" session >/dev/null 2>&1' _ "$predsock" "$predhome/hooks/herdr-agent-state.sh" || true
 done
 pred_herdr pane-foreign some-test-session
+printf '{"hook_event_name":"PreToolUse","session_id":"pred-herdr"}' \
+  | HERDR_ENV=1 HERDR_SOCKET_PATH="$predsock" HERDR_PANE_ID=pane-tool-event \
+    sh "$predhome/hooks/herdr-agent-state.sh" session >/dev/null 2>&1 || true
 sleep 0.3
 if ! grep -q 'pane-worker' "$predrecv" 2>/dev/null; then
   ok "herdr pane state stays silent for every harness worker marker"
 else bad "herdr pane state should no-op for harness worker markers"; fi
 if ! grep -q 'pane-foreign' "$predrecv" 2>/dev/null; then
-  ok "herdr pane state stays silent for a session that is not its runtime's own"
-else bad "herdr pane state must not report a foreign session id"; fi
+  ok "herdr pane state stays silent for a session the projection does not allow"
+else bad "herdr pane state must not report a session the projection refuses"; fi
+if ! grep -q 'pane-tool-event' "$predrecv" 2>/dev/null; then
+  ok "herdr pane state reports only on SessionStart"
+else bad "herdr pane state must ignore events other than SessionStart"; fi
 # A stale tree beside the hook whose projection fails to import must not hide the good
 # AGENT_HOME copy further down the candidate list.
 mkdir -p "$predtmp/stale/hooks" "$predtmp/stale/tools/fleet"
 cp "$HERDR" "$predtmp/stale/hooks/herdr-agent-state.sh"
 : > "$predtmp/stale/tools/fleet/__init__.py"
 printf 'raise ImportError("stale tree")\n' > "$predtmp/stale/tools/fleet/herdr_projection.py"
-printf '{"hook_event_name":"PreToolUse","session_id":"pred-herdr"}' \
-  | AGENT_HOME="$ROOT" CLAUDE_CONFIG_DIR="$predclaude" HERDR_ENV=1 HERDR_SOCKET_PATH="$predsock" \
-    HERDR_PANE_ID=pane-fallback sh "$predtmp/stale/hooks/herdr-agent-state.sh" working >/dev/null 2>&1 || true
+printf '{"hook_event_name":"SessionStart","session_id":"pred-herdr"}' \
+  | AGENT_HOME="$predhome" HERDR_ENV=1 HERDR_SOCKET_PATH="$predsock" \
+    HERDR_PANE_ID=pane-fallback sh "$predtmp/stale/hooks/herdr-agent-state.sh" session >/dev/null 2>&1 || true
 predwait=0
 while ! grep -q 'pane-fallback' "$predrecv" 2>/dev/null && [ "$predwait" -lt 30 ]; do predwait=$((predwait + 1)); sleep 0.1; done
 if grep -q 'pane-fallback' "$predrecv" 2>/dev/null; then
@@ -3813,13 +3915,15 @@ dispatch_scan_prod=$(cd "$ROOT" && grep -rnE \
 # the layout: distribution.py's release candidates and its forced-prune gap
 # reader, migration-manifest.py's non-executing inventory, the Fleet dispatch
 # collector's explicit legacy discovery, and the wrappers'/docs' description
-# of where a registry lives.
+# of where a registry lives (peer_obligations.py's `_rebase_release_argument`
+# docstring names a release-local registry it leaves alone).
 dispatch_scan_allowed='
 tools/install/distribution.py 3
 tools/migration-manifest.py 2
 tools/fleet/collectors/dispatch.py 6
 tools/fleet/collectors/__init__.py 1
 tools/render-landing.py 1
+utilities/peer_obligations.py 1
 adapters/codex/bin/preflight.sh 1
 adapters/opencode/bin/preflight.sh 1
 adapters/claude/plugin-marketplace/plugins/hearting-claude/core/ADAPTATION_INVENTORY.md 1
@@ -3971,7 +4075,7 @@ else
 fi
 
 # --- d1/d2 depth text tokens must never re-enter the render surface.
-d1d2=$(cd "$ROOT" && grep -n "'d1'\|\"d1\"\|'d2'\|\"d2\"" tools/fleet/render.py 2>/dev/null)
+d1d2=$(cd "$ROOT" && grep -n "'d1'\|\"d1\"\|'d2'\|\"d2\"" tools/fleet/render.py tools/fleet/render_*.py 2>/dev/null)
 if [ -z "$d1d2" ]; then
   ok "no d1/d2 depth text tokens in tools/fleet/render.py"
 else

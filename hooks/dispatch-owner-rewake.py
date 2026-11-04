@@ -406,22 +406,30 @@ def _session_owner_states(
     # One read context for the whole scan, and the row's own fields before
     # the lineage: `owns` otherwise re-read every handover snapshot and seat
     # ledger per row, ~20ms each, so a 1,994-row registry cost every Bash
-    # call ~40s of CPU (2026-10-28).
-    read_context = PeerReadContext()
+    # call ~40s of CPU (2026-10-28). The scan is read-only, so it also resolves
+    # every row against one observation of the lineage directory, as the sweep
+    # does: without the pin each `owns` listed and stat'ed every session ledger
+    # again, ~1,600 rows x ~660 ledgers = ~8s of CPU per Bash call (2026-11-03).
+    # Ownership reads relation rows only, so the scan uses the runner-published
+    # compact rows for unchanged ledgers, as the sweep's discovery does, instead
+    # of reading every handover snapshot and ledger on each Bash call and Stop.
+    read_context = PeerReadContext(compact_lineage=True)
     rows: list[tuple[str, float, str]] = []
-    for attempt_id, (stamp, status, metadata) in latest.items():
-        if status not in statuses:
-            continue
-        if any(metadata.get(key) != value for key, value in REGISTRY_DEPTH1_START.items()):
-            continue
-        if not _worker_type_is_depth1(metadata.get("worker_type")):
-            continue
-        if not seat_handover.owns(metadata, session, jobs, read_context=read_context):
-            continue
-        age = _row_age(stamp, now)
-        if age is None or age < -MAXIMUM_CLOCK_SKEW_SECONDS:
-            continue
-        rows.append((attempt_id, age, status))
+    with read_context.pinned_lineage():
+        for attempt_id, (stamp, status, metadata) in latest.items():
+            if status not in statuses:
+                continue
+            if any(metadata.get(key) != value for key, value in REGISTRY_DEPTH1_START.items()):
+                continue
+            if not _worker_type_is_depth1(metadata.get("worker_type")):
+                continue
+            # Unknown (an unreadable lineage) is not this session's row yet: the next call looks again.
+            if seat_handover.owns(metadata, session, jobs, read_context=read_context) is not True:
+                continue
+            age = _row_age(stamp, now)
+            if age is None or age < -MAXIMUM_CLOCK_SKEW_SECONDS:
+                continue
+            rows.append((attempt_id, age, status))
     rows.sort(key=lambda row: -row[1])
     return rows
 
@@ -452,6 +460,12 @@ def registry_launch(payload: object) -> tuple[Launch, ArmClaim] | ArmRefusal | N
     if gate is None:
         return None
     payload, session = gate
+    if os.environ.get("AGENT_DISPATCH_CHILD") == "1":
+        # A registered worker session never holds a depth-1 claude-parent-runtime
+        # row: that carrier is chosen only outside a child
+        # (dispatch_parent_completion._direct_registered_parent). The scan below
+        # would read the whole registry on every call to find nothing.
+        return None
     jobs = _resolved_jobs(payload)
     if jobs is None:
         return None
@@ -575,11 +589,14 @@ def _row_metadata(jobs: Path, attempt_id: object) -> dict[str, str] | None:
     return row.metadata if row is not None else None
 
 
-def _handed_to(jobs: Path, attempt_id: object, session: str) -> bool:
-    """Whether the registry row of `attempt_id` now belongs to `session` by a same-seat handover."""
+def _handed_to(jobs: Path, attempt_id: object, session: str) -> bool | None:
+    """Whether the registry row of `attempt_id` now belongs to `session` by a same-seat handover.
+
+    ``None`` when the seat lineage cannot be read: unknown, not another session."""
     metadata = _row_metadata(jobs, attempt_id)
-    return bool(metadata) and metadata.get("parent_sid") != session \
-        and seat_handover.effective_parent(metadata, jobs) == session
+    if not metadata or metadata.get("parent_sid") == session:
+        return False
+    return seat_handover.owns(metadata, session, jobs)
 
 
 class LineageMoved(RuntimeError):
@@ -622,11 +639,16 @@ def _reclaim_refusal(existing: dict[str, Any], jobs: Path, session: str) -> str 
         return "unreadable"
     # The session that armed it may have been cleared; its same-seat successor takes the wait over.
     handed = existing.get("session_id") != session and _handed_to(jobs, existing.get("attempt_id"), session)
+    if handed is None:
+        return "handover-unreadable"   # unknown, not another session: the next call looks again
     if existing.get("session_id") != session and not handed:
         return "foreign-session"
     metadata = _row_metadata(jobs, existing.get("attempt_id"))
-    if metadata is not None and not seat_handover.owns(metadata, session, jobs):
+    owned = None if metadata is None else seat_handover.owns(metadata, session, jobs)
+    if owned is False:
         return "foreign-session"       # the arming session handed the owner on and no longer answers for it
+    if metadata is not None and owned is None:
+        return "handover-unreadable"   # unknown, not another session: the next call looks again
     arms = existing.get("arms")
     if not isinstance(arms, int):
         return "unreadable"
@@ -936,11 +958,18 @@ def replacement_authority(launch: Launch, claim: ArmClaim, jobs: Path, aid: str,
     """The native incarnation and held arm grant this carrier its exact scope."""
     trusted = _trusted_jobs()
     held = _read_arm(claim.path)
+    if not (trusted is not None and Path(jobs).resolve() == trusted.resolve() == launch.jobs.resolve()
+            and aid == launch.attempt_id == claim.attempt_id
+            and claim.session_id == launch.session_id):
+        return False
+    owned = seat_handover.owns(metadata, launch.session_id, jobs)
+    if owned is None:
+        # Unknown is neither this carrier's authority nor a refusal: the replacement
+        # waits for the same command once the lineage reads (LOOP §4).
+        from route_authority import require_known
+        require_known(owned, metadata, jobs)
     return bool(
-        trusted is not None and Path(jobs).resolve() == trusted.resolve() == launch.jobs.resolve()
-        and aid == launch.attempt_id == claim.attempt_id
-        and claim.session_id == launch.session_id
-        and seat_handover.owns(metadata, launch.session_id, jobs)
+        owned
         and held and held.get("holder") == list(claim.holder)
         and held.get("state") == "waiting" and held.get("attempt_id") == aid
         and held.get("session_id") == launch.session_id
@@ -1282,12 +1311,13 @@ class ClaimDeferred:
     visible through a launched successor or must be announced."""
 
 
-def _reserved_successor_launched(launch: Launch, metadata: dict[str, str]) -> bool:
+def _reserved_successor_launched(launch: Launch, metadata: dict[str, str]) -> bool | None:
     """Whether the accepted claim behind a deferred delivery already launched.
 
     The source row's own binding names the exact reserved successor; only a
-    registered row past the launch fence counts as a launch. Anything unreadable
-    stays ``False`` so the caller announces instead of assuming a launch."""
+    registered row past the launch fence counts as a launch. ``None`` means the
+    binding or the successor row could not be read: the caller still announces
+    (it never assumes a launch), but does not state that nothing launched."""
     try:
         from dispatch_replacement import source_binding
 
@@ -1297,7 +1327,7 @@ def _reserved_successor_launched(launch: Launch, metadata: dict[str, str]) -> bo
         row = current_attempt_row(launch.jobs, binding[1])
     except (DispatchContractError, JoinContractError, OSError, ValueError,
             KeyError, TypeError):
-        return False
+        return None
     return bool(row is not None and row.metadata.get("launch_claimed") == "1")
 
 
@@ -1984,11 +2014,14 @@ def _run_carrier_once(launch, claim, payload, observation, holder, deadline) -> 
         # the launch fence keeps the ordinary silent exit: the follow path owns
         # its completion.
         observation["reason"] = "completion-claim-unavailable"
-        if _reserved_successor_launched(launch, owing):
+        launched = _reserved_successor_launched(launch, owing)
+        if launched:
             return _ended(claim, 0, terminal=True)
         message += (
             " Runtime fact: a replacement is reserved for this owner and was not launched;"
-            " `start` on the route continues it."
+            " `start` on the route continues it." if launched is False else
+            " Runtime fact: a replacement is reserved for this owner; whether it launched"
+            " could not be read. `start` on the route continues it if it did not."
         )
         return _emit_with_gates(launch, claim, state, message, block=False,
                                 owner_closed=wait_state == "ready")
