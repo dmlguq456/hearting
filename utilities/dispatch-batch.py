@@ -2753,8 +2753,8 @@ def _run_slices(args: argparse.Namespace, route: dict[str, object]) -> int:
         2,
         args.action,
     ).path
-    chain_id = SUBDIVISION_ADMISSION.slice_chain_id(
-        str(route.get("route_id") or ""), args.parallel_group, slices,
+    chain_id = SUBDIVISION_ADMISSION.current_slice_chain_id(
+        str(route.get("route_id") or ""), args.parallel_group, slices, Path(jobs),
     )
     manifest_path = (
         Path(jobs).parent / "subdivision" / str(route.get("route_id")) / f"{chain_id}.json"
