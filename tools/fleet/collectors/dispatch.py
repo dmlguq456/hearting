@@ -5058,16 +5058,19 @@ def _cycle_inventory_matches(root, directory, wanted, projection, read_json):
                     and (name not in entries or entries[name][0] != inode)):
                 entries[name] = (inode, tuple(inverse.get(name, ())), True)
     names = sorted(listing)
-    pending = [name for name in names if name not in entries
-               or entries[name][0] != listing[name] or not entries[name][2]]
+    pending = {name for name in names if name not in entries
+               or entries[name][0] != listing[name] or not entries[name][2]}
     previous = _CYCLE_LABEL_INVENTORIES.get(root)
-    offset = previous[2] % len(pending) if previous and pending else 0
-    batch = (pending[offset:] + pending[:offset])[:200]
+    # Keep the cursor in the complete inventory: the pending set shrinks after
+    # each batch, so applying the old offset to it would skip the next block.
+    offset = previous[2] % len(names) if previous and names else 0
+    ordered = names[offset:] + names[:offset]
+    batch = [name for name in ordered if name in pending][:200]
     for name in batch:
         record = read_json(os.path.join(directory, name))
         entries[name] = (listing[name], tuple(index.cycle_keys(name, record)), record is not None)
     _CYCLE_LABEL_INVENTORIES[root] = (None, names,
-        (offset + len(batch)) % len(pending) if pending else 0)
+        (names.index(batch[-1]) + 1) % len(names) if batch else offset)
     found = {}
     for name in names:
         value = entries.get(name)
