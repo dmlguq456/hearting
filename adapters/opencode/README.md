@@ -111,6 +111,9 @@ no shim is installed at the harness root. Export `AGENT_HOME` to the installed
 root for release behavior, or to a checkout/worktree to use that tree as the
 active runtime.
 
+If the memory prompt hook is unavailable, record `recall` or `skip` with
+`preflight.sh recall-gate <cwd> ...`.
+
 | Need | Command |
 |---|---|
 | lifecycle/workflow | `preflight.sh prompt-signal`, `preflight.sh briefing`, `preflight.sh worklog` |

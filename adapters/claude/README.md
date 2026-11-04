@@ -32,6 +32,8 @@ Detail it used to carry lives here and in the core sections it names.
 - Claude hooks realize portable invariants for workflow signals, spec-read
   observations, memory, and design checks. Main-session memory lifecycle does
   not run for workers. Session end never owns destructive worktree cleanup.
+- If the memory prompt hook is unavailable, record `recall` or `skip` with
+  `mem recall-gate`.
 - Use `statusline.sh` only for runtime status.
 - Repo-root `skills/` is the canonical Skill authoring tree;
   `tools/sync-entry-skill-layer.py` projects it into `adapters/claude/skills/`

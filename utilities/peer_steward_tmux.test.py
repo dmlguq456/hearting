@@ -148,6 +148,24 @@ class TmuxPeerStewardTest(unittest.TestCase):
             time.sleep(.05)
         self.fail("the fake Claude never took the pane")
 
+    def start_claude_as_pane_root(self, status="idle", sid=OLD):
+        """The fake Claude is the pane's first process, with no shell in between."""
+        runtime = self.root / "bin" / "claude"
+        runtime.parent.mkdir(exist_ok=True)
+        runtime.symlink_to(sys.executable)
+        # Several argv words make tmux exec the program itself, with no shell in front.
+        self.tmux("respawn-pane", "-k", "-t", self.pane, str(runtime), str(self.root / "claude.py"),
+                  str(self.log), sid, status, NEW, "")
+        surface = peer_steward.terminal_surface.TmuxSurface(socket=str(self.socket))
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            agent = (surface.agent(self.pane) or {}).get("result", {}).get("agent") or {}
+            if (agent.get("agent_session") or {}).get("value") == sid and "footer" in (
+                    surface.read_visible(self.pane) or ""):
+                return agent["pid"]
+            time.sleep(.05)
+        self.fail("the fake Claude never took the pane")
+
     def book(self):
         import session_tidy as st
         import session_tidy_clear as clear
@@ -233,6 +251,15 @@ class TmuxPeerStewardTest(unittest.TestCase):
         self.assertIn(b"hello from a peer", typed)
         self.assertTrue(typed.endswith(b"\x1b[201~\r"), typed)
 
+    def test_a_prompt_reaches_a_claude_that_is_the_panes_root_process(self):
+        pid = self.start_claude_as_pane_root()
+        self.assertEqual(str(pid), self.tmux("display-message", "-p", "-t", self.pane, "#{pane_pid}").stdout.strip())
+        rc, line = self.steward("prompt", self.pane, "hello from a peer")
+        self.assertNotIn("pane-identity-unverified", line)
+        typed = self.typed()
+        self.assertEqual(typed.count(b"\x1b[200~"), 1, typed)
+        self.assertIn(b"hello from a peer", typed)
+
     def test_a_prompt_to_a_busy_claude_pane_types_nothing_and_stays_queued(self):
         self.start_claude(status="busy")
         rc, line = self.steward("prompt", self.pane, "hello from a peer")
@@ -312,6 +339,16 @@ class TmuxPeerStewardTest(unittest.TestCase):
         while time.monotonic() < deadline and not out.exists():
             time.sleep(.05)
         return json.loads(out.read_text())
+
+    def test_an_inherited_herdr_pane_id_does_not_hide_the_tmux_pane_seat(self):
+        # A tmux server started under herdr hands its panes a herdr pane id that is not theirs.
+        seat = self.in_runtime(
+            "import json, os, session_tidy as st, session_tidy_clear as clear\n"
+            "from pathlib import Path\n"
+            "os.environ['HERDR_PANE_ID'] = 'w9:p9'\n"
+            "seat = st.resolve_seat('claude', os.getcwd(), os.environ, sid)\n"
+            "Path(out).write_text(json.dumps([seat.kind, seat.pane, bool(clear.pane_command(seat.pane))]))\n")
+        self.assertEqual(seat, ["pane", self.address, True])
 
     def test_the_runtime_hook_gets_a_tmux_pane_seat(self):
         seat = self.in_runtime(

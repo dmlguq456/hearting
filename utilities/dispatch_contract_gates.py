@@ -566,6 +566,7 @@ def completion_marker_gate(
                     raise DispatchContractError("saved-resource-output-changed", dep)
                 continue
             missing.append(dep)
+            _resource_predecessor_action(route, dep, resource_actions)
             continue
         try:
             marker = json.loads(marker_path.read_text(encoding="utf-8"))
@@ -605,6 +606,8 @@ def completion_marker_gate(
             missing.append(dep)
             if currency.state == "resource-stage-not-current":
                 resource_actions[dep] = resource_stage_next_action(currency, dep)
+            else:
+                _resource_predecessor_action(route, dep, resource_actions)
             continue
         markers[dep] = marker
         proceeding.append((dep_node, marker_path, marker))
@@ -1470,6 +1473,14 @@ def completion_superseded(currency: GateCurrency, *, answered: bool = False) -> 
 # stage whose proof does not match, a missing or malformed record) keeps `completion-marker-missing`.
 RESOURCE_STAGE_UNSETTLED = "resource-stage-unsettled"
 RESOURCE_STAGE_UNOBSERVABLE = "resource-stage-unobservable"
+
+
+def _resource_predecessor_action(route, dep: str, actions: dict) -> None:
+    """A resource predecessor with no current marker is continued, never waited on."""
+    node = next((row for row in route.get("nodes", []) if row.get("id") == dep), None)
+    if node is not None and node.get("kind") == "resource-runner":
+        actions[dep] = resource_stage_next_action(
+            GateCurrency("resource-stage-not-current", RESOURCE_STAGE_UNSETTLED), dep)
 
 
 def resource_stage_unsettled(currency: GateCurrency) -> bool:

@@ -1,8 +1,6 @@
 # CLAUDE.md — Claude Adapter Bootstrap
 
-This is the Claude Code adapter bootstrap, not the portable source of truth.
-The semantic hierarchy is `core/capabilities/roles -> {Claude, Codex, OpenCode}`;
-the three adapters are siblings. Edit portable sources first.
+Claude adapter bootstrap, not the portable source of truth: `core/capabilities/roles -> {Claude, Codex, OpenCode}`, adapters are siblings; edit portable sources first.
 
 The harness root is `AGENT_HOME`: for a managed release,
 `${XDG_DATA_HOME:-$HOME/.local/share}/hearting/current` or an existing route's
@@ -108,17 +106,15 @@ dispatch depth, model role, tests, safety, or validation.
 
 ## Where to look
 
-| Need | Read |
-|---|---|
-| Layers, harness root, artifact root | `core/CORE.md` |
-| Routing §0.2, entry card §0.4, report §0.5, completion §0.6 | `core/WORKFLOW.md` |
-| Intensity, QA, model roles, artifacts, Skills | `core/CONVENTIONS.md` |
-| Git, worktrees, dispatch, receipts §5.10a, frame questions §5.10b, continuation §5.12, other sessions §5.14 | `core/OPERATIONS.md` |
-| Memory | `core/MEMORY.md` |
-| Capabilities, roles, modes | `capabilities/README.md`, `roles/README.md`, `roles/MODES.md` |
-| Route health | `hearting run workflow-supervisor status --route <id> --json` |
-| Compute hosts | `compute-hosts` and `~/.config/hearting/compute-hosts.yaml`; `run` receipts include GPU headroom |
-| This runtime's commands and edge cases | the adapter `README.md` and `ADAPTATION.md` named below |
+- Layers, harness root, artifact root: `core/CORE.md`
+- Routing §0.2, entry card §0.4, report §0.5, completion §0.6: `core/WORKFLOW.md`
+- Intensity, QA, model roles, artifacts, Skills: `core/CONVENTIONS.md`
+- Git, worktrees, dispatch, receipts §5.10a, frame questions §5.10b, continuation §5.12, other sessions §5.14: `core/OPERATIONS.md`
+- Memory: `core/MEMORY.md`
+- Capabilities, roles, modes: `capabilities/README.md`, `roles/README.md`, `roles/MODES.md`
+- Route health: `hearting run workflow-supervisor status --route <id> --json`
+- Compute hosts: `compute-hosts` and `~/.config/hearting/compute-hosts.yaml`; `run` receipts include GPU headroom
+- This runtime's commands and edge cases: the adapter `README.md` and `ADAPTATION.md`
 
 Resolve the artifact root with `utilities/artifact-root.sh`; linked worktrees
 write the primary checkout's `.agent_reports/`, and legacy `.claude_reports/`
@@ -157,9 +153,3 @@ Portable behavior contract = `roles/response-policy.md`.
   `mem recall-gate`.
 - Hooks, statusline, Skills projection, and edge cases:
   `adapters/claude/README.md` and `adapters/claude/ADAPTATION.md`.
-
-## Compatibility Boundary
-
-Codex and OpenCode files are sibling implementation references, never Claude
-bootstrap input. Portable meaning comes from `core/`, `capabilities/`, and
-`roles/`; map that meaning to Claude-native runtime surfaces.

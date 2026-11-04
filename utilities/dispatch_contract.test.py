@@ -3849,6 +3849,25 @@ class DispatchContractTest(unittest.TestCase):
     self.assertIn(step,caught.exception.next_action)
     self.assertNotIn("revise",caught.exception.next_action)
 
+ def test_resource_predecessor_without_marker_gets_resource_guidance(self):
+  with tempfile.TemporaryDirectory() as td:
+   base=Path(td)
+   route={"dispatch_contract_version":3,"route_id":"rt-resource-gate0002",
+          "route_hash":"sha256:"+"9"*64,"registry_digest":"sha256:"+"a"*64,
+          "nodes":[{"id":"host-run","depends_on":[],"kind":"resource-runner",
+                    "completion_gate":"resource-exit","continuation":{"kind":"supervised"}},
+                   {"id":"impl-review","depends_on":["host-run"],"kind":"review-worker",
+                    "completion_gate":"code-impl-review","dispatch_depth":2}]}
+   path=base/"route.json"; path.write_text(json.dumps(route),encoding="utf-8")
+   jobs=base/"jobs.log"; jobs.write_text("",encoding="utf-8")
+   with patch_split(D,"_sibling_attempt_gate"):
+    with self.assertRaises(D.DispatchContractError) as caught:
+     D.completion_marker_gate(str(path),"impl-review","start",base,jobs,
+                              registry_lines=[],attempt_id="att-review-new")
+   self.assertEqual(caught.exception.reason,"completion-marker-missing")
+   self.assertIn("continue resource stage host-run",caught.exception.next_action)
+   self.assertNotIn("wait for node",caught.exception.next_action)
+
  def _gate_ledger(self,base,route):
   import workflow_state as WS
   return WS.WorkflowLedger(route["route_id"],route["route_hash"],root=base/"workflow")
