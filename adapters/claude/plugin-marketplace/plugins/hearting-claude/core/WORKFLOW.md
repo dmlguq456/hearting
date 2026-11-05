@@ -432,7 +432,10 @@ and records path/time in the route evidence and first leg task. Existing folders
 stay untouched and use the same interview's manual-preparation/direct choices.
 Preparation retains the approved physical parent binding; directory creation and
 Git initialization use pinned directories so a replaced ancestor cannot redirect
-writes outside that binding.
+writes outside that binding. The binding stays open through first-leg compilation,
+publication and launch, including resumed snapshots. A prepared first leg keeps
+that repository; a replaced path cannot turn it into an existing-repository
+worktree allocation. These are runtime checks within the existing approved start.
 Frame-time corrections stay on that route, appear in its existing Fleet detail,
 and reach the interview and first owner. The retained history has no reader-only
 size cutoff: bounded delivery takes recent conditions first and reports omitted

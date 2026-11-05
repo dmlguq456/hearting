@@ -23,6 +23,98 @@ F = load('frame_revision_start_fixture', 'framed_start.test.py')
 S = load('frame_revision_interview_fixture', 'work_start.test.py')
 
 class RepositoryBoundary(F.FrameFrictionContinuationTest):
+    def outside_repository(self):
+        outside = self.root.parent / 'outside-approved-parent'; outside.mkdir()
+        target = outside / 'new-project'; target.mkdir()
+        subprocess.run(['git', 'init', '--quiet', str(target)], check=True)
+        subprocess.run(['git', '-C', str(target), '-c', 'user.name=Fixture',
+                        '-c', 'user.email=fixture@example.invalid', 'commit',
+                        '--allow-empty', '-qm', 'Outside fixture'], check=True)
+        return outside, target
+
+    def swap_parent(self, outside):
+        self.parent.rename(self.parent.with_name('original-parent'))
+        self.parent.symlink_to(outside, target_is_directory=True)
+
+    def assert_outside_untouched(self, target, receipt):
+        worktrees = subprocess.check_output(['git', '-C', str(target), 'worktree',
+                                             'list', '--porcelain'], text=True)
+        self.assertEqual(worktrees.count('worktree '), 1)
+        self.assertFalse(receipt.get('owner_started'), receipt)
+        self.assertEqual(self.leg_calls, [])
+
+    def test_parent_swap_after_preparation_cannot_allocate_or_start_outside(self):
+        self.new_repository_frame()
+        outside, target = self.outside_repository()
+        original = F.W._prepare_frame_repository
+        def swap(*args):
+            result = original(*args)
+            self.swap_parent(outside)
+            return result
+        with mock.patch.object(F.W, '_prepare_frame_repository', side_effect=swap):
+            receipt = self.settle()
+        self.assert_outside_untouched(target, receipt)
+        self.assertEqual(self.leg_routes(), [])
+
+    def test_parent_swap_during_compile_cannot_publish_or_start_outside(self):
+        self.new_repository_frame()
+        outside, target = self.outside_repository()
+        module = F.W._route_module()
+        original = module.compose_route
+        def swap(**kwargs):
+            result = original(**kwargs)
+            if kwargs.get('selection_only') and not self.parent.is_symlink():
+                self.swap_parent(outside)
+            return result
+        with mock.patch.object(module, 'compose_route', side_effect=swap):
+            receipt = self.settle()
+        self.assert_outside_untouched(target, receipt)
+        self.assertEqual(self.leg_routes(), [])
+
+    def checkpoint_swap(self, checkpoint):
+        self.new_repository_frame()
+        outside, target = self.outside_repository()
+        def swap(name):
+            if name == checkpoint:
+                self.swap_parent(outside)
+        with mock.patch.object(F.W, '_checkpoint', side_effect=swap):
+            receipt = self.settle()
+        self.assert_outside_untouched(target, receipt)
+
+    def test_parent_swap_after_snapshot_stops_before_publication(self):
+        self.checkpoint_swap('after-compiled-snapshot')
+        self.assertEqual(self.leg_routes(), [])
+
+    def test_parent_swap_after_publication_stops_before_start(self):
+        self.checkpoint_swap('after-route-bind')
+
+    def test_resumed_snapshot_reopens_the_same_physical_repository(self):
+        self.new_repository_frame()
+        outside, target = self.outside_repository()
+        def interrupt(name):
+            if name == 'after-compiled-snapshot':
+                raise RuntimeError('fixture interrupted after snapshot')
+        with mock.patch.object(F.W, '_checkpoint', side_effect=interrupt):
+            with self.assertRaisesRegex(RuntimeError, 'fixture interrupted'):
+                self.settle()
+        self.assertIn('snapshot', self.record()['first_leg'])
+        self.swap_parent(outside)
+        receipt = self.settle()
+        self.assert_outside_untouched(target, receipt)
+        self.assertEqual(self.leg_routes(), [])
+
+    def test_swap_during_launch_preparation_stops_before_the_launcher(self):
+        self.new_repository_frame()
+        outside, target = self.outside_repository()
+        original = F.W.prepare_task_request
+        def swap(*args, **kwargs):
+            result = original(*args, **kwargs)
+            self.swap_parent(outside)
+            return result
+        with mock.patch.object(F.W, 'prepare_task_request', side_effect=swap):
+            receipt = self.settle()
+        self.assert_outside_untouched(target, receipt)
+
     def test_registered_parent_binding_survives_recheck_after_approval(self):
         self.new_repository_frame()
         self.interview = F.W._interview_repository_preparation(self.route, self.jobs, self.interview, {})

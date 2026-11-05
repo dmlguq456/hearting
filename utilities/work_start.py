@@ -37,6 +37,7 @@ from execution_access import ExecutionAccessError, prepare_task_request
 import owner_write_advisory as OWNER_WRITE_ADVISORY
 import route_plan as RP
 import resource_resume as RESOURCE_RESUME
+import frame_repository
 try:  # ends a detached child with the test that started it; no-op outside tests
     from detached_lifetime import bind as end_with_test
 except ImportError:  # a partial tree without it (e.g. a fixture release): no record
@@ -908,6 +909,11 @@ def _run_reporting_registration(command, attempt, on_registered):
 
 
 def _start(route, path, jobs, node, harness, run, on_registered=None):
+    with frame_repository.for_route(route) as repository:
+        return _start_bound(route, path, jobs, node, harness, run, on_registered, repository)
+
+
+def _start_bound(route, path, jobs, node, harness, run, on_registered, repository):
     command = [sys.executable, str(ROOT / "utilities/dispatch-owner.py"), "--start",
                "--route-evidence", str(path), "--jobs", str(jobs),
                "--slug", route["slug"] + "-" + node,
@@ -951,6 +957,7 @@ def _start(route, path, jobs, node, harness, run, on_registered=None):
             command += ["--execution-access-file", str(prepared)]
     # When this launch began, had its row registered and returned (epoch seconds): the start
     # receipt keeps the per-leg timing that no other record holds.
+    repository.verify(route.get("cwd"))
     started, registered = time.time(), []
 
     def reported():
@@ -1924,6 +1931,21 @@ def _manual_frame_closure(route, jobs):
 
 def _first_leg(route, path, jobs, result, root, record, output, record_path, decision_record, *,
                wait, run, sleep, clock):
+    try:
+        with frame_repository.RepositoryBinding(decision_record) as repository:
+            return _first_leg_bound(route, path, jobs, result, root, record, output, record_path,
+                                    decision_record, repository, wait=wait, run=run, sleep=sleep, clock=clock)
+    except frame_repository.RepositoryBindingError as exc:
+        return None, {**result, "state": "needs-attention", "reason": exc.reason, "detail": str(exc),
+                      "record_file": str(record_path),
+                      "recovery_command": RP.first_leg_recovery_command(record_path, RP.read_record(record_path)),
+                      "next_step": "The approved destination changed; the decision is retained. "
+                          "Retry this same start after restoring it, or use the existing recovery_command "
+                          "with a prepared repository's --cwd."}
+
+
+def _first_leg_bound(route, path, jobs, result, root, record, output, record_path, decision_record,
+                     repository, *, wait, run, sleep, clock):
     """Compile, publish and start the approved first leg; bind each fact into the record before the
     next step. Returns `(record, None)` once its start receipt is stored, or `(None, response)` to
     hand the caller the first leg's own state while the frame route stays open."""
@@ -1935,6 +1957,7 @@ def _first_leg(route, path, jobs, result, root, record, output, record_path, dec
     if "snapshot" not in first:
         try:
             decision_record = _prepare_frame_repository(record_path, decision_record)
+            repository.bind(decision_record)
         except (OSError, ValueError) as exc:
             recovery = RP.first_leg_recovery_command(record_path, decision_record)
             return None, {**result, "state": "needs-attention", "reason": "repository-preparation-pending",
@@ -1969,6 +1992,8 @@ def _first_leg(route, path, jobs, result, root, record, output, record_path, dec
                 work_request={"text": task,
                               "owner_harness": context.get("owner")}, readiness=probe)
         except ValueError as exc:
+            if isinstance(exc, frame_repository.RepositoryBindingError):
+                raise
             preparation_failed = str(exc).startswith("source-worktree-preparation-failed:")
             attention = {**result, "state": "needs-attention",
                          "reason": "first-leg-preparation-failed" if preparation_failed else "first-leg-compose-refused",
@@ -1991,6 +2016,7 @@ def _first_leg(route, path, jobs, result, root, record, output, record_path, dec
             "route_id": leg_route["route_id"], "route_hash": leg_route["route_hash"]})
         first = decision_record["first_leg"]
         _checkpoint("after-compiled-snapshot")
+    repository.verify()
     snap = first["snapshot"]
     snapshot_path = root / snap["path"]
     if RP.file_digest(snapshot_path) != snap["sha256"]:
@@ -2004,12 +2030,14 @@ def _first_leg(route, path, jobs, result, root, record, output, record_path, dec
     if (published.get("route_id"), published.get("route_hash")) != (snap["route_id"], snap["route_hash"]):
         raise ValueError("route-decision-conflict: the published first leg differs from its snapshot")
     _checkpoint("after-route-publish")
+    repository.verify(published["cwd"])
     if "route" not in first:
         decision_record = _bind(record_path, route={
             "route_id": snap["route_id"], "route_hash": snap["route_hash"],
             "route_file": leg_path.relative_to(root).as_posix()})
         first = decision_record["first_leg"]
     _checkpoint("after-route-bind")
+    repository.verify(published["cwd"])
     if "start_receipt" in first:
         return decision_record, None
     leg_route = module.verify_route(published)

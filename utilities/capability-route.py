@@ -1240,6 +1240,15 @@ def compile_proposal_leg(leg, index, *, frame_route, frame_cycle_id, readiness):
 
 
 def compile_first_leg(leg, *, frame_route, frame_cycle_id, context, binding, work_request, readiness, index=0):
+    import frame_repository
+    with frame_repository.RepositoryBinding(binding.get("record"), index) as repository:
+        return _compile_first_leg(leg, frame_route=frame_route, frame_cycle_id=frame_cycle_id,
+                                  context=context, binding=binding, work_request=work_request,
+                                  readiness=readiness, index=index, repository=repository)
+
+
+def _compile_first_leg(leg, *, frame_route, frame_cycle_id, context, binding, work_request, readiness,
+                       index, repository):
     """An approved leg, compiled in memory with its route-plan reference sealed.
 
     Same arguments the printed compose command carries: the leg's shape, graph, capability, mode and
@@ -1250,19 +1259,20 @@ def compile_first_leg(leg, *, frame_route, frame_cycle_id, context, binding, wor
     kwargs = _leg_compose_kwargs(RP.leg_arguments(leg), frame_route=frame_route, frame_cycle_id=frame_cycle_id,
                                  slug=f"{context['slug']}-leg{index}")
     kwargs["cwd"] = RP.leg_cwd(leg, frame_route["cwd"], base_cwd=context["cwd"])
+    repository.verify(kwargs["cwd"])
     owner = ((kwargs["selection_pins"] or {}).get("owner") or {}).get("harness") or context.get("owner")
     if work_request is not None:
         work_request = {**work_request, "owner_harness": owner or work_request.get("owner_harness")}
     selection = compose_route(**kwargs, work_request=work_request, route_plan=binding,
                               parent_harness=owner or "claude", selection_only=True)
+    repository.verify(kwargs["cwd"])
     diagnosis = _compose_git_diagnosis(kwargs["cwd"])
     if (diagnosis.get("state") == "non-git" and selection.get("shape") != "direct"
             and _isolates_worktree(selection)):
         raise ValueError(UI_TEXT.translator()("route.error.not_git_worker"))
     frame_preparation = frame_route.get("framed_worktree") or {}
     inherit_frame_allocation = _inherits_frame_worktree(frame_route, leg, index, kwargs["cwd"])
-    created_repository = ((binding.get("record") or {}).get("first_leg") or {}).get("repository_baseline") or {}
-    use_new_repository = index == 0 and created_repository.get("path") == kwargs["cwd"]
+    use_new_repository = repository.active
     if _isolates_worktree(selection) and not inherit_frame_allocation and not use_new_repository:
         worktree = prepare_isolated_worktree(
             kwargs["cwd"], frame_route.get("slug"), artifact_root=frame_route["artifact_root"],
@@ -1275,6 +1285,7 @@ def compile_first_leg(leg, *, frame_route, frame_cycle_id, context, binding, wor
     # The probe is collected only after preparation, against the exact cwd that will be sealed.
     route = compose_route(**kwargs, **_leg_evidence(leg, lambda: readiness(kwargs["cwd"])),
                           work_request=work_request, route_plan=binding, parent_harness=owner or "claude")
+    repository.verify(route["cwd"])
     if inherit_frame_allocation:
         route = _seal_framed_worktree(route, {**frame_preparation, "state": "inherited",
                                               "from_route_id": frame_route["route_id"]})

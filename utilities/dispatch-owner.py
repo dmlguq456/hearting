@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import frame_repository
 from owner_route_binding import OwnerRouteBindingError, validate_owner_route_binding, derive_quick_owner_binding, derive_frame_route_binding
 from dispatch_mode_contract import DispatchModeContractError, resolve_qa
 from dispatch_contract import (DispatchContractError, frame_harness_admission,
@@ -1223,7 +1224,11 @@ def main(argv):
             if source not in {"explicit", "route-pin"} or not admitted(selected):
                 raise OwnerError("explicit-adapter-disabled-by-user-policy")
             print("policy_note=disabled-since-admission")
-        result = run_owner_wrapper([str(wrapper), *forwarded], child_env)
+        # Reopen the approved physical binding after selector/artifact work,
+        # and hold it across the common launcher for all three adapters.
+        with frame_repository.for_route(route_data if route_evidence else {}) as repository:
+            repository.verify(values["--worktree"])
+            result = run_owner_wrapper([str(wrapper), *forwarded], child_env)
         if result == 0 and frame_degradation and "--start" in forwarded:
             route, first_attempt_id, first_harness, degradation_reason, detail = frame_degradation
             if first_attempt_id:
@@ -1234,7 +1239,8 @@ def main(argv):
                 except Exception:
                     pass
         return result
-    except (OwnerError, OwnerRouteBindingError, OSError, _defaults.DefaultsConfigError) as exc:
+    except (OwnerError, OwnerRouteBindingError, OSError, _defaults.DefaultsConfigError,
+            frame_repository.RepositoryBindingError) as exc:
         return _error(str(exc))
 
 
