@@ -121,6 +121,67 @@ class JobFailures(unittest.TestCase):
             patch.start()
             self.addCleanup(patch.stop)
 
+    def test_oversize_registry_keeps_its_malformed_count_without_retaining_rows(self):
+        for limit in (dispatch._PARSED_REGISTRY_RAW_BYTES_LIMIT, 1):
+            with self.subTest(limit=limit), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "jobs.log"
+                path.write_text("date\trunning\t/repo\t/work\tkept\tcapability=autopilot-code\n"
+                                "malformed\trow\n")
+                with mock.patch.object(dispatch, "_PARSED_REGISTRY_RAW_BYTES_LIMIT", limit), \
+                     dispatch.collection_read_scope():
+                    jobs, malformed = dispatch._scan_jobs_log(path, set())
+                    self.assertEqual([job.slug for job in jobs], ["kept"])
+                    self.assertEqual(malformed, 1)
+                    self.assertEqual(dispatch._registry_diagnostics(path), (None, 1))
+                    if limit == 1:
+                        self.assertFalse(any(key[0] == str(path)
+                                             for key in dispatch._PARSED_REGISTRY_ROWS))
+
+    @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0,
+                     "requires unprivileged filesystem permission checks")
+    def test_oversize_unreadable_registry_propagates_real_permission_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "jobs.log"
+            path.write_text("date\trunning\t/repo\t/work\tkept\tcapability=autopilot-code\n")
+            path.chmod(0)
+            try:
+                for limit in (dispatch._PARSED_REGISTRY_RAW_BYTES_LIMIT, 1):
+                    with self.subTest(limit=limit), mock.patch.object(
+                            dispatch, "_PARSED_REGISTRY_RAW_BYTES_LIMIT", limit), \
+                            dispatch.collection_read_scope():
+                        with self.assertRaises(PermissionError):
+                            dispatch._scan_jobs_log(path, set())
+            finally:
+                path.chmod(0o600)
+
+    @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0,
+                     "requires unprivileged filesystem permission checks")
+    def test_oversize_permission_failure_keeps_last_jobs_as_unknown(self):
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.object(procscan, "scan", return_value=[]), \
+             mock.patch.object(procscan, "_ps_lines", return_value=[]), \
+             mock.patch.object(herdr, "enrich"), \
+             mock.patch.object(usage_cache, "account_usage", return_value={}), \
+             mock.patch.object(resource_runs, "collect", return_value=[]), \
+             mock.patch.object(projection, "attach_projections"), \
+             mock.patch.object(dispatch, "_PARSED_REGISTRY_RAW_BYTES_LIMIT", 1), \
+             mock.patch.dict(os.environ, {"AGENT_HOME": str(Path(directory) / "home")}):
+            path = Path(directory) / "jobs.log"
+            path.write_text("date\trunning\t/repo\t/work\tkept\tcapability=autopilot-code\n")
+            first = collectors.collect_all(jobs_path=str(path), fast_first=True)
+            self.assertEqual([job.slug for job in first.jobs], ["kept"])
+            path.chmod(0)
+            try:
+                failed = collectors.collect_all(jobs_path=str(path), fast_first=True)
+            finally:
+                path.chmod(0o600)
+            self.assertEqual([job.slug for job in failed.jobs], ["kept"])
+            self.assertIsNot(failed.jobs[0], first.jobs[0])
+            self.assertEqual(failed.jobs[0].liveness, "unknown")
+            self.assertTrue(failed.jobs[0]._observation_stale)
+            self.assertEqual(failed.observations["jobs"]["state"], "failed")
+            self.assertIn("PermissionError", failed.observations["jobs"]["last_error"])
+
     def test_registry_candidates_propagate_inaccessible_paths(self):
         with mock.patch.object(dispatch.os, "stat", side_effect=PermissionError("NAS denied")):
             with self.assertRaises(PermissionError):

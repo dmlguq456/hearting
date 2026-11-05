@@ -318,11 +318,22 @@ def _touch_registry_path_locked(absolute, key):
 def _trim_registry_path_order_locked():
     def source_bytes():
         return sum(key[1][2] for key in _PARSED_REGISTRY_PATH_ORDER.values()
-                   if isinstance(key[1], tuple) and len(key[1]) >= 3)
-    while (len(_PARSED_REGISTRY_PATH_ORDER) > _PARSED_REGISTRY_ROWS_LIMIT
-           or source_bytes() > _PARSED_REGISTRY_RAW_BYTES_LIMIT):
+                   if key in _PARSED_REGISTRY_ROWS
+                   and isinstance(key[1], tuple) and len(key[1]) >= 3)
+    while len(_PARSED_REGISTRY_PATH_ORDER) > _PARSED_REGISTRY_ROWS_LIMIT:
         absolute, _key = _PARSED_REGISTRY_PATH_ORDER.popitem(last=False)
         _drop_registry_path_locked(absolute)
+    while source_bytes() > _PARSED_REGISTRY_RAW_BYTES_LIMIT:
+        absolute, key = next((path, key) for path, key in _PARSED_REGISTRY_PATH_ORDER.items()
+                             if key in _PARSED_REGISTRY_ROWS)
+        diagnostic = _PARSED_REGISTRY_DIAGNOSTICS.get(key)
+        _drop_registry_path_locked(absolute)
+        # The source no longer occupies the row cache, but this read's error
+        # and malformed count must still reach its caller. The existing path
+        # count bound also bounds these lightweight diagnostics-only entries.
+        if diagnostic is not None:
+            _PARSED_REGISTRY_DIAGNOSTICS[key] = diagnostic
+            _touch_registry_path_locked(absolute, key)
 
 
 def _remember_registry_diagnostics(path, generation, error, malformed):
