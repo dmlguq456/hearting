@@ -63,7 +63,7 @@ English by default. For Korean, declare it once: set
 `"title_language": "ko"` in
 `${XDG_CONFIG_HOME:-~/.config}/hearting/fleet.json`, set
 `FLEET_NOW_LANG=Korean`, or set Claude Code's `language` setting to Korean.
-The same declaration sets the language of Fleet's session titles.
+The same declaration sets the language of Fleet's screens and session titles.
 
 > “Implement and test the login API, then leave a change report.”
 
@@ -86,7 +86,8 @@ travel with the request to the owner and every worker. When the two frame legs
 agree and leave nothing for you to choose, work starts without another
 question and you get a one-line notice you can correct in your next message.
 When a dispatched request finishes, the runtime writes a short summary of the
-intent, the result, what changed, what was checked, and what is left.
+intent, the result, its cost (elapsed time and session tokens), what changed,
+what was checked, and what is left.
 
 How much of this runs depends on the request. A one-line answer or a typo runs
 inline (`direct`). A small change gets the frame and one quick worker
@@ -193,9 +194,10 @@ Bash. Session titles follow your language; set `title_language` in
 
 - The Explorer is the default `fleet` screen; its layout and keyboard handling
   are still being finished for v4.0.
-- Fleet's screens are not in the shared text catalog yet: they stay English
-  when you choose Korean, and the MEMORY screen and a few status words are
-  still Korean-only. Moving them to the catalog is planned.
+- Fleet is not light yet. On a machine with a long work history and many live
+  sessions, one Explorer window used about a third of one CPU core and about
+  0.8 GB of memory, and drew its first full screen in about 6 seconds. Lowering
+  its CPU use continues in v4.x.
 
 ## Quick start
 
@@ -346,14 +348,20 @@ workers on every runtime also get your global rules.
 
 Work leaves files you can read, not only a chat log. Each project has one
 artifact root, `.agent_reports/`, shared by every runtime and by every git
-worktree of the project:
+worktree of the project. Each request is one work cycle in
+`campaigns/<campaign>/<cycle>/artifacts/`, where a campaign groups related
+requests (a new project starts one named after its folder):
 
-| Folder | What lands there |
+| Folder in a cycle's `artifacts/` | What lands there |
 |---|---|
-| `research/`, `analysis_project/` | Surveys and analyses of code, papers, or documents |
-| `spec/` | The current blueprint; a revision keeps the previous version |
-| `plans/<date>_<slug>/` | One work cycle: plan, checklist, dev and test logs, evidence, final report |
+| `plans/` | Plan, checklist, dev and test logs, evidence, final report |
+| `research/`, `analysis_project/`, `analysis/` | Surveys and analyses of code, papers, or documents |
+| `spec/` | Blueprint components; the current revision is shared under `.agent_reports/shared/spec/`, and a revision keeps the previous one |
 | `documents/`, `experiments/` | Drafted documents; experiment setups and results |
+
+A campaign can keep one status page, `STATUS.md` in a cycle's `artifacts/`;
+Hearting never creates it. Fleet shows its one-line summary on the project's
+line, and each request that closes adds a line under "Recently closed".
 
 To follow a request while it runs:
 
@@ -365,9 +373,6 @@ hearting run workflow-supervisor status --route <route-id> --json  # which stage
 Do not delete `.agent_reports/` to unblock a task; the next stage reads the
 evidence it holds. An older `.claude_reports/` folder is still read as a
 legacy alias.
-
-<!-- TODO(v4 W4): a one-page project status, refreshed when a request closes or a PR merges; describe it here once it ships. -->
-<!-- TODO(public-readiness stage 4): the completion line with elapsed time and tokens; unknown values stay unknown. -->
 
 ## Memory
 
@@ -382,6 +387,12 @@ local store shared by every session, project, and runtime on the machine.
   lifecycle.
 - **History is kept.** A changed decision supersedes the old one instead of
   deleting it, and a hand-off stays pending until a later session takes it.
+- **Idle sessions tidy themselves.** Once per stretch of your work, an idle
+  session saves a short session card for the next one and then compacts its
+  conversation with the runtime's own compaction, the same way on all three
+  runtimes. The window is not cleared and its scrollback stays. On Claude Code
+  the install turns off Claude's own idle compaction (`idleCompaction: false`)
+  so the two do not overlap; uninstall restores your earlier value.
 - **Local unless you opt in.** Sharing memory between machines is optional
   ([Shared Memory Exchange](INSTALL_LAYOUT.md#shared-memory-exchange)).
 - `mem` is on your `PATH` for direct use, for example
@@ -400,7 +411,10 @@ See [core/MEMORY.md](core/MEMORY.md) for the full contract.
 Every runtime sees the full capability set. Where a runtime lacks a surface,
 the installer marks it `SKIP` with a reason instead of hiding the difference.
 Claude Code alone is a supported setup; with more than one runtime installed,
-Hearting can place workers and independent reviews across them.
+Hearting can place workers and independent reviews across them. What Hearting
+adds is small but not free: on Codex, one measurement on one machine found the
+first response about 1.5 s slower than without Hearting and about 2.5K more
+input tokens per request.
 
 Shared contracts name budgets, not vendor models. Each runtime maps the budgets
 to real models in a user-owned file,
@@ -422,8 +436,12 @@ changed settings; running sessions keep theirs. Details are in
 
 None of these is needed for the basic workflow.
 
-- **herdr** — a terminal pane manager. Fleet and peer sessions use it when it
-  is present; without it, the related hooks exit quietly.
+- **herdr or tmux** — terminal pane managers. Peer windows, pane titles, peer
+  delivery, automatic `/clear`, and question notifications use herdr when it is
+  present, or tmux when you work inside tmux; a desktop session also gets
+  question notifications through `notify-send`. Without either, these are off,
+  the related hooks exit quietly, and `hearting runtime doctor` says what is
+  off.
 - **Cairn** — an optional reader for finished artifacts. When it is not set up
   it reports itself unavailable; ordinary work is unaffected.
 - **Compute hosts and GPUs** — `compute-hosts` reads
