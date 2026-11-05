@@ -224,30 +224,69 @@ def frame_reference(route):
         return None
 
 
-def frame_corrections(route):
-    """Read-only retained conditions; absence/uncertain identity supplies no text."""
+FRAME_CORRECTION_INPUT_BYTES = 65536
+FRAME_CORRECTION_DELIVERY_BYTES = 8192
+
+
+def frame_correction_view(route):
+    """Retained history and bounded newest-first delivery share one admission contract.
+
+    The writer retains full accepted inputs. Total file size is not a reason to
+    silently discard them; only delivery is shortened, with explicit coverage.
+    """
     ref = frame_reference(route)
+    empty = {"requests": [], "total": 0, "omitted": 0, "truncated": False, "reference": ""}
     if ref is None:
-        return []
+        return empty
     root, rid, rhash = ref
     path = root / ".runtime/framed-decision" / (rid + ".corrections.json")
     try:
-        if path.is_symlink() or path.stat().st_size > 1024 * 1024:
-            return []
-        value = json.loads(path.read_text(encoding="utf-8"))
+        if path.is_symlink():
+            return empty
+        with path.open(encoding="utf-8") as handle:
+            value = json.load(handle)
         if (value.get("schema"), value.get("route_id"), value.get("route_hash")) != (
                 "frame_route_input_v1", rid, rhash):
-            return []
-        return [item for item in value["requests"] if isinstance(item, dict)
-                and isinstance(item.get("id"), str) and isinstance(item.get("text"), str)]
+            return empty
+        retained = [item for item in value["requests"] if isinstance(item, dict)
+                    and isinstance(item.get("id"), str) and isinstance(item.get("text"), str)]
     except (OSError, ValueError, KeyError, TypeError):
-        return []
+        return empty
+    items, remaining, shortened = [], FRAME_CORRECTION_DELIVERY_BYTES, False
+    for item in reversed(retained):
+        overhead = len(item["id"].encode("utf-8")) + 32
+        if remaining <= overhead:
+            break
+        raw = item["text"].encode("utf-8")
+        text = raw[:remaining-overhead].decode("utf-8", errors="ignore")
+        shortened |= len(text.encode("utf-8")) < len(raw)
+        items.append({**item, "text": text})
+        remaining -= overhead + len(text.encode("utf-8"))
+        if shortened:
+            break
+    omitted = len(retained) - len(items)
+    return {"requests": items, "total": len(retained), "omitted": omitted,
+            "truncated": shortened or omitted > 0, "reference": str(path)}
+
+
+def frame_corrections(route):
+    return frame_correction_view(route)["requests"]
+
+
+def frame_correction_coverage(view):
+    return {"total": view["total"], "included": len(view["requests"]), "omitted": view["omitted"],
+            "truncated": view["truncated"], "reference": view["reference"]}
 
 
 def frame_corrections_text(route):
-    items = frame_corrections(route)
-    return ("\n## Conditions added during framing\n\n" + "\n".join(
-        f"- [{item['id']}] {item['text']}" for item in items) + "\n") if items else ""
+    view = frame_correction_view(route)
+    if not view["requests"]:
+        return ""
+    coverage = (f"Coverage: truncated; recent conditions first, {len(view['requests'])}/{view['total']} "
+                f"entries shown ({view['omitted']} omitted; displayed text may be shortened). "
+                f"Full retained history: {view['reference']}\n\n") if view["truncated"] else ""
+    return ("\n## Conditions added during framing\n\n" + coverage + "\n".join(
+        f"- [{item['id']}] {item['text']}" for item in view["requests"]) + "\n")
 
 
 def seal_original(route, cwd=None, environ=None) -> str:

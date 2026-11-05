@@ -63,7 +63,7 @@ def frame_input(route, text=None, request_id=None, *, jobs=None):
             raise InputError("frame-input-target-changed")
         duplicate = False
         if text is not None:
-            if not text.strip() or len(text.encode()) > 65536:
+            if not text.strip() or len(text.encode()) > work_intent.FRAME_CORRECTION_INPUT_BYTES:
                 raise InputError("correction-text-empty-or-oversized")
             digest = _digest(text)
             request_id = request_id or "input-" + _digest([rid, digest])[:32]
@@ -77,11 +77,13 @@ def frame_input(route, text=None, request_id=None, *, jobs=None):
                 value["requests"].append({"id": request_id, "digest": digest, "text": text,
                     "at": time.time(), "source_session": route_authority.correction_source_session()})
                 _write(path, value)
-        return {"state": "frame-stored", "route_id": rid, "request_id": request_id, "duplicate": duplicate,
+        coverage = work_intent.frame_correction_coverage(work_intent.frame_correction_view(route))
+        return {"delivery_coverage": coverage, "state": "frame-stored", "route_id": rid, "request_id": request_id, "duplicate": duplicate,
                 "retained_corrections": len(value["requests"]), "delivery_timing": "interview-and-first-owner",
                 "requests": [{k: v for k, v in item.items() if k != "text"} for item in value["requests"]],
                 "applied": "not-verified", "next_step": "Conditions are retained on this frame, visible in its "
-                    "Fleet detail, and included in the interview and first owner task. The frame keeps running."}
+                    "Fleet detail, and included newest first within the interview and first owner task's delivery budget. "
+                    "Truncated coverage links the full retained history. The frame keeps running."}
 
 
 def _digest(value):

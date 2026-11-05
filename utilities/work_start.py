@@ -321,18 +321,18 @@ def _native_progress(route, jobs, asked):
 def native_answer_candidate(route, jobs, asked):
     """Purely identify a valid reply to this route's currently registered interview.
 
-    `(answers.native.json, answers)` when the reply completes it, `(answers.native.partial.json, None)`
-    when it answers part of it, None when it is no answer to it."""
+    `(path, answers-or-None, interview-digest)` binds candidate selection and
+    commit to the same revision, including a partial native call."""
     import frame_interview as FI
     progress = _native_progress(route, jobs, asked)
     if progress is None:
         return None
     if progress.answers is None:
-        return progress.directory / FI.NATIVE_PARTIAL_NAME, None
-    return progress.directory / FI.NATIVE_ANSWERS_NAME, progress.answers
+        return progress.directory / FI.NATIVE_PARTIAL_NAME, None, hashlib.sha256(progress.raw).hexdigest()
+    return progress.directory / FI.NATIVE_ANSWERS_NAME, progress.answers, hashlib.sha256(progress.raw).hexdigest()
 
 
-def record_native_answer(route, jobs, asked):
+def record_native_answer(route, jobs, asked, *, expected_interview_digest=None):
     """Keep a valid native reply beside the one current registered interview.
 
     A complete reply becomes `answers.native.json`. A partial one is kept as
@@ -342,22 +342,41 @@ def record_native_answer(route, jobs, asked):
     progress = _native_progress(route, jobs, asked)
     if progress is None:
         return None
-    if progress.answers is not None:
-        target = progress.directory / FI.NATIVE_ANSWERS_NAME
-        target.write_text(json.dumps(progress.answers, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        with contextlib.suppress(OSError):
-            (progress.directory / FI.NATIVE_PARTIAL_NAME).unlink()
-        return target
-    target = progress.directory / FI.NATIVE_PARTIAL_NAME
-    if target.is_symlink():
+    if expected_interview_digest and hashlib.sha256(progress.raw).hexdigest() != expected_interview_digest:
         return None
-    staged = target.with_name(f"{target.name}.{os.getpid()}.tmp")
-    staged.write_text(json.dumps({
-        "schema": FI.NATIVE_PARTIAL_SCHEMA, "route_id": progress.question["route_id"],
-        "round": progress.question.get("round"), "interview_sha256": hashlib.sha256(progress.raw).hexdigest(),
-        "slots": progress.slots, "missing": progress.missing}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    os.replace(staged, target)
-    return target
+    import workflow_state as WS
+    ledger = WS.WorkflowLedger(route["route_id"], route["route_hash"], jobs=jobs)
+    with ledger.lock():
+        resolution = WS.human_gate_resolution(ledger.journal(), "frame-review")
+        question_path = Path(resolution.get("artifact") or "")
+        if (resolution.get("status") != "blocked" or question_path.is_symlink()
+                or question_path != progress.directory / "interview.json"
+                or question_path.read_bytes() != progress.raw):
+            return None  # The reply was calculated for a different interview revision.
+        if (progress.directory / "answers.json").exists():
+            return None
+        # Other native calls may have committed partial rows while this call was
+        # being interpreted. Merge again under the same lock as replacement.
+        digest = hashlib.sha256(progress.raw).hexdigest()
+        slots = {**_native_partial(progress.directory, progress.raw, progress.question.get("round"),
+                                   route["route_id"]), **FI.native_slots(progress.question, asked)}
+        answers = FI.answers_from_native_slots(progress.question, slots)
+        if answers is not None:
+            value = answers  # The same locked directory now prevents interview replacement.
+            target = progress.directory / FI.NATIVE_ANSWERS_NAME
+        else:
+            target = progress.directory / FI.NATIVE_PARTIAL_NAME
+            value = {"schema": FI.NATIVE_PARTIAL_SCHEMA, "route_id": route["route_id"],
+                     "round": progress.question.get("round"), "interview_sha256": digest,
+                     "slots": slots, "missing": FI.missing_native_slots(progress.question, slots)}
+        if target.is_symlink():
+            return None
+        from workflow_state import _atomic_write
+        _atomic_write(target, json.dumps(value, ensure_ascii=False, indent=2) + "\n")
+        if answers is not None:
+            with contextlib.suppress(OSError):
+                (progress.directory / FI.NATIVE_PARTIAL_NAME).unlink()
+        return target
 
 
 def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
@@ -422,6 +441,8 @@ def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
         # reopen the producer or write into a completed cycle on a lost reply.
         recorded_path = Path(resolution["artifact"])
         recorded = FI.load_json_file(recorded_path)
+        if "repository_preparation" in recorded and "repository_preparation" not in supplied:
+            supplied = {**supplied, "repository_preparation": recorded["repository_preparation"]}
         if "route_proposals" in recorded and "route_proposals" not in supplied:
             # The recorded question carries the mapping the runtime built from these marks.
             supplied = {**supplied, "route_proposals": recorded["route_proposals"]}
@@ -466,6 +487,7 @@ def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
             brief["constraints"] = (brief.get("constraints", "") + conditions).strip()
         supplied = {**supplied, "brief": brief}
     supplied, mark_errors = _marked_route_proposals(route, jobs, supplied)
+    supplied = _interview_repository_preparation(route, jobs, supplied, original)
     question = {**supplied, "schema": FI.SCHEMA, "route_id": route["route_id"], "round": round_no,
                 "self_path": str(question_path), "summary": str(directory / "frame-summary.json"),
                 "created": original.get("created") or datetime.now(timezone.utc).strftime("%Y-%m-%d")}
@@ -1323,7 +1345,12 @@ def _proposal_rows(route, jobs, root, record, output):
         if diagnosis.get("state") != "git" or target == proposed and os.path.lexists(path):
             state = ("create-after-approval" if target == proposed and not os.path.lexists(path)
                      and path.parent.is_dir() else "manual")
-            preparations.append({"leg": index, "cwd": proposed, "state": state,
+            binding = {}
+            if state == "create-after-approval":
+                parent = path.parent.resolve(strict=True)
+                stamp = parent.stat()
+                binding = {"parent": {"path": str(parent), "device": stamp.st_dev, "inode": stamp.st_ino}}
+            preparations.append({"leg": index, "cwd": proposed, "state": state, **binding,
                                  "existing_destination": target == proposed and os.path.lexists(path)})
         return compiled
 
@@ -1533,6 +1560,26 @@ def _marked_route_proposals(route, jobs, interview):
     return {**interview, "route_proposals": {"question": question.get("id"), "by_option": by_option}}, []
 
 
+def _interview_repository_preparation(route, jobs, interview, original):
+    """Bind runtime preparation facts when the question is registered, before its answer."""
+    interview = {key: value for key, value in interview.items() if key != "repository_preparation"}
+    proposals = (interview.get("route_proposals") or {}).get("by_option") or {}
+    if not RP.is_framed_route(route) or not proposals:
+        return interview
+    rows = _proposal_rows(route, jobs, *_framed_cycle(route))
+    bindings = {}
+    for label, proposal in proposals.items():
+        previous = ((original.get("route_proposals") or {}).get("by_option") or {}).get(label)
+        saved = (original.get("repository_preparation") or {}).get(label)
+        if saved and previous and RP.same_proposal(previous, proposal):
+            bindings[label] = saved
+            continue
+        row = next((row for row in rows if row.get("proposal") and RP.same_proposal(row["proposal"], proposal)), None)
+        if row and row.get("repository_preparation"):
+            bindings[label] = row["repository_preparation"]
+    return {**interview, "repository_preparation": bindings} if bindings else interview
+
+
 def _proposal_review(route, path, jobs, rows=None):
     """Information for the session that writes the interview: both validated proposals (or none with
     the reason), whether they are equal, the start-approval parts each leg would carry, and the
@@ -1688,7 +1735,9 @@ def _decide(route, jobs, root, record, output, briefs, intent):
                     "prompt_file": str(prompt), "prompt_sha256": hashlib.sha256(task).hexdigest(),
                     "spec_read": "auto" if str(source).startswith("compose-auto:") else source,
                     "owner": (route.get("work_request") or {}).get("owner_harness")}}
-    setup = next((row for row in match.get("repository_preparation", []) if row["leg"] == 0), None)
+    preparations = (interview.get("repository_preparation") or {}).get(
+        choice["label"], match.get("repository_preparation", []))
+    setup = next((row for row in preparations if row["leg"] == 0), None)
     if setup:
         compose["repository_setup"] = setup
     if execution_scope == "report" and leg.get("shape") == "staged":
@@ -1729,7 +1778,7 @@ def _first_leg_started(leg_result, jobs, route):
 
 
 def _prepare_frame_repository(record_path, record):
-    """Prepare only the absent destination approved in the existing route question."""
+    """Prepare the absent destination through its approved physical parent."""
     setup = record["decision"]["first_leg_compose"].get("repository_setup")
     if not setup:
         return record
@@ -1737,63 +1786,89 @@ def _prepare_frame_repository(record_path, record):
     first = record.get("first_leg") or {}
     created = first.get("repository_created")
     if setup["state"] != "create-after-approval" and created is None:
-        # Manual preparation may have finished since the question was answered.
         if _route_module()._compose_git_diagnosis(path).get("state") == "git":
             return record
         raise ValueError(f"repository-preparation-manual: {path}; existing folders are untouched. "
                          "Use the existing interview's manual-preparation/direct choice, or compose --route-plan --cwd "
                          "with the prepared repository.")
-    if created is None:
+    parent = setup.get("parent") or {}
+    unsafe = "repository-preparation-manual: approved parent or destination was replaced; preparation stopped"
+    with contextlib.ExitStack() as opened:
         try:
-            path.mkdir()                 # atomic: an existing folder, even empty, stays untouched
-        except FileExistsError as exc:
-            raise ValueError(f"repository-preparation-manual: {path} already exists; nothing changed") from exc
-        stamp = path.stat()
-        created = {"path": str(path), "at": datetime.now(timezone.utc).isoformat(),
-                   "device": stamp.st_dev, "inode": stamp.st_ino}
-        record = _bind(record_path, repository_created=created)
-    stamp = path.lstat()
-    if path.is_symlink() or (stamp.st_dev, stamp.st_ino) != (created["device"], created["inode"]):
-        raise ValueError("repository-preparation-manual: created destination was replaced; nothing changed")
-    if any(child.name != ".git" for child in path.iterdir()):
-        raise ValueError("repository-preparation-manual: destination now contains user files; nothing changed")
-    git_dir = path / ".git"
-    initialized = first.get("repository_initialized")
-    if git_dir.is_symlink() or git_dir.is_file():
-        raise ValueError("repository-preparation-manual: Git directory was replaced; nothing changed")
-    if initialized:
-        current_git = git_dir.stat()
-        if (current_git.st_dev, current_git.st_ino) != (initialized.get("device"), initialized.get("inode")):
-            raise ValueError("repository-preparation-manual: Git directory was replaced; nothing changed")
-    elif git_dir.exists():
-        raise ValueError("repository-preparation-manual: existing Git directory has no creation evidence; nothing changed")
-    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    env.update(GIT_AUTHOR_NAME="Hearting", GIT_AUTHOR_EMAIL="hearting@localhost",
-               GIT_COMMITTER_NAME="Hearting", GIT_COMMITTER_EMAIL="hearting@localhost")
-    def git(*args, input=None):
-        done = subprocess.run(["git", "-C", str(path), *args], input=input, text=True,
-                              capture_output=True, timeout=60, env=env)
-        if done.returncode:
-            raise ValueError("repository-preparation-pending: " + done.stderr.strip())
-        return done.stdout.strip()
-    first = record.get("first_leg") or {}
-    if "repository_initialized" not in first:
-        git("init", "--quiet")
-        current_git = git_dir.stat()
-        record = _bind(record_path, repository_initialized={"path": str(path),
-                        "at": datetime.now(timezone.utc).isoformat(),
-                        "device": current_git.st_dev, "inode": current_git.st_ino})
-    if "repository_baseline" not in (record.get("first_leg") or {}):
-        # Plumbing keeps the user's index and hooks out of this empty baseline.
-        tree = git("mktree", input="")
-        commit = git("commit-tree", tree, "-m", "Initialize approved repository")
-        record = _bind(record_path, repository_baseline={"path": str(path), "commit": commit,
-                        "at": datetime.now(timezone.utc).isoformat()})
-    baseline = record["first_leg"]["repository_baseline"]["commit"]
-    head = subprocess.run(["git", "-C", str(path), "rev-parse", "--verify", "HEAD"],
-                          text=True, capture_output=True, timeout=60, env=env)
-    if head.returncode or head.stdout.strip() != baseline:
-        git("update-ref", "HEAD", baseline, "0" * 40)
+            parent_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            opened.callback(os.close, parent_fd)
+            stamp = os.fstat(parent_fd)
+            if (str(path.parent.resolve()) != parent.get("path")
+                    or (stamp.st_dev, stamp.st_ino) != (parent.get("device"), parent.get("inode"))):
+                raise ValueError(unsafe)
+            if created is None:
+                try:
+                    os.mkdir(path.name, mode=0o700, dir_fd=parent_fd)
+                except FileExistsError as exc:
+                    raise ValueError(f"repository-preparation-manual: {path} already exists; nothing changed") from exc
+            leaf_fd = os.open(path.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+            opened.callback(os.close, leaf_fd)
+            stamp = os.fstat(leaf_fd)
+            if created is None:
+                created = {"path": str(path), "at": datetime.now(timezone.utc).isoformat(),
+                           "device": stamp.st_dev, "inode": stamp.st_ino}
+                record = _bind(record_path, repository_created=created)
+            if (stamp.st_dev, stamp.st_ino) != (created["device"], created["inode"]):
+                raise ValueError(unsafe)
+
+            def verify():
+                # Recheck the visible binding before each write and before handing
+                # it to compose. The descriptors also prevent an intervening rename
+                # from redirecting mkdir or Git to a replacement ancestor.
+                parent_now, leaf_now = path.parent.stat(), path.lstat()
+                if (str(path.parent.resolve()) != parent.get("path") or path.is_symlink()
+                        or (parent_now.st_dev, parent_now.st_ino) != (parent["device"], parent["inode"])
+                        or (leaf_now.st_dev, leaf_now.st_ino) != (created["device"], created["inode"])):
+                    raise ValueError(unsafe)
+
+            verify()
+            if any(name != ".git" for name in os.listdir(leaf_fd)):
+                raise ValueError("repository-preparation-manual: destination now contains user files; nothing changed")
+            fd_root = Path("/proc/self/fd") if Path("/proc/self/fd").is_dir() else Path("/dev/fd")
+            pinned = fd_root / str(leaf_fd)
+            git_dir = pinned / ".git"
+            initialized = first.get("repository_initialized")
+            if git_dir.is_symlink() or git_dir.is_file():
+                raise ValueError("repository-preparation-manual: Git directory was replaced; nothing changed")
+            if initialized:
+                current_git = git_dir.stat()
+                if (current_git.st_dev, current_git.st_ino) != (initialized.get("device"), initialized.get("inode")):
+                    raise ValueError("repository-preparation-manual: Git directory was replaced; nothing changed")
+            elif git_dir.exists():
+                raise ValueError("repository-preparation-manual: existing Git directory has no creation evidence; nothing changed")
+            env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+            env.update(GIT_AUTHOR_NAME="Hearting", GIT_AUTHOR_EMAIL="hearting@localhost",
+                       GIT_COMMITTER_NAME="Hearting", GIT_COMMITTER_EMAIL="hearting@localhost")
+            def git(*args, input=None, optional=False):
+                verify()
+                done = subprocess.run(["git", "-C", str(pinned), *args], input=input, text=True,
+                                      capture_output=True, timeout=60, env=env, pass_fds=(leaf_fd,))
+                verify()
+                if done.returncode and not optional:
+                    raise ValueError("repository-preparation-pending: " + done.stderr.strip())
+                return done.stdout.strip() if not done.returncode else None
+            if "repository_initialized" not in (record.get("first_leg") or {}):
+                git("init", "--quiet")
+                current_git = git_dir.stat()
+                record = _bind(record_path, repository_initialized={"path": str(path),
+                                "at": datetime.now(timezone.utc).isoformat(),
+                                "device": current_git.st_dev, "inode": current_git.st_ino})
+            if "repository_baseline" not in (record.get("first_leg") or {}):
+                tree = git("mktree", input="")
+                commit = git("commit-tree", tree, "-m", "Initialize approved repository")
+                record = _bind(record_path, repository_baseline={"path": str(path), "commit": commit,
+                                "at": datetime.now(timezone.utc).isoformat()})
+            baseline = record["first_leg"]["repository_baseline"]["commit"]
+            if git("rev-parse", "--verify", "HEAD", optional=True) != baseline:
+                git("update-ref", "HEAD", baseline, "0" * 40)
+            verify()
+        except OSError as exc:
+            raise ValueError(unsafe) from exc
     return record
 
 

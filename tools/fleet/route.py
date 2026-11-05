@@ -1578,13 +1578,17 @@ def with_frame_corrections(view, record):
         if utilities not in sys.path:
             sys.path.insert(0, utilities)
         import work_intent
-        items = work_intent.frame_corrections(record)
+        coverage = work_intent.frame_correction_view(record)
+        items = coverage["requests"]
         if items:
             from fleet.explorer.view_model import _safe_text
-            text = _safe_text(" · ".join(item["text"] for item in items), limit=300)
+            text = _safe_text(" · ".join(item["text"] for item in items)[:300], limit=300)
             for node in view.get("nodes", []):
                 if node.get("id") == "frame":
-                    node["says"] = work_intent.ui_translator()("route.frame.corrections", count=len(items), text=text)
+                    node["says"] = work_intent.ui_translator()("route.frame.corrections", count=coverage["total"], text=text)
+                    if coverage["truncated"]:
+                        node["says"] += (f" · truncated: {len(items)}/{coverage['total']} recent entries shown; "
+                                         f"full history: {coverage['reference']}")
     except (ImportError, OSError, ValueError, TypeError):
         pass
     return view

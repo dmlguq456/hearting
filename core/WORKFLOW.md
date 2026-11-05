@@ -420,7 +420,9 @@ preparation or publication. Absolute record paths may name another artifact root
 relative paths stay inside the selected root. A manual first leg's receipt lists
 the existing complete/close/finalize commands for its frame, retaining the decision.
 An unanswered interview can be corrected in its existing round; recorded answers
-and decisions are immutable. Request quotes come from this compose's human prompt
+and decisions are immutable. Native full and partial replies commit under the
+same interview lock and belong only to the exact registered interview bytes.
+Request quotes come from this compose's human prompt
 boundary; unavailable provenance omits the quote. Framed display separates the
 requested width, bootstrap intensity and eventual approved leg intensity.
 For an explicitly requested new repository, the existing route question includes
@@ -428,8 +430,14 @@ its destination and preparation (at most two notice lines). After approval the
 runtime creates only an absent folder, initializes Git and its empty baseline,
 and records path/time in the route evidence and first leg task. Existing folders
 stay untouched and use the same interview's manual-preparation/direct choices.
+Preparation retains the approved physical parent binding; directory creation and
+Git initialization use pinned directories so a replaced ancestor cannot redirect
+writes outside that binding.
 Frame-time corrections stay on that route, appear in its existing Fleet detail,
-and reach the interview and first owner. Explicit conflicting output paths in
+and reach the interview and first owner. The retained history has no reader-only
+size cutoff: bounded delivery takes recent conditions first and reports omitted
+or shortened content with a reference to the full history in receipts, interviews,
+owner tasks and the existing Fleet detail. Explicit conflicting output paths in
 interview wording and `done_when` appear as receipt advisories.
 A leg's `extra_stages` entry becomes node
 `plan-<id>` right after its `after` stage, shaped on a catalogue check or
