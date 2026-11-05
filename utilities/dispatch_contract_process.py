@@ -2214,13 +2214,21 @@ def attempt_process_quiescence(
     recorded namespaces are extinct on the host (`_namespace_extinct_quiescence`).
     """
 
-    from resource_run_registry import recorded_governor_identity, previous_boot_evidence, boot_identity
+    from resource_run_registry import (
+        recorded_governor_identity, previous_boot_evidence, boot_identity, kernel_boot_id,
+    )
     identity = recorded_governor_identity(metadata)
     if identity:
         if previous_boot_evidence(identity):
             return ProcessQuiescence("quiescent", "host-reboot")
         current_boot = boot_identity()
-        if not current_boot or (identity.get('boot_id') != current_boot['boot_id']
+        # A local claim can legitimately contain only the kernel UUID (for
+        # example inside a PID namespace without machine-id). Match that same
+        # coordinate, then continue all normal process/receipt checks below.
+        # A host-bound claim still requires the complete current host identity.
+        if not current_boot and 'boot_host' not in identity:
+            current_boot = {'boot_id': kernel_boot_id()}
+        if not current_boot.get('boot_id') or (identity.get('boot_id') != current_boot['boot_id']
                 or ('boot_host' in identity and identity['boot_host'] != current_boot['boot_host'])):
             return ProcessQuiescence("unverifiable", "process-boot-unverifiable")
 
