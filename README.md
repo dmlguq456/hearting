@@ -405,9 +405,9 @@ Every runtime sees the full capability set. Where a runtime lacks a surface,
 the installer marks it `SKIP` with a reason instead of hiding the difference.
 Claude Code alone is a supported setup; with more than one runtime installed,
 Hearting can place workers and independent reviews across them. What Hearting
-adds is small but not free: on Codex, one measurement on one machine found the
-first response about 1.5 s slower than without Hearting and about 2.5K more
-input tokens per request.
+adds is small but not free: on Codex, three measured pairs on one machine found
+the first response about 1 s slower than without Hearting and about 2.4K more
+input tokens per request; a small two-turn bug fix took 42 s against 36 s.
 
 Shared contracts name budgets, not vendor models. Each runtime maps the budgets
 to real models in a user-owned file,
