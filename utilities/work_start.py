@@ -390,6 +390,10 @@ def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
                 brief = FI.brief_draft((Path(output) / "shards/frame/direction-brief.md").read_text(encoding="utf-8"))
         except (OSError, ValueError, UnicodeError, ProducerError):
             pass
+        import work_intent
+        conditions = work_intent.frame_corrections_text(route)
+        if conditions:
+            brief["constraints"] = (brief.get("constraints", "") + conditions).strip()
         return {"state": "needs-interview", "required_action": "prepare-frame-question",
                 "interview_template": {"understanding": understanding, "brief": brief, "questions": []},
                 "question_example": FI.QUESTION_EXAMPLE,
@@ -451,6 +455,16 @@ def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
         raise ValueError("frame-output-outside-cycle")
     question_path, answer_path = directory / "interview.json", directory / "answers.json"
     original = FI.load_json_file(question_path) if question_path.exists() else {}
+    import work_intent
+    conditions = work_intent.frame_corrections_text(route)
+    if (conditions and not answers and not answer_path.exists()
+            and not (directory / FI.NATIVE_ANSWERS_NAME).exists()
+            and not (directory / FI.NATIVE_PARTIAL_NAME).exists()
+            and isinstance(supplied.get("brief"), dict)):
+        brief = dict(supplied["brief"])
+        if conditions.strip() not in brief.get("constraints", ""):
+            brief["constraints"] = (brief.get("constraints", "") + conditions).strip()
+        supplied = {**supplied, "brief": brief}
     supplied, mark_errors = _marked_route_proposals(route, jobs, supplied)
     question = {**supplied, "schema": FI.SCHEMA, "route_id": route["route_id"], "round": round_no,
                 "self_path": str(question_path), "summary": str(directory / "frame-summary.json"),
@@ -1281,16 +1295,50 @@ def _proposal_rows(route, jobs, root, record, output):
     def probe(cwd=None):
         key = cwd or route["cwd"]
         if key not in readiness:
-            readiness[key] = module.proposal_readiness({**route, "cwd": key}, jobs)
+            base = Path(key)
+            while not base.is_dir() and base != base.parent:
+                base = base.parent
+            readiness[key] = module.proposal_readiness({**route, "cwd": str(base)}, jobs)
         return readiness[key]
 
+    preparations = []
     def compile_leg(leg, index):
-        return module.compile_proposal_leg(leg, index, frame_route=route, frame_cycle_id=record["cycle_id"],
-                                           readiness=probe)
+        target = RP.requested_repository(route) if index == 0 else None
+        cwd = RP.leg_cwd(leg, route["cwd"])
+        proposed = target if target and not leg.get("cwd") else cwd
+        preview = Path(proposed)
+        while not preview.is_dir() and preview != preview.parent:
+            preview = preview.parent
+        # Preview graph/scope in an existing folder. Launch readiness is checked
+        # afresh in the approved target after preparation; no target proof is forged.
+        compiled = module.compile_proposal_leg({**leg, "cwd": str(preview)}, index,
+            frame_route=route, frame_cycle_id=record["cycle_id"], readiness=probe)
+        if not module._isolates_worktree(compiled) or leg["shape"] == "direct":
+            return compiled if proposed == cwd else module.compile_proposal_leg(
+                leg, index, frame_route=route, frame_cycle_id=record["cycle_id"], readiness=probe)
+        if target and not leg.get("cwd"):
+            leg["cwd"] = target
+        path = Path(proposed)
+        diagnosis = module._compose_git_diagnosis(proposed) if path.is_dir() else {"state": "non-git"}
+        if diagnosis.get("state") != "git" or target == proposed and os.path.lexists(path):
+            state = ("create-after-approval" if target == proposed and not os.path.lexists(path)
+                     and path.parent.is_dir() else "manual")
+            preparations.append({"leg": index, "cwd": proposed, "state": state,
+                                 "existing_destination": target == proposed and os.path.lexists(path)})
+        return compiled
 
-    return [RP.evaluate_brief(output / "shards" / node / "direction-brief.md", root=root, node=node,
-                              compile_leg=compile_leg, start_approvals=module.route_start_approvals)
-            for node in RP.frame_legs(route)]
+    rows = []
+    for node in RP.frame_legs(route):
+        preparations = []
+        row = RP.evaluate_brief(output / "shards" / node / "direction-brief.md", root=root, node=node,
+                                compile_leg=compile_leg, start_approvals=module.route_start_approvals)
+        if preparations and row["proposal"] is not None:
+            row["repository_preparation"] = list(preparations)
+            for preparation in preparations:
+                if row["proposal"]["legs"][preparation["leg"]].get("cwd"):
+                    row["facts"]["legs"][preparation["leg"]]["cwd"] = preparation["cwd"]
+        rows.append(row)
+    return rows
 
 
 def _grouped_approvals(row):
@@ -1367,6 +1415,8 @@ def _automatic_direction(route, rows, output):
     if os.environ.get("AGENT_DISPATCH_REGISTERED_WORKER") == "1":
         return None
     if len(rows) != 2 or not RP.proposals_equal(rows) or any(_start_approval_keys(row) for row in rows):
+        return None
+    if any(row.get("repository_preparation") for row in rows):
         return None
     texts = []
     for row in rows:
@@ -1496,6 +1546,7 @@ def _proposal_review(route, path, jobs, rows=None):
             "display": RP.none_text(row["reason"]) if row["proposal"] is None else "proposal",
             "legs": (row.get("facts") or {}).get("legs", []),
             "start_approvals": _grouped_approvals(row),
+            **({"repository_preparation": row["repository_preparation"]} if row.get("repository_preparation") else {}),
             **({"read_notes": row["read_notes"]} if row.get("read_notes") else {}),
             **({"question_renames": renames} if (renames := RP.question_renames(row.get("source") or "")) else {})}
            for row in rows],
@@ -1503,6 +1554,19 @@ def _proposal_review(route, path, jobs, rows=None):
         "wording_differs": RP.wording_differs(rows),
         "frame_downgrade": _frame_downgrade_summary(route, jobs),
     }
+
+
+def _repository_notice(rows):
+    import work_intent
+    t = work_intent.ui_translator()
+    setups = [item for row in rows for item in row.get("repository_preparation", [])]
+    if not setups:
+        return []
+    item = setups[0]
+    if item["state"] == "create-after-approval":
+        return [t("route.repository.create", path=item["cwd"]), t("route.repository.untouched")]
+    key = "route.repository.existing" if item.get("existing_destination") else "route.repository.manual"
+    return [t(key, path=item["cwd"]), t("route.repository.choices")]
 
 
 def _approval_scope(question, response):
@@ -1624,6 +1688,9 @@ def _decide(route, jobs, root, record, output, briefs, intent):
                     "prompt_file": str(prompt), "prompt_sha256": hashlib.sha256(task).hexdigest(),
                     "spec_read": "auto" if str(source).startswith("compose-auto:") else source,
                     "owner": (route.get("work_request") or {}).get("owner_harness")}}
+    setup = next((row for row in match.get("repository_preparation", []) if row["leg"] == 0), None)
+    if setup:
+        compose["repository_setup"] = setup
     if execution_scope == "report" and leg.get("shape") == "staged":
         compose["graph"] = execution_graph
     return RP.build_decision(frame_route=frame_route, selected=choice["label"], reason="", briefs=briefs,
@@ -1661,6 +1728,63 @@ def _first_leg_started(leg_result, jobs, route):
     return not tokens or {"registered=1", "started=1", "child_spawned=1"} <= tokens
 
 
+def _prepare_frame_repository(record_path, record):
+    """Prepare only the absent destination approved in the existing route question."""
+    setup = record["decision"]["first_leg_compose"].get("repository_setup")
+    if not setup:
+        return record
+    path = Path(setup["cwd"])
+    first = record.get("first_leg") or {}
+    created = first.get("repository_created")
+    if setup["state"] != "create-after-approval" and created is None:
+        # Manual preparation may have finished since the question was answered.
+        if _route_module()._compose_git_diagnosis(path).get("state") == "git":
+            return record
+        raise ValueError(f"repository-preparation-manual: {path}; existing folders are untouched. "
+                         "Use the existing interview's manual-preparation/direct choice, or compose --route-plan --cwd "
+                         "with the prepared repository.")
+    if created is None:
+        try:
+            path.mkdir()                 # atomic: an existing folder, even empty, stays untouched
+        except FileExistsError as exc:
+            raise ValueError(f"repository-preparation-manual: {path} already exists; nothing changed") from exc
+        stamp = path.stat()
+        created = {"path": str(path), "at": datetime.now(timezone.utc).isoformat(),
+                   "device": stamp.st_dev, "inode": stamp.st_ino}
+        record = _bind(record_path, repository_created=created)
+    stamp = path.lstat()
+    if path.is_symlink() or (stamp.st_dev, stamp.st_ino) != (created["device"], created["inode"]):
+        raise ValueError("repository-preparation-manual: created destination was replaced; nothing changed")
+    if any(child.name != ".git" for child in path.iterdir()):
+        raise ValueError("repository-preparation-manual: destination now contains user files; nothing changed")
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(GIT_AUTHOR_NAME="Hearting", GIT_AUTHOR_EMAIL="hearting@localhost",
+               GIT_COMMITTER_NAME="Hearting", GIT_COMMITTER_EMAIL="hearting@localhost")
+    def git(*args, input=None):
+        done = subprocess.run(["git", "-C", str(path), *args], input=input, text=True,
+                              capture_output=True, timeout=60, env=env)
+        if done.returncode:
+            raise ValueError("repository-preparation-pending: " + done.stderr.strip())
+        return done.stdout.strip()
+    first = record.get("first_leg") or {}
+    if "repository_initialized" not in first:
+        git("init", "--quiet")
+        record = _bind(record_path, repository_initialized={"path": str(path),
+                        "at": datetime.now(timezone.utc).isoformat()})
+    if "repository_baseline" not in (record.get("first_leg") or {}):
+        # Plumbing keeps the user's index and hooks out of this empty baseline.
+        tree = git("mktree", input="")
+        commit = git("commit-tree", tree, "-m", "Initialize approved repository")
+        record = _bind(record_path, repository_baseline={"path": str(path), "commit": commit,
+                        "at": datetime.now(timezone.utc).isoformat()})
+    baseline = record["first_leg"]["repository_baseline"]["commit"]
+    head = subprocess.run(["git", "-C", str(path), "rev-parse", "--verify", "HEAD"],
+                          text=True, capture_output=True, timeout=60, env=env)
+    if head.returncode or head.stdout.strip() != baseline:
+        git("update-ref", "HEAD", baseline, "0" * 40)
+    return record
+
+
 def _manual_frame_closure(route, jobs):
     """Read-only closure instructions for an independently composed approved first leg.
 
@@ -1675,7 +1799,7 @@ def _manual_frame_closure(route, jobs):
         if binding["digest"] != plan["digest"]:
             return None
         decision = binding["record"]["decision"]
-        if binding["record"].get("first_leg"):
+        if (binding["record"].get("first_leg") or {}).get("route"):
             return None                   # the ordinary frame transaction owns closure
         context = decision["first_leg_compose"]["context"]
         root = Path(context["artifact_root"])
@@ -1716,6 +1840,21 @@ def _first_leg(route, path, jobs, result, root, record, output, record_path, dec
     context = compose["context"]
     first = decision_record.get("first_leg") or {}
     if "snapshot" not in first:
+        try:
+            decision_record = _prepare_frame_repository(record_path, decision_record)
+        except (OSError, ValueError) as exc:
+            recovery_leg = {**decision["proposal"]["legs"][0],
+                            **{key: compose[key] for key in ("capability", "mode", "shape", "graph", "intensity")}}
+            recovery = shlex.join(RP.compose_argv(recovery_leg, context=context,
+                route_plan_arg=f"{record_path}#0", parent_cycle=record["cycle_id"],
+                slug=f"{context['slug']}-leg0", pins=RP.frame_selection_pins(decision, root)))
+            return None, {**result, "state": "needs-attention", "reason": "repository-preparation-pending",
+                          "detail": str(exc), "record_file": str(record_path),
+                          "recovery_command": recovery,
+                          "next_step": "Preparation and approval are retained. Existing folders are not initialized. "
+                              "Use the existing interview's manual/direct choice, or run recovery_command once its "
+                              "--cwd repository is prepared (it carries the approved plan, prompt and parent cycle). "
+                              "Retry this start after fixing a preparation error."}
         binding = RP.read_route_plan(f"{record_path}#0", root)
         readiness = {}
 
@@ -1726,9 +1865,19 @@ def _first_leg(route, path, jobs, result, root, record, output, record_path, dec
             return readiness[key]
         leg = {**binding["leg"], **{key: compose[key] for key in ("capability", "mode", "shape", "graph", "intensity")}}
         try:
+            import work_intent
+            task = Path(context["prompt_file"]).read_text(encoding="utf-8") + work_intent.frame_corrections_text(route)
+            prepared = (decision_record.get("first_leg") or {}).get("repository_created")
+            if prepared:
+                initialized = decision_record["first_leg"]["repository_initialized"]
+                task += (f"\nRepository preparation: Hearting created {prepared['path']} at {prepared['at']}; "
+                         f"git init at {initialized['at']} (empty baseline "
+                         f"{decision_record['first_leg']['repository_baseline']['commit']}).\n")
+            task_path = _decision_home(root) / f"{route['route_id']}.prepared-leg-task.md"
+            _keep_first(task_path, task.encode("utf-8"))
             leg_route = module.compile_first_leg(
                 leg, frame_route=route, frame_cycle_id=record["cycle_id"], context=context, binding=binding,
-                work_request={"text": Path(context["prompt_file"]).read_text(encoding="utf-8"),
+                work_request={"text": task,
                               "owner_harness": context.get("owner")}, readiness=probe)
         except ValueError as exc:
             preparation_failed = str(exc).startswith("source-worktree-preparation-failed:")
@@ -2451,6 +2600,7 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
                 template = {**(step.get("interview_template") or {}), "questions": _interview_questions(rows)}
                 step = {**step, "interview_template": template,
                         "route_proposal_review": _proposal_review(route, path, jobs, rows),
+                        "preparation_notice": _repository_notice(rows),
                         "next_step": step.get("next_step", "") + " route_proposal_review holds each brief's validated route "
                             "proposal (or proposal:none(reason)), whether the two are equal, and the start-approval parts "
                             "in scope. interview_template already holds the route question and one yes/no question per "
@@ -2459,6 +2609,18 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
                             "each marked option to its proposal when the interview is submitted; add the questions only "
                             "the person can answer beside them. An answer outside the options selects no route."}
             result.update(frame_interview=step, gate="frame-review", task=request["text"])
+            if step.get("interview"):
+                import frame_interview as FI
+                conflicts = FI.path_conflicts(step["interview"], route.get("cwd"))
+                if conflicts:
+                    step["path_conflicts"] = conflicts
+            if RP.is_framed_route(route) and step["state"] == "needs-question":
+                _root, _record, _output = _framed_cycle(route)
+                notices = _repository_notice(_proposal_rows(route, jobs, _root, _record, _output))
+                if notices:
+                    step["preparation_notice"] = notices
+                    step["next_step"] += (" Include these two preparation_notice lines with the existing question; "
+                                          "its alternative may choose manual preparation or direct work.")
             if step["state"] != "released":
                 return {**result, **step}
             owner_frame_launch_gate(SimpleNamespace(route_file=str(path)), "start", ROOT, jobs)
@@ -2878,6 +3040,11 @@ def start_work(route, path, jobs, *, wait=False, interview=None, answers=None,
     if advanced is not result:
         return advanced          # the next leg's own start already armed its own resume
     if result.get("owner_started") or result.get("state") in {"inline", "completed"}:
+        if result.get("state") == "inline":
+            import work_intent
+            conditions = work_intent.frame_corrections_text(route)
+            if conditions and conditions.strip() not in result.get("task", ""):
+                result["task"] = str(result.get("task") or "") + conditions
         closure = _manual_frame_closure(route, jobs)
         if closure:
             result["frame_closure"] = closure

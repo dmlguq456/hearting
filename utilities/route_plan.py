@@ -609,6 +609,19 @@ def leg_cwd(leg, default_cwd, *, base_cwd=None) -> str:
     return str((path if path.is_absolute() else Path(base_cwd or default_cwd) / path).resolve())
 
 
+def requested_repository(route):
+    """One explicitly named new Git destination; ambiguous/negative wording supplies none."""
+    text = (route.get("work_request") or {}).get("text") or ""
+    pattern = re.compile(r"(?:new\s+(?:local\s+)?git\s+(?:repository|repo)|새\s*(?:로컬\s*)?git\s*저장소)"
+                         r"\s*(?:at\s+|[:=：]\s*)?[(`\"']?\s*((?:~/|/|\.\.?/)[^\s`\"'()<>,;]+)", re.I)
+    paths = set()
+    for line in text.splitlines():
+        if re.search(r"do not|don't|not doing|non.goal|안 할|하지 않|만들지", line, re.I):
+            continue
+        paths.update(leg_cwd({"cwd": match.group(1)}, route["cwd"]) for match in pattern.finditer(line))
+    return next(iter(paths)) if len(paths) == 1 else None
+
+
 def validate_proposal(proposal, *, compile_leg, start_approvals) -> dict:
     """Compile every leg through `compile_leg(leg, index) -> route` (a memory compile that writes,
     starts and records nothing) and reconcile `entry_approvals` with the parts the legs really carry.

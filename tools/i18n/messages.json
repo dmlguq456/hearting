@@ -670,6 +670,10 @@
    "en": "Not a git repository: source-mutating worker route; run git init and start again, or continue in this session with --shape direct",
    "ko": "git 저장소 아님: source-mutating worker route; git init 후 다시 시작하거나, 이 세션에서 --shape direct로 진행"
   },
+  "route.frame.corrections": {
+   "en": "correct {count} retained: {text}",
+   "ko": "correct {count}건 보관: {text}"
+  },
   "route.frame.pending": {
    "en": "awaiting frame decision",
    "ko": "frame 결정 대기"
@@ -753,6 +757,26 @@
   "route.q.split_stages": {
    "en": "Separate stages",
    "ko": "분리 단계"
+  },
+  "route.repository.choices": {
+   "en": "The same question can choose manual repository preparation or direct work in this session.",
+   "ko": "같은 질문에서 저장소를 직접 준비한 뒤 진행하거나 현재 세션에서 직접 진행하도록 고릅니다."
+  },
+  "route.repository.create": {
+   "en": "After approval: create {path}, initialize Git and an empty baseline.",
+   "ko": "승인 후 새 저장소 준비: {path} (폴더 생성 · git init · 빈 기준 커밋)."
+  },
+  "route.repository.existing": {
+   "en": "The new repository destination already exists: {path} (no automatic preparation).",
+   "ko": "새 저장소 목적지가 이미 있습니다: {path} (자동 준비 없음)."
+  },
+  "route.repository.manual": {
+   "en": "The first work folder needs Git preparation: {path} (existing folders stay untouched).",
+   "ko": "첫 실행 위치에 Git 저장소 준비가 필요합니다: {path} (기존 폴더는 변경하지 않음)."
+  },
+  "route.repository.untouched": {
+   "en": "Existing folders stay untouched. Manual preparation or direct work are alternatives in the same question.",
+   "ko": "기존 폴더는 건드리지 않습니다. 같은 질문에서 수동 준비 또는 직접 진행도 고를 수 있습니다."
   },
   "route.size": {
    "en": "Size: nodes={nodes} worker_dispatches={workers} owner_dispatches={owners} resource(measured)={resources} (initial run estimate; retries and follow-up routes excluded)",

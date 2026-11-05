@@ -148,6 +148,14 @@ created: {YYYY-MM-DD}
    catching more. Omit `shape` and it follows `size`; a different `shape` is
    kept and the difference is shown to the person.
 
+   For a requested new Git repository, set the first leg's existing `cwd` field
+   to the explicit destination from the request. The ordinary route question
+   includes preparation; after approval the runtime creates an absent folder,
+   initializes Git and an empty baseline. An existing folder stays untouched;
+   the same question offers manual preparation or direct work. Conditions added
+   during framing are in the route's retained corrections, carried into the
+   interview and first leg without restarting the frame.
+
    ```yaml
    route_proposal_v1:
      summary: "one plain sentence: what runs, in which order"
@@ -158,7 +166,7 @@ created: {YYYY-MM-DD}
          shape: staged           # direct | solo | staged; omitted, it follows size
          graph: [eval-run, metrics, report]   # staged only; stage ids or capability:stage[:unit] from the catalogue; never a frame stage
          intensity: standard     # optional; direct fixes direct, solo fixes quick, and staged allows standard+
-         cwd: /path/to/existing-worktree  # optional: use this worktree for this leg; relative to the frame's cwd
+         cwd: /path/to/task-repository  # optional: existing checkout or requested new repository; relative to the frame's cwd
          why: "one sentence"
          done_when:              # optional, 1-5: what shows this leg is finished (a sentence or {text, check})
            - "the abort tests pass"

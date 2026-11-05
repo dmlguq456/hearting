@@ -1261,7 +1261,9 @@ def compile_first_leg(leg, *, frame_route, frame_cycle_id, context, binding, wor
         raise ValueError(UI_TEXT.translator()("route.error.not_git_worker"))
     frame_preparation = frame_route.get("framed_worktree") or {}
     inherit_frame_allocation = _inherits_frame_worktree(frame_route, leg, index, kwargs["cwd"])
-    if _isolates_worktree(selection) and not inherit_frame_allocation:
+    created_repository = ((binding.get("record") or {}).get("first_leg") or {}).get("repository_baseline") or {}
+    use_new_repository = index == 0 and created_repository.get("path") == kwargs["cwd"]
+    if _isolates_worktree(selection) and not inherit_frame_allocation and not use_new_repository:
         worktree = prepare_isolated_worktree(
             kwargs["cwd"], frame_route.get("slug"), artifact_root=frame_route["artifact_root"],
             preparation_key=_route_plan_preparation_key(binding), explicitly_approved=bool(leg.get("cwd")))
@@ -2090,6 +2092,32 @@ def main():
                 return 2
             print(f"route_default={found} source={source}",file=sys.stderr)
             given=found
+        frame_path = resolve_route_argument(given, jobs)
+        frame_raw = json.loads(frame_path.read_text()) if Path(frame_path).is_file() else None
+        if ROUTE_PLAN.is_framed_route(frame_raw):
+            from work_start import _framed_cycle
+            _first = {}
+            try:
+                _root, _record, _output = _framed_cycle(frame_raw)
+                _decision_path = _output / ROUTE_PLAN.RECORD_RELATIVE
+                _first = (ROUTE_PLAN.read_record(_decision_path).get("first_leg") or {}) if _decision_path.exists() else {}
+            except ValueError:
+                pass   # conditions can precede the frame's first start/cycle
+            _leg_id = (_first.get("route") or {}).get("route_id")
+            _leg_owner = route_owner_attempt(_leg_id, jobs) if _leg_id else None
+            if _leg_owner:
+                given = _leg_owner
+            else:
+                from dispatch_owner_input import frame_input
+                result = frame_input(verify_route(frame_raw), a.message_file.read_text() if a.message_file else None,
+                                     a.request_id, jobs=jobs)
+                if result.get("redirect_owner"):
+                    given = result["redirect_owner"]
+                else:
+                    print(json.dumps(result, ensure_ascii=False))
+                    from start_receipt import print_next_line
+                    print_next_line(result)
+                    return 0
         a.attempt_id=_correct_attempt_argument(given,jobs)
         if a.attempt_id!=given:
             print(f"owner_attempt_default={a.attempt_id} route={given}",file=sys.stderr)

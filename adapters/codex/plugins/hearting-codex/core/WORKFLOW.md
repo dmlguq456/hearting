@@ -423,6 +423,14 @@ An unanswered interview can be corrected in its existing round; recorded answers
 and decisions are immutable. Request quotes come from this compose's human prompt
 boundary; unavailable provenance omits the quote. Framed display separates the
 requested width, bootstrap intensity and eventual approved leg intensity.
+For an explicitly requested new repository, the existing route question includes
+its destination and preparation (at most two notice lines). After approval the
+runtime creates only an absent folder, initializes Git and its empty baseline,
+and records path/time in the route evidence and first leg task. Existing folders
+stay untouched and use the same interview's manual-preparation/direct choices.
+Frame-time corrections stay on that route, appear in its existing Fleet detail,
+and reach the interview and first owner. Explicit conflicting output paths in
+interview wording and `done_when` appear as receipt advisories.
 A leg's `extra_stages` entry becomes node
 `plan-<id>` right after its `after` stage, shaped on a catalogue check or
 measurement stage of the same unit (one that writes no source; its gate, review

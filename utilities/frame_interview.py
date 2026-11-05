@@ -40,6 +40,31 @@ ANSWER_SOURCE_GUIDANCE = ('Set "actor_kind": "user" only for the person\'s actua
                           'is explicitly recorded; unmarked answers remain unknown. Registered workers cannot '
                           'claim user or supervisor authority. Supervisor answers release frame-review only; '
                           'person-only start approvals keep their gates.')
+
+
+def path_conflicts(interview, cwd):
+    """Advisory only: the same explicitly named output file in two different folders."""
+    pattern = re.compile(r"(?<![\w:])(?:/|\./|[\w.-]+/)[\w./-]+\.[\w-]+")
+    brief = interview.get("brief") or {}
+    wording = [brief.get("outcome", "")] + [q.get("question", "") for q in interview.get("questions", [])]
+    spoken = {p for text in wording if isinstance(text, str) for p in pattern.findall(text)}
+    proposals = (interview.get("route_proposals") or {}).get("by_option") or {}
+    found = []
+    for proposal in proposals.values():
+        for index, leg in enumerate(proposal.get("legs", [])):
+            import route_plan
+            base = Path(route_plan.leg_cwd(leg, cwd or "."))
+            for item in leg.get("done_when", []):
+                text = " ".join(str(item.get(k) or "") for k in ("text", "check")) if isinstance(item, dict) else str(item)
+                for checked in pattern.findall(text):
+                    target = (Path(checked) if Path(checked).is_absolute() else base / checked).resolve()
+                    for said in spoken:
+                        origin = (Path(said) if Path(said).is_absolute() else base / said).resolve()
+                        if origin.name == target.name and origin != target:
+                            row = {"leg": index, "interview_path": str(origin), "done_when_path": str(target)}
+                            if row not in found:
+                                found.append(row)
+    return found[:16]
 ANSWERS_SHAPE = ('answers file: {"actor_kind": "supervisor", "understanding_confirmed": true, '
                  '"answers": {"<question id>": {"choice": 0}}} '
                  '-- choice is an option index or label ("none" plus a "note" when no option fits); '

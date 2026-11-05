@@ -207,6 +207,49 @@ def record_path(route) -> Path | None:
     return Path(root) / ".runtime" / "intent" / f"{key}.json"
 
 
+def frame_reference(route):
+    """The exact frame identity/root, also for a leg with an absolute plan reference."""
+    import route_plan as RP
+    if RP.is_framed_route(route):
+        return Path(route["artifact_root"]), route["route_id"], route["route_hash"]
+    try:
+        plan = route["route_plan"]
+        binding = RP.read_route_plan(f"{plan['decision']}#{plan['index']}", route["artifact_root"])
+        if binding["digest"] != plan["digest"]:
+            return None
+        decision = binding["record"]["decision"]
+        return (Path(decision["first_leg_compose"]["context"]["artifact_root"]),
+                decision["frame_route"]["route_id"], decision["frame_route"]["route_hash"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def frame_corrections(route):
+    """Read-only retained conditions; absence/uncertain identity supplies no text."""
+    ref = frame_reference(route)
+    if ref is None:
+        return []
+    root, rid, rhash = ref
+    path = root / ".runtime/framed-decision" / (rid + ".corrections.json")
+    try:
+        if path.is_symlink() or path.stat().st_size > 1024 * 1024:
+            return []
+        value = json.loads(path.read_text(encoding="utf-8"))
+        if (value.get("schema"), value.get("route_id"), value.get("route_hash")) != (
+                "frame_route_input_v1", rid, rhash):
+            return []
+        return [item for item in value["requests"] if isinstance(item, dict)
+                and isinstance(item.get("id"), str) and isinstance(item.get("text"), str)]
+    except (OSError, ValueError, KeyError, TypeError):
+        return []
+
+
+def frame_corrections_text(route):
+    items = frame_corrections(route)
+    return ("\n## Conditions added during framing\n\n" + "\n".join(
+        f"- [{item['id']}] {item['text']}" for item in items) + "\n") if items else ""
+
+
 def seal_original(route, cwd=None, environ=None) -> str:
     """Write the excerpt once for a route the person started; a leg or a repeat keeps the first."""
     if not isinstance(route, dict) or not isinstance(route.get("work_request"), dict) or route.get("route_plan"):
@@ -309,7 +352,7 @@ def prompt_block(route) -> str:
     if value.get("done"):
         lines.append(f"- Done when: {value['done']}")
     lines.append("Stay within this intent; the assignment below says which part is yours.")
-    return "\n".join(lines) + "\n\n"
+    return "\n".join(lines) + "\n\n" + frame_corrections_text(route)
 
 
 # ---------------------------------------------------------------------------

@@ -31,6 +31,59 @@ class InputError(ValueError):
     pass
 
 
+def frame_input(route, text=None, request_id=None, *, jobs=None):
+    """Retain pre-owner conditions on the existing frame, serialized with its decision."""
+    import work_intent
+    root, rid, rhash = work_intent.frame_reference(route)
+    directory = root / ".runtime/framed-decision"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / (rid + ".corrections.json")
+    with (directory / (rid + ".lock")).open("a+b") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        if jobs is not None:
+            # The frame may have started its owner while this correction waited
+            # on the existing decision lock. Route that input to the owner now.
+            import work_start
+            import route_plan
+            try:
+                _root, _cycle, output = work_start._framed_cycle(route)
+                decision = route_plan.read_record(output / route_plan.RECORD_RELATIVE)
+                leg_id = ((decision.get("first_leg") or {}).get("route") or {}).get("route_id")
+                owner = work_start._route_module().route_owner_attempt(leg_id, jobs) if leg_id else None
+                if owner:
+                    return {"redirect_owner": owner}
+            except (OSError, ValueError):
+                pass
+        if path.is_symlink():
+            raise InputError("frame-input-state-unsafe")
+        value = json.loads(path.read_text()) if path.exists() else {
+            "schema": "frame_route_input_v1", "route_id": rid, "route_hash": rhash, "requests": []}
+        if (value.get("schema"), value.get("route_id"), value.get("route_hash")) != (
+                "frame_route_input_v1", rid, rhash):
+            raise InputError("frame-input-target-changed")
+        duplicate = False
+        if text is not None:
+            if not text.strip() or len(text.encode()) > 65536:
+                raise InputError("correction-text-empty-or-oversized")
+            digest = _digest(text)
+            request_id = request_id or "input-" + _digest([rid, digest])[:32]
+            if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", request_id):
+                raise InputError("correction-id-invalid")
+            old = next((item for item in value["requests"] if item["id"] == request_id), None)
+            if old and old["digest"] != digest:
+                raise InputError("correction-id-content-conflict")
+            duplicate = old is not None
+            if not old:
+                value["requests"].append({"id": request_id, "digest": digest, "text": text,
+                    "at": time.time(), "source_session": route_authority.correction_source_session()})
+                _write(path, value)
+        return {"state": "frame-stored", "route_id": rid, "request_id": request_id, "duplicate": duplicate,
+                "retained_corrections": len(value["requests"]), "delivery_timing": "interview-and-first-owner",
+                "requests": [{k: v for k, v in item.items() if k != "text"} for item in value["requests"]],
+                "applied": "not-verified", "next_step": "Conditions are retained on this frame, visible in its "
+                    "Fleet detail, and included in the interview and first owner task. The frame keeps running."}
+
+
 def _digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
