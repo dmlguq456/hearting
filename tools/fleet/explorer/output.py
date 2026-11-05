@@ -19,6 +19,7 @@ import time
 import unicodedata
 from typing import Iterable, Optional, Sequence, Tuple
 
+from ..config import ui_text
 from .types import Health
 
 TAIL_BYTES = 64 * 1024
@@ -26,10 +27,10 @@ TAIL_RECORDS = 200
 MAX_STAGE_SOURCES = 6              # a request without a chosen stage mixes at most this many stage logs
 MAX_ROWS = 5000                    # rows kept for the scope being read (the oldest leave first)
 RESOLVE_RETRY_SEC = 5.0            # a source that could not be opened is looked for again this often
-SUPERVISOR_ONLY = "감독 기록만 남음 · 원천 정리됨"
-RESET_NOTE = "원천이 잘리거나 교체되어 처음부터 다시 읽음"
 RESET_NOTICE_SEC = 30.0
-CLEANED = "원천 정리됨"
+# What a source's state says on screen (catalog keys in tools/i18n/messages.json).
+_NOTE = {"cleaned": "fleet.output.supervisor_only", "reset": "fleet.output.reset",
+         "missing": "fleet.output.cleaned"}
 
 
 @dataclass(frozen=True)
@@ -76,14 +77,14 @@ def clip(text: str, width: int, ellipsis: str = "…") -> str:
 
 
 def fit_row(text: str, omitted: int, width: int) -> str:
-    """One physical row: the first line, ``(+k줄)`` for the lines left out, a right ``…`` when it does not fit.
+    """One physical row: the first line, ``(+k more)`` for the lines left out, a right ``…`` when it does not fit.
 
     The marker is always kept: the first line is cut to leave room for it, then ``…`` follows it.
     """
     text = text.replace("\n", " ")
     if not omitted:
         return clip(text, width)
-    marker = f" (+{omitted}줄)"
+    marker = ui_text("fleet.output.more_lines", count=omitted)
     if cell_width(text) + cell_width(marker) <= width:
         return text + marker
     # One cell stays free after the ``…``: in a terminal that draws it two cells wide it still fits.
@@ -208,7 +209,7 @@ def line_row(line, label, abbr, stamp="") -> Optional[OutputLine]:
     # event row while retaining the full body in OutputEvent for the transcript.
     if kind == "output" and omitted:
         return OutputLine(head + (glyph + " " if glyph else "") +
-                          lines[0] + f" (+{omitted}줄)", 0)
+                          lines[0] + ui_text("fleet.output.more_lines", count=omitted), 0)
     return OutputLine(head + (glyph + " " if glyph else "") + lines[0], omitted)
 
 
@@ -444,9 +445,9 @@ class OutputReader:
                 if not self._read_src(src, earlier=False, stamped=stamped):
                     problems.append((plan.label, src.state, src.reason))
             if slot.supervisor_only:
-                problems.append((plan.label, "cleaned", SUPERVISOR_ONLY))
+                problems.append((plan.label, "cleaned", ""))
             if any(src.reset_at is not None and self.clock() - src.reset_at < RESET_NOTICE_SEC for src in slot.sources):
-                problems.append((plan.label, "reset", RESET_NOTE))
+                problems.append((plan.label, "reset", ""))
         return self._view(scope, title, plans, problems)
 
     def _view(self, scope, title, plans, problems):
@@ -471,8 +472,9 @@ class OutputReader:
             scope.last_success = self.clock()
         notes = []
         for label, state, reason in problems:
-            text = SUPERVISOR_ONLY if state == "cleaned" else RESET_NOTE if state == "reset" else (
-                CLEANED if state == "missing" else (f"읽지 못함 · {reason}" if reason else "읽지 못함"))
+            text = ui_text(_NOTE[state]) if state in _NOTE else (
+                ui_text("fleet.output.unreadable_because", reason=reason) if reason
+                else ui_text("fleet.output.unreadable"))
             notes.append(f"[{label}] {text}" if len(plans) > 1 else text)
         if unreadable:
             progressed = len(unreadable) < sum(len(scope.slots[p.attempt_id].sources) or 1
@@ -547,14 +549,15 @@ def read_generation(reader, entry, now=None) -> OutputView:
     """The raw-output view of one earlier generation (``entry`` is a lineage entry)."""
     harness, sid = str(entry.get("harness") or ""), str(entry.get("sid") or "")
     abbr = _abbr(harness)
-    label = "이전 " + sid[:8]
-    title = f"이전 대화 · {abbr} {sid[:8]} · 원래 출력"
+    label = ui_text("fleet.output.earlier_label", sid=sid[:8])
+    title = ui_text("fleet.output.earlier_title", harness=abbr, sid=sid[:8])
     where = entry.get("transcript") or {}
     path, status = where.get("path"), where.get("status")
     if not path or status == "missing":
-        return OutputView(title, (), (CLEANED,), Health("success", reader.clock()), False)
+        return OutputView(title, (), (ui_text(_NOTE["missing"]),), Health("success", reader.clock()), False)
     if status != "available":
-        return OutputView(title, (), (f"읽지 못함 · {status or '원문 위치 확인 불가'}",),
+        return OutputView(title, (), (ui_text("fleet.output.unreadable_because",
+                                              reason=status or ui_text("fleet.output.no_transcript_place")),),
                           Health("failed", None, status or "unknown"), False)
     if _is_attempt_log(path, harness):
         plan = SourcePlan(f"generation:{harness}:{sid}", label, harness, abbr, "generation", direct=path)
@@ -570,7 +573,8 @@ def read_generation(reader, entry, now=None) -> OutputView:
     except OSError as exc:
         rows, error = None, type(exc).__name__
     if rows is None:
-        return OutputView(title, (), (f"읽지 못함 · {error}",), Health("failed", None, error), False)
+        return OutputView(title, (), (ui_text("fleet.output.unreadable_because", reason=error),),
+                          Health("failed", None, error), False)
     view = OutputView(title, tuple(rows), (), Health("success", reader.clock()), False)
     cache[(harness, sid)] = (stamp, view)
     while len(cache) > 4:

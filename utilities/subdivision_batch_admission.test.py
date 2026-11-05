@@ -595,6 +595,89 @@ class FailedStartClosesUnclaimedRowTest(AdmissionFixture):
         self.assertEqual(self._status(jobs, "att-claimed"), "open")
         self.assertIn(f"note={SUBDIV.BATCH_START_FAILED}", jobs.read_text())
 
+    def _meta(self, jobs: Path, attempt: str) -> dict:
+        line = next(l for l in jobs.read_text().splitlines() if f"attempt_id={attempt}," in l + ",")
+        return SUBDIV.parse_registry_metadata(line.split("\t")[5])
+
+    def test_closed_unstarted_rows_record_never_launched(self):
+        import dispatch_contract as D
+
+        jobs = self.base / "jobs.log"
+        rows = [
+            self._row("att-start", "0"), self._row("att-reg", "0"), self._row("att-claimed", "1"),
+            self._row("att-pid", "0") + ",pid=4242,pid_start=77",
+            self._row("att-running", "0").replace("\topen\t", "\trunning\t", 1),
+        ]
+        jobs.write_text("\n".join(rows) + "\n")
+        self.assertEqual(SUBDIV._close_unclaimed_row(jobs, "att-start"), 1)
+        self.assertEqual(SUBDIV._cancel_registered_row(jobs, "att-reg"), 1)
+        for attempt, note in (("att-start", SUBDIV.BATCH_START_FAILED), ("att-reg", SUBDIV.BATCH_REGISTRATION_INCOMPLETE)):
+            with self.subTest(closed=attempt):
+                meta = self._meta(jobs, attempt)
+                self.assertEqual(self._status(jobs, attempt), "done")
+                self.assertEqual(meta["note"], note)
+                self.assertEqual(meta["launch_outcome"], "never-launched")
+                self.assertEqual(meta["failure_class"], "cancelled")
+                self.assertEqual(meta["reconcile_reason"], note)
+                # The same evidence the serial refusal path writes.
+                self.assertEqual(meta["classifier_source"], D.SUBSESSION_CHAIN_REFUSAL_CLASSIFIER)
+                verdict = D.attempt_process_quiescence(meta, terminal_receipt=True)
+                self.assertEqual((verdict.state, verdict.reason), ("quiescent", "never-launched"))
+                line = next(l for l in jobs.read_text().splitlines() if f"attempt_id={attempt}," in l + ",")
+                self.assertTrue(D.attempt_row_terminal_never_started(line.split("\t")))
+
+        # A row that fails the strict proof still closes where it did before, without
+        # claiming it never started; a claimed or running row is left alone by the start path.
+        self.assertEqual(SUBDIV._close_unclaimed_row(jobs, "att-pid"), 1)
+        meta = self._meta(jobs, "att-pid")
+        self.assertEqual(self._status(jobs, "att-pid"), "done")
+        self.assertEqual(meta["note"], SUBDIV.BATCH_START_FAILED)
+        self.assertNotIn("launch_outcome", meta)
+        self.assertNotIn("classifier_source", meta)
+        self.assertEqual(SUBDIV._close_unclaimed_row(jobs, "att-claimed"), 0)
+        self.assertEqual(self._status(jobs, "att-claimed"), "open")
+        self.assertEqual(SUBDIV._close_unclaimed_row(jobs, "att-running"), 0)
+        self.assertEqual(self._status(jobs, "att-running"), "running")
+        # The registration-incomplete close keeps closing any open row, claimed or not.
+        self.assertEqual(SUBDIV._cancel_registered_row(jobs, "att-claimed"), 1)
+        meta = self._meta(jobs, "att-claimed")
+        self.assertEqual(meta["note"], SUBDIV.BATCH_REGISTRATION_INCOMPLETE)
+        self.assertNotIn("launch_outcome", meta)
+
+    def test_parallel_registration_failure_rows_are_quiescent_through_start_admitted_batch(self):
+        import dispatch_contract as D
+
+        admission = StartAdmittedBatchPartialFailureTest._admission(self, 3)
+        jobs = self.base / "jobs.log"
+        jobs.write_text("")
+
+        def fake_run(cmd, env):
+            action = cmd[cmd.index("--action") + 1]
+            slug = cmd[cmd.index("--slug") + 1]
+            session = next(row for row in admission.sessions if row["slug"] == slug)
+            if action == "register" and slug == "slice-3":
+                return subprocess.CompletedProcess(cmd, 65, "", "register-failed")
+            with jobs.open("a", encoding="utf-8") as handle:
+                handle.write(self._row(session["attempt_id"], "0") + "\n")
+            return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+        with mock.patch.object(SUBDIV, "terminal_claim_observation", return_value=None), \
+             mock.patch.object(SUBDIV, "dispatch_command",
+                               side_effect=lambda manifest, session, action, parent, jobs:
+                               ["x", "--action", action, "--slug", session["slug"]]):
+            results = SUBDIV.start_admitted_batch(
+                admission, parent="owner", jobs=jobs,
+                governor_reservation_env="AGENT_DISPATCH_GOVERNOR_RESERVATION", run=fake_run)
+        self.assertEqual([row["cancelled"] for row in results], [1, 1, 0])
+        for session in admission.sessions[:2]:
+            with self.subTest(slice=session["slug"]):
+                meta = self._meta(jobs, session["attempt_id"])
+                self.assertEqual(self._status(jobs, session["attempt_id"]), "done")
+                self.assertEqual(meta["note"], SUBDIV.BATCH_REGISTRATION_INCOMPLETE)
+                self.assertEqual(meta["launch_outcome"], "never-launched")
+                verdict = D.attempt_process_quiescence(meta, terminal_receipt=True)
+                self.assertEqual((verdict.state, verdict.reason), ("quiescent", "never-launched"))
+
     def test_raised_starts_return_per_slice_results_and_preserve_claimed_live_row(self):
         admission = StartAdmittedBatchPartialFailureTest._admission(self, 3)
         jobs = self.base / "jobs.log"
@@ -818,6 +901,58 @@ class PlanSlicesBriefAndAdapterTest(unittest.TestCase):
                 [row["attempt_id"] for row in manifest_a["sessions"]],
                 [row["attempt_id"] for row in manifest_b["sessions"]],
             )
+
+    def test_refused_chain_moves_to_the_next_generation_and_stays_stable_otherwise(self):
+        def row(status, attempt, chain, meta):
+            return (f"2026-11-04T00:00:00Z\t{status}\t/repo\t/repo\tslice\tattempt_id={attempt},"
+                    f"session_chain_id={chain},subsession_mode=parallel,{meta}")
+
+        legacy = "launch_claimed=0,note=subsession-batch-start-failed"
+        current = ("launch_claimed=0,note=subsession-batch-registration-incomplete,"
+                   "launch_outcome=never-launched,failure_class=cancelled")
+        claimed_then_refused = "launch_claimed=1,note=subsession-batch-start-failed,launch_outcome=never-launched"
+        ran = "launch_claimed=1,launch_started=1,pid=4242,pid_start=77,note=subsession-batch-start-failed"
+        with tempfile.TemporaryDirectory() as td, mock.patch.dict(os.environ, {}, clear=True):
+            root = Path(td)
+            jobs = root / "jobs.log"
+            args = ("rt-b", "execute", self.SLICES)
+            generation0 = SUBDIV.slice_chain_id(*args)
+            generation1 = SUBDIV.slice_chain_id(*args, generation=1)
+            generation2 = SUBDIV.slice_chain_id(*args, generation=2)
+            self.assertEqual(len({generation0, generation1, generation2}), 3)
+            self.assertEqual(SUBDIV.current_slice_chain_id(*args, root / "absent.log"), generation0)
+            jobs.write_text("")
+            self.assertEqual(SUBDIV.current_slice_chain_id(*args, jobs), generation0)
+            cases = (
+                ("legacy shape", [row("done", "att-1", generation0, legacy), row("done", "att-2", generation0, legacy)], generation1),
+                ("current shape", [row("done", "att-1", generation0, current), row("cancelled", "att-2", generation0, current)], generation1),
+                ("claim fence closed, never launched", [row("done", "att-1", generation0, claimed_then_refused), row("done", "att-2", generation0, current)], generation1),
+                ("an open row", [row("done", "att-1", generation0, current), row("open", "att-2", generation0, "launch_claimed=0")], generation0),
+                ("a started row", [row("done", "att-1", generation0, current), row("done", "att-2", generation0, ran)], generation0),
+                ("another chain's rows", [row("done", "att-1", "ssc-execute-other", current)], generation0),
+                ("two refused generations", [row("done", "att-1", generation0, current), row("done", "att-2", generation1, legacy)], generation2),
+            )
+            for name, rows, expected in cases:
+                with self.subTest(name):
+                    jobs.write_text("\n".join(rows) + "\n")
+                    self.assertEqual(SUBDIV.current_slice_chain_id(*args, jobs), expected)
+
+            # plan_slices names the same chain, and the next generation mints its own session ids.
+            os.environ["AGENT_DISPATCH_ATTEMPT_ID"] = "att-owner-a"
+            owner_generation0 = SUBDIV.slice_chain_id(*args)
+            owner_generation1 = SUBDIV.slice_chain_id(*args, generation=1)
+            for name in ("first", "refused"):
+                (root / name).mkdir()
+            (root / "first" / "jobs.log").write_text("")
+            (root / "refused" / "jobs.log").write_text(row("done", "att-1", owner_generation0, current) + "\n")
+            first, manifest_first, _plan, _wt = self._plan(root / "first", self.SLICES)
+            again, manifest_again, _plan, _wt = self._plan(root / "refused", self.SLICES)
+            self.assertEqual(first["chain_id"], owner_generation0)
+            self.assertEqual(again["chain_id"], owner_generation1)
+            self.assertEqual(again["chain_id"], SUBDIV.current_slice_chain_id(*args, root / "refused" / "jobs.log"))
+            self.assertNotEqual(
+                [row["attempt_id"] for row in manifest_first["sessions"]],
+                [row["attempt_id"] for row in manifest_again["sessions"]])
 
     def test_slice_adapter_follows_route_allocation_without_pin(self):
         def adapters(loader, env, slices=None):

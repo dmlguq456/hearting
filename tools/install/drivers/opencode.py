@@ -101,7 +101,7 @@ def _instructions_path():
 
 
 def _skills_path():
-    return str(paths.resolve_source("opencode_setting/opencode-skills"))
+    return str(paths.runtime_home("opencode") / "skills")
 
 
 def _digest(path):
@@ -511,7 +511,7 @@ def checks(scope="global"):
     check_list = []
 
     check_list.append(verifier.check_herdr_integration(RUNTIME, agent_home))
-    check_list.append(_guard_check(scope))
+    check_list.append(lambda: _guard_check(scope))   # run by `verify`, like every other check
 
     for entry in entries:
         if entry.get("guard"):
@@ -527,12 +527,9 @@ def checks(scope="global"):
         elif action == "copy_managed":
             dest = Path(entry["dest"])
             integration_id = entry["integration_id"]
-            check_list.append({
-                "id": f"opencode.herdr.installed.{integration_id}",
-                "ok": herdr_integration.version_marker(
-                    dest, integration_id, herdr_integration.VERSIONS[RUNTIME]),
-                "detail": f"{dest} carries the current {integration_id} integration",
-            })
+            check_list.append(verifier.check_managed_copy(
+                f"opencode.herdr.installed.{integration_id}", dest, integration_id,
+                herdr_integration.VERSIONS[RUNTIME]))
         elif action == "seed_once":
             check_list.append(
                 user_model_config.verification_check(
@@ -560,6 +557,8 @@ def checks(scope="global"):
                 "import sys; [compile(open(f,encoding='utf-8').read(), f, 'exec') for f in sys.argv[1:]]",
                 "tools/build-manifest.py",
                 "tools/memory/mem.py",
+                "tools/memory/mem_base.py",
+                "tools/memory/mem_migration.py",
                 "tools/memory/protocol_v2.py",
                 "tools/memory/git_exchange_v2.py",
                 "tools/memory/sync_v2.py",

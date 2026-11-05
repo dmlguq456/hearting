@@ -29,6 +29,49 @@ from dispatch_continuation_budget import AdmitVerdict, ContinuationLedger
 from foreground_activity import OWNER_TURN_IDLE_SECONDS  # noqa: F401
 from foreground_activity import ActivityWindow as OwnerTurnActivity  # noqa: F401
 
+# Registered supervisors share the bounded, no-progress transient retry chain
+# used by the interactive Codex capacity continuation.
+from dispatch_attempt_policy import TRANSIENT_RETRY_DELAYS
+
+
+def transient_retry_delay(error_info: object, failures: int, *, registered: bool = True) -> int | None:
+    """Return the next bounded retry delay for an exact structured overload.
+
+    Registered work excludes 429 because that remains an account/usage
+    terminal. Raw app-server and normalized rollout spellings are accepted;
+    malformed or ambiguous values fail closed.
+    """
+    if not isinstance(failures, int) or isinstance(failures, bool) or failures < 0:
+        return None
+    kind, status = "", None
+    if error_info in ("server_overloaded", "serverOverloaded"):
+        kind = "serverOverloaded"
+    elif isinstance(error_info, dict) and len(error_info) == 1:
+        kind, detail = next(iter(error_info.items()))
+        if not isinstance(kind, str):
+            return None
+        if isinstance(detail, dict):
+            status = detail.get("httpStatusCode", detail.get("http_status_code",
+                     detail.get("http_status")))
+    elif isinstance(error_info, dict) and set(error_info).issubset({"kind", "http_status"}):
+        kind = error_info.get("kind", "")
+        status = error_info.get("http_status")
+    else:
+        return None
+    if status is not None and (not isinstance(status, int) or isinstance(status, bool)):
+        return None
+    if kind in {"server_overloaded", "serverOverloaded"}:
+        pass
+    elif kind in {"response_too_many_failed_attempts", "responseTooManyFailedAttempts"}:
+        if not isinstance(status, int) or isinstance(status, bool):
+            return None
+        accepted = {503} if registered else {429, 503}
+        if status not in accepted:
+            return None
+    else:
+        return None
+    return TRANSIENT_RETRY_DELAYS[failures] if failures < len(TRANSIENT_RETRY_DELAYS) else None
+
 
 class SupervisorError(RuntimeError):
     """A session supervisor could not preserve its completion contract."""

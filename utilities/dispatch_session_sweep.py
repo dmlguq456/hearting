@@ -78,9 +78,11 @@ DELIVER_LEASE_SECONDS = 120.0
 # so the same records come back on every prompt. Records not reached within this
 # budget stay pending for the next prompt instead.
 DELIVER_BUDGET_SECONDS = 6.0
-# One pass-wide deadline covers discovery, claiming, rendering and ACK inside the
-# configured 10 s prompt hook. The remainder is the render/ACK reserve.
-ACTION_BUDGET_SECONDS = 8.0
+# One pass-wide deadline covers discovery and claiming inside the configured
+# 10 s prompt hook; no new work starts after it. Rendering and ACK of what the
+# pass already holds run after it, so the remaining 4 s is their reserve under
+# load (HOOK-LATENCY 7-4; 8 s left 2 s and was decided down on 2026-11-04).
+ACTION_BUDGET_SECONDS = 6.0
 STORAGE_KEY = "_storage_key"     # added to a returned copy only: the directory a record is stored under
 
 
@@ -700,7 +702,7 @@ def retain_receiving_turn(batches: list[tuple[Path, list[dict]]], session_id: st
 def sweep_deliver(
     root: Path, recipient_kind: str, session_id: str, *, now_ns: int | None = None,
     native_evidence: dict | None = None, receipt_observer=None,
-    notice_context=None, deadline_ns: int | None = None,
+    notice_context=None, deadline_ns: int | None = None, read_context=None,
 ) -> tuple[list[dict], int]:
     """Claude carrier 2 -- deliver, not merely refuse (2026-08-29 decision,
     supersedes the A-21 "surface nothing" slice for Claude).
@@ -733,7 +735,7 @@ def sweep_deliver(
     notice_context = notice_context or NoticeReadContext()
     # One discovery context for the whole pass; the post-claim effect section
     # opens its own per group (a claim is an effect boundary).
-    discovery_context = PeerReadContext(compact_lineage=True)
+    discovery_context = read_context or PeerReadContext(compact_lineage=True)
     claimed: list[dict] = []
     addressed, entry_count = addressed_records(
         root, recipient_kind, session_id, read_context=discovery_context,

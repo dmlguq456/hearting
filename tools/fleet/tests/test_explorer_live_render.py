@@ -13,6 +13,9 @@ from tools.fleet.explorer.state import NavState
 from tools.fleet.explorer.system import usage_text
 from tools.fleet.explorer.tables import _harness_mix, _stage_hue, _stage_items, gauge_cells
 from tools.fleet.explorer.view_model import ExplorerViewModel, load_fixture
+import sys  # noqa: E402
+sys.path.append(str(Path(__file__).resolve().parents[3] / "utilities"))  # split_module_fixture
+from split_module_fixture import patch_split  # noqa: E402
 
 FIXTURES = Path(__file__).parent / "fixtures" / "explorer"
 
@@ -641,8 +644,9 @@ class ClaudeActualContract(unittest.TestCase):
                                         "_EXPLORER_PUBLISHED_MODEL": base, "_EXPLORER_MODEL": base,
                                         "_EXPLORER_RESULT": None, "_EXPLORER_REPLAY_ACTIVE": True,
                                         "_EXPLORER_SHOWN": False, "_EXPLORER_READINESS": {"ready": False}}.items():
-                        stack.enter_context(patch.object(render, name, value))
-                    stack.enter_context(patch.object(render, "_explorer_runtime", return_value=SimpleNamespace(publication_ready=lambda _r: False)))
+                        stack.enter_context(patch_split(render, name, value))
+                    stack.enter_context(patch.object(render, "_explorer_runtime", return_value=SimpleNamespace(
+                        publication_ready=lambda _r: False, draw_frame=draw)))
                     stack.enter_context(patch.object(render, "_explorer_compose", return_value=None))
                     now = 12000 if entry is self.CHANGED else 10000 if entry is self.SUCCESS else 10200
                     stack.enter_context(patch.object(render.time, "time", return_value=now))
@@ -680,7 +684,7 @@ class ClaudeActualContract(unittest.TestCase):
                               "layout": render._layout_mode(140), "fixed_end": 2, "body_start": 2,
                               "body_end": 3, "legend_start": 3, "fixed_priorities": {0: 1, 1: 1}}}
                 for name, value in values.items():
-                    stack.enter_context(patch.object(render, name, value))
+                    stack.enter_context(patch_split(render, name, value))
                 stack.enter_context(patch.object(render.time, "monotonic", return_value=10))
                 stack.enter_context(patch.object(render.time, "time", return_value=now))
                 stack.enter_context(patch.object(render, "_build_lines", side_effect=AssertionError("body rebuild")))
@@ -712,7 +716,7 @@ class HeaderCallerFallback(unittest.TestCase):
             "version": "v3.50.3-20-gad247e2b6", "install_method": "unmanaged"})
         snapshot.usage_snapshots = {"codex": {"payload": {"rl_5h": 20, "rl_7d": 30},
                                                "observed_at": 2_000_000_000}}
-        names = ("trainer-west-gpu-node-01", "cnn", "xgpu-b", "lgpu-c", "gpu-c")
+        names = ("trainer-west-gpu-node-01", "gpu", "xgpu-b", "lgpu-c", "gpu-c")
         snapshot.compute_hosts = {"hosts": [
             {"host": name, "self": index == 0, "reachable": True, "cpu_count": 4,
              "cpu_utilization_pct": 25, "memory_total_mib": 8192,
@@ -723,7 +727,8 @@ class HeaderCallerFallback(unittest.TestCase):
 
     @staticmethod
     def runtime():
-        return SimpleNamespace(prepare=lambda snapshot, detail, *, vm, generation, now: (vm, {}))
+        return SimpleNamespace(prepare=lambda snapshot, detail, *, vm, generation, now: (vm, {}),
+                               draw_frame=draw)
 
     def test_live_compose_keeps_source_host_and_draws_bounded_valid_header(self):
         from tools.fleet import render

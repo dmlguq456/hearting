@@ -48,8 +48,11 @@ def card_title(lines):
     return ""
 
 
-def generation_chain(entries, harness, sid):
+def generation_chain(entries, harness, sid, *, ended=False):
     """Generations of a seat, oldest first: one per session-tidy card, then the running session (``now``).
+
+    An ended seat has no running session: its last session counts once, by its own card when it
+    left one, else as one generation without a card that is not ``now``.
 
     A generation follows the one before it as the same session (a compact: ``cont``) or a new session
     (``new``; a clear when its start source says so). A running session that took over by a retire
@@ -62,7 +65,10 @@ def generation_chain(entries, harness, sid):
             items.append({"harness": entry.get("harness"), "sid": entry.get("sid"), "card": card,
                           "entry": entry, "now": False})
     running = next((entry for entry in entries if entry.get("current")), None)
-    items.append({"harness": harness, "sid": sid, "card": None, "entry": running, "now": True})
+    if not ended:
+        items.append({"harness": harness, "sid": sid, "card": None, "entry": running, "now": True})
+    elif not items or items[-1]["sid"] != sid:
+        items.append({"harness": harness, "sid": sid, "card": None, "entry": running, "now": False})
     for index, item in enumerate(items):
         if index == 0:
             item["kind"], item["connection"] = "new", None

@@ -12,6 +12,425 @@ from fleet.collectors import dispatch
 
 
 class ParsedRegistryRowsTest(unittest.TestCase):
+    def test_raw_adapter_reuses_normalized_source_without_a_second_comma_parse(self):
+        registry=dispatch._orphan_registry_module()
+        native=dispatch._dispatch_registry_cache.RegistryRecord
+        original=native.completion_metadata
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(native,'completion_metadata',autospec=True,side_effect=original) as parse:
+            path=Path(directory)/'jobs.log'
+            path.write_text('t\tdone\t/r\t/w\tone\tattempt_id=one,note=single spaces\n'
+                            't\tdone\t/r\t/w\ttwo\tattempt_id=two,note=double  spaces,_name=raw name\n')
+            with dispatch._dispatch_registry_cache.registry_read_scope():
+                parsed=dispatch.parsed_registry_rows(path)
+                calls=parse.call_count
+                rows=dispatch._orphan_registry_rows(path,registry,read_only=True)
+                self.assertEqual(parse.call_count,calls)
+            self.assertIsInstance(parsed[0][2],dispatch.RegistryMetadata)
+            self.assertEqual(parsed[1][2]['note'],'double spaces')
+            self.assertEqual(rows[1]['meta']['note'],'double  spaces')
+            self.assertEqual(rows[1]['meta']['_name'],'raw name')
+            copy=parsed[1][2].raw_copy();copy['note']='caller mutation'
+            self.assertEqual(parsed[1][2].raw_copy()['note'],'double  spaces')
+            self.assertEqual([dict(row)for row in rows],registry.read_rows(path))
+
+    def test_terminal_passive_rows_skip_unused_schema_work_but_keep_exact_status(self):
+        registry=dispatch._orphan_registry_module()
+        fields=('t','done','/r','/w','closed','attempt_schema_version=2,dispatch_depth=99')
+        expected=registry._row_from_fields(0,fields)
+        with mock.patch.object(registry,'validate_attempt_metadata',wraps=registry.validate_attempt_metadata) as verify:
+            passive=registry._row_from_fields(0,fields,defer_raw=True)
+            self.assertEqual(registry.classify(passive,None,{}),('terminal','cleanup-check-required',None))
+            verify.assert_not_called()
+            self.assertEqual(passive['attempt_contract_status'],expected['attempt_contract_status'])
+            self.assertEqual(dict(passive),expected)
+            self.assertEqual(list(passive),list(expected))
+            verify.assert_called_once()
+
+    def test_attempt_record_shares_only_one_pass_and_one_authoritative_root(self):
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as directory:
+            first, second = Path(directory)/'first', Path(directory)/'second'
+            for root, value in ((first,'old'), (second,'other-registry')):
+                (root/'watchdog').mkdir(parents=True)
+                (root/'watchdog'/'same.json').write_text(dispatch.json.dumps({'nested': {'value': value}}))
+            a, b = SimpleNamespace(attempt_id='same', root=first), SimpleNamespace(attempt_id='same', root=second)
+            with mock.patch.object(dispatch,'_row_state_roots',side_effect=lambda job:(job.root,)):
+                with dispatch.collection_read_scope():
+                    observed = dispatch._attempt_state_record(a,'watchdog')
+                    observed['nested']['value'] = 'caller mutation'
+                    (first/'watchdog'/'same.json').write_text('{"nested":{"value":"new"}}')
+                    self.assertEqual(dispatch._attempt_state_record(a,'watchdog')['nested']['value'],'old')
+                    self.assertEqual(dispatch._attempt_state_record(b,'watchdog')['nested']['value'],'other-registry')
+                with dispatch.collection_read_scope():
+                    self.assertEqual(dispatch._attempt_state_record(a,'watchdog')['nested']['value'],'new')
+                (first/'watchdog'/'same.json').write_text('{"nested":{"value":"outside"}}')
+                self.assertEqual(dispatch._attempt_state_record(a,'watchdog')['nested']['value'],'outside')
+
+    def test_merged_projection_reuses_producers_but_returns_owned_outer_maps(self):
+        from runtime_observation import ProjectionCache
+        meta = ('attempt_schema_version=2,dispatch_depth=1,transport=headless,'
+                'execution_surface=registered-headless,registered_worker=1,'
+                'fallback_hop=same-harness-headless,route_id=rt,route_node=work,attempt_id=one')
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(dispatch, '_REGISTRY_MERGED_CACHE', ProjectionCache(max_entries=1,max_bytes=65536)):
+            first, second = Path(directory)/'first', Path(directory)/'second'
+            first.write_text('t\tdone\t/r\t/w\tone\t'+meta+'\n')
+            second.write_text('t\tdone\t/r\t/w\ttwo\t'+meta.replace('route_node=work','route_node=test')
+                              .replace('attempt_id=one','attempt_id=two')+'\n')
+            def read(paths):
+                with dispatch._dispatch_registry_cache.registry_read_scope():
+                    return dispatch._scan_registry_evidence(paths)
+            original = read([first,second])
+            again = read([first,second])
+            self.assertEqual(again, original)
+            self.assertEqual(dispatch._REGISTRY_MERGED_CACHE.admissions, 1)
+            self.assertEqual(set(again[0]['rt']), {'work','test'})
+            again[0].clear();again[1].clear()
+            self.assertEqual(read([first,second]), original)
+            first.write_text(first.read_text().replace('\tdone\t','\trunning\t'))
+            current = read([first,second])
+            self.assertNotIn('one',current[1])
+            self.assertIn('two',current[1])
+            with mock.patch.object(dispatch, '_REGISTRY_MERGED_CACHE', ProjectionCache(max_bytes=1)):
+                self.assertEqual(read([first,second]), current)
+                self.assertFalse(dispatch._REGISTRY_MERGED_CACHE)
+            second.unlink()
+            self.assertNotIn('test', read([first,second])[0]['rt'])
+            # Unretained input rows may have unhashable metadata; they still
+            # produce the current result, without entering the borrowed cache.
+            with mock.patch.object(dispatch, '_PARSED_REGISTRY_RAW_BYTES_LIMIT', 1):
+                dispatch._drop_registry_path_locked(str(first))
+                unretained = read([first])
+                self.assertEqual(unretained[0]['rt']['work']['status'], 'running')
+                self.assertFalse(dispatch._REGISTRY_MERGED_CACHE)
+
+    def test_source_eviction_releases_borrowed_native_projections_and_metadata(self):
+        import gc
+        import weakref
+        class Metadata(dict):
+            pass
+        references = []
+        def convert(record):
+            value = Metadata(dispatch._parse_pipe_meta(record.fields[5]))
+            references.append(weakref.ref(value))
+            return value
+        registry = dispatch._orphan_registry_module()
+        raw = 't\tdone\t/r\t/w\tone\tattempt_id=one,route_id=rt,route_node=work,delivery_intent=1\n'
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(dispatch, '_registry_record_metadata', side_effect=convert), \
+                mock.patch.object(dispatch, '_PARSED_REGISTRY_RAW_BYTES_LIMIT', len(raw)+1):
+            first, second = Path(directory)/'first', Path(directory)/'second'
+            first.write_text(raw)
+            second.write_text(raw.replace('one', 'two'))
+            with dispatch._dispatch_registry_cache.registry_read_scope():
+                dispatch._orphan_registry_rows(first, registry, read_only=True)
+                dispatch._scan_registry_evidence([first])
+                dispatch._delivery_intents(first, dispatch.parsed_registry_rows(first))
+            self.assertIn(str(first), dispatch._ORPHAN_ROW_PROJECTIONS)
+            dispatch.parsed_registry_rows(second)
+            gc.collect()
+            self.assertNotIn(str(first), dispatch._ORPHAN_ROW_PROJECTIONS)
+            self.assertNotIn(str(first), dispatch._DELIVERY_INTENTS)
+            self.assertFalse(any(os.path.abspath(key[1]) == str(first)
+                                 for key in dispatch._REGISTRY_EVIDENCE_CACHE))
+            self.assertIsNone(references[0]())
+
+    def test_source_replacement_charges_removed_rows_before_reusing_the_cache(self):
+        from runtime_observation import ProjectionCache
+        registry = dispatch._orphan_registry_module()
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(dispatch, '_ORPHAN_ROW_PROJECTIONS', ProjectionCache(max_bytes=65536)):
+            path = Path(directory)/'jobs.log'
+            path.write_text('t\tdone\t/r\t/w\tone\tattempt_id=one,note=' + 'x'*100000 + '\n')
+            with dispatch._dispatch_registry_cache.registry_read_scope():
+                dispatch._orphan_registry_rows(path, registry, read_only=True)
+            self.assertIn(str(path), dispatch._ORPHAN_ROW_PROJECTIONS)
+            path.write_text('')
+            with dispatch._dispatch_registry_cache.registry_read_scope():
+                dispatch.parsed_registry_rows(path)
+            self.assertNotIn(str(path), dispatch._ORPHAN_ROW_PROJECTIONS)
+            self.assertEqual(dispatch._ORPHAN_ROW_PROJECTIONS.rejections, 1)
+
+    def test_fingerprint_budget_does_not_change_a_published_history(self):
+        from runtime_observation import ProjectionCache
+        evidence = dispatch.RegistryRouteEvidence(work={'note': '한글' * 100})
+        expected = dispatch.json.dumps(evidence, sort_keys=True, default=str)
+        with mock.patch.object(dispatch, '_REGISTRY_FINGERPRINT_CACHE', ProjectionCache(max_bytes=1)):
+            self.assertEqual(evidence.fingerprint(), expected)
+            self.assertEqual(evidence.fingerprint(), expected)
+            self.assertFalse(dispatch._REGISTRY_FINGERPRINT_CACHE)
+            self.assertEqual(dispatch._REGISTRY_FINGERPRINT_CACHE.rejections, 2)
+
+    def test_passive_rows_defer_wide_raw_text_without_changing_the_mapping(self):
+        registry = dispatch._orphan_registry_module()
+        fields = ('t', 'done', '/repo', '/work', '한글🙂',
+                  'note=' + 'x' * 100000 + ',attempt_id=att-one')
+        eager = registry._row_from_fields(3, fields)
+        passive = registry._row_from_fields(3, fields, defer_raw=True)
+        self.assertIs(type(eager), dict)
+        self.assertNotIn('raw', passive._values)
+        self.assertEqual(list(passive), list(eager))
+        self.assertEqual(dict(passive), eager)
+        self.assertEqual(passive.get('raw'), eager['raw'])
+        self.assertNotIn('raw', passive._values)  # reads do not grow the cache
+        self.assertEqual(registry.classify(passive, None, {}),
+                         registry.classify(eager, None, {}))
+        from runtime_observation import retained_size
+        self.assertLess(retained_size(passive), retained_size(eager) // 2)
+        with self.assertRaises(TypeError):
+            passive['status'] = 'running'
+
+    def test_native_passive_adapter_borrows_rows_but_public_adapter_returns_dicts(self):
+        registry = dispatch._orphan_registry_module()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'jobs.log'
+            path.write_text('t\tdone\t/r\t/w\t한글\tattempt_id=one,note=hello\n')
+            with dispatch._dispatch_registry_cache.registry_read_scope():
+                passive = dispatch._orphan_registry_rows(path, registry, read_only=True)
+                public = dispatch._orphan_registry_rows(path, registry)
+            self.assertNotIn('raw', passive[0]._values)
+            self.assertIs(type(public[0]), dict)
+            self.assertEqual(dict(passive[0]), public[0])
+            public[0]['meta']['note'] = 'changed by caller'
+            self.assertEqual(passive[0]['meta']['note'], 'hello')
+
+    def test_native_adapter_shares_equal_text_but_preserves_raw_whitespace(self):
+        registry = dispatch._orphan_registry_module()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'jobs.log'
+            path.write_text('t\tdone\t/r\t/w\tone\tattempt_id=one,note=single spaces\n'
+                            't\tdone\t/r\t/w\ttwo\tattempt_id=two,note=double  spaces\n')
+            with dispatch._dispatch_registry_cache.registry_read_scope():
+                parsed = dispatch.parsed_registry_rows(path)
+                passive = dispatch._orphan_registry_rows(path, registry, read_only=True)
+            self.assertIs(passive[0]['meta']['note'], parsed[0][2]['note'])
+            self.assertEqual(parsed[1][2]['note'], 'double spaces')
+            self.assertEqual(passive[1]['meta']['note'], 'double  spaces')
+            self.assertEqual([dict(row) for row in passive], registry.read_rows(path))
+
+    def test_oversized_reuse_entries_leave_the_current_observation_usable(self):
+        from types import SimpleNamespace
+        from runtime_observation import ProjectionCache
+        def convert(order, fields, **kwargs):
+            return {'order': order, 'meta': dict(kwargs.get('meta') or {})}
+        raw = 't\tdone\t/r\t/w\ta\tattempt_id=one,route_id=rt-one,route_node=work\n'
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)/'jobs.log';path.write_text(raw)
+            with mock.patch.object(dispatch, '_ORPHAN_ROW_PROJECTIONS', ProjectionCache(max_bytes=1)):
+                first = dispatch._orphan_registry_rows(path, SimpleNamespace(_row_from_fields=convert))
+                second = dispatch._orphan_registry_rows(path, SimpleNamespace(_row_from_fields=convert))
+                self.assertEqual(first, second)
+                self.assertEqual(len(first), 1)
+                self.assertFalse(dispatch._ORPHAN_ROW_PROJECTIONS)
+            with mock.patch.object(dispatch, '_REGISTRY_EVIDENCE_CACHE', ProjectionCache(max_bytes=1)):
+                rows = dispatch.parsed_registry_rows(path)
+                first = dispatch._registry_evidence_for_path(path, rows)
+                second = dispatch._registry_evidence_for_path(path, rows)
+                self.assertEqual(first, second)
+                self.assertIn('rt-one', first[0])
+                self.assertFalse(dispatch._REGISTRY_EVIDENCE_CACHE)
+
+    def test_source_byte_limit_evicts_all_references_of_the_old_path(self):
+        import tempfile
+        from unittest import mock
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as directory:
+            first, second = Path(directory)/'first.log', Path(directory)/'second.log'
+            raw = 't\tdone\t/r\t/w\ta\tattempt_id=one\n'
+            first.write_text(raw); second.write_text(raw.replace('one', 'two'))
+            with mock.patch.object(dispatch, '_PARSED_REGISTRY_RAW_BYTES_LIMIT', len(raw)+1):
+                dispatch.parsed_registry_rows(first)
+                dispatch.parsed_registry_rows(second)
+                for cache in (dispatch._PARSED_REGISTRY_ROWS, dispatch._PARSED_REGISTRY_SEGMENTS,
+                              dispatch._PARSED_REGISTRY_INDEXES):
+                    self.assertFalse(any(key[0] == str(first) for key in cache))
+                self.assertTrue(any(key[0] == str(second) for key in dispatch._PARSED_REGISTRY_ROWS))
+
+    def test_metadata_converter_change_invalidates_an_unchanged_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'jobs.log'
+            path.write_text('t\topen\t/r\t/w\tjob\tattempt_id=original\n')
+            with dispatch._dispatch_registry_cache.registry_read_scope():
+                original = dispatch.parsed_registry_rows(path)
+            with mock.patch.object(dispatch, '_registry_record_metadata',
+                                   return_value={'attempt_id': 'new-policy'}) as convert:
+                with dispatch._dispatch_registry_cache.registry_read_scope():
+                    updated = dispatch.parsed_registry_rows(path)
+                self.assertEqual(convert.call_count, 1)
+                self.assertEqual(updated[0][2]['attempt_id'], 'new-policy')
+                self.assertEqual(original[0][2]['attempt_id'], 'original')
+
+    def test_atomic_row_replacement_reuses_unchanged_metadata_conversions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'jobs.log'
+            lines = [f't\topen\t/r\t/w\tjob-{i}\tattempt_id=att-{i}\n' for i in range(100)]
+            path.write_text(''.join(lines))
+            with mock.patch.object(dispatch, '_registry_record_metadata',
+                                   wraps=dispatch._registry_record_metadata) as convert:
+                with dispatch._dispatch_registry_cache.registry_read_scope():
+                    original = dispatch.parsed_registry_rows(path)
+                self.assertEqual(convert.call_count, 100)
+                replacement = path.with_suffix('.new')
+                lines[-1] = lines[-1].replace('\topen\t', '\tdone\t')
+                replacement.write_text(''.join(lines))
+                replacement.replace(path)
+                with dispatch._dispatch_registry_cache.registry_read_scope():
+                    current = dispatch.parsed_registry_rows(path)
+                self.assertEqual(convert.call_count, 101)
+                self.assertIs(current[0][2], original[0][2])
+                self.assertEqual(current[-1][1][1], 'done')
+                self.assertEqual(original[-1][1][1], 'open')
+
+    def test_unchanged_pinned_rows_need_no_historical_text_reconstruction(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'jobs.log'
+            row = 't\topen\t/repo\t/work\tslug\tattempt_id=att-one\n'
+            path.write_text(row)
+            with dispatch._dispatch_registry_cache.registry_read_scope():
+                initial = dispatch.parsed_registry_rows(path)
+            with mock.patch.object(dispatch._dispatch_registry_cache.RegistryRecord, 'raw',
+                                   new_callable=mock.PropertyMock,
+                                   side_effect=AssertionError('rebuilt historical raw row')):
+                with dispatch._dispatch_registry_cache.registry_read_scope():
+                    self.assertIs(dispatch.parsed_registry_rows(path), initial)
+                    self.assertEqual(dispatch._registry_diagnostics(path), (None, 0))
+            with path.open('a') as handle:
+                handle.write(row.replace('att-one', 'att-two'))
+            with dispatch._dispatch_registry_cache.registry_read_scope():
+                appended = dispatch.parsed_registry_rows(path)
+            self.assertEqual([meta['attempt_id'] for _order, _fields, meta in appended],
+                             ['att-one', 'att-two'])
+
+    def test_route_evidence_reuses_generation_and_folds_append_without_mutating_publication(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'jobs.log'
+            metadata = ('attempt_schema_version=2,dispatch_depth=1,transport=headless,'
+                        'execution_surface=registered-headless,registered_worker=1,'
+                        'fallback_hop=same-harness-headless,attempt_id=att-1,'
+                        'route_id=rt-1,route_node=execute,harness=codex')
+            row = 't\trunning\t/repo\t/work\tjob\t' + metadata + '\n'
+            path.write_text(row)
+            with mock.patch.object(dispatch, '_attempt_contract', wraps=dispatch._attempt_contract) as convert:
+                with dispatch._dispatch_registry_cache.registry_read_scope():
+                    first, _ = dispatch._scan_registry_evidence([path])
+                calls = convert.call_count
+                with dispatch._dispatch_registry_cache.registry_read_scope():
+                    unchanged, _ = dispatch._scan_registry_evidence([path])
+                self.assertEqual(convert.call_count, calls)
+                self.assertIs(first['rt-1'], unchanged['rt-1'])
+                fingerprint = first['rt-1'].fingerprint()
+                with path.open('a') as handle:
+                    handle.write(row.replace('\trunning\t', '\tdone\t'))
+                with dispatch._dispatch_registry_cache.registry_read_scope():
+                    appended, terminals = dispatch._scan_registry_evidence([path])
+                self.assertEqual(convert.call_count, calls * 2)
+                self.assertEqual(first['rt-1']['execute']['status'], 'running')
+                self.assertEqual(len(first['rt-1']['execute']['attempt_history']), 1)
+                self.assertEqual(len(appended['rt-1']['execute']['attempt_history']), 2)
+                self.assertEqual(first['rt-1'].fingerprint(), fingerprint)
+                self.assertNotEqual(appended['rt-1'].fingerprint(), fingerprint)
+                self.assertIn('att-1', terminals)
+                path.write_text(row.replace('rt-1', 'rt-2'))
+                with dispatch._dispatch_registry_cache.registry_read_scope():
+                    replaced, _ = dispatch._scan_registry_evidence([path])
+                self.assertEqual(set(replaced), {'rt-2'})
+                self.assertEqual(appended['rt-1']['execute']['status'], 'done')
+
+    def test_orphan_conversions_reuse_unchanged_rows_without_exposing_cached_mutation(self):
+        registry = dispatch._orphan_registry_module()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "jobs.log"
+            first = "t\topen\t/repo\t/work\tone\tattempt_id=att-1\n"
+            second = "t\tdone\t/repo\t/work\ttwo\tattempt_id=att-2\n"
+            path.write_text(first)
+            with mock.patch.object(registry, "_row_from_fields", wraps=registry._row_from_fields) as convert:
+                with dispatch._dispatch_registry_cache.registry_read_scope():
+                    initial = dispatch._orphan_registry_rows(path, registry)
+                initial[0]["meta"]["attempt_id"] = "caller mutation"
+                initial[0]["status"] = "caller mutation"
+                with dispatch._dispatch_registry_cache.registry_read_scope():
+                    unchanged = dispatch._orphan_registry_rows(path, registry)
+                self.assertEqual(convert.call_count, 1)
+                self.assertEqual(unchanged[0]["meta"]["attempt_id"], "att-1")
+                self.assertEqual(unchanged[0]["status"], "open")
+                with path.open("a") as handle:
+                    handle.write(second)
+                with dispatch._dispatch_registry_cache.registry_read_scope():
+                    appended = dispatch._orphan_registry_rows(path, registry)
+                self.assertEqual(convert.call_count, 2)
+                self.assertEqual(len(appended), 2)
+                replacement = path.with_suffix(".replacement")
+                replacement.write_text(first.replace("open", "done"))
+                os.replace(replacement, path)
+                with dispatch._dispatch_registry_cache.registry_read_scope():
+                    replaced = dispatch._orphan_registry_rows(path, registry)
+                self.assertEqual(convert.call_count, 3)
+                self.assertEqual(len(replaced), 1)
+                self.assertEqual(replaced[0]["status"], "done")
+                self.assertEqual(replaced, registry.read_rows(path))
+                path.unlink()
+                with dispatch._dispatch_registry_cache.registry_read_scope():
+                    self.assertEqual(dispatch._orphan_registry_rows(path, registry), [])
+
+    def test_process_backfill_selects_the_same_slug_and_exact_attempt_as_full_indexes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            current, legacy = Path(temp) / "current", Path(temp) / "legacy"
+            current.write_text(
+                "t\topen\t/repo\t/wt\tshared\tattempt_id=old,mode=old\n"
+                "t\topen\t/repo\t/wt\tshared\tattempt_id=new,mode=new\n"
+                "t\tdone\t/repo\t/wt\tother\tattempt_id=other,mode=other\n")
+            legacy.write_text("t\topen\t/repo\t/wt\tshared\tattempt_id=old,mode=foreign\n")
+            paths = [str(current), str(legacy)]
+            all_slugs, all_attempts = dispatch._jobs_log_fields(paths)
+            slugs, attempts = dispatch._jobs_log_fields(paths, slugs={"shared"}, attempts={"old"})
+            self.assertEqual(slugs, {"shared": all_slugs["shared"]})
+            self.assertEqual(attempts, {"old": all_attempts["old"]})
+            self.assertEqual(slugs["shared"]["mode"], "new")
+            self.assertEqual(attempts["old"]["mode"], "old")
+
+    def test_parent_selection_preserves_duplicates_siblings_and_registry_precedence(self):
+        with tempfile.TemporaryDirectory() as temp:
+            current, legacy = Path(temp) / "current", Path(temp) / "legacy"
+            current.write_text(
+                "t\topen\t/repo\t/wt\tp\tattempt_id=parent\n"
+                "t\tdone\t/repo\t/wt\tp\tattempt_id=parent\n"
+                "t\topen\t/repo\t/wt\ts\tattempt_id=sibling,parent_attempt_id=parent\n"
+                "t\topen\t/repo\t/wt\tu\tattempt_id=unrelated,parent_attempt_id=other\n")
+            legacy.write_text(
+                "t\topen\t/repo\t/wt\tu\tattempt_id=unrelated,parent_attempt_id=parent\n")
+            paths = [str(current), str(legacy)]
+            full = dispatch._parent_extinction_rows(paths)
+            selected = dispatch._parent_extinction_rows(paths, {"parent"})
+            expected = tuple(row for row in full if row[1].get("attempt_id") == "parent"
+                             or row[1].get("parent_attempt_id") == "parent")
+            self.assertEqual(selected, expected)
+            self.assertEqual(len(selected), 3)
+            with mock.patch.object(dispatch, "parsed_registry_rows",
+                                   side_effect=AssertionError("no child needs parent evidence")):
+                self.assertEqual(dispatch._parent_extinction_rows(paths, set()), ())
+
+    def test_long_metadata_values_scan_field_boundaries_once(self):
+        class CountedText(str):
+            scans = 0
+
+            def find(self, *args):
+                type(self).scans += 1
+                return super().find(*args)
+
+            def rfind(self, *args):
+                type(self).scans += 1
+                return super().rfind(*args)
+
+            def split(self, *args):
+                return [type(self)(part) for part in super().split(*args)]
+
+        raw = CountedText("capability=code,note=" + "word " * 2000 + "end,mode=dev")
+        legacy, keys = dispatch._registry_metadata_analysis(raw)
+        self.assertFalse(legacy)
+        self.assertEqual(set(keys), {"note"})
+        self.assertLess(raw.scans, 20)  # depends on the three fields, not 2,000 words
+
     def test_fast_spacing_guard_matches_the_legacy_regex(self):
         legacy_pattern = re.compile(r"(?:^|,)[^=,]*\s[^=,]*=|=\s|\s+[^\s,]*=")
         examples = (
@@ -306,10 +725,10 @@ class ParsedRegistryRowsTest(unittest.TestCase):
                 third = dispatch.parsed_registry_rows(path)
             self.assertIsNot(first, third)
             self.assertEqual(
-                dispatch._parse_pipe_meta_cached.cache_info().misses, first_misses + 1)
+                dispatch._parse_pipe_meta_cached.cache_info().misses, first_misses)
             self.assertEqual(len(third), 2)
             self.assertEqual(third[-1][0], 3)
-            self.assertEqual(third[0], first[0])
+            self.assertIs(third[0], first[0])
 
     def test_registry_order_keeps_physical_zero_based_line_positions(self):
         dispatch._parse_pipe_meta_cached.cache_clear()
@@ -350,7 +769,7 @@ class ParsedRegistryRowsTest(unittest.TestCase):
                 self.assertEqual(
                     [row[1][4] for row in rows], [f"slug{i}" for i in range(index + 1)])
                 self.assertEqual(
-                    dispatch._parse_pipe_meta_cached.cache_info().misses, misses + index)
+                    dispatch._parse_pipe_meta_cached.cache_info().misses, misses)
 
     def test_cache_is_isolated_by_path_and_file_generation(self):
         dispatch._parse_pipe_meta_cached.cache_clear()

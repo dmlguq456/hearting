@@ -41,10 +41,10 @@ class TodayParityPlumbingTests(unittest.TestCase):
             self.assertEqual(_validated_header_identity(capture), {
                 "version": "v3.50.3-20-gad247e2b6", "install_method": "managed/stable"})
             source.write_text(json.dumps({"compute_hosts": {"hosts": [
-                {"host": "mgpu-a1", "self": True}, {"host": "cnn", "self": False}]}}),
+                {"host": "mgpu-a1", "self": True}, {"host": "gpu", "self": False}]}}),
                 encoding="utf-8")
             self.assertEqual(_validated_header_hosts(capture), [
-                {"mark": "⌂", "name": "mgpu-a1"}, {"mark": "◇", "name": "cnn"}])
+                {"mark": "⌂", "name": "mgpu-a1"}, {"mark": "◇", "name": "gpu"}])
             source.write_text("{}", encoding="utf-8")
             self.assertEqual(_validated_header_identity(capture), {
                 "version": "unknown", "install_method": "unmanaged"})
@@ -130,7 +130,7 @@ def _r14_narrow_header_record(working=0, idle=0, blocked=0, version="v3.50.3-20-
     record = _rows_record(80, "OVERVIEW", {0: (reference, candidate)}, profile=R14_REFERENCE_PROFILE)
     record["validated_header_identity"] = {"version": version, "install_method": "unmanaged"}
     record["validated_header_hosts"] = [
-        {"mark": "⌂", "name": "mgpu-a1"}, {"mark": "◇", "name": "cnn"},
+        {"mark": "⌂", "name": "mgpu-a1"}, {"mark": "◇", "name": "gpu"},
         {"mark": "◇", "name": "xgpu-b"}, {"mark": "◇", "name": "lgpu-c"},
         {"mark": "◇", "name": "gpu-c"},
     ]
@@ -170,10 +170,10 @@ def _r14_narrow_header_record(working=0, idle=0, blocked=0, version="v3.50.3-20-
 def _r14_wide_header_record(working=0, idle=0, blocked=0, version="v3.50.3-20-gad247e2b6",
                             clock="02:38", method="unmanaged"):
     width = 168
-    hosts = [{"mark": "⌂", "name": "mgpu-a1"}, {"mark": "◇", "name": "cnn"},
+    hosts = [{"mark": "⌂", "name": "mgpu-a1"}, {"mark": "◇", "name": "gpu"},
              {"mark": "◇", "name": "xgpu-b"}, {"mark": "◇", "name": "lgpu-c"},
              {"mark": "◇", "name": "gpu-c"}]
-    host = " hosts ⌂ mgpu-a1  ◇ cnn  ◇ xgpu-b  ◇ lgpu-c  ◇ gpu-c 5/5"
+    host = " hosts ⌂ mgpu-a1  ◇ gpu  ◇ xgpu-b  ◇ lgpu-c  ◇ gpu-c 5/5"
     old_census = (f"⠏ {working} working  ● {idle} idle  ● {blocked} answer needed   hearting "
                   f"{version}  {clock}")
     new_census = (f"⠏ {working} working  ● {idle} idle  ● {blocked} answer needed   hearting "
@@ -187,7 +187,7 @@ def _r14_wide_header_record(working=0, idle=0, blocked=0, version="v3.50.3-20-ga
     record["reference_overflow_mask"]["version"] = REFERENCE_MASK_VERSION
 
     host_parts = [(" hosts ", "dim"), ("⌂ ", "g_work"), ("mgpu-a1", "g_work"), ("  ", "branch_s"),
-                  ("◇ ", "dim"), ("cnn", "loc_repo"), ("  ", "branch_s"),
+                  ("◇ ", "dim"), ("gpu", "loc_repo"), ("  ", "branch_s"),
                   ("◇ ", "dim"), ("xgpu-b", "loc_repo"), ("  ", "branch_s"),
                   ("◇ ", "dim"), ("lgpu-c", "loc_repo"), ("  ", "branch_s"),
                   ("◇ ", "dim"), ("gpu-c", "loc_repo"), (" 5/5", "dim")]

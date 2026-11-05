@@ -18,6 +18,7 @@ import dispatch_session_sweep as sweep
 import dispatch_supervision as supervision
 from route_identity import route_hash
 from workflow_state import WorkflowLedger
+from split_module_fixture import split_patch
 
 
 def recorded_owner_fixture(root, *, carrier="claude-parent-runtime", session="parent", checkpoint="owner-envelope-sealed"):
@@ -135,7 +136,7 @@ class NoticeTest(unittest.TestCase):
     def _resolve_success_batch(self, seed, now_ns=None):
         from types import SimpleNamespace
         with mock.patch("dispatch_attempt_policy.committed_outcome", return_value="succeeded"), \
-             mock.patch("dispatch_contract.observed_attempt_liveness",
+             split_patch("dispatch_contract.observed_attempt_liveness",
                         return_value=SimpleNamespace(state="terminal")):
             return notice.resolve_delivery_batch(self.jobs, seed, recipient_key="parent",
                                                  delivery_root=self.root, now_ns=now_ns)
@@ -515,7 +516,7 @@ class NoticeTest(unittest.TestCase):
                 with mock.patch("dispatch_terminal_commit.owner_completion_state", side_effect=AssertionError("heavy")), \
                      mock.patch("dispatch_terminal_commit.owner_completion_pending", side_effect=AssertionError("heavy")), \
                      mock.patch("dispatch_terminal_commit.inspect_owner_completion", side_effect=AssertionError("heavy")), \
-                     mock.patch("artifact_producer.completed_spec_publication", side_effect=AssertionError("heavy")):
+                     split_patch("artifact_producer.completed_spec_publication", side_effect=AssertionError("heavy")):
                     self.assertTrue(notice.notice_is_current(closure, notice_context=context))
                     completed = self._stored_owner_completion(jobs, meta, legacy=True, parent_attempt=parent_attempt)
                     self.assertEqual(completed["receipt"]["parent_attempt_id"], "")
@@ -590,7 +591,7 @@ class NoticeTest(unittest.TestCase):
         record = supervision.materialize(self.jobs, {"att-owner"}, reason="supervisor-exited")[0]
         self.close()
         with mock.patch("dispatch_terminal_commit.owner_completion_pending", return_value=True), \
-             mock.patch("dispatch_contract.attempt_process_quiescence",
+             split_patch("dispatch_contract.attempt_process_quiescence",
                         return_value=SimpleNamespace(state="quiescent", reason="registry-closed")):
             self.assertEqual(record["receipt"]["reason"], "supervisor-exited")
             self.assertEqual(record["receipt"]["obligation_revision"], "")

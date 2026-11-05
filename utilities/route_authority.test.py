@@ -28,6 +28,7 @@ import dispatch_seat_handover as HANDOVER  # noqa: E402
 import opencode_runtime  # noqa: E402
 from execution_access import ExecutionAccessRequest  # noqa: E402
 from route_identity import route_hash  # noqa: E402
+from split_module_fixture import patch_split  # noqa: E402
 
 
 class RotatedFrameCapacityAuthorityTest(unittest.TestCase):
@@ -260,6 +261,62 @@ class Case1ParentSessionTest(unittest.TestCase):
                 sids = {row.get("sid") for rows in graph.ledger_rows.values() for row in rows}
                 self.assertIn("busy", sids)
                 self.assertNotIn("late", sids)
+
+    def test_published_rows_and_the_compact_reader_keep_only_the_bytes_their_stat_saw(self):
+        # RV-1142 L3: the other two readers of the same rule. Published rows carry the stat's
+        # generation and no row appended after it; the compact reader re-reads a ledger that
+        # changed since publication and also takes only the bytes its own stat saw.
+        import dispatch_recipient_inbox as inbox
+        import session_tidy as tidy
+        from peer_read_context import PeerReadContext
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            jobs = root / "dispatch" / "jobs.log"
+            binding = HANDOVER.binding_of(jobs, self.OWNER)
+            with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(root / "state"),
+                                              "AGENT_DISPATCH_JOBS": str(jobs)}):
+                self._record_handover(binding, "codex-sid", "codex-sid-after-clear",
+                                      "codex", "case-compact", 1, "clear")
+                busy = tidy._ledger_path(tidy.Seat("pane", "busy-seat", "w2:busy"))
+                busy.write_text(json.dumps({"ts": 1, "harness": "claude", "sid": "busy",
+                                            "event": "prompt"}) + "\n")
+                directory = busy.parent
+                seen = {name: list(generation)
+                        for name, *generation in HANDOVER._lineage_signature(directory)[1]}
+                read_bytes = tidy.read_bytes
+
+                def appending(sid):
+                    def read(path):
+                        if Path(path).suffix == ".jsonl":
+                            with Path(path).open("a") as handle:
+                                handle.write(json.dumps({"ts": 9, "harness": "claude", "sid": sid,
+                                                         "event": "prompt"}) + "\n")
+                        return read_bytes(path)
+                    return read
+
+                with mock.patch.object(tidy, "read_bytes", appending("late")):
+                    payload = HANDOVER.build_lineage_rows_payload()
+                self.assertEqual(set(payload["ledgers"]), {Path(name).stem for name in seen})
+                for key, entry in payload["ledgers"].items():
+                    self.assertEqual(entry["generation"], seen[key + ".jsonl"])
+                    self.assertNotIn("late", {row.get("sid") for _index, row in entry["rows"]})
+                inbox.write_lineage_rows(inbox.dispatch_inbox_root(), payload)
+                built = []
+
+                def compact(*args, **kwargs):
+                    built.append(original(*args, **kwargs))
+                    return built[-1]
+
+                original = HANDOVER._build_compact_lineage_graph
+                with mock.patch.object(tidy, "read_bytes", appending("later")), \
+                        mock.patch.object(HANDOVER, "_build_compact_lineage_graph", side_effect=compact):
+                    graph = HANDOVER.lineage_graph(read_context=PeerReadContext(compact_lineage=True))
+                self.assertEqual(len(built), 1)
+                self.assertIs(built[0], graph)
+                sids = {row.get("sid") for rows in graph.ledger_rows.values() for row in rows}
+                self.assertTrue({"busy", "late"} <= sids, sids)
+                self.assertNotIn("later", sids)
+                self.assertTrue(RA.owns(self.OWNER, "codex-sid-after-clear", jobs))
 
     def test_a_replaced_or_shrunk_ledger_during_the_read_is_still_unavailable(self):
         import session_tidy as tidy
@@ -660,7 +717,7 @@ class OwnerPinChangeTest(unittest.TestCase):
         with mock.patch.dict(os.environ, self.isolated_env(), clear=True), \
              mock.patch.object(RA, "caller_identity", return_value=caller), \
              mock.patch.object(work_start, "_rows", return_value=rows), \
-             mock.patch.object(router, "_compose_readiness", return_value=probe) as readiness:
+             patch_split(router, "_compose_readiness", return_value=probe) as readiness:
             result = router._change_pins(self.route, Path(self.temp.name) / "jobs.log", values)
         return result, readiness
 
@@ -1020,11 +1077,11 @@ class Case4RetryLinkTest(unittest.TestCase):
                 ",".join(f"{k}={v}" for k, v in latest.items() if not k.startswith("_"))],
                 {**candidate, "automatic_retry_of": args.attempt_id}))
             for state in ("live", "unverifiable"):
-                with mock.patch.object(DC, "attempt_process_quiescence",
+                with patch_split(DC, "attempt_process_quiescence",
                                        return_value=SimpleNamespace(state=state)):
                     self.assertEqual(RA.retry_predecessor([latest], jobs=jobs, task=new), args.attempt_id)
             conflicted = {**latest, "terminal_conflict": "pending"}
-            with mock.patch.object(DC, "terminal_conflict_pending", return_value=True):
+            with patch_split(DC, "terminal_conflict_pending", return_value=True):
                 self.assertEqual(RA.retry_predecessor([conflicted], jobs=jobs, task=new), args.attempt_id)
             replacement._directory(jobs).joinpath("inputs", args.attempt_id + ".json").write_text("{}")
             self.assertEqual(RA.retry_predecessor([latest], jobs=jobs, task=new), args.attempt_id)
@@ -1043,7 +1100,7 @@ class Case4RetryLinkTest(unittest.TestCase):
             row.update(DC.parse_registry_metadata(
                 replacement.seal_launch_input(args, "codex", old_task)))
             changed = "Close historical/current conflict and actual DB parity."
-            with mock.patch.object(DC, "attempt_process_quiescence",
+            with patch_split(DC, "attempt_process_quiescence",
                                    return_value=SimpleNamespace(state="quiescent")):
                 self.assertTrue(RA.new_owner_request(row, jobs=jobs, task=changed))
                 self.assertFalse(RA.new_owner_request(row, jobs=jobs, task=old_task))
@@ -1055,7 +1112,7 @@ class Case4RetryLinkTest(unittest.TestCase):
                 self.assertFalse(RA.new_owner_request({**row, "terminal_conflict": "1"},
                                                       jobs=jobs, task=changed))
             for state in ("live", "unverifiable"):
-                with mock.patch.object(DC, "attempt_process_quiescence",
+                with patch_split(DC, "attempt_process_quiescence",
                                        return_value=SimpleNamespace(state=state)):
                     self.assertFalse(RA.new_owner_request(row, jobs=jobs, task=changed))
 
@@ -1433,13 +1490,13 @@ class WrapperAdmissionTest(unittest.TestCase):
                                jobs=None, agent_home=ROOT)
         seen = []
         def refusing(*a, **k):
-            seen.append(k["planned_revision_nodes"])
+            seen.append(k["attempt_id"])
             raise DC.DispatchContractError("human-gate-not-raised", "preview-disposition")
-        with mock.patch("review_input.preview_request_nodes", return_value=("plan",)), \
+        with mock.patch("review_input.preview_request_admission", return_value=None), \
              mock.patch.object(DC, "recover_preview_gate_after_refusal", return_value="preview_gate_recovery=unavailable"):
             reason, code, fields = RA.completion_gate(args, "start", ROOT, Path("/j/jobs.log"), gate=refusing,
                                                       before=(lambda: seen.append("before"),))
-        self.assertEqual(seen, ["before", ("plan",)])
+        self.assertEqual(seen, ["before", "att-x"])
         self.assertEqual((reason, code, fields["detail"], fields["child_spawned"]),
                          ("human-gate-not-raised", 65, "preview_gate_recovery=unavailable", "0"))
         self.assertIsNone(RA.completion_gate(args, "start", ROOT, Path("/j/jobs.log"), gate=lambda *a, **k: None))
@@ -1730,7 +1787,7 @@ class AccessChangeTest(unittest.TestCase):
         with mock.patch.dict(os.environ, extra), \
              mock.patch.object(RA, "caller_identity", return_value=caller), \
              mock.patch.object(work_start, "_rows", return_value=rows), \
-             mock.patch.object(router, "_turn_peer_source", return_value="unattributed"):
+             patch_split(router, "_turn_peer_source", return_value="unattributed"):
             if not env:
                 os.environ.pop("AGENT_DISPATCH_EXECUTION_ACCESS_FILE", None)
             return router._record_access_change(self.route, self.jobs)

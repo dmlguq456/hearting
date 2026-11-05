@@ -94,6 +94,25 @@ class NativeSessionTest(unittest.TestCase):
         self.assertEqual(result["result"], "answer")
         self.assertEqual(result["subtype"], "success")
 
+    def test_a_turns_steps_add_up_to_its_token_usage_counters_only(self):
+        self.program("event('step_start', part={})\n"
+                     "event('step_finish', part={'reason':'tool-calls','tokens':{'input':100,'output':20,"
+                     "'reasoning':5,'cache':{'read':1000,'write':7}}})\n"
+                     "event('step_start', part={})\n"
+                     "event('text', part={'text':'answer'})\n"
+                     "event('step_finish', part={'reason':'stop','tokens':{'input':30,'output':10,"
+                     "'reasoning':0,'cache':{'read':1120,'write':0}}})\n")
+        with unittest.mock.patch.object(runtime.opencode_runtime, "is_v2", return_value=True):
+            result, code = runtime.run_turn(self.args, "question", emit=self.events.append)
+        self.assertEqual(code, 0)
+        self.assertEqual(result["usage"], {"input_tokens": 130, "output_tokens": 35,
+                                           "cache_read_input_tokens": 2120,
+                                           "cache_creation_input_tokens": 7})
+        self.program("event('step_start', part={})\nevent('text', part={'text':'answer'})\n")
+        with unittest.mock.patch.object(runtime.opencode_runtime, "is_v2", return_value=True):
+            result, _code = runtime.run_turn(self.args, "question", emit=self.events.append)
+        self.assertNotIn("usage", result)   # no counts reported: none invented
+
     def test_v2_identityless_provider_rejection_is_preserved_without_secret(self):
         self.program("print(json.dumps({'type':'error','sessionID':'','error':{"
                      "'type':'provider.auth','code':'api_key_expired','status':401,"
@@ -738,7 +757,7 @@ import dispatch_resource_wait as RESOURCE
 import dispatch_contract as CONTRACT
 import owner_route_binding as OWNER
 sys.stdin.read()
-session = 'ses_ee3219f52ffe32c72Oe1nJNaxc'
+session = 'ses_fixture00000000000000000023'
 def event(kind, **values):
  print(json.dumps(dict(type=kind, sessionID=session, **values)), flush=True)
 event('step_start', part={})
@@ -784,7 +803,7 @@ event('step_finish', part={'reason':'stop'})
                                                 FAKE_UTILITIES=str(ROOT / 'utilities')))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         owner = json.loads((f.base / 'resource-owner.json').read_text())
-        self.assertEqual(owner['session_id'], 'ses_ee3219f52ffe32c72Oe1nJNaxc')
+        self.assertEqual(owner['session_id'], 'ses_fixture00000000000000000023')
         self.assertEqual(owner['parent_attempt_id'], fixture.PARENT)
 
 

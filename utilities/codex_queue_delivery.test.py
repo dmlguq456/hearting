@@ -29,9 +29,9 @@ SPEC.loader.exec_module(QUEUE)
 
 
 SOCKET = Path("/tmp/app-server.sock")
-THREAD = "01a0e1c0-bd78-7a30-aea5-a7cf4f3356e3"
+THREAD = "0100000f-0000-7000-8000-000000000017"
 CLIENT_ID = "delivery-test-0001"
-ITEM_ID = "01a0e1c1-fdb8-7190-8524-6812c28b3f9a"
+ITEM_ID = "01000010-0000-7000-8000-000000000018"
 ITEM = {"id": ITEM_ID, "clientUserMessageId": CLIENT_ID,
         "input": [{"type": "text", "text": "fixture"}]}
 

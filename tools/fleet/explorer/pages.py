@@ -1,6 +1,7 @@
 """Bounded repo, session, route, and selected-history detail projections."""
 
 from collections.abc import Mapping
+from ..config import ui_text
 from .grid import cell_width
 from .grid import clip_cells as clip
 from .tables import repo_rule_label
@@ -751,7 +752,7 @@ def draw_route_detail(grid, vm, route, x, use, y, state=None, bottom=None):
     if not nodes:
         for xx in range(x + 1, right):
             grid.put(xx, y, "═", frame_key)
-        grid.put(x + 3, y + 2, clip("이 route의 stage 기록을 읽지 못했습니다 (route 기록 없음)", max(0, use - 6)),
+        grid.put(x + 3, y + 2, clip(ui_text("fleet.route.no_stage_record"), max(0, use - 6)),
                  "dim", limit=right)
         grid.mark_moved()
         return bottom + 1

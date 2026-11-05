@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""Replay the 2026-10-28 owner-pin-handoff case on temp records (U5 plan 0).
+"""Replay the owner-pin-handoff case on synthetic temp records (U5 plan 0).
 
-Read-only capture lives in ``fixtures/u5-pin-handoff-e4c2.json``.  This module
+The anonymized projection lives in ``fixtures/u5-pin-handoff-e4c2.json``;
+workloads, task prose, paths, session IDs and machine/lease IDs are synthetic.
+The captured record shape and handoff relationships are preserved. This module
 rebuilds the sealed routes, the R0 ledger, the registry rows, the jobs rows and
 the replacement owner's supervisor state under one private temporary root, then
 proves the pre-repair refusal chain against unmodified source and the post-repair
@@ -70,16 +72,16 @@ FIXTURE_PATH = HERE / "fixtures" / "u5-pin-handoff-e4c2.json"
 FIXTURE = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
 
 OLD_OWNER = "att-45b52ff4a004334049fa5d1fcedbec9745c48d5e1a0e70ba"
-OLD_OWNER_SID = "0418c5a4-f76c-4fda-9351-96732f72236c"
-S71_SID = "53f4ef6b-8767-46eb-8c59-29de682e6dee"
+OLD_OWNER_SID = "10000061-0000-4000-8000-00000000006f"
+S71_SID = "10000082-0000-4000-8000-000000000091"
 R1_OWNER = "att-9f4aaab1d16e79cb4f9f47f6a36a8856"
 REPLACEMENT = "att-u5e9replacement00000000000000000"
 E9_SID = "01a1811a-0000-7000-8000-000000000000"
 E9_THREAD = "fixture-thread-e9owner"
-VAR_RUN = "ami-retrain50102020__var__045454ce1b52"
-VAR_REMOTE = "cnn-20261027-060348-ami-rir512-var-scratch50-seed0"
-FIX_DIRECT_REMOTE = "cnn-20261028-094907-ami-rir512-fix-resume-cnn0-e05-seed0-direct"
-FIX_RUN = "ami-retrain50102020__fix__603f1b434f83"
+VAR_RUN = "fixture-run-0070"
+VAR_REMOTE = "fixture-run-0499"
+FIX_DIRECT_REMOTE = "fixture-run-0507"
+FIX_RUN = "fixture-run-0069"
 
 
 def _replace(value, pairs):
@@ -392,7 +394,7 @@ class PreservedResourceHandoffReplayTest(unittest.TestCase):
             meta.pop(key, None)
         meta.pop("owner_identity_lineage", None)
         fields = ["2026-10-28T02:00:00.000000Z", "open", str(self.repo), str(self.worktree),
-                  "framed-ami-ami-v3-ep39-ep46-sr-09d6b888bb-leg1-owner",
+                  "fixture-item-0713",
                   ",".join(f"{key}={value}" for key, value in meta.items())]
         self.owner_meta = meta
         return "\t".join(fields)
@@ -1138,7 +1140,7 @@ class PreservedResourceHandoffReplayTest(unittest.TestCase):
             observed.append(True)
             return {"state": "quiescent", "reason": "fixture-remote-empty"}
         with mock.patch.object(RR, "compute_execution_observation", side_effect=quiescent), \
-                mock.patch("review_input.preview_request_nodes", return_value=frozenset()), \
+                mock.patch("review_input.preview_request_admission", return_value=None), \
                 mock.patch("subprocess.check_output", return_value=str(self.base)):
             self.assertTrue(SUP.admit_owner_successor_start(
                 dict(self.r1), "run-verify", str(self.jobs), REPLACEMENT, E9_THREAD))

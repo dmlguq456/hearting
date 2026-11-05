@@ -25,6 +25,11 @@ import resource
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
+try:  # ends a detached child with the test that started it; no-op outside tests
+    from detached_lifetime import bind as end_with_test
+except ImportError:  # a partial tree without it (e.g. a fixture release): no record
+    def end_with_test(child):
+        return child
 from dispatch_contract import (
     DispatchContractError,
     dispatch_state_root,
@@ -205,6 +210,7 @@ def run(
                     stdout=output, stderr=errors,
                     start_new_session=True, env=child_env)
                 pid = process.pid
+            end_with_test(pid)
             if threading.current_thread() is threading.main_thread():
                 for signum in (signal.SIGTERM, signal.SIGHUP):
                     handlers[signum] = signal.signal(signum, interrupted)

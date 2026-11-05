@@ -28,6 +28,72 @@ from fleet.collectors import dispatch, procscan  # noqa: E402
 import dispatch_pending_delivery as pending_delivery  # noqa: E402
 
 
+class DeliveryDocumentReuseTest(unittest.TestCase):
+    def test_count_only_intents_do_not_need_recipient_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            jobs = root / 'jobs.log'
+            jobs.write_text('t\tdone\t/r\t/w\tjob\tattempt_id=att-one,delivery_intent=1,'
+                            'delivery_id=delivery-one,parent_sid=parent\n')
+            with mock.patch.object(dispatch, 'dispatch_state_root', return_value=root), \
+                    mock.patch.object(dispatch._dispatch_registry_cache.RegistryView, 'handover_attempt',
+                                      side_effect=AssertionError('count-only recipient lookup')):
+                counts = dispatch._pending_delivery_counts([jobs])
+            self.assertEqual(counts, dict(pending=1, expired=0, retained_batch_duties=0,
+                                          no_recipient=None))
+
+    def test_unchanged_optional_counts_skip_collector_and_changes_reopen_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            jobs = root / 'jobs.log'
+            jobs.write_text('')
+            recipient = root / 'pending-delivery' / 'recipient'
+            recipient.mkdir(parents=True)
+            record = recipient / 'delivery.json'
+            record.write_text(json.dumps(dict(state='pending')))
+            with mock.patch.object(dispatch, 'dispatch_state_root', return_value=root), \
+                    mock.patch.object(dispatch, '_pending_delivery_counts_uncached',
+                                      wraps=dispatch._pending_delivery_counts_uncached) as collect:
+                with dispatch.collection_read_scope():
+                    first = dispatch._pending_delivery_counts([jobs])
+                first['pending'] = 999
+                with dispatch.collection_read_scope():
+                    again = dispatch._pending_delivery_counts([jobs])
+                self.assertEqual(again['pending'], 1)
+                self.assertEqual(collect.call_count, 1)
+                record.write_text(json.dumps(dict(state='expired')))
+                with dispatch.collection_read_scope():
+                    changed = dispatch._pending_delivery_counts([jobs])
+                self.assertEqual(changed['pending'], 0)
+                self.assertEqual(changed['expired'], 1)
+                self.assertEqual(collect.call_count, 2)
+                record.unlink()
+                with dispatch.collection_read_scope():
+                    removed = dispatch._pending_delivery_counts([jobs])
+                self.assertEqual(removed['expired'], 0)
+                self.assertEqual(collect.call_count, 3)
+                with dispatch.collection_read_scope():
+                    dispatch._pending_delivery_counts([jobs], session_observation={})
+                self.assertEqual(collect.call_count, 4)
+
+    def test_unchanged_parse_is_reused_but_replace_and_deletion_are_observed(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / 'record.json'
+            path.write_text(json.dumps(dict(state='pending')))
+            with mock.patch.object(dispatch.json, 'loads', wraps=json.loads) as parse:
+                self.assertEqual(dispatch._delivery_document(path), dict(state='pending'))
+                self.assertEqual(dispatch._delivery_document(path), dict(state='pending'))
+                self.assertEqual(parse.call_count, 1)
+                replacement = path.with_suffix('.new')
+                replacement.write_text(json.dumps(dict(state='acked')))
+                replacement.replace(path)
+                self.assertEqual(dispatch._delivery_document(path), dict(state='acked'))
+                self.assertEqual(parse.call_count, 2)
+                path.unlink()
+                with self.assertRaises(FileNotFoundError):
+                    dispatch._delivery_document(path)
+
+
 def _record(**overrides):
     receipt = {
         "schema_version": 2,
@@ -822,6 +888,7 @@ class PendingDeliveryCountsTest(unittest.TestCase):
             self.assertEqual(self._observed_registry_count([manual[0]], {("claude", "unqualified")})["no_recipient"], 1)
             self.assertEqual(self._observed_registry_count([manual[0]], {manual[3]})["no_recipient"], 0)
 
+    @mock.patch.dict("os.environ", {"FLEET_NOW_LANG": "Korean"})   # Korean screen words
     def test_collected_intent_counts_reach_existing_render_projections(self):
         from fleet import render
         from fleet.explorer.live import build_view_model
@@ -914,6 +981,7 @@ class PendingDeliveryCountsTest(unittest.TestCase):
             self.assertEqual(unknown["pending"], 1)
             self.assertIsNone(unknown["no_recipient"])
 
+    @mock.patch.dict("os.environ", {"FLEET_NOW_LANG": "Korean"})   # Korean screen words
     def test_render_and_overview_show_known_count_but_never_unknown_as_zero(self):
         from fleet import render
         from fleet.explorer.live import build_view_model
@@ -944,6 +1012,31 @@ class PendingDeliveryCountsTest(unittest.TestCase):
                         self.assertNotIn("받을 세션 없음", text)
                     self.assertNotIn("no_recipient", vm.system["peer_delivery"])
                 self.assertEqual(json.dumps(snapshot, sort_keys=True), before)
+
+
+class RenderWordLanguage(unittest.TestCase):
+    """The no-recipient count and the kill-selection key row read the shared catalog."""
+
+    def test_no_recipient_count_and_kill_selection_row(self):
+        from fleet import render
+        from fleet.explorer.chrome import draw_chrome
+        from fleet.explorer.grid import CellGrid
+        from fleet.explorer.state import NavState
+        from fleet.explorer.view_model import ExplorerViewModel
+        vm = ExplorerViewModel.from_mapping({"system": {"peer_delivery": {"pending": 3, "no_recipient": 2},
+                                                        "install": {"version": "v9"}}})
+        for language, words, keys in (
+                ("Korean", " · 받을 세션 없음 2", "종료 선택 · ↑↓ 이동 · x 종료 요청 · Esc 취소 · q 끝"),
+                ("English", " · 2 with no session to receive",
+                 "pick what to kill · ↑↓ move · x kill · Esc cancel · q quit")):
+            with self.subTest(language=language), mock.patch.dict(os.environ, {"FLEET_NOW_LANG": language}), \
+                    mock.patch.object(render, "_PROMPT", None), mock.patch.object(render, "_SELECT_MODE", True):
+                self.assertEqual(render._delivery_pending_rows({"pending": 3, "no_recipient": 2}),
+                                 [[("  delivery pending: 3 · awaiting recipient" + words, "lvl_y")]])
+                grid = CellGrid(140, 45)
+                draw_chrome(grid, vm, NavState(view="SYSTEM"))
+                self.assertIn("pending" + words, grid.rows_text()[-1])
+                self.assertEqual(render._explorer_keys_provider(140)(None), (keys,))
 
 
 if __name__ == "__main__":

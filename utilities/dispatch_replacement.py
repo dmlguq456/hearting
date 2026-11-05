@@ -49,7 +49,10 @@ CORRECTED = 'corrected'
 # declared gate holds it: the runtime carries its original result and report to a replacement owner
 # as observations, never as an answer. It is a pause of its own family, taken once per owner.
 OBSERVED = 'observed'
-PAUSE_KINDS = frozenset({'capacity', 'unlaunched', CORRECTED, OBSERVED})
+# A frame leg the person stopped alone: relaunched only by the person's next explicit `start`
+# of its route, never by a carrier or tick, in a family of its own like the other pauses.
+STOPPED = 'stopped'
+PAUSE_KINDS = frozenset({'capacity', 'unlaunched', CORRECTED, OBSERVED, STOPPED})
 FRAME_TRANSITION = {'from': 'top', 'to': 'deep', 'reason': 'capacity', 'ordinal': 1, 'origin': 'frame-rule'}
 CONTINUATION_WAIT_NOTE = (
     'This route has already used its one automatic continuation. If you raise a human gate later, '
@@ -144,13 +147,15 @@ def registry_text(jobs):
 
 def _rows(lines):
     """Registry rows by attempt id. Callers re-read the same registry many times in one
-    process, so the last parse is reused for identical content; each call gets copies."""
+    process, so the last parse is reused for identical content; each call gets copies.
+    The memo keeps each row's line index, not a second split copy of every line: a
+    resident observer would otherwise hold the whole registry text twice."""
     lines = tuple(lines)
     key, cached = _ROWS_MEMO
     if cached is None or key != lines:
-        cached = _parse_rows(lines)
+        cached = _parse_rows(lines, keep_fields=False)
         _ROWS_MEMO[:] = [lines, cached]
-    return {aid: (list(fields), dict(meta)) for aid, (fields, meta) in cached.items()}
+    return {aid: (lines[index].split('\t'), dict(meta)) for aid, (index, meta) in cached.items()}
 
 
 _REGISTRY_ROWS_MEMO = [None, None]
@@ -177,9 +182,10 @@ def registry_rows(jobs):
     return cached
 
 
-def _parse_rows(lines):
+def _parse_rows(lines, *, keep_fields=True):
+    """Rows by attempt id: ``(fields, meta)``, or ``(line index, meta)`` without fields."""
     result = {}
-    for line in lines:
+    for index, line in enumerate(lines):
         fields = line.split('\t')
         if len(fields) != 6:
             continue
@@ -188,7 +194,7 @@ def _parse_rows(lines):
         if aid:
             if aid in result:
                 raise DC.DispatchContractError('replacement-attempt-ambiguous', aid)
-            result[aid] = (fields, meta)
+            result[aid] = (fields if keep_fields else index, meta)
     return result
 
 
@@ -719,15 +725,39 @@ def _source_scope_matches(path, scopes):
     return False
 
 
-def _git_readonly(worktree, *args):
+def _git_readonly(worktree, *args, timeout=3):
     import artifact_context
     try:
         return subprocess.run(
             ['git', '-C', str(worktree), *args], capture_output=True,
-            env=artifact_context._readonly_git_env(), timeout=3, check=False,
+            env=artifact_context._readonly_git_env(), timeout=timeout, check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
+
+
+def commits_after(worktree, launch_head, *, timeout=3):
+    """``[(commit, subject)]`` after ``launch_head`` up to HEAD, by read-only Git; None when unobservable.
+
+    The one commit-range observation of a prior attempt: a timed-out stage's
+    replacement and a judged stage's next round (``worker_bootstrap.attempt_changes``)
+    both read it here.
+    """
+    result = _git_readonly(worktree, 'log', '--format=%H%x00%s%x1e', f'{launch_head}..HEAD',
+                           timeout=timeout)
+    if result is None or result.returncode != 0:
+        return None
+    commits = []
+    for record in result.stdout.split(b'\x1e'):
+        fields = record.strip(b'\r\n').split(b'\0')
+        if len(fields) != 2:
+            continue
+        commit, subject = fields
+        if not re.fullmatch(rb'(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})', commit):
+            continue
+        commits.append((commit.decode('ascii'),
+                        subject.decode('utf-8', 'replace').replace('\n', ' ')[:160]))
+    return commits
 
 
 def _stage_progress_block(jobs, aid, fields, meta, lines):
@@ -802,21 +832,10 @@ def _stage_progress_block(jobs, aid, fields, meta, lines):
     elif not worktree or not head:
         observations.append(f'- launch_head recorded ({launch_head}); commit range unavailable')
     else:
-        result = _git_readonly(worktree, 'log', '--format=%H%x00%s%x1e',
-                               f'{launch_head}..HEAD')
-        if result is None or result.returncode != 0:
+        commits = commits_after(worktree, launch_head)
+        if commits is None:
             observations.append(f'- commit range {launch_head}..HEAD unavailable (Git observation failed)')
         else:
-            commits = []
-            for record in result.stdout.split(b'\x1e'):
-                fields = record.strip(b'\r\n').split(b'\0')
-                if len(fields) != 2:
-                    continue
-                commit, subject = fields
-                if not re.fullmatch(rb'(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})', commit):
-                    continue
-                commits.append((commit.decode('ascii'),
-                                subject.decode('utf-8', 'replace').replace('\n', ' ')[:160]))
             observations.append(f'- commits after launch_head: {len(commits)} observed')
             for commit, subject in commits[:20]:
                 observations.append(f'  - {commit} {subject}')
@@ -1108,12 +1127,11 @@ def _check_record(record, family, source=None):
     return record
 
 
-def legacy_budget_exhausted(jobs, lines, source, *, route=None, include_family=False):
+def legacy_budget_exhausted(jobs, lines, source, *, route=None):
     """Read SD106 and SD157 consumption from the caller's jobs-lock snapshot.
 
-    Do not move this check ahead of SD106's exact existing-recovery-id replay.
-    SD157 permits its own by-source reservation to resume; SD106 calls with
-    include_family=True and must not consume even that reservation again.
+    SD157 permits its own by-source reservation to resume. The SD106 caller that
+    also counted the family reservation itself went with its writer (#1170).
     No registry, route, or index is written and no second jobs lock is taken.
     """
     rows = _rows(lines)
@@ -1164,25 +1182,17 @@ def legacy_budget_exhausted(jobs, lines, source, *, route=None, include_family=F
         legacy = (meta.get('retry_ordinal') == '1'
                   or meta.get('recovery_exhausted') == '1'
                   or (meta.get('start_permitted') == '0' and meta.get('recovery_id'))
-                  or attention is not None or bool(include_family and meta.get('automatic_retry_of')
-                                                    and not meta.get('replacement_family_id')))
+                  or attention is not None)
         family_hint = (reservation or {}).get('family_id')
-        if (family_hint and not include_family and other != aid
+        if (family_hint and other != aid
                 and _read(_record_path(jobs, family_hint)) is None):
             index_error = DC.DispatchContractError('replacement-claim-pending')
-        if family_hint and _is_capacity_record(_read(_record_path(jobs, family_hint))):
-            if include_family and other == aid:
-                return True  # SD106 must not add a second successor to a resumed source.
-            family_hint = None
         # SD157's own reservation is a replay, not a second consumption.
         # Its own SD106 exhaustion, however, is always a veto.
         # Automatic transport succession has no cumulative family budget.
-        # SD106 cancellation recovery cannot add a successor to a reserved source.
-        family_consumes = bool(family_hint) and include_family
-        if (legacy or family_consumes or index_error or other in reference_ids
+        if (legacy or index_error or other in reference_ids
                 or meta.get('automatic_retry_of') == aid):
-            candidates.append((fields, meta, bool(legacy), family_hint,
-                               family_consumes, index_error))
+            candidates.append((fields, meta, bool(legacy), index_error))
     if not candidates and not references:
         # Preserve legacy route-less first-claim callers: no consumption
         # evidence means no reason to require a historical route here.
@@ -1208,28 +1218,15 @@ def legacy_budget_exhausted(jobs, lines, source, *, route=None, include_family=F
         route = historical_route(source)
     if route is None:
         # An exact predecessor reference cannot be waved away as unrelated.
-        if references or any(meta.get('attempt_id') == aid and
-                             (legacy or family_consumes or error)
-                             for _, meta, legacy, _, family_consumes, error in candidates):
+        if references or any(meta.get('attempt_id') == aid and (legacy or error)
+                             for _, meta, legacy, error in candidates):
             raise DC.DispatchContractError('replacement-legacy-budget-link-unproven')
         return False
     logical = _logical_key(route, source)
-    family = _digest(logical)
     lineage = {r['route_id']: r for r in verified_route_lineage(route)}
-    if include_family:
-        record = _read(_record_path(jobs, family))
-        if record is not None:
-            _check_record(record, family)
-            return True
 
-    for _, prior, legacy, family_hint, family_consumes, index_error in candidates:
+    for _, prior, legacy, index_error in candidates:
         other = prior.get('attempt_id')
-        # A checked by-source index is already a durable exact family binding;
-        # no family record or original-row annotation need exist yet.
-        if family_consumes and family_hint == family:
-            if index_error:
-                raise DC.DispatchContractError('replacement-legacy-budget-link-unproven') from index_error
-            return True
         prior_id = prior.get('owner_route_id') or prior.get('route_id')
         prior_hash = prior.get('owner_route_hash') or prior.get('route_hash')
         previous = lineage.get(prior_id)
@@ -1264,9 +1261,7 @@ def legacy_budget_exhausted(jobs, lines, source, *, route=None, include_family=F
         # From here on the prior row belongs to this exact logical family.
         if index_error:
             raise DC.DispatchContractError('replacement-legacy-budget-link-unproven') from index_error
-        if family_consumes and family_hint != family:
-            raise DC.DispatchContractError('replacement-legacy-budget-link-unproven')
-        if legacy or family_consumes:
+        if legacy:
             return True
     if references:
         raise DC.DispatchContractError('replacement-legacy-budget-link-unproven')
@@ -1320,6 +1315,26 @@ def _same_runtime_end(jobs, rows, source, *, explicit=False):
     prior = rows[prior_id][1]
     return all(source.get(key, '') == prior.get(key, '')
                for key in ('failure_class', 'terminal_event', 'harness', 'model_profile'))
+
+
+def stage_completed_since(jobs, fields, meta):
+    """Whether another attempt published this stage's completion after ``meta``'s attempt began.
+
+    A worker stage only: the owner already ran it inline, or a later attempt finished it, so a
+    replacement of this dead attempt would only repeat finished work (84b68e). Anything that
+    cannot be read answers False and leaves the ordinary decision unchanged.
+    """
+    node, route_id = meta.get('route_node'), meta.get('route_id')
+    if meta.get('worker_type') == 'owner' or not node or not route_id:
+        return False
+    try:
+        marker = _read(DC.resolve_dispatch_state_root(DC.resolve_agent_home(), Path(jobs))
+                       / 'completion' / route_id / f'{node}.json')
+        return bool(marker and marker.get('route_hash') == meta.get('route_hash')
+                    and marker.get('attempt_id') not in {None, '', meta.get('attempt_id')}
+                    and _instant(marker.get('completed_at')) > _instant(fields[0]))
+    except (DC.DispatchContractError, OSError, ValueError, TypeError, AttributeError):
+        return False
 
 
 def _plain_retry_successor(rows, aid):
@@ -1426,6 +1441,35 @@ def claim(jobs: Path, aid: str, *, resume_capacity=False) -> dict:
         return record
 
 
+# Parent proofs whose completion carrier is also a bound replacement controller:
+# the Claude rewake hook (`runtime-hook`) and Codex managed completion
+# (`native-session`) pass `authority_check` to `advance`. A carrier proven only
+# by its environment (`carrier-env`, the OpenCode turn plugin) delivers notices
+# but never launches a replacement.
+REPLACEMENT_CARRIER_PROOFS = frozenset({'runtime-hook', 'native-session'})
+
+
+def _parent_carrier_replaces(metadata):
+    """Whether the row's declared parent carrier can launch its automatic replacement.
+
+    A carrier no adapter declares (an owner supervisor, a worker parent) keeps the
+    reservation, as before; only a declared parent carrier without a controller
+    is excluded.
+    """
+    carrier = metadata.get('parent_completion_delivery')
+    if not carrier:
+        return True
+    try:
+        from harness_capabilities import HARNESSES, parent_completion
+        declared = [parent_completion(name) for name in HARNESSES]
+    except (ImportError, OSError, ValueError, KeyError):
+        return True
+    for completion in declared:
+        if completion.get('carrier') == carrier:
+            return completion.get('parent_proof') in REPLACEMENT_CARRIER_PROOFS
+    return True
+
+
 def accept_terminal_delivery_duty(jobs, aid):
     """Publish an eligible automatic recovery claim before its notice is materialized.
 
@@ -1436,11 +1480,15 @@ def accept_terminal_delivery_duty(jobs, aid):
     """
     jobs = Path(jobs)
     try:
-        rows = _rows(jobs.read_text().splitlines())
-    except (OSError, DC.DispatchContractError):
+        rows = _rows(registry_text(jobs))
+    except (OSError, UnicodeError, DC.DispatchContractError):
         return None
     row = rows.get(aid)
     if row is None or not row[1].get('delivery_intent'):
+        return None
+    if not _parent_carrier_replaces(row[1]):
+        # Nothing bound to this parent would launch the reservation, and it would
+        # only defer the notice: the parent gets the death notice and its `start`.
         return None
     try:
         kind = death_kind(row[0], row[1], jobs=jobs)
@@ -2258,6 +2306,8 @@ def parent_resume_eligibility(jobs, aid, *, route_id=None, environ=None, require
         validate_claim_source(jobs, lines, record)
         _children_quiescent(rows, aid)
         if require_parent:
+            # An unreadable lineage raises the recipient wait, which arms nothing here: unknown
+            # is not the parent, and the parent's own `start` raises the same wait itself.
             from session_identity import identity
             caller = identity(environ)
             if not caller.known or not caller.session_id:
@@ -2746,7 +2796,8 @@ def _advance(jobs, aid, *, run=subprocess.run, authority_check=None, resume_capa
     kind = death_kind(fields, source, jobs=jobs)
     progress = route_authority.decide_continuation(action='replacement-progress', jobs=jobs,
         status=fields[1], metadata=source, facts={'kind': kind, 'resume_capacity': resume_capacity,
-        'bound_carrier': authority_check is not None, 'registry_rows': rows})
+        'bound_carrier': authority_check is not None, 'registry_rows': rows,
+        'completed_since': bool(kind) and stage_completed_since(jobs, fields, source)})
     if progress.state == 'advance':
         return advance(jobs, source['replacement_original_attempt_id'], run=run,
                        authority_check=authority_check, resume_capacity=resume_capacity)

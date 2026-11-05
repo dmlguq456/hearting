@@ -1,5 +1,7 @@
 # analyze-user
 
+Read only this file for owner procedure. Run only the runtime commands your Route steps and the latest receipt print; never assemble a runtime command yourself. Read another reference or `core/` only when a receipt or Route step names that section. Named task inputs and artifacts remain inputs to read; policy cross-references below are lookup locations, not additional required reading.
+
 Cross-project user-profile entrypoint. Extract reusable patterns from the user's prior figures, writing, presentations, analyses, domain work, and code, then persist them as DB `type=profile` records. The pipeline is `discover → analyze → verify → qa → output → summary`, with adversarial-tier verification (`intensity=adversarial`). This file defines routing and invocation; load the relevant reference only when its detailed procedure or template is needed.
 
 > **Output location**: DB `type=profile` records, read with `python3 <agent-home>/tools/memory/mem.py profile <stem>` or `mem profile <stem>`. The seven stems range from `01_paper_figure_style` through `07_coding_convention`. Use `_internal/` only as temporary scratch space for source indexes, QA reviews, and pipeline state; the DB remains the source of truth. The artifact-root 3-tier convention does not apply directly, but keep durable profile content separate from internal logs.
@@ -55,7 +57,7 @@ The main agent may route here when a request clearly asks to derive or update a 
 - **`--user-refine`** — pause immediately before Phase 5 only when the user explicitly requests a review point.
 - **QA** — adversarial fixed (no flag).
 
-For the complete aspect table, source mapping, argument semantics, decision defaults, and resume-state schema, read `arguments-and-decisions.md`.
+For the complete aspect table, source mapping, argument semantics, decision defaults, and resume-state schema, read `arguments-and-decisions.md` only when a receipt or Route step names it.
 
 ## Pipeline Overview (6 Phases)
 
@@ -70,15 +72,15 @@ For the complete aspect table, source mapping, argument semantics, decision defa
 | 5b pptx object extraction | Figure aspect only — export an SVG vector-object library |
 | 6 Pipeline Summary | Append the run summary to `_internal/pipeline_summary.md` |
 
-Read `pipeline-phases.md` for each phase's complete procedure, agent prompt, conversion command, QA reviewer contract, and output template.
+Only when a receipt or Route step names it, read `pipeline-phases.md` for each phase's complete procedure, agent prompt, conversion command, QA reviewer contract, and output template.
 
 ## Reference Index
 
-| File | When to load (mandatory) | Content |
+| File | Load policy | Content |
 |---|---|---|
-| `arguments-and-decisions.md` | When interpreting arguments, defaults, or a resume point | `<aspect>` table, `--source`, `--mode init\|update`, fixed adversarial QA, `--from`, `--user-refine`, decision defaults, and `pipeline_state.yaml` resume schema |
-| `pipeline-phases.md` | When running the six-phase pipeline (required) | Source discovery and conversion; aspect extraction and consensus; cross-reference validation; prior-version dialectic; multi-agent QA; output generation; pptx object extraction; pipeline summary |
-| `integration-and-usage.md` | When selecting downstream profile consumers or memory integration | Role-reference matrix, memory relationship table, invocation examples, and update-frequency recommendations |
+| `arguments-and-decisions.md` | Only when a receipt or Route step names it | `<aspect>` table, `--source`, `--mode init\|update`, fixed adversarial QA, `--from`, `--user-refine`, decision defaults, and `pipeline_state.yaml` resume schema |
+| `pipeline-phases.md` | Only when a receipt or Route step names it | Source discovery and conversion; aspect extraction and consensus; cross-reference validation; prior-version dialectic; multi-agent QA; output generation; pptx object extraction; pipeline summary |
+| `integration-and-usage.md` | Only when a receipt or Route step names it | Role-reference matrix, memory relationship table, invocation examples, and update-frequency recommendations |
 
 ## Artifact Producer Lifecycle (W7C)
 

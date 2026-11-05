@@ -36,6 +36,11 @@ if str(UTILITIES_ROOT) not in sys.path:
 import harness_manifest
 import dispatch_contract
 import model_config
+try:  # ends a detached child with the test that started it; no-op outside tests
+    from detached_lifetime import bind as end_with_test
+except ImportError:  # a partial tree without it (e.g. a fixture release): no record
+    def end_with_test(child):
+        return child
 import projector
 import retired_memory_state
 import safe_fs
@@ -684,7 +689,9 @@ def _keep_edited_opencode_bootstrap(previous: Optional[dict], scope: str):
 
     The file is Hearting's (its header says to edit the rules folder instead).
     The edit is kept byte for byte beside it, and activation continues instead
-    of stopping on a collision. Returns the destination to rewrite and one line.
+    of stopping on a collision. Returns ``{destination: digest of the kept
+    bytes}`` (the transaction rewrites it only while it still holds them) and
+    one line.
     """
     home = paths.runtime_home("opencode", scope)
     dest = home / "AGENTS.md"
@@ -692,10 +699,11 @@ def _keep_edited_opencode_bootstrap(previous: Optional[dict], scope: str):
                    if isinstance(item, dict) and item.get("dest") == str(dest)
                    and item.get("kind") == "render"), None)
     if record is None or dest.is_symlink() or not dest.is_file():
-        return None, []
+        return {}, []
     data = dest.read_bytes()
-    if hashlib.sha256(data).hexdigest() == record.get("content_sha256"):
-        return None, []
+    digest = hashlib.sha256(data).hexdigest()
+    if digest == record.get("content_sha256"):
+        return {}, []
     kept = next((path for path in sorted(home.glob("AGENTS.md.edited-*"))
                  if path.is_file() and not path.is_symlink() and path.read_bytes() == data), None)
     if kept is None:
@@ -706,8 +714,8 @@ def _keep_edited_opencode_bootstrap(previous: Optional[dict], scope: str):
             kept = home / f"AGENTS.md.edited-{stamp}-{suffix}"
             suffix += 1
         _atomic_bytes(kept, data)
-    return str(dest), [f"OpenCode AGENTS.md had edits; kept them in {kept} and rewrote the file "
-                       "(edit rules in Claude's user rule folder instead)"]
+    return {str(dest): digest}, [f"OpenCode AGENTS.md had edits; kept them in {kept} and rewrote the file "
+                                 "(edit rules in Claude's user rule folder instead)"]
 
 
 def _kernel_agents(source_root: Path) -> set[str]:
@@ -910,6 +918,7 @@ def _linked_entries(
                 source_root / "adapters/codex/skills",
                 home / "skills",
                 "skill",
+                exclude=projector.main_hidden_skills(source_root),
             )
         )
         entries.extend(_native_agent_entries(runtime, source_root, home)[0])
@@ -945,6 +954,7 @@ def _linked_entries(
                 source_root / "adapters/claude/skills",
                 home / "skills",
                 "skill",
+                exclude=projector.main_hidden_skills(source_root),
             )
         )
         entries.extend(_native_agent_entries(runtime, source_root, home)[0])
@@ -973,6 +983,8 @@ def _linked_entries(
                 source_root / "adapters/opencode/skills",
                 home / "skills",
                 "skill",
+                exclude=(projector.main_hidden_skills(source_root)
+                         | projector.main_hidden_skills(source_root, "explicit_only_skill_names")),
             )
         )
         entries.extend(_native_agent_entries(runtime, source_root, home)[0])
@@ -1596,6 +1608,7 @@ def _claude_managed_values(source: dict) -> dict:
     return {
         "statusLine": statusline,
         "autoMemoryEnabled": auto_memory_enabled,
+        "idleCompaction": False,
         "env": managed_env,
     }
 
@@ -1873,6 +1886,14 @@ def _merge_claude_settings(
     else:
         conflicts.append("statusLine")
 
+    from native_context import _native_key_record
+    idle_record = _native_key_record(previous, "claude", "idleCompaction" in data,
+                                     data.get("idleCompaction"), False, key="idleCompaction")
+    if data.get("idleCompaction") is not False:
+        data["idleCompaction"] = False
+        changed = True
+    managed_values["idleCompaction"] = False
+
     desired_auto_memory = desired_values["autoMemoryEnabled"]
     current_auto_memory = data.get("autoMemoryEnabled", missing_value)
     previous_auto_memory = previous_values.get("autoMemoryEnabled", missing_value)
@@ -1949,12 +1970,12 @@ def _merge_claude_settings(
     if changed:
         _atomic_json(config, data)
     context_previous = context_before if context_present else None
-    native_context = None
+    native_context = {"claude": {"keys": {"idleCompaction": idle_record}}}
     if context_window is not None:
         from native_context import _native_key_record
         record = _native_key_record(previous, "claude", context_present, context_before,
                                    str(context_window), extra={"env_present": env_container_present})
-        native_context = {"claude": {"keys": {f"env.{context_key}": record}}}
+        native_context["claude"]["keys"][f"env.{context_key}"] = record
     return {
         "kind": "claude-settings-merged",
         "path": str(config),
@@ -2004,6 +2025,8 @@ def _claude_settings_health(
         missing = True
     elif config["statusLine"] != desired_values["statusLine"]:
         conflicts.append("statusLine")
+    if "idleCompaction" in source and config.get("idleCompaction") is not False:
+        missing = True
     if "autoMemoryEnabled" not in config:
         missing = True
     elif config["autoMemoryEnabled"] != desired_values["autoMemoryEnabled"]:
@@ -3323,12 +3346,13 @@ def _apply_transaction(
     protected_paths: Sequence[Path] = (),
     commit_callback=None,
     transaction_snapshot: Optional[dict] = None,
-    rewrite_owned: Sequence[str] = (),
+    rewrite_owned: Optional[Dict[str, str]] = None,
 ) -> List[dict]:
     state_dir = paths.harness_state_dir(runtime, scope)
     tx_root = state_dir / "transactions" / uuid.uuid4().hex
     backup_root = tx_root / "backup"
     owned, user_changed = _trusted_owned(runtime, previous, desired, scope)
+    rewrite_owned = dict(rewrite_owned or {})
     for value in rewrite_owned:  # an edited Hearting file whose edit is already kept aside
         owned.add(value)
         user_changed.pop(value, None)
@@ -3413,6 +3437,12 @@ def _apply_transaction(
             if record["state"] == "moved":
                 Path(record["backup"]).parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(dest), record["backup"])
+                if key in rewrite_owned and _bytes_sha256(Path(record["backup"])) != rewrite_owned[key]:
+                    # Edited again after its earlier edit was kept aside: the backup
+                    # is discarded on commit, so stop and let rollback put it back.
+                    raise ActivationError(
+                        f"concurrent-successor: {dest} changed while its edit was being kept; "
+                        "rerun to keep the newer edit too")
 
         _write_journal(journal_path, runtime, "applying", snapshots)
 
@@ -4058,14 +4088,14 @@ def activate(
     agent_report_lines.extend(dict.fromkeys(item["detail"] for item in desired
                                             if item.get("guard") and item.get("detail")))
     agent_report_lines.extend(_edited_render_lines(runtime, previous, desired))
-    rewrite_owned: List[str] = []
+    rewrite_owned: Dict[str, str] = {}
     kept_lines: List[str] = []
     skipped_rules: List[str] = []
     if runtime == "opencode":
         if user_rules.carry_enabled():
             skipped_rules = user_rules.collect(paths.runtime_home("claude"))[1]
         edited, kept_lines = _keep_edited_opencode_bootstrap(previous, scope)
-        rewrite_owned.extend([edited] if edited else [])
+        rewrite_owned.update(edited)
     digest = _projection_digest(desired)
     packaged_checksum = _bundle_checksum(active_root) if mode == "packaged" else None
     if mode == "packaged" and packaged_checksum is None:
@@ -4465,12 +4495,12 @@ def reconnect_peer_obligations(active_root: str | Path) -> bool:
     env = os.environ.copy()
     env["AGENT_HOME"] = str(root)
     try:
-        subprocess.Popen(
+        end_with_test(subprocess.Popen(
             [sys.executable, str(utility), "__ensure-obligations",
              "--lifecycle-root", str(root)], env=env,
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             close_fds=True, start_new_session=True,
-        )
+        ))
         return True
     except (OSError, subprocess.SubprocessError):
         return False
@@ -4483,10 +4513,10 @@ def reconnect_resource_observers(active_root: str | Path) -> bool:
     if not utility.is_file():
         return False
     try:
-        subprocess.Popen([sys.executable, str(utility)],
+        end_with_test(subprocess.Popen([sys.executable, str(utility)],
             env={**os.environ, "AGENT_HOME": str(root), "PYTHONDONTWRITEBYTECODE": "1"},
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            close_fds=True, start_new_session=True)
+            close_fds=True, start_new_session=True))
         return True
     except (OSError, subprocess.SubprocessError):
         return False
@@ -4562,6 +4592,17 @@ def _unmerge_claude_settings(
             data.pop("env")
     claude_native = native_context.get("claude", {}) if isinstance(native_context, dict) else {}
     native_keys = claude_native.get("keys", {}) if isinstance(claude_native, dict) else {}
+    from native_context import _native_restore_action
+    idle_record = native_keys.get("idleCompaction") if isinstance(native_keys, dict) else None
+    idle_action, idle_baseline = _native_restore_action(
+        idle_record, "idleCompaction" in data, data.get("idleCompaction"),
+        adapter="claude", key="idleCompaction")
+    if idle_action == "restore":
+        data["idleCompaction"] = idle_baseline
+        changed = True
+    elif idle_action == "delete":
+        data.pop("idleCompaction", None)
+        changed = True
     window_record = native_keys.get("env.CLAUDE_CODE_AUTO_COMPACT_WINDOW") if isinstance(native_keys, dict) else None
     current_env = data.get("env")
     if isinstance(current_env, dict):

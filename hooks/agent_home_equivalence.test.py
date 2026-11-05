@@ -77,6 +77,18 @@ class AgentHomeEquivalenceTest(unittest.TestCase):
         self.assertEqual(shell, python)
         self.assertEqual(shell, str(self.default))
 
+    def test_xdg_data_home_install_wins_over_the_home_default_in_both(self) -> None:
+        # GA-A5-015: with a separate XDG install and a HOME default both valid, the shell
+        # chain picked the XDG one and Python the HOME one; both now read XDG_DATA_HOME.
+        xdg = self.home / "xdg-data"
+        _mark(xdg / "hearting" / "current")
+        _mark(self.default)
+        shell, python = self._resolve_both({"XDG_DATA_HOME": str(xdg)})
+        self.assertEqual(shell, python)
+        self.assertEqual(shell, str(xdg / "hearting" / "current"))
+        shell, python = self._resolve_both({"XDG_DATA_HOME": ""})   # empty means unset, as in sh
+        self.assertEqual((shell, python), (str(self.default), str(self.default)))
+
     def test_claude_home_used_when_agent_home_absent(self) -> None:
         target = self.home / "claude-home"
         _mark(target)

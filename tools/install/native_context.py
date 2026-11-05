@@ -27,15 +27,15 @@ _HEADER = re.compile(r"[ \t]*\[")
 
 
 def _native_key_record(previous, adapter: str, current_present: bool, current,
-                       desired, *, extra=None) -> dict:
+                       desired, *, extra=None, key: str | None = None) -> dict:
     """Carry a valid activation baseline only while the projected value still matches."""
     managed = previous.get("managed_config", {}) if isinstance(previous, dict) else {}
     native = managed.get("native_context", {}) if isinstance(managed, dict) else {}
     runtime_record = native.get(adapter, {}) if isinstance(native, dict) else {}
     keys = runtime_record.get("keys", {}) if isinstance(runtime_record, dict) else {}
-    old = keys.get(_CONTEXT_KEY if adapter == "codex" else
-                   "env.CLAUDE_CODE_AUTO_COMPACT_WINDOW") if isinstance(keys, dict) else None
-    value_type = int if adapter == "codex" else str
+    key = key or (_CONTEXT_KEY if adapter == "codex" else "env.CLAUDE_CODE_AUTO_COMPACT_WINDOW")
+    old = keys.get(key) if isinstance(keys, dict) else None
+    value_type = bool if key == "idleCompaction" else int if adapter == "codex" else str
     valid_old = (isinstance(old, dict) and isinstance(old.get("baseline"), dict)
                  and type(old["baseline"].get("present")) is bool
                  and (not old["baseline"]["present"] or "value" in old["baseline"])
@@ -60,9 +60,9 @@ def _native_key_record(previous, adapter: str, current_present: bool, current,
     return record
 
 
-def _native_restore_action(record, current_present: bool, current, *, adapter: str):
+def _native_restore_action(record, current_present: bool, current, *, adapter: str, key: str | None = None):
     """Return (action, baseline value) only for a well-formed exact-match receipt."""
-    value_type = int if adapter == "codex" else str
+    value_type = bool if key == "idleCompaction" else int if adapter == "codex" else str
     if not isinstance(record, dict) or type(record.get("projected")) is not value_type:
         return "keep", None
     if adapter == "codex" and record["projected"] < 1:

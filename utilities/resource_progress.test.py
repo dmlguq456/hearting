@@ -13,6 +13,7 @@ from unittest import mock
 
 import resource_progress as progress
 import resource_metric_sources as metric_sources
+from split_module_fixture import patch_split
 
 
 def _cairn_problems(record_path):
@@ -79,6 +80,38 @@ def _legacy_epoch_run(base, name_pad=100):
 
 
 class ResourceProgressTest(unittest.TestCase):
+    @unittest.skipUnless(hasattr(os, 'O_PATH'), 'requires directory descriptors')
+    def test_passive_public_reads_reuse_safe_directory_and_close_it(self):
+        import resource_run_registry as registry
+        root = self.root / 'public-artifacts'
+        directory = root / 'resource-runs'
+        directory.mkdir(parents=True)
+        path = directory / 'run-a.json'
+        path.write_text(json.dumps({'run_id': 'run-a', 'value': 1}))
+        cache = registry.ResourceReadCache()
+        with registry.passive_read_scope(cache), \
+                mock.patch.object(progress, '_json', wraps=progress._json) as parse:
+            self.assertEqual(progress.read_public_run_record(root, 'run-a')['value'], 1)
+            self.assertEqual(progress.read_public_run_record(root, 'run-a')['value'], 1)
+            self.assertEqual(parse.call_count, 1)
+            held = registry.passive_handle(('public-directory', str(root)), lambda: None)
+            fd = held.fd
+            replacement = directory / 'replacement.json'
+            replacement.write_text(json.dumps({'run_id': 'run-a', 'value': 2}))
+            os.replace(replacement, path)
+            self.assertEqual(progress.read_public_run_record(root, 'run-a')['value'], 2)
+            self.assertEqual(parse.call_count, 2)
+            foreign = self.root / 'foreign-public'
+            foreign.mkdir()
+            (foreign / 'run-b.json').write_text(json.dumps({'run_id': 'run-b', 'value': 'foreign'}))
+            directory.rename(root / 'old-resource-runs')
+            directory.symlink_to(foreign, target_is_directory=True)
+            self.assertIsNone(progress.read_public_run_record(root, 'run-b'))
+        with self.assertRaises(OSError):
+            os.fstat(fd)
+        with registry.passive_read_scope(cache):
+            self.assertIsNone(progress.read_public_run_record(root, 'run-a'))
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -282,7 +315,7 @@ class ResourceProgressTest(unittest.TestCase):
 class ResourceProgressProductionTest(unittest.TestCase):
     """Bridge arms[].production: local unwrap vs remote-origin guard.
 
-    Mirrors project-c.canonical-resource-bridge/v1 (cnn T/B arms): child
+    Mirrors project-c.canonical-resource-bridge/v1 (gpu T/B arms): child
     identity/directory/config live inside arm["production"] with an explicit
     host. Remote-origin arms must never be resolved in local /proc and their
     metadata alone never proves live/done.
@@ -330,7 +363,7 @@ class ResourceProgressProductionTest(unittest.TestCase):
         return {"capacity": "T", "state": "training-updates",
                 "run_id": "local-20261006-t",
                 "production": {
-                    "schema": "project-c.cnn-production/v1",
+                    "schema": "project-c.gpu-production/v1",
                     "capacity": "T", "gpu_index": 0,
                     "directory": str(self.directory),
                     "config_sha256": self.digest, "state": "training-updates",
@@ -340,23 +373,23 @@ class ResourceProgressProductionTest(unittest.TestCase):
                                          "cmdline_sha256": "b" * 64}}}
 
     def remote_arm(self, pid=3945450, start=565464077, capacity="T", gpu=0,
-                   run="t_baseline_20261006", receipt_host="cnn"):
+                   run="t_baseline_20261006", receipt_host="gpu"):
         return {"capacity": capacity, "state": "training-updates",
-                "run_id": "cnn-20261006-015922-tf-canonical-%s-scratch400k-a1"
+                "run_id": "gpu-20261006-015922-tf-canonical-%s-scratch400k-a1"
                           % capacity.lower(),
                 "compute_host_receipt": {
                     "host": receipt_host, "gpus": str(gpu),
-                    "run_id": "cnn-20261006-015922-tf-canonical-%s-scratch400k-a1"
+                    "run_id": "gpu-20261006-015922-tf-canonical-%s-scratch400k-a1"
                               % capacity.lower()},
                 "production": {
-                    "schema": "project-c.cnn-production/v1", "host": "cnn",
+                    "schema": "project-c.gpu-production/v1", "host": "gpu",
                     "capacity": capacity, "gpu_index": gpu,
                     "directory": "/home/example/Project_Zoo/Project-C_artifacts"
-                                 "/cnn_canonical_20261006/recovery-a1/%s/runs/%s"
+                                 "/gpu_canonical_20261006/recovery-a1/%s/runs/%s"
                                  % (capacity.lower(), run),
                     "config_sha256": "9" * 64, "state": "training-updates",
                     "run_name": run,
-                    "compute_run_id": "cnn-20261006-015922-tf-canonical-%s-scratch400k-a1"
+                    "compute_run_id": "gpu-20261006-015922-tf-canonical-%s-scratch400k-a1"
                                       % capacity.lower(),
                     "wrapper_identity": {"pid": 3945423, "starttime": 565463952,
                                          "cmdline_sha256": "c" * 64},
@@ -384,7 +417,7 @@ class ResourceProgressProductionTest(unittest.TestCase):
         self.assertNotIn(3945423, self.lookups)
         # Receipt-only host marks remote origin too.
         arm = self.local_nested()
-        arm["compute_host_receipt"] = {"host": "cnn"}
+        arm["compute_host_receipt"] = {"host": "gpu"}
         arm["production"] = {**arm["production"],
                              "process_identity": {"pid": 3945450, "starttime": 565464077,
                                                   "cmdline_sha256": "d" * 64}}
@@ -419,7 +452,7 @@ class ResourceProgressProductionTest(unittest.TestCase):
                "directory": str(self.directory), "config_sha256": self.digest,
                "process_identity": {"pid": 42, "starttime": 11,
                                     "cmdline_sha256": "b" * 64},
-               "compute_host_receipt": {"host": "cnn", "gpus": "0"}}
+               "compute_host_receipt": {"host": "gpu", "gpus": "0"}}
         self.assertIsNone(self.collect({"arms": [arm]}))
         self.assertEqual(self.lookups, [4])
         self.assertNotIn(42, self.lookups)
@@ -432,7 +465,7 @@ class ResourceProgressProductionTest(unittest.TestCase):
 class RemoteCandidatesTest(unittest.TestCase):
     """Display-only remote arms: multi-arm join input, never liveness proof.
 
-    Mirrors the cnn T/B bridge: producer identity/directory/config live in
+    Mirrors the gpu T/B bridge: producer identity/directory/config live in
     arm["production"] with an explicit host, progress/config files stay
     hash-checked, and no local /proc lookup can occur (no reader exists).
     """
@@ -454,7 +487,7 @@ class RemoteCandidatesTest(unittest.TestCase):
         self.run = {"pid": 4, "starttime": "10", "command_hash": "a" * 64,
                     "process_group": 4, "cwd": str(self.repo)}
 
-    def arm(self, capacity="T", pid=3945450, start=565464077, host="cnn",
+    def arm(self, capacity="T", pid=3945450, start=565464077, host="gpu",
             run="t_baseline_20261006", gpu=0, attempt=67117, successful=67096,
             skipped=21, loss=0.00985, set_config=True):
         directory = self.root / ("runs-%s" % capacity.lower()) / run
@@ -465,14 +498,14 @@ class RemoteCandidatesTest(unittest.TestCase):
         os.utime(directory / "progress.json", (self.now - 600, self.now - 600))
         config_sha = self.digest if set_config else "0" * 64
         return {"capacity": capacity, "state": "training-updates",
-                "run_id": "cnn-20261006-%s" % capacity.lower(),
+                "run_id": "gpu-20261006-%s" % capacity.lower(),
                 "compute_host_receipt": {"host": host},
                 "production": {
-                    "schema": "project-c.cnn-production/v1", "host": host,
+                    "schema": "project-c.gpu-production/v1", "host": host,
                     "capacity": capacity, "gpu_index": gpu,
                     "directory": str(directory), "config_sha256": config_sha,
                     "state": "training-updates", "run_name": run,
-                    "compute_run_id": "cnn-20261006-%s" % capacity.lower(),
+                    "compute_run_id": "gpu-20261006-%s" % capacity.lower(),
                     "command": ["/bin/project-c-train", "--config", str(self.config)],
                     "process_identity": {"pid": pid, "starttime": start,
                                          "cmdline_sha256": "d" * 64}}}
@@ -495,7 +528,7 @@ class RemoteCandidatesTest(unittest.TestCase):
         self.assertEqual(by_cap["T"]["loss_kind"], "last-batch")
         for item in found:
             self.assertTrue(item["remote"])
-            self.assertEqual(item["host"], "cnn")
+            self.assertEqual(item["host"], "gpu")
             self.assertEqual(item["config_ref"], "config:scratch_t.json")
             self.assertIsNotNone(item["production_origin"])
 
@@ -521,10 +554,48 @@ class RemoteCandidatesTest(unittest.TestCase):
                           run="b_baseline_20261006", gpu=1)
         found = self.collect_remote({"arms": [first, second]})
         self.assertEqual([(item["host"], item["pid"]) for item in found],
-                         [("cnn", 42), ("mgpu-a1", 42)])
+                         [("gpu", 42), ("mgpu-a1", 42)])
 
 
 class DeclaredResourceProgressTest(unittest.TestCase):
+    def test_passive_parents_are_shared_but_leaf_and_closing_checks_stay_fresh(self):
+        import resource_run_registry as registry
+        self.assertTrue(self.write())
+        second = self.path.with_name('second.progress.json')
+        second.write_bytes(self.path.read_bytes())
+        original = Path.lstat
+        parents = []
+        def observe(path, *args, **kwargs):
+            if path == self.path.parent:
+                parents.append(path)
+            return original(path, *args, **kwargs)
+        with mock.patch.object(Path, 'lstat', observe):
+            with registry.passive_read_scope(registry.ResourceReadCache()):
+                first, _ = progress._read(self.path, Path(self.path.anchor))
+                other, _ = progress._read(second, Path(second.anchor))
+                self.assertEqual(first, other)
+                # One initial observation plus both independent closing checks.
+                self.assertEqual(len(parents), 3)
+                second.write_text('changed')
+                self.assertEqual(progress._read(second, Path(second.anchor))[0], b'changed')
+            with registry.passive_read_scope(registry.ResourceReadCache()):
+                self.assertEqual(progress._read(second, Path(second.anchor))[0], b'changed')
+        self.assertEqual(len(parents), 6)
+
+    def test_passive_parent_replacement_is_rejected_and_next_pass_reobserves(self):
+        import resource_run_registry as registry
+        self.assertTrue(self.write())
+        parent = self.path.parent
+        with registry.passive_read_scope(registry.ResourceReadCache()):
+            progress._read(self.path, Path(self.path.anchor))
+            parent.rename(parent.with_name('previous'))
+            parent.mkdir()
+            self.path.write_text('new generation')
+            with self.assertRaisesRegex(ValueError, 'progress-path-changed'):
+                progress._read(self.path, Path(self.path.anchor))
+        with registry.passive_read_scope(registry.ResourceReadCache()):
+            self.assertEqual(progress._read(self.path, Path(self.path.anchor))[0], b'new generation')
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -977,6 +1048,7 @@ class ExperimentObservationTest(unittest.TestCase):
             self.assertEqual(public["rows"][0]["admission"]["denied_samples"], 2)
             self.assertIsNone(public["output_dir"])
 
+    @mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"})   # Korean notice words
     def test_independent_raw_counter_binding_persists_without_canonical_progress(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -1255,7 +1327,7 @@ class ExperimentObservationTest(unittest.TestCase):
                              {f"arm-{index:02d}" for index in range(13)})
             self.assertEqual(len(record["metrics"]), 13)
 
-    def test_whamr_nine_epoch_json_runs_identify_five_eta_over_plan(self):
+    def test_dataset_nine_epoch_json_runs_identify_five_eta_over_plan(self):
         outcomes = []
         for index in range(9):
             with tempfile.TemporaryDirectory() as tmp:
@@ -1604,7 +1676,7 @@ class ExperimentObservationTest(unittest.TestCase):
         import dispatch_seat_handover as handover
         import session_tidy as tidy
         from peer_obligations import _ordinary_notice_target
-        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(tidy, "state_root", return_value=Path(temporary)):
+        with tempfile.TemporaryDirectory() as temporary, patch_split(tidy, "state_root", return_value=Path(temporary)):
             identity = {"jobs": str(Path(temporary) / "jobs.log"), "storage_recipient": "sid-codex",
                         "lineage": {"kind": "provenance", "harness": "codex", "session_id": "sid-codex"}}
             self.assertEqual(handover.session_successor("sid-codex"), ("", ""))
@@ -1620,6 +1692,44 @@ class ExperimentObservationTest(unittest.TestCase):
                              ("claude", "sid-claude-2", "sid-codex"))
             with mock.patch.object(handover, "_readable_lineage_signature", side_effect=OSError("ledger")):
                 self.assertIsNone(_ordinary_notice_target(identity, "codex-native-queue"))
+    def test_notice_text_survives_a_missing_catalog(self):
+        run = {"run_id": "r1", "status": "succeeded", "exit_code": 0}
+        observation = {"summary": {"metric": "loss", "trend": "개선"}, "elapsed_seconds": 60}
+        with mock.patch("importlib.util.spec_from_file_location", side_effect=FileNotFoundError("gone")):
+            text = "; ".join(progress._notice_texts(run, "final", observation, None, []))
+        self.assertIn("status=succeeded; exit=0; latest=no metrics; best=no metrics; trend=improving", text)
+        self.assertIn("actual=1m; plan=unknown duration", text)
+
+    def test_notice_words_follow_the_declared_language(self):
+        run = {"run_id": "r1", "status": "succeeded", "exit_code": 0}
+        observation = {"summary": {"metric": "loss", "latest": {"value": 0.5, "epoch": 3},
+                                   "best": {"value": 0.4, "epoch": 2}, "trend": "악화",
+                                   "baseline_delta": None},
+                       "elapsed_seconds": 3720, "planned_seconds": None,
+                       "predicted_total_seconds": None}
+        texts = {}
+        for language in ("English", "Korean"):
+            with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": language}):
+                texts[language] = ("; ".join(progress._notice_texts(run, "final", observation, None, [])),
+                                   "; ".join(progress._notice_texts(run, "checkpoint", observation,
+                                                                    "/r/record.json", [{"format": "jsonl"}])))
+        final, checkpoint = texts["English"]
+        self.assertIn("public run record=no record path", final)
+        self.assertIn("latest=loss=0.5@3; best=loss=0.4@2; trend=worsening", final)
+        self.assertIn("actual=1h02m; planned=unknown", final)
+        self.assertIn("latest=loss=0.5@3; best=loss=0.4@2; baseline delta=no baseline; trend=worsening",
+                      checkpoint)
+        self.assertIn("estimated total time unknown; planned unknown; elapsed 1h02m", checkpoint)
+        self.assertIn("source jsonl=no path", checkpoint)
+        final, checkpoint = texts["Korean"]
+        self.assertIn("public run record=기록 경로 없음", final)
+        self.assertIn("마지막=loss=0.5@3; 최고=loss=0.4@2; 추세=악화", final)
+        self.assertIn("실제=1h02m; 계획=미상", final)
+        self.assertIn("최근=loss=0.5@3; 최고=loss=0.4@2; 기준 delta=기준 없음; 추세=악화", checkpoint)
+        self.assertIn("ETA 총 미상; 계획 미상; 경과 1h02m", checkpoint)
+        self.assertIn("source jsonl=경로 없음", checkpoint)
+
+    @mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"})   # Korean notice words
     def test_terminal_observation_keeps_durable_live_checkpoint_and_adds_one_final_notice(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2085,6 +2195,79 @@ class ExperimentObservationTest(unittest.TestCase):
         self.assertIsNotNone(progress.write_public_run_record(artifact, "case-e", later))
         kept = progress.read_public_run_record(artifact, "case-e")
         self.assertEqual((kept["output_dir_state"], kept["output_dir"]), ("present", str(output)))
+
+    def test_output_dir_reason_tells_remote_unmapped_from_not_declared(self):
+        base = Path(self.tmp.name) / "d2-remote"
+        project = base / "nas" / "project"
+        (project / "configs").mkdir(parents=True)
+        output = project / "out"
+        output.mkdir()
+        mapping = {"/host-ns": str(base / "nas")}
+        unmounted = {"/host-ns": str(base / "not-mounted-here")}
+
+        def config(name, value):
+            path = project / "configs" / name
+            path.write_text(json.dumps({"output_dir": value}))
+            return ["python", "train.py", "--config", "configs/" + name]
+
+        def observe(name, **run):
+            artifact = base / name
+            run = {"run_id": name, "artifact_root": str(artifact), "node": "full-run",
+                   "route_id": "r", "started_at": 0, **run}
+            with mock.patch.object(progress, "_observation_state_path",
+                                   return_value=base / (name + ".state")):
+                progress.observe_experiment(run, base / "registry.json", 60,
+                    row_key="run", started_at=0, notify_events=False)
+            record = progress.read_public_run_record(artifact, name)
+            return record["output_dir_state"], record["output_dir_reason"], record["output_dir"]
+
+        remote = {"cwd": "/host-ns/project", "run_root": "/host-ns/runs"}
+        (project / "other").mkdir()
+        (project / "configs" / "both.json").write_text(
+            json.dumps({"output_dir": "out", "save_dir": "other"}))
+        conflict = ["python", "train.py", "--config", "configs/both.json"]
+        cases = {
+            # nothing declared and no exact config/request evidence
+            "plain": ({}, ("unknown", "not-declared", None)),
+            # compute-hosts dropped a declared folder it could not map
+            "declared-unmapped": ({"output_dir_unmapped": True},
+                                  ("unknown", "remote-unmapped", None)),
+            # exact config evidence fills the folder through the host mapping
+            "config-mapped": ({**remote, "path_namespace": mapping,
+                               "command": config("mapped.json", "/host-ns/project/out")},
+                              ("present", None, str(output))),
+            # config names a host-only path outside the mapping and the shared run root
+            "config-host-only": ({**remote, "path_namespace": mapping,
+                                  "command": config("host.json", "/scratch/private/out")},
+                                 ("unknown", "remote-unmapped", None)),
+            # the namespace source is not mounted where this observer runs
+            "source-not-mounted": ({**remote, "path_namespace": unmounted,
+                                    "command": config("mapped.json", "/host-ns/project/out")},
+                                   ("unknown", "remote-unmapped", None)),
+            # config evidence names a folder that does not exist yet
+            "config-missing": ({"cwd": str(project),
+                                "command": config("missing.json", "not-yet")},
+                               ("unknown", "declared-unresolved", None)),
+            # two keys naming different folders are no single binding
+            "config-conflict": ({"cwd": str(project), "command": conflict},
+                                ("unknown", "not-declared", None)),
+        }
+        for name, (run, expected) in cases.items():
+            self.assertEqual(observe(name, **run), expected, name)
+            if expected[2] is None:
+                self.assertIsNone(progress.discover_output_root(run), name)
+        # A node that declares no training output stays `none` even when compute-hosts
+        # had to drop a declared folder; the unmapped reason never changes that state.
+        route = base / "route.json"
+        route.write_text(json.dumps({"nodes": [
+            {"id": "eval-run", "kind": "resource-runner", "outputs": ["eval-report"]},
+            {"id": "full-run", "kind": "resource-runner", "outputs": ["logs/**"]}]}))
+        self.assertEqual(observe("eval-unmapped", node="eval-run", route=str(route),
+                                 output_dir_unmapped=True)[:2],
+                         ("none", "node-declares-no-training-output"))
+        self.assertEqual(observe("train-unmapped", node="full-run", route=str(route),
+                                 output_dir_unmapped=True)[:2],
+                         ("unknown", "remote-unmapped"))
 
     def test_compacted_record_feeds_resource_wait_note_and_runner_observation(self):
         import dispatch_resource_wait

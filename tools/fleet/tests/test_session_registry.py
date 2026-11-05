@@ -41,6 +41,15 @@ def _load_hyphenated(name, relative_path):
 
 
 class _RegistryDirMixin:
+    def test_shared_directory_cache_preserves_directory_declared_harness(self):
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, '123.json').write_text(json.dumps({'pid': 123, 'sessionId': 'same'}))
+            cache = session_registry.PassiveReadCache()
+            with mock.patch.object(session_registry, '_dir_for', return_value=directory):
+                self.assertEqual(session_registry.read('claude', 123, validation_cache=cache)['harness'], 'claude')
+                self.assertEqual(session_registry.read('codex', 123, validation_cache=cache)['harness'], 'codex')
+                self.assertEqual(session_registry.read('claude', 123, validation_cache=cache)['harness'], 'claude')
+
     """Points FLEET_SESSION_REGISTRY_DIR at a private tmpdir for the test's duration."""
 
     def setUp(self):
@@ -75,6 +84,26 @@ class ConstantsTest(unittest.TestCase):
 
 
 class ReadWriteRoundTripTest(_RegistryDirMixin, unittest.TestCase):
+    def test_passive_parse_reuse_preserves_fresh_default_and_file_safety(self):
+        session_registry.write('codex', 41, dict(sessionId='old', cwd='/repo'))
+        path = Path(session_registry.registry_path('codex', 41))
+        cache = session_registry.PassiveReadCache()
+        with mock.patch.object(session_registry.json, 'load', wraps=json.load) as parse:
+            first = session_registry.read('codex', 41, validation_cache=cache)
+            first['cwd'] = '/caller-mutation'
+            again = session_registry.read('codex', 41, validation_cache=cache)
+            self.assertEqual(again['cwd'], '/repo')
+            self.assertEqual(parse.call_count, 1)
+            self.assertEqual(session_registry.read('codex', 41), again)
+            self.assertEqual(parse.call_count, 2)
+            replacement = path.with_suffix('.new')
+            replacement.write_text(json.dumps(dict(sessionId='new', cwd='/repo')))
+            replacement.replace(path)
+            self.assertEqual(session_registry.read('codex', 41, validation_cache=cache)['sessionId'], 'new')
+            path.rename(replacement)
+            path.symlink_to(replacement)
+            self.assertIsNone(session_registry.read('codex', 41, validation_cache=cache))
+
     def test_round_trip(self):
         session_registry.write("codex", 4242, {"cwd": "/repo", "status": "busy"})
         record = session_registry.read("codex", 4242)
@@ -521,12 +550,12 @@ class ManagedGatewayRegistryTest(unittest.TestCase):
 class ResumeAliasTest(unittest.TestCase):
     """Prior session ids a resume/fork left behind, derived from the live process's own
     argv. Measured 2026-09-09: pid 2979449 ran
-    `… --session-id 6044eb9f-… --fork-session --resume …/2b091520-….jsonl`, and the peer
+    `… --session-id 10000087-… --fork-session --resume …/10000072-….jsonl`, and the peer
     ledger held that conversation's receipts under BOTH ids — the older one carrying the
     sender identity the newer one lacked. Nothing on disk records the equivalence."""
 
-    _NEW = "6044eb9f-7983-4c41-9b86-0bb2b70638fa"
-    _OLD = "2b091520-0afd-4334-a04f-4511d4debf6e"
+    _NEW = "10000087-0000-4000-8000-000000000096"
+    _OLD = "10000072-0000-4000-8000-000000000080"
 
     def test_resume_path_stem_becomes_an_alias(self):
         argv = ["claude", "--session-id", self._NEW, "--fork-session",

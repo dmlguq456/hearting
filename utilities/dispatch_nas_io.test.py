@@ -24,6 +24,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).parent))
 import dispatch_contract as DC
 import review_source_subject as SUBJECT
+from split_module_fixture import patch_split
 
 CURRENT = ("attempt_schema_version=2,dispatch_depth=2,transport=headless,"
            "execution_surface=registered-headless,registered_worker=1,"
@@ -196,7 +197,7 @@ class NasDispatchIOTest(unittest.TestCase):
                     parent, jobs, binding = case._fenced_spawn(td, suffix)
                     self.children.append(parent)
                     holder = None
-                    namespace = mock.patch.object(DC, "process_namespace_identity", wraps=DC.process_namespace_identity)
+                    namespace = patch_split(DC, "process_namespace_identity", wraps=DC.process_namespace_identity)
                     if change == "lease-return":
                         attempt = f"att-parent-{suffix}"
                         lease = DC.supervisor_lease_path(jobs, attempt)
@@ -214,7 +215,7 @@ class NasDispatchIOTest(unittest.TestCase):
                                  "pid_scope=namespace-local,pid_observer_ns=pid:[outer],pid_ns=pid:[outer]")
                         lines[0] = case.owner_row(attempt, parent.pid, DC.process_start_ticks(parent.pid), extra=extra)
                         jobs.write_text("\n".join(lines) + "\n")
-                        namespace = mock.patch.object(DC, "process_namespace_identity", return_value="pid:[inner]")
+                        namespace = patch_split(DC, "process_namespace_identity", return_value="pid:[inner]")
                     entered, holding, release = threading.Event(), threading.Event(), threading.Event()
                     self.release_events.append(release)
                     rounds, invalid = [], []
@@ -243,7 +244,7 @@ class NasDispatchIOTest(unittest.TestCase):
                             yield lines
                     marker = Path(td) / "must-not-run"
                     try:
-                        with namespace, mock.patch.object(DC, "_proc_observation", side_effect=observe):
+                        with namespace, patch_split(DC, "_proc_observation", side_effect=observe):
                             if holder is not None:
                                 binding = DC.resolve_live_parent_attempt(
                                     jobs, parent_slug="owner", repo="/repo", worktree="/wt",
@@ -641,6 +642,94 @@ class NasDispatchIOTest(unittest.TestCase):
         self.assertFalse(payload.exists())
         self.assertIsNotNone(self.children[-1].poll())
 
+    SLICE_ROUTE = ",route_id=rt-nas-slices,route_hash=sha256:" + "c" * 64
+
+    def slice_extra(self, chain, index, *, mode="parallel", node="execute", extra=""):
+        return (self.SLICE_ROUTE + f",route_node={node},parent_attempt_id=att-owner,session_chain_id={chain}"
+                f",subsession_mode={mode},subsession_index={index},subsession_count=2" + extra)
+
+    def start_slice_while(self, attempt, other, change):
+        """Launch `attempt` (preclaim declares the plan-check scope) and run `change` on `other`'s row
+        between the two registry commits. Returns the payload marker path."""
+        def permission(_lines):
+            self.assert_global_locks_free()
+        permission._dispatch_registry_scoped = True
+        permission._dispatch_registry_nodes = frozenset({"plan-check"})
+        original = DC._launch_registry_transaction
+        rounds = []
+        @contextmanager
+        def mutate(jobs):
+            with original(jobs) as lines:
+                rounds.append(True)
+                if len(rounds) == 2:
+                    index, fields, _ = DC._launch_row(lines, other)
+                    change(fields)
+                    lines[index] = "\t".join(fields)
+                    DC._atomic_registry_replace(jobs, lines)
+                yield lines
+        payload = self.base / f"payload-{attempt}"
+        with mock.patch.object(DC, "_launch_registry_transaction", side_effect=mutate):
+            proc, _ = DC.spawn_claimed_attempt(self.jobs, attempt, parent_binding=None,
+                                              preclaim=permission, spawn=self.spawn(payload))
+            proc.wait(timeout=5)
+        return payload
+
+    def test_parallel_sibling_start_does_not_change_a_slice_launch(self):
+        self.register("att-owner", extra=",worker_type=owner,dispatch_depth=1")
+        self.register("att-slice-1", extra=self.slice_extra("ssc-execute-a", 1))
+        self.register("att-slice-2", extra=self.slice_extra("ssc-execute-a", 2))
+
+        def sibling_starts(fields):
+            fields[1] = "running"
+            fields[5] += ",launch_claimed=1,launch_started=1,pid=4242,pid_start=77"
+        payload = self.start_slice_while("att-slice-1", "att-slice-2", sibling_starts)
+        self.assertTrue(payload.exists())
+        self.assertIn("pid=4242", self.jobs.read_text())
+        # The sibling is not an input of this launch, so the launch pins only its own row.
+        lines = self.jobs.read_text().splitlines()
+        _, fields, _ = DC._launch_row(lines, "att-slice-1")
+        pinned = DC._launch_dependencies(lines, fields, reads={
+            "nodes": [], "attempts": set(), "groups": set(), "exact": False})
+        self.assertNotIn("att-slice-2", [dict(row[5])["attempt_id"] for row in pinned])
+
+    def test_slice_launch_still_refuses_what_it_consumed(self):
+        def settle(fields):
+            fields[1] = "done"
+        cases = {
+            "other chain, same node": (
+                {"att-other": self.slice_extra("ssc-execute-b", 1)}, "att-other", settle),
+            "serial chain sibling": (
+                {"att-serial": self.slice_extra("ssc-execute-a", 2, mode="serial")}, "att-serial", settle),
+            "own retry row": (
+                {"att-retry": self.slice_extra("ssc-execute-a", 2, extra=",automatic_retry_of=att-slice-1")},
+                "att-retry", settle),
+            "parent row": ({}, "att-owner", settle),
+            "predecessor": (
+                {"att-plan-check": self.SLICE_ROUTE + ",route_node=plan-check"}, "att-plan-check", settle),
+        }
+        for name, (others, target, change) in cases.items():
+            with self.subTest(changed=name):
+                self.jobs.write_text("")
+                self.register("att-owner", extra=",worker_type=owner,dispatch_depth=1")
+                self.register("att-slice-1", extra=self.slice_extra("ssc-execute-a", 1))
+                with self.jobs.open("a", encoding="utf-8") as handle:
+                    for attempt, extra in others.items():  # a retry row cannot pass registration while its source is pending
+                        handle.write(self.row(attempt, extra=extra) + "\n")
+                with self.assertRaises(DC.DispatchContractError) as refused:
+                    self.start_slice_while("att-slice-1", target, change)
+                self.assertEqual(refused.exception.reason, "attempt-post-claim-identity-changed")
+                self.assertFalse((self.base / "payload-att-slice-1").exists())
+
+        # A marker that consumed the whole chain keeps every sibling in the launch's input.
+        self.jobs.write_text("")
+        self.register("att-slice-1", extra=self.slice_extra("ssc-execute-a", 1))
+        self.register("att-slice-2", extra=self.slice_extra("ssc-execute-a", 2))
+        lines = self.jobs.read_text().splitlines()
+        _, fields, _ = DC._launch_row(lines, "att-slice-1")
+        consumed = DC._launch_dependencies(lines, fields, reads={
+            "nodes": [], "attempts": set(), "groups": {"ssc-execute-a"}, "exact": False})
+        self.assertEqual(sorted(dict(row[5])["attempt_id"] for row in consumed), ["att-slice-1", "att-slice-2"])
+
     def test_actual_completion_reader_pins_foreign_owner_alias_at_both_commits(self):
         # The callback uses the real readiness reader, not a whole native wrapper.
         # No declaration of direct DAG nodes describes this foreign input.
@@ -765,8 +854,8 @@ class NasDispatchIOTest(unittest.TestCase):
                             DC._atomic_registry_replace(jobs, lines)
                         yield lines
                 payload = self.base / f'marker-payload-{phase}'
-                with mock.patch.object(DC, 'completion_marker_is_current', return_value=True), \
-                     mock.patch.object(DC, 'note_evidence_change'), \
+                with patch_split(DC, 'completion_marker_is_current', return_value=True), \
+                     patch_split(DC, 'note_evidence_change'), \
                      mock.patch.object(DC, '_launch_registry_transaction', side_effect=mutate):
                     with self.assertRaises(DC.DispatchContractError) as refused:
                         DC.spawn_claimed_attempt(self.jobs, 'att-marker-consumer', parent_binding=None,

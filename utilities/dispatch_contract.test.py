@@ -9,6 +9,7 @@ ROOT=P.parent.parent
 sys.path.insert(0,str(P.parent))
 import dispatch_contract as D
 from replica_batch_contract import build_manifest
+from split_module_fixture import patch_split
 
 
 class PidfdOpenTest(unittest.TestCase):
@@ -134,11 +135,61 @@ class ControlledConsumerTestCase(unittest.TestCase):
   with controlled_process_scope(lambda:getattr(self,"jobs",None)):
    return super().run(result)
 
+class RegistryMetadataCacheTest(unittest.TestCase):
+ """The row parse cache keeps about one registry of row text, never every generation."""
+ def rows(self,count,start=0):
+  return [f"attempt_id=att-{i:06d},harness=codex,status_word=open,launch_claimed=1,"
+          f"note={'x'*40},log_file=/state/logs/row-{i:06d}.jsonl" for i in range(start,start+count)]
+ def test_results_match_a_plain_parse_and_each_caller_gets_its_own_dict(self):
+  cache=D._RegistryMetadataCache(64,1<<20)
+  for pipe in ["a=1,b=x=y,c,d=", "dup=1,dup=2", "", "k=v"]+self.rows(3):
+   expected=dict(part.split("=",1) for part in pipe.split(",") if "=" in part)
+   self.assertEqual(dict(cache(pipe)),expected)
+   self.assertEqual(dict(cache(pipe)),expected)
+  info=cache.cache_info()
+  self.assertEqual((info.hits,info.misses,info.maxsize,info.currsize),(7,7,64,7))
+  first,second=D.parse_registry_metadata("a=1"),D.parse_registry_metadata("a=1")
+  first["a"]="changed"
+  self.assertEqual(second,{"a":"1"})
+ def test_row_text_bound_drops_the_oldest_rows_first(self):
+  rows=self.rows(40)
+  budget=sum(len(pipe) for pipe in rows[:10])
+  cache=D._RegistryMetadataCache(1000,budget)
+  for pipe in rows:
+   cache(pipe)
+  self.assertLessEqual(cache._bytes,budget)
+  self.assertEqual(list(cache._entries),rows[-10:])
+  cache(rows[-10])                        # a hit refreshes, so the next miss drops rows[-9]
+  cache(self.rows(1,start=99)[0])
+  self.assertIn(rows[-10],cache._entries)
+  self.assertNotIn(rows[-9],cache._entries)
+  cache.cache_clear()
+  self.assertEqual((cache._bytes,cache.cache_info().currsize,len(cache._shared)),(0,0,0))
+ def test_field_names_and_short_values_are_shared_and_long_values_are_not(self):
+  cache=D._RegistryMetadataCache(64,1<<20)
+  left,right=(dict(cache(pipe)) for pipe in self.rows(2))
+  name=lambda row,key:next(k for k in row if k==key)
+  self.assertIs(name(left,"harness"),name(right,"harness"))
+  self.assertIs(left["harness"],right["harness"])
+  self.assertIs(left["launch_claimed"],right["launch_claimed"])
+  self.assertIsNot(left["note"],right["note"])            # 40 characters: not shared
+  with patch_split(D,"_REGISTRY_METADATA_SHARED_MAX",4):
+   for pipe in self.rows(5,start=10):
+    cache(pipe)
+   self.assertLessEqual(len(cache._shared),4)
+ def test_the_module_cache_keeps_the_lru_surface_and_its_bounds(self):
+  info=D._registry_metadata_items.cache_info()
+  self.assertEqual(info.maxsize,D._REGISTRY_METADATA_CACHE_SIZE)
+  self.assertEqual(D._registry_metadata_items.maxbytes,D._REGISTRY_METADATA_CACHE_BYTES)
+  D._registry_metadata_items.cache_clear()
+  D.parse_registry_metadata("attempt_id=att-1");D.parse_registry_metadata("attempt_id=att-1")
+  self.assertEqual(D._registry_metadata_items.cache_info()[:2],(1,1))
+
 class PreviousBootQuiescenceTest(unittest.TestCase):
  def test_exact_retained_identity_uses_shared_host_proof_before_pid_reuse(self):
   import resource_run_registry as R
-  old='83f954bc-4963-4dfa-9f2f-c8f3597900a6'
-  current={'boot_id':'67138871-1a60-467f-b9dc-d46749025baa','boot_host':'local'}
+  old='10000094-0000-4000-8000-0000000000a3'
+  current={'boot_id':'10000088-0000-4000-8000-000000000097','boot_host':'local'}
   with tempfile.TemporaryDirectory() as td:
    metadata={'artifact_root':td,'pid':'123','pid_start':'456','pid_ns':'pid:[789]'}
    state=Path(td)/'.runtime/model-worker-governor/state.json';state.parent.mkdir(parents=True)
@@ -146,7 +197,7 @@ class PreviousBootQuiescenceTest(unittest.TestCase):
    def write(value):state.write_text(json.dumps({'claims':{'token':{'claimant_identity':value}}}))
    with mock.patch.object(R,'boot_identity',return_value=current), \
      mock.patch.object(R,'local_boot_history',return_value={old,current['boot_id']}), \
-     mock.patch.object(D,'_attempt_process_quiescence_impl',side_effect=AssertionError('reused PID')):
+     patch_split(D,'_attempt_process_quiescence_impl',side_effect=AssertionError('reused PID')):
     write(identity)
     result=D.attempt_process_quiescence(metadata)
     self.assertEqual((result.state,result.reason),('quiescent','host-reboot'))
@@ -166,7 +217,7 @@ class PreviousBootQuiescenceTest(unittest.TestCase):
    write({**identity,**current})
    expected=D.ProcessQuiescence('live','normal-current-boot')
    with mock.patch.object(R,'boot_identity',return_value=current), \
-     mock.patch.object(D,'_attempt_process_quiescence_impl',return_value=expected) as normal:
+     patch_split(D,'_attempt_process_quiescence_impl',return_value=expected) as normal:
     self.assertEqual(D.attempt_process_quiescence(metadata),expected)
     normal.assert_called_once_with(metadata)
 
@@ -210,6 +261,25 @@ def controlled_metadata_scope(metadata):
  with tempfile.TemporaryDirectory() as td:
   jobs=Path(td)/"jobs.log";jobs.write_text(attempt_row(metadata)+"\n")
   with controlled_process_scope(jobs):yield
+
+class RegistrationParseTest(unittest.TestCase):
+ def test_the_literal_attempt_check_agrees_with_the_parsed_identity(self):
+  for pipe,attempt,expected in (("attempt_id=att-a1,x=1","att-a1",True),
+                                ("attempt_id=att-a10","att-a1",False),
+                                ("parent_attempt_id=att-a1,attempt_id=att-b","att-a1",False),
+                                ("note=attempt_id=att-a1,attempt_id=att-b","att-a1",False),
+                                ("attempt_id=att-b,attempt_id=att-a1","att-a1",True),
+                                ("attempt_id=,x=1","",True),("x=1","",False)):
+   self.assertEqual(D.row_has_attempt(pipe,attempt),expected,(pipe,attempt))
+   self.assertEqual(D.row_has_attempt(pipe,attempt),D.parse_registry_metadata(pipe).get("attempt_id")==attempt)
+ def test_one_parse_per_row_text_stays_aligned_with_every_read(self):
+  parsed=D._RegistryParse(); row="t\topen\tr\tw\ts\tattempt_id=att-a1"
+  first=parsed.rows([row,"malformed"]); later=parsed.rows(["new\tdone\tr\tw\ts\tattempt_id=att-b",row])
+  self.assertIsNone(first[1]); self.assertIs(later[1],first[0])
+  self.assertEqual(later[0][1]["attempt_id"],"att-b"); self.assertEqual(first[0][0][1],"open")
+  with patch_split(D,"parse_registry_metadata",side_effect=AssertionError("parsed again")):
+   self.assertIs(parsed.rows([row])[0],first[0])
+
 
 class FrameLaunchGateTest(unittest.TestCase):
  def test_launch_degradation_uses_existing_writer_and_write_failure_is_harmless(self):
@@ -279,8 +349,8 @@ class FrameLaunchGateTest(unittest.TestCase):
   with tempfile.TemporaryDirectory() as td:
    base=Path(td);route,path,jobs,markers,rows=self.fixture(base)
    binding=SimpleNamespace(route_file=str(path))
-   with mock.patch.object(D,"completion_marker_is_current",return_value=True), \
-        mock.patch.object(D,"completion_attempt_readiness",return_value=D.AttemptReadiness("ready","test")):
+   with patch_split(D,"completion_marker_is_current",return_value=True), \
+        patch_split(D,"completion_attempt_readiness",return_value=D.AttemptReadiness("ready","test")):
     with self.assertRaises(D.DispatchContractError) as caught:
      D.owner_frame_launch_gate(binding,"start",base,jobs)
     self.assertEqual(caught.exception.reason,"human-gate-not-raised")
@@ -308,8 +378,8 @@ class FrameLaunchGateTest(unittest.TestCase):
    route["human_gate_bindings"]=[{"gate":"frame-review","node":"research","position":"entry"}]
    path.write_text(json.dumps(route))
    binding=SimpleNamespace(route_file=str(path))
-   with mock.patch.object(D,"completion_marker_is_current",return_value=True), \
-        mock.patch.object(D,"completion_attempt_readiness",return_value=D.AttemptReadiness("ready","test")):
+   with patch_split(D,"completion_marker_is_current",return_value=True), \
+        patch_split(D,"completion_attempt_readiness",return_value=D.AttemptReadiness("ready","test")):
     ledger=WS.WorkflowLedger(route["route_id"],route["route_hash"],jobs=jobs)
     ledger.set_workflow_state("BLOCKED_HUMAN_GATE",evidence={"gate":"frame-review"},actor="gate")
     with self.assertRaises(D.DispatchContractError) as caught:
@@ -395,7 +465,7 @@ class DispatchContractTest(unittest.TestCase):
   stat_tail=lambda state,flags: "4242 (fixture) %s 1 2 3 4 5 %d 7 8 9 10 11 12 13 14 15 16 17 18 99" % (state,flags)
   with mock.patch.object(Path,"stat",return_value=types.SimpleNamespace(st_uid=os.getuid())), \
        mock.patch.object(Path,"read_text",side_effect=lambda *a,**k: stat_tail("S",4)), \
-       mock.patch.object(D,"_forked_across_uid_boundary",return_value=False):
+       patch_split(D,"_forked_across_uid_boundary",return_value=False):
    self.assertEqual(D._tag_access_observation(entry,"99"),("", ""))
 
   for error in (FileNotFoundError(), ProcessLookupError()):
@@ -406,7 +476,7 @@ class DispatchContractTest(unittest.TestCase):
 
   with mock.patch.object(Path,"stat",return_value=types.SimpleNamespace(st_uid=os.getuid())), \
        mock.patch.object(Path,"read_text",return_value=stat_tail("S",0)), \
-       mock.patch.object(D,"_forked_across_uid_boundary",return_value=False):
+       patch_split(D,"_forked_across_uid_boundary",return_value=False):
    self.assertEqual(D._tag_access_observation(entry,"99"),
                     ("99", "procfs-environ:4242:same-uid-unobservable"))
 
@@ -416,7 +486,7 @@ class DispatchContractTest(unittest.TestCase):
    handle=D.create_witness(root,"reservation")
    token="cancel-receipt-token"
    D._GOVERNOR_WITNESS_HANDLES[D._governor_witness_key(root,token)]=handle
-   with mock.patch.object(D,"_governor_json",return_value={"state":"unclaimed"}), \
+   with patch_split(D,"_governor_json",return_value={"state":"unclaimed"}), \
         mock.patch.object(D.subprocess,"run",return_value=subprocess.CompletedProcess([],0,stdout="reservation=absent\n",stderr="")):
     D.cancel_governor_reservation(Path("governor"),root,token)
    self.assertIn(D._governor_witness_key(root,token),D._GOVERNOR_WITNESS_HANDLES)
@@ -433,8 +503,8 @@ class DispatchContractTest(unittest.TestCase):
     handle=real_create_witness(root,"reservation")
     handles.append(handle)
     return handle
-   with mock.patch.object(D,"create_witness",side_effect=witness), \
-        mock.patch.object(D,"_governor_json",return_value={"tokens":[]}):
+   with patch_split(D,"create_witness",side_effect=witness), \
+        patch_split(D,"_governor_json",return_value={"tokens":[]}):
     with self.assertRaises(D.DispatchContractError):
      D.reserve_governor_token(Path("governor"),root,"dispatch")
    self.assertEqual(len(handles),1)
@@ -443,16 +513,16 @@ class DispatchContractTest(unittest.TestCase):
  def test_governor_witness_map_is_root_scoped_and_provided_token_is_not_owned(self):
   with tempfile.TemporaryDirectory() as td:
    a,b=Path(td)/"a",Path(td)/"b";token="a"*32
-   with mock.patch.object(D,"_governor_json",return_value={"tokens":[token]}):
+   with patch_split(D,"_governor_json",return_value={"tokens":[token]}):
     D.reserve_governor_token(Path("governor"),a,"dispatch")
     D.reserve_governor_token(Path("governor"),b,"dispatch")
    ha=D._GOVERNOR_WITNESS_HANDLES[D._governor_witness_key(a,token)]
    hb=D._GOVERNOR_WITNESS_HANDLES[D._governor_witness_key(b,token)]
    try:
-    with mock.patch.object(D,"_governor_json",return_value={"state":"unclaimed"}), mock.patch.object(D.subprocess,"run",return_value=subprocess.CompletedProcess([],0,stdout="reservation=cancelled\n",stderr="")):
+    with patch_split(D,"_governor_json",return_value={"state":"unclaimed"}), mock.patch.object(D.subprocess,"run",return_value=subprocess.CompletedProcess([],0,stdout="reservation=cancelled\n",stderr="")):
      D.cancel_governor_reservation(Path("governor"),a,token)
     self.assertTrue(ha._closed);self.assertFalse(hb._closed)
-    with mock.patch.object(D,"_governor_json",return_value={"state":"unclaimed"}), mock.patch.object(D,"create_witness",side_effect=AssertionError("provided token must not issue FD")):
+    with patch_split(D,"_governor_json",return_value={"state":"unclaimed"}), patch_split(D,"create_witness",side_effect=AssertionError("provided token must not issue FD")):
      self.assertEqual(D.reserve_governor_token(Path("governor"),b,"dispatch",provided_token=token)[0],token)
     self.assertFalse(hb._closed)
    finally:
@@ -467,7 +537,7 @@ class DispatchContractTest(unittest.TestCase):
    try:
     with self.assertRaises(D.DispatchContractError):D._return_governor_witness(root,token,{"owner_witness":{}})
     self.assertFalse(h._closed)
-    with mock.patch.object(D,"_governor_json",side_effect=[{"state":"unclaimed"},{"state":"claimed","owner_witness":h.binding()}]), mock.patch.object(D.subprocess,"run",return_value=subprocess.CompletedProcess([],75,stdout="",stderr="reservation already claimed")):
+    with patch_split(D,"_governor_json",side_effect=[{"state":"unclaimed"},{"state":"claimed","owner_witness":h.binding()}]), mock.patch.object(D.subprocess,"run",return_value=subprocess.CompletedProcess([],75,stdout="",stderr="reservation already claimed")):
      D.cancel_governor_reservation(Path("governor"),root,token)
     self.assertTrue(h._closed);self.assertNotIn(key,D._GOVERNOR_WITNESS_HANDLES)
    finally:D.close_witness(h);D._GOVERNOR_WITNESS_HANDLES.pop(key,None)
@@ -601,61 +671,13 @@ class DispatchContractTest(unittest.TestCase):
    values.update(changed)
    self.assertFalse(D.codex_standard_owner_network_enabled(**values), changed)
 
- def test_recovery_identity_is_canonical_and_process_stable(self):
-  identity={
-   "source_route_id":"rt-source",
-   "source_route_hash":"sha256:"+"1"*64,
-   "node_or_group_leg":"execute/leg-1",
-   "original_attempt_id":"att-original",
-   "cancellation_receipt_digest":"sha256:"+"2"*64,
-  }
-  expected="rec-"+hashlib.sha256(json.dumps(
-   identity,ensure_ascii=False,sort_keys=True,separators=(",",":"),
-  ).encode("utf-8")).hexdigest()
-  self.assertEqual(D.recovery_id(**identity),expected)
-  self.assertEqual(D.recovery_id(
-   cancellation_receipt_digest=identity["cancellation_receipt_digest"],
-   original_attempt_id=identity["original_attempt_id"],
-   node_or_group_leg=identity["node_or_group_leg"],
-   source_route_hash=identity["source_route_hash"],
-   source_route_id=identity["source_route_id"],
-  ),expected)
-  code=("import json,sys;from pathlib import Path;"
-        "sys.path.insert(0,sys.argv[1]);import dispatch_contract as D;"
-        "print(D.recovery_id(**json.loads(sys.argv[2])))")
-  ordered=json.dumps(identity)
-  reversed_order=json.dumps(dict(reversed(tuple(identity.items()))))
-  observed=[subprocess.run(
-   [sys.executable,"-c",code,str(P.parent),payload],
-   check=True,text=True,capture_output=True,
-  ).stdout.strip() for payload in (ordered,reversed_order)]
-  self.assertEqual(observed,[expected,expected])
-
- def test_recovery_identity_rejects_every_incomplete_field(self):
-  identity={
-   "source_route_id":"rt-source",
-   "source_route_hash":"sha256:"+"1"*64,
-   "node_or_group_leg":"execute",
-   "original_attempt_id":"att-original",
-   "cancellation_receipt_digest":"sha256:"+"2"*64,
-  }
-  for key in identity:
-   with self.subTest(key=key):
-    incomplete={**identity,key:""}
-    with self.assertRaises(D.DispatchContractError) as caught:
-     D.recovery_id(**incomplete)
-    self.assertEqual(caught.exception.reason,"recovery-identity-incomplete")
-
  def test_recovery_metadata_round_trips_through_annotate_and_close(self):
   with tempfile.TemporaryDirectory() as td:
    jobs=Path(td)/"jobs.log";attempt="att-recovery-schema"
    row=(f"2026-08-25T00:00:00Z\topen\t/r\t/w\texecute\t{CURRENT},"
         f"route_id=rt-source,route_node=execute,attempt_id={attempt}")
    self.assertTrue(D.claim_attempt_row(jobs,attempt,row))
-   rid=D.recovery_id(
-    source_route_id="rt-source",source_route_hash="sha256:"+"1"*64,
-    node_or_group_leg="execute",original_attempt_id=attempt,
-    cancellation_receipt_digest="sha256:"+"2"*64)
+   rid="rec-"+"3"*64  # an existing SD-106 recovery row's identity
    mutable={
     "recovery_id":rid,
     "retry_ordinal":"1",
@@ -701,11 +723,11 @@ class DispatchContractTest(unittest.TestCase):
     D.ProcessGroupObservation("empty"),False,False),
   )
   for name,group,descendants,authority,expected in cases:
-   with self.subTest(name=name),mock.patch.object(
+   with self.subTest(name=name),patch_split(
     D,"process_group_observation",return_value=group,
-   ),mock.patch.object(
+   ),patch_split(
     D,"attempt_tagged_descendants",return_value=descendants,
-   ),mock.patch.object(
+   ),patch_split(
     D,"attempt_scan_namespace_authority",return_value=authority,
    ):
     proof=D.prove_attempt_quiescence(metadata,max_wait_seconds=0)
@@ -718,11 +740,11 @@ class DispatchContractTest(unittest.TestCase):
  def test_cancellation_quiescence_wait_is_bounded(self):
   metadata=cancellation_metadata()
   populated=D.ProcessGroupObservation("populated",((41,"900","S"),))
-  with mock.patch.object(
+  with patch_split(
    D,"process_group_observation",return_value=populated,
-  ),mock.patch.object(
+  ),patch_split(
    D,"attempt_tagged_descendants",return_value=D.ProcessGroupObservation("empty"),
-  ),mock.patch.object(
+  ),patch_split(
    D,"attempt_scan_namespace_authority",return_value=True,
   ),mock.patch.object(
    D.time,"monotonic",side_effect=(10.0,10.05,10.05,10.2),
@@ -735,11 +757,11 @@ class DispatchContractTest(unittest.TestCase):
  def test_authenticated_portable_teardown_is_equal_but_live_evidence_wins(self):
   metadata=cancellation_metadata(portable=True)
   unverifiable=D.ProcessGroupObservation("unverifiable",reason="foreign")
-  with mock.patch.object(
+  with patch_split(
    D,"process_group_observation",return_value=unverifiable,
-  ),mock.patch.object(
+  ),patch_split(
    D,"attempt_tagged_descendants",return_value=unverifiable,
-  ),mock.patch.object(
+  ),patch_split(
    D,"attempt_scan_namespace_authority",return_value=False,
   ):
    portable=D.prove_attempt_quiescence(metadata,max_wait_seconds=0)
@@ -747,12 +769,12 @@ class DispatchContractTest(unittest.TestCase):
   self.assertEqual(portable.source,"authenticated-namespace-portable")
   self.assertRegex(portable.portable_receipt_digest,r"^sha256:[0-9a-f]{64}$")
 
-  with mock.patch.object(
+  with patch_split(
    D,"process_group_observation",return_value=D.ProcessGroupObservation(
     "populated",((41,"900","S"),)),
-  ),mock.patch.object(
+  ),patch_split(
    D,"attempt_tagged_descendants",return_value=unverifiable,
-  ),mock.patch.object(
+  ),patch_split(
    D,"attempt_scan_namespace_authority",return_value=False,
   ):
    stale=D.prove_attempt_quiescence(metadata,max_wait_seconds=0)
@@ -767,15 +789,15 @@ class DispatchContractTest(unittest.TestCase):
            if portable else D.ProcessGroupObservation("empty"))
     descendants=(D.ProcessGroupObservation("unverifiable",reason="foreign")
                  if portable else D.ProcessGroupObservation("empty"))
-    with mock.patch.object(
+    with patch_split(
      D,"process_group_observation",return_value=group,
-    ),mock.patch.object(
+    ),patch_split(
      D,"attempt_tagged_descendants",return_value=descendants,
-    ),mock.patch.object(
+    ),patch_split(
      D,"attempt_scan_namespace_authority",return_value=not portable,
     ):
      proof=D.prove_attempt_quiescence(metadata,max_wait_seconds=0)
-    with mock.patch.object(
+    with patch_split(
      D,"_atomic_registry_replace",wraps=D._atomic_registry_replace,
     ) as replace:
      digest=D.seal_cancellation_quiescence_receipt(
@@ -798,9 +820,9 @@ class DispatchContractTest(unittest.TestCase):
    jobs=Path(td)/"jobs.log";metadata=cancellation_metadata()
    jobs.write_text(attempt_row(metadata)+"\n",encoding="utf-8")
    empty=D.ProcessGroupObservation("empty")
-   with mock.patch.object(D,"process_group_observation",return_value=empty), \
-        mock.patch.object(D,"attempt_tagged_descendants",return_value=empty), \
-        mock.patch.object(D,"attempt_scan_namespace_authority",return_value=True):
+   with patch_split(D,"process_group_observation",return_value=empty), \
+        patch_split(D,"attempt_tagged_descendants",return_value=empty), \
+        patch_split(D,"attempt_scan_namespace_authority",return_value=True):
     proof=D.prove_attempt_quiescence(metadata,max_wait_seconds=0)
    D.seal_cancellation_quiescence_receipt(jobs,metadata["attempt_id"],proof)
    raw=jobs.read_text().strip().split("\t",5)
@@ -821,129 +843,6 @@ class DispatchContractTest(unittest.TestCase):
    self.assertEqual(caught.exception.reason,"cancellation-quiescence-receipt-conflict")
    self.assertNotEqual(digest,"sha256:"+"f"*64)
 
- def test_recovery_retry_claim_is_stable_and_idempotent(self):
-  with tempfile.TemporaryDirectory() as td:
-   jobs=Path(td)/"jobs.log";metadata=cancellation_metadata()
-   jobs.write_text(attempt_row(metadata)+"\n",encoding="utf-8")
-   empty=D.ProcessGroupObservation("empty")
-   with mock.patch.object(
-    D,"process_group_observation",return_value=empty,
-   ),mock.patch.object(
-    D,"attempt_tagged_descendants",return_value=empty,
-   ),mock.patch.object(
-    D,"attempt_scan_namespace_authority",return_value=True,
-   ):
-    proof=D.prove_attempt_quiescence(metadata,max_wait_seconds=0)
-   receipt=D.seal_cancellation_quiescence_receipt(
-    jobs,metadata["attempt_id"],proof)
-   rid=D.recovery_id(
-    source_route_id=metadata["route_id"],
-    source_route_hash=metadata["route_hash"],node_or_group_leg="execute",
-    original_attempt_id=metadata["attempt_id"],
-    cancellation_receipt_digest=receipt)
-   kwargs=dict(
-    recovery_id=rid,source_route_id=metadata["route_id"],
-    source_route_hash=metadata["route_hash"],node_or_group_leg="execute",
-    original_attempt_id=metadata["attempt_id"],remaining_cascade=7)
-   with mock.patch.object(
-    D,"_atomic_registry_replace",wraps=D._atomic_registry_replace,
-   ) as replace:
-    first=D.claim_recovery_retry(jobs,**kwargs)
-    replay=D.claim_recovery_retry(jobs,**{**kwargs,"remaining_cascade":0})
-   self.assertEqual(replay,first)
-   self.assertTrue(first.start_permitted)
-   self.assertEqual(first.retry_ordinal,1)
-   self.assertEqual(first.retry_attempt_id,D._stable_recovery_attempt_id(rid))
-   self.assertEqual(replace.call_count,1)
-   self.assertEqual(len(jobs.read_text().splitlines()),1)
-   claimed=D.parse_registry_metadata(jobs.read_text().strip().split("\t",5)[5])
-   self.assertEqual(claimed["retry_attempt_id"],first.retry_attempt_id)
-   self.assertEqual(claimed["retry_ordinal"],"1")
-   self.assertTrue(D.seal_recovery_blocked(
-    jobs,original_attempt_id=metadata["attempt_id"],recovery_id=rid))
-   blocked=D.parse_registry_metadata(jobs.read_text().strip().split("\t",5)[5])
-   self.assertEqual(blocked["start_permitted"],"0")
-   self.assertEqual(blocked["retry_attempt_id"],first.retry_attempt_id)
-   self.assertEqual(blocked["retry_ordinal"],"1")
-   exhausted=D.claim_recovery_retry(jobs,**kwargs)
-   self.assertEqual(exhausted.retry_attempt_id,first.retry_attempt_id)
-   self.assertEqual(exhausted.retry_ordinal,1)
-   self.assertFalse(exhausted.start_permitted)
-
- def test_recovery_retry_exhaustion_is_permanent_and_never_claims_start(self):
-  with tempfile.TemporaryDirectory() as td:
-   jobs=Path(td)/"jobs.log";metadata=cancellation_metadata()
-   metadata.update({
-    "cancellation_quiescence_receipt":
-     D.ATTEMPT_CANCELLATION_QUIESCENCE_RECEIPT,
-    "cancellation_receipt_digest":"sha256:"+"7"*64,
-    "quiescence_pgid_proof":D.GROUP_REAP_PROOF,
-    "quiescence_descendant_proof":D.ATTEMPT_DESCENDANT_PROOF,
-   })
-   jobs.write_text(attempt_row(metadata,status="done")+"\n",encoding="utf-8")
-   rid=D.recovery_id(
-    source_route_id=metadata["route_id"],
-    source_route_hash=metadata["route_hash"],node_or_group_leg="execute",
-    original_attempt_id=metadata["attempt_id"],
-    cancellation_receipt_digest=metadata["cancellation_receipt_digest"])
-   kwargs=dict(
-    recovery_id=rid,source_route_id=metadata["route_id"],
-    source_route_hash=metadata["route_hash"],node_or_group_leg="execute",
-    original_attempt_id=metadata["attempt_id"],remaining_cascade=0)
-   with mock.patch.object(
-    D,"_atomic_registry_replace",wraps=D._atomic_registry_replace,
-   ) as replace:
-    exhausted=D.claim_recovery_retry(jobs,**kwargs)
-    replay=D.claim_recovery_retry(jobs,**{**kwargs,"remaining_cascade":3})
-   self.assertEqual(replay,exhausted)
-   self.assertFalse(exhausted.start_permitted)
-   self.assertEqual(exhausted.reason,"receipt-unavailable-retry-exhausted")
-   self.assertEqual(replace.call_count,1)
-   fields=jobs.read_text().strip().split("\t",5)
-   sealed=D.parse_registry_metadata(fields[5])
-   self.assertEqual(fields[1],"done")
-   self.assertEqual(sealed.get("note"),metadata.get("note"))
-   self.assertEqual(sealed["recovery_exhausted"],"1")
-   self.assertEqual(sealed.get("failure_class"),metadata.get("failure_class"))
-   self.assertNotIn("retry_attempt_id",sealed)
-   self.assertFalse(D.attempt_launch_is_available(jobs,metadata["attempt_id"]))
-
- def test_route_wide_retry_limit_is_recomputed_inside_claim_lock(self):
-  with tempfile.TemporaryDirectory() as td:
-   jobs=Path(td)/"jobs.log";rows=[];identities=[]
-   for index in range(2):
-    metadata=cancellation_metadata(f"att-route-cas-{index}")
-    metadata.update({
-     "cancellation_quiescence_receipt":D.ATTEMPT_CANCELLATION_QUIESCENCE_RECEIPT,
-     "cancellation_receipt_digest":"sha256:"+str(index+7)*64,
-     "quiescence_pgid_proof":D.GROUP_REAP_PROOF,
-     "quiescence_descendant_proof":D.ATTEMPT_DESCENDANT_PROOF,
-    })
-    rows.append(attempt_row(metadata,status="done"))
-    identities.append((metadata,D.recovery_id(
-     source_route_id=metadata["route_id"],source_route_hash=metadata["route_hash"],
-     node_or_group_leg="execute",original_attempt_id=metadata["attempt_id"],
-     cancellation_receipt_digest=metadata["cancellation_receipt_digest"])))
-   jobs.write_text("\n".join(rows)+"\n")
-   metadata,rid=identities[0]
-   first=D.claim_recovery_retry(
-    jobs,recovery_id=rid,source_route_id=metadata["route_id"],
-    source_route_hash=metadata["route_hash"],node_or_group_leg="execute",
-    original_attempt_id=metadata["attempt_id"],remaining_cascade=1)
-   with jobs.open("a") as stream:
-    stream.write(attempt_row({
-     **cancellation_metadata(first.retry_attempt_id),
-     "recovery_id":rid,"retry_ordinal":"1",
-    })+"\n")
-   metadata,rid=identities[1]
-   second=D.claim_recovery_retry(
-    jobs,recovery_id=rid,source_route_id=metadata["route_id"],
-    source_route_hash=metadata["route_hash"],node_or_group_leg="execute",
-    original_attempt_id=metadata["attempt_id"],remaining_cascade=1)
-   claims=[first,second]
-   self.assertEqual([claim.start_permitted for claim in claims],[True,False])
-   self.assertEqual(claims[1].reason,"receipt-unavailable-retry-exhausted")
-
  def test_four_field_marker_never_advances_to_false_pass(self):
   with tempfile.TemporaryDirectory() as td:
    base=Path(td);jobs=base/"jobs.log";attempt="att-marker-delivery"
@@ -959,11 +858,11 @@ class DispatchContractTest(unittest.TestCase):
    raw=f"2026-08-25T00:00:00Z\topen\t/r\t/w\texecute\t{metadata}"
    jobs.write_text(raw+"\n",encoding="utf-8")
    parsed=D.parse_registry_metadata(metadata)
-   with mock.patch.object(
+   with patch_split(
     D,"_updated_attempt_metadata",wraps=D._updated_attempt_metadata,
-   ) as update, mock.patch.object(
+   ) as update, patch_split(
     D,"_atomic_registry_replace",wraps=D._atomic_registry_replace,
-   ) as replace, mock.patch.object(
+   ) as replace, patch_split(
     D,"attempt_process_quiescence",
     side_effect=AssertionError("process inspection inside jobs lock"),
    ) as process:
@@ -1133,7 +1032,7 @@ class DispatchContractTest(unittest.TestCase):
    raw=f"2026-08-25T00:00:00Z\topen\t/r\t/w\texecute\t{metadata}"
    jobs.write_text(raw+"\n",encoding="utf-8")
    parsed=D.parse_registry_metadata(metadata)
-   with mock.patch.object(D,"_atomic_registry_replace") as replace:
+   with patch_split(D,"_atomic_registry_replace") as replace:
     result=D.marker_bound_delivery_transaction(
      jobs,attempt,parent_attempt_id=attempt,
      expected_row_revision="0"*64,
@@ -1170,11 +1069,11 @@ class DispatchContractTest(unittest.TestCase):
   terminal=self.parent_row("att-parent",999999,"1",status="done")
   rows=lambda *values: [(value.split("\t"), D.parse_registry_metadata(value.split("\t",5)[5]))
                         for value in values]
-  with mock.patch.object(D,"post_exit_receipt_reason",return_value="receipt"), \
-       mock.patch.object(D,"attempt_process_quiescence",return_value=D.ProcessQuiescence("quiescent","gone")):
+  with patch_split(D,"post_exit_receipt_reason",return_value="receipt"), \
+       patch_split(D,"attempt_process_quiescence",return_value=D.ProcessQuiescence("quiescent","gone")):
    self.assertEqual(D.resolve_parent_extinction(child, rows(terminal)).state,"proven")
-  with mock.patch.object(D,"post_exit_receipt_reason",return_value="receipt"), \
-       mock.patch.object(
+  with patch_split(D,"post_exit_receipt_reason",return_value="receipt"), \
+       patch_split(
         D,"attempt_process_quiescence",
         return_value=D.ProcessQuiescence("live","local-pid-live")):
    proof=D.resolve_parent_extinction(child,rows(terminal))
@@ -1224,8 +1123,8 @@ class DispatchContractTest(unittest.TestCase):
    D.resolve_parent_extinction(
     child,rows(terminal,conflicting_sibling)).reason,
    "parent-route-context-conflict")
-  with mock.patch.object(D,"canonical_repository_identity",return_value="/same-repo"), \
-       mock.patch.object(D,"post_exit_receipt_reason",return_value="receipt"):
+  with patch_split(D,"canonical_repository_identity",return_value="/same-repo"), \
+       patch_split(D,"post_exit_receipt_reason",return_value="receipt"):
    other_tree=dict(child,worktree="/same-repo-other-worktree")
    self.assertEqual(D.resolve_parent_extinction(other_tree,rows(terminal)).reason,
                     "parent-worktree-foreign")
@@ -1234,13 +1133,13 @@ class DispatchContractTest(unittest.TestCase):
   observation={"state":"extinct","parent_attempt_id":"att-parent",
                "pid":"999999","pid_start":"1",
                "pid_observer_ns":"pid:[watcher]"}
-  with mock.patch.object(D,"post_exit_receipt_reason",return_value=""), \
-       mock.patch.object(
+  with patch_split(D,"post_exit_receipt_reason",return_value=""), \
+       patch_split(
         D,"attempt_process_quiescence",
         return_value=D.ProcessQuiescence(
          "unverifiable","local-process-group-identity-unverifiable")), \
-       mock.patch.object(D,"process_namespace_identity",return_value="pid:[watcher]"), \
-       mock.patch.object(D,"_proc_observation",return_value=("missing","","")):
+       patch_split(D,"process_namespace_identity",return_value="pid:[watcher]"), \
+       patch_split(D,"_proc_observation",return_value=("missing","","")):
    proof=D.resolve_parent_extinction(child,rows(watcher_parent),observation)
    self.assertEqual(proof.reason,"parent-terminal-watcher-pid-extinct")
    live_observation=dict(observation,pid_start="2")
@@ -1251,7 +1150,7 @@ class DispatchContractTest(unittest.TestCase):
    self.assertEqual(
     D.resolve_parent_extinction(child,rows(watcher_parent),foreign_observation).state,
     "unproven")
-   with mock.patch.object(D,"_proc_observation",return_value=("inaccessible","","")):
+   with patch_split(D,"_proc_observation",return_value=("inaccessible","","")):
     self.assertEqual(
      D.resolve_parent_extinction(child,rows(watcher_parent),observation).state,
      "unproven")
@@ -1260,8 +1159,8 @@ class DispatchContractTest(unittest.TestCase):
    self.assertEqual(
     D.resolve_parent_extinction(child,rows(namespace_parent),observation).state,
     "unproven")
-  with mock.patch.object(D,"post_exit_receipt_reason",return_value=""), \
-       mock.patch.object(D,"attempt_process_quiescence",return_value=D.ProcessQuiescence("unverifiable","live")):
+  with patch_split(D,"post_exit_receipt_reason",return_value=""), \
+       patch_split(D,"attempt_process_quiescence",return_value=D.ProcessQuiescence("unverifiable","live")):
    self.assertEqual(D.resolve_parent_extinction(child, rows(terminal)).state,"unproven")
 
  # F-1: parent_completion_window's typed `source` pins the fail-closed axes
@@ -1344,7 +1243,7 @@ class DispatchContractTest(unittest.TestCase):
     holder.seek(0);holder.truncate()
     holder.write(f"kind={D.SUPERVISOR_LEASE_KIND}\nattempt_id=att-parent\nnonce={nonce}\n")
     holder.flush()
-    with mock.patch.object(D,"process_namespace_identity",return_value="pid:[inner]"):
+    with patch_split(D,"process_namespace_identity",return_value="pid:[inner]"):
      window=D.parent_completion_window(jobs,child_fields,child_meta)
     self.assertEqual(window,D.ParentCompletionWindow(True,"parent-live:supervisor-lease"))
    finally:
@@ -1423,7 +1322,7 @@ class DispatchContractTest(unittest.TestCase):
 
  def _check_supervised_lease_with_descendants(self,descendants):
   with tempfile.TemporaryDirectory() as td, \
-       mock.patch.object(D,"attempt_tagged_descendants",return_value=descendants):
+       patch_split(D,"attempt_tagged_descendants",return_value=descendants):
    base=Path(td);jobs=base/"jobs.log";attempt="att-parent-lease"
    parent=subprocess.Popen(["sleep","60"])
    lease=D.supervisor_lease_path(jobs,attempt)
@@ -1443,7 +1342,7 @@ class DispatchContractTest(unittest.TestCase):
     holder.seek(0);holder.truncate()
     holder.write(f"kind={D.SUPERVISOR_LEASE_KIND}\nattempt_id={attempt}\nnonce={nonce}\n")
     holder.flush()
-    with mock.patch.object(D,"process_namespace_identity",return_value="pid:[inner]"):
+    with patch_split(D,"process_namespace_identity",return_value="pid:[inner]"):
      binding=D.resolve_live_parent_attempt(
       jobs,parent_slug="owner",repo="/repo",worktree="/wt",
       expected_attempt_id=attempt)
@@ -1468,7 +1367,7 @@ class DispatchContractTest(unittest.TestCase):
     jobs.write_text(sealed_row)
 
     fcntl.flock(holder.fileno(),fcntl.LOCK_UN);holder.close();holder=None
-    with mock.patch.object(D,"process_namespace_identity",return_value="pid:[inner]"):
+    with patch_split(D,"process_namespace_identity",return_value="pid:[inner]"):
      with self.assertRaises(D.DispatchContractError) as released:
       D.resolve_live_parent_attempt(
        jobs,parent_slug="owner",repo="/repo",worktree="/wt",
@@ -1480,7 +1379,7 @@ class DispatchContractTest(unittest.TestCase):
     foreign_holder.flush()
     fcntl.flock(foreign_holder.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)
     try:
-     with mock.patch.object(D,"process_namespace_identity",return_value="pid:[inner]"):
+     with patch_split(D,"process_namespace_identity",return_value="pid:[inner]"):
       with self.assertRaises(D.DispatchContractError) as foreign:
        D.resolve_live_parent_attempt(
         jobs,parent_slug="owner",repo="/repo",worktree="/wt",
@@ -1494,7 +1393,7 @@ class DispatchContractTest(unittest.TestCase):
     target_holder=target.open("a+")
     fcntl.flock(target_holder.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)
     try:
-     with mock.patch.object(D,"process_namespace_identity",return_value="pid:[inner]"):
+     with patch_split(D,"process_namespace_identity",return_value="pid:[inner]"):
       with self.assertRaises(D.DispatchContractError) as symlinked:
        D.resolve_live_parent_attempt(
         jobs,parent_slug="owner",repo="/repo",worktree="/wt",
@@ -1522,7 +1421,7 @@ class DispatchContractTest(unittest.TestCase):
     jobs.write_text(self.owner_row(attempt,437,"20",extra=extra)+"\n")
     holder.write(f"kind={D.SUPERVISOR_LEASE_KIND}\nattempt_id={attempt}\nnonce={nonce}\n")
     holder.flush()
-    with mock.patch.object(
+    with patch_split(
         D,"_proc_observation",return_value=("present","different","S")):
      with self.assertRaises(D.DispatchContractError) as caught:
       D.resolve_live_parent_attempt(
@@ -1533,8 +1432,8 @@ class DispatchContractTest(unittest.TestCase):
     # an exact held lease authoritative outside the namespace-only fallback.
     for observation in (("present","different","S"),("missing",None,None)):
      with self.subTest(observation=observation), \
-          mock.patch.object(D,"_proc_observation",return_value=observation), \
-          mock.patch.object(D,"attempt_tagged_descendants",return_value=
+          patch_split(D,"_proc_observation",return_value=observation), \
+          patch_split(D,"attempt_tagged_descendants",return_value=
                             D.ProcessGroupObservation("populated",((901,"1"),))):
       with self.assertRaises(D.DispatchContractError) as rejected:
        D.resolve_live_parent_attempt(
@@ -1551,8 +1450,8 @@ class DispatchContractTest(unittest.TestCase):
     ",pid_observer_ns=pid:[outer],pid_ns=pid:[outer]")+"\n")
    for reason in ("local-pid-reused","process-namespace-unverifiable"):
     with self.subTest(reason=reason), \
-         mock.patch.object(D,"_parent_liveness_evidence",return_value=(False,reason,None)), \
-         mock.patch.object(D,"process_namespace_identity",return_value="pid:[inner]"):
+         patch_split(D,"_parent_liveness_evidence",return_value=(False,reason,None)), \
+         patch_split(D,"process_namespace_identity",return_value="pid:[inner]"):
      with self.assertRaises(D.DispatchContractError) as caught:
       D.resolve_live_parent_attempt(jobs,parent_slug="owner",repo="/repo",worktree="/wt",
        expected_attempt_id="att-parent-diagnostic")
@@ -1635,7 +1534,7 @@ class DispatchContractTest(unittest.TestCase):
     # Git can time out on NAS after admission and return a physical-path
     # fallback. That is not parent extinction and must never enter the
     # foreground guard's TERM path. No repeated Git call is needed here.
-    with mock.patch.object(D, "canonical_repository_identity", return_value=str(primary)) as git:
+    with patch_split(D, "canonical_repository_identity", return_value=str(primary)) as git:
      self.assertTrue(D.parent_attempt_binding_is_live(jobs, binding))
      git.assert_not_called()
      jobs.write_text(row.replace(f"\t{primary}\t", "\t/foreign\t") + "\n")
@@ -1768,17 +1667,17 @@ class DispatchContractTest(unittest.TestCase):
   inner_namespace="pid:[inner-remounted]"
   def namespace_identity(pid="self"):
    return None if pid == 1 else inner_namespace
-  with mock.patch.object(D,"process_namespace_identity",side_effect=namespace_identity), \
-       mock.patch.object(D,"process_start_ticks",return_value="42"), \
-       mock.patch.object(D,"process_namespace_pids",return_value=(7,)), \
+  with patch_split(D,"process_namespace_identity",side_effect=namespace_identity), \
+       patch_split(D,"process_start_ticks",return_value="42"), \
+       patch_split(D,"process_namespace_pids",return_value=(7,)), \
        mock.patch.object(D.os,"getpgid",return_value=7):
    identity=D.process_launch_identity(7)
   self.assertNotIn("pid_host",identity)
   self.assertNotIn("pid_host_start",identity)
   self.assertNotIn("pid_host_ns",identity)
   self.assertNotIn("pid_host_proof",identity)
-  with mock.patch.object(D,"process_namespace_identity",return_value="pid:[outer]"), \
-       mock.patch.object(D,"_proc_observation") as observation:
+  with patch_split(D,"process_namespace_identity",return_value="pid:[outer]"), \
+       patch_split(D,"_proc_observation") as observation:
    result=D.attempt_process_quiescence({**identity,"pid_scope":"namespace-local"})
   self.assertEqual((result.state,result.reason),
                    ("unverifiable","process-namespace-unverifiable"))
@@ -1788,9 +1687,9 @@ class DispatchContractTest(unittest.TestCase):
   metadata={"attempt_id":"att-unverifiable-descendant",
             "pid_scope":"namespace-local"}
   probe=mock.Mock(state="populated",members=((901,"42","S"),),reason="")
-  with mock.patch.object(D,"_attempt_process_quiescence_impl",
+  with patch_split(D,"_attempt_process_quiescence_impl",
                          return_value=D.ProcessQuiescence("unverifiable","process-namespace-unverifiable")), \
-       mock.patch.object(D,"attempt_tagged_descendants",return_value=probe):
+       patch_split(D,"attempt_tagged_descendants",return_value=probe):
    result=D.attempt_process_quiescence(metadata)
   self.assertEqual((result.state,result.reason,result.pid),
                    ("live","attempt-descendant-live",901))
@@ -1819,7 +1718,7 @@ class DispatchContractTest(unittest.TestCase):
   self.assertEqual(
    D.attempt_process_quiescence({"launch_outcome":"never-launched"}).state,
    "quiescent")
-  with mock.patch.object(D,"process_namespace_identity",return_value="pid:[other]"):
+  with patch_split(D,"process_namespace_identity",return_value="pid:[other]"):
    mismatch=D.attempt_process_quiescence({
     "pid":str(os.getpid()),"pid_start":D.process_start_ticks(os.getpid()),
     "pid_scope":"namespace-local","pid_observer_ns":"pid:[source]",
@@ -1831,8 +1730,8 @@ class DispatchContractTest(unittest.TestCase):
    "pid_observer_ns":"pid:[source]","pid_host":"1437","pid_host_start":"20",
    "pid_host_ns":"pid:[observer]",
   }
-  with mock.patch.object(D,"process_namespace_identity",return_value="pid:[observer]"), \
-       mock.patch.object(D,"_proc_observation",return_value=("present","20","S")):
+  with patch_split(D,"process_namespace_identity",return_value="pid:[observer]"), \
+       patch_split(D,"_proc_observation",return_value=("present","20","S")):
    no_proof=D.attempt_process_quiescence(host_metadata)
    legacy_proof=D.attempt_process_quiescence({
     **host_metadata,"pid_host_proof":"nspid-outermost"})
@@ -1841,11 +1740,39 @@ class DispatchContractTest(unittest.TestCase):
   self.assertEqual(no_proof.state,"unverifiable")
   self.assertEqual(legacy_proof.state,"unverifiable")
   self.assertEqual((proven.state,proven.pid),("live",1437))
-  with mock.patch.object(D,"_proc_observation",return_value=("present","different","S")):
+  with patch_split(D,"_proc_observation",return_value=("present","different","S")):
    reused=D.attempt_process_quiescence({
     "pid":str(os.getpid()),"pid_start":"original","pid_scope":"host-visible",
    })
   self.assertEqual((reused.state,reused.reason),("quiescent","local-pid-reused"))
+
+ def test_legacy_unstarted_slice_close_is_quiescent_and_lookalikes_are_not(self):
+  # The key set of a slice row closed before the close also wrote launch_outcome.
+  legacy={
+   "attempt_id":"att-slice","parent_attempt_id":"att-owner","session_chain_id":"ssc-aaaa",
+   "subsession_mode":"parallel","launch_claimed":"0","registered_worker":"1",
+   "execution_surface":"registered-headless",
+  }
+  for note in ("subsession-batch-start-failed","subsession-batch-registration-incomplete"):
+   with self.subTest(legacy=note):
+    result=D.attempt_process_quiescence({**legacy,"note":note},terminal_receipt=True)
+    self.assertEqual((result.state,result.reason),("quiescent","never-launched"))
+  base={**legacy,"note":"subsession-batch-start-failed"}
+  lookalikes={
+   "launch-cleanup-unverified":{"launch_outcome":"launch-cleanup-unverified"},
+   "pid-and-start":{"pid":"4242","pid_start":"77"},
+   "other-note":{"note":"completed"},
+   "claimed":{"launch_claimed":"1"},
+   "started":{"launch_started":"1"},
+   "no-note":{"note":""},
+   "no-chain":{"session_chain_id":""},
+  }
+  for name,change in lookalikes.items():
+   with self.subTest(lookalike=name):
+    metadata={**base,**change}
+    if name=="no-note": metadata.pop("note")
+    self.assertNotEqual(
+     D.attempt_process_quiescence(metadata,terminal_receipt=True).state,"quiescent")
 
  def test_foreground_reap_note_cannot_override_a_live_recorded_process(self):
   metadata={
@@ -1857,10 +1784,10 @@ class DispatchContractTest(unittest.TestCase):
   self.assertEqual(result.state,"live")
 
  def test_process_identity_and_group_observation_fail_closed_on_unknown(self):
-  with mock.patch.object(
+  with patch_split(
       D,"_proc_observation",return_value=("inaccessible","", "")):
    self.assertFalse(D.process_identity_is_live(123,"42"))
-  with mock.patch.object(
+  with patch_split(
       D,"_proc_observation",return_value=("missing","", "")):
    self.assertFalse(D.process_identity_is_live(123,"42"))
   with mock.patch.object(D.Path,"iterdir",side_effect=PermissionError(13,"denied")):
@@ -1872,20 +1799,20 @@ class DispatchContractTest(unittest.TestCase):
   # F-1: 'inaccessible' (permission/namespace/procfs denial) must be
   # 'unresolved', never 'dead' -- collapsing it into 'dead' is exactly the
   # defect the review found in the reconcile expiry caller.
-  with mock.patch.object(
+  with patch_split(
       D,"_proc_observation",return_value=("missing","","")):
    self.assertEqual(D.process_identity_disposition(123,"42"),"dead")
-  with mock.patch.object(
+  with patch_split(
       D,"_proc_observation",return_value=("inaccessible","","")):
    self.assertEqual(D.process_identity_disposition(123,"42"),"unresolved")
-  with mock.patch.object(
+  with patch_split(
       D,"_proc_observation",return_value=("present","99","R")):
    # start tick mismatch: pid reused by a different process -- positively dead.
    self.assertEqual(D.process_identity_disposition(123,"42"),"dead")
-  with mock.patch.object(
+  with patch_split(
       D,"_proc_observation",return_value=("present","42","Z")):
    self.assertEqual(D.process_identity_disposition(123,"42"),"dead")
-  with mock.patch.object(
+  with patch_split(
       D,"_proc_observation",return_value=("present","42","R")):
    self.assertEqual(D.process_identity_disposition(123,"42"),"live")
   self.assertEqual(D.process_identity_disposition(123,""),"unresolved")
@@ -1913,13 +1840,13 @@ class DispatchContractTest(unittest.TestCase):
    "launch_outcome":"governed-process-reaped",
    "group_reap_proof":D.GROUP_REAP_PROOF,"group_reap_pgid":"437",
   }
-  with mock.patch.object(D,"process_namespace_identity",return_value="pid:[other]"):
+  with patch_split(D,"process_namespace_identity",return_value="pid:[other]"):
    reaped=D.attempt_process_quiescence(receipt)
   self.assertEqual(
    (reaped.state,reaped.reason),
    ("quiescent","governed-process-group-reaped"))
-  with mock.patch.object(D,"process_namespace_identity",return_value="pid:[source]"), \
-       mock.patch.object(D,"_proc_observation",return_value=("present","42","S")):
+  with patch_split(D,"process_namespace_identity",return_value="pid:[source]"), \
+       patch_split(D,"_proc_observation",return_value=("present","42","S")):
    live=D.attempt_process_quiescence(receipt)
    terminal_live=D.attempt_process_quiescence(receipt,terminal_receipt=True)
   self.assertEqual((live.state,live.reason),("live","local-pid-live"))
@@ -1933,10 +1860,10 @@ class DispatchContractTest(unittest.TestCase):
    "pid_ns":D.process_namespace_identity(),"attempt_id":"att-receipt-race",
    "registered_worker":"1",
   }
-  with mock.patch.object(D,"_proc_observation",return_value=("missing","", "")), \
-       mock.patch.object(D,"process_group_observation",
+  with patch_split(D,"_proc_observation",return_value=("missing","", "")), \
+       patch_split(D,"process_group_observation",
                          return_value=D.ProcessGroupObservation("empty")), \
-       mock.patch.object(D,"attempt_tagged_descendants",
+       patch_split(D,"attempt_tagged_descendants",
                          return_value=D.ProcessGroupObservation("empty")):
    local=D.attempt_process_quiescence(base)
    pending=D.attempt_process_quiescence(base,terminal_receipt=True)
@@ -1961,7 +1888,7 @@ class DispatchContractTest(unittest.TestCase):
    "pid_ns":"pid:[source]","attempt_id":"att-receipt-unavailable",
    "registered_worker":"1",
   }
-  with mock.patch.object(D,"_proc_observation",
+  with patch_split(D,"_proc_observation",
                          return_value=("inaccessible","", "")):
    result=D.attempt_process_quiescence(metadata,terminal_receipt=True)
   self.assertEqual((result.state,result.reason),
@@ -1971,10 +1898,10 @@ class DispatchContractTest(unittest.TestCase):
   metadata={"pid":"437","pid_start":"42","pgid":"437",
             "pid_scope":"host-visible","attempt_id":"att-host-visible",
             "registered_worker":"1"}
-  with mock.patch.object(D,"_proc_observation",return_value=("missing","", "")), \
-       mock.patch.object(D,"process_group_observation",
+  with patch_split(D,"_proc_observation",return_value=("missing","", "")), \
+       patch_split(D,"process_group_observation",
                          return_value=D.ProcessGroupObservation("empty")), \
-       mock.patch.object(D,"attempt_tagged_descendants",
+       patch_split(D,"attempt_tagged_descendants",
                          return_value=D.ProcessGroupObservation("empty")):
    result=D.attempt_process_quiescence(metadata,terminal_receipt=True)
   self.assertEqual((result.state,result.reason),("quiescent","local-pid-gone"))
@@ -1982,16 +1909,16 @@ class DispatchContractTest(unittest.TestCase):
  def test_missing_leader_requires_complete_owned_group_observation(self):
   metadata={"pid":"437","pid_start":"42","pgid":"437"}
   unknown=D.ProcessGroupObservation("unverifiable",reason="denied")
-  with mock.patch.object(D,"_proc_observation",return_value=("missing","", "")), \
-       mock.patch.object(D,"process_group_observation",return_value=unknown):
+  with patch_split(D,"_proc_observation",return_value=("missing","", "")), \
+       patch_split(D,"process_group_observation",return_value=unknown):
    result=D.attempt_process_quiescence(metadata)
   self.assertEqual(
    (result.state,result.reason),
    ("unverifiable","local-process-group-unverifiable"))
-  with mock.patch.object(D,"_proc_observation",return_value=("missing","", "")):
+  with patch_split(D,"_proc_observation",return_value=("missing","", "")):
    no_group=D.attempt_process_quiescence({"pid":"437","pid_start":"42"})
   self.assertEqual(no_group.state,"unverifiable")
-  with mock.patch.object(D,"_proc_observation",return_value=("missing","", "")), \
+  with patch_split(D,"_proc_observation",return_value=("missing","", "")), \
        mock.patch.object(D.os,"killpg") as killpg:
    authority=D.signal_exact_process_group(437,"42",__import__("signal").SIGTERM)
   self.assertEqual(authority,"leader-gone")
@@ -2000,9 +1927,9 @@ class DispatchContractTest(unittest.TestCase):
  def test_launch_identity_rejects_procfs_pid_namespace_mismatch(self):
   def namespace(pid="self"):
    return "pid:[inner]" if pid==437 else "pid:[observer]"
-  with mock.patch.object(D,"process_namespace_identity",side_effect=namespace), \
-       mock.patch.object(D,"process_start_ticks",return_value="42") as start, \
-       mock.patch.object(D,"process_namespace_pids",return_value=(1437,437)) as nspid, \
+  with patch_split(D,"process_namespace_identity",side_effect=namespace), \
+       patch_split(D,"process_start_ticks",return_value="42") as start, \
+       patch_split(D,"process_namespace_pids",return_value=(1437,437)) as nspid, \
        mock.patch.object(D.os,"getpgid",return_value=437):
    identity=D.process_launch_identity(437)
   self.assertNotIn("pid_start",identity)
@@ -2016,8 +1943,8 @@ class DispatchContractTest(unittest.TestCase):
    "pid_host":"1437","pid_host_start":"42","pgid_host":"1437",
    "pid_host_ns":"pid:[observer]","pid_host_proof":D.PID_HOST_NAMESPACE_PROOF,
   }
-  with mock.patch.object(D,"process_namespace_identity",return_value="pid:[observer]"), \
-       mock.patch.object(D,"_proc_observation") as observation:
+  with patch_split(D,"process_namespace_identity",return_value="pid:[observer]"), \
+       patch_split(D,"_proc_observation") as observation:
    self.assertEqual(D.authoritative_process_identities(metadata),())
    result=D.attempt_process_quiescence(metadata)
   self.assertEqual(result.state,"unverifiable")
@@ -2127,7 +2054,7 @@ class DispatchContractTest(unittest.TestCase):
    "batch_manifest_sha256":"sha256:"+"a"*64,
    "batch_leg_sha256":"sha256:"+"b"*64,
   }
-  with mock.patch.object(D,"_governor_json",return_value=payload):
+  with patch_split(D,"_governor_json",return_value=payload):
    with self.assertRaises(D.DispatchContractError) as caught:
     D.reserve_governor_token(
      Path("/governor"),Path("/root"),"dispatch",
@@ -2216,7 +2143,7 @@ class DispatchContractTest(unittest.TestCase):
    ({**residue,"launch_started":"1"},"open","draining"),
    ({key:value for key,value in residue.items() if key!="launch_claimed"},"open","draining"),
   )
-  with mock.patch.object(D,"attempt_process_quiescence",
+  with patch_split(D,"attempt_process_quiescence",
                          return_value=D.ProcessQuiescence("quiescent","fixture")):
    for sibling,status,expected in cases:
     with self.subTest(sibling=sibling):
@@ -2342,9 +2269,9 @@ class DispatchContractTest(unittest.TestCase):
    try:
     with mock.patch("route_parent_close.row_requested",return_value=False), \
          mock.patch("route_authority.owns",return_value=True), \
-         mock.patch.object(D,"attempt_governed_process_quiescence",
+         patch_split(D,"attempt_governed_process_quiescence",
                            return_value=D.ProcessQuiescence("quiescent","gone")), \
-         mock.patch.object(D,"supervisor_lease_is_held",return_value=False):
+         patch_split(D,"supervisor_lease_is_held",return_value=False):
      proc,identity=D.spawn_claimed_attempt(
       jobs,attempt,parent_binding=None,spawn=spawn,respawn_of=("99999999","100"),
       pre_release=lambda _identity:{"summary_owner":"dispatch-v1"})
@@ -2387,16 +2314,16 @@ class DispatchContractTest(unittest.TestCase):
    spawn=lambda _fd:spawned.append(True)
    with mock.patch("route_parent_close.row_requested",return_value=False), \
         mock.patch("route_authority.owns",return_value=True):
-    with mock.patch.object(D,"attempt_governed_process_quiescence",
+    with patch_split(D,"attempt_governed_process_quiescence",
                            return_value=D.ProcessQuiescence("live","still-running")), \
-         mock.patch.object(D,"supervisor_lease_is_held",return_value=False):
+         patch_split(D,"supervisor_lease_is_held",return_value=False):
      with self.assertRaises(D.DispatchContractError) as caught:
       D.spawn_claimed_attempt(jobs,attempt,parent_binding=None,spawn=spawn,
                               respawn_of=("99999999","100"))
      self.assertEqual(caught.exception.reason,"attempt-respawn-consumer-live")
-    with mock.patch.object(D,"attempt_governed_process_quiescence",
+    with patch_split(D,"attempt_governed_process_quiescence",
                            return_value=D.ProcessQuiescence("quiescent","gone")), \
-         mock.patch.object(D,"supervisor_lease_is_held",return_value=True):
+         patch_split(D,"supervisor_lease_is_held",return_value=True):
      with self.assertRaises(D.DispatchContractError) as caught:
       D.spawn_claimed_attempt(jobs,attempt,parent_binding=None,spawn=spawn,
                               respawn_of=("99999999","100"))
@@ -2427,9 +2354,9 @@ class DispatchContractTest(unittest.TestCase):
    try:
     with mock.patch("route_parent_close.row_requested",return_value=False), \
          mock.patch("route_authority.owns",return_value=True), \
-         mock.patch.object(D,"attempt_governed_process_quiescence",
+         patch_split(D,"attempt_governed_process_quiescence",
                            return_value=D.ProcessQuiescence("quiescent","gone")), \
-         mock.patch.object(D,"supervisor_lease_is_held",return_value=False):
+         patch_split(D,"supervisor_lease_is_held",return_value=False):
      threads=[threading.Thread(target=run) for _ in range(2)]
      for thread in threads:thread.start()
      for thread in threads:thread.join(timeout=10)
@@ -2505,8 +2432,8 @@ class DispatchContractTest(unittest.TestCase):
    parent,jobs,binding=self._fenced_spawn(td,"cgroup-record")
    child=None
    try:
-    with mock.patch.object(D,"process_unified_cgroup",return_value="/x/session-1.scope"), \
-         mock.patch.object(D,"process_cgroup_namespace_identity",return_value="cgroup:[9]"):
+    with patch_split(D,"process_unified_cgroup",return_value="/x/session-1.scope"), \
+         patch_split(D,"process_cgroup_namespace_identity",return_value="cgroup:[9]"):
      child,_identity=D.spawn_claimed_attempt(
       jobs,"att-child-cgroup-record",parent_binding=binding,spawn=self._fence_spawn,
       launch_metadata={"launch_lifecycle":"detached"})
@@ -2739,7 +2666,7 @@ class DispatchContractTest(unittest.TestCase):
       sys.executable,"-c",f"from pathlib import Path;Path({str(marker)!r}).write_text('bad')"],
      pass_fds=(gate_fd,),start_new_session=True)
     child.append(proc);return proc
-   with mock.patch.object(D,"process_launch_identity",side_effect=lambda pid:{"pid":str(pid)}):
+   with patch_split(D,"process_launch_identity",side_effect=lambda pid:{"pid":str(pid)}):
     with self.assertRaises(D.DispatchContractError) as caught:
      D.spawn_claimed_attempt(
       jobs,attempt,parent_binding=None,spawn=spawn,
@@ -2804,7 +2731,7 @@ class DispatchContractTest(unittest.TestCase):
     jobs.write_text(self.owner_row(attempt,parent.pid,start,extra=extra)+"\n")
     holder.write(f"kind={D.SUPERVISOR_LEASE_KIND}\nattempt_id={attempt}\nnonce={nonce}\n")
     holder.flush()
-    with mock.patch.object(D,"process_namespace_identity",return_value="pid:[inner]"):
+    with patch_split(D,"process_namespace_identity",return_value="pid:[inner]"):
      binding=D.resolve_live_parent_attempt(
       jobs,parent_slug="owner",repo="/repo",worktree="/wt",
       expected_attempt_id=attempt)
@@ -2980,12 +2907,6 @@ class DispatchContractTest(unittest.TestCase):
     execution_surface="claude-agent-team-teammate",registered_worker=False,
     fallback_hop="native-subagent"))
   self.assertEqual(caught.exception.reason,"teammate-not-dispatch-attempt")
- def test_launch_broker_is_retired(self):
-  with tempfile.TemporaryDirectory() as td:
-   root=Path(td); jobs=root/"jobs.log"
-   with self.assertRaises(D.DispatchContractError) as caught:
-    D.ensure_launch_broker(root,jobs,dispatch_depth=1,action="start",intensity="strong")
-   self.assertEqual(caught.exception.reason,"launch-broker-retired")
  def test_atomic_attempt_claim_is_exact_and_idempotent(self):
   with tempfile.TemporaryDirectory() as td:
    jobs=Path(td)/"jobs.log"; attempt="att-123456789abc"; prefix="att-123456789abc-extra"
@@ -3246,28 +3167,6 @@ class DispatchContractTest(unittest.TestCase):
    self._run_terminal_claim_race(start_actor,terminal_actor)
    self.assertNotIn("launch_claimed=1",jobs.read_text())
 
- def test_retry_precheck_can_pass_then_terminal_claim_fence_blocks_retry(self):
-  with tempfile.TemporaryDirectory() as td:
-   jobs=Path(td)/"jobs.log"; route="rt-retry-race"; attempt="att-retry-race"
-   metadata=cancellation_metadata(attempt)
-   metadata.update({"route_id":route,"route_hash":"sha256:"+"1"*64})
-   jobs.write_text(attempt_row(metadata)+"\n")
-   precheck_passed=threading.Event(); release_retry=threading.Event()
-   def retry_actor():
-    self.assertIsNone(D.terminal_claim_observation(jobs,route,attempt))
-    precheck_passed.set()
-    self.assertTrue(release_retry.wait(timeout=5))
-    return D.claim_recovery_retry(jobs,recovery_id="recovery-race",source_route_id=route,
-      source_route_hash=metadata["route_hash"],node_or_group_leg="execute",
-      original_attempt_id=attempt,remaining_cascade=1)
-   def terminal_actor():
-    self.assertTrue(precheck_passed.wait(timeout=5))
-    with (Path(f"{jobs}.lock")).open("a") as lock:
-     fcntl.flock(lock.fileno(),fcntl.LOCK_EX)
-     result=D.claim_terminal_route_locked(jobs,route,attempt,lock_fd=lock.fileno(),proof={"writer":"terminal"})
-    release_retry.set()
-    return result
-   self._run_terminal_claim_race(retry_actor,terminal_actor)
  def test_register_to_start_transition_is_crash_atomic(self):
   with tempfile.TemporaryDirectory() as td:
    jobs=Path(td)/"jobs.log"; attempt="att-crashatomic123"
@@ -3903,7 +3802,7 @@ class DispatchContractTest(unittest.TestCase):
      "2026-08-09T00:00:00Z\tdone\t/repo\t/wt\tplan\t"
      f"{CURRENT},{pipe}"
     ]
-    with mock.patch.object(D,"completion_marker_is_current",return_value=True):
+    with patch_split(D,"completion_marker_is_current",return_value=True):
      D.completion_marker_gate(
       str(route_path),"execute","start",base,base/"jobs.log",
       registry_lines=rows,attempt_id="att-successor-new",
@@ -3941,9 +3840,9 @@ class DispatchContractTest(unittest.TestCase):
   jobs=base/"jobs.log"
   jobs.write_text("",encoding="utf-8")
   ready=D.AttemptReadiness("ready","fixture-ready","att-frame")
-  with mock.patch.object(D,"completion_marker_is_current",return_value=True), \
-       mock.patch.object(D,"completion_attempt_readiness",return_value=ready), \
-       mock.patch.object(D,"_sibling_attempt_gate"):
+  with patch_split(D,"completion_marker_is_current",return_value=True), \
+       patch_split(D,"completion_attempt_readiness",return_value=ready), \
+       patch_split(D,"_sibling_attempt_gate"):
    D.completion_marker_gate(str(path),node,"start",base,jobs,
                             registry_lines=[],attempt_id="att-plan-new")
 
@@ -3967,9 +3866,9 @@ class DispatchContractTest(unittest.TestCase):
              "completion-marker-missing":"missing or malformed"}
    for reason,step in expected.items():
     currency=D.GateCurrency("resource-stage-not-current",reason)
-    with mock.patch.object(D,"completion_marker_is_current",return_value=False), \
-         mock.patch.object(D,"gate_currency",return_value=currency), \
-         mock.patch.object(D,"_sibling_attempt_gate"):
+    with patch_split(D,"completion_marker_is_current",return_value=False), \
+         patch_split(D,"gate_currency",return_value=currency), \
+         patch_split(D,"_sibling_attempt_gate"):
      with self.assertRaises(D.DispatchContractError) as caught:
       D.completion_marker_gate(str(path),"impl-review","start",base,jobs,
                                registry_lines=[],attempt_id="att-review-new")
@@ -3977,6 +3876,25 @@ class DispatchContractTest(unittest.TestCase):
                      ("completion-marker-missing","host-run"))
     self.assertIn(step,caught.exception.next_action)
     self.assertNotIn("revise",caught.exception.next_action)
+
+ def test_resource_predecessor_without_marker_gets_resource_guidance(self):
+  with tempfile.TemporaryDirectory() as td:
+   base=Path(td)
+   route={"dispatch_contract_version":3,"route_id":"rt-resource-gate0002",
+          "route_hash":"sha256:"+"9"*64,"registry_digest":"sha256:"+"a"*64,
+          "nodes":[{"id":"host-run","depends_on":[],"kind":"resource-runner",
+                    "completion_gate":"resource-exit","continuation":{"kind":"supervised"}},
+                   {"id":"impl-review","depends_on":["host-run"],"kind":"review-worker",
+                    "completion_gate":"code-impl-review","dispatch_depth":2}]}
+   path=base/"route.json"; path.write_text(json.dumps(route),encoding="utf-8")
+   jobs=base/"jobs.log"; jobs.write_text("",encoding="utf-8")
+   with patch_split(D,"_sibling_attempt_gate"):
+    with self.assertRaises(D.DispatchContractError) as caught:
+     D.completion_marker_gate(str(path),"impl-review","start",base,jobs,
+                              registry_lines=[],attempt_id="att-review-new")
+   self.assertEqual(caught.exception.reason,"completion-marker-missing")
+   self.assertIn("continue resource stage host-run",caught.exception.next_action)
+   self.assertNotIn("wait for node",caught.exception.next_action)
 
  def _gate_ledger(self,base,route):
   import workflow_state as WS
@@ -3997,9 +3915,9 @@ class DispatchContractTest(unittest.TestCase):
   with tempfile.TemporaryDirectory() as td:
    base=Path(td); _route,path=self._gated_route(base)
    ready=D.AttemptReadiness("ready","fixture-ready","att-frame")
-   with mock.patch.object(D,"completion_marker_is_current",return_value=True), \
-        mock.patch.object(D,"completion_attempt_readiness",return_value=ready), \
-        mock.patch.object(D,"_sibling_attempt_gate"):
+   with patch_split(D,"completion_marker_is_current",return_value=True), \
+        patch_split(D,"completion_attempt_readiness",return_value=ready), \
+        patch_split(D,"_sibling_attempt_gate"):
     with self.assertRaises(D.DispatchContractError) as caught:
      D.completion_marker_gate(
       str(path),"plan","start",base,base/"missing"/"jobs.log",
@@ -4065,9 +3983,9 @@ class DispatchContractTest(unittest.TestCase):
       "decision":"proceed","released_by":"user"},actor="release")
    with mock.patch.dict(os.environ,{"AGENT_WORKFLOW_ROOT":str(base/"release-ambient")}):
     ready=D.AttemptReadiness("ready","fixture-ready","att-frame")
-    with mock.patch.object(D,"completion_marker_is_current",return_value=True), \
-         mock.patch.object(D,"completion_attempt_readiness",return_value=ready), \
-         mock.patch.object(D,"_sibling_attempt_gate"):
+    with patch_split(D,"completion_marker_is_current",return_value=True), \
+         patch_split(D,"completion_attempt_readiness",return_value=ready), \
+         patch_split(D,"_sibling_attempt_gate"):
      D.completion_marker_gate(str(path),"plan","start",base,jobs,
                               registry_lines=[],attempt_id="att-plan-new")
     foreign=WS.WorkflowLedger(route["route_id"],route["route_hash"],
@@ -4217,11 +4135,11 @@ class DispatchContractTest(unittest.TestCase):
       (marker_dir/f"{n['id']}.json").write_text(json.dumps({"attempt_id":"att-"+n["id"],"registered_worker":True}),encoding="utf-8")
      ready=D.AttemptReadiness("ready","fixture-ready","att-dep")
      with mock.patch.dict(os.environ,{"AGENT_WORKFLOW_ROOT":str(base/"workflow")}), \
-          mock.patch.object(D,"completion_marker_is_current",return_value=True), \
-          mock.patch.object(D,"completion_attempt_readiness",return_value=ready), \
-          mock.patch.object(D,"_sibling_attempt_gate"), \
-          mock.patch.object(D,"_frame_pair_attempt_gate"), \
-          mock.patch.object(D,"_auxiliary_arbitration_gate"):
+          patch_split(D,"completion_marker_is_current",return_value=True), \
+          patch_split(D,"completion_attempt_readiness",return_value=ready), \
+          patch_split(D,"_sibling_attempt_gate"), \
+          patch_split(D,"_frame_pair_attempt_gate"), \
+          patch_split(D,"_auxiliary_arbitration_gate"):
       try:
        D.completion_marker_gate(str(path),binding["node"],"start",base,base/"jobs.log",
                                 registry_lines=[],attempt_id="att-new")
@@ -4405,9 +4323,9 @@ class DispatchContractTest(unittest.TestCase):
    base=Path(td)
    route,path,marker_dir=self._auxiliary_group_route(base)
    ready=D.AttemptReadiness("ready","fixture-ready","att-predecessor")
-   with mock.patch.object(D,"completion_marker_is_current",return_value=True), \
-        mock.patch.object(D,"completion_attempt_readiness",return_value=ready), \
-        mock.patch.object(D,"_sibling_attempt_gate"):
+   with patch_split(D,"completion_marker_is_current",return_value=True), \
+        patch_split(D,"completion_attempt_readiness",return_value=ready), \
+        patch_split(D,"_sibling_attempt_gate"):
     with self.assertRaises(D.DispatchContractError) as caught:
      D.completion_marker_gate(str(path),"execute","start",base,base/"jobs.log",
                               registry_lines=[],attempt_id="att-execute-new")
@@ -4471,9 +4389,9 @@ class DispatchContractTest(unittest.TestCase):
     # the environment points at a DIFFERENT dispatch state root than the one
     # the gate was handed -- exactly what a rotation leaves behind
     with mock.patch.dict(os.environ,{"AGENT_DISPATCH_JOBS":str(env_jobs)}), \
-         mock.patch.object(D,"completion_marker_is_current",return_value=True), \
-         mock.patch.object(D,"completion_attempt_readiness",return_value=ready), \
-         mock.patch.object(D,"_sibling_attempt_gate"):
+         patch_split(D,"completion_marker_is_current",return_value=True), \
+         patch_split(D,"completion_attempt_readiness",return_value=ready), \
+         patch_split(D,"_sibling_attempt_gate"):
      D.completion_marker_gate(str(path),"execute","start",gate_home,gate_jobs,
                               registry_lines=[],attempt_id="att-execute-new")
   with self.assertRaises(D.DispatchContractError) as caught:
@@ -4494,9 +4412,9 @@ class DispatchContractTest(unittest.TestCase):
    base=Path(td)
    route,path,_marker_dir=self._auxiliary_group_route(base)
    ready=D.AttemptReadiness("ready","fixture-ready","att-predecessor")
-   with mock.patch.object(D,"completion_marker_is_current",return_value=True), \
-        mock.patch.object(D,"completion_attempt_readiness",return_value=ready), \
-        mock.patch.object(D,"_sibling_attempt_gate"):
+   with patch_split(D,"completion_marker_is_current",return_value=True), \
+        patch_split(D,"completion_attempt_readiness",return_value=ready), \
+        patch_split(D,"_sibling_attempt_gate"):
     # a resolvable group that nobody has arbitrated yet
     with self.assertRaises(D.DispatchContractError) as caught:
      D.completion_marker_gate(str(path),"execute","start",base,base/"jobs.log",
@@ -4504,7 +4422,7 @@ class DispatchContractTest(unittest.TestCase):
     self.assertEqual(caught.exception.reason,"auxiliary-arbitration-missing")
     # the same group, but its arbiter cannot be resolved at all
     route_module=D._route_module()
-    with mock.patch.object(route_module,"owner_merge_auxiliary_groups",
+    with patch_split(route_module,"owner_merge_auxiliary_groups",
                            return_value={"plan-check":
                                          "auxiliary-arbiter-ambiguous:plan-check:a,b"}):
      with self.assertRaises(D.DispatchContractError) as caught:
@@ -4740,13 +4658,13 @@ class DispatchContractTest(unittest.TestCase):
           "acquired_at":"2020-01-01T00:00:00Z","deadline":"2099-01-01T00:01:00Z",
           "released_at":None,"expired":False}
   metadata["review_lease_record_digest"]=D.review_lease_record_digest(record)
-  with mock.patch.object(D,"attempt_governed_process_quiescence",
+  with patch_split(D,"attempt_governed_process_quiescence",
                          return_value=D.ProcessQuiescence("unverifiable","process-namespace-unverifiable")), \
-       mock.patch.object(D,"review_governed_lease_is_held",return_value=True):
+       patch_split(D,"review_governed_lease_is_held",return_value=True):
    self.assertEqual(D.review_holder_disposition(record,metadata,Path("/tmp")).state,"live")
-  with mock.patch.object(D,"attempt_governed_process_quiescence",
+  with patch_split(D,"attempt_governed_process_quiescence",
                          return_value=D.ProcessQuiescence("quiescent","process-pid-gone")), \
-       mock.patch.object(D,"review_governed_lease_is_held",return_value=True):
+       patch_split(D,"review_governed_lease_is_held",return_value=True):
    self.assertEqual(D.review_holder_disposition(record,metadata,Path("/tmp")).state,"dead")
 
 def extinct_metadata(attempt="att-extinct-fixture"):
@@ -4791,11 +4709,11 @@ class LinkedWorktreeSliceStartPathTest(unittest.TestCase):
  def test_f13_plain_provided_token_returns_empty_reservation_payload(self):
   with tempfile.TemporaryDirectory() as td:
    token="a"*32
-   with mock.patch.object(D,"_governor_json",return_value={"state":"unclaimed"}):
+   with patch_split(D,"_governor_json",return_value={"state":"unclaimed"}):
     self.assertEqual(
      D.reserve_governor_token(Path("governor"),Path(td),"dispatch",provided_token=token),
      (token,{}))
-   with mock.patch.object(D,"_governor_json",
+   with patch_split(D,"_governor_json",
                           return_value={"state":"unclaimed","reservation_kind":"parallel-batch"}):
     with self.assertRaises(D.DispatchContractError):
      D.reserve_governor_token(Path("governor"),Path(td),"dispatch",provided_token=token)
@@ -4838,8 +4756,8 @@ class LinkedWorktreeSliceStartPathTest(unittest.TestCase):
                "route_node":"execute",
                **dict(kv.split("=",1) for kv in self.SLICE_FIELDS.split(","))} if slice_ else {})}
   sibling=(self.child_row("att-s2").replace("route_id=rt-1","route_id=rt-1,route_file=/route.json"))
-  with mock.patch.object(D,"post_exit_receipt_reason",return_value="receipt"), \
-       mock.patch.object(D,"attempt_process_quiescence",
+  with patch_split(D,"post_exit_receipt_reason",return_value="receipt"), \
+       patch_split(D,"attempt_process_quiescence",
                          return_value=D.ProcessQuiescence("quiescent","gone")):
    self.assertEqual(D.resolve_parent_extinction(child(True),rows(parent)).state,"proven")
    self.assertEqual(D.resolve_parent_extinction(child(True),rows(parent,sibling)).state,"proven")
@@ -4897,7 +4815,7 @@ class ObserverNamespaceExtinctTest(unittest.TestCase):
     if str(path) == "/proc/self/status": return self_status
     if isinstance(status,Exception): raise status
     return status
-   with self.subTest(status=status,self_status=self_status), mock.patch.object(D.os,"readlink",side_effect=readlink), mock.patch.object(D,"_current_observer_is_host_like",return_value=True), mock.patch.object(D.os,"listdir",return_value=["7"]), mock.patch.object(Path,"read_text",read_text):
+   with self.subTest(status=status,self_status=self_status), mock.patch.object(D.os,"readlink",side_effect=readlink), patch_split(D,"_current_observer_is_host_like",return_value=True), mock.patch.object(D.os,"listdir",return_value=["7"]), mock.patch.object(Path,"read_text",read_text):
     self.assertEqual(D.observer_namespace_extinct(direct_extinct_metadata()),expected)
 
  def test_present_when_a_live_entry_matches_the_recorded_namespace(self):
@@ -4905,7 +4823,7 @@ class ObserverNamespaceExtinctTest(unittest.TestCase):
   metadata=direct_extinct_metadata()
   with mock.patch.object(D.os,"readlink",side_effect=self._fake_readlink(
     self_ns="pid:[999]",entries={"7":"pid:[401]"})), \
-       mock.patch.object(D,"_current_observer_is_host_like",return_value=True), \
+       patch_split(D,"_current_observer_is_host_like",return_value=True), \
        mock.patch.object(D.os,"listdir",return_value=["7"]):
    self.assertEqual(D.observer_namespace_extinct(metadata),"present")
 
@@ -4914,7 +4832,7 @@ class ObserverNamespaceExtinctTest(unittest.TestCase):
   metadata=direct_extinct_metadata()
   with mock.patch.object(D.os,"readlink",side_effect=self._fake_readlink(
     self_ns="pid:[999]",entries={"7":"pid:[500]"})), \
-       mock.patch.object(D,"_current_observer_is_host_like",return_value=True), \
+       patch_split(D,"_current_observer_is_host_like",return_value=True), \
        mock.patch.object(D.os,"listdir",return_value=["7"]):
    self.assertEqual(D.observer_namespace_extinct(metadata),"extinct")
 
@@ -4926,7 +4844,7 @@ class ObserverNamespaceExtinctTest(unittest.TestCase):
     return "pid:[999]"
    raise PermissionError()
   with mock.patch.object(D.os,"readlink",side_effect=readlink), \
-       mock.patch.object(D,"_current_observer_is_host_like",return_value=True), \
+       patch_split(D,"_current_observer_is_host_like",return_value=True), \
        mock.patch.object(D.os,"listdir",return_value=["7"]):
    self.assertEqual(D.observer_namespace_extinct(metadata),"unverifiable")
 
@@ -4945,7 +4863,7 @@ class ObserverNamespaceExtinctTest(unittest.TestCase):
   metadata=direct_extinct_metadata()
   with mock.patch.object(D.os,"readlink",side_effect=self._fake_readlink(
     self_ns="pid:[999]",entries={"9":"pid:[401]"})), \
-       mock.patch.object(D,"_current_observer_is_host_like",return_value=True), \
+       patch_split(D,"_current_observer_is_host_like",return_value=True), \
        mock.patch.object(D.os,"listdir",return_value=["9"]):
    self.assertEqual(D.observer_namespace_extinct(metadata),"present")
   # The registry-level consequence (a recycled inode is never
@@ -4956,7 +4874,7 @@ class ObserverNamespaceExtinctTest(unittest.TestCase):
   # C-4
   metadata=direct_extinct_metadata()
   with mock.patch.object(D.os,"readlink",return_value="pid:[999]"), \
-       mock.patch.object(D,"_current_observer_is_host_like",return_value=False):
+       patch_split(D,"_current_observer_is_host_like",return_value=False):
    self.assertEqual(D.observer_namespace_extinct(metadata),"unverifiable")
 
  def test_unverifiable_on_missing_observer_fields(self):
@@ -4987,10 +4905,10 @@ class CancellationQuiescenceExtinctSourceTest(unittest.TestCase):
   # C-6
   metadata=extinct_metadata()
   empty=D.ProcessGroupObservation("empty")
-  with mock.patch.object(D,"process_group_observation",return_value=empty), \
-       mock.patch.object(D,"attempt_tagged_descendants",return_value=empty), \
-       mock.patch.object(D,"attempt_scan_namespace_authority",return_value=False), \
-       mock.patch.object(D,"observer_namespace_extinct",return_value="extinct") as extinct_probe:
+  with patch_split(D,"process_group_observation",return_value=empty), \
+       patch_split(D,"attempt_tagged_descendants",return_value=empty), \
+       patch_split(D,"attempt_scan_namespace_authority",return_value=False), \
+       patch_split(D,"observer_namespace_extinct",return_value="extinct") as extinct_probe:
    proof=D.prove_attempt_quiescence(metadata,max_wait_seconds=0)
   self.assertFalse(proof.proven)
   self.assertEqual(proof.reason,"cancellation-quiescence-unproven")
@@ -5000,10 +4918,10 @@ class CancellationQuiescenceExtinctSourceTest(unittest.TestCase):
   # C-7
   metadata=extinct_metadata()
   empty=D.ProcessGroupObservation("empty")
-  with mock.patch.object(D,"process_group_observation",return_value=empty), \
-       mock.patch.object(D,"attempt_tagged_descendants",return_value=empty), \
-       mock.patch.object(D,"attempt_scan_namespace_authority",return_value=False), \
-       mock.patch.object(D,"observer_namespace_extinct",return_value="extinct"):
+  with patch_split(D,"process_group_observation",return_value=empty), \
+       patch_split(D,"attempt_tagged_descendants",return_value=empty), \
+       patch_split(D,"attempt_scan_namespace_authority",return_value=False), \
+       patch_split(D,"observer_namespace_extinct",return_value="extinct"):
    proof=D.prove_attempt_quiescence(
     metadata,max_wait_seconds=0,allow_namespace_extinct=True)
   self.assertTrue(proof.proven)
@@ -5016,10 +4934,10 @@ class CancellationQuiescenceExtinctSourceTest(unittest.TestCase):
   metadata=extinct_metadata()
   empty=D.ProcessGroupObservation("empty")
   populated=D.ProcessGroupObservation("populated",((41,"900","S"),))
-  with mock.patch.object(D,"process_group_observation",return_value=empty), \
-       mock.patch.object(D,"attempt_tagged_descendants",return_value=populated), \
-       mock.patch.object(D,"attempt_scan_namespace_authority",return_value=False), \
-       mock.patch.object(D,"observer_namespace_extinct",return_value="extinct"):
+  with patch_split(D,"process_group_observation",return_value=empty), \
+       patch_split(D,"attempt_tagged_descendants",return_value=populated), \
+       patch_split(D,"attempt_scan_namespace_authority",return_value=False), \
+       patch_split(D,"observer_namespace_extinct",return_value="extinct"):
    proof=D.prove_attempt_quiescence(
     metadata,max_wait_seconds=0,allow_namespace_extinct=True)
   self.assertFalse(proof.proven)
@@ -5029,10 +4947,10 @@ class CancellationQuiescenceExtinctSourceTest(unittest.TestCase):
   metadata=extinct_metadata()
   unverifiable=D.ProcessGroupObservation("unverifiable",reason="foreign")
   empty=D.ProcessGroupObservation("empty")
-  with mock.patch.object(D,"process_group_observation",return_value=unverifiable), \
-       mock.patch.object(D,"attempt_tagged_descendants",return_value=empty), \
-       mock.patch.object(D,"attempt_scan_namespace_authority",return_value=False), \
-       mock.patch.object(D,"observer_namespace_extinct",return_value="extinct"):
+  with patch_split(D,"process_group_observation",return_value=unverifiable), \
+       patch_split(D,"attempt_tagged_descendants",return_value=empty), \
+       patch_split(D,"attempt_scan_namespace_authority",return_value=False), \
+       patch_split(D,"observer_namespace_extinct",return_value="extinct"):
    proof=D.prove_attempt_quiescence(
     metadata,max_wait_seconds=0,allow_namespace_extinct=True)
   self.assertFalse(proof.proven)
@@ -5043,10 +4961,10 @@ class CancellationQuiescenceExtinctSourceTest(unittest.TestCase):
   metadata=extinct_metadata()
   unverifiable=D.ProcessGroupObservation("unverifiable",reason="foreign")
   empty=D.ProcessGroupObservation("empty")
-  with mock.patch.object(D,"process_group_observation",return_value=empty), \
-       mock.patch.object(D,"attempt_tagged_descendants",return_value=unverifiable), \
-       mock.patch.object(D,"attempt_scan_namespace_authority",return_value=False), \
-       mock.patch.object(D,"observer_namespace_extinct",return_value="extinct"):
+  with patch_split(D,"process_group_observation",return_value=empty), \
+       patch_split(D,"attempt_tagged_descendants",return_value=unverifiable), \
+       patch_split(D,"attempt_scan_namespace_authority",return_value=False), \
+       patch_split(D,"observer_namespace_extinct",return_value="extinct"):
    proof=D.prove_attempt_quiescence(
     metadata,max_wait_seconds=0,allow_namespace_extinct=True)
   self.assertFalse(proof.proven)
@@ -5070,11 +4988,11 @@ class NormalCleanupSettlementTest(ControlledConsumerTestCase):
 
  def observations(self,tag=None,group=None,authority=True,leader=("missing","","")):
   stack=contextlib.ExitStack()
-  stack.enter_context(mock.patch.object(D,"_proc_observation",return_value=leader))
-  stack.enter_context(mock.patch.object(D,"process_group_observation",return_value=group or self.empty))
-  stack.enter_context(mock.patch.object(D,"attempt_tagged_descendants",return_value=tag or self.empty))
-  stack.enter_context(mock.patch.object(D,"attempt_scan_namespace_authority",return_value=authority))
-  stack.enter_context(mock.patch.object(D,"observer_namespace_extinct",return_value="present"))
+  stack.enter_context(patch_split(D,"_proc_observation",return_value=leader))
+  stack.enter_context(patch_split(D,"process_group_observation",return_value=group or self.empty))
+  stack.enter_context(patch_split(D,"attempt_tagged_descendants",return_value=tag or self.empty))
+  stack.enter_context(patch_split(D,"attempt_scan_namespace_authority",return_value=authority))
+  stack.enter_context(patch_split(D,"observer_namespace_extinct",return_value="present"))
   return stack
 
  def seal(self):
@@ -5156,7 +5074,7 @@ class NormalCleanupSettlementTest(ControlledConsumerTestCase):
 
  def test_settlement_compare_and_set_rejects_changed_row(self):
   original=self.jobs.read_bytes()
-  with self.observations(),mock.patch.object(D,"annotate_attempt_row_if",return_value=False) as writer:
+  with self.observations(),patch_split(D,"annotate_attempt_row_if",return_value=False) as writer:
    result=D.resolve_attempt_cleanup(self.jobs,self.metadata["attempt_id"],apply=True)
   self.assertFalse(result["settled"])
   self.assertEqual(result["reason"],"cleanup-row-changed")
@@ -5179,10 +5097,10 @@ class TerminalCleanupResponsibilityTest(ControlledConsumerTestCase):
                   delivery_receipt_b64="original-delivery",failure_class="pass")
   self.jobs.write_text(attempt_row(metadata,"done")+"\n")
   denied=D.ProcessGroupObservation("unverifiable",reason="procfs-environ:997325:same-uid-unobservable")
-  with mock.patch.object(D,"_proc_observation",return_value=("missing","","")), \
-       mock.patch.object(D,"process_group_observation",return_value=D.ProcessGroupObservation("empty")), \
-       mock.patch.object(D,"attempt_tagged_descendants",return_value=denied), \
-       mock.patch.object(D,"attempt_scan_namespace_authority",return_value=True):
+  with patch_split(D,"_proc_observation",return_value=("missing","","")), \
+       patch_split(D,"process_group_observation",return_value=D.ProcessGroupObservation("empty")), \
+       patch_split(D,"attempt_tagged_descendants",return_value=denied), \
+       patch_split(D,"attempt_scan_namespace_authority",return_value=True):
    result=D.resolve_attempt_cleanup(self.jobs,metadata["attempt_id"],apply=True)
   self.assertTrue(result["changed"],result)
   self.assertEqual(result["proof_source"],"authenticated-namespace-portable")
@@ -5191,10 +5109,10 @@ class TerminalCleanupResponsibilityTest(ControlledConsumerTestCase):
  def test_portable_cleanup_converges_despite_later_private_environment(self):
   sealed,denied=self.portable_cleanup()
   original=self.jobs.read_bytes()
-  with mock.patch.object(D,"_proc_observation",return_value=("missing","","")), \
-       mock.patch.object(D,"process_group_observation",return_value=D.ProcessGroupObservation("empty")), \
-       mock.patch.object(D,"attempt_tagged_descendants",return_value=denied), \
-       mock.patch.object(D,"attempt_scan_namespace_authority",return_value=True):
+  with patch_split(D,"_proc_observation",return_value=("missing","","")), \
+       patch_split(D,"process_group_observation",return_value=D.ProcessGroupObservation("empty")), \
+       patch_split(D,"attempt_tagged_descendants",return_value=denied), \
+       patch_split(D,"attempt_scan_namespace_authority",return_value=True):
    self.assertEqual(D.attempt_process_quiescence(sealed,terminal_receipt=True).state,"quiescent")
    for _ in range(2):
     result=D.resolve_attempt_cleanup(self.jobs,sealed["attempt_id"],apply=True)
@@ -5209,15 +5127,15 @@ class TerminalCleanupResponsibilityTest(ControlledConsumerTestCase):
  def test_portable_cleanup_never_overrides_live_or_unknown_group(self):
   sealed,denied=self.portable_cleanup()
   live=D.ProcessGroupObservation("populated",((42,"901","S"),))
-  with mock.patch.object(D,"_proc_observation",return_value=("missing","","")), \
-       mock.patch.object(D,"attempt_scan_namespace_authority",return_value=True):
-   with mock.patch.object(D,"process_group_observation",return_value=D.ProcessGroupObservation("empty")), \
-        mock.patch.object(D,"attempt_tagged_descendants",return_value=live):
+  with patch_split(D,"_proc_observation",return_value=("missing","","")), \
+       patch_split(D,"attempt_scan_namespace_authority",return_value=True):
+   with patch_split(D,"process_group_observation",return_value=D.ProcessGroupObservation("empty")), \
+        patch_split(D,"attempt_tagged_descendants",return_value=live):
     self.assertEqual(D.attempt_process_quiescence(sealed,terminal_receipt=True).state,"live")
    for group,expected in ((live,"live"),(D.ProcessGroupObservation("unverifiable",reason="unreadable"),"unverifiable")):
     with self.subTest(group=group.state), \
-         mock.patch.object(D,"process_group_observation",return_value=group), \
-         mock.patch.object(D,"attempt_tagged_descendants",return_value=denied):
+         patch_split(D,"process_group_observation",return_value=group), \
+         patch_split(D,"attempt_tagged_descendants",return_value=denied):
      self.assertEqual(D.attempt_process_quiescence(sealed,terminal_receipt=True).state,expected)
 
  def test_portable_cleanup_requires_exact_binding_and_current_namespace(self):
@@ -5226,15 +5144,15 @@ class TerminalCleanupResponsibilityTest(ControlledConsumerTestCase):
                    {"pid_start":"another-process"},{"route_hash":"sha256:foreign"},
                    {"pid_observer_ns":"pid:[foreign]"}):
    with self.subTest(mutation=mutation), \
-        mock.patch.object(D,"_proc_observation",return_value=("missing","","")), \
-        mock.patch.object(D,"process_group_observation",return_value=D.ProcessGroupObservation("empty")), \
-        mock.patch.object(D,"attempt_tagged_descendants",return_value=denied), \
-        mock.patch.object(D,"attempt_scan_namespace_authority",return_value=True):
+        patch_split(D,"_proc_observation",return_value=("missing","","")), \
+        patch_split(D,"process_group_observation",return_value=D.ProcessGroupObservation("empty")), \
+        patch_split(D,"attempt_tagged_descendants",return_value=denied), \
+        patch_split(D,"attempt_scan_namespace_authority",return_value=True):
     self.assertEqual(D.attempt_process_quiescence({**sealed,**mutation},terminal_receipt=True).state,"unverifiable")
-  with mock.patch.object(D,"_proc_observation",return_value=("missing","","")), \
-       mock.patch.object(D,"process_group_observation",return_value=D.ProcessGroupObservation("empty")), \
-       mock.patch.object(D,"attempt_tagged_descendants",return_value=denied), \
-       mock.patch.object(D,"attempt_scan_namespace_authority",return_value=False):
+  with patch_split(D,"_proc_observation",return_value=("missing","","")), \
+       patch_split(D,"process_group_observation",return_value=D.ProcessGroupObservation("empty")), \
+       patch_split(D,"attempt_tagged_descendants",return_value=denied), \
+       patch_split(D,"attempt_scan_namespace_authority",return_value=False):
    self.assertEqual(D.attempt_process_quiescence(sealed,terminal_receipt=True).state,"unverifiable")
 
  def test_terminal_proof_preserves_success_and_cannot_authorize_retry(self):
@@ -5244,10 +5162,10 @@ class TerminalCleanupResponsibilityTest(ControlledConsumerTestCase):
   self.jobs.write_text(attempt_row(metadata,"done")+"\n")
   empty=D.ProcessGroupObservation("empty")
   mismatch=D.ProcessGroupObservation("unverifiable",reason="observer-namespace-mismatch")
-  with mock.patch.object(D,"process_group_observation",return_value=empty), \
-       mock.patch.object(D,"attempt_tagged_descendants",return_value=mismatch), \
-       mock.patch.object(D,"attempt_scan_namespace_authority",return_value=False), \
-       mock.patch.object(D,"observer_namespace_extinct",return_value="extinct"):
+  with patch_split(D,"process_group_observation",return_value=empty), \
+       patch_split(D,"attempt_tagged_descendants",return_value=mismatch), \
+       patch_split(D,"attempt_scan_namespace_authority",return_value=False), \
+       patch_split(D,"observer_namespace_extinct",return_value="extinct"):
    original=self.jobs.read_bytes()
    planned=D.resolve_attempt_cleanup(self.jobs,metadata["attempt_id"])
    self.assertEqual(planned["reason"],"cleanup-proof-available")
@@ -5267,17 +5185,17 @@ class TerminalCleanupResponsibilityTest(ControlledConsumerTestCase):
   self.assertFalse(D._cleanup_receipt_reason(dict(sealed,pid_start="another-process")))
   self.assertFalse(D._cleanup_receipt_reason(dict(sealed,cleanup_receipt_digest="sha256:wrong")))
   populated=D.ProcessGroupObservation("populated",((4242,"900","S"),))
-  with mock.patch.object(D,"attempt_tagged_descendants",return_value=populated):
+  with patch_split(D,"attempt_tagged_descendants",return_value=populated):
    self.assertEqual(D.attempt_process_quiescence(sealed,terminal_receipt=True).state,"live")
 
  def test_incomplete_observation_preserves_obligation_and_all_bytes(self):
   metadata=extinct_metadata("att-cleanup-unknown")
   self.jobs.write_text(attempt_row(metadata,"done")+"\n")
   original=self.jobs.read_bytes()
-  with mock.patch.object(D,"process_group_observation",return_value=D.ProcessGroupObservation("empty")), \
-       mock.patch.object(D,"attempt_tagged_descendants",return_value=D.ProcessGroupObservation("unverifiable",reason="proc-permission-denied")), \
-       mock.patch.object(D,"attempt_scan_namespace_authority",return_value=False), \
-       mock.patch.object(D,"observer_namespace_extinct",return_value="extinct"):
+  with patch_split(D,"process_group_observation",return_value=D.ProcessGroupObservation("empty")), \
+       patch_split(D,"attempt_tagged_descendants",return_value=D.ProcessGroupObservation("unverifiable",reason="proc-permission-denied")), \
+       patch_split(D,"attempt_scan_namespace_authority",return_value=False), \
+       patch_split(D,"observer_namespace_extinct",return_value="extinct"):
    result=D.resolve_attempt_cleanup(self.jobs,metadata["attempt_id"],apply=True)
   self.assertFalse(result["settled"],result)
   self.assertEqual(self.jobs.read_bytes(),original)
@@ -5339,7 +5257,7 @@ class ResidueDrainRefreshTest(ControlledConsumerTestCase):
   original=self.jobs.read_bytes()
   with contextlib.ExitStack() as stack:
    for name,value in mocks.items():
-    stack.enter_context(mock.patch.object(D,name,**value))
+    stack.enter_context(patch_split(D,name,**value))
    result=D.resolve_residue_drain(self.jobs,self.attempt,apply=True)
   self.assertEqual((result["state"],result["changed"]),(state,False),result)
   self.assertTrue(result["reason"].startswith(reason),result)
@@ -5387,7 +5305,7 @@ class ResidueDrainRefreshTest(ControlledConsumerTestCase):
                              process_group_observation=dict(return_value=D.ProcessGroupObservation("empty")),
                              attempt_tagged_descendants=dict(return_value=populated))
   self.assertEqual(result["live_pids"],[4242])
-  with mock.patch.object(D,"attempt_tagged_descendants",return_value=populated):
+  with patch_split(D,"attempt_tagged_descendants",return_value=populated):
    self.assertEqual(D.residue_live_pids(self.metadata),(4242,))
   self.assertEqual(D.residue_live_pids({}),())
 
@@ -5402,7 +5320,7 @@ class ResidueDrainRefreshTest(ControlledConsumerTestCase):
 
  def test_row_changed_after_observation_is_not_overwritten(self):
   self.write()
-  with mock.patch.object(D,"annotate_attempt_row_if",return_value=False):
+  with patch_split(D,"annotate_attempt_row_if",return_value=False):
    result=D.resolve_residue_drain(self.jobs,self.attempt,apply=True)
   self.assertEqual((result["state"],result["changed"],result["reason"]),
                    ("drained",False,"residue-row-changed"))
@@ -5548,7 +5466,7 @@ class LaunchCgroupDeniedEnvironTest(unittest.TestCase):
   return mock.patch.object(Path,"read_text",read_text)
 
  def same_ns(self,namespace=None):
-  return mock.patch.object(D,"process_cgroup_namespace_identity",return_value=namespace or self.NS)
+  return patch_split(D,"process_cgroup_namespace_identity",return_value=namespace or self.NS)
 
  def probes(self,metadata):
   """Single-shot and batch answers for the same row."""
@@ -5636,7 +5554,7 @@ class CancellationReceiptWedgeTest(unittest.TestCase):
   # gone (a sandbox, or any non-host procfs) still wedges on the receipt. A
   # host-like observer that does prove it is NamespaceExtinctQuiescenceTest.
   metadata=direct_extinct_metadata()
-  with mock.patch.object(D,"namespace_gone",return_value="unverifiable"):
+  with patch_split(D,"namespace_gone",return_value="unverifiable"):
    self.assertEqual(
     D.attempt_process_quiescence(metadata,terminal_receipt=True),
     D.ProcessQuiescence("unverifiable","post-exit-receipt-incomplete"))
@@ -5644,10 +5562,10 @@ class CancellationReceiptWedgeTest(unittest.TestCase):
  def _sealed_cancellation_metadata(self):
   metadata=extinct_metadata()
   empty=D.ProcessGroupObservation("empty")
-  with mock.patch.object(D,"process_group_observation",return_value=empty), \
-       mock.patch.object(D,"attempt_tagged_descendants",return_value=empty), \
-       mock.patch.object(D,"attempt_scan_namespace_authority",return_value=False), \
-       mock.patch.object(D,"observer_namespace_extinct",return_value="extinct"):
+  with patch_split(D,"process_group_observation",return_value=empty), \
+       patch_split(D,"attempt_tagged_descendants",return_value=empty), \
+       patch_split(D,"attempt_scan_namespace_authority",return_value=False), \
+       patch_split(D,"observer_namespace_extinct",return_value="extinct"):
    proof=D.prove_attempt_quiescence(
     metadata,max_wait_seconds=0,allow_namespace_extinct=True)
   with tempfile.TemporaryDirectory() as td:
@@ -5660,7 +5578,7 @@ class CancellationReceiptWedgeTest(unittest.TestCase):
  def test_sealed_cancellation_receipt_clears_the_wedge(self):
   # C-10
   sealed,_=self._sealed_cancellation_metadata()
-  with mock.patch.object(D,"_attempt_process_quiescence_impl") as impl:
+  with patch_split(D,"_attempt_process_quiescence_impl") as impl:
    impl.return_value=D.ProcessQuiescence("quiescent","")
    result=D.attempt_process_quiescence(sealed,terminal_receipt=True)
   self.assertNotEqual(result.reason,"post-exit-receipt-incomplete")
@@ -5670,7 +5588,7 @@ class CancellationReceiptWedgeTest(unittest.TestCase):
   sealed,_=self._sealed_cancellation_metadata()
   partial={**sealed,"quiescence_pgid_proof":"garbage"}
   # As C-9: the wedge belongs to an observer that cannot see the namespace.
-  with mock.patch.object(D,"namespace_gone",return_value="unverifiable"):
+  with patch_split(D,"namespace_gone",return_value="unverifiable"):
    self.assertEqual(
     D.attempt_process_quiescence(partial,terminal_receipt=True).reason,
     "post-exit-receipt-incomplete")
@@ -5703,10 +5621,10 @@ class CancellationSealSourceValidatorTest(unittest.TestCase):
   # C-14
   metadata=extinct_metadata()
   empty=D.ProcessGroupObservation("empty")
-  with mock.patch.object(D,"process_group_observation",return_value=empty), \
-       mock.patch.object(D,"attempt_tagged_descendants",return_value=empty), \
-       mock.patch.object(D,"attempt_scan_namespace_authority",return_value=False), \
-       mock.patch.object(D,"observer_namespace_extinct",return_value="extinct"):
+  with patch_split(D,"process_group_observation",return_value=empty), \
+       patch_split(D,"attempt_tagged_descendants",return_value=empty), \
+       patch_split(D,"attempt_scan_namespace_authority",return_value=False), \
+       patch_split(D,"observer_namespace_extinct",return_value="extinct"):
    proof=D.prove_attempt_quiescence(
     metadata,max_wait_seconds=0,allow_namespace_extinct=True)
   with tempfile.TemporaryDirectory() as td:
@@ -5771,7 +5689,7 @@ class StageAdvanceClaimTest(unittest.TestCase):
  def test_A11_cancelled_successor_row_is_started_not_reclaimable(self):
   # A cancelled/receiptless successor row must still count as "started" so
   # `runnable_successors` (dispatch_stage_advance.py) never reclaims it --
-  # its recovery is SD-105/106's `claim_recovery_retry`, never stage advance
+  # its recovery is SD-106's same-node retry, never stage advance
   # (plan-check round 1, non-blocking finding 1).
   import dispatch_stage_advance as SA
   with tempfile.TemporaryDirectory() as td:
@@ -6324,7 +6242,10 @@ class DeliveryIntentWiringTest(unittest.TestCase):
         #     reconcile_attempt_terminal's `closed` branch, close_attempt_row_if).
         #   - the remaining reconcile_attempt_terminal `repaired-terminal`/
         #     `terminal-conflict` branches, §4.3 exclusion table): MUST NOT.
-        source = (Path(__file__).with_name("dispatch_contract.py")).read_text(encoding="utf-8")
+        # dispatch_contract.py is split into dispatch_contract_*.py siblings; scan them all.
+        here = Path(__file__).parent
+        source = "\n".join(path.read_text(encoding="utf-8") for path in (
+            here / "dispatch_contract.py", *sorted(here.glob("dispatch_contract_*.py"))))
         lines = source.splitlines()
         sites = [
             index for index, line in enumerate(lines)
@@ -6459,12 +6380,12 @@ class RuntimeAncestryBindingTest(unittest.TestCase):
         def fake_stat(pid):
             return {1: {"ppid": 0, "start": 10}}.get(pid)
 
-        with mock.patch.object(D, "_runtime_ancestry_proc_stat", side_effect=fake_stat), \
-             mock.patch.object(D, "_runtime_ancestry_harness_process", return_value=None):
+        with patch_split(D, "_runtime_ancestry_proc_stat", side_effect=fake_stat), \
+             patch_split(D, "_runtime_ancestry_harness_process", return_value=None):
             self.assertIsNone(D.runtime_ancestry_binding(1))
 
     def test_unresolvable_ancestor_stat_returns_none(self):
-        with mock.patch.object(D, "_runtime_ancestry_proc_stat", return_value=None):
+        with patch_split(D, "_runtime_ancestry_proc_stat", return_value=None):
             self.assertIsNone(D.runtime_ancestry_binding(999999))
 
     def test_missing_namespace_identity_returns_none_not_partial(self):
@@ -6473,9 +6394,9 @@ class RuntimeAncestryBindingTest(unittest.TestCase):
         def fake_stat(pid):
             return {42: {"ppid": 0, "start": 99}}.get(pid)
 
-        with mock.patch.object(D, "_runtime_ancestry_proc_stat", side_effect=fake_stat), \
-             mock.patch.object(D, "_runtime_ancestry_harness_process", return_value="claude"), \
-             mock.patch.object(D, "process_namespace_identity", return_value=None):
+        with patch_split(D, "_runtime_ancestry_proc_stat", side_effect=fake_stat), \
+             patch_split(D, "_runtime_ancestry_harness_process", return_value="claude"), \
+             patch_split(D, "process_namespace_identity", return_value=None):
             self.assertIsNone(D.runtime_ancestry_binding(42))
 
 
@@ -6500,7 +6421,7 @@ class ReservationClaimTimeoutTest(unittest.TestCase):
             def poll(self):
                 return 1
         with mock.patch.dict(os.environ, {D.RESERVATION_CLAIM_TIMEOUT_ENV: "600"}), \
-             mock.patch.object(D, "_governor_json", return_value={"state": "unclaimed"}):
+             patch_split(D, "_governor_json", return_value={"state": "unclaimed"}):
             start = time.monotonic()
             with self.assertRaises(D.DispatchContractError) as ctx:
                 D.wait_governor_reservation_claim(Path("/g"), Path("/r"), "tok", DeadProc())
@@ -6971,7 +6892,7 @@ class FrameLegRegistrationTest(_AttemptPolicyFixture):
   ):
    with self.subTest(outer=outer):
     self.assertEqual(self.refusal(route,**kw).reason,outer)
-    with mock.patch.object(D,"validate_attempt_metadata"):
+    with patch_split(D,"validate_attempt_metadata"):
      inner=self.refusal(route,**kw)
     self.assertEqual(inner.reason,"frame-route-surface-invalid")
     self.assertNotEqual(inner.reason,"quick-route-surface-invalid")
@@ -7092,7 +7013,7 @@ class QuickThreeNodeRegistrationTest(_AttemptPolicyFixture):
     self.assertTrue(policy["quick"])
   # a frame leg is still fenced to the two HEADLESS hops -- widening the pin
   # did not open the native-subagent or inline hops to it
-  with mock.patch.object(D,"validate_attempt_metadata"):
+  with patch_split(D,"validate_attempt_metadata"):
    for hop in ("native-subagent","inline"):
     with self.subTest(hop=hop):
      exception=self.refusal(self.route(),route_node="frame",intensity="quick",
@@ -7170,7 +7091,7 @@ class FrameUnavailabilitySkipsCompletedDeferredLegTest(unittest.TestCase):
         # capacity death so an un-fixed skip condition (still reading plain
         # `failure_class == "pass"`) would fall through and misclassify this
         # completed-deferred leg as unavailable.
-        with mock.patch.object(
+        with patch_split(
             D, "attempt_process_quiescence",
             return_value=D.ProcessQuiescence("quiescent", "no-pid"),
         ), mock.patch.object(
@@ -7190,7 +7111,7 @@ class FrameUnavailabilitySkipsCompletedDeferredLegTest(unittest.TestCase):
             "note": "dead-capacity",
         }
         lines = [self._row_line("codex", metadata)]
-        with mock.patch.object(
+        with patch_split(
             D, "attempt_process_quiescence",
             return_value=D.ProcessQuiescence("quiescent", "no-pid"),
         ), mock.patch.object(
@@ -7364,7 +7285,7 @@ class NamespaceGoneTest(unittest.TestCase):
   stack=contextlib.ExitStack()
   stack.enter_context(mock.patch.object(D.os,"readlink",side_effect=readlink))
   stack.enter_context(mock.patch.object(D.os,"listdir",return_value=list(entries)))
-  stack.enter_context(mock.patch.object(D,"_current_observer_is_host_like",return_value=host_like))
+  stack.enter_context(patch_split(D,"_current_observer_is_host_like",return_value=host_like))
   return stack
 
  def test_extinct_only_when_every_recorded_namespace_is_gone(self):
@@ -7392,7 +7313,7 @@ class NamespaceGoneTest(unittest.TestCase):
    ({"pid:[4026534323]":"unverifiable","pid:[4026534999]":"extinct"},"unverifiable"),
    ({"pid:[4026534323]":"unverifiable","pid:[4026534999]":"present"},"present"),
   ):
-   with self.subTest(states=states), mock.patch.object(
+   with self.subTest(states=states), patch_split(
      D,"_recorded_pid_namespace_state",side_effect=lambda value,states=states:states[value]):
     self.assertEqual(D.namespace_gone(split),expected)
 
@@ -7405,7 +7326,7 @@ class NamespaceGoneTest(unittest.TestCase):
    raise OSError(errno.EIO,"io")
   with mock.patch.object(D.os,"readlink",side_effect=readlink), \
        mock.patch.object(D.os,"listdir",return_value=["7"]), \
-       mock.patch.object(D,"_current_observer_is_host_like",return_value=True):
+       patch_split(D,"_current_observer_is_host_like",return_value=True):
    self.assertEqual(D.namespace_gone(namespace_row_metadata()),"unverifiable")
 
  def test_rows_without_a_recorded_kernel_namespace_prove_nothing(self):
@@ -7413,7 +7334,7 @@ class NamespaceGoneTest(unittest.TestCase):
   for mutation in ({"pid_observer_ns":""},{"pid_scope":"host-visible"},
                    {"registered_worker":"0"},{"pid_observer_ns":"pid:[source]"},
                    {"pid_ns":"pid:[inner]"}):
-   with self.subTest(mutation=mutation), mock.patch.object(
+   with self.subTest(mutation=mutation), patch_split(
      D,"_recorded_pid_namespace_state",return_value="extinct") as walk:
     self.assertEqual(D.namespace_gone({**base,**mutation}),"unverifiable")
     walk.assert_not_called()
@@ -7429,8 +7350,8 @@ class NamespaceExtinctQuiescenceTest(unittest.TestCase):
    "unverifiable",(),"observer-namespace-mismatch")
   def probe(_metadata,*,host_complete=False):
    return host if host_complete else ordinary
-  with mock.patch.object(D,"namespace_gone",return_value=gone), \
-       mock.patch.object(D,"attempt_tagged_descendants",side_effect=probe):
+  with patch_split(D,"namespace_gone",return_value=gone), \
+       patch_split(D,"attempt_tagged_descendants",side_effect=probe):
    return D.attempt_process_quiescence(metadata,terminal_receipt=terminal_receipt)
 
  def test_extinct_namespaces_and_empty_host_walk_are_quiescent_past_the_receipt_gate(self):
@@ -7468,18 +7389,18 @@ class NamespaceExtinctQuiescenceTest(unittest.TestCase):
   for governed in (D.ProcessQuiescence("unverifiable","local-process-identity-inaccessible"),
                    D.ProcessQuiescence("unverifiable","process-identity-missing")):
    with self.subTest(reason=governed.reason), \
-        mock.patch.object(D,"_attempt_process_quiescence_impl",return_value=governed), \
-        mock.patch.object(D,"attempt_tagged_descendants",
+        patch_split(D,"_attempt_process_quiescence_impl",return_value=governed), \
+        patch_split(D,"attempt_tagged_descendants",
                           return_value=D.ProcessGroupObservation("empty")), \
-        mock.patch.object(D,"namespace_gone",return_value="extinct") as gone:
+        patch_split(D,"namespace_gone",return_value="extinct") as gone:
     self.assertEqual(D.attempt_process_quiescence(metadata).state,"unverifiable")
     gone.assert_not_called()
   legacy={key:value for key,value in metadata.items() if key!="attempt_id"}
-  with mock.patch.object(D,"namespace_gone",return_value="extinct") as gone:
+  with patch_split(D,"namespace_gone",return_value="extinct") as gone:
    self.assertEqual(D.attempt_process_quiescence(legacy).reason,"process-namespace-unverifiable")
    gone.assert_not_called()
   # The governed-process-only surface is not widened at all.
-  with mock.patch.object(D,"namespace_gone",return_value="extinct"):
+  with patch_split(D,"namespace_gone",return_value="extinct"):
    self.assertEqual(D.attempt_governed_process_quiescence(metadata),
                     D.ProcessQuiescence("unverifiable","process-namespace-unverifiable"))
 
@@ -7490,7 +7411,7 @@ class NamespaceExtinctQuiescenceTest(unittest.TestCase):
   with controlled_metadata_scope(metadata):
    for host_like,expected in ((True,"empty"),(False,"unverifiable")):
     with self.subTest(host_like=host_like), \
-         mock.patch.object(D,"_current_observer_is_host_like",return_value=host_like):
+         patch_split(D,"_current_observer_is_host_like",return_value=host_like):
      self.assertEqual(D.attempt_tagged_descendants(metadata,host_complete=True).state,expected)
      with D.process_table_scan_scope():
       self.assertEqual(D.attempt_tagged_descendants(metadata,host_complete=True).state,expected)
@@ -7501,7 +7422,7 @@ class NamespaceExtinctQuiescenceTest(unittest.TestCase):
   try:
    deadline=time.monotonic()+5
    while time.monotonic()<deadline:
-    with mock.patch.object(D,"_current_observer_is_host_like",return_value=True):
+    with patch_split(D,"_current_observer_is_host_like",return_value=True):
      found=D.attempt_tagged_descendants(metadata,host_complete=True)
     if found.state=="populated":break
     time.sleep(0.05)
@@ -7512,8 +7433,8 @@ class NamespaceExtinctQuiescenceTest(unittest.TestCase):
 
  def test_open_row_needs_reconcile_and_closed_rows_follow_their_outcome(self):
   metadata=namespace_row_metadata()
-  with mock.patch.object(D,"namespace_gone",return_value="extinct"), \
-       mock.patch.object(D,"attempt_tagged_descendants",
+  with patch_split(D,"namespace_gone",return_value="extinct"), \
+       patch_split(D,"attempt_tagged_descendants",
                          side_effect=lambda _m,*,host_complete=False:D.ProcessGroupObservation(
                           "empty" if host_complete else "unverifiable",(),
                           "" if host_complete else "observer-namespace-mismatch")):
@@ -7544,9 +7465,9 @@ class NamespaceExtinctQuiescenceTest(unittest.TestCase):
      provable,"cancellation-quiescence-proven" if provable else "cancellation-quiescence-unproven",
      metadata["attempt_id"],"namespace-extinct",464,"empty","empty",True,
      D._cancellation_quiescence_binding_digest(metadata))
-    with mock.patch.object(D,"attempt_process_quiescence",
+    with patch_split(D,"attempt_process_quiescence",
                            return_value=D.ProcessQuiescence("quiescent",D.NAMESPACE_EXTINCT_REASON)), \
-         mock.patch.object(D,"prove_attempt_quiescence",return_value=proof):
+         patch_split(D,"prove_attempt_quiescence",return_value=proof):
      result=D.resolve_attempt_cleanup(jobs,metadata["attempt_id"],apply=True)
     self.assertTrue(result["settled"],result)
     saved=D.parse_registry_metadata(jobs.read_text().strip().split("\t",5)[5])
@@ -7567,11 +7488,11 @@ class ExistingAttemptLaunchStateTest(unittest.TestCase):
      ("existing-unverified","process-namespace-unverifiable")),
    ):
     with self.subTest(state=verdict.state), \
-         mock.patch.object(D,"attempt_process_quiescence",return_value=verdict):
+         patch_split(D,"attempt_process_quiescence",return_value=verdict):
      self.assertEqual(D.existing_attempt_launch_state(jobs,"att-existing"),expected)
      self.assertEqual(D.attempt_launch_state(jobs,"att-existing",claimed=False,action="start"),
                       expected[0])
-   with mock.patch.object(D,"attempt_process_quiescence",side_effect=OSError("boom")):
+   with patch_split(D,"attempt_process_quiescence",side_effect=OSError("boom")):
     self.assertEqual(D.existing_attempt_launch_state(jobs,"att-existing"),
                      ("existing-unverified","process-observation-failed"))
    self.assertEqual(D.attempt_launch_state(jobs,"att-existing",claimed=True,action="start"),"claimed")
@@ -7582,7 +7503,7 @@ class ExistingAttemptLaunchStateTest(unittest.TestCase):
   with tempfile.TemporaryDirectory() as td:
    jobs=Path(td)/"jobs.log"
    jobs.write_text(namespace_row("att-closed","done")+"\n",encoding="utf-8")
-   with mock.patch.object(D,"attempt_process_quiescence") as probe:
+   with patch_split(D,"attempt_process_quiescence") as probe:
     self.assertEqual(D.existing_attempt_launch_state(jobs,"att-closed"),
                      ("existing-completed","attempt-closed"))
     self.assertEqual(D.existing_attempt_launch_state(jobs,"att-missing"),
@@ -7644,15 +7565,15 @@ class TagScanPermissionScopeTest(unittest.TestCase):
    with mock.patch.object(Path,'iterdir',return_value=iter([entry])), \
         mock.patch.object(Path,'read_bytes',read_bytes),mock.patch.object(Path,'stat',stat), \
         mock.patch.object(Path,'read_text',read_text), \
-        mock.patch.object(D,'_parent_leader_pids',return_value=set()), \
-        mock.patch.object(D,'attempt_scan_namespace_authority',return_value=authority):
+        patch_split(D,'_parent_leader_pids',return_value=set()), \
+        patch_split(D,'attempt_scan_namespace_authority',return_value=authority):
     self.assertEqual(D.attempt_tagged_descendants(metadata).state,expected)
    reads[0]=0
    with mock.patch.object(Path,'iterdir',return_value=iter([entry])), \
         mock.patch.object(Path,'read_bytes',read_bytes),mock.patch.object(Path,'stat',stat), \
         mock.patch.object(Path,'read_text',read_text), \
-        mock.patch.object(D,'_parent_leader_pids',return_value=set()), \
-        mock.patch.object(D,'attempt_scan_namespace_authority',return_value=authority):
+        patch_split(D,'_parent_leader_pids',return_value=set()), \
+        patch_split(D,'attempt_scan_namespace_authority',return_value=authority):
     scan=D.scan_process_table()
     self.assertEqual(D._tagged_descendants_from_scan(scan,metadata,'att-scope').state,expected)
 
@@ -7720,8 +7641,8 @@ class AttemptExecutionObservationTest(unittest.TestCase):
   def read_text(path,encoding=None):
    if str(path)=="/proc/101/comm": return comm+"\n"
    raise FileNotFoundError(path)
-  with mock.patch.object(D,"attempt_tagged_descendants",return_value=member), \
-       mock.patch.object(D,"process_start_ticks",return_value=actual_start), \
+  with patch_split(D,"attempt_tagged_descendants",return_value=member), \
+       patch_split(D,"process_start_ticks",return_value=actual_start), \
        mock.patch.object(D.Path,"read_bytes",read_bytes), \
        mock.patch.object(D.Path,"read_text",read_text):
    return D.attempt_execution_observation(metadata)
@@ -7739,13 +7660,13 @@ class AttemptExecutionObservationTest(unittest.TestCase):
   self.assertEqual((role.state,role.reason),("unknown","attempt-process-role-unclassified"))
   reused=self._observe(b"/usr/bin/codex"+bytes([0]),actual_start="12",comm="codex")
   self.assertEqual((reused.state,reused.reason),("unknown","attempt-process-identity-changed"))
-  with mock.patch.object(D,"attempt_tagged_descendants",
+  with patch_split(D,"attempt_tagged_descendants",
        return_value=D.ProcessGroupObservation("unverifiable",reason="observer-namespace-mismatch")):
    self.assertEqual(D.attempt_execution_observation({"attempt_id":"att-observe",
        "harness":"codex"}).state,"unknown")
 
  def test_empty_complete_tag_census_is_absent(self):
-  with mock.patch.object(D,"attempt_tagged_descendants",
+  with patch_split(D,"attempt_tagged_descendants",
        return_value=D.ProcessGroupObservation("empty")):
    result=D.attempt_execution_observation({"attempt_id":"att-observe","harness":"codex"})
   self.assertEqual((result.state,result.reason),("absent","attempt-tag-census-empty"))

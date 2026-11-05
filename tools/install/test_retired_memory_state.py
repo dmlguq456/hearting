@@ -14,13 +14,13 @@ import retired_memory_state as retired  # noqa: E402
 
 STALE = (
     ".distill-state-0a1b2c3d-1111-2222-3333-444455556666",
-    ".distill-state-ses_f6b5dbfccffetI7z3sqjrkxtho",
+    ".distill-state-ses_fixture00000000000000000027",
     ".turn-state-0a1b2c3d-1111-2222-3333-444455556666",
     ".codex-turn-state-0a1b2c3d-1111-2222-3333-444455556666",
     ".distill-err-0a1b2c3d-1111-2222-3333-444455556666",
     ".distill-err-periodic-ebb01fce1f",
     ".distill-failures.log",
-    ".opencode-distill-stamp-ses_f5f1effe7eM36wup0mukiS",
+    ".opencode-distill-stamp-ses_fixture00000000000000000026",
     ".codex-distill-out-abc",
     ".codex-distill-prompt-abc",
 )
@@ -106,7 +106,10 @@ class RetiredMemoryStateTest(unittest.TestCase):
 
     def test_nothing_current_reads_or_writes_a_retired_name(self):
         root = Path(__file__).resolve().parents[2]
-        live = [root / "tools/memory/mem.py", *(root / "hooks").glob("*.sh"),
+        # mem.py and the modules it is split into (tools/memory/mem_*.py, "Split out of `mem.py`").
+        mem_parts = [path for path in sorted((root / "tools/memory").glob("mem_*.py"))
+                     if "Split out of `mem.py`" in path.read_text(encoding="utf-8")]
+        live = [root / "tools/memory/mem.py", *mem_parts, *(root / "hooks").glob("*.sh"),
                 *(root / "hooks").glob("*.py"), *(root / "adapters/codex/hooks").glob("*.py"),
                 *(root / "adapters/codex/bin").glob("*.sh"),
                 *(root / "adapters/opencode/bin").glob("*.sh"),

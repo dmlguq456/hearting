@@ -10,6 +10,11 @@ import stat
 import subprocess
 import sys
 import time
+try:  # ends a detached child with the test that started it; no-op outside tests
+    from detached_lifetime import bind as end_with_test
+except ImportError:  # a partial tree without it (e.g. a fixture release): no record
+    def end_with_test(child):
+        return child
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -181,6 +186,7 @@ def launch_trigger(harness: str, sid: str, phase: str, transcript: str | None = 
         )
     except OSError:
         return False
+    end_with_test(process)
     if bounded_anchor:
         try:
             process.stdin.write(bounded_anchor)

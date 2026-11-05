@@ -251,7 +251,7 @@ class WiredAcquisitionSiteTests(unittest.TestCase):
         self.assertIn(("acquired", "delivery-record"), record_calls)
 
     def test_finalize_declares_the_release_before_boundary(self):
-        calls = self._assigned_and_called("utilities/artifact_producer.py")
+        calls = self._assigned_and_called("utilities/artifact_producer_finalize.py")
         self.assertIn(("assert_not_held", "producer-admission"), calls)
         self.assertEqual(L.RELEASE_BEFORE_FINALIZE, ("producer-admission",))
 

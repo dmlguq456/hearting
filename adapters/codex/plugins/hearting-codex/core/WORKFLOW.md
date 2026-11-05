@@ -275,7 +275,10 @@ the isolated worktree first. If the source change was already made in place,
 Otherwise use `compose --start --prompt-file <task>` with no `--shape`; the
 frame chooses the capability, stages, and solo or staged shape, judging each
 leg's optional `size` (`one-change`, `one-pass`, `multi-stage`) first; an
-omitted shape follows it.
+omitted shape follows it. Direct has no review-worker path of its own: work that
+needs an independent review is not direct (omit `--shape`, or `staged`), and a
+light check of a direct change may use the harness's own native subagent
+(decision 2026-11-03).
 
 | Main decision | Command | Result |
 |---|---|---|
@@ -401,7 +404,9 @@ budget and start approval) and writing under
 For execution, use `compose --campaign-key <stream> --start --prompt-file
 <task>` with no `--shape` for framed work or an explicit decided shape. Use
 `--shape direct` only for one atomic, reversible inline change. The slug comes from the task; the
-campaign defaults to this session's latest stream in the same artifact root,
+campaign defaults to this session's latest stream in the same artifact root
+(including temporary directories and returning from a prepared worktree to
+the primary checkout; another session or artifact root supplies no default),
 else to the one active stream of the routes sealed for this folder, and otherwise
 is an existing or new stream key, `--parent-cycle`, or an explicit `--unassigned`
 (the refusal names this folder's streams first, then the root's active keys; a
@@ -515,6 +520,11 @@ or `--registered-headless-evidence` from the parent, exactly like `compile`.
 The stderr `[경로]` notice (§0.4) keeps the campaign choice observed before
 compose starts, and accompanies an admitted first leg. A no-wait snapshot is
 pending; only an elapsed bounded wait is a timeout.
+
+Start receipts for open work include `runtime.run_command` and, when the adapter
+provides one, `runtime.preflight_command`, using the already resolved harness root.
+Reuse those prefixes without rediscovering the installation; `capability-info`
+and tool availability checks retain their existing meaning.
 
 ### 0.3. Pre-Execution Gate for Long-Running Work
 
@@ -716,7 +726,7 @@ Before approval, choose from compact manifest routing metadata and §0.2; do not
 load the full entry Skill body or its references merely to propose a route. At
 `standard+`, the dispatch-depth-1 owner reads the selected capability contract and each
 dispatch-depth-2 worker reads only its stage contract. `direct` or `quick` acting
-sessions read the detail they need after approval. If a runtime automatically
+sessions read `capabilities/<name>.md` directly after approval; the entry Skill is explicit-only. If a runtime automatically
 injects a selected Skill body into main, do not duplicate that read; record the
 runtime limitation rather than claiming total-token savings.
 
@@ -893,7 +903,12 @@ Writing a report file does not by itself complete the user-facing report.
 **Runtime completion summary.** When the runtime seals a registered owner's
 completion it also writes `completion-summary.md`, once, beside the owner
 envelope: the intent (§0.4) with the person's words, the result (one leg of a
-plan says a later leg remains), what changed, what was checked, what stayed
+plan says a later leg remains), one cost line (time from the route's first
+registered attempt to the seal, and the session tokens its owner, workers and
+retries wrote into their own attempt logs, summed; a session that wrote none is
+counted as `unknown`, and one whose started turn or step left no count makes
+the total `at least`; the line shows token counts, not a share of a plan), what
+changed, what was checked, what stayed
 unverified or remains, nodes closed without an independent review, and the
 artifact path, in the shared UI-text catalog's language (English by default,
 Korean when declared). A code report's numbered sections 1/4/5/6 are read as the
@@ -972,7 +987,11 @@ guarded, with tracked status read again under the finish lock. The returned
 result may report unscoped tracked dirt as an observation, without attributing
 authorship or changing the stored receipt. Finish preserves the worktree and
 index, while its evidence, route/session identity, commit lineage and replay
-checks remain in force.
+checks remain in force. Review fixes pushed to the same PR branch after the
+finish are recorded by the same command: the finishing session, the same
+evidence and a commit that descends from the recorded one add an update (new
+commit and summary) beside the finish, which stays as it was; anything else
+still conflicts.
 
 ```text
 python3 utilities/capability-route.py finish [--route <route.json|rt-id>] --evidence <file|http(s)-url> --summary-file <file> [--commit <full-sha>]
@@ -995,7 +1014,9 @@ python3 utilities/capability-route.py status <route id | route file | attempt id
 `status` defaults the artifact root from the cwd, and each open row carries its
 `resume_command`. Given one route or attempt, it reports that route and its
 registry attempts. `start`, `finish`, `close`, `correct` and `status` each take a
-route id, route file or attempt id. That command names a canonical route by its ID
+route id, route file or attempt id; `close` given an attempt that is not its route's
+owner stops that attempt alone and leaves the route open (OPERATIONS "Parent close").
+That command names a canonical route by its ID
 (`start --route rt-<16 hex>`); `start` finds the record under the cwd's artifact
 root, `AGENT_ARTIFACT_ROOT`, the jobs registry or a session's route-chain ledger,
 and still takes a route file. A `start` without `--route` continues this session's newest
@@ -1068,7 +1089,9 @@ completion gate and no human gate remains open.** An intermediate stage that
 succeeded — a training run that reached its last epoch, a green CI check, a
 worker that returned `PASS` — is stage evidence, never workflow completion. No
 acting agent, dispatch-depth-1 owner, supervisor, or runtime lifecycle hook may
-declare completion from an intermediate success.
+declare completion from an intermediate success. Receiving an experiment result
+is not interpreting it: the owner or supervisor that receives it interprets it
+before proposing another run (`capabilities/autopilot-lab.md`).
 
 Committed success and remaining cleanup are separate facts. A marker does not
 make a live descendant quiescent: the execution boundary retains cleanup,

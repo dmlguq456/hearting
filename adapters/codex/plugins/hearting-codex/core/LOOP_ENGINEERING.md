@@ -483,6 +483,59 @@ GPU sampling deadlines cover SSH connection, both bounded NVIDIA queries and
 process attribution, with room in the outer collection deadline. Slow sampling
 stays in the independent GPU refresh pump and does not delay basic refresh or
 input. A genuinely expired query still reports the timeout and unknown metrics.
+Fleet's adaptive background cadence also accounts for collector CPU time:
+a CPU-heavy pass leaves at least four times its thread CPU time before the next
+periodic pass. Cheap reads retain the existing interval, and slow I/O alone does
+not earn an additional CPU delay. First collection, explicit refresh, input and
+animation retain their existing scheduling; a costly observation's lower refresh
+frequency is the deliberate cost of reducing idle CPU. This adds no control,
+approval or recovery step.
+Completed cache-writer threads and their generation deduplication history stay
+bounded in a long-running viewer. Live writes remain owned; the existing on-disk
+observation ordering still protects newer saved screens.
+The input loop derives requests only for the open view; OVERVIEW does not rebuild
+the session detail index just to poll pane metadata. Updating one immutable view
+model field reuses the other already frozen fields. A failed observation save is
+attempted once for that generation; the next complete observation retries without
+turning each input wake into another serialization and writer launch.
+Detail enrichment copies the rows it mutates, including optional resource titles
+and pane metadata; read-only history and host observations stay shared. A board's
+repository supervision counts reuse one holder/role observation within that pass,
+then read afresh on the next pass, including the grant path.
+Fleet's read-only stall-advisory scan also shares one existing lineage read
+context for the pass. Parent session and harness come from one recipient
+resolution, and the next pass observes lineage again; no delivery or mutation
+inherits this display observation.
+An unchanged cell frame already held by the same terminal window needs only
+its animated runs repainted. Geometry, attributes and stale/live changes redraw
+the whole frame; input geometry and terminal refresh still advance on every wake.
+
+Fleet may reuse pure display conversions and validations while every observed
+file generation, membership and validator they depend on agrees. Changed rows
+are processed again; a complete-line append can reuse its prefix, and replacement,
+truncation, unsafe paths and unavailable reads invalidate the affected result.
+Caches stay bounded by entries and bytes, with only current source generations.
+Read-only consumers may borrow owned immutable-by-convention projections;
+ordinary mutable providers and callers retain their defensive copies. Previously
+published graphs must remain unchanged when a later generation is folded.
+
+Process, recipient, progress, completion and clock judgments remain current.
+Passive display reuse does not enter strict authority readers or writer/controller
+paths. Shared path/metadata observations and safe directory descriptors belong to
+one scan and are released with it. Existing dead-owner retention may run before
+advisory reads for rows it already excludes, preserving output and precedence.
+These changes reduce actual repeated work without changing collection periods,
+cooldown, retention or archival policy, adding persistent state or new gates.
+An immutable display model may share unchanged subtrees with its predecessor;
+fresh action and readiness metadata still belong to the current observation.
+Cell-frame reuse depends on values consumed by the renderer, not provenance
+or ordering metadata that the current interaction model owns separately.
+Registry replacement may retain exact-field row conversions from its predecessor.
+Whole display projections may also reuse their complete observed input generation.
+Process observations shared by readers belong to one collection pass, with entry
+and byte bounds; each following pass observes PID identity and clock again.
+An unchanged display publication may retain its immutable content while fresh
+readiness and action metadata advance independently. Reuse never delays a tick.
 
 ## Basis and current scope
 

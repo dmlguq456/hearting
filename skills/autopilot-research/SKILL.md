@@ -2,6 +2,7 @@
 # GENERATED METADATA — edit harness-manifest.json, then run tools/generate.py.
 description: "Use when a task needs a durable survey of new academic, technology, or market evidence before downstream specification or production. Owns research; default preset. Not for repository-only project analysis, a simple factual lookup, or work already grounded by sufficient current evidence."
 argument-hint: "<query> [--mode academic|technology|market] [--depth shallow|medium|deep] [--intensity direct|quick|standard|strong|thorough|adversarial] [--no-clarify] [--no-figures] [--from search|analyze|report]"
+disable-model-invocation: true
 metadata:
   group: entry
   fam: pre
@@ -27,9 +28,9 @@ before approval.
 
 ## Post-approval owner contract
 
-After approval, direct/quick sessions and the `standard+` dispatch-depth-1 owner load
-`capabilities/autopilot-research.md`, then use the Reference Index below. Assigned
-stage workers load only their assigned stage contracts.
+Main session only: after approval, read `capabilities/autopilot-research.md`. Registered owners read only `capabilities/autopilot-research/references/owner-execution.md`; stage workers read only their assigned contracts.
+The other entry-router steps apply to the main session. A registered owner uses
+only its Route steps and the latest receipt for runtime commands.
 
 ## Reference Index
 

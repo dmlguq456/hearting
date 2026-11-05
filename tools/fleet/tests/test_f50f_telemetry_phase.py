@@ -19,8 +19,8 @@ if _TOOLS_DIR not in sys.path:
 from fleet import model, projection, render  # noqa: E402
 from fleet.collectors import codex_companion as cc  # noqa: E402
 
-_SID = "201f59a8-21e7-4778-9f6f-c1b56c24e7ff"
-_THREAD = "019f8cac-25cd-7cc2-89fa-7ed97b2f3eb9"
+_SID = "1000006f-0000-4000-8000-00000000007d"
+_THREAD = "01000004-0000-7000-8000-000000000007"
 _WINDOW = 272000
 _ACTIVE = 92000
 # These legacy plugin rollouts have raw usage but no execution-bound native
@@ -120,7 +120,7 @@ class ThreadRolloutJoinTest(_Fixture):
         self.assertIsNone(job.context)
 
     def test_no_matching_rollout_is_an_honest_gap(self):
-        self.write_rollout(thread_id="019f8cac-0000-4000-8000-000000000999")
+        self.write_rollout(thread_id="01000004-0000-4000-8000-000000000999")
         job = self.row()
         self.assertIsNone(job.plugin_telemetry)
         self.assertIsNone(job.context)

@@ -30,12 +30,12 @@ class SessionHandleTest(unittest.TestCase):
             SimpleNamespace(harness="codex", session_id="abcdefgh-one", title="first"),
             SimpleNamespace(harness="codex", session_id="abcdefgh-two", title="second"),
         ]
-        snapshot = {"hosts": [{"host": "cnn", "gpus": [{"index": 0, "processes": [{
+        snapshot = {"hosts": [{"host": "gpu", "gpus": [{"index": 0, "processes": [{
             "session_owner": {"kind": "session", "harness": "codex", "id": "abcdefgh-two"},
         }]}]}]}
         resources = render._gpu_session_resources(snapshot)
         self.assertEqual(render._gpu_resources_for_session(sessions[0], resources), [])
-        self.assertEqual(render._gpu_resources_for_session(sessions[1], resources)[0]["host"], "cnn")
+        self.assertEqual(render._gpu_resources_for_session(sessions[1], resources)[0]["host"], "gpu")
 
     def test_fleet_session_name_uses_summary_without_display_id(self):
         session = SimpleNamespace(harness="codex", session_id="abcdefgh-one",
@@ -74,7 +74,7 @@ class SessionHandleTest(unittest.TestCase):
         text = render._plain(render._gpu_token(gpu, 120))
         self.assertNotIn("session unknown/abcdefgh", text)
         self.assertEqual(render._gpu_session_resources({
-            "hosts": [{"host": "cnn", "gpus": [gpu]}],
+            "hosts": [{"host": "gpu", "gpus": [gpu]}],
         }), {})
 
 

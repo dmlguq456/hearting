@@ -45,6 +45,11 @@ import dispatch_completion_join as completion_join
 import dispatch_pending_delivery as pending_delivery
 import dispatch_session_sweep
 import dispatch_supervision
+try:  # ends a detached child with the test that started it; no-op outside tests
+    from detached_lifetime import bind as end_with_test
+except ImportError:  # a partial tree without it (e.g. a fixture release): no record
+    def end_with_test(child):
+        return child
 
 
 class ReplayBlocked(RuntimeError):
@@ -320,6 +325,7 @@ def _start_server(command: list[str], endpoint: Path, worktree: Path, env: dict[
     except OSError:
         stderr_file.close()
         raise
+    end_with_test(process)
     process._replay_stderr_file = stderr_file
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:

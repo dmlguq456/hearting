@@ -14,6 +14,11 @@ import sys
 import time
 
 from resource_run_registry import proc_identity
+try:  # ends a detached child with the test that started it; no-op outside tests
+    from detached_lifetime import bind as end_with_test
+except ImportError:  # a partial tree without it (e.g. a fixture release): no record
+    def end_with_test(child):
+        return child
 
 
 def load_tool(name):
@@ -96,9 +101,22 @@ def ensure_watch(command, lock_path, *, environ=None, spawn=subprocess.Popen):
         env = dict(os.environ if environ is None else environ)
         env['AGENT_HOME'] = str(Path(__file__).resolve().parents[1])
         env['PYTHONDONTWRITEBYTECODE'] = '1'
-        proc = spawn(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                     stderr=subprocess.DEVNULL, env=env, start_new_session=True, close_fds=True)
+        proc = end_with_test(spawn(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, env=env, start_new_session=True, close_fds=True))
         return {'started': True, 'pid': getattr(proc, 'pid', None), 'legacy_retained': retained}
+
+
+def retire_watch(command, lock_path):
+    """Retire older-release observers of a run that needs none; never start one.
+
+    This release's own observer leaves by itself on its next poll.
+    """
+    lock_path = Path(lock_path)
+    with lock_path.with_suffix('.launch.lock').open('a+') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return sum(1 for argv, identity in list(_matching_watchers(command))
+                   if Path(argv[1]).resolve() != Path(command[1]).resolve()
+                   and _retire_watch(argv, identity))
 
 
 def resource_lock(registry, run_id):
@@ -144,11 +162,31 @@ def reconcile():
         compute._refuse_namespace_self(config, 'resource-observers')
         root = config['run_root']
         entries = root.iterdir() if root.is_dir() else []
+        now = time.time()
         for directory in entries:
             if directory.name.startswith('.') or directory.is_symlink() or not directory.is_dir():
                 continue
-            if (directory / 'exit_code').exists() or not (directory / 'meta.json').is_file():
+            if not (directory / 'meta.json').is_file():
                 continue
+            if (directory / 'exit_code').exists():
+                # Only a run whose watching stopped as unknown is reported late.
+                if not (directory / compute.QUIET_RUN_MARKER).exists():
+                    continue
+            else:
+                quiet_since = compute._run_quiet_since(directory, now)
+                # A quiet run is let go only once its host reports the session
+                # gone (recorded beside it, so it is asked once); a live or
+                # unreadable session keeps its watcher.
+                if quiet_since is not None and (
+                        (directory / compute.QUIET_RUN_MARKER).exists()
+                        or compute._run_session_alive(directory) is False):
+                    compute._record_quiet_run(directory, quiet_since, now)
+                    retired = retire_watch(
+                        [sys.executable, str(Path(compute.__file__).resolve()), 'watch-run', str(directory)],
+                        directory / '.observation-watch.lock')
+                    results.append({'kind': 'compute', 'run_id': directory.name, 'watching': False,
+                                    'state': 'unknown', 'retired': retired})
+                    continue
             try:
                 meta = json.loads((directory / 'meta.json').read_text())
                 started = compute._spawn_completion_watch(directory, meta,

@@ -25,6 +25,29 @@ import projector  # noqa: E402
 import runtime_activation as activation  # noqa: E402
 
 
+class ManagedCopyVerifyTest(unittest.TestCase):
+    """GA-A7-004: `verify` runs every check a driver lists; a managed copy's check is one too."""
+
+    def test_each_runtime_lists_a_callable_managed_copy_check_that_runs(self):
+        import verifier
+        passing = lambda *_a, **_k: (lambda: {"id": "other", "ok": True, "detail": ""})
+        for runtime in herdr.VERSIONS:
+            with self.subTest(runtime=runtime), tempfile.TemporaryDirectory() as temporary:
+                driver = importlib.import_module(f"drivers.{runtime}")
+                dest = Path(temporary) / "managed-asset"
+                entry = {"action": "copy_managed", "dest": str(dest), "integration_id": runtime,
+                         "source": str(dest)}
+                with mock.patch.object(driver.projector, "plan", return_value={runtime: [entry]}), \
+                        mock.patch.object(driver.verifier, "check_herdr_integration", side_effect=passing), \
+                        mock.patch.object(driver.verifier, "check_cmd", side_effect=passing):
+                    checks = driver.checks()
+                self.assertTrue(checks and all(callable(check) for check in checks))
+                results = verifier.run(runtime, mock.Mock(checks=lambda: checks))
+                managed = [row for row in results if row["id"] == f"{runtime}.herdr.installed.{runtime}"]
+                self.assertEqual(len(managed), 1)
+                self.assertFalse(managed[0]["ok"])          # absent copy: a failed check, not a TypeError
+
+
 class PinnedSourceTest(unittest.TestCase):
     def test_three_runtime_sources_have_the_expected_marker_and_entrypoint(self):
         for runtime in herdr.VERSIONS:
@@ -404,7 +427,7 @@ class JsoncRegistrationTest(unittest.TestCase):
 
 class NativeSessionReporterFixtureTest(unittest.TestCase):
     def _run_hook(self, harness, payload, *, allowed, launch_argv, extra_env=None,
-                  expect_report=True, source_asset=False):
+                  expect_report=True, source_asset=False, stale_tree=False):
         with tempfile.TemporaryDirectory(prefix="herdr session hook ") as tmp:
             root = Path(tmp)
             tools = root / "tools" / "fleet"
@@ -434,6 +457,16 @@ class NativeSessionReporterFixtureTest(unittest.TestCase):
             else:
                 source = ROOT / "adapters" / "codex" / "hooks" / "herdr-agent-state.sh"
                 script = source if source_asset else root / "codex home" / "herdr-agent-state.sh"
+            if stale_tree:
+                # A nearer tree whose package imports but whose projection fails.
+                stale = root / "stale"
+                (stale / "tools" / "fleet").mkdir(parents=True)
+                (stale / "tools" / "fleet" / "__init__.py").write_text("", encoding="utf-8")
+                (stale / "tools" / "fleet" / "herdr_projection.py").write_text(
+                    "raise ImportError('stale tree')\n", encoding="utf-8")
+                script = stale / "hooks" / "herdr-agent-state.sh"
+                # Codex tries AGENT_HOME first: point it at the broken tree.
+                extra_env = {**(extra_env or {}), **({"AGENT_HOME": str(stale)} if harness == "codex" else {})}
             if not source_asset:
                 script.parent.mkdir(parents=True)
                 shutil.copyfile(source, script)
@@ -490,6 +523,16 @@ class NativeSessionReporterFixtureTest(unittest.TestCase):
                     listener.accept()
             listener.close()
             return received[0] if received else None
+
+    def test_a_broken_candidate_tree_falls_through_to_the_next_one(self):
+        for harness, launch in (("claude", ["claude", "--resume", "ses-A"]),
+                                ("codex", ["codex", "resume", "ses-A"])):
+            with self.subTest(harness=harness):
+                request = self._run_hook(harness, {
+                    "hook_event_name": "SessionStart", "session_id": "ses-A", "source": "startup",
+                    "transcript_path": str(Path(tempfile.gettempdir()) / "ses-A.jsonl"),
+                }, allowed=True, launch_argv=launch, stale_tree=True)
+                self.assertEqual(request["params"]["agent_session_id"], "ses-A")
 
     def test_native_hooks_forward_transcript_source_resume_argv_and_nanosecond_sequence(self):
         for harness, launch in (("claude", ["claude", "--resume", "ses-A"]),
@@ -623,7 +666,9 @@ class NativeSessionReporterFixtureTest(unittest.TestCase):
                 mock.patch("peer_obligations.request_obligation_recovery"), \
                 mock.patch.object(module.time, "time_ns", return_value=123456):
             module.project({"hook_event_name": "SessionStart", "source": "resume"}, "ses-A")
+        # A display header: the steward mark reads the runner-published relations.
         project.assert_called_once_with("codex", "ses-A", worker=False, report_session=True,
+                                        display_relations=True,
                                         session_seq=123456, session_start_source="resume")
 
 

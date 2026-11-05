@@ -21,7 +21,7 @@ if _TOOLS_DIR not in sys.path:
 
 from fleet.collectors import codex  # noqa: E402
 
-_SID = "019f78f9-c11c-7fb2-afed-ae3730e4d811"
+_SID = "01000003-0000-7000-8000-000000000003"
 
 
 def _make_rollout(root, cwd, sid=_SID):
@@ -74,7 +74,7 @@ class NestedHomeRolloutTest(unittest.TestCase):
                 os.makedirs(d, exist_ok=True)
             r1 = _make_rollout(os.path.join(wt_a, "home"), wt_a)
             r2 = _make_rollout(os.path.join(wt_b, "home"), wt_b,
-                               sid="019f78f9-c11c-7fb2-afed-ae3730e4d812")
+                               sid="01000003-0000-7000-8000-000000000004")
             links = {"5": r1, "6": r2}
             with mock.patch.object(codex.os, "listdir", return_value=list(links)), \
                  mock.patch.object(codex.os, "readlink",
@@ -87,9 +87,9 @@ class NestedHomeRolloutTest(unittest.TestCase):
             cwd = os.path.join(tmp, "shared-worktree")
             os.makedirs(cwd)
             first = _make_rollout(os.path.join(tmp, "codex-home"), cwd, sid=
-                                  "019f78f9-c11c-7fb2-afed-ae3730e4d821")
+                                  "01000003-0000-7000-8000-000000000005")
             second = _make_rollout(os.path.join(tmp, "codex-home"), cwd, sid=
-                                   "019f78f9-c11c-7fb2-afed-ae3730e4d822")
+                                   "01000003-0000-7000-8000-000000000006")
             links = {"5": first, "6": second}
             with mock.patch.object(codex.os, "listdir", return_value=list(links)), \
                     mock.patch.object(codex.os, "readlink",

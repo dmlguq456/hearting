@@ -12,6 +12,7 @@ import unittest
 
 from dispatch_contract import parse_registry_metadata, process_launch_identity
 from unittest import mock
+from split_module_fixture import patch_split
 
 
 FENCE = Path(__file__).with_name("launch-fence.py")
@@ -33,7 +34,7 @@ class LaunchFenceTest(unittest.TestCase):
             try:
                 with mock.patch.object(L, "set_parent_death_signal"), \
                      mock.patch.object(L.os, "getppid", return_value=123), \
-                     mock.patch.object(L.ROUTE, "verify_route", return_value={}), \
+                     patch_split(L.ROUTE, "verify_route", return_value={}), \
                      mock.patch.object(
                          L.ROUTE, "revalidate_launch_compatibility",
                          return_value=(False, {
@@ -76,7 +77,7 @@ class LaunchFenceTest(unittest.TestCase):
                 try:
                     with mock.patch.object(L, "set_parent_death_signal"), \
                          mock.patch.object(L.os, "getppid", return_value=123), \
-                         mock.patch.object(L.ROUTE, "verify_route", return_value=route), \
+                         patch_split(L.ROUTE, "verify_route", return_value=route), \
                          mock.patch.object(L.ROUTE, "revalidate_launch_compatibility",
                                            return_value=(False, {"runtime_root": {"expected": runtime}})), \
                          mock.patch.object(L, "mark_attempt_launch_started") as mark, \
@@ -115,7 +116,7 @@ class LaunchFenceTest(unittest.TestCase):
                      mock.patch.object(L.os, "getppid", return_value=123), \
                      mock.patch.object(L.os, "read", return_value=b"1"), \
                      mock.patch.object(L.os, "close"), \
-                     mock.patch.object(L.ROUTE, "verify_route", return_value={}), \
+                     patch_split(L.ROUTE, "verify_route", return_value={}), \
                      mock.patch.object(
                          L.ROUTE, "revalidate_launch_compatibility",
                          return_value=compatibility,

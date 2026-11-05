@@ -6,6 +6,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 from tools.fleet.explorer.focus import SelectionPump, SourceCache
 from tools.fleet.explorer.types import FocusKey, FocusResult, Health
@@ -346,7 +347,7 @@ class SessionPageDialogue(unittest.TestCase):
         from unittest import mock
         from tools.fleet.explorer import focus
         from tools.fleet.explorer.types import FocusRequest
-        current = "5ed20fe8-499b-4490-a87f-f492612948cf"
+        current = "10000086-0000-4000-8000-000000000095"
         compacted = "7dcee068-0000-4000-8000-000000000001"
         cleared = "bbf14dfc-0000-4000-8000-000000000002"
 
@@ -404,7 +405,10 @@ class ExplorerFeedRequests(unittest.TestCase):
         return self.render._explorer_requests(self.snapshot, NavState(**state), self.render._EXPLORER_MODEL)
 
     def test_the_overview_reads_only_the_panes(self):
-        self.assertEqual(set(self.requests()), {"panes"})
+        with mock.patch("tools.fleet.explorer.live.session_index",
+                        side_effect=AssertionError("OVERVIEW needs no session detail index")):
+            self.assertEqual(set(self.requests()), {"panes"})
+            self.assertEqual(set(self.requests(view="MODELS")), {"panes", "models"})
 
     def test_history_reads_every_seat_and_the_opened_seat_in_full(self):
         found = self.requests(view="HISTORY", folds=(("hopen:HISTORY", "a7"),))

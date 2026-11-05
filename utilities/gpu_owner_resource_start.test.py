@@ -21,6 +21,7 @@ from unittest import mock
 from execution_access import load_parent_effective_grant
 import gpu_execution_sandbox as G
 import work_start as W
+from split_module_fixture import patch_split
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -72,7 +73,7 @@ class GpuOwnerResourceStartTest(unittest.TestCase):
 
     def compose(self):
         with mock.patch.dict(os.environ, self.f.env, clear=True), \
-             mock.patch.object(self.r, "_compose_readiness", side_effect=self.readiness):
+             patch_split(self.r, "_compose_readiness", side_effect=self.readiness):
             route = self.r.compose_route(capability="autopilot-lab", capability_mode="setup",
                 shape="staged", graph=None, slug="gpu-normal-start", cwd=str(self.f.worktree),
                 artifact_root=str(self.f.artifacts), signals=["gpu"], spec_read="fixture",
@@ -103,7 +104,7 @@ class GpuOwnerResourceStartTest(unittest.TestCase):
             stack.enter_context(mock.patch.object(c, "shell_command", side_effect=payload))
             stack.enter_context(mock.patch.object(c, "attach_summary_owner", return_value={}))
             stack.enter_context(mock.patch.object(c, "owner_frame_launch_gate"))
-            stack.enter_context(mock.patch.object(c, "completion_marker_gate"))
+            stack.enter_context(patch_split(c, "completion_marker_gate"))
             stack.enter_context(mock.patch("dispatch_lifecycle.pid_namespace_evidence", return_value={
                 "lifecycle_selector_source": "host-like", "lifecycle_nspid_width": "1",
                 "lifecycle_pid1_class": "system-init",

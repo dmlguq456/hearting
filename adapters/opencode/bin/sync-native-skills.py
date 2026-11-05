@@ -111,7 +111,7 @@ def render(identifier: str, spec: dict, capability_file: Path) -> tuple[str, str
     if invocation_class == "entry-router":
         use_steps = f"""1. Before approval, route from this compact metadata and `core/WORKFLOW.md §0.2`; do not read the full portable source merely to propose the route.
 2. Present the intent card from `core/WORKFLOW.md §0.4` unless the same route and scope are already approved.
-3. After approval, direct/quick acting sessions read `capabilities/{identifier}.md`; at `standard+`, the dispatch-depth-1 owner reads it and stage workers read only their assigned contracts.
+3. {harness_manifest.entry_read_instruction(identifier)}
 4. Before the first durable capability artifact, compile and bind the checked route with `preflight.sh route --capability {identifier} ...`. A native-agent restriction never authorizes direct execution.
 5. Run `adapters/opencode/bin/preflight.sh capability-info {identifier}` and obey the reported status:"""
         route_guard = f"- Before durable capability output: `adapters/opencode/bin/preflight.sh route --capability {identifier} <complete compile arguments>`"

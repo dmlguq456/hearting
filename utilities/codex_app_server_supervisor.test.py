@@ -19,6 +19,7 @@ import textwrap
 from types import SimpleNamespace
 import unittest
 from unittest import mock
+from split_module_fixture import patch_split
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -381,6 +382,30 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
         self.assertEqual([item["read_enforcement"] for item in rows],
                          ["os-sandbox", "os-sandbox", "os-sandbox"])
         self.assertEqual(effective.read_bytes(), original)
+
+    def test_parent_deploy_wait_failure_ends_blocked_without_a_recovery_lease(self):
+        import io
+        self.jobs.write_text(owner_row(self.lease))
+        module = load_supervisor_module()
+        class Server:
+            process = None
+            def __init__(self, *args, **kwargs): pass
+            def request(self, method, params):
+                return {"thread": {"id": "thread-1"}}
+            def notification(self, *args): pass
+            def close(self): pass
+        events = []
+        with mock.patch.object(module, "AppServer", Server), \
+             mock.patch.object(module, "run_turn", return_value=("runtime_wait: registered-children", None)), \
+             mock.patch.object(module.RESOURCE_WAIT, "wait", side_effect=
+                module.RESOURCE_WAIT.ParentDeployWaitBlocked("parent-deploy-wait-timeout")), \
+             mock.patch.object(module, "reconcile", return_value=True) as reconcile, \
+             mock.patch.object(module, "emit", side_effect=events.append), \
+             mock.patch("sys.stdin", io.StringIO("wait for the approved parent deploy")):
+            self.assertEqual(module.main(self.command()[2:]), 3)
+        self.assertEqual(reconcile.call_args.args[1].failure_class, "blocked")
+        self.assertFalse(self.lease.exists())
+        self.assertEqual(reconcile.call_args.args[1].terminal_event, "dispatch.supervisor.terminal")
 
     def command(self, *, broken_app: Path | None = None,
                 model_context_window: str | None = None) -> list[str]:
@@ -1602,9 +1627,9 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
                 return rendered
 
             with mock.patch.object(route_authority_module, "owns", return_value=True), \
-                 mock.patch.object(contract, "attempt_governed_process_quiescence",
+                 patch_split(contract, "attempt_governed_process_quiescence",
                                    return_value=contract.ProcessQuiescence("quiescent", "fixture")), \
-                 mock.patch.object(contract, "supervisor_lease_is_held", return_value=False), \
+                 patch_split(contract, "supervisor_lease_is_held", return_value=False), \
                  mock.patch.object(route_parent_close, "row_requested", return_value=False), \
                  mock.patch.object(route_parent_close, "owner_continuation_processes",
                                    return_value=(contract.ProcessQuiescence(

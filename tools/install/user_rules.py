@@ -8,7 +8,8 @@ OpenCode ``AGENTS.md`` as the rules block followed by the bootstrap; without
 rules the file stays the plain bootstrap link. The block holds each rule's text
 byte for byte. Rules scoped to paths by front matter are left out, because
 OpenCode would apply them everywhere, and a file that is not UTF-8 text is
-skipped and reported. The carry is on unless the user's
+skipped and reported. Linked files and linked folders inside the rule folder
+are read as Claude reads them, each real folder once. The carry is on unless the user's
 ``~/.config/hearting/dispatch-defaults.yaml`` says::
 
     user_rules:
@@ -37,29 +38,51 @@ HEADER = (BEGIN + b" (Hearting writes this whole file: the user's own rules from
 _SCOPED = re.compile(rb"\A(?:\xef\xbb\xbf)?---\r?\n(?:(?!---\r?\n).*\r?\n)*?paths\s*:", re.M)
 
 
+def rule_files(root: Path):
+    """Each ``*.md`` file under ``root`` as ``(path, relative)``, the way Claude reads it.
+
+    Claude follows links in its rule folder, a linked folder of shared rules
+    included, and handles a link that loops back. So this follows linked
+    folders too, and visits each real folder once.
+    """
+    root = Path(root)
+    seen = set()
+    for directory, dirs, names in os.walk(root, followlinks=True):
+        try:
+            real = os.path.realpath(directory)
+        except OSError:
+            dirs[:] = []
+            continue
+        if real in seen:
+            dirs[:] = []
+            continue
+        seen.add(real)
+        dirs.sort()
+        for name in sorted(names):
+            path = Path(directory) / name
+            if name.endswith(".md") and path.is_file():
+                yield path, path.relative_to(root)
+
+
 def collect(claude_home: Path) -> tuple[list[tuple[str, bytes]], list[str]]:
     """Unscoped UTF-8 ``*.md`` rules under ``claude_home/rules`` and skip notes."""
     root = Path(claude_home) / "rules"
     found, skipped = [], []
     if not root.is_dir():
         return found, skipped
-    for directory, _dirs, names in os.walk(root):
-        for name in names:
-            path = Path(directory) / name
-            if not name.endswith(".md") or not path.is_file():
-                continue
-            relative = path.relative_to(root).as_posix()
-            try:
-                data = path.read_bytes()
-                data.decode("utf-8")
-            except UnicodeDecodeError:
-                skipped.append(f"{relative} is not UTF-8 text")
-                continue
-            except OSError as exc:
-                skipped.append(f"{relative} is unreadable ({type(exc).__name__})")
-                continue
-            if data.strip() and not _SCOPED.match(data):
-                found.append((relative, data))
+    for path, relative in rule_files(root):
+        relative = relative.as_posix()
+        try:
+            data = path.read_bytes()
+            data.decode("utf-8")
+        except UnicodeDecodeError:
+            skipped.append(f"{relative} is not UTF-8 text")
+            continue
+        except OSError as exc:
+            skipped.append(f"{relative} is unreadable ({type(exc).__name__})")
+            continue
+        if data.strip() and not _SCOPED.match(data):
+            found.append((relative, data))
     return sorted(found), sorted(skipped)
 
 

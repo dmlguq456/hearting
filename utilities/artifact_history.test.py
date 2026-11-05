@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import artifact_admission as adm  # noqa: E402
 import artifact_history as H  # noqa: E402
+from split_module_fixture import patch_split  # noqa: E402
 
 TXN = "htxn_" + "5" * 32
 EXAMPLE = {"schema_version": 1, "contract": "artifact-history/v1", "event_id": "hevt_" + "4" * 32,
@@ -365,7 +366,7 @@ class PublishFailureAndLatestTest(HistoryBase):
 
     def test_latest_failure_does_not_fail_the_publish_and_the_next_publish_re_syncs(self):
         a, b = event(now=NOW), event(now=NOW + 5)
-        with self.locked(), mock.patch.object(H.producer, "_write_atomic", side_effect=OSError("read-only")):
+        with self.locked(), patch_split(H.producer, "_write_atomic", side_effect=OSError("read-only")):
             paths = H.publish_events_locked(self.root, [a])
         self.assertEqual(len(paths), 1)
         self.assertEqual(len(self.files()), 1)

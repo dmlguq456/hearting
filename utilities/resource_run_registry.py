@@ -14,6 +14,11 @@ import time
 import uuid
 import functools
 import subprocess
+import threading
+import copy
+from collections import OrderedDict
+from contextlib import contextmanager, suppress
+from contextvars import ContextVar
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -24,6 +29,123 @@ INDEX_SCHEMA = 1
 REGISTRY_SCHEMA = 1
 IDENTITY_KEYS = ("pid", "starttime", "command_hash")
 _LEGACY_RESOURCE_IDENTITY_CACHE: dict[str, tuple[tuple[str, int, int], dict[str, list[dict]]]] = {}
+_PASSIVE_READ = ContextVar("resource_passive_read", default=None)
+
+
+class ResourceReadCache:
+    """Pure parses for the read-only Fleet observer, never writer-owned documents."""
+
+    def __init__(self):
+        self.entries, self.bytes = OrderedDict(), 0
+        self.generations = {}
+        self.hits = self.misses = 0
+        self.lock = threading.RLock()
+
+    def read(self, key, raw, dependencies, load):
+        with self.lock:
+            previous = self.entries.get(key)
+            if (previous is not None and previous[0] == raw
+                    and len(previous[1]) == len(dependencies)
+                    and all(a is b for a, b in zip(previous[1], dependencies))):
+                self.entries.move_to_end(key)
+                self.hits += 1
+                return previous[2]
+        self.misses += 1
+        value = load()
+        with self.lock:
+            old = self.entries.pop(key, None)
+            self.generations.pop(key, None)
+            if old is not None:
+                self.bytes -= len(old[0])
+            if len(raw) <= 4 * 1024 * 1024:
+                self.entries[key] = (raw, dependencies, value)
+                self.bytes += len(raw)
+            while len(self.entries) > 4096 or self.bytes > 32 * 1024 * 1024:
+                _key, old = self.entries.popitem(last=False)
+                self.generations.pop(_key, None)
+                self.bytes -= len(old[0])
+        return value
+
+    def route_document(self, path):
+        key = ('route-document', os.fspath(path))
+        info = path.stat()
+        generation = (info.st_dev, info.st_ino, info.st_mode, info.st_size,
+                      info.st_mtime_ns, info.st_ctime_ns, Path.read_text, json.loads)
+        with self.lock:
+            previous = self.entries.get(key)
+            if previous is not None and self.generations.get(key) == generation:
+                self.entries.move_to_end(key)
+                return previous[2]
+        raw = path.read_text(encoding='utf-8')
+        value = self.read(key, raw.encode('utf-8'), (json.loads,), lambda: json.loads(raw))
+        after = path.stat()
+        if generation[:6] == (after.st_dev, after.st_ino, after.st_mode, after.st_size,
+                              after.st_mtime_ns, after.st_ctime_ns):
+            with self.lock:
+                previous = self.entries.get(key)
+                if previous is not None and previous[2] is value:
+                    self.generations[key] = generation
+        return value
+
+
+@contextmanager
+def passive_read_scope(cache):
+    scope = {'cache': cache, 'memo': {}, 'handles': {}}
+    token = _PASSIVE_READ.set(scope)
+    try:
+        yield
+    finally:
+        for handle in scope['handles'].values():
+            if handle is not None:
+                with suppress(OSError):
+                    handle.close()
+        _PASSIVE_READ.reset(token)
+
+
+def passive_parse(key, raw, dependencies, load):
+    scope = _PASSIVE_READ.get()
+    return scope['cache'].read(key, raw, dependencies, load) if scope is not None else load()
+
+
+def passive_memo(key, load):
+    scope = _PASSIVE_READ.get()
+    if scope is None:
+        return load()
+    if key not in scope['memo']:
+        scope['memo'][key] = load()
+    return scope['memo'][key]
+
+
+def passive_read_active():
+    return _PASSIVE_READ.get() is not None
+
+
+def passive_parent_identity(path):
+    """Share initial directory observations; callers still close with fresh stats."""
+    scope = _PASSIVE_READ.get()
+    reads = scope.get('parent-identities') if scope is not None else None
+    if scope is not None and reads is None:
+        from runtime_observation import ProjectionCache
+        reads = scope['parent-identities'] = ProjectionCache(max_entries=1024, max_bytes=384 * 1024)
+    key = (os.fspath(path), Path.lstat)
+    if reads is not None and key in reads:
+        reads.move_to_end(key)
+        return reads[key]
+    info = path.lstat()
+    identity = (info.st_dev, info.st_ino, info.st_mode)
+    if reads is not None:
+        from runtime_observation import retained_size
+        reads.remember(key, identity, weight=retained_size((key, identity)) + 128)
+    return identity
+
+
+def passive_handle(key, load):
+    scope = _PASSIVE_READ.get()
+    if scope is None:
+        return None
+    if key not in scope['handles']:
+        scope['handles'][key] = load()
+    return scope['handles'][key]
 
 
 def agent_home() -> Path:
@@ -81,6 +203,10 @@ def launched_identity(proc, attempts: int = 20, delay: float = 0.01) -> dict | N
 
 
 def boot_identity() -> dict:
+    return dict(passive_memo('boot-identity', _read_boot_identity))
+
+
+def _read_boot_identity() -> dict:
     """Bind new local resource identities to their host and kernel lifetime."""
     try:
         boot = str(uuid.UUID(Path('/proc/sys/kernel/random/boot_id').read_text().strip()))
@@ -136,7 +262,29 @@ def recorded_governor_identity(worker: dict) -> dict | None:
         return None
     try:
         path = Path(worker['artifact_root']) / '.runtime/model-worker-governor/state.json'
-        state = json.loads(path.read_text())
+        if passive_read_active():
+            # Many historical resources name the same owner/claim journal.
+            # Observe its text afresh once per scan, then reuse only its pure
+            # parse when those bytes and the parser are unchanged.
+            scope = _PASSIVE_READ.get()
+            reads = scope.get('governor-text')
+            if reads is None:
+                from runtime_observation import ProjectionCache
+                reads = scope['governor-text'] = ProjectionCache(max_entries=32, max_bytes=1024 * 1024)
+            key = (str(path), Path.read_text)
+            observed = reads.get(key)
+            if observed is None:
+                raw = path.read_text()
+                observed = raw, raw.encode('utf-8')
+                reads.remember(key, observed, weight=sum(map(sys.getsizeof, observed))
+                               + sys.getsizeof(key) + sys.getsizeof(key[0]) + 128)
+            else:
+                reads.move_to_end(key)
+            raw, encoded = observed
+            state = passive_parse(('governor-document', str(path)), encoded,
+                                  (json.loads,), lambda: json.loads(raw))
+        else:
+            state = json.loads(path.read_text())
         identities = {}
         for claim in state.get('claims', {}).values():
             identity = claim.get('claimant_identity') or {}
@@ -156,7 +304,8 @@ def recorded_governor_identity(worker: dict) -> dict | None:
                 identities[(boot, identity.get('boot_host'))] = {**identity, 'boot_id': boot}
         if len(identities) > 1:
             return {'boot_id': None}
-        return next(iter(identities.values())) if identities else None
+        value = next(iter(identities.values())) if identities else None
+        return copy.deepcopy(value) if passive_read_active() else value
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return None
 
@@ -179,7 +328,6 @@ def legacy_resource_identity(run: dict) -> dict | None:
             # Strict read_text() refused damaged text; the pinned lines are its decode.
             if pinned_view.has_invalid_utf8:
                 return None
-            pinned_lines = dispatch_registry_cache.registry_text_lines(jobs_path)
             signature = (path, *pinned_view.signature)
         else:
             try:
@@ -203,12 +351,16 @@ def legacy_resource_identity(run: dict) -> dict | None:
             if signature is not None:
                 _LEGACY_RESOURCE_IDENTITY_CACHE[path] = (signature, owners_by_attempt)
         if pinned_view is not None and aid and aid not in owners_by_attempt:
-            # The pinned pass already holds every line. Parse only rows that can
-            # name this attempt, not the whole registry's metadata on each append.
+            # Inspect already split fields only on a miss. Materializing every
+            # historical raw line before the cache lookup copied the complete
+            # registry even when this exact owner's generation was unchanged.
             needle = 'attempt_id=' + aid
+            field_rows = ((record.fields for record in pinned_view.records)
+                          if pinned_view._prefix_reuse_eligible and not pinned_view.has_partial_tail
+                          else (line.split('\t') for line in
+                                dispatch_registry_cache.registry_text_lines(jobs_path)))
             owners_by_attempt[aid] = [
-                meta for line in pinned_lines if needle in line
-                for fields in (line.split('\t'),) if len(fields) == 6
+                meta for fields in field_rows if len(fields) == 6 and needle in fields[5]
                 for meta in (parse_registry_metadata(fields[5]),)
                 if meta.get('attempt_id') == aid]
         owners = owners_by_attempt.get(aid, [])
@@ -248,7 +400,8 @@ def reboot_evidence(run: dict) -> dict | None:
         return None
     try:
         boot = _boot_epoch()
-        uptime = float(Path('/proc/uptime').read_text().split()[0])
+        uptime = passive_memo(('resource-uptime', Path.read_text),
+                              lambda: float(Path('/proc/uptime').read_text().split()[0]))
         start, launched = int(run['starttime']), float(run['started_at'])
         if (boot and 0 < launched < boot and start > uptime * os.sysconf('SC_CLK_TCK')
                 and run.get('pid_namespace') == os.readlink('/proc/self/ns/pid')):
@@ -307,16 +460,18 @@ _PF_EXITING = 0x4
 def _detached_wrapper_exited(run, pid):
     """One stat read for a recorded process whose full identity is unreadable.
 
-    None when the PID is gone. True when a run with no launch controller still
-    has its exact single-threaded process in /proc only because it exited: a
-    zombie (or one being reaped) waiting for whatever reaper adopted the
-    detached wrapper, or a process past exit_mm, which has already emptied its
-    cmdline. Its exit proof is the sentinel it wrote before exiting, so it is
-    exited, not unreadable. A controller-launched run keeps the exact-owner
-    rule above: only its controller collects that child.
+    None when the PID is gone. True when the run's exact single-threaded
+    process is still in /proc only because it exited: a zombie (or one being
+    reaped) waiting for whatever reaper adopted the detached wrapper, or a
+    process past exit_mm, which has already emptied its cmdline. Its exit proof
+    is the sentinel it wrote before exiting, so it is exited, not unreadable.
+    While a controller-launched process is still its controller's child (the
+    same stat names that PID as parent), only that controller collects it: the
+    exact-owner rule above answers, and this says nothing. Once its kernel
+    parent is anyone else the controller died and an adopter reaps it, so the
+    same rule as a detached wrapper applies.
     """
-    if run.get("launch_controller"):
-        return False if Path(f"/proc/{pid}").exists() else None
+    controller = run.get("launch_controller")
     try:
         raw = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -325,10 +480,13 @@ def _detached_wrapper_exited(run, pid):
         return False
     try:
         fields = raw.rsplit(") ", 1)[1].split()
+        if controller and (not isinstance(controller, dict) or isinstance(controller.get("pid"), bool)
+                           or int(fields[1]) == int(controller["pid"])):
+            return False
         exiting = fields[0] in {"Z", "X"} or int(fields[6]) & _PF_EXITING
         return bool(exiting and int(fields[17]) <= 1
                     and fields[19] == str(run.get("starttime")))
-    except (IndexError, ValueError):
+    except (IndexError, KeyError, TypeError, ValueError):
         return False
 
 
@@ -662,6 +820,10 @@ def read_registry_source(path: Path) -> tuple[dict, bytes | None]:
 
 
 def _boot_epoch() -> float | None:
+    return passive_memo('boot-epoch', _read_boot_epoch)
+
+
+def _read_boot_epoch() -> float | None:
     try:
         for line in Path("/proc/stat").read_text(encoding="utf-8").splitlines():
             if line.startswith("btime "):
@@ -731,7 +893,10 @@ def normalize_run(run_id: str, run: dict, registry: Path, identity_reader=proc_i
         try:
             route_path = Path(run["route"])
             if route_path.is_absolute() and not route_path.is_symlink():
-                route_doc = json.loads(route_path.read_text(encoding="utf-8"))
+                scope = _PASSIVE_READ.get()
+                route_doc = (passive_memo(('route-document', os.fspath(route_path)),
+                             lambda: scope['cache'].route_document(route_path)) if scope is not None
+                             else json.loads(route_path.read_text(encoding="utf-8")))
                 if (not run.get("route_id") or route_doc.get("route_id") == run.get("route_id")):
                     artifact_root = route_doc.get("artifact_root")
         except (OSError, ValueError, TypeError):
@@ -920,7 +1085,8 @@ def scan(index_path=None, identity_reader=proc_identity, now=None,
                 diagnostics.append({"kind": "missing-registry", "path": str(registry),
                                     "reason": "registered-path-absent", "blocking": False})
                 continue
-            payload = strict_json_loads(data)
+            payload = passive_parse(('registry', str(registry)), data,
+                                    (strict_json_loads,), lambda: strict_json_loads(data))
             runs = payload.get("runs") if isinstance(payload, dict) else None
             if payload.get("schema_version") != REGISTRY_SCHEMA or not isinstance(runs, dict):
                 raise ValueError("invalid-registry-schema")

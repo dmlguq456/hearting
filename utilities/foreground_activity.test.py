@@ -21,6 +21,7 @@ sys.modules[S.name] = A
 S.loader.exec_module(A)
 
 import owner_route_binding as OWNER_BINDING
+from split_module_fixture import patch_split, split_patch
 
 
 OWNER_ATTEMPT = "att-owner-activity"
@@ -309,7 +310,7 @@ class ForegroundActivityTests(unittest.TestCase):
             (11, "2"): {"ppid": 1, "pgid": 10},  # same group, not a descendant
             (12, "3"): {"ppid": 10, "pgid": 12},  # exact runtime descendant
         }
-        with mock.patch("dispatch_contract.attempt_tagged_descendants",
+        with split_patch("dispatch_contract.attempt_tagged_descendants",
                         side_effect=AssertionError("owner must not broaden by tag")):
             self.assertEqual(monitor._members(table), {(10, "1"), (12, "3")})
 
@@ -376,7 +377,7 @@ class ForegroundActivityTests(unittest.TestCase):
             args = owner_args(root, jobs, route_path, route)
             process = SimpleNamespace(pid=4242)
             monitor = mock.Mock()
-            with mock.patch.object(OWNER_BINDING.ROUTE, "verify_route",
+            with patch_split(OWNER_BINDING.ROUTE, "verify_route",
                                    side_effect=lambda raw, **_kwargs: raw), \
                  mock.patch.object(A, "_stat", return_value={"start": "77"}), \
                  mock.patch.object(A, "ForegroundActivityMonitor", return_value=monitor) as create:
@@ -403,7 +404,7 @@ class ForegroundActivityTests(unittest.TestCase):
                 str(first_path.resolve()), first["route_id"], first["route_hash"])
             target = OWNER_BINDING.OwnerRouteBinding(
                 str(next_path.resolve()), next_route["route_id"], next_route["route_hash"])
-            with mock.patch.object(OWNER_BINDING.ROUTE, "verify_route",
+            with patch_split(OWNER_BINDING.ROUTE, "verify_route",
                                    side_effect=lambda raw, **_kwargs: raw):
                 OWNER_BINDING.publish_owner_route_advance(
                     jobs, owner_attempt_id=OWNER_ATTEMPT, source=source, target=target,
@@ -413,7 +414,7 @@ class ForegroundActivityTests(unittest.TestCase):
                 stream.write(adopted_child_row(root, next_path, next_route))
             args = owner_args(root, jobs, next_path, next_route)
             monitor = mock.Mock()
-            with mock.patch.object(OWNER_BINDING.ROUTE, "verify_route",
+            with patch_split(OWNER_BINDING.ROUTE, "verify_route",
                                    side_effect=lambda raw, **_kwargs: raw), \
                  mock.patch.object(A, "_stat", return_value={"start": "78"}), \
                  mock.patch.object(A, "ForegroundActivityMonitor", return_value=monitor) as create:
@@ -441,7 +442,7 @@ class ForegroundActivityTests(unittest.TestCase):
                 args = owner_args(root, jobs, route_path, route)
                 if case == "refreshed-args-mismatch":
                     args.route_id = "rt-other"
-                with mock.patch.object(OWNER_BINDING.ROUTE, "verify_route",
+                with patch_split(OWNER_BINDING.ROUTE, "verify_route",
                                        side_effect=lambda raw, **_kwargs: raw), \
                      mock.patch.object(A, "_stat", return_value={"start": "79"}), \
                      mock.patch.object(A, "ForegroundActivityMonitor",
@@ -462,7 +463,7 @@ class ForegroundActivityTests(unittest.TestCase):
                 start_new_session=True,
             )
             try:
-                with mock.patch.object(OWNER_BINDING.ROUTE, "verify_route",
+                with patch_split(OWNER_BINDING.ROUTE, "verify_route",
                                        side_effect=lambda raw, **_kwargs: raw), \
                      mock.patch.object(A.ForegroundActivityMonitor, "_runtime_lineage",
                                        return_value={(process.pid, A._stat(

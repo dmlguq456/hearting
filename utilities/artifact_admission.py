@@ -12,10 +12,13 @@ commit point is the canonical publish `atomic_publish.rename_directory_locked`
 
 `.runtime/artifact-admission/v1/index.json` is a derived, rebuildable
 accelerator; the durable source of truth is the published manifest and its
-events. `.runtime/artifact-admission/v1/root-identity.json` is the only value
-here that cannot be rebuilt from published manifests.
+events. On a large root its artifact, revision, event and stream rows live in
+`index.bulk/` beside it, one file per cycle (see "cycle rows kept beside
+index.json" below). `.runtime/artifact-admission/v1/root-identity.json` is the
+only value here that cannot be rebuilt from published manifests.
 """
 
+from collections import abc
 from contextlib import contextmanager, ExitStack
 import errno
 import fcntl
@@ -24,10 +27,11 @@ import json
 import os
 import re
 import stat
+import struct
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
@@ -51,7 +55,8 @@ _INDEX_BYTE_WARN_SIZE = 2 * 1024 * 1024
 _README_TEXT = (
     "This directory is a derived, rebuildable accelerator over published\n"
     "manifests. Do not hand-edit any file here.\n\n"
-    "- `index.json` can always be regenerated: `artifact_admission.rebuild_index()`.\n"
+    "- `index.json` (and `index.bulk/`, its per-cycle rows on a large root) can always be\n"
+    "  regenerated: `artifact_admission.rebuild_index()`.\n"
     "- `root-identity.json` is the ONLY value here that cannot be rebuilt.\n"
 )
 
@@ -893,10 +898,10 @@ def _copy_index_document(document: artifact_index.IndexDocument) -> artifact_ind
     return artifact_index.IndexDocument(
         schema_version=document.schema_version,
         artifact_root_id=document.artifact_root_id,
-        stable_ids=dict(document.stable_ids),
+        stable_ids=artifact_index.copy_section(document.stable_ids),
         routes={name: dict(bucket) for name, bucket in document.routes.items()},
-        event_ids=dict(document.event_ids),
-        streams=dict(document.streams),
+        event_ids=artifact_index.copy_section(document.event_ids),
+        streams=artifact_index.copy_section(document.streams),
         manifests=dict(document.manifests),
         cycles=dict(document.cycles),
     )
@@ -924,10 +929,14 @@ def load_index(root: Path) -> artifact_index.IndexDocument:
                 and cached.get("key") == key and _generation_hit_allowed(root, cached)):
             return _copy_index_document(cached["document"])
     payload = _read_json(path)
+    store = _bulk_store(root)
     if payload is None:
         identity = ensure_root_identity(root)
-        return artifact_index.empty(identity.artifact_root_id)
+        empty = artifact_index.empty(identity.artifact_root_id)
+        return empty if store is None else _with_bulk(empty, store)
     document = artifact_index._parse_owned(payload)
+    if store is not None:
+        document = _with_bulk(document, store)
     key_after = _file_key(path)
     if key is not None and key_after == key:
         # A reader that validated this generation may leave the small head
@@ -951,7 +960,8 @@ def clear_index_cache() -> None:
 def _head_payload(root: Path, index: artifact_index.IndexDocument, key: List[int]) -> Dict[str, Any]:
     prefixes = (artifact_identity.prefix_for("campaign"), artifact_identity.prefix_for("cycle"))
     pinned = {prefix: [] for prefix in prefixes}
-    for stable_id in index.stable_ids:
+    stable = index.stable_ids
+    for stable_id in (stable.kept() if isinstance(stable, _BulkSection) else stable):
         if not isinstance(stable_id, str):
             continue
         for prefix in prefixes:
@@ -1051,9 +1061,567 @@ def load_index_head(root: Path) -> Optional[IndexHead]:
     return head
 
 
-def _write_index(root: Path, index: artifact_index.IndexDocument) -> None:
+# ---------------------------------------------------------------------------
+# cycle rows kept beside index.json (3366fe)
+#
+# Above `BULK_THRESHOLD_ROWS` rows, the three sections that grow with every
+# artifact and event -- `stable_ids` rows of artifacts, artifact revisions and
+# events, `event_ids` and `streams` -- leave `index.json` for one file per cycle
+# under `index.bulk/cycles/`, with `index.bulk/keys.bin`, a sorted table that
+# names the cycle file holding each key.  `index.json` keeps the same closed
+# shape with every other row (manifests, cycles, routes, campaign and cycle ids,
+# ...), so a resident helper of an older release still reads and writes it: it
+# sees no moved rows (its own uniqueness check covers fewer IDs; it never
+# refuses on their absence, because a cycle's events and stream cursors leave
+# together), and the rows it adds stay in `index.json` until the next writer of
+# this release folds them into the cycle files and leaves them out again.
+#
+# Moved rows are only ever added: a row names its key's owner and is immutable,
+# and a stream cursor only moves forward (the higher one is kept).  A writer
+# therefore rewrites only the cycle files its change touches and appends the
+# keys it adds to `keys.bin`, each by atomic replace, before `index.json`;
+# a crash in between leaves rows a later read already sees, never loses one.
+# Rows still in `index.json` (all of them when the layout is turned on, or an
+# older writer's) move a whole cycle at a time, at most `BULK_FOLD_ROWS` per
+# write beyond the cycles the write changes, so no single write holds the lock
+# for the whole move and an older reader always sees each cycle's rows either
+# all together or not at all.  `format.json` turns the layout on; without it the
+# directory is ignored.  Rebuild (and a writer handing in a whole document)
+# rewrites every cycle file.
+# ---------------------------------------------------------------------------
+
+BULK_REL = "index.bulk"
+BULK_THRESHOLD_ROWS = 50_000
+BULK_FOLD_ROWS = 50_000
+_BULK_SECTIONS = ("stable_ids", "event_ids", "streams")
+_BULK_STABLE_PREFIXES = tuple(artifact_identity.prefix_for(kind)
+                              for kind in ("artifact", "artifact_revision", "event"))
+_BULK_OTHER = "_other"
+_BULK_MAGIC = b"HTGKEYS1"
+_BULK_HEADER = struct.Struct(">8sII")
+_BULK_ENTRY = struct.Struct(">QI")
+_BULK_NAME_BYTES = 36
+
+
+def _bulk_dir(root: Path) -> Path:
+    return _admission_dir(root) / BULK_REL
+
+
+def _bulk_moved(section: str, key: Any) -> bool:
+    return section != "stable_ids" or (isinstance(key, str) and key.startswith(_BULK_STABLE_PREFIXES))
+
+
+def _bulk_key_hash(key: str) -> int:
+    return int.from_bytes(hashlib.blake2b(key.encode("utf-8"), digest_size=8).digest(), "big")
+
+
+def _bulk_owner(row: Any) -> str:
+    cycle_id = row.get("cycle_id") if type(row) is dict else None
+    return cycle_id if type(cycle_id) is str and _CYCLE_ID_FILE_RE.match(cycle_id) else _BULK_OTHER
+
+
+def _bulk_merge_row(section: str, older: Any, newer: Any) -> Any:
+    """Rows are immutable once written (the newer wins, as a dict assignment would); a stream
+    cursor only moves forward, so the higher `last_sequence` wins."""
+    if older is None:
+        return newer
+    if newer is None:
+        return older
+    if section == "streams":
+        try:
+            if int(older.get("last_sequence", 0)) > int(newer.get("last_sequence", 0)):
+                return older
+        except (TypeError, ValueError, AttributeError):
+            pass
+    return newer
+
+
+def _bulk_empty_sections() -> Dict[str, Dict[str, Any]]:
+    return {name: {} for name in _BULK_SECTIONS}
+
+
+class _BulkLocator:
+    """`keys.bin`: a sorted (key hash, cycle-file number) table and the cycle-file names."""
+
+    def __init__(self, names: List[str], data: bytes, offset: int, count: int):
+        self.names = names
+        self.data = data
+        self.offset = offset
+        self.count = count
+
+    @classmethod
+    def empty(cls) -> "_BulkLocator":
+        return cls([], b"", 0, 0)
+
+    @classmethod
+    def parse(cls, data: bytes) -> "_BulkLocator":
+        if len(data) < _BULK_HEADER.size:
+            raise ValueError("bulk-locator-short")
+        magic, names_count, count = _BULK_HEADER.unpack_from(data, 0)
+        offset = _BULK_HEADER.size + names_count * _BULK_NAME_BYTES
+        if magic != _BULK_MAGIC or len(data) != offset + count * _BULK_ENTRY.size:
+            raise ValueError("bulk-locator-invalid")
+        names = [data[_BULK_HEADER.size + i * _BULK_NAME_BYTES:
+                      _BULK_HEADER.size + (i + 1) * _BULK_NAME_BYTES].decode("ascii").rstrip()
+                 for i in range(names_count)]
+        return cls(names, data, offset, count)
+
+    def _hash_at(self, position: int) -> int:
+        return _BULK_ENTRY.unpack_from(self.data, self.offset + position * _BULK_ENTRY.size)[0]
+
+    def _lower(self, value: int) -> int:
+        low, high = 0, self.count
+        while low < high:
+            middle = (low + high) // 2
+            if self._hash_at(middle) < value:
+                low = middle + 1
+            else:
+                high = middle
+        return low
+
+    def owners(self, key: str) -> List[str]:
+        return self._owners_of(_bulk_key_hash(key))
+
+    def _owners_of(self, value: int) -> List[str]:
+        position = self._lower(value)
+        found = []
+        while position < self.count:
+            hashed, number = _BULK_ENTRY.unpack_from(self.data, self.offset + position * _BULK_ENTRY.size)
+            if hashed != value:
+                break
+            if number < len(self.names):
+                found.append(self.names[number])
+            position += 1
+        return found
+
+    def with_entries(self, pairs) -> Optional["_BulkLocator"]:
+        """This table plus `(key, cycle-file name)` pairs it lacks, or None when it has them all."""
+        names = list(self.names)
+        numbers = {name: number for number, name in enumerate(names)}
+        pairs = list(pairs)
+        if len(pairs) * 16 > self.count:
+            # Many keys at once (a cycle moved out of index.json): one merge of the whole table.
+            for _key, owner in pairs:
+                if owner not in numbers:
+                    numbers[owner] = len(names)
+                    names.append(owner)
+            entries = list(_BULK_ENTRY.iter_unpack(self.data[self.offset:]))
+            entries.extend((_bulk_key_hash(key), numbers[owner]) for key, owner in pairs)
+            entries.sort()
+            unique = [entry for position, entry in enumerate(entries)
+                      if position == 0 or entries[position - 1] != entry]
+            if len(unique) == self.count and len(names) == len(self.names):
+                return None
+            return _BulkLocator.build(names, b"".join(_BULK_ENTRY.pack(*entry) for entry in unique), len(unique))
+        missing = set()
+        for key, owner in pairs:
+            value = _bulk_key_hash(key)
+            if owner in self._owners_of(value):
+                continue
+            if owner not in numbers:
+                numbers[owner] = len(names)
+                names.append(owner)
+            missing.add((value, numbers[owner]))
+        if not missing:
+            return None
+        pieces, cursor = [], 0
+        start = self.offset
+        for value, number in sorted(missing):
+            position = self._lower(value)
+            pieces.append(self.data[start + cursor * _BULK_ENTRY.size: start + position * _BULK_ENTRY.size])
+            pieces.append(_BULK_ENTRY.pack(value, number))
+            cursor = position
+        pieces.append(self.data[start + cursor * _BULK_ENTRY.size: start + self.count * _BULK_ENTRY.size])
+        return _BulkLocator.build(names, b"".join(pieces), self.count + len(missing))
+
+    @staticmethod
+    def build(names: List[str], entries: bytes, count: int) -> "_BulkLocator":
+        header = _BULK_HEADER.pack(_BULK_MAGIC, len(names), count)
+        table = b"".join(name.encode("ascii").ljust(_BULK_NAME_BYTES) for name in names)
+        data = header + table + entries
+        return _BulkLocator(names, data, len(header) + len(table), count)
+
+    @staticmethod
+    def full(owner_keys: Mapping[str, Any]) -> "_BulkLocator":
+        return _BulkLocator.empty().with_entries(
+            (key, name) for name in sorted(owner_keys) for key in owner_keys[name]) or _BulkLocator.empty()
+
+
+class _BulkStore:
+    """One root's cycle files and key table, read lazily and kept for this process."""
+
+    def __init__(self, root: Path):
+        self.dir = _bulk_dir(root)
+        self.real = os.path.realpath(str(self.dir))
+        self._locator: Optional[Tuple[Optional[List[int]], _BulkLocator]] = None
+        self._derived = False  # the table in hand was derived from the cycle files, not read
+        self._shards: Dict[str, Tuple[Optional[List[int]], Dict[str, Dict[str, Any]]]] = {}
+
+    def _locator_path(self) -> Path:
+        return self.dir / "keys.bin"
+
+    def _shard_path(self, name: str) -> Path:
+        return self.dir / "cycles" / "{0}.json".format(name)
+
+    def locator(self, *, fresh: bool = False) -> _BulkLocator:
+        """The key table every lookup follows.  A table that is missing or does not parse is derived
+        from the cycle files it indexes (they are the rows; the table only finds them), so a lookup
+        never misses a row a cycle file holds; the next locked write stores the derived table."""
+        path = self._locator_path()
+        if self._locator is not None and not fresh:
+            return self._locator[1]
+        key = _file_key(path)
+        if self._locator is not None and self._locator[0] == key and (key is not None or self._derived):
+            return self._locator[1]
+        try:
+            locator = _BulkLocator.parse(path.read_bytes())
+            self._derived = False
+        except (FileNotFoundError, ValueError):
+            locator = _BulkLocator.full({name: self.keys_of(name) for name in self.names()})
+            self._derived = True
+        self._locator = (key, locator)
+        return locator
+
+    def keys_of(self, name: str) -> List[str]:
+        shard = self.shard(name)
+        return [key for section in _BULK_SECTIONS for key in shard[section]]
+
+    def uncovered(self) -> List[Tuple[str, str]]:
+        """(cycle file, key) pairs the key table in use does not name: lookups would miss them."""
+        locator = self.locator(fresh=True)
+        numbers = {name: number for number, name in enumerate(locator.names)}
+        entries = set(_BULK_ENTRY.iter_unpack(locator.data[locator.offset:]))
+        return [(name, key) for name in self.names() for key in self.keys_of(name)
+                if (_bulk_key_hash(key), numbers.get(name, -1)) not in entries]
+
+    def shard(self, name: str, *, fresh: bool = False) -> Dict[str, Dict[str, Any]]:
+        cached = self._shards.get(name)
+        if cached is not None and not fresh:
+            return cached[1]
+        path = self._shard_path(name)
+        key = _file_key(path)
+        if cached is not None and key is not None and cached[0] == key:
+            return cached[1]
+        payload = _read_json(path) if key is not None else None
+        sections = _bulk_empty_sections()
+        if isinstance(payload, dict):
+            for section in _BULK_SECTIONS:
+                rows = payload.get(section)
+                if isinstance(rows, dict):
+                    sections[section] = rows
+        self._shards[name] = (key, sections)
+        return sections
+
+    def get(self, section: str, key: str) -> Any:
+        found = None
+        for name in self.locator().owners(key):
+            found = _bulk_merge_row(section, found, self.shard(name)[section].get(key))
+        return found
+
+    def names(self) -> List[str]:
+        try:
+            return sorted(name[:-5] for name in os.listdir(str(self.dir / "cycles"))
+                          if name.endswith(".json") and not name.startswith("."))
+        except FileNotFoundError:
+            return []
+
+    def everything(self, section: str) -> Dict[str, Any]:
+        rows: Dict[str, Any] = {}
+        for name in self.names():
+            for key, row in self.shard(name)[section].items():
+                rows[key] = _bulk_merge_row(section, rows.get(key), row)
+        return rows
+
+    def _write_shard(self, name: str, sections: Dict[str, Dict[str, Any]]) -> None:
+        """Atomic replace of one cycle file; the caller syncs the directory once for the batch."""
+        payload = {"cycle": name, "schema": 1}
+        payload.update(sections)
+        path = self._shard_path(name)
+        temp = path.with_name(".{0}.{1}.tmp".format(path.name, _new_token()))
+        fd = os.open(str(temp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(artifact_manifest.canonical_bytes(payload))
+                handle.flush()
+                os.fsync(handle.fileno())
+                os.replace(str(temp), str(path))
+                info = os.fstat(handle.fileno())
+        except BaseException:
+            try:
+                os.unlink(str(temp))
+            except OSError:
+                pass
+            raise
+        self._shards[name] = ([info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns,
+                               info.st_mode, info.st_ctime_ns], sections)
+
+    def _write_locator(self, locator: _BulkLocator) -> None:
+        key = _atomic_write_bytes(self._locator_path(), locator.data)
+        self._locator = (key, locator)
+        self._derived = False
+
+    def add(self, rows: Mapping[str, Mapping[str, Any]]) -> None:
+        """Fold `rows` into the cycle files that own them, then name their keys in `keys.bin`."""
+        by_owner: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        for section in _BULK_SECTIONS:
+            for key, row in (rows.get(section) or {}).items():
+                by_owner.setdefault(_bulk_owner(row), _bulk_empty_sections())[section][key] = row
+        pairs = []
+        (self.dir / "cycles").mkdir(parents=True, exist_ok=True)
+        wrote = False
+        for name, incoming in sorted(by_owner.items()):
+            current = self.shard(name, fresh=True)
+            merged = {section: dict(current[section]) for section in _BULK_SECTIONS}
+            changed = False
+            for section in _BULK_SECTIONS:
+                for key, row in incoming[section].items():
+                    value = _bulk_merge_row(section, merged[section].get(key), row)
+                    if merged[section].get(key) != value:
+                        merged[section][key] = value
+                        changed = True
+                    pairs.append((key, name))
+            if changed:
+                self._write_shard(name, merged)
+                wrote = True
+        if wrote:
+            _fsync_dir(self.dir / "cycles")
+        current = self.locator(fresh=True)
+        locator = current.with_entries(pairs)
+        if locator is None and self._derived:
+            locator = current  # a derived table is stored by the first write that has one in hand
+        if locator is not None:
+            self._write_locator(locator)
+
+    def replace(self, rows: Mapping[str, Mapping[str, Any]]) -> None:
+        """Make the cycle files hold exactly `rows` (migration, rebuild, a whole document)."""
+        by_owner: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        for section in _BULK_SECTIONS:
+            for key, row in (rows.get(section) or {}).items():
+                by_owner.setdefault(_bulk_owner(row), _bulk_empty_sections())[section][key] = row
+        before = set(self.names())
+        (self.dir / "cycles").mkdir(parents=True, exist_ok=True)
+        for name, sections in sorted(by_owner.items()):
+            self._write_shard(name, sections)
+        _fsync_dir(self.dir / "cycles")
+        self._write_locator(_BulkLocator.full(
+            {name: [key for section in _BULK_SECTIONS for key in sections[section]]
+             for name, sections in by_owner.items()}))
+        for name in sorted(before - set(by_owner)):
+            try:
+                self._shard_path(name).unlink()
+            except OSError:
+                pass
+            self._shards.pop(name, None)
+
+
+class _BulkSection(abc.MutableMapping):
+    """One moved section: rows in memory (`index.json`'s and this process's) over the cycle files.
+
+    Lookups read only the cycle files `keys.bin` names for the key; iterating reads every
+    cycle file (verification and rebuild only)."""
+
+    def __init__(self, name: str, store: _BulkStore, inline: Mapping[str, Any],
+                 overlay: Optional[Dict[str, Any]] = None):
+        self.name = name
+        self.store = store
+        self.inline = inline
+        self.overlay = overlay if overlay is not None else {}
+        self._all: Optional[Dict[str, Any]] = None
+
+    def copy_section(self) -> "_BulkSection":
+        return _BulkSection(self.name, self.store, self.inline, dict(self.overlay))
+
+    def _lookup(self, key: Any) -> Any:
+        if self._all is not None:
+            return self._all.get(key)
+        stored = self.store.get(self.name, key) if _bulk_moved(self.name, key) and isinstance(key, str) else None
+        found = _bulk_merge_row(self.name, stored, self.inline.get(key))
+        return _bulk_merge_row(self.name, found, self.overlay.get(key))
+
+    def get(self, key: Any, default: Any = None) -> Any:
+        found = self._lookup(key)
+        return default if found is None else found
+
+    def __getitem__(self, key: Any) -> Any:
+        found = self._lookup(key)
+        if found is None:
+            raise KeyError(key)
+        return found
+
+    def __contains__(self, key: Any) -> bool:
+        return self._lookup(key) is not None
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        self.overlay[key] = value
+        self._all = None
+
+    def __delitem__(self, key: Any) -> None:
+        raise TypeError("index {0} rows are never removed".format(self.name))
+
+    def materialize(self) -> Dict[str, Any]:
+        if self._all is None:
+            rows = self.store.everything(self.name)
+            for layer in (self.inline, self.overlay):
+                for key, row in layer.items():
+                    rows[key] = _bulk_merge_row(self.name, rows.get(key), row)
+            self._all = rows
+        return self._all
+
+    def __iter__(self):
+        return iter(self.materialize())
+
+    def __len__(self) -> int:
+        return len(self.materialize())
+
+    def kept(self) -> Dict[str, Any]:
+        """The rows that stay in `index.json`."""
+        rows = {key: row for key, row in self.inline.items() if not _bulk_moved(self.name, key)}
+        rows.update((key, row) for key, row in self.overlay.items() if not _bulk_moved(self.name, key))
+        return rows
+
+
+def _bulk_store(root: Path) -> Optional[_BulkStore]:
+    """This root's cycle-file layout, or None while `index.json` still holds every row."""
+    return _BulkStore(root) if (_bulk_dir(root) / "format.json").is_file() else None
+
+
+def _with_bulk(document: artifact_index.IndexDocument, store: _BulkStore) -> artifact_index.IndexDocument:
+    return replace(document, **{name: _BulkSection(name, store, getattr(document, name))
+                                for name in _BULK_SECTIONS})
+
+
+def attach_bulk_rows(root: Path, document: artifact_index.IndexDocument) -> artifact_index.IndexDocument:
+    """Read-only: answer the moved sections of an `index.json` document from the cycle files too."""
+    store = _bulk_store(root)
+    return document if store is None else _with_bulk(document, store)
+
+
+def _bulk_bound(index: artifact_index.IndexDocument, store: _BulkStore) -> bool:
+    return all(isinstance(getattr(index, name), _BulkSection)
+               and getattr(index, name).store.real == store.real for name in _BULK_SECTIONS)
+
+
+def _bulk_all_rows(index: artifact_index.IndexDocument) -> Dict[str, Dict[str, Any]]:
+    rows = {}
+    for name in _BULK_SECTIONS:
+        section = getattr(index, name)
+        source = section.materialize() if isinstance(section, _BulkSection) else section
+        rows[name] = {key: row for key, row in source.items() if _bulk_moved(name, key)}
+    return rows
+
+
+def _bulk_kept(index: artifact_index.IndexDocument) -> artifact_index.IndexDocument:
+    stable = index.stable_ids
+    kept = (stable.kept() if isinstance(stable, _BulkSection)
+            else {key: row for key, row in stable.items() if not _bulk_moved("stable_ids", key)})
+    return replace(index, stable_ids=kept, event_ids={}, streams={})
+
+
+def _row_cycle(row: Any) -> Any:
+    return row.get("cycle_id") if type(row) is dict else None
+
+
+def _bulk_fold(index: artifact_index.IndexDocument, budget: int
+               ) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]]]:
+    """Split the moved rows held in memory into (rows to fold into cycle files, rows `index.json` keeps).
+
+    Every row this write changed is folded, with every row `index.json` still holds for the same
+    cycles; other cycles' rows follow whole, cycle by cycle, until `budget` rows.  One pass over
+    the rows held in `index.json` (all of them while the layout is being turned on)."""
+    sections = {name: getattr(index, name) for name in _BULK_SECTIONS}
+    groups: Dict[Any, Dict[str, List[str]]] = {}
+    stay: Dict[str, Dict[str, Any]] = {name: {} for name in _BULK_SECTIONS}
+    for name, section in sections.items():
+        kept_here = stay[name]
+        for key, row in section.inline.items():
+            if name == "stable_ids" and not (type(key) is str and key.startswith(_BULK_STABLE_PREFIXES)):
+                kept_here[key] = row
+                continue
+            owner = row.get("cycle_id") if type(row) is dict else None
+            members = groups.get(owner)
+            if members is None:
+                members = groups[owner] = {section_name: [] for section_name in _BULK_SECTIONS}
+            members[name].append(key)
+    fold = set()
+    for name, section in sections.items():
+        for key, row in section.overlay.items():
+            if _bulk_moved(name, key):
+                fold.add(_row_cycle(row))
+                if key in section.inline:
+                    fold.add(_row_cycle(section.inline[key]))
+    size = {owner: sum(len(keys) for keys in members.values()) for owner, members in groups.items()}
+    used = sum(size.get(owner, 0) for owner in fold)
+    for owner in sorted(groups, key=str):
+        if used >= budget:
+            break
+        if owner not in fold:
+            fold.add(owner)
+            used += size[owner]
+    folded: Dict[str, Dict[str, Any]] = {name: {} for name in _BULK_SECTIONS}
+    for owner, members in groups.items():
+        target = folded if owner in fold else stay
+        for name, keys in members.items():
+            inline, rows = sections[name].inline, target[name]
+            for key in keys:
+                rows[key] = inline[key]
+    for name, section in sections.items():
+        for key, row in section.overlay.items():
+            if _bulk_moved(name, key):
+                folded[name][key] = _bulk_merge_row(name, folded[name].get(key), row)
+            else:
+                stay[name][key] = row
+    return folded, stay
+
+
+def _bulk_row_count(index: artifact_index.IndexDocument) -> int:
+    return sum(len(getattr(index, name)) for name in _BULK_SECTIONS)
+
+
+def _bulk_write(root: Path, index: artifact_index.IndexDocument, *, whole: bool = False
+                ) -> Optional[Tuple[artifact_index.IndexDocument, artifact_index.IndexDocument]]:
+    """Write the moved rows of `index`; return (what `index.json` keeps, the whole view after
+    the write), or None while `index.json` is written whole.
+
+    Cycle files and `keys.bin` are written before `index.json`.  Turning the layout on writes
+    only `format.json`: every row is still in `index.json` then, and moves out a few cycles per
+    write from this one on.  Only `whole` (rebuild) makes the cycle files hold exactly `index`;
+    any other document whose sections are plain rows (one read before the layout was turned on,
+    in the same locked section) is folded like the rows `index.json` holds."""
+    store = _bulk_store(root)
+    if store is None:
+        if _bulk_row_count(index) < BULK_THRESHOLD_ROWS:
+            return None
+        store = _BulkStore(root)
+        if isinstance(index.stable_ids, _BulkSection):
+            index = replace(index, **{name: dict(getattr(index, name).materialize()) for name in _BULK_SECTIONS})
+        (store.dir / "cycles").mkdir(parents=True, exist_ok=True)
+        _atomic_write_bytes(store.dir / "format.json", artifact_manifest.canonical_bytes(
+            {"schema": 1, "sections": list(_BULK_SECTIONS),
+             "stable_prefixes": list(_BULK_STABLE_PREFIXES)}))
+        index = _with_bulk(index, store)
+    elif not _bulk_bound(index, store):
+        if whole or any(isinstance(getattr(index, name), _BulkSection) for name in _BULK_SECTIONS):
+            store.replace(_bulk_all_rows(index))
+            kept = _bulk_kept(index)
+            return kept, _with_bulk(kept, store)
+        index = _with_bulk(index, store)
+    store = index.stable_ids.store
+    folded, stay = _bulk_fold(index, BULK_FOLD_ROWS)
+    store.add(folded)
+    kept = replace(index, **stay)
+    return kept, _with_bulk(kept, store)
+
+
+def _write_index(root: Path, index: artifact_index.IndexDocument, *, whole: bool = False) -> None:
+    """`whole` (rebuild only): the index is exactly `index`, including rows it no longer has."""
     global _INDEX_GENERATION
-    key = _atomic_write_bytes(_index_path(root), artifact_index.canonical_bytes(index))
+    split = _bulk_write(root, index, whole=whole)
+    if split is not None:
+        kept, index = split
+        data = artifact_index.canonical_bytes(kept)
+    else:
+        data = artifact_index.canonical_bytes(index)
+    key = _atomic_write_bytes(_index_path(root), data)
     if key is None:
         return
     _write_index_head(root, index, key)
@@ -1272,7 +1840,7 @@ def rebuild_index(root: Path) -> artifact_index.IndexDocument:
             }
         ),
     )
-    _write_index(root, index)
+    _write_index(root, index, whole=True)
     return index
 
 
@@ -1281,6 +1849,23 @@ def verify_index(root: Path) -> artifact_manifest.ValidationReport:
     index_path = _index_path(root)
     rebuilt, _fallback_keys = _compute_rebuilt_index(root)
     rebuilt_bytes = artifact_index.canonical_bytes(rebuilt)
+    store = _bulk_store(root)
+    if store is not None:
+        # The rows kept beside index.json are compared as one document with it.
+        payload = _read_json(index_path)
+        try:
+            current_bytes = (artifact_index.canonical_bytes(_with_bulk(artifact_index.parse(payload), store))
+                             if payload is not None else None)
+        except ValueError:
+            current_bytes = b""  # a hand-edited row that does not parse is drift too
+        if current_bytes is not None and current_bytes != rebuilt_bytes:
+            v = Violation("index-drift", "$", "current index bytes differ from rebuild")
+            return artifact_manifest.ValidationReport(ok=False, violations=(v,))
+        if store.uncovered():
+            # Lookups follow keys.bin: a row it does not name would be taken for absent.
+            v = Violation("index-drift", "$.index.bulk/keys.bin", "keys.bin does not name every cycle-file key")
+            return artifact_manifest.ValidationReport(ok=False, violations=(v,))
+        return artifact_manifest.ValidationReport(ok=True, violations=())
     try:
         current_size = index_path.stat().st_size
     except OSError:

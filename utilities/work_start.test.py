@@ -20,6 +20,7 @@ from types import SimpleNamespace
 
 import work_start as W
 from dispatch_completion_join import CurrentDeliveryState
+from split_module_fixture import patch_split, split_patch
 
 
 def load(name, path):
@@ -54,7 +55,7 @@ class WorkStartTest(unittest.TestCase):
         self.join.start(); self.addCleanup(self.join.stop)
         self.gate = mock.patch.object(W, "owner_frame_launch_gate", side_effect=self.owner_gate)
         self.gate.start(); self.addCleanup(self.gate.stop)
-        self.pair = mock.patch.object(W, "completion_marker_gate")
+        self.pair = patch_split(W, "completion_marker_gate")
         self.pair.start(); self.addCleanup(self.pair.stop)
         self.current = mock.patch.object(W, "current_delivery_state", side_effect=self.delivery)
         self.current.start(); self.addCleanup(self.current.stop)
@@ -79,7 +80,7 @@ class WorkStartTest(unittest.TestCase):
             advanced.append(True)
             return {**result, "state": "ready"}
         with mock.patch("route_parent_close.intent", return_value=None), \
-                mock.patch.object(W, "_route_module", return_value=module), \
+                patch_split(W, "_route_module", return_value=module), \
                 mock.patch.object(W, "_advance", side_effect=advance), \
                 mock.patch.object(W, "_advance_plan", side_effect=lambda _route, _jobs, result, **kw: result), \
                 mock.patch.object(W, "_arm_capacity_resume", side_effect=lambda result, *_args: result), \
@@ -103,7 +104,7 @@ class WorkStartTest(unittest.TestCase):
         module = SimpleNamespace(resolve_route_argument=lambda *a: source_path,
                                  verify_route=lambda value: value,
                                  restore_consumed_tombstones=lambda *a, **kw: {"restored": [], "errors": []})
-        with mock.patch.object(W, "_route_module", return_value=module):
+        with patch_split(W, "_route_module", return_value=module):
             first = self.start()
             second = self.start()
         self.assertTrue(first["owner_started"])
@@ -905,7 +906,7 @@ class WorkStartTest(unittest.TestCase):
                               ('unverifiable', 'owner-process-unverifiable')):
             with self.subTest(state=state), \
                  mock.patch.object(W, 'join_selected_attempts', return_value={'state': 'timeout', 'children': []}), \
-                 mock.patch.object(D, 'attempt_process_quiescence',
+                 patch_split(D, 'attempt_process_quiescence',
                                    return_value=D.ProcessQuiescence(state, 'fixture')):
                 result = self.start()
                 self.assertEqual((result['state'], result['reason']), ('needs-attention', reason), result)
@@ -1219,7 +1220,7 @@ class WorkStartTest(unittest.TestCase):
                         side_effect=lambda r, m: {"root_route_id": "rt-root", "node": "__owner__"}), \
              mock.patch("dispatch_replacement._route", return_value=(self.path, self.route)), \
              mock.patch("dispatch_replacement._terminal_absent", side_effect=AssertionError("no log to read")), \
-             mock.patch("dispatch_contract.attempt_process_quiescence",
+             split_patch("dispatch_contract.attempt_process_quiescence",
                         return_value=SimpleNamespace(state="quiescent", reason="process-absent")), \
              mock.patch("dispatch_capacity_evidence.harness_hold", return_value=None), \
              mock.patch("dispatch_replacement_batch.command", return_value=None):
@@ -1448,6 +1449,34 @@ class WorkStartTest(unittest.TestCase):
                                                         "reason": "parent-identity-unmatched"}])
         self.assertEqual(self.calls, [])
 
+    def test_a_closed_route_whose_rows_moved_to_the_archive_replays_as_completed(self):
+        # The registry archive moved the settled owner row; its completion proof reads the live
+        # registry (owner_route_binding._owner_snapshot), so the replay puts the rows back first.
+        import dispatch_registry_archive as archive
+        import dispatch_terminal_commit as terminal
+        self.path.with_suffix(".outcome.json").write_text(json.dumps({
+            "route_id": self.route["route_id"], "route_hash": self.route["route_hash"],
+            "terminal_gate_proven": True, "terminal_owner_attempt_id": "att-owner"}))
+        owner = ("2026-09-01T00:00:00.000000Z\tdone\t/repo\t/repo\towner\tattempt_id=att-owner,"
+                 f"worker_type=owner,workflow_completion=runtime-v1,owner_route_id={self.route['route_id']}")
+        other = "2026-11-01T00:00:00.000000Z\topen\t/repo\t/repo\tother\tattempt_id=att-other"
+        archive._archive(self.jobs.parent, self.jobs, [owner], time.time_ns())
+        self.jobs.write_text(other + "\n")
+        seen = []
+
+        def completion(jobs, status, meta):
+            records = __import__("dispatch_registry_cache").registry_view(jobs).completion_attempt_records(
+                meta["attempt_id"])
+            seen.append((meta["attempt_id"], len(records)))
+            return terminal.CompletionState("complete" if len(records) == 1 else "unknown")
+        with mock.patch.object(terminal, "owner_completion_state", side_effect=completion), \
+                mock.patch.object(terminal, "completed_owner_publication", return_value=None):
+            result = self.start()
+        self.assertEqual((result["state"], result["required_action"]), ("completed", "advance-completed"), result)
+        self.assertEqual(seen, [("att-owner", 1)])
+        self.assertEqual(self.jobs.read_text().splitlines(), [owner, other])
+        self.assertEqual(self.calls, [])
+
     def test_a_replaced_owner_with_nothing_to_settle_does_not_hold_a_closed_route(self):
         # The first owner stopped at a gate and was replaced; its BLOCKED row is `not-applicable`,
         # and the replacement settled the route (Claude r4 leg1, defect 2).
@@ -1623,7 +1652,7 @@ class WorkStartTest(unittest.TestCase):
                    "child_harness": "codex", "status": "supported", "launch_authority": "conductor",
                    "checked_worktree": self.tmp.name}
         self.ready = self.released = True
-        with mock.patch.object(module, "_compose_readiness", return_value={"tuples": [checked]}) as probe, \
+        with patch_split(module, "_compose_readiness", return_value={"tuples": [checked]}) as probe, \
              mock.patch.object(RA, "caller_identity", return_value=("claude", "parent")):
             first = self.start()
             second = self.start()
@@ -1762,8 +1791,8 @@ class WorkStartTest(unittest.TestCase):
         pending = {"cycle_id": "cyc-original", "status": "pending", "reason": "shared-spec-conflict"}
         admitted = {"cycle_id": "cyc-original", "status": "admitted", "shared_reference_revision_id": "rrev-original"}
         with mock.patch.object(artifact_producer, "prepare_route_artifact_env", side_effect=AssertionError("reopen")), \
-             mock.patch.object(artifact_producer, "route_cycle_for", return_value={"cycle_id": "cyc-original"}), \
-             mock.patch.object(artifact_producer, "completed_spec_publication", side_effect=[pending, admitted]) as publish:
+             patch_split(artifact_producer, "route_cycle_for", return_value={"cycle_id": "cyc-original"}), \
+             patch_split(artifact_producer, "completed_spec_publication", side_effect=[pending, admitted]) as publish:
             first = self.start()
             self.assertEqual((first["state"], first["reason"]), ("needs-attention", "shared-spec-publication-pending"))
             self.assertEqual(first["shared_publication"], pending)
@@ -1785,8 +1814,8 @@ class WorkStartTest(unittest.TestCase):
             "route_hash": self.route["route_hash"], "terminal_gate_proven": True}))
         original = outcome_path.read_bytes()
         with mock.patch.object(artifact_producer, "prepare_route_artifact_env", side_effect=AssertionError("reopen")), \
-             mock.patch.object(artifact_producer, "route_cycle_for", side_effect=AssertionError("guessed root")), \
-             mock.patch.object(artifact_producer, "completed_spec_publication", side_effect=AssertionError("no root")):
+             patch_split(artifact_producer, "route_cycle_for", side_effect=AssertionError("guessed root")), \
+             patch_split(artifact_producer, "completed_spec_publication", side_effect=AssertionError("no root")):
             for root in (None, "", " "):
                 if root is None:
                     self.route.pop("artifact_root", None)
@@ -1815,10 +1844,10 @@ class WorkStartTest(unittest.TestCase):
             "route_hash": self.route["route_hash"], "terminal_gate_proven": True}))
         with mock.patch.object(artifact_producer, "prepare_route_artifact_env",
                                side_effect=AssertionError("reopen")), \
-                mock.patch.object(artifact_producer, "route_cycle_for", return_value=None), \
-                mock.patch.object(artifact_producer, "list_references",
+                patch_split(artifact_producer, "route_cycle_for", return_value=None), \
+                patch_split(artifact_producer, "list_references",
                                   side_effect=AssertionError("unseeded code must not enumerate references")), \
-                mock.patch.object(artifact_producer, "admit_shared",
+                patch_split(artifact_producer, "admit_shared",
                                   side_effect=AssertionError("unseeded code must not attempt publication")):
             receipt = self.start()
         self.assertEqual(receipt["state"], "completed", receipt)
@@ -1839,7 +1868,7 @@ class WorkStartTest(unittest.TestCase):
                  terminal.CompletionState("pending", "shared-spec-publication-pending"), terminal.CompletionState("complete")]), \
              mock.patch.object(terminal, "settle_owner_completion", return_value=terminal.TerminalCommitResult(
                  "completed", shared_publication=publication)) as settle, \
-             mock.patch.object(artifact_producer, "completed_spec_publication") as duplicate, \
+             patch_split(artifact_producer, "completed_spec_publication") as duplicate, \
              mock.patch.object(artifact_producer, "prepare_route_artifact_env", side_effect=AssertionError("reopen")):
             result = self.start()
         self.assertEqual(result["state"], "completed")
@@ -1941,7 +1970,7 @@ class WorkStartTest(unittest.TestCase):
                                              ({"consumer_recovery": "not-started:no-queued-correction"}, None)):
                 with self.subTest(replaced=replaced, recovery=recovery), \
                      mock.patch("route_parent_close.intent", return_value=None), \
-                     mock.patch.object(W, "_route_module", return_value=module), \
+                     patch_split(W, "_route_module", return_value=module), \
                      mock.patch.object(W, "continuation_work_request", return_value={}), \
                      mock.patch.object(W, "resume_command", return_value="resume"), \
                      mock.patch.object(inline_finish, "pending_state", return_value=None), \
@@ -2935,9 +2964,9 @@ class UnseededCodeCleanupWorkStartTest(GF.fixture.ProducerTestBase):
         }
         campaign_dir.rename(moved_campaign)
 
-        with mock.patch.object(artifact_producer, "list_references",
+        with patch_split(artifact_producer, "list_references",
                                side_effect=AssertionError("unseeded cleanup must not scan shared refs")), \
-                mock.patch.object(artifact_producer, "admit_shared",
+                patch_split(artifact_producer, "admit_shared",
                                   side_effect=AssertionError("unseeded cleanup must not admit shared refs")), \
                 mock.patch.object(artifact_producer, "prepare_route_artifact_env",
                                   side_effect=AssertionError("closed route must not be reopened")):
@@ -3035,9 +3064,9 @@ class SeedOnlyCodeCleanupWorkStartTest(GF.fixture.ProducerTestBase):
             base_publication["shared_reference_id"])
 
         with self.observe_shared_spec_enumeration() as enumerated:
-            with mock.patch.object(artifact_producer, "admit_shared",
+            with patch_split(artifact_producer, "admit_shared",
                                    side_effect=AssertionError("seed-only cleanup must not publish shared refs")), \
-                    mock.patch.object(artifact_producer, "list_references",
+                    patch_split(artifact_producer, "list_references",
                                       side_effect=AssertionError("seed-only cleanup must not census shared refs")), \
                     mock.patch.object(artifact_producer, "prepare_route_artifact_env",
                                       side_effect=AssertionError("closed route must not be reopened")):
@@ -3276,8 +3305,8 @@ class CorrectAnswerContinuationTest(unittest.TestCase):
                 mock.patch.object(W, "start_work", side_effect=start_work), \
                 mock.patch.object(W, "_rows", return_value={current: ("done", {"note": "dead-worker-blocked"})}), \
                 mock.patch("dispatch_replacement._route", return_value=(self.route_path, {})), \
-                mock.patch.object(self.router, "verify_route", side_effect=lambda route, *a, **k: route), \
-                mock.patch.object(self.router, "_record_route_chain"):
+                patch_split(self.router, "verify_route", side_effect=lambda route, *a, **k: route), \
+                patch_split(self.router, "_record_route_chain"):
             code = self.router.main()
         return code, json.loads(out.getvalue()), calls, submit
 
@@ -3390,10 +3419,10 @@ class NeverStartedReplacementNormalStartTest(unittest.TestCase):
         self.gate = mock.patch.object(W, "owner_frame_launch_gate", side_effect=self.owner_gate)
         self.gate.start()
         self.addCleanup(self.gate.stop)
-        self.pair = mock.patch.object(W, "completion_marker_gate")
+        self.pair = patch_split(W, "completion_marker_gate")
         self.pair.start()
         self.addCleanup(self.pair.stop)
-        self.seat_root = mock.patch.object(session_tidy, "state_root", return_value=self.root / "seat-state")
+        self.seat_root = patch_split(session_tidy, "state_root", return_value=self.root / "seat-state")
         self.seat_root.start()
         self.addCleanup(self.seat_root.stop)
 
@@ -3416,7 +3445,7 @@ class NeverStartedReplacementNormalStartTest(unittest.TestCase):
         self.owner_input = dispatch_owner_input
         self.replacement = dispatch_replacement
         self.contract = dispatch_contract
-        self.process_probe = mock.patch.object(
+        self.process_probe = patch_split(
             dispatch_contract, "attempt_process_quiescence", side_effect=self._fixture_quiescence)
         self.process_probe.start()
         self.addCleanup(self.process_probe.stop)
@@ -4813,7 +4842,7 @@ class ModernNeverStartedOwnerNormalStartTest(NeverStartedReplacementNormalStartT
         self._store(owner_b, "legacy correction 7", "input-b-7")
         before = len(self.launches)
 
-        with mock.patch.object(self.contract, "_settled_cleanup_receipt", return_value=False):
+        with patch_split(self.contract, "_settled_cleanup_receipt", return_value=False):
             receipt = self._cli_start()
 
         self.assertEqual(len(self.launches), before)

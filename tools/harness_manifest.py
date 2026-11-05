@@ -115,6 +115,13 @@ def render_procedure_index(identifier: str, root: Path | None = None) -> str:
         f"{rows}\n"
     )
 
+
+def entry_read_instruction(identifier: str) -> str:
+    """Entry Skill steps guide the main session; registered owners have one read path."""
+    return (f"Main session only: after approval, read `capabilities/{identifier}.md`. "
+            f"Registered owners read only `capabilities/{identifier}/references/owner-execution.md`; "
+            "stage workers read only their assigned contracts.")
+
 def skill_capabilities(manifest: dict) -> dict:
     """The capabilities that project as Skills and native commands: every class except compiler-internal.
 
@@ -123,6 +130,30 @@ def skill_capabilities(manifest: dict) -> dict:
     """
     return {name: spec for name, spec in manifest["capabilities"].items()
             if spec["invocation"]["class"] != "compiler-internal"}
+
+
+def main_hidden_skill_names(manifest: dict) -> set[str]:
+    """Skills kept out of the main session's native skill list.
+
+    Stage skills (`parent-invoked`) are read by path by dispatched stage workers, and a
+    `compiler-internal` capability has no Skill at all, so neither belongs in the list that
+    every main-session request carries. Their `adapters/*/skills/<name>/SKILL.md` stay generated.
+    """
+    return {name for name, spec in manifest["capabilities"].items()
+            if spec["invocation"]["class"] in ("parent-invoked", "compiler-internal")}
+
+
+def explicit_only_skill_names(manifest: dict) -> set[str]:
+    """Skills a user starts by name but the model never picks from its skill list.
+
+    Entry-router Skills are chosen by the person (`$name`, `/name`) or reached through
+    `hearting run capability-route compose`, so their name and description stay out of the
+    list every request carries. Unlike `main_hidden_skill_names`, the Skill itself is still
+    projected where the runtime has an explicit-only switch (Codex `allow_implicit_invocation`,
+    Claude `disable-model-invocation`); OpenCode has none and relies on its native command.
+    """
+    return {name for name, spec in manifest["capabilities"].items()
+            if spec["invocation"]["class"] == "entry-router"}
 
 
 def _expect(condition: bool, message: str) -> None:

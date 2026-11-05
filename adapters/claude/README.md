@@ -32,6 +32,8 @@ Detail it used to carry lives here and in the core sections it names.
 - Claude hooks realize portable invariants for workflow signals, spec-read
   observations, memory, and design checks. Main-session memory lifecycle does
   not run for workers. Session end never owns destructive worktree cleanup.
+- If the memory prompt hook is unavailable, record `recall` or `skip` with
+  `mem recall-gate`.
 - Use `statusline.sh` only for runtime status.
 - Repo-root `skills/` is the canonical Skill authoring tree;
   `tools/sync-entry-skill-layer.py` projects it into `adapters/claude/skills/`
@@ -66,7 +68,7 @@ so that residual runtime input is reported separately from profile masking.
 | worktree cleanup | `adapters/claude/bin/worktree-cleanup.sh`; dry-run first, apply only after merge + integrated verification + push |
 | interactive owner completion | `hooks/dispatch-owner-rewake.py`; `PostToolUse(Bash)` `asyncRewake` arms from the start receipt or the registry's same-session dispatch-depth-1 owner row — never from command text; `Stop` re-takes an existing arm for a turn with no Bash. The arm ledger keeps one waiter per attempt and re-arms after the owner's gate closes (SD-129); supervision wakes return their notice claims to the immediate prompt sweep. It waits outside the model and returns one exact-attempt receipt. |
 | steward watch completion | `hooks/peer-steward-rewake.py`; `PostToolUse(Bash)` `asyncRewake` arms only from a same-session `peer-steward.py watch` armed line with `wake=hook`, waits on the watch receipt outside the model, acks it, and returns one exit-2 notice per watch; `hooks/peer-message-record.py prompt` sweeps un-acked receipts at the next prompt if the hook dies |
-| memory candidate exposure | `UserPromptSubmit` runs `hooks/mem-recall-inject.sh`: active current-project/global capsule headlines and IDs only, maximum six / 2,400 UTF-8 bytes, fail-open. The model decides relevance and reads full records. The bridge publishes the same-turn receipt required by main-session material mutation; explicit `recall-gate` is the fallback |
+| memory candidate exposure | `UserPromptSubmit` runs `hooks/mem-recall-inject.sh`: active current-project/global capsule headlines and IDs only, maximum six / 1,200 UTF-8 bytes, fail-open. The model decides relevance and reads full records. The bridge publishes the same-turn receipt required by main-session material mutation; explicit `recall-gate` is the fallback |
 | stage-session capacity | `dispatch-headless.py` projects the portable sub-session axes, phase brief, fixed-file fence, and `_internal/state/<attempt_id>.md`. `PreCompact` flushes the ledger, `PostCompact` re-reads it, and the edit hook denies missing/stale/out-of-list state. Sub-sessions carry `stage_authority=0`; only the dispatch-depth-1 owner aggregates the one stage gate. |
 
 ## Runtime Home Projection
@@ -244,4 +246,4 @@ evidence, not liveness. See [Claude background Bash documentation](https://code.
 
 ## Runtime compaction tidy
 
-`PreCompact` supplies shared six-field summary instructions. `PostCompact` queues main-session memory tidy and saves a nonempty `compact_summary` as the card at the session's own verified pane/native seat. Only an explicit automatic trigger with both card files successfully saved can book the existing handover snapshot → clear → `이어서해` flow. Its helper waits up to three hours for transcript evidence that the compacted turn ended; idle alone does not clear. Before clearing, it preserves the full summary, a bounded recent tail, and the transcript path on the card. Manual/unknown compaction, empty or failed cards, project/outside-herdr seats, and workers/sub-sessions stay queue-only; compaction is never held for tidy.
+`PreCompact` supplies shared six-field summary instructions. `PostCompact` queues main-session memory tidy and saves a nonempty `compact_summary` as the card at the session's own verified pane/native seat. Only an explicit automatic trigger with both card files successfully saved can book the existing handover snapshot → clear → `이어서해` flow. Its helper waits up to three hours for transcript evidence that the compacted turn ended; idle alone does not clear. Before clearing, it preserves the full summary, a bounded recent tail, and the transcript path on the card. Manual/unknown compaction, empty or failed cards, project seats (no Herdr or tmux pane), and workers/sub-sessions stay queue-only; compaction is never held for tidy.

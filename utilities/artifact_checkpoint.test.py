@@ -21,6 +21,7 @@ import artifact_cycle_titles as CT
 import artifact_checkpoint_trigger as T
 import artifact_manifest as m
 import artifact_producer as P
+from split_module_fixture import patch_split
 
 spec = importlib.util.spec_from_file_location(
     "checkpoint_producer_fixture", Path(__file__).with_name("artifact_producer.test.py"))
@@ -643,7 +644,7 @@ class InterimManifestTest(CheckpointTestBase):
                 self.assertEqual(inner["status"], "emitted")
             return result
 
-        with mock.patch.object(P, "_checkpoint_scan", side_effect=scan_with_a_concurrent_checkpoint):
+        with patch_split(P, "_checkpoint_scan", side_effect=scan_with_a_concurrent_checkpoint):
             outer = P.checkpoint(self.root, cycle_id=self.cycle_id)
         self.assertEqual((outer["status"], outer["reason"]), ("skipped", "superseded"))
         self.assertIn("artifacts/plans/cycle/b.md", _ids_by_path(self.interim()))
@@ -660,7 +661,7 @@ class InterimManifestTest(CheckpointTestBase):
             return result
 
         self.write_output(self.result, "plans/cycle/new.md", b"n\n")
-        with mock.patch.object(P, "_checkpoint_scan", side_effect=scan_then_tear):
+        with patch_split(P, "_checkpoint_scan", side_effect=scan_then_tear):
             result = P.checkpoint(self.root, cycle_id=self.cycle_id)
         self.assertEqual((result["status"], result["reason"]), ("skipped", "sealed-manifest-present"))
         self.assertTrue(P.reservation_path(self.root, self.cycle_id).exists())
@@ -735,7 +736,7 @@ class CheckpointDisplayTitleTest(CheckpointTestBase):
             if path == payload:
                 raise AssertionError("title resume must not read ZIP payload")
             return real_read(path)
-        with mock.patch.object(P, "_checkpoint_scan", side_effect=AssertionError("no scan")), \
+        with patch_split(P, "_checkpoint_scan", side_effect=AssertionError("no scan")), \
              mock.patch.object(P, "checkpoint", side_effect=AssertionError("no checkpoint")), \
              mock.patch.object(Path, "read_bytes", read):
             resumed = self.resume(title=title)
@@ -759,7 +760,7 @@ class CheckpointDisplayTitleTest(CheckpointTestBase):
         self.resume(title="사용자가 지정한 한국어 제목")
         paths = [P.cycle_record_path(self.root, self.cycle_id), self.root / CT.CYCLE_TITLES_REL]
         before = {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in paths}
-        with mock.patch.object(P, "_write_cycle_record", side_effect=AssertionError("no record write")), \
+        with patch_split(P, "_write_cycle_record", side_effect=AssertionError("no record write")), \
              mock.patch.object(CT, "emit_after_checkpoint", side_effect=AssertionError("no title emit")):
             self.resume()
             self.resume(title="사용자가 지정한 한국어 제목")
@@ -767,7 +768,7 @@ class CheckpointDisplayTitleTest(CheckpointTestBase):
         self.assertEqual({path: (path.read_bytes(), path.stat().st_mtime_ns) for path in paths}, before)
 
     def test_resume_title_without_manifest_changes_record_only(self):
-        with mock.patch.object(P, "_checkpoint_scan", side_effect=AssertionError("no scan")):
+        with patch_split(P, "_checkpoint_scan", side_effect=AssertionError("no scan")):
             self.resume(title="산출물 생성 전 한국어 제목")
         self.assertEqual(P.read_cycle_record(self.root, self.cycle_id)["title"], "산출물 생성 전 한국어 제목")
         self.assertFalse(P.open_manifest_path(self.root, self.cycle_id).exists())
@@ -985,7 +986,7 @@ class FinalizeContinuityTest(CheckpointTestBase):
                 raise OSError(28, "No space left on device")
             return real_write(path, data, mode)
 
-        with mock.patch.object(P, "_write_atomic", side_effect=fail_document):
+        with patch_split(P, "_write_atomic", side_effect=fail_document):
             with self.assertRaises(OSError):
                 P.checkpoint(self.root, cycle_id=self.cycle_id)
         self.assertNotEqual(self.ledger()["artifacts"]["artifacts/plans/cycle/plan.md"]["content_digest"], v1[2])

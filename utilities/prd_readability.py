@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 SCHEMA = "prd-readability/1"
-LIMITS = {"summary_lines": 40, "summary_item_chars": 160, "summary_chars": 2500}
+LIMITS = {"summary_lines": 40, "summary_item_chars": 160, "summary_chars": 2500, "body_line_chars": 600}
 MAX_LISTED = 50
 EXCERPT_CHARS = 80
 BEGIN = "<!-- BLUEPRINT-SUMMARY:BEGIN -->"
@@ -44,6 +44,29 @@ ID_RULES = (
     ("session-id", re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b")),
     ("pane-id", re.compile(r"\bw\d+:p\d+\b")),
 )
+# Body-only prose rules (prd-authoring "History outside the body" and "Sentences"). They read the
+# line with inline code spans blanked, so enum values and identifiers in backticks never match.
+# A PRD revision is a bare integer `vN`; a name glued before it ("BC-ResNet v2", "LibriMix v1")
+# or a dotted release ("v2.152.0") is not one, so only revision narration is matched.
+_REVISION = r"(?<![\w.\-])(?<![A-Za-z0-9][ \-])v\d+(?![.\d])"
+_REVISION_WORD = r"(?:바꿈|바꾼|바꿨|바뀜|바뀐|개정|변경|도입|추가|더해|더했|더한|삭제|제거|폐기|대체|신설|정정|교체|이관)"
+PROSE_RULES = (
+    ("version-mention", re.compile(
+        _REVISION + r"(?:\s*(?:부터|까지|당시|이후|이전)"
+        r"|(?:에서|으로|로|에)\S{0,2}\s+(?:\S+\s+){0,2}?" + _REVISION_WORD
+        + r"|\s+" + _REVISION_WORD + r")"
+        r"|(?i:\b(?:since|until|as of|introduced in|changed in|revised in|removed in|added in|replaced in"
+        r"|superseded in)\s+v\d+\b(?![.\d]))")),
+    ("supersede-narrative", re.compile(
+        r"(?i:\bsuperseded by\b|\bformerly\b|\bpreviously\b)"
+        r"|(?:대체|폐기)(?:했다|했고|했으며|됐다|되었다|되었고|됨|하였다)"
+        r"|이전에는[^.。]{0,80}?(?:였으나|었으나|했으나|였지만|었지만|했지만)"
+        r"|현재\s*정본은|아래는\s*이력")),
+    ("user-quote", re.compile(
+        r"사용자\s*원문|사용자\s*확정\s*\d+\s*건|트리거\s*=|사용자\s*[:：]\s*[\"“「‘']"
+        r"|(?i:\buser(?:'s)?\s+(?:original\s+)?words\b|\bthe\s+user\s+said\b|\btrigger\s*=)")),
+)
+CODE_SPAN = re.compile(r"`[^`\n]*`")
 FENCE_OPEN = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 LIST_MARK = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
 BLOCK_RULES = ("summary-missing", "summary-position", "summary-lines", "summary-chars")
@@ -213,9 +236,27 @@ def _line_findings(lines: list[str], bounds: tuple[int, int] | None) -> list[tup
             m = CIRCLED.search(line)
             if m:
                 hits.append(("circled-char", m))
+            if area == "body":
+                hits.extend(_prose_hits(line))
         for rule, m in hits:
             found.append((rule, i + 1, area, _excerpt(line, m.start())))
+        if area == "body" and i != h1 and not line.lstrip().startswith("|") and len(line) > LIMITS["body_line_chars"]:
+            found.append(("long-line", i + 1, area, _clip(f"{len(line)} chars > {LIMITS['body_line_chars']}: {line}")))
     return found
+
+
+def _prose_hits(line: str) -> list[tuple[str, re.Match]]:
+    """Body prose rules, one hit per rule; code spans and bracketed version tags are blanked first."""
+    blank = lambda m: " " * len(m.group(0))
+    text = VERSION_TAG.sub(blank, CODE_SPAN.sub(blank, line))
+    hits = []
+    for rule, pattern in PROSE_RULES:
+        if rule == "version-mention" and line.lstrip().startswith("|"):
+            continue  # table rows name models and datasets with versions
+        m = pattern.search(text)
+        if m:
+            hits.append((rule, m))
+    return hits
 
 
 def _summary_info(lines: list[str], bounds: tuple[int, int] | None) -> dict:

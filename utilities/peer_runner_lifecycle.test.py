@@ -28,6 +28,7 @@ sys.path.insert(0, str(ROOT / "tools" / "install"))
 import peer_obligations as obligations  # noqa: E402
 import dispatch_contract as contract  # noqa: E402
 import runtime_activation  # noqa: E402
+from split_module_fixture import patch_split  # noqa: E402
 
 _STEWARD_SPEC = importlib.util.spec_from_file_location(
     "peer_steward_under_runner_lifecycle_test", ROOT / "utilities/peer-steward.py")
@@ -56,6 +57,14 @@ def _pidfd_handoff_available():
 
 
 _PIDFD_HANDOFF = _pidfd_handoff_available()
+
+# The legacy-census CPU bound (15% of one core over a 20 s window) was calibrated
+# on a host whose process table holds only the fixture and the runner's own
+# tooling. The runner's real census reads every /proc entry and inspects every
+# live agent process, so on a shared host running many sessions (1244 processes,
+# 2026-11-04) the same window costs ~25% whatever the change under test does.
+_CENSUS_PROCESS_LIMIT = 600
+_HOST_PROCESSES = sum(1 for entry in os.listdir("/proc") if entry.isdigit())
 
 
 class LifecycleBindingTest(unittest.TestCase):
@@ -943,9 +952,9 @@ console.log(JSON.stringify(calls[0]));
                                return_value=False), \
              mock.patch.object(peer_steward.herdr_observation,
                                "socket_path_for_endpoint", return_value=None), \
-             mock.patch.object(peer_steward, "_watch_terminal_from_view", return_value=None), \
-             mock.patch.object(peer_steward, "_herdr_missing", return_value=False), \
-             mock.patch.object(peer_steward, "subprocess", CapturingSubprocess()):
+             patch_split(peer_steward, "_watch_terminal_from_view", return_value=None), \
+             patch_split(peer_steward, "_herdr_missing", return_value=False), \
+             patch_split(peer_steward, "subprocess", CapturingSubprocess()):
             binding = obligations.managed_service_binding(host_a)
             self.assertEqual(binding, str(current))
             peer_steward._ensure_watch_observers(service_current=binding)
@@ -987,6 +996,9 @@ console.log(JSON.stringify(calls[0]));
             os.close(probe)
 
     @unittest.skipUnless(_PIDFD_HANDOFF, "pidfd handoff unavailable")
+    @unittest.skipIf(_HOST_PROCESSES > _CENSUS_PROCESS_LIMIT,
+                     f"host process table has {_HOST_PROCESSES} entries; the census CPU "
+                     f"bound holds only up to {_CENSUS_PROCESS_LIMIT}")
     def test_managed_runner_reuses_external_discovery_for_real_legacy_process_census(self):
         import dispatch_batch_obligations as batch
 
@@ -1020,7 +1032,24 @@ console.log(JSON.stringify(calls[0]));
         # observers. The fixture processes hold real FLOCKs in this PID namespace.
         self.jobs.parent.mkdir(parents=True, exist_ok=True)
         self.jobs.write_text("x" * 23_000_000, encoding="utf-8")
+        # The runner window treats herdr as present (`_herdr_missing` is patched
+        # below), so its notice and prompt passes run `herdr agent list`. A host
+        # with a real herdr on PATH answered those from the live server and they
+        # were counted as launches (28 != 16 on the shared host, never in CI).
+        # A fixture herdr with an empty inventory answers them on every host.
+        fixture_bin = self.base / "fixture-bin"
+        fixture_bin.mkdir()
+        fixture_herdr = fixture_bin / "herdr"
+        fixture_herdr.write_text(
+            "#!/bin/sh\n"
+            "if [ \"$1\" = agent ] && [ \"$2\" = list ]; then\n"
+            "  printf '%s\\n' '{\"result\":{\"agents\":[]}}'\n"
+            "  exit 0\n"
+            "fi\n"
+            "exit 1\n", encoding="utf-8")
+        fixture_herdr.chmod(0o755)
         env = dict(self._environment(self.a), FIXTURE_READY_ROOT=str(ready_root))
+        env["PATH"] = os.pathsep.join((str(fixture_bin), env["PATH"]))
         old_processes = []
         current_processes = []
         lock_paths = []
@@ -1174,14 +1203,14 @@ console.log(JSON.stringify(calls[0]));
         cpu_before = int(cpu_fields[11]) + int(cpu_fields[12])
         started = time.monotonic()
         try:
-            with mock.patch.object(peer_steward, "_watch_root", return_value=watch_root), \
-                 mock.patch.object(peer_steward, "_watch_entries", side_effect=count_watch_scan), \
-                 mock.patch.object(peer_steward, "_herdr_missing", return_value=False), \
+            with patch_split(peer_steward, "_watch_root", return_value=watch_root), \
+                 patch_split(peer_steward, "_watch_entries", side_effect=count_watch_scan), \
+                 patch_split(peer_steward, "_herdr_missing", return_value=False), \
                  mock.patch.object(peer_steward.herdr_observation,
                                    "socket_path_for_endpoint", return_value=None), \
                  mock.patch.object(peer_steward.herdr_observation,
                                    "pane_census", return_value=None), \
-                 mock.patch.object(peer_steward, "_watch_terminal_from_view", return_value=None), \
+                 patch_split(peer_steward, "_watch_terminal_from_view", return_value=None), \
                  mock.patch.object(batch, "_jobs_paths",
                                    side_effect=lambda jobs=None, strict=True: [
                                        Path(jobs).resolve(strict=False) if jobs else self.jobs.resolve()
@@ -1220,7 +1249,12 @@ console.log(JSON.stringify(calls[0]));
         cpu_percent = (cpu_after - cpu_before) * 100.0 / (hz * elapsed)
         self.assertGreaterEqual(elapsed, 19.0)
         self.assertGreaterEqual(len(passes), 3)
-        self.assertEqual(len(current_processes), 16)
+        census_reads = [process for process in current_processes
+                        if list(process.args)[:1] == ["herdr"]]
+        self.assertTrue(all(list(process.args) == ["herdr", "agent", "list"]
+                            for process in census_reads), [p.args for p in census_reads])
+        self.assertEqual(len(current_processes) - len(census_reads), 16,
+                         [p.args for p in current_processes if p not in census_reads])
         self.assertGreaterEqual(len(watch_scans), len(passes))
         self.assertLessEqual(len(watch_scans), len(passes) + 1)
         self.assertEqual(len(batch_scans), len(watch_scans))
@@ -1919,7 +1953,7 @@ console.log(JSON.stringify(calls[0]));
                  mock.patch.dict(os.environ, runner_env, clear=True), \
                  mock.patch.object(obligations, "exec_service_runner"), \
                  mock.patch.object(batch.subprocess, "Popen", side_effect=launch_current), \
-                 mock.patch.object(peer_steward, "time", runner_clock), \
+                 patch_split(peer_steward, "time", runner_clock), \
                  mock.patch.object(peer_steward, "_runner_maintenance_pass"):
                 # Global maintenance duties are covered by the reconcile suite;
                 # here they would only reach the fake clock and launch fixture.

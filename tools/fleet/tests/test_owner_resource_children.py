@@ -305,7 +305,7 @@ class OwnerResourceChildrenTest(unittest.TestCase):
 
     def test_remote_registered_run_matches_gpu_but_cwd_and_reused_pid_do_not(self):
         self.attach()
-        snapshot = {"configured": True, "hosts": [{"host": "cnn", "self": False,
+        snapshot = {"configured": True, "hosts": [{"host": "gpu", "self": False,
             "reachable": True, "gpus": [{"index": 0, "name": "NVIDIA A100", "processes": [{
                 "pid": 900, "proc_start": 999, "pgid": 900, "cwd": self.owner.cwd,
                 "owner": {"kind": "run", "id": self.resource.run_id}, "used_memory_mib": 12000,
@@ -315,7 +315,7 @@ class OwnerResourceChildrenTest(unittest.TestCase):
         lines = render._build_lines([], [self.owner], "both", False, 0, term_width=168,
                                     resources=[self.resource], governor=None)
         self.assertEqual(sum("● GPU" in flatten([line]) for line in lines if line), 1)
-        self.assertIn("GPU cnn:0", flatten(lines))
+        self.assertIn("GPU gpu:0", flatten(lines))
         snapshot["hosts"][0]["gpus"][0]["processes"][0]["owner"] = None
         self.assertEqual(render._resource_gpu_resources(self.resource, snapshot), [])
         snapshot["hosts"][0]["self"] = True

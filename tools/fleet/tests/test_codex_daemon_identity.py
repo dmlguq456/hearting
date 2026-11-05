@@ -18,9 +18,9 @@ from fleet.collectors import codex, procscan  # noqa: E402
 
 _REAL_LISTENER_SNAPSHOT = codex._tcp_listener_snapshot
 PID = 43101
-ROOT = "01a0fa57-7f0e-7eb0-bffe-1d56df94e90c"
-SECOND = "01a0fa57-7f0e-7eb0-bffe-1d56df94e91c"
-CHILD = "01a0fa57-7f0e-7eb0-bffe-1d56df94e92c"
+ROOT = "01000013-0000-7000-8000-00000000001b"
+SECOND = "01000013-0000-7000-8000-00000000001c"
+CHILD = "01000013-0000-7000-8000-00000000001d"
 
 
 class FakeDaemonWebSocket:

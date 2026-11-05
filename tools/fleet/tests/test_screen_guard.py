@@ -20,6 +20,21 @@ from unittest import mock
 TOOLS = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(TOOLS))
 from fleet import install_follow, screen_guard  # noqa: E402
+sys.path.append(str(Path(__file__).resolve().parents[3] / "utilities"))  # split_module_fixture
+from split_module_fixture import set_split  # noqa: E402
+
+# Screen words come from tools/i18n/messages.json. These suites keep the Korean words byte for
+# byte under a Korean declaration (the real-terminal child gets the same declaration).
+STALLED = "화면 출력이 막혀 있음"
+_KOREAN = mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"})
+
+
+def setUpModule():
+    _KOREAN.start()
+
+
+def tearDownModule():
+    _KOREAN.stop()
 
 CLEAR = b"\x1b[H\x1b[2J"          # xterm-256color clear: a full repaint starts with it
 
@@ -96,7 +111,7 @@ class ScreenGuardTest(unittest.TestCase):
         for _ in range(3):
             frame(guard, "next")
             self.assertEqual(guard.getch(), -1)
-            self.assertEqual(guard.hold_reason(), screen_guard.STALLED)
+            self.assertEqual(guard.hold_reason(), STALLED)
         self.assertEqual(screen.calls, before, "no curses call may race the pending write")
         self.assertEqual(guard.skipped, 3)
         screen.gate.set()
@@ -128,13 +143,13 @@ class ScreenGuardTest(unittest.TestCase):
         frame(guard)
         self.assertEqual(screen.calls, [])
         self.assertIsNone(guard._worker)
-        self.assertEqual(guard.hold_reason(), screen_guard.STALLED)
+        self.assertEqual(guard.hold_reason(), STALLED)
         self.assertEqual(guard.getch(), ord("k"), "input still reads when no write is pending")
 
     def test_frame_drawn_before_output_stopped_is_settled_not_flushed(self):
         screen = FakeScreen()
         answers = iter([True, False])
-        guard = self.guard(screen, writable=lambda: next(answers))
+        guard = self.guard(screen, writable=lambda: next(answers, False))
         frame(guard)
         self.assertEqual(screen.names(), ["erase", "addstr", "noutrefresh"])
 
@@ -184,6 +199,23 @@ class ScreenGuardTest(unittest.TestCase):
         frame(guard)
         self.assertFalse([args for name, args in screen.calls if name == "addstr" and args[0] == 4])
 
+    @mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "English"})
+    def test_hold_and_recovered_notes_read_in_english_without_a_korean_declaration(self):
+        clock = [100.0]
+        screen = FakeScreen(rows=5, cols=80)
+        writable = [False]
+        guard = self.guard(screen, writable=lambda: writable[0], repaint_after=5.0,
+                           clock=lambda: clock[0])
+        frame(guard)
+        self.assertEqual(guard.hold_reason(), "screen output is blocked")
+        clock[0] += 60
+        writable[0] = True
+        frame(guard)
+        shown = [args[2] for name, args in screen.calls if name == "addstr" and args[0] == 4]
+        self.assertEqual(shown, ["screen output was blocked for 1 minute, now redrawn"])
+        self.assertEqual([screen_guard._span(value) for value in (1, 59, 120, 7200)],
+                         ["1 second", "59 seconds", "2 minutes", "2 hours"])
+
     def test_close_waits_for_the_pending_write(self):
         screen = FakeScreen()
         screen.gate = threading.Event()
@@ -216,6 +248,33 @@ class ScreenGuardTest(unittest.TestCase):
             guard.close()                  # returns only once the write is finished
         self.assertTrue(guard._done.is_set())
         self.assertEqual(interrupts, [0])
+
+    def test_quitting_drops_a_frame_the_terminal_is_not_reading(self):
+        """RV-1042 S2: a writer blocked on a terminal that stopped reading cannot hold quit."""
+        master, slave = pty.openpty()
+        self.addCleanup(os.close, master)
+        self.addCleanup(os.close, slave)
+
+        class Curses:                      # one frame larger than any pty queue
+            def getmaxyx(self):
+                return 10, 40
+
+            def refresh(self):
+                os.write(slave, b"x" * (1 << 20))
+
+            def __getattr__(self, name):
+                return lambda *args: None
+
+        guard = screen_guard.ScreenGuard(budget=0.05).attach(Curses(), fd=slave)
+        guard._written = 1                 # past the first frame, which is written in full
+        frame(guard)
+        self.assertFalse(guard._done.is_set(), "nobody reads the terminal")
+        started = time.monotonic()
+        guard.settle(grace=0.2)
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertTrue(guard._done.is_set(), "the writer finished; curses is free")
+        self.assertTrue(select.select((), (slave,), (), 0)[1], "room for the restore")
+        guard.close()
 
     def test_first_frame_is_written_in_full(self):
         """Render's raw mouse-mode write follows the first paint; it must not split it."""
@@ -443,7 +502,7 @@ def _explorer_child(directory, old, data, state):
     from fleet import fleet as fleet_main, render
     from fleet.refresh import LiveSnapshot
 
-    render._collect_memory_observed = lambda include_backlog=False: (None, "absent")
+    set_split(render, "_collect_memory_observed", lambda include_backlog=False: (None, "absent"))
     render._collect_governor = lambda: None
     render.set_explorer_mode(True)
     collects = [0]
@@ -552,7 +611,8 @@ class RealTerminalTest(unittest.TestCase):
                         HOME=str(self.base / "home"), XDG_STATE_HOME=str(self.base / "xdg-state"),
                         XDG_DATA_HOME=str(self.base / "xdg-data"),
                         XDG_CACHE_HOME=str(self.base / "xdg-cache"),
-                        XDG_CONFIG_HOME=str(self.base / "xdg-config"), TMPDIR=str(self.base / "tmp"))
+                        XDG_CONFIG_HOME=str(self.base / "xdg-config"), TMPDIR=str(self.base / "tmp"),
+                        FLEET_NOW_LANG="Korean")
 
     def start(self, *args):
         terminal = Terminal([sys.executable, str(Path(__file__).resolve()), "--child", *args],
@@ -595,7 +655,7 @@ class RealTerminalTest(unittest.TestCase):
         time.sleep(1.0)
         later = self.progress()
         self.assertGreaterEqual(later["tick"] - stalled["tick"], 8, (stalled, later))
-        self.assertEqual(later["hold"], screen_guard.STALLED)
+        self.assertEqual(later["hold"], STALLED)
         self.assertGreater(later["skipped"], stalled.get("skipped", 0))
         mark = len(terminal.received)
         self.assertTrue(terminal.read_for(10, lambda: CLEAR in terminal.received[mark:]
@@ -605,6 +665,38 @@ class RealTerminalTest(unittest.TestCase):
         self.assertGreater(self.progress()["tick"], resumed)
         os.write(terminal.master, b"q")
         self.assertTrue(terminal.read_for(10, lambda: terminal.child.poll() is not None))
+        self.assertEqual(terminal.child.returncode, 0)
+
+    def stalled_explorer(self):
+        none = str(self.base / "no-release")
+        terminal = self.start("explorer", str(self.base), none, none, none)
+        started = terminal.read_for(45, lambda: self.progress().get("collects", 0) >= 3
+                                    and len(terminal.received) > 512)
+        self.assertTrue(started, self.stderr_log())
+        terminal.fill()                    # the terminal stops reading
+        first = self.progress()["collects"]
+        self.assertTrue(_wait(lambda: self.progress()["collects"] >= first + 2, 10),
+                        self.stderr_log())
+        return terminal
+
+    def test_q_quits_the_explorer_while_its_terminal_is_not_reading(self):
+        """RV-1042 S1: mouse reporting goes off after the frame in flight, and the quit
+        does not wait for the terminal to read again."""
+        terminal = self.stalled_explorer()
+        os.write(terminal.master, b"q")
+        self.assertTrue(_wait(lambda: terminal.child.poll() is not None, 15), self.stderr_log())
+        self.assertEqual(terminal.child.returncode, 0)
+        terminal.read_for(1.0)
+        self.assertIn(b"\x1b[?1006l\x1b[?1002l", bytes(terminal.received).rsplit(b"~", 1)[-1])
+
+    def test_repeated_ctrl_c_quits_the_explorer_while_its_terminal_is_not_reading(self):
+        """RV-1042 S2: no Ctrl-C leaves the viewer waiting on a terminal that is not reading."""
+        terminal = self.stalled_explorer()
+        os.killpg(terminal.child.pid, signal.SIGINT)
+        time.sleep(0.3)
+        if terminal.child.poll() is None:
+            os.killpg(terminal.child.pid, signal.SIGINT)
+        self.assertTrue(_wait(lambda: terminal.child.poll() is not None, 15), self.stderr_log())
         self.assertEqual(terminal.child.returncode, 0)
 
     def release(self, data, version):
@@ -659,7 +751,7 @@ class RealTerminalTest(unittest.TestCase):
         terminal.read_for(0.5)
         terminal.fill()
         self.activate(data, state, new)
-        held = lambda: any(event.get("hold") == screen_guard.STALLED  # noqa: E731
+        held = lambda: any(event.get("hold") == STALLED  # noqa: E731
                            for event in self.events())
         self.assertTrue(_wait(held, 10), (self.events(), self.stderr_log()))
         second = self.progress()["collects"]

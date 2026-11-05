@@ -22,6 +22,7 @@ import artifact_lifecycle
 import artifact_producer
 import dispatch_terminal_commit
 import inline_finish
+from split_module_fixture import patch_split
 
 CAP_SPEC = importlib.util.spec_from_file_location(
     "inline_finish_capability_route", ROOT / "utilities/capability-route.py")
@@ -250,7 +251,7 @@ class ResultLocationLineTest(unittest.TestCase):
         self.assertEqual(self.line({**self.route, "cwd": str(self.base / "missing")}), "")
 
     def test_unversioned_route_runs_no_git(self):
-        with unittest.mock.patch.object(CAP, "_git", side_effect=AssertionError("git probed")):
+        with patch_split(CAP, "_git", side_effect=AssertionError("git probed")):
             self.assertEqual(self.line({**self.route, "source_commit": "unversioned"}), "")
 
 
@@ -530,7 +531,7 @@ class PublicInlineFinishTest(unittest.TestCase):
         recorded_commit = held.pop("commit", state["intent"]["commit"])
         state_path.unlink()
         unproven = {"inline": {"passed": False, "reason": "completion-attempt-not-current"}}
-        with unittest.mock.patch.object(CAP, "terminal_gate_observation", return_value=unproven):
+        with patch_split(CAP, "terminal_gate_observation", return_value=unproven):
             outcome, created = CAP.close_route(
                 self.route, self.route_file, recorded_commit, "an earlier caller's close",
                 allow_unproven=True, jobs=self.jobs, **held)
@@ -568,7 +569,7 @@ class PublicInlineFinishTest(unittest.TestCase):
             if point == "after-close":
                 raise inline_finish.InlineFinishError("fixture-after-close")
 
-        with unittest.mock.patch.object(CAP, "terminal_gate_observation", return_value=unknown), \
+        with patch_split(CAP, "terminal_gate_observation", return_value=unknown), \
                 unittest.mock.patch.object(inline_finish, "_fault", side_effect=stop_after_close):
             with self.assertRaisesRegex(inline_finish.InlineFinishError, "fixture-after-close"):
                 inline_finish.finish(args, self.route, self.route_file, CAP)
@@ -655,7 +656,7 @@ class PublicInlineFinishTest(unittest.TestCase):
         original_state = state_path.read_bytes()
         args = SimpleNamespace(evidence=str(self.evidence), summary_file=str(self.summary), commit=None)
         unknown = {"inline": {"passed": False, "reason": "completion-attempt-not-current"}}
-        with unittest.mock.patch.object(CAP, "terminal_gate_observation", return_value=unknown):
+        with patch_split(CAP, "terminal_gate_observation", return_value=unknown):
             with self.assertRaisesRegex(artifact_producer.ProducerError, "completion-terminal-gate-unproven"):
                 inline_finish.finish(args, self.route, self.route_file, CAP)
         self.assertEqual(state_path.read_bytes(), original_state)
@@ -1320,6 +1321,123 @@ class PublicInlineFinishTest(unittest.TestCase):
         self.assertTrue(outcome["terminal_gate_proven"])
         self.assertEqual(outcome["head_commit"], rebased)
 
+    PR_URL = "https://github.com/example/repo/pull/1255"
+
+    def _git(self, *args):
+        return subprocess.run(["git", "-C", str(self.repo), *args],
+                              check=True, capture_output=True, text=True).stdout.strip()
+
+    def _review_fix(self, text):
+        (self.repo / "README.md").write_text(text, encoding="utf-8")
+        self._git("add", "README.md")
+        self._git("commit", "-qm", text.strip())
+        return self._git("rev-parse", "HEAD")
+
+    def _finished_with_pr(self, finish=None):
+        self.command[self.command.index("--evidence") + 1] = self.PR_URL
+        first = (finish or self.finish)()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        return json.loads(first.stdout)
+
+    def _slot(self):
+        return self.root / ".runtime/inline-finish/v1" / self.route["route_id"]
+
+    def test_review_fixes_on_the_finished_pr_branch_update_the_recorded_commit(self):
+        # P10/HOOK2/P11/P4: the route was finished with the PR as evidence, review asked for fixes, the
+        # fixes went to the same PR branch, and the same finish with the new head was refused.
+        receipt = self._finished_with_pr()
+        finished_at = receipt["commit"]
+        state_before = json.loads((self._slot() / "finish.json").read_text(encoding="utf-8"))
+        outcome_before = CAP.outcome_path(self.route_file).read_bytes()
+        manifest_before = (self.cycle_dir / "manifest.json").read_bytes()
+        fixed = self._review_fix("review fix\n")
+        self.summary.write_text("Finished the inline route, with the review fixes.\n", encoding="utf-8")
+        updated = self.finish()
+        self.assertEqual(updated.returncode, 0, updated.stderr)
+        result = json.loads(updated.stdout)
+        self.assertEqual(result["commit"], fixed)
+        self.assertEqual(result["inline_finish_id"], receipt["inline_finish_id"])
+        self.assertEqual([row["commit"] for row in result["updates"]], [fixed])
+        self.assertEqual(result["updates"][0]["previous_commit"], finished_at)
+        # The finish itself stays as it was: its intent, receipt, close and seal.
+        state = json.loads((self._slot() / "finish.json").read_text(encoding="utf-8"))
+        for key in ("inline_finish_id", "intent", "receipt", "outcome_digest", "manifest_digest", "state"):
+            self.assertEqual(state[key], state_before[key], key)
+        self.assertEqual(CAP.outcome_path(self.route_file).read_bytes(), outcome_before)
+        self.assertEqual((self.cycle_dir / "manifest.json").read_bytes(), manifest_before)
+        update = state["updates"][0]
+        self.assertEqual(update["session"], "inline-finish-test-session")
+        self.assertEqual(update["summary_sha256"], inline_finish._digest(self.summary.read_bytes()))
+        self.assertEqual(update["previous_summary_sha256"], state["intent"]["summary_sha256"])
+        self.assertEqual((self._slot() / update["summary_file"]).read_bytes(), self.summary.read_bytes())
+        # Asked again it replays what it recorded now, and a second round of fixes updates it again.
+        replay = self.finish()
+        self.assertEqual(replay.returncode, 0, replay.stderr)
+        self.assertEqual(json.loads(replay.stdout)["commit"], fixed)
+        self.assertEqual(len(json.loads((self._slot() / "finish.json").read_text())["updates"]), 1)
+        again = self._review_fix("second review fix\n")
+        second = self.finish()
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual([row["commit"] for row in json.loads(second.stdout)["updates"]], [fixed, again])
+        status = subprocess.run([sys.executable, str(ROOT / "utilities/capability-route.py"), "status",
+                                 str(self.route_file)], cwd=self.repo, env=self.env, capture_output=True, text=True)
+        self.assertEqual(status.returncode, 0, status.stderr)
+        row = json.loads(status.stdout)[0]
+        self.assertEqual(row["head_commit"], again)
+        self.assertEqual([item["commit"] for item in row["finish_updates"]], [fixed, again])
+        self.assertEqual(json.loads(CAP.outcome_path(self.route_file).read_text())["head_commit"], finished_at)
+
+    def test_a_finished_route_refuses_what_is_not_a_fast_forward_of_its_own_result(self):
+        self._finished_with_pr()
+        slot = self._slot() / "finish.json"
+        outcome = CAP.outcome_path(self.route_file)
+        held = (slot.read_bytes(), outcome.read_bytes())
+        branch = self._git("symbolic-ref", "--short", "HEAD")
+        finished_at = self._git("rev-parse", "HEAD")
+
+        def refused(why, run=None):
+            result = (run or self.finish)()
+            self.assertNotEqual(result.returncode, 0, why)
+            self.assertIn("finish-intent-conflict", result.stderr, why)
+            self.assertEqual((slot.read_bytes(), outcome.read_bytes()), held, why)
+
+        # Rebased or rewritten after the finish: shares the route's history, does not descend from it.
+        self._git("checkout", "-q", "-b", "sibling", finished_at + "~1")
+        sibling = self._review_fix("a sibling of the finished result\n")
+        self._git("checkout", "-q", branch)
+        self.command.extend(["--commit", sibling])
+        refused("a head that does not descend from the finished result")
+        self.command[-1] = self._review_fix("review fix\n")
+        self.command[self.command.index("--evidence") + 1] = self.PR_URL.replace("1255", "1256")
+        refused("another PR as evidence")
+        self.command[self.command.index("--evidence") + 1] = self.PR_URL
+        # Another session, of any runtime, does not move this session's finished route.
+        refused("another session", lambda: self.finish_as("claude", "another-session"))
+        updated = self.finish()
+        self.assertEqual(updated.returncode, 0, updated.stderr)
+        held = (slot.read_bytes(), outcome.read_bytes())
+        self.command[-1] = finished_at
+        refused("the head rewound to the finished commit")
+
+    def test_each_runtime_updates_its_own_finished_route(self):
+        for harness in ("codex", "claude", "opencode"):
+            with self.subTest(harness=harness):
+                fixture = PublicInlineFinishTest("test_review_fixes_on_the_finished_pr_branch_update_the_recorded_commit")
+                fixture.setUp()
+                try:
+                    session = "inline-finish-" + harness
+                    fixture._finished_with_pr(lambda: fixture.finish_as(harness, session))
+                    fixed = fixture._review_fix("review fix\n")
+                    other = "claude" if harness != "claude" else "opencode"
+                    foreign = fixture.finish_as(other, "inline-finish-" + other)
+                    self.assertNotEqual(foreign.returncode, 0)
+                    self.assertIn("finish-intent-conflict", foreign.stderr)
+                    updated = fixture.finish_as(harness, session)
+                    self.assertEqual(updated.returncode, 0, updated.stderr)
+                    self.assertEqual(json.loads(updated.stdout)["commit"], fixed)
+                finally:
+                    fixture.tearDown()
+
     def test_active_review_lease_is_refused_before_intent(self):
         lease_path = artifact_producer._review_lease_path(self.root, self.cycle["cycle_id"], "att-review")
         lease_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1602,7 +1720,7 @@ class UnstartedInlineFinishTest(unittest.TestCase):
                     seen.append((dict(node), Path(output)))
                     return original(route, node, output)
 
-                with unittest.mock.patch.object(CAP, "_require_entry_scope_review_preview",
+                with patch_split(CAP, "_require_entry_scope_review_preview",
                                                 side_effect=recording):
                     result = inline_finish.finish(args, fixture.route, fixture.route_file, CAP)
                 output = self._cycle_dir(fixture, result["cycle_id"]) / "artifacts"
@@ -1612,7 +1730,7 @@ class UnstartedInlineFinishTest(unittest.TestCase):
                 refused = self._fixture(started=started)
                 refused_args = SimpleNamespace(evidence=str(refused.evidence),
                                                summary_file=str(refused.summary), commit=None)
-                with unittest.mock.patch.object(CAP, "_require_entry_scope_review_preview",
+                with patch_split(CAP, "_require_entry_scope_review_preview",
                                                 side_effect=ValueError("completion-evidence-unreadable")):
                     with self.assertRaisesRegex(ValueError, "completion-evidence-unreadable"):
                         inline_finish.finish(refused_args, refused.route, refused.route_file, CAP)
@@ -1744,9 +1862,9 @@ class SpecInlinePublicationTest(unittest.TestCase):
         fixture = PublicInlineFinishTest()
         fixture.setUp()
         self.addCleanup(fixture.tearDown)
-        with unittest.mock.patch.object(artifact_producer, "list_references",
+        with patch_split(artifact_producer, "list_references",
                                        side_effect=AssertionError("unseeded code must not enumerate references")), \
-                unittest.mock.patch.object(artifact_producer, "admit_shared",
+                patch_split(artifact_producer, "admit_shared",
                                           side_effect=AssertionError("unseeded code must not attempt publication")):
             done = fixture.finish()
         self.assertEqual(done.returncode, 0, done.stderr + done.stdout)

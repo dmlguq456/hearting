@@ -53,7 +53,7 @@ def _default_root():
     if resolver is not None:
         try:
             resolved = subprocess.run(
-                [str(resolver), cwd or os.curdir], check=False,
+                [str(resolver), cwd or os.curdir], stdin=subprocess.DEVNULL, check=False,
                 capture_output=True, text=True, timeout=3.0,
             )
             if resolved.returncode == 0 and resolved.stdout.strip():

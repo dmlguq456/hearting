@@ -127,8 +127,7 @@ def drop_inapplicable(node, reviewed_evidence):
     return reviewed_evidence
 
 
-def resolve_input(route, node, jobs, reviewed_evidence=None, *, retry_of=None,
-                  producer_preview=None):
+def resolve_input(route, node, jobs, reviewed_evidence=None, *, retry_of=None):
     """Resolve explicit authority or the current primary plan gate, read-only.
 
     A node that is not a plan/spec review has no reviewed input; a value given for it is ignored."""
@@ -174,31 +173,13 @@ def resolve_input(route, node, jobs, reviewed_evidence=None, *, retry_of=None,
     marker_path = DC.resolve_dispatch_state_root(ROOT, Path(jobs)) / "completion" / route["route_id"] / "plan.json"
     try:
         marker = json.loads(marker_path.read_text())
-        if producer_preview is not None:
-            # Internal, read-only admission result; never an argv/environment
-            # override. Bind the projection to the exact original history and
-            # current bytes before using it to render a dry-run assignment.
-            revision = producer_preview.get("revision") or {}
-            history = marker_path.parent / f"plan.{marker['sequence']}.json"
-            if (DC.gate_currency(route, producer, marker_path, marker).state != "revised-unrecorded"
-                    or any(producer_preview.get(key) != marker.get(key)
-                           for key in ("route_id", "route_hash", "node_id", "attempt_id"))
-                    or producer_preview.get("stage_authority") != "revision"
-                    or revision.get("of_sequence") != marker.get("sequence")
-                    or revision.get("of_marker_sha256") != hashlib.sha256(history.read_bytes()).hexdigest()
-                    or revision.get("of_evidence_sha256") != marker["evidence"]["sha256"]):
-                raise ValueError("plan preview does not bind original marker")
-            evidence = producer_preview["evidence"]
-            if Path(evidence["path"]).resolve() != Path(marker["evidence"]["path"]).resolve():
-                raise ValueError("plan preview changed evidence path")
-        else:
-            if not DC.completion_marker_is_current(route, producer, marker_path, marker):
-                # Currency keeps missing/malformed evidence as hard failures.
-                currency = DC.gate_currency(route, producer, marker_path, marker)
-                if currency.state not in {"revised-unrecorded", "superseded"}:
-                    raise ValueError("plan marker is not current")
-                note_same_work_drift("reviewed-evidence-not-current", currency.reason)
-            evidence = marker["evidence"]
+        if not DC.completion_marker_is_current(route, producer, marker_path, marker):
+            # Currency keeps missing/malformed evidence as hard failures.
+            currency = DC.gate_currency(route, producer, marker_path, marker)
+            if currency.state not in {"revised-unrecorded", "superseded"}:
+                raise ValueError("plan marker is not current")
+            note_same_work_drift("reviewed-evidence-not-current", currency.reason)
+        evidence = marker["evidence"]
         candidate = _file(evidence["path"])
         if candidate["sha256"] != evidence["sha256"]:
             note_same_work_drift("reviewed-evidence-changed", candidate["path"])
@@ -208,7 +189,7 @@ def resolve_input(route, node, jobs, reviewed_evidence=None, *, retry_of=None,
         note_same_work_drift("reviewed-evidence-producer-mismatch", str(node["id"]))
         candidate = explicit
     return {**candidate, "producer": {"route_id": route["route_id"], "route_node": "plan",
-            "attempt_id": marker.get("attempt_id"), "marker_digest": _digest(producer_preview or marker)}}
+            "attempt_id": marker.get("attempt_id"), "marker_digest": _digest(marker)}}
 
 
 def _path(jobs, attempt_id):
@@ -368,11 +349,6 @@ def preview_request_admission(args, jobs):
     if admission.budget.state != "admit":
         raise DC.DispatchContractError("reviewed-evidence-revision-not-admitted", admission.budget.state)
     return admission
-
-
-def preview_request_nodes(args, jobs):
-    admission = preview_request_admission(args, jobs)
-    return admission.planned_revision_nodes if admission is not None else frozenset()
 
 
 def prepare_request(args):

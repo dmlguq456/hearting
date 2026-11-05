@@ -10,6 +10,8 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from fleet import fleet, refresh, render
+sys.path.append(str(Path(__file__).resolve().parents[3] / "utilities"))  # split_module_fixture
+from split_module_fixture import patch_split  # noqa: E402
 
 
 class ParallelSnapshotTest(unittest.TestCase):
@@ -20,7 +22,7 @@ class ParallelSnapshotTest(unittest.TestCase):
     def quiet_renderer(self):
         stack = contextlib.ExitStack()
         for name in ("set_show_all", "set_api_disabled", "set_hearting"):
-            stack.enter_context(mock.patch.object(render, name))
+            stack.enter_context(patch_split(render, name))
         stack.enter_context(mock.patch.object(render.gitinfo, "enrich_entities"))
         stack.enter_context(mock.patch.object(render, "_malformed", return_value=0))
         stack.enter_context(mock.patch.object(render, "_collect_memory", return_value=None))

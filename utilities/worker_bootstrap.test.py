@@ -20,6 +20,7 @@ import artifact_producer as AP
 import dispatch_contract as DC
 import dispatch_wrapper_common as C
 import route_identity
+from split_module_fixture import patch_split
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -245,7 +246,7 @@ class WorkerBootstrapTest(unittest.TestCase):
                     record = {"campaign_id": "camp_test", "cycle_id": "cyc_test", "producer_id": "prod_test"}
                     route = {"source_commit": "unversioned", "cwd": str(source)}
                     with mock.patch.dict(os.environ, values, clear=True), \
-                            mock.patch.object(AP, "cycle_dir", return_value=artifacts / "cycle"), \
+                            patch_split(AP, "cycle_dir", return_value=artifacts / "cycle"), \
                             mock.patch("artifact_workflow_groups.group_for_cycle", return_value=None):
                         produced = AP._env_for(artifacts, record, route)
                     prepared = C.prepare_runtime_root(
@@ -323,7 +324,7 @@ class WorkerBootstrapTest(unittest.TestCase):
             route = {"source_commit": "unversioned", "cwd": str(source)}
             values = {"HOME": str(home)}
             with mock.patch.dict(os.environ, values, clear=True), \
-                    mock.patch.object(AP, "cycle_dir", return_value=base / "cycle"), \
+                    patch_split(AP, "cycle_dir", return_value=base / "cycle"), \
                     mock.patch("artifact_workflow_groups.group_for_cycle", return_value=None):
                 produced = AP._env_for(artifact_root, record, route)
                 legacy = AP._env_for(artifact_root, record, {"source_commit": "abc123", "cwd": str(source)})
@@ -364,7 +365,7 @@ class WorkerBootstrapTest(unittest.TestCase):
                 record = {"campaign_id": "camp_test", "cycle_id": "cyc_test", "producer_id": "prod_test"}
                 route = {"source_commit": "unversioned", "cwd": str(source)}
                 with mock.patch.dict(os.environ, values, clear=True), \
-                        mock.patch.object(AP, "cycle_dir", return_value=artifact_root / "cycle"), \
+                        patch_split(AP, "cycle_dir", return_value=artifact_root / "cycle"), \
                         mock.patch("artifact_workflow_groups.group_for_cycle", return_value=None):
                     produced = AP._env_for(artifact_root, record, route)
                 self.assertEqual(produced.get("AGENT_RUNTIME_DIR"), str(expected))
@@ -399,7 +400,7 @@ class WorkerBootstrapTest(unittest.TestCase):
             runtime = project / ".agent_runtime"
             record = {"campaign_id": "camp_test", "cycle_id": "cyc_test", "producer_id": "prod_test"}
             with mock.patch.dict(os.environ, {"AGENT_RUNTIME_DIR": str(runtime)}, clear=False), \
-                    mock.patch.object(AP, "cycle_dir", return_value=project / "child-cycle"), \
+                    patch_split(AP, "cycle_dir", return_value=project / "child-cycle"), \
                     mock.patch("artifact_workflow_groups.group_for_cycle", return_value=None):
                 child_env = AP._env_for(artifact_root, record)
             self.assertEqual(child_env["AGENT_RUNTIME_DIR"], str(runtime))
@@ -484,6 +485,21 @@ class WorkerBootstrapTest(unittest.TestCase):
         self.assertNotIn("Portable Worker Kernel", contract)
         self.assertNotIn("memory lifecycle", contract)
         self.assertNotIn("worker-terminal-contract:", W.render_worker_bootstrap(ROOT, "stage"))
+
+    def test_a_registered_worker_ends_blocked_instead_of_asking_a_native_question(self):
+        # No supervisor reads a registered worker's native question tool, so the one way a
+        # worker asks a person is the blocker line of its terminal response.
+        for worker_type in ("owner", "stage", "review", "support", "frame"):
+            with self.subTest(worker_type=worker_type):
+                rendered = W.render_worker_bootstrap(ROOT, worker_type)
+                self.assertIn("native question tool", rendered)
+                self.assertIn("`accepted`", rendered)
+                self.assertIn("blocker line", rendered)
+                self.assertIn("`BLOCKED`", rendered)
+        contract = W.worker_terminal_contract(ROOT)
+        self.assertIn("native question tool", contract)
+        self.assertIn(W.handoff_template(), contract)
+        self.assertIn("runtime_wait: registered-children", contract)
 
     def test_task_publication_scope_stays_with_the_approved_owner(self):
         owner = W.render_worker_bootstrap(ROOT, "owner")
@@ -781,8 +797,8 @@ class NodeScopeTest(unittest.TestCase):
             for worker_type in ("stage", "frame"):
                 args.worker_type = worker_type
                 with self.subTest(worker_type=worker_type), \
-                     mock.patch.object(AP, "load_route", wraps=AP.load_route) as route_loader, \
-                     mock.patch.object(DC, "validate_review_output_binding",
+                     patch_split(AP, "load_route", wraps=AP.load_route) as route_loader, \
+                     patch_split(DC, "validate_review_output_binding",
                                        side_effect=validate_review_binding) as review_validator:
                     prompt = W.assignment_prompt(args, "prepare the child", parent_env)
 
@@ -868,7 +884,7 @@ class NodeScopeTest(unittest.TestCase):
                 {"campaign_id": "camp1", "cycle_id": "cyc1"}, "digest", True,
             )
             with mock.patch.object(T, "load_producer_binding", return_value=binding), \
-                 mock.patch.object(AP, "cycle_dir", return_value=cycle_dir):
+                 patch_split(AP, "cycle_dir", return_value=cycle_dir):
                 prompt = W.assignment_prompt(args, "do the research", {})
             self.assertIn(
                 str(cycle_dir / "artifacts" / "spec" / "<component>" / "_internal" / "research" / "**"),
@@ -1052,7 +1068,7 @@ class WorkerEndingPromptTest(unittest.TestCase):
                 # even when the adapter's trailing ending is correctly gated.
                 compact = " ".join(prompt.split())
                 self.assertIn(
-                    "For a supervised owner, end a child-registration or resource-wait turn with only",
+                    "For a supervised owner, end a child-registration, resource-wait, or parent-deploy-request turn with only",
                     compact,
                 )
                 self.assertIn("polling fallback waits synchronously in the current turn.", compact)
@@ -1188,20 +1204,24 @@ class OwnerRouteStepsPromptTest(unittest.TestCase):
         self.assertEqual(command, W.route_start_command(self.root / "route with space.json", "plan"))
         self.assertNotIn("--jobs", command)
         self.assertNotIn("--prompt-file", command)
-        self.assertIn("Optional: add --prompt-file <path>", text)
+        self.assertIn("Use each node's printed start command", text)
         help_text = subprocess.run([sys.executable, argv[1], "--help"], text=True, capture_output=True).stdout
         for flag in ("--route", "--node", "--start"):
             self.assertIn(flag, help_text)
 
     def test_outputs_share_one_absolute_prefix_and_owner_nodes_have_no_command(self):
         text = self.steps()
-        self.assertEqual(text.count(self.output_dir), text.count(f"Outputs under {self.output_dir}/:") + text.count(f"--evidence {self.output_dir}/plan.md"))
+        self.assertIn(f"--evidence {self.output_dir}/plan.md", text)
+        self.assertIn(f"--evidence {self.output_dir}/_internal/plan_reviews/round_1.md", text)
         self.assertIn(f"Outputs under {self.output_dir}/:\n1. plan → plan.md, checklist.md\n", text)
         self.assertIn("2. plan-check after plan → _internal/plan_reviews/round_1.md\n", text)
         self.assertIn("3. execute after plan-check → source-diff, dev_logs/**\n", text)
         self.assertIn("4. report after execute [you run it yourself] → final_report.md\n", text)
-        self.assertEqual(text.count("--node plan-check"), 0)
-        self.assertEqual(text.count("--start`"), 1)
+        self.assertEqual(text.count("--node plan-check"), 2)
+        self.assertEqual(text.count("--start`"), 3)
+        self.assertNotIn("--node report", text)
+        for node in ("plan", "plan-check", "execute"):
+            self.assertIn(W.route_start_command(self.root / "route with space.json", node), text)
 
     def test_inline_completion_command_is_concrete_with_the_first_evidence_file(self):
         text = self.steps()
@@ -1237,6 +1257,43 @@ class OwnerRouteStepsPromptTest(unittest.TestCase):
         route["nodes"][0]["parallel_group"] = "g1"
         self.assertIn("1. plan (parallel group g1) → plan.md", self.steps(route))
 
+    def test_subdivision_gets_an_exact_slices_command_without_owner_flag_assembly(self):
+        route = steps_route()
+        route["nodes"][2]["subdivision"] = {"max_slices": 4}
+        text = self.steps(route)
+        command = re.search(r"If the plan declares slices, use: `([^`]+)`", text).group(1)
+        self.assertEqual(shlex.split(command)[2:],
+            ["--parallel-group", "execute", "--slices", f"{self.output_dir}/plan.md", "--start"])
+        self.assertIn("single-session-required returns to this node's ordinary start command", text)
+
+    def test_owner_arbitration_prints_bound_command_and_realized_leg_count(self):
+        route = steps_route()
+        anchor = route["nodes"][1]
+        anchor.update(kind="review-worker", parallel_group="plan-check", parallel_leg_index=0)
+        route["nodes"].insert(2, {**anchor, "id": "plan-check-aux", "parallel_leg_index": 1,
+                                 "leg_class": "auxiliary"})
+        text = self.steps(route)
+        command = re.search(r"then run: `([^`]+)`", text).group(1)
+        self.assertEqual(shlex.split(command)[2:], ["arbitrate", "--route",
+            str(self.root / "route with space.json"), "--group", "plan-check", "--evidence",
+            f"{self.output_dir}/_internal/plan-check-owner-merge.md"])
+        self.assertIn("after every leg completes", text)
+        self.assertIn("auxiliary_findings_considered with exactly 1 dispositions", text)
+        self.assertNotIn("then run:", self.steps())
+        self.assertNotIn("then run:", self.steps(route, environ={}))
+
+    def test_node_arbitration_keeps_completion_evidence_with_the_declared_arbiter(self):
+        route = steps_route()
+        anchor = route["nodes"][0]
+        anchor.update(kind="pipeline-stage", parallel_group="plan", parallel_leg_index=0)
+        route["nodes"].insert(1, {**anchor, "id": "plan-aux", "parallel_leg_index": 1,
+                                 "leg_class": "auxiliary"})
+        route["nodes"][2].update(kind="review-worker", depends_on=["plan", "plan-aux"])
+        text = self.steps(route)
+        self.assertIn("in arbiter node plan-check's own completion evidence", text)
+        self.assertIn("the owner does not run arbitrate for this group", text)
+        self.assertNotIn("then run:", text)
+
     def test_nothing_without_a_dispatchable_stage_a_route_or_an_owner(self):
         self.assertEqual(self.steps(steps_route(nodes=[])), "")
         owner_only = steps_route()
@@ -1253,17 +1310,25 @@ class OwnerRouteStepsPromptTest(unittest.TestCase):
         args = self.owner(path)
         text = W.assignment_prompt(args, "Fix it", {"AGENT_ARTIFACT_OUTPUT_DIR": self.output_dir})
         self.assertEqual(text.count("Route steps (sealed route rt-steps"), 1)
-        self.assertEqual(text.count("complete --inline"), 1)
+        self.assertEqual(text.count("complete --inline"), 3)
         self.assertNotIn("A declared stage (", text)
         self.assertIn("Assignment:\nFix it\n\n", text)
 
     def test_contract_read_line_points_an_owner_at_the_block(self):
+        owners = []
         for harness in ("claude", "codex", "opencode"):
             owner = W.contract_read_prompt(SimpleNamespace(worker_type="owner", assigned_contract="autopilot-code"), harness)
-            self.assertIn("Route steps carry the exact start commands", owner)
+            owners.append(owner)
+            self.assertIn("capabilities/autopilot-code/references/owner-execution.md", owner)
+            self.assertIn("Route steps and the latest receipt print", owner)
+            self.assertIn("never assemble a runtime command yourself", owner)
+            self.assertNotIn("SKILL.md", owner)
+            self.assertNotIn("OPERATIONS.md", owner)
+            self.assertNotIn("dev-pipeline.md", owner)
             stage = W.contract_read_prompt(SimpleNamespace(worker_type="stage", assigned_contract="autopilot-code",
                                                            completion_gate=None), harness)
             self.assertNotIn("Route steps", stage)
+        self.assertEqual(len(set(owners)), 1)
 
     def test_a_space_in_the_route_path_is_quoted(self):
         command = W.route_start_command("/a b/route.json", "plan")

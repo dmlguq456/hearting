@@ -315,21 +315,19 @@ class RegistryGenerationRetentionTest(unittest.TestCase):
     def test_append_reuses_only_the_latest_retained_prefix(self):
         base = self._row("att000") + self._row("att001")
         self.jobs.write_text(base, encoding="utf-8")
-        with self.cache.registry_read_scope():
-            prefix_rows = dispatch.parsed_registry_rows(str(self.jobs))
-        with self.jobs.open("ab") as stream:
-            stream.write(self._row("att002").encode("utf-8"))
-
-        with mock.patch.object(dispatch, "_parse_registry_lines",
-                               wraps=dispatch._parse_registry_lines) as parse:
+        with mock.patch.object(dispatch, "_registry_record_metadata",
+                               wraps=dispatch._registry_record_metadata) as convert:
+            with self.cache.registry_read_scope():
+                prefix_rows = dispatch.parsed_registry_rows(str(self.jobs))
+            self.assertEqual(convert.call_count, 2)
+            with self.jobs.open("ab") as stream:
+                stream.write(self._row("att002").encode("utf-8"))
             with self.cache.registry_read_scope():
                 rows = dispatch.parsed_registry_rows(str(self.jobs))
+            self.assertEqual(convert.call_count, 3)
         self.assertEqual(len(rows), 3)
         self.assertIs(rows[0], prefix_rows[0])
         self.assertIs(rows[1], prefix_rows[1])
-        self.assertEqual(parse.call_count, 1)
-        self.assertEqual(parse.call_args.kwargs["first_line"], 2)
-        self.assertEqual(len(parse.call_args.args[1]), 1)
         stamp = self.jobs.stat()
         generation = (stamp.st_dev, stamp.st_ino, stamp.st_size,
                       stamp.st_mtime_ns, stamp.st_ctime_ns)

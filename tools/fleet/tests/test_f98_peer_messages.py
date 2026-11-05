@@ -20,6 +20,8 @@ from fleet import render  # noqa: E402
 from fleet import collectors  # noqa: E402
 from fleet.collectors import peer_messages  # noqa: E402
 from fleet.model import Session  # noqa: E402
+sys.path.append(str(Path(__file__).resolve().parents[3] / "utilities"))  # split_module_fixture
+from split_module_fixture import patch_split  # noqa: E402
 
 # `utilities/peer-message.py` is hyphenated (not `import`able by name); loaded the
 # same way its own test suite (utilities/peer_message.test.py) does.
@@ -62,6 +64,69 @@ def _rec(from_sid, to_sid=None, to_name=None, kind="steer", summary="hi",
 
 
 class CollectorTest(unittest.TestCase):
+    def test_whole_output_reuse_tracks_age_duties_and_replacement(self):
+        from fleet.collectors import peer_messages as pm
+        from unittest import mock
+        records = [(0.0, {'kind': 'steer', 'from': {'harness': 'claude', 'session_id': 'a'},
+                          'to': {'harness': 'codex', 'session_id': 'b'}})]
+        with mock.patch.object(pm, '_OUTPUT_OBSERVATION', None), mock.patch.object(
+                pm, '_project_records', wraps=pm._project_records) as project:
+            first = pm._peer_result(records, {}, 0.0, reuse=True)
+            first['by_session'][('codex', 'b')]['recv_1h'] = -1
+            self.assertEqual(pm._peer_result(records, {}, 59.0, reuse=True)['by_session'][('codex','b')]['recv_1h'], 1)
+            self.assertEqual(project.call_count, 1)
+            self.assertEqual(pm._peer_result(records, {}, 60.0, reuse=True)['by_session'][('codex','b')]['last_recv']['age_min'], 1)
+            self.assertEqual(project.call_count, 1)
+            pm._peer_result(records, {('codex','b'): [{'kind':'watch','age_min':0}]}, 60.0, reuse=True)
+            self.assertEqual(project.call_count, 1)
+            replacement = [(0.0, {**records[0][1], 'kind': 'notice'})]
+            pm._peer_result(replacement, {}, 60.0, reuse=True)
+            self.assertEqual(project.call_count, 2)
+
+    def test_old_prepared_files_reopen_when_clock_moves_backwards(self):
+        from fleet.collectors import dispatch
+        now = time.time()
+        with tempfile.TemporaryDirectory() as root:
+            _write_ledger(root, 'sender', [_rec('sender', 'receiver', minutes_ago=25 * 60)])
+            with mock.patch.object(peer_messages.time, 'time', return_value=now), dispatch.collection_read_scope():
+                self.assertEqual(peer_messages.collect(state_roots=[root])['records'], [])
+            with mock.patch.object(peer_messages.time, 'time', return_value=now - 2 * 3600):
+                expected = peer_messages.collect(state_roots=[root])
+                self.assertEqual(len(expected['records']), 1)
+                with dispatch.collection_read_scope():
+                    self.assertEqual(peer_messages.collect(state_roots=[root]), expected)
+
+    def test_passive_generation_reuse_matches_fresh_clock_and_file_oracle(self):
+        from fleet.collectors import dispatch
+        now = time.time()
+        with tempfile.TemporaryDirectory() as root:
+            path = _write_ledger(root, 'sender', [_rec('sender', 'receiver', minutes_ago=60)])
+            with mock.patch.object(peer_messages.time, 'time', return_value=now):
+                expected = peer_messages.collect(state_roots=[root])
+                with dispatch.collection_read_scope(), mock.patch.object(
+                        peer_messages.json, 'loads', wraps=json.loads) as parse:
+                    first = peer_messages.collect(state_roots=[root])
+                    count = parse.call_count
+                    first['records'][0]['kind'] = 'caller mutation'
+                    second = peer_messages.collect(state_roots=[root])
+                    self.assertEqual(parse.call_count, count)
+                    self.assertEqual(second, expected)
+            with mock.patch.object(peer_messages.time, 'time', return_value=now + 120):
+                expected = peer_messages.collect(state_roots=[root])
+                with dispatch.collection_read_scope():
+                    self.assertEqual(peer_messages.collect(state_roots=[root]), expected)
+                self.assertEqual(expected['by_session'][('claude', 'sender')]['sent_1h'], 0)
+            replacement = Path(path).with_suffix('.new')
+            replacement.write_text(json.dumps(_rec('replacement', 'receiver')) + '\n')
+            replacement.replace(path)
+            expected = peer_messages.collect(state_roots=[root])
+            with dispatch.collection_read_scope():
+                self.assertEqual(peer_messages.collect(state_roots=[root]), expected)
+            Path(path).unlink()
+            with dispatch.collection_read_scope():
+                self.assertEqual(peer_messages.collect(state_roots=[root]),
+                                 {'records': [], 'by_session': {}})
+
     def test_health_success_for_missing_ledger_and_default_shape_stays_mapping(self):
         with tempfile.TemporaryDirectory() as tmp:
             legacy = peer_messages.collect(state_roots=[tmp])
@@ -278,7 +343,7 @@ class CollectorTest(unittest.TestCase):
         self.assertNotEqual(last_recv["from_name"], "sid-b-display")
         # The sender has no ledger name here, and an unnamed sender stays unnamed: the
         # collector used to paste the raw session id into the display-name slot, which is
-        # how `← 01a084f7-63f2-7961-ae60-6fc2d8e60fc2` reached the board (2026-09-09).
+        # how `← 0100000b-0000-7000-8000-000000000013` reached the board (2026-09-09).
         # The exact id stays in its own field for the join; naming is the renderer's job.
         self.assertIsNone(last_recv["from_name"])
         self.assertEqual(last_recv["from_session_id"], "sid-a")
@@ -381,8 +446,8 @@ class ResumedSessionJoinTest(unittest.TestCase):
         """`--fork-session` leaves the parent running under its own row; adopting its id
         would hand the parent's messages to the child."""
         from fleet import collectors
-        parent_sid = "6044eb9f-7983-4c41-9b86-0bb2b70638fa"
-        child = self._session(session_id="01a084f7-63f2-7961-ae60-6fc2d8e60fc2")
+        parent_sid = "10000087-0000-4000-8000-000000000096"
+        child = self._session(session_id="0100000b-0000-7000-8000-000000000013")
         parent = self._session(session_id=parent_sid)
         parent.pid = 2
         with mock.patch("fleet.session_registry.session_aliases", return_value=[parent_sid]):
@@ -588,17 +653,17 @@ class StateRootsPeerPromotionTest(unittest.TestCase):
 class PeerEndpointLabelTest(unittest.TestCase):
     """The name slot holds whatever the sender wrote; the board must not print machine text.
 
-    Measured on the live board: `✉ → uds:/run/user/1002/cc-socks/2952102.sock` came from a
+    Measured on the live board: `✉ → uds:/run/user/1000/fixture-sockets/1234.sock` came from a
     real ledger record whose `to.name` was a socket address. That names nothing a person can
-    look up — worse than the `claude:7a001534` fallback, because it is the same
+    look up — worse than the `claude:1000008b` fallback, because it is the same
     non-information dressed as a name.
     """
 
     def test_machine_addresses_are_not_treated_as_names(self):
-        for value in ("uds:/run/user/1002/cc-socks/2952102.sock",
+        for value in ("uds:/run/user/1000/fixture-sockets/1234.sock",
                       "/tmp/whatever.sock",
                       "http://example/x",
-                      "01a084f7-63f2-7961-ae60-6fc2d8e60fc2",  # raw session id in the name slot
+                      "0100000b-0000-7000-8000-000000000013",  # raw session id in the name slot
                       "", "   ", None, 42):
             with self.subTest(value=value):
                 self.assertFalse(render._peer_name_is_readable(value))
@@ -616,11 +681,11 @@ class PeerEndpointLabelTest(unittest.TestCase):
     def test_an_unusable_name_falls_through_to_the_short_id(self):
         # Only when no tag can be resolved for the peer — a resolvable tag outranks both,
         # which is what keeps one relation from changing shape between ticks.
-        with mock.patch.object(render, "_resolve_session_tag", return_value=None):
+        with patch_split(render, "_resolve_session_tag", return_value=None):
             segs = render._peer_endpoint_segs(
-                "claude", "7a001534-ea46-4a67-971b-199c586889e2",
-                "uds:/run/user/1002/cc-socks/2952102.sock", {})
-        self.assertEqual("".join(t for t, _ in segs), "7a001534")
+                "claude", "1000008b-0000-4000-8000-00000000009a",
+                "uds:/run/user/1000/fixture-sockets/1234.sock", {})
+        self.assertEqual("".join(t for t, _ in segs), "1000008b")
 
     def test_an_unusable_name_with_no_id_falls_back_to_the_harness(self):
         segs = render._peer_endpoint_segs("claude", None, "/tmp/x.sock", {})
@@ -628,8 +693,8 @@ class PeerEndpointLabelTest(unittest.TestCase):
 
     def test_an_on_screen_peer_still_wins_over_every_fallback(self):
         segs = render._peer_endpoint_segs(
-            "claude", "7a001534-ea46-4a67-971b-199c586889e2", "/tmp/x.sock",
-            {("claude", "7a001534-ea46-4a67-971b-199c586889e2"): "46"})
+            "claude", "1000008b-0000-4000-8000-00000000009a", "/tmp/x.sock",
+            {("claude", "1000008b-0000-4000-8000-00000000009a"): "46"})
         self.assertEqual("".join(t for t, _ in segs), "[46]")
 
 
@@ -642,13 +707,13 @@ class PeerRepoLabelsTest(unittest.TestCase):
                 segs = render._peer_endpoint_segs(harness, sid, None,
                     {(harness, sid): "42"}, repos)
                 self.assertEqual(render._plain(segs), repos[harness, sid] + " [42]")
-        with mock.patch.object(render, "_resolve_session_tag", return_value=None):
+        with patch_split(render, "_resolve_session_tag", return_value=None):
             segs = render._peer_endpoint_segs("codex", "same-id", None, {}, repos)
         self.assertEqual(render._plain(segs), "hearting:same-id")
 
     def test_missing_repo_and_narrow_width_preserve_tag_and_relation(self):
         entry = {"to_harness": "codex", "to_session_id": "same-id", "age_min": 0}
-        with mock.patch.object(render, "_resolve_session_tag", return_value="42"):
+        with patch_split(render, "_resolve_session_tag", return_value="42"):
             for width in (30, 60, 168):
                 rows = render._peer_link_strip(sent=entry, term_width=width,
                     repo_by_key={("claude", "same-id"): "foreign"})
@@ -666,7 +731,7 @@ class PeerRepoLabelsTest(unittest.TestCase):
         first.peer_last_sent = {"to_harness": "opencode", "to_session_id": "prior-two"}
         with mock.patch.object(render, "_peer_link_strip",
                                side_effect=AssertionError("legacy peer strip rendered")), \
-                mock.patch.object(render, "_resolve_session_tag",
+                patch_split(render, "_resolve_session_tag",
                                   side_effect=AssertionError("peer tag resolver called")), \
                 mock.patch.object(render, "_gpu_session_resources", return_value={}), \
                 mock.patch.object(render, "_fresh_compute_hosts", return_value=({}, 0)):
@@ -688,7 +753,7 @@ class PeerEndpointOneShapeTest(unittest.TestCase):
     def test_a_session_id_always_produces_the_badge_shape(self):
         # Off-board peers resolve their own tag, so a session does not change shape when it
         # scrolls off screen.
-        with mock.patch.object(render, "_resolve_session_tag", return_value="3a"):
+        with patch_split(render, "_resolve_session_tag", return_value="3a"):
             for name in ("a8e66aa4a25f5d807", "wB:p5", "kws-net-67", None,
                          "Claude Code 사용량 리셋 및 감독 인수인계"):
                 with self.subTest(name=name):
@@ -696,21 +761,21 @@ class PeerEndpointOneShapeTest(unittest.TestCase):
                     self.assertEqual("".join(t for t, _ in segs), "[3a]")
 
     def test_an_on_board_badge_beats_the_resolver(self):
-        with mock.patch.object(render, "_resolve_session_tag", side_effect=AssertionError):
+        with patch_split(render, "_resolve_session_tag", side_effect=AssertionError):
             segs = render._peer_endpoint_segs("claude", "sid-1", "x", {("claude", "sid-1"): "67"})
         self.assertEqual("".join(t for t, _ in segs), "[67]")
 
     def test_a_resolver_failure_never_breaks_the_row(self):
-        with mock.patch.object(render, "_resolve_session_tag", side_effect=OSError("boom")):
+        with patch_split(render, "_resolve_session_tag", side_effect=OSError("boom")):
             segs = render._peer_endpoint_segs("claude", "sid-1", "kws-net-67", {})
         self.assertEqual("".join(t for t, _ in segs), "kws-net-67")
 
     def test_machine_values_are_never_shown_as_a_name(self):
-        with mock.patch.object(render, "_resolve_session_tag", return_value=None):
+        with patch_split(render, "_resolve_session_tag", return_value=None):
             for name in ("a8e66aa4a25f5d807",                      # bare hex id
                          "wB:p5",                                   # a pane, not a session
-                         "uds:/run/user/1002/cc-socks/2952102.sock",
-                         "01a084f7-63f2-7961-ae60-6fc2d8e60fc2",
+                         "uds:/run/user/1000/fixture-sockets/1234.sock",
+                         "0100000b-0000-7000-8000-000000000013",
                          "Claude Code 사용량 리셋 및 감독 인수인계"):   # a title, not a name
                 with self.subTest(name=name):
                     segs = render._peer_endpoint_segs("claude", None, name, {})
@@ -719,7 +784,7 @@ class PeerEndpointOneShapeTest(unittest.TestCase):
     def test_a_long_real_name_is_clipped_not_discarded(self):
         # `fleet-stall-codex-parity-10` is a real name that happens to be long; a clipped
         # real name beats falling through to `claude:a8e66aa4`.
-        with mock.patch.object(render, "_resolve_session_tag", return_value=None):
+        with patch_split(render, "_resolve_session_tag", return_value=None):
             segs = render._peer_endpoint_segs("claude", None, "fleet-stall-codex-parity-10", {})
         shown = "".join(t for t, _ in segs)
         self.assertTrue(shown.startswith("fleet-stall-codex-parity"), shown)

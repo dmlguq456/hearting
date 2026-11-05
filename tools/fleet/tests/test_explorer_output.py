@@ -12,14 +12,28 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tools.fleet.explorer.output import (CLEANED, RESET_NOTE, SUPERVISOR_ONLY, TAIL_RECORDS, OutputLine,
-                                         OutputReader, SourcePlan, attempt_view, fit_row, line_row,
-                                         render_output)
+from tools.fleet.explorer.output import (TAIL_RECORDS, OutputLine, OutputReader, SourcePlan, attempt_view,
+                                         fit_row, line_row, read_generation, render_output)
 from tools.fleet.explorer.types import FocusKey, Health
 from tools.fleet.tests import explorer_fixture as ef
 
 VIEW = attempt_view()
 Line = VIEW.Line
+
+# The screen words come from tools/i18n/messages.json. These suites keep their Korean expectations
+# byte for byte under a Korean declaration; ``EnglishWords`` checks the default.
+SUPERVISOR_ONLY = "감독 기록만 남음 · 원천 정리됨"
+RESET_NOTE = "원천이 잘리거나 교체되어 처음부터 다시 읽음"
+CLEANED = "원천 정리됨"
+_KOREAN = mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"})
+
+
+def setUpModule():
+    _KOREAN.start()
+
+
+def tearDownModule():
+    _KOREAN.stop()
 
 
 def write_jsonl(path, rows):
@@ -186,7 +200,6 @@ class SourceHealth(TempCase):
         write_jsonl(log, ef.supervisor_rows("att-x", "sid-1", str(self.dir)))
         view = self.reader().read("k", "t", [plan(log, "claude", "owner", "att-x")])
         self.assertEqual(view.notes, (SUPERVISOR_ONLY,))
-        self.assertEqual(SUPERVISOR_ONLY, "감독 기록만 남음 · 원천 정리됨")
         self.assertEqual(view.rows, ())
         self.assertEqual(view.health.state, "success")
 
@@ -414,6 +427,40 @@ class Streaming(TempCase):
         view = self.reader_.read("k", "t", [self.owner])
         self.assertEqual(self.rows(view), ["[owner] OC » new world"])
         self.assertEqual(view.notes, (RESET_NOTE,))
+
+
+@mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "English"})
+class EnglishWords(TempCase):
+    """With no Korean declaration the same rows and notes read in English."""
+
+    def test_rows_and_notes(self):
+        self.assertEqual(fit_row("abc", 3, 20), "abc (+3 more)")
+        self.assertEqual(fit_row("x" * 100, 7, 30), "x" * 18 + " (+7 more)…")
+        log = self.dir / "owner.att-x.claude.jsonl"
+        write_jsonl(log, ef.supervisor_rows("att-x", "sid-1", str(self.dir)))
+        reader = self.reader()
+        view = reader.read("k", "t", [plan(log, "claude", "owner", "att-x")])
+        self.assertEqual(view.notes, ("only the supervisor's record remains · source cleaned up",))
+        gone = reader.read("k1", "t", [plan(self.dir / "gone.codex.jsonl")])
+        self.assertEqual(gone.notes, ("source cleaned up",))
+        path = self.dir / "p.codex.jsonl"
+        write_jsonl(path, [message("x", "m1")])
+        with mock.patch.object(Path, "stat", side_effect=PermissionError("no")):
+            denied = self.reader().read("k", "t", [plan(path)])
+        self.assertEqual(denied.notes, ("could not read · PermissionError",))
+
+    def test_an_earlier_generation_names_itself(self):
+        reader = self.reader()
+        entry = {"harness": "claude", "sid": "0123456789abcdef", "transcript": {"status": "missing"}}
+        view = read_generation(reader, entry)
+        self.assertEqual(view.title, "earlier conversation · CL 01234567 · original output")
+        self.assertEqual(view.notes, ("source cleaned up",))
+        unknown = read_generation(reader, {**entry, "transcript": {"path": "/x", "status": ""}})
+        self.assertEqual(unknown.notes, ("could not read · transcript location unknown",))
+        with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"}):
+            korean = read_generation(reader, {**entry, "transcript": {"path": "/x", "status": ""}})
+        self.assertEqual(korean.title, "이전 대화 · CL 01234567 · 원래 출력")
+        self.assertEqual(korean.notes, ("읽지 못함 · 원문 위치 확인 불가",))
 
 
 if __name__ == "__main__":

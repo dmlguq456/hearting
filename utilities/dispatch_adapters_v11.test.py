@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import contextlib, importlib.util, io, json, os, shutil, subprocess, sys, tempfile, threading, time, unittest
+import ast, contextlib, importlib.util, io, json, os, shutil, subprocess, sys, tempfile, threading, time, unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,6 +10,7 @@ sys.path.insert(0,str(ROOT/"utilities"))
 import dispatch_contract as DC
 sys.path.insert(0,str(ROOT/"tools"))
 import fixture_processes  # noqa: E402
+from split_module_fixture import patch_split  # noqa: E402
 
 ADAPTERS={
  "codex":([sys.executable,str(ROOT/"adapters/codex/bin/dispatch-headless.py")],["--model","gpt-test","--reasoning","low"]),
@@ -28,6 +29,24 @@ def fake_shell(harness, payload):
  version = ('[ "$1" = --version ] && { echo 1.19.0; exit 0; }\n'
             if harness == "opencode" else "")
  return "#!/bin/sh\n" + version + payload
+
+
+@contextlib.contextmanager
+def owned_watcher_fixture():
+ temporary=tempfile.TemporaryDirectory(prefix="watcher-failure-")
+ temporary._finalizer.detach()
+ processes=[]
+ try:
+  yield temporary.name,processes
+ finally:
+  try:
+   fixture_processes.reap(temporary.name)
+   for proc in processes:proc.wait(timeout=5)
+  except BaseException:
+   print(f"owned watcher fixture retained: {temporary.name}",file=sys.stderr)
+   raise
+  else:
+   temporary.cleanup()
 
 
 class AdapterV11Test(unittest.TestCase):
@@ -89,7 +108,7 @@ class AdapterV11Test(unittest.TestCase):
                    ",".join(f"{k}={v}" for k,v in source.items())+"\n")
    fake_claim={"replacement_attempt_id":"att-next","family_id":"family-fixture"}
    with mock.patch.object(recovery,"datetime",FrozenDateTime), \
-        mock.patch.object(recovery.DC._route_module(),"verify_route"), \
+        patch_split(recovery.DC._route_module(),"verify_route"), \
         mock.patch.object(artifact_context,"resolve_context",
                          return_value=SimpleNamespace(output_dir=output)):
     for harness in ADAPTERS:
@@ -260,6 +279,142 @@ class AdapterV11Test(unittest.TestCase):
    finally:
     for patch in reversed(patches): patch.stop()
    return code,stream.getvalue(),jobs.read_text(encoding="utf-8"),len(calls)
+ def test_watcher_failure_actual_handlers_preserve_launch_in_every_wrapper(self):
+  for harness in ADAPTERS:
+   for kind,error in (("orphan",OSError("synthetic spawn")),
+                      ("orphan",DC.DispatchContractError("orphan-watch-identity-invalid","synthetic identity")),
+                      ("reap",OSError("synthetic spawn")),
+                      ("reap",DC.DispatchContractError("reap-watch-identity-invalid","synthetic identity")),
+                      ("reap",ValueError("synthetic pgid"))):
+    with self.subTest(harness=harness,kind=kind,error=type(error).__name__), owned_watcher_fixture() as (td,launched):
+     root=Path(td); repo,art=self.fixture(root); jobs=root/"jobs.log"; logs=root/"logs"
+     fakebin=root/"bin"; fakebin.mkdir(); started=root/"payload-started"
+     fake=fakebin/harness
+     fake.write_text(fake_shell(harness,f"echo started > '{started}'\nexec sleep 3\n"));fake.chmod(0o755)
+     wrapper=self.load_wrapper(harness)
+     if kind=="orphan":
+      argv=["dispatch-headless.py","--start","--worktree",str(repo),"--slug","watcher-owner",
+            "--capability","autopilot-code","--capability-mode","dev","--intensity","standard",
+            "--dispatch-depth","1","--worker-type","owner","--unit","_kernel/owner",
+            "--assigned-contract","autopilot-code","--owner-harness",harness,
+            "--jobs",str(jobs),"--log-dir",str(logs),"--attempt-id","att-watcher-owner",
+            "--prompt-text","finite fixture",*ADAPTERS[harness][1]]
+      if harness!="opencode":argv += ["--completion-delivery","poll"]
+     else:
+      self.seed_parent(jobs,repo,harness=harness)
+      argv=["dispatch-headless.py",*self.command(harness,"start",repo,jobs,logs)[2:]]
+     env={**os.environ,"PATH":str(fakebin)+os.pathsep+os.environ.get("PATH",""),
+          "HOME":str(root/"home"),"AGENT_HOME":str(ROOT),"AGENT_ARTIFACT_ROOT":str(art),
+          "AGENT_DISPATCH_JOBS":str(jobs),
+          "AGENT_MODEL_GOVERNOR_ROOT":str(art/".runtime/model-worker-governor"),
+          "AGENT_RESOURCE_RUN_INDEX":str(root/"resource-index.json"),
+          "COMPUTE_HOSTS_CONFIG":str(root/"compute.yaml"),"OPENCODE_CONFIG_CONTENT":"{}",
+          "XDG_STATE_HOME":str(root/"state")}
+     Path(env["HOME"]).mkdir()
+     codex_home=Path(env["HOME"])/".codex";codex_home.mkdir()
+     (codex_home/"auth.json").write_text('{}\n')
+     claude_home=Path(env["HOME"])/".claude";claude_home.mkdir()
+     env.update(CODEX_HOME=str(codex_home),CLAUDE_CONFIG_DIR=str(claude_home))
+     if kind=="reap": env.update(AGENT_DISPATCH_CHILD="1",AGENT_DISPATCH_ATTEMPT_ID="att-parent-fixture")
+     def refuse(*args,**kwargs):
+      deadline=time.monotonic()+3
+      while not started.exists() and time.monotonic()<deadline: time.sleep(.02)
+      self.assertTrue(started.exists(),"finite native payload never started")
+      raise error
+     resolution=wrapper.reconcile_launch_lifecycle(wrapper.DETACHED,{},evidence={})
+     spawn=wrapper.spawn_claimed_attempt
+     def retain_child(*args,**kwargs):
+      result=spawn(*args,**kwargs);launched.append(result[0]);return result
+     patches=[mock.patch.dict(os.environ,env,clear=True),
+              mock.patch.object(wrapper,"reconcile_launch_lifecycle",return_value=resolution),
+              mock.patch.object(wrapper,"spawn_claimed_attempt",side_effect=retain_child),
+              mock.patch.object(wrapper,f"launch_{kind}_watch",side_effect=refuse)]
+     for name,value in (("check_runtime_projection",0),("ensure_runtime_home_projection",None),
+                        ("launch_summary_owner",{"summary_owner":"fixture"})):
+      if hasattr(wrapper,name):patches.append(mock.patch.object(wrapper,name,return_value=value))
+     stream=io.StringIO()
+     with contextlib.ExitStack() as stack:
+      for patch in patches:stack.enter_context(patch)
+      stack.enter_context(mock.patch.object(wrapper,"materialize_after_terminal_close"))
+      with redirect_stdout(stream):code=wrapper.main(argv)
+      output=stream.getvalue()
+      self.assertEqual(code,70,output)
+      for field in ("child_spawned=1","launch_started=1","started=1","registered=1"):
+       self.assertIn(field,output)
+      self.assertNotIn("child_spawned=0",output)
+      self.assertIn("cleanup_settled=",output)
+      rows=jobs.read_text().splitlines()
+      selected=rows[-1].split("\t")
+      meta=DC.parse_registry_metadata(selected[5])
+      self.assertEqual(meta["launch_started"],"1")
+      self.assertNotEqual(meta.get("launch_outcome"),"never-launched")
+      self.assertEqual(selected[1],"done")
+      self.assertEqual(meta["note"],f"dead-{kind}-watch-launch-error")
+ def test_foreground_review_watcher_failure_preserves_actual_seal_in_every_wrapper(self):
+  for harness in ADAPTERS:
+   for error in (OSError("synthetic spawn"),DC.DispatchContractError("reap-watch-identity-invalid","synthetic identity"),
+                 ValueError("synthetic pgid")):
+    with self.subTest(harness=harness,error=type(error).__name__), owned_watcher_fixture() as (td,launched):
+     base=Path(td);jobs=base/"jobs.log";attempt="att-foreground-watcher-failure"
+     wrapper=self.load_wrapper(harness)
+     path=ROOT/f"adapters/{harness}/bin/dispatch-headless.py"
+     cell=next(node for node in ast.walk(ast.parse(path.read_text()))
+               if isinstance(node,ast.If) and "foreground_review_handoff" in ast.unparse(node.test))
+     function=ast.FunctionDef(name="exercise",args=ast.arguments(posonlyargs=[],args=[],kwonlyargs=[],kw_defaults=[],defaults=[]),
+                              body=[cell,ast.Return(ast.Constant(0))],decorator_list=[])
+     compiled=compile(ast.fix_missing_locations(ast.Module(body=[function],type_ignores=[])),str(path),"exec")
+     env={**os.environ,"AGENT_ARTIFACT_ROOT":str(base),"AGENT_DISPATCH_JOBS":str(jobs),
+          "AGENT_RESOURCE_RUN_INDEX":str(base/"resource-index.json"),"COMPUTE_HOSTS_CONFIG":str(base/"compute.yaml")}
+     with mock.patch.dict(os.environ,env,clear=True):
+      proc=subprocess.Popen([sys.executable,"-c","import time; time.sleep(.1)"],start_new_session=True)
+      launched.append(proc)
+      try:
+       identity=DC.process_launch_identity(proc.pid)
+       meta={**identity,"attempt_schema_version":"2","dispatch_depth":"1","transport":"headless",
+             "execution_surface":"registered-headless","registered_worker":"1","fallback_hop":"same-harness-headless",
+             "worker_type":"review","attempt_id":attempt,"harness":harness,
+             "launch_lifecycle":"foreground-scoped","launch_started":"1"}
+       jobs.write_text("2026-10-29\topen\t/r\t/w\treview\t"+",".join(f"{k}={v}" for k,v in meta.items())+"\n")
+       seals=[]; snapshots=[]
+       def seal(*args,**kwargs):
+        result=wrapper.seal_foreground_result(*args,**kwargs)
+        seals.append(result);snapshots.append(jobs.read_bytes());return result
+       def refuse(*args,**kwargs):
+        self.assertIs(kwargs["foreground_seal"],seals[0])
+        self.assertEqual(jobs.read_bytes(),snapshots[0])
+        raise error
+       args=SimpleNamespace(launch_lifecycle=wrapper.FOREGROUND_SCOPED,parent_binding=None,
+                            foreground_timeout=2,watchdog_budget=wrapper.begin_finite_watchdog(2),
+                            attempt_id=attempt,worker_type="review")
+       namespace={**vars(wrapper),"args":args,"proc":proc,"jobs":jobs,"start_ticks":identity["pid_start"],
+                  "launch_metadata":identity,"activity_context":None,"foreground_review_handoff":True,
+                  "seal_foreground_result":seal,"launch_reap_watch":refuse,
+                  "materialize_after_terminal_close":mock.Mock()}
+       exec(compiled,namespace)
+       stream=io.StringIO()
+       with redirect_stdout(stream):code=namespace["exercise"]()
+       self.assertEqual(code,70,stream.getvalue())
+       self.assertEqual(jobs.read_bytes(),snapshots[0])
+       self.assertIn("child_spawned=1",stream.getvalue())
+       self.assertIn("launch_started=1",stream.getvalue())
+       self.assertEqual(dict(seals[0].values)["foreground_process_exit"],"0")
+       namespace["materialize_after_terminal_close"].assert_not_called()
+      finally:
+       proc.wait(timeout=5)
+ def test_watcher_fixture_finalizes_children_before_retiring_scratch_on_failures(self):
+  for kind in ("setup-failure","timeout","interruption"):
+   expected={"setup-failure":RuntimeError,"timeout":subprocess.TimeoutExpired,"interruption":KeyboardInterrupt}[kind]
+   with self.subTest(kind=kind),self.assertRaises(expected):
+    with owned_watcher_fixture() as (td,processes):
+     proc=subprocess.Popen([sys.executable,"-c","import time; time.sleep(3)"],
+                           env={**os.environ,"HEARTING_FIXTURE_ROOT":td},start_new_session=True)
+     processes.append(proc)
+     if kind=="timeout":proc.wait(timeout=.01)
+     if kind=="interruption":raise KeyboardInterrupt()
+     raise RuntimeError("synthetic setup failure")
+   self.assertIsNotNone(proc.poll())
+   self.assertFalse(Path(td).exists())
+   self.assertFalse(fixture_processes.marked_processes(td))
  def test_sibling_registry_rows_and_nested_refusal(self):
   for harness in ("codex", "claude", "opencode"):
    with self.subTest(harness=harness), tempfile.TemporaryDirectory() as td:
@@ -944,6 +1099,9 @@ class AdapterV11Test(unittest.TestCase):
         "PYTHONDONTWRITEBYTECODE":"1"}
    with mock.patch.dict(os.environ,env,clear=True):
     home=wrapper.prepare_nested_codex_home(worktree,source,jobs=jobs)
+    # Without `jobs` the same inherited registry selects the same home; this
+    # call used to raise NameError on an unimported helper.
+    self.assertEqual(wrapper.prepare_nested_codex_home(worktree,source),home)
     agent_home=wrapper.resolve_agent_home().resolve()
    self.assertEqual(agent_home,ROOT.resolve())
    self.assertTrue((home/"auth.json").is_symlink())
@@ -1007,13 +1165,20 @@ class AdapterV11Test(unittest.TestCase):
    with mock.patch.dict(os.environ,env,clear=True):
     stores=live.sessions_dirs_for("transport=headless","s",ROOT,root/"default",str(worktree),jobs=jobs)
    self.assertTrue({args.nested_codex_home/"sessions",other/"sessions",legacy/"sessions"} <= set(stores),stores)
-   moved=check(str(pointer))                              # what the child used to get
-   self.assertNotEqual(moved.returncode,0,moved.stdout)
-   self.assertIn("check=hearting:failed",moved.stdout)
+   # What the child used to get: the moved pointer. A worker home is checked against the release
+   # that built it (its worker-home.json source), so the owner's older home still passes.
+   moved=check(str(pointer))
+   self.assertEqual(moved.returncode,0,moved.stdout+moved.stderr)
+   self.assertIn("check=hearting:ok",moved.stdout)
+   # A home whose link was really broken still fails, with the check named and no traceback.
+   (Path(child["CODEX_HOME"])/"hearting").unlink()
+   broken=check(child["AGENT_HOME"])
+   self.assertNotEqual(broken.returncode,0,broken.stdout)
+   self.assertIn("check=hearting:failed",broken.stdout)
    # A projection failure now names its reason for the launcher's receipt.
    out=io.StringIO()
    with mock.patch.object(wrapper.subprocess,"run",return_value=subprocess.CompletedProcess(
-     [],1,moved.stdout,"")),contextlib.redirect_stdout(out):
+     [],1,broken.stdout,"")),contextlib.redirect_stdout(out):
     rc=wrapper.check_runtime_projection(str(worktree),False)
    self.assertEqual(rc,1)
    lines=out.getvalue().splitlines()
@@ -1024,6 +1189,121 @@ class AdapterV11Test(unittest.TestCase):
      [],69,"check=failed\nreason=codex-home-unset\n","")),contextlib.redirect_stdout(named):
     self.assertEqual(wrapper.check_runtime_projection(str(worktree),False),69)
    self.assertEqual([l for l in named.getvalue().splitlines() if l.startswith("reason=")],["reason=codex-home-unset"])
+ def old_release_owner_home(self, td, *, install_children=True):
+  """An owner home built on an older release, and a child start launched from it.
+
+  The old release is a symlink farm over this tree; `select_execution_root` is made to
+  choose this tree as the installed release, as a real runtime does after an update.
+  Returns the wrapper outcome and what the test needs to read back."""
+  root=Path(td); repo,art=self.fixture(root); jobs=root/"jobs.log"; logs=root/"logs"
+  fakebin=root/"bin"; fakebin.mkdir(); count=root/"child-count"
+  fake=fakebin/"codex"
+  fake.write_text(fake_shell("codex","printf 'child\n' >> \"$FAKE_CHILD_COUNT\"\n"),encoding="utf-8")
+  fake.chmod(0o755)
+  old=root/"releases"/"vOld"; old.mkdir(parents=True)
+  for entry in ROOT.iterdir():
+   if entry.name!=".git": (old/entry.name).symlink_to(entry)
+  source=root/"codex-source"; source.mkdir(); (source/"auth.json").write_text("{}\n",encoding="utf-8")
+  command=self.command("codex","start",repo,jobs,logs)
+  self.seed_parent(jobs,repo,harness="codex")
+  wrapper=self.load_wrapper("codex")
+  env={"PATH":str(fakebin)+os.pathsep+os.environ.get("PATH",""),"HOME":str(root/"home"),
+       "AGENT_ARTIFACT_ROOT":str(art),"AGENT_DISPATCH_JOBS":str(jobs),"AGENT_DISPATCH_CHILD":"1",
+       "AGENT_DISPATCH_ATTEMPT_ID":"att-parent-fixture","AGENT_DISPATCH_ALLOW_NAMESPACED_SPAWN":"1",
+       "XDG_STATE_HOME":str(root/"state"),"FAKE_CHILD_COUNT":str(count),
+       "CODEX_RUNTIME_PROJECTION_FAST":"1","CODEX_RUNTIME_PROJECTION_SKIP_CLI_DISCOVERY":"1",
+       "PYTHONDONTWRITEBYTECODE":"1"}
+  (root/"home").mkdir()
+  with mock.patch.dict(os.environ,{**env,"AGENT_HOME":str(ROOT),"CODEX_HOME":str(source)},clear=True):
+   owner_home=wrapper.prepare_nested_codex_home(repo,source,jobs=jobs,projection_root=old)
+  owner_before=(os.readlink(owner_home/"hearting"),sorted(p.name for p in owner_home.iterdir()))
+  resolution=wrapper.reconcile_launch_lifecycle(
+   wrapper.DETACHED,{"AGENT_DISPATCH_ALLOW_NAMESPACED_SPAWN":"1"},evidence={"lifecycle_selector_source":"host-like"})
+  import peer_obligations
+  buffer=io.StringIO(); errors=io.StringIO()
+  child_env={**env,"CODEX_HOME":str(owner_home),"AGENT_SESSION_ROLE":"worker","AGENT_HOME":str(old)}
+  with contextlib.ExitStack() as stack:
+   stack.enter_context(mock.patch.dict(os.environ,child_env,clear=True))
+   stack.enter_context(mock.patch.object(peer_obligations,"installed_release",return_value=ROOT))
+   stack.enter_context(mock.patch.object(wrapper,"reconcile_launch_lifecycle",return_value=resolution))
+   stack.enter_context(redirect_stdout(buffer)); stack.enter_context(contextlib.redirect_stderr(errors))
+   code=wrapper.main(["dispatch-headless.py",*command[2:]])
+  return SimpleNamespace(code=code,receipt=buffer.getvalue(),stderr=errors.getvalue(),jobs=jobs,count=count,
+                         old=old,owner_home=owner_home,owner_before=owner_before)
+
+ def test_an_old_release_owner_home_starts_a_child_on_the_installed_release(self):
+  with tempfile.TemporaryDirectory() as td:
+   try:
+    run=self.old_release_owner_home(td)
+    self.assertEqual(run.code,0,run.receipt+run.stderr)
+    self.assertIn("child_spawned=1",run.receipt)
+    self.assertNotIn("Traceback",run.stderr)
+    self.assertNotIn("reason=codex-runtime-projection-mismatch",run.receipt)
+    row=[l for l in run.jobs.read_text().splitlines() if "att-codex-fixture-0001" in l][-1]
+    meta=DC.parse_registry_metadata(row.split("\t")[5])
+    self.assertEqual(Path(meta["launch_home"]).resolve(),ROOT.resolve())
+    child_home=Path(meta["runtime_home"])
+    self.assertNotEqual(child_home,run.owner_home)
+    self.assertEqual(Path(os.path.realpath(child_home/"hearting")),ROOT.resolve())
+    self.assertEqual(Path(json.loads((child_home/"worker-home.json").read_text())["source"]).resolve(),ROOT.resolve())
+    # The owner's home is untouched: still linked to the older release, same entries.
+    self.assertEqual((os.readlink(run.owner_home/"hearting"),sorted(p.name for p in run.owner_home.iterdir())),
+                     run.owner_before)
+    self.assertEqual(Path(os.path.realpath(run.owner_home/"hearting")),run.old.resolve())
+   finally:
+    fixture_processes.reap(td)
+
+ def test_worker_home_projection_check_still_fails_a_broken_home(self):
+  # The projection check reads a worker home's own worker-home.json source; each way that home can be
+  # really wrong must still fail, name its check, and print no traceback.
+  with tempfile.TemporaryDirectory() as td:
+   root=Path(td); repo,art=self.fixture(root); jobs=root/"jobs.log"
+   source=root/"codex-source"; source.mkdir(); (source/"auth.json").write_text("{}\n",encoding="utf-8")
+   (root/"home").mkdir()
+   wrapper=self.load_wrapper("codex")
+   env={"PATH":os.environ.get("PATH",""),"HOME":str(root/"home"),"AGENT_DISPATCH_JOBS":str(jobs),
+        "PYTHONDONTWRITEBYTECODE":"1","XDG_STATE_HOME":str(root/"state")}
+   jobs.write_text("")
+   with mock.patch.dict(os.environ,{**env,"AGENT_HOME":str(ROOT),"CODEX_HOME":str(source)},clear=True):
+    built=wrapper.prepare_nested_codex_home(repo,source,jobs=jobs,projection_root=ROOT)
+   other=root/"releases"/"vOther"; other.mkdir(parents=True)
+   for entry in ROOT.iterdir():
+    if entry.name!=".git": (other/entry.name).symlink_to(entry)
+   def check(home):
+    return subprocess.run([str(ROOT/"adapters/codex/bin/check-runtime-projection.sh")],
+     env={**env,"AGENT_HOME":str(ROOT),"CODEX_HOME":str(home),"AGENT_SESSION_ROLE":"worker",
+          "CODEX_RUNTIME_PROJECTION_FAST":"1","CODEX_RUNTIME_PROJECTION_SKIP_CLI_DISCOVERY":"1"},
+     capture_output=True,text=True,check=False)
+   self.assertEqual(check(built).returncode,0)
+   def fresh(name):
+    copy=root/name; shutil.copytree(built,copy,symlinks=True); return copy
+   def edit_meta(home,**change):
+    path=home/"worker-home.json"; data=json.loads(path.read_text()); data.update(change)
+    path.write_text(json.dumps(data))
+   broken={}
+   home=fresh("no-link"); (home/"hearting").unlink(); broken["no-link"]=(home,"check=hearting:failed")
+   # worker-home.json no longer names a usable release: the check falls back to the caller's
+   # release and the home's own record fails its profile assertion.
+   home=fresh("source-missing"); edit_meta(home,source=str(root/"does-not-exist"))
+   broken["source-missing"]=(home,"check=agents-md:failed")
+   home=fresh("other-harness"); edit_meta(home,harness="claude")
+   broken["other-harness"]=(home,"check=agents-md:failed")
+   # AGENTS.md is a link into the shared profile template: replace the link, never write through it.
+   home=fresh("agents-md"); (home/"AGENTS.md").unlink(); (home/"AGENTS.md").write_text("not the worker profile\n")
+   broken["agents-md"]=(home,"check=agents-md:failed")
+   # `source` names a real release, but the home's link points at a different real release:
+   # the relaxation is link-verified, so this still fails.
+   home=fresh("link-elsewhere"); edit_meta(home,source=str(other))
+   broken["source-is-a-real-release-link-is-another"]=(home,"check=hearting:failed")
+   for name,(home,expected) in broken.items():
+    with self.subTest(broken=name):
+     result=check(home)
+     self.assertNotEqual(result.returncode,0,result.stdout)
+     self.assertIn("status=failed",result.stdout)
+     self.assertIn(expected,result.stdout)
+     self.assertNotIn("Traceback",result.stderr)
+     self.assertNotIn("AssertionError",result.stderr)
+
  def test_nested_codex_home_foreign_worktree_uses_existing_state_scope(self):
   with tempfile.TemporaryDirectory() as td:
    root=Path(td); source=root/"source"; source.mkdir(); worktree=root/"nas"; worktree.mkdir()
@@ -1282,8 +1562,10 @@ class AdapterV11Test(unittest.TestCase):
    self.skipTest("bubblewrap is unavailable")
   base=[bwrap,"--die-with-parent","--unshare-pid","--ro-bind","/","/",
         "--proc","/proc","--dev","/dev","--tmpfs","/tmp"]
+  if ROOT.is_relative_to("/tmp"):
+   base += ["--ro-bind",str(ROOT),str(ROOT)]
   tmpdir=os.environ.get("TMPDIR","").rstrip("/")
-  if tmpdir and not tmpdir.startswith("/tmp") and os.path.isdir(tmpdir):
+  if tmpdir and tmpdir != "/tmp" and os.path.isdir(tmpdir):
    base += ["--bind",tmpdir,tmpdir]
   probe=subprocess.run([*base,"true"],text=True,capture_output=True)
   if probe.returncode:

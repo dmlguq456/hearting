@@ -16,6 +16,11 @@ import subprocess
 import sys
 import tempfile
 import time
+try:  # ends a detached child with the test that started it; no-op outside tests
+    from detached_lifetime import bind as end_with_test
+except ImportError:  # a partial tree without it (e.g. a fixture release): no record
+    def end_with_test(child):
+        return child
 
 _ID_RE = re.compile(r"batch-[0-9a-f]{32}\Z")
 _MAX_BYTES = 128 * 1024
@@ -580,6 +585,7 @@ def _spawn_observer(jobs: Path, duty_id: str, fd: int, launch, *, expected_obser
         process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL, close_fds=True, pass_fds=(fd,), start_new_session=True,
             cwd=str(jobs.parent), env=governance_environment(child_env))
+        end_with_test(process)
         if not _fd_holds_lease(fd, lease_path):
             return None
         record["observer"] = {"pid": process.pid, "pid_start": _pid_start(process.pid)}

@@ -5,11 +5,9 @@ from __future__ import annotations
 
 import argparse
 import base64
-import contextlib
 from datetime import datetime, timezone
 import hashlib
 import importlib.util
-import io
 import json
 import os
 from pathlib import Path
@@ -18,6 +16,7 @@ import stat
 import sys
 import time
 import uuid
+from collections.abc import Mapping
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "utilities")]
@@ -52,9 +51,7 @@ from dispatch_contract import (ARTIFACT_PROOF_RECEIPT,
                                observed_attempt_liveness,
                                post_exit_receipt_reason,
                                process_namespace_identity,
-                               recovery_id,
                                dispatch_state_roots,
-                               claim_recovery_retry,
                                reconcile_local_registry, resolve_agent_home,
                                resolve_dispatch_state_root,
                                resolve_parent_extinction,
@@ -66,7 +63,6 @@ from dispatch_contract import (ARTIFACT_PROOF_RECEIPT,
                                tagged_residue_receipt,
                                ROUTE_IDENTITY_METADATA_KEYS,
                                validate_attempt_metadata)  # noqa: E402
-from dispatch_continuation_budget import resolve_continuation_budget  # noqa: E402
 from owner_route_binding import (  # noqa: E402
     ROUTE as owner_route_verifier,
     OwnerRouteBinding,
@@ -130,7 +126,67 @@ def parse_meta(pipe):
     return dict(part.split("=", 1) for part in pipe.split(",") if "=" in part)
 
 
-def _row_from_fields(order, fields, *, meta=None, meta_owned=False):
+class _ReadOnlyRegistryRow(Mapping):
+    """A passive row with the same text view, without retaining joined history.
+
+    Most historical rows are classified by status and metadata alone. A single
+    non-ASCII field can widen the entire joined line, so keeping that string for
+    every row needlessly duplicates a large registry. Control readers continue
+    to receive ordinary dictionaries; passive classifiers can request this view.
+    Terminal rows need no schema judgment unless a consumer asks for it; the
+    established status value is then computed exactly, with bounded retention.
+    """
+
+    __slots__ = ("_values", "_fields", "_contract_status")
+
+    def __init__(self, values, fields):
+        self._values, self._fields = values, tuple(fields)
+        self._contract_status = None
+
+    def __getitem__(self, key):
+        if key == "raw":
+            return "\t".join(self._fields)
+        if key == "attempt_contract_status":
+            if self._contract_status is not None:
+                return self._contract_status
+            value = _row_contract_status(self._values['meta'])
+            # Account a small status slot up front; unusually large diagnostics
+            # remain exact return values without growing the retained projection.
+            if sys.getsizeof(value) <= 256:
+                self._contract_status = value
+            return value
+        return self._values[key]
+
+    def __iter__(self):
+        for key in self._values:
+            if key == "legacy_read_only":
+                yield "raw"
+            yield key
+        yield 'attempt_contract_status'
+
+    def __len__(self):
+        return len(self._values) + 2
+
+    @property
+    def _projection_storage(self):
+        # Byte accounting inspects stored objects, without materializing raw.
+        return self._values, self._fields, self._contract_status
+
+
+def _row_contract_status(meta):
+    raw_schema = meta.get('attempt_schema_version')
+    if raw_schema in (None, '', '1'):
+        return 'legacy-read-only'
+    if raw_schema != '2':
+        return 'invalid:attempt-schema-version'
+    try:
+        validate_attempt_metadata(meta)
+    except DispatchContractError as exc:
+        return f'invalid:{exc.reason}'
+    return 'current'
+
+
+def _row_from_fields(order, fields, *, meta=None, meta_owned=False, defer_raw=False):
     """Build the established row contract from an already split six-field line."""
     if len(fields) != 6:
         return None
@@ -143,20 +199,16 @@ def _row_from_fields(order, fields, *, meta=None, meta_owned=False):
         meta = dict(meta)
     raw_schema = meta.get("attempt_schema_version")
     legacy = raw_schema in (None, "", "1")
-    contract_status = (
-        "legacy-read-only" if legacy
-        else "current" if raw_schema == "2"
-        else "invalid:attempt-schema-version"
-    )
-    if contract_status == "current":
-        try:
-            validate_attempt_metadata(meta)
-        except DispatchContractError as exc:
-            contract_status = f"invalid:{exc.reason}"
-    return {"order": order, "timestamp": fields[0], "status": fields[1],
+    values = {"order": order, "timestamp": fields[0], "status": fields[1],
             "repo": fields[2], "worktree": fields[3], "slug": fields[4],
-            "pipe": fields[5], "meta": meta, "raw": "\t".join(fields),
-            "legacy_read_only": legacy, "attempt_contract_status": contract_status}
+            "pipe": fields[5], "meta": meta}
+    if not defer_raw:
+        values["raw"] = "\t".join(fields)
+    values['legacy_read_only'] = legacy
+    if defer_raw:
+        return _ReadOnlyRegistryRow(values, fields)
+    values['attempt_contract_status'] = _row_contract_status(meta)
+    return values
 
 
 def read_rows(jobs, *, lines=None):
@@ -2261,199 +2313,6 @@ def automatic_cancel_receiptless(rows, args):
     return 0
 
 
-def _close_exact_dead(rows, args):
-    """Run the join's own ``reconcile --only-exact-dead --apply`` for one attempt.
-
-    Same classification, lock-held revalidation and close as the runtime join,
-    so a row whose death is exact (for example ``dead-namespace-absent``) closes
-    the same way here. Returns whether the row closed; any failure is "not
-    closed" and leaves the receiptless path to run as before.
-    """
-
-    exact_args = argparse.Namespace(**{
-        **vars(args), "only_exact_dead": True, "apply": True, "audit": None,
-        "integration_ref": getattr(args, "integration_ref", None),
-    })
-    stream = io.StringIO()
-    try:
-        with contextlib.redirect_stdout(stream):
-            reconcile(rows, exact_args)
-        record = json.loads(stream.getvalue())
-    except (DispatchContractError, JoinContractError, OSError, ValueError):
-        return False
-    closed = bool(isinstance(record, dict) and record.get("closed"))
-    if closed:
-        # As the join does after its exact close: settle the post-exit proof now.
-        resolve_attempt_cleanup(args.jobs, args.attempt, apply=True)
-    return closed
-
-
-def recover_receiptless(rows, args):
-    """Seal and claim one recovery retry; registration and spawn stay external."""
-
-    try:
-        route = json.loads(args.route_file.read_text(encoding="utf-8"))
-        launch = route.get("launch_compatibility_tuple")
-        jobs_binding = (
-            (launch.get("jobs_path") or {}).get("path")
-            if isinstance(launch, dict)
-            else None
-        )
-    except (OSError, ValueError):
-        jobs_binding = None
-    if not isinstance(jobs_binding, str) or not jobs_binding:
-        print(json.dumps({
-            "apply": args.apply,
-            "attempted": 0,
-            "claimed": 0,
-            "spawned": 0,
-            "reason": "recovery-route-jobs-binding-missing",
-        }, sort_keys=True))
-        return 0
-    if Path(jobs_binding).resolve(strict=False) != args.jobs.resolve(strict=False):
-        print(json.dumps({
-            "apply": args.apply,
-            "attempted": 0,
-            "claimed": 0,
-            "spawned": 0,
-            "reason": "recovery-route-jobs-mismatch",
-        }, sort_keys=True))
-        return 0
-
-    selected = [row for row in rows if matches(row, args)]
-    if len(selected) != 1:
-        print(json.dumps({
-            "apply": args.apply,
-            "attempted": len(selected),
-            "claimed": 0,
-            "spawned": 0,
-            "reason": "attempt-row-not-unique",
-        }, sort_keys=True))
-        return 0
-    row = selected[0]
-    metadata = row["meta"]
-    existing_recovery = bool(
-        metadata.get("recovery_id")
-        and (
-            metadata.get("retry_ordinal") == "1"
-            or metadata.get("note") == "receipt-unavailable-retry-exhausted"
-        )
-    )
-    already_cancelled = bool(
-        row["status"] == "done"
-        and metadata.get("classifier_source") == AUTOMATIC_RECEIPTLESS_CLASSIFIER
-        and metadata.get("cancellation_receipt_digest")
-        and (
-            metadata.get("failure_class") == "cancelled"
-            or existing_recovery
-        )
-    )
-    cancellation = None
-    if (not already_cancelled and args.apply and row["status"] in OPEN
-            and row.get("attempt_contract_status") == "current"
-            and _close_exact_dead(rows, args)):
-        # An exact death closes first, exactly as the runtime join closes it.
-        # Its retry is the runtime's own replacement (SD-157, death_kind=silent);
-        # the receipt-unavailable claim below needs a cancellation receipt this
-        # row never gets, and claiming would spend the one replacement on a
-        # retry nothing launches.
-        print(json.dumps({
-            "apply": True,
-            "attempted": 1,
-            "claimed": 0,
-            "spawned": 0,
-            "reason": "exact-death-closed",
-        }, sort_keys=True))
-        return 0
-    if not already_cancelled:
-        cancellation = _automatic_receiptless_result(rows, args)
-        if not cancellation["closed"]:
-            decision = cancellation["decisions"][0]
-            print(json.dumps({
-                "apply": args.apply,
-                "attempted": 1,
-                "claimed": 0,
-                "spawned": 0,
-                "reason": decision["reason"],
-                "derived_gate": decision["derived_gate"],
-                "retry_launch": 0,
-                "cancellation": cancellation,
-            }, sort_keys=True))
-            return 0
-        rows = read_rows(args.jobs)
-        row = next(
-            item for item in rows
-            if item["meta"].get("attempt_id") == args.attempt
-        )
-        metadata = row["meta"]
-    if not args.apply:
-        print(json.dumps({
-            "apply": False,
-            "attempted": 1,
-            "claimed": 0,
-            "spawned": 0,
-            "reason": "apply-required-for-recovery-claim",
-        }, sort_keys=True))
-        return 0
-
-    source_route_id = metadata.get("route_id", "")
-    source_route_hash = metadata.get("route_hash", "")
-    node_or_group_leg = (
-        metadata.get("route_node") or metadata.get("batch_route_node") or ""
-    )
-    cancellation_digest = metadata.get("cancellation_receipt_digest", "")
-    recovery_identity = recovery_id(
-        source_route_id=source_route_id,
-        source_route_hash=source_route_hash,
-        node_or_group_leg=node_or_group_leg,
-        original_attempt_id=args.attempt,
-        cancellation_receipt_digest=cancellation_digest,
-    )
-    budget = resolve_continuation_budget(
-        route_file=args.route_file,
-        route_id=source_route_id,
-        route_hash=source_route_hash,
-        expected_cwd=row["worktree"],
-    )
-    remaining = budget.retry_slots
-    try:
-        # The recovery helper owns and rechecks the jobs.log.lock fence; this
-        # CLI must not treat its outer reads as the terminal-claim guard.
-        claim = claim_recovery_retry(
-            args.jobs,
-            recovery_id=recovery_identity,
-            source_route_id=source_route_id,
-            source_route_hash=source_route_hash,
-            node_or_group_leg=node_or_group_leg,
-            original_attempt_id=args.attempt,
-            remaining_cascade=remaining,
-        )
-    except DispatchContractError as exc:
-        print(json.dumps({
-            "apply": True,
-            "attempted": 1,
-            "claimed": 0,
-            "spawned": 0,
-            "reason": exc.reason,
-            "recovery_id": recovery_identity,
-        }, sort_keys=True))
-        return 0
-    print(json.dumps({
-        "apply": True,
-        "attempted": 1,
-        "claimed": int(claim.state == "claimed"),
-        "spawned": 0,
-        "reason": claim.reason,
-        "recovery_id": claim.recovery_id,
-        "retry_ordinal": claim.retry_ordinal,
-        "retry_attempt_id": claim.retry_attempt_id or None,
-        "start_permitted": claim.start_permitted,
-        "remaining_cascade": remaining,
-        "budget_source": budget.source,
-    }, sort_keys=True))
-    return 0
-
-
 _CASCADE_TERMINAL_CATEGORIES = {
     "terminal-handoff",
     "terminal-heartbeat",
@@ -3043,12 +2902,8 @@ def emit_orphan_status(rows, args):
     return 0
 
 
-def emit_orphan_scan(rows, args):
-    """SD-64/71: fail-open registry-wide orphan count for preflight status.
-
-    No filter is required (unlike ``reconcile``) since a status probe does
-    not know a specific route ahead of time; it only ever reads.
-    """
+def orphan_scan_rows(rows, args):
+    """SD-64/71: the orphaned conductors among ``rows`` (read-only)."""
     newest = {}
     for item in rows:
         key = fold_key(item["meta"])
@@ -3066,10 +2921,64 @@ def emit_orphan_scan(rows, args):
             boundary = resume_boundary(route_file, incomplete)
             orphans.append({"attempt_id": meta.get("attempt_id"), "route_id": route_id,
                             "slug": row["slug"], "resume_boundary": boundary or "-"})
+    return orphans
+
+
+def emit_orphan_scan(rows, args):
+    """SD-64/71: fail-open registry-wide orphan count for preflight status.
+
+    No filter is required (unlike ``reconcile``) since a status probe does
+    not know a specific route ahead of time; it only ever reads.
+    """
+    orphans = orphan_scan_rows(rows, args)
     print(f"check=ok\norphaned_conductor_jobs={len(orphans)}")
     if orphans:
         print(f"orphaned_resume_boundary={orphans[0]['resume_boundary']}")
         print(json.dumps(orphans, sort_keys=True))
+    return 0
+
+
+def emit_status_snapshot(args):
+    """Every registry fact `harness-status.sh` shows, from one read of jobs.log.
+
+    The open-row count and slugs (rows of exactly six fields with status
+    ``open``, as the former two awk passes counted), the observed-status
+    evidence, the orphan scan and the resource-run counts used to read the
+    registry five times in five processes on every OpenCode turn. One pinned
+    generation now serves all of them; each part stays fail-soft on its own,
+    as the separate commands were. Resource counts are printed with a
+    ``resource_count_`` prefix for the status script to place.
+    """
+    from dispatch_registry_cache import registry_read_scope, registry_snapshot
+    with registry_read_scope():
+        lines = registry_snapshot(args.jobs).lines
+        rows = read_rows(args.jobs, lines=lines)
+        open_slugs = [fields[4] for fields in (line.split("\t") for line in lines)
+                      if len(fields) == 6 and fields[1] == "open"]
+        print(f"headless_open_jobs={len(open_slugs)}")
+        if open_slugs:
+            print("headless_open_slugs=" + ",".join(open_slugs))
+        try:
+            evidence = observed_status_rows(rows, args)
+            print("headless_evidence=" + json.dumps(evidence, ensure_ascii=False, separators=(",", ":")))
+        except Exception:  # noqa: BLE001 - as the separate command: unknown, never a failed status
+            print("headless_evidence=unknown")
+        try:
+            orphans = orphan_scan_rows(rows, args)
+        except Exception:  # noqa: BLE001 - as the separate command: no orphan count is 0
+            orphans = []
+        print(f"orphaned_conductor_jobs={len(orphans)}")
+        if orphans:
+            print(f"orphaned_resume_boundary={orphans[0]['resume_boundary']}")
+        try:
+            # F-59 resource counts read the registry for legacy owner identity;
+            # inside this scope that is the same pinned read.
+            import resource_run_registry
+            resources = resource_run_registry.counts()
+            for key in ("working", "stale", "exited", "malformed"):
+                print(f"resource_count_{key}={resources[key]}")
+        except Exception:  # noqa: BLE001 - the status then asks resource_run_registry itself
+            pass
     return 0
 
 
@@ -3101,7 +3010,7 @@ def emit_inventory(state_root, args):
 
 
 def main(argv):
-    p = argparse.ArgumentParser(description=__doc__, allow_abbrev=False); p.add_argument("operation", choices=("current", "liveness", "observed-status", "reconcile", "attempt-state", "orphan-status", "orphan-scan", "repair-stale-row", "resolve-terminal-conflict", "archive-import", "inventory"))
+    p = argparse.ArgumentParser(description=__doc__, allow_abbrev=False); p.add_argument("operation", choices=("current", "liveness", "observed-status", "reconcile", "attempt-state", "orphan-status", "orphan-scan", "status-snapshot", "repair-stale-row", "resolve-terminal-conflict", "archive-import", "inventory"))
     p.add_argument("--jobs", type=Path); p.add_argument("--global-jobs", type=Path); p.add_argument("--local-jobs", type=Path)
     p.add_argument("--session"); p.add_argument("--route")
     p.add_argument("--node"); p.add_argument("--attempt"); p.add_argument("--job"); p.add_argument("--all", action="store_true")
@@ -3112,10 +3021,7 @@ def main(argv):
     p.add_argument("--automatic-cancel-receiptless", action="store_true")
     p.add_argument("--only-exact-dead", action="store_true",
                    help="settle only the selected attempt's exact death; never apply cleanup eligibility")
-    p.add_argument("--recover-receiptless", action="store_true",
-                   help="exact retry recovery; requires --attempt and --route-file")
     p.add_argument("--seal-artifact-proof-receipt", action="store_true")
-    p.add_argument("--route-file", type=Path)
     p.add_argument("--agent-home", type=Path); p.add_argument("--now", type=float, default=time.time(), help=argparse.SUPPRESS)
     p.add_argument("--pid", type=int); p.add_argument("--pid-start"); p.add_argument("--pid-scope")
     p.add_argument("--pid-observer-ns", help=argparse.SUPPRESS)
@@ -3130,8 +3036,7 @@ def main(argv):
         args.operation != "reconcile" or not args.attempt
         or any((args.session, args.route, args.node, args.job, args.all,
                 args.global_jobs, args.local_jobs, args.cancel_receiptless_namespace,
-                args.automatic_cancel_receiptless, args.recover_receiptless,
-                args.seal_artifact_proof_receipt))
+                args.automatic_cancel_receiptless, args.seal_artifact_proof_receipt))
     ):
         print("check=failed\nreason=exact-attempt-death-required"); return 64
     from dispatch_terminal_commit import require_current_cleanup
@@ -3215,13 +3120,14 @@ def main(argv):
                 "--expected-row-sha256", result["row_sha256"], "--apply"]) + " --review-evidence <review report>"
         print("check=ok\n" + json.dumps(result, sort_keys=True))
         return 0
+    if args.operation == "status-snapshot":
+        return emit_status_snapshot(args)
     if args.operation not in ("liveness", "orphan-scan", "observed-status") and not any((args.session, args.route, args.node, args.attempt, args.job)):
         print("check=failed\nreason=current-filter-required"); return 64
     recovery_modes = sum(bool(value) for value in (
         args.only_exact_dead,
         args.cancel_receiptless_namespace,
         args.automatic_cancel_receiptless,
-        args.recover_receiptless,
         args.seal_artifact_proof_receipt,
     ))
     if recovery_modes > 1:
@@ -3244,15 +3150,6 @@ def main(argv):
         or any((args.session, args.route, args.node, args.job, args.all))
     ):
         print("check=failed\nreason=exact-attempt-automatic-cancel-required"); return 64
-    if args.recover_receiptless and (
-        args.operation != "reconcile"
-        or not args.attempt
-        or not args.route_file
-        or any((args.session, args.route, args.node, args.job, args.all))
-    ):
-        print("check=failed\nreason=exact-attempt-recovery-required\n"
-              "required=reconcile --recover-receiptless --attempt <attempt-id> --route-file <route.json>"
-              " (no --session/--route/--node/--job/--all)"); return 64
     rows = read_rows(args.jobs)
     if args.operation == "current":
         return emit_current(rows, args)
@@ -3270,8 +3167,6 @@ def main(argv):
         return cancel_receiptless_namespace(rows, args)
     if args.automatic_cancel_receiptless:
         return automatic_cancel_receiptless(rows, args)
-    if args.recover_receiptless:
-        return recover_receiptless(rows, args)
     if args.seal_artifact_proof_receipt:
         return seal_artifact_proof_receipt(rows, args)
     return reconcile(rows, args)

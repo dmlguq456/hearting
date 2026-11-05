@@ -42,7 +42,11 @@ def _target(jobs, attempt):
         error = InputError("correction-target-not-owner")
         if meta.get("worker_type") == "frame":
             # A frame leg has no owner to receive a correction; the runtime continues the leg.
-            error.retry_when = "A frame leg is continued by the runtime; run resume_command."
+            error.retry_when = ("A frame leg is continued by the runtime; run resume_command. "
+                                "`capability-route close --route <this attempt id>` stops it alone.")
+        else:
+            error.retry_when = ("A correction reaches a route owner; `capability-route close --route "
+                                "<this attempt id>` stops this attempt alone.")
         raise error
     keys = ("attempt_id", "harness", "owner_route_id", "owner_route_hash",
             "route_id", "route_hash", "parent_sid", "supervisor_lease_nonce")
@@ -369,7 +373,9 @@ def move_parked_consumer(jobs, row, target, request_id, *, session=None, spawn=N
                 caller = route_authority.caller_identity()[1]
             except (DispatchContractError, OSError, ValueError, TypeError):
                 caller = ""
-        if not route_authority.owns(metadata, caller, jobs):
+        # Only the effective parent moves it; an unreadable lineage (unknown) moves
+        # nothing now, and the next correction looks again.
+        if route_authority.owns(metadata, caller, jobs) is not True:
             return {}
         lease_path = supervisor_lease_path(jobs, attempt)
         if metadata.get("supervisor_lease_file") != str(lease_path):
@@ -453,7 +459,16 @@ def recover_consumer(jobs, attempt, *, session=None, spawn=None):
                 caller = route_authority.caller_identity()[1]
             except (DispatchContractError, OSError, ValueError, TypeError):
                 caller = ""
-        if not route_authority.owns(metadata, caller, jobs):
+        owned = route_authority.owns(metadata, caller, jobs)
+        if owned is None:
+            # Unknown is neither the parent nor another one: nothing is restored now and
+            # the correction stays queued for the next start or correct (LOOP §4).
+            # The receipt names when to run the same command again; consumer_* keys
+            # sit beside the caller's own directive fields without replacing them.
+            wait = route_authority.lineage_unreadable_wait(metadata, jobs)
+            return _recovery_result("not-started", wait.reason, consumer_retry_when=wait.retry_when,
+                                    consumer_detail=wait.detail)
+        if not owned:
             return _recovery_result("awaiting-parent")
         if metadata.get("launch_claimed") != "1" or metadata.get("launch_started") != "1":
             return _recovery_result("not-started", "owner-launch-not-claimed")

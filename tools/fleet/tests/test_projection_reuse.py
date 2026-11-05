@@ -11,6 +11,21 @@ from tools.fleet.model import DispatchJob, Session, WorkProjection
 
 
 class ProjectionReuseBoundaryTests(unittest.TestCase):
+    def test_owner_candidates_keep_evidence_order_and_skip_unloaded_histories(self):
+        class Unloaded(dict):
+            def values(self):
+                raise AssertionError('unloaded route history was scanned')
+        owner=SimpleNamespace(session_id='sid',slug='owner')
+        evidence={'unloaded':Unloaded(),
+                  'second':{'work':{'parent':'owner'}},
+                  'first':{'work':{'parent':'sid'}},
+                  'unrelated':{'work':{'parent':'other'}}}
+        records={'first':{'route_id':'first'},'second':{'route_id':'second'},
+                 'unrelated':{'route_id':'unrelated'}}
+        result=projection._evidence_owner_candidates(owner,evidence,records)
+        self.assertEqual([rid for rid,_record,_nodes in result],['second','first'])
+        self.assertIs(result[0][1],records['second'])
+
     def test_each_tick_resolves_changed_route_evidence_artifacts_registry_and_clock(self):
         route_id = "rt-projection-test"
         route_hash = "sha256:" + "a" * 64

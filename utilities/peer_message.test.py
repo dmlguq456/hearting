@@ -20,6 +20,7 @@ import unittest
 import threading
 from unittest import mock
 from pathlib import Path
+from split_module_fixture import patch_split, set_split
 
 _HERE = Path(__file__).resolve().parent
 _SPEC = importlib.util.spec_from_file_location("peer_message", str(_HERE / "peer-message.py"))
@@ -193,6 +194,43 @@ class PeerMessageTest(_TmpRootMixin, unittest.TestCase):
         self.assertEqual(len(notices), 1)
         self.assertEqual(notices[0]["from"]["harness"], "runtime")
         self.assertEqual(notices[0]["producer_binding"], producer)
+
+    def test_runtime_completion_prompt_gets_no_memory_candidates(self):
+        recipient = {"harness": "codex", "session_id": "runtime-recipient"}
+        sender = {"harness": "runtime", "session_id": None, "name": "Hearting runtime"}
+        duty_id = "registered-batch-" + "a" * 32
+        refs = [duty_id, "att-runtime-completion", "delivery-runtime-completion"]
+        producer = {
+            "schema": peer_message._RUNTIME_PRODUCER_SCHEMA,
+            "duty_id": duty_id, "jobs": str(self.jobs_path),
+            "attempt_id": refs[1], "carrier": "codex-native-queue",
+            "delivery_id": refs[2], "receipt_digest": "b" * 64,
+            "recipient": recipient, "route_id": "rt-runtime", "route_node": "execute",
+        }
+        body = "[notice] zebrafish completion"
+        text, _ref = peer_message.prepare_peer_message(
+            body, sender, recipient, defer=True, refs=refs,
+            producer_binding=producer, receipt="native-pending")
+        root = Path(__file__).resolve().parents[1]
+        store = self.tmp_root / "mem-store"
+        store.mkdir()
+        env = dict(os.environ, MEM_STORE=str(store), AGENT_HOME=str(root),
+                   MEM_RECALL_EVENTS=str(self.tmp_root / "events.jsonl"),
+                   MEM_RECALL_RECEIPTS=str(self.tmp_root / "receipts"))
+        env.pop("AGENT_SESSION_ROLE", None)
+        subprocess.run([sys.executable, str(root / "tools/memory/mem.py"), "add", "durable",
+                        "decision", "zebrafish completion body", "--headline", "Zebrafish lead"],
+                       cwd=str(self.tmp_root), env=env, check=True, capture_output=True)
+
+        def candidates(prompt):
+            return subprocess.run(
+                ["bash", str(root / "hooks/mem-recall-inject.sh"), "--prompt", prompt,
+                 "--cwd", str(self.tmp_root), "--session-id", recipient["session_id"],
+                 "--runtime", "codex", "--format", "text"],
+                cwd=str(root), env=env, text=True, capture_output=True, check=True).stdout
+
+        self.assertIn("Zebrafish lead", candidates("zebrafish completion"))
+        self.assertEqual(candidates(text), "")
 
     def test_runtime_sender_without_a_registered_producer_binding_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "runtime-producer-binding-required"):
@@ -940,7 +978,7 @@ class UsableSessionIdTest(_TmpRootMixin, unittest.TestCase):
     """
 
     def test_real_ids_pass_through_unchanged(self):
-        for sid in ("841d1f64-0cff-4c16-8578-e874a45a2bb6", "01a064d8-e0e6-7ac2-97df-877c380ce013",
+        for sid in ("10000095-0000-4000-8000-0000000000a4", "01000009-0000-7000-8000-00000000000f",
                     "ses_7f3a19c2b0004e11", "sid-a"):
             with self.subTest(sid=sid):
                 self.assertEqual(peer_message.usable_session_id(sid), sid)
@@ -963,8 +1001,8 @@ class UsableSessionIdTest(_TmpRootMixin, unittest.TestCase):
 
     def test_trailer_parse_keeps_a_real_id(self):
         parsed = peer_message.parse_peer_trailer(
-            "body\n(peer-from: claude 841d1f64-0cff-4c16-8578-e874a45a2bb6 hearting-18)")
-        self.assertEqual(parsed["session_id"], "841d1f64-0cff-4c16-8578-e874a45a2bb6")
+            "body\n(peer-from: claude 10000095-0000-4000-8000-0000000000a4 hearting-18)")
+        self.assertEqual(parsed["session_id"], "10000095-0000-4000-8000-0000000000a4")
 
     def test_the_module_own_absent_marker_round_trips_as_absent(self):
         """`peer_trailer` writes `-` when it has no id; parsing it back must not mint one."""
@@ -3211,7 +3249,8 @@ class HandoffAcceptanceTest(_TmpRootMixin, unittest.TestCase):
         from types import SimpleNamespace
         self.runner = runner
         self.steward = runner._handoff_steward()
-        self.steward.peer_message = peer_message
+        self.addCleanup(set_split, self.steward, "peer_message", self.steward.peer_message)
+        set_split(self.steward, "peer_message", peer_message)
         self.sender = {"harness": "claude", "session_id": "predecessor", "name": "old"}
         self.recipient = {"harness": "codex", "session_id": "successor", "name": "new"}
         self.predecessor = {**self.sender, "pane": "w1:p1", "server": "default", "foreground": {"pid": 11, "start": "101"}}
@@ -3245,7 +3284,7 @@ class HandoffAcceptanceTest(_TmpRootMixin, unittest.TestCase):
             mock.patch.object(self.steward, "_retire_target", return_value=("idle", {k:v for k,v in self.successor.items() if k not in {"foreground", "server"}}, None, None)),
             mock.patch.object(self.steward, "_prompt_current_candidate", side_effect=current_candidate),
             mock.patch.object(self.steward, "_retire_foreground", return_value=self.successor["foreground"]),
-            mock.patch.object(self.steward, "_pid_identity_ok", return_value=True),
+            patch_split(self.steward, "_pid_identity_ok", return_value=True),
             mock.patch.object(self.steward.peer_obligations, "ObligationStore", return_value=self.store),
             mock.patch.object(self.steward.peer_obligations, "ensure_normal_runner"),
             mock.patch.object(self.steward, "_HERDR_SESSION", None)]
@@ -3446,7 +3485,7 @@ class HandoffAcceptanceTest(_TmpRootMixin, unittest.TestCase):
         self.assertNotIn("handoff accept", guidance)
 
         with mock.patch.object(session_tidy, "resolve_caller", return_value=self.caller), \
-             mock.patch.object(self.steward, "_pid_identity_ok", return_value=False):
+             patch_split(self.steward, "_pid_identity_ok", return_value=False):
             guidance = peer_message.receiver_guidance(self.text, self.recipient, cwd=str(self.tmp_root))
         self.assertNotIn("handoff accept", guidance)
         self.assertNotIn("acceptance", peer_message._read_pending(self.ref))
@@ -3584,9 +3623,9 @@ class HandoffAcceptanceTest(_TmpRootMixin, unittest.TestCase):
     def test_registered_parent_same_seat_holder_then_codex_acceptance_keeps_original_storage(self):
         import session_tidy
         import dispatch_seat_handover as handover
-        registered = "92144f29-855c-45ec-9256-d303a1943d04"
-        intermediate = "e3250355-411d-410f-9f19-cbd3e4b5077c"
-        successor_sid = "01a17511-79d4-7ef0-ab19-12e4163d9d6c"
+        registered = "10000099-0000-4000-8000-0000000000a8"
+        intermediate = "100000aa-0000-4000-8000-0000000000b9"
+        successor_sid = "01000057-0000-7000-8000-000000000065"
         parent_pane, successor_pane = "wX:pA", "wX:pB"
         meta = {"attempt_id": "att-sr-lineage", "dispatch_depth": "1", "worker_type": "owner",
                 "parent_sid": registered, "parent_harness": "claude",
@@ -3763,7 +3802,7 @@ class HandoffAcceptanceTest(_TmpRootMixin, unittest.TestCase):
         outputs = []
         # This case exercises native identity rejection after the executable
         # prerequisite; it must not depend on Herdr being installed on CI.
-        with mock.patch.object(self.steward, "_herdr_missing", return_value=False), \
+        with patch_split(self.steward, "_herdr_missing", return_value=False), \
              mock.patch.object(self.steward, "_prompt_current_candidate",
                                return_value=(None, "target-identity-unverified")), \
              mock.patch.object(self.steward, "_herdr_prompt") as send, \
@@ -3778,7 +3817,7 @@ class HandoffAcceptanceTest(_TmpRootMixin, unittest.TestCase):
     def test_owner_peer_and_completion_without_herdr_remain_unavailable(self):
         args = self.steward.build_parser().parse_args(["prompt", "w1:p2", "owner report body"])
         outputs = []
-        with mock.patch.object(self.steward, "_herdr_missing", return_value=True), \
+        with patch_split(self.steward, "_herdr_missing", return_value=True), \
              mock.patch.object(self.steward, "_prompt_current_candidate") as identity, \
              mock.patch.object(self.steward, "_herdr_prompt") as send, \
              mock.patch("builtins.print", side_effect=lambda *a, **_k: outputs.append(" ".join(map(str, a)))):
@@ -3839,7 +3878,7 @@ class HandoffAcceptanceTest(_TmpRootMixin, unittest.TestCase):
             print(f"prompted={outcome} reason=native-queue")
             return exit_code
         with mock.patch.object(tidy, "read_latest_card", return_value={"generation": 7, "body": "read this card"}), \
-             mock.patch.object(tidy, "state_root", return_value=self.tmp_root), \
+             patch_split(tidy, "state_root", return_value=self.tmp_root), \
              mock.patch.object(tidy, "mark_card_handed_off") as marked, \
              mock.patch.object(self.runner, "injected_executable", return_value=None), \
              mock.patch.object(self.steward, "_retire_target", side_effect=target), \
@@ -3900,7 +3939,7 @@ class HandoffAcceptanceTest(_TmpRootMixin, unittest.TestCase):
                     return 0
                 with mock.patch.object(tidy, "read_latest_card",
                                        return_value={"id": "card-startup", "body": "exact card"}), \
-                     mock.patch.object(tidy, "state_root", return_value=self.tmp_root), \
+                     patch_split(tidy, "state_root", return_value=self.tmp_root), \
                      mock.patch.object(tidy, "mark_card_handed_off"), \
                      mock.patch.object(self.runner, "injected_executable", return_value=None), \
                      mock.patch.object(self.steward, "_retire_target", side_effect=target), \
@@ -4082,7 +4121,7 @@ class HandoffAcceptanceTest(_TmpRootMixin, unittest.TestCase):
                 self.assertNotIn("acceptance", peer_message._read_pending(self.ref))
                 self.assertEqual(self.store.list(), [])
         peer_message._save_pending(original)
-        with mock.patch.object(self.steward, "_pid_identity_ok", return_value=False):
+        with patch_split(self.steward, "_pid_identity_ok", return_value=False):
             with self.assertRaisesRegex(ValueError, "lifetime-unverified"):
                 self.runner.accept_handoff(self.ref, self.caller)
         self.assertEqual(self.store.list(), [])
@@ -4109,7 +4148,7 @@ class HandoffAcceptanceTest(_TmpRootMixin, unittest.TestCase):
                         print(verdict)
                         return 5
                     with mock.patch.object(tidy, "read_latest_card", return_value={"id":"card", "body":"continue me"}), \
-                         mock.patch.object(tidy, "state_root", return_value=self.tmp_root), \
+                         patch_split(tidy, "state_root", return_value=self.tmp_root), \
                          mock.patch.object(tidy, "mark_card_handed_off") as marked, \
                          mock.patch.object(self.runner, "injected_executable", return_value=injected), \
                          mock.patch.object(self.steward, "_retire_target", side_effect=target), \
@@ -4132,7 +4171,8 @@ class SupervisedHandoffTest(_TmpRootMixin, unittest.TestCase):
         import dispatch_seat_handover as handover
         self.tidy, self.runner, self.handover = tidy, runner, handover
         self.steward = runner._handoff_steward()
-        self.steward.peer_message = peer_message
+        self.addCleanup(set_split, self.steward, "peer_message", self.steward.peer_message)
+        set_split(self.steward, "peer_message", peer_message)
         self.p_seat = tidy.session_seat(tidy._pane_seat_of("w1:p1"), "claude", "predecessor")
         tidy.record_event(self.p_seat, "claude", "predecessor", "start", source="startup",
                           cwd=str(self.tmp_root), transcript=str(self.tmp_root / "source.jsonl"))
@@ -4208,9 +4248,9 @@ class SupervisedHandoffTest(_TmpRootMixin, unittest.TestCase):
                               side_effect=lambda pane, *a, **kw:
                               dict(self.identities[pane]["foreground"])),
             mock.patch.object(self.steward, "_retire_pane_info", return_value=None),
-            mock.patch.object(self.steward, "_pid_identity_ok", return_value=True),
+            patch_split(self.steward, "_pid_identity_ok", return_value=True),
             mock.patch.object(self.steward, "_native_opencode_turn", return_value=None),
-            mock.patch.object(self.steward, "_herdr_missing", return_value=False),
+            patch_split(self.steward, "_herdr_missing", return_value=False),
             mock.patch.object(self.steward, "_current_session_identity",
                               return_value=("supervisor", "claude")),
             mock.patch.object(self.steward, "_start_request", side_effect=start_request),
@@ -4377,6 +4417,7 @@ class SupervisedHandoffTest(_TmpRootMixin, unittest.TestCase):
                          ("claude", "predecessor"))
         self.assertEqual(row["handoff"]["target"], "w1:p1")
 
+    @mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"})   # Korean card words
     def test_missing_card_with_a_transcript_seals_the_previous_conversation_line(self):
         self._register_job()
         self._advance(2)
@@ -4397,6 +4438,7 @@ class SupervisedHandoffTest(_TmpRootMixin, unittest.TestCase):
         self.assertEqual(code, 0, accepted)
         self.assertIn("retire=reserved", accepted)
 
+    @mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"})   # Korean card words
     def test_stale_card_with_a_transcript_keeps_the_old_body_and_seals_at_the_frontier(self):
         self._register_job()
         card = self._write_source_card("진행 중: 오래된 카드", prompt_seq=0)
@@ -4480,6 +4522,7 @@ class SupervisedHandoffTest(_TmpRootMixin, unittest.TestCase):
         self.assertEqual(self._pending_count(), before_pending)
         self.assertEqual(self.store.list(), before_duties)
 
+    @mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"})   # Korean card words
     def test_working_source_is_handed_over_immediately_with_the_working_line(self):
         self._register_job()
         self.states["w1:p1"] = "working"
@@ -4872,6 +4915,39 @@ class PendingLockLifetimeTest(_TmpRootMixin, unittest.TestCase):
         self.assertEqual(seen, [(holder.st_dev, holder.st_ino)])
         self.assertEqual(old_flocks, [])
         self.assertFalse(path.exists())
+
+    def test_t14_ref_lock_retries_when_its_file_is_replaced_before_flock(self):
+        # The history prune unlinks a rowless ref lock while holding it. A locker
+        # that opened the old file first must not end up holding that unlinked
+        # inode while the next opener locks the new file at the same path.
+        key = "d" * 32
+        path = self.lock_path(key)
+        path.touch(mode=0o600)
+        real_flock = fcntl.flock
+        key_flocks, replaced = [], []
+
+        def replace_before_first_flock(fd, operation):
+            info = os.fstat(fd)
+            if stat.S_ISREG(info.st_mode) and operation & fcntl.LOCK_EX:
+                key_flocks.append(info.st_ino)
+                if not replaced:
+                    path.unlink()
+                    path.touch(mode=0o600)
+                    replaced.append(path.stat().st_ino)
+            return real_flock(fd, operation)
+
+        with mock.patch.object(fcntl, "flock", side_effect=replace_before_first_flock):
+            with peer_message.pending_lock(key):
+                other = os.open(path, os.O_RDWR)
+                try:
+                    with self.assertRaises(BlockingIOError):
+                        real_flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                finally:
+                    os.close(other)
+        self.assertEqual(len(replaced), 1)
+        self.assertEqual(len(key_flocks), 2)
+        self.assertEqual(key_flocks[1], replaced[0])
+        self.assertTrue(path.is_file())
 
     def test_t12_short_mixed_multiprocess_old_and_new_writers(self):
         import multiprocessing

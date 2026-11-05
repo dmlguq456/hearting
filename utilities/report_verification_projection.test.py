@@ -26,6 +26,7 @@ import dispatch_batch_obligations  # noqa: E402
 import peer_obligations  # noqa: E402
 import route_identity  # noqa: E402
 import route_lineage  # noqa: E402
+from split_module_fixture import patch_split  # noqa: E402
 
 REAL_EVIDENCE = dispatch_contract.evidence_currency
 REAL_GATE = dispatch_contract.gate_currency
@@ -63,7 +64,7 @@ class ProjectionFixture(unittest.TestCase):
             absent = projection.project_report(self.source, artifact_root=self.root)
             self.assertIsNone(projection.report_detail_payload(absent))
     def test_route_without_report_keeps_absence_and_real_hash_mismatch(self):
-        with mock.patch.object(artifact_producer, "route_cycle_for",
+        with patch_split(artifact_producer, "route_cycle_for",
                                return_value={"cycle_id": CYCLE_ID}):
             # Use an admitted cycle with no report stage and no report directory.
             self.route["nodes"] = [{"id": "full-run", "outputs": []}]
@@ -75,7 +76,7 @@ class ProjectionFixture(unittest.TestCase):
             self.assertEqual(wrong["verification"]["reason"], "route-hash-binding-mismatch")
 
     def test_existing_invalid_report_source_is_visible(self):
-        with mock.patch.object(artifact_producer, "route_cycle_for",
+        with patch_split(artifact_producer, "route_cycle_for",
                                return_value={"cycle_id": CYCLE_ID}):
             self.source.rename(self.source.with_name("report-original"))
             self.source.write_text("invalid report directory", encoding="utf-8")
@@ -84,7 +85,7 @@ class ProjectionFixture(unittest.TestCase):
             self.assertIs(projection.report_detail_payload(payload), payload)
 
     def test_route_keeps_other_unresolved_reasons_and_checks_bound_subject_hash(self):
-        with mock.patch.object(artifact_producer, "route_cycle_for",
+        with patch_split(artifact_producer, "route_cycle_for",
                                return_value={"cycle_id": CYCLE_ID}):
             for payload, reason in ((projection._unresolved("artifact-revision-stale"),
                                      "artifact-revision-stale"),
@@ -184,13 +185,13 @@ class ProjectionFixture(unittest.TestCase):
                                               return_value=SimpleNamespace(ok=True)))
         stack.enter_context(mock.patch.object(artifact_manifest, "manifest_digest",
                                               return_value="sha256:" + "0" * 64))
-        stack.enter_context(mock.patch.object(artifact_lifecycle, "canonical_route_path",
+        stack.enter_context(patch_split(artifact_lifecycle, "canonical_route_path",
                                               return_value=self.route_path))
         stack.enter_context(mock.patch.object(
             artifact_lifecycle, "bind_existing_runtime_route",
             side_effect=lambda *_a, **_kw: (object(), self.route)))
-        stack.enter_context(mock.patch.object(route_identity, "route_hash", return_value=ROUTE_HASH))
-        stack.enter_context(mock.patch.object(route_lineage, "verified_route_lineage", return_value=[self.route]))
+        stack.enter_context(patch_split(route_identity, "route_hash", return_value=ROUTE_HASH))
+        stack.enter_context(patch_split(route_lineage, "verified_route_lineage", return_value=[self.route]))
         stack.enter_context(mock.patch.object(artifact_lifecycle, "read_manifest_snapshots", return_value=[]))
         stack.enter_context(mock.patch.object(
             artifact_lifecycle, "evaluate_cycle_completion",
@@ -199,11 +200,11 @@ class ProjectionFixture(unittest.TestCase):
         stack.enter_context(mock.patch.object(
             artifact_lifecycle, "_load_capability_route",
             return_value=SimpleNamespace(completion_dir=lambda _rid, jobs=None: self.marker_dir)))
-        stack.enter_context(mock.patch.object(
+        stack.enter_context(patch_split(
             dispatch_contract, "evidence_currency", return_value=SimpleNamespace(state="current")))
-        stack.enter_context(mock.patch.object(
+        stack.enter_context(patch_split(
             dispatch_contract, "gate_currency", return_value=SimpleNamespace(state="current")))
-        stack.enter_context(mock.patch.object(
+        stack.enter_context(patch_split(
             dispatch_contract, "completion_attempt_readiness",
             return_value=SimpleNamespace(state="ready")))
 
@@ -443,8 +444,8 @@ class ClosedFindingTests(ProjectionFixture):
         (self.marker_dir / f"{leg}.{marker['attempt_id']}.attempt.json").write_bytes(encoded(link))
         self.save_marker(leg, marker)
         self.addCleanup(mock.patch.stopall)
-        mock.patch.object(dispatch_contract, "evidence_currency", REAL_EVIDENCE).start()
-        mock.patch.object(dispatch_contract, "gate_currency", REAL_GATE).start()
+        patch_split(dispatch_contract, "evidence_currency", REAL_EVIDENCE).start()
+        patch_split(dispatch_contract, "gate_currency", REAL_GATE).start()
         return node, marker_path, marker
 
     def save_marker(self, leg, marker):
@@ -495,7 +496,7 @@ class ClosedFindingTests(ProjectionFixture):
         result = REAL_READINESS(self.route, node, marker, self.jobs,
                                 registry_lines=lines, observe=True)
         self.assertEqual(result.reason, "attempt-route-hash-mismatch")
-        with mock.patch.object(dispatch_contract, "completion_attempt_readiness", REAL_READINESS):
+        with patch_split(dispatch_contract, "completion_attempt_readiness", REAL_READINESS):
             self.jobs.write_text(lines[0] + "\n")
             self.assertEqual(self.payload()["verification"]["verdict"], "unresolved")
 
@@ -511,8 +512,8 @@ class ClosedFindingTests(ProjectionFixture):
         self.document["routes"][0]["route_hash"] = self.route["route_hash"]
         self.route_path.write_bytes(encoded(self.route))
         (self.cycle / "manifest.json").write_bytes(encoded(self.document))
-        with mock.patch.object(
-                route_identity, "route_hash", REAL_ROUTE_HASH), mock.patch.object(
+        with patch_split(
+                route_identity, "route_hash", REAL_ROUTE_HASH), patch_split(
                 route_lineage, "verified_route_lineage", REAL_LINEAGE):
             self.assertEqual(len(REAL_LINEAGE(self.route)), 2)
             with self.assertRaises(route_lineage.RouteLineageError):

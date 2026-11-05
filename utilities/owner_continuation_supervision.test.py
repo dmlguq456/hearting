@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import dispatch_completion_join as J
 import owner_route_binding as O
 import session_supervisor_decisions as D
+from split_module_fixture import patch_split
 
 spec = importlib.util.spec_from_file_location("orphan_watch", Path(__file__).with_name("dispatch-orphan-watch.py"))
 W = importlib.util.module_from_spec(spec)
@@ -33,7 +34,7 @@ class ContinuationSupervisionTest(unittest.TestCase):
         self.log = self.root / "owner.jsonl"
         self.log.write_text(json.dumps({"type": "result", "subtype": "success", "is_error": False,
                                        "result": "Review is running.\nruntime_wait: registered-children"}) + "\n")
-        self.verify = mock.patch.object(O.ROUTE, "verify_route", side_effect=lambda value, **kw: value)
+        self.verify = patch_split(O.ROUTE, "verify_route", side_effect=lambda value, **kw: value)
         self.verify.start()
         self.addCleanup(self.verify.stop)
         self.proof = mock.patch.object(W, "observed_owner_lifecycle", return_value=(

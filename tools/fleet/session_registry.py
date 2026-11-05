@@ -32,6 +32,8 @@ import os
 import re
 import stat
 import tempfile
+import threading
+from collections import OrderedDict
 
 HARNESSES = ("claude", "codex", "opencode")
 FIELDS = ("pid", "sessionId", "cwd", "startedAt", "procStart", "version", "kind",
@@ -52,6 +54,41 @@ ALIAS_SUPPORT = {"claude": "proc-argv",
                  "opencode": "not-implemented"}
 
 _MAX_BYTES = 64 * 1024
+
+
+class PassiveReadCache:
+    """Validated metadata for passive display readers; process truth is separate."""
+    def __init__(self):
+        self.entries = OrderedDict()
+        self.bytes = 0
+        self.lock = threading.RLock()
+
+    def get(self, path, generation):
+        with self.lock:
+            held = self.entries.get(path)
+            if held is not None and held[0] == generation:
+                self.entries.move_to_end(path)
+                return dict(held[2])
+        return None
+
+    def put(self, path, generation, size, record):
+        if not all(value is None or isinstance(value, (str, int, float, bool))
+                   for value in record.values()):
+            return
+        with self.lock:
+            old = self.entries.pop(path, None)
+            if old is not None:
+                self.bytes -= old[1]
+            self.entries[path] = (generation, size, dict(record))
+            self.bytes += size
+            while len(self.entries) > 2048 or self.bytes > 16 * 1024 * 1024:
+                _key, old = self.entries.popitem(last=False)
+                self.bytes -= old[1]
+
+
+def _read_generation(info):
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_size,
+            info.st_mtime_ns, info.st_ctime_ns, json.load)
 
 
 class RegistryWriteUnsupported(RuntimeError):
@@ -161,7 +198,7 @@ def registry_path(harness, pid, *, home=None):
     return os.path.join(_dir_for(harness, home=home), "%d.json" % int(pid))
 
 
-def read(harness, pid, *, home=None):
+def read(harness, pid, *, home=None, validation_cache=None):
     """dict with every FIELDS key present (absent → None), or None on any failure."""
     _check_harness(harness)
     path = registry_path(harness, pid, home=home)
@@ -171,6 +208,12 @@ def read(harness, pid, *, home=None):
             return None
         if metadata.st_size > _MAX_BYTES:
             return None
+        generation = _read_generation(metadata)
+        if validation_cache is not None:
+            held = validation_cache.get(path, generation)
+            if held is not None:
+                held['harness'] = harness  # a shared/aliased directory still declares its caller's harness
+                return held
         with open(path, encoding="utf-8") as handle:
             payload = json.load(handle)
     except Exception:
@@ -179,6 +222,12 @@ def read(harness, pid, *, home=None):
         return None
     record = {field: payload.get(field) for field in FIELDS}
     record["harness"] = harness   # directory-declared identity wins over file content
+    if validation_cache is not None:
+        try:
+            if generation == _read_generation(os.lstat(path)):
+                validation_cache.put(path, generation, metadata.st_size, record)
+        except OSError:
+            pass
     return record
 
 

@@ -13,9 +13,10 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[3]
 PREFLIGHT = ROOT / "adapters" / "codex" / "bin" / "preflight.sh"
-LOCAL_EVIDENCE_HOOK = ROOT / "hooks" / "local-evidence-inject.sh"
 MEM_PY = ROOT / "tools" / "memory" / "mem.py"
-SESSION_TIDY = ROOT / "utilities" / "session_tidy.py"
+UTILITIES = ROOT / "utilities"
+if str(UTILITIES) not in sys.path:
+    sys.path.insert(0, str(UTILITIES))
 
 
 def first_string(mapping: dict[str, Any], *keys: str) -> str:
@@ -76,28 +77,6 @@ def run_preflight(*args: str) -> str:
     return result.stdout
 
 
-def local_evidence_context(current_cwd: str) -> str:
-    """Run the bounded local-evidence presence probe; every failure is zero context.
-
-    Session start rather than prompt submit: the block is byte-identical between
-    prompts, and this event also fires on resume/clear/compact, which is the only
-    thing a per-prompt repeat was buying. The probe holds its own wall-clock
-    budget, so this timeout is a backstop, not the fence.
-    """
-    command = [str(LOCAL_EVIDENCE_HOOK), "--cwd", current_cwd, "--format", "text"]
-    env = os.environ.copy()
-    env["AGENT_HOME"] = str(ROOT)
-    try:
-        result = subprocess.run(
-            command, cwd=str(ROOT), env=env, text=True,
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            timeout=5, check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return ""
-    return result.stdout if result.returncode == 0 else ""
-
-
 def forget_shown_candidates(payload: dict[str, Any]) -> None:
     """After compact or clear the model no longer holds what memory showed it.
 
@@ -116,43 +95,6 @@ def forget_shown_candidates(payload: dict[str, Any]) -> None:
         )
     except (OSError, subprocess.SubprocessError):
         pass
-
-
-def card_context(payload: dict[str, Any], current_cwd: str) -> tuple[str, str, Any]:
-    """Session card / tidy notice due at this start; independent of the memory opt-in.
-
-    JSON mode hands back the consumption receipts instead of writing them, so
-    they are committed only after this bridge's final output exists.
-    """
-    sid = session_id(payload)
-    if not sid or not SESSION_TIDY.is_file():
-        return "", "", None
-    command = [sys.executable, str(SESSION_TIDY), "hook", "--harness", "codex",
-               "--event", "start", "--session-id", sid, "--cwd", current_cwd, "--format", "json"]
-    source = nested_string(payload, "source")
-    if source:
-        command += ["--source", source]
-    transcript = nested_string(payload, "transcript_path", "transcriptPath")
-    if transcript:
-        command += ["--transcript", transcript]
-    try:
-        result = subprocess.run(
-            command, cwd=str(ROOT), env=os.environ.copy(), text=True,
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=4, check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return "", "", None
-    if result.returncode:
-        return "", "", None
-    try:
-        payload = json.loads(result.stdout or "{}")
-    except ValueError:
-        return "", "", None
-    if not isinstance(payload, dict):
-        return "", "", None
-    return (str(payload.get("additionalContext") or ""),
-            str(payload.get("humanNotice") or ""),
-            payload.get("deferredConsumed"))
 
 
 def env_truthy(name: str) -> bool:
@@ -208,44 +150,25 @@ def main() -> int:
             pass
 
     parts = []
-    human_notice = ""
-    card_deferred = None
     try:
         if not worker:
             forget_shown_candidates(payload)
-            card, human_notice, card_deferred = card_context(payload, current_cwd)
-            parts.append(card)
-            try:
-                utilities = ROOT / "utilities"
-                if str(utilities) not in sys.path:
-                    sys.path.insert(0, str(utilities))
-                from dispatch_contract import dispatch_state_roots, resolve_agent_home
-                from dispatch_session_sweep import activate, delivery_context
-                from dispatch_notice_state import NoticeReadContext
-                notice_context = NoticeReadContext()
-                if sid:
-                    batches = [(root, activate(root, "codex-native-queue", sid,
-                                                request_recovery=False, notice_context=notice_context))
-                               for root in dict.fromkeys(dispatch_state_roots(resolve_agent_home()))
-                               if root.is_dir()]
-                    parts.append(delivery_context(batches))
-            except Exception:
-                pass
-            if env_truthy("CODEX_SESSION_MEMORY_INJECT"):
-                parts.append(run_preflight("memory", current_cwd))
-            parts.append(local_evidence_context(current_cwd))
-    finally:
-        try:
-            emit_context("SessionStart", parts, human_notice)
-            if card_deferred:
+            if sid:
                 try:
                     import session_tidy
-                    session_tidy.apply_deferred(card_deferred)
+                    session_tidy.run_hook("codex", "start", sid,
+                        source=nested_string(payload, "source"),
+                        transcript=nested_string(payload, "transcript_path", "transcriptPath"),
+                        cwd=current_cwd, render_context=False)
                 except Exception:
                     pass
-        finally:
-            if not worker:
-                request_lifecycle_recovery()
+            # This independent, opt-in profile injection has no prompt duplicate.
+            if env_truthy("CODEX_SESSION_MEMORY_INJECT"):
+                parts.append(run_preflight("memory", current_cwd))
+        emit_context("SessionStart", parts)
+    finally:
+        if not worker:
+            request_lifecycle_recovery()
     return 0
 
 

@@ -20,6 +20,7 @@ P = importlib.util.module_from_spec(spec); spec.loader.exec_module(P)
 sys.path.insert(0, str(ROOT / "utilities"))
 import dispatch_contract as D  # noqa: E402
 from tools.fleet import model
+from split_module_fixture import patch_split  # noqa: E402
 
 
 class ProgressTest(unittest.TestCase):
@@ -100,7 +101,7 @@ class ProgressTest(unittest.TestCase):
         from claude_project_dir import encode_project_dir
         cwd = self.base / "owner-worktree"; cwd.mkdir()
         runtime_home = self.base / "worker-home"
-        session = "085a89c5-3951-4b87-a9c2-c98cd6e97616"
+        session = "10000064-0000-4000-8000-000000000072"
         receipt = self.base / "owner.claude.jsonl"
         receipt.write_text("".join(json.dumps(row) + "\n" for row in (
             {"type": "dispatch.supervisor.session", "parent_attempt_id": self.attempt,
@@ -463,8 +464,8 @@ class ProgressTest(unittest.TestCase):
             f"pid=7,pid_start=1,pgid=7,pid_scope=namespace-local,"
             "pid_ns=pid:[inner],pid_observer_ns=pid:[outer],")
         self.jobs.write_text(text)
-        with mock.patch.object(P, "authoritative_process_identities", return_value=()), \
-             mock.patch.object(P, "attempt_tagged_descendants",
+        with patch_split(P, "authoritative_process_identities", return_value=()), \
+             patch_split(P, "attempt_tagged_descendants",
                                return_value=SimpleNamespace(state="populated")):
             verdict = P.inspect(self.args(), 99000.0)
         self.assertEqual((verdict["state"], verdict["source"]),

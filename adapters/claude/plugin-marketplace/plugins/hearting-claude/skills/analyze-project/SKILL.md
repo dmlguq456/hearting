@@ -2,6 +2,7 @@
 # GENERATED METADATA — edit harness-manifest.json, then run tools/generate.py.
 description: "Use when the user asks to analyze existing code, a paper, or a document and no usable persistent analysis exists, or to refresh stale analysis; default initial analysis to persistent output. Owns analysis; default preset. Not for conversational, read-only, or no-file analysis; orientation, context recovery, status, experiments, external research, source changes, or completed-work audits."
 argument-hint: "[--mode code|paper|doc] [<scope/target/input-folder>] [--skip-qa]"
+disable-model-invocation: true
 metadata:
   group: pre
   fam: pre
@@ -27,9 +28,9 @@ before approval.
 
 ## Post-approval owner contract
 
-After approval, direct/quick sessions and the `standard+` dispatch-depth-1 owner load
-`capabilities/analyze-project.md`, then use the Reference Index below. Assigned
-stage workers load only their assigned stage contracts.
+Main session only: after approval, read `capabilities/analyze-project.md`. Registered owners read only `capabilities/analyze-project/references/owner-execution.md`; stage workers read only their assigned contracts.
+The other entry-router steps apply to the main session. A registered owner uses
+only its Route steps and the latest receipt for runtime commands.
 
 ## Reference Index
 

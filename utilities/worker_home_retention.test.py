@@ -29,6 +29,7 @@ import dispatch_completion_join as JOIN  # noqa: E402
 import session_notice as NOTICE  # noqa: E402
 from route_identity import route_hash  # noqa: E402
 from worker_runtime_home import _builder  # noqa: E402
+from split_module_fixture import patch_split  # noqa: E402
 
 RETENTION_NS = R.IDLE_SECONDS * 10**9
 SOURCE = str(ROOT)
@@ -629,6 +630,66 @@ class Fixture(unittest.TestCase):
 
         with mock.patch.object(R, "_registry_lock", lock), mock.patch.object(R, "_detach", detach):
             yield fired
+
+
+class HomeReferenceRelevanceReuseTest(Fixture):
+    """HL-11: a Codex prompt that attached N completion notices asked this 4N
+    times (claim, submission fence, send, ACK), and an attempt outside the
+    registry tail re-read every worker HOME manifest each time (2,277 live).
+    Counted reads; a fake settle margin instead of waiting."""
+
+    def setUp(self):
+        super().setUp()
+        for name in ("_REFERENCE_TAILS", "_REFERENCE_HOMES"):
+            cache = getattr(R, name, None)
+            if cache is not None:
+                self.enterContext(mock.patch.dict(cache, clear=True))
+        # Every listing here counts as older than one timestamp tick.
+        self.enterContext(mock.patch.object(R, "_REFERENCE_SETTLED_NS", -(10 ** 18), create=True))
+
+    def _home(self, attempt, worker_type="stage"):
+        home = self.home_path(attempt, worker_type=worker_type)
+        home.mkdir(mode=0o700)
+        (home / "worker-home.json").write_text(json.dumps(
+            {"schema": 1, "source": SOURCE, "harness": "claude", "worker_type": worker_type}))
+        return home
+
+    def _ask(self, *attempt_sets):
+        reads = []
+        real = R._read_json
+
+        def counted(path, *args, **kwargs):
+            if path == "worker-home.json":
+                reads.append(path)
+            return real(path, *args, **kwargs)
+
+        with mock.patch.object(R, "_read_json", side_effect=counted):
+            answers = [R.home_reference_relevant(self.root, attempts) for attempts in attempt_sets]
+        return answers, len(reads)
+
+    def test_one_home_listing_serves_every_question_while_the_directory_is_unchanged(self):
+        for index in range(20):
+            self._home(f"att-{index:032x}")
+        asked = [[f"att-{0xfeed00 + notice:032x}"] for notice in range(4) for _lock in range(4)]
+        answers, reads = self._ask(*asked)
+        self.assertEqual(answers, [False] * 16)
+        # Base: 16 questions x 20 manifests.
+        self.assertEqual(reads, 20)
+
+    def test_a_new_home_or_a_new_registry_row_is_seen_by_the_next_question(self):
+        known = "att-" + "a" * 32
+        later = "att-" + "b" * 32
+        self._home(known)
+        self.assertEqual(self._ask([known], [later]), ([True, False], 1))
+        self._home(later)  # the directory changed: listed again
+        self.assertEqual(self._ask([later]), ([True], 2))
+        self.row(later)  # registered in the tail: no HOME question at all
+        self.assertEqual(self._ask([later], [later]), ([False, False], 0))
+
+    def test_a_listing_taken_right_after_a_change_is_not_kept(self):
+        self._home("att-" + "c" * 32)
+        with mock.patch.object(R, "_REFERENCE_SETTLED_NS", 10 ** 15, create=True):
+            self.assertEqual(self._ask(["att-" + "d" * 32], ["att-" + "d" * 32])[1], 2)
 
 
 class Expiry(Fixture):
@@ -2094,7 +2155,7 @@ class Liveness(Fixture):
         state.update(pid=4242, proc_start="1", observer_namespace=foreign)
         state_path.write_text(json.dumps(state))
         self.assertTrue(owner_lock.is_file())
-        with mock.patch.object(DC, "_current_observer_is_host_like", return_value=False):
+        with patch_split(DC, "_current_observer_is_host_like", return_value=False):
             result = self.expire()
         self.assertEqual(result["removed"], 1)
         self.assertFalse(home.exists())
@@ -2108,7 +2169,7 @@ class Liveness(Fixture):
     def test_exact_free_summary_locks_allow_home_retirement(self):
         home = self.add("att-summary-free")
         self.attach_summary_owner("att-summary-free", home)
-        with mock.patch.object(DC, "_current_observer_is_host_like", return_value=True):
+        with patch_split(DC, "_current_observer_is_host_like", return_value=True):
             self.assertEqual(self.expire()["removed"], 1)
         self.assertFalse(home.exists())
 
@@ -2189,7 +2250,7 @@ class Liveness(Fixture):
                 return DC.ProcessQuiescence("live", "attempt-descendant-live")
             return DC.ProcessQuiescence("unverifiable", "process-namespace-unverifiable")
 
-        with mock.patch.object(DC, "attempt_process_quiescence", fake):
+        with patch_split(DC, "attempt_process_quiescence", fake):
             result = self.expire()
         self.assertEqual(self.kept(result, "not-quiescent"), 1)
         self.assertEqual(self.unknown(result, "quiescence-unverifiable"), 1)
@@ -2204,7 +2265,7 @@ class Liveness(Fixture):
         observed = DC.attempt_process_quiescence(self.rows["att-q3"][1], terminal_receipt=True)
         # Use one real host observation for both passes; unrelated /proc changes
         # between them must not turn this into a timing-dependent assertion.
-        with mock.patch.object(DC, "attempt_process_quiescence", return_value=observed):
+        with patch_split(DC, "attempt_process_quiescence", return_value=observed):
             self.sweep(0)
             result = self.sweep((8) / 7)
         if observed.state == "quiescent":
@@ -2220,7 +2281,7 @@ class Liveness(Fixture):
 
 class Races(Fixture):
     def _optional_sweep(self, days):
-        with mock.patch.object(DC, "_current_observer_is_host_like", return_value=True), \
+        with patch_split(DC, "_current_observer_is_host_like", return_value=True), \
                 mock.patch.object(R._Context, "home_process_evidence",
                                   return_value=("absent", "fixture-process-scan-complete")):
             return self.sweep(days)
@@ -2835,7 +2896,7 @@ class Races(Fixture):
             return real(meta, terminal_receipt=terminal_receipt)
 
         with mock.patch.object(R, "_registry_lock", lock), \
-                mock.patch.object(DC, "attempt_process_quiescence", probe):
+                patch_split(DC, "attempt_process_quiescence", probe):
             self.assertEqual(self.sweep(8 / 7)["removed"], 1)
         self.assertTrue(calls)
         self.assertNotIn(True, calls)
@@ -3673,7 +3734,7 @@ class Orphans(Fixture):
             attempt = f"att-orphan-{index}"
             homes.append(self.add(attempt, harness=harness))
             self._remove_registry_rows(attempt)
-        with mock.patch.object(DC, "_current_observer_is_host_like", return_value=True), \
+        with patch_split(DC, "_current_observer_is_host_like", return_value=True), \
                 mock.patch.object(R._Context, "home_process_evidence",
                                   return_value=("absent", "fixture-process-scan-complete")):
             result = self.expire()
@@ -3737,7 +3798,7 @@ class Orphans(Fixture):
             # and the children just launched. Enumerate that complete cohort, then
             # let the production scanner read each process's real env/cwd/fds.
             with self.process_inventory(os.getpid(), *(child.pid for child in children)), \
-                    mock.patch.object(DC, "_current_observer_is_host_like", return_value=True), \
+                    patch_split(DC, "_current_observer_is_host_like", return_value=True), \
                     mock.patch.object(R._Context, "home_process_evidence", process_evidence):
                 first = self.sweep(0)
                 self.assertEqual(first["eligible"], 3, first)
@@ -3768,7 +3829,7 @@ class Orphans(Fixture):
     def test_unmapped_legacy_unreadable_process_metadata_stays_unknown_with_actual_cause(self):
         home = self.add_unmapped_legacy("att-unmapped-unreadable-process")
         with self.process_inventory(os.getpid(), unreadable_environ=(os.getpid(),)), \
-                mock.patch.object(DC, "_current_observer_is_host_like", return_value=True):
+                patch_split(DC, "_current_observer_is_host_like", return_value=True):
             result = self.expire()
 
         self.assertTrue(home.is_dir())
@@ -3784,7 +3845,7 @@ class Orphans(Fixture):
         old = self.now - int(9 / 7 * RETENTION_NS)
         for home in (reader, other):
             os.utime(home, ns=(old, old))
-        with mock.patch.object(DC, "_current_observer_is_host_like", return_value=True), \
+        with patch_split(DC, "_current_observer_is_host_like", return_value=True), \
                 mock.patch.object(R._Context, "home_process_evidence",
                                   return_value=("absent", "fixture-process-scan-complete")):
             with R.worker_home_read_admission(
@@ -3807,7 +3868,7 @@ class Orphans(Fixture):
         os.utime(home, ns=(old, old))
         transcript = home / "projects" / "transcript.jsonl"
 
-        with mock.patch.object(DC, "_current_observer_is_host_like", return_value=True), \
+        with patch_split(DC, "_current_observer_is_host_like", return_value=True), \
                 mock.patch.object(R._Context, "home_process_evidence",
                                   return_value=("absent", "fixture-process-scan-complete")):
             with R.worker_home_read_admission(
@@ -3819,7 +3880,7 @@ class Orphans(Fixture):
         self.assertEqual(self.kept(result, "protected:home-reader-active"), 1, result)
         self.assertTrue(home.is_dir())
 
-        with mock.patch.object(DC, "_current_observer_is_host_like", return_value=True), \
+        with patch_split(DC, "_current_observer_is_host_like", return_value=True), \
                 mock.patch.object(R._Context, "home_process_evidence",
                                   return_value=("absent", "fixture-process-scan-complete")):
             # A live reader restarts the eligibility clock; detach wins only
@@ -3838,7 +3899,7 @@ class Orphans(Fixture):
         group = self.root / "pending-delivery" / ("d" * 64)
         record = group / ("delivery-" + "e" * 32 + ".json")
         self.delivery_record(record, attempt, state="acked")
-        with mock.patch.object(DC, "_current_observer_is_host_like", return_value=True), \
+        with patch_split(DC, "_current_observer_is_host_like", return_value=True), \
                 mock.patch.object(R._Context, "home_process_evidence",
                                   return_value=("absent", "fixture-process-scan-complete")):
             result = self.expire()
@@ -3864,7 +3925,7 @@ class Orphans(Fixture):
         fd = os.open(lease, os.O_RDWR)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)
-            with mock.patch.object(DC, "_current_observer_is_host_like", return_value=True):
+            with patch_split(DC, "_current_observer_is_host_like", return_value=True):
                 result = self.expire()
             self.assertEqual(self.kept(result, "delivery-open"), 1)
             self.assertEqual(self.kept(result, "lease-held"), 1)
@@ -3891,7 +3952,7 @@ class Orphans(Fixture):
                     [sys.executable, "-c", "import time; time.sleep(30)"], pass_fds=(fd,)))
             finally:
                 os.close(fd)
-            with mock.patch.object(DC, "_current_observer_is_host_like", return_value=True):
+            with patch_split(DC, "_current_observer_is_host_like", return_value=True):
                 result = self.expire()
             self.assertEqual(self.kept(result, "not-quiescent"), 3)
             self.assertTrue(all(home.is_dir() for home in homes))
@@ -3925,7 +3986,7 @@ class Orphans(Fixture):
             return realpath(path, *args, **kwargs)
 
         try:
-            with mock.patch.object(DC, "_current_observer_is_host_like", return_value=True), \
+            with patch_split(DC, "_current_observer_is_host_like", return_value=True), \
                     mock.patch.object(os.path, "realpath", counted):
                 result = self.sweep(0)
             # The symlinked HOME is still found, the link is resolved once for three
@@ -4019,7 +4080,7 @@ class Mapping(Fixture):
         # Model a complete bounded inventory whose observer cannot establish
         # namespace visibility. The production path supplies the real cause.
         with self.process_inventory(os.getpid()), \
-                mock.patch.object(DC, "_current_observer_is_host_like", return_value=False):
+                patch_split(DC, "_current_observer_is_host_like", return_value=False):
             result = self.expire()
         for path in (destination, unmapped, broken, oversized, linked):
             self.assertTrue(path.is_dir())
@@ -4185,9 +4246,44 @@ class Bounds(Fixture):
                     homes = [fixture.add(f"att-scale-{kind}-{n}") for n in range(3)]
                     fixture.sweep(0)
                     discovery, preparation, dependencies, holds = [], [], [], []
+                    held_dependencies, under_lock = [], []
+                    active = [False]
                     original_index, original_detach = R._delivery_index, R._detach
                     original_fresh, original_lock = R._fresh, R._registry_lock
+                    # The hold is bounded by what runs under jobs.log.lock, not by a
+                    # clock (0.25 s flaked at 0.398 s on a loaded runner): no pass that
+                    # prepares or discovers history runs while it is held, the
+                    # candidate's own rechecks there name a bounded set, and the final
+                    # admission takes at most one stat-capped look at the recipient
+                    # groups per hold.
+                    history_passes = {name: getattr(R, name) for name in (
+                        "_Snapshot", "_declared_index", "_candidate_recipient_groups",
+                        "_late_delivery_change", "_prepare_candidate_delivery_baseline")}
+                    held_related, held_looks = [], []
+                    def outside(name, fn):
+                        def checked(*args, **kwargs):
+                            if active[0]:
+                                under_lock.append(name)
+                            return fn(*args, **kwargs)
+                        return checked
+                    original_fingerprint = R._reference_fingerprint
+                    original_group_change = R._late_candidate_group_change
+                    def fingerprint(root, identities, **kwargs):
+                        if active[0]:
+                            held_related.append(len(identities))
+                        return original_fingerprint(root, identities, **kwargs)
+                    def group_change(baseline, related, *args, **kwargs):
+                        if active[0]:
+                            held_related.append(len(related))
+                        return original_group_change(baseline, related, *args, **kwargs)
+                    original_scan = R._scan_published
+                    def scan(*args, stat_limit=None, **kwargs):
+                        if active[0]:
+                            held_looks[-1].append(stat_limit)
+                        return original_scan(*args, stat_limit=stat_limit, **kwargs)
                     def indexed(*args, **kwargs):
+                        if active[0]:
+                            under_lock.append("_delivery_index")
                         start = time.monotonic()
                         try:
                             return original_index(*args, **kwargs)
@@ -4201,19 +4297,30 @@ class Bounds(Fixture):
                             preparation.append(time.monotonic() - start)
                     def fresh(watched):
                         dependencies.append(len(watched))
+                        if active[0]:
+                            held_dependencies.append(len(watched))
                         return original_fresh(watched)
                     @contextlib.contextmanager
                     def locked(jobs):
                         with original_lock(jobs) as admitted:
+                            active[0] = True
+                            held_looks.append([])
                             start = time.monotonic()
                             try:
                                 yield admitted
                             finally:
                                 holds.append(time.monotonic() - start)
-                    with mock.patch.object(R, "_delivery_index", indexed), \
-                            mock.patch.object(R, "_detach", detached), \
-                            mock.patch.object(R, "_fresh", fresh), \
-                            mock.patch.object(R, "_registry_lock", locked):
+                                active[0] = False
+                    with contextlib.ExitStack() as patches:
+                        for name, fn in history_passes.items():
+                            patches.enter_context(mock.patch.object(R, name, outside(name, fn)))
+                        patches.enter_context(mock.patch.object(R, "_delivery_index", indexed))
+                        patches.enter_context(mock.patch.object(R, "_reference_fingerprint", fingerprint))
+                        patches.enter_context(mock.patch.object(R, "_late_candidate_group_change", group_change))
+                        patches.enter_context(mock.patch.object(R, "_scan_published", scan))
+                        patches.enter_context(mock.patch.object(R, "_detach", detached))
+                        patches.enter_context(mock.patch.object(R, "_fresh", fresh))
+                        patches.enter_context(mock.patch.object(R, "_registry_lock", locked))
                         for invocation in range(40):
                             result = R.sweep(fixture.jobs, now_ns=fixture.now + int(8 / 7 * RETENTION_NS)
                                              + invocation * 301 * 10**9)
@@ -4224,7 +4331,14 @@ class Bounds(Fixture):
                     self.assertEqual(len(preparation), 3)
                     self.assertEqual(len(holds), 6)
                     self.assertLess(max(dependencies), 512)
-                    self.assertLess(max(holds), 0.25)
+                    self.assertEqual(under_lock, [], (kind, under_lock))
+                    self.assertTrue(held_dependencies, kind)
+                    self.assertLess(max(held_dependencies), 512)
+                    self.assertLess(max(held_related, default=0), 512)
+                    self.assertEqual(sum(map(len, held_looks)), 3, held_looks)
+                    self.assertTrue(all(len(looks) <= 1 for looks in held_looks), held_looks)
+                    self.assertTrue(all(limit is not None for looks in held_looks for limit in looks),
+                                    held_looks)
                     self.assertLess(max(preparation), 3.0)
                     print(json.dumps({"history": kind, "entries_per_history": count,
                                       "discovery_s": discovery, "preparation_s": preparation,
@@ -4303,6 +4417,20 @@ class Bounds(Fixture):
             self.assertEqual(self.sweep((1) / 7), {"skipped": "busy"})
         finally:
             os.close(fd)
+
+    def test_due_homes_that_detach_refuses_do_not_keep_the_short_interval(self):
+        # RV-1041 R2: a full budget of due homes that `_detach` refuses again
+        # (renewed protection, unsafe partial retention) is not backlog.
+        for index in range(R.REMOVE_LIMIT + 1):
+            self.add(f"att-refused-{index}")
+        base = self.now + int(8 / 7 * RETENTION_NS)
+        R.sweep(self.jobs, now_ns=self.now, force=True)
+        with mock.patch.object(R, "_detach", return_value="defer:partial-retention-unsafe"):
+            refused = R.sweep(self.jobs, now_ns=base, force=True)
+        self.assertEqual((refused["due"], refused["removed"]), (R.REMOVE_LIMIT, 0))
+        self.assertNotIn("more", refused)
+        self.assertTrue(all(self.home_path(f"att-refused-{index}").exists()
+                            for index in range(R.REMOVE_LIMIT + 1)))
 
     def test_next_pass_starts_sooner_only_while_due_homes_are_left_behind(self):
         for index in range(R.REMOVE_LIMIT + 1):
@@ -4640,8 +4768,8 @@ print("writes=300", flush=True)
             result = self.sweep((8) / 7)
         self.assertEqual(result["removed"], 1)
         self.assertFalse(home.exists())
+        # The outside() checks above are the bound on the hold; no wall clock.
         self.assertEqual(len(held), 2)
-        self.assertTrue(all(duration < 0.25 for duration in held), held)
 
     def test_complete_blank_and_malformed_registry_lines_do_not_poison_pass(self):
         home = self.add("att-noisy")
@@ -5207,7 +5335,7 @@ print(json.dumps(r._directory_page(Path(sys.argv[2]),int(sys.argv[3]),3,time.mon
                 return real_probe(*args, **kwargs)
             with mock.patch.object(R, "_registry_lock_until", lock), \
                     mock.patch.object(R, "_directory_page", page), mock.patch.object(R, "_read_json", read), \
-                    mock.patch.object(DC, "attempt_process_quiescence", probe):
+                    patch_split(DC, "attempt_process_quiescence", probe):
                 result = R.sweep(self.jobs, now_ns=at + 301 * 10**9)
             self.assertEqual(result["removed"], 1, result)
             self.assertFalse(home.exists())

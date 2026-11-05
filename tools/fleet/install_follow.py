@@ -9,12 +9,12 @@ import tempfile
 import time
 
 from . import installinfo
+from .config import ui_text
 
 _HANDOFF = "_FLEET_REEXEC_FD"
 _STDERR = "_FLEET_REEXEC_STDERR_FD"
 WAIT_NOTE_AFTER = 30.0     # a newer release still waiting this long is named on screen
 _DECLINE_FRESH = 10.0      # a refusal newer than this is the reason shown
-_LOOP_HOLD = "확인 창·입력이 끝나면 넘어감"
 
 
 def read_handoff(env=None):
@@ -132,7 +132,7 @@ class InstallFollower:
         return found
 
     def waiting_note(self, now=None):
-        """``v…로 넘어가기 대기: 이유`` once a newer release has waited ``WAIT_NOTE_AFTER``."""
+        """``waiting to switch to v…: reason`` once a newer release has waited ``WAIT_NOTE_AFTER``."""
         pending = self._pending
         if pending is None:
             return None
@@ -141,8 +141,8 @@ class InstallFollower:
             return None
         declined = self._declined
         reason = (declined[0] if declined is not None and now - declined[1] < _DECLINE_FRESH
-                  else _LOOP_HOLD)
-        return f"{pending[0].name}로 넘어가기 대기: {reason}"
+                  else ui_text("fleet.install.after_dialog"))
+        return ui_text("fleet.install.waiting", version=pending[0].name, reason=reason)
 
     def restart(self, target, argv, viewer_state, *, stderr_fd=None):
         """Recheck under the install lock, then exec in-place with anonymous state."""
@@ -173,7 +173,8 @@ class InstallFollower:
                     os.execve(sys.executable,
                               [sys.executable, str(target / "tools/fleet/fleet.py"), *argv], env)
             except (OSError, ValueError, TypeError) as exc:
-                self._declined = (f"새 릴리스 실행 실패 ({type(exc).__name__})", time.monotonic())
+                self._declined = (ui_text("fleet.install.start_failed", error=type(exc).__name__),
+                                  time.monotonic())
                 return False
             finally:
                 if stderr_fd is not None:

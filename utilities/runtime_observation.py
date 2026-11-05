@@ -16,9 +16,167 @@ from pathlib import Path
 import threading
 import time
 from typing import Callable, Hashable, Iterable, TypeVar
+from contextlib import contextmanager
+from contextvars import ContextVar
+import copy
+import functools
+import sys
+from collections.abc import Mapping
 
 
 T = TypeVar("T")
+
+
+def retained_size(value, limit=None):
+    """Size one owned built-in projection graph, counting shared children once.
+
+    Functions/modules referenced as policy identities do not own their globals.
+    The traversal is bounded too: an oversized candidate stops at the limit.
+    """
+    seen, pending, total = set(), [value], 0
+    while pending:
+        item = pending.pop()
+        if id(item) in seen:
+            continue
+        seen.add(id(item))
+        total += sys.getsizeof(item)
+        if limit is not None and total > limit:
+            return total
+        kind = type(item)
+        if kind in (str, bytes, int, float, bool, type(None)):
+            continue
+        if kind is dict:
+            pending.extend(item.keys())
+            pending.extend(item.values())
+            continue
+        if kind in (list, tuple, set, frozenset):
+            pending.extend(item)
+            continue
+        storage = getattr(kind, '_projection_storage', None)
+        if isinstance(storage, property):
+            # The accessor can return a temporary tuple of stored children.
+            # Its container is not retained; only those real children are.
+            pending.extend(storage.__get__(item, type(item)))
+        elif isinstance(item, Mapping):
+            pending.extend(item.keys())
+            pending.extend(item.values())
+            attributes = getattr(item, '__dict__', None)
+            if attributes:
+                pending.append(attributes)
+        elif isinstance(item, (list, tuple, set, frozenset)):
+            pending.extend(item)
+            attributes = getattr(item, '__dict__', None)
+            if attributes:
+                pending.append(attributes)
+    return total
+
+
+class ProjectionCache(OrderedDict):
+    """LRU ownership with entry and byte charges (exact or schema-derived)."""
+
+    def __init__(self, max_entries=32, max_bytes=512 * 1024 * 1024):
+        super().__init__()
+        self.max_entries, self.max_bytes = max_entries, max_bytes
+        self.weights, self.bytes = {}, 0
+        self.admissions = self.evictions = self.rejections = 0
+
+    def __setitem__(self, key, value):
+        self.remember(key, value)
+
+    def remember(self, key, value, *, weight=None):
+        """Admit an exact graph weight or a caller's schema-derived charge."""
+        self.pop(key, None)
+        if weight is None:
+            weight = retained_size((key, value), self.max_bytes)
+        if weight > self.max_bytes:
+            self.rejections += 1
+            return
+        super().__setitem__(key, value)
+        self.weights[key] = weight
+        self.bytes += weight
+        self.admissions += 1
+        while len(self) > self.max_entries or self.bytes > self.max_bytes:
+            self.popitem(last=False)
+
+    def pop(self, key, default=None):
+        self.bytes -= self.weights.pop(key, 0)
+        return super().pop(key, default)
+
+    def __delitem__(self, key):
+        super().__delitem__(key)
+        self.bytes -= self.weights.pop(key)
+
+    def popitem(self, last=True):
+        key, value = super().popitem(last=last)
+        self.bytes -= self.weights.pop(key)
+        self.evictions += 1
+        return key, value
+
+    def clear(self):
+        super().clear()
+        self.weights.clear()
+        self.bytes = 0
+
+
+_PASS_READS = ContextVar("pass_observations", default=None)
+_PASS_READ_BYTES = 768 * 1024
+
+
+def observation_scope_active():
+    return _PASS_READS.get() is not None
+
+
+@contextmanager
+def observation_read_scope():
+    """Share fresh reads only within this pass, never across control operations."""
+    if _PASS_READS.get() is not None:
+        yield
+        return
+    token = _PASS_READS.set([OrderedDict(), 0])
+    try:
+        yield
+    finally:
+        _PASS_READS.reset(token)
+
+
+def observe_once(reader=None, *, immutable=False):
+    """Bound repeated passive reads to 4096 entries / 768 KiB per pass.
+
+    Outside an explicit scope this is the original fresh reader. Exceptions
+    remain fresh, and mutable results are never shared with another caller.
+    """
+    if reader is None:
+        return lambda target: observe_once(target, immutable=immutable)
+    clone = (lambda value: value) if immutable else copy.deepcopy
+    @functools.wraps(reader)
+    def read(*args, **kwargs):
+        scope = _PASS_READS.get()
+        if scope is None:
+            return reader(*args, **kwargs)
+        try:
+            uid = os.geteuid() if hasattr(os, 'geteuid') else None
+        except OSError:
+            return reader(*args, **kwargs)
+        key = (reader, uid, args, tuple(sorted(kwargs.items())))
+        try:
+            hash(key)
+        except TypeError:
+            return reader(*args, **kwargs)
+        entries = scope[0]
+        if key in entries:
+            value, _weight = entries[key]
+            entries.move_to_end(key)
+            return clone(value)
+        value = reader(*args, **kwargs)
+        weight = retained_size((key, value), _PASS_READ_BYTES) + 128
+        if weight <= _PASS_READ_BYTES:
+            entries[key] = (clone(value), weight)
+            scope[1] += weight
+            while len(entries) > 4096 or scope[1] > _PASS_READ_BYTES:
+                _key, (_value, removed) = entries.popitem(last=False)
+                scope[1] -= removed
+        return value
+    return read
 
 
 @dataclass(frozen=True)

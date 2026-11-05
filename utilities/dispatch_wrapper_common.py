@@ -977,6 +977,78 @@ def close_job_row(jobs: Path, slug: str, worktree: str, reason: str, reset: str,
         return changed
 
 
+def watcher_launch_failure(jobs, attempt_id, proc, launch_metadata, note, reason, detail,
+                           *, materialize, fail):
+    """Retain launch facts and hand one failed attachment to exact cleanup.
+
+    No signal authority comes from a numeric PID or a fresh start-time read.
+    Sealed outcomes remain with their existing terminal writer.
+    """
+    import dispatch_contract as DC
+    from route_parent_close import stop_failed_launch
+    from codex_dispatch_terminal import terminal_envelope_observed
+
+    def row():
+        matches = [line.split("\t") for line in Path(jobs).read_text(encoding="utf-8").splitlines()
+                   if len(line.split("\t")) == 6
+                   and DC.row_has_attempt(line.split("\t")[5], attempt_id)]
+        return matches[0] if len(matches) == 1 else None
+
+    cleanup = {"settled": False, "reason": "cleanup-launch-binding-unverified"}
+    try:
+        selected = row()
+        meta = DC.parse_registry_metadata(selected[5]) if selected else {}
+        if (selected is not None and str(proc.pid) == launch_metadata.get("pid")
+                and launch_metadata.get("pid_start") and launch_metadata.get("pgid") == str(proc.pid)
+                and all(meta.get(key) == value for key, value in launch_metadata.items())):
+            DC.validate_attempt_metadata(meta)
+            binding = DC.launched_attempt_identity(selected)
+            preserved = (meta.get("foreground_outcome_ready") == "1"
+                         or bool(meta.get("review_process_outcome_b64"))
+                         or bool(meta.get("completion_marker"))
+                         or terminal_envelope_observed(meta.get("log_file")))
+            closed = False
+            if selected[1] in {"open", "running"} and not preserved:
+                closed = DC.close_attempt_row_if(
+                    jobs, attempt_id, "dead-" + note, lambda fresh: fresh == selected)
+            current = row()
+            if current is None or DC.launched_attempt_identity(current) != binding:
+                cleanup = {"settled": False, "reason": "cleanup-row-changed"}
+            elif closed:
+                current_meta = DC.parse_registry_metadata(current[5])
+                # Only close's note/cleanup/delivery additions may differ from
+                # the selected row before stopping this exact launch.
+                owned_close = (current_meta.get("note") == "dead-" + note
+                    and not current_meta.get("teardown_claim")
+                    and all(current_meta.get(k) == v for k, v in meta.items() if k != "note")
+                    and all(k in meta or k in {"note", "cleanup_receipt_b64", "cleanup_receipt_digest"}
+                            or k.startswith("delivery_") for k in current_meta))
+                if owned_close:
+                    stop_reason = stop_failed_launch(jobs, current)
+                    try:
+                        proc.wait(timeout=0.5)
+                    except subprocess.TimeoutExpired:
+                        pass
+                if not owned_close or row() != current:
+                    cleanup = {"settled": False, "reason": "cleanup-row-changed"}
+                elif isinstance(stop_reason, str):
+                    cleanup = {"settled": False, "reason": stop_reason}
+                else:
+                    cleanup = DC.resolve_attempt_cleanup(jobs, attempt_id, apply=True)
+                materialize(jobs, attempt_id)
+            elif selected[1] in {"done", "killed", "cancelled"} and current == selected:
+                cleanup = DC.resolve_attempt_cleanup(jobs, attempt_id, apply=True)
+            else:
+                cleanup = {"settled": False, "reason": (
+                    "cleanup-terminal-result-required" if preserved else "cleanup-row-changed")}
+    except (OSError, ValueError, DC.DispatchContractError) as exc:
+        cleanup = {"settled": False, "reason": getattr(exc, "reason", "cleanup-observation-unavailable")}
+    return fail(reason, 70, detail=detail, attempt_id=attempt_id,
+                registered="1", started="1", launch_started="1", child_spawned="1",
+                cleanup_settled="1" if cleanup["settled"] else "0",
+                cleanup_reason=str(cleanup["reason"]))
+
+
 def attach_summary_owner(args, log_path: Path, prompt_path: Path, identity, *,
                          harness: str, summary_launcher, runtime_home: str | None = None):
     """Attach the summary owner; the wrapper passes its harness name and its own

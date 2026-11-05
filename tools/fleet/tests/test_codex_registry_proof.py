@@ -15,7 +15,7 @@ if str(TOOLS) not in sys.path:
 from fleet import session_registry  # noqa: E402
 from fleet.collectors import codex, procscan  # noqa: E402
 
-THREAD = "01a0fa57-7f0e-7eb0-bffe-1d56df94e90c"
+THREAD = "01000013-0000-7000-8000-00000000001b"
 
 
 class RegistryNotIdentityTest(unittest.TestCase):

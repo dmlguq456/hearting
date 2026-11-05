@@ -10,6 +10,236 @@ from tools.fleet.explorer.view_model import ExplorerViewModel
 
 
 class ExplorerRuntimeReuseTests(unittest.TestCase):
+    def test_bulk_fill_preserves_clipping_virtual_extents_and_trace(self):
+        from tools.fleet.explorer.frame import _PageGrid
+        from tools.fleet.explorer.grid import CellGrid
+        trace = []
+        with patch.object(CellGrid, 'default_trace', trace):
+            grid = _PageGrid(6,12,2,keep_rows=(4,6))
+        grid.fill(-3,4,4,'.','head',236)
+        self.assertEqual(grid._cells[4], [('.', 'section_head',236)]*4+[(' ',None,None)]*2)
+        self.assertEqual(grid.cells[4][::-2], grid._cells[4][::-2])
+        self.assertEqual(grid.cells[2][::-1], [(' ',None,None)]*6)
+        self.assertEqual(grid.last_content_row,4)
+        grid.fill(0,2,5)
+        grid.fill(0,3,6)
+        self.assertNotIn(6,grid._cells)
+        self.assertEqual(grid.last_content_row,4)
+        grid.fill(0,3,6,tint=0)
+        self.assertEqual(grid.last_content_row,6)
+        self.assertNotIn(6,grid._cells)
+        grid.fill(4,3,5,'x')
+        self.assertEqual(len(grid._cells[5]),6)
+        self.assertEqual(grid._cells[5],[(' ',None,None)]*6)
+        grid.fill(0,6,7,'#','dim')
+        self.assertEqual(grid.last_content_row,6)
+        self.assertEqual(grid._cells[7],[('#','dim',None)]*6)
+        grid.fill(0,6,99,'x')
+        self.assertEqual(len(trace),6)
+        grid.cells[5][1:5:2] = [('x',None,None),('y','dim',None)]
+        self.assertEqual(grid._cells[5][1:5:2],[('x',None,None),('y','dim',None)])
+        with self.assertRaises(ValueError):
+            grid.cells[5][1:5] = [('x',None,None)]
+        plain=CellGrid(5,1)
+        plain.fill(0,-2,0,'x')
+        self.assertEqual(plain.rows_text(),('     ',))
+        plain.fill(-2,3,0,'x','head')
+        self.assertEqual(plain.rows_text(),('xxx  ',))
+
+    def test_overview_reuses_cells_when_only_unrendered_detail_records_change(self):
+        from tools.fleet.explorer import frame
+        from tools.fleet.explorer.state import NavState
+        from tools.fleet.explorer.view_model import load_fixture
+        model=load_fixture(Path(__file__).parent/'fixtures'/'explorer'/'view_model.json')
+        changed=model.with_updates(nodes=({'id':'changed'},),cards=({'text':'changed'},),
+                                   dialogue=({'body':'changed'},),answered=({'id':'changed'},))
+        tag=model.sessions[0].get('tag') if model.sessions else ''
+        for cols,rows in ((80,45),(140,45),(274,85),(410,84)):
+            for state in (NavState(),NavState(usage_open=True),NavState(opened=tag),
+                          NavState(scroll=(('pane',4),('tree',2)))):
+                with self.subTest(cols=cols,state=state):
+                    runtime=ExplorerRuntime()
+                    original=runtime.draw_frame(model,state,cols,rows)
+                    with patch.object(frame,'draw',wraps=frame.draw) as draw:
+                        self.assertIs(runtime.draw_frame(changed,state,cols,rows),original)
+                    draw.assert_not_called()
+                    self.assertEqual(original,frame.draw(changed,state,cols,rows))
+
+    def test_unchanged_model_update_keeps_the_published_instance(self):
+        original = ExplorerViewModel.from_mapping({'sessions': [{'tag': 'a'}]})
+        self.assertIs(original.with_updates(sessions=[{'tag': 'a'}]), original)
+        self.assertIs(ExplorerViewModel.from_mapping(original.to_mapping(), previous=original), original)
+        changed = original.with_updates(sessions=[{'tag': 'b'}])
+        self.assertIsNot(changed, original)
+        self.assertEqual(original.sessions[0]['tag'], 'a')
+
+    def test_changed_models_share_unchanged_subtrees_and_keep_fresh_metadata(self):
+        from tools.fleet.explorer.view_model import freeze, thaw
+        old = ExplorerViewModel(sessions=({'tag': 'a', 'progress': {'count': 1}},
+                                          {'tag': 'b', 'progress': {'count': 2}}),
+                                source_records={'native': {'pid': 1}})
+        data = old.to_mapping()
+        data['sessions'][1]['progress']['count'] = 3
+        data['source_records']['native']['pid'] = 2
+        current = ExplorerViewModel.from_mapping(data, previous=old)
+        self.assertEqual(current, ExplorerViewModel.from_mapping(data))
+        self.assertIs(current.sessions[0], old.sessions[0])
+        self.assertIsNot(current.sessions[1], old.sessions[1])
+        self.assertEqual(current.source_records['native']['pid'], 2)
+        data['sessions'][0]['progress']['count'] = 999
+        self.assertEqual(current.sessions[0]['progress']['count'], 1)
+        self.assertEqual(old.source_records['native']['pid'], 1)
+        cases = [({'a': [1, True]}, {'a': [1, 1]}),
+                 ({'a': 1, 'b': 2}, {'b': 2, 'a': 1}),
+                 ({'a': [1]}, {'b': [1, 2]}), ({'a': 1}, {}),
+                 ({'1': 'old'}, {1: 'new', '1': 'last'})]
+        for before, after in cases:
+            expected = freeze(after)
+            actual = freeze(after, freeze(before))
+            self.assertEqual(thaw(actual), thaw(expected))
+            self.assertEqual(tuple(actual), tuple(expected))
+            if after == {'a': [1, 1]}:
+                self.assertIs(type(actual['a'][1]), int)
+
+    def test_frame_reuse_ignores_metadata_but_matches_every_view_cells_and_hits(self):
+        from tools.fleet.explorer import frame
+        from tools.fleet.explorer.state import NavState, VIEWS
+        from tools.fleet.explorer.view_model import load_fixture
+        model = load_fixture(Path(__file__).parent / 'fixtures' / 'explorer' / 'view_model.json')
+        updated = model.with_updates(source_records={'native': {'pid': 'current'}},
+                                     readiness={'ready': False, 'generation': 2},
+                                     ordering={'private': 'current'})
+        for cols, rows in ((80, 45), (140, 45), (274, 85), (410, 84)):
+            for view in VIEWS:
+                with self.subTest(cols=cols, view=view):
+                    runtime = ExplorerRuntime()
+                    state = NavState(view=view)
+                    first = runtime.draw_frame(model, state, cols, rows)
+                    with patch.object(frame, 'draw', wraps=frame.draw) as draw:
+                        reused = runtime.draw_frame(updated, state, cols, rows)
+                    self.assertIs(reused, first)
+                    self.assertEqual(draw.call_count, 0)
+                    self.assertEqual(reused, frame.draw(updated, state, cols, rows))
+
+    def test_model_updates_freeze_changed_data_and_share_unchanged_fields(self):
+        from dataclasses import replace
+        from dataclasses import FrozenInstanceError
+
+        model = ExplorerViewModel(sessions=({"tag": "a", "nested": [1]},),
+                                  source_records={"private": {"rows": [1, 2, 3]}})
+        rows = [{"tag": "b", "nested": [2]}]
+        updated = model.with_updates(sessions=rows, clock=1000)
+        self.assertEqual(updated, replace(model, sessions=rows, clock=1000))
+        self.assertIs(updated.source_records, model.source_records)
+        self.assertIs(updated.routes, model.routes)
+        rows[0]["nested"].append(3)
+        self.assertEqual(updated.sessions[0]["nested"], (2,))
+        with self.assertRaises(TypeError):
+            updated.sessions[0]["tag"] = "changed"
+        with self.assertRaises(FrozenInstanceError):
+            updated.clock = 2000
+        with self.assertRaises(TypeError):
+            model.with_updates(unknown=1)
+
+    def test_thousands_of_completed_saves_do_not_retain_thread_or_generation_history(self):
+        import weakref
+
+        retained = []
+
+        class CompletedThread:
+            def __init__(self, *, target, args, **_kwargs):
+                self.target, self.args, self.ident = target, args, None
+                retained.append(weakref.ref(self))
+
+            def start(self):
+                self.ident = 1
+                self.target(*self.args)
+                self.target = self.args = None
+
+            def is_alive(self):
+                return False
+
+            def join(self, _timeout):
+                pass
+
+        for written in (True, False):
+            runtime = ExplorerRuntime()
+            model = ExplorerViewModel()
+            readiness = {"ready": True, "fully_fresh": True, "all_new": True}
+            with patch("tools.fleet.explorer.runtime.threading.Thread", CompletedThread), \
+                    patch.object(runtime, "_cache_envelope", return_value={}), \
+                    patch.object(runtime, "_write_cache", return_value=written):
+                for generation in range(5000):
+                    current = {**readiness, "generation": generation, "observed_at": 1000 + generation}
+                    runtime.persist_complete_async(model, current)
+                    if generation == 100:
+                        warm_history = len(runtime._persisted_generations) + len(runtime._failed_generations)
+                self.assertIsNone(runtime.persist_complete_async(model, current))
+            self.assertEqual(len(runtime._persisted_generations) + len(runtime._failed_generations), warm_history)
+            self.assertLessEqual(sum(ref() is not None for ref in retained), 1)
+            self.assertEqual(len(runtime._pending_generations), 0)
+
+    def test_unchanged_live_usage_does_not_copy_the_whole_immutable_model(self):
+        row = {"harness": "claude", "text": "claude", "windows": (("week", 40, None),)}
+        model = ExplorerViewModel(usage=(row,))
+        with patch.object(live, "_usage_records", return_value=[dict(row)]):
+            self.assertIs(live.current_claude_usage(model, {}, 1000), model)
+        changed = {**row, "windows": (("week", 50, None),)}
+        with patch.object(live, "_usage_records", return_value=[changed]):
+            updated = live.current_claude_usage(model, {}, 1000)
+        self.assertIsNot(updated, model)
+        self.assertEqual(updated.usage[0]["windows"][0][1], 50)
+
+    def test_idle_frames_reuse_cells_without_freezing_the_clock_or_input(self):
+        from dataclasses import replace
+        from tools.fleet.explorer import frame
+        from tools.fleet.explorer.state import NavState
+
+        runtime = ExplorerRuntime()
+        model = ExplorerViewModel(clock=1000, repos=({"id": "repo", "name": "repo"},))
+        state = NavState()
+        first = runtime.draw_frame(model, state, 140, 45)
+        with patch.object(frame, "draw", wraps=frame.draw) as draw:
+            # A new VM can carry the same visible data while a collector runs.
+            same = replace(model, clock=1000.5)
+            self.assertIs(runtime.draw_frame(same, state, 140, 45), first)
+            self.assertEqual(draw.call_count, 0)
+            cases = (
+                (replace(model, clock=1060), state, 140, 45, 1),
+                (model, replace(state, view="ROUTES"), 140, 45, 1),
+                (model, replace(state, scroll=(("pane", 3),)), 140, 45, 1),
+                (model, state, 80, 24, 1),
+                (model, state, 140, 45, 0),
+                (replace(model, hearting={"version": "new"}), state, 140, 45, 1),
+                (replace(model, repos=({"id": "changed"},)), state, 140, 45, 1),
+            )
+            for vm, nav, cols, rows, beat in cases:
+                with self.subTest(view=nav.view, cols=cols, beat=beat):
+                    before = draw.call_count
+                    actual = runtime.draw_frame(vm, nav, cols, rows, beat=beat)
+                    self.assertEqual(draw.call_count, before + 1)
+                    self.assertEqual(actual, frame.draw(vm, nav, cols, rows, beat=beat))
+
+    def test_question_edits_invalidate_a_frame_even_when_nav_states_compare_equal(self):
+        from dataclasses import replace
+        from tools.fleet.explorer import frame
+        from tools.fleet.explorer.state import NavState
+
+        runtime = ExplorerRuntime()
+        model = ExplorerViewModel()
+        state = NavState(view="QUESTIONS", question_overlay={"state": "opening"})
+        runtime.draw_frame(model, state, 140, 45)
+        edited = replace(state, question_overlay={"state": "failed", "error": "offline"})
+        self.assertEqual(state, edited)  # the editor is excluded from NavState equality
+        with patch.object(frame, "draw", wraps=frame.draw) as draw:
+            actual = runtime.draw_frame(model, edited, 140, 45)
+            self.assertEqual(draw.call_count, 1)
+            self.assertEqual(actual, frame.draw(model, edited, 140, 45))
+            edited.question_overlay["error"] = "retry"
+            before = draw.call_count
+            runtime.draw_frame(model, edited, 140, 45)
+            self.assertEqual(draw.call_count, before + 1)
+
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tempdir.cleanup)
@@ -103,7 +333,7 @@ class ExplorerRuntimeReuseTests(unittest.TestCase):
             render._explorer_compose(snapshot, 140, 45, NavState(), render._EXPLORER_RESULT, now=1000)
             self.assertEqual(build.call_count, 3)
 
-    def test_persistence_deduplicates_before_serializing_and_retries_failed_write(self):
+    def test_persistence_deduplicates_failures_and_retries_the_next_generation(self):
         from tools.fleet.explorer.view_model import ExplorerViewModel
 
         readiness = {"ready": True, "fully_fresh": True, "all_new": True,
@@ -122,7 +352,10 @@ class ExplorerRuntimeReuseTests(unittest.TestCase):
         with patch.object(retry_runtime, "_write_cache", side_effect=(False, True)) as write:
             failed = retry_runtime.persist_complete_async(vm, readiness)
             failed.join(2)
-            recovered = retry_runtime.persist_complete_async(vm, readiness)
+            for _ in range(100):
+                self.assertIsNone(retry_runtime.persist_complete_async(vm, readiness))
+            recovered = retry_runtime.persist_complete_async(vm, {
+                **readiness, "generation": 2, "generation_identity": "g2", "observed_at": 1001.0})
             self.assertIsNotNone(recovered)
             recovered.join(2)
             self.assertEqual(write.call_count, 2)

@@ -88,7 +88,8 @@ def _parent_read_context():
         sys.path.insert(0, utilities)
     try:
         from peer_read_context import PeerReadContext
-        return PeerReadContext()
+        from dispatch_supervision import passive_read_context
+        return passive_read_context() or PeerReadContext()
     except ImportError:
         return None
 
@@ -558,6 +559,13 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
                 job_key, "herdr", observed.get("last_error") if not observed.get("complete") else None)
     except Exception as exc:
         observations["herdr"] = _observation_health(job_key, "herdr", "%s: %s" % (type(exc).__name__, exc))
+    if not fast_first:
+        # aedd50: the tmux pane of sessions Herdr did not place (display only).
+        try:
+            from . import tmux as _tmux
+            _tmux.enrich(sessions)
+        except Exception:
+            pass
     for s in sessions:
         if s.harness == "claude" and enrichers.get("claude"):
             try:
@@ -568,6 +576,13 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
     # process launch directories. Do not change those matching inputs mid-pass.
     from .. import session_cwd
     session_cwd.project(sessions)
+    # Claude ids and directories exist only now: join their clear/compact predecessors on
+    # the pane the herdr pass matched, before any join that keys on session id.
+    try:
+        from . import herdr as _herdr_aliases
+        _herdr_aliases.join_deferred_pane_aliases(sessions)
+    except Exception:
+        pass
     # Exact Fleet-owned decision/approval waits are additive enrichment. Run
     # after harness identity resolution and before the single liveness verdict.
     try:
@@ -878,7 +893,9 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
                     job.interaction_observations.extend(values)
         # Capture the collector's output at its boundary, never in render or
         # from the independent detail worker. Older readers keep the attributes.
-        node_evidence = copy.deepcopy(getattr(dispatch.collect, "last_route_nodes", {}) or {})
+        evidence = getattr(dispatch.collect, "last_route_nodes", {})
+        node_evidence = (evidence if isinstance(evidence, dispatch.RegistryEvidence)
+                         else copy.deepcopy(evidence or {}))
         degradations = copy.deepcopy(getattr(dispatch.collect, "last_degradations", {}) or {})
         pending_delivery = copy.deepcopy(getattr(dispatch.collect, "last_pending_delivery", None))
         malformed = getattr(dispatch.collect, "last_malformed", 0)
@@ -886,7 +903,9 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
         job_error = "%s: %s" % (type(exc).__name__, str(exc)[:160])
         if previous is not None:
             jobs = copy.deepcopy(previous.jobs)
-            node_evidence = copy.deepcopy(previous.node_evidence)
+            node_evidence = (previous.node_evidence
+                if isinstance(previous.node_evidence, dispatch.RegistryEvidence)
+                else copy.deepcopy(previous.node_evidence))
             degradations = copy.deepcopy(previous.degradations)
             pending_delivery, malformed = previous.pending_delivery, previous.malformed
             for job in jobs:

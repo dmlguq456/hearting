@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import json
 import contextlib
+import fcntl
 import importlib.util
 import threading
 import os
@@ -24,6 +25,7 @@ import dispatch_observation_log as OBS  # noqa: E402
 import dispatch_contract as DC  # noqa: E402
 import dispatch_pending_delivery as PD  # noqa: E402
 import dispatch_retention as SHARED  # noqa: E402
+from split_module_fixture import patch_split  # noqa: E402
 
 _SPEC = importlib.util.spec_from_file_location("g03_home_fixtures", ROOT / "utilities/worker_home_retention.test.py")
 _HOME_FIXTURES = importlib.util.module_from_spec(_SPEC)
@@ -64,6 +66,75 @@ class DispatchLogRetentionTest(unittest.TestCase):
 
     def sweep(self, *, at=None):
         return R.sweep(self.jobs, now_ns=self.now if at is None else at, force=True)
+
+    def completion_dir(self, route_id, evidence, *, age_days=8, extra=None):
+        directory = self.root / "completion" / route_id
+        directory.mkdir(parents=True)
+        for name in ("inline.json", "inline.1.json"):
+            (directory / name).write_text(json.dumps({
+                "schema_version": 2, "route_id": route_id, "node_id": "inline",
+                "completion_gate": "inline-complete",
+                "evidence": {"path": evidence, "sha256": "0" * 64}}), encoding="utf-8")
+        (directory / ".inline.completion.lock").write_bytes(b"")
+        if extra:
+            (directory / extra).write_text("{}", encoding="utf-8")
+        old = (self.now - age_days * DAY) / 1_000_000_000
+        for path in (*directory.iterdir(), directory):
+            os.utime(path, (old, old))
+        return directory
+
+    def test_completion_markers_of_a_removed_test_root_go_after_seven_quiet_days(self):
+        self.add_row("att-registered", self.log("registered.jsonl"), ended=self.now - DAY,
+                     route_id="rt-00000000000000aa")
+        gone = os.path.join(tempfile.gettempdir(), "tmpzz_gone0", "ev.txt")
+        self.assertFalse(os.path.lexists(os.path.dirname(gone)))
+        leaked = self.completion_dir("rt-00000000000000a1", gone)
+        kept = {
+            "registered": self.completion_dir("rt-00000000000000aa", gone),
+            "recent": self.completion_dir("rt-00000000000000a2", gone, age_days=3),
+            "present-evidence": self.completion_dir("rt-00000000000000a3", str(self.jobs)),
+            "agent-scratchpad": self.completion_dir(
+                "rt-00000000000000a4", os.path.join(tempfile.gettempdir(), "claude-0", "ev.md")),
+            "other-file": self.completion_dir("rt-00000000000000a5", gone, extra="notes.txt"),
+            "no-evidence": self.completion_dir("rt-00000000000000a6", ""),
+            # A row moved to the dispatch archive (#1183) still names its route.
+            "archived": self.completion_dir("rt-00000000000000a7", gone),
+        }
+        segment = self.root / "archive" / "registry-2026-10"
+        segment.mkdir(parents=True)
+        (segment / "rows.jsonl").write_text(json.dumps({
+            "raw": f"{stamp(self.now - 30 * DAY)}\tdone\t/repo\t/wt\tjob\t"
+                   "attempt_id=att-archived,route_id=rt-00000000000000a7"}) + "\n", encoding="utf-8")
+        result = self.sweep()
+        self.assertEqual((result["completion_removed"], result["completion_examined"]), (1, 8))
+        self.assertFalse(leaked.exists())
+        for why, directory in kept.items():
+            with self.subTest(why=why):
+                self.assertTrue(directory.exists())
+
+    def test_an_ended_attempts_quiet_launch_lock_goes_unless_it_is_held(self):
+        import hashlib
+        log = self.log("lock-owner.jsonl")
+        self.add_row("att-ended", log, ended=self.now - 2 * DAY)
+        self.add_row("att-held", log, ended=self.now - 2 * DAY)
+        self.add_row("att-live", log, status="open", ended=self.now - 2 * DAY)
+        locks = {}
+        for attempt in ("att-ended", "att-held", "att-live", "att-unregistered"):
+            key = hashlib.sha256(attempt.encode()).hexdigest()
+            path = self.root / f"jobs.log.launch.{key}.lock"
+            path.write_bytes(b"")
+            old = (self.now - 8 * DAY) / 1_000_000_000
+            os.utime(path, (old, old))
+            locks[attempt] = path
+        holder = os.open(locks["att-held"], os.O_RDWR)
+        self.addCleanup(os.close, holder)
+        fcntl.flock(holder, fcntl.LOCK_EX)
+        result = self.sweep()
+        self.assertEqual(result["launch_locks_removed"], 1)
+        self.assertFalse(locks["att-ended"].exists())
+        for attempt in ("att-held", "att-live", "att-unregistered"):
+            with self.subTest(attempt=attempt):
+                self.assertTrue(locks[attempt].exists())
 
     def test_only_verified_logs_older_than_fourteen_days_are_removed(self):
         old = self.log("old.jsonl")
@@ -170,7 +241,7 @@ class DispatchLogRetentionTest(unittest.TestCase):
             prompts.append(review_path)
 
         unbound = self.log("orphan.codex.prompt.txt")
-        with mock.patch.object(
+        with patch_split(
                 DC, "attempt_process_quiescence",
                 side_effect=lambda meta, **_kwargs: (
                     DC.ProcessQuiescence("unverifiable", "fixture-unknown")
@@ -196,7 +267,7 @@ class DispatchLogRetentionTest(unittest.TestCase):
                 return DC.ProcessQuiescence("live", "attempt-descendant-live")
             return DC.ProcessQuiescence("unverifiable", "process-namespace-unverifiable")
 
-        with mock.patch.object(DC, "attempt_process_quiescence", side_effect=quiescence):
+        with patch_split(DC, "attempt_process_quiescence", side_effect=quiescence):
             result = self.sweep()
         self.assertEqual(result["removed"], 0)
         self.assertTrue(live.exists() and unknown.exists())
@@ -294,6 +365,127 @@ class DispatchLogRetentionTest(unittest.TestCase):
         self.assertEqual(second["removed"], 4)
         self.assertFalse(any(path.exists() for path in paths))
 
+    def test_over_the_limit_a_pass_removes_past_the_batch_and_skips_protected_logs(self):
+        count = R.REMOVE_LIMIT + 8
+        paths = []
+        for index in range(count):
+            path = self.log(f"pressure-{index:03d}.jsonl", b"p" * 8)
+            self.add_row(f"att-pressure-{index:03d}", path, ended=self.now - (index + 1) * 3600 * 1_000_000_000)
+            paths.append(path)
+        held = self.log("pressure-held.jsonl", b"h" * 8)
+        self.add_row("att-pressure-held", held, status="open", ended=self.now - 3600 * 1_000_000_000)
+
+        with mock.patch.object(R, "MAX_LOG_BYTES", 8):
+            result = self.sweep()
+
+        self.assertEqual(result["removed"], count)
+        self.assertGreater(count, R.REMOVE_LIMIT)
+        self.assertFalse(any(path.exists() for path in paths))
+        self.assertTrue(held.exists())
+        self.assertEqual(result["over_limit_bytes"], 0)
+
+    def test_over_the_limit_only_the_removal_time_budget_ends_a_pass(self):
+        count = R.REMOVE_LIMIT + 8
+        paths = []
+        for index in range(count):
+            path = self.log(f"slow-{index:03d}.jsonl", b"s" * 8)
+            self.add_row(f"att-slow-{index:03d}", path, ended=self.now - (index + 1) * 3600 * 1_000_000_000)
+            paths.append(path)
+        unlink = R._unlink_if_same
+
+        def slow_unlink(layout, name, expected):
+            time.sleep(0.12)
+            return unlink(layout, name, expected)
+
+        with mock.patch.object(R, "MAX_LOG_BYTES", 8), \
+                mock.patch.object(R, "MAX_PASS_SECONDS", 1), \
+                mock.patch.object(R, "_unlink_if_same", slow_unlink):
+            result = self.sweep()
+
+        # Guards the removal time budget now that the 16-file cap no longer
+        # applies over the limit: the 1 s budget alone still ends the pass.
+        # (It also passes on the old 16-file cap, so it does not pin the change.)
+        self.assertGreater(result["removed"], 0)
+        self.assertLess(result["removed"], R.REMOVE_LIMIT)
+        self.assertGreater(result["deferred"], 0)
+        self.assertEqual(result["more"], 1)
+        self.assertEqual(sum(path.exists() for path in paths), count - result["removed"])
+
+    def _pressure_logs(self, count):
+        """Unexpired logs, all removable over the limit; the last candidate is index 0."""
+        paths = []
+        for index in range(count):
+            path = self.log(f"guard-{index:03d}.jsonl", b"g" * 8)
+            self.add_row(f"att-guard-{index:03d}", path, ended=self.now - (index + 1) * 3600 * 1_000_000_000)
+            paths.append(path)
+        return paths
+
+    def _sweep_after_removal(self, nth, change, *, snapshot_always_reused=False):
+        unlink = R._unlink_if_same
+        seen = []
+
+        def hook(layout, name, expected):
+            done = unlink(layout, name, expected)
+            seen.append(name)
+            if len(seen) == nth:
+                change()
+            return done
+
+        patches = [mock.patch.object(R, "MAX_LOG_BYTES", 1), mock.patch.object(R, "_unlink_if_same", hook)]
+        if snapshot_always_reused:
+            patches.append(mock.patch.object(R, "_current_snapshot", lambda jobs, held: held.snapshot))
+        with contextlib.ExitStack() as stack:
+            for patch in patches:
+                stack.enter_context(patch)
+            return self.sweep()
+
+    def _append_open_row(self, attempt, path):
+        def change():
+            with open(self.jobs, "a", encoding="utf-8") as handle:
+                handle.write(f"{stamp(self.now)}\topen\t/repo\t/wt\tjob\tattempt_id={attempt},harness=claude,"
+                             f"worker_type=stage,launch_outcome=never-launched,log_file={path}\n")
+        return change
+
+    def test_an_open_row_appended_past_the_old_batch_size_keeps_that_log(self):
+        count = R.REMOVE_LIMIT + 6
+        paths = self._pressure_logs(count)
+        change = self._append_open_row("att-guard-000", paths[0])
+
+        result = self._sweep_after_removal(R.REMOVE_LIMIT + 1, change)
+
+        self.assertTrue(paths[0].exists())
+        self.assertEqual(result["removed"], count - 1)
+        self.assertFalse(any(path.exists() for path in paths[1:]))
+
+    def test_a_same_size_registry_rewrite_during_the_pass_keeps_that_log(self):
+        paths = self._pressure_logs(4)
+
+        def change():
+            replacement = self.root / "jobs.log.rewrite"
+            text = self.jobs.read_text(encoding="utf-8")
+            marker = "att-guard-000"
+            row = next(line for line in text.splitlines() if marker in line)
+            replacement.write_text(text.replace(row, row.replace("\tdone\t", "\topen\t")), encoding="utf-8")
+            self.assertEqual(replacement.stat().st_size, self.jobs.stat().st_size)
+            os.replace(replacement, self.jobs)
+
+        result = self._sweep_after_removal(1, change)
+
+        self.assertTrue(paths[0].exists())
+        self.assertEqual(result["removed"], 3)
+
+    def test_the_registry_stamp_comparison_alone_keeps_a_log_when_the_snapshot_is_always_reused(self):
+        count = R.REMOVE_LIMIT + 6
+        paths = self._pressure_logs(count)
+        change = self._append_open_row("att-guard-000", paths[0])
+
+        result = self._sweep_after_removal(R.REMOVE_LIMIT + 1, change, snapshot_always_reused=True)
+
+        # A stale snapshot never refreshes, so every candidate after the append is
+        # kept (fail closed); none is removed on the stale reading.
+        self.assertTrue(paths[0].exists())
+        self.assertEqual(result["removed"], R.REMOVE_LIMIT + 1)
+
     def test_files_still_inside_retention_do_not_end_examination_early(self):
         recent = []
         for index in range(R.REMOVE_LIMIT + 2):
@@ -353,6 +545,108 @@ class DispatchLogRetentionTest(unittest.TestCase):
         self.assertEqual((second["removed"], second["more"]), (1, 0))
         self.assertEqual(R.sweep(self.jobs, now_ns=self.now + 2 * gap),
                          {"skipped": "not-due"})
+
+    def test_short_interval_continues_while_removing_and_still_over_the_limit(self):
+        paths = []
+        for index in range(4):
+            path = self.log(f"pressure-{index}.jsonl", b"p" * 8)
+            self.add_row(f"att-pressure-{index}", path, ended=self.now - (4 - index) * DAY)
+            paths.append(path)
+        with mock.patch.object(R, "MAX_LOG_BYTES", 8):
+            first = self.sweep()
+            self.assertEqual((first["removed"], first["over_limit_bytes"], first["more"]), (3, 0, 0))
+        # Still over the limit after removing something: come back soon.
+        for index in range(R.REMOVE_LIMIT - 1):
+            path = self.log(f"bulk-{index:03d}.jsonl", b"b" * 8)
+            self.add_row(f"att-bulk-{index:03d}", path, ended=self.now - 40 * DAY)
+        with mock.patch.object(R, "MAX_LOG_BYTES", 8), mock.patch.object(R, "EXAMINE_LIMIT", 4):
+            second = self.sweep()
+        self.assertGreater(second["removed"], 0)
+        self.assertGreater(second["over_limit_bytes"], 0)
+        self.assertEqual(second["more"], 1)
+
+    def test_over_the_limit_with_nothing_removable_keeps_the_normal_interval(self):
+        path = self.log("held.jsonl", b"h" * 32)
+        self.add_row("att-held", path, status="open", ended=self.now - 40 * DAY)
+        with mock.patch.object(R, "MAX_LOG_BYTES", 8):
+            result = self.sweep()
+        self.assertEqual((result["removed"], result["more"]), (0, 0))
+        self.assertGreater(result["over_limit_bytes"], 0)
+
+    def test_renewed_protection_refusals_are_not_backlog_but_a_spent_recheck_budget_is(self):
+        # RV-1041 R2: a file whose protection was renewed between examination
+        # and removal stays, and that alone keeps the normal interval.
+        for index in range(3):
+            path = self.log(f"renewed-{index}.jsonl")
+            self.add_row(f"att-renewed-{index}", path, ended=self.now - 30 * DAY)
+
+        @contextlib.contextmanager
+        def refused(*args, **kwargs):
+            yield False
+
+        with mock.patch.object(R, "_fresh_eligible", refused):
+            result = self.sweep()
+        self.assertEqual((result["removed"], result["deferred"], result["more"]), (0, 3, 0))
+
+        @contextlib.contextmanager
+        def out_of_budget(*args, **kwargs):
+            args[8].admission_reason = "delivery-refresh-budget"
+            yield False
+
+        with mock.patch.object(R, "_fresh_eligible", out_of_budget):
+            result = R.sweep(self.jobs, now_ns=self.now, force=True)
+        self.assertEqual((result["removed"], result["more"]), (0, 1))
+        self.assertEqual(result["kept_reasons"].get("delivery-refresh-budget"), 3)
+
+    def test_one_registry_read_serves_every_removal_while_jobs_log_is_unchanged(self):
+        import worker_home_retention as WHR
+
+        for index in range(3):
+            path = self.log(f"quiet-{index}.jsonl")
+            self.add_row(f"att-quiet-{index}", path, ended=self.now - 30 * DAY)
+        reads = []
+        original = WHR._Snapshot.__init__
+
+        def counting(snapshot, jobs):
+            reads.append(jobs)
+            original(snapshot, jobs)
+
+        with mock.patch.object(WHR._Snapshot, "__init__", counting):
+            result = self.sweep()
+        self.assertEqual(result["removed"], 3)
+        self.assertEqual(len(reads), 1)
+        self.assertEqual(R._LOG_DIR_CHECKED, {})
+
+    def test_a_registry_append_during_the_pass_is_read_again_before_each_removal(self):
+        import worker_home_retention as WHR
+
+        for index in range(3):
+            path = self.log(f"busy-{index}.jsonl")
+            self.add_row(f"att-busy-{index}", path, ended=self.now - 30 * DAY)
+        reads = []
+        original = WHR._Snapshot.__init__
+        unlink = R._unlink_if_same
+        appended = []
+
+        def counting(snapshot, jobs):
+            reads.append(jobs)
+            original(snapshot, jobs)
+
+        def unlink_then_append(layout, name, expected):
+            done = unlink(layout, name, expected)
+            if not appended:
+                appended.append(name)
+                with open(self.jobs, "a", encoding="utf-8") as handle:
+                    handle.write(f"{stamp(self.now)}\tdone\t/repo\t/wt\tjob\t"
+                                 "attempt_id=att-late-unrelated,harness=claude\n")
+            return done
+
+        with mock.patch.object(WHR._Snapshot, "__init__", counting), \
+                mock.patch.object(R, "_unlink_if_same", unlink_then_append):
+            result = self.sweep()
+        self.assertEqual(result["removed"], 3)
+        # The pass read, then one more per removal after the registry changed.
+        self.assertEqual(len(reads), 3)
 
     def test_inode_replacement_between_scan_and_unlink_is_preserved(self):
         path = self.log("swap.jsonl")
@@ -894,7 +1188,7 @@ class DispatchLogRetentionTest(unittest.TestCase):
                 return original_probe(*args, **kwargs)
             with mock.patch.object(home, "_registry_lock_until", lock), \
                     mock.patch.object(home, "_directory_page", page), mock.patch.object(home, "_read_json", read), \
-                    mock.patch.object(DC, "attempt_process_quiescence", probe):
+                    patch_split(DC, "attempt_process_quiescence", probe):
                 second = R.sweep(self.jobs, now_ns=self.now + 301 * 10**9)
             self.assertEqual(second["removed"], 1, second)
             self.assertFalse(target.exists())

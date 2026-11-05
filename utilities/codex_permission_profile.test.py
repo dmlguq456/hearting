@@ -23,6 +23,7 @@ from execution_access import AccessContext, build_grant, load_request
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 import fixture_processes  # noqa: E402
+from split_module_fixture import split_patch  # noqa: E402
 
 
 def require_native_runtime(testcase):
@@ -123,7 +124,7 @@ class PermissionProfileTest(unittest.TestCase):
             "source_commit": "unversioned",
         }), encoding="utf-8")
         roots = [str(artifact), str(self.dispatch_state), str(cwd)]
-        with mock.patch("dispatch_contract.launch_repository_identity",
+        with split_patch("dispatch_contract.launch_repository_identity",
                         return_value=(str(cwd), "non-git")), \
              mock.patch.object(profiles, "named_profiles_available", return_value=True):
             config = profiles.recordish_profile_config(str(cwd), roots, str(route_file))
@@ -144,7 +145,7 @@ class PermissionProfileTest(unittest.TestCase):
         route_file = self.base / "ancestor-route.json"
         route_file.write_text(json.dumps({"cwd": str(cwd), "artifact_root": str(artifact),
                                           "source_commit": "unversioned"}), encoding="utf-8")
-        with mock.patch("dispatch_contract.launch_repository_identity",
+        with split_patch("dispatch_contract.launch_repository_identity",
                         return_value=(str(cwd), "non-git")), \
              mock.patch.object(profiles, "named_profiles_available", return_value=True):
             config = profiles.recordish_profile_config(

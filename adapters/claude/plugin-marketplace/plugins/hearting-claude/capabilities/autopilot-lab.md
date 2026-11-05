@@ -108,6 +108,16 @@ shape, the derivation and current runtime limits.
 | `setup` | Experiment spec, scaffold, run commands, pending `_RUNLOG` row, birth `run.json`, post-run verification, and a recorded handoff naming the successor workflow. |
 | `eval` | Eval spec, evaluation execution or guidance, metrics and per-array analysis, figures/media, report, `_RUNLOG` completion, lineage finalization. |
 
+**Interpret a result before the next run.** Whoever receives an experiment
+result (owner or supervising session) relates it to the person's primary
+comparison, splits it by condition so offsetting gains and losses show, opens the
+worst cases in the existing outputs (facts apart from hypotheses), and proposes
+the smallest check of the leading cause (`references/eval-procedure.md` E3-1,
+`qa/ml-debug` Result diagnosis). Another tuning or training run is not the
+default next step. Completion, ETA, or a total score alone is not an
+interpretation, a diagnostic oracle is not an improvement, and a repeated
+completion notice is not a new result.
+
 ### Existing-result analysis (eval default composition)
 
 For a request that analyzes existing results without a new measurement, default

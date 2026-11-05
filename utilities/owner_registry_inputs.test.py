@@ -11,6 +11,7 @@ from unittest import mock
 import dispatch_registry_cache as cache
 import dispatch_terminal_commit as terminal
 import owner_route_binding
+from split_module_fixture import patch_split
 
 route_module = owner_route_binding.ROUTE
 
@@ -39,14 +40,14 @@ class OwnerRegistryInputsTest(unittest.TestCase):
         self.enterContext(mock.patch.object(
             owner_route_binding, "resolve_owner_route_lifecycle",
             return_value=(self.binding, "current")))
-        self.process = self.enterContext(mock.patch.object(
+        self.process = self.enterContext(patch_split(
             route_module, "attempt_process_quiescence",
             return_value=SimpleNamespace(state="quiescent")))
-        self.enterContext(mock.patch.object(
+        self.enterContext(patch_split(
             route_module, "owner_terminal_prerequisites", return_value={}))
-        self.enterContext(mock.patch.object(route_module, "owner_operation_fence"))
+        self.enterContext(patch_split(route_module, "owner_operation_fence"))
         encoded = base64.urlsafe_b64encode(str(self.report).encode()).decode().rstrip("=")
-        self.enterContext(mock.patch.object(
+        self.enterContext(patch_split(
             route_module, "inspect_terminal_attempt",
             return_value={"state": "valid", "verdict": "PASS",
                           "artifact_state": "readable", "artifact_path_b64": encoded}))
