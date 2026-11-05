@@ -57,13 +57,13 @@ need adapters/opencode/skills/autopilot-lab/SKILL.md 'capabilities/autopilot-lab
 need adapters/codex/skills/autopilot-refine/SKILL.md 'capabilities/autopilot-refine.md' 'Codex refine projection 에 owner pointer 존재'
 
 # 4. adapter bootstraps
-need adapters/claude/CLAUDE.md 'The main session may finish one atomic, reversible fix' 'Claude main session judges tiny fixes'
+need adapters/claude/CLAUDE.md 'handle one reversible outcome inline' 'Claude main session judges one local completion unit'
 need adapters/claude/CLAUDE.md 'Other work starts with:' 'Claude uses compose for other new work'
 need adapters/claude/CLAUDE.md  'headless worker dispatch'         'Claude bootstrap delegation-surface 실현'
-need adapters/codex/AGENTS.md 'The main session may finish one atomic, reversible fix' 'Codex main session judges tiny fixes'
+need adapters/codex/AGENTS.md 'handle one reversible outcome inline' 'Codex main session judges one local completion unit'
 need adapters/codex/AGENTS.md 'Other work starts with:' 'Codex uses compose for other new work'
 need adapters/codex/AGENTS.md   'never silently extends'           'Codex bootstrap delegation-surface 실현'
-need adapters/opencode/AGENTS.md 'The main session may finish one atomic, reversible fix' 'OpenCode main session judges tiny fixes'
+need adapters/opencode/AGENTS.md 'handle one reversible outcome inline' 'OpenCode main session judges one local completion unit'
 need adapters/opencode/AGENTS.md 'Other work starts with:' 'OpenCode uses compose for other new work'
 
 # 5. Claude skill realization

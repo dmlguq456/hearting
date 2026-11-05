@@ -49,10 +49,13 @@ for bootstrap in (
     assert "hearting run capability-route compose --start --prompt-file <task>" in routing, (
         f"{bootstrap} lost the compose route for other work"
     )
-    assert "The main session may finish one atomic, reversible fix in the current Git worktree" in routing
-    assert "it automatically: no task file, compose, finish, or capability-info call" in routing
-    assert "Use the existing direct predicates (§0.2.1)" in routing
-    assert "if scope grows, compose before expanding the work" in routing
+    assert "handle one reversible outcome inline" in routing
+    assert "small feature's source, tests and README" in routing
+    for predicate in ("known scope", "focused checks", "no shared contract change",
+                      "long resource work", "artifact handoff", "independent verifier"):
+        assert predicate in routing, f"{bootstrap} lost direct predicate: {predicate}"
+    assert "recorded automatically without task/compose/finish/capability-info calls" in routing
+    assert "Compose before scope grows" in routing
     assert "Other work starts with:" in routing
 
 

@@ -42,11 +42,11 @@ harness root above. Read documents only as needed.
 
 ## Starting work
 
-The main session may finish one atomic, reversible fix in the current Git
-worktree by reading, editing, checking, and replying normally. Hearting records
-it automatically: no task file, compose, finish, or capability-info call.
-Use the existing direct predicates (§0.2.1); if scope grows, compose before
-expanding the work. Other work starts with:
+In this Git worktree, handle one reversible outcome inline, including a small
+feature's source, tests and README: known scope, focused checks; no shared
+contract change, long resource work, artifact handoff or independent verifier.
+Read/edit/check/reply; recorded automatically without task/compose/finish/capability-info calls.
+Compose before scope grows. Other work starts with:
 
 ```
 hearting run capability-route compose --start --prompt-file <task>

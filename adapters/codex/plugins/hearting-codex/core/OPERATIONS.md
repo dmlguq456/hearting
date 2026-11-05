@@ -689,7 +689,7 @@ lifecycle predicate term.
 | Work promoted to `standard+` by durable scope, shared-contract, resource, resume, verifier, or separability signals | Use a worktree and task branch from the latest base. Separable multi-file or feature work at `standard+` must use headless dispatch. Team delegation and inline micro-stages are limited to `quick` and genuinely microscopic stages. |
 | A new independent request while work is active | Dispatch it to a new worktree alongside the first job |
 
-Explicit `direct` remains inline; tiny fixes use WORKFLOW §0.2.1 without start/finish. When an explicit selected route changes source, the approved
+Explicit `direct` remains inline; small local completion units use WORKFLOW §0.2.1 without start/finish. When an explicit selected route changes source, the approved
 start uses the shared source-worktree preparation contract above.
 
 **Token-pressure non-interference:** token or context pressure cannot downshift this table, remove a required stage or depth, skip liveness and registry handling, or weaken worktree, write, spec, sandbox, approval, safety, validation, security, or accessibility guards. Unknown or exceeded budgets preserve the pipeline and surface degraded availability. Only unrequested optional exploration and user-facing verbosity may shrink.

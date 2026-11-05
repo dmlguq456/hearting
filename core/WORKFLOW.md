@@ -96,7 +96,7 @@ deciding that reanalysis is needed.
 [docs] research / analyze-project(paper or doc) → autopilot-draft → autopilot-refine
 ```
 
-- **Spec-backed implementation:** if a code request has no `spec/`, run `autopilot-spec` first, except a known-scope tiny fix under §0.2.1 or a one-off throwaway. Repeated new behavior graduates to a spec.
+- **Spec-backed implementation:** if a code request has no `spec/`, run `autopilot-spec` first, except a known-scope local completion unit under §0.2.1 (including a small new feature) or a one-off throwaway. Repeated new behavior graduates to a spec.
 - **No spec without prior evidence:** if neither `research/` nor `analysis_project/` grounds the spec, run `autopilot-research` or `analyze-project` first. Enforce this more strongly in unfamiliar domains and for new intent.
 - Hook write gates are retired; artifact creation order remains a routing convention.
 
@@ -270,15 +270,29 @@ An entry's recipe is an assembly preset: the default when nothing else is
 chosen and an example of how its parts fit together. The route is the sealed
 stage list, assembled from the part catalog (`capabilities/topologies.json`
 recipes plus `part_catalog`, SD-165).
-The main session judges the existing seven direct predicates: one atomic
-outcome, known scope, focused verification, and no shared-contract change,
-long-running resource work, artifact handoff, or independent verifier.
-A reversible fix that satisfies them and finishes in the current cwd's Git
+The main session judges the existing seven direct predicates by **one local
+completion unit**, rather than separate edits or verbs:
+one reversible result for a feature or defect; known scope, whose location and
+impact a short read of the source, callers and tests establishes; focused
+verification with a known runner and expected result; no change to contracts
+shared by components, adapters or external consumers (API, schema, security
+boundary or PRD decisions); no long-running resource work; no independent
+artifact handoff; and no independent verifier. A requested test run is the
+session's own verification, not an independent verifier.
+
+A small new feature or fix and its source, regression tests and README form
+the same completion unit. A new file is not scope expansion by itself; a
+small component's full suite can be focused verification. Its README explains
+the feature rather than creating an independent artifact handoff. `fix`,
+`outcome` and `edit` name this same scope. File, line and verb counts
+are not classifiers. Reading known related files to confirm scope differs
+from exploring several modules to find the cause.
+
+A unit that satisfies these predicates and finishes in the current cwd's Git
 worktree needs only reading, editing, focused checking and an ordinary final
 reply. Existing turn hooks record it automatically; no task file, compose,
 finish, separate capability-info call, question or classification call is
-required. File and line counts are not classifiers. A new worktree or scope
-exploration uses the explicit route instead.
+required. A new worktree or scope exploration uses the explicit route instead.
 
 If the work grows, compose before the next expanded action. The new route
 links the current turn's start snapshot, observed changes and native evidence;
@@ -288,7 +302,7 @@ session's mistaken small-work judgment never disables the automatic record:
 it retains total counts, bounded path samples with truncation/unknown markers,
 observed command outcomes and the final reply.
 `COMPLETE` for that automatic route means the record was saved, not that the
-fix or its tests passed. Missing, interrupted and running results stay unknown.
+work or its tests passed. Missing, interrupted and running results stay unknown.
 
 Explicit `compose --start --shape direct --prompt-file <task>` still prepares
 an isolated worktree and an inline route; `compose --shape direct` records work
@@ -303,10 +317,18 @@ light check of a direct change may use the harness's own native subagent
 
 | Main decision | Command | Result |
 |---|---|---|
-| Tiny reversible fix in the current Git worktree | read → edit → check → reply | automatic record; no start/finish round trip |
+| One reversible local completion unit in the current Git worktree, including a small feature with its tests and README | read → edit → check → reply | automatic record; no start/finish round trip |
 | Explicit direct source change needing preparation | `compose --start --shape direct --prompt-file <task>` | isolated worktree, inline node, dispatch depth 0 |
-| One atomic, reversible change already made in place | `compose --shape direct` | records the in-place change as an inline node |
+| One reversible local completion unit already made in place | `compose --shape direct` | records the in-place change as an inline node |
 | Other new work | `compose --start --prompt-file <task>` | framed; frame proposes the smallest route and the existing interview confirms it |
+
+Examples of the same boundary:
+
+- **Direct:** one small local feature with its tests and README.
+- **Plan first:** unrelated tasks bundled together, a new structure to choose,
+  or cause exploration across several modules.
+- **Full frame:** shared contracts, external API/schema changes, migrations,
+  security or data risk, even when the edit is short.
 
 `solo` means one registered owner; `staged` means separate stages. Shape
 omission starts a framed route. `--capability`, `--capability-mode`, `--graph`,
@@ -469,7 +491,7 @@ budget and start approval) and writing under
 
 For execution, use `compose --campaign-key <stream> --start --prompt-file
 <task>` with no `--shape` for framed work or an explicit decided shape. Use
-`--shape direct` only for one atomic, reversible inline change. The slug comes from the task; the
+`--shape direct` only for one reversible local completion unit (§0.2.1). The slug comes from the task; the
 campaign defaults to this session's latest stream in the same artifact root
 (including temporary directories and returning from a prepared worktree to
 the primary checkout; another session or artifact root supplies no default),

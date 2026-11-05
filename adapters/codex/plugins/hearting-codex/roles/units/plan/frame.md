@@ -105,11 +105,14 @@ created: {YYYY-MM-DD}
 
    Judge each leg's `size` from sections 2–4 before its shape, and let the
    shape follow it:
-   - `one-change` → `direct`: one atomic, reversible edit the owner session
-     makes and checks itself.
-   - `one-pass` → `solo`: a bounded change one worker finishes and checks in
-     one pass (typically a few files in one module, no shared contract to
-     settle first).
+   - `one-change` → `direct`: one reversible local completion unit under
+     `core/WORKFLOW.md §0.2.1`, including a small feature or fix with its source,
+     regression tests and README. The owner session makes and checks it itself;
+     file and verb counts do not split the unit.
+   - `one-pass` → `solo`: bounded work already assigned to one worker, or
+     several independent outcomes it can finish and check in one pass, with
+     no shared contract to settle first. Related files alone do not turn
+     `one-change` into `one-pass`.
    - `multi-stage` → `staged`: the change needs its own plan check and
      independent review — shared contracts or specs, several modules or
      adapters, a migration, or a direction that can still bend.
