@@ -40,6 +40,7 @@ keeps the accepted handover pending instead of treating unknown ownership as emp
 
 from __future__ import annotations
 from collections import OrderedDict
+from runtime_observation import ProjectionCache
 import threading
 
 import contextlib
@@ -192,7 +193,13 @@ def _build_lineage_graph(read_context=None) -> LineageGraph:
                 return compact
         # Snapshots are not a second lineage reader; their unreadable schema
         # still prevents a current authority judgment.
-        _all_snapshots()
+        from dispatch_supervision import passive_read_context
+        if passive_read_context() is not None:
+            # This call only validates snapshots. The passive seat projection
+            # already validates each changed file and retains no snapshot prose.
+            _snapshot_seat_keys()
+        else:
+            _all_snapshots()
         signature, contents = _readable_lineage_signature(directory)
         metadata = (signature[0], tuple(item[:-1] for item in signature[1]), signature[2])
         cached = _LINEAGE_GRAPH_CACHE.get(signature)
@@ -766,7 +773,7 @@ def _snapshot_data_usable(data):
             and _bindings_readable(data.get('bindings')))
 
 
-_PASSIVE_SNAPSHOT_SEATS = OrderedDict()
+_PASSIVE_SNAPSHOT_SEATS = ProjectionCache(max_entries=128, max_bytes=112 * 1024)
 _PASSIVE_SNAPSHOT_LOCK = threading.RLock()
 
 
@@ -801,12 +808,11 @@ def _snapshot_seat_keys():
         if held is None:
             data = read_snapshot(path.stem)
             seat_key = str(data['seat']['key']) if _snapshot_data_usable(data) else None
-            if before == signature() and (seat_key is None or len(seat_key) <= 4096):
+            if seat_key is not None and before == signature() and len(seat_key) <= 4096:
                 with _PASSIVE_SNAPSHOT_LOCK:
                     _PASSIVE_SNAPSHOT_SEATS[key] = (before, seat_key)
-                    _PASSIVE_SNAPSHOT_SEATS.move_to_end(key)
-                    while len(_PASSIVE_SNAPSHOT_SEATS) > 128:
-                        _PASSIVE_SNAPSHOT_SEATS.popitem(last=False)
+                    if key in _PASSIVE_SNAPSHOT_SEATS:
+                        _PASSIVE_SNAPSHOT_SEATS.move_to_end(key)
         if seat_key is None:
             raise ValueError('handover-snapshot-invalid')
         keys.add(seat_key)

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from contextvars import ContextVar
-from collections import OrderedDict
+from runtime_observation import ProjectionCache, retained_size
 import threading
 import hashlib
 import glob
@@ -50,7 +50,7 @@ class StopWaiting(RuntimeError):
 
 
 _ROUTE_ATTENTION_READ = ContextVar("supervision_route_attention_read", default=None)
-_PASSIVE_ROUTE_DOCUMENTS = OrderedDict()
+_PASSIVE_ROUTE_DOCUMENTS = ProjectionCache(max_entries=128, max_bytes=1280 * 1024)
 _PASSIVE_ROUTE_LOCK = threading.RLock()
 
 
@@ -60,7 +60,7 @@ def _read_route_document(path):
         return json.loads(path.read_text(encoding='utf-8')), None
     def signature():
         st = path.stat()
-        return (st.st_dev, st.st_ino, st.st_mode, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+        return (st.st_dev, st.st_ino, st.st_mode, st.st_size, st.st_mtime_ns, st.st_ctime_ns, json.loads)
     key, before = str(path), signature()
     with _PASSIVE_ROUTE_LOCK:
         previous = _PASSIVE_ROUTE_DOCUMENTS.get(key)
@@ -68,15 +68,25 @@ def _read_route_document(path):
             _PASSIVE_ROUTE_DOCUMENTS.move_to_end(key)
             return previous['document'], previous
     document = json.loads(path.read_text(encoding='utf-8'))
-    entry = {'signature': before, 'document': document, 'hash': None}
+    entry = {'signature': before, 'document': document, 'hash': None, 'hash_policy': None}
     if before == signature() and before[3] <= 1024 * 1024:
         with _PASSIVE_ROUTE_LOCK:
-            _PASSIVE_ROUTE_DOCUMENTS[key] = entry
-            _PASSIVE_ROUTE_DOCUMENTS.move_to_end(key)
-            while (len(_PASSIVE_ROUTE_DOCUMENTS) > 128
-                   or sum(value['signature'][3] for value in _PASSIVE_ROUTE_DOCUMENTS.values()) > 16 * 1024 * 1024):
-                _PASSIVE_ROUTE_DOCUMENTS.popitem(last=False)
+            # Reserve the small lazy digest and policy fields as well.
+            _PASSIVE_ROUTE_DOCUMENTS.remember(key, entry,
+                weight=retained_size((key, entry)) + 512)
+            if key in _PASSIVE_ROUTE_DOCUMENTS:
+                _PASSIVE_ROUTE_DOCUMENTS.move_to_end(key)
     return document, entry
+
+
+def _observed_route_hash(route, cached_route):
+    from route_identity import route_hash
+    if cached_route is None:
+        return route_hash(route)
+    if cached_route.get('hash_policy') is not route_hash:
+        cached_route['hash'] = route_hash(route)
+        cached_route['hash_policy'] = route_hash
+    return cached_route['hash']
 
 
 def passive_read_context():
@@ -370,14 +380,19 @@ def _attempt_human_wait(metadata, jobs):
     if not path.is_absolute() or path.is_symlink():
         return None
     try:
-        route = json.loads(path.read_text(encoding="utf-8"))
+        route, cached_route = _read_route_document(path)
         expected = metadata.get("owner_route_id") or metadata.get("route_id")
         expected_hash = metadata.get("owner_route_hash") or metadata.get("route_hash")
         if (route.get("route_id") != expected
                 or (expected_hash and route.get("route_hash") != expected_hash)):
             return None
-        from human_gate_observation import pending_human_waits
-        return bool(pending_human_waits(route, jobs=jobs))
+        if cached_route is None:
+            from human_gate_observation import pending_human_waits
+            return bool(pending_human_waits(route, jobs=jobs))
+        if _observed_route_hash(route, cached_route) != route.get('route_hash'):
+            return False
+        from human_gate_observation import _pending_human_waits_validated
+        return bool(_pending_human_waits_validated(route, jobs=jobs))
     except (OSError, UnicodeError, ValueError, TypeError):
         return None
 
@@ -399,16 +414,10 @@ def _route_needs_attention(metadata, jobs, now):
                 or not expected_route_id or not expected_route_hash):
             return None
         route, cached_route = _read_route_document(route_path)
-        from route_identity import route_hash
         if (route.get("route_id") != expected_route_id
                 or route.get("route_hash") != expected_route_hash):
             return None
-        actual_hash = cached_route.get('hash') if cached_route is not None else None
-        if actual_hash is None:
-            actual_hash = route_hash(route)
-            if cached_route is not None:
-                cached_route['hash'] = actual_hash
-        if actual_hash != expected_route_hash:
+        if _observed_route_hash(route, cached_route) != expected_route_hash:
             return None
         route_node = metadata.get("route_node")
         if (route_node and route_node != "_owner"

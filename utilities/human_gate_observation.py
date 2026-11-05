@@ -376,6 +376,14 @@ def pending_human_waits(route, *, jobs, outcome=None):
         from route_identity import route_hash
         if route_hash(route) != route["route_hash"]:
             return []
+    except (OSError, ValueError, TypeError, KeyError):
+        return []
+    return _pending_human_waits_validated(route, jobs=jobs, outcome=outcome)
+
+
+def _pending_human_waits_validated(route, *, jobs, outcome=None):
+    """Read current waits after the caller has verified these exact route bytes."""
+    try:
         ledger_root, _ = WS.ledger_root_for(jobs)
         ledger = WS.WorkflowLedger(route["route_id"], route["route_hash"], root=ledger_root)
         journal = [row for row in _journal(ledger)
