@@ -199,7 +199,9 @@ Explorer 창 하나가 CPU 한 코어의 약 3분의 1과 메모리 약 0.8 GB�
 - **설치하고 로그인한 에이전트 CLI 하나 이상:** Claude Code, Codex, OpenCode 중
   하나. Claude Code 하나만으로도 됩니다.
 
-<!-- TODO(공개 준비 5단계): 시험한 OS × 하네스 표를 넣는다. -->
+지금까지 확인한 범위: CI가 Ubuntu에서 Claude Code·Codex·OpenCode용 설치를 확인하고,
+[QUICKSTART.ko.md](QUICKSTART.ko.md)의 실측은 Linux에서 했습니다. macOS는 처음부터
+끝까지 확인하지 않았고, Windows(Git Bash)는 실험 단계입니다.
 
 ### 설치
 
@@ -249,7 +251,8 @@ Git 프로젝트 안에서 에이전트 CLI를 열고 작은 일을 맡겨 보�
 저장할 뿐이고, 수정이나 시험이 통과했는지는 판단하지 않습니다. 끄려면
 `HEARTING_AUTO_RECORD=off`를 설정하세요.
 
-<!-- TODO(공개 준비 1·6단계): 데모 저장소, 예상 patch, 실측 시간을 담은 QUICKSTART.md를 연결한다. -->
+[QUICKSTART.ko.md](QUICKSTART.ko.md)에서 작은 데모 파일로 첫 작업을 해 볼 수 있습니다.
+예상 변경과 실측 시간도 함께 있습니다.
 
 ### 업데이트와 상태
 
@@ -306,7 +309,7 @@ headless:
   `workspace-write` 샌드박스 안에서 승인 질문 없이 돌고, OpenCode 작업자는
   사용자의 OpenCode 권한 설정에서 출발합니다.
 
-<!-- TODO(공개 준비 2단계): 설치 출력이 이 기본값과 파일 경로를 알리게 되면 여기에 적는다. -->
+Claude Code를 포함해 처음 설치하면 설치기가 이 기본값과 이를 바꾸는 파일을 알려 줍니다.
 
 **Claude Code 사용자 규칙은 OpenCode에도 적용됩니다.** OpenCode에는 사용자
 전역 규칙 파일이 따로 없어서, `~/.claude/rules/`(또는
@@ -468,7 +471,7 @@ python3 tools/generate.py --check
 남은 작업 트리에서 번들을 만들지 않으므로, 설치 수명 주기 시험은 깨끗한
 체크아웃에서 돌리세요. `--mode linked`는 실시간 디버깅용입니다.
 
-<!-- TODO(공개 준비 6단계): CONTRIBUTING.md를 추가하고 여기에 연결한다. -->
+pull request를 열기 전에 [CONTRIBUTING.md](CONTRIBUTING.md)를 읽어 주세요.
 
 ## 문서
 
