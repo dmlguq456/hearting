@@ -1445,13 +1445,21 @@ class FrameFrictionContinuationTest(StartBase):
 
 class FailureTableTest(StartBase):
     def test_manually_composed_first_leg_gets_guarded_frame_closure_commands_without_mutation(self):
-        self.settle()
+        # Keep the real frame cycle open, as when a caller recovers the first leg
+        # manually. The ordinary start would complete and seal it for us.
+        custom_jobs = self.jobs.parent / "custom registry" / "jobs.log"
+        custom_jobs.parent.mkdir()
+        self.jobs.rename(custom_jobs)
+        self.jobs = custom_jobs
+        os.environ["AGENT_DISPATCH_JOBS"] = str(self.jobs)
+        with mock.patch.object(W, "_route_cli", side_effect=RuntimeError("before-frame-complete")):
+            with self.assertRaisesRegex(RuntimeError, "before-frame-complete"):
+                self.settle()
         leg_path = self.leg_routes()[0]
         leg = json.loads(leg_path.read_text())
         record = self.record()
         record.pop("first_leg")
         self.record_path().write_bytes(RP.render(record))
-        R.outcome_path(self.path).unlink()
         before = self.record_path().read_bytes()
         guidance = W._manual_frame_closure(leg, self.jobs)
         receipt = W.start_work(leg, leg_path, self.jobs, run=self.fake_run)
@@ -1459,13 +1467,39 @@ class FailureTableTest(StartBase):
         self.assertEqual(guidance["frame_route_id"], self.route["route_id"])
         self.assertEqual(self.record_path().read_bytes(), before)
         self.assertFalse(R.outcome_path(self.path).exists())
+        cycle_id = record["decision"]["frame_route"]["cycle_id"]
+        self.assertEqual(P.read_cycle_record(self.root, cycle_id)["state"], "open")
         self.assertEqual(len(guidance["commands"]), 3)
-        for command in guidance["commands"][:2]:
+        import route_parent_close
+        for command in guidance["commands"]:
             argv = shlex.split(command)
-            self.in_process_cli(self.jobs, *argv[2:])
+            command_env = {}
+            if argv[0] == "env":
+                argv.pop(0)
+                while "=" in argv[0]:
+                    key, value = argv.pop(0).split("=", 1)
+                    command_env[key] = value
+            stdout, stderr = io.StringIO(), io.StringIO()
+            # A copied command must retain its nondefault registry even when
+            # the shell points at another one. Execute the public parser and
+            # command implementation, not EndingBase's permissive CLI double.
+            ambient_jobs = self.jobs.parent / "other-jobs.log"
+            ambient_jobs.write_text("", encoding="utf-8")
+            with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(ambient_jobs), **command_env}), \
+                    mock.patch.object(sys, "argv", argv[1:]), \
+                    contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                try:
+                    code = P.main(argv[2:]) if Path(argv[1]).name == "artifact_producer.py" else R.main()
+                except SystemExit as exc:
+                    code = exc.code
+                self.assertIn(code, (None, 0), f"{command}\n{stderr.getvalue()}")
+                if argv[2] == "close":
+                    self.assertEqual(route_parent_close.jobs_path(), self.jobs.resolve())
         self.assertTrue(self.outcome()["terminal_gate_proven"])
+        self.assertEqual(P.read_cycle_record(self.root, cycle_id)["state"], "sealed")
         self.assertEqual(self.record_path().read_bytes(), before)
         self.assertEqual(len(self.leg_routes()), 1)
+        self.assertFalse(R.outcome_path(leg_path).exists())
         self.assertIsNone(W._manual_frame_closure(leg, self.jobs))
 
     def test_a164_11_a_first_leg_compose_refusal_keeps_the_record_and_the_same_start_resumes(self):
