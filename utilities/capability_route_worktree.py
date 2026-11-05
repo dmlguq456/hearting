@@ -134,12 +134,12 @@ def _compose_git_diagnosis(cwd):
 
 
 def _decide_non_git_compose(cwd_diagnosis, requested_shape,
-                            dispatch_depth, registered_attempt, capability_hint):
+                            dispatch_depth, registered_attempt, capability_hint, *, new_repository=False):
     """The single compose-start decision for Git, non-Git direct, and non-Git refusal.
 
     `requested_shape` is the shape the start will run: a readable route-plan leg's own
-    shape, else `--shape`. Only an explicit direct shape runs without a worker; an omitted
-    shape follows the Git default (framed), so the frame decides as in a Git folder."""
+    shape, else `--shape`. An ordinary depth-zero non-Git start defaults to this
+    session; an explicitly named new repository keeps framed preparation."""
     common = {"cwd": str(cwd_diagnosis.get("cwd") or ""),
               "capability_hint": capability_hint}
     state = cwd_diagnosis.get("state")
@@ -150,7 +150,9 @@ def _decide_non_git_compose(cwd_diagnosis, requested_shape,
         return {**common, "kind": "error", "detail": f"{common['cwd']}: {detail}"}
     t = UI_TEXT.translator()
     cause = t("route.nongit.cause", cwd=common['cwd'])
-    if requested_shape != "direct":
+    ordinary_inline = (requested_shape is None and dispatch_depth == 0
+                       and not registered_attempt and not new_repository)
+    if requested_shape != "direct" and not ordinary_inline:
         return {**common, "kind": "worker-candidate", "cause": cause,
                 "next": t("route.nongit.next_worker")}
     if dispatch_depth > 0 or registered_attempt:

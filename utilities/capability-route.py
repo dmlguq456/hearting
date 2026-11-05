@@ -1927,11 +1927,13 @@ def main():
                              "detail": "invalid AGENT_DISPATCH_DEPTH"}
             requested_shape = (route_plan_binding["leg"].get("shape")
                                if route_plan_binding is not None else a.shape)
+            import route_plan as RP
             non_git_decision = _decide_non_git_compose(
                 diagnosis, requested_shape, dispatch_depth,
                 bool(os.environ.get("AGENT_DISPATCH_ATTEMPT_ID")
                      or os.environ.get("AGENT_DISPATCH_REGISTERED_WORKER", "").lower() in {"1", "true"}),
-                a.capability)
+                a.capability, new_repository=bool(RP.requested_repository({"cwd": str(cwd),
+                    "work_request": {"text": a.prompt_file.read_text() if a.prompt_file else ""}})))
             if non_git_decision["kind"] == "error":
                 raise ValueError("compose-start-git-diagnosis: " + str(non_git_decision.get("detail")))
             if non_git_decision["kind"] == "refuse":

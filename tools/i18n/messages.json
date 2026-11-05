@@ -631,8 +631,8 @@
    "ko": "입력 {names} ← {cycles} {path}"
   },
   "route.card.non_git_direct": {
-   "en": "Not a git folder — this session proceeds directly. If a worker is needed, start again without --shape (source edits need git init)",
-   "ko": "git 아닌 폴더 — 이 세션이 직접 진행. 작업자가 필요하면 --shape 없이 다시 시작(원본 수정은 git init 필요)"
+   "en": "Not a git folder — this session proceeds directly",
+   "ko": "git 아닌 폴더 — 이 세션이 직접 진행"
   },
   "route.card.output": {
    "en": "Output {path}",

@@ -477,6 +477,9 @@ def compose_decision_lines(route, non_git_decision=None, t=None):
     """Read only the sealed selection/nodes; same display for every harness."""
     import route_plan as RP
 
+    if non_git_decision and non_git_decision.get("kind") == "direct":
+        return []  # The existing one-line non-Git card owns the notice.
+
     t = t or UI_TEXT.translator()
     basis = {row.get("axis"): row for row in
              (route.get("selection") or {}).get("selection_basis", [])}
@@ -563,6 +566,11 @@ def compose_card(route, plan=None, plan_source=None, *, owner_harness=None,
         + _compose_campaign_line(campaign_selection if campaign_selection is not None
                                  else compose_campaign_selection(route), t)
     )
+    if non_git_decision and non_git_decision.get("kind") == "direct":
+        notice = card.splitlines()[0] + " · " + t("route.card.non_git_direct")
+        if non_git_decision.get("capability_unresolved"):
+            notice += " · " + t("route.card.capability_unresolved")
+        return notice
     import work_intent
     for line in work_intent.card_lines(route, original=intent_original, t=t):
         card += "\n" + line
