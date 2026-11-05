@@ -353,8 +353,14 @@ def record_native_answer(route, jobs, asked, *, expected_interview_digest=None):
                 or question_path != progress.directory / "interview.json"
                 or question_path.read_bytes() != progress.raw):
             return None  # The reply was calculated for a different interview revision.
-        if (progress.directory / "answers.json").exists():
-            return None
+        manual = progress.directory / "answers.json"
+        if manual.exists():
+            try:
+                existing = FI.load_json_file(manual, max_bytes=FI.MAX_ANSWERS_BYTES, kind="answers")
+            except (OSError, ValueError):
+                existing = None
+            if isinstance(existing, dict) and not FI.validate_answers(progress.question, existing):
+                return None
         # Other native calls may have committed partial rows while this call was
         # being interpreted. Merge again under the same lock as replacement.
         digest = hashlib.sha256(progress.raw).hexdigest()
