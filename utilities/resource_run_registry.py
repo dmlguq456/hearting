@@ -40,6 +40,11 @@ class ResourceReadCache:
         self.generations = {}
         self.hits = self.misses = 0
         self.lock = threading.RLock()
+        from runtime_observation import ProjectionCache
+        self.rows = ProjectionCache(max_entries=1024, max_bytes=14 * 1024 * 1024)
+        self.row_hits = self.row_misses = 0
+        self.sources = ProjectionCache(max_entries=512, max_bytes=6 * 1024 * 1024)
+        self.source_hits = self.source_misses = 0
 
     def read(self, key, raw, dependencies, load):
         with self.lock:
@@ -131,7 +136,7 @@ def passive_parent_identity(path):
     if reads is not None and key in reads:
         reads.move_to_end(key)
         return reads[key]
-    info = path.lstat()
+    info = path.lstat() if isinstance(path, Path) else os.lstat(path)
     identity = (info.st_dev, info.st_ino, info.st_mode)
     if reads is not None:
         from runtime_observation import retained_size
@@ -762,7 +767,51 @@ def indexed_paths(index_path=None) -> tuple[list[Path], list[dict]]:
     return paths, diagnostics
 
 
+def _cached_registry_source(path):
+    scope = _PASSIVE_READ.get()
+    if scope is None:
+        return None
+    cache = scope['cache']
+    key = os.fspath(path)
+    dependencies = (os.stat, os.lstat, os.readlink, os.open, os.fstat, Path.lstat, Path.resolve, read_registry_source, _read_registry_source)
+    with cache.lock:
+        held = cache.sources.get(key)
+        cache.source_misses += 1
+        if held is None or any(a is not b for a, b in zip(held[4], dependencies)):
+            return None
+        source, data, signature, layout, _policy = held
+        try:
+            info = os.stat(source['resolved_path'], follow_symlinks=False)
+            current = (info.st_dev, info.st_ino, info.st_mode, info.st_size,
+                       info.st_mtime_ns, info.st_ctime_ns)
+            if current != signature:
+                return None
+            # This is the original closing namespace proof, after the fresh
+            # leaf generation. No file bytes need reading when it still agrees.
+            for raw_path, device, inode, mode, link, target in layout:
+                info = os.lstat(raw_path)
+                if (info.st_dev, info.st_ino, info.st_mode) != (device, inode, mode):
+                    return None
+                if link is not None and (os.readlink(raw_path) != link
+                        or str(Path(raw_path).resolve(strict=True)) != target):
+                    return None
+        except (OSError, ValueError, RuntimeError):
+            return None
+        cache.sources.move_to_end(key)
+        cache.source_hits += 1
+        cache.source_misses -= 1
+        return copy.deepcopy(source), data
+
+
 def read_registry_source(path: Path) -> tuple[dict, bytes | None]:
+    """Observe this source generation; passive readers reuse verified bytes only."""
+    cached = _cached_registry_source(path)
+    if cached is not None:
+        return cached
+    return _read_registry_source(path)
+
+
+def _read_registry_source(path: Path) -> tuple[dict, bytes | None]:
     """Read once with path identity; only ordinary ENOENT is a negative fact.
 
     Inspect links before resolving so a dangling link cannot become a missing
@@ -803,20 +852,34 @@ def read_registry_source(path: Path) -> tuple[dict, bytes | None]:
     if signature(first) != signature(last) or signature(last) != signature(resolved.stat()):
         raise ValueError(f"registry-changed-during-read:{path}")
     # The logical path and each ancestor must still name the object just read.
+    layout = []
     for observed in [*parents, entry]:
         current_path = Path(observed["path"])
         current_info = current_path.lstat()
         if (current_info.st_dev, current_info.st_ino) != (observed["device"], observed["inode"]):
             raise ValueError(f"registry-path-changed-during-read:{path}")
+        layout.append((observed['path'], current_info.st_dev, current_info.st_ino,
+                       current_info.st_mode, observed.get('link'), observed.get('target')))
         if "link" in observed and (os.readlink(current_path) != observed["link"]
                 or str(current_path.resolve(strict=True)) != observed["target"]):
             raise ValueError(f"registry-link-changed-during-read:{path}")
     if path.resolve(strict=True) != resolved:
         raise ValueError(f"registry-path-changed-during-read:{path}")
-    return {"kind": "file", "path": str(path), "resolved_path": str(resolved),
+    source = {"kind": "file", "path": str(path), "resolved_path": str(resolved),
             "device": last.st_dev, "inode": last.st_ino, "ancestors": parents,
             "leaf": entry, "sha256": "sha256:" + hashlib.sha256(data).hexdigest(),
-            "size": len(data)}, data
+            "size": len(data)}
+    scope = _PASSIVE_READ.get()
+    if scope is not None:
+        cache = scope['cache']
+        key = os.fspath(path)
+        dependencies = (os.stat, os.lstat, os.readlink, os.open, os.fstat, Path.lstat, Path.resolve, read_registry_source, _read_registry_source)
+        signature = (last.st_dev, last.st_ino, last.st_mode, last.st_size,
+                     last.st_mtime_ns, last.st_ctime_ns)
+        with cache.lock:
+            cache.sources.remember(key, (copy.deepcopy(source), data, signature,
+                                         tuple(layout), dependencies))
+    return source, data
 
 
 def _boot_epoch() -> float | None:
@@ -842,6 +905,149 @@ def _start_epoch(run: dict) -> float | None:
         return boot + float(run["starttime"]) / float(os.sysconf("SC_CLK_TCK")) if boot else None
     except (KeyError, TypeError, ValueError, OSError):
         return None
+
+
+def _row_input_layout(raw):
+    if not raw:
+        return ()
+    path = Path(raw).expanduser()
+    if not path.is_absolute() or '..' in path.parts:
+        return None
+    parents = tuple(os.fspath(parent) for parent in reversed(path.parents))
+    return parents + (os.fspath(path),)
+
+
+def _row_input_generation(layout):
+    """Fresh leaf generation and the same no-link parent proof as progress reads.
+
+    Directory mtime is not a file dependency: an unrelated sibling publication
+    cannot change this row. Parent inode/mode and the leaf's full generation do.
+    Initial parent observations are shared only inside this passive scan;
+    independent closing checks still detect a replaced parent in the same scan.
+    """
+    if layout is None:
+        return None
+    if layout and layout[0] == 'public-record':
+        import resource_progress
+        return resource_progress._public_run_generation(layout[1], layout[2])
+    observed = []
+    for index, path in enumerate(layout):
+        try:
+            if index + 1 < len(layout):
+                device, inode, mode = passive_parent_identity(path)
+                value = (device, inode, mode)
+            else:
+                info = os.lstat(path)
+                mode = info.st_mode
+                value = (info.st_dev, info.st_ino, mode, info.st_size,
+                         info.st_mtime_ns, info.st_ctime_ns)
+        except FileNotFoundError:
+            observed.append(None)
+            break
+        except OSError:
+            return None
+        if stat.S_ISLNK(mode):
+            return None
+        observed.append(value)
+    # Keep the original closing proof; a cached parse never authorizes a path
+    # that the uncached reader would reject after a parent replacement.
+    for path, value in zip(layout[:-1], observed):
+        if value is None:
+            break
+        try:
+            info = os.lstat(path)
+        except OSError:
+            return None
+        if (info.st_dev, info.st_ino, info.st_mode) != value[:3]:
+            return None
+    return tuple(observed)
+
+
+def _static_run_values(run_id, run, registry, artifact_root):
+    """Interpret file-backed and literal fields, without PID or clock verdicts."""
+    from resource_progress import read_progress, read_public_run_record
+    execution = run.get('execution')
+    progress = read_progress({**run, 'run_id': str(run_id)}, 0.0)
+    if progress is not None:
+        progress = {key: value for key, value in progress.items() if key != 'age_s'}
+    return {
+        'job_type': 'resource', 'resource_class': 'lab', 'run_id': str(run_id),
+        'resource_policy': run.get('resource_policy'), 'observer_of': run.get('observer_of'),
+        'cwd': run.get('cwd') if isinstance(run.get('cwd'), str) else '',
+        'pid': run.get('pid'), 'starttime': run.get('starttime'),
+        'command_hash': run.get('command_hash'), 'process_group': run.get('process_group'),
+        'pid_namespace': run.get('pid_namespace'), 'execution': execution,
+        'compute_run_id': execution.get('run_id') if isinstance(execution, dict) else None,
+        'compute_host': execution.get('host') if isinstance(execution, dict) else None,
+        'command': (run['command'] if isinstance(run.get('command'), list)
+                    and all(isinstance(arg, str) for arg in run['command']) else None),
+        'registry_status': run.get('status'), 'registry_path': str(registry),
+        'route': run.get('route'), 'node': run.get('node'), 'artifact_root': artifact_root,
+        'route_file': run.get('route_file'), 'route_id': run.get('route_id'),
+        'route_hash': run.get('route_hash'), 'route_node': run.get('route_node'),
+        'config_ref': run.get('config_ref'), 'config_sha256': run.get('config_sha256'),
+        'source_commit': run.get('source_commit'), 'source_dirty': run.get('source_dirty'),
+        'source_git_state': run.get('source_git_state'),
+        'experiment_run_record': (read_public_run_record(artifact_root, str(run_id))
+                                  if artifact_root else None),
+        'progress_file': run.get('progress_file'), 'progress': progress,
+        'workflow_state': run.get('workflow_state'), 'exit_code': run.get('exit_code'),
+        'ended_at': run.get('ended_at') if isinstance(run.get('ended_at'), (int, float)) else None,
+        'failure_class': run.get('failure_class'),
+        'parent_attempt_id': run.get('parent_attempt_id'), 'sentinel': run.get('sentinel'),
+    }
+
+
+def _static_run_row(run_id, run, registry, artifact_root):
+    scope = _PASSIVE_READ.get()
+    if scope is None:
+        return _static_run_values(run_id, run, registry, artifact_root)
+    import resource_progress
+    from runtime_observation import retained_size
+    cache = scope['cache']
+    key = (os.fspath(registry), str(run_id))
+    dependencies = (resource_progress.read_progress, resource_progress._read,
+                    resource_progress._json, resource_progress._valid_progress,
+                    resource_progress.read_public_run_record, resource_progress._public_run_generation,
+                    resource_progress._open_public_directory, _static_run_values,
+                    Path.lstat, os.lstat, os.open, os.stat)
+    with cache.lock:
+        held = cache.rows.get(key)
+        if held is not None and held[0] == run and held[1] == artifact_root:
+            layouts = held[2]
+        else:
+            try:
+                public = (os.fspath(Path(artifact_root).expanduser() / 'resource-runs' /
+                                   (str(run_id) + '.json')) if artifact_root
+                          and resource_progress._SAFE_RUN_ID.fullmatch(str(run_id)) else None)
+                public_layout = (('public-record', str(artifact_root), str(run_id))
+                                 if artifact_root and hasattr(os, 'O_PATH') else _row_input_layout(public))
+                layouts = (_row_input_layout(run.get('progress_file')), public_layout)
+            except (OSError, TypeError, ValueError, RuntimeError):
+                layouts = (None,)
+        before = tuple(_row_input_generation(layout) for layout in layouts)
+        if (held is not None and held[0] == run and held[1] == artifact_root
+                and held[3] == before and all(value is not None for value in before)
+                and all(a is b for a, b in zip(held[4], dependencies))):
+            cache.rows.move_to_end(key)
+            cache.row_hits += 1
+            return copy.deepcopy(held[5])
+    cache.row_misses += 1
+    value = _static_run_values(run_id, run, registry, artifact_root)
+    after = tuple(_row_input_generation(layout) for layout in layouts)
+    if before == after and all(item is not None for item in before):
+        # Copy the raw row too: in-place edits and caller-owned result mutations
+        # must not silently change the retained projection's input or output.
+        candidate = (run, artifact_root, layouts, after, dependencies, value)
+        weight = retained_size((key, candidate), cache.rows.max_bytes)
+        if weight <= cache.rows.max_bytes:
+            owned = copy.deepcopy((run, value))
+            with cache.lock:
+                cache.rows.remember(key, (owned[0], artifact_root, layouts, after,
+                                          dependencies, owned[1]), weight=weight)
+        else:
+            cache.rows.rejections += 1
+    return copy.deepcopy(value)
 
 
 def normalize_run(run_id: str, run: dict, registry: Path, identity_reader=proc_identity,
@@ -879,15 +1085,6 @@ def normalize_run(run_id: str, run: dict, registry: Path, identity_reader=proc_i
     training_progress = None
     remote_training = []
     local_placement = None
-    from resource_progress import read_progress
-    progress = read_progress({**run, "run_id": str(run_id)}, now)
-    if liveness == "working":
-        from resource_progress import collect as collect_progress, remote_candidates
-        from resource_placement import observe as observe_placement
-        local_placement = observe_placement({**run, "run_id": str(run_id)})
-        training_progress = collect_progress(run, registry, now)
-        remote_training = remote_candidates(run, registry, now)
-    experiment_observation = None
     artifact_root = run.get("artifact_root")
     if not artifact_root and isinstance(run.get("route"), str):
         try:
@@ -901,6 +1098,17 @@ def normalize_run(run_id: str, run: dict, registry: Path, identity_reader=proc_i
                     artifact_root = route_doc.get("artifact_root")
         except (OSError, ValueError, TypeError):
             pass
+    static = _static_run_row(run_id, run, registry, artifact_root)
+    progress = static['progress']
+    if progress is not None:
+        progress = {**progress, 'age_s': max(0.0, now - progress['updated_at'])}
+    if liveness == "working":
+        from resource_progress import collect as collect_progress, remote_candidates
+        from resource_placement import observe as observe_placement
+        local_placement = observe_placement({**run, "run_id": str(run_id)})
+        training_progress = collect_progress(run, registry, now)
+        remote_training = remote_candidates(run, registry, now)
+    experiment_observation = None
     observation_meta = run.get("observation") if isinstance(run.get("observation"), dict) else {}
     has_source_bindings = isinstance(observation_meta.get("source_bindings"), list) \
         and bool(observation_meta.get("source_bindings"))
@@ -942,51 +1150,13 @@ def normalize_run(run_id: str, run: dict, registry: Path, identity_reader=proc_i
             result = read_experiment_observation(candidate_run, registry, str(row_key))
             if result and result.get("available"):
                 experiment_observation = result
-    public_observation = None
-    if artifact_root:
-        from resource_progress import read_public_run_record
-        public_observation = read_public_run_record(artifact_root, str(run_id))
-    return {
-        "job_type": "resource", "resource_class": "lab", "run_id": str(run_id),
-        "resource_policy": run.get("resource_policy"), "observer_of": run.get("observer_of"),
-        "cwd": cwd, "elapsed_min": elapsed_min, "liveness": liveness,
-        "pid": run.get("pid"), "starttime": run.get("starttime"),
-        "command_hash": run.get("command_hash"), "process_group": run.get("process_group"),
-        "pid_namespace": run.get("pid_namespace"),
-        "execution": execution,
-        "compute_run_id": execution.get("run_id") if isinstance(execution, dict) else None,
-        "compute_host": execution.get("host") if isinstance(execution, dict) else None,
-        "command": (run["command"] if isinstance(run.get("command"), list)
-                    and all(isinstance(arg, str) for arg in run["command"]) else None),
-        "registry_status": run.get("status"), "registry_path": str(registry),
-        "log_path": log_path, "log_updated_at": log_updated_at, "log_size": log_size,
-        "route": run.get("route"), "node": run.get("node"),
-        # Root-scoped quiescence consumes these as additive attribution inputs.
-        # Existing resource-runner rows carry only route/node; newer ad-hoc
-        # registrars may carry an explicit root or the route's expected identity.
-        "artifact_root": artifact_root,
-        "route_file": run.get("route_file"),
-        "route_id": run.get("route_id"), "route_hash": run.get("route_hash"),
-        "route_node": run.get("route_node"),
-        "config_ref": run.get("config_ref"), "config_sha256": run.get("config_sha256"),
-        "source_commit": run.get("source_commit"), "source_dirty": run.get("source_dirty"),
-        "source_git_state": run.get("source_git_state"), "started_at": started_at,
-        "training_progress": training_progress,
-        "experiment_observation": experiment_observation,
-        "experiment_run_record": public_observation,
-        "progress_file": run.get("progress_file"), "progress": progress,
-        "remote_training": remote_training,
-        "local_placement": local_placement,
-        # Tracked-workflow projection (OPERATIONS §5.12): a resource row must expose why
-        # it ended and who owns it, not just whether a PID is still there.
-        "workflow_state": run.get("workflow_state"),
-        "exit_code": run.get("exit_code"),
-        "ended_at": run.get("ended_at") if isinstance(run.get("ended_at"), (int, float)) else None,
-        "failure_class": run.get("failure_class"),
-        "parent_attempt_id": run.get("parent_attempt_id"),
-        "sentinel": run.get("sentinel"),
-        "state_evidence": {"reason": reason, "current_identity": current},
-    }
+    return {**static, 'elapsed_min': elapsed_min, 'liveness': liveness,
+            'log_path': log_path, 'log_updated_at': log_updated_at, 'log_size': log_size,
+            'started_at': started_at, 'training_progress': training_progress,
+            'experiment_observation': experiment_observation,
+            'progress': progress, 'remote_training': remote_training,
+            'local_placement': local_placement,
+            'state_evidence': {'reason': reason, 'current_identity': current}}
 
 
 def observe_run_if_due(run_id: str, run: dict, registry: Path, *, now=None,

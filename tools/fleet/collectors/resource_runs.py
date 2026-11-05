@@ -28,9 +28,13 @@ def collect(index_path=None):
             _READ_CACHE = shared.ResourceReadCache()
         with scope(_READ_CACHE) if callable(scope) else nullcontext():
             raw, diagnostics = shared.scan(index_path=index_path)
+        projects = {}
         for item in raw:
             try:
-                item["project"] = project_of(item.get("cwd"))
+                cwd = item.get("cwd")
+                if cwd not in projects:
+                    projects[cwd] = project_of(cwd)
+                item["project"] = projects[cwd]
                 rows.append(ResourceJob(**item))
             except Exception as exc:
                 diagnostics.append({

@@ -2135,16 +2135,42 @@ def _open_public_directory(artifact_root):
         raise
 
 
-def _read_public_in_scan(artifact_root, run_id):
-    from resource_run_registry import passive_handle, passive_parse
-    if not isinstance(run_id, str) or not _SAFE_RUN_ID.fullmatch(run_id):
-        return None
+def _passive_public_directory(artifact_root):
+    from resource_run_registry import passive_handle
     def directory():
         try:
             return _open_public_directory(artifact_root)
         except (OSError, ValueError, TypeError, RuntimeError):
             return None
-    held = passive_handle(('public-directory', str(artifact_root)), directory)
+    return passive_handle(('public-directory', str(artifact_root)), directory)
+
+
+def _public_run_generation(artifact_root, run_id):
+    """Observe the same descriptor-bound namespace as the passive public reader."""
+    if not isinstance(run_id, str) or not _SAFE_RUN_ID.fullmatch(run_id):
+        return ('invalid-id',)
+    held = _passive_public_directory(artifact_root)
+    if held is None:
+        return ('absent-directory',)
+    try:
+        parent = os.fstat(held.fd)
+    except OSError:
+        return None
+    try:
+        leaf = os.stat(run_id + '.json', dir_fd=held.fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return ('absent-leaf', parent.st_dev, parent.st_ino, parent.st_mode)
+    except OSError:
+        return None
+    return (parent.st_dev, parent.st_ino, parent.st_mode, leaf.st_dev, leaf.st_ino,
+            leaf.st_mode, leaf.st_size, leaf.st_mtime_ns, leaf.st_ctime_ns)
+
+
+def _read_public_in_scan(artifact_root, run_id):
+    from resource_run_registry import passive_parse
+    if not isinstance(run_id, str) or not _SAFE_RUN_ID.fullmatch(run_id):
+        return None
+    held = _passive_public_directory(artifact_root)
     if held is None:
         return None
     name = run_id + '.json'

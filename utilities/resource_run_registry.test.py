@@ -74,6 +74,202 @@ class ResourceRegistryTest(unittest.TestCase):
                 self.assertEqual(cache.route_document(path), dict(route_id='rt-replaced'))
                 self.assertEqual(parse.call_count, 2)
 
+    def test_static_rows_reuse_files_but_reobserve_identity_clock_and_owned_values(self):
+        import resource_progress
+        cache = registry.ResourceReadCache()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            progress = root / 'progress.json'
+            def write(completed):
+                progress.write_text(json.dumps(dict(schema_version=1, run_id='run-a', node='train',
+                    updated_at=100, completed=completed, total=20, unit='step')))
+            write(3)
+            row = dict(cwd=str(root), node='train', started_at=100,
+                       progress_file=str(progress), command=['train'], execution={'kind': 'local'})
+            with mock.patch.object(registry, 'classify_identity', return_value=('working', None, 'live')) as census, \
+                    mock.patch.object(registry, '_static_run_values', wraps=registry._static_run_values) as parse, \
+                    mock.patch.object(resource_progress, 'collect', return_value=None), \
+                    mock.patch.object(resource_progress, 'remote_candidates', return_value=[]), \
+                    mock.patch('resource_placement.observe', return_value=None):
+                def observe(now):
+                    with registry.passive_read_scope(cache):
+                        return registry.normalize_run('run-a', row, root / 'registry.json', now=now)
+                first = observe(160)
+                first['progress']['completed'] = 999
+                first['command'].append('caller-mutation')
+                second = observe(220)
+                self.assertEqual(second['progress']['completed'], 3)
+                self.assertEqual(second['progress']['age_s'], 120)
+                self.assertEqual(second['elapsed_min'], 2)
+                self.assertEqual(second['command'], ['train'])
+                self.assertEqual(row['command'], ['train'])
+                self.assertEqual(census.call_count, 2)
+                self.assertEqual(parse.call_count, 1)
+                write(4)
+                self.assertEqual(observe(280)['progress']['completed'], 4)
+                self.assertEqual(parse.call_count, 2)
+                row['command'] = ['new-command']
+                self.assertEqual(observe(340)['command'], ['new-command'])
+                self.assertEqual(parse.call_count, 3)
+                census.return_value = ('exited', None, 'gone')
+                self.assertEqual(observe(400)['liveness'], 'exited')
+                self.assertEqual(parse.call_count, 3)
+
+    def test_static_rows_are_registry_qualified_and_recompute_only_changed_file(self):
+        cache = registry.ResourceReadCache()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rows = []
+            for name in ('a', 'b'):
+                path = root / name
+                path.mkdir()
+                (path / 'progress.json').write_text(json.dumps(dict(schema_version=1, run_id='same-id',
+                    node='train', updated_at=100, completed=1, unit='step')))
+                rows.append((path / 'registry.json', dict(node='train', started_at=100,
+                    progress_file=str(path / 'progress.json'))))
+            with mock.patch.object(registry, 'classify_identity', return_value=('exited', None, 'gone')), \
+                    mock.patch.object(registry, '_static_run_values', wraps=registry._static_run_values) as parse:
+                def observe():
+                    with registry.passive_read_scope(cache):
+                        return [registry.normalize_run('same-id', row, path, now=160) for path, row in rows]
+                observe()
+                observe()
+                self.assertEqual(parse.call_count, 2)
+                changed = root / 'a/progress.json'
+                body = json.loads(changed.read_text())
+                body['completed'] = 2
+                temp = changed.with_suffix('.new')
+                temp.write_text(json.dumps(body))
+                temp.replace(changed)
+                result = observe()
+                self.assertEqual([r['progress']['completed'] for r in result], [2, 1])
+                self.assertEqual(parse.call_count, 3)
+
+    def test_static_row_cache_rejects_parent_replacement_links_and_deleted_files(self):
+        cache = registry.ResourceReadCache()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            parent = root / 'inputs'
+            parent.mkdir()
+            path = parent / 'progress.json'
+            path.write_text(json.dumps(dict(schema_version=1, run_id='run-a', node='train',
+                                           updated_at=100, completed=3, unit='step')))
+            row = dict(node='train', progress_file=str(path), started_at=100)
+            with mock.patch.object(registry, 'classify_identity', return_value=('exited', None, 'gone')):
+                def observe():
+                    return registry.normalize_run('run-a', row, root / 'registry.json', now=160)
+                with registry.passive_read_scope(cache):
+                    self.assertEqual(observe()['progress']['completed'], 3)
+                    parent.rename(root / 'old-inputs')
+                    parent.mkdir()
+                    path.write_text((root / 'old-inputs/progress.json').read_text())
+                    self.assertIsNone(observe()['progress'])
+                with registry.passive_read_scope(cache):
+                    self.assertEqual(observe()['progress']['completed'], 3)
+                    path.unlink()
+                    self.assertIsNone(observe()['progress'])
+                parent.rmdir()
+                parent.symlink_to(root / 'old-inputs', target_is_directory=True)
+                with registry.passive_read_scope(cache):
+                    self.assertIsNone(observe()['progress'])
+
+    def test_static_rows_match_uncached_result_and_refresh_public_record(self):
+        import resource_progress
+        cache = registry.ResourceReadCache()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            public = root / 'resource-runs'
+            public.mkdir()
+            record = public / 'run-a.json'
+            record.write_text(json.dumps(dict(run_id='run-a', metrics=[{'completed': 3}])))
+            path = root / 'registry.json'
+            row = dict(artifact_root=str(root), cwd=str(root), command=['train'], started_at=100,
+                       route_id='route-one', node='train', workflow_state='pending', exit_code=0)
+            with mock.patch.object(registry, 'classify_identity', return_value=('exited', None, 'gone')):
+                def cached():
+                    with registry.passive_read_scope(cache):
+                        return registry.normalize_run('run-a', row, path, now=220)
+                first = cached()
+                self.assertEqual(first, registry.normalize_run('run-a', row, path, now=220))
+                first['experiment_run_record']['metrics'][0]['completed'] = 999
+                self.assertEqual(cached()['experiment_run_record']['metrics'][0]['completed'], 3)
+                replacement = record.with_suffix('.new')
+                replacement.write_text(json.dumps(dict(run_id='run-a', metrics=[{'completed': 4}])))
+                replacement.replace(record)
+                second = cached()
+                self.assertEqual(second, registry.normalize_run('run-a', row, path, now=220))
+                self.assertEqual(second['experiment_run_record']['metrics'][0]['completed'], 4)
+                record.unlink()
+                self.assertIsNone(cached()['experiment_run_record'])
+                self.assertEqual(cached(), registry.normalize_run('run-a', row, path, now=220))
+
+    def test_static_row_cache_byte_limit_does_not_change_output(self):
+        cache = registry.ResourceReadCache()
+        cache.rows.max_bytes = 1
+        with mock.patch.object(registry, 'classify_identity', return_value=('exited', None, 'gone')):
+            with registry.passive_read_scope(cache):
+                first = registry.normalize_run('run-a', dict(command=['one']), Path('/registry.json'), now=100)
+                second = registry.normalize_run('run-a', dict(command=['one']), Path('/registry.json'), now=100)
+        self.assertEqual(first, second)
+        self.assertEqual(len(cache.rows), 0)
+        self.assertEqual(cache.rows.bytes, 0)
+
+    def test_passive_registry_source_reuses_generation_and_owns_metadata(self):
+        cache = registry.ResourceReadCache()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'registry.json'
+            path.write_text(json.dumps(dict(schema_version=1, runs={})))
+            with mock.patch.object(registry, '_read_registry_source', wraps=registry._read_registry_source) as read:
+                with registry.passive_read_scope(cache):
+                    source, raw = registry.read_registry_source(path)
+                source['ancestors'][0]['path'] = 'caller-mutation'
+                with registry.passive_read_scope(cache):
+                    current, other = registry.read_registry_source(path)
+                self.assertEqual(raw, other)
+                self.assertNotEqual(current['ancestors'][0]['path'], 'caller-mutation')
+                self.assertEqual(read.call_count, 1)
+                replacement = path.with_suffix('.new')
+                replacement.write_text(json.dumps(dict(schema_version=1, runs={'new': {}})))
+                replacement.replace(path)
+                with registry.passive_read_scope(cache):
+                    updated, data = registry.read_registry_source(path)
+                self.assertNotEqual(updated['sha256'], current['sha256'])
+                self.assertIn('new', json.loads(data)['runs'])
+                self.assertEqual(read.call_count, 2)
+
+    def test_passive_registry_source_keeps_links_missing_and_errors_distinct(self):
+        cache = registry.ResourceReadCache()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / 'original.json'
+            target.write_text('{}')
+            link = root / 'registry.json'
+            link.symlink_to(target)
+            with registry.passive_read_scope(cache):
+                registry.read_registry_source(link)
+            link.unlink()
+            link.symlink_to(root / 'absent.json')
+            with registry.passive_read_scope(cache):
+                with self.assertRaisesRegex(ValueError, 'registry-link-unverifiable'):
+                    registry.read_registry_source(link)
+            with registry.passive_read_scope(cache):
+                registry.read_registry_source(target)
+            with mock.patch.object(registry.os, 'open', side_effect=PermissionError('unavailable')):
+                with registry.passive_read_scope(cache):
+                    with self.assertRaises(PermissionError):
+                        registry.read_registry_source(target)
+            target.unlink()
+            with registry.passive_read_scope(cache):
+                source, data = registry.read_registry_source(target)
+            self.assertEqual(source['kind'], 'missing')
+            self.assertIsNone(data)
+            cache.sources.max_bytes = 1
+            target.write_text('{}')
+            with registry.passive_read_scope(cache):
+                self.assertEqual(registry.read_registry_source(target)[1], b'{}')
+            self.assertEqual(len(cache.sources), 1)  # The other path's old entry is not used.
+            self.assertGreater(cache.sources.rejections, 0)
+
     def test_compute_identity_requires_output_receipt_but_keeps_stable_format(self):
         execution = {"kind": "compute-hosts", "run_id": "compute-1",
                      "meta_sha256": "m" * 64, "exit_sha256": "e" * 64,
