@@ -748,8 +748,8 @@ metadata meaning, without changing this distinction. The card stays blocking,
 whatever the sealed value, when the work is destructive (data, history, or
 worktree loss), mutates an external system, deploys, or the user asked to be
 asked. The
-route-participation rule below applies to explicit workflows; tiny fixes use
-the automatic record, and the 0–1 / 1–3 inline questions of the frame
+route-participation rule below applies to explicit workflows; small local
+completion units satisfying §0.2.1 use the automatic record, and the 0–1 / 1–3 inline questions of the frame
 interview (below) are asked only when they exist. A current or immediately preceding user
 instruction that already approves the same route and scope satisfies the gate;
 do not repeat the card. After approval, capability-owned stages, validation,
@@ -1465,8 +1465,9 @@ Only `direct` has no plan. Every other autopilot graph includes a plan check, bu
 
 One-line prose/config edits, pure renames, cleanup, and one-off reviews that need
 no plan or log may bypass autopilot and use direct editing or the implementation
-role. Tiny source-code fixes use §0.2.1 automatic recording. Other source edits or
-commits enter the explicit `autopilot-code` route required by §0.4. Use heavier
+role. Small local completion units satisfying §0.2.1, including a feature's
+source, tests and README, use automatic recording. Source edits or commits
+outside that scope enter the explicit `autopilot-code` route required by §0.4. Use heavier
 autopilot tiers only when work needs their tracking or accumulated artifacts.
 `DESIGN_PRINCIPLES §4` and each capability's quick tier define minor versus
 major. When one request spans several rows of this map, resolve the primary with
