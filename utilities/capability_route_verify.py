@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
+import threading
 import re
 from pathlib import Path
 
@@ -46,6 +48,45 @@ from capability_route_compose import (
 from capability_route_scope import (
     _project_entry_scope_nodes, valid_entry_execution_scope_marker,
 )
+
+
+_VERIFICATION_REGISTRIES = None
+_VERIFICATION_REGISTRY_LOCK = threading.RLock()
+
+
+def _verification_registry():
+    """Borrow one private catalog for pure verification; active readers stay fresh.
+
+    The catalog never leaves the verifier. Recipe transformations already copy
+    their inputs; only the static JSON parse and canonical digest are retained.
+    Unit contracts, route data, selection pins and lifecycle evidence are still
+    checked by their normal readers on every pass.
+    """
+    from runtime_observation import observation_scope_active, ProjectionCache
+    if not observation_scope_active():
+        registry = TOPO.load_registry()
+        return registry, TOPO.registry_digest(registry)
+    path = Path(TOPO.REGISTRY)
+    def signature():
+        info = path.stat()
+        return (info.st_dev, info.st_ino, info.st_mode, info.st_size,
+                info.st_mtime_ns, info.st_ctime_ns, os.geteuid())
+    key = (str(path.absolute()), TOPO.load_registry, TOPO.registry_digest)
+    before = signature()
+    global _VERIFICATION_REGISTRIES
+    with _VERIFICATION_REGISTRY_LOCK:
+        if _VERIFICATION_REGISTRIES is None:
+            _VERIFICATION_REGISTRIES = ProjectionCache(max_entries=4, max_bytes=768 * 1024)
+        held = _VERIFICATION_REGISTRIES.get(key)
+        if held is not None and held[0] == before:
+            _VERIFICATION_REGISTRIES.move_to_end(key)
+            return held[1], held[2]
+    registry = TOPO.load_registry()
+    digest = TOPO.registry_digest(registry)
+    if before == signature():
+        with _VERIFICATION_REGISTRY_LOCK:
+            _VERIFICATION_REGISTRIES[key] = (before, registry, digest)
+    return registry, digest
 
 
 class _ValidationBasisDegrade:
@@ -344,8 +385,7 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
     if snapshots is not None:
         registry, registry_digest_now, current_units_digest, legacy_unit_view = snapshots
     else:
-        registry=TOPO.load_registry()
-        registry_digest_now=TOPO.registry_digest(registry)
+        registry, registry_digest_now = _verification_registry()
         current_units_digest=unit_catalog_digest()
     capability_digest_now=None
     if isinstance(route.get("capability_registry_digest"), str) and isinstance(route.get("capability"), str):
