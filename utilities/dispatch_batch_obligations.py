@@ -1163,33 +1163,45 @@ class OwnerSettlementReadContext:
         state, row, related, paths, generations, lease_held, retry_at, _attempts = entry
         if (self._clock() >= retry_at or row != (status, raw)
                 or related != self._fingerprint_rows(related_rows)):
+            self._deferred.discard(key)
             return None
         if state != "not-applicable":
             try:
                 if bool(lease_is_held(jobs, metadata)) != lease_held:
+                    self._deferred.discard(key)
+                    self._unsettled.pop(key, None)
                     return None
             except Exception:
+                self._deferred.discard(key)
+                self._unsettled.pop(key, None)
                 return None
             if paths is not None:
                 try:
-                    current = self._current_generations(paths, self._pass_file_generations)
+                    # A different consumer may have written since the last
+                    # dependency pass. Never validate a retry through that
+                    # pass's cached stat values.
+                    current = self._current_generations(paths)
                 except OSError:
+                    self._deferred.discard(key)
+                    self._unsettled.pop(key, None)
                     return None
                 self._metrics["dependency_checks"] += len(paths)
                 if current != generations:
+                    self._deferred.discard(key)
                     return None
         self._deferred.add(key)
         self._metrics["deferred_owner_checks"] += 1
         return state
 
     def note_unsettled_owner(self, jobs: Path, state: str, status: str, raw: str,
-                             metadata: dict, related_rows, paths):
+                             metadata: dict, related_rows, paths, *, fresh=False):
         """Hold this pass's classification until its settlement attempt ended."""
         key = (str(jobs.resolve(strict=False)), metadata.get("attempt_id", ""))
         before = ()
         if paths is not None:
             try:
-                before = self._current_generations(paths, self._pass_file_generations)
+                before = self._current_generations(
+                    paths, None if fresh else self._pass_file_generations)
             except OSError:
                 before = None
         self._unsettled_noted[key] = (state, (status, raw),
@@ -1319,13 +1331,71 @@ class OwnerSettlementReadContext:
     def record_historical_check(self):
         self._metrics["historical_checks"] += 1
 
+    def registered_owner_redrive(self, jobs: Path, status: str, raw: str,
+                                 metadata: dict, related_rows, *, lease_held: bool,
+                                 materialize, refresh=None):
+        """Share one bounded terminal materialization across runner consumers."""
+        attempt_id = metadata.get("attempt_id", "")
+        if not attempt_id:
+            materialize()
+            return False
+        deferred = self.unsettled_current(
+            jobs, status, raw, metadata, related_rows,
+            lambda _jobs, _metadata: lease_held)
+        key = (str(jobs.resolve(strict=False)), attempt_id)
+        if deferred is not None:
+            return True
+        try:
+            paths = _owner_unsettled_dependency_paths(jobs, status, metadata)
+        except Exception:
+            paths = None
+        # Capture the pre-attempt generation with a fresh stat. The eventual
+        # retry entry records post-attempt generations, so our own writes do
+        # not spuriously wake this owner on every pass.
+        self.note_unsettled_owner(jobs, "unknown", status, raw, metadata,
+                                  related_rows, paths, fresh=True)
+        try:
+            materialize()
+            if refresh is not None:
+                current = refresh()
+                if (current is None or current[0] != status or current[1] != raw
+                        or current[2].get("attempt_id") != attempt_id
+                        or self._fingerprint_rows(current[3])
+                            != self._fingerprint_rows(related_rows)):
+                    self.forget_unsettled_owner(jobs, attempt_id)
+                    return False
+            from dispatch_terminal_commit import owner_completion_state
+            try:
+                state = owner_completion_state(jobs, status, metadata).state
+            except Exception:
+                state = "unknown"
+            if state in {"pending", "unknown"}:
+                self.commit_unsettled_owner(
+                    jobs, attempt_id, state=state, lease_held=False)
+            else:
+                self.forget_unsettled_owner(jobs, attempt_id)
+            return False
+        except Exception:
+            self.commit_unsettled_owner(
+                jobs, attempt_id, state="unknown", lease_held=False)
+            raise
+
     def needs_scan(self, jobs: Path, lease_is_held) -> bool:
         key = str(jobs.resolve(strict=False))
         prior = self._seen.get(key)
         stamp = _registry_stamp(jobs)
         scan = prior is None or stamp is None or stamp != prior[0]
         active_owner = any(root == key for root, _attempt in self._active_owners)
-        if active_owner or self.due_unsettled_owner_ids(jobs):
+        # Unsettled owners must be reclassified so a changed owner row,
+        # related row, lease, or dependency can release the retry before its
+        # timer. The candidate path compares dependency generations with fresh
+        # stat calls; the old per-pass `_deferred` set is not durable enough to
+        # drive this scan.
+        unsettled_owner = any(root == key and entry[0] != "not-applicable"
+                              for (root, _attempt), entry in self._unsettled.items())
+        if not unsettled_owner:
+            unsettled_owner = bool(self.due_unsettled_owner_ids(jobs))
+        if active_owner or unsettled_owner:
             scan = True
         # A full candidate scan below rechecks each candidate's lease itself;
         # only the unchanged fast path needs this cached lease probe.

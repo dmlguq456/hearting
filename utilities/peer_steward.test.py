@@ -15815,7 +15815,7 @@ class RegisteredUnknownRetryTest(_TmpRootMixin, unittest.TestCase):
         retry_state = {}
         observed_rows = []
 
-        def observe_source(_duty, _store, *, read_context=None):
+        def observe_source(_duty, _store, *, read_context=None, settlement_context=None):
             row = current_attempt_row(self.jobs_path, attempt_id)
             observed_rows.append(row.raw if row is not None else None)
 
@@ -16872,6 +16872,205 @@ class NativeReceivingTurnRecoveryTest(_TmpRootMixin, unittest.TestCase):
         current = store.get(duty["id"])
         self.assertEqual((current["state"], current["delivery"]), ("complete", "acked"))
 
+    def test_registered_and_external_settlement_share_owner_retry(self):
+        import dispatch_batch_obligations as obligations
+        import dispatch_completion_join as join
+        import dispatch_pending_delivery as pending
+        import dispatch_registry_cache
+        from dispatch_terminal_commit import CompletionState
+
+        store, duty, aid, sid = self._duty()
+        pending.record_path(self.tmp_root, sid, "delivery-native-crash").unlink()
+        text = self.jobs_path.read_text(encoding="utf-8").replace(
+            f"attempt_id={aid}",
+            f"attempt_id={aid},worker_type=owner,workflow_completion=runtime-v1")
+        self.jobs_path.write_text(text, encoding="utf-8")
+        dispatch_registry_cache.clear_cache()
+        duties = [duty]
+        for index in range(1, 4):
+            duties.append(store.create(
+                f"registered-shared-owner-{index}", "registered-batch",
+                dict(duty["intent"]["identity"]), {"carrier": "codex-native-queue"}))
+        context_type = getattr(obligations, "OwnerSettlementReadContext", None)
+        context = context_type() if context_type is not None else None
+        if context is not None:
+            context._clock = lambda: 1000.0
+            self.addCleanup(context.close)
+        inspect = __import__("inspect")
+        supports_settlement_context = "settlement_context" in inspect.signature(
+            peer_steward._resume_registered_obligation).parameters
+        supports_owner_context = "context" in inspect.signature(
+            obligations._resume_owner_settlements).parameters
+
+        def resume_registered(member):
+            kwargs = ({"settlement_context": context}
+                      if supports_settlement_context else {})
+            peer_steward._resume_registered_obligation(
+                store.get(member["id"]), store, **kwargs)
+
+        def resume_external():
+            kwargs = {"context": context} if supports_owner_context else {}
+            obligations._resume_owner_settlements(self.jobs_path, **kwargs)
+
+        with mock.patch.object(join, "materialize_after_terminal_close") as materialize, \
+             mock.patch("dispatch_terminal_commit.owner_completion_state",
+                        return_value=CompletionState("pending")), \
+             mock.patch("dispatch_contract.supervisor_lease_is_held", return_value=False), \
+             mock.patch.object(peer_steward.peer_obligations,
+                               "_registered_terminal_state", return_value=None), \
+             mock.patch("dispatch_seat_handover._effective", return_value=(sid, "codex")):
+            for _pass in range(3):
+                for member in duties:
+                    resume_registered(member)
+                resume_external()
+                self.assertEqual(materialize.call_count, 1,
+                                 "R1_THREE_PASSES_ONE_REGISTERED_REDRIVE")
+
+    def test_shared_owner_retry_observes_new_pending_before_due(self):
+        import dispatch_batch_obligations as obligations
+        import dispatch_completion_join as join
+        import dispatch_pending_delivery as pending
+        import dispatch_registry_cache
+        from dispatch_terminal_commit import CompletionState
+
+        store, duty, aid, sid = self._duty()
+        exact = pending.read(self.tmp_root, sid, "delivery-native-crash")
+        pending.record_path(self.tmp_root, sid, "delivery-native-crash").unlink()
+        text = self.jobs_path.read_text(encoding="utf-8").replace(
+            f"attempt_id={aid}",
+            f"attempt_id={aid},worker_type=owner,workflow_completion=runtime-v1")
+        self.jobs_path.write_text(text, encoding="utf-8")
+        dispatch_registry_cache.clear_cache()
+        duties = [duty]
+        for index in range(1, 4):
+            duties.append(store.create(
+                f"registered-shared-owner-{index}", "registered-batch",
+                dict(duty["intent"]["identity"]), {"carrier": "codex-native-queue"}))
+        context_type = getattr(obligations, "OwnerSettlementReadContext", None)
+        context = context_type() if context_type is not None else None
+        if context is not None:
+            context._clock = lambda: 1000.0
+            self.addCleanup(context.close)
+        inspect = __import__("inspect")
+        supports_settlement_context = "settlement_context" in inspect.signature(
+            peer_steward._resume_registered_obligation).parameters
+        supports_owner_context = "context" in inspect.signature(
+            obligations._resume_owner_settlements).parameters
+
+        def resume_registered(member):
+            kwargs = ({"settlement_context": context}
+                      if supports_settlement_context else {})
+            peer_steward._resume_registered_obligation(
+                store.get(member["id"]), store, **kwargs)
+
+        def resume_external():
+            kwargs = {"context": context} if supports_owner_context else {}
+            obligations._resume_owner_settlements(self.jobs_path, **kwargs)
+
+        with mock.patch.object(join, "materialize_after_terminal_close") as materialize, \
+             mock.patch("dispatch_terminal_commit.owner_completion_state",
+                        return_value=CompletionState("pending")), \
+             mock.patch("dispatch_contract.supervisor_lease_is_held", return_value=False), \
+             mock.patch.object(peer_steward.peer_obligations,
+                               "_registered_terminal_state", return_value=None), \
+             mock.patch("dispatch_seat_handover._effective", return_value=(sid, "codex")):
+            for member in duties:
+                resume_registered(member)
+            resume_external()
+
+            restored = pending.create(
+                self.tmp_root, recipient_kind=exact["recipient_kind"], recipient_key=sid,
+                delivery_id=exact["delivery_id"],
+                session_generation=exact["session_generation"],
+                session_generation_supported=exact["session_generation_supported"],
+                attempt_ids=exact["attempt_ids"], parent_attempt_id=exact["parent_attempt_id"],
+                route_id=exact["route_id"], route_node=exact["route_node"],
+                receipt=exact["receipt"], receipt_digest=exact["receipt_digest"],
+                row_revisions=exact["row_revisions"], lineage=exact.get("lineage", []))
+            self.assertEqual(restored["recipient_kind"], "codex-native-queue")
+            self.assertEqual(restored["receipt_digest"], duty["observation"][
+                "native_receiving_turn"]["receipt_digest"])
+            self.assertEqual(restored["row_revisions"][aid], duty["observation"][
+                "native_receiving_turn"]["row_revision"])
+            self.assertTrue(pending.received_ack_identity(
+                restored, sid, restored["delivery_id"]))
+            pending.claim(self.tmp_root, sid, restored["delivery_id"],
+                           claim_owner="fixture", lease_seconds=30)
+            pending.ack(self.tmp_root, sid, restored["delivery_id"], acked_by="fixture")
+            with mock.patch.object(peer_steward, "_resume_native_receiving_turn",
+                                   return_value=False) as delivery_seam:
+                resume_registered(duty)
+            delivery_seam.assert_called_once()
+
+    def test_shared_owner_retry_rejects_wrong_digest_recipient_and_revision(self):
+        import dispatch_completion_join as join
+        import dispatch_pending_delivery as pending
+
+        original_root, original_jobs = self.tmp_root, self.jobs_path
+        for field, value in (("receipt_digest", "f" * 64),
+                             ("recipient_kind", "claude-parent-runtime"),
+                             ("row_revision", "stale-revision")):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as temporary:
+                self.tmp_root = Path(temporary)
+                self.jobs_path = self.tmp_root / "jobs.log"
+                self.jobs_path.touch()
+                with mock.patch.dict(os.environ, {
+                        "AGENT_DISPATCH_JOBS": str(self.jobs_path),
+                        "AGENT_PEER_LEDGER_ROOT": str(self.tmp_root)}):
+                    store, duty, aid, sid = self._duty()
+                    exact = pending.read(self.tmp_root, sid, "delivery-native-crash")
+                    invalid = dict(exact, state="pending")
+                    if field == "row_revision":
+                        invalid["row_revisions"] = {aid: value}
+                    else:
+                        invalid[field] = value
+                    read_calls = 0
+                    materialized = False
+                    def read_missing_then_materialized(*_args):
+                        nonlocal read_calls
+                        read_calls += 1
+                        return None if read_calls == 1 or not materialized else invalid
+                    def materialize_invalid_record(*_args):
+                        nonlocal materialized
+                        materialized = True
+                    with mock.patch.object(join, "materialize_after_terminal_close",
+                                           side_effect=materialize_invalid_record) as materialize, \
+                         mock.patch("dispatch_seat_handover._effective",
+                                    return_value=(sid, "codex")), \
+                         mock.patch.object(pending, "read",
+                                           side_effect=read_missing_then_materialized), \
+                         mock.patch.object(pending, "claim_ready_batch") as deliver, \
+                         mock.patch.object(peer_steward, "_resume_native_receiving_turn") as receive:
+                        peer_steward._resume_registered_obligation(store.get(duty["id"]), store)
+                    materialize.assert_called_once()
+                    deliver.assert_not_called()
+                    receive.assert_not_called()
+                    self.assertEqual(store.get(duty["id"])["observation"]["reason"],
+                                     "completion-delivery-record-unavailable")
+        self.tmp_root, self.jobs_path = original_root, original_jobs
+
+    def test_existing_exact_record_skips_missing_record_validation(self):
+        import dispatch_completion_join as join
+
+        store, duty, aid, sid = self._duty()
+        row = join.current_attempt_row(self.jobs_path, aid)
+        metadata = dict(row.metadata)
+        metadata.pop("delivery_receipt_digest")
+        metadata.pop("delivery_row_revision")
+        row_without_delivery_metadata = SimpleNamespace(
+            attempt_id=row.attempt_id, status=row.status, raw=row.raw, metadata=metadata)
+        with mock.patch.object(join, "current_attempt_row",
+                               return_value=row_without_delivery_metadata), \
+             mock.patch("dispatch_seat_handover._effective", return_value=(sid, "codex")), \
+             mock.patch.object(peer_steward, "_resume_native_receiving_turn",
+                               return_value=False):
+            peer_steward._resume_registered_obligation(duty, store)
+
+        settled = store.get(duty["id"])
+        self.assertEqual((settled["state"], settled["delivery"]), ("complete", "acked"))
+        self.assertNotEqual(settled.get("observation", {}).get("reason"),
+                            "completion-delivery-record-unavailable")
+
     def test_matching_terminal_tombstone_is_never_rematerialized(self):
         import dispatch_attempt_reference as attempt_reference
         import dispatch_completion_join as join
@@ -17315,7 +17514,8 @@ class NativeDispatchReceiptTest(unittest.TestCase):
                                 "registered-batch", identity, {"carrier": carrier})
             record = {"state": "pending", "delivery_id": metadata["delivery_id"],
                       "recipient_kind": carrier, "attempt_ids": [attempt],
-                      "receipt_digest": metadata["delivery_receipt_digest"]}
+                      "receipt_digest": metadata["delivery_receipt_digest"],
+                      "row_revisions": {attempt: metadata["delivery_row_revision"]}}
             agents = {"result": {"agents": [{"agent": "claude", "pane_id": "w1:p9",
                       "agent_session": {"value": sid}}]}}
             with mock.patch("dispatch_completion_join.current_attempt_row", return_value=row), \
@@ -17323,6 +17523,7 @@ class NativeDispatchReceiptTest(unittest.TestCase):
                  mock.patch("dispatch_seat_handover.effective_parent", return_value=sid), \
                  mock.patch("dispatch_seat_handover.effective_parent_harness", return_value="claude"), \
                  mock.patch.object(pending, "read", return_value=record), \
+                 mock.patch.object(pending, "received_ack_identity", return_value={"exact": True}), \
                  mock.patch.object(pending, "claim") as claim, \
                  mock.patch.object(peer_steward, "_settle_claude_native_dispatch_receipt",
                                    return_value=True) as received, \

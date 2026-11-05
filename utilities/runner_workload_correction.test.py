@@ -874,7 +874,8 @@ class RunnerWorkloadCorrectionTest(unittest.TestCase):
             return None
 
         def checked_reconcile(store, duties=None, *, read_context=None, retry_state=None,
-                              notice_selection=None, runner_incarnation=None):
+                              notice_selection=None, runner_incarnation=None,
+                              settlement_context=None):
             if not runner_store:
                 runner_store.append(store)
             if (runner_store[0] is store
@@ -889,6 +890,7 @@ class RunnerWorkloadCorrectionTest(unittest.TestCase):
                     store, duties, read_context=read_context, retry_state=retry_state,
                     notice_selection=notice_selection,
                     runner_incarnation=runner_incarnation,
+                    settlement_context=settlement_context,
                 )
             finally:
                 if (runner_store[0] is store
@@ -913,12 +915,15 @@ class RunnerWorkloadCorrectionTest(unittest.TestCase):
                 if monitoring[0] and phase[0] == "runner":
                     counts["message_cpu_seconds"] += time.process_time() - cpu_started
 
-        def checked_resume_registered(duty, store, *, read_context=None):
+        def checked_resume_registered(duty, store, *, read_context=None,
+                                      settlement_context=None):
             if monitoring[0] and phase[0] == "runner":
                 counts["registered_resumes"] += 1
             cpu_started = time.process_time()
             try:
-                return original_resume_registered(duty, store, read_context=read_context)
+                return original_resume_registered(
+                    duty, store, read_context=read_context,
+                    settlement_context=settlement_context)
             finally:
                 if monitoring[0] and phase[0] == "runner":
                     counts["registered_cpu_seconds"] += time.process_time() - cpu_started
