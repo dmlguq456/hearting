@@ -734,7 +734,7 @@ def build_continuation_route(
         "selection_pins","requested_intensity",
         "effective_intensity","owner_model_profile","execution_topology",
         "owner_dispatch_depth","max_dispatch_depth","tracking",
-        "tracked_gate_evidence","spec_touch","cwd","source_commit",
+        "tracked_gate_evidence","spec_touch","cwd","source_commit","source_repository",
         "registry_digest","capability_registry_digest","dispatch_defaults_digest","dispatch_allocation",
         "owner_harness_policy","selection","codex_execution_sandbox","human_gates","human_gate_bindings",
         "confirmation_mode","small_work_confirmation",
@@ -1241,7 +1241,16 @@ def compile_proposal_leg(leg, index, *, frame_route, frame_cycle_id, readiness):
 
 def compile_first_leg(leg, *, frame_route, frame_cycle_id, context, binding, work_request, readiness, index=0):
     import frame_repository
-    with frame_repository.RepositoryBinding(binding.get("record"), index) as repository:
+    repository = frame_repository.RepositoryBinding(binding.get("record"), index)
+    if index and repository.active:
+        # A later leg keeps the dedicated repository only while it names that
+        # same approved destination. Compare lexical input before resolving any
+        # mutable ancestor; explicit alternate repositories keep their policy.
+        raw = Path(leg.get("cwd") or frame_route["cwd"]).expanduser()
+        destination = os.path.abspath(raw if raw.is_absolute() else Path(context["cwd"]) / raw)
+        if destination != repository.setup["cwd"]:
+            repository = frame_repository.RepositoryBinding(None)
+    with repository:
         return _compile_first_leg(leg, frame_route=frame_route, frame_cycle_id=frame_cycle_id,
                                   context=context, binding=binding, work_request=work_request,
                                   readiness=readiness, index=index, repository=repository)
@@ -1612,6 +1621,10 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
         payload["composed_recipe"]=json.loads(json.dumps(recipe))
     if route_plan is not None:
         payload["route_plan"]=json.loads(json.dumps(route_plan))
+    import frame_repository
+    source_repository = frame_repository.capture_source(cwd)
+    if source_repository:
+        payload["source_repository"] = source_repository
     digest=route_hash(payload); payload["route_hash"]=digest; payload["route_id"]=ROUTE_IDENTITY.route_id_from_hash(digest)
     owner_attempt_id=_resolve_owner_attempt_id()
     payload["owner_attempt_id"]=owner_attempt_id

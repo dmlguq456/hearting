@@ -14,6 +14,7 @@ import selectors
 import shlex
 import stat
 import subprocess
+import frame_repository
 import tempfile
 import time
 from dispatch_contract import supervisor_lease_path
@@ -116,7 +117,7 @@ def command(args, session: str) -> list[str]:
         raise OpenCodeTransportError("opencode-command-empty")
     binary = prefix[-1]
     argv = opencode_runtime.run_argv(
-        binary=binary, cwd=args.worktree,
+        binary=binary, cwd=frame_repository.native_worktree(args.worktree),
         agent=getattr(args, "opencode_agent", "build"), model=args.model,
         variant=getattr(args, "variant", None), session=session or None,
         standalone=bool(getattr(args, "opencode_standalone", False)),
@@ -256,7 +257,8 @@ def run_turn(args, prompt: str, *, emit, idle_reset: bool = False,
     with tempfile.TemporaryFile() as input_file:
         input_file.write(prompt.encode("utf-8"))
         input_file.seek(0)
-        process = subprocess.Popen(command(args, session), cwd=args.worktree,
+        process = subprocess.Popen(command(args, session), **frame_repository.native_process_options(args.worktree),
+                                                      env=frame_repository.native_environment(os.environ),
                                    stdin=input_file, stdout=subprocess.PIPE, stderr=None)
         if ordinary_owner_turn:
             from foreground_activity import owner_turn_activity

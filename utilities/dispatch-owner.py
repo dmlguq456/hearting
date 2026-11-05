@@ -805,10 +805,12 @@ def run_owner_wrapper(argv: list[str], env: dict[str, str]) -> int:
     call waits for it to stop the owner and close its row, instead of
     ``subprocess.run`` killing it 0.25s later mid-cleanup.
     """
+    options = frame_repository.child_options(env=env)
+    argv = frame_repository.child_argv(argv)
     if "--start" not in argv or select_launch_lifecycle() != FOREGROUND_SCOPED:
-        return subprocess.run(argv, env=env).returncode
+        return subprocess.run(argv, **options).returncode
     print(FOREGROUND_NOTICE, file=sys.stderr, flush=True)
-    run = run_forwarding_termination(argv, env=env, capture=False, timeout=None)
+    run = run_forwarding_termination(argv, **options, capture=False, timeout=None)
     if run.received_signal is None:
         return run.returncode
     sys.stdout.flush()
@@ -1226,7 +1228,7 @@ def main(argv):
             print("policy_note=disabled-since-admission")
         # Reopen the approved physical binding after selector/artifact work,
         # and hold it across the common launcher for all three adapters.
-        with frame_repository.for_route(route_data if route_evidence else {}) as repository:
+        with frame_repository.for_route(route_data if route_evidence else {}, route_evidence) as repository:
             repository.verify(values["--worktree"])
             result = run_owner_wrapper([str(wrapper), *forwarded], child_env)
         if result == 0 and frame_degradation and "--start" in forwarded:

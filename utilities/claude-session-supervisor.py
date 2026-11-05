@@ -17,6 +17,7 @@ import tempfile
 from dispatch_owner_input import OwnerInput
 import dispatch_resource_wait as RESOURCE_WAIT
 import sys
+import frame_repository
 import time
 from typing import Any, NamedTuple
 import uuid
@@ -791,10 +792,10 @@ class ClaudeStreamSession:
         try:
             self.process = subprocess.Popen(
                 claude_command(args, session_id, resume, stream=True),
-                cwd=args.worktree,
+                **frame_repository.native_process_options(args.worktree),
                 env={
-                    **os.environ,
-                    **(
+                    **frame_repository.native_environment(os.environ),
+                        **(
                         {"AGENT_DISPATCH_COMPLETION_STATE_FILE": args.state_file}
                         if args.state_file
                         else {}
@@ -1161,10 +1162,10 @@ def run_turn(
         try:
             process = subprocess.Popen(
                 command,
-                cwd=args.worktree,
+                **frame_repository.native_process_options(args.worktree),
                 env={
-                    **os.environ,
-                    **(
+                    **frame_repository.native_environment(os.environ),
+                        **(
                         {"AGENT_DISPATCH_COMPLETION_STATE_FILE": args.state_file}
                         if args.state_file
                         else {}
@@ -1346,6 +1347,7 @@ def parser() -> argparse.ArgumentParser:
     return value
 
 
+@frame_repository.process_entry
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     continuation_budget = resolve_continuation_budget(

@@ -909,7 +909,7 @@ def _run_reporting_registration(command, attempt, on_registered):
 
 
 def _start(route, path, jobs, node, harness, run, on_registered=None):
-    with frame_repository.for_route(route) as repository:
+    with frame_repository.for_route(route, path) as repository:
         return _start_bound(route, path, jobs, node, harness, run, on_registered, repository)
 
 
@@ -2561,6 +2561,8 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
                         "No payload rerun is authorized by a missing supervisor or exit proof."}
     if route["effective_intensity"] == "direct":
         from artifact_producer import prepare_route_artifact_env
+        with frame_repository.for_route(route, path) as repository:
+            repository.verify(route.get("cwd"))
         return {**result, "state": "inline", "required_action": "execute-inline",
                 "task": request["text"],
                 # The inline session is the producer (capabilities/*.md lifecycle step 1):

@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import signal
 import sys
+import frame_repository
 
 from dispatch_contract import mark_attempt_launch_started
 from dispatch_launch_evidence import save_fence_failure
@@ -35,6 +36,11 @@ def set_parent_death_signal(signum: int) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    with frame_repository.process_binding(sys.argv[1:] if argv is None else argv):
+        return _main(argv)
+
+
+def _main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--parent-pid", required=True, type=int)
     parser.add_argument("--gate-fd", required=True, type=int)
