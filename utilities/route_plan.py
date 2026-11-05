@@ -929,6 +929,18 @@ def project_next_leg(route, completed_cycle_id):
         return None
 
 
+def first_leg_recovery_command(record_path, record):
+    """The existing compose command for an approved first leg, from the same command owner."""
+    decision = record["decision"]
+    compose = decision["first_leg_compose"]
+    context = compose["context"]
+    leg = {**decision["proposal"]["legs"][0],
+           **{key: compose[key] for key in ("capability", "mode", "shape", "graph", "intensity")}}
+    return shlex.join(compose_argv(leg, context=context, route_plan_arg=f"{record_path}#0",
+        parent_cycle=decision["frame_route"]["cycle_id"], slug=f"{context['slug']}-leg0",
+        pins=frame_selection_pins(decision, context["artifact_root"])))
+
+
 def completed_cycle(route):
     """The sealed producer cycle this route ran in, or None.
 

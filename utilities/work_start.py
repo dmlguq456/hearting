@@ -1855,11 +1855,7 @@ def _first_leg(route, path, jobs, result, root, record, output, record_path, dec
         try:
             decision_record = _prepare_frame_repository(record_path, decision_record)
         except (OSError, ValueError) as exc:
-            recovery_leg = {**decision["proposal"]["legs"][0],
-                            **{key: compose[key] for key in ("capability", "mode", "shape", "graph", "intensity")}}
-            recovery = shlex.join(RP.compose_argv(recovery_leg, context=context,
-                route_plan_arg=f"{record_path}#0", parent_cycle=record["cycle_id"],
-                slug=f"{context['slug']}-leg0", pins=RP.frame_selection_pins(decision, root)))
+            recovery = RP.first_leg_recovery_command(record_path, decision_record)
             return None, {**result, "state": "needs-attention", "reason": "repository-preparation-pending",
                           "detail": str(exc), "record_file": str(record_path),
                           "recovery_command": recovery,
