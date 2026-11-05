@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
-"""Render the public GitHub Pages surface: docs/index.html + docs/map.html.
+"""Render the public GitHub Pages surface: docs/index.html, docs/fleet.html, docs/map.html.
 
-The landing page is an app shell: a scrolling narrative sidebar on the left and
-a full-bleed diagram canvas on the right that carries the agent map, cut for a
-public audience so the flagship subsystems are visible: sealed N-way dispatch,
-the Fleet view over it, per-role model tiers, the fixed artifact system, the
-persistent memory store, and the loops that keep the harness honest.
+- index.html: the landing page. It leads with what Hearting is for (keeping
+  agent work on the user's intent), shows Fleet's real screen pictures near the
+  top, explains how a request runs, gives the quick start, and keeps the layer
+  map (L0-L6) as a section further down.
+- fleet.html: a page about Fleet, centred on the pictures under docs/fleet/.
+- map.html: the capability catalog.
 
-Sources: manifest.json (tracks, hooks, loops) and
-harness-manifest.json (capability census, summaries, taxonomy). Both pages are
-self-contained (no CDN/network), share one design system, and are dark-first
-with a light override.
+Sources: manifest.json (tracks, loops) and harness-manifest.json (capability
+census, summaries, taxonomy). The pages are self-contained (no CDN, no
+network), share one design system, and are dark-first with a light override.
+The Fleet pictures are synthetic demo captures (tools/fleet/tests/readme_captures.py).
 
 Usage:
-  python3 tools/render-landing.py          # write docs/index.html + docs/map.html
-  python3 tools/render-landing.py --check  # verify both files are current
+  python3 tools/render-landing.py          # write docs/index.html, fleet.html, map.html
+  python3 tools/render-landing.py --check  # verify the three files are current
 """
 from __future__ import annotations
 
@@ -26,16 +27,18 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DOCS = ROOT / "docs"
 REPO_URL = "https://github.com/dmlguq456/hearting"
+SITE_URL = "https://dmlguq456.github.io/hearting/"
 INSTALL_CMD = (
     "curl -fsSL https://github.com/dmlguq456/hearting/"
     "releases/latest/download/install.sh | sh"
 )
+INSTALL_CLAUDE_CMD = INSTALL_CMD + " -s -- --runtime claude"
 
 
 def load_data() -> dict:
     manifest = json.loads((ROOT / "manifest.json").read_text(encoding="utf-8"))
     harness = json.loads((ROOT / "harness-manifest.json").read_text(encoding="utf-8"))
-    # A compiler-internal capability is not a product surface: the landing page never counts or lists it.
+    # A compiler-internal capability is not a product surface: the pages never count or list it.
     caps = {name: spec for name, spec in harness["capabilities"].items()
             if spec["invocation"]["class"] != "compiler-internal"}
     units = harness["units"]
@@ -43,7 +46,6 @@ def load_data() -> dict:
         name for name, spec in caps.items()
         if spec["invocation"]["class"] == "entry-router"
     )
-    hard_hooks = [h for h in manifest["hooks"] if h.get("hard_block")]
     roles = sorted({spec["role"] for spec in units.values()})
     return {
         "caps": caps,
@@ -51,14 +53,11 @@ def load_data() -> dict:
         "roles": roles,
         "entries": entries,
         "tracks": manifest["tracks"],
-        "hard_hooks": hard_hooks,
         "loops": manifest["loops"],
         "cap_total": len(caps),
         "entry_total": len(entries),
         "unit_total": len(units),
         "role_total": len(roles),
-        "hook_total": len(manifest["hooks"]),
-        "hard_total": len(hard_hooks),
         "loop_total": len(manifest["loops"]),
     }
 
@@ -88,13 +87,13 @@ CSS = r"""
     --accent-soft: rgba(109,109,246,.15);
     --ok: #34D399; --warn: #FBBF24; --danger: #FB7185; --info: #60A5FA;
 
-    --term-bg: #08080D; --term-br: rgba(255,255,255,.13); --term-tx: #C9C9D6;
-
+    --term-bg: #0B0E17;
     --grid-line: rgba(255,255,255,.035);
     --wire: rgba(150,150,255,.34);
     --glow-a: rgba(109,109,246,.20);
     --glow-b: rgba(34,211,238,.11);
     --shadow: 0 1px 2px rgba(0,0,0,.5), 0 12px 34px rgba(0,0,0,.42);
+    --shot-shadow: 0 2px 4px rgba(0,0,0,.5), 0 24px 70px rgba(0,0,0,.55), 0 0 0 1px rgba(255,255,255,.04);
     --r-lg: 18px; --r-md: 12px; --r-sm: 8px;
   }
   @media (prefers-color-scheme: light) {
@@ -116,206 +115,341 @@ CSS = r"""
       --glow-a: rgba(109,109,246,.14);
       --glow-b: rgba(34,180,238,.10);
       --shadow: 0 1px 2px rgba(20,20,45,.05), 0 10px 28px rgba(20,20,45,.07);
-      --term-br: rgba(255,255,255,.09);
+      --shot-shadow: 0 2px 4px rgba(20,20,45,.10), 0 22px 60px rgba(20,20,45,.22), 0 0 0 1px rgba(20,20,45,.10);
     }
   }
 
   * { box-sizing: border-box; margin: 0; }
-  html, body { height: 100%; }
+  html { scroll-behavior: smooth; scroll-padding-top: 76px; }
   body {
     font-family: var(--font-ui); background: var(--bg); color: var(--text);
     line-height: 1.62; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
-    font-size: 16px;
+    font-size: 16px; overflow-x: hidden;
   }
   a { color: inherit; text-decoration: none; }
   code, .mono { font-family: var(--font-mono); font-variant-ligatures: none; }
+  img { max-width: 100%; height: auto; }
   ::selection { background: rgba(109,109,246,.32); }
-
-  /* ── app shell ───────────────────────────────────────── */
-  .shell { display: flex; height: 100vh; overflow: hidden; }
-  .side {
-    width: 428px; flex: none; height: 100vh; overflow-y: auto; overscroll-behavior: contain;
-    border-right: 1px solid var(--border); background: var(--bg-2);
-    position: relative; scrollbar-width: thin;
-  }
-  .side::-webkit-scrollbar { width: 8px; }
-  .side::-webkit-scrollbar-thumb { background: var(--border-2); border-radius: 8px; }
-  .side::before {
-    content: ""; position: absolute; inset: 0 0 auto 0; height: 420px; pointer-events: none;
-    background:
-      radial-gradient(520px 300px at 15% -8%, var(--glow-a), transparent 70%),
-      radial-gradient(420px 260px at 95% 2%, var(--glow-b), transparent 72%);
-  }
-  .side-in { position: relative; padding: 30px 32px 64px; }
-
-  .brand { display: flex; align-items: center; gap: 10px; font-weight: 750; letter-spacing: -.02em; font-size: 16px; }
-  .brand svg { display: block; }
-  .badges { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 18px; }
-  .badge {
-    font-size: 12.5px; font-weight: 600; color: var(--text-2);
-    border: 1px solid var(--border); background: var(--panel); border-radius: 999px; padding: 4px 12px;
-  }
-  .badge.hot { color: #fff; border-color: transparent; background: linear-gradient(115deg, var(--g1), var(--g2)); }
-
-  .side h1 { margin-top: 22px; font-size: 35px; line-height: 1.12; letter-spacing: -.035em; font-weight: 780; }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 0 28px; }
   .grad {
     background: linear-gradient(102deg, var(--g1) 4%, var(--g2) 52%, var(--g3) 100%);
     -webkit-background-clip: text; background-clip: text; color: transparent;
   }
-  .side .sub { margin-top: 15px; color: var(--text-2); font-size: 16.5px; }
-  .runtimes { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 16px; }
-  .runtimes span {
-    display: inline-flex; align-items: center; gap: 6px; font-size: 13.5px; color: var(--text-2);
-    border: 1px solid var(--border); border-radius: 999px; padding: 5px 12px; background: var(--panel);
-  }
-  .runtimes i { width: 6px; height: 6px; border-radius: 50%; background: linear-gradient(120deg, var(--g1), var(--g3)); }
 
+  /* ── top bar ─────────────────────────────────────────── */
+  .top {
+    position: sticky; top: 0; z-index: 40; border-bottom: 1px solid var(--border);
+    background: color-mix(in srgb, var(--bg) 84%, transparent);
+    -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
+  }
+  .top .in { display: flex; align-items: center; gap: 18px; height: 60px; }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 750; letter-spacing: -.02em; font-size: 17px; }
+  .brand svg { display: block; }
+  .top nav { display: flex; align-items: center; gap: 2px; margin-left: auto; }
+  .top nav a {
+    padding: 7px 13px; border-radius: 999px; font-size: 14.5px; color: var(--text-2);
+    transition: background .15s, color .15s; white-space: nowrap;
+  }
+  .top nav a:hover { background: var(--panel-2); color: var(--text); }
+  .top nav a.on { color: var(--text); background: var(--panel); }
+  .top nav a.cta {
+    margin-left: 6px; color: #fff; font-weight: 600;
+    background: linear-gradient(115deg, var(--g1), var(--g2));
+  }
+  .top nav a.cta:hover { filter: brightness(1.1); }
+
+  /* ── hero ────────────────────────────────────────────── */
+  .hero { position: relative; padding: 56px 0 0; text-align: center; }
+  .hero::before {
+    content: ""; position: absolute; inset: 0 0 auto 0; height: 560px; pointer-events: none; z-index: -1;
+    background:
+      radial-gradient(780px 380px at 18% -6%, var(--glow-a), transparent 70%),
+      radial-gradient(640px 340px at 86% 0%, var(--glow-b), transparent 72%);
+  }
+  .eyebrow {
+    display: inline-flex; align-items: center; gap: 8px; font-size: 13.5px; font-weight: 600; color: var(--text-2);
+    border: 1px solid var(--border-2); background: var(--panel); border-radius: 999px; padding: 5px 14px;
+  }
+  .eyebrow i { width: 6px; height: 6px; border-radius: 50%; background: linear-gradient(120deg, var(--g1), var(--g3)); }
+  .hero h1 {
+    margin: 22px auto 0; max-width: 960px;
+    font-size: clamp(34px, 5.6vw, 60px); line-height: 1.07; letter-spacing: -.04em; font-weight: 790;
+    text-wrap: balance;
+  }
+  .hero .lede { text-wrap: pretty; max-width: 760px; margin: 20px auto 0; font-size: clamp(16.5px, 1.7vw, 19px); color: var(--text-2); }
+  .hero .lede b { color: var(--text); font-weight: 620; }
   .install {
-    margin-top: 20px; display: flex; align-items: stretch; overflow: hidden;
+    max-width: 760px; margin: 28px auto 0; display: flex; align-items: stretch; overflow: hidden; text-align: left;
     border: 1px solid var(--border-2); border-radius: var(--r-md);
     background: var(--solid); box-shadow: var(--shadow);
   }
-  .install .p { display: flex; align-items: center; padding-left: 13px; color: var(--g2); font-family: var(--font-mono); font-size: 13px; }
+  .install .p { display: flex; align-items: center; padding-left: 14px; color: var(--g2); font-family: var(--font-mono); font-size: 13.5px; }
   .install code {
-    flex: 1; min-width: 0; font-size: 13px; padding: 13px 11px; color: var(--text);
+    flex: 1; min-width: 0; font-size: 13.5px; padding: 14px 12px; color: var(--text);
     overflow-x: auto; white-space: nowrap; scrollbar-width: none;
   }
   .install code::-webkit-scrollbar { display: none; }
   .install button {
     border: 0; border-left: 1px solid var(--border); background: var(--panel);
-    color: var(--text-2); font-family: var(--font-ui); font-size: 13px; font-weight: 600;
-    padding: 0 15px; cursor: pointer; white-space: nowrap; transition: color .15s, background .15s;
+    color: var(--text-2); font-family: var(--font-ui); font-size: 13.5px; font-weight: 600;
+    padding: 0 18px; cursor: pointer; white-space: nowrap; transition: color .15s, background .15s;
   }
   .install button:hover { color: var(--text); background: var(--panel-2); }
-  .fine { margin-top: 11px; font-size: 13px; color: var(--text-3); }
+  .fine { margin-top: 12px; font-size: 13.5px; color: var(--text-3); }
   .fine a { color: var(--text-2); text-decoration: underline; text-underline-offset: 3px; }
+  .btns { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; margin-top: 22px; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 620;
+    border: 1px solid var(--border-2); border-radius: 999px; padding: 10px 20px; background: var(--panel);
+    transition: all .15s;
+  }
+  .btn:hover { background: var(--panel-2); border-color: var(--accent); }
+  .btn.primary { color: #fff; border-color: transparent; background: linear-gradient(115deg, var(--g1), var(--g2)); }
+  .btn.primary:hover { filter: brightness(1.1); }
 
-  .sblock { margin-top: 38px; }
-  .skick {
-    font-size: 12px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase;
-    color: var(--text-3); margin-bottom: 14px; display: flex; align-items: center; gap: 8px;
+  /* screen pictures: real Fleet captures drawn from synthetic demo data */
+  .shot {
+    display: block; border-radius: 14px; overflow: hidden; background: var(--term-bg);
+    box-shadow: var(--shot-shadow); line-height: 0;
   }
-  .skick::after { content: ""; flex: 1; height: 1px; background: var(--border); }
-  .sblock > p { font-size: 15px; color: var(--text-2); }
+  .shot img { display: block; width: 100%; height: auto; }
+  .shot.crop img { max-width: none; }
+  a.shot { transition: transform .2s ease, box-shadow .2s ease; }
+  a.shot:hover { transform: translateY(-3px); }
+  .hero-shot { margin-top: 44px; }
+  .hero-shot .shot { max-width: 1180px; margin: 0 auto; }
+  figcaption, .cap-note { font-size: 13.5px; color: var(--text-3); line-height: 1.5; }
+  .hero-shot figcaption { margin-top: 14px; text-align: center; }
+  .hero-shot figcaption a { color: var(--text-2); text-decoration: underline; text-underline-offset: 3px; }
 
-  .jump { display: flex; flex-direction: column; gap: 2px; }
-  .jump a {
-    display: flex; align-items: center; gap: 10px; padding: 9px 11px; border-radius: var(--r-sm);
-    font-size: 15px; color: var(--text-2); transition: background .15s, color .15s;
+  /* ── sections ────────────────────────────────────────── */
+  .sec { padding: 92px 0 0; }
+  .kick {
+    font-size: 12.5px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; color: var(--accent);
+    margin-bottom: 14px; display: flex; align-items: center; gap: 10px;
   }
-  .jump a:hover, .jump a.on { background: var(--panel); color: var(--text); }
-  .jump .n {
-    font-family: var(--font-mono); font-size: 11.5px; color: var(--text-3);
-    border: 1px solid var(--border); border-radius: 5px; padding: 2px 6px; flex: none;
-  }
-  .jump a.on .n { color: var(--accent); border-color: var(--accent); }
-
-  .flag {
-    border: 1px solid var(--border); border-radius: var(--r-md); padding: 16px 17px;
-    background: linear-gradient(150deg, var(--accent-soft), transparent 62%), var(--panel);
-    margin-bottom: 9px;
-  }
-  .flag h3 { font-size: 15.5px; letter-spacing: -.01em; display: flex; align-items: center; gap: 8px; }
-  .flag h3 .dot { width: 7px; height: 7px; border-radius: 50%; background: linear-gradient(120deg, var(--g1), var(--g3)); flex: none; }
-  .flag ul { margin: 9px 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 5px; }
-  .flag li { font-size: 14px; color: var(--text-2); padding-left: 16px; position: relative; }
-  .flag li::before {
-    content: ""; position: absolute; left: 3px; top: 9px; width: 4px; height: 4px;
-    border-radius: 50%; background: var(--accent);
-  }
-  .flag li b { color: var(--text); font-weight: 620; }
-
-  .profs { display: flex; flex-direction: column; gap: 8px; }
-  .prof {
-    display: flex; align-items: center; gap: 12px; padding: 12px 14px;
-    border: 1px solid var(--border); border-radius: var(--r-md); background: var(--panel);
-    cursor: pointer; transition: border-color .15s, background .15s; text-align: left; font: inherit; color: inherit;
-  }
-  .prof:hover { border-color: var(--border-2); background: var(--panel-2); }
-  .prof.on { border-color: var(--accent); background: var(--accent-soft); }
-  .prof .cnt { font-size: 20px; font-weight: 750; letter-spacing: -.02em; min-width: 30px; }
-  .prof .nm { font-family: var(--font-mono); font-size: 13px; font-weight: 600; }
-  .prof .ds { font-size: 12px; color: var(--text-3); }
-  .prof .tag {
-    margin-left: auto; font-size: 10px; font-weight: 700; letter-spacing: .05em; color: #fff;
-    background: linear-gradient(120deg, var(--g1), var(--g2)); border-radius: 999px; padding: 2px 8px;
-  }
-
-  ol.steps { list-style: none; padding: 0; counter-reset: s; display: flex; flex-direction: column; gap: 13px; }
-  ol.steps li { display: flex; gap: 12px; font-size: 15px; color: var(--text-2); }
-  ol.steps .n {
-    counter-increment: s; flex: none; width: 24px; height: 24px; border-radius: 50%; margin-top: 1px;
-    background: var(--panel-2); color: var(--text); font-size: 12.5px; font-weight: 700;
-    display: flex; align-items: center; justify-content: center;
-  }
-  ol.steps .n::before { content: counter(s); }
-  ol.steps b { color: var(--text); font-weight: 620; }
-  ol.steps code, .flag code {
-    font-size: 13px; background: var(--panel); border: 1px solid var(--border);
+  .kick::after { content: ""; width: 54px; height: 1px; background: var(--border-2); }
+  .sec h2 { font-size: clamp(27px, 3.6vw, 40px); line-height: 1.12; letter-spacing: -.035em; font-weight: 770; max-width: 860px; text-wrap: balance; }
+  .sec .lead { margin-top: 16px; max-width: 760px; font-size: 17.5px; color: var(--text-2); }
+  .sec .lead b { color: var(--text); font-weight: 620; }
+  .sec .lead code, .card code, .qs code, .note code, .split p code, .split .t code {
+    font-size: .88em; background: var(--panel); border: 1px solid var(--border);
     border-radius: 6px; padding: 1px 6px; color: var(--text);
   }
+  .sec > .wrap > .grid, .sec > .wrap > .pipe, .sec > .wrap > .split { margin-top: 38px; }
 
-  .slinks { display: flex; flex-wrap: wrap; gap: 7px; }
-  .slinks a {
-    font-size: 13.5px; color: var(--text-2); border: 1px solid var(--border);
-    border-radius: 999px; padding: 6px 13px; background: var(--panel); transition: all .15s;
+  .card {
+    border: 1px solid var(--border); border-radius: var(--r-lg); padding: 24px 26px;
+    background: linear-gradient(160deg, var(--panel-2), var(--panel));
   }
-  .slinks a:hover { color: var(--text); border-color: var(--border-2); }
-  .sfoot { margin-top: 36px; padding-top: 19px; border-top: 1px solid var(--border); font-size: 13px; color: var(--text-3); }
+  .card h3 { font-size: 18px; letter-spacing: -.02em; font-weight: 700; }
+  .card p { margin-top: 9px; font-size: 15.5px; color: var(--text-2); }
+  .card .num { font-family: var(--font-mono); font-size: 12.5px; font-weight: 700; color: var(--accent); margin-bottom: 12px; display: block; letter-spacing: .06em; }
+  .card.hot { border-color: transparent; background:
+      linear-gradient(var(--bg), var(--bg)) padding-box,
+      linear-gradient(130deg, var(--g1), var(--g2), var(--g3)) border-box;
+    border: 1px solid transparent; position: relative; }
+  .card.hot::before { content: ""; position: absolute; inset: 0; border-radius: inherit; background: var(--accent-soft); pointer-events: none; }
+  .card.hot > * { position: relative; }
+  .why { display: grid; grid-template-columns: repeat(6, 1fr); gap: 14px; }
+  .why .card { grid-column: span 2; }
+  .why .card:nth-child(n+4) { grid-column: span 3; }
+  .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
 
-  /* ── stage / canvas ──────────────────────────────────── */
-  .stage { flex: 1; min-width: 0; display: flex; flex-direction: column; height: 100vh; position: relative; }
-  .bar {
-    flex: none; display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
-    padding: 14px 24px; border-bottom: 1px solid var(--border); background: var(--bg-2); z-index: 5;
+  /* how a request runs */
+  .pipe { display: grid; grid-template-columns: repeat(5, 1fr); gap: 0; }
+  .pipe .st { position: relative; padding: 4px 24px 4px 0; }
+  .pipe .st:not(:last-child)::after {
+    content: ""; position: absolute; right: 8px; top: 15px; width: 8px; height: 8px;
+    border-top: 2px solid var(--text-3); border-right: 2px solid var(--text-3); transform: rotate(45deg);
   }
-  .bar .ttl { font-size: 14.5px; font-weight: 650; letter-spacing: -.01em; }
-  .bar .ttl span { color: var(--text-3); font-weight: 400; }
-  .filters { display: flex; gap: 4px; margin-left: auto; align-items: center; }
-  .filters .lab { font-size: 12.5px; color: var(--text-3); margin-right: 4px; }
-  .filters button {
-    font-family: var(--font-mono); font-size: 12.5px; font-weight: 600; cursor: pointer;
-    border: 1px solid var(--border); border-radius: 999px; padding: 5px 12px;
-    background: var(--panel); color: var(--text-2); transition: all .15s;
+  .pipe .dot {
+    width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; margin-bottom: 14px;
+    font-family: var(--font-mono); font-size: 13px; font-weight: 700; color: #fff;
+    background: linear-gradient(130deg, var(--g1), var(--g2));
   }
-  .filters button:hover { color: var(--text); }
-  .filters button.on { color: #fff; border-color: transparent; background: linear-gradient(120deg, var(--g1), var(--g2)); }
-  .legend { display: flex; gap: 12px; align-items: center; font-size: 12.5px; color: var(--text-3); }
-  .legend i { display: inline-block; width: 9px; height: 9px; border-radius: 3px; margin-right: 5px; vertical-align: -1px; }
-  .legend .e { background: linear-gradient(120deg, var(--g1), var(--g2)); }
-  .legend .s { background: var(--panel-2); border: 1px solid var(--border-2); }
-  .legend .g { background: var(--warn); }
+  .pipe h3 { font-size: 16.5px; letter-spacing: -.015em; }
+  .pipe p { margin-top: 6px; font-size: 14.5px; color: var(--text-2); }
+  .fleetband {
+    margin-top: 26px; display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    border: 1px dashed var(--border-2); border-radius: var(--r-md); padding: 13px 18px; background: var(--panel);
+    font-size: 15px; color: var(--text-2);
+  }
+  .fleetband b { color: var(--text); }
+  .fleetband a { margin-left: auto; color: var(--accent); font-weight: 620; white-space: nowrap; }
+  .split { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; align-items: start; }
+  .split h3 { font-size: 17px; letter-spacing: -.015em; margin-bottom: 10px; }
+  .split p.t { font-size: 15.5px; color: var(--text-2); margin-top: 10px; }
+  .split p.t b { color: var(--text); font-weight: 620; }
+  .ladder2 { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 12px; }
+  .ladder2 span {
+    font-family: var(--font-mono); font-size: 12.5px; padding: 5px 10px; border-radius: 6px;
+    border: 1px solid var(--border-2); color: var(--text); background: var(--panel-2);
+  }
+  .ladder2 span.first { border-color: var(--ok); color: var(--ok); background: transparent; }
+  .ladder2 span.top { color: var(--danger); border-color: rgba(251,113,133,.4); background: rgba(251,113,133,.08); }
 
-  .canvas {
-    flex: 1; overflow: auto; position: relative; padding: 34px 30px 52px;
+  /* the intent card the user actually approves */
+  .rcard {
+    border: 1px solid var(--border-2); border-radius: var(--r-md); background: var(--solid);
+    padding: 15px 17px; box-shadow: var(--shadow);
+  }
+  .rcard .rh {
+    font-size: 12px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase;
+    color: var(--text-3); margin-bottom: 10px; display: flex; align-items: center; gap: 8px;
+  }
+  .rcard .rh::after { content: ""; flex: 1; height: 1px; background: var(--border); }
+  .rrow { display: flex; gap: 12px; font-size: 14px; line-height: 1.62; padding: 3px 0; }
+  .rrow .rk {
+    font-family: var(--font-mono); font-size: 11.5px; letter-spacing: .07em; text-transform: uppercase;
+    color: var(--text-3); width: 70px; flex: none; padding-top: 3px;
+  }
+  .rrow .rv { color: var(--text-2); min-width: 0; }
+  .rrow .rv b { color: var(--text); font-weight: 620; }
+  .rrow .rv code {
+    font-size: 13px; background: var(--panel); border: 1px solid var(--border);
+    border-radius: 5px; padding: 1px 6px; color: var(--accent);
+  }
+  .rops {
+    display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-top: 11px; padding-top: 10px;
+    border-top: 1px dashed var(--border);
+  }
+  .rop {
+    font-size: 12.5px; font-weight: 600; border: 1px solid var(--border); border-radius: 999px;
+    padding: 4px 13px; color: var(--text-3);
+  }
+  .rop.on { color: #fff; border-color: transparent; background: linear-gradient(120deg, var(--g1), var(--g2)); }
+  .rops .rnote { font-size: 12.5px; color: var(--text-3); margin-left: auto; }
+
+  /* Fleet showcase */
+  .tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  .card p a { color: var(--accent); white-space: nowrap; }
+  .tile figcaption { margin-top: 12px; font-size: 14.5px; color: var(--text-2); }
+  .card p a { color: var(--accent); white-space: nowrap; }
+  .tile figcaption b { color: var(--text); display: block; font-size: 15.5px; margin-bottom: 2px; }
+  .pill-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 26px; }
+  .pill-row span {
+    display: inline-flex; align-items: center; gap: 8px; font-size: 14px; color: var(--text-2);
+    border: 1px solid var(--border); border-radius: 999px; padding: 6px 14px; background: var(--panel);
+  }
+  .pill-row code { font-size: .9em; }
+  .pill-row span::before { content: "✓"; color: var(--ok); font-size: 12px; }
+  .cmdrow { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-top: 28px; }
+  .cmd {
+    display: inline-flex; align-items: center; gap: 10px; font-family: var(--font-mono); font-size: 15px;
+    border: 1px solid var(--border-2); border-radius: var(--r-md); padding: 10px 16px; background: var(--solid); box-shadow: var(--shadow);
+  }
+  .cmd i { font-style: normal; color: var(--g2); }
+
+  /* quick start */
+  .qs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; counter-reset: q; }
+  .qs .card { counter-increment: q; min-width: 0; }
+  .qs .card:first-child { grid-column: 1 / -1; }
+  .qs .card::before {
+    content: counter(q); display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%;
+    margin-bottom: 14px; background: var(--panel-2); border: 1px solid var(--border-2);
+    font-size: 13px; font-weight: 700; color: var(--text);
+  }
+  .qs .card p { font-size: 14.5px; }
+  .qs pre, pre.code {
+    margin-top: 12px; font-family: var(--font-mono); font-size: 12.5px; line-height: 1.7; color: var(--text);
+    background: var(--solid); border: 1px solid var(--border); border-radius: var(--r-sm); padding: 10px 12px;
+    overflow-x: auto; white-space: pre; scrollbar-width: thin;
+  }
+  .note {
+    margin-top: 18px; border: 1px solid var(--border); border-left: 3px solid var(--warn); border-radius: var(--r-sm);
+    padding: 13px 17px; background: var(--panel); font-size: 15px; color: var(--text-2);
+  }
+  .note b { color: var(--text); }
+  .note a { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+  .links { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  .links a {
+    border: 1px solid var(--border); border-radius: var(--r-md); padding: 16px 18px; background: var(--panel);
+    transition: all .15s; display: block;
+  }
+  .links a:hover { border-color: var(--border-2); background: var(--panel-2); }
+  .links b { display: block; font-size: 16px; letter-spacing: -.01em; }
+  .links span { font-size: 14px; color: var(--text-3); }
+  .foot { margin-top: 96px; padding: 34px 0 56px; border-top: 1px solid var(--border); font-size: 14px; color: var(--text-3); }
+  .foot .def { max-width: 640px; }
+  .foot .def b { color: var(--text-2); }
+  .foot .row { margin-top: 18px; display: flex; flex-wrap: wrap; gap: 8px 22px; }
+  .foot .row a { color: var(--text-2); }
+  .foot .row a:hover { color: var(--text); }
+
+  /* ── fleet page ──────────────────────────────────────── */
+  .scr { padding: 46px 0 52px; }
+  .scr + .scr { border-top: 1px solid var(--border); }
+  .scr-head { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr); gap: 44px; align-items: start; margin-bottom: 26px; }
+  .scr .tag { font-family: var(--font-mono); font-size: 12px; font-weight: 700; letter-spacing: .08em; color: var(--accent); }
+  .scr h3 { margin-top: 8px; font-size: clamp(24px, 3vw, 30px); letter-spacing: -.03em; line-height: 1.15; }
+  .scr p { font-size: 16.5px; color: var(--text-2); }
+  .scr code { font-size: .88em; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 1px 6px; color: var(--text); }
+  .scr ul { margin: 12px 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 7px; }
+  .scr li { position: relative; padding-left: 18px; font-size: 15px; color: var(--text-2); }
+  .scr li::before { content: ""; position: absolute; left: 3px; top: 10px; width: 5px; height: 5px; border-radius: 50%; background: var(--accent); }
+  .scr li b { color: var(--text); font-weight: 620; }
+  .views { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  .views .card { padding: 18px 20px; }
+  .views h3 { font-family: var(--font-mono); font-size: 14px; letter-spacing: .04em; color: var(--accent); }
+  .views p { font-size: 14.5px; margin-top: 7px; }
+  .narrow { display: grid; grid-template-columns: 1fr 1.25fr; gap: 36px; align-items: center; margin-top: 40px; }
+  .narrow h3 { font-size: 22px; letter-spacing: -.02em; }
+  .narrow p { margin-top: 10px; color: var(--text-2); }
+  .keys { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
+  .keys span { font-size: 13.5px; color: var(--text-2); }
+  .keys kbd {
+    font-family: var(--font-mono); font-size: 12px; color: var(--text); border: 1px solid var(--border-2);
+    border-bottom-width: 2px; border-radius: 6px; padding: 1px 7px; background: var(--panel-2); margin-right: 5px;
+  }
+  .limits { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  .limits .big { font-size: 34px; font-weight: 780; letter-spacing: -.04em; line-height: 1.1; }
+  .limits .big small { font-size: 15px; font-weight: 500; color: var(--text-3); letter-spacing: 0; margin-left: 4px; }
+  .limits .card p { font-size: 14.5px; }
+  .cta-band {
+    margin-top: 96px; text-align: center; border: 1px solid var(--border-2); border-radius: 22px; padding: 54px 28px;
+    background:
+      radial-gradient(520px 220px at 20% 0%, var(--glow-a), transparent 70%),
+      radial-gradient(420px 200px at 85% 100%, var(--glow-b), transparent 72%),
+      var(--panel);
+  }
+  .cta-band h2 { margin: 0 auto; max-width: 640px; font-size: clamp(26px, 3.4vw, 36px); letter-spacing: -.035em; line-height: 1.15; }
+  .cta-band p { margin: 14px auto 0; max-width: 560px; color: var(--text-2); font-size: 16.5px; }
+
+  /* ── layer map ───────────────────────────────────────── */
+  .mapsec { margin-top: 38px; }
+  .foldhint {
+    display: flex; align-items: center; gap: 9px; margin: 0 0 20px; width: max-content; max-width: 100%;
+    font-size: 13px; color: var(--text-3);
+    border: 1px solid var(--border); border-radius: 999px; padding: 7px 16px; background: var(--panel);
+  }
+  .foldhint b { color: var(--text-2); font-weight: 650; white-space: nowrap; }
+  .diagram {
+    position: relative; padding: 30px; border: 1px solid var(--border); border-radius: 24px;
     background:
       radial-gradient(760px 420px at 22% -6%, var(--glow-a), transparent 68%),
       radial-gradient(620px 380px at 88% 6%, var(--glow-b), transparent 70%),
       linear-gradient(var(--grid-line) 1px, transparent 1px) 0 0 / 100% 34px,
       linear-gradient(90deg, var(--grid-line) 1px, transparent 1px) 0 0 / 34px 100%,
-      var(--bg);
+      var(--bg-2);
   }
-  .diagram { position: relative; min-width: 1120px; max-width: 1480px; margin: 0 auto; }
   #wires { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 0; overflow: visible; }
-  .rows { position: relative; z-index: 1; display: grid; grid-template-columns: 250px minmax(0,1fr) 250px; gap: 22px; align-items: start; }
+  .rows { position: relative; z-index: 1; display: grid; grid-template-columns: 236px minmax(0,1fr) 236px; gap: 22px; align-items: start; }
+  .col:not(.main) .rail { position: sticky; top: 80px; }
   .col { display: flex; flex-direction: column; gap: 26px; }
   .col.main { gap: 30px; }
 
   .node {
-    border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--panel);
-    backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+    border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--solid);
     padding: 20px 22px; box-shadow: var(--shadow); position: relative;
   }
-  .node.solid { background: linear-gradient(165deg, var(--panel-2), var(--panel)); }
+  .node.solid { background: linear-gradient(165deg, var(--panel-2), var(--solid)); }
   .node > .head { display: flex; align-items: center; gap: 10px; margin-bottom: 0; flex-wrap: wrap; }
   .node > .head .lv {
     font-family: var(--font-mono); font-size: 12px; font-weight: 700; letter-spacing: .06em;
     color: var(--accent); border: 1px solid var(--accent); border-radius: 5px; padding: 2px 7px;
   }
   .node > .head h3 { font-size: 18.5px; letter-spacing: -.015em; font-weight: 700; }
-  .node > .head .note { font-size: 13.5px; color: var(--text-3); margin-left: auto; }
-  .node > .head button.note { border: 0; background: none; cursor: pointer; font: inherit; font-size: 13.5px; color: var(--text-3); }
-  .node > .head button.note:hover { color: var(--text-2); }
 
   .utter { display: flex; align-items: center; gap: 14px; }
   .utter .av {
@@ -336,14 +470,14 @@ CSS = r"""
   button.chip:hover { color: var(--text); border-color: var(--border-2); background: var(--panel-2); transform: translateY(-1px); }
   .chip.entry { color: var(--text); border-color: var(--border-2); background: var(--panel-2); font-weight: 600; }
   .chip.gate { color: var(--warn); border-color: rgba(251,191,36,.34); background: rgba(251,191,36,.07); }
-  .chip.dim { opacity: .22; }
 
-  .contract { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .contract { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 14px; }
   .sub { border: 1px solid var(--border); border-radius: var(--r-md); padding: 14px 15px; background: var(--panel); }
   .sub .t {
     font-size: 12px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase;
     color: var(--text-3); margin-bottom: 11px;
   }
+  .sub p { font-size: 13.5px; color: var(--text-2); margin-top: 10px; }
   .ladder { display: flex; align-items: center; gap: 3px; flex-wrap: wrap; }
   .ladder .st {
     font-family: var(--font-mono); font-size: 12.5px; padding: 4px 9px; border-radius: 5px; cursor: pointer;
@@ -351,52 +485,11 @@ CSS = r"""
   }
   .ladder .st.on { color: var(--text); border-color: var(--border-2); background: var(--panel-2); }
   .ladder .st.top { color: var(--danger); border-color: rgba(251,113,133,.36); background: rgba(251,113,133,.08); }
-  .seal { font-family: var(--font-mono); font-size: 12.5px; color: var(--text-2); line-height: 1.85; }
-  .seal b { color: var(--accent); font-weight: 600; }
-  .seal .k { color: var(--text-3); }
 
-  /* the intent card the user actually approves */
-  .rcard {
-    border: 1px solid var(--border-2); border-radius: var(--r-md); background: var(--solid);
-    padding: 15px 17px; box-shadow: var(--shadow); margin-bottom: 14px;
-  }
-  .rcard .rh {
-    font-size: 12px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase;
-    color: var(--text-3); margin-bottom: 10px; display: flex; align-items: center; gap: 8px;
-  }
-  .rcard .rh::after { content: ""; flex: 1; height: 1px; background: var(--border); }
-  .rrow { display: flex; gap: 12px; font-size: 14px; line-height: 1.62; padding: 3px 0; }
-  .rrow .rk {
-    font-family: var(--font-mono); font-size: 11.5px; letter-spacing: .07em; text-transform: uppercase;
-    color: var(--text-3); width: 62px; flex: none; padding-top: 3px;
-  }
-  .rrow .rv { color: var(--text-2); min-width: 0; }
-  .rrow .rv b { color: var(--text); font-weight: 620; }
-  .rrow .rv code {
-    font-size: 13px; background: var(--panel); border: 1px solid var(--border);
-    border-radius: 5px; padding: 1px 6px; color: var(--accent);
-  }
-  .rops {
-    display: flex; gap: 6px; align-items: center; margin-top: 11px; padding-top: 10px;
-    border-top: 1px dashed var(--border);
-  }
-  .rop {
-    font-size: 12.5px; font-weight: 600; border: 1px solid var(--border); border-radius: 999px;
-    padding: 4px 13px; color: var(--text-3);
-  }
-  .rop.on { color: #fff; border-color: transparent; background: linear-gradient(120deg, var(--g1), var(--g2)); }
-  .rops .rnote { font-size: 12.5px; color: var(--text-3); margin-left: auto; }
-
-  /* ── progressive disclosure: every layer is a block you open ─────────── */
-  .foldhint {
-    display: flex; align-items: center; gap: 9px; margin: 0 auto 20px; width: max-content;
-    font-size: 13px; color: var(--text-3);
-    border: 1px solid var(--border); border-radius: 999px; padding: 7px 16px; background: var(--panel);
-  }
-  .foldhint b { color: var(--text-2); font-weight: 650; }
-  .foldable > .head, .foldable > .rh { cursor: pointer; user-select: none; }
+  /* progressive disclosure: every layer is a block you open */
   .fold-sum { font-size: 14.5px; color: var(--text-2); line-height: 1.55; margin-top: 7px; }
   .rail .fold-sum { font-size: 13.5px; margin-top: 6px; }
+  .foldable > .head, .foldable > .rh { cursor: pointer; user-select: none; }
   .chev {
     margin-left: auto; flex: none; width: 27px; height: 27px; border-radius: 50%;
     border: 1px solid var(--border-2); background: var(--panel); cursor: pointer;
@@ -414,7 +507,8 @@ CSS = r"""
   .fold-body > .fold-inner { overflow: hidden; min-height: 0; }
   .foldable.is-open > .fold-body { grid-template-rows: 1fr; opacity: 1; margin-top: 17px; }
   @media (prefers-reduced-motion: reduce) {
-    .fold-body, .chev { transition: none; }
+    .fold-body, .chev, a.shot { transition: none; }
+    html { scroll-behavior: auto; }
   }
 
   .tracks { display: flex; flex-direction: column; gap: 8px; }
@@ -431,7 +525,7 @@ CSS = r"""
   .track .flow { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 11px 13px; }
   .track .arw { color: var(--text-3); font-size: 12.5px; }
 
-  /* dispatch fabric */
+  /* dispatch */
   .fabric { display: grid; grid-template-columns: 1.15fr 1fr; gap: 16px; }
   .tree { display: flex; flex-direction: column; gap: 9px; }
   .tier { display: flex; align-items: center; gap: 10px; }
@@ -457,7 +551,6 @@ CSS = r"""
     text-align: center; cursor: pointer; transition: all .14s;
   }
   .leg:hover { border-style: solid; background: var(--panel-2); color: var(--text); }
-  .leg span { display: block; font-size: 11px; color: var(--text-3); margin-top: 2px; }
   .fall { display: flex; flex-direction: column; gap: 6px; }
   .fall .hop {
     display: flex; align-items: center; gap: 8px; font-family: var(--font-mono); font-size: 12.5px;
@@ -468,55 +561,8 @@ CSS = r"""
   .fall .hop .i { width: 5px; height: 5px; border-radius: 50%; background: var(--ok); flex: none; }
   .fall .hop.last .i { background: var(--text-3); }
   .fall .hop .x { margin-left: auto; color: var(--text-3); font-size: 11.5px; }
-  .metrics { display: flex; gap: 8px; margin-top: 13px; flex-wrap: wrap; }
-  .metric { border: 1px solid var(--border); border-radius: 9px; padding: 8px 12px; background: var(--panel); flex: 1; min-width: 112px; }
-  .metric b { display: block; font-size: 16.5px; letter-spacing: -.02em; }
-  .metric span { font-size: 12.5px; color: var(--text-3); }
 
-  /* fleet terminal mockup */
-  .term {
-    border: 1px solid var(--term-br); border-radius: 11px; background: var(--term-bg);
-    overflow: hidden; box-shadow: 0 10px 30px rgba(0,0,0,.4); margin-top: 14px;
-  }
-  .term .tb {
-    display: flex; align-items: center; gap: 7px; padding: 8px 12px;
-    border-bottom: 1px solid var(--term-br); background: rgba(255,255,255,.025);
-  }
-  .term .tb i { width: 8px; height: 8px; border-radius: 50%; background: rgba(255,255,255,.14); }
-  .term .tb .nm { font-family: var(--font-mono); font-size: 12px; color: #8A8A9A; margin-left: 5px; }
-  .term .tb .live { margin-left: auto; font-family: var(--font-mono); font-size: 11px; color: var(--ok); display: flex; align-items: center; gap: 5px; }
-  .term .tb .live i { width: 5px; height: 5px; background: var(--ok); box-shadow: 0 0 8px var(--ok); }
-  .term .body { padding: 12px 15px 14px; font-family: var(--font-mono); font-size: 12.5px; color: var(--term-tx); line-height: 1.95; }
-  .term .r { display: flex; align-items: center; gap: 9px; white-space: nowrap; }
-  .term .r .s { width: 9px; flex: none; }
-  .term .r .nmx { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-  .term .r .tag { color: #6E6E80; }
-  .term .r .t { color: #55556A; width: 42px; text-align: right; }
-  .term .r.child .nmx { color: #9C9CB0; }
-  .term .r.child .nmx::before { content: "↳ "; color: #55556A; }
-  .term .w { color: var(--ok); } .term .i2 { color: #6E6E80; }
-  .term .b2 { color: var(--warn); } .term .dn { color: var(--info); }
-  .term .hd { color: #55556A; border-bottom: 1px dashed rgba(255,255,255,.08); padding-bottom: 4px; margin-bottom: 5px; display: block; }
-  .term .r .g { color: #4A4A5E; letter-spacing: -1px; flex: none; }
-  .term .r .pc { color: #6E6E80; width: 34px; text-align: right; flex: none; }
-  .term .r.deep .nmx { padding-left: 14px; }
-  .term .usage {
-    color: #6E6E80; font-size: 11.5px; line-height: 1.9; padding-bottom: 7px; margin-bottom: 6px;
-    border-bottom: 1px dashed rgba(255,255,255,.08);
-  }
-  .term .usage .ul { color: #55556A; letter-spacing: .08em; text-transform: uppercase; }
-  .term .usage .uh { color: #9C9CB0; display: inline-block; width: 52px; }
-  .term .usage .ur { white-space: nowrap; }
-  .term .usage .ul { display: inline-block; width: 46px; }
-  .term .usage .rs { color: #4A4A5E; }
-  .term .usage b { color: #7C7C92; font-weight: 400; letter-spacing: -1px; }
-  /* Fleet earns a standing block: it is the one surface that shows the harness working. */
-  .fleetnode { border-color: var(--border-2); background: linear-gradient(160deg, var(--panel-2), var(--panel)); }
-  .fleetnode > .head .lv { color: var(--ok); border-color: var(--ok); }
-  .fleetnode .term { margin-top: 16px; }
-  .term .ft { color: #55556A; border-top: 1px dashed rgba(255,255,255,.08); padding-top: 5px; margin-top: 5px; display: block; }
-
-  /* model tier matrix */
+  /* model budgets */
   .tiers { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
   .prof-row { display: flex; flex-direction: column; gap: 7px; }
   .pcard {
@@ -525,29 +571,15 @@ CSS = r"""
     font-family: inherit; transition: all .14s; width: 100%;
   }
   .pcard:hover { border-color: var(--border-2); background: var(--panel-2); }
-  .pcard .ptop { display: flex; align-items: center; gap: 8px; }
   .pcard .pn { font-family: var(--font-mono); font-size: 13.5px; font-weight: 650; }
   .pcard .pd { display: block; font-size: 12.5px; color: var(--text-3); margin-top: 2px; line-height: 1.45; }
-  .pcard .pe {
-    margin-left: auto; font-family: var(--font-mono); font-size: 11.5px; color: var(--text-3);
-    border: 1px solid var(--border); border-radius: 5px; padding: 2px 7px; white-space: nowrap;
-  }
   .pcard.deep .pn { color: var(--g2); }
   .pcard.bal .pn { color: var(--accent); }
   .pcard.light .pn { color: var(--g3); }
   .pcard.mini .pn { color: var(--text-3); }
-  .pcard.mini { opacity: .7; }
-  .maptab { width: 100%; border-collapse: collapse; font-size: 13px; }
-  .maptab th {
-    text-align: left; font-size: 11.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
-    color: var(--text-3); padding: 0 8px 8px 0; border-bottom: 1px solid var(--border);
-  }
-  .maptab td { padding: 8px 8px 8px 0; border-bottom: 1px solid var(--border); color: var(--text-2); }
-  .maptab td:first-child { font-family: var(--font-mono); font-size: 12.5px; color: var(--text); }
-  .maptab td .pp { font-family: var(--font-mono); font-size: 12px; color: var(--accent); }
-  .maptab tr:last-child td { border-bottom: 0; }
+  .pcard.mini { opacity: .75; }
 
-  /* artifact system */
+  /* artifacts */
   .flowline { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 13px; }
   .flowline .fx {
     font-family: var(--font-mono); font-size: 13px; border: 1px solid var(--border-2); border-radius: 7px;
@@ -556,7 +588,7 @@ CSS = r"""
   .flowline .fx:hover { border-color: var(--accent); }
   .flowline .fa { color: var(--text-3); font-size: 13.5px; }
   .flowline .fn { font-size: 12.5px; color: var(--text-3); margin-left: 6px; }
-  .buckets { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; }
+  .buckets { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }
   .bucket { border: 1px solid var(--border); border-radius: 9px; padding: 12px 10px; background: var(--panel); text-align: center; }
   .bucket b { display: block; font-family: var(--font-mono); font-size: 12.5px; color: var(--text); }
   .bucket span { font-size: 12px; color: var(--text-3); }
@@ -570,25 +602,14 @@ CSS = r"""
   .rule::before { content: "✓"; color: var(--ok); font-size: 11.5px; }
 
   /* side rails */
-  .rail { border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--panel); padding: 17px 18px; box-shadow: var(--shadow); }
+  .rail { border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--solid); padding: 17px 18px; box-shadow: var(--shadow); }
   .rail .rh { display: flex; align-items: center; gap: 9px; margin-bottom: 0; }
   .rail .rh h4 { font-size: 15px; font-weight: 700; letter-spacing: -.01em; }
   .rail .rh .tag { font-family: var(--font-mono); font-size: 11px; color: var(--text-3); letter-spacing: .05em; }
-  .rail .rd { font-size: 13px; color: var(--text-3); margin-bottom: 0; line-height: 1.5; }
-  .rail .items { display: flex; flex-direction: column; gap: 6px; }
-  .ritem {
-    border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; background: var(--panel);
-    transition: all .14s; cursor: pointer; width: 100%; text-align: left; color: inherit; font-family: inherit;
-  }
-  .ritem:hover { border-color: var(--border-2); background: var(--panel-2); }
-  .ritem .n { font-family: var(--font-mono); font-size: 12.5px; color: var(--text); display: flex; align-items: center; gap: 6px; }
-  .ritem .n .hard {
-    font-size: 10px; font-weight: 700; letter-spacing: .06em; color: var(--danger);
-    border: 1px solid rgba(251,113,133,.4); border-radius: 4px; padding: 0 4px; margin-left: auto;
-  }
-  .ritem .b { font-size: 12px; color: var(--text-3); margin-top: 3px; line-height: 1.45; }
-  .rfoot { margin-top: 13px; padding-top: 12px; border-top: 1px solid var(--border); font-size: 12.5px; color: var(--text-3); }
-
+  .rail .rd { font-size: 13px; color: var(--text-3); margin-bottom: 14px; line-height: 1.5; }
+  .rail .thumb { margin-top: 14px; }
+  .rail .thumb .shot { border-radius: 9px; }
+  .rail .rlink { display: inline-block; margin-top: 12px; font-size: 13.5px; font-weight: 620; color: var(--accent); }
   .spine { display: flex; flex-direction: column; }
   .step { position: relative; padding-left: 23px; padding-bottom: 15px; }
   .step:last-child { padding-bottom: 0; }
@@ -612,7 +633,6 @@ CSS = r"""
     color: var(--accent); border: 1px solid var(--accent); border-radius: 5px; padding: 2px 7px;
   }
   .loops-head h3 { font-size: 17px; font-weight: 700; }
-  .loops-head .d { font-size: 13.5px; color: var(--text-3); }
   .loops-head::after { content: ""; flex: 1; height: 1px; background: var(--border); }
   .loop-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 9px; }
   .loop {
@@ -627,7 +647,7 @@ CSS = r"""
 
   /* inspector */
   .inspector {
-    position: absolute; right: 22px; bottom: 20px; width: 384px; z-index: 20;
+    position: fixed; right: 22px; bottom: 20px; width: 384px; z-index: 50;
     border: 1px solid var(--border-2); border-radius: var(--r-lg); background: var(--solid);
     box-shadow: 0 8px 40px rgba(0,0,0,.45); padding: 17px 19px;
     opacity: 0; transform: translateY(8px); pointer-events: none; transition: opacity .18s, transform .18s;
@@ -646,25 +666,20 @@ CSS = r"""
   .inspector .ib { font-size: 14px; color: var(--text-2); margin-top: 9px; line-height: 1.55; }
   .inspector .im { font-family: var(--font-mono); font-size: 12px; color: var(--text-3); margin-top: 9px; }
 
-  /* ── map page ────────────────────────────────────────── */
-  .page, .page .shell { height: auto; overflow: visible; }
-  .page .stage { height: auto; }
-  .page .canvas { overflow: visible; }
-  .mapwrap { position: relative; z-index: 1; max-width: 1180px; margin: 0 auto; }
-  .maphead { margin-bottom: 26px; }
-  .maphead h1 { font-size: clamp(26px, 3.6vw, 38px); letter-spacing: -.03em; line-height: 1.12; }
-  .maphead p { margin-top: 13px; color: var(--text-2); max-width: 660px; font-size: 16.5px; }
-  .stats { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 20px; }
+  /* ── capability catalog page ─────────────────────────── */
+  .maphead { padding: 52px 0 6px; }
+  .maphead h1 { font-size: clamp(28px, 4.2vw, 44px); letter-spacing: -.035em; line-height: 1.1; }
+  .maphead p { margin-top: 14px; color: var(--text-2); max-width: 660px; font-size: 17px; }
+  .stats { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 22px; }
   .stat { border: 1px solid var(--border); border-radius: var(--r-md); background: var(--panel); padding: 10px 16px; min-width: 100px; }
   .stat b { display: block; font-size: 23px; letter-spacing: -.02em; }
   .stat span { font-size: 13px; color: var(--text-3); }
-  .cap-group { margin-bottom: 30px; }
+  .cap-group { margin-top: 34px; }
   .cap-group h3 { font-size: 17px; letter-spacing: -.015em; }
   .cap-group .desc { font-size: 13.5px; color: var(--text-3); margin: 3px 0 13px; }
   .cap-grid { display: grid; gap: 9px; grid-template-columns: repeat(auto-fill, minmax(272px, 1fr)); }
   .cap { border: 1px solid var(--border); border-radius: var(--r-md); background: var(--panel); padding: 13px 15px; transition: all .15s; }
   .cap:hover { border-color: var(--border-2); background: var(--panel-2); }
-  .cap.dim { opacity: .26; }
   .cap .name { display: flex; align-items: center; gap: 8px; justify-content: space-between; }
   .cap .name .mono { font-size: 14px; font-weight: 650; color: var(--text); }
   .cap .pill {
@@ -675,29 +690,56 @@ CSS = r"""
   .cap .pill.stage { color: var(--text-3); background: var(--panel-2); border: 1px solid var(--border); }
   .cap p { font-size: 13.5px; color: var(--text-2); margin-top: 6px;
     display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
-  .backhome {
-    display: inline-flex; align-items: center; gap: 7px; font-size: 14px; color: var(--text-2);
-    border: 1px solid var(--border); border-radius: 999px; padding: 8px 16px; background: var(--panel); margin-bottom: 22px;
-  }
-  .backhome:hover { color: var(--text); border-color: var(--border-2); }
 
   /* ── responsive ──────────────────────────────────────── */
-  @media (max-width: 1240px) {
-    .side { width: 372px; }
+  @media (max-width: 1100px) {
+    .rows { grid-template-columns: minmax(0,1fr); }
+    .col.main { order: -1; }
+    .col:not(.main) .rail { position: static; }
     .fabric, .contract, .tiers { grid-template-columns: 1fr; }
     .buckets { grid-template-columns: repeat(3, 1fr); }
     .loop-grid { grid-template-columns: repeat(3, 1fr); }
+    .qs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .views { grid-template-columns: repeat(2, 1fr); }
   }
-  @media (max-width: 980px) {
-    html, body { height: auto; }
-    .shell { flex-direction: column; height: auto; overflow: visible; }
-    .side { width: 100%; height: auto; overflow: visible; border-right: 0; border-bottom: 1px solid var(--border); }
-    .stage { height: auto; }
-    .canvas { overflow-x: auto; padding: 22px 16px 32px; }
-    .diagram { min-width: 980px; }
-    .inspector { position: fixed; left: 16px; right: 16px; bottom: 16px; width: auto; }
-    .side-in { padding: 22px 20px 40px; }
-    .side h1 { font-size: 32px; }
+  @media (max-width: 900px) {
+    .scr-head { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+    .scr { padding: 32px 0 36px; }
+    .narrow { grid-template-columns: 1fr; }
+    .pipe { grid-template-columns: 1fr; gap: 22px; }
+    .pipe .st { padding: 0 0 0 46px; }
+    .pipe .st:not(:last-child)::after { display: none; }
+    .pipe .dot { position: absolute; left: 0; top: 0; margin: 0; }
+    .split { grid-template-columns: 1fr; }
+    .tiles { grid-template-columns: 1fr; }
+    .limits, .grid3, .links { grid-template-columns: 1fr; }
+    .why { grid-template-columns: 1fr; }
+    .why .card, .why .card:nth-child(n+4) { grid-column: auto; }
+  }
+  @media (max-width: 640px) {
+    .wrap { padding: 0 18px; }
+    .top .in { gap: 10px; }
+    .top nav a { padding: 6px 9px; font-size: 13.5px; }
+    .top nav a.hide-sm { display: none; }
+    .top nav a.cta { margin-left: 2px; }
+    .hero { padding-top: 36px; }
+    .hero-shot { margin-top: 30px; }
+    .sec { padding-top: 64px; }
+    .qs, .views { grid-template-columns: minmax(0, 1fr); }
+    .buckets { grid-template-columns: repeat(2, 1fr); }
+    .loop-grid { grid-template-columns: 1fr; }
+    .diagram { padding: 14px; border-radius: 16px; }
+    .node { padding: 16px 16px; }
+    .utter .tail { display: none; }
+    .track { flex-direction: column; }
+    .track .lab { width: auto; border-right: 0; border-bottom: 1px solid var(--border); }
+    .inspector { left: 14px; right: 14px; bottom: 14px; width: auto; }
+    .install .p { display: none; }
+    .install code { font-size: 12px; }
+    .install button { padding: 0 13px; }
+    .cta-band { padding: 38px 20px; margin-top: 70px; }
+    .fleetband a { margin-left: 0; }
+    .rrow .rk { width: 58px; }
   }
 """
 
@@ -716,10 +758,13 @@ LOGO = (
     '<path d="M7.2 16.3 16.5 15.6 17.3 21.0 8.0 21.6Z" fill="url(#lg)" opacity=".8"/></svg>'
 )
 
-COPY_JS = (
-    "navigator.clipboard.writeText(document.getElementById('cmd').textContent)"
-    ".then(()=>{this.textContent='Copied';setTimeout(()=>this.textContent='Copy',1400)})"
-)
+
+def copy_js(target_id: str) -> str:
+    return (
+        f"navigator.clipboard.writeText(document.getElementById('{target_id}').textContent)"
+        ".then(()=>{this.textContent='Copied';setTimeout(()=>this.textContent='Copy',1400)})"
+    )
+
 
 TRACK_COLOR = {
     "--cat-1": "#A47AE0", "--cat-2": "#6B96F0", "--cat-3": "#5FC684",
@@ -727,198 +772,228 @@ TRACK_COLOR = {
     "--cat-7": "#F87171", "--cat-8": "#D1D5DB",
 }
 
+# ----------------------------------------------------------------- Fleet pictures
+# docs/fleet/*.png and walkthrough.gif are drawn from synthetic demo rows by
+# tools/fleet/tests/readme_captures.py. Sizes are the drawn sizes (the test checks them).
+
+SHOTS = {
+    "overview": (1440, 810, "Fleet's Explorer OVERVIEW: eight sessions in four projects across Claude Code, Codex, and OpenCode, "
+                 "grouped by project, each project's line showing its open requests, waiting answers, and latest result; every "
+                 "session with its model, context gauge, and what it is doing now; one session waiting for an answer, two open "
+                 "requests with their stage lines, and per-host CPU and GPU use at the bottom left."),
+    "routes": (1440, 720, "ROUTES: two open requests, a code request in its execute stage and a lab request running its eval-asr "
+               "worker, each with the worker's model and elapsed time."),
+    "questions": (1440, 720, "QUESTIONS: one decision a Claude Code session has been waiting on for seven minutes, with since when and "
+                  "how to answer it; one older approval wait from a Codex session listed under it; and three questions answered today."),
+    "session": (1440, 720, "A session page: one Claude Code session's state, context gauge, and current activity, its request, the "
+                "OpenCode session it steers, and the GPU it holds."),
+    "resources": (1440, 720, "RESOURCES: two hosts with per-GPU utilisation and memory, the session and command behind each GPU "
+                  "process, and CPU and memory use."),
+    "output": (1440, 810, "A request's page: the stage graph with setup done, eval-asr running, eval-sep and report pending, and "
+               "below it the owner's raw output listing an edit, a shell command, and their results."),
+    "narrow": (900, 720, "Fleet's OVERVIEW in a 100-column terminal: the same sessions, projects, and request lines in a narrower layout."),
+}
+GIF_ALT = ("Fleet walk-through in four steps: the OVERVIEW of all sessions, the ROUTES list of open requests, one session's "
+           "page, and one request's stage graph with the owner's raw output.")
+
+
+def shot(name: str, eager: bool = False) -> str:
+    w, h, alt = SHOTS[name]
+    lazy = "" if eager else ' loading="lazy"'
+    return (f'<a class="shot" href="fleet/{name}.png" target="_blank" rel="noopener">'
+            f'<img src="fleet/{name}.png" width="{w}" height="{h}" alt="{html.escape(alt, quote=True)}"{lazy} /></a>')
+
+
+def crop(name: str, x0: int, y0: int, w: int, h: int, href: str) -> str:
+    """A window onto one drawn screen (the right-hand pane), at near full scale so the text stays readable."""
+    iw, ih, alt = SHOTS[name]
+    style = (f"width:{iw / w * 100:.4f}%;margin-left:-{x0 / w * 100:.4f}%;margin-top:-{y0 / w * 100:.4f}%")
+    return (f'<a class="shot crop" href="{href}" style="aspect-ratio:{w}/{h}">'
+            f'<img src="fleet/{name}.png" width="{iw}" height="{ih}" style="{style}" '
+            f'alt="{html.escape(alt, quote=True)}" loading="lazy" /></a>')
+
+
+def gif(href: str = "") -> str:
+    if href:
+        return (f'<a class="shot" href="{href}"><img src="fleet/walkthrough.gif" width="1440" height="810" '
+                f'alt="{html.escape(GIF_ALT, quote=True)}" /></a>')
+    return (f'<div class="shot"><img src="fleet/walkthrough.gif" width="1440" height="810" '
+            f'alt="{html.escape(GIF_ALT, quote=True)}" /></div>')
+
+
+# ------------------------------------------------------------------ page chrome
+
+def topbar(active: str) -> str:
+    def a(key: str, href: str, label: str, extra: str = "") -> str:
+        cls = " ".join(x for x in ("on" if key == active else "", extra) if x)
+        return f'<a href="{href}"' + (f' class="{cls}"' if cls else "") + f'>{label}</a>'
+
+    return f"""<header class="top"><div class="wrap in">
+    <a class="brand" href="index.html">{LOGO}<span>Hearting</span></a>
+    <nav aria-label="Main">
+      {a("why", "index.html#why", "Why", "hide-sm")}
+      {a("fleet", "fleet.html", "Fleet")}
+      {a("start", "index.html#quickstart", "Quick start", "hide-sm")}
+      {a("map", "index.html#map", "Layer map", "hide-sm")}
+      {a("catalog", "map.html", "Capabilities", "hide-sm")}
+      <a class="cta" href="{REPO_URL}">GitHub &#8599;</a>
+    </nav>
+  </div></header>"""
+
+
+def footer() -> str:
+    return f"""<footer class="foot"><div class="wrap">
+    <div class="def"><b>hearting</b> &nbsp;<i>(n.)</i> &mdash; the small stones packed by hand between the two
+    faces of a dry stone wall. Unseen from either side, and the reason the wall stands.</div>
+    <div class="row">
+      <a href="index.html">Home</a><a href="fleet.html">Fleet</a><a href="map.html">Capabilities</a>
+      <a href="{REPO_URL}">GitHub</a><a href="{REPO_URL}/releases">Releases</a>
+      <a href="{REPO_URL}/blob/main/AGENTS.md">Purpose</a><span>MIT licensed</span>
+    </div>
+  </div></footer>"""
+
+
+def page(title: str, description: str, body: str, active: str, scripts: str = "") -> str:
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>{html.escape(title)}</title>
+<meta name="description" content="{html.escape(description, quote=True)}" />
+<meta property="og:title" content="{html.escape(title, quote=True)}" />
+<meta property="og:description" content="{html.escape(description, quote=True)}" />
+<meta property="og:image" content="{SITE_URL}fleet/overview.png" />
+<!-- GENERATED by tools/render-landing.py — DO NOT EDIT BY HAND. -->
+<style>{CSS}</style>
+</head>
+<body>
+{topbar(active)}
+{body}
+{footer()}
+{scripts}
+</body>
+</html>
+"""
+
+
+# ------------------------------------------------------------------- layer map
+
 ARTIFACT_BUCKETS = [
-    ("research/", "external evidence", "autopilot-research", False),
-    ("analysis_project/", "source analysis", "analyze-project", False),
-    ("spec/", "current blueprint", "autopilot-spec", True),
-    ("plans/", "code cycles", "autopilot-code", True),
-    ("documents/", "drafts", "draft / refine", False),
-    ("experiments/", "runs &amp; logs", "autopilot-lab", False),
+    ("plans/", "plan, logs, evidence, final report", "autopilot-code", True),
+    ("research/", "surveys and external evidence", "autopilot-research", False),
+    ("analysis_project/", "analysis of existing code", "analyze-project", False),
+    ("spec/", "the blueprint, one current revision", "autopilot-spec", True),
+    ("documents/", "drafted documents", "draft / refine", False),
 ]
 
 ARTIFACT_RULES = [
-    "one root per project",
-    "the owning capability updates it",
-    "spec revisions snapshot the prior version",
-    "worktree outputs share the canonical artifact root",
-    "no code without a spec",
+    "one root per project, shared by every runtime and git worktree",
+    "each request is one cycle under campaigns/&lt;campaign&gt;/&lt;cycle&gt;/artifacts/",
+    "the owning capability writes each artifact",
+    "a spec revision keeps the previous one",
 ]
-
-# What each hard guard denies, read from the hook scripts' own header contracts.
-GUARD_NOTE = {}
 
 MEMORY_STEPS = [
-    ("Capsule probe", "Every eligible main prompt runs <code>mem candidates</code> over the "
-     "active capsule index — at most 6 headline+ID hits in 1,200 bytes, bodies untouched."),
-    ("Opportunity receipt", "The probe records each opportunity, including zero hits, "
-     "without blocking the task."),
-    ("Agent-owned recall", "No score threshold adopts a hit. The agent reads the full record by "
-     "ID, then cross-checks it against live code."),
-    ("Agent-declared purpose", "There is no automatic distiller. Writes the main session decides "
-     "to make declare one purpose: decision, user-correction, unresolved-obligation, or artifact-pointer."),
-    ("Supersede, never delete", "Changed decisions are superseded — one active canonical path, "
-     "full history auditable, deleted rows recoverable from the graveyard."),
-    ("Pending protection", "Handoffs stay <code>pending</code> until an explicit consume; prune, "
-     "merge, and delete fail closed against them."),
+    ("One local store", "SQLite with full-text search, including CJK, shared by every session, project, "
+     "and runtime on the machine."),
+    ("Headlines first", "Where the runtime supports it, each prompt brings a few short candidate headlines. "
+     "The agent reads a record in full before using it."),
+    ("History is kept", "A changed decision supersedes the old one instead of deleting it. A hand-off stays "
+     "pending until a later session takes it."),
+    ("Idle sessions tidy themselves", "Once per stretch of work, an idle session saves a short session card, "
+     "then compacts with the runtime's own compaction."),
+    ("Local unless you opt in", "Sharing memory between machines is optional."),
 ]
 
-# Tier · budget below is "as CLAUDE realizes it", not a portable number. The tier column
-# is adapter-dependent and cannot be made portable: Claude and OpenCode give balanced-deep
-# its own tier, Codex rides the deep tier at a lower effort, and OpenCode declares no
-# deep tier (deep collapses onto balanced-deep) with its own variant per tier. Each adapter's own tiers live in
-# its config/models.conf. Three rows were outright wrong until 2026-09-09 (mini rode
-# `medium` though every adapter ships `mini:low`, balanced-deep was on the deep tier, and
-# `balanced` was missing entirely). `generate.py --check` only proves docs/ matches this
-# list, so it cannot catch drift here — keep it honest by hand when a profile changes.
 MODEL_PROFILES = [
-    ("deep", "deep", "highest-confidence convergence, failure-mode and security judgment", "deep · xhigh"),  # claude
-    ("balanced-deep", "bal", "deep-model judgment at a lower coordination budget", "balanced-deep · medium"),
-    ("balanced", "bal", "long multi-step execution after the decision is settled", "light · high"),
-    ("light", "light", "low-latency production, structured checking, broad exploration", "light · medium"),
-    ("mini", "mini", "lifecycle and classification only — refused for substantive nodes", "mini · low"),
+    ("deep", "deep", "hard judgment"),
+    ("balanced-deep", "bal", "important judgment"),
+    ("balanced", "bal", "planned execution, long multi-step work"),
+    ("light", "light", "planned execution, checking, broad exploration"),
+    ("mini", "mini", "small helper calls; refused for substantive stages"),
 ]
-
-STAGE_MODEL_MAP = [
-    ("owner (standard+)", "deep orchestrator", "deep"),
-    ("frame · plan", "deep maker", "balanced-deep"),
-    ("plan (strong+)", "deep maker", "deep"),
-    ("execute", "fast implementer", "light"),
-    ("impl-review", "fast reviewer", "light"),
-    ("failure-mode", "deep reviewer", "deep"),
-    ("adversary leg", "external adversary", "deep"),
-    ("test · report", "fast reviewer / writer", "light"),
-]
-
-# One repo group with a live owner and its dispatched stages, plus a second repo
-# sitting idle — the shape the real view takes, with synthetic names.
-FLEET_ROWS = [
-    ("w",  "●", 0, "hearting", "claude · owner d1", "working", 53, "16h"),
-    ("w",  "│", 1, "code-execute", "claude · light", "working", 21, "4m"),
-    ("dn", "│", 1, "impl-review", "codex · light", "done", 34, "2m"),
-    ("b2", "│", 1, "failure-mode", "codex · deep", "blocked", 11, "1m"),
-    ("i2", "○", 0, "lab-runtime", "interactive", "idle", 12, "38m"),
-]
-
-
-def _mono(slug: str) -> str:
-    return slug.split("__", 1)[-1] if "__" in slug else slug
 
 
 def build_info(d: dict) -> dict:
-    """Inspector payload keyed by node id — capability summaries, guards, loops, concepts."""
+    """Inspector payload keyed by node id: capability summaries, loops, concepts."""
     info: dict[str, dict] = {}
     for name, spec in d["caps"].items():
         entry = spec["invocation"]["class"] == "entry-router"
         info[f"cap:{name}"] = {
-            "kind": "entry router" if entry else "stage",
+            "kind": "entry point" if entry else "stage",
             "title": name,
             "body": str(spec.get("summary", "")).strip(),
             "meta": f"group: {spec['group']} · family: {spec['family']}",
-        }
-    for hook in d["hard_hooks"]:
-        info[f"hook:{hook['mono']}"] = {
-            "kind": "hard guard",
-            "title": hook["mono"],
-            "body": f"Denies {GUARD_NOTE.get(hook['mono'], 'the unsafe call')} — on {hook['event']}, "
-                    f"before the tool runs rather than in review. The model judges; this code enforces.",
-            "meta": hook["event"],
         }
     for loop in d["loops"]:
         info[f"loop:{loop['mono']}"] = {
             "kind": "loop",
             "title": loop["mono"],
             "body": loop["blurb"],
-            "meta": loop["schedule"],
+            "meta": "runs on a schedule" if loop["type"] == "time" else "runs on demand",
         }
     concepts = [
         ("fx:main", "main session", "dispatch depth 0",
-         "Context owner, router, and final integrator — not the default executor. It recovers memory and "
-         "artifacts, proposes the route card, dispatches, harvests, and integrates.",
-         "never runs separable standard+ stages inline"),
-        ("fx:owner", "capability owner", "dispatch depth 1",
-         "A thin conductor bound to one sealed route. It reads stage verdict metadata rather than stage "
-         "bodies and passes context between stages only through files.",
-         "quick = exactly one owner, no depth 2"),
+         "The session you talk to. It shows the intent card, starts the work, and brings the result back to you.",
+         "does not run separable stages inline"),
+        ("fx:owner", "owner", "dispatch depth 1",
+         "One session keeps your request and its finish line to the end. It passes context between stages "
+         "through files and reads each stage's short verdict rather than its whole output.",
+         "bound to one route"),
         ("fx:stage", "stage workers", "dispatch depth 2",
-         "plan · plan-check · execute · impl-review · test · report. Each is a separately launched headless "
-         "session with a sealed role, model profile, and disjoint write scope. Only execute mutates source.",
-         "depth 3 is forbidden"),
-        ("fx:nway", "N-way parallel group", "dispatch",
-         "2–4 route-declared siblings started in exactly one dispatch-batch transaction. Width, leg indexes, "
-         "disjoint scopes, sealed profiles, and harness evidence are verified before any process starts — a "
-         "capacity shortage creates zero rows and zero model processes.",
-         "standard 2 · strong 3 · thorough 4"),
-        ("fx:family", "cross-family diversity", "dispatch",
-         "Legs spread across model families by default: a checker lands on a different family than its maker, "
-         "and consecutive nodes don't home to the conductor's own harness. Routing everything to one harness "
-         "is the exception that carries a recorded reason.",
-         "cross-harness = ≥2 families"),
-        ("fx:fallback", "checked fallback chain", "dispatch",
-         "same-harness-headless → cross-harness-headless → native-subagent → inline. Every hop keeps the same "
-         "route id, write scope, completion gate, and attempt identity; degradation is recorded with its "
-         "failure class, never silent.",
-         "SD-50"),
+         "Plan, plan check, execute, test, review, report. Each runs in its own session with its own model "
+         "budget and write scope. Only execute edits source.",
+         "dispatch depth 3 is forbidden"),
+        ("fx:nway", "parallel legs", "dispatch",
+         "Independent reviews can run as 2 to 4 sibling legs started together. They write separate "
+         "artifacts and join before work continues. The checker runs on another runtime when one is available.",
+         "2 to 4 legs"),
+        ("fx:fallback", "checked fallback", "dispatch",
+         "A stage tries the same runtime's headless worker, then another runtime's, then a native "
+         "subagent, then inline. Every step keeps the same route, write scope and attempt identity, and a "
+         "step down is recorded with its reason.",
+         "never silent"),
         ("fx:registry", "attempt registry", "dispatch",
-         "One canonical jobs.log for every runtime. A start writes a registered row first, then atomically "
-         "claims its fenced PID/start identity. A duplicate or already-started claim spawns zero children.",
-         ".dispatch/jobs.log"),
-        ("fx:liveness", "liveness classification", "dispatch",
-         "ALIVE · SUSPECT · DEAD · EXITED, derived from exact recorded PID plus start time — never an "
-         "indefinite wait and never a path-based guess. Exit 3 means something is unharvested.",
-         "utilities/dispatch-liveness.sh"),
-        ("fx:fleet", "Fleet", "live view",
-         "The cross-harness dashboard over that same registry: interactive sessions and dispatched workers in "
-         "one tree, each with state, harness, sealed model profile, context gauge, and token accounting. "
-         "Orphaned rows are surfaced rather than dropped.",
-         "part of the harness, not a separate product"),
-        ("rt:card", "route card", "contract",
-         "Before material work the agent shows the intent kept with the route: your own words, the intent, "
-         "its scope, what it will not do, and when it is done, plus the route. You approve a filled-in proposal "
-         "instead of recalling capability names or flags.",
-         "WORKFLOW §0.4"),
-        ("rt:seal", "sealed route", "contract",
-         "The compiler binds capability, intensity, topology, node write scopes, and model profiles to the "
-         "registry digest, source commit, and physical cwd. A worker cannot renegotiate it, and a caller cannot "
-         "swap a sealed profile for a trailing model flag.",
-         "route_hash · registry_digest"),
-        ("rt:intensity", "intensity ladder", "contract",
-         "direct → quick → standard → strong → thorough → adversarial. Intensity selects the stage graph and "
-         "dispatch depth; verification rigor is derived from it rather than set on a separate axis. Token "
-         "pressure can never downshift it.",
-         "CONVENTIONS §1.1"),
-        ("rt:compose", "compose-on-demand", "contract",
-         "Curated recipes are fast paths, not a ceiling. For a request no recipe enumerates, the entry composes "
-         "a node graph from the same unit catalog; the composed route passes the same validator, is hash-sealed "
-         "exactly like a recipe, and still requires the route card.",
-         "composed: true"),
-        ("md:role", "portable model roles", "model tiers",
-         "Shared contracts name behavior, never a vendor model. Every unit in the catalog binds exactly one "
-         "role and a route node's role must equal its unit's declared role; the shared vocabulary also covers "
-         "conductor and adversarial nodes as deep orchestrator and external adversary.",
+         "Every dispatched worker gets a row in one registry shared by all three runtimes. Fleet reads it, "
+         "so a worker that stalled shows up as a stalled worker.",
+         "one registry for every runtime"),
+        ("fx:liveness", "liveness", "dispatch",
+         "A worker is classified ALIVE, SUSPECT, DEAD, or EXITED from its recorded process id and start time.",
+         "no waiting on a notification that may not arrive"),
+        ("rt:card", "intent card", "contract",
+         "Before work you asked for starts, the agent shows one short card: your words, what it understood, "
+         "the scope, what it will not do, and when it is done. You answer Proceed, Edit, or Stop.",
+         "those lines travel to the owner and every worker"),
+        ("rt:seal", "fixed route", "contract",
+         "When you proceed, the route is compiled and fixed for that request: capability, intensity, stages, "
+         "write scopes, and model budgets. A worker cannot renegotiate it.",
+         "also called a sealed route"),
+        ("rt:intensity", "intensity", "contract",
+         "A tiny reversible fix is done in place and recorded automatically. Above that: quick, standard, "
+         "strong, thorough, adversarial. More intensity adds a written plan, independent reviews, and "
+         "adversarial and security checks. Context pressure never lowers it.",
+         "chosen by the frame"),
+        ("md:role", "model roles", "model budgets",
+         f"Shared contracts name behavior, never a vendor model. {d['unit_total']} stage units each bind "
+         f"one of {d['role_total']} roles.",
          f"{d['role_total']} roles · {d['unit_total']} units"),
-        ("md:profile", "execution profiles", "model tiers",
-         "Role and budget are separate axes. deep, balanced-deep, light, and mini are distinct operating points; "
-         "adapters map them to concrete models, and an adapter without a verified effort axis must report "
-         "reduced granularity instead of claiming parity.",
-         "CONVENTIONS §2.2"),
-        ("md:map", "per-node selection", "model tiers",
-         "Node meaning and risk select the profile — not dispatch depth or role wording. Route compilation seals "
-         "owner_model_profile and every node and parallel-leg profile; capacity failover may substitute a checked "
-         "model while preserving and reporting the profile intent.",
-         "sealed at compile time"),
-        ("ev:root", "one artifact root", "artifacts",
-         "Every capability writes to one project-wide root, resolved from the primary checkout. Linked task "
-         "worktrees are source-only: writes to their artifact snapshot fail closed, so evidence never forks.",
+        ("md:profile", "model budgets", "model budgets",
+         "deep for hard judgment, balanced-deep for important judgment, balanced or light for planned "
+         "execution, mini for small helper calls. You decide which real model each budget uses.",
+         "hearting model set <runtime> <budget> <model>"),
+        ("ev:root", "artifact root", "artifacts",
+         "Every request writes to one artifact root per project, shared by every runtime and by every git "
+         "worktree of the project.",
          ".agent_reports/"),
-        ("ev:order", "fixed artifact order", "artifacts",
-         "research / analyze-project → spec → plans for code, and research → draft → refine for documents. "
-         "The folder set is fixed, each artifact has exactly one owning capability, and spec revisions snapshot "
-         "the prior version instead of overwriting it.",
-         "WORKFLOW §0.1 · §6"),
-        ("lp:self", "loops that report, never apply", "self-improvement",
-         "Drill replays behavioral fixtures and scores them after instruction changes. On-call corroborates "
-         "memory-backed incidents against live evidence before filing a proposal. Runtime-watch fingerprints "
-         "the vendors' own docs and probes local CLIs. Every one of them proposes; none edits policy.",
+        ("ev:order", "artifact order", "artifacts",
+         "Research and analysis come first, then the spec, then plans. A request is one cycle under "
+         "campaigns/<campaign>/<cycle>/artifacts/. A revision of the spec keeps the previous one.",
+         "core/WORKFLOW.md"),
+        ("lp:self", "maintainer loops", "self-improvement",
+         "Drill replays behavior fixtures after instruction changes and drafts a diagnosis on failure. "
+         "On-call and runtime-watch report incidents and runtime changes. None of them edits Hearting's "
+         "own instructions; they propose.",
          f"{d['loop_total']} loops"),
     ]
     for key, title, kind, body, meta in concepts:
@@ -926,21 +1001,17 @@ def build_info(d: dict) -> dict:
     return info
 
 
-# Every layer collapses to a title plus this one line; detail opens on click.
 FOLD_SUMMARY = {
-    "n-route": "Five fields you approve &mdash; then the route is sealed to commit, "
-               "write scope, and model profile.",
-    "n-tracks": "Four pipelines over {entry_total} entry routers and {cap_total} capabilities.",
-    "n-fabric": "The owner conducts and workers never route. 2&ndash;4 legs in one "
-                "transaction, live in Fleet.",
-    "n-tiers": "deep &middot; balanced-deep &middot; light &middot; mini &mdash; chosen per "
-               "node, sealed at compile time.",
-    "n-art": ".agent_reports/ &mdash; one root, one direction, one owning capability per artifact.",
-    "n-mem": "SQLite + FTS5 across every session, project, and runtime.",
-    "n-guards": "{hook_total} hooks, {hard_total} of them hard blocks &mdash; denied before "
-                "the tool call.",
-    "n-loops": "{loop_total} loops that test, corroborate, and propose &mdash; none of them "
-               "edits policy.",
+    "n-route": "One card you answer. Then the route is fixed for that request.",
+    "n-tracks": "Four pipelines over {entry_total} entry points and {cap_total} capabilities.",
+    "n-fabric": "The owner conducts, workers never route, and every worker shows up in Fleet.",
+    "n-tiers": "deep &middot; balanced-deep &middot; balanced &middot; light &middot; mini &mdash; "
+               "chosen per stage, never a vendor name.",
+    "n-art": ".agent_reports/ &mdash; one root per project, one owning capability per artifact.",
+    "n-mem": "SQLite + full-text search across every session, project, and runtime.",
+    "n-fleetrail": "Sessions, requests, workers, questions, and GPUs on one screen.",
+    "n-loops": "{loop_total} maintainer loops that test, corroborate, and propose &mdash; none "
+               "edits Hearting's own instructions.",
 }
 
 CHEV = '<button class="chev" type="button" aria-label="Toggle this block">&#8964;</button>'
@@ -950,9 +1021,7 @@ def fold_sum(node: str, d: dict) -> str:
     return f'<div class="fold-sum">{FOLD_SUMMARY[node].format(**d)}</div>'
 
 
-# ------------------------------------------------------------------ canvas
-
-def build_canvas(d: dict) -> str:
+def build_map(d: dict) -> str:
     caps = d["caps"]
 
     def cap_chip(name: str) -> str:
@@ -961,8 +1030,7 @@ def build_canvas(d: dict) -> str:
             return ""
         entry = spec["invocation"]["class"] == "entry-router"
         cls = "chip" + (" entry" if entry else "")
-        return (f'<button class="{cls}" '
-                f'data-info="cap:{name}">{html.escape(name)}</button>')
+        return f'<button class="{cls}" data-info="cap:{name}">{html.escape(name)}</button>'
 
     tracks_html = []
     for track in d["tracks"]:
@@ -971,7 +1039,7 @@ def build_canvas(d: dict) -> str:
         for i, slug in enumerate(track["steps"]):
             if i:
                 flow.append('<span class="arw">&rarr;</span>')
-            flow.append(cap_chip(_mono(slug)))
+            flow.append(cap_chip(slug.split("__", 1)[-1] if "__" in slug else slug))
         for gate in track.get("gates", []):
             flow.append(f'<span class="chip gate">&#9679; {html.escape(gate)}</span>')
         tracks_html.append(
@@ -980,69 +1048,42 @@ def build_canvas(d: dict) -> str:
             f'<div class="flow">{"".join(flow)}</div></div>'
         )
 
-    guards = "".join(
-        f'<button class="ritem" data-info="hook:{h["mono"]}">'
-        f'<div class="n">{html.escape(h["mono"])}<span class="hard">HARD</span></div>'
-        f'<div class="b">{GUARD_NOTE.get(h["mono"], html.escape(h["event"]))}</div></button>'
-        for h in d["hard_hooks"]
-    )
-
     memory = "".join(
         f'<div class="step"><div class="sn">{title}</div><div class="sb">{body}</div></div>'
         for title, body in MEMORY_STEPS
     )
-
     buckets = "".join(
         f'<div class="bucket{" hi" if hi else ""}"><b>{name}</b><span>{desc}</span>'
         f'<span class="ow">{owner}</span></div>'
         for name, desc, owner, hi in ARTIFACT_BUCKETS
     )
-
     rules = "".join(f'<span class="rule">{r}</span>' for r in ARTIFACT_RULES)
-
     loops = "".join(
         f'<button class="loop" data-info="loop:{l["mono"]}">'
         f'<div class="n">{html.escape(l["name"])}<span class="k">{l["type"]}</span></div>'
         f'<div class="b">{html.escape(l["blurb"])}</div></button>'
         for l in d["loops"]
     )
-
     stage_chips = "".join(
         f'<span class="chip">{s}</span>' for s in
         ("code-plan", "plan-check", "code-execute", "impl-review", "code-test", "code-report")
     )
-
     profile_cards = "".join(
         f'<button class="pcard {css}" data-info="md:profile">'
-        f'<span class="ptop"><span class="pn">{name}</span><span class="pe">{effort}</span></span>'
-        f'<span class="pd">{desc}</span></button>'
-        for name, css, desc, effort in MODEL_PROFILES
+        f'<span class="pn">{name}</span><span class="pd">{desc}</span></button>'
+        for name, css, desc in MODEL_PROFILES
     )
-
-    stage_rows = "".join(
-        f'<tr><td>{stage}</td><td>{role}</td><td><span class="pp">{profile}</span></td></tr>'
-        for stage, role, profile in STAGE_MODEL_MAP
-    )
-
     role_chips = "".join(
         f'<button class="chip" data-info="md:role">{html.escape(r)}</button>' for r in d["roles"]
     )
-
-    def gauge(pct: int) -> str:
-        filled = max(1, round(pct / 100 * 12))
-        return ("&#9473;" * filled) + ("&#9472;" * (12 - filled))
-
-    fleet_rows = "".join(
-        f'<div class="r{" child" if depth else ""}{" deep" if depth > 1 else ""}">'
-        f'<span class="s {cls}">{dot}</span>'
-        f'<span class="nmx">{name}</span><span class="tag">{tag}</span>'
-        f'<span class="g">{gauge(pct)}</span><span class="pc">{pct}%</span>'
-        f'<span class="{cls}">{state}</span><span class="t">{age}</span></div>'
-        for cls, dot, depth, name, tag, state, pct, age in FLEET_ROWS
+    overview_thumb = (
+        f'<div class="thumb"><a class="shot" href="fleet.html">'
+        f'<img src="fleet/overview.png" width="1440" height="810" loading="lazy" '
+        f'alt="Fleet OVERVIEW: every session grouped by project" /></a></div>'
     )
 
     return f"""
-    <div class="foldhint"><b>7 layers.</b> Click any block to open it.</div>
+    <div class="foldhint"><b>7 layers.</b> Click a layer to open it, and any chip to read what it is.</div>
 
     <div class="diagram" id="diagram">
       <svg id="wires" aria-hidden="true">
@@ -1061,13 +1102,11 @@ def build_canvas(d: dict) -> str:
       <div class="rows">
         <div class="col">
           <div class="rail foldable" id="n-mem">
-            <div class="rh"><h4>Memory</h4><span class="tag">SQLITE · FTS5</span>{CHEV}</div>
+            <div class="rh"><h4>Memory</h4><span class="tag">SQLITE &middot; FTS</span>{CHEV}</div>
             {fold_sum("n-mem", d)}
             <div class="fold-body"><div class="fold-inner">
-              <div class="rd">Runs alongside every layer to the right — the agent decides what
-              matters, the code owns the mechanics.</div>
+              <div class="rd">Runs alongside every layer: the agent decides what matters, the code owns the mechanics.</div>
               <div class="spine">{memory}</div>
-              <div class="rfoot">Workers are exempt: no probe, no inject, no sync.</div>
             </div></div>
           </div>
         </div>
@@ -1081,55 +1120,43 @@ def build_canvas(d: dict) -> str:
             </div>
           </div>
 
-          <div class="node foldable" id="n-route">
-            <div class="head"><span class="lv">L1</span><h3>Routing contract</h3>{CHEV}</div>
+          <div class="node foldable is-open" id="n-route">
+            <div class="head"><span class="lv">L1</span><h3>Intent card and route</h3>{CHEV}</div>
             {fold_sum("n-route", d)}
             <div class="fold-body"><div class="fold-inner">
 
             <div class="rcard">
-              <div class="rh">Route card &mdash; the whole handshake</div>
+              <div class="rh">Intent card &mdash; the whole handshake</div>
               <div class="rrow"><span class="rk">your words</span><span class="rv">&ldquo;The login API in the spec still isn&rsquo;t built &mdash; build it with tests&rdquo;</span></div>
               <div class="rrow"><span class="rk">intent</span><span class="rv">Implement and test the login API, then leave a change report</span></div>
               <div class="rrow"><span class="rk">scope</span><span class="rv">src/auth/**, tests/auth/**</span></div>
               <div class="rrow"><span class="rk">not doing</span><span class="rv">No schema or migration change</span></div>
-              <div class="rrow"><span class="rk">done</span><span class="rv">Tests green, <code>plans/&lt;cycle&gt;/pipeline_summary.md</code> written</span></div>
-              <div class="rrow"><span class="rk">route</span><span class="rv"><b>autopilot-code</b> &middot; dev &middot; <code>standard</code> &mdash; multi-file, needs independent verification</span></div>
+              <div class="rrow"><span class="rk">done</span><span class="rv">Tests green, change report written</span></div>
+              <div class="rrow"><span class="rk">route</span><span class="rv"><b>autopilot-code</b> &middot; <code>standard</code> &mdash; multi-file, needs independent verification</span></div>
               <div class="rops">
-                <span class="rop on">Proceed</span><span class="rop">Amend</span><span class="rop">Stop</span>
-                <span class="rnote">one approval, sealed with the route, before anything is touched</span>
+                <span class="rop on">Proceed</span><span class="rop">Edit</span><span class="rop">Stop</span>
+                <span class="rnote">When there is nothing to choose, work starts with a one-line notice instead.</span>
               </div>
             </div>
 
             <div class="contract">
-              <div class="sub"><div class="t">Sealed the moment you approve</div>
+              <div class="sub"><div class="t">Fixed when you proceed</div>
                 <div class="chips">
-                  <button class="chip entry" data-info="rt:card">route card</button>
-                  <button class="chip" data-info="rt:gate">spec gate</button>
-                  <button class="chip" data-info="rt:gate">artifact order</button>
-                  <button class="chip entry" data-info="rt:seal">sealed route</button>
-                  <button class="chip" data-info="rt:compose">compose-on-demand</button>
+                  <button class="chip entry" data-info="rt:card">intent card</button>
+                  <button class="chip entry" data-info="rt:seal">fixed route</button>
                 </div>
-                <div class="seal" style="margin-top:11px">
-                  <span class="k">route_hash</span> <b>rt-35552ff2&hellip;</b><br />
-                  <span class="k">write_scope</span> source-scoped, plans/&lt;cycle&gt;/**<br />
-                  <span class="k">bound to</span> registry digest &middot; commit &middot; cwd
-                </div>
+                <p>Capability, intensity, stages, write scopes, and model budgets are fixed for the request.</p>
               </div>
-              <div class="sub"><div class="t">Intensity ladder</div>
+              <div class="sub"><div class="t">How much runs</div>
                 <div class="ladder">
-                  <button class="st on" data-info="rt:intensity">direct</button>
+                  <button class="st on" data-info="rt:intensity">tiny fix</button>
                   <button class="st on" data-info="rt:intensity">quick</button>
                   <button class="st on" data-info="rt:intensity">standard</button>
                   <button class="st on" data-info="rt:intensity">strong</button>
                   <button class="st on" data-info="rt:intensity">thorough</button>
                   <button class="st top" data-info="rt:intensity">adversarial</button>
                 </div>
-                <div class="t" style="margin-top:14px">Governance</div>
-                <div class="chips">
-                  <span class="chip">CORE</span><span class="chip">WORKFLOW</span>
-                  <span class="chip">CONVENTIONS</span><span class="chip">OPERATIONS</span>
-                  <span class="chip">MEMORY</span><span class="chip">DESIGN_PRINCIPLES</span>
-                </div>
+                <p>Bigger or riskier work adds a plan, independent reviews, and adversarial checks.</p>
               </div>
             </div>
 
@@ -1145,44 +1172,43 @@ def build_canvas(d: dict) -> str:
           </div>
 
           <div class="node solid foldable" id="n-fabric">
-            <div class="head"><span class="lv">L3</span><h3>Dispatch fabric</h3>{CHEV}</div>
+            <div class="head"><span class="lv">L3</span><h3>Dispatch</h3>{CHEV}</div>
             {fold_sum("n-fabric", d)}
             <div class="fold-body"><div class="fold-inner">
             <div class="fabric">
               <div class="tree">
                 <div class="tier"><span class="d">d0</span>
-                  <button class="box" data-info="fx:main"><b>main session</b> router &middot; integrator
-                    <span class="m">context owner</span></button></div>
+                  <button class="box" data-info="fx:main"><b>main session</b> the one you talk to
+                    <span class="m">frame</span></button></div>
                 <div class="tier w2"><span class="d">d1</span>
-                  <button class="box" data-info="fx:owner"><b>capability owner</b> sealed route, thin conductor
-                    <span class="m">deep orchestrator</span></button></div>
+                  <button class="box" data-info="fx:owner"><b>owner</b> keeps your request to the end
+                    <span class="m">one session</span></button></div>
                 <div class="tier"><span class="d">d2</span>
-                  <button class="box" data-info="fx:stage"><b>stage workers</b> file-only handoff
-                    <span class="m">3-line verdict</span></button></div>
+                  <button class="box" data-info="fx:stage"><b>stage workers</b> only execute edits source
+                    <span class="m">lower-cost</span></button></div>
                 <div class="chips" style="padding-left:34px">{stage_chips}</div>
                 <div class="nway">
-                  <div class="nh">N-way group &middot; one transaction &middot; 2&ndash;4 legs</div>
+                  <div class="nh">parallel legs &middot; started together &middot; 2&ndash;4</div>
                   <div class="legs">
-                    <button class="leg" data-info="fx:nway">maker<span>family A</span></button>
-                    <button class="leg" data-info="fx:family">checker<span>family B</span></button>
-                    <button class="leg" data-info="fx:family">adversary<span>family C</span></button>
+                    <button class="leg" data-info="fx:nway">leg 1</button>
+                    <button class="leg" data-info="fx:nway">leg 2</button>
+                    <button class="leg" data-info="fx:nway">leg 3</button>
                   </div>
                 </div>
               </div>
               <div>
                 <div class="sub" style="margin-bottom:12px"><div class="t">Checked fallback</div>
                   <div class="fall">
-                    <button class="hop" data-info="fx:fallback"><i class="i"></i>same-harness headless<span class="x">1</span></button>
-                    <button class="hop" data-info="fx:fallback"><i class="i"></i>cross-harness headless<span class="x">2</span></button>
+                    <button class="hop" data-info="fx:fallback"><i class="i"></i>same-runtime headless<span class="x">1</span></button>
+                    <button class="hop" data-info="fx:fallback"><i class="i"></i>another runtime, headless<span class="x">2</span></button>
                     <button class="hop" data-info="fx:fallback"><i class="i"></i>native subagent<span class="x">3</span></button>
                     <button class="hop last" data-info="fx:fallback"><i class="i"></i>inline, reason recorded<span class="x">4</span></button>
                   </div>
                 </div>
-                <div class="sub"><div class="t">Accounting</div>
+                <div class="sub"><div class="t">What Fleet reads</div>
                   <div class="chips">
-                    <button class="chip" data-info="fx:registry">jobs.log</button>
+                    <button class="chip" data-info="fx:registry">attempt registry</button>
                     <button class="chip" data-info="fx:liveness">liveness</button>
-                    <button class="chip entry" data-info="fx:fleet">Fleet</button>
                   </div>
                 </div>
               </div>
@@ -1191,70 +1217,32 @@ def build_canvas(d: dict) -> str:
             </div></div>
           </div>
 
-          <div class="node fleetnode" id="n-fleetblock">
-            <div class="head"><span class="lv">LIVE</span><h3>Fleet</h3>
-              <span class="note">one word: <code>fleet</code></span></div>
-            <div class="fold-sum">Every session and every dispatched worker across the three
-            runtimes, in one tree — with the sealed model profile each one is running under and
-            how much context it has left.</div>
-
-            <div class="term" id="n-fleet">
-              <div class="tb"><i></i><i></i><i></i><span class="nm">fleet</span>
-                <span class="live"><i></i>LIVE</span></div>
-              <div class="body">
-                <div class="usage">
-                  <div class="ur"><span class="ul">usage</span><span class="uh">claude</span>
-                    5h <b>&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9472;&#9472;&#9472;&#9472;</b> 71%
-                    &nbsp; 7d <b>&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9472;&#9472;</b> 88% <span class="rs">&#8631; 3d23h</span></div>
-                  <div class="ur"><span class="ul"></span><span class="uh">codex</span>
-                    5h <b>&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;</b> &nbsp;&mdash;
-                    &nbsp; 7d <b>&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;</b> 100% <span class="rs">&#8631; 2d16h</span></div>
-                </div>
-                <span class="hd">session / node&nbsp;&nbsp;&middot;&nbsp;&nbsp;harness &middot; sealed profile
-                &nbsp;&nbsp;&middot;&nbsp;&nbsp;context&nbsp;&nbsp;&middot;&nbsp;&nbsp;state</span>
-                {fleet_rows}
-                <span class="ft">the owner and its dispatched stages under one repo &middot; orphaned
-                rows surfaced, never dropped &middot; per-session token accounting<br />
-                <b style="color:#9C9CB0">fleet</b> &middot; <b style="color:#9C9CB0">--once</b> for a
-                plain snapshot &middot; <b style="color:#9C9CB0">--json</b> to script it</span>
-              </div>
-            </div>
-          </div>
-
           <div class="node foldable" id="n-tiers">
-            <div class="head"><span class="lv">L4</span><h3>Model tier per role</h3>{CHEV}</div>
+            <div class="head"><span class="lv">L4</span><h3>Model budget per stage</h3>{CHEV}</div>
             {fold_sum("n-tiers", d)}
             <div class="fold-body"><div class="fold-inner">
             <div class="tiers">
-              <div>
-                <div class="sub" style="margin-bottom:12px"><div class="t">Execution profiles</div>
-                  <div class="prof-row">{profile_cards}</div>
-                </div>
-                <div class="sub"><div class="t">Roles in the unit catalog &mdash; {d['role_total']}</div>
-                  <div class="chips">{role_chips}</div>
-                </div>
+              <div class="sub"><div class="t">Model budgets</div>
+                <div class="prof-row">{profile_cards}</div>
               </div>
-              <div class="sub">
-                <div class="t">Selection, per node</div>
-                <table class="maptab">
-                  <tr><th>node</th><th>role</th><th>profile</th></tr>
-                  {stage_rows}
-                </table>
+              <div class="sub"><div class="t">Roles in the unit catalog &mdash; {d['role_total']}</div>
+                <div class="chips">{role_chips}</div>
+                <p>Shared contracts name roles and budgets, never a vendor model. You decide which real
+                model each budget uses.</p>
               </div>
             </div>
-
             </div></div>
           </div>
 
           <div class="node foldable" id="n-art">
-            <div class="head"><span class="lv">L5</span><h3>Fixed artifact system</h3>{CHEV}</div>
+            <div class="head"><span class="lv">L5</span><h3>Artifacts</h3>{CHEV}</div>
             {fold_sum("n-art", d)}
             <div class="fold-body"><div class="fold-inner">
             <div class="flowline">
               <button class="fx" data-info="ev:order">research</button><span class="fa">&rarr;</span>
               <button class="fx" data-info="ev:order">spec</button><span class="fa">&rarr;</span>
               <button class="fx" data-info="ev:order">plans</button>
-              <span class="fn">one direction &mdash; a later stage never invents its own evidence</span>
+              <span class="fn">work leaves files you can read, not only a chat log</span>
             </div>
             <div class="buckets">{buckets}</div>
             <div class="rules">{rules}</div>
@@ -1264,22 +1252,20 @@ def build_canvas(d: dict) -> str:
         </div>
 
         <div class="col">
-          <div class="rail foldable" id="n-guards">
-            <div class="rh"><h4>Guards</h4><span class="tag">FAIL-CLOSED</span>{CHEV}</div>
-            {fold_sum("n-guards", d)}
+          <div class="rail foldable" id="n-fleetrail">
+            <div class="rh"><h4>Fleet</h4><span class="tag">LIVE VIEW</span>{CHEV}</div>
+            {fold_sum("n-fleetrail", d)}
             <div class="fold-body"><div class="fold-inner">
-              <div class="rd">Wrap every layer to the left. Deterministic hooks run before the
-              tool call — the model judges, the code enforces.</div>
-              <div class="items">{guards}</div>
-              <div class="rfoot">write scope &middot; spec read &middot; artifact root &middot;
-              git state &middot; memory path</div>
+              <div class="rd">Watches every layer to the left, read-only.</div>
+              {overview_thumb}
+              <a class="rlink" href="fleet.html">Tour Fleet &rarr;</a>
             </div></div>
           </div>
         </div>
       </div>
 
       <div class="loops foldable" id="n-loops">
-        <div class="head loops-head"><span class="ln">L6</span><h3>The harness watches itself</h3>{CHEV}</div>
+        <div class="head loops-head"><span class="ln">L6</span><h3>Maintainer loops</h3>{CHEV}</div>
         {fold_sum("n-loops", d)}
         <div class="fold-body"><div class="fold-inner">
           <div class="loop-grid">{loops}</div>
@@ -1288,23 +1274,19 @@ def build_canvas(d: dict) -> str:
     </div>"""
 
 
-CANVAS_JS = r"""
+MAP_JS = r"""
 (function () {
   "use strict";
   var INFO = JSON.parse(document.getElementById("info-data").textContent);
 
-  /* ── wires: measured from real element boxes, so any reflow stays correct ── */
+  /* wires: measured from real element boxes, so any reflow stays correct */
   var EDGES = [
     ["n-utter", "n-route"],
     ["n-route", "n-tracks"],
     ["n-tracks", "n-fabric"],
-    ["n-fabric", "n-fleetblock"],
-    ["n-fleetblock", "n-tiers"],
+    ["n-fabric", "n-tiers"],
     ["n-tiers", "n-art"]
   ];
-  // The rails flank every layer, so a literal edge to one of them would misread as
-  // "only this layer". Their relationship is carried by position and copy instead.
-  var SIDE = [];
 
   function draw() {
     var svg = document.getElementById("wires");
@@ -1323,27 +1305,24 @@ CANVAS_JS = r"""
       var r = el.getBoundingClientRect();
       return { l: r.left - base.left, t: r.top - base.top, w: r.width, h: r.height };
     }
-    function path(dAttr, dashed) {
-      if (!dashed) {
-        // Soft halo behind the wire. An SVG filter can't do this here: a zero-width
-        // vertical path gives an objectBoundingBox filter a zero-sized region.
-        var halo = document.createElementNS(ns, "path");
-        halo.setAttribute("d", dAttr);
-        halo.setAttribute("fill", "none");
-        halo.setAttribute("stroke", "#6D6DF6");
-        halo.setAttribute("stroke-width", "7");
-        halo.setAttribute("stroke-linecap", "round");
-        halo.setAttribute("opacity", ".16");
-        svg.appendChild(halo);
-      }
+    function path(dAttr) {
+      // Soft halo behind the wire. An SVG filter can't do this here: a zero-width
+      // vertical path gives an objectBoundingBox filter a zero-sized region.
+      var halo = document.createElementNS(ns, "path");
+      halo.setAttribute("d", dAttr);
+      halo.setAttribute("fill", "none");
+      halo.setAttribute("stroke", "#6D6DF6");
+      halo.setAttribute("stroke-width", "7");
+      halo.setAttribute("stroke-linecap", "round");
+      halo.setAttribute("opacity", ".16");
+      svg.appendChild(halo);
       var p = document.createElementNS(ns, "path");
       p.setAttribute("d", dAttr);
       p.setAttribute("fill", "none");
-      p.setAttribute("stroke", dashed ? "var(--wire)" : "url(#wg)");
-      p.setAttribute("stroke-width", dashed ? "1.1" : "2");
+      p.setAttribute("stroke", "url(#wg)");
+      p.setAttribute("stroke-width", "2");
       p.setAttribute("stroke-linecap", "round");
-      if (dashed) { p.setAttribute("stroke-dasharray", "3 5"); p.setAttribute("opacity", ".7"); }
-      else { p.setAttribute("marker-end", "url(#arrow)"); }
+      p.setAttribute("marker-end", "url(#arrow)");
       svg.appendChild(p);
     }
     function dot(x, y) {
@@ -1352,30 +1331,18 @@ CANVAS_JS = r"""
       c.setAttribute("fill", "var(--wire)");
       svg.appendChild(c);
     }
-
     EDGES.forEach(function (e) {
       var a = box(e[0]), b = box(e[1]);
       if (!a || !b) return;
       var x = a.l + a.w / 2, y1 = a.t + a.h + 3, y2 = b.t - 3;
+      if (y2 - y1 < 6) return;
       var mid = (y1 + y2) / 2;
-      path("M" + x + " " + y1 + " C " + x + " " + mid + ", " + x + " " + mid + ", " + x + " " + y2, false);
+      path("M" + x + " " + y1 + " C " + x + " " + mid + ", " + x + " " + mid + ", " + x + " " + y2);
       dot(x, y1);
-    });
-
-    SIDE.forEach(function (e) {
-      var a = box(e[0]), b = box(e[1]);
-      if (!a || !b) return;
-      var fromRight = e[2] === "right";
-      var x1 = fromRight ? a.l + a.w : a.l;
-      var x2 = fromRight ? b.l : b.l + b.w;
-      var y1 = a.t + Math.min(a.h * 0.4, 150);
-      var y2 = b.t + Math.min(b.h / 2, 90);
-      var cx = (x1 + x2) / 2;
-      path("M" + x1 + " " + y1 + " C " + cx + " " + y1 + ", " + cx + " " + y2 + ", " + x2 + " " + y2, true);
     });
   }
 
-  /* ── inspector ── */
+  /* inspector */
   var panel = document.getElementById("inspector");
   function show(key) {
     var item = INFO[key];
@@ -1394,42 +1361,7 @@ CANVAS_JS = r"""
   var close = document.getElementById("insp-close");
   if (close) close.addEventListener("click", function () { panel.classList.remove("on"); });
 
-  /* ── jump list follows the canvas ── */
-  var canvas = document.querySelector(".canvas");
-  var links = Array.prototype.slice.call(document.querySelectorAll(".jump a[data-target]"));
-  links.forEach(function (a) {
-    a.addEventListener("click", function (ev) {
-      ev.preventDefault();
-      var el = document.getElementById(a.dataset.target);
-      if (!el) return;
-      // Desktop: the canvas is the scroller. Stacked mobile: the page is.
-      if (canvas && canvas.scrollHeight > canvas.clientHeight + 4) {
-        canvas.scrollTo({ top: el.offsetTop - 34, behavior: "smooth" });
-      } else {
-        el.scrollIntoView({ behavior: "smooth", block: "start" });
-      }
-    });
-  });
-  if (canvas && links.length) {
-    canvas.addEventListener("scroll", function () {
-      var y = canvas.scrollTop + 110, cur = links[0];
-      links.forEach(function (a) {
-        var el = document.getElementById(a.dataset.target);
-        if (el && el.offsetTop <= y) cur = a;
-      });
-      links.forEach(function (a) { a.classList.toggle("on", a === cur); });
-    }, { passive: true });
-  }
-
-  draw();
-  window.addEventListener("resize", draw);
-  if (window.ResizeObserver) {
-    var host = document.getElementById("diagram");
-    if (host) new ResizeObserver(function () { draw(); }).observe(host);
-  }
-  if (document.fonts && document.fonts.ready) document.fonts.ready.then(draw);
-
-  /* ── progressive disclosure ─────────────────────────────────────────── */
+  /* progressive disclosure */
   function setOpen(block, open) {
     block.classList.toggle("is-open", open);
     var chev = block.querySelector(":scope > .head > .chev, :scope > .rh > .chev");
@@ -1440,216 +1372,392 @@ CANVAS_JS = r"""
     var head = block.querySelector(":scope > .head, :scope > .rh");
     if (!head) return;
     var chev = head.querySelector(".chev");
-    if (chev) chev.setAttribute("aria-expanded", "false");
+    if (chev) chev.setAttribute("aria-expanded", block.classList.contains("is-open") ? "true" : "false");
     head.addEventListener("click", function (ev) {
       if (ev.target.closest("a")) return;
       setOpen(block, !block.classList.contains("is-open"));
     });
   });
-  /* the sidebar map opens the block it points at */
-  Array.prototype.forEach.call(document.querySelectorAll(".jump a[data-target]"), function (link) {
-    link.addEventListener("click", function () {
-      var block = document.getElementById(link.getAttribute("data-target"));
-      if (block && block.classList.contains("foldable")) setOpen(block, true);
-    });
-  });
+
+  draw();
+  window.addEventListener("resize", draw);
+  if (window.ResizeObserver) {
+    var hostEl = document.getElementById("diagram");
+    if (hostEl) new ResizeObserver(function () { draw(); }).observe(hostEl);
+  }
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(draw);
 })();
 """
 
 
+# ------------------------------------------------------------------ landing page
+
 def render_index(d: dict) -> str:
     info_json = json.dumps(build_info(d), ensure_ascii=False).replace("</", "<\\/")
-    return f"""<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Hearting — one agent workflow, three harnesses</title>
-<meta name="description" content="A portable, deterministic operating layer for Claude Code, Codex, and OpenCode: routed capabilities, sealed N-way cross-harness dispatch, a live Fleet view, per-role model tiers, a fixed artifact system, and one persistent memory store." />
-<!-- GENERATED by tools/render-landing.py — DO NOT EDIT BY HAND. -->
-<style>{CSS}</style>
-</head>
-<body>
-<div class="shell">
+    body = f"""
+<main>
+<section class="hero"><div class="wrap">
+  <span class="eyebrow"><i></i>For Claude Code, Codex, and OpenCode</span>
+  <h1>Keep your coding agents <span class="grad">on your intent.</span></h1>
+  <p class="lede">Agents differ in skill and cost, and you can no longer work without them.
+  Hearting makes the work follow what you asked, <b>whichever agent runs it</b>. A capable model
+  settles the intent and the plan. Lower-cost workers carry it out in small, checked steps.
+  <b>Fleet</b> shows every one of them, live, on one screen.</p>
 
-  <aside class="side"><div class="side-in">
-    <a class="brand" href="index.html">{LOGO}<span>Hearting</span></a>
-    <div class="badges">
-      <a class="badge hot" href="{REPO_URL}/releases">latest release &#8599;</a>
-      <span class="badge">MIT</span>
-      <span class="badge">{d['cap_total']} capabilities</span>
-      <span class="badge">{d['unit_total']} role units</span>
-      <span class="badge">{d['hook_total']} hooks</span>
+  <div class="install" id="install">
+    <span class="p">$</span>
+    <code id="cmd">{INSTALL_CMD}</code>
+    <button onclick="{html.escape(copy_js("cmd"), quote=True)}">Copy</button>
+  </div>
+  <p class="fine">Linux and macOS &middot; checksummed release &middot;
+    <a href="{REPO_URL}/releases">release notes</a> &middot;
+    <a href="#quickstart">what you need first</a></p>
+
+  <figure class="hero-shot">
+    {gif("fleet.html")}
+    <figcaption>Fleet, the live view of every agent: OVERVIEW &rarr; ROUTES &rarr; a session &rarr; a
+    request's raw output. Real screens drawn from synthetic demo data.
+    <a href="fleet.html">Take the Fleet tour &rarr;</a></figcaption>
+  </figure>
+</div></section>
+
+<section class="sec" id="why"><div class="wrap">
+  <div class="kick">Why Hearting</div>
+  <h2>The work stays tied to what you asked, not to how capable the agent is.</h2>
+  <p class="lead">Agents differ by vendor, by model, and by what your workplace gives you, and working
+  without them is no longer an option. Hearting keeps the way you work the same across them. You stay in
+  charge, and the work holds together even when the agent contributes little on its own.</p>
+  <div class="grid why">
+    <div class="card"><span class="num">01</span><h3>Consistent work, whatever the agent</h3>
+      <p>Hearting confirms your intent with you before work starts, keeps each worker inside a bounded
+      scope, and checks results independently.</p></div>
+    <div class="card"><span class="num">02</span><h3>One way of working everywhere</h3>
+      <p>The same requests, stages, artifacts, and memory on Claude Code, Codex, and OpenCode &mdash; one
+      of them or all three. Fleet watches all of them in one view.</p></div>
+    <div class="card hot"><span class="num">03</span><h3>A crutch for low-cost agents</h3>
+      <p>Hearting cannot make a weak model smarter. It lets one carry out your intent anyway: a capable
+      model settles the intent and the plan (the <i>frame</i>), and cheaper workers carry it out in small,
+      checked steps (<i>dispatch</i>).</p></div>
+    <div class="card"><span class="num">04</span><h3>Light on the agent</h3>
+      <p>No step works only if an agent memorizes a long procedure. The procedure lives in the harness.</p></div>
+    <div class="card"><span class="num">05</span><h3>Existing work first</h3>
+      <p>Before planning, a cheap read-only scan lists what your code, earlier artifacts, memory, and git
+      history already settled, so the plan starts from that instead of from what the model happens to know.</p></div>
+  </div>
+</div></section>
+
+<section class="sec" id="how"><div class="wrap">
+  <div class="kick">How a request runs</div>
+  <h2>Say what you want. The harness does the routing.</h2>
+  <p class="lead">Describe the outcome in your own words. There are no command names to learn.</p>
+  <div class="pipe">
+    <div class="st"><div class="dot">1</div><h3>You ask</h3>
+      <p>&ldquo;Implement and test the login API, then leave a change report.&rdquo;</p></div>
+    <div class="st"><div class="dot">2</div><h3>Prior-art scan</h3>
+      <p>What the project already has: code, artifacts, memory, git history.</p></div>
+    <div class="st"><div class="dot">3</div><h3>Frame</h3>
+      <p>A capable model proposes the route. You are asked only when there is a real choice.</p></div>
+    <div class="st"><div class="dot">4</div><h3>Owner and workers</h3>
+      <p>One session keeps your request. Lower-cost workers plan, execute, test, and review in small
+      steps; only <i>execute</i> edits source.</p></div>
+    <div class="st"><div class="dot">5</div><h3>Report</h3>
+      <p>What changed, what was verified, what is left, and what it cost.</p></div>
+  </div>
+  <div class="fleetband"><span><b>Fleet</b> shows every step above while it runs.</span>
+    <a href="fleet.html">See it &rarr;</a></div>
+
+  <div class="split" style="margin-top:34px">
+    <div class="rcard">
+      <div class="rh">The one card you answer</div>
+      <div class="rrow"><span class="rk">your words</span><span class="rv">&ldquo;The login API in the spec still isn&rsquo;t built &mdash; build it with tests&rdquo;</span></div>
+      <div class="rrow"><span class="rk">intent</span><span class="rv">Implement and test the login API, then leave a change report</span></div>
+      <div class="rrow"><span class="rk">scope</span><span class="rv">src/auth/**, tests/auth/**</span></div>
+      <div class="rrow"><span class="rk">not doing</span><span class="rv">No schema or migration change</span></div>
+      <div class="rrow"><span class="rk">done</span><span class="rv">Tests green, change report written</span></div>
+      <div class="rops"><span class="rop on">Proceed</span><span class="rop">Edit</span><span class="rop">Stop</span>
+        <span class="rnote">illustrative card</span></div>
     </div>
-
-    <h1>One agent workflow.<br /><span class="grad">Three harnesses.</span></h1>
-    <p class="sub">A portable, deterministic operating layer for coding agents. Describe the
-    outcome once — routing, cross-harness dispatch, model selection, verification, and evidence
-    are the harness's job, not yours.</p>
-    <div class="runtimes">
-      <span><i></i>Claude Code</span><span><i></i>Codex CLI</span><span><i></i>OpenCode</span>
+    <div>
+      <h3>Small things stay small</h3>
+      <p class="t"><b>A tiny reversible fix</b> is made right in your folder and recorded automatically.
+      Nothing to start or finish.</p>
+      <div class="ladder2"><span class="first">tiny fix</span><span>quick</span><span>standard</span>
+        <span>strong</span><span>thorough</span><span class="top">adversarial</span></div>
+      <p class="t">A small change gets the frame and one quick worker. Bigger or riskier work adds a
+      written plan, independent reviews, and finally adversarial or security checks.</p>
+      <p class="t"><b>Each stage uses a model budget chosen for it</b> &mdash; <code>deep</code> for hard
+      judgment, <code>light</code> for planned execution. You decide which real model each budget uses.</p>
     </div>
+  </div>
+</div></section>
 
-    <div class="install" id="install">
-      <span class="p">$</span>
-      <code id="cmd">{INSTALL_CMD}</code>
-      <button onclick="{html.escape(COPY_JS, quote=True)}">Copy</button>
-    </div>
-    <p class="fine">SHA-256 checksummed release &middot;
-      <a href="{REPO_URL}/releases">release notes</a></p>
+<section class="sec" id="fleet"><div class="wrap">
+  <div class="kick">Fleet</div>
+  <h2>When agents work in the background, you shouldn&rsquo;t have to guess.</h2>
+  <p class="lead">Is it still running? Is it stuck? Is it waiting for you? Did it finish? Fleet answers in one
+  terminal view, for every Claude Code, Codex, and OpenCode session on your machine and every worker
+  Hearting dispatched from them.</p>
+  <figure class="hero-shot" style="margin-top:36px">
+    {crop("questions", 292, 50, 1148, 340, "fleet.html#s-questions")}
+    <figcaption>QUESTIONS: every agent waiting for your answer, since when, and how to answer it.
+    Click for the full screen.</figcaption>
+  </figure>
+  <div class="grid grid3" style="margin-top:30px">
+    <div class="card"><span class="num">ALIVE?</span><h3>What is running</h3>
+      <p>Every session by project, with what it is doing now and its request&rsquo;s stage line. <a href="fleet.html#s-routes">ROUTES &rarr;</a></p></div>
+    <div class="card"><span class="num">STUCK?</span><h3>What went quiet</h3>
+      <p>A stalled worker shows as a stalled worker, not as a parent session that went quiet. <a href="fleet.html#problem">How &rarr;</a></p></div>
+    <div class="card"><span class="num">WAITING?</span><h3>What needs you</h3>
+      <p>Who asks, about what, for which request, and since when. Older waits stay until answered. <a href="fleet.html#s-questions">QUESTIONS &rarr;</a></p></div>
+  </div>
+  <div class="pill-row">
+    <span>Built from the records the work itself writes</span>
+    <span>A value it can&rsquo;t read shows as <code>?</code></span>
+    <span>Watching changes nothing</span>
+  </div>
+  <div class="cmdrow">
+    <a class="btn primary" href="fleet.html">Take the Fleet tour &rarr;</a>
+    <span class="cmd"><i>$</i>fleet</span>
+  </div>
+</div></section>
 
-    <div class="sblock">
-      <div class="skick">The map</div>
-      <div class="jump">
-        <a href="#n-utter" data-target="n-utter" class="on"><span class="n">L0</span>One sentence in</a>
-        <a href="#n-route" data-target="n-route"><span class="n">L1</span>Routing contract</a>
-        <a href="#n-tracks" data-target="n-tracks"><span class="n">L2</span>Pipelines</a>
-        <a href="#n-fabric" data-target="n-fabric"><span class="n">L3</span>Dispatch fabric</a>
-        <a href="#n-fleetblock" data-target="n-fleetblock"><span class="n">LIVE</span>Fleet</a>
-        <a href="#n-tiers" data-target="n-tiers"><span class="n">L4</span>Model tier per role</a>
-        <a href="#n-art" data-target="n-art"><span class="n">L5</span>Fixed artifact system</a>
-        <a href="#n-loops" data-target="n-loops"><span class="n">L6</span>Self-watching loops</a>
-      </div>
-    </div>
+<section class="sec" id="quickstart"><div class="wrap">
+  <div class="kick">Quick start</div>
+  <h2>Four steps from install to a watched task.</h2>
+  <p class="lead">You need Linux or macOS, Python 3.11+ with PyYAML, Git, <code>curl</code> or
+  <code>wget</code>, and at least one signed-in agent CLI. Claude Code alone is enough.</p>
+  <div class="grid qs">
+    <div class="card"><h3>Install</h3>
+      <p>One line, no clone. For Claude Code only, end it with <code>sh -s -- --runtime claude</code>.</p>
+      <pre>{html.escape(INSTALL_CMD)}</pre></div>
+    <div class="card"><h3>Check</h3>
+      <p>The doctor reports what is live and names any optional piece that is missing.</p>
+      <pre>~/.local/bin/hearting runtime doctor \\
+  --runtime all --strict</pre></div>
+    <div class="card"><h3>Ask</h3>
+      <p>Open your agent CLI inside a Git project and ask for something small, such as fixing a typo and
+      running the existing test.</p></div>
+    <div class="card"><h3>Watch</h3>
+      <p>Run Fleet in a second terminal to see the session and any workers it dispatches.</p>
+      <pre>fleet</pre></div>
+  </div>
+  <div class="note"><b>Read Permissions first.</b> Background Claude Code workers run in bypass mode by
+  default, because nobody is there to answer a permission prompt. Sessions you start yourself keep your own
+  settings. <a href="{REPO_URL}#permissions">Permissions in the README &rarr;</a></div>
+</div></section>
 
-    <div class="sblock">
-      <div class="skick">What makes it different</div>
+<section class="sec" id="map"><div class="wrap">
+  <div class="kick">The layer map</div>
+  <h2>How it is built, from your sentence down to upkeep.</h2>
+  <p class="lead">Seven layers sit between what you say and the work that gets done. Open one to see its
+  parts. Memory runs alongside all of them, and Fleet watches all of them.</p>
+  <div class="mapsec">{build_map(d)}</div>
+</div></section>
 
-      <div class="flag">
-        <h3><span class="dot"></span>Sealed N-way dispatch</h3>
-        <ul>
-          <li><b>Bounded depth</b> — d0 main, d1 owner, d2 stages. Depth 3 is forbidden and
-          workers never route.</li>
-          <li><b>N-way groups</b> — 2–4 declared legs start in one transaction. A capacity
-          shortage creates zero rows, not a half-started group.</li>
-          <li><b>Different families by default</b> — a checker lands on a different model family
-          than its maker; one-harness routing is the exception with a recorded reason.</li>
-          <li><b>Recorded degradation</b> — same-harness → cross-harness → native → inline, each
-          hop keeping the same route id, scope, and attempt identity.</li>
-        </ul>
-      </div>
+<section class="sec" id="deeper"><div class="wrap">
+  <div class="kick">Go deeper</div>
+  <h2>{d['cap_total']} capabilities, {d['entry_total']} entry points, three runtimes.</h2>
+  <div class="grid links" style="margin-top:30px">
+    <a href="{REPO_URL}#readme"><b>README</b><span>Install, permissions, memory, models, and limits.</span></a>
+    <a href="fleet.html"><b>Fleet tour</b><span>Every screen, and why you can trust it.</span></a>
+    <a href="map.html"><b>Capability catalog</b><span>Every entry point and stage, with its summary.</span></a>
+    <a href="{REPO_URL}/blob/main/MANUAL.md"><b>Manual</b><span>How the parts fit together.</span></a>
+    <a href="{REPO_URL}/blob/main/AGENTS.md"><b>Purpose and principles</b><span>Why Hearting exists, and how it is maintained.</span></a>
+    <a href="{REPO_URL}/releases"><b>Releases</b><span>Versions, notes, and the installer.</span></a>
+  </div>
+</div></section>
+</main>
 
-      <div class="flag">
-        <h3><span class="dot"></span>Fleet, over the same registry</h3>
-        <ul>
-          <li><b>One attempt registry</b> — a start writes its row before it claims a fenced PID,
-          so a duplicate claim spawns zero children.</li>
-          <li><b>PID-exact liveness</b> — ALIVE · SUSPECT · DEAD · EXITED instead of waiting on a
-          notification that may never arrive.</li>
-          <li><b>Nothing is dropped</b> — orphaned rows are surfaced, not hidden, next to context
-          gauge and per-session token accounting.</li>
-        </ul>
-      </div>
-
-      <div class="flag">
-        <h3><span class="dot"></span>Model tier chosen per role</h3>
-        <ul>
-          <li><b>Two axes, never merged</b> — {d['role_total']} portable roles say what a node does;
-          <code>deep</code> / <code>balanced-deep</code> / <code>light</code> / <code>mini</code>
-          say what it may spend.</li>
-          <li><b>Sealed at compile time</b> — a caller can't swap a sealed profile for a trailing
-          model flag, and <code>mini</code> is refused for substantive nodes.</li>
-          <li><b>Intent survives failover</b> — a capacity substitute preserves and reports the
-          profile it stood in for.</li>
-        </ul>
-      </div>
-
-      <div class="flag">
-        <h3><span class="dot"></span>A fixed artifact system</h3>
-        <ul>
-          <li><b>One root per project</b> — <code>.agent_reports/</code>, resolved from the primary
-          checkout; worktree snapshot writes fail closed.</li>
-          <li><b>Fixed order</b> — research → spec → plans. No code without a spec, no spec without
-          prior evidence.</li>
-          <li><b>One owner per artifact</b> — and spec revisions snapshot the prior version instead
-          of overwriting it.</li>
-        </ul>
-      </div>
-
-      <div class="flag">
-        <h3><span class="dot"></span>Memory that survives the session</h3>
-        <ul>
-          <li><b>Recall can't be skipped</b> — each prompt runs a bounded capsule probe and writes a
-          receipt that material work is gated on.</li>
-          <li><b>No classifier decides for you</b> — code owns scope fences and limits; the agent
-          reads the full record and judges relevance.</li>
-          <li><b>The agent writes, not a background process</b> — no automatic distiller; every
-          write declares its purpose in the moment it's made.</li>
-          <li><b>History is never lost</b> — supersede over delete, a graveyard for restores, and
-          pending handoffs that fail closed until consumed.</li>
-        </ul>
-      </div>
-
-      <div class="flag">
-        <h3><span class="dot"></span>Guards instead of good intentions</h3>
-        <ul>
-          <li><b>{d['hard_total']} hard blocks</b> of {d['hook_total']} hooks — write scope, spec read,
-          artifact root, git state, and memory path are denied before the tool call, not flagged after.</li>
-          <li><b>Route participation is required</b> — a source edit with no compiled route for this
-          working directory is refused, hotfix included.</li>
-          <li><b>Behavior is regression-tested</b> — the drill loop replays fixtures and scores them
-          after instruction changes, then drafts a diagnosis without applying it.</li>
-        </ul>
-      </div>
-    </div>
-
-    <div class="sblock">
-      <div class="skick">Quickstart</div>
-      <ol class="steps">
-        <li><span class="n"></span><div><b>Install the verified release.</b> One line, SHA-256
-          checksummed, no clone. It activates all three runtimes as immutable bundles, and
-          <code>update</code> / <code>uninstall</code> stay reversible.</div></li>
-        <li><span class="n"></span><div><b>Confirm what is live.</b>
-          <code>harness runtime doctor --runtime all --strict</code> reports the active source,
-          revision, freshness, and the session action each runtime still needs.</div></li>
-        <li><span class="n"></span><div><b>Describe the outcome.</b> The harness proposes the route
-          card and closes the loop with durable evidence.</div></li>
-        <li><span class="n"></span><div><b>Watch it run.</b> <code>fleet</code> shows every
-          interactive session and dispatched worker across the three runtimes in one live tree.</div></li>
-      </ol>
-    </div>
-
-    <div class="sblock">
-      <div class="skick">Go deeper</div>
-      <div class="slinks">
-        <a href="map.html">Capability catalog</a>
-        <a href="{REPO_URL}">GitHub</a>
-        <a href="{REPO_URL}/releases">Releases</a>
-        <a href="{REPO_URL}/blob/main/MANUAL.md">Manual</a>
-      </div>
-    </div>
-
-    <div class="sfoot"><b style="color:var(--text-2)">hearting</b> &nbsp;<i>(n.)</i> &mdash; the small
-    stones packed by hand between the two faces of a dry stone wall. Unseen from either side, and the
-    reason the wall stands.<br /><br />A portable operating layer for coding agents. MIT licensed.</div>
-  </div></aside>
-
-  <main class="stage">
-    <div class="bar">
-      <div class="ttl">Agent map <span>&mdash; the whole harness, one canvas</span></div>
-      <div class="legend">
-        <span><i class="e"></i>entry router</span>
-        <span><i class="s"></i>stage</span>
-        <span><i class="g"></i>gate</span>
-      </div>
-    </div>
-
-    <div class="canvas">{build_canvas(d)}</div>
-
-    <div class="inspector" id="inspector">
-      <div class="ih"><span class="k"></span><span class="t"></span>
-        <button id="insp-close" aria-label="close">&times;</button></div>
-      <div class="ib"></div>
-      <div class="im"></div>
-    </div>
-  </main>
-
+<div class="inspector" id="inspector" role="dialog" aria-live="polite">
+  <div class="ih"><span class="k"></span><span class="t"></span>
+    <button id="insp-close" aria-label="close">&times;</button></div>
+  <div class="ib"></div>
+  <div class="im"></div>
 </div>
-<script type="application/json" id="info-data">{info_json}</script>
-<script>{CANVAS_JS}</script>
-</body>
-</html>
 """
+    scripts = (f'<script type="application/json" id="info-data">{info_json}</script>\n'
+               f'<script>{MAP_JS}</script>')
+    return page(
+        "Hearting — keep your coding agents on your intent",
+        "Hearting keeps agent work on your intent, whichever agent runs it, on Claude Code, Codex, and "
+        "OpenCode: a capable model settles the plan, lower-cost workers carry it out in small checked "
+        "steps, and Fleet shows every session and worker live.",
+        body, "home", scripts)
+
+
+# ------------------------------------------------------------------- Fleet page
+
+SCREENS = [
+    ("overview", "OVERVIEW", "Every session, grouped by project.",
+     "Each project's line says where it stands, and each session shows what it is doing right now.",
+     ["<b>Per project:</b> open requests, questions waiting for you, what is left to decide, and when it last changed.",
+      "<b>Per session:</b> runtime, model and effort, a short title, context left, what it is doing now, and for how long.",
+      "<b>Marks:</b> working, idle, and waiting-for-you each look different.",
+      "<b>Top row:</b> each runtime's usage-window gauges, and how many sessions are working, idle, or waiting."]),
+    ("routes", "ROUTES", "Each request, stage by stage.",
+     "A stage line such as <code>plan › execute › test › report</code>, with the workers running under it.",
+     ["See which stage a request is in and which worker, on which model, is running it."]),
+    ("questions", "QUESTIONS", "Everything waiting for your answer.",
+     "Every agent waiting for an answer or an approval: which session asks, what kind of question, for which "
+     "request, and since when.",
+     ["Older waits stay listed until you answer or the work ends. Nothing drops off for its age.",
+      "Answer from Fleet when the runtime offers a reply path. Otherwise Fleet points you to the session."]),
+    ("session", "SESSION PAGE", "One session, in full.",
+     "State, context left, what it is doing now, its request, the sessions it steers, and the GPU it holds.",
+     ["Select any session in the tree to open its page."]),
+    ("resources", "RESOURCES", "What is using the machine.",
+     "CPU, memory, and per-GPU use on this machine and on any hosts you configured, with the session that owns "
+     "each GPU process.",
+     ["Even without configured hosts, Fleet shows this machine's CPU and GPU use."]),
+    ("output", "REQUEST PAGE", "A request's stage graph and raw output.",
+     "Select a request to see its stages, and under them the owner's raw output: tool calls and results in "
+     "order, without opening the runtime itself.",
+     ["Setup done, one stage running, the rest pending, and what the owner just did."]),
+]
+
+OTHER_VIEWS = [
+    ("PEERS", "Which sessions watch or steer which, and their last exchange."),
+    ("HISTORY", "Earlier sessions of each terminal seat, so work that continued in a new session stays traceable."),
+    ("MEMORY", "Per project: the newest decisions, open work by stage, and the latest records saved to shared memory."),
+    ("MODELS · SYSTEM", "Which real model each budget maps to, and the installed Hearting release."),
+]
+
+
+def render_fleet(d: dict) -> str:
+    rows = []
+    for name, tag, title, lead, bullets in SCREENS:
+        lis = "".join(f"<li>{b}</li>" for b in bullets)
+        rows.append(
+            f'<div class="scr" id="s-{name}"><div class="scr-head"><div><span class="tag">{tag}</span>'
+            f'<h3>{title}</h3></div><div><p>{lead}</p><ul>{lis}</ul></div></div>'
+            f'{shot(name)}</div>'
+        )
+    views = "".join(f'<div class="card"><h3>{n}</h3><p>{t}</p></div>' for n, t in OTHER_VIEWS)
+
+    body = f"""
+<main>
+<section class="hero"><div class="wrap">
+  <span class="eyebrow"><i></i>Fleet &middot; part of Hearting</span>
+  <h1>Every agent, <span class="grad">on one screen.</span></h1>
+  <p class="lede">Background agents leave you guessing. Is it still running? Is it stuck? Is it waiting for
+  you? Did it finish? Fleet answers in one terminal view, for <b>every Claude Code, Codex, and OpenCode
+  session on your machine</b> and every worker Hearting dispatched from them.</p>
+  <div class="btns">
+    <span class="cmd"><i>$</i><span id="fcmd">fleet</span></span>
+    <a class="btn primary" href="index.html#quickstart">Install Hearting</a>
+    <a class="btn" href="#screens">See the screens</a>
+  </div>
+  <figure class="hero-shot">
+    {gif()}
+    <figcaption>OVERVIEW &rarr; ROUTES &rarr; a session page &rarr; a request's raw output. Every picture on this
+    page is a real Fleet screen drawn from synthetic demo data, never from a real machine.</figcaption>
+  </figure>
+</div></section>
+
+<section class="sec" id="problem"><div class="wrap">
+  <div class="kick">The problem</div>
+  <h2>A background agent is a black box until you open its terminal.</h2>
+  <p class="lead">With several sessions across three runtimes, and workers dispatched under them, you end up
+  opening windows one by one to learn the same three things.</p>
+  <div class="grid grid3">
+    <div class="card"><span class="num">ALIVE?</span><h3>What is running</h3>
+      <p>Working, idle, and waiting-for-you have different marks. Each session shows what it is doing now and for
+      how long.</p></div>
+    <div class="card"><span class="num">STUCK?</span><h3>What went quiet</h3>
+      <p>A stalled worker shows up as a stalled worker, not as a parent session that went quiet. Rows whose
+      parent is gone are shown, not dropped.</p></div>
+    <div class="card hot"><span class="num">WAITING?</span><h3>What needs you</h3>
+      <p>QUESTIONS lists every agent waiting for your answer or approval, since when, and for which request.</p></div>
+  </div>
+</div></section>
+
+<section class="sec" id="screens"><div class="wrap">
+  <div class="kick">The screens</div>
+  <h2>One screen per question.</h2>
+  <p class="lead">Press <code>Tab</code> to move between views. Select a session or a request to open its
+  page.</p>
+  <div style="margin-top:22px">{"".join(rows)}</div>
+
+  <div class="grid views" style="margin-top:26px">{views}</div>
+
+  <div class="narrow">
+    <div><h3>It fits a narrow terminal</h3>
+    <p>The same OVERVIEW, laid out for a 100-column window. Click any picture on this page for the full-size
+    image.</p>
+    <div class="keys">
+      <span><kbd>Tab</kbd>view</span><span><kbd>/</kbd>filter</span><span><kbd>Enter</kbd>open</span>
+      <span><kbd>u</kbd>usage</span><span><kbd>q</kbd>quit</span>
+    </div></div>
+    {shot("narrow")}
+  </div>
+</div></section>
+
+<section class="sec" id="trust"><div class="wrap">
+  <div class="kick">Why you can trust it</div>
+  <h2>It shows what the work recorded, and nothing it made up.</h2>
+  <div class="grid grid3">
+    <div class="card"><span class="num">01</span><h3>Built from the work&rsquo;s own records</h3>
+      <p>Fleet reads the attempt registry the dispatcher writes and each runtime&rsquo;s own session state. It does
+      not guess from what a terminal printed.</p></div>
+    <div class="card"><span class="num">02</span><h3>Unknown stays unknown</h3>
+      <p>A value Fleet could not read is shown as <code>?</code>. Never as zero, never as success.</p></div>
+    <div class="card"><span class="num">03</span><h3>Watching changes nothing</h3>
+      <p>Observation never completes, retries, or cleans up work. Fleet acts only on what you select, such as
+      answering a waiting question.</p></div>
+  </div>
+</div></section>
+
+<section class="sec" id="run"><div class="wrap">
+  <div class="kick">Run it</div>
+  <h2>Installed with Hearting. One word to start.</h2>
+  <p class="lead">Open a second terminal next to your agent and run <code>fleet</code>.</p>
+  <div class="split" style="margin-top:30px">
+    <pre class="code">fleet              # the Explorer, full screen (needs curses)
+fleet --once       # one plain snapshot
+fleet --json       # the same state as JSON, for scripts
+fleet-monitor      # the earlier group/process view</pre>
+    <div>
+      <p class="t" style="margin-top:0">Titles and Fleet&rsquo;s own words follow your language. Set
+      <code>title_language</code> in <code>${{XDG_CONFIG_HOME:-~/.config}}/hearting/fleet.json</code> to override it.</p>
+      <p class="t"><code>--once</code> and <code>--json</code> need no <code>curses</code>, so they also work on
+      Windows under Git Bash (experimental).</p>
+    </div>
+  </div>
+</div></section>
+
+<section class="sec" id="limits"><div class="wrap">
+  <div class="kick">Known limits</div>
+  <h2>Fleet is not light yet.</h2>
+  <p class="lead">Measured on a busy machine with a long work history and many live sessions, one Explorer
+  window used:</p>
+  <div class="grid limits">
+    <div class="card"><div class="big">&asymp; 1/3<small>of one CPU core</small></div>
+      <p>Lowering its CPU use continues in v4.x.</p></div>
+    <div class="card"><div class="big">&asymp; 0.8<small>GB of memory</small></div>
+      <p>One Explorer window, on that machine.</p></div>
+    <div class="card"><div class="big">&asymp; 6<small>seconds to first screen</small></div>
+      <p>The first full screen takes about this long to draw when the history is long.</p></div>
+  </div>
+  <div class="note">Answering a question from Fleet works only where the runtime offers a reply path. Where it
+  does not, Fleet points you to the session instead.</div>
+</div></section>
+
+<section class="wrap"><div class="cta-band">
+  <h2>See every agent without opening a single terminal.</h2>
+  <p>Fleet comes with Hearting. Install once, then run <code>fleet</code>.</p>
+  <div class="btns">
+    <a class="btn primary" href="index.html#quickstart">Quick start</a>
+    <a class="btn" href="{REPO_URL}#fleet-every-agent-on-one-screen">Fleet in the README</a>
+    <a class="btn" href="index.html">Back to home</a>
+  </div>
+</div></section>
+</main>
+"""
+    return page(
+        "Fleet — every agent on one screen · Hearting",
+        "Fleet is Hearting's live terminal view of every Claude Code, Codex, and OpenCode session and every "
+        "dispatched worker: running, stuck, or waiting for you, on one screen.",
+        body, "fleet")
 
 
 # ------------------------------------------------------------------- map page
@@ -1669,6 +1777,7 @@ MAP_GROUP_ORDER = [
     ("ops", "Cross-project &amp; operations", "Continuity, inspection, and the user profile.",
      ["analyze-user", "audit", "session-tidy"]),
 ]
+
 
 def render_map(d: dict) -> str:
     caps = d["caps"]
@@ -1708,47 +1817,27 @@ def render_map(d: dict) -> str:
             f'<div class="cap-group"><h3>Other</h3><div class="cap-grid">{cards}</div></div>'
         )
 
-    return f"""<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Capability catalog — Hearting</title>
-<meta name="description" content="Every Hearting capability and pipeline stage." />
-<!-- GENERATED by tools/render-landing.py — DO NOT EDIT BY HAND. -->
-<style>{CSS}</style>
-</head>
-<body class="page">
-<div class="shell">
-  <main class="stage">
-    <div class="bar">
-      <a class="ttl" href="index.html" style="display:flex;align-items:center;gap:9px">{LOGO}
-        <span style="color:var(--text);font-weight:650">Hearting</span></a>
+    body = f"""
+<main><div class="wrap" style="padding-bottom:20px">
+  <div class="maphead">
+    <h1>Every capability, <span class="grad">one catalog.</span></h1>
+    <p>One portable catalog projected into three runtimes. Entry points own whole pipelines; stages are the
+    workers they dispatch. You never type these names: describe the outcome and the harness picks.</p>
+    <div class="stats">
+      <div class="stat"><b>{d['cap_total']}</b><span>capabilities</span></div>
+      <div class="stat"><b>{d['entry_total']}</b><span>entry points</span></div>
+      <div class="stat"><b>{d['unit_total']}</b><span>stage units</span></div>
+      <div class="stat"><b>{d['role_total']}</b><span>model roles</span></div>
+      <div class="stat"><b>3</b><span>runtimes</span></div>
     </div>
-
-    <div class="canvas">
-      <div class="mapwrap">
-        <a class="backhome" href="index.html">&larr; Back to the map</a>
-        <div class="maphead">
-          <h1>Every capability, <span class="grad">one catalog.</span></h1>
-          <p>One portable catalog projected into three runtimes. Entry routers own whole
-          pipelines; stages are the sealed workers they dispatch.</p>
-          <div class="stats">
-            <div class="stat"><b>{d['cap_total']}</b><span>capabilities</span></div>
-            <div class="stat"><b>{d['entry_total']}</b><span>entry routers</span></div>
-            <div class="stat"><b>{d['unit_total']}</b><span>role units</span></div>
-            <div class="stat"><b>{d['role_total']}</b><span>model roles</span></div>
-            <div class="stat"><b>3</b><span>runtimes</span></div>
-          </div>
-        </div>
-        {"".join(groups_html)}
-      </div>
-    </div>
-  </main>
-</div>
-</body>
-</html>
+  </div>
+  {"".join(groups_html)}
+</div></main>
 """
+    return page(
+        "Capability catalog — Hearting",
+        "Every Hearting capability and pipeline stage.",
+        body, "catalog")
 
 
 def main() -> int:
@@ -1756,6 +1845,7 @@ def main() -> int:
     data = load_data()
     outputs = {
         DOCS / "index.html": render_index(data),
+        DOCS / "fleet.html": render_fleet(data),
         DOCS / "map.html": render_map(data),
     }
     if check:
