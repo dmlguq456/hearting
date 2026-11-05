@@ -1281,5 +1281,194 @@ class ReviewRegressionTest(Fixture):
         self.assertEqual(closed.returncode,0,closed.stdout+closed.stderr)
 
 
+class HeldHistoryAndSnapshotLockTest(Fixture):
+    def test_held_history_evicts_oldest_with_marker_and_preserves_latest_reply(self):
+        self.ledger_line('codex', SID, 'rt-still-open')
+        routes = self.root / '.runtime/routes'
+        routes.mkdir(parents=True)
+        route = routes / 'rt-still-open.json'
+        original = json.dumps({'route_id':'rt-still-open', 'artifact_root':str(self.root)})
+        route.write_text(original)
+        target = self.root / '.runtime/auto-record' / f'codex-{SID}.held.md'
+        for index in range(8):
+            T.turn_start('codex', SID, str(self.repo), self.env, now=100 + index*10)
+            (self.repo/'greet.py').write_text(f'print({index})\n')
+            observation = (f'Check {index}: exit 7 (failed).\n' + '한글 관측\n'*3500 +
+                           f'Final reply {index}: verification failed; still recorded.\n')
+            with mock.patch.object(T, 'observation_section', return_value=observation):
+                result = T.turn_end('codex', SID, str(self.repo), self.env, now=105 + index*10)
+            self.assertEqual(result['state'], 'route-observed')
+            self.assertLessEqual(target.stat().st_size, 256*1024)
+        history = target.read_text()
+        self.assertIn('history truncated', history)
+        self.assertNotIn('Final reply 0:', history)
+        self.assertNotIn('Final reply 1:', history)
+        self.assertIn('Final reply 6:', history)
+        self.assertIn('Check 7: exit 7 (failed).', history)
+        self.assertIn('Final reply 7:', history)
+        self.assertEqual(route.read_text(), original)
+        self.assertFalse(route.with_suffix('.outcome.json').exists())
+        rows = T.supplementary_records('codex', SID, str(self.repo), self.env)
+        self.assertTrue(rows[-1]['record_saved'])
+        self.assertEqual(rows[-1]['reference'], str(target))
+
+    def test_legacy_oversized_history_is_capped_on_the_next_append(self):
+        self.ledger_line('codex', SID, 'rt-legacy-open')
+        target = self.root / '.runtime/auto-record' / f'codex-{SID}.held.md'
+        target.parent.mkdir(parents=True)
+        target.write_text('OLD-FIRST\n' + '한글 old history\n'*100000 + 'RECENT-LEGACY\n')
+        T.turn_start('codex', SID, str(self.repo), self.env)
+        (self.repo/'greet.py').write_text('print("fixed")\n')
+        result = T.turn_end('codex', SID, str(self.repo), self.env,
+            payload={'last_assistant_message':'Latest reply survives the legacy history trim.'})
+        self.assertEqual(result['state'], 'route-observed')
+        self.assertLessEqual(target.stat().st_size, 256*1024)
+        history = target.read_text()  # valid UTF-8 after trimming inside multibyte text
+        self.assertIn('history truncated', history)
+        self.assertNotIn('OLD-FIRST', history)
+        self.assertIn('RECENT-LEGACY', history)
+        self.assertIn('Latest reply survives', history)
+
+    def test_held_write_failure_keeps_history_and_reports_unknown_without_taking_over(self):
+        self.ledger_line('codex', SID, 'rt-write-failure')
+        target = self.root / '.runtime/auto-record' / f'codex-{SID}.held.md'
+        target.parent.mkdir(parents=True)
+        target.write_text('Existing history must survive a failed replacement.\n')
+        T.turn_start('codex', SID, str(self.repo), self.env)
+        (self.repo/'greet.py').write_text('a source change\n')
+        replace = T.os.replace
+        def fail_history(source, destination):
+            if Path(destination) == target:
+                raise PermissionError('fixture')
+            return replace(source, destination)
+        with mock.patch.object(T.os, 'replace', side_effect=fail_history):
+            result = T.turn_end('codex', SID, str(self.repo), self.env)
+        self.assertEqual(result['state'], 'route-observed')
+        self.assertEqual(target.read_text(), 'Existing history must survive a failed replacement.\n')
+        self.assertFalse(self.state(harness='codex')['held_turn']['record_saved'])
+        self.assertEqual(self.state(harness='codex')['held_turn']['error'], 'PermissionError')
+        self.assertEqual(list(target.parent.glob('.held-*')), [])
+
+    def test_unreadable_off_lock_snapshot_is_not_an_unchanged_or_successful_turn(self):
+        self.start()
+        (self.repo/'greet.py').write_text('an unreadable change\n')
+        with mock.patch.object(T, 'snapshot', return_value=None):
+            self.assertEqual(self.end()['state'], 'unreadable')
+            self.assertEqual(self.start()['state'], 'unreadable')
+        self.assertEqual(self.end()['state'], 'no-start-snapshot')
+        self.assertEqual(self.calls, [])
+
+    def test_25000_paths_keep_counts_and_leave_state_lock_available_during_both_snapshots(self):
+        status = b''.join(f'?? source-{i:05d}.py\0'.encode() for i in range(25000))
+        original_git, original_snapshot = T._git, T.snapshot
+        lock = T._state_lock(T.state_path(self.env, 'claude', SID))
+        checked = []
+        def take(*args):
+            with T._locked(lock, 0.0) as available:
+                self.assertTrue(available, 'snapshot must not hold the state lock')
+                checked.append(available)
+            return original_snapshot(*args)
+        def probe(top, args, env, **kwargs):
+            if args[0] == 'status':
+                return subprocess.CompletedProcess(args, 0, status, b'')
+            return original_git(top, args, env, **kwargs)
+        with mock.patch.object(T, 'snapshot', side_effect=take):
+            self.start()
+            with mock.patch.object(T, '_git', side_effect=probe):
+                self.assertEqual(self.end()['state'], 'recorded')
+        self.assertEqual(len(checked), 2)
+        last = self.state()['records'][str(self.root)]['last_turn']
+        self.assertEqual(last['changed_files'], 25000)
+        self.assertTrue(last['changed_files_exact'])
+        self.assertTrue(last['truncated'])
+
+    def test_slow_old_start_cannot_replace_the_newer_turn(self):
+        entered, release = threading.Event(), threading.Event()
+        original = T.snapshot
+        replies, errors = {}, []
+        def take(*args):
+            value = original(*args)
+            if threading.current_thread() is worker:
+                entered.set()
+                if not release.wait(10):
+                    raise AssertionError('test did not release snapshot')
+            return value
+        def old_start():
+            try:
+                replies.update(T.turn_start('claude', SID, str(self.repo), self.env, now=100))
+            except BaseException as exc:
+                errors.append(exc)
+        worker = threading.Thread(target=old_start)
+        with mock.patch.object(T, 'snapshot', side_effect=take):
+            worker.start()
+            try:
+                self.assertTrue(entered.wait(10))
+                with T._locked(T._state_lock(T.state_path(self.env,'claude',SID)), 0.0) as available:
+                    self.assertTrue(available)
+                (self.repo/'greet.py').write_text('edit before the newer turn\n')
+                self.assertEqual(T.turn_start('claude',SID,str(self.repo),self.env,now=120)['state'],'baseline')
+                (self.repo/'README.md').write_text('the newer turn only\n')
+            finally:
+                release.set()
+                worker.join(15)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(replies['state'], 'late-start')
+        self.assertEqual(self.state()['turn_started_at'], 120)
+        T.turn_end('claude', SID, str(self.repo), self.env, now=130,
+                   recorder=self.recorder, appender=self.appender)
+        self.assertEqual(self.calls[0]['sources'], [['README.md']])
+
+    def test_slow_end_uses_the_late_end_boundary_without_closing_the_new_turn(self):
+        self._overlapping_end(110, 'recorded')
+
+    def test_end_capture_superseded_by_an_earlier_timestamped_start_stays_unknown(self):
+        self._overlapping_end(130, 'superseded-end')
+
+    def _overlapping_end(self, end_time, expected):
+        T.turn_start('claude', SID, str(self.repo), self.env, now=100)
+        (self.repo/'greet.py').write_text('first turn\n')
+        original = T.snapshot
+        entered, release = threading.Event(), threading.Event()
+        replies, errors = {}, []
+        def take(*args):
+            value = original(*args)
+            if threading.current_thread() is worker:
+                entered.set()
+                if not release.wait(10):
+                    raise AssertionError('test did not release snapshot')
+            return value
+        def old_end():
+            try:
+                replies.update(T.turn_end('claude', SID, str(self.repo), self.env, now=end_time,
+                    recorder=self.recorder, appender=self.appender))
+            except BaseException as exc:
+                errors.append(exc)
+        worker = threading.Thread(target=old_end)
+        with mock.patch.object(T, 'snapshot', side_effect=take):
+            worker.start()
+            try:
+                self.assertTrue(entered.wait(10))
+                with T._locked(T._state_lock(T.state_path(self.env,'claude',SID)), 0.0) as available:
+                    self.assertTrue(available)
+                self.assertEqual(T.turn_start('claude',SID,str(self.repo),self.env,now=120)['state'],'baseline')
+                (self.repo/'README.md').write_text('second turn\n')
+            finally:
+                release.set()
+                worker.join(15)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(replies['state'], expected)
+        self.assertEqual(self.state()['turn_started_at'], 120)
+        self.assertIsNone(self.state()['turn_ended_at'])
+        T.turn_end('claude', SID, str(self.repo), self.env, now=140,
+                   recorder=self.recorder, appender=self.appender)
+        if expected == 'recorded':
+            self.assertEqual(self.calls[0]['sources'], [['greet.py']])
+            self.assertEqual(self.appended, [[['README.md']]])
+        else:
+            self.assertEqual(self.calls[0]['sources'], [['README.md']])
+
+
 if __name__ == "__main__":
     unittest.main()

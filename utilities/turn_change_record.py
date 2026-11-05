@@ -49,6 +49,8 @@ MAX_ATTEMPTS = 3
 MAX_CLOSE_ATTEMPTS = 10
 MAX_PENDING = 20
 EVIDENCE_LIMIT = 64 * 1024
+HELD_LIMIT = EVIDENCE_LIMIT * 4
+HELD_TRUNCATION = b"# Supplementary history truncated (oldest first; latest observations retained)\n\n"
 ENTRY_BYTES = EVIDENCE_LIMIT * 4
 OPEN_TURN_SECONDS = 6 * 3600
 KEEP_SECONDS = 14 * 86400
@@ -447,6 +449,36 @@ def _bounded(text: str, limit: int = EVIDENCE_LIMIT) -> str:
     if limit <= len(marker):
         return marker[:limit].decode('utf-8', 'ignore')
     return raw[:limit-len(marker)].decode('utf-8', 'ignore') + marker.decode('utf-8')
+
+
+def _append_held(target: Path, text: str) -> None:
+    """Under the session state lock, atomically retain a bounded tail, including old logs.
+    Read at most the total cap even when a legacy file has grown much larger."""
+    addition = (_bounded(text, EVIDENCE_LIMIT - 1) + "\n").encode("utf-8")
+    try:
+        with target.open("rb") as stream:
+            size = stream.seek(0, os.SEEK_END)
+            stream.seek(max(0, size - HELD_LIMIT))
+            history = stream.read(HELD_LIMIT)
+    except FileNotFoundError:
+        size, history = 0, b""
+    history += addition
+    if size + len(addition) > HELD_LIMIT:
+        history = history[-(HELD_LIMIT - len(HELD_TRUNCATION)):]
+        # Drop the oldest partial line too; UTF-8 and newer observations stay intact.
+        history = HELD_TRUNCATION + history.partition(b"\n")[2]
+    fd, temporary = tempfile.mkstemp(prefix=".held-", dir=target.parent)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(history)
+        os.replace(temporary, target)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(temporary)
+
+
+def _turn_key(state):
+    return tuple(state.get(key) for key in ("turn_started_at", "top", "root"))
 
 
 def record_header(harness: str, sid: str, top: Path) -> str:
@@ -911,8 +943,22 @@ def turn_start(harness: str, sid: str, cwd: str, env, *, now=None, recorder=None
     now = time.time() if now is None else now
     path = state_path(env, harness, sid)
     result = {"state": "busy"}
+    # Git and per-path metadata can take seconds in a large tree. Capture outside
+    # the state lock; recheck the route/root and turn ordering before publishing.
+    top = _top(cwd, env)
+    mode, captured_root = _mode(harness, sid, top, _read(path), env) if top else ("skip", "")
+    taken, anchor = None, None
+    if mode in ("record", "route-held"):
+        from tidy_transcripts import turn_anchor
+        native = payload or {}
+        anchor = turn_anchor(harness, sid, native.get("transcript_path") or native.get("transcriptPath"), at=now)
+        taken = snapshot(top, env)
 
     def begin(state):
+        latest = max(state.get("turn_started_at") or 0, state.get("turn_ended_at") or 0)
+        if latest > now:
+            result["state"] = "late-start"
+            return  # a slow older capture cannot replace a newer boundary
         if not state:
             _prune(path.parent, now)
             _prune_markers(env)
@@ -924,7 +970,6 @@ def turn_start(harness: str, sid: str, cwd: str, env, *, now=None, recorder=None
             state["prior_turn"] = {key: state.get(key) for key in PRIOR_KEYS}
         else:
             state.pop("prior_turn", None)
-        top = _top(cwd, env)
         state.update(harness=harness, session_id=sid, top=str(top) if top else None,
                      turn_started_at=now, turn_ended_at=None, head="", entries=None, root="")
         result["state"] = "no-work-tree"
@@ -933,13 +978,9 @@ def turn_start(harness: str, sid: str, cwd: str, env, *, now=None, recorder=None
         mode, root = _mode(harness, sid, top, state, env)
         result["state"] = mode
         if mode in ("record", "route-held"):
-            taken = snapshot(top, env)
-            if taken is None:
+            if taken is None or root != captured_root:
                 result["state"] = "unreadable"
             else:
-                from tidy_transcripts import turn_anchor
-                native = payload or {}
-                anchor = turn_anchor(harness, sid, native.get("transcript_path") or native.get("transcriptPath"), at=now)
                 state.update(**taken, root=root, native_anchor=anchor)
                 result["state"] = "baseline" if mode == "record" else "route-held-baseline"
 
@@ -959,6 +1000,16 @@ def turn_end(harness: str, sid: str, cwd: str, env, *, now=None, recorder=None, 
     appender = append if appender is None else appender
     path = state_path(env, harness, sid)
     result = {"state": "busy"}
+    observed = _read(path)
+    after, captured_root = None, ""
+    began, top = observed.get("turn_started_at"), observed.get("top")
+    if (observed.get("turn_ended_at") is None and isinstance(began, (int, float))
+            and began <= now and top and observed.get("entries") is not None and Path(top).is_dir()):
+        mode, captured_root = _mode(harness, sid, Path(top), observed, env)
+        if mode in ("record", "route-held") and captured_root == observed.get("root"):
+            after = snapshot(Path(top), env)
+            if after is not None and after.get("entries") is None:
+                after = None
 
     def queue(state, before, after, top, root, began, until=None, mode="record"):
         """Queue the source changes between ``before`` and ``after`` as one turn."""
@@ -983,8 +1034,7 @@ def turn_end(harness: str, sid: str, cwd: str, env, *, now=None, recorder=None, 
                     target.parent.mkdir(parents=True, exist_ok=True)
                     header = '' if target.exists() else record_header(harness, sid, top_path)
                     section = f"Supplement to existing routes; no completion or takeover. Turn {_iso(began)}.\n" + item['section']
-                    with target.open('a', encoding='utf-8') as stream:
-                        stream.write(_bounded(header + section, EVIDENCE_LIMIT-1) + '\n')
+                    _append_held(target, header + section)
                     saved = True
                 except OSError as exc:
                     error = type(exc).__name__
@@ -1023,6 +1073,9 @@ def turn_end(harness: str, sid: str, cwd: str, env, *, now=None, recorder=None, 
                           top, root, prior["turn_started_at"],
                           (state.get("native_anchor") or {}).get("cursor"), mode)
             return
+        if _turn_key(state) != _turn_key(observed):
+            result["state"] = "superseded-end"
+            return  # the capture belongs to another turn; keep the newer state intact
         state.pop("prior_turn", None)
         opened = (state.get("turn_ended_at") is None and isinstance(began, (int, float)) and top
                   and Path(top).is_dir())
@@ -1031,16 +1084,12 @@ def turn_end(harness: str, sid: str, cwd: str, env, *, now=None, recorder=None, 
             top_path = Path(top)
             mode, root = _mode(harness, sid, top_path, state, env)
             result["state"], result["root"] = mode, root
-            after = None
             if mode in ("record", "route-held"):
-                # Only this turn's own start snapshot is compared; without it nothing is attributed.
+                # Only this turn's own start and the matching off-lock end are usable.
                 has_start = state.get("entries") is not None and root == state.get("root")
-                after = snapshot(top_path, env) if has_start else None
                 result["state"] = "unreadable" if has_start else "no-start-snapshot"
-                if after is not None and after.get("entries") is None:
-                    after = None
-            if after is not None:
-                queue(state, state, after, top, root, began, mode=mode)
+                if has_start and root == captured_root and after is not None:
+                    queue(state, state, after, top, root, began, mode=mode)
         state.update(turn_ended_at=now, entries=None, head="")
 
     if _update(path, finish_turn) is None:
