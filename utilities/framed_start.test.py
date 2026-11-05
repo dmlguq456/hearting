@@ -1374,6 +1374,32 @@ class FrameFrictionContinuationTest(StartBase):
         redirected = inputs.frame_input(self.route, "later condition", jobs=self.jobs)
         self.assertEqual(redirected, {"redirect_owner": receipt["owner_attempt_id"]})
 
+    def test_new_repository_in_a_quoted_parser_example_is_not_creation_authority(self):
+        route = {"cwd": "/workspace", "work_request": {"text":
+            "Fix parsing of the phrase new git repository /tmp/example.\n"
+            "```text\nCreate a new git repository /tmp/quoted\n```"}}
+        self.assertIsNone(RP.requested_repository(route))
+
+    def test_replaced_git_directory_is_preserved_on_preparation_retry(self):
+        self.new_repository_frame()
+        real_run = subprocess.run
+        def fail_ref(argv, **kwargs):
+            if argv[0] == "git" and "update-ref" in argv:
+                return subprocess.CompletedProcess(argv, 1, "", "temporary ref failure")
+            return real_run(argv, **kwargs)
+        with mock.patch.object(subprocess, "run", side_effect=fail_ref):
+            self.assertEqual(self.settle()["reason"], "repository-preparation-pending")
+        (self.destination / ".git").rename(self.parent / "created-git")
+        foreign = self.parent / "foreign"
+        subprocess.run(["git", "init", "--quiet", str(foreign)], check=True)
+        before = (foreign / ".git/config").read_bytes()
+        (self.destination / ".git").symlink_to(foreign / ".git", target_is_directory=True)
+        receipt = self.settle()
+        self.assertEqual(receipt["reason"], "repository-preparation-pending")
+        self.assertIn("Git directory was replaced", receipt["detail"])
+        self.assertEqual((foreign / ".git/config").read_bytes(), before)
+        self.assertFalse((foreign / ".git/refs/heads/master").exists())
+
     def test_frame_conditions_are_deduplicated_and_reach_interview_owner_and_existing_fleet_detail(self):
         import dispatch_owner_input as inputs
         import work_intent
@@ -1412,6 +1438,8 @@ class FrameFrictionContinuationTest(StartBase):
         question["brief"]["outcome"] = "Write ./reports/report.md"
         self.assertEqual(FI.path_conflicts(question, "/workspace"), [])
         question["brief"]["outcome"] = "Write another file"
+        self.assertEqual(FI.path_conflicts(question, "/workspace"), [])
+        question["brief"]["outcome"] = "Copy old/report.md to reports/report.md"
         self.assertEqual(FI.path_conflicts(question, "/workspace"), [])
 
 

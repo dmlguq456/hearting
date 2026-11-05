@@ -1757,6 +1757,16 @@ def _prepare_frame_repository(record_path, record):
         raise ValueError("repository-preparation-manual: created destination was replaced; nothing changed")
     if any(child.name != ".git" for child in path.iterdir()):
         raise ValueError("repository-preparation-manual: destination now contains user files; nothing changed")
+    git_dir = path / ".git"
+    initialized = first.get("repository_initialized")
+    if git_dir.is_symlink() or git_dir.is_file():
+        raise ValueError("repository-preparation-manual: Git directory was replaced; nothing changed")
+    if initialized:
+        current_git = git_dir.stat()
+        if (current_git.st_dev, current_git.st_ino) != (initialized.get("device"), initialized.get("inode")):
+            raise ValueError("repository-preparation-manual: Git directory was replaced; nothing changed")
+    elif git_dir.exists():
+        raise ValueError("repository-preparation-manual: existing Git directory has no creation evidence; nothing changed")
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     env.update(GIT_AUTHOR_NAME="Hearting", GIT_AUTHOR_EMAIL="hearting@localhost",
                GIT_COMMITTER_NAME="Hearting", GIT_COMMITTER_EMAIL="hearting@localhost")
@@ -1769,8 +1779,10 @@ def _prepare_frame_repository(record_path, record):
     first = record.get("first_leg") or {}
     if "repository_initialized" not in first:
         git("init", "--quiet")
+        current_git = git_dir.stat()
         record = _bind(record_path, repository_initialized={"path": str(path),
-                        "at": datetime.now(timezone.utc).isoformat()})
+                        "at": datetime.now(timezone.utc).isoformat(),
+                        "device": current_git.st_dev, "inode": current_git.st_ino})
     if "repository_baseline" not in (record.get("first_leg") or {}):
         # Plumbing keeps the user's index and hooks out of this empty baseline.
         tree = git("mktree", input="")

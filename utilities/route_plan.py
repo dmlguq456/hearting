@@ -615,7 +615,15 @@ def requested_repository(route):
     pattern = re.compile(r"(?:new\s+(?:local\s+)?git\s+(?:repository|repo)|새\s*(?:로컬\s*)?git\s*저장소)"
                          r"\s*(?:at\s+|[:=：]\s*)?[(`\"']?\s*((?:~/|/|\.\.?/)[^\s`\"'()<>,;]+)", re.I)
     paths = set()
+    fenced = False
     for line in text.splitlines():
+        if line.strip().startswith(("```", "~~~")):
+            fenced = not fenced
+            continue
+        if fenced or not re.match(r"\s*(?:[-*]\s*)?(?:create\b|make\b|initialize\b|please\s+create\b|"
+                                  r"new\s+(?:local\s+)?git\b|새\s*|(?:intent|scope|outcome|의도|범위|산출물)\s*[:：])",
+                                  line, re.I):
+            continue
         if re.search(r"do not|don't|not doing|non.goal|안 할|하지 않|만들지", line, re.I):
             continue
         paths.update(leg_cwd({"cwd": match.group(1)}, route["cwd"]) for match in pattern.finditer(line))
