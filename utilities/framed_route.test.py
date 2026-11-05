@@ -278,6 +278,13 @@ class FramedRouteCompileTest(FramedBase):
                                  [{"gate": "frame-review", "node": "route-decision", "position": "entry"}])
                 self.assertTrue(RP.is_framed_route(R.verify_route(json.loads(json.dumps(route)), R.ROOT)))
                 self.assertEqual(RP.frame_legs(route), tuple(ids[:-1]))
+                display = "\n".join(R.compose_decision_lines(route))
+                self.assertIn(f"frame {len(ids) - 1}갈래", display)
+                self.assertIn("준비 실행 강도=standard", display)
+                self.assertIn("본 작업 강도는 승인된 제안에서 결정", display)
+                if intensity == "quick":
+                    self.assertIn("frame 요청=quick (source=explicit)", display)
+                    self.assertNotIn("intensity=standard (source=explicit", display)
         with self.assertRaisesRegex(ValueError, "invalid intensity"):
             self.compose(intensity="bogus")
         one = self.compose(intensity="quick")

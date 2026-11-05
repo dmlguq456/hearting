@@ -195,7 +195,7 @@ def _record_view(record, route_id, jobs, node_evidence=None, now=None, degradati
             node["elapsed_min"] = max(elapsed) if elapsed else None
         node["resource_run_ids"] = [r.run_id for r in children]
     view["progress"]["done"] = sum(n["state"] == "done" for n in view.get("nodes", ()))
-    return view
+    return route.with_frame_corrections(view, record)
 
 
 def _working_resources_for_record(record, jobs):

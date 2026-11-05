@@ -33,7 +33,8 @@ for document, phrases in {
 
 workflow = (ROOT / "core/WORKFLOW.md").read_text(encoding="utf-8")
 assert "uses that entry as the primary route" in workflow
-assert "`direct` is an intensity inside the selected entry route" in workflow
+assert "explicit `direct` remains an intensity inside an entry route" in workflow
+assert "The tiny-fix path in §0.2.1 records an inline change automatically" in workflow
 analysis_invocation = manifest["capabilities"]["analyze-project"]["invocation"]
 assert "user asks to analyze existing code" in analysis_invocation["use_when"]
 assert "default initial analysis to persistent output" in analysis_invocation["use_when"]
@@ -44,16 +45,19 @@ for bootstrap in (
     "adapters/opencode/AGENTS.md",
 ):
     text = (ROOT / bootstrap).read_text(encoding="utf-8")
-    routing = " ".join(text.split("Route by `core/WORKFLOW.md §0.2`", 1)[1].split())
-    compose = re.search(r"`(?:utilities/capability-route.py|preflight.sh|hearting run capability-route) compose`", routing)
-    assert compose is not None, f"{bootstrap} lost the compose route surface"
-    normalized = " ".join(routing.split())
-    assert "The main session decides only whether the work is direct (§0.2.1)" in normalized, (
-        f"{bootstrap} must limit the main session to deciding direct or not"
+    routing = " ".join(text.split("## Starting work", 1)[1].split("## Following the runtime", 1)[0].split())
+    assert "hearting run capability-route compose --start --prompt-file <task>" in routing, (
+        f"{bootstrap} lost the compose route for other work"
     )
-    assert "use `--shape direct` for one atomic, reversible inline change; otherwise omit `--shape` and let the frame decide" in normalized, (
-        f"{bootstrap} must send other new work to the frame by omitting shape"
-    )
+    assert "handle one reversible outcome inline" in routing
+    assert "small feature's source, tests and README" in routing
+    for predicate in ("known scope", "focused checks", "no shared contract change",
+                      "long resource work", "artifact handoff", "independent verifier"):
+        assert predicate in routing, f"{bootstrap} lost direct predicate: {predicate}"
+    assert "recorded automatically without task/compose/finish/capability-info calls" in routing
+    assert "Compose before scope grows" in routing
+    assert "Other work starts with:" in routing
+
 
 
 def anchor(value: str) -> str:

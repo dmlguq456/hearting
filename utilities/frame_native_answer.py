@@ -109,11 +109,12 @@ def record(harness: str, payload: dict) -> Path | None:
             candidates.append((route, candidate))
     if len(candidates) != 1:
         return None
-    route, (_target, _answers) = candidates[0]
+    route, candidate = candidates[0]
     try:
         # Recompute immediately before the existing write path so a changed raise,
         # route, or sibling answer cannot inherit an earlier candidate decision.
-        return work_start.record_native_answer(route, jobs, asked)
+        return work_start.record_native_answer(route, jobs, asked,
+            expected_interview_digest=candidate[2] if len(candidate) > 2 else None)
     except (OSError, ValueError, KeyError, TypeError):
         return None
 

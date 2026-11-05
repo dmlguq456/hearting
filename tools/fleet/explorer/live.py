@@ -722,7 +722,8 @@ def _node_detail(node, now):
                         if rounds and rounds > 1 else ""),
         "unit": " · ".join(p for p in (_text(node.get("unit")), _text(node.get("model_profile"))) if p) or "·",
         "gate": _text(node.get("gate")),
-        "out": " · ".join(str(p) for p in (node.get("write_scope") or ())) or "·", "says": "",
+        "out": " · ".join(str(p) for p in (node.get("write_scope") or ())) or "·",
+        "says": _text(node.get("says")),
     }
     if "depends_on" in node or node.get("parallel_group") is not None:
         result["graph_known"] = True

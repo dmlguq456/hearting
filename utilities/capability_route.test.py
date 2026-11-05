@@ -7560,7 +7560,9 @@ class ComposeRouteTest(TestRoute):
   diagnosis={"state":"non-git","cwd":cwd,"detail":"fatal: not a git repository"}
   direct=R._decide_non_git_compose(diagnosis,"direct",0,False,None)
   self.assertEqual(direct["kind"],"direct")
-  for request_shape,depth,attempt in ((None,0,False),("framed",0,False),("solo",0,False),
+  self.assertEqual(R._decide_non_git_compose(diagnosis,None,0,False,None)["kind"],"direct")
+  self.assertEqual(R._decide_non_git_compose(diagnosis,None,0,False,None,new_repository=True)["kind"],"worker-candidate")
+  for request_shape,depth,attempt in (("framed",0,False),("solo",0,False),
                                       (None,1,False),("direct",1,False),("direct",0,True)):
    result=R._decide_non_git_compose(diagnosis,request_shape,depth,attempt,"autopilot-code")
    expected = "worker-candidate" if request_shape != "direct" else "refuse"
@@ -7643,7 +7645,7 @@ class ComposeRouteTest(TestRoute):
 
  def test_compose_start_with_empty_ancestor_git_marker_starts_direct(self):
   import work_start
-  exact="git 아닌 폴더 — 이 세션이 직접 진행. 작업자가 필요하면 --shape 없이 다시 시작(원본 수정은 git init 필요)"
+  exact="git 아닌 폴더 — 이 세션이 직접 진행"
   with tempfile.TemporaryDirectory(prefix="compose-ancestor-marker-") as tmp, \
        mock.patch.dict(os.environ,{"AGENT_HOME":str(R.ROOT),"AGENT_DISPATCH_ATTEMPT_ID":""}):
    root=Path(tmp); parent=root/"parent"; cwd=parent/"project"
@@ -7686,7 +7688,7 @@ class ComposeRouteTest(TestRoute):
    self.assertIn("source=non-git-unresolved", "\n".join(R.compose_decision_lines(route)))
    decision={"kind":"direct","capability_unresolved":True}
    card=R.compose_card(route,non_git_decision=decision)
-   self.assertEqual(card.count("git 아닌 폴더 — 이 세션이 직접 진행. 작업자가 필요하면 --shape 없이 다시 시작(원본 수정은 git init 필요)"),1)
+   self.assertEqual(card.count("git 아닌 폴더 — 이 세션이 직접 진행"),1)
    self.assertEqual(card.count("작업 종류 미정 — `--capability`로 지정"),1)
    R.verify_route(route,R.ROOT)
 
@@ -8045,7 +8047,7 @@ class ComposeRouteTest(TestRoute):
                 "\n".join(R.compose_decision_lines(measured)))
   framed=self.compose(capability=None,capability_mode=None,shape="framed",graph=None,intensity="strong")
   frame_display="\n".join(R.compose_decision_lines(framed))
-  self.assertIn("source=explicit, requested=strong",frame_display)
+  self.assertIn("frame 요청=strong (source=explicit)",frame_display)
   self.assertNotIn("강도 안내",frame_display)
   self.assertIn("capability=frame 결정 대기",frame_display)
  def test_compose_start_and_resume_print_decisions_before_launch_once_in_all_harnesses(self):

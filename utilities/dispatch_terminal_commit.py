@@ -546,8 +546,10 @@ def _seal_completion_summary(request, route, primary, slot) -> None:
         import work_intent
         if (slot / work_intent.SUMMARY_NAME).exists():
             return
+        from dispatch_owner_input import completion_corrections
         text = work_intent.completion_summary(route, primary, route_file=request.route_file,
-                                              cost=_completion_cost(request, route))
+                                              cost=_completion_cost(request, route),
+                                              corrections=completion_corrections(request.jobs, request.owner_attempt_id))
         _write_exclusive(slot / work_intent.SUMMARY_NAME, text.encode())
     except Exception:  # noqa: BLE001 -- an existing or unrenderable summary keeps the delivery as it was
         return

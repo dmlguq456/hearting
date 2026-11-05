@@ -84,6 +84,27 @@ def state_key(snapshot):
     evidence = {rid: (value.fingerprint() if isinstance(value, RegistryRouteEvidence)
                      else json.dumps(value, sort_keys=True, default=str))
                 for rid, value in snapshot.node_evidence.items()}
+    # Retained frame conditions change detail, not the immutable route or its
+    # execution state. A scoped sidecar stamp invalidates the existing detail fill.
+    from pathlib import Path
+    for rid, nodes in snapshot.node_evidence.items():
+        if not isinstance(rid, str) or not hasattr(nodes, "get"):
+            continue
+        frame = nodes.get("frame") or {}
+        if not isinstance(frame, dict):
+            continue
+        raw = frame.get("route_file")
+        if not isinstance(raw, str) or not raw:
+            continue
+        route_file = Path(raw)
+        if route_file.parent.name != "routes" or route_file.parent.parent.name != ".runtime":
+            continue
+        path = route_file.parent.parent / "framed-decision" / (rid + ".corrections.json")
+        try:
+            stamp = path.stat()
+            evidence[rid] = (evidence[rid], stamp.st_mtime_ns, stamp.st_size)
+        except OSError:
+            pass
     return {"rows": rows, "resources": resources, "evidence": evidence,
             "activity": {identity(row): _activity(row) for row in snapshot.sessions + snapshot.jobs}}
 

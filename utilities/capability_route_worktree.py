@@ -134,12 +134,12 @@ def _compose_git_diagnosis(cwd):
 
 
 def _decide_non_git_compose(cwd_diagnosis, requested_shape,
-                            dispatch_depth, registered_attempt, capability_hint):
+                            dispatch_depth, registered_attempt, capability_hint, *, new_repository=False):
     """The single compose-start decision for Git, non-Git direct, and non-Git refusal.
 
     `requested_shape` is the shape the start will run: a readable route-plan leg's own
-    shape, else `--shape`. Only an explicit direct shape runs without a worker; an omitted
-    shape follows the Git default (framed), so the frame decides as in a Git folder."""
+    shape, else `--shape`. An ordinary depth-zero non-Git start defaults to this
+    session; an explicitly named new repository keeps framed preparation."""
     common = {"cwd": str(cwd_diagnosis.get("cwd") or ""),
               "capability_hint": capability_hint}
     state = cwd_diagnosis.get("state")
@@ -150,7 +150,9 @@ def _decide_non_git_compose(cwd_diagnosis, requested_shape,
         return {**common, "kind": "error", "detail": f"{common['cwd']}: {detail}"}
     t = UI_TEXT.translator()
     cause = t("route.nongit.cause", cwd=common['cwd'])
-    if requested_shape != "direct":
+    ordinary_inline = (requested_shape is None and dispatch_depth == 0
+                       and not registered_attempt and not new_repository)
+    if requested_shape != "direct" and not ordinary_inline:
         return {**common, "kind": "worker-candidate", "cause": cause,
                 "next": t("route.nongit.next_worker")}
     if dispatch_depth > 0 or registered_attempt:
@@ -1376,6 +1378,14 @@ def _close_route_argument(a):
         return latest
     path=artifact_producer.resolve_route_argument(Path(root),route)
     if not path.is_file():
+        try:
+            located = resolve_route_argument(route, getattr(a, "jobs", None))
+            if located.is_file():
+                record = json.loads(located.read_text())
+                if isinstance(record, dict) and record.get("route_id") == str(route):
+                    return str(located)
+        except (OSError, ValueError):
+            pass
         raise ValueError(f"route-not-found: {route} under {root}/.runtime/routes")
     return str(path)
 
@@ -1421,7 +1431,8 @@ def _legacy_inline_finish(a, route, route_file, api, entry_error=None, *, _admis
     explicit = None
     marker, _row = complete_node(route, node, node_id, evidence, jobs=None,
                                  attempt_id=attempt_id, explicit_attempt_metadata=explicit)
-    outcome, _created = close_route(route, str(route_file), a.commit if getattr(a, "commit", None) else None,
+    commit, _git_cwd, commit_observation = inline_finish.select_result_commit(route, getattr(a, "commit", None), api)
+    outcome, _created = close_route(route, str(route_file), commit,
                                     summary, allow_unproven=True)
     root = Path(route.get("artifact_root") or _compose_artifact_root(os.getcwd()))
     cycle = None
@@ -1437,6 +1448,7 @@ def _legacy_inline_finish(a, route, route_file, api, entry_error=None, *, _admis
     print(f"legacy-inline-finish node={node_id} outcome={bool(outcome)} finalized={bool(finalized)}", file=sys.stderr)
     return {"schema": "finish_receipt_v1", "route_id": route.get("route_id"),
             "route_hash": route.get("route_hash"), "state": "legacy-finished", "legacy": True,
+            **({"commit_observation": commit_observation} if commit_observation else {}),
             "node": node_id, "marker": marker, "outcome": outcome, "finalized": finalized}
 
 @contextlib.contextmanager

@@ -577,8 +577,13 @@ class ProjectCardSlotRunTest(RunnerCase):
             self.assertEqual(item["card_generation"], 1)
             run_dir = st.state_root() / "runs" / "batch-project"
             run_dir.mkdir(parents=True)
-            bundle = runner.assemble(item, "batch-project", run_dir)
+            import turn_change_record
+            automatic = {'session_id': 'runner-B', 'summary': 'check exit 1; final reply reference'}
+            with mock.patch.object(turn_change_record, 'supplementary_records', return_value=[automatic]) as observe:
+                bundle = runner.assemble(item, "batch-project", run_dir)
             doc = json.loads(bundle.path.read_text(encoding="utf-8"))
+            observe.assert_any_call('claude', 'runner-B', str(self.cwd))
+            self.assertIn(automatic, doc['automatic_records'])
             self.assertEqual(doc["card"], "B card")
             before_a = st.read_latest_card(seat_a)
             with mock.patch.object(runner, "memory_refs", return_value=([{"id": "mem-B"}], 0)), \

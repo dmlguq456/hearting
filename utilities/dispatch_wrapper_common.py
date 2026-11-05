@@ -21,6 +21,7 @@ import secrets
 import signal
 import subprocess
 import sys
+import frame_repository
 import time
 from contextlib import contextmanager, suppress
 from datetime import datetime, timezone
@@ -187,7 +188,7 @@ def read_launch_fence_failure(fd: int) -> tuple[dict[str, object] | None, bool]:
 
 def resolve_artifact_root(worktree: str) -> str:
     result = subprocess.run(
-        [str(ROOT / "utilities" / "artifact-root.sh"), worktree],
+        [str(ROOT / "utilities" / "artifact-root.sh"), frame_repository.execution_path(worktree)],
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

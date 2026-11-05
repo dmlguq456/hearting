@@ -1712,6 +1712,8 @@ class WorkStartTest(unittest.TestCase):
                                return_value={"AGENT_ARTIFACT_OUTPUT_DIR": "/exact/artifacts"}) as prepare:
             result = self.start()
         self.assertEqual(result["state"], "inline")
+        self.assertEqual(result["cwd"], os.getcwd())
+        self.assertIn(result["cwd"], result["next_step"])
         self.assertEqual(result["artifact_env"]["AGENT_ARTIFACT_OUTPUT_DIR"], "/exact/artifacts")
         prepare.assert_called_once_with(self.path, start=True, jobs=self.jobs, require_cycle=False)
         self.assertEqual(self.calls, [])
@@ -2060,6 +2062,34 @@ class FrameInterviewStepTest(WF.WorkflowFixture):
     def resolution(self):
         ledger = WF.WS.WorkflowLedger(self.route["route_id"], self.route["route_hash"], jobs=self.jobs)
         return WF.WS.human_gate_resolution(ledger.journal(), "frame-review")
+
+    def test_unanswered_interview_is_replaced_in_the_same_round_and_new_answers_release_it(self):
+        first = self.step(interview=self.question_file)
+        self.question["brief"]["outcome"] = "One report in results/report.md."
+        self.question_file.write_text(json.dumps(self.question))
+        replaced = self.step(interview=self.question_file)
+        self.assertEqual(replaced["interview_file"], first["interview_file"])
+        self.assertEqual(replaced["required_action"], "ask-registered-question")
+        self.assertEqual(replaced["interview"]["brief"]["outcome"], self.question["brief"]["outcome"])
+        self.assertEqual((self.resolution()["epoch"], self.calls), (1, ["gate"]))
+        self.assertEqual(self.step(answers=self.answers())["state"], "released")
+        saved = Path(replaced["interview_file"]).read_bytes()
+        self.question["brief"]["outcome"] = "Another output."
+        self.question_file.write_text(json.dumps(self.question))
+        with self.assertRaisesRegex(ValueError, "frame-input-conflict"):
+            self.step(interview=self.question_file)
+        self.assertEqual(Path(replaced["interview_file"]).read_bytes(), saved)
+
+    def test_partial_native_answers_protect_the_registered_wording(self):
+        import frame_interview as FI
+        first = self.step(interview=self.question_file)
+        saved = Path(first["interview_file"]).read_bytes()
+        (Path(first["interview_file"]).parent / FI.NATIVE_PARTIAL_NAME).write_text("{}")
+        self.question["brief"]["outcome"] = "Another output."
+        self.question_file.write_text(json.dumps(self.question))
+        with self.assertRaisesRegex(ValueError, "recorded answers"):
+            self.step(interview=self.question_file)
+        self.assertEqual(Path(first["interview_file"]).read_bytes(), saved)
 
     def test_nonuser_complete_answer_does_not_occupy_the_pending_human_answer(self):
         import frame_interview as FI

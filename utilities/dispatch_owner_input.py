@@ -31,6 +31,61 @@ class InputError(ValueError):
     pass
 
 
+def frame_input(route, text=None, request_id=None, *, jobs=None):
+    """Retain pre-owner conditions on the existing frame, serialized with its decision."""
+    import work_intent
+    root, rid, rhash = work_intent.frame_reference(route)
+    directory = root / ".runtime/framed-decision"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / (rid + ".corrections.json")
+    with (directory / (rid + ".lock")).open("a+b") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        if jobs is not None:
+            # The frame may have started its owner while this correction waited
+            # on the existing decision lock. Route that input to the owner now.
+            import work_start
+            import route_plan
+            try:
+                _root, _cycle, output = work_start._framed_cycle(route)
+                decision = route_plan.read_record(output / route_plan.RECORD_RELATIVE)
+                leg_id = ((decision.get("first_leg") or {}).get("route") or {}).get("route_id")
+                owner = work_start._route_module().route_owner_attempt(leg_id, jobs) if leg_id else None
+                if owner:
+                    return {"redirect_owner": owner}
+            except (OSError, ValueError):
+                pass
+        if path.is_symlink():
+            raise InputError("frame-input-state-unsafe")
+        value = json.loads(path.read_text()) if path.exists() else {
+            "schema": "frame_route_input_v1", "route_id": rid, "route_hash": rhash, "requests": []}
+        if (value.get("schema"), value.get("route_id"), value.get("route_hash")) != (
+                "frame_route_input_v1", rid, rhash):
+            raise InputError("frame-input-target-changed")
+        duplicate = False
+        if text is not None:
+            if not text.strip() or len(text.encode()) > work_intent.FRAME_CORRECTION_INPUT_BYTES:
+                raise InputError("correction-text-empty-or-oversized")
+            digest = _digest(text)
+            request_id = request_id or "input-" + _digest([rid, digest])[:32]
+            if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", request_id):
+                raise InputError("correction-id-invalid")
+            old = next((item for item in value["requests"] if item["id"] == request_id), None)
+            if old and old["digest"] != digest:
+                raise InputError("correction-id-content-conflict")
+            duplicate = old is not None
+            if not old:
+                value["requests"].append({"id": request_id, "digest": digest, "text": text,
+                    "at": time.time(), "source_session": route_authority.correction_source_session()})
+                _write(path, value)
+        coverage = work_intent.frame_correction_coverage(work_intent.frame_correction_view(route))
+        return {"delivery_coverage": coverage, "state": "frame-stored", "route_id": rid, "request_id": request_id, "duplicate": duplicate,
+                "retained_corrections": len(value["requests"]), "delivery_timing": "interview-and-first-owner",
+                "requests": [{k: v for k, v in item.items() if k != "text"} for item in value["requests"]],
+                "applied": "not-verified", "next_step": "Conditions are retained on this frame, visible in its "
+                    "Fleet detail, and included newest first within the interview and first owner task's delivery budget. "
+                    "Truncated coverage links the full retained history. The frame keeps running."}
+
+
 def _digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
@@ -160,7 +215,7 @@ def bound_input_thread(jobs, attempt):
     return None
 
 
-def _public(value, *, live=False, reachable=None, owner_phase=None):
+def _public(value, *, live=False, reachable=None, owner_phase=None, metadata=None):
     reachable = live if reachable is None else reachable
     phase = owner_phase or _owner_phase(value["attempt_id"])
     timing = ("active-turn" if value["transport"] == "codex-active-turn" and phase == "running-turn"
@@ -177,10 +232,17 @@ def _public(value, *, live=False, reachable=None, owner_phase=None):
               "positive quiescence evidence.")
     if timing == "phase-unavailable":
         notice = ("Delivery timing is unknown because the exact owner phase is unavailable. " + notice)
+    metadata = metadata or {}
+    one_shot = metadata.get("intensity") == "quick" or metadata.get("route_node") == "one-shot"
+    if one_shot:
+        notice += (" This is a one-shot owner: another turn is not guaranteed. "
+                   "A next-owner-turn correction may remain undelivered when this turn ends. "
+                   "Delivery receipts do not verify that the correction was applied.")
     return {"attempt_id": value["attempt_id"], "thread_id": value["thread_id"],
             "transport": value["transport"], "accepting": value["accepting"] and reachable,
             "supervisor_live": live, "owner_phase": phase,
             "delivery_timing": timing, "delivery_notice": notice,
+            "one_shot": one_shot, "application_guaranteed": False,
             "requests": [{key: item[key] for key in item if key != "text"}
                          for item in value["requests"]],
             "applied": "not-verified",
@@ -196,7 +258,7 @@ def inspect(jobs, attempt):
             raise InputError("owner-input-target-changed")
         live = supervisor_lease_is_held(jobs, row.metadata)
         reachable = _reachable(row, value, live)
-        result = _public(value, live=live, reachable=reachable)
+        result = _public(value, live=live, reachable=reachable, metadata=row.metadata)
         for item in result["requests"]:
             item["delivery_observation"] = (
                 "delivery-unknown" if not reachable and item["state"] == "sending" else
@@ -243,7 +305,7 @@ def submit(jobs, attempt, text, request_id=None):
                 break
         live = supervisor_lease_is_held(jobs, row.metadata)
         if duplicate_item is not None:
-            result = {**_public(value, live=live, reachable=_reachable(row, value, live)),
+            result = {**_public(value, live=live, reachable=_reachable(row, value, live), metadata=row.metadata),
                       "request_id": request_id, "duplicate": True,
                       **_retained_fields(duplicate_item)}
             queued = duplicate_item.get("state") == "queued"
@@ -263,7 +325,7 @@ def submit(jobs, attempt, text, request_id=None):
             _transition(item, "retained" if retain else "queued")
             value["requests"].append(item)
             _write(path, value)
-            result = {**_public(value, live=live, reachable=_reachable(row, value, live)),
+            result = {**_public(value, live=live, reachable=_reachable(row, value, live), metadata=row.metadata),
                       "request_id": request_id, "duplicate": False, **_retained_fields(item)}
             queued = not retain
 
@@ -787,6 +849,20 @@ def unresolved_revision(jobs, attempt):
 
 def unresolved(jobs, attempt):
     return bool(unresolved_revision(jobs, attempt))
+
+
+def completion_corrections(jobs, attempt):
+    """Count exact input receipts at completion; transport acceptance is not application."""
+    try:
+        _, target = _target(jobs, attempt)
+        with _locked(jobs, attempt) as (_, value):
+            if value is None or value.get("target") != target:
+                return {}
+            states = [item.get("state") for item in value["requests"]]
+            return {"undelivered": sum(state in {"queued", "undelivered", "retained"} for state in states),
+                    "unknown": sum(state in {"sending", "delivery-unknown"} for state in states)}
+    except (InputError, JoinContractError, OSError, ValueError, KeyError, TypeError):
+        return {}
 
 
 def materialize_unresolved(jobs, attempt):

@@ -38,9 +38,8 @@ class ListSizes(unittest.TestCase):
                                             for hit in frame.hits))
                         self.assertTrue(all(sum(cell_width(cell[0]) for cell in row) == cols
                                             for row in frame.cells))
-                        self.assertEqual(len(frame.text_rows()[42]), cols)
-                        self.assertEqual(len(frame.text_rows()[43]), cols)
-                        self.assertEqual(len(frame.text_rows()[44]), cols)
+                        for row in frame.text_rows()[42:45]:
+                            self.assertEqual(cell_width(row), cols)
 
 
 class QuietSizes(unittest.TestCase):
@@ -60,6 +59,9 @@ class QuietSizes(unittest.TestCase):
                     self.assertTrue(all((hit.y == -1 and hit.action[0] == "parent") or
                                         (0 <= hit.y < 41 and 0 <= hit.x0 < hit.x1 <= cols)
                                         for hit in frame.hits))
-                    self.assertEqual(len(frame.text_rows()[42]), cols)
-                    self.assertEqual(len(frame.text_rows()[43]), cols)
-                    self.assertEqual(len(frame.text_rows()[44]), cols)
+                    for row in frame.text_rows()[42:45]:
+                        self.assertEqual(cell_width(row), cols)
+
+
+if __name__ == "__main__":
+    unittest.main()

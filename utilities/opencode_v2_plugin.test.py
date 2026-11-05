@@ -1388,8 +1388,8 @@ try {
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_v2_shell_reaches_the_route_presence_gate(self):
-        # GA-A5-014: V2 calls its shell tool `shell`; a commit in a repository with no route
-        # is refused exactly as V1's `bash` is, and an ordinary command still passes.
+        # GA-A5-014: V2 `shell` follows V1's current-worktree tiny-fix exception,
+        # while a commit in another worktree still reaches the route gate.
         node = shutil.which("node")
         if not node:
             self.skipTest("node is unavailable for the V2 plugin module contract")
@@ -1403,6 +1403,8 @@ try {
                          ["-c", "user.email=t@e", "-c", "user.name=t", "commit", "-q", "-m", "init"]):
                 subprocess.run(["git", *argv], cwd=project, check=True, capture_output=True)
             (project / "src" / "engine.py").write_text("x = 2\n")       # a source change to commit
+            other = project.parent / 'other'
+            shutil.copytree(project, other)  # an independent fixture Git checkout
             script = r"""
 import assert from "node:assert/strict"
 import { pathToFileURL } from "node:url"
@@ -1428,11 +1430,12 @@ const run = (command) => hooks.get("tool.execute.before")({ tool: "shell", sessi
                                                              input: { command } })
 try {
   await run("ls src")
-  await assert.rejects(run("git commit -am change"), /no route for/)
+  await run("git commit -am change")
+  await assert.rejects(run("git -C " + process.env.OTHER_ROOT + " commit -am change"), /no route for/)
 } finally { await cleanup() }
 """
             env = {**BASE_ENV, "PLUGIN_PATH": str(ROOT / "adapters/opencode/plugins/hearting-guards.js"),
-                   "TEMP_ROOT": str(project), "HOME": str(home), "AGENT_HOME": str(ROOT),
+                   "TEMP_ROOT": str(project), "OTHER_ROOT": str(other), "HOME": str(home), "AGENT_HOME": str(ROOT),
                    "PYTHONDONTWRITEBYTECODE": "1", "XDG_STATE_HOME": str(home / ".state"),
                    "XDG_CONFIG_HOME": str(home / ".config"), "XDG_DATA_HOME": str(home / ".data"),
                    "XDG_CACHE_HOME": str(home / ".cache"), "FLEET_ROUTE_CHAIN_DIR": str(home / "ledgers"),

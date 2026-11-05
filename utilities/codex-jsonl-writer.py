@@ -7,6 +7,7 @@ import datetime as _dt
 import json
 import os
 import subprocess
+import frame_repository
 import sys
 from pathlib import Path
 
@@ -57,7 +58,9 @@ def _usage_path(log: Path, attempt: str) -> Path | None:
 def run(log: Path, attempt: str, argv: list[str]) -> int:
     log.parent.mkdir(parents=True, exist_ok=True)
     usage_path = _usage_path(log, attempt)
-    child = subprocess.Popen(argv, stdin=sys.stdin, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    child = subprocess.Popen(argv, stdin=sys.stdin, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                 **frame_repository.native_process_options(),
+                                 env=frame_repository.native_environment(os.environ))
     found_usage: dict[str, int] = {}
     # Defect L: this log is a live feed, not just a post-mortem record. Fleet's
     # `_parse_codex_attempt_tail` reads it while the child runs to recover the
@@ -101,6 +104,7 @@ def run(log: Path, attempt: str, argv: list[str]) -> int:
     return child.returncode
 
 
+@frame_repository.process_entry
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--log", required=True, type=Path)

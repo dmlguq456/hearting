@@ -1558,7 +1558,7 @@ def collect_views(jobs, node_evidence=None, now=None, degradations=None):
     now = time.time() if now is None else now
     node_evidence = node_evidence or {}
     records = resolve_records(jobs, node_evidence)
-    return build_views(
+    views = build_views(
         jobs,
         node_evidence,
         records,
@@ -1566,6 +1566,32 @@ def collect_views(jobs, node_evidence=None, now=None, degradations=None):
         resolve_gate_marks(records, jobs=jobs, node_evidence=node_evidence),
         degradations,
     )
+    return [with_frame_corrections(view, records.get(view["route_id"]) or {}) for view in views]
+
+
+def with_frame_corrections(view, record):
+    """Collection-time read only; use the existing stage note/detail, with no new screen."""
+    if record.get("capability") != "route-frame":
+        return view
+    try:
+        utilities = str(Path(__file__).resolve().parents[2] / "utilities")
+        if utilities not in sys.path:
+            sys.path.insert(0, utilities)
+        import work_intent
+        coverage = work_intent.frame_correction_view(record)
+        items = coverage["requests"]
+        if items:
+            from fleet.explorer.view_model import _safe_text
+            text = _safe_text(" · ".join(item["text"] for item in items)[:300], limit=300)
+            for node in view.get("nodes", []):
+                if node.get("id") == "frame":
+                    node["says"] = work_intent.ui_translator()("route.frame.corrections", count=coverage["total"], text=text)
+                    if coverage["truncated"]:
+                        node["says"] += (f" · truncated: {len(items)}/{coverage['total']} recent entries shown; "
+                                         f"full history: {coverage['reference']}")
+    except (ImportError, OSError, ValueError, TypeError):
+        pass
+    return view
 
 
 def summary(views):
@@ -1585,6 +1611,8 @@ def summary(views):
                   "harness": n.get("harness"), "effort": n.get("effort")}
                  for n in v.get("nodes") or []]
         for node, source in zip(nodes, v.get("nodes") or []):
+            if source.get("says"):
+                node["says"] = source["says"]
             if source.get("degradation") is not None:
                 node["degradation"] = source.get("degradation")
             if source.get("attempt_round") is not None:

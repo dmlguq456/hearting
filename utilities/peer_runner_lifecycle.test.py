@@ -2026,6 +2026,61 @@ console.log(JSON.stringify(calls[0]));
         finally:
             os.close(fd)
 
+    def test_before_exec_runs_once_after_selection_and_before_execve(self):
+        import fcntl
+
+        self._point_current(self.b)
+        store = obligations.ObligationStore(self.state)
+        lock_path = store.root / obligations.RUNNER_LOCK_NAME
+        lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        inherited = os.get_inheritable(fd)
+        events = []
+
+        def before_exec():
+            events.append(("before_exec", os.get_inheritable(fd)))
+
+        def execve(path, argv, env):
+            events.append(("execve", argv[1]))
+            raise OSError("fixture exec failure")
+
+        try:
+            with mock.patch.object(obligations, "__file__",
+                                   str(self.a / "utilities/peer_obligations.py")), \
+                 mock.patch.dict(os.environ, self.env, clear=True), \
+                 mock.patch.object(os, "execve", side_effect=execve):
+                self.assertFalse(obligations.exec_service_runner(
+                    fd, self.state, str(self.current), before_exec=before_exec))
+            self.assertEqual(events, [
+                ("before_exec", inherited),
+                ("execve", str(self.b / "utilities/peer-steward.py"))])
+            self.assertEqual(os.get_inheritable(fd), inherited)
+        finally:
+            os.close(fd)
+
+    def test_before_exec_is_not_called_without_replacement(self):
+        import fcntl
+
+        store = obligations.ObligationStore(self.state)
+        lock_path = store.root / obligations.RUNNER_LOCK_NAME
+        lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        calls = []
+        try:
+            with mock.patch.object(obligations, "__file__",
+                                   str(self.a / "utilities/peer_obligations.py")), \
+                 mock.patch.dict(os.environ, self.env, clear=True), \
+                 mock.patch.object(os, "execve", side_effect=AssertionError("no replacement")):
+                for service_current in (str(self.current), str(self.base / "missing-current")):
+                    self.assertFalse(obligations.exec_service_runner(
+                        fd, self.state, service_current,
+                        before_exec=lambda: calls.append(service_current)))
+            self.assertEqual(calls, [])
+        finally:
+            os.close(fd)
+
 
 if __name__ == "__main__":
     unittest.main()
