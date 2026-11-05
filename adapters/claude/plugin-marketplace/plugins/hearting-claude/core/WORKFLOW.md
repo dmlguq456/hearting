@@ -210,6 +210,7 @@ clear; an explicit `--capability` and mode take precedence, and an unclear purpo
 as unresolved while retaining the existing storage fallback. The session performs that
 capability's work and can close it through the normal inline `finish` path. Its
 one-line card says `git 아닌 폴더 — 이 세션이 직접 진행`.
+Selection and compilation use the same task bytes, including a one-shot stdin input.
 An explicitly selected worker shape, including a route-plan leg whose own shape is not direct, is a
 worker request. In a non-Git folder, a compiled artifact-only worker route may run in the
 bound folder; a route whose compiled write scope mutates source is refused with the reason

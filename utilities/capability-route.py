@@ -1866,6 +1866,7 @@ def main():
         shape=a.shape or "framed"
         if a.start and (a.explain or a.prompt_file is None):
             raise ValueError("compose-start-requires-task: use --start --prompt-file <task>, without --explain")
+        compose_task = a.prompt_file.read_text() if a.prompt_file else ""
         cwd_was_explicit = a.cwd is not None
         cwd=a.cwd or os.getcwd()
         promotion_cwd = cwd
@@ -1886,7 +1887,7 @@ def main():
             if given is not None:
                 print(f"campaign_key_resolved={a.campaign_key} given={given}",file=sys.stderr)
         if a.slug is None:
-            a.slug=compose_default_slug(a.prompt_file.read_text() if a.prompt_file else "",
+            a.slug=compose_default_slug(compose_task,
                                         capability=a.capability or (None if shape=="framed" else COMPOSE_DEFAULT_CAPABILITY),
                                         shape=shape)
         route_plan_binding = None
@@ -1933,7 +1934,7 @@ def main():
                 bool(os.environ.get("AGENT_DISPATCH_ATTEMPT_ID")
                      or os.environ.get("AGENT_DISPATCH_REGISTERED_WORKER", "").lower() in {"1", "true"}),
                 a.capability, new_repository=bool(RP.requested_repository({"cwd": str(cwd),
-                    "work_request": {"text": a.prompt_file.read_text() if a.prompt_file else ""}})))
+                    "work_request": {"text": compose_task}})))
             if non_git_decision["kind"] == "error":
                 raise ValueError("compose-start-git-diagnosis: " + str(non_git_decision.get("detail")))
             if non_git_decision["kind"] == "refuse":
@@ -1946,7 +1947,7 @@ def main():
                 if a.capability is not None:
                     capability_source = "explicit"
                 else:
-                    classified = _classify_non_git_task(a.prompt_file.read_text())
+                    classified = _classify_non_git_task(compose_task)
                     if classified is None:
                         capability = COMPOSE_DEFAULT_CAPABILITY
                         capability_mode = None
@@ -1984,7 +1985,7 @@ def main():
             profile_demands=json.loads(Path(a.profile_demands).read_text()) if a.profile_demands else None,
             explicit_profiles=json.loads(Path(a.explicit_profiles).read_text()) if a.explicit_profiles else None,
             profile=a.profile,
-            work_request={"text":a.prompt_file.read_text(),"owner_harness":owner_pin} if a.prompt_file else None,
+            work_request={"text":compose_task,"owner_harness":owner_pin} if a.prompt_file else None,
             selection_pins=pins or None,route_plan=route_plan_binding,
             execution_scope=a.execution_scope,
             capability_source=capability_source,

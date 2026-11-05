@@ -25,6 +25,29 @@ F = load('nongit_default_finish_fixture', 'utilities/inline_finish.test.py')
 class StopBeforeCompile(Exception): pass
 
 class NonGitDefaultTest(unittest.TestCase):
+    def test_one_shot_stdin_is_shared_by_default_slug_selection_and_compilation(self):
+        task = 'Research the local documentation and write a short report.\n'
+        probe = '''import importlib.util,json,sys
+spec=importlib.util.spec_from_file_location('stdin_compose_probe',sys.argv[1])
+module=importlib.util.module_from_spec(spec);sys.modules[spec.name]=module;spec.loader.exec_module(module)
+def capture(**kwargs):
+    print(json.dumps({'shape':kwargs['shape'],'text':kwargs['work_request']['text']}))
+    raise SystemExit(0)
+module.compose_route=capture
+sys.argv=sys.argv[1:]
+module.main()
+'''
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw); cwd = root/'project'; cwd.mkdir()
+            result = subprocess.run([sys.executable,'-c',probe,str(ROOT/'utilities/capability-route.py'),
+                'compose','--start','--cwd',str(cwd),'--artifact-root',str(root/'artifacts'),
+                '--campaign-key','stdin-fixture','--capability','autopilot-research',
+                '--prompt-file','/dev/stdin','--spec-read','fixture','--drift-verdict','within-spec',
+                '--artifact-guard','fixture'],input=task,text=True,capture_output=True,timeout=30)
+            self.assertEqual(result.returncode,0,result.stderr)
+            self.assertEqual(json.loads(result.stdout),{'shape':'direct','text':task})
+            self.assertFalse((cwd/'.git').exists())
+
     def selection(self, *, shape=None, task=None, git=False):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw); cwd = root/'project'; cwd.mkdir()
