@@ -15,6 +15,35 @@ import resource_run_registry as registry
 
 
 class ResourceRegistryTest(unittest.TestCase):
+    def test_passive_governor_observation_is_shared_but_next_scan_is_fresh(self):
+        cache = registry.ResourceReadCache()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / '.runtime/model-worker-governor/state.json'
+            path.parent.mkdir(parents=True)
+            worker = dict(artifact_root=directory, pid='123', pid_start='456', pid_ns='pid:[7]')
+            identity = dict(pid=123, starttime='456', pid_namespace=7,
+                            boot_id='00000000-0000-0000-0000-000000000001', nested={'value': 'original'})
+            path.write_text(json.dumps({'claims': {'one': {'claimant_identity': identity}}}))
+            original_read = Path.read_text
+            reads = []
+            def read(target, *args, **kwargs):
+                reads.append(target)
+                return original_read(target, *args, **kwargs)
+            with mock.patch.object(Path, 'read_text', read), \
+                    mock.patch.object(registry.json, 'loads', wraps=json.loads) as parse:
+                with registry.passive_read_scope(cache):
+                    first = registry.recorded_governor_identity(worker)
+                    first['nested']['value'] = 'caller mutation'
+                    self.assertEqual(registry.recorded_governor_identity(worker)['nested']['value'], 'original')
+                self.assertEqual((len(reads), parse.call_count), (1, 1))
+                with registry.passive_read_scope(cache):
+                    self.assertEqual(registry.recorded_governor_identity(worker)['pid'], 123)
+                self.assertEqual((len(reads), parse.call_count), (2, 1))
+                path.write_text('{"claims": {}}')
+                with registry.passive_read_scope(cache):
+                    self.assertIsNone(registry.recorded_governor_identity(worker))
+                self.assertEqual((len(reads), parse.call_count), (3, 2))
+
     def test_passive_route_parse_reuses_generation_and_rechecks_identity_and_clock(self):
         cache = registry.ResourceReadCache()
         with tempfile.TemporaryDirectory() as directory:
@@ -170,7 +199,10 @@ class ResourceRegistryTest(unittest.TestCase):
                     registry._LEGACY_RESOURCE_IDENTITY_CACHE.pop(str(jobs), None)
                     found.append(registry.legacy_resource_identity(row))
                     dispatch_contract._registry_metadata_items.cache_clear()
-                    with dispatch_registry_cache.registry_read_scope():
+                    with (dispatch_registry_cache.registry_read_scope(),
+                          mock.patch.object(dispatch_registry_cache.RegistryRecord, 'raw',
+                                            new_callable=mock.PropertyMock,
+                                            side_effect=AssertionError('copied history'))):
                         found.append(registry.legacy_resource_identity(row))
                         found.append(registry.legacy_resource_identity(row))
                     parsed = dispatch_contract._registry_metadata_items.cache_info().misses
@@ -185,6 +217,17 @@ class ResourceRegistryTest(unittest.TestCase):
             self.assertEqual(found, [None] * 3)
             found, _parsed = identities(filler + near)
             self.assertEqual(found, [None] * 3)
+            # Noncanonical separators and a pending final line keep the exact
+            # original text-reader semantics instead of using the LF-only view.
+            for source in (owner.rstrip('\n'), owner.replace('\n', '\r\n'),
+                           owner.replace('\n', '\v')):
+                jobs.write_text(source)
+                registry._LEGACY_RESOURCE_IDENTITY_CACHE.pop(str(jobs), None)
+                with mock.patch.object(registry, 'recorded_governor_identity',
+                                       side_effect=lambda meta: dict(meta)):
+                    expected = registry.legacy_resource_identity(row)
+                    with dispatch_registry_cache.registry_read_scope():
+                        self.assertEqual(registry.legacy_resource_identity(row), expected)
 
     def test_empty_log_has_no_output_timestamp_but_nonempty_log_does(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -400,10 +443,15 @@ class ResourceRegistryTest(unittest.TestCase):
                 pass
 
     def test_an_unrelated_process_exiting_mid_scan_does_not_hold_a_drained_group(self):
-        leader = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
-        identity = registry.launched_identity(leader)
+        # Hold the fixture until its identity is observed. A zero-work child
+        # can exit before the first /proc read under ordinary scheduling.
+        leader = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.buffer.read()"],
+                                  stdin=subprocess.PIPE, start_new_session=True)
+        try:
+            identity = registry.launched_identity(leader)
+        finally:
+            leader.communicate(timeout=5)
         self.assertIsNotNone(identity)
-        leader.wait(timeout=5)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         sentinel = Path(temporary.name) / "run.exit"

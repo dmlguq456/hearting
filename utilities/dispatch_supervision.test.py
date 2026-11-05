@@ -661,6 +661,33 @@ except d.DispatchContractError as e: print(json.dumps({'reason':e.reason}))
             self.assertIsNone(supervision._recorded_completion_result(receipt, require_ack=False, notice_context=context))
             projection.assert_called_once()
 
+    def test_display_recipients_share_only_the_current_pass_lineage_context(self):
+        from types import SimpleNamespace
+        self.jobs.write_text('')
+        receipt = dict(job_registry=str(self.jobs), monitored_attempt_ids=['one', 'two'],
+                       recipient_thread_id='parent')
+        def row(_jobs, attempt):
+            return SimpleNamespace(metadata=dict(attempt_id=attempt, parent_sid='parent',
+                                                 delivery_id='delivery'))
+        with mock.patch('dispatch_completion_join.current_attempt_row', side_effect=row), \
+                mock.patch('dispatch_seat_handover.effective_parent', return_value='parent') as recipient, \
+                mock.patch.object(pending, 'read', return_value=None):
+            with supervision.route_attention_read_scope():
+                first = supervision.passive_read_context()
+                supervision._recorded_completion_result(receipt, require_ack=False)
+                self.assertEqual([call.kwargs for call in recipient.call_args_list],
+                                 [{'read_context': first}] * 2)
+            recipient.reset_mock()
+            with supervision.route_attention_read_scope():
+                second = supervision.passive_read_context()
+                self.assertIsNot(first, second)
+                supervision._recorded_completion_result(receipt, require_ack=False)
+                self.assertEqual([call.kwargs for call in recipient.call_args_list],
+                                 [{'read_context': second}] * 2)
+            recipient.reset_mock()
+            supervision._recorded_completion_result(receipt, require_ack=False)
+            self.assertEqual([call.kwargs for call in recipient.call_args_list], [{}, {}])
+
     def test_residue_pid_is_named_in_the_notice_only_while_it_runs(self):
         self._notice_rows()
         receipt = supervision.materialize(self.jobs, {"att-child"}, reason="join-deadline")[0]["receipt"]

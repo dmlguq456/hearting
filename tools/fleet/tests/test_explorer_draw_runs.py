@@ -60,6 +60,22 @@ def per_cell(screen, frame, stale):
 
 
 class DrawRunsTest(unittest.TestCase):
+    def test_new_frames_reuse_unchanged_unicode_rows(self):
+        from types import SimpleNamespace
+        from importlib import import_module
+        paint_grid = import_module(render.__package__ + '.explorer.grid')
+        stationary = (('한','soft',None),('', 'soft',None),(' ',None,None),(' ',None,None))
+        before=SimpleNamespace(cells=(stationary,(('a','soft',None),(' ',None,None))))
+        after=SimpleNamespace(cells=(tuple(list(stationary)),(('b','soft',None),(' ',None,None))))
+        with mock.patch.object(render,'_EXPLORER_PAINT_CACHE',None):
+            original=render._explorer_paint_runs(before,2,4)
+            with mock.patch.object(paint_grid,'run_safe',side_effect=AssertionError('recompiled unchanged Unicode row')):
+                reused=render._explorer_paint_runs(after,2,4)
+            self.assertEqual(tuple(run for run in original if run[0]==0),
+                             tuple(run for run in reused if run[0]==0))
+            self.assertTrue(any(run[0]==1 and run[2].startswith('b') for run in reused))
+            self.assertLessEqual(render._EXPLORER_PAINT_CACHE[5],64*1024)
+
     def test_same_window_repaints_only_animation_and_still_refreshes_input_geometry(self):
         frame = draw(ef.demo_model(detail=True), NavState(), 140, 45)
         screen = Screen(45, 140)

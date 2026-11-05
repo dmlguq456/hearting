@@ -314,7 +314,7 @@ def _prepared_ledger(path, now, cache):
                 continue
             rows.append((ts, rec if _record_shape_valid(rec) else None))
             size += len(line) * 4
-        return SimpleNamespace(observed_at=now, records=tuple(rows), malformed=malformed,
+        return SimpleNamespace(observed_at=now, source_token=object(), records=tuple(rows), malformed=malformed,
             diagnostics=tuple(diagnostics), byte_size=size,
             cacheable=not any(item['operation'] == 'read_peer_ledger' for item in diagnostics))
 
@@ -521,53 +521,14 @@ def _pending_obligations(roots, now, diagnostics=None):
     return by_session
 
 
-def collect(state_roots=None, *, include_health=False):
-    records = []
-    malformed = 0
-    now = time.time()
-    diagnostics = []
-    from . import dispatch
-    cache = _PASSIVE_PARSE_CACHE if dispatch._COLLECTION_INPUTS.get() is not None else None
-    if state_roots is None:
-        try:
-            roots = tuple(_state_roots(diagnostics))
-        except Exception as exc:
-            roots = ()
-            _note_diagnostic(diagnostics, "resolve_state_roots", exc)
-    else:
-        try:
-            roots = tuple(state_roots)
-        except Exception as exc:
-            roots = ()
-            _note_diagnostic(diagnostics, "resolve_state_roots", exc)
+_OUTPUT_OBSERVATION = None
+_OUTPUT_LOCK = threading.RLock()
+_OUTPUT_MAX_BYTES = 96 * 1024
+_OUTPUT_STATS = {'hits': 0, 'loads': 0, 'rejections': 0}
 
-    seen_files = set()
-    scan_status = {"checked_roots": 0, "failed_roots": 0}
-    paths = _ledger_paths(roots, diagnostics, scan_status)
-    for path in paths:
-        try:
-            real = os.path.realpath(path)
-            if real in seen_files:
-                continue
-            seen_files.add(real)
-        except OSError as exc:
-            _note_diagnostic(diagnostics, "resolve_peer_path", exc)
-            continue
-        prepared = _prepared_ledger(path, now, cache)
-        malformed += prepared.malformed
-        for item in prepared.diagnostics:
-            _note_diagnostic(diagnostics, item['operation'], item['error'])
-        for ts, rec in prepared.records:
-            if (now - ts) > _WINDOW_SECONDS:
-                continue
-            if rec is None:
-                _note_diagnostic(diagnostics, 'parse_peer_record', 'MalformedRecord')
-                continue
-            records.append((ts, rec))
 
-    records.sort(key=lambda pair: pair[0], reverse=True)
-    records = records[:_MAX_RECORDS]
-
+def _project_records(records, now, clocks):
+    """Pure whole-ledger projection; the caller owns fresh file/time reads."""
     ordered = sorted(records, key=lambda pair: pair[0])
     by_session = {}
     pending = {}
@@ -600,6 +561,7 @@ def collect(state_roots=None, *, include_health=False):
 
     def _record_recv(to_key, kind, frm, to, from_key, age_min):
         row = _row(to_key)
+        clocks[(to_key, 'last_recv')] = ts
         if age_min <= 60:
             row["recv_1h"] += 1
         row["last_recv"] = {"from_name": _peer_name(frm, from_key),
@@ -613,6 +575,7 @@ def collect(state_roots=None, *, include_health=False):
 
     def _record_sent(from_key, kind, frm, to, to_key, age_min):
         row = _row(from_key)
+        clocks[(from_key, 'last_sent')] = ts
         row["last_sent"] = {"to_name": _peer_name(to, to_key),
                             "to_session_id": to_key[1] if to_key else None,
                             "to_harness": (to_key[0] if to_key
@@ -627,6 +590,7 @@ def collect(state_roots=None, *, include_health=False):
         # `recv_1h` is untouched here: the notice and its correlated sent record are one
         # logical message and must count once (F-101i).
         row = _row(to_key)
+        clocks[(to_key, 'last_recv')] = ts
         row["last_recv"] = {"from_name": _peer_name(frm, from_key),
                              "from_session_id": from_key[1] if from_key else None,
                              # An identity-less sender still has a harness, and the sent
@@ -673,10 +637,101 @@ def collect(state_roots=None, *, include_health=False):
             elif to_key and deliverable:
                 _record_recv(to_key, "notice", frm, to, from_key, age_min)
 
-    for key, duties in _pending_obligations(roots, now, diagnostics).items():
-        _row(key)["pending_obligations"] = sorted(
-            duties, key=lambda item: (item.get("kind", ""), item.get("age_min", 0))
-        )[:8]
+    return by_session
+
+
+def _peer_result(records, pending_duties, now, *, reuse=False, source_tokens=None):
+    from runtime_observation import retained_size
+    global _OUTPUT_OBSERVATION
+    # Production tokens name a prepared file incarnation and its row index,
+    # retaining only tiny tokens rather than the old full ledger dictionaries.
+    tokens = tuple(source_tokens) if source_tokens is not None else tuple(records)
+    signature = (tuple((ts, token, max(0, int((now-ts)//60)) <= 60)
+                       for (ts, _rec), token in zip(records, tokens)),
+                 _project_records, _clean_from_name)
+    held = None
+    if reuse:
+        with _OUTPUT_LOCK:
+            if _OUTPUT_OBSERVATION is not None and _OUTPUT_OBSERVATION[0] == signature:
+                held = _OUTPUT_OBSERVATION
+                _OUTPUT_STATS['hits'] += 1
+    if held is None:
+        clocks = {}
+        by_session = _project_records(records, now, clocks)
+        if reuse:
+            with _OUTPUT_LOCK:
+                _OUTPUT_STATS['loads'] += 1
+                admitted = retained_size((signature, clocks, by_session), _OUTPUT_MAX_BYTES) <= _OUTPUT_MAX_BYTES
+                if not admitted:
+                    _OUTPUT_STATS['rejections'] += 1
+                _OUTPUT_OBSERVATION = (((copy.deepcopy(signature[0]), *signature[1:]) if source_tokens is None else signature,
+                                        clocks, copy.deepcopy(by_session))
+                                       if admitted else None)
+    else:
+        clocks, by_session = held[1], copy.deepcopy(held[2])
+    for (key, direction), ts in clocks.items():
+        by_session[key][direction]['age_min'] = max(0, int((now-ts)//60))
+    for key, duties in pending_duties.items():
+        by_session.setdefault(key, {'sent_1h': 0, 'recv_1h': 0,
+                                   'last_recv': None, 'last_sent': None})['pending_obligations'] = sorted(
+            duties, key=lambda item: (item.get('kind', ''), item.get('age_min', 0)))[:8]
+    return {'records': copy.deepcopy([rec for _ts, rec in records]) if reuse else
+            [rec for _ts, rec in records], 'by_session': by_session}
+
+
+def collect(state_roots=None, *, include_health=False):
+    records = []
+    source_tokens = {}
+    malformed = 0
+    now = time.time()
+    diagnostics = []
+    from . import dispatch
+    cache = _PASSIVE_PARSE_CACHE if dispatch._COLLECTION_INPUTS.get() is not None else None
+    if state_roots is None:
+        try:
+            roots = tuple(_state_roots(diagnostics))
+        except Exception as exc:
+            roots = ()
+            _note_diagnostic(diagnostics, "resolve_state_roots", exc)
+    else:
+        try:
+            roots = tuple(state_roots)
+        except Exception as exc:
+            roots = ()
+            _note_diagnostic(diagnostics, "resolve_state_roots", exc)
+
+    seen_files = set()
+    scan_status = {"checked_roots": 0, "failed_roots": 0}
+    paths = _ledger_paths(roots, diagnostics, scan_status)
+    for path in paths:
+        try:
+            real = os.path.realpath(path)
+            if real in seen_files:
+                continue
+            seen_files.add(real)
+        except OSError as exc:
+            _note_diagnostic(diagnostics, "resolve_peer_path", exc)
+            continue
+        prepared = _prepared_ledger(path, now, cache)
+        malformed += prepared.malformed
+        for item in prepared.diagnostics:
+            _note_diagnostic(diagnostics, item['operation'], item['error'])
+        for record_index, (ts, rec) in enumerate(prepared.records):
+            if (now - ts) > _WINDOW_SECONDS:
+                continue
+            if rec is None:
+                _note_diagnostic(diagnostics, 'parse_peer_record', 'MalformedRecord')
+                continue
+            records.append((ts, rec))
+            source_tokens[id(rec)] = (getattr(prepared, "source_token", None) or object(), record_index)
+
+    records.sort(key=lambda pair: pair[0], reverse=True)
+    records = records[:_MAX_RECORDS]
+
+    pending_duties = _pending_obligations(roots, now, diagnostics)
+    result = _peer_result(records, pending_duties, now, reuse=cache is not None,
+                          source_tokens=[source_tokens[id(rec)] for _ts, rec in records])
+    by_session = result['by_session']
 
     if not diagnostics:
         state = "success"
@@ -686,8 +741,6 @@ def collect(state_roots=None, *, include_health=False):
         state = "failed"
     collect.last_diagnostics = list(diagnostics)
     collect.last_malformed = malformed
-    result = {"records": (copy.deepcopy([rec for _ts, rec in records]) if cache is not None
-                          else [rec for _ts, rec in records]), "by_session": by_session}
     if include_health:
         return result, SimpleNamespace(state=state, diagnostics=tuple(diagnostics))
     return result

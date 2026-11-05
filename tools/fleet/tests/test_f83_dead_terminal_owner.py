@@ -20,6 +20,15 @@ _ROW = ("2026-07-19T00:00:00Z\tdone\t/r\t/w\t{slug}\t"
 
 
 class DeadTerminalOwnerTest(unittest.TestCase):
+    def test_dead_owner_classifier_accepts_passive_metadata(self):
+        from types import MappingProxyType
+        meta = {"worker_type": "owner", "dispatch_depth": "1",
+                "attempt_id": "closed-owner", "note": "dead-runtime-exit"}
+        for view in (meta, MappingProxyType(meta), dispatch.RegistryMetadata(meta, {})):
+            with self.subTest(view=type(view).__name__):
+                self.assertTrue(dispatch._dead_terminal_owner_row("done", view))
+                self.assertFalse(dispatch._dead_terminal_owner_row("killed", view))
+
     def test_expired_owner_uses_existing_retention_without_stall_receipt_reads(self):
         with tempfile.TemporaryDirectory() as td:
             home = os.path.join(td, 'home')

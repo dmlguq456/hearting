@@ -41,6 +41,15 @@ def _load_hyphenated(name, relative_path):
 
 
 class _RegistryDirMixin:
+    def test_shared_directory_cache_preserves_directory_declared_harness(self):
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, '123.json').write_text(json.dumps({'pid': 123, 'sessionId': 'same'}))
+            cache = session_registry.PassiveReadCache()
+            with mock.patch.object(session_registry, '_dir_for', return_value=directory):
+                self.assertEqual(session_registry.read('claude', 123, validation_cache=cache)['harness'], 'claude')
+                self.assertEqual(session_registry.read('codex', 123, validation_cache=cache)['harness'], 'codex')
+                self.assertEqual(session_registry.read('claude', 123, validation_cache=cache)['harness'], 'claude')
+
     """Points FLEET_SESSION_REGISTRY_DIR at a private tmpdir for the test's duration."""
 
     def setUp(self):

@@ -135,7 +135,8 @@ def cycle_title(root, record, read_json, *, validation_cache=None):
                             if row['cycle_id'] == cid and row['campaign_id'] == camp), '')
                     except artifact_cycle_titles.CycleTitlesError:
                         pass
-                declarations['campaign_id'] = artifact_meta.legacy_title(root, camp)[0]
+                declarations['campaign_id'] = dispatch._observed_legacy_campaign_title(
+                    root, camp, artifact_meta.legacy_title)
         except Exception:
             pass
     # An automatically derived title equal to the slug is not a human title.

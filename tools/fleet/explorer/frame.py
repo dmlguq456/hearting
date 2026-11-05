@@ -1,7 +1,7 @@
 """Pure whole-screen draw orchestration for immutable explorer inputs."""
 from dataclasses import dataclass, replace
 
-from .grid import CellGrid, Hit
+from .grid import CellGrid, Hit, normalize_style
 from .output import clip
 from .view_model import ExplorerViewModel
 from .chrome import NAV_WIDTH
@@ -53,8 +53,9 @@ class _PageRow:
 
     def __getitem__(self, column):
         if isinstance(column, slice):
-            return [self.grid._cell(self.y, x)
-                    for x in range(*column.indices(self.grid.cols))]
+            row = self.grid._cells.get(self.y)
+            return (row[column] if row is not None else
+                    [(" ", None, None)] * len(range(*column.indices(self.grid.cols))))
         column = int(column)
         if column < 0:
             column += self.grid.cols
@@ -66,8 +67,20 @@ class _PageRow:
             values = list(value)
             if len(indexes) != len(values):
                 raise ValueError("page row slice assignment cannot change width")
-            for x, cell in zip(indexes, values):
-                self.grid._set_cell(self.y, x, cell)
+            if not values or self.y < 0 or self.y >= self.grid.rows:
+                return
+            if (3 <= self.y < self.grid.probe_y
+                    and any(x >= self.grid.pane_x and (cell[0] != " " or cell[1] is not None
+                                                       or cell[2] is not None)
+                            for x, cell in zip(indexes, values))):
+                self.grid.last_content_row = max(self.grid.last_content_row, self.y)
+            if not self.grid._keeps(self.y):
+                return
+            row = self.grid._cells.get(self.y)
+            if row is None:
+                row = [(" ", None, None)] * self.grid.cols
+                self.grid._cells[self.y] = row
+            row[column] = values
             return
         column = int(column)
         if column < 0:
@@ -158,6 +171,28 @@ class _PageGrid(CellGrid):
             row = [(" ", None, None) for _ in range(self.cols)]
             self._cells[y] = row
         row[x] = value
+
+    def fill(self, x0, x1, y, glyph=" ", key=None, tint=None):
+        """Fill one kept row without per-cell viewport and extent checks."""
+        y = int(y)
+        if y < 0 or y >= self.rows:
+            return
+        lo, hi = max(0, int(x0)), min(self.cols, int(x1))
+        style = normalize_style(key, tint)
+        if self.trace is not None:
+            self.trace.append(("fill", y, lo, hi, glyph))
+        if lo >= hi:
+            return
+        if (3 <= y < self.probe_y and hi > self.pane_x
+                and (glyph != " " or style[0] is not None or style[1] is not None)):
+            self.last_content_row = max(self.last_content_row, y)
+        if not self._keeps(y):
+            return
+        row = self._cells.get(y)
+        if row is None:
+            row = [(" ", None, None)] * self.cols
+            self._cells[y] = row
+        row[lo:hi] = [(glyph, style[0], style[1])] * (hi - lo)
 
     def add_hit(self, y, x0, x1, action):
         y, x0, x1 = int(y), int(x0), int(x1)

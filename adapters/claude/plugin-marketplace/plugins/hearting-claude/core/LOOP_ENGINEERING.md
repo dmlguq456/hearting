@@ -531,6 +531,11 @@ fresh action and readiness metadata still belong to the current observation.
 Cell-frame reuse depends on values consumed by the renderer, not provenance
 or ordering metadata that the current interaction model owns separately.
 Registry replacement may retain exact-field row conversions from its predecessor.
+Whole display projections may also reuse their complete observed input generation.
+Process observations shared by readers belong to one collection pass, with entry
+and byte bounds; each following pass observes PID identity and clock again.
+An unchanged display publication may retain its immutable content while fresh
+readiness and action metadata advance independently. Reuse never delays a tick.
 
 ## Basis and current scope
 

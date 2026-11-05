@@ -1305,12 +1305,16 @@ def _recorded_completion_result(receipt: dict, *, require_ack: bool, notice_cont
         jobs = Path(receipt["job_registry"])
         monitored = set(receipt["monitored_attempt_ids"])
         covered = {}
+        # Fleet already owns one fresh read-only lineage observation per scan.
+        # Carriers outside that scope keep their original per-recipient reads.
+        read_context = passive_read_context()
+        recipient_options = {'read_context': read_context} if read_context is not None else {}
         for attempt in sorted(monitored):
             row = current_attempt_row(jobs, attempt)
             if row is None:
                 return None
             meta = row.metadata
-            target = effective_parent(meta, jobs)
+            target = effective_parent(meta, jobs, **recipient_options)
             if (meta.get("parent_sid") != receipt["recipient_thread_id"]
                     or not meta.get("delivery_id") or not target):
                 return None
@@ -1333,7 +1337,7 @@ def _recorded_completion_result(receipt: dict, *, require_ack: bool, notice_cont
             if notice_context is not None:
                 for aid in sorted(attempt_ids):
                     member = current_attempt_row(jobs, aid)
-                    if member is None or effective_parent(member.metadata, jobs) != target:
+                    if member is None or effective_parent(member.metadata, jobs, **recipient_options) != target:
                         return None
             def project(observer):
                 observer("file", jobs)

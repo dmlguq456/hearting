@@ -558,6 +558,44 @@ class RemoteCandidatesTest(unittest.TestCase):
 
 
 class DeclaredResourceProgressTest(unittest.TestCase):
+    def test_passive_parents_are_shared_but_leaf_and_closing_checks_stay_fresh(self):
+        import resource_run_registry as registry
+        self.assertTrue(self.write())
+        second = self.path.with_name('second.progress.json')
+        second.write_bytes(self.path.read_bytes())
+        original = Path.lstat
+        parents = []
+        def observe(path, *args, **kwargs):
+            if path == self.path.parent:
+                parents.append(path)
+            return original(path, *args, **kwargs)
+        with mock.patch.object(Path, 'lstat', observe):
+            with registry.passive_read_scope(registry.ResourceReadCache()):
+                first, _ = progress._read(self.path, Path(self.path.anchor))
+                other, _ = progress._read(second, Path(second.anchor))
+                self.assertEqual(first, other)
+                # One initial observation plus both independent closing checks.
+                self.assertEqual(len(parents), 3)
+                second.write_text('changed')
+                self.assertEqual(progress._read(second, Path(second.anchor))[0], b'changed')
+            with registry.passive_read_scope(registry.ResourceReadCache()):
+                self.assertEqual(progress._read(second, Path(second.anchor))[0], b'changed')
+        self.assertEqual(len(parents), 6)
+
+    def test_passive_parent_replacement_is_rejected_and_next_pass_reobserves(self):
+        import resource_run_registry as registry
+        self.assertTrue(self.write())
+        parent = self.path.parent
+        with registry.passive_read_scope(registry.ResourceReadCache()):
+            progress._read(self.path, Path(self.path.anchor))
+            parent.rename(parent.with_name('previous'))
+            parent.mkdir()
+            self.path.write_text('new generation')
+            with self.assertRaisesRegex(ValueError, 'progress-path-changed'):
+                progress._read(self.path, Path(self.path.anchor))
+        with registry.passive_read_scope(registry.ResourceReadCache()):
+            self.assertEqual(progress._read(self.path, Path(self.path.anchor))[0], b'new generation')
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)

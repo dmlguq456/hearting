@@ -3606,21 +3606,37 @@ def _draw_explorer(stdscr, snapshot, frame=None):
 
 _EXPLORER_PAINT_CACHE = None
 _EXPLORER_DRAW_CACHE = None
+_EXPLORER_PAINT_ROW_MAX_BYTES = 40 * 1024
 
 
 def _explorer_paint_runs(frame, height, width):
     """Compile one immutable cell frame; animation and attributes stay live."""
     from itertools import groupby
     from operator import itemgetter
+    from sys import getsizeof
     from .explorer.grid import cell_width, run_safe
     global _EXPLORER_PAINT_CACHE
     cached = _EXPLORER_PAINT_CACHE
     if cached is not None and cached[0] is frame and cached[1:3] == (height, width):
         return cached[3]
+    previous_rows = (cached[4] if cached is not None and len(cached) > 4
+                     and cached[1:3] == (height, width) else {})
+    compiled_rows = {}
+    row_bytes = 128
     runs = []
     for y, row in enumerate(frame.cells[:height]):
+        visible = row[:width]
+        previous = previous_rows.get(y)
+        if previous is not None and previous[0] == visible:
+            runs.extend(previous[1])
+            charge = getsizeof(previous[1]) + 128 + (getsizeof(visible) if visible is not row else 0)
+            if row_bytes + charge <= _EXPLORER_PAINT_ROW_MAX_BYTES:
+                compiled_rows[y] = (visible, previous[1])
+                row_bytes += charge
+            continue
+        first_run = len(runs)
         x = 0
-        for style, group in groupby(row[:width], key=itemgetter(1, 2)):
+        for style, group in groupby(visible, key=itemgetter(1, 2)):
             glyphs = [cell[0] for cell in group]
             start, x = x, x + len(glyphs)
             text = "".join(glyphs)
@@ -3636,8 +3652,13 @@ def _explorer_paint_runs(frame, height, width):
             else:
                 runs.extend((y, start + offset, glyph, style)
                             for offset, glyph in enumerate(glyphs) if glyph)
+        row_runs = tuple(runs[first_run:])
+        charge = getsizeof(row_runs) + 128 + (getsizeof(visible) if visible is not row else 0)
+        if row_bytes + charge <= _EXPLORER_PAINT_ROW_MAX_BYTES:
+            compiled_rows[y] = (visible, row_runs)
+            row_bytes += charge
     result = tuple(runs)
-    _EXPLORER_PAINT_CACHE = (frame, height, width, result)
+    _EXPLORER_PAINT_CACHE = (frame, height, width, result, compiled_rows, row_bytes)
     return result
 
 
