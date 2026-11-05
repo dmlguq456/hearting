@@ -223,6 +223,66 @@ class RegistryLinesCacheTest(unittest.TestCase):
         self.assertIsNot(first, fresh)
         self.assertEqual(fresh.records[0].slug, "two")
 
+    def test_pinned_scope_serves_the_given_generation_without_reading(self):
+        self.jobs.write_text("t\topen\t/repo\t/wt\tone\tattempt_id=one\n", encoding="utf-8")
+        view = CACHE.registry_view(self.jobs, append_only=True)
+        CACHE.reset_metrics()
+        with CACHE.registry_read_scope(pinned=view):
+            self.assertIs(CACHE.registry_view(self.jobs), view)
+            snapshot = CACHE.registry_snapshot(self.jobs)
+            self.assertIs(snapshot.view, view)
+            self.assertTrue(snapshot.matches_jobs(self.jobs))
+            self.assertEqual(CACHE.registry_text_lines(self.jobs), tuple(view.lines))
+            # The seeded generation stays pinned while the file changes.
+            with self.jobs.open("a", encoding="utf-8") as stream:
+                stream.write("t\tdone\t/repo\t/wt\ttwo\tattempt_id=two\n")
+            self.assertIs(CACHE.registry_view(self.jobs), view)
+            self.assertEqual(CACHE.metrics_snapshot()["content_reads"], 0)
+
+        # An outer scope keeps its own generation; ``pinned`` is ignored.
+        with CACHE.registry_read_scope():
+            outer = CACHE.registry_view(self.jobs)
+            self.assertIsNot(outer, view)
+            with CACHE.registry_read_scope(pinned=view):
+                self.assertIs(CACHE.registry_view(self.jobs), outer)
+
+        # A registry with CR bytes is not seeded: the scope reads it once.
+        self.jobs.write_bytes(b"t\topen\t/repo\t/wt\tone\tattempt_id=one\r\n"
+                              b"t\tdone\t/repo\t/wt\ttwo\tattempt_id=two\n")
+        crlf = CACHE.registry_view(self.jobs)
+        CACHE.reset_metrics()
+        with CACHE.registry_read_scope(pinned=crlf):
+            CACHE.registry_view(self.jobs)
+            CACHE.registry_snapshot(self.jobs)
+            self.assertEqual(CACHE.metrics_snapshot()["content_reads"], 1)
+
+    def test_pinned_generation_is_never_carried_into_a_later_effect_scope(self):
+        """``pinned`` serves one manual observation section and ends with it.
+
+        A claim or an effect group that opens its own scope after a write must read the
+        registry fresh; the generation seeded into the observation scope is not reused."""
+        self.jobs.write_text("t\topen\t/repo\t/wt\tone\tattempt_id=one\n", encoding="utf-8")
+        view = CACHE.registry_view(self.jobs, append_only=True)
+        with CACHE.registry_read_scope(pinned=view):
+            self.assertTrue(CACHE.registry_scope_active())
+            self.assertIs(CACHE.registry_view(self.jobs), view)
+        self.assertFalse(CACHE.registry_scope_active(), "the pinned scope must end with its section")
+        # The settlement write between the observation section and the effect.
+        with self.jobs.open("a", encoding="utf-8") as stream:
+            stream.write("t\tdone\t/repo\t/wt\ttwo\tattempt_id=two\n")
+        CACHE.reset_metrics()
+        with CACHE.registry_read_scope():
+            effect = CACHE.registry_view(self.jobs)
+            self.assertIsNot(effect, view, "an effect scope must not reuse the observation's generation")
+            self.assertEqual(len(effect.lines), 2)
+            self.assertEqual(len(view.lines), 1)
+        # A scope that is already open (a discovery or effect scope) is never replaced.
+        with CACHE.registry_read_scope():
+            outer = CACHE.registry_view(self.jobs)
+            with CACHE.registry_read_scope(pinned=view):
+                self.assertIs(CACHE.registry_view(self.jobs), outer)
+            self.assertIs(CACHE.registry_view(self.jobs), outer)
+
     def test_scope_text_lines_equal_plain_text_decode_for_every_line_separator(self):
         raw = (b"a\tb\r\nc\rd\x0be\x0cf\x1cg\x1dh\x1ei" + "\x85j k l".encode("utf-8")
                + b"\n\nbad=\xff\nlast\rtail\x0cend")

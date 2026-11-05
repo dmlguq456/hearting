@@ -26,6 +26,9 @@ _ID_RE = re.compile(r"batch-[0-9a-f]{32}\Z")
 _MAX_BYTES = 128 * 1024
 _PENDING = {"observing", "delivery-pending", "unknown"}
 _SETTLED_DEPENDENCY_CHECKS_PER_PASS = 64
+_UNSETTLED_OWNERS_LIMIT = 4096
+_OWNER_RETRY_FIRST_SECONDS = 60.0  # the unknown-obligation retry cap in peer-steward
+_OWNER_RETRY_MAX_SECONDS = 600.0
 _DEPENDENCY_WATCH_MASK = 0x00000002 | 0x00000004 | 0x00000008 | 0x00000040 | 0x00000080 \
                          | 0x00000100 | 0x00000200 | 0x00000400 | 0x00000800
 _INOTIFY_EVENT_HEADER = struct.Struct("iIII")
@@ -39,6 +42,14 @@ _LOCAL_WATCH_FILESYSTEMS = frozenset({
 
 class BatchObligationError(ValueError):
     pass
+
+
+def _owner_retry_delay(state, attempts):
+    """Seconds an unchanged unsettled owner waits before its next observation."""
+    if state == "unknown":
+        return min(_OWNER_RETRY_MAX_SECONDS,
+                   _OWNER_RETRY_FIRST_SECONDS * 2 ** min(attempts, 4))
+    return _OWNER_RETRY_MAX_SECONDS
 
 
 def _root(jobs: str | Path) -> Path:
@@ -769,8 +780,16 @@ class OwnerSettlementReadContext:
         self._dependency_watch_fs_support = {}
         self._dependency_dirty_paths = set()
         self._dependency_watcher_fallback = False
+        # Unfinished (not-applicable, pending, unknown) owner observations by
+        # key: (state, (status, raw), related fingerprint, paths, generations
+        # after the settlement attempt, lease held, retry time, attempts).
+        self._unsettled = {}
+        self._unsettled_noted = {}
+        self._deferred = set()
+        self._clock = time.monotonic
         self._metrics = {"historical_checks": 0, "settled_cache_hits": 0,
-                         "dependency_checks": 0, "dependency_invalidations": 0}
+                         "dependency_checks": 0, "dependency_invalidations": 0,
+                         "deferred_owner_checks": 0, "unsettled_retries": 0}
 
     @staticmethod
     def _fingerprint_rows(rows):
@@ -1130,6 +1149,113 @@ class OwnerSettlementReadContext:
                     if not owners:
                         self._route_owners.pop((key[0], alias), None)
 
+    def unsettled_current(self, jobs: Path, status: str, raw: str, metadata: dict,
+                          related_rows, lease_is_held):
+        """The remembered unfinished state while every observed input is unchanged.
+
+        Returns None once the owner row, its related rows, its dependency
+        generations or its supervisor lease changed, or its retry time came.
+        """
+        key = (str(jobs.resolve(strict=False)), metadata.get("attempt_id", ""))
+        entry = self._unsettled.get(key)
+        if entry is None:
+            return None
+        state, row, related, paths, generations, lease_held, retry_at, _attempts = entry
+        if (self._clock() >= retry_at or row != (status, raw)
+                or related != self._fingerprint_rows(related_rows)):
+            return None
+        if state != "not-applicable":
+            try:
+                if bool(lease_is_held(jobs, metadata)) != lease_held:
+                    return None
+            except Exception:
+                return None
+            if paths is not None:
+                try:
+                    current = self._current_generations(paths, self._pass_file_generations)
+                except OSError:
+                    return None
+                self._metrics["dependency_checks"] += len(paths)
+                if current != generations:
+                    return None
+        self._deferred.add(key)
+        self._metrics["deferred_owner_checks"] += 1
+        return state
+
+    def note_unsettled_owner(self, jobs: Path, state: str, status: str, raw: str,
+                             metadata: dict, related_rows, paths):
+        """Hold this pass's classification until its settlement attempt ended."""
+        key = (str(jobs.resolve(strict=False)), metadata.get("attempt_id", ""))
+        before = ()
+        if paths is not None:
+            try:
+                before = self._current_generations(paths, self._pass_file_generations)
+            except OSError:
+                before = None
+        self._unsettled_noted[key] = (state, (status, raw),
+                                      self._fingerprint_rows(related_rows), paths, before)
+
+    def commit_unsettled_owner(self, jobs: Path, attempt_id: str, *, state=None,
+                               lease_held: bool):
+        """Remember the held classification with generations read after the attempt.
+
+        The attempt's own writes are part of what is remembered, so only a later
+        change by someone else wakes the owner before its retry time. Retries
+        that started from the generations the previous retry left behind count
+        toward the backoff; any other change starts it over.
+        """
+        self._commit_noted((str(jobs.resolve(strict=False)), attempt_id), state, lease_held)
+
+    def _commit_noted(self, key, state, lease_held):
+        noted = self._unsettled_noted.pop(key, None)
+        if noted is None:
+            return
+        noted_state, row, related, paths, before = noted
+        state = state or noted_state
+        generations = ()
+        if paths is not None:
+            try:
+                generations = self._current_generations(paths)
+            except OSError:
+                self._unsettled.pop(key, None)
+                return
+        previous = self._unsettled.get(key)
+        attempts = 0
+        if previous is not None:
+            self._metrics["unsettled_retries"] += 1
+            if (previous[1] == row and previous[2] == related and previous[3] == paths
+                    and previous[4] == before and previous[5] == lease_held):
+                attempts = previous[7] + 1
+        self._unsettled[key] = (state, row, related, paths, generations, lease_held,
+                                self._clock() + _owner_retry_delay(state, attempts), attempts)
+        if len(self._unsettled) > _UNSETTLED_OWNERS_LIMIT:
+            self._unsettled.pop(next(iter(self._unsettled)), None)
+
+    def forget_unsettled_owner(self, jobs: Path, attempt_id: str):
+        key = (str(jobs.resolve(strict=False)), attempt_id)
+        self._unsettled.pop(key, None)
+        self._unsettled_noted.pop(key, None)
+        self._deferred.discard(key)
+
+    def is_deferred(self, jobs: Path, attempt_id: str) -> bool:
+        return (str(jobs.resolve(strict=False)), attempt_id) in self._deferred
+
+    def due_unsettled_owner_ids(self, jobs: Path):
+        root = str(jobs.resolve(strict=False))
+        now = self._clock()
+        return tuple(attempt for (item_root, attempt), entry in self._unsettled.items()
+                     if item_root == root and entry[6] <= now)
+
+    def _end_unsettled_pass(self, jobs: Path):
+        """Settle this pass's holds: not-applicable is final, unfinished ones lapse."""
+        root = str(jobs.resolve(strict=False))
+        for key in [key for key in self._unsettled_noted if key[0] == root]:
+            if self._unsettled_noted[key][0] == "not-applicable":
+                self._commit_noted(key, None, False)
+            else:
+                self._unsettled_noted.pop(key, None)
+        self._deferred.difference_update([key for key in self._deferred if key[0] == root])
+
     def remember_active_owner(self, jobs: Path, record):
         key = (str(jobs.resolve(strict=False)), record.completion_metadata().get("attempt_id", ""))
         self._active_owners[key] = record
@@ -1147,14 +1273,16 @@ class OwnerSettlementReadContext:
         for record in records:
             metadata = record.completion_metadata()
             parent = metadata.get("parent_attempt_id")
-            if parent and (root, parent) in self._settled:
+            if parent and ((root, parent) in self._settled
+                           or (root, parent) in self._unsettled):
                 affected.add(parent)
             for field in ("route_id", "route_hash", "owner_route_id", "owner_route_hash"):
                 alias = metadata.get(field)
                 if alias:
                     affected.update(self._route_owners.get((root, alias), ()))
             attempt = metadata.get("attempt_id")
-            if attempt and (root, attempt) in self._settled:
+            if attempt and ((root, attempt) in self._settled
+                            or (root, attempt) in self._unsettled):
                 affected.add(attempt)
         return tuple(affected)
 
@@ -1168,9 +1296,13 @@ class OwnerSettlementReadContext:
     def owner_candidate_floor(self, jobs: Path, view):
         key = str(jobs.resolve(strict=False))
         prior = self._cursors.get(key)
-        if (prior is not None and view.append_only_generation
+        # The same full signature is the registry cache's own proof of an
+        # unchanged generation; an append needs the append-only chain instead.
+        if (prior is not None
                 and view.path_identity == prior[0] and view.resolved_path == prior[1]
-                and tuple(view.signature[:2]) == prior[2]
+                and (tuple(view.signature) == prior[4]
+                     or (view.append_only_generation
+                         and tuple(view.signature[:2]) == prior[2]))
                 and view.last_complete_order >= prior[3]):
             return prior[3]
         return -1
@@ -1178,7 +1310,8 @@ class OwnerSettlementReadContext:
     def remember_owner_cursor(self, jobs: Path, view):
         key = str(jobs.resolve(strict=False))
         self._cursors[key] = (view.path_identity, view.resolved_path,
-                              tuple(view.signature[:2]), view.last_complete_order)
+                              tuple(view.signature[:2]), view.last_complete_order,
+                              tuple(view.signature))
 
     def metrics(self):
         return dict(self._metrics)
@@ -1192,7 +1325,7 @@ class OwnerSettlementReadContext:
         stamp = _registry_stamp(jobs)
         scan = prior is None or stamp is None or stamp != prior[0]
         active_owner = any(root == key for root, _attempt in self._active_owners)
-        if active_owner:
+        if active_owner or self.due_unsettled_owner_ids(jobs):
             scan = True
         # A full candidate scan below rechecks each candidate's lease itself;
         # only the unchanged fast path needs this cached lease probe.
@@ -1216,6 +1349,7 @@ class OwnerSettlementReadContext:
     def remember(self, jobs: Path, before_stamp, live_leases, retry_required=False,
                  signatures=()):
         key = str(jobs.resolve(strict=False))
+        self._end_unsettled_pass(jobs)
         after_stamp = _registry_stamp(jobs)
         if retry_required or before_stamp is None or after_stamp != before_stamp:
             self._seen.pop(key, None)
@@ -1296,32 +1430,51 @@ def _owner_settlement_dependency_paths(jobs: Path, status: str, metadata: dict):
                 if snapshots.is_dir():
                     paths.extend(path for path in snapshots.iterdir()
                                  if path.suffix == ".json")
-        # Missing optional files depend on their nearest existing parent, so
-        # their later creation invalidates the observation without a tree scan.
-        observed = []
-        seen = set()
-        for dependency in paths:
-            candidate = Path(dependency).expanduser()
-            while not candidate.exists() and candidate != candidate.parent:
-                candidate = candidate.parent
-            key = str(candidate.absolute())
-            if key not in seen:
-                seen.add(key)
-                observed.append(candidate)
-        return tuple(observed) if observed else None
+        observed = _observed_dependencies(paths)
+        return observed if observed else None
     except (OSError, UnicodeError, ValueError, KeyError, TypeError, RuntimeError):
         return None
 
 
+def _observed_dependencies(paths):
+    """Missing optional files depend on their nearest existing parent, so
+    their later creation invalidates the observation without a tree scan."""
+    observed = []
+    seen = set()
+    for dependency in paths:
+        candidate = Path(dependency).expanduser()
+        while not candidate.exists() and candidate != candidate.parent:
+            candidate = candidate.parent
+        key = str(candidate.absolute())
+        if key not in seen:
+            seen.add(key)
+            observed.append(candidate)
+    return tuple(observed)
+
+
+def _owner_unsettled_dependency_paths(jobs: Path, status: str, metadata: dict):
+    """Settlement dependencies plus the parent-close journal of an unfinished owner.
+
+    The journal stays out of the settled cache, where an active route's appends
+    would force a complete re-proof; an unfinished owner only needs to notice it.
+    """
+    paths = _owner_settlement_dependency_paths(jobs, status, metadata)
+    if paths is None:
+        return None
+    try:
+        from workflow_state import ledger_root_for
+        route_id = (metadata.get("parent_close_route_id") or metadata.get("owner_route_id")
+                    or metadata.get("route_id"))
+        journal = ledger_root_for(jobs)[0] / route_id / "journal.jsonl"
+    except Exception:
+        return paths
+    return _observed_dependencies((*paths, journal))
+
+
 def _pending_owner_settlements(jobs: Path, *, context=None):
     """Return exact owner rows whose existing terminal path still owes work."""
-    from dispatch_contract import (
-        SUPERVISOR_LEASE_KIND, parse_registry_metadata, supervisor_lease_is_held,
-    )
-    from dispatch_terminal_commit import owner_completion_pending
-
     try:
-        from dispatch_registry_cache import registry_view
+        from dispatch_registry_cache import registry_read_scope, registry_view
         view = registry_view(jobs, append_only=True)
         view.require_complete_text()
         if context is None:
@@ -1338,11 +1491,13 @@ def _pending_owner_settlements(jobs: Path, *, context=None):
             impacted = set(context.affected_settled_owner_ids(jobs, changed_rows))
             impacted.update(context.take_invalidated_owner_ids(jobs))
             impacted.update(context.active_owner_ids(jobs))
+            impacted.update(context.due_unsettled_owner_ids(jobs))
             for attempt_id in impacted:
                 current = view.settlement_owner_candidate(attempt_id)
                 if current is None:
                     context.forget_owner(jobs, attempt_id)
                     context.forget_active_owner(jobs, attempt_id)
+                    context.forget_unsettled_owner(jobs, attempt_id)
                 else:
                     previous = selected.get(attempt_id)
                     if previous is None or current.order > previous.order:
@@ -1350,12 +1505,30 @@ def _pending_owner_settlements(jobs: Path, *, context=None):
             candidates = tuple(selected.values())
     except FileNotFoundError:
         return ()
-    pending = []
     if context is not None:
         context.begin_dependency_pass()
+    # One read-only classification section observes the generation that
+    # selected its candidates; settlement writes run after this returns.
+    with registry_read_scope(pinned=view):
+        pending = _classify_owner_candidates(jobs, view, candidates, context)
+    if context is not None:
+        context.remember_owner_cursor(jobs, view)
+    return pending
+
+
+def _classify_owner_candidates(jobs: Path, view, candidates, context):
+    from dispatch_contract import (
+        SUPERVISOR_LEASE_KIND, parse_registry_metadata, supervisor_lease_is_held,
+    )
+    from dispatch_terminal_commit import owner_completion_state
+
+    pending = []
     for candidate in candidates:
         order, raw, fields = candidate.order, candidate.raw, candidate.fields
         if fields[1] not in {"open", "running", "done"}:
+            if context is not None and candidate.completion_metadata().get("attempt_id"):
+                context.forget_unsettled_owner(
+                    jobs, candidate.completion_metadata()["attempt_id"])
             continue
         meta = candidate.completion_metadata()
         if (meta.get("worker_type") != "owner" or meta.get("launch_started") != "1"
@@ -1365,15 +1538,18 @@ def _pending_owner_settlements(jobs: Path, *, context=None):
             if context is not None and meta.get("attempt_id"):
                 context.forget_active_owner(jobs, meta["attempt_id"])
                 context.forget_owner(jobs, meta["attempt_id"])
+                context.forget_unsettled_owner(jobs, meta["attempt_id"])
             continue
         attempt_id = meta["attempt_id"]
         if fields[1] in {"open", "running"} and context is not None:
+            context.forget_unsettled_owner(jobs, attempt_id)
             context.remember_active_owner(jobs, candidate)
         if fields[1] == "done":
             if meta.get("workflow_completion") != "runtime-v1":
                 if context is not None:
                     context.forget_active_owner(jobs, attempt_id)
                     context.forget_owner(jobs, attempt_id)
+                    context.forget_unsettled_owner(jobs, attempt_id)
                 continue
             related_rows = view.completion_related(
                 meta.get("attempt_id", ""),
@@ -1382,45 +1558,68 @@ def _pending_owner_settlements(jobs: Path, *, context=None):
             if (context is not None and context.settled_owner_current(
                     jobs, fields[1], raw, meta, related_rows)):
                 context.forget_active_owner(jobs, attempt_id)
+                context.forget_unsettled_owner(jobs, attempt_id)
                 continue
-            try:
-                if context is not None:
-                    context.record_historical_check()
-                pending_state = owner_completion_pending(jobs, fields[1], meta)
-                if not pending_state:
+            deferred = (None if context is None else context.unsettled_current(
+                jobs, fields[1], raw, meta, related_rows, supervisor_lease_is_held))
+            if deferred == "not-applicable":
+                context.forget_active_owner(jobs, attempt_id)
+                continue
+            if deferred is not None:
+                # Unchanged inputs before the retry time: keep the unfinished
+                # owner visible without observing it again.
+                context.remember_active_owner(jobs, candidate)
+            else:
+                try:
                     if context is not None:
-                        dependencies = _owner_settlement_dependency_paths(jobs, fields[1], meta)
-                        if dependencies:
-                            remembered = context.remember_settled_owner(
-                                jobs, fields[1], raw, meta, related_rows, dependencies)
-                            if remembered is not True:
-                                # An invalidated or unavailable snapshot cannot
-                                # prove settlement; keep the row on its normal
-                                # settlement path instead of caching it.
-                                context.forget_active_owner(jobs, attempt_id)
+                        context.record_historical_check()
+                    state = owner_completion_state(jobs, fields[1], meta).state
+                    if state == "not-applicable":
+                        if context is not None:
+                            context.note_unsettled_owner(
+                                jobs, state, fields[1], raw, meta, related_rows, None)
+                            context.forget_active_owner(jobs, attempt_id)
+                        continue
+                    if state not in {"pending", "unknown"}:
+                        if context is not None:
+                            context.forget_unsettled_owner(jobs, attempt_id)
+                            dependencies = _owner_settlement_dependency_paths(
+                                jobs, fields[1], meta)
+                            if dependencies:
+                                remembered = context.remember_settled_owner(
+                                    jobs, fields[1], raw, meta, related_rows, dependencies)
+                                if remembered is not True:
+                                    # An invalidated or unavailable snapshot cannot
+                                    # prove settlement; keep the row on its normal
+                                    # settlement path instead of caching it.
+                                    context.forget_active_owner(jobs, attempt_id)
+                                else:
+                                    context.forget_active_owner(jobs, attempt_id)
+                                    continue
                             else:
                                 context.forget_active_owner(jobs, attempt_id)
                                 continue
                         else:
-                            context.forget_active_owner(jobs, attempt_id)
                             continue
-                    else:
-                        continue
-                if context is not None:
-                    context.forget_owner(jobs, meta["attempt_id"])
-                    context.remember_active_owner(jobs, candidate)
-            except Exception:
-                # An unavailable observation remains a retryable obligation.
-                if context is not None:
-                    context.forget_owner(jobs, attempt_id)
-                    context.remember_active_owner(jobs, candidate)
+                    if context is not None:
+                        context.forget_owner(jobs, meta["attempt_id"])
+                        context.remember_active_owner(jobs, candidate)
+                        if state in {"pending", "unknown"}:
+                            context.note_unsettled_owner(
+                                jobs, state, fields[1], raw, meta, related_rows,
+                                _owner_unsettled_dependency_paths(jobs, fields[1], meta))
+                except Exception:
+                    # An unavailable observation remains a retryable obligation.
+                    if context is not None:
+                        context.forget_owner(jobs, attempt_id)
+                        context.remember_active_owner(jobs, candidate)
+                        context.note_unsettled_owner(
+                            jobs, "unknown", fields[1], raw, meta, related_rows, None)
         try:
             lease_held = supervisor_lease_is_held(jobs, meta)
         except (OSError, ValueError):
             lease_held = True
         pending.append((order, fields[1], raw, meta, lease_held))
-    if context is not None:
-        context.remember_owner_cursor(jobs, view)
     return tuple(pending)
 
 
@@ -1449,6 +1648,8 @@ def _resume_owner_settlements(jobs: Path, *, context=None) -> None:
     retry_required = False
     signatures = []
     for order, status, raw, meta, lease_held in pending:
+        attempt_id = meta.get("attempt_id", "")
+        deferred = context is not None and context.is_deferred(jobs, attempt_id)
         if lease_held:
             live_leases.append(meta)
             if status == "done":
@@ -1456,25 +1657,37 @@ def _resume_owner_settlements(jobs: Path, *, context=None) -> None:
                                    meta.get("attempt_id", ""), status,
                                    meta.get("workflow_completion", ""),
                                    meta.get("note", "")))
+                if context is not None and not deferred:
+                    context.commit_unsettled_owner(jobs, attempt_id, lease_held=True)
+            continue
+        if deferred:
+            # Unchanged inputs before the retry time: keep the unfinished
+            # settlement visible without repeating the same attempt.
+            signatures.append((str(jobs), "owner-settlement",
+                               meta.get("attempt_id", ""), status,
+                               meta.get("workflow_completion", ""),
+                               meta.get("note", "")))
             continue
         try:
             settlement_stamp = _registry_stamp(jobs)
             if status == "done":
                 materialize_after_terminal_close(jobs, meta["attempt_id"])
-                from dispatch_terminal_commit import owner_completion_pending
+                from dispatch_terminal_commit import owner_completion_state
                 try:
-                    if owner_completion_pending(jobs, status, meta):
-                        retry_required = True
-                        signatures.append((str(jobs), "owner-settlement",
-                                           meta.get("attempt_id", ""), status,
-                                           meta.get("workflow_completion", ""),
-                                           meta.get("note", "")))
+                    after = owner_completion_state(jobs, status, meta).state
                 except Exception:
+                    after = "unknown"
+                if after in {"pending", "unknown"}:
                     retry_required = True
                     signatures.append((str(jobs), "owner-settlement",
                                        meta.get("attempt_id", ""), status,
                                        meta.get("workflow_completion", ""),
                                        meta.get("note", "")))
+                    if context is not None:
+                        context.commit_unsettled_owner(
+                            jobs, attempt_id, state=after, lease_held=False)
+                elif context is not None:
+                    context.forget_unsettled_owner(jobs, attempt_id)
             else:
                 result = settle_finished_attempt(
                     jobs, ChildRow(order, status, raw.split("\t")[4],
