@@ -25,6 +25,15 @@ A framed route is sealed at intensity `standard`. With no intensity it runs two 
 
 Two legs never read each other's brief. The terminal depends on every frame leg and carries the one `frame-review` human gate at its entry. There is no owner node and no owner launch.
 
+For a small task whose direction is already fixed by the request and evidence,
+each leg writes a compact brief in the existing eight-section schema. One
+admissible direction needs no invented alternatives. Ordinary defaults that do
+not change the plan are agent-owned: record them in the brief and carry them
+into the executing leg's final answer, rather than asking the person. Genuine
+plan-changing decisions keep the existing interview. This changes the amount
+of analysis, not the number, independence or model grade of the frame legs;
+larger or unsettled tasks retain the full comparison.
+
 An owner pin applies only to the owner, not to frame legs; automatically
 selected two-leg frames prefer a different harness only as a tie-break among
 ungated candidates of the same quality band, using one harness when no such
