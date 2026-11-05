@@ -99,7 +99,7 @@ class BlinkAssertions(unittest.TestCase):
 
 
 class SessionRouteCountTests(BlinkAssertions):
-    def test_only_open_current_counts_disappear_without_moving_or_recolouring_text(self):
+    def test_only_open_current_counts_pulse_bright_and_dark_without_moving_text(self):
         base = blink_view_model()
         title = "잘린 제목 Long title " * 12
         for cols in (100, 140, 168, 274, 410):
@@ -125,11 +125,14 @@ class SessionRouteCountTests(BlinkAssertions):
                         for y, x in badge:
                             for offset in range(len("route 1")):
                                 a, b = on.cells[y][x + offset], off.cells[y][x + offset]
-                                self.assertEqual(b[1], "dim")
-                                self.assertEqual(a[1], "dim")
-                                self.assertEqual(b[0], " " if status not in ("done", "stale") else a[0])
+                                # The text never goes away; only an open count changes colour.
+                                self.assertEqual(b[0], a[0])
+                                expected = (("dim", "dim") if status in ("done", "stale")
+                                            else ("g_work", "g_work_off"))
+                                self.assertEqual((a[1], b[1]), expected)
                                 self.assertEqual(render._HUE_OF[a[1]][0], render._HUE_OF[b[1]][0])
                                 self.assertFalse(render._HUE_OF[a[1]][1] & render._A_REVERSE)
+                                self.assertFalse(render._HUE_OF[b[1]][1] & render._A_REVERSE)
                         masked = [list(row) for row in on.cells]
                         for y, x in badge:
                             for offset in range(len("route 1")):

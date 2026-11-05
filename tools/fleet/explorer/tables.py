@@ -256,11 +256,13 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3):
                 title_end = grid.put(x + c["title"], y, title_text, bold_key,
                                      limit=x + c["title"] + room)
                 if tail:
-                    # Actually extinguish the count on the shared working beat;
-                    # retaining its reserved cells keeps the title and columns still.
-                    if route_tail and tag in open_current_routes and not getattr(grid, "beat", 1):
-                        tail = " " * _seg_width(tail)
-                    grid.put(title_end, y, tail, "dim", limit=x + c["title"] + c["title_w"])
+                    # An open count pulses on the shared working beat between the bright and
+                    # dark green of the g_work/g_work_off pair; its text stays, so the title
+                    # and columns never move. A finished count stays a steady dim note.
+                    tail_key = "dim"
+                    if route_tail and tag in open_current_routes:
+                        tail_key = "g_work" if getattr(grid, "beat", 1) else "g_work_off"
+                    grid.put(title_end, y, tail, tail_key, limit=x + c["title"] + c["title_w"])
             context = session.get("context")
             if not c["narrow"]:
                 _draw_context_gauge(grid, x + c["ctx"], y, context, session.get("window"))

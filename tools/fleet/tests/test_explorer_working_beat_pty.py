@@ -142,12 +142,9 @@ class ExplorerWorkingBeatPtyTest(unittest.TestCase):
                     for (y, x), (_kind, label, states) in targets.items():
                         text, attributes = lines[y]
                         shown = text[x:x + len(label)]
-                        if _kind == "live":
-                            self.assertIn(shown, (label, " " * len(label)))
-                            states.add(shown)
-                        else:
-                            self.assertEqual(shown, label)
-                            states.add(attributes[x])
+                        # Every target keeps its text; the open ones pulse by attribute.
+                        self.assertEqual(shown, label)
+                        states.add(attributes[x])
                     time.sleep(0.15)
                 for kind in ("count", "live"):
                     observed = [states for value_kind, _label, states in targets.values() if value_kind == kind]
