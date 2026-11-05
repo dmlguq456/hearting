@@ -799,6 +799,16 @@ def _completion_home():
 
 
 def _dispatch_state_roots(home=None, jobs=None):
+    """Share one fresh path resolution within an existing passive read scope."""
+    try:
+        from runtime_observation import observe_once
+    except ImportError:
+        # Standalone file-path consumers can still use the original discovery.
+        return _read_dispatch_state_roots(home, jobs)
+    return observe_once(_read_dispatch_state_roots)(home, jobs)
+
+
+def _read_dispatch_state_roots(home=None, jobs=None):
     """Read-order candidates for dispatch state: canonical state root
     (dirname of the resolved registry, honoring an inherited
     AGENT_DISPATCH_JOBS) first, then the legacy agent-home-relative tree

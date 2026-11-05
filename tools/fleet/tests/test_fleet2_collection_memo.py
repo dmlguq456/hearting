@@ -23,6 +23,32 @@ from split_module_fixture import patch_split  # noqa: E402
 
 
 class Fleet2CollectionMemoTest(unittest.TestCase):
+    def test_route_state_roots_are_shared_only_inside_one_pass_and_remain_owned(self):
+        from fleet import route
+        with mock.patch.object(route, '_read_dispatch_state_roots',
+                               side_effect=lambda *args: ['first-root']) as reader:
+            with dispatch.collection_read_scope():
+                route._dispatch_state_roots('/home', '/jobs').append('caller-owned')
+                self.assertEqual(route._dispatch_state_roots('/home', '/jobs'), ['first-root'])
+                reader.assert_called_once_with('/home', '/jobs')
+                self.assertEqual(route._dispatch_state_roots('/other', '/jobs'), ['first-root'])
+                self.assertEqual(reader.call_count, 2)
+            reader.side_effect = lambda *args: ['changed-root']
+            with dispatch.collection_read_scope():
+                self.assertEqual(route._dispatch_state_roots('/home', '/jobs'), ['changed-root'])
+            self.assertEqual(reader.call_count, 3)
+            route._dispatch_state_roots('/home', '/jobs')
+            self.assertEqual(reader.call_count, 4)
+
+    def test_route_state_roots_keep_standalone_fresh_reads_without_the_scope_helper(self):
+        from fleet import route
+        with mock.patch.object(route, '_read_dispatch_state_roots',
+                               side_effect=lambda *args: ['standalone-root']) as reader, \
+                mock.patch.dict(sys.modules, {'runtime_observation': None}):
+            self.assertEqual(route._dispatch_state_roots('/home', '/jobs'), ['standalone-root'])
+            self.assertEqual(route._dispatch_state_roots('/home', '/jobs'), ['standalone-root'])
+        self.assertEqual(reader.call_count, 2)
+
     def test_optional_agents_are_observed_once_but_fresh_after_the_pass(self):
         from fleet.collectors import steward
         current = [None]
