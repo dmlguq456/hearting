@@ -100,4 +100,18 @@ class InlineLocationTest(unittest.TestCase):
         self.assertEqual(receipt['commit'],self.source)
         self.assertEqual(receipt['commit_observation']['selected_from'],'execution-checkout')
 
+    def test_unavailable_common_directory_does_not_prove_a_shared_repository(self):
+        fixture=self.fixture();self.commit_result(fixture)
+        import inline_finish
+        real=subprocess.run
+        def unavailable(argv,*args,**kwargs):
+            if '--git-common-dir' in argv:
+                return subprocess.CompletedProcess(argv,128,'','unavailable')
+            return real(argv,*args,**kwargs)
+        with mock.patch.object(inline_finish.os,'getcwd',return_value=str(fixture.repo)), \
+             mock.patch.object(inline_finish.subprocess,'run',side_effect=unavailable):
+            commit,_cwd,observation=inline_finish.select_result_commit(fixture.route,None,F.CAP)
+        self.assertEqual(commit,self.source)
+        self.assertEqual(observation['selected_from'],'execution-checkout')
+
 if __name__=='__main__':unittest.main()

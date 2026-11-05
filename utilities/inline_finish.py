@@ -161,7 +161,8 @@ def select_result_commit(route, supplied, api):
     caller_valid = bool(caller_head and _shares_source_history(caller_cwd, source, caller_head)
                         and _on_a_branch(caller_cwd, caller_head))
     if caller_valid and route_head:
-        caller_valid = common(caller_cwd) == common(route_cwd)
+        caller_common, route_common = common(caller_cwd), common(route_cwd)
+        caller_valid = bool(caller_common and route_common and caller_common == route_common)
     git_cwd, selected_from = route_cwd, "execution-checkout"
     commit = str(supplied or route_head or "").lower()
     if supplied:
