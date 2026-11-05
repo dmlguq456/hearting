@@ -88,24 +88,24 @@ next stage reads the evidence it holds.
 
 ## What to expect
 
-One measured run, not a promise, and due to be measured again right before
-v4.0. The numbers below come from
+One measured run per task, not a promise. The numbers below come from
 [`tools/release/first-journey.py`](tools/release/first-journey.md): published
-release v3.66.2 installed into an isolated Linux environment, one session per
-runtime, no confirmation card answered. Times are model work only. They leave
+release v3.82.17 installed into an isolated Linux environment on 2026-11-06,
+one session per runtime, no confirmation card answered. Times are model work only. They leave
 out sign-in and the time you spend reading and replying.
 
 | Runtime | Small fix (typo, focused test, diff) | Medium task (several files) |
 |---|---:|---:|
-| Claude Code | 33.7 s (a rerun: 27.5 s) | 47.8 s |
-| Codex | 58.1 s (a rerun: 60.8 s) | 142.3 s |
-| OpenCode | 45.0 s | 165.7 s |
+| Claude Code | 20.7 s | 24.6 s |
+| Codex | 22.8 s | 35.1 s |
+| OpenCode | 9.5 s | 20.2 s |
 
 - The medium task fixed a typo, added an optional argument and a new test file,
   updated the README, ran the full tests, and showed the diff in one session.
-- Install took 6.4 s for Claude Code only and 13.4 s for all three runtimes.
-- Every run succeeded, but the sample is small: a few runs, one machine, and
-  one account per runtime.
+  Each runtime made the change in place, and Hearting recorded it automatically.
+- Install took 6.9 s for Claude Code only and 13.0 s for all three runtimes.
+- Every run succeeded, but the sample is small: one run per task, one machine,
+  and one account per runtime.
 - Token counts are collected, but each runtime counts differently (Codex
   input includes cache; Claude lists cache separately), so do not compare them
   across runtimes.

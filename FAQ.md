@@ -130,9 +130,10 @@ summary at the end of a dispatched request has one cost line (elapsed time and
 session tokens; a count the runtime did not report stays `unknown`), and Fleet
 shows the token counts and usage windows that the runtimes report. None of
 that is a bill or a quota forecast. What Hearting itself adds was measured on
-Codex on one machine, three pairs each: the first response about 1 s slower
+Codex on one machine, three pairs each: the first response about 0.7 s slower
 than without Hearting and about 2.4K more input tokens per request; a small
-two-turn bug fix took 42 s against 36 s. The only end-to-end timings we have are in
+two-turn bug fix took about as long either way (38 s with Hearting, 39 s
+without). The only end-to-end timings we have are in
 [What to expect](QUICKSTART.md#what-to-expect), with their limits.
 
 ## Why do I need a new session after an update?
