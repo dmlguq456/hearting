@@ -166,13 +166,13 @@ def _snapshot_signature():
     return tuple(observed)
 
 
-def _readable_lineage_signature(directory: Path):
+def _readable_lineage_signature(directory: Path, observed=None):
     """Observe current readable bytes once and retain them for the parser.
 
     Stat alone cannot expose transient read failures. Use the normal no-follow
     reader even on cache hits, binding its bytes to the observed generation.
     """
-    location, files, generation = _lineage_signature(directory)
+    location, files, generation = (_lineage_signature(directory) if observed is None else observed)
     observed, contents = [], {}
     for filename, *file_generation in files:
         raw = _observed_ledger_bytes(directory / filename, file_generation)
@@ -193,7 +193,14 @@ def _build_lineage_graph(read_context=None) -> LineageGraph:
         # Snapshots are not a second lineage reader; their unreadable schema
         # still prevents a current authority judgment.
         _all_snapshots()
-        signature, contents = _readable_lineage_signature(directory)
+        if read_context is None:
+            signature, contents = _readable_lineage_signature(directory)
+        else:
+            # A pinned passive pass already observed this file inventory. Keep
+            # reading every ledger's bytes and closing identities against that
+            # observation, without repeating the opening directory/file stats.
+            observed = read_context.lineage_signature(lambda: _lineage_signature(directory))
+            signature, contents = _readable_lineage_signature(directory, observed)
         metadata = (signature[0], tuple(item[:-1] for item in signature[1]), signature[2])
         cached = _LINEAGE_GRAPH_CACHE.get(signature)
 
@@ -213,8 +220,7 @@ def _build_lineage_graph(read_context=None) -> LineageGraph:
         if read_context is not None:
             # A normal observation replaces the pass, even if only readable
             # bytes changed. Metadata never substitutes for this observation.
-            read_context.invalidate_lineage_graph()
-            read_context.lineage_graph(metadata, lambda: graph)
+            read_context.observe_lineage_graph(metadata, graph)
         return graph
     except (OSError, ValueError, TypeError):
         _LINEAGE_GRAPH_CACHE.clear()

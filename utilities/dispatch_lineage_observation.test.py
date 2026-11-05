@@ -436,6 +436,31 @@ class ObservationTest(peer._TmpRootMixin, unittest.TestCase):
         print(json.dumps({"ledgers": 337, "rows": 337 * 38, "resolutions": 100,
                           "reads": reads.call_count, "elapsed": time.monotonic() - started}))
 
+    def test_pinned_pass_shares_its_inventory_but_each_new_pass_reads_current_bytes(self):
+        meta, _record, _seat = self.handoff("inventory-shared")
+        expected = "inventory-shared-Z"
+        self.assertEqual(handover.effective_parent(meta, self.jobs_path), expected)
+        real_read = tidy.read_bytes
+        for _round in range(2):
+            handover._LINEAGE_GRAPH_CACHE.clear()
+            raw = []
+            def read(path):
+                value = real_read(path)
+                if Path(path).suffix == ".jsonl":
+                    raw.append(str(path))
+                return value
+            context = PeerReadContext()
+            with context.pinned_lineage(), \
+                    mock.patch.object(handover, "_lineage_signature", wraps=handover._lineage_signature) as observe, \
+                    mock.patch.object(tidy, "read_bytes", side_effect=read):
+                for _query in range(3):
+                    self.assertEqual(handover.effective_parent(
+                        meta, self.jobs_path, read_context=context), expected)
+                # One opening inventory and the cold graph's closing check.
+                self.assertEqual(observe.call_count, 2)
+                self.assertTrue(raw)
+                self.assertTrue(all(count == 1 for count in Counter(raw).values()))
+
     def test_warm_current_observation_invalidates_both_caches_and_same_bytes_recover(self):
         for harness, target in (("claude", "claude"), ("codex", "codex"),
                                 ("opencode", "opencode"), ("claude", "codex")):

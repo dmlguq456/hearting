@@ -188,3 +188,11 @@ class PeerReadContext:
         if self._lineage_pin is not None:
             self._lineage_pin = _UNOBSERVED
         self._lineage_summary = None
+
+    def observe_lineage_graph(self, signature, graph):
+        """Replace a successfully read graph without dropping its pinned observation."""
+        key = tuple(signature)
+        self._lineage_graphs = {key: graph}
+        if self._lineage_pin is not None:
+            self._lineage_pin = key
+        self._lineage_summary = None

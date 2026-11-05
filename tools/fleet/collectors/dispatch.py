@@ -1521,6 +1521,11 @@ def _build_codex_rollout_index(jobs):
             seen_roots.add(root)
             roots.append(root)
 
+    return _index_codex_rollouts(roots)
+
+
+def _index_codex_rollouts(roots, _share_directories=True):
+    """Index the same files, sharing only stable directory path observations."""
     result = {}
     parsed_files = {}
     for sessions_root in roots:
@@ -1528,11 +1533,22 @@ def _build_codex_rollout_index(jobs):
         try:
             walker = os.walk(sessions_root)
             for root, _dirs, names in walker:
+                canonical_root, directory_state = None, None
+                directory_observed = False
                 for name in names:
                     if not (name.startswith("rollout-") and name.endswith(".jsonl")):
                         continue
                     path = os.path.join(root, name)
-                    physical = os.path.realpath(path)
+                    if _share_directories and not directory_observed:
+                        directory_observed = True
+                        try:
+                            canonical_root = os.path.realpath(root)
+                            directory_state = _stat_info_stamp(os.stat(root))
+                        except OSError:
+                            canonical_root = None
+                    physical = (os.path.join(canonical_root, name)
+                                if canonical_root is not None and not os.path.islink(path)
+                                else os.path.realpath(path))
                     if physical not in parsed_files:
                         try:
                             cwd = _codex_transcript_cwd(path)
@@ -1551,6 +1567,16 @@ def _build_codex_rollout_index(jobs):
                     newest = by_cwd.get(cwd)
                     if newest is None or mtime > newest:
                         by_cwd[cwd] = mtime
+                if directory_state is not None:
+                    try:
+                        unchanged = (directory_state == _stat_info_stamp(os.stat(root))
+                                     and os.path.realpath(root) == canonical_root)
+                    except OSError:
+                        unchanged = False
+                    if not unchanged:
+                        # Discard the partial index and use the original
+                        # per-file resolver once when the directory moved.
+                        return _index_codex_rollouts(roots, False)
         except OSError:
             continue
     return result

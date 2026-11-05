@@ -1765,6 +1765,48 @@ class CodexJobLivenessPathTest(unittest.TestCase):
             "/REGISTRY/.dispatch/homes/nested-child.lab/sessions"
         ])
 
+    def test_directory_path_sharing_matches_file_resolution_and_preserves_symlink_aliases(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, 'sessions')
+            regular = {self._rollout(root, str(n), '/work/' + str(n % 3), 1000.0 + n)
+                       for n in range(40)}
+            alias = Path(next(iter(regular))).parent / 'rollout-alias.jsonl'
+            alias.symlink_to(next(iter(regular)))
+            root_alias = Path(tmp) / 'alias'
+            root_alias.symlink_to(root, target_is_directory=True)
+            roots = [root, str(root_alias)]
+            expected = dispatch._index_codex_rollouts(roots, False)
+            native_realpath = os.path.realpath
+            with mock.patch.object(dispatch.os.path, 'realpath', wraps=native_realpath) as resolve:
+                self.assertEqual(dispatch._index_codex_rollouts(roots), expected)
+            self.assertFalse(any(os.fspath(call.args[0]) in regular
+                                 for call in resolve.call_args_list))
+            self.assertTrue(any(os.fspath(call.args[0]) == str(alias)
+                                for call in resolve.call_args_list))
+
+    def test_directory_retarget_discards_the_partial_index_and_retries_file_resolution_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            first, second = Path(tmp) / 'first', Path(tmp) / 'second'
+            self._rollout(str(first), 'shared', '/work/first', 1000.0)
+            self._rollout(str(second), 'shared', '/work/second', 2000.0)
+            alias = Path(tmp) / 'sessions'
+            alias.symlink_to(first, target_is_directory=True)
+            moved = [False]
+            native_read = dispatch._codex_transcript_cwd
+            def read(path):
+                value = native_read(path)
+                if not moved[0]:
+                    moved[0] = True
+                    alias.unlink()
+                    alias.symlink_to(second, target_is_directory=True)
+                return value
+            with mock.patch.object(dispatch, '_codex_transcript_cwd', side_effect=read), \
+                    mock.patch.object(dispatch.os, 'walk', wraps=os.walk) as walk:
+                actual = dispatch._index_codex_rollouts([str(alias)])
+                self.assertEqual(walk.call_count, 2)
+            self.assertEqual(actual, dispatch._index_codex_rollouts([str(alias)], False))
+            self.assertEqual(actual[str(alias)], {'/work/second': 2000.0})
+
     def test_shared_default_root_is_walked_once_and_each_rollout_parsed_once(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = os.path.join(tmp, "sessions")
