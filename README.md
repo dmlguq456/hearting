@@ -19,13 +19,15 @@ lower-cost workers carry it out in small checked steps, and Fleet shows every se
   <a href="#quick-start">Quick start</a> ·
   <a href="#fleet-every-agent-on-one-screen">Fleet</a> ·
   <a href="#permissions">Permissions</a> ·
-  <a href="https://dmlguq456.github.io/hearting/">Landing page &amp; agent map ↗</a>
+  <a href="https://dmlguq456.github.io/hearting/fleet.html">Fleet tour ↗</a> ·
+  <a href="https://dmlguq456.github.io/hearting/">Website ↗</a>
 </p>
 
 <p align="center">
   <img src="docs/fleet.svg" alt="Fleet's Explorer OVERVIEW: eight sessions in four projects across Claude Code, Codex, and OpenCode, grouped by project, each project's line showing its open routes, waiting answers, and latest result; every session with its model, context gauge, and what it is doing now; one session waiting for an answer, two open routes with their stage lines, and per-host CPU and GPU use at the bottom left." width="100%">
 </p>
 <p align="center"><sub>Fleet's Explorer, OVERVIEW: sessions from all three runtimes grouped by project, each project's status on its own line, one session waiting for your answer, two requests mid-flight, and GPU use per host. Drawn from synthetic demo data (<a href="docs/fleet/overview.png">PNG</a>).</sub></p>
+<p align="center"><a href="https://dmlguq456.github.io/hearting/fleet.html"><strong>Take the Fleet tour →</strong></a> — every screen at full size, and why you can trust it.</p>
 
 ## Why Hearting
 
@@ -89,9 +91,9 @@ When a dispatched request finishes, the runtime writes a short summary of the
 intent, the result, its cost (elapsed time and session tokens), what changed,
 what was checked, and what is left.
 
-How much of this runs depends on the request. A one-line answer or a typo runs
-inline (`direct`). A small change gets the frame and one quick worker
-(`quick`). Bigger or riskier work adds a written plan and checklist,
+How much of this runs depends on the request. A one-line answer or a tiny reversible
+fix is done right in your folder and recorded automatically. A small change that
+needs a route gets the frame and one quick worker (`quick`). Bigger or riskier work adds a written plan and checklist,
 independent reviews, and finally adversarial or security checks
 (`standard → strong → thorough → adversarial`).
 
@@ -106,8 +108,6 @@ More requests that work as written:
 
 > “Analyze this repository and write a PRD for the next feature.”
 
-> “Review these papers and the experiment code, then build a reproduction plan.”
-
 > “Find the earlier decision and apply this project's naming convention.”
 
 See [capabilities/README.md](capabilities/README.md) for every entry point and
@@ -115,10 +115,13 @@ See [capabilities/README.md](capabilities/README.md) for every entry point and
 
 ## Fleet: every agent on one screen
 
-When agents work in the background, the usual problem is not knowing: is it
-still running, is it stuck, is it waiting for you, did it finish? Fleet
-answers that in one terminal view — for every Claude Code, Codex, and OpenCode
-session on the machine and every worker Hearting dispatched from them.
+When agents work in the background, you cannot tell whether one is still
+running, stuck, or waiting for you. Fleet answers in one terminal view, for every
+Claude Code, Codex, and OpenCode session on the machine and every worker
+Hearting dispatched from them.
+
+**[Take the Fleet tour →](https://dmlguq456.github.io/hearting/fleet.html)**
+Every screen at full size, with a line on what each one tells you.
 
 ### What you see at a glance
 
@@ -132,14 +135,11 @@ working, idle, or waiting for you. Below it, one screen per question:
 
 | Screen | What it tells you |
 |---|---|
-| **OVERVIEW** | Every session, grouped by project. Each project's line says where it stands: open requests, questions waiting for you, what is left to decide, and when it last changed. Each session shows runtime, model and effort, a short title, context left, what it is doing now, and for how long. Working, idle, and waiting-for-you have different marks. |
+| **OVERVIEW** | Every session, grouped by project. Each project's line says where it stands: open requests, questions waiting for you, what is left to decide, and when it last changed. Each session shows runtime, model, context left, what it is doing now, and for how long. |
 | **ROUTES** | Each request's stage line — `plan › execute › test › report` — with the workers running under it. |
-| **QUESTIONS** | Every agent waiting for your answer or approval: which session asks, what kind of question, for which request, and since when. Older waits stay listed until you answer or the work ends; nothing is dropped for its age. Answer from Fleet when the runtime offers a reply path; otherwise Fleet points you to the session. |
-| **PEERS** | Which sessions watch or steer which, and their last exchange. |
-| **HISTORY** | Earlier sessions of each terminal seat, so work that continued in a new session stays traceable. |
+| **QUESTIONS** | Every agent waiting for your answer or approval: which session, what kind, for which request, and since when. Older waits stay listed until you answer or the work ends. Answer from Fleet when the runtime offers a reply path; otherwise Fleet points you to the session. |
 | **RESOURCES** | CPU, memory, and per-GPU use on this machine and any configured hosts, with the session that owns each GPU process. |
-| **MEMORY** | For each project: its newest decisions, open work by stage, and the latest records saved to shared memory. |
-| **MODELS · SYSTEM** | Which real model each budget maps to, and the installed Hearting release. |
+| **Others** | PEERS (which sessions watch or steer which), HISTORY (earlier sessions of each terminal seat), MEMORY (each project's newest decisions and open work), MODELS · SYSTEM (which real model each budget maps to, and the installed release). |
 
 ### Key screens
 
@@ -155,15 +155,8 @@ working, idle, or waiting for you. Below it, one screen per question:
 </table>
 
 Select a session or a request to open its page, and from there its raw output:
-tool calls and results in order, without opening the runtime itself.
-
-<p align="center">
-  <img src="docs/fleet/output.png" alt="A request's page: the stage graph with setup done, eval-asr running, eval-sep and report pending, and below it the owner's raw output listing an edit, a shell command, and their results." width="100%">
-</p>
-<p align="center"><sub>A lab request's page: setup done, one evaluation running, the next stages pending, and the owner's raw output underneath. Demo data.</sub></p>
-
-The layout holds in narrow terminals too; see the
-[100-column OVERVIEW](docs/fleet/narrow.png).
+tool calls and results in order, without opening the runtime itself. The layout
+holds in narrow terminals too; see the [100-column OVERVIEW](docs/fleet/narrow.png).
 
 ### Why you can trust what it shows
 
@@ -192,12 +185,10 @@ Bash. Session titles follow your language; set `title_language` in
 
 ### Known limits
 
-- The Explorer is the default `fleet` screen; its layout and keyboard handling
-  are still being finished for v4.0.
-- Fleet is not light yet. On a machine with a long work history and many live
-  sessions, one Explorer window used about a third of one CPU core and about
-  0.8 GB of memory, and drew its first full screen in about 6 seconds. Lowering
-  its CPU use continues in v4.x.
+Fleet is not light yet. On a machine with a long work history and many live
+sessions, one Explorer window used about a third of one CPU core and about
+0.8 GB of memory, and drew its first full screen in about 6 seconds. Lowering
+its CPU use continues in v4.x.
 
 ## Quick start
 
@@ -211,7 +202,9 @@ Bash. Session titles follow your language; set `title_language` in
 - **At least one agent CLI, installed and signed in:** Claude Code, Codex, or
   OpenCode. Claude Code alone is enough.
 
-<!-- TODO(public-readiness stage 5): add the tested OS × runtime matrix. -->
+Tested so far: CI checks the installation for Claude Code, Codex, and OpenCode
+on Ubuntu, and the measured runs in [QUICKSTART.md](QUICKSTART.md) used Linux.
+macOS has not been checked end to end, and Windows (Git Bash) is experimental.
 
 ### Install
 
@@ -255,18 +248,19 @@ change, what was run to check it, and anything left undone. For anything
 beyond a one-line fix, the plan, evidence, and report stay in the project's
 `.agent_reports/` folder.
 
-When a request changes source code, Hearting usually makes the change in a
-separate git worktree beside your project, `<project>-wt/<name>`, on its own
-branch, so your folder, branch, and uncommitted files stay as they were. The
-result then names the folder and branch that hold the change and whether it is
-committed. A small edit made in place, by any tool, is still recorded
-automatically as a direct route — one record per session and folder, later
-turns appended, no model call. Set `HEARTING_AUTO_RECORD=off` to stop it.
+A tiny reversible fix like this one is made right in your project folder, and
+Hearting records it automatically: the changed files, the check commands it saw
+run, and the final reply. There is nothing to start or finish, and no model is
+called. When a request needs more, Hearting changes source in a separate git
+worktree beside your project, `<project>-wt/<name>`, on its own branch, so your
+folder, branch, and uncommitted files stay as they were; the result names the
+folder, the branch, and whether it is committed. The automatic record saves what
+happened. It does not judge whether the fix or its tests passed. Set
+`HEARTING_AUTO_RECORD=off` to stop it.
 
-The [Quickstart](QUICKSTART.md) walks this task end to end with measured times,
-and the [FAQ](FAQ.md) covers `PATH`, Python versions, and permissions.
-
-<!-- TODO(public-readiness stage 1): link a published demo repository with the expected patch. -->
+The [Quickstart](QUICKSTART.md) walks a first task end to end on small demo
+files, with the expected change and measured times. The [FAQ](FAQ.md) covers
+`PATH`, Python versions, and permissions.
 
 ### Update and status
 
@@ -325,8 +319,8 @@ headless:
   `workspace-write` sandbox without approval prompts; OpenCode workers start
   from your own OpenCode permission configuration.
 
-The installer prints a short note with this default and the file path after
-a Claude Code install; it asks for no input.
+A first install that includes Claude Code prints a short note with this default
+and the file that changes it; it asks for no input.
 
 **Your Claude Code user rules also apply in OpenCode.** OpenCode has no
 user-level rule file of its own, so when `~/.claude/rules/` (or
@@ -417,9 +411,9 @@ Every runtime sees the full capability set. Where a runtime lacks a surface,
 the installer marks it `SKIP` with a reason instead of hiding the difference.
 Claude Code alone is a supported setup; with more than one runtime installed,
 Hearting can place workers and independent reviews across them. What Hearting
-adds is small but not free: on Codex, one measurement on one machine found the
-first response about 1.5 s slower than without Hearting and about 2.5K more
-input tokens per request.
+adds is small but not free: on Codex, three measured pairs on one machine found
+the first response about 1 s slower than without Hearting and about 2.4K more
+input tokens per request; a small two-turn bug fix took 42 s against 36 s.
 
 Shared contracts name budgets, not vendor models. Each runtime maps the budgets
 to real models in a user-owned file,
@@ -493,7 +487,7 @@ The `pre-push` hook runs the same projection check CI runs. Packaged
 activation refuses to build from a dirty tree, so run the install lifecycle
 suites from a clean checkout; `--mode linked` exists only for live debugging.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
+Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 
 ## Documentation
 
