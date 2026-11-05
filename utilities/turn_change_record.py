@@ -937,14 +937,75 @@ def _record_pass(path: Path, harness: str, sid: str, env, recorder, appender, no
     return result
 
 
+def _end_event(now, payload):
+    """Bound native hints retained on an existing turn while its capture is pending."""
+    hints = {}
+    for key, cap in (("transcript_path", 4096), ("transcriptPath", 4096), ("turn_id", 256),
+                     ("last_assistant_message", 8192), ("hook_event_name", 128)):
+        value = _field(payload or {}, key)
+        if value:
+            if key == "last_assistant_message":
+                from work_intent import redact_secrets
+                value = redact_secrets(value)
+            hints[key] = value.encode("utf-8")[:cap].decode("utf-8", "ignore")
+    if (payload or {}).get("interrupted"):
+        hints["interrupted"] = True
+    return {"at": now, "payload": hints}
+
+
+def _ready_ends(state, before=None):
+    """At most the retained prior turn and current turn; no new queue or waiter."""
+    for turn in (state.get("prior_turn") or {}, state):
+        event = turn.get("deferred_end")
+        if (not isinstance(event, dict) or not isinstance(event.get("at"), (int, float))
+                or turn.get("start_pending") or turn.get("entries") is None):
+            continue
+        if before is not None and event["at"] >= before:
+            continue
+        if turn is not state and (state.get("start_pending") or state.get("entries") is None
+                or turn.get("top") != state.get("top") or turn.get("root") != state.get("root")
+                or event["at"] >= (state.get("turn_started_at") or 0)):
+            continue
+        yield event
+
+
+def _resume_ends(path, harness, sid, cwd, env, recorder, appender, before=None):
+    return [turn_end(harness, sid, cwd, env, now=event["at"], payload=event.get("payload"),
+                     recorder=recorder, appender=appender)
+            for event in _ready_ends(_read(path), before)]
+
+
 def turn_start(harness: str, sid: str, cwd: str, env, *, now=None, recorder=None, appender=None, payload=None) -> dict:
-    """Take this turn's start snapshot (git only while the session records this folder),
-    then close any automatic route still open."""
+    """Publish this boundary before off-lock Git I/O, then attach only its own capture."""
     now = time.time() if now is None else now
     path = state_path(env, harness, sid)
     result = {"state": "busy"}
-    # Git and per-path metadata can take seconds in a large tree. Capture outside
-    # the state lock; recheck the route/root and turn ordering before publishing.
+
+    def reserve(state):
+        latest = max(state.get("turn_started_at") or 0, state.get("turn_ended_at") or 0)
+        if latest > now:
+            result["state"] = "late-start"
+            return
+        if not state:
+            _prune(path.parent, now)
+            _prune_markers(env)
+        if (state.get("turn_ended_at") is None and isinstance(state.get("turn_started_at"), (int, float))
+                and (state.get("entries") is not None and state.get("root") or state.get("start_pending"))):
+            state["prior_turn"] = {key: state.get(key) for key in PRIOR_KEYS}
+            for key in ("start_pending", "deferred_end"):
+                if key in state:
+                    state["prior_turn"][key] = state[key]
+        else:
+            state.pop("prior_turn", None)
+        state.pop("deferred_end", None)
+        state.update(harness=harness, session_id=sid, top=None, root="", head="", entries=None,
+                     native_anchor=None, turn_started_at=now, turn_ended_at=None, start_pending=True)
+        result["state"] = "start-pending"
+
+    if _update(path, reserve) is None or result["state"] != "start-pending":
+        return result
+    # Even _top and native reads are outside the lock. An end arriving here sees
+    # the reservation and retains its own event instead of taking a mixed snapshot.
     top = _top(cwd, env)
     mode, captured_root = _mode(harness, sid, top, _read(path), env) if top else ("skip", "")
     taken, anchor = None, None
@@ -954,40 +1015,31 @@ def turn_start(harness: str, sid: str, cwd: str, env, *, now=None, recorder=None
         anchor = turn_anchor(harness, sid, native.get("transcript_path") or native.get("transcriptPath"), at=now)
         taken = snapshot(top, env)
 
-    def begin(state):
-        latest = max(state.get("turn_started_at") or 0, state.get("turn_ended_at") or 0)
-        if latest > now:
-            result["state"] = "late-start"
-            return  # a slow older capture cannot replace a newer boundary
-        if not state:
-            _prune(path.parent, now)
-            _prune_markers(env)
-        # The previous turn is still open: its end step may simply not have run yet (the
-        # next prompt came at once). Keep its start snapshot for that late end; an
-        # interrupted turn's is dropped at the next start or end.
-        if (state.get("turn_ended_at") is None and isinstance(state.get("turn_started_at"), (int, float))
-                and state.get("entries") is not None and state.get("root")):
-            state["prior_turn"] = {key: state.get(key) for key in PRIOR_KEYS}
-        else:
-            state.pop("prior_turn", None)
-        state.update(harness=harness, session_id=sid, top=str(top) if top else None,
-                     turn_started_at=now, turn_ended_at=None, head="", entries=None, root="")
-        result["state"] = "no-work-tree"
-        if top is None:
+    def publish(state):
+        slot = state if state.get("turn_started_at") == now else state.get("prior_turn") or {}
+        current = slot is state
+        result["state"] = "late-start"
+        if slot.get("turn_started_at") != now or not slot.get("start_pending"):
             return
-        mode, root = _mode(harness, sid, top, state, env)
-        result["state"] = mode
-        if mode in ("record", "route-held"):
-            if taken is None or root != captured_root:
-                result["state"] = "unreadable"
-            else:
-                state.update(**taken, root=root, native_anchor=anchor)
-                result["state"] = "baseline" if mode == "record" else "route-held-baseline"
+        slot.pop("start_pending", None)
+        slot.update(top=str(top) if top else None, native_anchor=anchor)
+        status = "no-work-tree"
+        if top is not None:
+            mode, root = _mode(harness, sid, top, state, env)
+            status = mode
+            if mode in ("record", "route-held"):
+                status = "unreadable"
+                if taken is not None and root == captured_root:
+                    slot.update(**taken, root=root)
+                    status = "baseline" if mode == "record" else "route-held-baseline"
+        if current:
+            result["state"] = status
 
-    _update(path, begin)
+    if _update(path, publish) is None:
+        return {"state": "busy"}
+    _resume_ends(path, harness, sid, cwd, env, recorder, appender)
     state = _read(path)
     if state.get("pending") or any(not entry.get("closed") for entry in (state.get("records") or {}).values()):
-        # A queued turn whose record step did not run (killed) is written at the next boundary.
         _record_pass(path, harness, sid, env, recorder or record, appender or append, now, 0.0)
     return result
 
@@ -1000,6 +1052,10 @@ def turn_end(harness: str, sid: str, cwd: str, env, *, now=None, recorder=None, 
     appender = append if appender is None else appender
     path = state_path(env, harness, sid)
     result = {"state": "busy"}
+    end_event = _end_event(now, payload)  # sanitize/limit outside the state lock too
+    # A prior end whose start boundary became available after its child stopped
+    # can be drained by the next existing boundary too; never replay this call.
+    _resume_ends(path, harness, sid, cwd, env, recorder, appender, before=now)
     observed = _read(path)
     after, captured_root = None, ""
     began, top = observed.get("turn_started_at"), observed.get("top")
@@ -1053,6 +1109,14 @@ def turn_end(harness: str, sid: str, cwd: str, env, *, now=None, recorder=None, 
             return
         began, top = state.get("turn_started_at"), state.get("top")
         prior = state.get("prior_turn")
+        if state.get("start_pending") and isinstance(began, (int, float)):
+            target = prior if now < began else state
+            result["state"] = "late-end"
+            if (isinstance(target, dict) and isinstance(target.get("turn_started_at"), (int, float))
+                    and target["turn_started_at"] <= now):
+                target["deferred_end"] = end_event
+                result["state"] = "start-pending"
+            return
         if isinstance(began, (int, float)) and now < began:
             # This end happened before the open turn began: the next turn's start step ran
             # first. The open turn is not this one's to close. This turn's own start
@@ -1061,6 +1125,10 @@ def turn_end(harness: str, sid: str, cwd: str, env, *, now=None, recorder=None, 
             if (isinstance(prior, dict) and isinstance(prior.get("turn_started_at"), (int, float))
                     and prior["turn_started_at"] > now):
                 return  # a later turn's kept snapshot: that turn's own late end still needs it
+            if isinstance(prior, dict) and prior.get("start_pending"):
+                prior["deferred_end"] = end_event
+                result["state"] = "start-pending"
+                return
             state.pop("prior_turn", None)
             if (isinstance(prior, dict) and isinstance(prior.get("turn_started_at"), (int, float))
                     and prior["turn_started_at"] <= now and prior.get("entries") is not None
@@ -1072,6 +1140,11 @@ def turn_end(harness: str, sid: str, cwd: str, env, *, now=None, recorder=None, 
                     queue(state, prior, {key: state.get(key) for key in ("head", "entries", "entries_total", "source_total", "entries_truncated", "tail_digest")},
                           top, root, prior["turn_started_at"],
                           (state.get("native_anchor") or {}).get("cursor"), mode)
+            return
+        if (observed.get("start_pending") and observed.get("turn_started_at") == began
+                and state.get("turn_ended_at") is None):
+            state["deferred_end"] = end_event
+            result["state"] = "start-pending"
             return
         if _turn_key(state) != _turn_key(observed):
             result["state"] = "superseded-end"
@@ -1090,10 +1163,15 @@ def turn_end(harness: str, sid: str, cwd: str, env, *, now=None, recorder=None, 
                 result["state"] = "unreadable" if has_start else "no-start-snapshot"
                 if has_start and root == captured_root and after is not None:
                     queue(state, state, after, top, root, began, mode=mode)
+        state.pop("deferred_end", None)
         state.update(turn_ended_at=now, entries=None, head="")
 
     if _update(path, finish_turn) is None:
         return result
+    if result["state"] == "start-pending":
+        resumed = _resume_ends(path, harness, sid, cwd, env, recorder, appender)
+        if resumed:
+            return resumed[-1]
     state = _read(path)
     flushed = ""
     if state.get("pending") or any(not entry.get("closed") for entry in (state.get("records") or {}).values()):

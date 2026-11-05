@@ -2,6 +2,7 @@
 """The automatic change record: each turn's own source changes, one record per session and
 folder, never in the way."""
 import importlib.util
+import contextlib
 import json
 import os
 import shutil
@@ -1282,6 +1283,168 @@ class ReviewRegressionTest(Fixture):
 
 
 class HeldHistoryAndSnapshotLockTest(Fixture):
+    def test_new_start_pending_keeps_the_previous_end_and_separates_both_turns(self):
+        captured = []
+        def record(*args, **kwargs):
+            captured.extend(args[4])
+            return self.recorder(*args, **kwargs)
+        def append(*args, **kwargs):
+            captured.extend(args[5])
+            return self.appender(*args, **kwargs)
+        def step(phase, when, **kwargs):
+            return getattr(T, 'turn_' + phase)('claude', SID, str(self.repo), self.env, now=when,
+                recorder=record, appender=append, **kwargs)
+        step('start', 100)
+        (self.repo/'greet.py').write_text('first turn A edit\n')
+        entered, release, ended = threading.Event(), threading.Event(), threading.Event()
+        replies, errors = {}, []
+        original = T.snapshot
+        def take(*args):
+            value = original(*args)  # real Git/metadata snapshot, then delay publication
+            if threading.current_thread() is newer:
+                entered.set()
+                if not release.wait(15):
+                    raise AssertionError('test did not release the new start')
+            return value
+        def start_new():
+            try:
+                replies['start'] = step('start', 120)
+            except BaseException as exc:
+                errors.append(exc)
+        def end_old():
+            try:
+                replies['end'] = step('end', 110,
+                    payload={'last_assistant_message':'A final reply; check failed, exit unknown.'})
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                ended.set()
+        newer = threading.Thread(target=start_new)
+        older = threading.Thread(target=end_old)
+        with mock.patch.object(T, 'snapshot', side_effect=take):
+            newer.start()
+            try:
+                self.assertTrue(entered.wait(10))
+                with T._locked(T._state_lock(T.state_path(self.env,'claude',SID)), 0.0) as available:
+                    self.assertTrue(available)
+                (self.repo/'README.md').write_text('second turn B edit only\n')
+                older.start()
+                self.assertTrue(ended.wait(10), 'old end must not wait on the new Git capture')
+            finally:
+                release.set()
+                newer.join(15)
+                if older.ident is not None:
+                    older.join(15)
+        self.assertFalse(newer.is_alive())
+        self.assertFalse(older.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(self.calls[0]['sources'], [['greet.py']])
+        self.assertEqual(captured[0]['source_count'], 1)
+        self.assertIn('A final reply', captured[0]['section'])
+        self.assertIsNone(self.state()['turn_ended_at'])
+        self.assertEqual(self.state()['turn_started_at'], 120)
+        step('end', 140, payload={'last_assistant_message':'B final reply.'})
+        self.assertEqual(self.appended, [[['README.md']]])
+        self.assertEqual(captured[1]['source_count'], 1)
+        self.assertIn('B final reply', captured[1]['section'])
+        self.assertNotIn('prior_turn', self.state())
+
+    @contextlib.contextmanager
+    def starting(self, when, *, resume=True, unreadable=False):
+        entered, release = threading.Event(), threading.Event()
+        replies, errors = {}, []
+        snapshot, drain = T.snapshot, T._resume_ends
+        def take(*args):
+            value = snapshot(*args)
+            if threading.current_thread() is worker:
+                entered.set()
+                if not release.wait(15):
+                    raise AssertionError('test did not release capture')
+                if unreadable:
+                    return None
+            return value
+        def resuming(*args, **kwargs):
+            return [] if not resume and threading.current_thread() is worker else drain(*args, **kwargs)
+        def start():
+            try:
+                replies.update(T.turn_start('claude', SID, str(self.repo), self.env, now=when,
+                    recorder=self.recorder, appender=self.appender))
+            except BaseException as exc:
+                errors.append(exc)
+        worker = threading.Thread(target=start)
+        with mock.patch.object(T,'snapshot',side_effect=take), mock.patch.object(T,'_resume_ends',side_effect=resuming):
+            worker.start()
+            try:
+                self.assertTrue(entered.wait(10))
+                yield replies
+            finally:
+                release.set()
+                worker.join(15)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, [])
+
+    def test_own_end_during_start_capture_is_saved_with_its_reply_and_interruption(self):
+        with self.starting(100):
+            (self.repo/'greet.py').write_text('this turn\n')
+            ended = T.turn_end('claude',SID,str(self.repo),self.env,now=110,
+                recorder=self.recorder,appender=self.appender,
+                payload={'interrupted':True,'last_assistant_message':'A interrupted final reply.'})
+            self.assertEqual(ended['state'],'start-pending')
+            self.assertEqual(self.calls,[])
+        self.assertEqual(self.calls[0]['sources'],[['greet.py']])
+        self.assertEqual(self.state()['turn_ended_at'],110)
+        summary = self.state()['records'][str(self.root)]['last_turn']['summary']
+        self.assertIn('A interrupted final reply',summary)
+        self.assertIn('native boundary: interrupted',summary)
+        self.assertNotIn('deferred_end',self.state())
+
+    def test_next_end_drains_a_prior_end_left_after_start_publication(self):
+        T.turn_start('claude',SID,str(self.repo),self.env,now=100)
+        (self.repo/'greet.py').write_text('A edit\n')
+        with self.starting(120,resume=False):
+            (self.repo/'README.md').write_text('B edit\n')
+            T.turn_end('claude',SID,str(self.repo),self.env,now=110,
+                recorder=self.recorder,appender=self.appender,
+                payload={'last_assistant_message':'A reply token=unsafe-token-value '+('x'*20000)})
+        self.assertEqual(self.calls,[])
+        event=self.state()['prior_turn']['deferred_end']
+        self.assertLessEqual(len(event['payload']['last_assistant_message'].encode()),8192)
+        self.assertNotIn('unsafe-token-value',json.dumps(event))
+        T.turn_end('claude',SID,str(self.repo),self.env,now=140,
+            recorder=self.recorder,appender=self.appender)
+        self.assertEqual(self.calls[0]['sources'],[['greet.py']])
+        self.assertEqual(self.appended,[[['README.md']]])
+        self.assertNotIn('prior_turn',self.state())
+
+    def test_prior_pending_start_can_publish_after_a_newer_boundary_without_replacing_it(self):
+        with self.starting(100) as reply:
+            (self.repo/'greet.py').write_text('A edit\n')
+            T.turn_start('claude',SID,str(self.repo),self.env,now=120,
+                recorder=self.recorder,appender=self.appender)
+            self.assertEqual(T.turn_end('claude',SID,str(self.repo),self.env,now=110,
+                recorder=self.recorder,appender=self.appender)['state'],'start-pending')
+            (self.repo/'README.md').write_text('B edit\n')
+        self.assertEqual(reply['state'],'late-start')
+        self.assertEqual(self.calls[0]['sources'],[['greet.py']])
+        self.assertEqual(self.state()['turn_started_at'],120)
+        T.turn_end('claude',SID,str(self.repo),self.env,now=140,
+            recorder=self.recorder,appender=self.appender)
+        self.assertEqual(self.appended,[[['README.md']]])
+
+    def test_failed_pending_capture_keeps_the_unverifiable_boundary_unknown(self):
+        T.turn_start('claude',SID,str(self.repo),self.env,now=100)
+        (self.repo/'greet.py').write_text('A edit\n')
+        with self.starting(120,unreadable=True) as reply:
+            (self.repo/'README.md').write_text('B edit\n')
+            T.turn_end('claude',SID,str(self.repo),self.env,now=110,
+                recorder=self.recorder,appender=self.appender)
+        self.assertEqual(reply['state'],'unreadable')
+        self.assertEqual(self.calls,[])
+        self.assertIn('deferred_end',self.state()['prior_turn'])
+        self.assertEqual(T.turn_end('claude',SID,str(self.repo),self.env,now=140,
+            recorder=self.recorder,appender=self.appender)['state'],'no-start-snapshot')
+        self.assertEqual(self.calls,[])
+
     def test_held_history_evicts_oldest_with_marker_and_preserves_latest_reply(self):
         self.ledger_line('codex', SID, 'rt-still-open')
         routes = self.root / '.runtime/routes'
