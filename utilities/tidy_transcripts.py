@@ -1080,7 +1080,7 @@ def turn_observations(harness, sid, anchor, payload=None, *, until=None):
                 for key in ('content', 'structuredContent', 'value', 'result', 'results'):
                     if key in value:
                         visit(value[key])
-                if value.get('type') == 'text':
+                if value.get('type') in ('text', 'input_text', 'output_text'):
                     visit(value.get('text', ''))
             elif isinstance(value, list):
                 for part in value:
@@ -1176,9 +1176,9 @@ def turn_observations(harness, sid, anchor, payload=None, *, until=None):
                 if not isinstance(p, dict):
                     continue
                 kind = p.get('type')
-                if kind == 'function_call' and re.search(r'(?:^|\.)(?:exec|exec_command|write_stdin|wait)$', p.get('name', '')):
-                    calls[p.get('call_id')] = command(p['name'], p.get('call_id'), p.get('arguments'), ref)
-                elif kind == 'function_call_output' and p.get('call_id') in calls:
+                if kind in ('function_call', 'custom_tool_call') and re.search(r'(?:^|\.)(?:exec|exec_command|write_stdin|wait)$', p.get('name', '')):
+                    calls[p.get('call_id')] = command(p['name'], p.get('call_id'), p.get('arguments') or p.get('input'), ref)
+                elif kind in ('function_call_output', 'custom_tool_call_output') and p.get('call_id') in calls:
                     item = calls[p['call_id']]
                     output(item, p.get('output'))
                     item['result_reference'] = ref

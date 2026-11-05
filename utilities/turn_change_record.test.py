@@ -959,6 +959,22 @@ class TinyFixContractTest(Fixture):
         self.assertIn('Final conclusion survives many checks.',supplement['summary'])
         self.assertIn('Reference:',supplement['summary'])
 
+    def test_codex_native_code_mode_custom_calls_capture_nested_command_results(self):
+        import tidy_transcripts as tt
+        path = self.native()
+        anchor = tt.turn_anchor('codex', SID, str(path))
+        self.row(path, {'type':'custom_tool_call','name':'exec','call_id':'code-mode',
+                        'input':'text(await tools.exec_command({cmd:"pytest"}));'})
+        result = {'i':0,'status':'fulfilled','value':{'exit_code':1,'output':'failure stdout remains private'}}
+        self.row(path, {'type':'custom_tool_call_output','call_id':'code-mode',
+                        'output':[{'type':'input_text','text':'Script completed\nWall time: 0.1s\nOutput:\n'},
+                                  {'type':'input_text','text':json.dumps(result)}]})
+        facts = tt.turn_observations('codex', SID, anchor)
+        self.assertEqual(len(facts['commands']),1)
+        self.assertEqual(facts['commands'][0]['state'],'exited')
+        self.assertEqual(facts['commands'][0]['exit_codes'],[1])
+        self.assertNotIn('stdout remains private',json.dumps(facts))
+
     def test_native_running_failure_and_stop_reply_do_not_become_a_pass(self):
         import tidy_transcripts as tt
         path = self.native()
