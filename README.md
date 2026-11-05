@@ -320,11 +320,11 @@ headless:
 A first install that includes Claude Code prints this default and the file that
 changes it.
 
-**Your Claude Code user rules also apply in OpenCode.** OpenCode has no
-user-level rule file of its own, so when `~/.claude/rules/` (or
-`$CLAUDE_CONFIG_DIR/rules/`) holds rule files, Hearting writes OpenCode's
-global `AGENTS.md` as those rules followed by its own instructions, and the
-install or update that starts it says so. Rules limited to certain paths are
+**Your Claude Code user rules also apply in OpenCode.** Hearting manages
+OpenCode's global `AGENTS.md` for its own instructions. When `~/.claude/rules/`
+(or `$CLAUDE_CONFIG_DIR/rules/`) holds rule files, Hearting puts those rules
+before its instructions in that file, and the install or update that starts it
+says so. Rules limited to certain paths are
 left out, and the rule files are only read. The rule text then also reaches
 the model provider your OpenCode uses. To stop it, add these two lines to the
 same `dispatch-defaults.yaml`; the next install, update, or
