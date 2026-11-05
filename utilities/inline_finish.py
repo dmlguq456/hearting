@@ -137,6 +137,56 @@ def _shares_source_history(cwd, source, commit) -> bool:
                           capture_output=True).returncode == 0
 
 
+def select_result_commit(route, supplied, api):
+    """Choose observable Git evidence without moving either checkout or changing route identity."""
+    source, route_cwd = str(route.get("source_commit") or ""), str(route["cwd"])
+    if not api._COMMIT_SHA.fullmatch(source):
+        return None, route_cwd, {}  # Non-Git sources never acquire a result commit later.
+    caller_cwd = os.getcwd()
+    route_head, caller_head = api._head_commit(route_cwd), api._head_commit(caller_cwd)
+
+    def changed(cwd, head):
+        if not api._COMMIT_SHA.fullmatch(str(head or "")):
+            return False
+        done = subprocess.run(["git", "-C", cwd, "rev-parse", source + "^{tree}", head + "^{tree}"],
+                              capture_output=True, text=True)
+        trees = done.stdout.splitlines()
+        return done.returncode == 0 and len(trees) == 2 and trees[0] != trees[1]
+
+    def common(cwd):
+        done = subprocess.run(["git", "-C", cwd, "rev-parse", "--git-common-dir"],
+                              capture_output=True, text=True)
+        return str((Path(cwd) / done.stdout.strip()).resolve()) if done.returncode == 0 else None
+
+    caller_valid = bool(caller_head and _shares_source_history(caller_cwd, source, caller_head)
+                        and _on_a_branch(caller_cwd, caller_head))
+    if caller_valid and route_head:
+        caller_valid = common(caller_cwd) == common(route_cwd)
+    git_cwd, selected_from = route_cwd, "execution-checkout"
+    commit = str(supplied or route_head or "").lower()
+    if supplied:
+        selected_from = "explicit"
+        if not route_head and caller_valid:
+            git_cwd = caller_cwd
+    elif caller_valid and (not route_head or (not changed(route_cwd, route_head)
+                                              and changed(caller_cwd, caller_head))):
+        commit, git_cwd, selected_from = caller_head, caller_cwd, "caller-working-directory"
+    warnings, messages = [], []
+    if caller_valid and route_head and caller_head != route_head and commit != route_head:
+        warnings.append("checkout-heads-differ")
+        messages.append("The execution checkout and caller have different Git heads; the receipt names "
+                        "which checkout supplied the selected commit.")
+    if not changed(git_cwd, commit):
+        warnings.append("unchanged-starting-tree")
+        messages.append("The selected commit has no source tree changes from the route start; "
+                        "a new source result commit is not established.")
+    observation = {"selected_from": selected_from, "git_cwd": git_cwd, "source_commit": source,
+                   "execution_cwd": route_cwd, "execution_head": route_head,
+                   "caller_cwd": caller_cwd, "caller_head": caller_head,
+                   "warnings": warnings, "warning_messages": messages}
+    return commit, git_cwd, observation
+
+
 def recorded_head(state: Mapping[str, Any] | None) -> tuple[Any, Any]:
     """The commit and summary digest a finished route records now: its latest update, else its finish."""
     state = state or {}
@@ -470,11 +520,11 @@ def finish(args, route: Mapping[str, Any], route_file: Path, api, *, _admission=
         if not summary_text: raise InlineFinishError("finish-summary-invalid")
     source = str(route.get("source_commit") or "")
     source_is_sha = bool(api._COMMIT_SHA.fullmatch(source))
+    commit, git_cwd, commit_observation = select_result_commit(route, args.commit, api)
     if source_is_sha:
-        commit = str(args.commit or api._head_commit(route["cwd"]) or "").lower()
         if not api._COMMIT_SHA.fullmatch(commit):
             raise InlineFinishError("finish-commit-invalid")
-        if not _shares_source_history(route["cwd"], source, commit) or not _on_a_branch(route["cwd"], commit):
+        if not _shares_source_history(git_cwd, source, commit) or not _on_a_branch(git_cwd, commit):
             raise InlineFinishError("finish-commit-not-source-descendant")
     else:
         # The route's sealed source kind is authoritative, even if this folder
@@ -483,7 +533,7 @@ def finish(args, route: Mapping[str, Any], route_file: Path, api, *, _admission=
     # Tracked edits inside this direct node's declared scope are not admissible.
     scope = (node.get("write_scope") or [])
     if source_is_sha:
-        _unscoped_tracked_dirt(route["cwd"], scope)
+        _unscoped_tracked_dirt(git_cwd, scope)
     else:
         unscoped_tracked_dirt = []
     identity = artifact_lifecycle.read_root_identity(root)
@@ -546,7 +596,7 @@ def finish(args, route: Mapping[str, Any], route_file: Path, api, *, _admission=
                 facts={"registered_route": registered_route(route, jobs, bool(inherited_jobs))})
             if not choice.allowed:
                 raise InlineFinishError(choice.reason)
-            unscoped_tracked_dirt = (_unscoped_tracked_dirt(route["cwd"], scope)
+            unscoped_tracked_dirt = (_unscoped_tracked_dirt(git_cwd, scope)
                                      if source_is_sha else [])
             latest = artifact_producer.read_cycle_record(root, record["cycle_id"])
             if (not latest or latest.get("state") not in {"open", "sealed"}
@@ -560,7 +610,7 @@ def finish(args, route: Mapping[str, Any], route_file: Path, api, *, _admission=
                 raise InlineFinishError("finish-route-drift")
             # The commit this call names; a later one of a finished route descends from the
             # finish's own, so it being on a branch keeps that one on a branch too.
-            if source_is_sha and not _on_a_branch(route["cwd"], result_commit):
+            if source_is_sha and not _on_a_branch(git_cwd, result_commit):
                 raise InlineFinishError("finish-commit-drift")
             observed_lease = artifact_producer._review_lease_observation(root, record["cycle_id"])
             choice = decide_continuation(route, action="finish-cycle",
@@ -582,7 +632,7 @@ def finish(args, route: Mapping[str, Any], route_file: Path, api, *, _admission=
                 # Review asked for fixes after the finish and they were pushed to the same PR
                 # branch: the same evidence names a later head of this session's result. It
                 # is recorded as an update beside the finish, which stays as it was.
-                if not (source_is_sha and _follow_up(route["cwd"], state, result_commit, sid)):
+                if not (source_is_sha and _follow_up(git_cwd, state, result_commit, sid)):
                     raise InlineFinishError("finish-intent-conflict")
                 previous_commit, previous_summary = recorded_head(state)
                 update = {"commit": result_commit, "previous_commit": previous_commit,
@@ -620,7 +670,7 @@ def finish(args, route: Mapping[str, Any], route_file: Path, api, *, _admission=
                     cmd = [sys.executable, str(api.ROOT/"utilities/capability-route.py"), "complete",
                            "--route", str(route_file), "--node", node["id"], "--evidence", str(evidence)]
                     child_env=os.environ.copy(); child_env["AGENT_INLINE_FINISH_ID"]=intent_id
-                    subprocess.run(cmd, cwd=route["cwd"], env=child_env, check=True, capture_output=True, text=True)
+                    subprocess.run(cmd, cwd=git_cwd, env=child_env, check=True, capture_output=True, text=True)
                 marker_raw = marker_file.read_bytes()
                 marker = json.loads(marker_raw)
                 if (marker.get("route_id") != route["route_id"]
@@ -774,6 +824,8 @@ def finish(args, route: Mapping[str, Any], route_file: Path, api, *, _admission=
                 result["commit"] = recorded_head(state)[0]
                 result["updates"] = list(state["updates"])
             result["unscoped_tracked_dirt"] = unscoped_tracked_dirt
+            if commit_observation:
+                result["commit_observation"] = {**commit_observation, "recorded_commit": result.get("commit")}
             if finished and verified.get("deleted"):
                 # Information only: the cycle (or its campaign) was deleted after the finish.
                 result["deleted_since"] = True

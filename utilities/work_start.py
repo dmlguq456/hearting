@@ -2563,8 +2563,11 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
         from artifact_producer import prepare_route_artifact_env
         with frame_repository.for_route(route, path) as repository:
             repository.verify(route.get("cwd"))
-        return {**result, "state": "inline", "required_action": "execute-inline",
-                "task": request["text"],
+        commit_note = (" Commit source changes there." if _route_module()._COMMIT_SHA.fullmatch(
+            str(route.get("source_commit") or "")) else "")        return {**result, "state": "inline", "required_action": "execute-inline",
+                "task": request["text"], "cwd": route["cwd"],
+                "next_step": f"Do this inline work in {route['cwd']}." + commit_note +
+                    " Then run finish for this route with the result evidence and summary.",
                 # The inline session is the producer (capabilities/*.md lifecycle step 1):
                 # an inactive root with legacy content keeps its legacy-compat window.
                 "artifact_env": prepare_route_artifact_env(path, start=True, jobs=jobs, require_cycle=False)}

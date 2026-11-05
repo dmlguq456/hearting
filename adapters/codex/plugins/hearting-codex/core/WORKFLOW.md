@@ -1062,6 +1062,14 @@ python3 utilities/capability-route.py finish [--route <route.json|rt-id>] --evid
 
 Without `--route` it finishes this session's latest route under the cwd's
 artifact root.
+An explicit route ID also uses the existing registry/route-chain lookup when
+the caller is in another folder. Every `execute-inline` receipt names the
+actual execution cwd, including a worktree prepared for a frame leg.
+Git finish prefers a proven changed caller head when the route checkout still
+has only its starting tree; explicit commits remain binding. Receipts name the
+commit source and warn when it comes from a different checkout or has the
+unchanged starting tree, without adding a completion gate. Normal execution
+checkout results need no warning. Non-Git finish keeps its null commit.
 
 Ineligible inline routes and legacy recovery also finish with the one command
 above (it completes the terminal marker, closes the route allowing an unproven

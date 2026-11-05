@@ -110,6 +110,9 @@ module.main()
         self.assertFalse((fixture.repo/'.git').exists())
         self.assertFalse(list(fixture.base.glob('*-wt')))
         self.assertEqual(route['cwd'], str(fixture.repo))
+        import work_start
+        inline = work_start.start_work(route, fixture.route_file, fixture.jobs)
+        self.assertNotIn('Commit source changes', inline['next_step'])
         card = F.CAP.compose_card(route, non_git_decision={'kind':'direct'})
         self.assertEqual(len(card.splitlines()), 1, card)
         finished = subprocess.run(fixture.command, cwd=fixture.repo, env=fixture.env,
