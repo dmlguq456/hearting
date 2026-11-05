@@ -230,7 +230,8 @@ SHA-256을 확인합니다. 고른 하네스에 전체 기능 묶음을 바뀌�
 `runtime doctor`는 PyYAML이나 herdr처럼 빠진 선택 요소가 있으면 그것과, 그것
 없이 안 되는 일을 알려 줍니다.
 
-첫 작업 전에 [권한](#권한)을 읽어 주세요.
+설치기가 작업자 기본 권한에 대한 안내를 출력합니다. 첫 작업 전에
+[권한](#권한)을 읽어 주세요.
 
 ### 첫 작업
 
@@ -251,8 +252,9 @@ Git 프로젝트 안에서 에이전트 CLI를 열고 작은 일을 맡겨 보�
 저장할 뿐이고, 수정이나 시험이 통과했는지는 판단하지 않습니다. 끄려면
 `HEARTING_AUTO_RECORD=off`를 설정하세요.
 
-[QUICKSTART.ko.md](QUICKSTART.ko.md)에서 작은 데모 파일로 첫 작업을 해 볼 수 있습니다.
-예상 변경과 실측 시간도 함께 있습니다.
+[빠른 시작 안내](QUICKSTART.ko.md)는 작은 데모 파일로 첫 작업을 끝까지 따라가며
+예상 변경과 실측 시간을 함께 보여 줍니다. [자주 묻는 질문](FAQ.ko.md)은 `PATH`,
+Python 버전, 권한을 다룹니다.
 
 ### 업데이트와 상태
 
@@ -309,7 +311,8 @@ headless:
   `workspace-write` 샌드박스 안에서 승인 질문 없이 돌고, OpenCode 작업자는
   사용자의 OpenCode 권한 설정에서 출발합니다.
 
-Claude Code를 포함해 처음 설치하면 설치기가 이 기본값과 이를 바꾸는 파일을 알려 줍니다.
+Claude Code를 포함해 처음 설치하면 설치기가 이 기본값과 이를 바꾸는 파일을 짧게
+알립니다. 입력은 요구하지 않습니다.
 
 **Claude Code 사용자 규칙은 OpenCode에도 적용됩니다.** 하팅은 OpenCode 전역
 `AGENTS.md`를 하팅 지침을 싣는 파일로 관리합니다. `~/.claude/rules/`(또는
@@ -471,13 +474,14 @@ python3 tools/generate.py --check
 남은 작업 트리에서 번들을 만들지 않으므로, 설치 수명 주기 시험은 깨끗한
 체크아웃에서 돌리세요. `--mode linked`는 실시간 디버깅용입니다.
 
-pull request를 열기 전에 [CONTRIBUTING.md](CONTRIBUTING.md)를 읽어 주세요.
+풀 리퀘스트를 열기 전에 [CONTRIBUTING.md](CONTRIBUTING.md)(영어)를 읽어 주세요.
 
 ## 문서
 
 | 목적 | 문서 |
 |---|---|
 | 목적과 유지보수 원칙 | [AGENTS.md](AGENTS.md) |
+| 첫 작업, 자주 묻는 질문, 기여 | [QUICKSTART.ko.md](QUICKSTART.ko.md), [FAQ.ko.md](FAQ.ko.md), [CONTRIBUTING.md](CONTRIBUTING.md) |
 | 전체 구조 한눈에 | [MANUAL.md](MANUAL.md) |
 | 설치와 하네스별 투영 | [INSTALL_LAYOUT.md](INSTALL_LAYOUT.md) |
 | 릴리스와 버전 | [RELEASE_POLICY.md](RELEASE_POLICY.md) |

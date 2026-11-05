@@ -170,11 +170,12 @@ try:
     from fleet.titles import last_title
     title = last_title(sid, harness="claude")
     name = mod.current_session_subject(inputs.get("runtime_name"), title)
-    # 2026-09-09 사용자 결정: statusline 은 제목만 진다. `[46]` 식별 배지는 herdr pane
-    # 상단 제목(`[46] ⚑ claude <요약>`)이 소유한다 — 하네스마다 다른 내부 상태줄에서
-    # 억지로 신원을 맞추는 대신 세 하네스가 공유하는 바깥 표면 하나에 둔다.
-    # 제목이 없어 이름이 디렉토리로 떨어지면 왼쪽 `📁 <dir>` 세그먼트와 같은 말이 되므로
-    # 그 경우엔 아무것도 출력하지 않는다.
+    # 2026-09-09 maintainer decision: the statusline carries only the title. The
+    # `[46]` identity badge belongs to the herdr pane title (`[46] ⚑ claude <summary>`)
+    # -- one outer surface shared by all three runtimes instead of forcing identity
+    # into each runtime's own internal status line.
+    # If there is no title and the name falls back to the directory, it would repeat
+    # the left `📁 <dir>` segment, so print nothing in that case.
     base = (cwd or "").rstrip("/").rsplit("/", 1)[-1]
     explicit_name = mod.sanitize_title(inputs.get("runtime_name"))
     if name and (explicit_name or name != base):

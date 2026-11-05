@@ -234,7 +234,8 @@ paths until that directory is on your `PATH`.
 `runtime doctor` also names an optional piece that is missing, such as PyYAML
 or herdr, and what does not work without it.
 
-Read [Permissions](#permissions) before your first task.
+The installer prints a note about the default worker permissions. Read
+[Permissions](#permissions) before your first task.
 
 ### First task
 
@@ -257,8 +258,9 @@ folder, the branch, and whether it is committed. The automatic record saves what
 happened. It does not judge whether the fix or its tests passed. Set
 `HEARTING_AUTO_RECORD=off` to stop it.
 
-[QUICKSTART.md](QUICKSTART.md) walks through a first task on small demo files,
-with the expected change and measured times.
+The [Quickstart](QUICKSTART.md) walks a first task end to end on small demo
+files, with the expected change and measured times. The [FAQ](FAQ.md) covers
+`PATH`, Python versions, and permissions.
 
 ### Update and status
 
@@ -317,8 +319,8 @@ headless:
   `workspace-write` sandbox without approval prompts; OpenCode workers start
   from your own OpenCode permission configuration.
 
-A first install that includes Claude Code prints this default and the file that
-changes it.
+A first install that includes Claude Code prints a short note with this default
+and the file that changes it; it asks for no input.
 
 **Your Claude Code user rules also apply in OpenCode.** Hearting manages
 OpenCode's global `AGENTS.md` for its own instructions. When `~/.claude/rules/`
@@ -493,6 +495,7 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 | Purpose | Document |
 |---|---|
 | Purpose and maintenance principles | [AGENTS.md](AGENTS.md) |
+| First task, common questions, contributing | [QUICKSTART.md](QUICKSTART.md), [FAQ.md](FAQ.md), [CONTRIBUTING.md](CONTRIBUTING.md) |
 | How the parts fit together | [MANUAL.md](MANUAL.md) |
 | Installation and runtime projections | [INSTALL_LAYOUT.md](INSTALL_LAYOUT.md) |
 | Releases and versioning | [RELEASE_POLICY.md](RELEASE_POLICY.md) |

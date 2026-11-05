@@ -906,5 +906,31 @@ def tearDownModule():
         _MODULE_HOME = None
 
 
+class InstallPermissionNoticeTest(unittest.TestCase):
+    """The install summary announces the bypass default for Claude workers."""
+
+    @staticmethod
+    def _render(result, as_json=False, **kwargs):
+        import contextlib
+        import io
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            installer.distribution._print_result(result, as_json, **kwargs)
+        return out.getvalue()
+
+    def test_install_with_claude_names_default_and_file(self):
+        text = self._render({"status": "installed", "runtimes": ["claude", "codex"]}, install_notice=True)
+        for needle in ("bypass", "dispatch-defaults.yaml", "claude_permission_mode", "allowlist"):
+            self.assertIn(needle, text)
+
+    def test_other_runtimes_and_updates_stay_quiet(self):
+        self.assertNotIn("bypass", self._render({"status": "installed", "runtimes": ["codex"]}, install_notice=True))
+        self.assertNotIn("bypass", self._render({"status": "updated", "runtimes": ["claude"]}))
+
+    def test_json_output_is_unchanged(self):
+        text = self._render({"status": "installed", "runtimes": ["claude"]}, True, install_notice=True)
+        self.assertNotIn("bypass", text)
+
+
 if __name__ == "__main__":
     unittest.main()

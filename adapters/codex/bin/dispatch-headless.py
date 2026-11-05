@@ -584,7 +584,7 @@ def _select_model_settings(args: argparse.Namespace) -> dict[str, str]:
                 _require_headless_model(model, source)
         elif resolved["profile"] == TOP_PROFILE:
             # The one door to the main-session-only model from registered
-            # dispatch: a route-sealed `top` profile (2026-09-09 사용자 결정).
+            # dispatch: a route-sealed `top` profile (2026-09-09 maintainer decision).
             # The waiver covers exactly the resolved model.
             source = "profile-top"
         else:

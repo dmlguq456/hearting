@@ -133,7 +133,7 @@ class ManagedReleaseMigrationTest(unittest.TestCase):
     The collision guard never overwrites a link it does not recognize, which is right for a
     foreign file and wrong for the installer's own release tree: the snapshot path was in no
     `prior` set, so `hearting`/`harness`/`mem` stayed pinned to v2.49.0 while `fleet` had to
-    be repointed by hand (user: "그럼 전부 고쳐").
+    be repointed by hand.
     """
 
     def setUp(self):

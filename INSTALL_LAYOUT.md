@@ -370,10 +370,11 @@ uses the existing Hearting name registry for that override. The existing
 provider selection, quota and cadence remain unchanged.
 `harness install` creates `${XDG_CONFIG_HOME:-~/.config}/hearting/fleet.json`
 once with `{"title_language": "auto"}` and preserves user edits on later installs
-and updates. `auto` uses the same operator-language selection as NOW:
-`FLEET_NOW_LANG`, a non-English locale, then the conversation's language.
-Change this single value to `ko`/`Korean` or `en`/`English` to override only the
-title; NOW keeps its existing language. Korean/Japanese/Chinese titles use at
+and updates. Title and NOW share one operator-language selection:
+`FLEET_NOW_LANG`, then this value when it is not `auto`, then Claude's native
+`language` setting, then a non-English locale, then the conversation's language.
+Change this single value to `ko`/`Korean` or `en`/`English` to set the language
+of both the title and NOW (`FLEET_NOW_LANG` still wins). Korean/Japanese/Chinese titles use at
 most 20 characters, English titles at most 40 characters and 3–6 words.
 Absent or invalid preferences use `auto`; `harness config status` reports the file.
 The same selection also chooses the language of screen text kept in the shared

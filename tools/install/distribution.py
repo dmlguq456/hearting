@@ -5984,7 +5984,15 @@ def _runtime_values(values: Optional[list[str]]) -> list[str]:
     return list(dict.fromkeys(values))
 
 
-def _print_result(result: dict, as_json: bool) -> None:
+PERMISSION_NOTICE = (
+    "note: background Claude workers run in bypass mode unless "
+    "headless.claude_permission_mode is allowlist in\n"
+    "      ${XDG_CONFIG_HOME:-$HOME/.config}/hearting/dispatch-defaults.yaml "
+    "(see README.md#permissions)"
+)
+
+
+def _print_result(result: dict, as_json: bool, *, install_notice: bool = False) -> None:
     if as_json:
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
         return
@@ -6003,6 +6011,8 @@ def _print_result(result: dict, as_json: bool) -> None:
         print(f"auto-update: {scheduler['status']} ({scheduler['kind']})")
     if result.get("path_hint"):
         print(f"PATH: ensure {result['path_hint']} is on PATH")
+    if install_notice and "claude" in (result.get("runtimes") or ()):
+        print(PERMISSION_NOTICE)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -6060,7 +6070,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             )
         else:
             result = auto_update(args.operation)
-        _print_result(result, args.json)
+        _print_result(result, args.json, install_notice=args.command == "bootstrap")
         return 0
     except DistributionError as exc:
         if getattr(args, "json", False):
