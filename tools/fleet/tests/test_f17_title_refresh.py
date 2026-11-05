@@ -49,6 +49,7 @@ class _ConfigHomeMixin:
         self._tmp = tempfile.TemporaryDirectory()
         self._old_runtime_env = {key: os.environ.get(key) for key in (
             "AGENT_HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "XDG_CONFIG_HOME",
+            "XDG_STATE_HOME",
         )}
         self._old_title_state = os.environ.get("FLEET_TITLE_STATE_DIR")
         self._old_safety_env = {key: os.environ.get(key) for key in (
@@ -65,9 +66,13 @@ class _ConfigHomeMixin:
         os.environ["HARNESS_CAPACITY_REFRESH_DISABLE"] = "1"
         os.environ["CODEX_HOME"] = os.path.join(self._tmp.name, "codex")
         os.environ["XDG_CONFIG_HOME"] = os.path.join(self._tmp.name, "config")
+        os.environ["XDG_STATE_HOME"] = os.path.join(self._tmp.name, "xdg-state")
         os.environ["FLEET_TITLE_STATE_DIR"] = os.path.join(self._tmp.name, "state")
         for key in self._old_safety_env:
             os.environ.pop(key, None)
+        jobs = Path(self._tmp.name) / "jobs.log"
+        jobs.write_text("", encoding="utf-8")
+        os.environ["AGENT_DISPATCH_JOBS"] = str(jobs)
         os.environ["AGENT_MODEL_GOVERNOR_ROOT"] = os.path.join(self._tmp.name, "governor")
 
     def tearDown(self):

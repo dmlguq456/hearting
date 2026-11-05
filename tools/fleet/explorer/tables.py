@@ -126,10 +126,13 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3):
     sessions = tuple(vm.sessions or ())
     route_rows = [route for route in vm.routes if route.get("session_tag")]
     current_routes = {}
+    open_current_routes = set()
     for route in route_rows:
         if route.get("current") is True:
             tag = route["session_tag"]
             current_routes[tag] = current_routes.get(tag, 0) + 1
+            if route.get("state") not in ("done", "stale"):
+                open_current_routes.add(tag)
     # The ROUTES summary and RECENT stay in view under a long session list: the page
     # viewport pins them to its bottom edge and only the sessions above them scroll.
     # A short screen keeps fewer RECENT rows (at least one) before it gives the pin up.
@@ -253,7 +256,13 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3):
                 title_end = grid.put(x + c["title"], y, title_text, bold_key,
                                      limit=x + c["title"] + room)
                 if tail:
-                    grid.put(title_end, y, tail, "dim", limit=x + c["title"] + c["title_w"])
+                    # An open count pulses on the shared working beat between the bright and
+                    # dark green of the g_work/g_work_off pair; its text stays, so the title
+                    # and columns never move. A finished count stays a steady dim note.
+                    tail_key = "dim"
+                    if route_tail and tag in open_current_routes:
+                        tail_key = "g_work" if getattr(grid, "beat", 1) else "g_work_off"
+                    grid.put(title_end, y, tail, tail_key, limit=x + c["title"] + c["title_w"])
             context = session.get("context")
             if not c["narrow"]:
                 _draw_context_gauge(grid, x + c["ctx"], y, context, session.get("window"))

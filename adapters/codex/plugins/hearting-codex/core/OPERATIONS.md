@@ -965,7 +965,9 @@ current pointer. It records service code provenance only; it grants no session,
 route, recipient, or other operation authority. Changing service code preserves
 the accepted duty, transfer identity, recipient, and session authority.
 Release following uses self-exec and preserves the narrow legacy compatibility
-handoff.
+handoff. A service runner pass that selects no replacement keeps its settlement
+context and readiness worker; both are retired only after a replacement target
+is selected and just before the exec, and restored when that exec fails.
 
 The same managed lifecycle binding may select current code for the shared
 completion, batch, watch, and runner observers. A lifecycle callback may replace
@@ -3185,12 +3187,20 @@ recipient generation. The notice-summary digest remains a separate fact, and a
 generic `received` ledger row is insufficient. Registered-batch continuation
 and handover duties retain their own settlement rules. Owner identity readers
 reuse the generation-checked registry input; current-row and non-registry
-authority checks remain fresh. The shared obligation runner may reuse a
-historical settlement observation only while the exact owner row and every
-identified settlement dependency remain unchanged. This is a scheduling
-optimization: it does not satisfy delivery, inspection, claim, mutation, or
-completion authority. Missing, unreadable, unstable, or untracked dependencies
-require a fresh observation and remain unknown until that observation succeeds.
+authority checks remain fresh. One read-only settlement classification pass
+observes a single registry generation; settlement writes and the
+classification after them read current state. The shared obligation runner may
+reuse a historical settlement observation only while the exact owner row and
+every identified settlement dependency remain unchanged. It likewise keeps a
+not-applicable, pending or unknown observation while the owner row, its related
+rows, its identified dependencies and its supervisor lease remain unchanged,
+until that owner's bounded retry time (at most ten minutes); a changed input is
+observed on the next pass, and a deferred unfinished settlement stays in the
+runner's outer signature. This is a scheduling optimization: it does not
+satisfy delivery, inspection, claim, mutation, or completion authority.
+Missing, unreadable, unstable, or untracked dependencies require a fresh
+observation before a settled result is reused and remain unknown until that
+observation succeeds.
 The first explicit lifecycle producer may initialize one state-root directory
 beneath an existing parent and then carries that root identity through its
 recovery-lock and runner request. Observers reuse that identity: recovery stops

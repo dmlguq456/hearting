@@ -1094,7 +1094,7 @@ def _read_retained_suffix(path: Path, path_identity: str, cached: RegistryView):
 
 
 @contextlib.contextmanager
-def registry_read_scope():
+def registry_read_scope(*, pinned: "RegistryView | None" = None):
     """Pin one stable generation of each registry for one passive Fleet pass.
 
     Pass lifetime of the callers in the delivery path: a sweep opens exactly one
@@ -1108,12 +1108,25 @@ def registry_read_scope():
     registry append between discovery and effect is seen by the effect check,
     not hidden behind the earlier pin. Read-only history readers keep the same
     per-pass scope and never reuse a delivery authority across a write.
+
+    ``pinned`` seeds a read-only observation scope with a generation the caller
+    already read, so nested readers share it instead of reading the file again.
+    It is for a manual observation section only (the owner-settlement
+    classification, whose settlement writes run after the scope closes): the
+    seeded generation is held until that scope ends and is never carried into a
+    discovery or effect scope, so a claim or an effect group still reads the
+    registry fresh. An outer scope keeps its own generation and ``pinned`` is
+    ignored.
     """
     current = _READ_SCOPE.get()
     if current is not None:
         yield
         return
-    token = _READ_SCOPE.set({})
+    scope = {}
+    if (pinned is not None and pinned._prefix_reuse_eligible
+            and not pinned.has_invalid_utf8):
+        scope[pinned.path_identity] = [pinned, None]
+    token = _READ_SCOPE.set(scope)
     try:
         yield
     finally:
