@@ -314,10 +314,10 @@ headless:
 Claude Code를 포함해 처음 설치하면 설치기가 이 기본값과 이를 바꾸는 파일을 짧게
 알립니다. 입력은 요구하지 않습니다.
 
-**Claude Code 사용자 규칙은 OpenCode에도 적용됩니다.** OpenCode에는 사용자
-전역 규칙 파일이 따로 없어서, `~/.claude/rules/`(또는
-`$CLAUDE_CONFIG_DIR/rules/`)에 규칙 파일이 있으면 하팅이 OpenCode의 전역
-`AGENTS.md`를 그 규칙 다음에 하팅 지침이 오는 파일로 씁니다. 처음 그렇게 하는
+**Claude Code 사용자 규칙은 OpenCode에도 적용됩니다.** 하팅은 OpenCode 전역
+`AGENTS.md`를 하팅 지침을 싣는 파일로 관리합니다. `~/.claude/rules/`(또는
+`$CLAUDE_CONFIG_DIR/rules/`)에 규칙 파일이 있으면 그 규칙을 이 파일에서 하팅
+지침보다 앞에 싣습니다. 처음 그렇게 하는
 설치나 업데이트가 이 사실을 알립니다. 특정 경로에만 적용되는 규칙은 빼고, 규칙
 파일은 읽기만 합니다. 그 결과 규칙 본문은 OpenCode가 쓰는 모델 제공자에게도
 전달됩니다. 끄려면 같은 `dispatch-defaults.yaml`에 아래 두 줄을 넣으세요. 다음
