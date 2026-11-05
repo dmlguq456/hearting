@@ -498,12 +498,27 @@ def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
             response = None
     if not next_round and resolution["status"] != "not-raised" and resolution.get("artifact") != str(question_path):
         raise ValueError("frame-interview-binding-conflict: use the currently registered interview")
-    _store_once(question_path, question)
+    replacing = bool(original and original != question)
+    with ledger.lock():
+        current = WS.human_gate_resolution(ledger.journal(), "frame-review")
+        saved = FI.load_json_file(question_path) if question_path.exists() else {}
+        if saved != original:
+            raise ValueError("frame-input-conflict: the registered interview changed; read it again")
+        if replacing:
+            if (current["status"] != "blocked" or round_no != current.get("epoch")
+                    or answer_path.exists() or native.exists()
+                    or (directory / FI.NATIVE_PARTIAL_NAME).exists()):
+                raise ValueError("frame-input-conflict: preserve an interview with recorded answers")
+            from workflow_state import _atomic_write
+            _atomic_write(question_path, json.dumps(question, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
+        else:
+            _store_once(question_path, question)
+        if response is not None:
+            _store_once(answer_path, response)
     _store_once(directory / "frame-summary.json", {"route_id": route["route_id"], "frames": [
         {"node": node["id"], "marker": str(Path(jobs).parent / "completion" / route["route_id"] / (node["id"] + ".json"))}
         for node in route["nodes"] if node.get("worker_type") == "frame"]})
     if response is not None:
-        _store_once(answer_path, response)
         with contextlib.suppress(OSError):
             (directory / FI.NATIVE_PARTIAL_NAME).unlink()      # answered: no unfinished native reply remains
         _checkpoint("after-answer-save")
@@ -515,7 +530,7 @@ def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
         if completed.returncode:
             raise ValueError(f"frame-{operation}-pending: {completed.stderr.strip()} {completed.stdout.strip()}")
 
-    ask_now = (resolution["status"] == "not-raised" or next_round) and not answers
+    ask_now = (resolution["status"] == "not-raised" or next_round or replacing) and not answers
     if resolution["status"] == "not-raised" or next_round:
         command("gate", "--block", "--artifact", str(question_path))
         resolution = WS.human_gate_resolution(ledger.journal(), "frame-review")
@@ -1644,6 +1659,50 @@ def _first_leg_started(leg_result, jobs, route):
         return False
     tokens = {token for launch in leg_result.get("launches", []) for token in (launch.get("receipt") or "").split()}
     return not tokens or {"registered=1", "started=1", "child_spawned=1"} <= tokens
+
+
+def _manual_frame_closure(route, jobs):
+    """Read-only closure instructions for an independently composed approved first leg.
+
+    The existing complete/close/finalize commands recheck all normal gates. Never
+    adopt or launch a leg, edit a decision, or close a frame from this reader.
+    """
+    plan = route.get("route_plan") or {}
+    if plan.get("index") != 0:
+        return None
+    try:
+        binding = RP.read_route_plan(f"{plan['decision']}#0", route["artifact_root"])
+        if binding["digest"] != plan["digest"]:
+            return None
+        decision = binding["record"]["decision"]
+        if binding["record"].get("first_leg"):
+            return None                   # the ordinary frame transaction owns closure
+        context = decision["first_leg_compose"]["context"]
+        root = Path(context["artifact_root"])
+        frame_id = decision["frame_route"]["route_id"]
+        frame_path = root / ".runtime/routes" / (frame_id + ".json")
+        frame = json.loads(frame_path.read_text(encoding="utf-8"))
+        if (frame.get("route_id"), frame.get("route_hash")) != (
+                frame_id, decision["frame_route"]["route_hash"]):
+            return None
+        if frame_path.with_suffix(".outcome.json").exists():
+            return None
+        record_path = Path(binding["decision"])
+        if not record_path.is_absolute():
+            record_path = Path(route["artifact_root"]) / record_path
+        command = [sys.executable, str(ROOT / "utilities/capability-route.py")]
+        commands = [shlex.join([*command, "complete", "--route", str(frame_path), "--jobs", str(jobs),
+                               "--node", RP.TERMINAL_NODE, "--evidence", str(record_path)]),
+                    shlex.join([*command, "close", "--route", str(frame_path), "--jobs", str(jobs),
+                               "--summary", "manually recovered first leg " + route["route_id"]]),
+                    shlex.join([sys.executable, str(ROOT / "utilities/artifact_producer.py"), "finalize",
+                                "--artifact-root", str(root), "--cycle", decision["frame_route"]["cycle_id"]])]
+        return {"frame_route_id": frame_id, "leg_route_id": route["route_id"], "commands": commands,
+                "next_step": "If this manually recovered leg implements the approved decision, close only its "
+                    "frame with these commands in order. They retain normal completion and live-work checks. "
+                    "The leg has its own lifecycle; do not restart the frame or stop the leg to close it."}
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
 
 
 def _first_leg(route, path, jobs, result, root, record, output, record_path, decision_record, *,
@@ -2818,6 +2877,11 @@ def start_work(route, path, jobs, *, wait=False, interview=None, answers=None,
     advanced = _advance_plan(route, jobs, result, run=run, sleep=sleep, clock=clock)
     if advanced is not result:
         return advanced          # the next leg's own start already armed its own resume
+    if result.get("owner_started") or result.get("state") in {"inline", "completed"}:
+        closure = _manual_frame_closure(route, jobs)
+        if closure:
+            result["frame_closure"] = closure
+            result["next_step"] = (str(result.get("next_step") or "") + " " + closure["next_step"]).strip()
     from start_receipt import save
     return save(_arm_capacity_resume(result, path, jobs), jobs)
 

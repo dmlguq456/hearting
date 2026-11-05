@@ -963,6 +963,13 @@ def compose_route(*, capability, capability_mode, shape, graph, slug, cwd, artif
     decided, so it compiles without the recipe's frame pair too; `framed` is where a frame runs.
     """
     import route_plan as RP
+    if route_plan is not None and shape == "framed":
+        leg = route_plan["leg"]
+        shape = leg["shape"]
+        capability = capability or leg["capability"]
+        capability_mode = capability_mode or leg.get("mode")
+        graph = graph or (",".join(leg["graph"]) if leg.get("graph") else None)
+        intensity = intensity or leg.get("intensity")
     given_intensity, given_capability = intensity, capability
     if capability is None and shape != "framed":
         capability = COMPOSE_DEFAULT_CAPABILITY
@@ -1856,18 +1863,25 @@ def main():
             a.slug=compose_default_slug(a.prompt_file.read_text() if a.prompt_file else "",
                                         capability=a.capability or (None if shape=="framed" else COMPOSE_DEFAULT_CAPABILITY),
                                         shape=shape)
-        route_plan_binding, route_plan_unreadable = None, False
+        route_plan_binding = None
         if a.route_plan:
-            # Unreadable, mismatched or out of range: the same compose as without the argument, plus one card line.
+            # An explicit approved plan must never become an unrelated default route.
             import route_plan as RP
             try:
                 route_plan_binding = RP.read_route_plan(a.route_plan, artifact_root)
-            except (OSError, ValueError):
-                route_plan_unreadable = True
+            except (OSError, ValueError) as exc:
+                raise ValueError(f"compose-route-plan-refused: {exc}") from exc
         a._route_chain_plan = _resolve_compose_plan(a, route_plan_binding)
         DISPATCH_DEFAULTS_WARNINGS.clear()
         pins=_parse_selection_pins(a.pin,a.owner)
         if route_plan_binding is not None:
+            if shape == "framed":
+                leg = route_plan_binding["leg"]
+                shape = leg["shape"]
+                a.capability = a.capability or leg["capability"]
+                a.capability_mode = a.capability_mode or leg.get("mode")
+                a.graph = a.graph or (",".join(leg["graph"]) if leg.get("graph") else None)
+                a.intensity = a.intensity or leg.get("intensity")
             # A continuation leg keeps the pins its frame was composed with; a pin given here replaces only its own target.
             pins={**_inherited_selection_pins(route_plan_binding,artifact_root),**pins}
             if a.cwd is None:
@@ -2007,7 +2021,6 @@ def main():
         if a.explain:
             import work_intent
             print(compose_card(route, _plan_for_card, _plan_source_for_card, owner_harness=owner_pin,
-                               route_plan_unreadable=route_plan_unreadable,
                                campaign_selection=_campaign_for_card,
                                intent_original=(None if route.get("route_plan") else
                                                 work_intent.original_excerpt(route.get("cwd")) or None)),
@@ -2057,7 +2070,6 @@ def main():
         # never closes this route, and a cycle it seals is never the one this route begins or continues).
         _route_autoclose(artifact_root,"compose",route)
         print(compose_card(route, _plan_for_card, _plan_source_for_card, owner_harness=owner_pin,
-                           route_plan_unreadable=route_plan_unreadable,
                            campaign_selection=_campaign_for_card, include_decisions=not a.start,
                            non_git_decision=non_git_decision),file=sys.stderr)
         if a.start:

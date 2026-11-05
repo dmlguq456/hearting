@@ -160,7 +160,7 @@ def bound_input_thread(jobs, attempt):
     return None
 
 
-def _public(value, *, live=False, reachable=None, owner_phase=None):
+def _public(value, *, live=False, reachable=None, owner_phase=None, metadata=None):
     reachable = live if reachable is None else reachable
     phase = owner_phase or _owner_phase(value["attempt_id"])
     timing = ("active-turn" if value["transport"] == "codex-active-turn" and phase == "running-turn"
@@ -177,10 +177,17 @@ def _public(value, *, live=False, reachable=None, owner_phase=None):
               "positive quiescence evidence.")
     if timing == "phase-unavailable":
         notice = ("Delivery timing is unknown because the exact owner phase is unavailable. " + notice)
+    metadata = metadata or {}
+    one_shot = metadata.get("intensity") == "quick" or metadata.get("route_node") == "one-shot"
+    if one_shot:
+        notice += (" This is a one-shot owner: another turn is not guaranteed. "
+                   "A next-owner-turn correction may remain undelivered when this turn ends. "
+                   "Delivery receipts do not verify that the correction was applied.")
     return {"attempt_id": value["attempt_id"], "thread_id": value["thread_id"],
             "transport": value["transport"], "accepting": value["accepting"] and reachable,
             "supervisor_live": live, "owner_phase": phase,
             "delivery_timing": timing, "delivery_notice": notice,
+            "one_shot": one_shot, "application_guaranteed": False,
             "requests": [{key: item[key] for key in item if key != "text"}
                          for item in value["requests"]],
             "applied": "not-verified",
@@ -196,7 +203,7 @@ def inspect(jobs, attempt):
             raise InputError("owner-input-target-changed")
         live = supervisor_lease_is_held(jobs, row.metadata)
         reachable = _reachable(row, value, live)
-        result = _public(value, live=live, reachable=reachable)
+        result = _public(value, live=live, reachable=reachable, metadata=row.metadata)
         for item in result["requests"]:
             item["delivery_observation"] = (
                 "delivery-unknown" if not reachable and item["state"] == "sending" else
@@ -243,7 +250,7 @@ def submit(jobs, attempt, text, request_id=None):
                 break
         live = supervisor_lease_is_held(jobs, row.metadata)
         if duplicate_item is not None:
-            result = {**_public(value, live=live, reachable=_reachable(row, value, live)),
+            result = {**_public(value, live=live, reachable=_reachable(row, value, live), metadata=row.metadata),
                       "request_id": request_id, "duplicate": True,
                       **_retained_fields(duplicate_item)}
             queued = duplicate_item.get("state") == "queued"
@@ -263,7 +270,7 @@ def submit(jobs, attempt, text, request_id=None):
             _transition(item, "retained" if retain else "queued")
             value["requests"].append(item)
             _write(path, value)
-            result = {**_public(value, live=live, reachable=_reachable(row, value, live)),
+            result = {**_public(value, live=live, reachable=_reachable(row, value, live), metadata=row.metadata),
                       "request_id": request_id, "duplicate": False, **_retained_fields(item)}
             queued = not retain
 
@@ -787,6 +794,20 @@ def unresolved_revision(jobs, attempt):
 
 def unresolved(jobs, attempt):
     return bool(unresolved_revision(jobs, attempt))
+
+
+def completion_corrections(jobs, attempt):
+    """Count exact input receipts at completion; transport acceptance is not application."""
+    try:
+        _, target = _target(jobs, attempt)
+        with _locked(jobs, attempt) as (_, value):
+            if value is None or value.get("target") != target:
+                return {}
+            states = [item.get("state") for item in value["requests"]]
+            return {"undelivered": sum(state in {"queued", "undelivered", "retained"} for state in states),
+                    "unknown": sum(state in {"sending", "delivery-unknown"} for state in states)}
+    except (InputError, JoinContractError, OSError, ValueError, KeyError, TypeError):
+        return {}
 
 
 def materialize_unresolved(jobs, attempt):

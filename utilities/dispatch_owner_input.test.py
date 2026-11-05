@@ -206,6 +206,21 @@ class OwnerInputTest(unittest.TestCase):
         self.assertEqual([r['state'] for r in self.state()], ['delivery-unknown', 'undelivered'])
         self.assertTrue(I.unresolved(self.jobs, self.attempt))
 
+    def test_one_shot_timing_and_completion_counts_distinguish_delivery_from_application(self):
+        self.jobs.write_text(self.jobs.read_text().replace("worker_type=owner,", "worker_type=owner,intensity=quick,"))
+        for transport in ("claude-next-turn", "opencode-next-turn", "codex-active-turn"):
+            control = I.OwnerInput(self.jobs, self.attempt, "thread-1", transport, self.events.append)
+            receipt = I.submit(self.jobs, self.attempt, "keep the output local", "one-shot")
+            self.assertTrue(receipt["one_shot"])
+            self.assertFalse(receipt["application_guaranteed"])
+            self.assertIn("another turn is not guaranteed", receipt["delivery_notice"])
+            self.assertEqual(receipt["applied"], "not-verified")
+        self.assertEqual(I.completion_corrections(self.jobs, self.attempt), {"undelivered": 1, "unknown": 0})
+        control.take("next-turn")
+        self.assertEqual(I.completion_corrections(self.jobs, self.attempt), {"undelivered": 0, "unknown": 1})
+        control.close()
+        self.assertEqual(I.completion_corrections(self.jobs, self.attempt), {"undelivered": 0, "unknown": 1})
+
     def test_old_supervisor_is_rejected_without_queueing(self):
         I._path(self.jobs, self.attempt).unlink()
         with self.assertRaisesRegex(I.InputError, 'unsupported'):

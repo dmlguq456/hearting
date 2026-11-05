@@ -753,14 +753,16 @@ def read_route_plan(text, artifact_root) -> dict:
     """Read a `<record>#<index>` argument against `artifact_root`.
 
     Returns `{decision, digest, index, leg, legs, record}`; raises ValueError when the record is
-    unreadable, is not a selected decision, lies outside the root, or `index` is out of range.
+    unreadable, is not a selected decision, or `index` is out of range. Explicit absolute
+    paths can name another root; relative paths cannot escape the selected root.
     The caller seals only `decision`, `digest` and `index`.
     """
     arg_path, index = parse_route_plan_arg(text)
     root = Path(artifact_root).resolve()
     path = Path(arg_path)
-    path = (path if path.is_absolute() else root / path)
-    if path.is_symlink() or not path.resolve().is_relative_to(root):
+    absolute = path.is_absolute()
+    path = path if absolute else root / path
+    if path.is_symlink() or (not absolute and not path.resolve().is_relative_to(root)):
         raise ValueError("route-plan-invalid:path")
     record = read_record(path.resolve())
     decision = record["decision"]
@@ -770,7 +772,9 @@ def read_route_plan(text, artifact_root) -> dict:
     legs = proposal.get("legs")
     if not isinstance(legs, list) or not 0 <= index < len(legs):
         raise ValueError("route-plan-invalid:index")
-    return {"decision": path.resolve().relative_to(root).as_posix(), "digest": record["digest"],
+    reference = (path.resolve().relative_to(root).as_posix() if path.resolve().is_relative_to(root)
+                 else str(path.resolve()))
+    return {"decision": reference, "digest": record["digest"],
             "index": index, "leg": legs[index], "legs": legs, "record": record}
 
 
@@ -781,7 +785,7 @@ def sealed_form(binding) -> dict:
 def validate_sealed(value) -> dict:
     """The format of a route's own `route_plan` field, never the record it names."""
     if (not isinstance(value, dict) or set(value) != {"decision", "digest", "index"}
-            or not isinstance(value["decision"], str) or not value["decision"] or value["decision"].startswith("/")
+            or not isinstance(value["decision"], str) or not value["decision"]
             or ".." in Path(value["decision"]).parts
             or not isinstance(value["digest"], str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", value["digest"])
             or isinstance(value["index"], bool) or not isinstance(value["index"], int)
@@ -833,7 +837,9 @@ def frame_selection_pins(decision, artifact_root) -> dict:
     try:
         import route_identity
         reference = decision["frame_route"]
-        path = Path(artifact_root).resolve() / ".runtime" / "routes" / f"{reference['route_id']}.json"
+        origin = (decision.get("first_leg_compose") or {}).get("context") or {}
+        root = Path(origin.get("artifact_root") or artifact_root).resolve()
+        path = root / ".runtime" / "routes" / f"{reference['route_id']}.json"
         if path.is_symlink():
             return {}
         frame = json.loads(path.read_text(encoding="utf-8"))

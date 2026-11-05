@@ -414,7 +414,16 @@ each item beside its artifact as `<artifact>.items.json` (`leg_items_v1`, read b
 `cwd`; validation, first launch, later legs and the printed compose command use
 that folder and check dispatch there. Relative paths are based on the frame's
 original cwd. Omission keeps the existing worktree preparation and inheritance;
-this adds no question, flag or required input. A leg's `extra_stages` entry becomes node
+this adds no question, flag or required input.
+An explicit `--route-plan` is binding: read/validation errors stop compose before
+preparation or publication. Absolute record paths may name another artifact root;
+relative paths stay inside the selected root. A manual first leg's receipt lists
+the existing complete/close/finalize commands for its frame, retaining the decision.
+An unanswered interview can be corrected in its existing round; recorded answers
+and decisions are immutable. Request quotes come from this compose's human prompt
+boundary; unavailable provenance omits the quote. Framed display separates the
+requested width, bootstrap intensity and eventual approved leg intensity.
+A leg's `extra_stages` entry becomes node
 `plan-<id>` right after its `after` stage, shaped on a catalogue check or
 measurement stage of the same unit (one that writes no source; its gate, review
 budget and start approval) and writing under
@@ -906,6 +915,10 @@ checks), the applicable commit/PR/deployment/serving state, and limits or work
 that remains. Preserve explicit user-requested content and output formats even
 when they differ from the default presentation. Deployment and operating claims
 require observed evidence.
+Owner correction receipts distinguish delivery from verified application and say
+that a one-shot owner's next turn is not guaranteed. Completion reports count
+inputs without delivery evidence (`미반영 correct N건` in Korean), separating
+unknown delivery and application. All three adapters share this behavior.
 A continuation or recovery notice resumes that same original task; its receipt
 adds context but does not replace, narrow, or discharge the user's requested
 content, evidence, or output format.

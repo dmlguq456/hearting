@@ -11,9 +11,9 @@ values now travel with every route, neither of them part of its identity:
   of the prompt file, read again from the sealed `work_request.text` whenever
   needed. With no intent line the request's first sentence is a marked draft.
 - `original`: a short excerpt of the person's own prompt, read by the runtime
-  from the session record when a route is first written -- only at a person's
-  prompt boundary (not a peer or runtime transfer), skipping bare approvals such
-  as "진행", with credentials masked -- and stored once in
+  from the shared hook's exact human prompt boundary when a route is first
+  written (not a peer/runtime transfer or a bare approval), with credentials
+  masked -- and stored once in
   `.runtime/intent/<work key>.json` beside the route. Every leg of a framed route
   shares the frame route's record and never reads the session itself.
 
@@ -36,8 +36,6 @@ if str(HERE) not in sys.path:
 MAX_ORIGINAL_CHARS = 600
 MAX_LINE_CHARS = 300
 MAX_NOT_DOING = 3
-MAX_APPROVALS_SKIPPED = 6
-TAIL_BYTES = 1024 * 1024
 RECORD_SCHEMA = "work_intent_original_v1"
 _LABELS = {
     "intent": ("의도", "intent", "goal"),
@@ -149,62 +147,6 @@ def _human_text(text: str) -> str:
     return value.strip()
 
 
-def _first_request(texts) -> str:
-    """From the newest user text back: skip bare approvals, stop at the first request.
-
-    The newest text decides whose boundary this is: an envelope there is not the person's."""
-    skipped = 0
-    for raw in texts:
-        text = _human_text(raw)
-        if not text:
-            return ""
-        if not _APPROVAL.match(text):
-            return text
-        skipped += 1
-        if skipped > MAX_APPROVALS_SKIPPED:
-            return ""
-    return ""
-
-
-def _jsonl_user_texts(harness: str, path: Path):
-    import tidy_transcripts
-    with open(path, "rb") as handle:
-        size = os.fstat(handle.fileno()).st_size
-        start = max(0, size - TAIL_BYTES)
-        handle.seek(start)
-        if start:
-            handle.readline()
-        rows = handle.read().splitlines()
-    for raw in reversed(rows):
-        try:
-            data = json.loads(raw)
-        except (ValueError, UnicodeDecodeError):
-            continue
-        role, text = tidy_transcripts._text_of_jsonl_row(data, harness)
-        if role == "user":
-            yield text
-
-
-def _opencode_user_texts(db_path: Path, sid: str):
-    import tidy_transcripts
-    from fleet import refresh_title
-    with tidy_transcripts._opencode_view(db_path) as con:
-        rows = con.execute(
-            "SELECT p.data, m.data FROM part p JOIN message m ON m.id = p.message_id "
-            "WHERE p.session_id = ? ORDER BY p.rowid DESC LIMIT 400", (sid,)).fetchall()
-    for raw, message_raw in rows:
-        try:
-            part, message = json.loads(raw), json.loads(message_raw)
-        except (TypeError, ValueError):
-            continue
-        if not isinstance(message, dict) or message.get("role") != "user":
-            continue
-        if (not isinstance(part, dict) or part.get("type") != "text"
-                or part.get("synthetic") or part.get("ignored")):
-            continue
-        yield refresh_title._opencode_text(part)
-
-
 def original_excerpt(cwd=None, environ=None) -> str:
     """The person's request at the current prompt, bounded and masked; empty whenever unsure."""
     environ = os.environ if environ is None else environ
@@ -215,21 +157,29 @@ def original_excerpt(cwd=None, environ=None) -> str:
             return ""
         if not _human_prompt_boundary(who.harness, who.session_id, cwd, environ):
             return ""
-        tools = HERE.parent / "tools"
-        if str(tools) not in sys.path:
-            sys.path.insert(0, str(tools))
-        import tidy_transcripts
-        source = tidy_transcripts.locate_transcript(who.harness, who.session_id)
-        if source is None:
+        # The shared prompt hook captures this boundary before later transcript
+        # writes can move it. Older boundaries without a quote stay unknown.
+        import session_tidy
+        seat = session_tidy.resolve_seat(who.harness, cwd or None, environ, who.session_id, "")
+        turn = session_tidy.read_json(session_tidy._prompt_seq_path(seat))
+        text = turn.get("request_excerpt", "")
+        if not isinstance(text, str):
             return ""
-        texts = (_opencode_user_texts(Path(source), who.session_id) if who.harness == "opencode"
-                 else _jsonl_user_texts(who.harness, Path(source)))
-        text = redact_secrets(_first_request(texts)).strip()
+        text = redact_secrets(text).strip()
     except Exception:  # noqa: BLE001 -- the excerpt is optional; any failure leaves it out
         return ""
     if len(text) > MAX_ORIGINAL_CHARS:
         text = text[:MAX_ORIGINAL_CHARS - 1].rstrip() + "…"
     return text
+
+
+def prompt_excerpt(text) -> str:
+    """A bounded quote of this exact human boundary, never an earlier request."""
+    text = _human_text(text) if isinstance(text, str) else ""
+    if not text or _APPROVAL.fullmatch(text):
+        return ""
+    text = redact_secrets(text)
+    return text if len(text) <= MAX_ORIGINAL_CHARS else text[:MAX_ORIGINAL_CHARS - 1].rstrip() + "…"
 
 
 # ---------------------------------------------------------------------------
@@ -506,7 +456,7 @@ def cost_line(cost, t) -> str:
     return t("completion.cost", elapsed=elapsed, tokens=words)
 
 
-def completion_summary(route, primary, *, route_file=None, t=None, cost=None) -> str:
+def completion_summary(route, primary, *, route_file=None, t=None, cost=None, corrections=None) -> str:
     """The runtime's close text for one completed owner: intent, result, cost, changes, checks, the rest.
 
     Every value comes from the sealed route, the route outcome, the registered
@@ -528,6 +478,9 @@ def completion_summary(route, primary, *, route_file=None, t=None, cost=None) ->
                     if intent.get("original") else "")
         lines.append(t("completion.intent", intent=_line(goal, 200), original=original))
     lines.append(t("completion.result", result=_result_line(route, t)))
+    for state in ("undelivered", "unknown"):
+        if (corrections or {}).get(state):
+            lines.append(t("completion.corrections_" + state, count=corrections[state]))
     if cost is not None:
         lines.append(cost_line(cost, t))
     try:

@@ -14,6 +14,14 @@
    "en": "Checks: {items}",
    "ko": "검증: {items}"
   },
+  "completion.corrections_undelivered": {
+   "en": "Unapplied correct {count}: no delivery evidence; application is unverified.",
+   "ko": "미반영 correct {count}건: 전달 증거 없음, 실제 반영 여부 미확인."
+  },
+  "completion.corrections_unknown": {
+   "en": "Correct delivery unknown {count}: application is unverified; do not resend automatically.",
+   "ko": "전달 불명 correct {count}건: 반영 미확인, 자동 재전송 금지."
+  },
   "completion.cost": {
    "en": "Cost: {elapsed} elapsed · {tokens}",
    "ko": "비용: 걸린 시간 {elapsed} · {tokens}"
@@ -638,10 +646,6 @@
    "en": " (inherited)",
    "ko": " (상속)"
   },
-  "route.card.plan_unreadable": {
-   "en": "Route plan could not be read",
-   "ko": "경로 계획을 읽지 못함"
-  },
   "route.card.scope": {
    "en": "Execution scope {scope}",
    "ko": "실행 범위 {scope}"
@@ -669,6 +673,10 @@
   "route.frame.pending": {
    "en": "awaiting frame decision",
    "ko": "frame 결정 대기"
+  },
+  "route.intensity.framed": {
+   "en": "frame request={requested} (source={source}) · frame legs={legs} · bootstrap intensity={bootstrap}; execution intensity follows the approved proposal",
+   "ko": "frame 요청={requested} (source={source}) · frame {legs}갈래 · 준비 실행 강도={bootstrap}; 본 작업 강도는 승인된 제안에서 결정"
   },
   "route.intensity.hint": {
    "en": "Intensity note: consider --intensity strong for a judgment or root-cause analysis",

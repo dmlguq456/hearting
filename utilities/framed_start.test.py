@@ -1268,6 +1268,30 @@ class PlanExtraStageTest(StartBase):
 
 
 class FailureTableTest(StartBase):
+    def test_manually_composed_first_leg_gets_guarded_frame_closure_commands_without_mutation(self):
+        self.settle()
+        leg_path = self.leg_routes()[0]
+        leg = json.loads(leg_path.read_text())
+        record = self.record()
+        record.pop("first_leg")
+        self.record_path().write_bytes(RP.render(record))
+        R.outcome_path(self.path).unlink()
+        before = self.record_path().read_bytes()
+        guidance = W._manual_frame_closure(leg, self.jobs)
+        receipt = W.start_work(leg, leg_path, self.jobs, run=self.fake_run)
+        self.assertEqual(receipt["frame_closure"], guidance)
+        self.assertEqual(guidance["frame_route_id"], self.route["route_id"])
+        self.assertEqual(self.record_path().read_bytes(), before)
+        self.assertFalse(R.outcome_path(self.path).exists())
+        self.assertEqual(len(guidance["commands"]), 3)
+        for command in guidance["commands"][:2]:
+            argv = shlex.split(command)
+            self.in_process_cli(self.jobs, *argv[2:])
+        self.assertTrue(self.outcome()["terminal_gate_proven"])
+        self.assertEqual(self.record_path().read_bytes(), before)
+        self.assertEqual(len(self.leg_routes()), 1)
+        self.assertIsNone(W._manual_frame_closure(leg, self.jobs))
+
     def test_a164_11_a_first_leg_compose_refusal_keeps_the_record_and_the_same_start_resumes(self):
         with mock.patch.object(R, "compile_first_leg", side_effect=ValueError("compose-graph-order:test-before-execute")):
             blocked = self.settle()

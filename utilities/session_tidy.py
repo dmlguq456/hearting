@@ -3390,6 +3390,14 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
             else:
                 # A physical user prompt closes this exact seat's marked wait.
                 # Transfer/automatic prompts are not answers from the user.
+                with contextlib.suppress(Exception):
+                    import work_intent
+                    boundary = _prompt_seq_path(session_seat(seat, harness, sid))
+                    current = read_json(boundary)
+                    if (isinstance(current, dict) and current.get("seq") == sequence
+                            and current.get("harness") == harness and current.get("sid") == sid):
+                        current["request_excerpt"] = work_intent.prompt_excerpt(prompt_text)
+                        atomic_write_json(boundary, current)
                 with contextlib.suppress(BaseException):
                     import human_wait_state
                     human_wait_state.close_signal(seat.key, sequence=sequence)
