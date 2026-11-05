@@ -71,15 +71,31 @@ class Fixture(unittest.TestCase):
                                      "artifact_root": str(root)}) + "\n")
 
     def edit(self, path, sid=SID, tool="Edit"):
-        return {"tool_name": tool, "session_id": sid, "cwd": str(self.repo),
+        return {"tool_name": tool, "session_id": sid, "cwd": str(self.tmp),
                 "tool_input": {"file_path": str(path)}}
 
     def bash(self, command, sid=SID, cwd=None):
-        return {"tool_name": "Bash", "session_id": sid, "cwd": str(cwd or self.repo),
-                "tool_input": {"command": command}}
+        return {"tool_name": "Bash", "session_id": sid, "cwd": str(cwd or self.tmp),
+                # An explicit cd preserves the trigger target while exercising another worktree.
+                "tool_input": {"command": f"cd {self.repo} && {command}" if cwd is None else command}}
 
     def judge(self, payload, harness="claude", **extra):
         return G.judge(harness, payload, {**self.env, **extra})
+
+
+class CurrentWorktreeTest(Fixture):
+    def test_same_worktree_edit_patch_and_commit_pass_for_all_adapters(self):
+        (self.repo / 'src/engine.py').write_text('x = 2\n')
+        for harness in ('claude', 'codex', 'opencode'):
+            for tool in ('Edit', 'Write', 'functions.apply_patch', 'Bash'):
+                args = {'file_path': str(self.repo/'src/engine.py')}
+                if 'apply_patch' in tool:
+                    args = {'patch': '*** Begin Patch\n*** Update File: '+str(self.repo/'src/engine.py')+'\n*** End Patch'}
+                elif tool == 'Bash':
+                    args = {'command': 'git commit -am fix'}
+                payload = {'tool_name':tool,'tool_input':args,'session_id':SID,'cwd':str(self.repo)}
+                self.assertEqual(self.judge(payload,harness=harness), '', (harness,tool))
+        self.assertTrue(self.judge(self.bash('nohup python train.py &',cwd=self.repo)))
 
 
 class EditTriggerTest(Fixture):
@@ -89,7 +105,7 @@ class EditTriggerTest(Fixture):
             self.assertFalse(G._has_source_change(self.repo, str(self.root), self.env))
         self.assertEqual(run.call_args.kwargs["env"]["GIT_OPTIONAL_LOCKS"], "0")
 
-    def test_first_source_edit_is_refused_with_the_compose_line(self):
+    def test_first_other_worktree_edit_is_refused_with_the_compose_line(self):
         reason = self.judge(self.edit(self.repo / "src" / "engine.py"))
         self.assertIn(f"no route for {self.root}", reason)
         line = reason.splitlines()[1]
@@ -168,18 +184,21 @@ class EditTriggerTest(Fixture):
         self.assertTrue(self.judge(self.edit(self.repo / "src" / "engine.py"),
                                    AGENT_ARTIFACT_ROOT=str(override)))
 
-    def test_scratch_repo_in_the_temp_dir_passes(self):
+    def test_temp_git_project_passes_from_another_cwd_too(self):
         scratch_repo = Path(tempfile.gettempdir()) / "clone"
         scratch_repo.mkdir()
         git(scratch_repo, "init", "-q")
-        self.assertEqual(self.judge(self.edit(scratch_repo / "a.py")), "")
+        payload = self.edit(scratch_repo / "a.py")
+        self.assertEqual(self.judge(payload), "")
+        payload["cwd"] = str(scratch_repo)
+        self.assertEqual(self.judge(payload), "")
 
     def test_codex_apply_patch_targets_are_judged(self):
-        patch = "*** Begin Patch\n*** Update File: src/engine.py\n@@\n-x = 1\n+x = 2\n*** End Patch\n"
-        payload = {"tool_name": "apply_patch", "session_id": SID, "cwd": str(self.repo),
+        patch = "*** Begin Patch\n*** Update File: " + str(self.repo/"src/engine.py") + "\n@@\n-x = 1\n+x = 2\n*** End Patch\n"
+        payload = {"tool_name": "apply_patch", "session_id": SID, "cwd": str(self.tmp),
                    "tool_input": {"command": ["apply_patch", patch]}}
         self.assertTrue(self.judge(payload, harness="codex"))
-        artifact_patch = patch.replace("src/engine.py", ".agent_reports/notes.md")
+        artifact_patch = patch.replace(str(self.repo/"src/engine.py"), str(self.root/"notes.md"))
         payload["tool_input"] = {"command": ["apply_patch", artifact_patch]}
         self.assertEqual(self.judge(payload, harness="codex"), "")
 
@@ -310,7 +329,7 @@ class ModeTest(Fixture):
 
     def test_opencode_mode_exit_1_with_reason_on_stdout(self):
         payload = {"tool": "write", "args": {"filePath": str(self.repo / "src" / "engine.py")},
-                   "sessionID": "ses_abc", "cwd": str(self.repo)}
+                   "sessionID": "ses_abc", "cwd": str(self.tmp)}
         result = self.run_mode("--opencode", payload)
         self.assertEqual(result.returncode, 1)
         self.assertIn("no route for", result.stdout)

@@ -433,8 +433,10 @@ function spawnTurnChangeRecord(phase, sid, cwd, at = (Date.now() / 1000).toFixed
       cwd: root,
       env: { ...process.env, AGENT_HOME: root },
       detached: true,
-      stdio: "ignore",
+      stdio: ["pipe", "ignore", "ignore"],
     })
+    child.stdin.on("error", () => {})
+    child.stdin.end(JSON.stringify({ hook_event_name: phase === "end" ? "session.idle" : "chat.message" }))
     child.on("error", () => {})
     if (at) child.on("exit", (code) => { if (code === 2) spawnTurnChangeRecord(phase, sid, cwd, "") })
     child.unref()

@@ -1855,6 +1855,25 @@ def _report_reference_line(args) -> str:
 
 
 def contract_read_prompt(args, harness: str) -> str:
+    """Retain the current-turn record as an input when tiny work was promoted."""
+    promotion = ""
+    binding = getattr(args, 'owner_route_binding', None)
+    route_file = getattr(args, 'route_file', None) or getattr(binding, 'route_file', None)
+    try:
+        route = json.loads(Path(route_file).read_text())
+        rid = getattr(args, 'route_id', None) or getattr(binding, 'route_id', None)
+        target = Path(route['artifact_root']) / '.runtime/auto-record' / f"{rid}.promotion.md"
+        if route.get('route_id') == rid and target.is_file():
+            promotion = (f"- Prior inline turn evidence: {target}. Read its start snapshot, changes and observed checks; "
+                         "the evidence names the original and prepared worktrees. Dirty edits can remain only in the original; "
+                         "read task-scoped diffs there and reapply only the task's changes if preparation made a new worktree. "
+                         "Preserve unrelated user edits and both worktrees. This is evidence, not completion or write authority.\n")
+    except (OSError, ValueError, TypeError, KeyError):
+        pass
+    return promotion + _contract_read_prompt(args, harness)
+
+
+def _contract_read_prompt(args, harness: str) -> str:
     """One contract-loading instruction; frame units are already injected."""
     if args.worker_type == "frame":
         return ("- Your frame unit contract is already included above. Read its named inputs within "

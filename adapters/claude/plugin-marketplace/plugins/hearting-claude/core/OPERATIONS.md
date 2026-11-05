@@ -683,12 +683,13 @@ lifecycle predicate term.
 
 | Scale | Handling |
 |---|---|
-| One-off typo, one line, or `direct` work whose selected route does not change source | Work directly in the main working tree |
+| Tiny reversible fix satisfying WORKFLOW §0.2.1 in the current Git worktree | Read, edit, check and reply; existing hooks record it automatically |
+| Other `direct` work whose selected route does not change source | Work directly in the main working tree |
 | Small work routed to `quick` because atomic-direct predicates are incomplete and no promotion signal is present | Registered-headless dispatch-depth-1 one-shot conductor in an isolated worktree |
 | Work promoted to `standard+` by durable scope, shared-contract, resource, resume, verifier, or separability signals | Use a worktree and task branch from the latest base. Separable multi-file or feature work at `standard+` must use headless dispatch. Team delegation and inline micro-stages are limited to `quick` and genuinely microscopic stages. |
 | A new independent request while work is active | Dispatch it to a new worktree alongside the first job |
 
-`direct` remains inline. When its selected route changes source, the approved
+Explicit `direct` remains inline; tiny fixes use WORKFLOW §0.2.1 without start/finish. When an explicit selected route changes source, the approved
 start uses the shared source-worktree preparation contract above.
 
 **Token-pressure non-interference:** token or context pressure cannot downshift this table, remove a required stage or depth, skip liveness and registry handling, or weaken worktree, write, spec, sandbox, approval, safety, validation, security, or accessibility guards. Unknown or exceeded budgets preserve the pipeline and surface degraded availability. Only unrequested optional exploration and user-facing verbosity may shrink.

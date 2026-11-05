@@ -1,27 +1,15 @@
 #!/usr/bin/env python3
-"""Route presence gate: the one check behind the route-participation invariant.
+"""Route presence for other-worktree edits/commits and long-running launches.
 
-Before a session's first material action in a folder it asks one question: does this
-session already hold any route for that folder? The folder is the canonical artifact
-root of the git work tree (``utilities/artifact-root.sh``). The answer comes from the
-session's own route-chain ledger (``tools/fleet/route_chain.py``), which
-``capability-route.py compose|compile|continuation|start`` already append to. Any line
-naming the root passes, open or closed, so a session×folder that once had a route is
-never refused again. Nothing about the route itself is checked.
+Ordinary main-session edits and commits in the current Git worktree pass;
+existing turn hooks record their changes. This gate does not classify size.
+Other-worktree work and plain long-run commands retain the route-existence
+check, worker/runtime/artifact/CI exemptions and fail-open behavior. Actual
+Git projects under the temp directory retain the historical gate exemption;
+the recorder includes them independently.
+Independent installed/shared-checkout guards and native permissions remain.
 
-Material actions are an edit tool on a path inside a git work tree, a shell
-``git commit`` while the work tree has non-artifact changes, and a long-run launch
-(``compute-hosts run``, ``nohup|setsid … python … train*|run.py``). Shell commands are
-recognised only in plain forms; anything ambiguous passes.
-
-Always passes: ``HEARTING_ROUTE_GATE=off``, a registered owner or worker, CI, dev
-activation (the active harness checkout is the repository being edited), artifact roots,
-the temp directory (scratchpad), runtime homes, paths outside git, and any payload or
-record this cannot read.
-
-Modes: ``--claude`` (default; exit 2, reason on stderr), ``--codex``
-(``{"decision": "block"}`` on stdout), ``--opencode`` (stdin
-``{"tool", "args", "sessionID", "cwd"}``; exit 1, reason on stdout).
+Modes: --claude (exit 2), --codex (block JSON), --opencode (exit 1).
 """
 from __future__ import annotations
 
@@ -92,12 +80,12 @@ def _within(path: Path, root: Path) -> bool:
     return path == root or root in path.parents
 
 
-def _excluded(path: Path, env) -> bool:
+def _excluded(path: Path, env, *, git_project=False) -> bool:
     if ".git" in path.parts:
         return True
     home = Path(env.get("HOME") or Path.home())
     data = Path(env.get("XDG_DATA_HOME") or home / ".local" / "share")
-    roots = [Path(tempfile.gettempdir()), home / ".claude", home / ".codex",
+    roots = ([] if git_project else [Path(tempfile.gettempdir())]) + [home / ".claude", home / ".codex",
              home / ".config" / "opencode", data / "hearting"]
     return any(_within(path, Path(os.path.realpath(root))) for root in roots)
 
@@ -541,7 +529,10 @@ def judge(harness: str, payload: dict, env=None) -> str:
         roots = held_roots(harness, _session_id(payload), env)
         if roots is None:
             return ""
+        current = _work_tree(_real(_string(payload, "cwd", "working_directory") or os.getcwd(), Path.cwd()))
         for kind, top, target in triggers:
+            if kind in ("edit", "commit") and current == top:
+                continue  # ordinary current-worktree work is recorded at turn end
             root = unrouted_root(top, roots, env)
             if not root:
                 continue
