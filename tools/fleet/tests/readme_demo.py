@@ -15,7 +15,7 @@ import os
 import tempfile
 import time
 
-VERSION = "v3.67.1"
+VERSION = "v4.0.0"
 
 PROJECTS = ("web-api", "ml-train", "docs-site", "mobile-app")
 HOME = "/home/demo"

@@ -12,14 +12,14 @@
 <text x="153" y="54" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">◇</text>
 <text x="171" y="54" textLength="63" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">gpu-box</text>
 <text x="243" y="54" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">2/2</text>
-<text x="747" y="54" textLength="27" lengthAdjust="spacing" fill="#ffffd7" xml:space="preserve">⠏ 3</text>
-<text x="783" y="54" textLength="63" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">working</text>
-<text x="864" y="54" textLength="27" lengthAdjust="spacing" fill="#6b8656" xml:space="preserve">● 4</text>
-<text x="900" y="54" textLength="36" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">idle</text>
-<text x="954" y="54" textLength="27" lengthAdjust="spacing" fill="#ffa9a9" xml:space="preserve">● 1</text>
-<text x="990" y="54" textLength="117" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">answer needed</text>
-<text x="1134" y="54" textLength="72" lengthAdjust="spacing" fill="#ffffd7" font-weight="700" xml:space="preserve">hearting</text>
-<text x="1215" y="54" textLength="63" lengthAdjust="spacing" fill="#68699f" xml:space="preserve">v3.67.1</text>
+<text x="756" y="54" textLength="27" lengthAdjust="spacing" fill="#ffffd7" xml:space="preserve">⠏ 3</text>
+<text x="792" y="54" textLength="63" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">working</text>
+<text x="873" y="54" textLength="27" lengthAdjust="spacing" fill="#6b8656" xml:space="preserve">● 4</text>
+<text x="909" y="54" textLength="36" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">idle</text>
+<text x="963" y="54" textLength="27" lengthAdjust="spacing" fill="#ffa9a9" xml:space="preserve">● 1</text>
+<text x="999" y="54" textLength="117" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">answer needed</text>
+<text x="1143" y="54" textLength="72" lengthAdjust="spacing" fill="#ffffd7" font-weight="700" xml:space="preserve">hearting</text>
+<text x="1224" y="54" textLength="54" lengthAdjust="spacing" fill="#68699f" xml:space="preserve">v4.0.0</text>
 <text x="1287" y="54" textLength="81" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">· managed</text>
 <text x="1386" y="54" textLength="45" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">11:59</text>
 <text x="9" y="72" textLength="99" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">usage(week)</text>
