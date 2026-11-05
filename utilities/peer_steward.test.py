@@ -17002,6 +17002,46 @@ class NativeReceivingTurnRecoveryTest(_TmpRootMixin, unittest.TestCase):
                 resume_registered(duty)
             delivery_seam.assert_called_once()
 
+    def test_registered_redrive_waits_for_held_owner_lease(self):
+        import dispatch_batch_obligations as obligations
+        import dispatch_completion_join as join
+        import dispatch_pending_delivery as pending
+        import dispatch_registry_cache
+        from dispatch_terminal_commit import CompletionState
+
+        store, duty, aid, sid = self._duty()
+        pending.record_path(self.tmp_root, sid, "delivery-native-crash").unlink()
+        text = self.jobs_path.read_text(encoding="utf-8").replace(
+            f"attempt_id={aid}",
+            f"attempt_id={aid},worker_type=owner,workflow_completion=runtime-v1")
+        self.jobs_path.write_text(text, encoding="utf-8")
+        dispatch_registry_cache.clear_cache()
+        context = obligations.OwnerSettlementReadContext()
+        context._clock = lambda: 1000.0
+        self.addCleanup(context.close)
+
+        def resume():
+            peer_steward._resume_registered_obligation(
+                store.get(duty["id"]), store, settlement_context=context)
+
+        with mock.patch.object(join, "materialize_after_terminal_close") as materialize, \
+             mock.patch("dispatch_terminal_commit.owner_completion_state",
+                        return_value=CompletionState("pending")), \
+             mock.patch("dispatch_contract.supervisor_lease_is_held",
+                        return_value=True) as lease_is_held, \
+             mock.patch.object(peer_steward.peer_obligations,
+                               "_registered_terminal_state", return_value=None), \
+             mock.patch("dispatch_seat_handover._effective", return_value=(sid, "codex")):
+            resume()
+            resume()
+            materialize.assert_not_called()
+            self.assertEqual(store.get(duty["id"])["observation"]["reason"],
+                             "completion-delivery-record-unavailable")
+
+            lease_is_held.return_value = False
+            resume()
+            materialize.assert_called_once()
+
     def test_shared_owner_retry_rejects_wrong_digest_recipient_and_revision(self):
         import dispatch_completion_join as join
         import dispatch_pending_delivery as pending
