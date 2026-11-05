@@ -4277,6 +4277,8 @@ class StatusRearmTest(_WatchMixin, unittest.TestCase):
 
 
 class WatchMessageTransportSettlementTest(_WatchMixin, unittest.TestCase):
+    _STEWARD_PANE = "w1:p8"
+
     def _watch(self, target):
         import session_tidy
 
@@ -4284,16 +4286,23 @@ class WatchMessageTransportSettlementTest(_WatchMixin, unittest.TestCase):
         # The shared obligation runner these commands start can reach a duty before
         # its ACK; a census without the recipient would cancel it as
         # recipient-session-absent, so list the recipient's session.
-        env.update({"HERDR_PANE_ID": "fixture:watch-transport-seat",
+        # The target and recipient are different sessions. Reporting the
+        # recipient on w1:p9 contradicts get/wait's sid-fake target and makes
+        # the runner retire this watch as session-replaced while it is ready.
+        env.update({"HERDR_PANE_ID": self._STEWARD_PANE,
                     "AGENT_DISPATCH_CALLER_HARNESS": "claude",
-                    "FAKE_HERDR_PANES": json.dumps(
-                        [{"pane_id": "w1:p9", "agent_session": {"value": "steward-1"}}])})
+                    "FAKE_HERDR_PANES": json.dumps([
+                        {"pane_id": "w1:p9", "agent_session": {"value": "sid-fake"}},
+                        {"pane_id": self._STEWARD_PANE,
+                         "agent_session": {"value": "steward-1"}},
+                    ])})
         proc = self._run("watch", target, env=env)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         fields = self._fields(proc.stdout.splitlines()[0])
-        self._wait_for_receipt(fields["watch_id"])
+        receipt = self._wait_for_receipt(fields["watch_id"])
+        self.assertEqual(receipt["state"], "idle", receipt)
         seat = session_tidy.Seat("pane", "watch-transport-" + fields["watch_id"],
-                                 "w1:p9", "claude")
+                                 self._STEWARD_PANE, "claude")
         arm_path = self.watch_root / f"{fields['watch_id']}.json"
         arm = json.loads(arm_path.read_text(encoding="utf-8"))
         arm["steward_seat"] = seat.as_dict()
@@ -4318,7 +4327,7 @@ class WatchMessageTransportSettlementTest(_WatchMixin, unittest.TestCase):
         row = peer_steward.peer_message._read_pending(ref)
         store = peer_steward.peer_obligations.ObligationStore()
         duty = store.create("message-" + ref, "message",
-            {"server": "default", "pane": "fixture:watch-transport-seat",
+            {"server": "default", "pane": self._STEWARD_PANE,
              **self._TRANSPORT_RECIPIENT},
             {"ref": ref, "body_digest": row["body_sha256"], "from": self._TRANSPORT_SENDER,
              "to": row["to"], "refs": row["refs"]})
