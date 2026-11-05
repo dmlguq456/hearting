@@ -439,19 +439,19 @@ worktree allocation. These are runtime checks within the existing approved start
 The common launcher passes the opened source descriptor and uses that directory
 as the wrapper's actual process cwd. Adapters, launch fences, governors and
 supervisors carry that binding to native child startup and resume. Durable route,
-registry and receipt paths remain canonical; execution never reopens that mutable
-pathname for its cwd. A fresh process reopens only the recorded physical identity
+registry and receipt paths remain canonical; execution keeps its bound physical
+cwd. A fresh process reopens only the recorded physical identity
 when its inherited descriptors are unavailable.
 Trusted launcher hops inherit only the source descriptor. Native model processes
 start in the bound kernel cwd with directory descriptors closed; parent and Git
-directory handles do not widen their filesystem access. Supervised directory
+directory handles remain in the trusted launcher. Supervised directory
 requests use the verified native process cwd for that process's lifetime.
 Later legs that keep this same dedicated new-repository destination reuse its
 physical binding and repository instead of allocating another worktree. An
 explicitly different destination keeps its existing selection and preparation.
 Compose records optional source-directory and Git common-directory identities.
 An existing explicit recovery destination uses its own recorded identity for
-the same descriptor handoff; this never claims that Hearting created that folder.
+the same descriptor handoff, preserving its original creation provenance.
 Frame-time corrections stay on that route, appear in its existing Fleet detail,
 and reach the interview and first owner. The retained history has no reader-only
 size cutoff: bounded delivery takes recent conditions first and reports omitted
