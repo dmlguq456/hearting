@@ -22,9 +22,9 @@ need core/WORKFLOW.md   '### 0.2. Semantic Primary Routing'                 'WOR
 need core/WORKFLOW.md   '### 0.3. Pre-Execution Gate for Long-Running Work' 'WORKFLOW §0.3 pre-execution gate 존재'
 need core/WORKFLOW.md   'never absorbs a secondary'                         'WORKFLOW §0.2 상호 대체 금지 절'
 need core/WORKFLOW.md   'uses that entry as the primary route'              'matching entry-router primary preference 존재'
-need core/WORKFLOW.md   'intensity inside the selected entry route'         'direct entry 우회 금지 절'
+need core/WORKFLOW.md   'explicit `direct` remains an intensity inside an entry route' 'explicit direct entry 유지 절'
 need core/WORKFLOW.md   'compose --start --shape direct --prompt-file'     'direct source edit starts isolated preparation before editing'
-need core/WORKFLOW.md   'records its route without preparing a worktree'   'already-made direct changes retain in-place route recording'
+need core/WORKFLOW.md   'Their receipt and explicit finish contracts are unchanged' 'explicit direct receipt/finish compatibility'
 need core/OPERATIONS.md 'Main-session role contract'                        'OPERATIONS §5.10 main-session role contract 존재'
 need core/OPERATIONS.md 'Inline exceptions'                                 'OPERATIONS §5.10 inline exceptions 존재'
 need core/OPERATIONS.md 'Delegation surfaces are distinct'                  'OPERATIONS §5.10 delegation surfaces 존재'
@@ -57,14 +57,14 @@ need adapters/opencode/skills/autopilot-lab/SKILL.md 'capabilities/autopilot-lab
 need adapters/codex/skills/autopilot-refine/SKILL.md 'capabilities/autopilot-refine.md' 'Codex refine projection 에 owner pointer 존재'
 
 # 4. adapter bootstraps
-need adapters/claude/CLAUDE.md 'The main session decides only whether the work is' 'Claude main session decides direct or not'
-need adapters/claude/CLAUDE.md 'otherwise omit .--shape. and let the frame decide' 'Claude omits shape for other new work'
+need adapters/claude/CLAUDE.md 'handle one reversible outcome inline' 'Claude main session judges one local completion unit'
+need adapters/claude/CLAUDE.md 'Other work starts with:' 'Claude uses compose for other new work'
 need adapters/claude/CLAUDE.md  'headless worker dispatch'         'Claude bootstrap delegation-surface 실현'
-need adapters/codex/AGENTS.md 'The main session decides only whether the work is' 'Codex main session decides direct or not'
-need adapters/codex/AGENTS.md 'otherwise omit .--shape. and let the frame decide' 'Codex omits shape for other new work'
+need adapters/codex/AGENTS.md 'handle one reversible outcome inline' 'Codex main session judges one local completion unit'
+need adapters/codex/AGENTS.md 'Other work starts with:' 'Codex uses compose for other new work'
 need adapters/codex/AGENTS.md   'never silently extends'           'Codex bootstrap delegation-surface 실현'
-need adapters/opencode/AGENTS.md 'The main session decides only whether the work is' 'OpenCode main session decides direct or not'
-need adapters/opencode/AGENTS.md 'otherwise omit .--shape. and let the frame decide' 'OpenCode omits shape for other new work'
+need adapters/opencode/AGENTS.md 'handle one reversible outcome inline' 'OpenCode main session judges one local completion unit'
+need adapters/opencode/AGENTS.md 'Other work starts with:' 'OpenCode uses compose for other new work'
 
 # 5. Claude skill realization
 need skills/autopilot-lab/SKILL.md 'core/WORKFLOW.md §0.2'         'lab SKILL semantic routing 참조'

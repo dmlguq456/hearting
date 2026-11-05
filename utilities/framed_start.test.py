@@ -1267,7 +1267,241 @@ class PlanExtraStageTest(StartBase):
                           "extra-stage-not-compiled:y", "extra-stage-not-compiled:z"])
 
 
+class FrameFrictionContinuationTest(StartBase):
+    def readiness(self, frame_route, jobs):
+        return {"tuples": [{**T.nested(parent, child), "checked_worktree": frame_route["cwd"]}
+                           for parent in ("claude", "codex", "opencode")
+                           for child in ("claude", "codex", "opencode")],
+                "candidates": T.registered_headless()["candidates"]}
+
+    def new_repository_frame(self, *, existing=False, contents=False):
+        self.parent = self.root.parent / "new-project-parent"
+        self.parent.mkdir()
+        self.destination = self.parent / "new-project"
+        if existing:
+            self.destination.mkdir()
+            if contents:
+                (self.destination / "keep.txt").write_text("user data")
+        task = f"Create a new local git repository at {self.destination}\nImplement the requested tool."
+        old_path = self.path
+        self.route, self.path = self.admitted(cwd=str(self.parent),
+            dispatch_evidence={"tuples": [{**T.nested("claude", "codex"), "checked_worktree": str(self.parent)}]},
+            work_request={"text": task, "owner_harness": None})
+        old_path.unlink()  # replace only this test fixture's initial dummy frame
+        self.output = self.begin_cycle(self.path)
+        self.write_frame_outputs(self.output)
+        self.leg = {"capability": "autopilot-code", "shape": "solo", "cwd": str(self.destination)}
+        self.set_briefs(self.leg, self.leg)
+        self.set_interview({"legs": [self.leg]})
+
+    def test_approved_absent_repository_starts_in_its_destination_and_records_creator(self):
+        self.new_repository_frame()
+        rows = W._proposal_rows(self.route, self.jobs, *W._framed_cycle(self.route))
+        self.assertEqual(rows[0]["repository_preparation"][0]["state"], "create-after-approval")
+        self.assertLessEqual(len(W._repository_notice(rows)), 2)
+        self.assertIsNone(W._automatic_direction(self.route, rows, self.output))
+        self.assertFalse(self.destination.exists())
+        receipt = self.settle()
+        self.assertTrue(receipt["owner_started"], receipt)
+        record = self.record()
+        created = record["first_leg"]["repository_created"]
+        self.assertEqual(created["path"], str(self.destination))
+        self.assertTrue(created["at"])
+        self.assertTrue((self.destination / ".git").is_dir())
+        leg = json.loads(self.leg_routes()[0].read_text())
+        self.assertEqual(leg["cwd"], str(self.destination))
+        self.assertIn("Hearting created " + str(self.destination), leg["work_request"]["text"])
+        self.assertIn(created["at"], leg["work_request"]["text"])
+        head = subprocess.check_output(["git", "-C", str(self.destination), "rev-parse", "HEAD"], text=True).strip()
+        self.assertEqual(head, record["first_leg"]["repository_baseline"]["commit"])
+        self.assertEqual(len(self.leg_routes()), 1)
+        self.settle()
+        self.assertEqual(len(self.leg_routes()), 1)
+
+    def test_existing_empty_or_populated_folder_is_untouched_and_uses_existing_choices(self):
+        self.new_repository_frame(existing=True, contents=True)
+        rows = W._proposal_rows(self.route, self.jobs, *W._framed_cycle(self.route))
+        self.assertEqual(rows[0]["repository_preparation"][0]["state"], "manual")
+        self.assertEqual(len(W._interview_questions(rows)), 1)
+        receipt = self.settle()
+        self.assertEqual(receipt["reason"], "repository-preparation-pending")
+        self.assertEqual(sorted(p.name for p in self.destination.iterdir()), ["keep.txt"])
+        self.assertEqual((self.destination / "keep.txt").read_text(), "user data")
+        (self.destination / "keep.txt").unlink()
+        self.settle()
+        self.assertEqual(list(self.destination.iterdir()), [])
+
+    def test_explicit_new_repository_destination_fills_an_omitted_first_leg_cwd(self):
+        self.new_repository_frame()
+        self.leg.pop("cwd")
+        self.set_briefs(self.leg, self.leg)
+        rows = W._proposal_rows(self.route, self.jobs, *W._framed_cycle(self.route))
+        self.assertEqual(rows[0]["proposal"]["legs"][0]["cwd"], str(self.destination))
+        self.set_interview(rows[0]["proposal"])
+        self.assertTrue(self.settle()["owner_started"])
+        leg = json.loads(self.leg_routes()[0].read_text())
+        self.assertEqual(leg["cwd"], str(self.destination))
+
+    def test_interrupted_baseline_binding_resumes_the_same_repository_without_reinitializing(self):
+        self.new_repository_frame()
+        real_run = subprocess.run
+        def fail_ref(argv, **kwargs):
+            if argv[0] == "git" and "update-ref" in argv:
+                return subprocess.CompletedProcess(argv, 1, "", "temporary ref failure")
+            return real_run(argv, **kwargs)
+        with mock.patch.object(subprocess, "run", side_effect=fail_ref):
+            self.assertEqual(self.settle()["reason"], "repository-preparation-pending")
+        created = dict(self.record()["first_leg"]["repository_created"])
+        baseline = dict(self.record()["first_leg"]["repository_baseline"])
+        self.assertTrue(self.settle()["owner_started"])
+        self.assertEqual(self.record()["first_leg"]["repository_created"], created)
+        self.assertEqual(self.record()["first_leg"]["repository_baseline"], baseline)
+
+    def test_public_correct_retains_frame_input_and_redirects_after_owner_start(self):
+        import dispatch_owner_input as inputs
+        condition = self.root.parent / "condition.txt"
+        condition.write_text("Use local sources only")
+        out = io.StringIO()
+        argv = ["capability-route.py", "correct", "--attempt-id", str(self.path), "--jobs", str(self.jobs),
+                "--message-file", str(condition)]
+        with mock.patch.object(sys, "argv", argv), contextlib.redirect_stdout(out):
+            self.assertEqual(R.main(), 0)
+        self.assertEqual(json.loads(out.getvalue())["state"], "frame-stored")
+        self.set_briefs({"capability": "autopilot-code", "shape": "solo"},
+                        {"capability": "autopilot-code", "shape": "solo"})
+        self.set_interview({"legs": [{"capability": "autopilot-code", "shape": "solo"}]})
+        receipt = self.settle()
+        redirected = inputs.frame_input(self.route, "later condition", jobs=self.jobs)
+        self.assertEqual(redirected, {"redirect_owner": receipt["owner_attempt_id"]})
+
+    def test_new_repository_in_a_quoted_parser_example_is_not_creation_authority(self):
+        route = {"cwd": "/workspace", "work_request": {"text":
+            "Fix parsing of the phrase new git repository /tmp/example.\n"
+            "```text\nCreate a new git repository /tmp/quoted\n```"}}
+        self.assertIsNone(RP.requested_repository(route))
+
+    def test_replaced_git_directory_is_preserved_on_preparation_retry(self):
+        self.new_repository_frame()
+        real_run = subprocess.run
+        def fail_ref(argv, **kwargs):
+            if argv[0] == "git" and "update-ref" in argv:
+                return subprocess.CompletedProcess(argv, 1, "", "temporary ref failure")
+            return real_run(argv, **kwargs)
+        with mock.patch.object(subprocess, "run", side_effect=fail_ref):
+            self.assertEqual(self.settle()["reason"], "repository-preparation-pending")
+        (self.destination / ".git").rename(self.parent / "created-git")
+        foreign = self.parent / "foreign"
+        subprocess.run(["git", "init", "--quiet", str(foreign)], check=True)
+        before = (foreign / ".git/config").read_bytes()
+        (self.destination / ".git").symlink_to(foreign / ".git", target_is_directory=True)
+        receipt = self.settle()
+        self.assertEqual(receipt["reason"], "repository-preparation-pending")
+        self.assertIn("Git directory was replaced", receipt["detail"])
+        self.assertEqual((foreign / ".git/config").read_bytes(), before)
+        self.assertFalse((foreign / ".git/refs/heads/master").exists())
+
+    def test_frame_conditions_are_deduplicated_and_reach_interview_owner_and_existing_fleet_detail(self):
+        import dispatch_owner_input as inputs
+        import work_intent
+        from types import SimpleNamespace
+        from fleet import details
+        basic = SimpleNamespace(sessions=[], jobs=[], resources=[], node_evidence={self.route["route_id"]: {
+            "frame": {"route_file": str(self.path)}}})
+        before = details.state_key(basic)
+        original = self.path.read_bytes()
+        first = inputs.frame_input(self.route, "Use local sources only", "local-only")
+        again = inputs.frame_input(self.route, "Use local sources only", "local-only")
+        self.assertEqual((first["retained_corrections"], again["duplicate"]), (1, True))
+        self.assertNotEqual(details.state_key(basic), before)
+        template = W.frame_interview_step(self.route, self.path, self.jobs)
+        self.assertIn("Use local sources only", template["interview_template"]["brief"]["constraints"])
+        self.settle()
+        leg = json.loads(self.leg_routes()[0].read_text())
+        self.assertIn("Use local sources only", leg["work_request"]["text"])
+        self.assertIn("Use local sources only", work_intent.prompt_block(leg))
+        from fleet import route as fleet_route
+        from fleet.explorer.live import _node_detail
+        view = fleet_route.with_frame_corrections({"nodes": [{"id": "frame", "state": "failed",
+                                                  "note": "dead-worker-blocked"}]}, self.route)
+        self.assertIn("correct 1건", view["nodes"][0]["says"])
+        self.assertEqual(view["nodes"][0]["note"], "dead-worker-blocked")
+        self.assertIn("Use local sources only", _node_detail(view["nodes"][0], 0)["says"])
+        self.assertEqual(self.path.read_bytes(), original)
+
+    def test_explicit_output_conflicts_warn_without_rejecting_or_confusing_relative_paths(self):
+        question = {"brief": {"outcome": "Write output/report.md"}, "questions": [],
+            "route_proposals": {"by_option": {"go": {"legs": [{"done_when": [
+                {"text": "Report exists", "check": "test -f reports/report.md"}]}]}}}}
+        warnings = FI.path_conflicts(question, "/workspace")
+        self.assertEqual(len(warnings), 1)
+        self.assertEqual(warnings[0]["done_when_path"], "/workspace/reports/report.md")
+        question["brief"]["outcome"] = "Write ./reports/report.md"
+        self.assertEqual(FI.path_conflicts(question, "/workspace"), [])
+        question["brief"]["outcome"] = "Write another file"
+        self.assertEqual(FI.path_conflicts(question, "/workspace"), [])
+        question["brief"]["outcome"] = "Copy old/report.md to reports/report.md"
+        self.assertEqual(FI.path_conflicts(question, "/workspace"), [])
+
+
 class FailureTableTest(StartBase):
+    def test_manually_composed_first_leg_gets_guarded_frame_closure_commands_without_mutation(self):
+        # Keep the real frame cycle open, as when a caller recovers the first leg
+        # manually. The ordinary start would complete and seal it for us.
+        custom_jobs = self.jobs.parent / "custom registry" / "jobs.log"
+        custom_jobs.parent.mkdir()
+        self.jobs.rename(custom_jobs)
+        self.jobs = custom_jobs
+        os.environ["AGENT_DISPATCH_JOBS"] = str(self.jobs)
+        with mock.patch.object(W, "_route_cli", side_effect=RuntimeError("before-frame-complete")):
+            with self.assertRaisesRegex(RuntimeError, "before-frame-complete"):
+                self.settle()
+        leg_path = self.leg_routes()[0]
+        leg = json.loads(leg_path.read_text())
+        record = self.record()
+        record.pop("first_leg")
+        self.record_path().write_bytes(RP.render(record))
+        before = self.record_path().read_bytes()
+        guidance = W._manual_frame_closure(leg, self.jobs)
+        receipt = W.start_work(leg, leg_path, self.jobs, run=self.fake_run)
+        self.assertEqual(receipt["frame_closure"], guidance)
+        self.assertEqual(guidance["frame_route_id"], self.route["route_id"])
+        self.assertEqual(self.record_path().read_bytes(), before)
+        self.assertFalse(R.outcome_path(self.path).exists())
+        cycle_id = record["decision"]["frame_route"]["cycle_id"]
+        self.assertEqual(P.read_cycle_record(self.root, cycle_id)["state"], "open")
+        self.assertEqual(len(guidance["commands"]), 3)
+        import route_parent_close
+        for command in guidance["commands"]:
+            argv = shlex.split(command)
+            command_env = {}
+            if argv[0] == "env":
+                argv.pop(0)
+                while "=" in argv[0]:
+                    key, value = argv.pop(0).split("=", 1)
+                    command_env[key] = value
+            stdout, stderr = io.StringIO(), io.StringIO()
+            # A copied command must retain its nondefault registry even when
+            # the shell points at another one. Execute the public parser and
+            # command implementation, not EndingBase's permissive CLI double.
+            ambient_jobs = self.jobs.parent / "other-jobs.log"
+            ambient_jobs.write_text("", encoding="utf-8")
+            with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(ambient_jobs), **command_env}), \
+                    mock.patch.object(sys, "argv", argv[1:]), \
+                    contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                try:
+                    code = P.main(argv[2:]) if Path(argv[1]).name == "artifact_producer.py" else R.main()
+                except SystemExit as exc:
+                    code = exc.code
+                self.assertIn(code, (None, 0), f"{command}\n{stderr.getvalue()}")
+                if argv[2] == "close":
+                    self.assertEqual(route_parent_close.jobs_path(), self.jobs.resolve())
+        self.assertTrue(self.outcome()["terminal_gate_proven"])
+        self.assertEqual(P.read_cycle_record(self.root, cycle_id)["state"], "sealed")
+        self.assertEqual(self.record_path().read_bytes(), before)
+        self.assertEqual(len(self.leg_routes()), 1)
+        self.assertFalse(R.outcome_path(leg_path).exists())
+        self.assertIsNone(W._manual_frame_closure(leg, self.jobs))
+
     def test_a164_11_a_first_leg_compose_refusal_keeps_the_record_and_the_same_start_resumes(self):
         with mock.patch.object(R, "compile_first_leg", side_effect=ValueError("compose-graph-order:test-before-execute")):
             blocked = self.settle()
@@ -1405,6 +1639,8 @@ class FirstLegStateReplayTest(StartBase):
         self.assertEqual(again["plan_advanced"]["leg"], 1)
         second, second_path = self.started_leg(again)
         self.assertEqual((again["route_id"], second["route_plan"]["index"]), (second["route_id"], 1))
+        self.assertEqual(again["cwd"], second["cwd"])
+        self.assertIn(second["cwd"], again["next_step"])
         self.assertEqual(P.read_cycle_record(self.root, again["artifact_env"]["AGENT_ARTIFACT_CYCLE_ID"])
                          ["parent_cycle_id"], cycle)
         rows = self.cursor()
@@ -1876,6 +2112,26 @@ class AutomaticDirectionTest(StartBase):
     def automatic(self):
         root, record, output = W._framed_cycle(self.route)
         return W._automatic_direction(self.route, W._proposal_rows(self.route, self.jobs, root, record, output), output)
+
+    def test_compact_known_direction_uses_the_existing_interview_and_preserves_real_choices(self):
+        text = (HERE / 'fixtures/frame-known-direction/compact.md').read_text()
+        self.set_briefs(text, text)
+        interview, answers = self.automatic()
+        derived, errors = W._marked_route_proposals(self.route, self.jobs, interview)
+        self.assertEqual(errors, [])
+        self.assertEqual(FI.validate({**derived, 'summary': '-'}), [])
+        self.assertEqual(FI.validate_answers(derived, answers), [])
+        proposal = next(iter(derived['route_proposals']['by_option'].values()))
+        self.assertEqual((proposal['legs'][0]['shape'], len(proposal['legs'])), ('solo', 1))
+        self.assertIn('empty name keeps the unnamed greeting', interview['brief']['outcome'])
+        self.assertIn('final answer', interview['brief']['outcome'])
+        # An architectural choice still needs the person. The compact format
+        # does not authorize ignoring questions or divergent route proposals.
+        with_question = text.replace('None.', 'Should this become a public network service?')
+        self.set_briefs(text, with_question)
+        self.assertIsNone(self.automatic())
+        self.set_briefs(text, full_brief([CODE_STAGED]))
+        self.assertIsNone(self.automatic())
 
     def test_equal_proposals_with_nothing_to_choose_get_a_valid_runtime_interview(self):
         self.set_briefs(full_brief([DIRECT]), full_brief([DIRECT], questions="none"))

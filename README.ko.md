@@ -199,7 +199,9 @@ Explorer 창 하나가 CPU 한 코어의 약 3분의 1과 메모리 약 0.8 GB�
 - **설치하고 로그인한 에이전트 CLI 하나 이상:** Claude Code, Codex, OpenCode 중
   하나. Claude Code 하나만으로도 됩니다.
 
-<!-- TODO(공개 준비 5단계): 시험한 OS × 하네스 표를 넣는다. -->
+지금까지 확인한 범위: CI가 Ubuntu에서 Claude Code·Codex·OpenCode용 설치를 확인하고,
+[QUICKSTART.ko.md](QUICKSTART.ko.md)의 실측은 Linux에서 했습니다. macOS는 처음부터
+끝까지 확인하지 않았고, Windows(Git Bash)는 실험 단계입니다.
 
 ### 설치
 
@@ -249,7 +251,8 @@ Git 프로젝트 안에서 에이전트 CLI를 열고 작은 일을 맡겨 보�
 저장할 뿐이고, 수정이나 시험이 통과했는지는 판단하지 않습니다. 끄려면
 `HEARTING_AUTO_RECORD=off`를 설정하세요.
 
-<!-- TODO(공개 준비 1·6단계): 데모 저장소, 예상 patch, 실측 시간을 담은 QUICKSTART.md를 연결한다. -->
+[QUICKSTART.ko.md](QUICKSTART.ko.md)에서 작은 데모 파일로 첫 작업을 해 볼 수 있습니다.
+예상 변경과 실측 시간도 함께 있습니다.
 
 ### 업데이트와 상태
 
@@ -306,12 +309,12 @@ headless:
   `workspace-write` 샌드박스 안에서 승인 질문 없이 돌고, OpenCode 작업자는
   사용자의 OpenCode 권한 설정에서 출발합니다.
 
-<!-- TODO(공개 준비 2단계): 설치 출력이 이 기본값과 파일 경로를 알리게 되면 여기에 적는다. -->
+Claude Code를 포함해 처음 설치하면 설치기가 이 기본값과 이를 바꾸는 파일을 알려 줍니다.
 
-**Claude Code 사용자 규칙은 OpenCode에도 적용됩니다.** OpenCode에는 사용자
-전역 규칙 파일이 따로 없어서, `~/.claude/rules/`(또는
-`$CLAUDE_CONFIG_DIR/rules/`)에 규칙 파일이 있으면 하팅이 OpenCode의 전역
-`AGENTS.md`를 그 규칙 다음에 하팅 지침이 오는 파일로 씁니다. 처음 그렇게 하는
+**Claude Code 사용자 규칙은 OpenCode에도 적용됩니다.** 하팅은 OpenCode 전역
+`AGENTS.md`를 하팅 지침을 싣는 파일로 관리합니다. `~/.claude/rules/`(또는
+`$CLAUDE_CONFIG_DIR/rules/`)에 규칙 파일이 있으면 그 규칙을 이 파일에서 하팅
+지침보다 앞에 싣습니다. 처음 그렇게 하는
 설치나 업데이트가 이 사실을 알립니다. 특정 경로에만 적용되는 규칙은 빼고, 규칙
 파일은 읽기만 합니다. 그 결과 규칙 본문은 OpenCode가 쓰는 모델 제공자에게도
 전달됩니다. 끄려면 같은 `dispatch-defaults.yaml`에 아래 두 줄을 넣으세요. 다음
@@ -393,8 +396,9 @@ hearting run workflow-supervisor status --route <route-id> --json  # 요청이 �
 `SKIP`으로 표시하고, 차이를 숨기지 않습니다. Claude Code 하나만으로도 지원되는
 구성이며, 하네스를 둘 이상 설치하면 하팅이 작업자와 독립 검토를 여러 하네스에
 나눠 둘 수 있습니다. 하팅이 더하는 몫은 작지만 공짜는 아닙니다. Codex에서 한
-기계로 잰 결과, 첫 반응이 하팅이 없을 때보다 약 1.5초 늦었고 요청마다 입력이 약
-2.5K 토큰 늘었습니다.
+기계로 세 번씩 잰 결과, 첫 반응이 하팅이 없을 때보다 약 0.7초 늦었고 요청마다
+입력이 약 2.4K 토큰 늘었습니다. 두 턴짜리 작은 버그 수정은 하팅이 있을 때 38초,
+없을 때 39초로 거의 같았습니다.
 
 공통 계약은 벤더 모델이 아니라 예산 이름을 씁니다. 하네스마다 예산을 실제
 모델로 잇는 사용자 소유 파일 `<runtime-home>/agent-config/models.conf`가 있고,
@@ -467,7 +471,7 @@ python3 tools/generate.py --check
 남은 작업 트리에서 번들을 만들지 않으므로, 설치 수명 주기 시험은 깨끗한
 체크아웃에서 돌리세요. `--mode linked`는 실시간 디버깅용입니다.
 
-<!-- TODO(공개 준비 6단계): CONTRIBUTING.md를 추가하고 여기에 연결한다. -->
+pull request를 열기 전에 [CONTRIBUTING.md](CONTRIBUTING.md)를 읽어 주세요.
 
 ## 문서
 

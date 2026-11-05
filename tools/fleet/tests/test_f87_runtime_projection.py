@@ -83,6 +83,26 @@ class RuntimeProjectionTest(unittest.TestCase):
             "        return ''\n"
             "    return pane or ''\n"
             "pane_ownership.verified_pane=admitted\n")
+        # HOME isolation does not hide other interactive runtimes in host /proc.
+        # Keep real ancestry discovery for our fake native process, excluding peers.
+        with (fixture / "sitecustomize.py").open("a", encoding="utf-8") as stream:
+            stream.write(
+                "_listdir = os.listdir\n"
+                "def fixture_processes(path):\n"
+                "    if os.fspath(path) != '/proc':\n"
+                "        return _listdir(path)\n"
+                "    visible = set()\n"
+                "    pid = os.getpid()\n"
+                "    while pid > 0 and pid not in visible:\n"
+                "        visible.add(pid)\n"
+                "        try:\n"
+                "            with open('/proc/%d/stat' % pid) as stat:\n"
+                "                pid = int(stat.read().rsplit(')', 1)[1].split()[1])\n"
+                "        except (OSError, ValueError, IndexError):\n"
+                "            break\n"
+                "    return [name for name in _listdir(path)\n"
+                "            if not name.isdigit() or int(name) in visible]\n"
+                "os.listdir = fixture_processes\n")
         env["PYTHONPATH"] = str(fixture) + os.pathsep + env.get("PYTHONPATH", "")
         env.update(overrides)
         return env

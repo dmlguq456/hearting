@@ -37,6 +37,7 @@ from execution_access import ExecutionAccessError, prepare_task_request
 import owner_write_advisory as OWNER_WRITE_ADVISORY
 import route_plan as RP
 import resource_resume as RESOURCE_RESUME
+import frame_repository
 try:  # ends a detached child with the test that started it; no-op outside tests
     from detached_lifetime import bind as end_with_test
 except ImportError:  # a partial tree without it (e.g. a fixture release): no record
@@ -321,18 +322,18 @@ def _native_progress(route, jobs, asked):
 def native_answer_candidate(route, jobs, asked):
     """Purely identify a valid reply to this route's currently registered interview.
 
-    `(answers.native.json, answers)` when the reply completes it, `(answers.native.partial.json, None)`
-    when it answers part of it, None when it is no answer to it."""
+    `(path, answers-or-None, interview-digest)` binds candidate selection and
+    commit to the same revision, including a partial native call."""
     import frame_interview as FI
     progress = _native_progress(route, jobs, asked)
     if progress is None:
         return None
     if progress.answers is None:
-        return progress.directory / FI.NATIVE_PARTIAL_NAME, None
-    return progress.directory / FI.NATIVE_ANSWERS_NAME, progress.answers
+        return progress.directory / FI.NATIVE_PARTIAL_NAME, None, hashlib.sha256(progress.raw).hexdigest()
+    return progress.directory / FI.NATIVE_ANSWERS_NAME, progress.answers, hashlib.sha256(progress.raw).hexdigest()
 
 
-def record_native_answer(route, jobs, asked):
+def record_native_answer(route, jobs, asked, *, expected_interview_digest=None):
     """Keep a valid native reply beside the one current registered interview.
 
     A complete reply becomes `answers.native.json`. A partial one is kept as
@@ -342,22 +343,47 @@ def record_native_answer(route, jobs, asked):
     progress = _native_progress(route, jobs, asked)
     if progress is None:
         return None
-    if progress.answers is not None:
-        target = progress.directory / FI.NATIVE_ANSWERS_NAME
-        target.write_text(json.dumps(progress.answers, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        with contextlib.suppress(OSError):
-            (progress.directory / FI.NATIVE_PARTIAL_NAME).unlink()
-        return target
-    target = progress.directory / FI.NATIVE_PARTIAL_NAME
-    if target.is_symlink():
+    if expected_interview_digest and hashlib.sha256(progress.raw).hexdigest() != expected_interview_digest:
         return None
-    staged = target.with_name(f"{target.name}.{os.getpid()}.tmp")
-    staged.write_text(json.dumps({
-        "schema": FI.NATIVE_PARTIAL_SCHEMA, "route_id": progress.question["route_id"],
-        "round": progress.question.get("round"), "interview_sha256": hashlib.sha256(progress.raw).hexdigest(),
-        "slots": progress.slots, "missing": progress.missing}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    os.replace(staged, target)
-    return target
+    import workflow_state as WS
+    ledger = WS.WorkflowLedger(route["route_id"], route["route_hash"], jobs=jobs)
+    with ledger.lock():
+        resolution = WS.human_gate_resolution(ledger.journal(), "frame-review")
+        question_path = Path(resolution.get("artifact") or "")
+        if (resolution.get("status") != "blocked" or question_path.is_symlink()
+                or question_path != progress.directory / "interview.json"
+                or question_path.read_bytes() != progress.raw):
+            return None  # The reply was calculated for a different interview revision.
+        manual = progress.directory / "answers.json"
+        if manual.exists():
+            try:
+                existing = FI.load_json_file(manual, max_bytes=FI.MAX_ANSWERS_BYTES, kind="answers")
+            except (OSError, ValueError):
+                existing = None
+            if isinstance(existing, dict) and not FI.validate_answers(progress.question, existing):
+                return None
+        # Other native calls may have committed partial rows while this call was
+        # being interpreted. Merge again under the same lock as replacement.
+        digest = hashlib.sha256(progress.raw).hexdigest()
+        slots = {**_native_partial(progress.directory, progress.raw, progress.question.get("round"),
+                                   route["route_id"]), **FI.native_slots(progress.question, asked)}
+        answers = FI.answers_from_native_slots(progress.question, slots)
+        if answers is not None:
+            value = answers  # The same locked directory now prevents interview replacement.
+            target = progress.directory / FI.NATIVE_ANSWERS_NAME
+        else:
+            target = progress.directory / FI.NATIVE_PARTIAL_NAME
+            value = {"schema": FI.NATIVE_PARTIAL_SCHEMA, "route_id": route["route_id"],
+                     "round": progress.question.get("round"), "interview_sha256": digest,
+                     "slots": slots, "missing": FI.missing_native_slots(progress.question, slots)}
+        if target.is_symlink():
+            return None
+        from workflow_state import _atomic_write
+        _atomic_write(target, json.dumps(value, ensure_ascii=False, indent=2) + "\n")
+        if answers is not None:
+            with contextlib.suppress(OSError):
+                (progress.directory / FI.NATIVE_PARTIAL_NAME).unlink()
+        return target
 
 
 def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
@@ -390,6 +416,10 @@ def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
                 brief = FI.brief_draft((Path(output) / "shards/frame/direction-brief.md").read_text(encoding="utf-8"))
         except (OSError, ValueError, UnicodeError, ProducerError):
             pass
+        import work_intent
+        conditions = work_intent.frame_corrections_text(route)
+        if conditions:
+            brief["constraints"] = (brief.get("constraints", "") + conditions).strip()
         return {"state": "needs-interview", "required_action": "prepare-frame-question",
                 "interview_template": {"understanding": understanding, "brief": brief, "questions": []},
                 "question_example": FI.QUESTION_EXAMPLE,
@@ -418,6 +448,8 @@ def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
         # reopen the producer or write into a completed cycle on a lost reply.
         recorded_path = Path(resolution["artifact"])
         recorded = FI.load_json_file(recorded_path)
+        if "repository_preparation" in recorded and "repository_preparation" not in supplied:
+            supplied = {**supplied, "repository_preparation": recorded["repository_preparation"]}
         if "route_proposals" in recorded and "route_proposals" not in supplied:
             # The recorded question carries the mapping the runtime built from these marks.
             supplied = {**supplied, "route_proposals": recorded["route_proposals"]}
@@ -451,7 +483,18 @@ def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
         raise ValueError("frame-output-outside-cycle")
     question_path, answer_path = directory / "interview.json", directory / "answers.json"
     original = FI.load_json_file(question_path) if question_path.exists() else {}
+    import work_intent
+    conditions = work_intent.frame_corrections_text(route)
+    if (conditions and not answers and not answer_path.exists()
+            and not (directory / FI.NATIVE_ANSWERS_NAME).exists()
+            and not (directory / FI.NATIVE_PARTIAL_NAME).exists()
+            and isinstance(supplied.get("brief"), dict)):
+        brief = dict(supplied["brief"])
+        if conditions.strip() not in brief.get("constraints", ""):
+            brief["constraints"] = (brief.get("constraints", "") + conditions).strip()
+        supplied = {**supplied, "brief": brief}
     supplied, mark_errors = _marked_route_proposals(route, jobs, supplied)
+    supplied = _interview_repository_preparation(route, jobs, supplied, original)
     question = {**supplied, "schema": FI.SCHEMA, "route_id": route["route_id"], "round": round_no,
                 "self_path": str(question_path), "summary": str(directory / "frame-summary.json"),
                 "created": original.get("created") or datetime.now(timezone.utc).strftime("%Y-%m-%d")}
@@ -498,12 +541,27 @@ def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
             response = None
     if not next_round and resolution["status"] != "not-raised" and resolution.get("artifact") != str(question_path):
         raise ValueError("frame-interview-binding-conflict: use the currently registered interview")
-    _store_once(question_path, question)
+    replacing = bool(original and original != question)
+    with ledger.lock():
+        current = WS.human_gate_resolution(ledger.journal(), "frame-review")
+        saved = FI.load_json_file(question_path) if question_path.exists() else {}
+        if saved != original:
+            raise ValueError("frame-input-conflict: the registered interview changed; read it again")
+        if replacing:
+            if (current["status"] != "blocked" or round_no != current.get("epoch")
+                    or answer_path.exists() or native.exists()
+                    or (directory / FI.NATIVE_PARTIAL_NAME).exists()):
+                raise ValueError("frame-input-conflict: preserve an interview with recorded answers")
+            from workflow_state import _atomic_write
+            _atomic_write(question_path, json.dumps(question, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
+        else:
+            _store_once(question_path, question)
+        if response is not None:
+            _store_once(answer_path, response)
     _store_once(directory / "frame-summary.json", {"route_id": route["route_id"], "frames": [
         {"node": node["id"], "marker": str(Path(jobs).parent / "completion" / route["route_id"] / (node["id"] + ".json"))}
         for node in route["nodes"] if node.get("worker_type") == "frame"]})
     if response is not None:
-        _store_once(answer_path, response)
         with contextlib.suppress(OSError):
             (directory / FI.NATIVE_PARTIAL_NAME).unlink()      # answered: no unfinished native reply remains
         _checkpoint("after-answer-save")
@@ -515,7 +573,7 @@ def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
         if completed.returncode:
             raise ValueError(f"frame-{operation}-pending: {completed.stderr.strip()} {completed.stdout.strip()}")
 
-    ask_now = (resolution["status"] == "not-raised" or next_round) and not answers
+    ask_now = (resolution["status"] == "not-raised" or next_round or replacing) and not answers
     if resolution["status"] == "not-raised" or next_round:
         command("gate", "--block", "--artifact", str(question_path))
         resolution = WS.human_gate_resolution(ledger.journal(), "frame-review")
@@ -851,6 +909,11 @@ def _run_reporting_registration(command, attempt, on_registered):
 
 
 def _start(route, path, jobs, node, harness, run, on_registered=None):
+    with frame_repository.for_route(route, path) as repository:
+        return _start_bound(route, path, jobs, node, harness, run, on_registered, repository)
+
+
+def _start_bound(route, path, jobs, node, harness, run, on_registered, repository):
     command = [sys.executable, str(ROOT / "utilities/dispatch-owner.py"), "--start",
                "--route-evidence", str(path), "--jobs", str(jobs),
                "--slug", route["slug"] + "-" + node,
@@ -894,6 +957,7 @@ def _start(route, path, jobs, node, harness, run, on_registered=None):
             command += ["--execution-access-file", str(prepared)]
     # When this launch began, had its row registered and returned (epoch seconds): the start
     # receipt keeps the per-leg timing that no other record holds.
+    repository.verify(route.get("cwd"))
     started, registered = time.time(), []
 
     def reported():
@@ -1266,16 +1330,55 @@ def _proposal_rows(route, jobs, root, record, output):
     def probe(cwd=None):
         key = cwd or route["cwd"]
         if key not in readiness:
-            readiness[key] = module.proposal_readiness({**route, "cwd": key}, jobs)
+            base = Path(key)
+            while not base.is_dir() and base != base.parent:
+                base = base.parent
+            readiness[key] = module.proposal_readiness({**route, "cwd": str(base)}, jobs)
         return readiness[key]
 
+    preparations = []
     def compile_leg(leg, index):
-        return module.compile_proposal_leg(leg, index, frame_route=route, frame_cycle_id=record["cycle_id"],
-                                           readiness=probe)
+        target = RP.requested_repository(route) if index == 0 else None
+        cwd = RP.leg_cwd(leg, route["cwd"])
+        proposed = target if target and not leg.get("cwd") else cwd
+        preview = Path(proposed)
+        while not preview.is_dir() and preview != preview.parent:
+            preview = preview.parent
+        # Preview graph/scope in an existing folder. Launch readiness is checked
+        # afresh in the approved target after preparation; no target proof is forged.
+        compiled = module.compile_proposal_leg({**leg, "cwd": str(preview)}, index,
+            frame_route=route, frame_cycle_id=record["cycle_id"], readiness=probe)
+        if not module._isolates_worktree(compiled) or leg["shape"] == "direct":
+            return compiled if proposed == cwd else module.compile_proposal_leg(
+                leg, index, frame_route=route, frame_cycle_id=record["cycle_id"], readiness=probe)
+        if target and not leg.get("cwd"):
+            leg["cwd"] = target
+        path = Path(proposed)
+        diagnosis = module._compose_git_diagnosis(proposed) if path.is_dir() else {"state": "non-git"}
+        if diagnosis.get("state") != "git" or target == proposed and os.path.lexists(path):
+            state = ("create-after-approval" if target == proposed and not os.path.lexists(path)
+                     and path.parent.is_dir() else "manual")
+            binding = {}
+            if state == "create-after-approval":
+                parent = path.parent.resolve(strict=True)
+                stamp = parent.stat()
+                binding = {"parent": {"path": str(parent), "device": stamp.st_dev, "inode": stamp.st_ino}}
+            preparations.append({"leg": index, "cwd": proposed, "state": state, **binding,
+                                 "existing_destination": target == proposed and os.path.lexists(path)})
+        return compiled
 
-    return [RP.evaluate_brief(output / "shards" / node / "direction-brief.md", root=root, node=node,
-                              compile_leg=compile_leg, start_approvals=module.route_start_approvals)
-            for node in RP.frame_legs(route)]
+    rows = []
+    for node in RP.frame_legs(route):
+        preparations = []
+        row = RP.evaluate_brief(output / "shards" / node / "direction-brief.md", root=root, node=node,
+                                compile_leg=compile_leg, start_approvals=module.route_start_approvals)
+        if preparations and row["proposal"] is not None:
+            row["repository_preparation"] = list(preparations)
+            for preparation in preparations:
+                if row["proposal"]["legs"][preparation["leg"]].get("cwd"):
+                    row["facts"]["legs"][preparation["leg"]]["cwd"] = preparation["cwd"]
+        rows.append(row)
+    return rows
 
 
 def _grouped_approvals(row):
@@ -1352,6 +1455,8 @@ def _automatic_direction(route, rows, output):
     if os.environ.get("AGENT_DISPATCH_REGISTERED_WORKER") == "1":
         return None
     if len(rows) != 2 or not RP.proposals_equal(rows) or any(_start_approval_keys(row) for row in rows):
+        return None
+    if any(row.get("repository_preparation") for row in rows):
         return None
     texts = []
     for row in rows:
@@ -1468,6 +1573,26 @@ def _marked_route_proposals(route, jobs, interview):
     return {**interview, "route_proposals": {"question": question.get("id"), "by_option": by_option}}, []
 
 
+def _interview_repository_preparation(route, jobs, interview, original):
+    """Bind runtime preparation facts when the question is registered, before its answer."""
+    interview = {key: value for key, value in interview.items() if key != "repository_preparation"}
+    proposals = (interview.get("route_proposals") or {}).get("by_option") or {}
+    if not RP.is_framed_route(route) or not proposals:
+        return interview
+    rows = _proposal_rows(route, jobs, *_framed_cycle(route))
+    bindings = {}
+    for label, proposal in proposals.items():
+        previous = ((original.get("route_proposals") or {}).get("by_option") or {}).get(label)
+        saved = (original.get("repository_preparation") or {}).get(label)
+        if saved and previous and RP.same_proposal(previous, proposal):
+            bindings[label] = saved
+            continue
+        row = next((row for row in rows if row.get("proposal") and RP.same_proposal(row["proposal"], proposal)), None)
+        if row and row.get("repository_preparation"):
+            bindings[label] = row["repository_preparation"]
+    return {**interview, "repository_preparation": bindings} if bindings else interview
+
+
 def _proposal_review(route, path, jobs, rows=None):
     """Information for the session that writes the interview: both validated proposals (or none with
     the reason), whether they are equal, the start-approval parts each leg would carry, and the
@@ -1481,6 +1606,7 @@ def _proposal_review(route, path, jobs, rows=None):
             "display": RP.none_text(row["reason"]) if row["proposal"] is None else "proposal",
             "legs": (row.get("facts") or {}).get("legs", []),
             "start_approvals": _grouped_approvals(row),
+            **({"repository_preparation": row["repository_preparation"]} if row.get("repository_preparation") else {}),
             **({"read_notes": row["read_notes"]} if row.get("read_notes") else {}),
             **({"question_renames": renames} if (renames := RP.question_renames(row.get("source") or "")) else {})}
            for row in rows],
@@ -1488,6 +1614,19 @@ def _proposal_review(route, path, jobs, rows=None):
         "wording_differs": RP.wording_differs(rows),
         "frame_downgrade": _frame_downgrade_summary(route, jobs),
     }
+
+
+def _repository_notice(rows):
+    import work_intent
+    t = work_intent.ui_translator()
+    setups = [item for row in rows for item in row.get("repository_preparation", [])]
+    if not setups:
+        return []
+    item = setups[0]
+    if item["state"] == "create-after-approval":
+        return [t("route.repository.create", path=item["cwd"]), t("route.repository.untouched")]
+    key = "route.repository.existing" if item.get("existing_destination") else "route.repository.manual"
+    return [t(key, path=item["cwd"]), t("route.repository.choices")]
 
 
 def _approval_scope(question, response):
@@ -1609,6 +1748,11 @@ def _decide(route, jobs, root, record, output, briefs, intent):
                     "prompt_file": str(prompt), "prompt_sha256": hashlib.sha256(task).hexdigest(),
                     "spec_read": "auto" if str(source).startswith("compose-auto:") else source,
                     "owner": (route.get("work_request") or {}).get("owner_harness")}}
+    preparations = (interview.get("repository_preparation") or {}).get(
+        choice["label"], match.get("repository_preparation", []))
+    setup = next((row for row in preparations if row["leg"] == 0), None)
+    if setup:
+        compose["repository_setup"] = setup
     if execution_scope == "report" and leg.get("shape") == "staged":
         compose["graph"] = execution_graph
     return RP.build_decision(frame_route=frame_route, selected=choice["label"], reason="", briefs=briefs,
@@ -1646,8 +1790,163 @@ def _first_leg_started(leg_result, jobs, route):
     return not tokens or {"registered=1", "started=1", "child_spawned=1"} <= tokens
 
 
+def _prepare_frame_repository(record_path, record):
+    """Prepare the absent destination through its approved physical parent."""
+    setup = record["decision"]["first_leg_compose"].get("repository_setup")
+    if not setup:
+        return record
+    path = Path(setup["cwd"])
+    first = record.get("first_leg") or {}
+    created = first.get("repository_created")
+    if setup["state"] != "create-after-approval" and created is None:
+        if _route_module()._compose_git_diagnosis(path).get("state") == "git":
+            return record
+        raise ValueError(f"repository-preparation-manual: {path}; existing folders are untouched. "
+                         "Use the existing interview's manual-preparation/direct choice, or compose --route-plan --cwd "
+                         "with the prepared repository.")
+    parent = setup.get("parent") or {}
+    unsafe = "repository-preparation-manual: approved parent or destination was replaced; preparation stopped"
+    with contextlib.ExitStack() as opened:
+        try:
+            parent_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            opened.callback(os.close, parent_fd)
+            stamp = os.fstat(parent_fd)
+            if (str(path.parent.resolve()) != parent.get("path")
+                    or (stamp.st_dev, stamp.st_ino) != (parent.get("device"), parent.get("inode"))):
+                raise ValueError(unsafe)
+            if created is None:
+                try:
+                    os.mkdir(path.name, mode=0o700, dir_fd=parent_fd)
+                except FileExistsError as exc:
+                    raise ValueError(f"repository-preparation-manual: {path} already exists; nothing changed") from exc
+            leaf_fd = os.open(path.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+            opened.callback(os.close, leaf_fd)
+            stamp = os.fstat(leaf_fd)
+            if created is None:
+                created = {"path": str(path), "at": datetime.now(timezone.utc).isoformat(),
+                           "device": stamp.st_dev, "inode": stamp.st_ino}
+                record = _bind(record_path, repository_created=created)
+            if (stamp.st_dev, stamp.st_ino) != (created["device"], created["inode"]):
+                raise ValueError(unsafe)
+
+            def verify():
+                # Recheck the visible binding before each write and before handing
+                # it to compose. The descriptors also prevent an intervening rename
+                # from redirecting mkdir or Git to a replacement ancestor.
+                parent_now, leaf_now = path.parent.stat(), path.lstat()
+                if (str(path.parent.resolve()) != parent.get("path") or path.is_symlink()
+                        or (parent_now.st_dev, parent_now.st_ino) != (parent["device"], parent["inode"])
+                        or (leaf_now.st_dev, leaf_now.st_ino) != (created["device"], created["inode"])):
+                    raise ValueError(unsafe)
+
+            verify()
+            if any(name != ".git" for name in os.listdir(leaf_fd)):
+                raise ValueError("repository-preparation-manual: destination now contains user files; nothing changed")
+            fd_root = Path("/proc/self/fd") if Path("/proc/self/fd").is_dir() else Path("/dev/fd")
+            pinned = fd_root / str(leaf_fd)
+            git_dir = pinned / ".git"
+            initialized = first.get("repository_initialized")
+            if git_dir.is_symlink() or git_dir.is_file():
+                raise ValueError("repository-preparation-manual: Git directory was replaced; nothing changed")
+            if initialized:
+                current_git = git_dir.stat()
+                if (current_git.st_dev, current_git.st_ino) != (initialized.get("device"), initialized.get("inode")):
+                    raise ValueError("repository-preparation-manual: Git directory was replaced; nothing changed")
+            elif git_dir.exists():
+                raise ValueError("repository-preparation-manual: existing Git directory has no creation evidence; nothing changed")
+            env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+            env.update(GIT_AUTHOR_NAME="Hearting", GIT_AUTHOR_EMAIL="hearting@localhost",
+                       GIT_COMMITTER_NAME="Hearting", GIT_COMMITTER_EMAIL="hearting@localhost")
+            def git(*args, input=None, optional=False):
+                verify()
+                done = subprocess.run(["git", "-C", str(pinned), *args], input=input, text=True,
+                                      capture_output=True, timeout=60, env=env, pass_fds=(leaf_fd,))
+                verify()
+                if done.returncode and not optional:
+                    raise ValueError("repository-preparation-pending: " + done.stderr.strip())
+                return done.stdout.strip() if not done.returncode else None
+            if "repository_initialized" not in (record.get("first_leg") or {}):
+                git("init", "--quiet")
+                current_git = git_dir.stat()
+                record = _bind(record_path, repository_initialized={"path": str(path),
+                                "at": datetime.now(timezone.utc).isoformat(),
+                                "device": current_git.st_dev, "inode": current_git.st_ino})
+            if "repository_baseline" not in (record.get("first_leg") or {}):
+                tree = git("mktree", input="")
+                commit = git("commit-tree", tree, "-m", "Initialize approved repository")
+                record = _bind(record_path, repository_baseline={"path": str(path), "commit": commit,
+                                "at": datetime.now(timezone.utc).isoformat()})
+            baseline = record["first_leg"]["repository_baseline"]["commit"]
+            if git("rev-parse", "--verify", "HEAD", optional=True) != baseline:
+                git("update-ref", "HEAD", baseline, "0" * 40)
+            verify()
+        except OSError as exc:
+            raise ValueError(unsafe) from exc
+    return record
+
+
+def _manual_frame_closure(route, jobs):
+    """Read-only closure instructions for an independently composed approved first leg.
+
+    The existing complete/close/finalize commands recheck all normal gates. Never
+    adopt or launch a leg, edit a decision, or close a frame from this reader.
+    """
+    plan = route.get("route_plan") or {}
+    if plan.get("index") != 0:
+        return None
+    try:
+        binding = RP.read_route_plan(f"{plan['decision']}#0", route["artifact_root"])
+        if binding["digest"] != plan["digest"]:
+            return None
+        decision = binding["record"]["decision"]
+        if (binding["record"].get("first_leg") or {}).get("route"):
+            return None                   # the ordinary frame transaction owns closure
+        context = decision["first_leg_compose"]["context"]
+        root = Path(context["artifact_root"])
+        frame_id = decision["frame_route"]["route_id"]
+        frame_path = root / ".runtime/routes" / (frame_id + ".json")
+        frame = json.loads(frame_path.read_text(encoding="utf-8"))
+        if (frame.get("route_id"), frame.get("route_hash")) != (
+                frame_id, decision["frame_route"]["route_hash"]):
+            return None
+        if frame_path.with_suffix(".outcome.json").exists():
+            return None
+        record_path = Path(binding["decision"])
+        if not record_path.is_absolute():
+            record_path = Path(route["artifact_root"]) / record_path
+        command = [sys.executable, str(ROOT / "utilities/capability-route.py")]
+        commands = [shlex.join([*command, "complete", "--route", str(frame_path), "--jobs", str(jobs),
+                               "--node", RP.TERMINAL_NODE, "--evidence", str(record_path)]),
+                    shlex.join(["env", f"AGENT_DISPATCH_JOBS={Path(jobs).resolve()}",
+                               *command, "close", "--route", str(frame_path),
+                               "--summary", "manually recovered first leg " + route["route_id"]]),
+                    shlex.join([sys.executable, str(ROOT / "utilities/artifact_producer.py"), "finalize",
+                                "--artifact-root", str(root), "--cycle", decision["frame_route"]["cycle_id"]])]
+        return {"frame_route_id": frame_id, "leg_route_id": route["route_id"], "commands": commands,
+                "next_step": "If this manually recovered leg implements the approved decision, close only its "
+                    "frame with these commands in order. They retain normal completion and live-work checks. "
+                    "The leg has its own lifecycle; do not restart the frame or stop the leg to close it."}
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
 def _first_leg(route, path, jobs, result, root, record, output, record_path, decision_record, *,
                wait, run, sleep, clock):
+    try:
+        with frame_repository.RepositoryBinding(decision_record) as repository:
+            return _first_leg_bound(route, path, jobs, result, root, record, output, record_path,
+                                    decision_record, repository, wait=wait, run=run, sleep=sleep, clock=clock)
+    except frame_repository.RepositoryBindingError as exc:
+        return None, {**result, "state": "needs-attention", "reason": exc.reason, "detail": str(exc),
+                      "record_file": str(record_path),
+                      "recovery_command": RP.first_leg_recovery_command(record_path, RP.read_record(record_path)),
+                      "next_step": "The approved destination changed; the decision is retained. "
+                          "Retry this same start after restoring it, or use the existing recovery_command "
+                          "with a prepared repository's --cwd."}
+
+
+def _first_leg_bound(route, path, jobs, result, root, record, output, record_path, decision_record,
+                     repository, *, wait, run, sleep, clock):
     """Compile, publish and start the approved first leg; bind each fact into the record before the
     next step. Returns `(record, None)` once its start receipt is stored, or `(None, response)` to
     hand the caller the first leg's own state while the frame route stays open."""
@@ -1657,6 +1956,18 @@ def _first_leg(route, path, jobs, result, root, record, output, record_path, dec
     context = compose["context"]
     first = decision_record.get("first_leg") or {}
     if "snapshot" not in first:
+        try:
+            decision_record = _prepare_frame_repository(record_path, decision_record)
+            repository.bind(decision_record)
+        except (OSError, ValueError) as exc:
+            recovery = RP.first_leg_recovery_command(record_path, decision_record)
+            return None, {**result, "state": "needs-attention", "reason": "repository-preparation-pending",
+                          "detail": str(exc), "record_file": str(record_path),
+                          "recovery_command": recovery,
+                          "next_step": "Preparation and approval are retained. Existing folders are not initialized. "
+                              "Use the existing interview's manual/direct choice, or run recovery_command once its "
+                              "--cwd repository is prepared (it carries the approved plan, prompt and parent cycle). "
+                              "Retry this start after fixing a preparation error."}
         binding = RP.read_route_plan(f"{record_path}#0", root)
         readiness = {}
 
@@ -1667,11 +1978,23 @@ def _first_leg(route, path, jobs, result, root, record, output, record_path, dec
             return readiness[key]
         leg = {**binding["leg"], **{key: compose[key] for key in ("capability", "mode", "shape", "graph", "intensity")}}
         try:
+            import work_intent
+            task = Path(context["prompt_file"]).read_text(encoding="utf-8") + work_intent.frame_corrections_text(route)
+            prepared = (decision_record.get("first_leg") or {}).get("repository_created")
+            if prepared:
+                initialized = decision_record["first_leg"]["repository_initialized"]
+                task += (f"\nRepository preparation: Hearting created {prepared['path']} at {prepared['at']}; "
+                         f"git init at {initialized['at']} (empty baseline "
+                         f"{decision_record['first_leg']['repository_baseline']['commit']}).\n")
+            task_path = _decision_home(root) / f"{route['route_id']}.prepared-leg-task.md"
+            _keep_first(task_path, task.encode("utf-8"))
             leg_route = module.compile_first_leg(
                 leg, frame_route=route, frame_cycle_id=record["cycle_id"], context=context, binding=binding,
-                work_request={"text": Path(context["prompt_file"]).read_text(encoding="utf-8"),
+                work_request={"text": task,
                               "owner_harness": context.get("owner")}, readiness=probe)
         except ValueError as exc:
+            if isinstance(exc, frame_repository.RepositoryBindingError):
+                raise
             preparation_failed = str(exc).startswith("source-worktree-preparation-failed:")
             attention = {**result, "state": "needs-attention",
                          "reason": "first-leg-preparation-failed" if preparation_failed else "first-leg-compose-refused",
@@ -1694,6 +2017,7 @@ def _first_leg(route, path, jobs, result, root, record, output, record_path, dec
             "route_id": leg_route["route_id"], "route_hash": leg_route["route_hash"]})
         first = decision_record["first_leg"]
         _checkpoint("after-compiled-snapshot")
+    repository.verify()
     snap = first["snapshot"]
     snapshot_path = root / snap["path"]
     if RP.file_digest(snapshot_path) != snap["sha256"]:
@@ -1707,12 +2031,14 @@ def _first_leg(route, path, jobs, result, root, record, output, record_path, dec
     if (published.get("route_id"), published.get("route_hash")) != (snap["route_id"], snap["route_hash"]):
         raise ValueError("route-decision-conflict: the published first leg differs from its snapshot")
     _checkpoint("after-route-publish")
+    repository.verify(published["cwd"])
     if "route" not in first:
         decision_record = _bind(record_path, route={
             "route_id": snap["route_id"], "route_hash": snap["route_hash"],
             "route_file": leg_path.relative_to(root).as_posix()})
         first = decision_record["first_leg"]
     _checkpoint("after-route-bind")
+    repository.verify(published["cwd"])
     if "start_receipt" in first:
         return decision_record, None
     leg_route = module.verify_route(published)
@@ -2236,10 +2562,12 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
                         "No payload rerun is authorized by a missing supervisor or exit proof."}
     if route["effective_intensity"] == "direct":
         from artifact_producer import prepare_route_artifact_env
+        with frame_repository.for_route(route, path) as repository:
+            repository.verify(route.get("cwd"))
+        cwd = route.get("cwd") or os.getcwd()
         return {**result, "state": "inline", "required_action": "execute-inline",
-                "task": request["text"],
-                # The inline session is the producer (capabilities/*.md lifecycle step 1):
-                # an inactive root with legacy content keeps its legacy-compat window.
+                "task": request["text"], "cwd": cwd,
+                "next_step": f"Do this inline work in {cwd}. Then run finish for this route with the result evidence and summary.",
                 "artifact_env": prepare_route_artifact_env(path, start=True, jobs=jobs, require_cycle=False)}
     rows = _rows(jobs)
     existing_owner = _slot(route, "owner", rows, jobs)
@@ -2392,6 +2720,7 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
                 template = {**(step.get("interview_template") or {}), "questions": _interview_questions(rows)}
                 step = {**step, "interview_template": template,
                         "route_proposal_review": _proposal_review(route, path, jobs, rows),
+                        "preparation_notice": _repository_notice(rows),
                         "next_step": step.get("next_step", "") + " route_proposal_review holds each brief's validated route "
                             "proposal (or proposal:none(reason)), whether the two are equal, and the start-approval parts "
                             "in scope. interview_template already holds the route question and one yes/no question per "
@@ -2400,6 +2729,18 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
                             "each marked option to its proposal when the interview is submitted; add the questions only "
                             "the person can answer beside them. An answer outside the options selects no route."}
             result.update(frame_interview=step, gate="frame-review", task=request["text"])
+            if step.get("interview"):
+                import frame_interview as FI
+                conflicts = FI.path_conflicts(step["interview"], route.get("cwd"))
+                if conflicts:
+                    step["path_conflicts"] = conflicts
+            if RP.is_framed_route(route) and step["state"] == "needs-question":
+                _root, _record, _output = _framed_cycle(route)
+                notices = _repository_notice(_proposal_rows(route, jobs, _root, _record, _output))
+                if notices:
+                    step["preparation_notice"] = notices
+                    step["next_step"] += (" Include these two preparation_notice lines with the existing question; "
+                                          "its alternative may choose manual preparation or direct work.")
             if step["state"] != "released":
                 return {**result, **step}
             owner_frame_launch_gate(SimpleNamespace(route_file=str(path)), "start", ROOT, jobs)
@@ -2818,6 +3159,16 @@ def start_work(route, path, jobs, *, wait=False, interview=None, answers=None,
     advanced = _advance_plan(route, jobs, result, run=run, sleep=sleep, clock=clock)
     if advanced is not result:
         return advanced          # the next leg's own start already armed its own resume
+    if result.get("owner_started") or result.get("state") in {"inline", "completed"}:
+        if result.get("state") == "inline":
+            import work_intent
+            conditions = work_intent.frame_corrections_text(route)
+            if conditions and conditions.strip() not in result.get("task", ""):
+                result["task"] = str(result.get("task") or "") + conditions
+        closure = _manual_frame_closure(route, jobs)
+        if closure:
+            result["frame_closure"] = closure
+            result["next_step"] = (str(result.get("next_step") or "") + " " + closure["next_step"]).strip()
     from start_receipt import save
     return save(_arm_capacity_resume(result, path, jobs), jobs)
 

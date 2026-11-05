@@ -202,7 +202,9 @@ its CPU use continues in v4.x.
 - **At least one agent CLI, installed and signed in:** Claude Code, Codex, or
   OpenCode. Claude Code alone is enough.
 
-<!-- TODO(public-readiness stage 5): add the tested OS × runtime matrix. -->
+Tested so far: CI checks the installation for Claude Code, Codex, and OpenCode
+on Ubuntu, and the measured runs in [QUICKSTART.md](QUICKSTART.md) used Linux.
+macOS has not been checked end to end, and Windows (Git Bash) is experimental.
 
 ### Install
 
@@ -255,7 +257,8 @@ folder, the branch, and whether it is committed. The automatic record saves what
 happened. It does not judge whether the fix or its tests passed. Set
 `HEARTING_AUTO_RECORD=off` to stop it.
 
-<!-- TODO(public-readiness stages 1 and 6): link QUICKSTART.md with the demo repository, expected patch, and measured time. -->
+[QUICKSTART.md](QUICKSTART.md) walks through a first task on small demo files,
+with the expected change and measured times.
 
 ### Update and status
 
@@ -314,13 +317,14 @@ headless:
   `workspace-write` sandbox without approval prompts; OpenCode workers start
   from your own OpenCode permission configuration.
 
-<!-- TODO(public-readiness stage 2): once the installer prints this default and the file path, say so here. -->
+A first install that includes Claude Code prints this default and the file that
+changes it.
 
-**Your Claude Code user rules also apply in OpenCode.** OpenCode has no
-user-level rule file of its own, so when `~/.claude/rules/` (or
-`$CLAUDE_CONFIG_DIR/rules/`) holds rule files, Hearting writes OpenCode's
-global `AGENTS.md` as those rules followed by its own instructions, and the
-install or update that starts it says so. Rules limited to certain paths are
+**Your Claude Code user rules also apply in OpenCode.** Hearting manages
+OpenCode's global `AGENTS.md` for its own instructions. When `~/.claude/rules/`
+(or `$CLAUDE_CONFIG_DIR/rules/`) holds rule files, Hearting puts those rules
+before its instructions in that file, and the install or update that starts it
+says so. Rules limited to certain paths are
 left out, and the rule files are only read. The rule text then also reaches
 the model provider your OpenCode uses. To stop it, add these two lines to the
 same `dispatch-defaults.yaml`; the next install, update, or
@@ -405,9 +409,10 @@ Every runtime sees the full capability set. Where a runtime lacks a surface,
 the installer marks it `SKIP` with a reason instead of hiding the difference.
 Claude Code alone is a supported setup; with more than one runtime installed,
 Hearting can place workers and independent reviews across them. What Hearting
-adds is small but not free: on Codex, one measurement on one machine found the
-first response about 1.5 s slower than without Hearting and about 2.5K more
-input tokens per request.
+adds is small but not free: on Codex, three measured pairs on one machine found
+the first response about 0.7 s slower than without Hearting and about 2.4K more
+input tokens per request; a small two-turn bug fix took about as long either
+way (38 s with Hearting, 39 s without).
 
 Shared contracts name budgets, not vendor models. Each runtime maps the budgets
 to real models in a user-owned file,
@@ -481,7 +486,7 @@ The `pre-push` hook runs the same projection check CI runs. Packaged
 activation refuses to build from a dirty tree, so run the install lifecycle
 suites from a clean checkout; `--mode linked` exists only for live debugging.
 
-<!-- TODO(public-readiness stage 6): add CONTRIBUTING.md and link it here. -->
+Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 
 ## Documentation
 

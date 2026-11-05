@@ -14,6 +14,7 @@ import re
 import secrets
 import subprocess
 import sys
+import frame_repository
 import time
 from pathlib import Path
 from typing import Any, Callable, NamedTuple
@@ -1928,6 +1929,7 @@ def reclaimable_reservations(root: str | Path, data: dict[str, Any], now: float)
                for reservation in data.get("reservations", {}).values())
 
 
+@frame_repository.process_entry
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", default=None)
@@ -2129,7 +2131,7 @@ def main() -> int:
         child_env.pop(RESERVATION_ENV, None)
         returned = None
         try:
-            child = subprocess.Popen(command, env=child_env)
+            child = subprocess.Popen(command, **frame_repository.child_options(env=child_env))
             return_code = child.wait()
             # Keep the existing group-drain wait, but make the single scan
             # inside release's state lock authoritative. A second scan after

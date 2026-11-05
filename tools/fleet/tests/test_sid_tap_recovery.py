@@ -23,7 +23,8 @@ from contextlib import ExitStack
 from pathlib import Path
 from unittest import mock
 
-from test_process_identity import FakeClaudeProc
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+from tools.fleet.tests.test_process_identity import FakeClaudeProc
 
 _TOOLS_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if _TOOLS_DIR not in sys.path:

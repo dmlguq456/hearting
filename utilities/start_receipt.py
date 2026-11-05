@@ -110,6 +110,9 @@ def next_line(receipt):
                     f"{resume_at} and leaves one notice")
         return "next: end this turn; the runtime brings the result back to this session"
     if state == "inline" or action == "execute-inline":
+        if receipt.get("cwd"):
+            return (f"next: work in {shlex.quote(str(receipt['cwd']))} in this session, then run: "
+                    f"{_finish_command(receipt)}")
         return f"next: do the work in this session, then run: {_finish_command(receipt)}"
     if action in _ANSWER_ACTIONS and receipt.get("correction_command"):
         return ("next: get the person's answer to owner_report, then run: "

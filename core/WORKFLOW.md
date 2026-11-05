@@ -20,8 +20,8 @@ silently dropping to capability-free work.
 
 Capability-free inline work is limited to read-only orientation, status, a
 simple factual or explanatory answer that requests no new durable artifact, or
-an explicit conversational/no-files constraint.
-`direct` is an intensity inside the selected entry route, not a bypass around entry routing.
+an explicit conversational/no-files constraint, or the tiny-fix path in §0.2.1.
+The tiny-fix path in §0.2.1 records an inline change automatically; explicit `direct` remains an intensity inside an entry route.
 
 Before material work or read-only context recovery proceeds, confirm that the
 current main-session prompt received its bounded capsule candidate probe. The
@@ -96,7 +96,7 @@ deciding that reanalysis is needed.
 [docs] research / analyze-project(paper or doc) → autopilot-draft → autopilot-refine
 ```
 
-- **No code without a spec:** if a code request has no `spec/`, run `autopilot-spec` first. A one-off throwaway is the only exception; repeated work graduates to a spec.
+- **Spec-backed implementation:** if a code request has no `spec/`, run `autopilot-spec` first, except a known-scope local completion unit under §0.2.1 (including a small new feature) or a one-off throwaway. Repeated new behavior graduates to a spec.
 - **No spec without prior evidence:** if neither `research/` nor `analysis_project/` grounds the spec, run `autopilot-research` or `analyze-project` first. Enforce this more strongly in unfamiliar domains and for new intent.
 - Hook write gates are retired; artifact creation order remains a routing convention.
 
@@ -201,14 +201,17 @@ with its declared group and automatic owner close. Include `eval-run` only when
 the request needs new raw results, using its existing inputs and write scope.
 In a Git folder, the parent chooses the capability: omitting `--capability` in ordinary compose
 uses the fixed `autopilot-code` default, not a classifier of the task text; framed work
-leaves that choice to its frame. A depth-0 `compose --start --shape direct` in a non-Git
-folder runs inline in the current session. Its task purpose selects the capability when
+leaves that choice to its frame. An ordinary depth-0 `compose --start` in a non-Git
+folder with no shape runs directly in the current session without a start question,
+Git initialization or a worktree. Explicit shapes remain binding; an explicitly
+named new Git repository retains its existing framed preparation/approval path.
+Its task purpose selects the capability when
 clear; an explicit `--capability` and mode take precedence, and an unclear purpose is shown
 as unresolved while retaining the existing storage fallback. The session performs that
-capability's work and can close it through the normal inline `finish` path. The start card
-says `git 아닌 폴더 — 이 세션이 직접 진행. 작업자가 필요하면 --shape 없이 다시 시작(원본 수정은 git init 필요)`.
-An omitted shape follows the Git default: the start is framed and its frame decides, as in a
-Git folder. Any other shape, including a route-plan leg whose own shape is not direct, is a
+capability's work and can close it through the normal inline `finish` path. Its
+one-line card says `git 아닌 폴더 — 이 세션이 직접 진행`.
+Selection and compilation use the same task bytes, including a one-shot stdin input.
+An explicitly selected worker shape, including a route-plan leg whose own shape is not direct, is a
 worker request. In a non-Git folder, a compiled artifact-only worker route may run in the
 bound folder; a route whose compiled write scope mutates source is refused with the reason
 and the next action (`git init` and restart, or continue this session with `--shape direct`).
@@ -267,11 +270,43 @@ An entry's recipe is an assembly preset: the default when nothing else is
 chosen and an example of how its parts fit together. The route is the sealed
 stage list, assembled from the part catalog (`capabilities/topologies.json`
 recipes plus `part_catalog`, SD-165).
-The main session decides only whether the work is direct. Before making one
-atomic, reversible direct source change, use
-`compose --start --shape direct --prompt-file <task>` so preparation creates
-the isolated worktree first. If the source change was already made in place,
-`compose --shape direct` records its route without preparing a worktree.
+The main session judges the existing seven direct predicates by **one local
+completion unit**, rather than separate edits or verbs:
+one reversible result for a feature or defect; known scope, whose location and
+impact a short read of the source, callers and tests establishes; focused
+verification with a known runner and expected result; no change to contracts
+shared by components, adapters or external consumers (API, schema, security
+boundary or PRD decisions); no long-running resource work; no independent
+artifact handoff; and no independent verifier. A requested test run is the
+session's own verification, not an independent verifier.
+
+A small new feature or fix and its source, regression tests and README form
+the same completion unit. A new file is not scope expansion by itself; a
+small component's full suite can be focused verification. Its README explains
+the feature rather than creating an independent artifact handoff. `fix`,
+`outcome` and `edit` name this same scope. File, line and verb counts
+are not classifiers. Reading known related files to confirm scope differs
+from exploring several modules to find the cause.
+
+A unit that satisfies these predicates and finishes in the current cwd's Git
+worktree needs only reading, editing, focused checking and an ordinary final
+reply. Existing turn hooks record it automatically; no task file, compose,
+finish, separate capability-info call, question or classification call is
+required. A new worktree or scope exploration uses the explicit route instead.
+
+If the work grows, compose before the next expanded action. The new route
+links the current turn's start snapshot, observed changes and native evidence;
+preparation preserves existing edits and user changes, without automatic
+stash, reset or overwrite. Its workflow owns completion from there. A main
+session's mistaken small-work judgment never disables the automatic record:
+it retains total counts, bounded path samples with truncation/unknown markers,
+observed command outcomes and the final reply.
+`COMPLETE` for that automatic route means the record was saved, not that the
+work or its tests passed. Missing, interrupted and running results stay unknown.
+
+Explicit `compose --start --shape direct --prompt-file <task>` still prepares
+an isolated worktree and an inline route; `compose --shape direct` records work
+already made in place. Their receipt and explicit finish contracts are unchanged.
 Otherwise use `compose --start --prompt-file <task>` with no `--shape`; the
 frame chooses the capability, stages, and solo or staged shape, judging each
 leg's optional `size` (`one-change`, `one-pass`, `multi-stage`) first; an
@@ -282,9 +317,18 @@ light check of a direct change may use the harness's own native subagent
 
 | Main decision | Command | Result |
 |---|---|---|
-| One atomic, reversible direct source change, before editing | `compose --start --shape direct --prompt-file <task>` | isolated worktree, inline node, dispatch depth 0 |
-| One atomic, reversible change already made in place | `compose --shape direct` | records the in-place change as an inline node |
+| One reversible local completion unit in the current Git worktree, including a small feature with its tests and README | read → edit → check → reply | automatic record; no start/finish round trip |
+| Explicit direct source change needing preparation | `compose --start --shape direct --prompt-file <task>` | isolated worktree, inline node, dispatch depth 0 |
+| One reversible local completion unit already made in place | `compose --shape direct` | records the in-place change as an inline node |
 | Other new work | `compose --start --prompt-file <task>` | framed; frame proposes the smallest route and the existing interview confirms it |
+
+Examples of the same boundary:
+
+- **Direct:** one small local feature with its tests and README.
+- **Plan first:** unrelated tasks bundled together, a new structure to choose,
+  or cause exploration across several modules.
+- **Full frame:** shared contracts, external API/schema changes, migrations,
+  security or data risk, even when the edit is short.
 
 `solo` means one registered owner; `staged` means separate stages. Shape
 omission starts a framed route. `--capability`, `--capability-mode`, `--graph`,
@@ -395,7 +439,51 @@ each item beside its artifact as `<artifact>.items.json` (`leg_items_v1`, read b
 `cwd`; validation, first launch, later legs and the printed compose command use
 that folder and check dispatch there. Relative paths are based on the frame's
 original cwd. Omission keeps the existing worktree preparation and inheritance;
-this adds no question, flag or required input. A leg's `extra_stages` entry becomes node
+this adds no question, flag or required input.
+An explicit `--route-plan` is binding: read/validation errors stop compose before
+preparation or publication. Absolute record paths may name another artifact root;
+relative paths stay inside the selected root. A manual first leg's receipt lists
+the existing complete/close/finalize commands for its frame, retaining the decision.
+An unanswered interview can be corrected in its existing round; recorded answers
+and decisions are immutable. Native full and partial replies commit under the
+same interview lock and belong only to the exact registered interview bytes.
+Request quotes come from this compose's human prompt
+boundary; unavailable provenance omits the quote. Framed display separates the
+requested width, bootstrap intensity and eventual approved leg intensity.
+For an explicitly requested new repository, the existing route question includes
+its destination and preparation (at most two notice lines). After approval the
+runtime creates only an absent folder, initializes Git and its empty baseline,
+and records path/time in the route evidence and first leg task. Existing folders
+stay untouched and use the same interview's manual-preparation/direct choices.
+Preparation retains the approved physical parent binding; directory creation and
+Git initialization use pinned directories so a replaced ancestor cannot redirect
+writes outside that binding. The binding stays open through first-leg compilation,
+publication and launch, including resumed snapshots. A prepared first leg keeps
+that repository; a replaced path cannot turn it into an existing-repository
+worktree allocation. These are runtime checks within the existing approved start.
+The common launcher passes the opened source descriptor and uses that directory
+as the wrapper's actual process cwd. Adapters, launch fences, governors and
+supervisors carry that binding to native child startup and resume. Durable route,
+registry and receipt paths remain canonical; execution keeps its bound physical
+cwd. A fresh process reopens only the recorded physical identity
+when its inherited descriptors are unavailable.
+Trusted launcher hops inherit only the source descriptor. Native model processes
+start in the bound kernel cwd with directory descriptors closed; parent and Git
+directory handles remain in the trusted launcher. Supervised directory
+requests use the verified native process cwd for that process's lifetime.
+Later legs that keep this same dedicated new-repository destination reuse its
+physical binding and repository instead of allocating another worktree. An
+explicitly different destination keeps its existing selection and preparation.
+Compose records optional source-directory and Git common-directory identities.
+An existing explicit recovery destination uses its own recorded identity for
+the same descriptor handoff, preserving its original creation provenance.
+Frame-time corrections stay on that route, appear in its existing Fleet detail,
+and reach the interview and first owner. The retained history has no reader-only
+size cutoff: bounded delivery takes recent conditions first and reports omitted
+or shortened content with a reference to the full history in receipts, interviews,
+owner tasks and the existing Fleet detail. Explicit conflicting output paths in
+interview wording and `done_when` appear as receipt advisories.
+A leg's `extra_stages` entry becomes node
 `plan-<id>` right after its `after` stage, shaped on a catalogue check or
 measurement stage of the same unit (one that writes no source; its gate, review
 budget and start approval) and writing under
@@ -403,7 +491,7 @@ budget and start approval) and writing under
 
 For execution, use `compose --campaign-key <stream> --start --prompt-file
 <task>` with no `--shape` for framed work or an explicit decided shape. Use
-`--shape direct` only for one atomic, reversible inline change. The slug comes from the task; the
+`--shape direct` only for one reversible local completion unit (§0.2.1). The slug comes from the task; the
 campaign defaults to this session's latest stream in the same artifact root
 (including temporary directories and returning from a prepared worktree to
 the primary checkout; another session or artifact root supplies no default),
@@ -508,7 +596,7 @@ when nothing follows; a declared parallel group survives only when its anchor
 is kept and is not the new terminal. Composition changes route *shape* only —
 the write, spec, and core gates, the dispatch-depth-3 ban, and every
 completion gate are unchanged, and a preset-free route is still a route the
-§0.4 gate and the route-participation invariant apply to.
+§0.4 entry confirmation and explicit-workflow participation rule apply to.
 
 For an approved source-changing `--start`, the shared preparation boundary
 resolves the selected graph first, prepares a new independent worktree when the
@@ -628,8 +716,8 @@ Read-only orientation, status reporting, explanations, and simple factual
 answers are exempt. Card exemption is not evidence exemption: an explanatory
 or factual answer still follows `roles/response-policy.md` "Local evidence
 before recall" when the repository holds covering research or document
-artifacts. `direct` is an explicit route shown in the card with its
-reason, not a silent no-route decision.
+artifacts. Tiny fixes under §0.2.1 use automatic evidence and an ordinary reply; an
+explicit `direct` route still appears in the card with its reason.
 
 The optional `시작 승인` line appears when the selected route carries parts
 marked with `start_approval`. Fold the choice into this existing confirmation:
@@ -660,8 +748,8 @@ metadata meaning, without changing this distinction. The card stays blocking,
 whatever the sealed value, when the work is destructive (data, history, or
 worktree loss), mutates an external system, deploys, or the user asked to be
 asked. The
-route-participation invariant below is unchanged: notice or card, source work
-still needs the bound route, and the 0–1 / 1–3 inline questions of the frame
+route-participation rule below applies to explicit workflows; small local
+completion units satisfying §0.2.1 use the automatic record, and the 0–1 / 1–3 inline questions of the frame
 interview (below) are asked only when they exist. A current or immediately preceding user
 instruction that already approves the same route and scope satisfies the gate;
 do not repeat the card. After approval, capability-owned stages, validation,
@@ -683,35 +771,31 @@ required or refused. The `[경로]` notice shows these as `[의도]` lines, and 
 route without a frame-review release hands them to its owner and every worker.
 Questions and gates are unchanged.
 
-Material source work has an additional deterministic participation invariant:
-before a source Edit/Write-family mutation or a commit containing source
-changes, the acting session must hold a current, cwd-bound route record emitted
-by `utilities/capability-route.py compile` or `compose`. For code, that route is
-`autopilot-code` at no less than `direct`. A Skill invocation, the prose card,
-an earlier session's record, or a stale record from another cwd is not route
-participation. Hotfixes do not bypass this floor.
+Source work remains traceable through an explicit workflow or the §0.2.1
+automatic record. Ordinary main-session edits and commits in the current Git
+worktree pass without a route-presence refusal. The hook does not reclassify
+size. Other-worktree edits and long-running launches retain the existing route
+check; installed-release/shared-checkout protections and native permissions
+remain independent. The historical /tmp gate exemption remains; only the
+recorder includes real /tmp Git projects. Registered workers, artifact/runtime roots, CI, dev
+activation and judgment failures retain their exemptions.
 
-One gate checks this, and only for existence: the route presence gate
-(`utilities/route_presence_gate.py`, `core/HOOKS.md`). Before a session's
-source edit inside a git work tree, `git commit` with non-artifact changes, or
-long-run launch (`compute-hosts run`, `nohup|setsid … python … train|run.py`), it
-asks whether this session's route-chain ledger names any route for that
-folder's canonical artifact root — composed, compiled, continued or started,
-open or closed. If not, it refuses that call and prints one paste-ready
-`capability-route.py compose --shape direct …` line for one atomic, reversible
-inline change; other new work omits `--shape` so the frame decides. Once any
-route exists there, every later call of that session×folder passes. It does not check which
-route, its freshness, lineage, stage or proof. Registered owners and workers,
-artifact roots, the temp directory, runtime homes, CI and dev activation pass;
-any judgement failure passes; `HEARTING_ROUTE_GATE=off` turns it off.
-`capability-route.py verify`/`status` still only inspect a route that exists.
-A turn that changes source files without such a route, through any tool, gets one
-afterwards: at turn end the runtime records an ordinary direct route in place, in
-the unassigned container, with the changed files and a diff summary as evidence and
-closes it; later changing turns of that session×folder are appended to the same
-record until the session composes a route of its own there
-(`utilities/turn_change_record.py`, `core/HOOKS.md`). It asks nothing of the agent
-and blocks nothing.
+At turn end the existing detached recorder stores changes, bounded native
+command termination facts, and the final reply with source references. It uses
+the existing automatic direct route in the unassigned container and appends
+later changing turns. Open explicit workflows also retain bounded exact-session observations for
+Fleet and continuation, without closing or taking over their routes. The route-side
+`.held.md` has a 256 KiB total cap as well as its 64 KiB append cap; oldest
+history is trimmed first with a visible truncation marker. Git snapshots run
+outside the session state lock, and results apply only to their matching turn.
+Unreadable or superseded observations stay unknown. Active
+explicit workflows keep their procedure; proven
+closed historical routes no longer suppress new automatic records, and unknown
+route state is not treated as closed. Actual Git projects under `/tmp` record
+too. `HEARTING_AUTO_RECORD=off` still disables recording; no model, per-tool
+process, question, refusal or required answer format is added. Automatic records
+supplement Fleet, continuation and tidy readers for the exact native session or
+confirmed lineage; they never replace an explicit route's default or authority.
 
 Compute-host storage access follows the `execution_needs` declaration on the
 registered part catalog row in `capabilities/topologies.json`. Native and
@@ -768,6 +852,16 @@ restatement of what the user wants, a plain-language brief, and the few
 decisions the frame legs could not settle without the user. The depth-0
 session builds that record from the joined frame legs and does the interview
 itself, and never leaves it to a helper.
+
+Scale a frame brief to the decision that remains. A small task whose direction
+is already fixed by the request and evidence keeps the eight-section schema
+with concise evidence and the sole admissible direction; it needs no invented
+alternatives. Ordinary defaults that leave the plan unchanged are chosen by
+the agent, recorded in the brief and carried into the executing leg's final
+answer, rather than becoming interview questions. Decisions that change the
+goal, scope, architecture, cost or an external outcome still go to the person.
+Larger or unsettled work retains its full direction comparison, independent
+perspectives and model grades.
 
 The interview brief may leave `affected` empty when the direction brief does
 not identify affected users or systems; unspecified scope stays unspecified.
@@ -895,6 +989,10 @@ checks), the applicable commit/PR/deployment/serving state, and limits or work
 that remains. Preserve explicit user-requested content and output formats even
 when they differ from the default presentation. Deployment and operating claims
 require observed evidence.
+Owner correction receipts distinguish delivery from verified application and say
+that a one-shot owner's next turn is not guaranteed. Completion reports count
+inputs without delivery evidence (`미반영 correct N건` in Korean), separating
+unknown delivery and application. All three adapters share this behavior.
 A continuation or recovery notice resumes that same original task; its receipt
 adds context but does not replace, narrow, or discharge the user's requested
 content, evidence, or output format.
@@ -969,7 +1067,8 @@ returns to such a route is not refused: `finish` reports it closed, and
 and close refusals without sweeping routes, reconciling the root, healing the
 index, or flushing history.
 
-A session finishes its own `direct` inline route to record real evidence.
+A session finishes its explicitly composed `direct` inline route to record real evidence.
+The tiny-fix path has no agent-facing finish command; its recorder saves the evidence.
 Supply a readable, nonempty regular file anywhere, or an http(s) URL, and the
 final summary; finish records that evidence inside the route's own cycle (a
 file byte for byte, a URL as a one-line record) under a runtime name, and that
@@ -999,6 +1098,21 @@ python3 utilities/capability-route.py finish [--route <route.json|rt-id>] --evid
 
 Without `--route` it finishes this session's latest route under the cwd's
 artifact root.
+An explicit route ID also uses the existing registry/route-chain lookup when
+the caller is in another folder. Every `execute-inline` receipt names the
+actual execution cwd, including a worktree prepared for a frame leg.
+Git finish prefers a proven changed caller head when the route checkout still
+has only its starting tree and a clean working tree/index; explicit commits remain binding.
+Execution edits keep their existing tracked-dirt observation and concrete-scope
+checks even when a commit is read from another checkout. Caller substitution
+uses Git common-directory identity as proof, independently of HEAD lookup.
+Compose's optional directory provenance supports a missing checkout only when
+the caller still belongs to that recorded repository. An ancestor shared with a
+different clone is insufficient; an unavailable observation stays unknown.
+Receipts name the
+commit source and warn when it comes from a different checkout or has the
+unchanged starting tree, without adding a completion gate. Normal execution
+checkout results need no warning. Non-Git finish keeps its null commit.
 
 Ineligible inline routes and legacy recovery also finish with the one command
 above (it completes the terminal marker, closes the route allowing an unproven
@@ -1361,9 +1475,9 @@ Only `direct` has no plan. Every other autopilot graph includes a plan check, bu
 
 One-line prose/config edits, pure renames, cleanup, and one-off reviews that need
 no plan or log may bypass autopilot and use direct editing or the implementation
-role. A source-code Edit/Write or a commit containing source changes may not:
-even an atomic hotfix enters an explicit `autopilot-code` route at `direct` and
-produces the current-session route record required by §0.4. Use heavier
+role. Small local completion units satisfying §0.2.1, including a feature's
+source, tests and README, use automatic recording. Source edits or commits
+outside that scope enter the explicit `autopilot-code` route required by §0.4. Use heavier
 autopilot tiers only when work needs their tracking or accumulated artifacts.
 `DESIGN_PRINCIPLES §4` and each capability's quick tier define minor versus
 major. When one request spans several rows of this map, resolve the primary with

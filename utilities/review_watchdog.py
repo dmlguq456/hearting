@@ -17,6 +17,7 @@ import selectors
 import signal
 import subprocess
 import sys
+import frame_repository
 import time
 from typing import Mapping, Sequence
 
@@ -383,9 +384,9 @@ def _run_watchdog(
             _bind_launch_fence_parent(child_argv, os.getpid()),
             start_new_session=True,
             preexec_fn=require_parent_death_signal if os.name == "posix" else None,
-            pass_fds=tuple(pass_fds),
+            **frame_repository.child_process_options(pass_fds=tuple(pass_fds)),
             close_fds=True,
-            env={**os.environ, "AGENT_DISPATCH_ATTEMPT_ID": attempt_id},
+            env=frame_repository.child_environment({**os.environ, "AGENT_DISPATCH_ATTEMPT_ID": attempt_id}),
         )
         end_with_test(child)
         # Only the fence may retain this close-on-exec writer. Keeping a
@@ -613,8 +614,8 @@ def launch_review_watchdog(
     args.extend(["--", *[str(item) for item in child_argv]])
     try:
         proc = subprocess.Popen(
-            args, start_new_session=True, pass_fds=tuple(pass_fds), close_fds=True,
-            env=None if env is None else dict(env),
+            args, start_new_session=True, **frame_repository.child_process_options(pass_fds=tuple(pass_fds)), close_fds=True,
+            env=frame_repository.child_environment(dict(os.environ) if env is None else dict(env)),
         )
     except BaseException:
         for fd in (readiness_read, readiness_write, control_read, control_write):
@@ -626,6 +627,7 @@ def launch_review_watchdog(
     return ReviewWatchdogHandle(proc, readiness_read, control_write, budget, attempt_id, nonce)
 
 
+@frame_repository.process_entry
 def main(argv: Sequence[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if not args or args[0] != "--run":
