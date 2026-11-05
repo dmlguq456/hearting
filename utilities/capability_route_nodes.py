@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import threading
 from pathlib import Path
 
 import dispatch_runtime_support as RUNTIME_SUPPORT
@@ -363,20 +364,91 @@ def _seal_terminal_commit_support(validation_basis):
     except Exception:
         return False
 
+# These are display-observation caches only. Verification outside an explicit
+# passive scope retains its original fresh reads and authority semantics.
+_UNIT_FRONTMATTER_CACHE = None
+_UNIT_DIGEST_CACHE = None
+_UNIT_CACHE_POLICY = None
+_UNIT_DIGEST_LOCK = threading.RLock()
+
+
 def unit_catalog_digest(units_root=None):
-    """Digest of unit frontmatter blocks (machine contracts); unit BODY prose stays un-hashed."""
+    """Digest machine contracts; reuse version-matched inputs in passive views."""
+    from runtime_observation import observation_scope_active
+    if observation_scope_active():
+        return _observed_unit_catalog_digest(units_root)
     return _unit_blocks_digest(_capture_unit_frontmatter(units_root))
+
+
+def _unit_files(units_root):
+    return tuple(path for path in sorted(units_root.glob('*/*.md'))
+                 if not path.name.startswith('_'))
+
+
+def _capture_frontmatter_file(path):
+    match = re.match(r"\A---\n.*?\n---\n", path.read_text(encoding='utf-8'), re.DOTALL)
+    return match.group(0) if match else None
 
 
 def _capture_unit_frontmatter(units_root=None):
     """Capture the exact hashed blocks, retaining malformed files as None."""
-    units_root=Path(units_root) if units_root else ROOT/"roles"/"units"
-    captured={}
-    for path in sorted(units_root.glob("*/*.md")):
-        if path.name.startswith("_"): continue
-        match=re.match(r"\A---\n.*?\n---\n", path.read_text(encoding="utf-8"), re.DOTALL)
-        captured[path.relative_to(units_root).as_posix()] = match.group(0) if match else None
-    return captured
+    root = Path(units_root) if units_root else ROOT / 'roles' / 'units'
+    return {path.relative_to(root).as_posix(): _capture_frontmatter_file(path)
+            for path in _unit_files(root)}
+
+
+def _passive_unit_catalog_digest(units_root=None):
+    from runtime_observation import ProjectionCache
+    global _UNIT_FRONTMATTER_CACHE, _UNIT_DIGEST_CACHE, _UNIT_CACHE_POLICY
+    root = Path(units_root) if units_root else ROOT / 'roles' / 'units'
+    paths = _unit_files(root)
+    def generation(path):
+        info = path.stat()
+        return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    try:
+        inputs = tuple((path.relative_to(root).as_posix(), generation(path)) for path in paths)
+    except OSError:
+        return _unit_blocks_digest(_capture_unit_frontmatter(root))
+    policy = (Path.read_text, Path.stat, _capture_frontmatter_file, _unit_blocks_digest)
+    key = (str(root.absolute()), inputs)
+    with _UNIT_DIGEST_LOCK:
+        if _UNIT_FRONTMATTER_CACHE is None:
+            _UNIT_FRONTMATTER_CACHE = ProjectionCache(max_entries=1024, max_bytes=64 * 1024)
+            _UNIT_DIGEST_CACHE = ProjectionCache(max_entries=8, max_bytes=32 * 1024)
+        if _UNIT_CACHE_POLICY != policy:
+            _UNIT_FRONTMATTER_CACHE.clear()
+            _UNIT_DIGEST_CACHE.clear()
+            _UNIT_CACHE_POLICY = policy
+        if key in _UNIT_DIGEST_CACHE:
+            _UNIT_DIGEST_CACHE.move_to_end(key)
+            return _UNIT_DIGEST_CACHE[key]
+    captured = {}
+    stable = True
+    for path, (name, stamp) in zip(paths, inputs):
+        file_key = (str(root.absolute()), name)
+        with _UNIT_DIGEST_LOCK:
+            held = _UNIT_FRONTMATTER_CACHE.get(file_key)
+        if held is not None and held[0] == stamp:
+            block = held[1]
+        else:
+            block = _capture_frontmatter_file(path)
+            same = stamp == generation(path)
+            stable = stable and same
+            if same:
+                with _UNIT_DIGEST_LOCK:
+                    if _UNIT_CACHE_POLICY == policy:
+                        _UNIT_FRONTMATTER_CACHE[file_key] = (stamp, block)
+        captured[name] = block
+    result = _unit_blocks_digest(captured)
+    if stable:
+        with _UNIT_DIGEST_LOCK:
+            if _UNIT_CACHE_POLICY == policy:
+                _UNIT_DIGEST_CACHE[key] = result
+    return result
+
+
+from runtime_observation import observe_once as _observe_unit_once
+_observed_unit_catalog_digest = _observe_unit_once(immutable=True)(_passive_unit_catalog_digest)
 
 
 def _unit_blocks_digest(captured):

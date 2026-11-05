@@ -14,6 +14,65 @@ from runtime_observation import (ObservationContext, file_generation,
                                 stable_read_bytes)  # noqa: E402
 
 
+class UnitCatalogProjectionTest(unittest.TestCase):
+    def test_passive_catalog_reuses_unchanged_files_and_only_parses_changed_unit(self):
+        import capability_route_nodes as nodes
+        from runtime_observation import observation_read_scope
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'dev').mkdir()
+            first, second = root / 'dev/a.md', root / 'dev/b.md'
+            first.write_text('---\nname: a\n---\nbody one\n')
+            second.write_text('---\nname: b\n---\nbody two\n')
+            nodes._UNIT_FRONTMATTER_CACHE = nodes._UNIT_DIGEST_CACHE = None
+            with mock.patch.object(nodes, '_capture_frontmatter_file', wraps=nodes._capture_frontmatter_file) as read:
+                with observation_read_scope():
+                    original = nodes.unit_catalog_digest(root)
+                    self.assertEqual(nodes.unit_catalog_digest(root), original)
+                self.assertEqual(read.call_count, 2)
+                with observation_read_scope():
+                    self.assertEqual(nodes.unit_catalog_digest(root), original)
+                self.assertEqual(read.call_count, 2)
+                first.write_text('---\nname: changed\n---\nbody one\n')
+                with observation_read_scope():
+                    changed = nodes.unit_catalog_digest(root)
+                self.assertNotEqual(changed, original)
+                self.assertEqual(read.call_count, 3)
+                # Unit body prose stays outside the machine-contract digest.
+                second.write_text('---\nname: b\n---\nnew body prose\n')
+                with observation_read_scope():
+                    self.assertEqual(nodes.unit_catalog_digest(root), changed)
+                self.assertEqual(read.call_count, 4)
+                self.assertEqual(nodes.unit_catalog_digest(root), changed)
+                self.assertEqual(read.call_count, 6)  # Active callers remain fresh.
+
+    def test_passive_catalog_observes_added_removed_and_unreadable_units(self):
+        import capability_route_nodes as nodes
+        from runtime_observation import observation_read_scope
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'dev').mkdir()
+            a = root / 'dev/a.md'
+            a.write_text('---\nname: a\n---\n')
+            nodes._UNIT_FRONTMATTER_CACHE = nodes._UNIT_DIGEST_CACHE = None
+            with observation_read_scope():
+                before = nodes.unit_catalog_digest(root)
+            b = root / 'dev/b.md'
+            b.write_text('---\nname: b\n---\n')
+            with observation_read_scope():
+                after = nodes.unit_catalog_digest(root)
+            self.assertNotEqual(before, after)
+            b.unlink()
+            with observation_read_scope():
+                self.assertEqual(nodes.unit_catalog_digest(root), before)
+            with mock.patch.object(Path, 'read_text', side_effect=PermissionError('unreadable')):
+                with observation_read_scope():
+                    with self.assertRaises(PermissionError):
+                        nodes.unit_catalog_digest(root)
+
+
 class PassObservationTest(unittest.TestCase):
     def test_a_changed_effective_uid_has_its_own_observation(self):
         from runtime_observation import observation_read_scope, observe_once
