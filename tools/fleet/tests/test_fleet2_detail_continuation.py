@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from tools.fleet import details
-from tools.fleet.model import DispatchJob, Session, WorkProjection
+from tools.fleet.model import DispatchJob, ResourceJob, Session, WorkProjection
 from tools.fleet.refresh import LiveSnapshot
 
 
@@ -109,6 +109,26 @@ class Fleet2DetailContinuationBoundaryTests(unittest.TestCase):
         self.assertIsNone(resource.display_title)
         self.assertEqual(original.tag_metadata[0]["agent"], "codex")
         self.assertNotEqual(original.jobs[0].title, "new job title")
+
+    def test_optional_native_resource_copy_owns_labels_and_borrows_observed_payloads(self):
+        progress = {'completed': 2, 'total': 10, 'unit': 'epoch'}
+        resource = ResourceJob(run_id='resource-1', parent_attempt_id='attempt-route-1',
+                               progress=progress, state_evidence={'reason': 'observed'})
+        job = _job('route-1')
+        job.resource_children = [resource]
+        job.state_evidence = {'inputs': {'observed_liveness': {'state': 'working'}}}
+        original = LiveSnapshot(jobs=[job], resources=[resource])
+        copied = details._copy_for_enrichment(original, required_only=False)
+        self.assertIsNot(copied.resources[0], resource)
+        self.assertIs(copied.resources[0].progress, progress)
+        self.assertIs(copied.resources[0].state_evidence, resource.state_evidence)
+        self.assertIs(copied.jobs[0].resource_children[0], copied.resources[0])
+        copied.resources[0].display_title = 'Owned title'
+        copied.resources[0].campaign_label = 'Owned campaign'
+        copied.jobs[0].state_evidence['inputs']['observed_liveness']['state'] = 'changed'
+        self.assertIsNone(resource.display_title)
+        self.assertFalse(hasattr(resource, 'campaign_label'))
+        self.assertEqual(job.state_evidence['inputs']['observed_liveness']['state'], 'working')
 
     def test_changed_or_missing_neighbourhood_proof_rejects_the_row(self):
         previous = _snapshot({"route-1": {"execute": {"revision": 1}}})

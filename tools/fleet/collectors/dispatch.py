@@ -3318,8 +3318,21 @@ def _scan_degradations(route_ids, agent_home=None, tail=64, jobs=()):
         if str(getattr(job, "route_id", "")) in wanted:
             state_roots.extend(_row_state_roots(job))
     roots = []
-    for state_root in state_roots:
+    for state_root in dict.fromkeys(state_roots):
         root = os.path.realpath(os.path.join(state_root, "degradations"))
+        try:
+            info = os.stat(root)
+        except (FileNotFoundError, NotADirectoryError):
+            # A missing directory cannot contain any of the requested shards.
+            # Observe it again on the next pass rather than probing every RID.
+            continue
+        except OSError:
+            # Keep the existing per-file attempts when the directory itself
+            # could not be observed (including execute-only source layouts).
+            pass
+        else:
+            if not stat.S_ISDIR(info.st_mode):
+                continue
         if root not in roots:
             roots.append(root)
     out, seen = {}, set()
@@ -5349,6 +5362,7 @@ def _label_route_id(job):
 
 _CYCLE_RECORD_CACHE = {}         # path -> (stat stamp, parsed cycle record or None)
 _TITLE_VALIDATION_CACHE = None
+_TITLE_CONTEXT_BYTES = 8 * 1024
 
 
 @observe_once(immutable=True)
@@ -5450,6 +5464,8 @@ def _campaign_labels_read(jobs):
     global _TITLE_VALIDATION_CACHE
     if _TITLE_VALIDATION_CACHE is None:
         _TITLE_VALIDATION_CACHE = TitleReadCache()
+    # Scoped to this call's observed JSON documents, never to a later tick.
+    meta_context = ProjectionCache(max_entries=64, max_bytes=_TITLE_CONTEXT_BYTES)
     # Install-follow may preserve a prior collector cache. Retire only the full
     # admission documents that this display reader no longer uses.
     for path in list(_CYCLE_RECORD_CACHE):
@@ -5484,7 +5500,8 @@ def _campaign_labels_read(jobs):
                 rec = _stat_memo(_CYCLE_RECORD_CACHE, path, _read_cycle_record)
                 if isinstance(rec, dict) and rec.get("route_id") == rid:
                     titles[(root, rid)] = cycle_title(root, rec, read_json,
-                                                    validation_cache=_TITLE_VALIDATION_CACHE)
+                                                    validation_cache=_TITLE_VALIDATION_CACHE,
+                                                    _meta_context=meta_context)
                     remaining.discard(rid)
                 else:
                     _CYCLE_ROUTE_PATHS.pop((root, rid), None)
@@ -5505,7 +5522,8 @@ def _campaign_labels_read(jobs):
             for rid, (path, rec) in matches.items():
                 _CYCLE_ROUTE_PATHS[(root, rid)] = path
                 titles[(root, rid)] = cycle_title(root, rec, read_json,
-                                                validation_cache=_TITLE_VALIDATION_CACHE)
+                                                validation_cache=_TITLE_VALIDATION_CACHE,
+                                                _meta_context=meta_context)
         except (OSError, TypeError, ValueError):
             continue
     for job in jobs:

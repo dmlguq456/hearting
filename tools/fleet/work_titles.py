@@ -3,6 +3,7 @@ import re
 import json
 import unicodedata
 import threading
+import sys
 from collections import OrderedDict
 from pathlib import Path
 from types import SimpleNamespace
@@ -78,7 +79,7 @@ def subject_command(subject, command):
     return subject if not command or command.casefold() in subject.casefold() else subject + ' ' + command
 
 
-def cycle_title(root, record, read_json, *, validation_cache=None):
+def cycle_title(root, record, read_json, *, validation_cache=None, _meta_context=None):
     """Read only this campaign's metadata; reuse canonical field validation."""
     from .collectors import dispatch
     cid, camp = record.get('cycle_id'), record.get('campaign_id')
@@ -107,15 +108,36 @@ def cycle_title(root, record, read_json, *, validation_cache=None):
                 doc = read_json(str(directory / 'meta.json'))
                 identity = read_json(str(root / '.runtime/artifact-admission/v1/root-identity.json')) or {}
                 if isinstance(doc, dict) and identity.get('artifact_root_id'):
-                    members = {key: read_json(str(producer / 'cycles' / (key + '.json'))) or {}
-                               for key in (doc.get('cycles') or {})
-                               if isinstance(key, str) and re.fullmatch(r'cyc_[0-9a-f]{32}', key)}
+                    key = (str(root), camp)
+                    validate = artifact_meta._validate_meta_doc
+                    held = _meta_context.get(key) if _meta_context is not None else None
+                    reuse = (held is not None and held[0] is doc and held[1] is identity
+                             and held[2] is validate)
+                    if not reuse:
+                        members = {key: read_json(str(producer / 'cycles' / (key + '.json'))) or {}
+                                   for key in (doc.get('cycles') or {})
+                                   if isinstance(key, str) and re.fullmatch(r'cyc_[0-9a-f]{32}', key)}
                     try:
-                        validate = artifact_meta._validate_meta_doc
-                        load = lambda: validate(doc, identity['artifact_root_id'], camp, members)
-                        foreign = (validation_cache.read(('meta', str(root), camp),
-                            (validate, doc, identity, *members.values()), load, artifact_meta.MetaError)
-                            if validation_cache is not None else load())
+                        # The caller's read_json pins every document for this
+                        # label batch. A campaign's complete member inventory
+                        # and validation are shared by its individual cycles.
+                        if reuse:
+                            _meta_context.move_to_end(key)
+                            foreign = held[3]
+                        else:
+                            load = lambda: validate(doc, identity['artifact_root_id'], camp, members)
+                            foreign = (validation_cache.read(('meta', str(root), camp),
+                                (validate, doc, identity, *members.values()), load, artifact_meta.MetaError)
+                                if validation_cache is not None else load())
+                            if _meta_context is not None:
+                                value = (doc, identity, validate, foreign)
+                                # Documents are borrowed from read_json's batch,
+                                # which outlives this local cache. Only these
+                                # containers and keys add retained storage.
+                                charge = (sys.getsizeof(key) + sum(map(sys.getsizeof, key))
+                                          + sys.getsizeof(value) + sys.getsizeof(foreign)
+                                          + 256)  # LRU/weight-map entry storage
+                                _meta_context.remember(key, value, weight=charge)
                         if foreign is not None and not foreign:
                             cycle = doc.get('cycles', {}).get(cid, {})
                             campaign = doc.get('campaign', {})

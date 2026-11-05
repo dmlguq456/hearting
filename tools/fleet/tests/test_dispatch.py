@@ -43,6 +43,28 @@ COMPOSED = os.path.join(os.path.dirname(__file__), "fixtures", "route", "synth_c
 
 class RuntimeRootSeparationTest(unittest.TestCase):
 
+    def test_missing_degradation_directory_is_one_fresh_negative_observation(self):
+        with tempfile.TemporaryDirectory() as td:
+            state = Path(td) / 'state'
+            wanted = {'rt-' + str(index) for index in range(100)}
+            native_stat = os.stat
+            with mock.patch.object(dispatch, '_row_state_roots', return_value=(str(state),)), \
+                    mock.patch.object(dispatch.os, 'stat', wraps=native_stat) as observed:
+                self.assertEqual(dispatch._scan_degradations(wanted), {})
+                self.assertEqual(observed.call_count, 1)
+            # Absence is not retained into the next call.
+            shard = state / 'degradations'
+            shard.mkdir(parents=True)
+            event = {'schema_version': 1, 'kind': 'degradation', 'ts': 1.0,
+                     'route_id': 'rt-0', 'route_node': 'execute', 'route_hash': 'h',
+                     'dispatch_depth': 2, 'fallback_hop': 'inline',
+                     'execution_surface': 'inline', 'writer': 'stage-dispatch-fallback.py',
+                     'event_id': 'fresh-directory'}
+            (shard / 'rt-0.jsonl').write_text(json.dumps(event) + '\n')
+            with mock.patch.object(dispatch, '_row_state_roots', return_value=(str(state),)):
+                self.assertEqual(dispatch._scan_degradations(wanted)['rt-0'][0]['event_id'],
+                                 'fresh-directory')
+
     def test_degradation_reader_consumes_maximum_candidate_row_and_partial_tail(self):
         sys.path.insert(0, str(Path(_TOOLS_DIR).parent / 'utilities'))
         from dispatch_degradation import record_degradation

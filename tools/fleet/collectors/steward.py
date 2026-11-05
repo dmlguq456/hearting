@@ -643,6 +643,12 @@ def end_observation():
     return _EndObservation()
 
 
+@_observe_once(immutable=True)
+def _observed_agents(reader):
+    """One fresh optional surface observation per passive collection pass."""
+    return reader()
+
+
 def _process_proof(harness, session_id, observation):
     """``"live"`` | ``"ended"`` | ``"unknown"`` from the runtime's own session-ownership
     proof, read backwards: a Claude session no live Claude process claims (registry, exact
@@ -700,7 +706,7 @@ def session_liveness(harness, session_id, *, agents=None, observation=None):
     if agents is None:
         try:
             from . import herdr
-            agents = herdr.list_agents()
+            agents = _observed_agents(herdr.list_agents)
         except Exception:
             agents = None
     for agent in agents or ():
@@ -820,7 +826,7 @@ def _repo_holders(repository_key, *, markers=None, relations=None, sessions=None
     if agents is None:
         try:
             from . import herdr
-            agents = herdr.list_agents()
+            agents = _observed_agents(herdr.list_agents)
         except Exception:
             agents = None
     out, seen = [], set()
@@ -941,7 +947,7 @@ def _record_supervision(context, markers, relations):
         return
     try:
         from . import herdr
-        agents = herdr.list_agents()
+        agents = _observed_agents(herdr.list_agents)
     except Exception:
         agents = None
     try:

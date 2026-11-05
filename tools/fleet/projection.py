@@ -831,7 +831,7 @@ _ENTRY_CAPABILITIES = frozenset((
 ))
 
 
-def _scan_grounding_dir(path):
+def _scan_grounding_dir(path, session_ids=None):
     """Scan one capability-grounding directory into ``{sid: (mtime, {k:v})}``. Each file is a KV
     body (``capability=…``) named by session id. Missing dir / OSError -> empty index."""
     index = {}
@@ -840,7 +840,9 @@ def _scan_grounding_dir(path):
     except OSError:
         return {}
     for entry in entries:
-        if entry.name.startswith("."):
+        # Preserve the directory observation and its failures, but do not
+        # stat/read markers belonging only to ended or unrelated sessions.
+        if entry.name.startswith(".") or (session_ids is not None and entry.name not in session_ids):
             continue
         try:
             mtime = entry.stat().st_mtime
@@ -858,7 +860,7 @@ def _scan_grounding_dir(path):
     return index
 
 
-def _capability_grounding_index(home):
+def _capability_grounding_index(home, *, session_ids=None):
     """``{sid: (mtime, {k:v})}`` — the new state-root location wins; ``<home>/.capability-grounding``
     (a release tree that predates F-<next> fleet-route-chain-r2) is a read-only fallback, consulted
     only for a sid the new location does not have."""
@@ -867,8 +869,9 @@ def _capability_grounding_index(home):
         new_dir = _route_chain.capability_grounding_dir()
     except Exception:
         new_dir = None
-    new_index = _scan_grounding_dir(new_dir) if new_dir else {}
-    old_index = _scan_grounding_dir(os.path.join(home, ".capability-grounding"))
+    new_index = _scan_grounding_dir(new_dir, session_ids) if new_dir else {}
+    remaining = None if session_ids is None else set(session_ids) - new_index.keys()
+    old_index = _scan_grounding_dir(os.path.join(home, ".capability-grounding"), remaining)
     merged = dict(old_index)
     merged.update(new_index)
     return merged
@@ -1782,9 +1785,9 @@ def attach_projections(sessions: Iterable[Session], jobs: Iterable[DispatchJob],
         entity._details_pending = False
     home = _grounding_home()
     marker_dir = spec_marker_dir or _spec_marker_state_dir()
-    if spec_markers is None:
-        spec_markers = _spec_marker_index(marker_dir)
-    cap_index = (_capability_grounding_index(home) if capability_groundings is None
+    session_ids = {_field(session, "session_id") for session in sessions
+                   if isinstance(_field(session, "session_id"), str)}
+    cap_index = (_capability_grounding_index(home, session_ids=session_ids) if capability_groundings is None
                  else capability_groundings)
     all_entities = sessions + jobs
     for session in sessions:
@@ -1828,6 +1831,11 @@ def attach_projections(sessions: Iterable[Session], jobs: Iterable[DispatchJob],
             session_start=now_for_chain - elapsed_min * 60,
             slack=_SPEC_MARKER_FRESHNESS_SLACK_S,
         )
+    if spec_markers is None:
+        needs_spec = any(should_update(session)
+                         and _field(session.cap_grounding, "capability") == "autopilot-spec"
+                         for session in sessions)
+        spec_markers = _spec_marker_index(marker_dir) if needs_spec else {}
     from . import route
     round_token = _ROUND_SCOPE.set(
         route.RoundScope(route_records, node_evidence or {}, tuple(jobs))

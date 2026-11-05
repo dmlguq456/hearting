@@ -11,6 +11,7 @@ import os
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -560,6 +561,28 @@ class CapabilityGroundingTest(unittest.TestCase):
                 index = projection._capability_grounding_index(tmp)
             self.assertEqual(index["sid-both"][1]["capability"], "autopilot-refine")
 
+    def test_selected_marker_index_matches_full_index_without_unrelated_body_reads(self):
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as new_dir:
+            self._write(tmp, 'sid-both', 'capability=autopilot-code\n')
+            self._write(tmp, 'sid-legacy', 'capability=autopilot-code\n')
+            self._write(tmp, 'sid-unrelated', 'capability=autopilot-spec\n')
+            Path(new_dir, 'sid-both').write_text('capability=autopilot-refine\n')
+            Path(new_dir, 'sid-unrelated').write_text('capability=autopilot-spec\n')
+            with mock.patch.dict(os.environ, {'FLEET_CAPABILITY_GROUNDING_DIR': new_dir}):
+                complete = projection._capability_grounding_index(tmp)
+                native_open = open
+                opened = []
+                def read_selected(path, *args, **kwargs):
+                    opened.append(os.fspath(path))
+                    self.assertNotEqual(os.path.basename(path), 'sid-unrelated')
+                    return native_open(path, *args, **kwargs)
+                with mock.patch('builtins.open', side_effect=read_selected):
+                    selected = projection._capability_grounding_index(
+                        tmp, session_ids={'sid-both', 'sid-legacy', '../escape'})
+            self.assertEqual(selected, {sid: complete[sid] for sid in ('sid-both', 'sid-legacy')})
+            self.assertEqual(set(opened), {os.path.join(new_dir, 'sid-both'),
+                                         os.path.join(tmp, '.capability-grounding', 'sid-legacy')})
+
     def test_legacy_release_marker_still_read_as_fallback(self):
         with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as new_dir:
             self._write(tmp, "sid-legacy-only", "capability=autopilot-code\nmode=dev\nintensity=standard\n")
@@ -569,6 +592,18 @@ class CapabilityGroundingTest(unittest.TestCase):
 
 
 class SpecMarkerStateRootTest(unittest.TestCase):
+    def test_spec_inventory_is_only_read_for_a_current_spec_entry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for capability, expected in (('autopilot-code', 0), ('autopilot-spec', 1)):
+                session = _session(sid='sid-selected', cwd=tmp, elapsed_min=1)
+                markers = {'sid-selected': (NOW, {'capability': capability})}
+                with self.subTest(capability=capability), mock.patch.object(
+                        projection, '_spec_marker_index', return_value={}) as inventory, \
+                        mock.patch.object(projection, '_artifact_candidates', return_value=[]):
+                    projection.attach_projections([session], [], route_records={}, node_evidence={},
+                        artifact_root=tmp, now=NOW, capability_groundings=markers, spec_marker_dir=tmp)
+                self.assertEqual(inventory.call_count, expected)
+
     def test_default_scan_reads_hook_marker_from_state_root(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = os.path.join(tmp, ".agent_reports")

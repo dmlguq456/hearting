@@ -14,7 +14,7 @@ import re
 import time
 
 from .model import (ActiveNodeProjection, ContextProjection, ProgressProjection,
-                    Session, WorkProjection)
+                    ResourceJob, Session, WorkProjection)
 from .refresh import _observation_identity, required_details_complete, set_required_details
 
 _METADATA = ("campaign_label", "location_kind", "location_wt", "location_repo",
@@ -570,13 +570,18 @@ def _copy_for_enrichment(snapshot, *, required_only):
         value.sessions, value.jobs, value.route_entities = copy.deepcopy(
             (snapshot.sessions, snapshot.jobs, snapshot.route_entities), memo)
     else:
-        # Optional titles mutate resources and pane metadata as well as session/job
-        # rows. Copy them together to preserve aliases (job.resource_children).
+        # Optional detail owns resource display fields, while their observed
+        # progress/identity payloads remain read-only just as in required detail.
+        # Keep custom resource objects on the ordinary defensive-copy path.
+        memo = {id(resource): copy.copy(resource) for resource in (snapshot.resources or ())
+                if type(resource) is ResourceJob}
+        # Copy rows together so job.resource_children still points at the same
+        # owned resource wrappers, and title result dictionaries stay isolated.
         # node_evidence, usage, memory and display observations are only read;
         # enrichment replaces fields such as degradations rather than editing them.
         (value.sessions, value.jobs, value.route_entities, value.resources,
          value.tag_metadata) = copy.deepcopy((snapshot.sessions, snapshot.jobs,
-            snapshot.route_entities, snapshot.resources, snapshot.tag_metadata))
+            snapshot.route_entities, snapshot.resources, snapshot.tag_metadata), memo)
     value.observations = dict(snapshot.observations or {})
     return value
 
@@ -590,10 +595,18 @@ def _apply_peer_observation(collect, sessions):
         supports_health = any(parameter.name == "include_health"
                               or parameter.kind == inspect.Parameter.VAR_KEYWORD
                               for parameter in parameters)
+        supports_record_projection = any(parameter.name == "include_records"
+                                         for parameter in parameters)
     except (TypeError, ValueError):
         supports_health = True
+        supports_record_projection = False
     try:
-        result = collect(include_health=True) if supports_health else collect()
+        options = {"include_health": True} if supports_health else {}
+        if supports_record_projection and supports_health:
+            # Detail joins consume session summaries and scan health, not the
+            # raw ledger dictionaries. Keep the public collector's default.
+            options["include_records"] = False
+        result = collect(**options)
         if isinstance(result, tuple) and len(result) == 2:
             peer, health = result
             state = health.get("state") if isinstance(health, Mapping) else getattr(health, "state", None)

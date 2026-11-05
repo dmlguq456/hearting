@@ -82,6 +82,29 @@ class WorkTitlesTest(unittest.TestCase):
                                              lambda value: dispatch._read_cycle_record(value))
             self.assertEqual(job.campaign_label, oracle)
 
+    def test_shared_campaign_validation_runs_once_for_a_label_batch(self):
+        extra = 'cyc_' + 'd' * 32
+        self.meta['cycles'][extra] = {'title': 'Second cycle'}
+        self.save_meta()
+        record = {**self.record, 'route_id': 'rt-two', 'cycle_id': extra}
+        (self.root / '.runtime/artifact-producer/v1/cycles' / (extra + '.json')).write_text(
+            json.dumps(record))
+        first, second = self.job(), self.job()
+        second.route_id = 'rt-two'
+        original = work_titles.TitleReadCache.read
+        with mock.patch.object(work_titles.TitleReadCache, 'read', autospec=True,
+                               side_effect=original) as validate:
+            dispatch._campaign_labels([first, second])
+        calls = [call for call in validate.call_args_list if call.args[1][0] == 'meta']
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(first.campaign_label, '최근 결과의 시각 표시')
+        self.assertEqual(second.campaign_label, 'Second cycle')
+        # Refusing the optional context must retain the same complete result.
+        with mock.patch.object(dispatch, '_TITLE_CONTEXT_BYTES', 1):
+            dispatch._campaign_labels([first, second])
+        self.assertEqual(first.campaign_label, '최근 결과의 시각 표시')
+        self.assertEqual(second.campaign_label, 'Second cycle')
+
     def test_complete_cycle_hint_avoids_negative_sweep_and_directory_change_reopens_it(self):
         import directory_record_index as index
         directory = self.root / '.runtime/artifact-producer/v1/cycles'

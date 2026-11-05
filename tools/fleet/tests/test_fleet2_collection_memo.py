@@ -23,6 +23,22 @@ from split_module_fixture import patch_split  # noqa: E402
 
 
 class Fleet2CollectionMemoTest(unittest.TestCase):
+    def test_optional_agents_are_observed_once_but_fresh_after_the_pass(self):
+        from fleet.collectors import steward
+        current = [None]
+        reader = mock.Mock(side_effect=lambda: current[0])
+        with dispatch.collection_read_scope():
+            self.assertIsNone(steward._observed_agents(reader))
+            current[0] = [{'agent': 'claude'}]
+            self.assertIsNone(steward._observed_agents(reader))
+            reader.assert_called_once()
+        with dispatch.collection_read_scope():
+            self.assertEqual(steward._observed_agents(reader), current[0])
+        self.assertEqual(reader.call_count, 2)
+        current[0] = []
+        self.assertEqual(steward._observed_agents(reader), [])
+        self.assertEqual(reader.call_count, 3)
+
     def test_native_role_metadata_is_shared_within_a_pass_and_fresh_next_pass(self):
         from fleet.collectors import steward, opencode
         import sqlite3

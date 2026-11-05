@@ -640,7 +640,8 @@ def _project_records(records, now, clocks):
     return by_session
 
 
-def _peer_result(records, pending_duties, now, *, reuse=False, source_tokens=None):
+def _peer_result(records, pending_duties, now, *, reuse=False, source_tokens=None,
+                 include_records=True):
     from runtime_observation import retained_size
     global _OUTPUT_OBSERVATION
     # Production tokens name a prepared file incarnation and its row index,
@@ -675,11 +676,12 @@ def _peer_result(records, pending_duties, now, *, reuse=False, source_tokens=Non
         by_session.setdefault(key, {'sent_1h': 0, 'recv_1h': 0,
                                    'last_recv': None, 'last_sent': None})['pending_obligations'] = sorted(
             duties, key=lambda item: (item.get('kind', ''), item.get('age_min', 0)))[:8]
-    return {'records': copy.deepcopy([rec for _ts, rec in records]) if reuse else
-            [rec for _ts, rec in records], 'by_session': by_session}
+    published = ((copy.deepcopy([rec for _ts, rec in records]) if reuse else
+                  [rec for _ts, rec in records]) if include_records else [])
+    return {'records': published, 'by_session': by_session}
 
 
-def collect(state_roots=None, *, include_health=False):
+def collect(state_roots=None, *, include_health=False, include_records=True):
     records = []
     source_tokens = {}
     malformed = 0
@@ -730,7 +732,8 @@ def collect(state_roots=None, *, include_health=False):
 
     pending_duties = _pending_obligations(roots, now, diagnostics)
     result = _peer_result(records, pending_duties, now, reuse=cache is not None,
-                          source_tokens=[source_tokens[id(rec)] for _ts, rec in records])
+                          source_tokens=[source_tokens[id(rec)] for _ts, rec in records],
+                          include_records=include_records)
     by_session = result['by_session']
 
     if not diagnostics:

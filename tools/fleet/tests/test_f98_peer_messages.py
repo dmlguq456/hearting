@@ -64,6 +64,26 @@ def _rec(from_sid, to_sid=None, to_name=None, kind="steer", summary="hi",
 
 
 class CollectorTest(unittest.TestCase):
+    def test_summary_request_keeps_health_counts_and_public_record_isolation(self):
+        from fleet.collectors import dispatch
+        now = time.time()
+        with tempfile.TemporaryDirectory() as root, mock.patch.object(
+                peer_messages.time, 'time', return_value=now):
+            _write_ledger(root, 'sender', [_rec('sender', 'receiver')])
+            with dispatch.collection_read_scope():
+                summary, summary_health = peer_messages.collect(
+                    [root], include_health=True, include_records=False)
+            with dispatch.collection_read_scope():
+                complete, complete_health = peer_messages.collect([root], include_health=True)
+            self.assertEqual(summary['records'], [])
+            self.assertEqual(len(complete['records']), 1)
+            self.assertEqual(summary['by_session'], complete['by_session'])
+            self.assertEqual(summary_health.state, complete_health.state)
+            complete['records'][0]['from']['session_id'] = 'caller mutation'
+            with dispatch.collection_read_scope():
+                again = peer_messages.collect([root])
+            self.assertEqual(again['records'][0]['from']['session_id'], 'sender')
+
     def test_whole_output_reuse_tracks_age_duties_and_replacement(self):
         from fleet.collectors import peer_messages as pm
         from unittest import mock
