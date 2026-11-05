@@ -98,6 +98,48 @@ class BlinkAssertions(unittest.TestCase):
             self.assertFalse(render._HUE_OF[dim][1] & render._A_BOLD, (y, x, dim))
 
 
+class SessionRouteCountTests(BlinkAssertions):
+    def test_only_open_current_counts_disappear_without_moving_or_recolouring_text(self):
+        base = blink_view_model()
+        title = "잘린 제목 Long title " * 12
+        for cols in (100, 140, 168, 274, 410):
+            for status in ("working", "idle", "dead", "done", "stale"):
+                for current in (False, True):
+                    with self.subTest(cols=cols, status=status, current=current):
+                        vm = replace(base,
+                                     sessions=tuple(dict(row, title=title) for row in base.sessions),
+                                     routes=tuple(dict(row, current=current, state=status)
+                                                  for row in base.routes))
+                        on = draw(vm, NavState(), cols, 45, beat=1)
+                        off = draw(vm, NavState(), cols, 45, beat=0)
+                        # Include wide-character continuation cells when locating
+                        # the suffix after a clipped CJK title.
+                        lines = ["".join(cell[0] or "\0" for cell in row) for row in on.cells]
+                        badge = [(y, line.index("route 1")) for y, line in enumerate(lines)
+                                 if "route 1" in line]
+                        if not current:
+                            self.assertFalse(badge)
+                            self.assert_structure(on, off)
+                            continue
+                        self.assertTrue(badge)
+                        for y, x in badge:
+                            for offset in range(len("route 1")):
+                                a, b = on.cells[y][x + offset], off.cells[y][x + offset]
+                                self.assertEqual(b[1], "dim")
+                                self.assertEqual(a[1], "dim")
+                                self.assertEqual(b[0], " " if status not in ("done", "stale") else a[0])
+                                self.assertEqual(render._HUE_OF[a[1]][0], render._HUE_OF[b[1]][0])
+                                self.assertFalse(render._HUE_OF[a[1]][1] & render._A_REVERSE)
+                        masked = [list(row) for row in on.cells]
+                        for y, x in badge:
+                            for offset in range(len("route 1")):
+                                masked[y][x + offset] = off.cells[y][x + offset]
+                        adjusted = replace(on, cells=tuple(tuple(row) for row in masked))
+                        self.assert_structure(adjusted, off)
+                        expanded = draw(vm, NavState(opened="c1"), cols, 45, beat=1)
+                        self.assertNotIn("route 1", "\n".join(expanded.text_rows()))
+
+
 class StagePhaseTests(BlinkAssertions):
     def test_stage_boxes_pulse_only_active_names_and_dot_all_hues(self):
         for index in range(5):
