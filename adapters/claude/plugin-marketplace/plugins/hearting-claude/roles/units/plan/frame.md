@@ -50,14 +50,16 @@ anything commits.
 2. **Diagnose the fundamental problem.** Separate symptom from root cause; for
    defects, identify the mechanism with file/line evidence. For new features,
    state the essential requirement and the constraint set that must hold.
-3. **Explore and expand the direction space.** Develop two or three genuinely
-   distinct directions (not one direction and two strawmen) with concrete
-   trade-offs: scope, risk, blast radius, migration cost, and what each
-   direction forecloses.
-4. **Commit to a direction verdict.** Choose one direction and record why each
-   alternative was rejected. If the honest verdict is "insufficient evidence to
-   choose", say so explicitly and name the single missing fact — do not emit a
-   survey without a verdict.
+3. **Explore the direction space in proportion to the unresolved decision.**
+   When the request and evidence leave meaningful alternatives, develop two or
+   three genuinely distinct directions with concrete trade-offs: scope, risk,
+   blast radius, migration cost, and what each direction forecloses. For a
+   small, already decided task with only one admissible direction, name it and
+   the evidence that fixes it; do not invent alternatives or widen the task.
+4. **Commit to a direction verdict.** Choose one direction and record why any
+   real alternatives were rejected. If the honest verdict is "insufficient
+   evidence to choose", say so explicitly and name the single missing fact — do
+   not emit a survey without a verdict.
    Extending the closest existing implementation or verification asset of the
    same function is the default. A new module or code path beside it explains
    why extension does not fit and compares rough files/changed lines and time
@@ -67,6 +69,10 @@ anything commits.
    rooted at `AGENT_ARTIFACT_OUTPUT_DIR` (the open cycle's `artifacts/`), not
    `AGENT_ARTIFACT_ROOT`. Use the inherited cycle; do not begin another cycle
    or write to legacy root-level `shards/`.
+   For the small, already decided case, keep each section to the evidence or
+   decision it contributes; one sentence can suffice. Preserve all eight
+   sections and the route proposal, without repeating the request or writing
+   the implementation plan. Larger or unsettled work keeps its full analysis.
 6. **Assemble the smallest route** (section 8 below) from the catalogue, only
    after the direction verdict is settled.
 7. Return per `_shared/dual-io.md`.
@@ -83,8 +89,9 @@ created: {YYYY-MM-DD}
 1. **Problem Statement**: what the problem actually is, one paragraph, evidence-backed.
 2. **Root-Cause / Essence**: mechanism with file:line evidence (defect) or the
    essential requirement and constraints (feature).
-3. **Direction Options**: 2–3 distinct directions with concrete trade-offs.
-4. **Direction Verdict**: the chosen direction, the rejected alternatives with
+3. **Direction Options**: distinct directions with concrete trade-offs, or the
+   sole admissible direction and why the request and evidence fix it.
+4. **Direction Verdict**: the chosen direction, any rejected alternatives with
    reasons, and the smallest test that would falsify the choice.
 5. **Hotfix Boundary**: what a patch-style shortcut here would look like and
    why it is (or is not) unacceptable for this task.
@@ -95,6 +102,11 @@ created: {YYYY-MM-DD}
    line on why you cannot decide it yourself. Facts you could establish by
    reading code or running a tool do not belong here; establish them. The
    dispatching depth-0 session turns this list into the frame interview (SD-129).
+   Ordinary defaults that leave the plan unchanged are the agent's decision,
+   such as how an optional greeting name behaves when empty. State the chosen
+   default in the brief for the executing leg to carry into its final answer;
+   do not turn it into a user question. If a choice changes the goal, scope,
+   architecture, cost or an external outcome, it remains a user decision.
    The runtime adds the route question and one yes/no start question for each
    part of your route whose catalogue row carries `start_approval`; do not
    repeat them here.
@@ -105,11 +117,14 @@ created: {YYYY-MM-DD}
 
    Judge each leg's `size` from sections 2–4 before its shape, and let the
    shape follow it:
-   - `one-change` → `direct`: one atomic, reversible edit the owner session
-     makes and checks itself.
-   - `one-pass` → `solo`: a bounded change one worker finishes and checks in
-     one pass (typically a few files in one module, no shared contract to
-     settle first).
+   - `one-change` → `direct`: one reversible local completion unit under
+     `core/WORKFLOW.md §0.2.1`, including a small feature or fix with its source,
+     regression tests and README. The owner session makes and checks it itself;
+     file and verb counts do not split the unit.
+   - `one-pass` → `solo`: bounded work already assigned to one worker, or
+     several independent outcomes it can finish and check in one pass, with
+     no shared contract to settle first. Related files alone do not turn
+     `one-change` into `one-pass`.
    - `multi-stage` → `staged`: the change needs its own plan check and
      independent review — shared contracts or specs, several modules or
      adapters, a migration, or a direction that can still bend.
