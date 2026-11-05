@@ -144,10 +144,10 @@ assume a runtime reloads all instructions live.
 
 ## Does Hearting change what OpenCode reads?
 
-Yes, in one place. OpenCode has no user-level rule file of its own, so when
-`~/.claude/rules/` (or `$CLAUDE_CONFIG_DIR/rules/`) holds Claude Code user
-rules, Hearting writes OpenCode's global `AGENTS.md` as those rules followed by
-its own instructions. Rules limited to certain paths are left out, and the
+Yes, in one place. Hearting manages OpenCode's global `AGENTS.md` for its own
+instructions. When `~/.claude/rules/` (or `$CLAUDE_CONFIG_DIR/rules/`) holds
+Claude Code user rules, Hearting puts those rules before its instructions in
+that file. Rules limited to certain paths are left out, and the
 rule files are only read. The rule text then also reaches the model provider
 your OpenCode uses. To stop it, add these lines to
 `${XDG_CONFIG_HOME:-$HOME/.config}/hearting/dispatch-defaults.yaml`:

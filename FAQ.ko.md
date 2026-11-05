@@ -132,10 +132,9 @@ Python 3.11 이상과 그 인터프리터용 PyYAML(`python3 -m pip install --us
 
 ## 하팅이 OpenCode가 읽는 내용을 바꾸나요?
 
-네, 한 곳에서 바꿉니다. OpenCode에는 사용자 전역 규칙 파일이 따로 없어서,
-`~/.claude/rules/`(또는 `$CLAUDE_CONFIG_DIR/rules/`)에 Claude Code 사용자 규칙이
-있으면 하팅이 OpenCode의 전역 `AGENTS.md`를 그 규칙 다음에 하팅 지침이 오는
-파일로 씁니다. 특정 경로에만 적용되는 규칙은 빼고, 규칙 파일은 읽기만 합니다. 그
+네, 한 곳에서 바꿉니다. 하팅은 OpenCode 전역 `AGENTS.md`를 하팅 지침을 싣는
+파일로 관리합니다. `~/.claude/rules/`(또는 `$CLAUDE_CONFIG_DIR/rules/`)에 Claude
+Code 사용자 규칙이 있으면 그 규칙을 이 파일에서 하팅 지침보다 앞에 싣습니다. 특정 경로에만 적용되는 규칙은 빼고, 규칙 파일은 읽기만 합니다. 그
 결과 규칙 본문은 OpenCode가 쓰는 모델 제공자에게도 전달됩니다. 끄려면
 `${XDG_CONFIG_HOME:-$HOME/.config}/hearting/dispatch-defaults.yaml`에 아래 줄을
 넣으세요.
