@@ -202,6 +202,18 @@ def launched_identity(proc, attempts: int = 20, delay: float = 0.01) -> dict | N
     return None
 
 
+def kernel_boot_id() -> str | None:
+    """Observe the current kernel without requiring a host identity."""
+    return passive_memo('kernel-boot-id', _read_kernel_boot_id)
+
+
+def _read_kernel_boot_id() -> str | None:
+    try:
+        return str(uuid.UUID(Path('/proc/sys/kernel/random/boot_id').read_text().strip()))
+    except (OSError, ValueError):
+        return None
+
+
 def boot_identity() -> dict:
     return dict(passive_memo('boot-identity', _read_boot_identity))
 
@@ -209,7 +221,9 @@ def boot_identity() -> dict:
 def _read_boot_identity() -> dict:
     """Bind new local resource identities to their host and kernel lifetime."""
     try:
-        boot = str(uuid.UUID(Path('/proc/sys/kernel/random/boot_id').read_text().strip()))
+        boot = kernel_boot_id()
+        if not boot:
+            return {}
         machine = Path('/etc/machine-id').read_text().strip()
         host = Path('/proc/sys/kernel/hostname').read_text().strip()
         if len(machine) != 32 or not all(c in '0123456789abcdef' for c in machine) or not host:
