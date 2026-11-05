@@ -734,7 +734,7 @@ def build_continuation_route(
         "selection_pins","requested_intensity",
         "effective_intensity","owner_model_profile","execution_topology",
         "owner_dispatch_depth","max_dispatch_depth","tracking",
-        "tracked_gate_evidence","spec_touch","cwd","source_commit",
+        "tracked_gate_evidence","spec_touch","cwd","source_commit","source_repository",
         "registry_digest","capability_registry_digest","dispatch_defaults_digest","dispatch_allocation",
         "owner_harness_policy","selection","codex_execution_sandbox","human_gates","human_gate_bindings",
         "confirmation_mode","small_work_confirmation",
@@ -963,6 +963,13 @@ def compose_route(*, capability, capability_mode, shape, graph, slug, cwd, artif
     decided, so it compiles without the recipe's frame pair too; `framed` is where a frame runs.
     """
     import route_plan as RP
+    if route_plan is not None and shape == "framed":
+        leg = route_plan["leg"]
+        shape = leg["shape"]
+        capability = capability or leg["capability"]
+        capability_mode = capability_mode or leg.get("mode")
+        graph = graph or (",".join(leg["graph"]) if leg.get("graph") else None)
+        intensity = intensity or leg.get("intensity")
     given_intensity, given_capability = intensity, capability
     if capability is None and shape != "framed":
         capability = COMPOSE_DEFAULT_CAPABILITY
@@ -1233,6 +1240,24 @@ def compile_proposal_leg(leg, index, *, frame_route, frame_cycle_id, readiness):
 
 
 def compile_first_leg(leg, *, frame_route, frame_cycle_id, context, binding, work_request, readiness, index=0):
+    import frame_repository
+    repository = frame_repository.RepositoryBinding(binding.get("record"), index)
+    if index and repository.active:
+        # A later leg keeps the dedicated repository only while it names that
+        # same approved destination. Compare lexical input before resolving any
+        # mutable ancestor; explicit alternate repositories keep their policy.
+        raw = Path(leg.get("cwd") or frame_route["cwd"]).expanduser()
+        destination = os.path.abspath(raw if raw.is_absolute() else Path(context["cwd"]) / raw)
+        if destination != repository.setup["cwd"]:
+            repository = frame_repository.RepositoryBinding(None)
+    with repository:
+        return _compile_first_leg(leg, frame_route=frame_route, frame_cycle_id=frame_cycle_id,
+                                  context=context, binding=binding, work_request=work_request,
+                                  readiness=readiness, index=index, repository=repository)
+
+
+def _compile_first_leg(leg, *, frame_route, frame_cycle_id, context, binding, work_request, readiness,
+                       index, repository):
     """An approved leg, compiled in memory with its route-plan reference sealed.
 
     Same arguments the printed compose command carries: the leg's shape, graph, capability, mode and
@@ -1243,18 +1268,21 @@ def compile_first_leg(leg, *, frame_route, frame_cycle_id, context, binding, wor
     kwargs = _leg_compose_kwargs(RP.leg_arguments(leg), frame_route=frame_route, frame_cycle_id=frame_cycle_id,
                                  slug=f"{context['slug']}-leg{index}")
     kwargs["cwd"] = RP.leg_cwd(leg, frame_route["cwd"], base_cwd=context["cwd"])
+    repository.verify(kwargs["cwd"])
     owner = ((kwargs["selection_pins"] or {}).get("owner") or {}).get("harness") or context.get("owner")
     if work_request is not None:
         work_request = {**work_request, "owner_harness": owner or work_request.get("owner_harness")}
     selection = compose_route(**kwargs, work_request=work_request, route_plan=binding,
                               parent_harness=owner or "claude", selection_only=True)
+    repository.verify(kwargs["cwd"])
     diagnosis = _compose_git_diagnosis(kwargs["cwd"])
     if (diagnosis.get("state") == "non-git" and selection.get("shape") != "direct"
             and _isolates_worktree(selection)):
         raise ValueError(UI_TEXT.translator()("route.error.not_git_worker"))
     frame_preparation = frame_route.get("framed_worktree") or {}
     inherit_frame_allocation = _inherits_frame_worktree(frame_route, leg, index, kwargs["cwd"])
-    if _isolates_worktree(selection) and not inherit_frame_allocation:
+    use_new_repository = repository.active
+    if _isolates_worktree(selection) and not inherit_frame_allocation and not use_new_repository:
         worktree = prepare_isolated_worktree(
             kwargs["cwd"], frame_route.get("slug"), artifact_root=frame_route["artifact_root"],
             preparation_key=_route_plan_preparation_key(binding), explicitly_approved=bool(leg.get("cwd")))
@@ -1266,6 +1294,7 @@ def compile_first_leg(leg, *, frame_route, frame_cycle_id, context, binding, wor
     # The probe is collected only after preparation, against the exact cwd that will be sealed.
     route = compose_route(**kwargs, **_leg_evidence(leg, lambda: readiness(kwargs["cwd"])),
                           work_request=work_request, route_plan=binding, parent_harness=owner or "claude")
+    repository.verify(route["cwd"])
     if inherit_frame_allocation:
         route = _seal_framed_worktree(route, {**frame_preparation, "state": "inherited",
                                               "from_route_id": frame_route["route_id"]})
@@ -1592,6 +1621,10 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
         payload["composed_recipe"]=json.loads(json.dumps(recipe))
     if route_plan is not None:
         payload["route_plan"]=json.loads(json.dumps(route_plan))
+    import frame_repository
+    source_repository = frame_repository.capture_source(cwd)
+    if source_repository:
+        payload["source_repository"] = source_repository
     digest=route_hash(payload); payload["route_hash"]=digest; payload["route_id"]=ROUTE_IDENTITY.route_id_from_hash(digest)
     owner_attempt_id=_resolve_owner_attempt_id()
     payload["owner_attempt_id"]=owner_attempt_id
@@ -1856,18 +1889,25 @@ def main():
             a.slug=compose_default_slug(a.prompt_file.read_text() if a.prompt_file else "",
                                         capability=a.capability or (None if shape=="framed" else COMPOSE_DEFAULT_CAPABILITY),
                                         shape=shape)
-        route_plan_binding, route_plan_unreadable = None, False
+        route_plan_binding = None
         if a.route_plan:
-            # Unreadable, mismatched or out of range: the same compose as without the argument, plus one card line.
+            # An explicit approved plan must never become an unrelated default route.
             import route_plan as RP
             try:
                 route_plan_binding = RP.read_route_plan(a.route_plan, artifact_root)
-            except (OSError, ValueError):
-                route_plan_unreadable = True
+            except (OSError, ValueError) as exc:
+                raise ValueError(f"compose-route-plan-refused: {exc}") from exc
         a._route_chain_plan = _resolve_compose_plan(a, route_plan_binding)
         DISPATCH_DEFAULTS_WARNINGS.clear()
         pins=_parse_selection_pins(a.pin,a.owner)
         if route_plan_binding is not None:
+            if shape == "framed":
+                leg = route_plan_binding["leg"]
+                shape = leg["shape"]
+                a.capability = a.capability or leg["capability"]
+                a.capability_mode = a.capability_mode or leg.get("mode")
+                a.graph = a.graph or (",".join(leg["graph"]) if leg.get("graph") else None)
+                a.intensity = a.intensity or leg.get("intensity")
             # A continuation leg keeps the pins its frame was composed with; a pin given here replaces only its own target.
             pins={**_inherited_selection_pins(route_plan_binding,artifact_root),**pins}
             if a.cwd is None:
@@ -2007,7 +2047,6 @@ def main():
         if a.explain:
             import work_intent
             print(compose_card(route, _plan_for_card, _plan_source_for_card, owner_harness=owner_pin,
-                               route_plan_unreadable=route_plan_unreadable,
                                campaign_selection=_campaign_for_card,
                                intent_original=(None if route.get("route_plan") else
                                                 work_intent.original_excerpt(route.get("cwd")) or None)),
@@ -2057,7 +2096,6 @@ def main():
         # never closes this route, and a cycle it seals is never the one this route begins or continues).
         _route_autoclose(artifact_root,"compose",route)
         print(compose_card(route, _plan_for_card, _plan_source_for_card, owner_harness=owner_pin,
-                           route_plan_unreadable=route_plan_unreadable,
                            campaign_selection=_campaign_for_card, include_decisions=not a.start,
                            non_git_decision=non_git_decision),file=sys.stderr)
         if a.start:
@@ -2078,6 +2116,32 @@ def main():
                 return 2
             print(f"route_default={found} source={source}",file=sys.stderr)
             given=found
+        frame_path = resolve_route_argument(given, jobs)
+        frame_raw = json.loads(frame_path.read_text()) if Path(frame_path).is_file() else None
+        if ROUTE_PLAN.is_framed_route(frame_raw):
+            from work_start import _framed_cycle
+            _first = {}
+            try:
+                _root, _record, _output = _framed_cycle(frame_raw)
+                _decision_path = _output / ROUTE_PLAN.RECORD_RELATIVE
+                _first = (ROUTE_PLAN.read_record(_decision_path).get("first_leg") or {}) if _decision_path.exists() else {}
+            except ValueError:
+                pass   # conditions can precede the frame's first start/cycle
+            _leg_id = (_first.get("route") or {}).get("route_id")
+            _leg_owner = route_owner_attempt(_leg_id, jobs) if _leg_id else None
+            if _leg_owner:
+                given = _leg_owner
+            else:
+                from dispatch_owner_input import frame_input
+                result = frame_input(verify_route(frame_raw), a.message_file.read_text() if a.message_file else None,
+                                     a.request_id, jobs=jobs)
+                if result.get("redirect_owner"):
+                    given = result["redirect_owner"]
+                else:
+                    print(json.dumps(result, ensure_ascii=False))
+                    from start_receipt import print_next_line
+                    print_next_line(result)
+                    return 0
         a.attempt_id=_correct_attempt_argument(given,jobs)
         if a.attempt_id!=given:
             print(f"owner_attempt_default={a.attempt_id} route={given}",file=sys.stderr)

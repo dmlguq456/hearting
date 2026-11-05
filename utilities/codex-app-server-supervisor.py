@@ -28,6 +28,7 @@ from pathlib import Path
 import shlex
 import subprocess
 import sys
+import frame_repository
 import time
 from typing import Any
 from types import SimpleNamespace
@@ -611,8 +612,8 @@ class AppServer:
         try:
             self.process = subprocess.Popen(
                 command,
-                cwd=cwd,
-                env=env,
+                **frame_repository.native_process_options(cwd),
+                env=frame_repository.native_environment(env),
                 text=True,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
@@ -877,12 +878,12 @@ def resource_sandbox_command(args, row):
     if payload is not None and payload["sandbox"] == "danger-full-access":
         # Only this registered payload leaves the owner's profile; the owner keeps its own.
         command = ["codex", "sandbox", "-P", ":danger-full-access", "--include-managed-config",
-                   "-C", args.worktree, "--", "/bin/sh", "-c", 'cd -- "$1" || exit; shift; exec "$@"',
-                   "resource-payload", row["cwd"], *row["command"]]
+                   "-C", frame_repository.native_worktree(args.worktree), "--", "/bin/sh", "-c", 'cd -- "$1" || exit; shift; exec "$@"',
+                   "resource-payload", frame_repository.native_path(row["cwd"]), *row["command"]]
         return command, {"mode": "danger-full-access", "enforcement": "none", "network_access": True,
                          "source": payload["source"], "scope": "host-process-payload"}
     if getattr(args, "recordish_profile_active", False):
-        options = [*config_arguments(args.native_permission_profile), "-P", RECORDISH_PROFILE_NAME]
+        options = [*config_arguments(frame_repository.runtime_paths(args.native_permission_profile)), "-P", RECORDISH_PROFILE_NAME]
         enforcement = "os-sandbox"
     elif args.sandbox == "danger-full-access":
         options = ["-P", ":danger-full-access"]
@@ -912,13 +913,13 @@ def resource_sandbox_command(args, row):
             # A prepared commit profile must not survive a safety downgrade
             # on runtimes without per-turn profile selection.
             selected_profile = ":read-only"
-        options = [*config_arguments(profile), "-P", selected_profile]
+        options = [*config_arguments(frame_repository.runtime_paths(profile)), "-P", selected_profile]
         enforcement = "os-sandbox"
     else:
         raise SupervisorError("resource-sandbox-selection-unsupported")
-    command = ["codex", "sandbox", *options, "--include-managed-config", "-C", args.worktree,
+    command = ["codex", "sandbox", *options, "--include-managed-config", "-C", frame_repository.native_worktree(args.worktree),
                "--", "/bin/sh", "-c", 'cd -- "$1" || exit; shift; exec "$@"',
-               "resource-payload", row["cwd"], *row["command"]]
+               "resource-payload", frame_repository.native_path(row["cwd"]), *row["command"]]
     return command, {"mode": args.sandbox, "enforcement": enforcement,
                      "network_access": bool(args.network_access)}
 
@@ -935,7 +936,7 @@ def _run_turn_once(
     params: dict[str, Any] = {
         "threadId": thread_id,
         "input": [{"type": "text", "text": prompt, "text_elements": []}],
-        "cwd": args.worktree,
+        "cwd": frame_repository.rpc_worktree(args.worktree, server),
     }
     # Keep an active named profile authoritative on ordinary turns. A
     # per-turn Git/task overlay is valid only after the exact owner context
@@ -963,7 +964,7 @@ def _run_turn_once(
         params["model"] = args.model
     if args.reasoning:
         params["effort"] = args.reasoning
-    response = server.request("turn/start", params)
+    response = server.request("turn/start", frame_repository.runtime_request(params, server))
     turn = response.get("turn")
     if not isinstance(turn, dict) or not isinstance(turn.get("id"), str):
         raise SupervisorError("turn-start-response-invalid")
@@ -1303,7 +1304,7 @@ def run_one_turn(args: argparse.Namespace) -> int:
     apply_owner_runtime_permissions(args)
     configure_permission_profiles(args, command)
     if args.native_permission_profile is not None:
-        command += config_arguments(args.native_permission_profile)
+        command += config_arguments(frame_repository.runtime_paths(args.native_permission_profile))
 
     command += codex_worker_arguments()
     command += context_window_arguments(args)
@@ -1322,7 +1323,7 @@ def run_one_turn(args: argparse.Namespace) -> int:
                               if args.turn_permissions_supported else None)},
         )
         server.notification("initialized")
-        thread_params: dict[str, Any] = {"cwd": args.worktree, "ephemeral": True}
+        thread_params: dict[str, Any] = {"cwd": frame_repository.rpc_worktree(args.worktree, server), "ephemeral": True}
         if getattr(args, "verification_profile_active", False):
             thread_params["permissions"] = LOCAL_VERIFICATION_PROFILE_NAME
         elif args.native_permission_profile is None:
@@ -1331,7 +1332,7 @@ def run_one_turn(args: argparse.Namespace) -> int:
             thread_params["approvalPolicy"] = args.approval
         if args.model:
             thread_params["model"] = args.model
-        thread_result = server.request("thread/start", thread_params)
+        thread_result = server.request("thread/start", frame_repository.runtime_request(thread_params, server))
         thread = thread_result.get("thread")
         if not isinstance(thread, dict) or not isinstance(thread.get("id"), str):
             raise SupervisorError("thread-start-response-invalid")
@@ -1366,6 +1367,7 @@ def run_one_turn(args: argparse.Namespace) -> int:
     return result_code
 
 
+@frame_repository.process_entry
 def main(argv: list[str] | None = None) -> int:
     argument_parser = parser()
     args = argument_parser.parse_args(argv)
@@ -1437,7 +1439,7 @@ def main(argv: list[str] | None = None) -> int:
     configure_permission_profiles(args, command)
     args.resource_launch_command = lambda row: resource_sandbox_command(args, row)
     if args.native_permission_profile is not None:
-        command += config_arguments(args.native_permission_profile)
+        command += config_arguments(frame_repository.runtime_paths(args.native_permission_profile))
     command += codex_worker_arguments()
     command += context_window_arguments(args)
     state_path = Path(args.state_file) if args.state_file else None
@@ -1527,7 +1529,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         server.notification("initialized")
         thread_params: dict[str, Any] = {
-            "cwd": args.worktree,
+            "cwd": frame_repository.rpc_worktree(args.worktree, server),
             "ephemeral": not RESOURCE_WAIT.durable_native_session(args),
         }
         if getattr(args, "verification_profile_active", False):
@@ -1542,7 +1544,7 @@ def main(argv: list[str] | None = None) -> int:
         if resource_session:
             thread_params.pop("ephemeral", None)
             thread_params["threadId"] = resource_session
-        thread_result = server.request("thread/resume" if resource_session else "thread/start", thread_params)
+        thread_result = server.request("thread/resume" if resource_session else "thread/start", frame_repository.runtime_request(thread_params, server))
         thread = thread_result.get("thread")
         if not isinstance(thread, dict) or not isinstance(thread.get("id"), str):
             raise SupervisorError("thread-start-response-invalid")

@@ -12,6 +12,7 @@ from pathlib import Path
 import selectors
 import signal
 import subprocess
+import frame_repository
 import threading
 import time
 from typing import Any, Callable, Mapping, Sequence
@@ -1047,11 +1048,13 @@ def _drain_forwarded_pipes(
     return incomplete
 
 
+@frame_repository.forwarded_entry
 def run_forwarding_termination(
     command: Sequence[str],
     *,
     cwd: str | Path | None = None,
     env: Mapping[str, str] | None = None,
+    pass_fds: tuple[int, ...] = (),
     capture: bool,
     timeout: float | None,
     grace: float = FORWARDED_TERMINATION_GRACE,
@@ -1118,6 +1121,7 @@ def run_forwarding_termination(
         proc = subprocess.Popen(
             list(command), cwd=cwd, env=None if env is None else dict(env),
             stdout=pipe, stderr=pipe,
+            **({"pass_fds": pass_fds} if pass_fds else {}),
         )
         child.append(proc)
         for signum in pending:

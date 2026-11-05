@@ -414,7 +414,51 @@ each item beside its artifact as `<artifact>.items.json` (`leg_items_v1`, read b
 `cwd`; validation, first launch, later legs and the printed compose command use
 that folder and check dispatch there. Relative paths are based on the frame's
 original cwd. Omission keeps the existing worktree preparation and inheritance;
-this adds no question, flag or required input. A leg's `extra_stages` entry becomes node
+this adds no question, flag or required input.
+An explicit `--route-plan` is binding: read/validation errors stop compose before
+preparation or publication. Absolute record paths may name another artifact root;
+relative paths stay inside the selected root. A manual first leg's receipt lists
+the existing complete/close/finalize commands for its frame, retaining the decision.
+An unanswered interview can be corrected in its existing round; recorded answers
+and decisions are immutable. Native full and partial replies commit under the
+same interview lock and belong only to the exact registered interview bytes.
+Request quotes come from this compose's human prompt
+boundary; unavailable provenance omits the quote. Framed display separates the
+requested width, bootstrap intensity and eventual approved leg intensity.
+For an explicitly requested new repository, the existing route question includes
+its destination and preparation (at most two notice lines). After approval the
+runtime creates only an absent folder, initializes Git and its empty baseline,
+and records path/time in the route evidence and first leg task. Existing folders
+stay untouched and use the same interview's manual-preparation/direct choices.
+Preparation retains the approved physical parent binding; directory creation and
+Git initialization use pinned directories so a replaced ancestor cannot redirect
+writes outside that binding. The binding stays open through first-leg compilation,
+publication and launch, including resumed snapshots. A prepared first leg keeps
+that repository; a replaced path cannot turn it into an existing-repository
+worktree allocation. These are runtime checks within the existing approved start.
+The common launcher passes the opened source descriptor and uses that directory
+as the wrapper's actual process cwd. Adapters, launch fences, governors and
+supervisors carry that binding to native child startup and resume. Durable route,
+registry and receipt paths remain canonical; execution keeps its bound physical
+cwd. A fresh process reopens only the recorded physical identity
+when its inherited descriptors are unavailable.
+Trusted launcher hops inherit only the source descriptor. Native model processes
+start in the bound kernel cwd with directory descriptors closed; parent and Git
+directory handles remain in the trusted launcher. Supervised directory
+requests use the verified native process cwd for that process's lifetime.
+Later legs that keep this same dedicated new-repository destination reuse its
+physical binding and repository instead of allocating another worktree. An
+explicitly different destination keeps its existing selection and preparation.
+Compose records optional source-directory and Git common-directory identities.
+An existing explicit recovery destination uses its own recorded identity for
+the same descriptor handoff, preserving its original creation provenance.
+Frame-time corrections stay on that route, appear in its existing Fleet detail,
+and reach the interview and first owner. The retained history has no reader-only
+size cutoff: bounded delivery takes recent conditions first and reports omitted
+or shortened content with a reference to the full history in receipts, interviews,
+owner tasks and the existing Fleet detail. Explicit conflicting output paths in
+interview wording and `done_when` appear as receipt advisories.
+A leg's `extra_stages` entry becomes node
 `plan-<id>` right after its `after` stage, shaped on a catalogue check or
 measurement stage of the same unit (one that writes no source; its gate, review
 budget and start approval) and writing under
@@ -910,6 +954,10 @@ checks), the applicable commit/PR/deployment/serving state, and limits or work
 that remains. Preserve explicit user-requested content and output formats even
 when they differ from the default presentation. Deployment and operating claims
 require observed evidence.
+Owner correction receipts distinguish delivery from verified application and say
+that a one-shot owner's next turn is not guaranteed. Completion reports count
+inputs without delivery evidence (`미반영 correct N건` in Korean), separating
+unknown delivery and application. All three adapters share this behavior.
 A continuation or recovery notice resumes that same original task; its receipt
 adds context but does not replace, narrow, or discharge the user's requested
 content, evidence, or output format.

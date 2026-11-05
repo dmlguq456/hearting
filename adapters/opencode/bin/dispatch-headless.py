@@ -87,6 +87,7 @@ from dispatch_contract import (
 from parent_next_directive import receipt_lines as parent_next_receipt_lines  # noqa: E402
 import launch_receipt  # noqa: E402
 import dispatch_wrapper_common as WRAPPER_COMMON  # noqa: E402
+import frame_repository
 # Identical in every wrapper; the old names stay so callers and mock targets do not move.
 _is_report_bundle_publish_stage = WRAPPER_COMMON.is_report_bundle_publish_stage
 _route_node_leg_fields = WRAPPER_COMMON.route_node_leg_fields
@@ -1102,6 +1103,7 @@ def initialize_supervised_owner_input(args: argparse.Namespace, jobs: Path) -> N
 
 
 def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -> str:
+    prompt_path, log_path = Path(frame_repository.native_path(prompt_path)), Path(frame_repository.native_path(log_path))
     settings = args.resolved_model_settings
     standalone = settings.get("context_window_execution_mode") == "standalone"
     if _supervised_owner(args):
@@ -1127,7 +1129,7 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
     title = ("hearting-worker-" + str(args.attempt_id)
              if opencode_runtime.is_v2() and getattr(args, "attempt_id", None) else None)
     cmd = opencode_runtime.run_argv(
-        binary="opencode", cwd=args.worktree, agent=args.agent,
+        binary="opencode", cwd=frame_repository.native_worktree(args.worktree), agent=args.agent,
         model=(settings["model"] if settings["source"] != "inherit" else None),
         variant=(settings["variant"] if settings["source"] != "inherit" else None),
         title=title,
@@ -1136,7 +1138,7 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
     prompt_arg = f'"$(cat -- {shlex.quote(os.path.abspath(prompt_path))})"'
     # V2 dropped `--dir`: the worker's Location is its process cwd, and a worker left
     # in the caller's directory edits there and sees the worktree as an outside path.
-    enter = (f"cd -- {shlex.quote(args.worktree)} && "
+    enter = (f"cd -- {shlex.quote(frame_repository.native_worktree(args.worktree))} && "
              if args.worktree and "--dir" not in cmd else "")
     log = shlex.quote(os.path.abspath(log_path))
     run = enter + " ".join(shlex.quote(x) for x in cmd) + f" {prompt_arg} >> {log} 2>&1"
@@ -1338,9 +1340,10 @@ def validate_route_record(args: argparse.Namespace) -> int:
     )
 
 
+@frame_repository.process_entry
 def main(argv: list[str]) -> int:
     args = parser().parse_args(argv[1:])
-    args.replacement_input_argv = list(argv[1:])
+    args.replacement_input_argv = frame_repository.durable_argv(argv[1:])
     # parent_sandbox is used here only to tighten the override gate, never to
     # loosen it, so consuming it before the tuple-validity check at :1136 is
     # safe even though it has not yet been validated.
@@ -1358,7 +1361,7 @@ def main(argv: list[str]) -> int:
         return fail("capacity-retry-evidence-missing", 64, child_spawned="0")
     if not Path(args.worktree).is_absolute():
         return fail("worktree-must-be-absolute", 64, worktree=args.worktree)
-    args.worktree = str(Path(args.worktree).resolve())
+    args.worktree = frame_repository.canonical_worktree(args.worktree)
     action = "start" if args.start else "register" if args.register else "dry-run"
     args.action = action
     args.command_attempt_id = args.attempt_id
@@ -1379,7 +1382,7 @@ def main(argv: list[str]) -> int:
     try:
         from dispatch_contract import launch_repository_identity
         args.repository_identity, args.repository_kind = launch_repository_identity(
-            args.worktree, args.route_file or os.environ.get("AGENT_OWNER_ROUTE_FILE"))
+            frame_repository.execution_path(args.worktree), args.route_file or os.environ.get("AGENT_OWNER_ROUTE_FILE"))
     except DispatchContractError as exc:
         return fail(exc.reason, 65, detail=exc.detail, worktree=args.worktree, child_spawned="0")
     try:
@@ -1721,8 +1724,8 @@ def main(argv: list[str]) -> int:
     args.resolved_completion_delivery = "session-resume-supervised" if _supervised_owner(args) else "one-shot"
     args.completion_delivery_reason = "ok" if _supervised_owner(args) else "not-applicable"
     if action in ("register", "start"):
-        prompt_path.parent.mkdir(parents=True, exist_ok=True)
-        log_path.parent.mkdir(parents=True, exist_ok=True)
+        Path(frame_repository.execution_path(prompt_path.parent)).mkdir(parents=True, exist_ok=True)
+        Path(frame_repository.execution_path(log_path.parent)).mkdir(parents=True, exist_ok=True)
         if action == "start":
             try:
                 reservation_token, args.replica_batch_reservation = reserve_governor_token(
@@ -1751,7 +1754,7 @@ def main(argv: list[str]) -> int:
         if args.attempt_claimed:
             initialize_supervised_owner_input(args, jobs)
             try:
-                prompt_path.write_text(prompt_text, encoding="utf-8")
+                Path(frame_repository.execution_path(prompt_path)).write_text(prompt_text, encoding="utf-8")
             except OSError as exc:
                 annotate_attempt_row(
                     jobs, args.attempt_id, {"launch_outcome": "never-launched"}
@@ -2077,8 +2080,8 @@ def main(argv: list[str]) -> int:
                 return subprocess.Popen(
                     fence_command,
                     start_new_session=True,
-                    env=dispatch_env,
-                    pass_fds=(gate_fd, fence_failure_write_fd),
+                    env=frame_repository.child_environment(dispatch_env),
+                    **frame_repository.child_process_options(pass_fds=(gate_fd, fence_failure_write_fd)),
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,

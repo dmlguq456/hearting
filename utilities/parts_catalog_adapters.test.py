@@ -127,13 +127,19 @@ class AdapterParityTest(unittest.TestCase):
         for name, argv in SURFACES.items():
             with self.subTest(adapter=name):
                 self.assertEqual(self.sealed_route(argv, *args)[0], expected)
-        # an unreadable plan is the same compose without it plus one card line, on every adapter
+        # An explicit unreadable plan refuses before publication on every adapter.
         missing = self.compose_args(*graph, "--route-plan", f"{self.artifacts}/absent.json#0")
-        for name, argv in SURFACES.items():
+        before = {p: p.read_bytes() for p in self.artifacts.rglob("rt-*.json")}
+        for name, argv in {"portable": PORTABLE, **SURFACES}.items():
             with self.subTest(adapter=name, plan="unreadable"):
-                route, card = self.sealed_route(argv, *missing)
-                self.assertNotIn("route_plan", route)
-                self.assertIn("경로 계획을 읽지 못함", card)
+                result = subprocess.run([*argv, *missing], text=True, capture_output=True,
+                                        env=self.env, cwd=self.repo)
+                self.assertEqual(result.returncode, 64, result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertIn("compose-route-plan-refused", result.stderr)
+                self.assertNotIn("[경로]", result.stderr)
+                self.assertNotIn("route_file=", result.stderr)
+        self.assertEqual({p: p.read_bytes() for p in self.artifacts.rglob("rt-*.json")}, before)
 
 
 if __name__ == "__main__":

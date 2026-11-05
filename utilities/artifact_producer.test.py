@@ -5302,7 +5302,7 @@ class QuickOwnerBindingIntegrationTest(ProducerTestBase):
             source = (root / "adapters" / harness / "bin" / "dispatch-headless.py").read_text()
             self.assertIn("bind_owner_launch,", source)
             call = source.index("bind_owner_launch(args, jobs)")
-            self.assertLess(source.index("prompt_path.write_text(prompt_text"), call)
+            self.assertLess(source.index("Path(frame_repository.execution_path(prompt_path)).write_text(prompt_text"), call)
             self.assertLess(call, source.index("spawn_claimed_attempt(", call))
 
 

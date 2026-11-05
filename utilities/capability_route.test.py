@@ -8045,7 +8045,7 @@ class ComposeRouteTest(TestRoute):
                 "\n".join(R.compose_decision_lines(measured)))
   framed=self.compose(capability=None,capability_mode=None,shape="framed",graph=None,intensity="strong")
   frame_display="\n".join(R.compose_decision_lines(framed))
-  self.assertIn("source=explicit, requested=strong",frame_display)
+  self.assertIn("frame 요청=strong (source=explicit)",frame_display)
   self.assertNotIn("강도 안내",frame_display)
   self.assertIn("capability=frame 결정 대기",frame_display)
  def test_compose_start_and_resume_print_decisions_before_launch_once_in_all_harnesses(self):
