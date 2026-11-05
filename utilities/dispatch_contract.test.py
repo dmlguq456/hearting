@@ -186,6 +186,30 @@ class RegistryMetadataCacheTest(unittest.TestCase):
   self.assertEqual(D._registry_metadata_items.cache_info()[:2],(1,1))
 
 class PreviousBootQuiescenceTest(unittest.TestCase):
+ def test_boot_only_claim_matches_kernel_then_keeps_process_checks(self):
+  import resource_run_registry as R
+  boot='10000088-0000-4000-8000-000000000097'
+  metadata={'pid':'123','pid_start':'456','pid_ns':'pid:[789]'}
+  identity={'pid':123,'starttime':'456','pid_namespace':789,'boot_id':boot}
+  with mock.patch.object(R,'recorded_governor_identity',return_value=identity), \
+    mock.patch.object(R,'boot_identity',return_value={}), \
+    mock.patch.object(R,'kernel_boot_id',return_value=boot), \
+    patch_split(D,'_attempt_process_quiescence_impl',
+                return_value=D.ProcessQuiescence('live','still-running')) as normal:
+   result=D.attempt_process_quiescence(metadata)
+   self.assertEqual((result.state,result.reason),('live','still-running'))
+   normal.assert_called_once_with(metadata)
+  for recorded,current in ((identity,None),(identity,'10000094-0000-4000-8000-0000000000a3'),
+      ({**identity,'boot_id':None},boot),({**identity,'boot_host':'local'},boot)):
+   with self.subTest(recorded=recorded,current=current), \
+     mock.patch.object(R,'recorded_governor_identity',return_value=recorded), \
+     mock.patch.object(R,'boot_identity',return_value={}), \
+     mock.patch.object(R,'kernel_boot_id',return_value=current), \
+     patch_split(D,'_attempt_process_quiescence_impl') as normal:
+    result=D.attempt_process_quiescence(metadata)
+    self.assertEqual((result.state,result.reason),('unverifiable','process-boot-unverifiable'))
+    normal.assert_not_called()
+
  def test_exact_retained_identity_uses_shared_host_proof_before_pid_reuse(self):
   import resource_run_registry as R
   old='10000094-0000-4000-8000-0000000000a3'

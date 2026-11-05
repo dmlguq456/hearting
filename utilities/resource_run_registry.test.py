@@ -15,6 +15,23 @@ import resource_run_registry as registry
 
 
 class ResourceRegistryTest(unittest.TestCase):
+    def test_kernel_uuid_does_not_weaken_full_host_identity(self):
+        boot = '10000088-0000-4000-8000-000000000097'
+        def read(path, *args, **kwargs):
+            if str(path) == '/proc/sys/kernel/random/boot_id':
+                return boot + '\n'
+            raise FileNotFoundError(str(path))
+        with mock.patch.object(Path, 'read_text', read):
+            self.assertEqual(registry.kernel_boot_id(), boot)
+            self.assertEqual(registry.boot_identity(), {})
+            self.assertIsNone(registry.previous_boot_evidence({'boot_id': boot}))
+        for value in ('', 'invalid'):
+            with mock.patch.object(Path, 'read_text', return_value=value):
+                self.assertIsNone(registry.kernel_boot_id())
+                self.assertEqual(registry.boot_identity(), {})
+        with mock.patch.object(Path, 'read_text', side_effect=PermissionError):
+            self.assertIsNone(registry.kernel_boot_id())
+
     def test_passive_governor_observation_is_shared_but_next_scan_is_fresh(self):
         cache = registry.ResourceReadCache()
         with tempfile.TemporaryDirectory() as directory:
