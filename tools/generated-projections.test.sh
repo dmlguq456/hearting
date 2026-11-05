@@ -331,7 +331,7 @@ grep -Fq 'completion_followup_text(' "$ROOT/utilities/dispatch_session_sweep.py"
 grep -Fq 'dispatch_session_sweep.py' "$ROOT/adapters/opencode/plugins/hearting-guards.js"
 has_entry_confirmation() {
   case "$1" in
-    *'present the §0.4 intent card before'*|*'else the §0.4 card unless approved'*|*'for unapproved material work, use the §0.4 card'*) return 0 ;;
+    *'before unapproved material work, present the §0.4 intent card'*|*'present the §0.4 intent card before'*|*'else the §0.4 card unless approved'*|*'for unapproved material work, use the §0.4 card'*) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -359,7 +359,7 @@ for bootstrap in \
   # Removing the entry action must fail even with the evidence-check exemption
   # elsewhere in each real bootstrap. Preserve the rest of the text verbatim.
   without_entry=$(printf '%s' "$bootstrap_flat" | sed -E \
-    's/present the §0\.4 intent card before//g; s/else the §0\.4 card unless approved//g; s/for unapproved material work, use the §0\.4 card//g')
+    's/before unapproved material work, present the §0\.4 intent card//g; s/present the §0\.4 intent card before//g; s/else the §0\.4 card unless approved//g; s/for unapproved material work, use the §0\.4 card//g')
   if has_entry_confirmation "$without_entry"; then
     echo "not ok - entry confirmation check accepts a missing action in $bootstrap" >&2
     exit 1
@@ -405,7 +405,7 @@ legacy `.claude_reports/` is only a fallback|legacy artifact-root fallback quali
 depth, tests, safety, and validation on fallback|fallback preservation guarantee
 before committing|expose-change-before-committing clause
 large scope, destructive work, or an external-system outcome|destructive-work structured-input clause
-use `--shape staged --graph <stage,…>` for stages the person named|person-named stage shape clause
+using `--shape staged --graph <stage,…>` for person-named stages|person-named stage shape clause
 are handles, not orders|resume/correction handle clause
 BOOTSTRAP_PARITY_EOF
 done
